@@ -45,7 +45,7 @@ function fakeDb() {
       if (/FROM crow_instances WHERE id = \?/.test(stmt?.sql ?? "") && stmt?.args?.[0] === TEST_SOURCE_ID) {
         return { rows: [{ id: TEST_SOURCE_ID, status: "active", trusted: 1, auth_token_hash: PEER_HASH }] };
       }
-      return { rows: [{ id: "local-123", name: "grackle", hostname: "grackle-host", is_home: 1 }] };
+      return { rows: [{ id: "local-123", name: "host-b", hostname: "host-b-host", is_home: 1 }] };
     },
     close: () => {},
   };
@@ -144,8 +144,8 @@ test("federation: valid signed GET /dashboard/overview → 200 + schema", async 
   const body = await r.json();
 
   assert.ok(body.instance, "instance missing");
-  assert.equal(body.instance.name, "grackle");
-  assert.equal(body.instance.hostname, "grackle-host");
+  assert.equal(body.instance.name, "host-b");
+  assert.equal(body.instance.hostname, "host-b-host");
   assert.equal(body.instance.is_home, true);
 
   assert.ok(Array.isArray(body.tiles), "tiles not an array");

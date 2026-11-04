@@ -941,7 +941,7 @@ async function rebuildMainFKsToProjectSpaces() {
   )`,
       // columns known to be added via addColumnIfMissing / addUuidColumn
       // (spec C2: backend_id would be silently lost if derived from PRAGMA table_info alone).
-      // file_path + s3_key: legacy host-local columns (found on grackle at the
+      // file_path + s3_key: legacy host-local columns (found on the home server at the
       // 2026-06-11 deploy, 16 rows of real data each) — carried by the rebuild;
       // NOT part of the canonical fresh-install schema.
       knownExtras: ["backend_id", "uuid", "origin_instance_id", "file_path", "s3_key"],
@@ -2200,7 +2200,7 @@ await db.execute(
 //
 // C1 (split-brain fix): we DELIBERATELY DO NOT randomblob-fill PRE-EXISTING rows here.
 // A random per-instance uid would give the SAME logical group (e.g. "Family" created
-// independently on crow AND grackle before this feature) a DIFFERENT uid on each host,
+// independently on crow AND the home server before this feature) a DIFFERENT uid on each host,
 // so the one-shot backfill would cross-INSERT and permanently duplicate every shared
 // legacy group. Pre-existing rows are left group_uid IS NULL (SQLite UNIQUE permits
 // multiple NULLs); backfillGroupsOnce() assigns them a DETERMINISTIC, FROZEN uid derived
@@ -2616,7 +2616,7 @@ try {
 // MPA orchestrator. bot_conversations holds per-conversation state-machine
 // rows; bot_registry is the single source of truth for what bots exist;
 // bot_preferences is per-user-per-bot config; bot_runs is the audit trail.
-// All four tables are MPA-scoped — primary instances on grackle/crow will
+// All four tables are MPA-scoped — primary instances on server-b/crow will
 // also create them (IF NOT EXISTS), but only MPA's gateway will populate them.
 
 await initTable("bot_conversations table", `

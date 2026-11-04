@@ -6,7 +6,7 @@
  * accept); read by the nest health signal (`peers-dial:<id>` warn) and the
  * Settings › Paired instances page ("Sync link" column).
  *
- * Why it exists: crow had NO dial address for black-swan for about six weeks
+ * Why it exists: crow had NO dial address for the cloud VM for about six weeks
  * (its crow_instances row carried a :443 gateway_url — never dialed — and an
  * empty tailscale_ip). The dialer returned silently, 928 sync entries queued,
  * and nothing anywhere said so. A peer with no usable dial address is now a

@@ -11,7 +11,7 @@
  * forever, and replication was silently dead on an otherwise-healthy
  * connection. Whether you lost the race was a function of the accepting
  * side's DB latency — which is why crow→MPA (quiet DB) replicated fine
- * while crow→grackle (busy DB) never moved a block.
+ * while crow→the home server (busy DB) never moved a block.
  *
  * The fix: buffer binary frames during the handshake and hand them off —
  * ws paused across the consumer swap, buffered frames replayed in order —

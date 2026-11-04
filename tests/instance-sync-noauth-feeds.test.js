@@ -1,5 +1,5 @@
 /**
- * A --no-auth companion gateway (e.g. grackle's loopback crow-mcp-bridge) must
+ * A --no-auth companion gateway (e.g. the home server's loopback crow-mcp-bridge) must
  * NOT initialize instance-sync Hypercore feeds — otherwise it grabs the feed
  * lock and starves the PRIMARY gateway ("File descriptor could not be locked"),
  * so the primary can't receive cross-instance sync. Same class as QW1

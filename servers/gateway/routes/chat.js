@@ -796,7 +796,7 @@ export default function chatRouter(dashboardAuth) {
           if (cfg) {
             const { createAdapterFromProfile: fromProfile } = await import("../ai/provider.js");
             // DB rows for bundle-registered local providers (crow-swap-*,
-            // crow-chat, crow-dispatch, grackle-*) have provider_type=NULL
+            // crow-chat, crow-dispatch, and the CUDA host's ids) have provider_type=NULL
             // because their endpoints are OpenAI-compatible (vLLM / llama.cpp)
             // rather than a named SDK. Fall back to "openai" rather than the
             // provider id, which isn't a known adapter key.
@@ -841,7 +841,7 @@ export default function chatRouter(dashboardAuth) {
           if (cfg) {
             const { createAdapterFromProfile: fromProfile } = await import("../ai/provider.js");
             // DB rows for bundle-registered local providers (crow-swap-*,
-            // crow-chat, crow-dispatch, grackle-*) have provider_type=NULL
+            // crow-chat, crow-dispatch, and the CUDA host's ids) have provider_type=NULL
             // because their endpoints are OpenAI-compatible (vLLM / llama.cpp)
             // rather than a named SDK. Fall back to "openai" rather than the
             // provider id, which isn't a known adapter key.

@@ -179,7 +179,8 @@ export async function getAiProfiles(db, { includeKeys = false } = {}) {
  * llm-settings migration strips direct fields from migrated profiles,
  * callers MUST pass `db` to reach their credentials.
  *
- * `apiKey` sentinel contract: bundle-registered providers (crow-*, grackle-*)
+ * `apiKey` sentinel contract: bundle-registered providers (first-party ids such
+ * as `crow-*` and the CUDA host's provider ids)
  * store `apiKey: "none"` in the providers DB row. The OpenAI-compat adapter's
  * `requiresKey` guard throws "API key required" on falsy apiKey, so code
  * paths that hydrate a profile from cfg MUST pass "none" through as a

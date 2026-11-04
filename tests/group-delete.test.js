@@ -27,7 +27,7 @@ import {
 const tmpDir = mkdtempSync(join(tmpdir(), "crow-group-tombstone-test-"));
 function initDb() {
   // CROW_DB_PATH outranks CROW_DATA_DIR in init-db (init-db.js:11) — blank it, or a
-  // shell exporting it (grackle's .env did exactly this, PR #180) misroutes the
+  // shell exporting it (the home server's .env did exactly this, PR #180) misroutes the
   // migration onto the REAL DB.
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: tmpDir, CROW_DB_PATH: "" }, stdio: "pipe" });
 }

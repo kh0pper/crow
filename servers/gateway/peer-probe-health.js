@@ -9,7 +9,7 @@
  *
  * Why not crow_instances.last_seen_at: it is refreshed by doors that do not
  * cross the tailnet. Hyperswarm replication runs over the public DHT, so
- * grackle kept a fresh last_seen_at for the 5 days (2026-09-17..22) it sat
+ * the home server kept a fresh last_seen_at for the 5 days (2026-09-17..22) it sat
  * logged out of Tailscale, with its blog Funnel, Serve and Ramble all down
  * and no alert. The gateway-URL probe is the one check that fails exactly
  * when the tailnet path is gone.

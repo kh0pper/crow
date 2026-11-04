@@ -27,5 +27,5 @@
   ],
   "ports": [8971, 8554, 8555],
   "webUI": { "port": 8971, "path": "/", "label": "Frigate" },
-  "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — grackle baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed."
+  "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed."
 }

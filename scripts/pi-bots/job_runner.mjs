@@ -13,8 +13,8 @@
  * Design (review-hardened):
  *  - The bot_jobs TABLE is the cross-process IPC channel: the gateway and
  *    scripts/pi-bots/ open the SAME crow.db. journal_mode is RAM-dependent
- *    (resolveJournalMode: WAL on >2 GiB hosts — crow/mpa/grackle — DELETE only on
- *    ≤2 GiB like black-swan); a single UPDATE...RETURNING claim is atomic in BOTH
+ *    (resolveJournalMode: WAL on >2 GiB hosts — crow/mpa/server-b — DELETE only on
+ *    ≤2 GiB like the cloud VM); a single UPDATE...RETURNING claim is atomic in BOTH
  *    modes (SQLite serializes writers). We NEVER hold a transaction across the
  *    (minutes-long) pi spawn — claim is one brief sync UPDATE, run is
  *    connection-free, finalize is one brief UPDATE.

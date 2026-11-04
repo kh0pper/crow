@@ -86,7 +86,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 6080 | 127.0.0.1 | browser (noVNC, existing) — since 1.4.0 noVNC binds 127.0.0.1 only and needs the per-instance `CROW_BROWSER_VNC_TOKEN` that the gateway's `/proxy/browser/` adds server-side; RFB is a unix socket inside the container, no TCP port (5900/5901 are no longer used; the entrypoint refuses to start otherwise). Overridable via `CROW_BROWSER_VNC_PORT`; CDP 9222 via `CROW_BROWSER_CDP_PORT`. Secondary instances on one host pick +1 offsets (6081/9223), and MUST also set a distinct X display number via `CROW_BROWSER_DISPLAY` (default 99, secondary 98) — under `network_mode: host` two instances on the same display collide | existing |
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
-| 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to grackle :8002) | external, freed |
+| 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to the home server :8002) | external, freed |
 | 8003 | tailscale IP | llamacpp-vulkan-qwen36-35b-a3b (crow-chat) | existing |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
 | 8004 | tailscale IP | llamacpp-vulkan-qwen3-embed (crow-embed; same port as faster-whisper, different interface) | existing |
@@ -108,7 +108,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
 | 8087 | 127.0.0.1 | scratch-offline (`SCRATCH_HTTP_PORT`) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
-| 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + grackle scraper stack (ufw-scoped). The vllm bundle's default used to be 8089 too; it moved to 8044 | external |
+| 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + the home server scraper stack (ufw-scoped). The vllm bundle's default used to be 8089 too; it moved to 8044 | external |
 | 8090 | 127.0.0.1 | (reserved — a private bundle maintained outside this repo) | reserved |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
@@ -167,7 +167,7 @@ Raven (10.0.0.203, `raven.example.ts.net`) is the second Strix Halo box. Its por
 |---|---|---|---|
 | raven:3009 | 127.0.0.1 | Crow gateway (user unit `crow-gateway.service`, `CROW_DISABLE_MODEL_ORCHESTRATION=1`); reached only through Tailscale Serve `raven:8444` | planned |
 | raven:8444 | tailnet (Serve) | Tailscale Serve HTTPS → `127.0.0.1:3009` (fleet `:8444` convention; never Funnel) | planned |
-| raven:8030 | 0.0.0.0 (ufw: crow + grackle only) | halogen Flash-Next production (`flash-next.service`), an external engine Crow never manages | live |
+| raven:8030 | 0.0.0.0 (ufw: crow + the home server only) | halogen Flash-Next production (`flash-next.service`), an external engine Crow never manages | live |
 | raven:8031–8033 | 0.0.0.0 | two-box masters (window mode, pi-lab) | reserved |
 | raven:13305 | 127.0.0.1 | Lemonade server (`lemond`, installed but disabled since the 2026-09-24 NPU spike) | disabled |
 | raven:9000 | 127.0.0.1 | Lemonade websocket | disabled |

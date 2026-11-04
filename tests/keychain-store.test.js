@@ -197,7 +197,7 @@ test("init-db creates crow_keychain with the same columns as the store's lazy en
   assert.doesNotMatch(ddl, /CHECK/);
 });
 
-test("REVIEW FOCUS 3 — crow_keychain can never replicate (and the grackle D3 importer skips it)", async () => {
+test("REVIEW FOCUS 3 — crow_keychain can never replicate (and the home server D3 importer skips it)", async () => {
   assert.ok(SYNC.LOCAL_ONLY_TABLES.includes("crow_keychain"));
   assert.ok(!SYNC.SYNCED_TABLES.includes("crow_keychain"));
   assert.throws(() => SYNC.assertLocalOnlyDisjoint(["memories", "crow_keychain"], SYNC.LOCAL_ONLY_TABLES), /local-only/);

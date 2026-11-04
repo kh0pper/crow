@@ -20,7 +20,7 @@
  *     --token       ~/.config/google-workspace-mcp-mpa/gws-token.json \
  *     --scopes      "https://mail.google.com/,https://www.googleapis.com/auth/calendar"
  *
- * Designed to be run interactively on grackle (or any host with a browser).
+ * Designed to be run interactively on the home server (or any host with a browser).
  * The script prints an authorization URL; the operator opens it (xdg-open
  * is tried automatically if available), grants consent, and the loopback
  * handler captures the code and completes the exchange.

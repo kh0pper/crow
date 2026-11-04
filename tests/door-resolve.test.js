@@ -133,7 +133,7 @@ test("listDoorModels lists forwardable models only, qualified", () => {
 });
 
 // Final fix wave I1: a reverse proxy on the same box (r4's public sslip.io
-// front door: black-swan Caddy -> crow Serve :8449 -> r4 on loopback) delivers
+// front door: the cloud VM Caddy -> crow Serve :8449 -> r4 on loopback) delivers
 // outside clients as 127.0.0.1. A forwarding header is trusted only if EVERY
 // address it names is itself loopback or tailnet.
 test("isTrustedDoorRequest: plain loopback and tailnet pass; a forwarded chain must be all-trusted", async () => {

@@ -45,7 +45,7 @@ fi
 echo "sweep user:   $GUARD_USER"
 
 # --- 1. ExecStartPre drop-in for each present crow gateway/bridge unit ------
-# crow-mcp-bridge is a real gateway process on grackle — give it the same
+# crow-mcp-bridge is a real gateway process on the home server — give it the same
 # ExecStartPre guard, not just timer coverage.
 units=$(systemctl list-unit-files --no-legend --plain 'crow-*gateway*.service' 'crow-mcp-bridge*.service' 2>/dev/null \
           | awk '{print $1}' | sort -u || true)

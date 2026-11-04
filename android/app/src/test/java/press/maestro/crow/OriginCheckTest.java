@@ -49,7 +49,7 @@ public class OriginCheckTest {
 
     @Test
     public void otherHostsAndSchemesAreRefused() {
-        assertFalse(OriginCheck.sameOrigin("https://grackle.example.ts.net:8444", PAIRED));
+        assertFalse(OriginCheck.sameOrigin("https://host-b.example.ts.net:8444", PAIRED));
         assertFalse(OriginCheck.sameOrigin("http://crow.example.ts.net:8444", PAIRED));
         assertFalse(OriginCheck.sameOrigin("https://crow.example.ts.net.evil.com:8444", PAIRED));
         assertFalse(OriginCheck.sameOrigin("null", PAIRED));

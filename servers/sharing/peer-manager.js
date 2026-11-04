@@ -316,7 +316,7 @@ export class PeerManager {
     this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
     this.localInstanceId = null; // wired by server.js — the local Crow instance id we advertise to peers
 
-    // A --no-auth companion gateway (e.g. grackle's loopback crow-mcp-bridge) is
+    // A --no-auth companion gateway (e.g. the home server's loopback crow-mcp-bridge) is
     // never a peer — it must NOT run the Hyperswarm P2P layer, or it steals the
     // DHT-topic connection (and per-contact feed locks) from the PRIMARY gateway,
     // starving the primary's cross-instance replication. Same signal as the

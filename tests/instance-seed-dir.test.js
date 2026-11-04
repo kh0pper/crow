@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 
-// The Finding-2 regression (grackle): the gateway's .env sets CROW_DB_PATH to the
+// The Finding-2 regression (the home server): the gateway's .env sets CROW_DB_PATH to the
 // repo data dir (where crow.db physically lives), but identity.json exists ONLY in
 // the instance data dir (~/.crow/data — whose crow.db is a symlink to the repo file).
 // The instance seed must anchor on resolveDataDir() (instanceSeedDir()) — the SAME
@@ -30,8 +30,8 @@ function tmp(prefix) { const d = mkdtempSync(join(tmpdir(), prefix)); tmpDirs.pu
 
 const SEED_HEX = "ab".repeat(32); // 64 hex chars → 32-byte seed
 
-/** Grackle layout: identity.json in the instance dir; crow.db (NO identity.json) in the repo data dir. */
-function grackleLayout() {
+/** The home server layout: identity.json in the instance dir; crow.db (NO identity.json) in the repo data dir. */
+function hostBLayout() {
   const instanceDir = tmp("iseed-instance-");
   const repoDataDir = tmp("iseed-repodata-");
   writeFileSync(join(instanceDir, "identity.json"), JSON.stringify({ seed: SEED_HEX }));
@@ -45,14 +45,14 @@ function grackleLayout() {
 const { botsDbPath, tasksDbPath, instanceSeedDir } = await import("../scripts/pi-bots/instance-paths.mjs");
 const { loadInstanceSeed, deriveBotIdentity } = await import("../servers/sharing/identity.js");
 
-test("grackle layout: seed resolves from the instance dir, NOT dirname(CROW_DB_PATH)", () => {
-  const { instanceDir } = grackleLayout();
+test("host-b layout: seed resolves from the instance dir, NOT dirname(CROW_DB_PATH)", () => {
+  const { instanceDir } = hostBLayout();
   assert.equal(instanceSeedDir(), resolve(instanceDir), "seed anchor = resolveDataDir()");
   const seed = loadInstanceSeed(instanceSeedDir());
   assert.ok(Buffer.isBuffer(seed), "seed is a Buffer");
   assert.equal(seed.length, 32, "32-byte seed");
   // Prove this test exercises the real hazard: the OLD anchor (dirname of the DB
-  // path — no identity.json there) throws, which is exactly what killed grackle's
+  // path — no identity.json there) throws, which is exactly what killed the home server's
   // bot advertisement.
   assert.throws(() => loadInstanceSeed(dirname(botsDbPath())),
     /ENOENT|no such file/i, "old dirname(botsDbPath()) anchor throws under this layout");
@@ -71,13 +71,13 @@ test("MPA layout: CROW_DATA_DIR and CROW_DB_PATH colocated still resolves and lo
 });
 
 test("working files stay DB-anchored: botsDbPath()/tasksDbPath() still honor CROW_DB_PATH", () => {
-  const { repoDataDir } = grackleLayout();
+  const { repoDataDir } = hostBLayout();
   assert.equal(botsDbPath(), join(repoDataDir, "crow.db"), "bots db = CROW_DB_PATH verbatim");
   assert.equal(tasksDbPath(), join(repoDataDir, "tasks.db"), "tasks db sits beside the crow.db in use");
 });
 
-test("consumer: botIdentityFor derives a bot identity under the grackle layout (used to throw)", async () => {
-  const { instanceDir } = grackleLayout();
+test("consumer: botIdentityFor derives a bot identity under the home server layout (used to throw)", async () => {
+  const { instanceDir } = hostBLayout();
   // botIdentityFor is DB-free (loadInstanceSeed + deriveBotIdentity) and reads the
   // seed at call time, so it can be exercised directly under the split env.
   const admin = await import("../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js");
@@ -89,8 +89,8 @@ test("consumer: botIdentityFor derives a bot identity under the grackle layout (
   assert.equal(ident.secp256k1Pubkey, expected.secp256k1Pubkey, "secp key parity");
 });
 
-test("consumer: ensureLocalBotContact resolves the seed under the grackle layout (used to return null)", async () => {
-  grackleLayout();
+test("consumer: ensureLocalBotContact resolves the seed under the home server layout (used to return null)", async () => {
+  hostBLayout();
   // Stub libsql client: ensureLocalBotContact swallows identity failures and
   // returns null, so a successful INSERT proves the REAL defaultIdentityFor
   // (no _identityFor injection) resolved the seed from the instance dir.
@@ -99,7 +99,7 @@ test("consumer: ensureLocalBotContact resolves the seed under the grackle layout
   const stubDb = {
     async execute(arg) {
       const sql = typeof arg === "string" ? arg : arg.sql;
-      if (sql.includes("pi_bot_defs")) return { rows: [{ display_name: "Grackle Bot" }] };
+      if (sql.includes("pi_bot_defs")) return { rows: [{ display_name: "Host-b Bot" }] };
       if (sql.startsWith("SELECT id FROM contacts")) return { rows: [] };
       if (sql.startsWith("INSERT INTO contacts")) { inserts.push(arg.args); return { lastInsertRowid: 42 }; }
       return { rows: [] };

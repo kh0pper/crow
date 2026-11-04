@@ -1,7 +1,7 @@
 # llama.cpp Qwen3-Embedding-0.6B (CPU)
 
 A **CPU-only** embedding endpoint for Crow's semantic search, for hosts without a
-compatible GPU (or that can't reach a shared embedding server like `grackle-embed`).
+compatible GPU (or that can't reach a shared embedding server on the CUDA host).
 It serves **Qwen3-Embedding-0.6B** (Q8_0 GGUF, 1024-dim) via llama.cpp with an
 OpenAI-compatible `/v1/embeddings` API on `127.0.0.1:8007`.
 

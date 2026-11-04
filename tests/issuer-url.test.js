@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { resolveIssuerUrl, issuerSource } from "../servers/gateway/issuer-url.js";
 
 test("configured HTTPS URL passes through byte-identical (existing drop-in installs)", () => {
-  const r = resolveIssuerUrl({ publicUrl: "https://black-swan.example.ts.net", port: 3001 });
-  assert.equal(r.url.href, "https://black-swan.example.ts.net/");
+  const r = resolveIssuerUrl({ publicUrl: "https://vps-1.example.ts.net", port: 3001 });
+  assert.equal(r.url.href, "https://vps-1.example.ts.net/");
   assert.equal(r.degraded, false);
 });
 

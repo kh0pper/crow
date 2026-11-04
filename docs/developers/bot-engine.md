@@ -266,7 +266,7 @@ The two systemd dirs are created empty when missing.
 
 Groups cannot be dropped without privilege (`setpriv --clear-groups` needs CAP_SETGID). `id -G` inside shows the docker gid as 65534, but the group is still in the credential; only the objects it opens are masked.
 
-**Without bubblewrap** (for example black-swan, where Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` also applies), pi starts as `setpriv --no-new-privs -- node cli.js …` when `setpriv` exists. sudo and setuid are blocked; docker and the user session are not.
+**Without bubblewrap** (for example the cloud VM, where Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` also applies), pi starts as `setpriv --no-new-privs -- node cli.js …` when `setpriv` exists. sudo and setuid are blocked; docker and the user session are not.
 
 **The probe:**
 - It tries the full `pidns` flags first, then a plain user namespace (`userns`), then setpriv.

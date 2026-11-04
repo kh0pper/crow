@@ -49,7 +49,7 @@ const { translations, fill } = await import("../servers/gateway/dashboard/shared
 const { createMgmtFake, makeSatelliteRow, toolsHash } = await import("./helpers/fake-satellite-mgmt.js");
 
 const BUNDLE = "gitea";
-const SAT_NAME = "black-swan-test";
+const SAT_NAME = "vps-1-test";
 const BOT = "b1";
 // gitea_list_repos reads like a lookup (the name rule alone calls it read); gitea_get_repo does
 // too. Only the pin's read marks may say so for a satellite-hosted bundle.

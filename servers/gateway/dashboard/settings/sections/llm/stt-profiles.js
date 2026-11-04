@@ -121,7 +121,7 @@ export default {
         </div>
         <div class="sttp-field">
           <label class="sttp-label">Base URL (optional — for self-hosted / region endpoint)</label>
-          <input type="text" id="sttf-url" placeholder="e.g. http://grackle:9000 or https://api.groq.com/openai/v1" class="sttp-input sttp-input-mono">
+          <input type="text" id="sttf-url" placeholder="e.g. http://server-b:9000 or https://api.groq.com/openai/v1" class="sttp-input sttp-input-mono">
         </div>
         <div class="sttp-field">
           <label class="sttp-label">Default model</label>

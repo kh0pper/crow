@@ -84,7 +84,7 @@ test("the browser's card is the server's card", () => {
   const ctx = vm.createContext({ document });
   vm.runInContext(sessionCardsJs("en") + "\nthis.scCardEl=scCardEl; this.model=sessionCardModel;", ctx);
   const cases = [
-    [{ sessionId: SID, label: "Plan <beds>", botName: "Grackle", state: "awake" }, { projectSlug: "garden", projectName: "Garden" }],
+    [{ sessionId: SID, label: "Plan <beds>", botName: "Host-b", state: "awake" }, { projectSlug: "garden", projectName: "Garden" }],
     [{ sessionId: SID, botName: "Hank", pendingUi: true }, {}],
     [{ sessionId: SID, label: "Quiet", botName: "Hank", state: "hibernating" }, { projectName: "Sunvox" }],
   ];

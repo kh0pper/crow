@@ -1836,7 +1836,7 @@ export async function registerModel({
   } // mutexGroup === null -> explicitly none, no key at all
 
   // Provider-scoped door (plan 2 Task 4): unambiguous to every peer even when
-  // two rows serve the same model id (crow-embed and grackle-embed both serve
+  // two rows serve the same model id (crow-embed and the CUDA host's embedding provider both serve
   // qwen3-embedding-0.6b today).
   const baseUrl = providerDoorUrl(doorBaseUrl({ tailnetIp, port: gatewayPortFn() }), providerId);
   const models = [{

@@ -48,7 +48,7 @@ function fakeDb() {
       // getInstance looks up by id — return a matching row
       if (sql.includes("crow_instances") && sql.includes("WHERE")) {
         return {
-          rows: [{ id: "local-123", name: "grackle", hostname: "grackle-host", is_home: 1 }],
+          rows: [{ id: "local-123", name: "host-b", hostname: "host-b-host", is_home: 1 }],
         };
       }
       // listAdvertisedBots and any other query → empty result

@@ -6,7 +6,7 @@ import { validateInstanceToken } from "../servers/gateway/instance-registry.js";
 
 const TOKEN = "ab".repeat(32); // 64 hex chars
 const HASH = createHash("sha256").update(TOKEN).digest("hex");
-const PEER_ROW = { id: "peer-1", name: "grackle", status: "active", trusted: 1, auth_token_hash: HASH };
+const PEER_ROW = { id: "peer-1", name: "host-b", status: "active", trusted: 1, auth_token_hash: HASH };
 
 // A db stub whose execute returns the supplied rows, recording the args used.
 function dbReturning(rows, sink) {

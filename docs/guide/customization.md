@@ -187,7 +187,7 @@ Remove a device override to restore the global version for that device:
 
 ### Technical details
 
-- **Device IDs** are free-form strings you choose (e.g., `"phone"`, `"grackle"`, `"work-laptop"`)
+- **Device IDs** are free-form strings you choose (e.g., `"phone"`, `"server-b"`, `"work-laptop"`)
 - Global sections have `device_id = NULL`; device sections have a non-null `device_id`
 - Protected sections (identity, memory_protocol, etc.) can have device overrides, but the global version cannot be deleted
 - Deleting a device override restores the global version — it does not delete the section entirely
@@ -199,7 +199,7 @@ To enable per-device context, set the `CROW_DEVICE_ID` environment variable befo
 
 ```bash
 # In your .env file
-CROW_DEVICE_ID=grackle
+CROW_DEVICE_ID=server-b
 ```
 
 This tells Crow which device it's running on. The gateway and the stdio servers automatically apply the matching device overrides to the MCP instructions and to `crow.md`.

@@ -66,7 +66,7 @@ for (const deliverFirst of ["A", "B"]) {
 }
 
 test("a NULL-origin legacy row loses a tie to a stamped write, on either side", async () => {
-  // A row replicated before lamport_origin existed (crow holds grackle's 17
+  // A row replicated before lamport_origin existed (crow holds the home server's 17
   // birds this way) has lamport_origin NULL. At an equal Lamport, a write
   // that carries an origin replaces it ...
   const legacy = await fresh();

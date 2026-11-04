@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # F3b — install + enable the per-instance bot runtime on THIS host.
 # Usage: scripts/pi-bots/install-runtime.sh <instance-name> [CROW_HOME]
-#   <instance-name>  systemd template key, e.g. "crow-mpa" or "grackle"
+#   <instance-name>  systemd template key, e.g. "crow-mpa" or "server-b"
 #   CROW_HOME        optional; defaults to ~/.crow (pass the MPA home dir for MPA)
 set -euo pipefail
 
@@ -13,7 +13,7 @@ DB_PATH="$DATA_DIR/crow.db"
 # (run the installer as the user who owns this host's node_modules so the
 # native-module ABI matches), overridable via CROW_NODE_BIN; falls back to
 # probing common locations. The units invoke `/usr/bin/env node`, so this PATH
-# is what selects the node binary per host (crow nvm v20, grackle /usr/bin v22).
+# is what selects the node binary per host (crow nvm v20, the home server /usr/bin v22).
 NODE_BIN="${CROW_NODE_BIN:-}"
 if [ -z "$NODE_BIN" ]; then
   _n="$(command -v node 2>/dev/null || true)"

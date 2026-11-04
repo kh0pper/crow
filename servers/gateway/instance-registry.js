@@ -77,7 +77,7 @@ export async function registerInstance(db, {
   }
 
   // data_dir stores CROW_DATA_DIR so same-host peers (e.g. primary + MPA
-  // on the same grackle filesystem) can read each other's DB files
+  // on the same home server filesystem) can read each other's DB files
   // directly rather than going through MCP federation. MCP reads on MPA
   // are blocked by a chronic libsql WAL wedge (Day 1 gotcha) — direct
   // SQL from a fresh libsql client sidesteps the wedge cleanly.
@@ -602,7 +602,7 @@ export function gatewayBackendPort(env = process.env) {
  * address (a NON-Funnel Serve endpoint for our port, else
  * http://<tailnet ip>:<port>) → the self row's gateway_url. NEVER
  * CROW_GATEWAY_URL — the public URL, on crow the Funnel :443 door, which
- * refuses private routes and which instance sync never dials (black-swan's
+ * refuses private routes and which instance sync never dials (the cloud VM's
  * six-week stall). tailscale_ip + sync_port ride along: the sync transport
  * dials them whenever gateway_url is a :443 URL. Never throws.
  */

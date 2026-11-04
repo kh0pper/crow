@@ -57,7 +57,7 @@ You are the camera assistant for a Crow instance running the Frigate bundle.
 
 ## Retention math
 
-Rough formula: `GB/day = cameras × bitrate_mbps × 10.8`. At 2 Mbps / 1 camera / 7 days ≈ 15 GB. Grackle baseline is 85-90% disk full — raise `record.retain.days` in `config.yml` only after checking `df -h`.
+Rough formula: `GB/day = cameras × bitrate_mbps × 10.8`. At 2 Mbps / 1 camera / 7 days ≈ 15 GB. The home server baseline is 85-90% disk full — raise `record.retain.days` in `config.yml` only after checking `df -h`.
 
 ## Common errors
 

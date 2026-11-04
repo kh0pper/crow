@@ -4,7 +4,7 @@
  * The whisper.cpp `server` binary (`./server -m <model>`) exposes
  * POST /inference with multipart audio. Response JSON has `text` field.
  *
- * config.baseUrl     — e.g. http://grackle:9000
+ * config.baseUrl     — e.g. http://server-b:9000
  * config.defaultModel — ignored (model is whatever the server was started with)
  */
 

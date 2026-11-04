@@ -1,5 +1,5 @@
 /**
- * Tailscale-logout alert (audit A14). grackle sat logged out of Tailscale
+ * Tailscale-logout alert (audit A14). The home server sat logged out of Tailscale
  * for 5 days with no alert: its last_seen_at stayed fresh (Hyperswarm runs
  * over the public DHT) and the peers signal only looked at status='active'
  * rows, at info severity, which never pushes. The signal now warns (and so
@@ -38,8 +38,8 @@ async function peers(rows, nowMs) {
   };
 }
 
-const grackle = (nowMs, status = "offline") => ({
-  id: "g1", name: "Primary", status, gateway_url: "https://grackle.example.ts.net:8444",
+const hostB = (nowMs, status = "offline") => ({
+  id: "g1", name: "Primary", status, gateway_url: "https://host-b.example.ts.net:8444",
   last_seen_at: sqliteNow(nowMs), // fresh — Hyperswarm kept it alive
 });
 
@@ -57,7 +57,7 @@ test("a peer failing /health past the threshold warns even with a fresh last_see
   _resetPeerProbeHealth();
   recordPeerProbe("g1", false, { nowMs: T0 });
   const now = T0 + PEER_UNREACHABLE_WARN_MS + 60_000;
-  const { detail, issue } = await peers([grackle(now)], now);
+  const { detail, issue } = await peers([hostB(now)], now);
   assert.equal(detail.state, "warn");
   assert.equal(issue.severity, "warn");
   // issue.label is what the pushed notification's title carries.
@@ -74,19 +74,19 @@ test("a short blip (under the threshold) does not warn", async () => {
   _resetPeerProbeHealth();
   recordPeerProbe("g1", false, { nowMs: T0 });
   const now = T0 + 10 * 60_000;
-  const { detail } = await peers([grackle(now, "active")], now);
+  const { detail } = await peers([hostB(now, "active")], now);
   assert.equal(detail.state, "ok");
 });
 
 test("a peer with no probe record and a fresh last_seen_at is ok", async () => {
   _resetPeerProbeHealth();
-  const { detail } = await peers([grackle(T0, "active")], T0);
+  const { detail } = await peers([hostB(T0, "active")], T0);
   assert.equal(detail.state, "ok");
 });
 
 test("an 'offline' peer unseen for >24h is now surfaced (info), not hidden by the old status filter", async () => {
   _resetPeerProbeHealth();
-  const row = { ...grackle(T0), gateway_url: null, last_seen_at: sqliteNow(T0 - 3 * 86_400_000) };
+  const row = { ...hostB(T0), gateway_url: null, last_seen_at: sqliteNow(T0 - 3 * 86_400_000) };
   const { detail, issue } = await peers([row], T0);
   assert.equal(detail.state, "info");
   assert.equal(issue.severity, "info");
@@ -97,7 +97,7 @@ test("es strings render", async () => {
   recordPeerProbe("g1", false, { nowMs: T0 });
   const now = T0 + PEER_UNREACHABLE_WARN_MS;
   invalidateHealthCache();
-  const r = await collectHealthSignals(db([grackle(now)]), { now: () => now, lang: "es" });
+  const r = await collectHealthSignals(db([hostB(now)]), { now: () => now, lang: "es" });
   const i = r.issues.find((x) => x.id === "peers:g1");
   assert.match(i.label, /inaccesible/);
   assert.match(i.label, /Primary/);
@@ -107,14 +107,14 @@ test("each unreachable peer has its own issue id, so a second outage inside the 
   _resetPeerProbeHealth();
   recordPeerProbe("g1", false, { nowMs: T0 });
   const t1 = T0 + PEER_UNREACHABLE_WARN_MS;
-  const first = await peers([grackle(t1)], t1);
+  const first = await peers([hostB(t1)], t1);
   let cycle = await runHealthNotifyCycle({ issues: first.issues, lastMap: {}, nowMs: t1, notify: async () => {} });
   assert.deepEqual(cycle.pushed, ["peers:g1"]);
 
   recordPeerProbe("r2", false, { nowMs: t1 });
   const t2 = t1 + PEER_UNREACHABLE_WARN_MS; // well inside 24 h of the first push
-  const raven = { ...grackle(t2), id: "r2", name: "raven" };
-  const second = await peers([grackle(t2), raven], t2);
+  const raven = { ...hostB(t2), id: "r2", name: "raven" };
+  const second = await peers([hostB(t2), raven], t2);
   assert.equal(second.detail.state, "warn");
   assert.equal(second.issues.length, 2);
   cycle = await runHealthNotifyCycle({ issues: second.issues, lastMap: cycle.lastMap, nowMs: t2, notify: async () => {} });

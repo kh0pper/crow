@@ -80,7 +80,7 @@ export { SYNC_PORT_KEY_PREFIX, SYNC_CR_KEY_PREFIX };
 // Every ws peer auto-answers pings, so older peers need no change.
 const HEARTBEAT_MS = 30_000;
 // Dialer election picks the lower instance id. If the elected side cannot
-// reach us (it has no address for us — black-swan's shape, 2026-08..10) no
+// reach us (it has no address for us — the cloud VM's shape, 2026-08..10) no
 // link would ever form. After this long with no link at all, the other side
 // dials as a fallback. Long enough that the elected side always wins a normal
 // boot race; the accept side refuses a fallback dial while a link is up.
@@ -460,7 +460,7 @@ export function describeMissingDialAddress(peer) {
  * Derive the ordered WebSocket dial candidates for a peer's crow_instances row.
  *
  * Primary: gateway_url, honoring its scheme. On this fleet gateway_url is a
- * Tailscale Serve HTTPS endpoint (e.g. https://grackle…ts.net:8444 → backend
+ * Tailscale Serve HTTPS endpoint (e.g. https://server-b…ts.net:8444 → backend
  * :3002) — tailscaled terminates TLS on the Serve port and proxies the
  * upgrade to the plain-HTTP backend, so the correct dial is
  * wss://<hostname>:<port>. The HOSTNAME is load-bearing: Serve needs SNI, so
@@ -1227,7 +1227,7 @@ export class PeerDialer {
 /**
  * Boot repair for peer rows the transport can never dial: gateway_url is the
  * :443 door (what pairing used to hand out) and tailscale_ip is empty — the
- * exact shape that stalled black-swan for six weeks. The URL's MagicDNS HOST
+ * exact shape that stalled the cloud VM for six weeks. The URL's MagicDNS HOST
  * is right even though its port is not, so tailscaled already knows the
  * host's tailnet address: fill tailscale_ip from `tailscale status --json`.
  * The dial ladder then reaches the backend directly, the peer's signed

@@ -24,7 +24,7 @@ export function gatewayHint(threadId) {
  * other. start() routes through adapterSeed() too, so the test constrains the
  * live path, not a copy. Seed comes from the INSTANCE data dir
  * (instanceSeedDir() = resolveDataDir()), never from dirname(CROW_DB_PATH):
- * the DB may legitimately live outside the instance dir (grackle's
+ * the DB may legitimately live outside the instance dir (the home server's
  * symlinked-DB layout).
  */
 export async function adapterSeed() {

@@ -4,7 +4,7 @@
   "type": "bundle",
   "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
   "category": "ai",
-  "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory/research/blog. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
+  "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory/research/blog. Runs on the home server's RTX 5060 Ti via vLLM-CUDA.",
   "host": "local",
   "requires": {
     "gpu": true,
@@ -21,7 +21,7 @@
       "id": "grackle-embed",
       "baseUrlTemplate": "http://{host_ip}:{port}/v1",
       "apiKey": "none",
-      "description": "Text embeddings via Qwen3-Embedding-0.6B (grackle, always warm)",
+      "description": "Text embeddings via Qwen3-Embedding-0.6B (the home server, always warm)",
       "models": [
         {
           "id": "qwen3-embedding-0.6b",

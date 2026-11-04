@@ -273,7 +273,7 @@ export function deriveInstanceIdentity(seed) {
  * scripts/pi-bots/instance-paths.mjs — the same anchor this module's own
  * loadOrCreateIdentity uses, so bot keys always derive from the identity that
  * federation itself runs on. Never pass dirname(CROW_DB_PATH): the DB file may
- * legitimately live outside the instance dir (grackle's symlinked-DB layout).
+ * legitimately live outside the instance dir (the home server's symlinked-DB layout).
  * Unencrypted seeds only (the host has no passphrase).
  */
 export function loadInstanceSeed(dataDir) {

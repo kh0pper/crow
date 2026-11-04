@@ -1,7 +1,7 @@
 /**
  * Owning-instance audio stream-proxy (federated playback).
  *
- * A paired peer (e.g. grackle's glasses voice loop) cannot reach this instance's
+ * A paired peer (e.g. the home server's glasses voice loop) cannot reach this instance's
  * internal Funkwhale (http://crow-funkwhale) nor hold its token. This route lets
  * the peer stream audio THROUGH us: we reconstruct the listen URL from OUR OWN
  * Funkwhale addon env (never from caller input — no SSRF), fetch it with OUR

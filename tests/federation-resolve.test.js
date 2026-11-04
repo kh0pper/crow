@@ -39,7 +39,7 @@ function makeServerWithPeers(peers) {
 test("resolve: exact name match → 200 with row", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
     { id: "aaa1", name: "Crow", hostname: "crow.ts.net", gateway_url: "https://crow.ts.net:8444" },
-    { id: "bbb2", name: "Grackle", hostname: "grackle.ts.net", gateway_url: "https://grackle.ts.net" },
+    { id: "bbb2", name: "Host-b", hostname: "host-b.ts.net", gateway_url: "https://host-b.ts.net" },
   ]);
   try {
     const r = await fetch(`${baseUrl}/dashboard/federation/resolve-instance?name=Crow`);
@@ -79,10 +79,10 @@ test("resolve: ambiguous duplicate names → 400 with matches list", async () =>
 
 test("resolve: short hostname fallback match", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
-    { id: "aaa1", name: "Corp Primary", hostname: "grackle.example.ts.net", gateway_url: "https://g" },
+    { id: "aaa1", name: "Corp Primary", hostname: "host-b.example.ts.net", gateway_url: "https://g" },
   ]);
   try {
-    const r = await fetch(`${baseUrl}/dashboard/federation/resolve-instance?name=grackle`);
+    const r = await fetch(`${baseUrl}/dashboard/federation/resolve-instance?name=host-b`);
     assert.equal(r.status, 200);
     assert.equal((await r.json()).id, "aaa1");
   } finally { await new Promise(r => srv.close(r)); }
@@ -91,7 +91,7 @@ test("resolve: short hostname fallback match", async () => {
 test("resolve: no match returns 404 with fuzzy suggestions", async () => {
   const { srv, baseUrl } = await makeServerWithPeers([
     { id: "aaa1", name: "Crow", hostname: "crow.ts.net", gateway_url: "https://c" },
-    { id: "bbb2", name: "Grackle", hostname: "grackle.ts.net", gateway_url: "https://g" },
+    { id: "bbb2", name: "Host-b", hostname: "host-b.ts.net", gateway_url: "https://g" },
   ]);
   try {
     const r = await fetch(`${baseUrl}/dashboard/federation/resolve-instance?name=Craw`);

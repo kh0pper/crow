@@ -320,7 +320,7 @@ test("integrations: a data_backend error row → warn", async () => {
 
 test("integrations: peer 401 → warn", async () => {
   invalidateHealthCache(); inertTailscale();
-  const r = await collectHealthSignals(makeDb({ peerAuthFails: [{ name: "grackle" }] }));
+  const r = await collectHealthSignals(makeDb({ peerAuthFails: [{ name: "host-b" }] }));
   assert.equal(find(r, "integrations").severity, "warn");
 });
 

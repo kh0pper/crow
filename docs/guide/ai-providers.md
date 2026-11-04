@@ -250,7 +250,7 @@ Crow has no hard-coded default provider — it picks one automatically, but the 
 The value is the provider `id` as registered (e.g. by an embedding bundle). After changing it, allow up to ~30s for the in-process cache to refresh (running processes re-probe the new provider automatically — no restart needed).
 
 ::: warning Re-embed after switching to a different model
-Embeddings are only comparable within the same model's vector space, and semantic search filters stored vectors by model. If the new provider serves a **different** model than the one your existing memories were embedded with (e.g. switching `grackle-embed`'s Qwen3-Embedding to `nomic-embed-text`), those older memories drop out of semantic results until you re-embed them. Re-embed once after switching:
+Embeddings are only comparable within the same model's vector space, and semantic search filters stored vectors by model. If the new provider serves a **different** model than the one your existing memories were embedded with (e.g. switching from the CUDA host's Qwen3-Embedding provider to `nomic-embed-text`), those older memories drop out of semantic results until you re-embed them. Re-embed once after switching:
 
 ```
 node scripts/backfill-embeddings.js --only memories

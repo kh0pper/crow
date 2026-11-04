@@ -1,12 +1,12 @@
 /**
- * DIALER-RETRY / BLACKSWAN-TRANSPORT gate (2026-10-03): a peer with no usable
+ * DIALER-RETRY / VPS-1-TRANSPORT gate (2026-10-03): a peer with no usable
  * dial address is a health condition, a missing address is learned from the
  * peer's SIGNED handshake, and sync resumes once it is — with no restart.
  *
  * Root cause on the fleet: crow (id sorts first, so the elected dialer) had a
- * crow_instances row for black-swan with gateway_url on :443 (never dialed)
+ * crow_instances row for the cloud VM with gateway_url on :443 (never dialed)
  * and tailscale_ip empty. PeerDialer.connect() returned silently and was never
- * scheduled again; black-swan, not elected, waited passively forever. 928
+ * scheduled again; the cloud VM, not elected, waited passively forever. 928
  * entries queued for six weeks with no signal anywhere.
  *
  * Harness: tests/fixtures/sync-fleet.mjs — two REAL InstanceSyncManagers on
@@ -99,7 +99,7 @@ async function notifyRows(db) {
   return (await db.execute({ sql: "SELECT title, source FROM notifications WHERE source LIKE 'health-monitor:peers-dial:%'", args: [] })).rows;
 }
 
-test("ONE-SIDED (black-swan shape): the elected side has a :443 URL and no tailscale_ip — the peer's fallback dial links, the address is learned, and the elected side then dials it itself", async () => {
+test("ONE-SIDED (vps-1 shape): the elected side has a :443 URL and no tailscale_ip — the peer's fallback dial links, the address is learned, and the elected side then dials it itself", async () => {
   _resetPeerDialHealth();
   const fleet = await makeFleet();
   const { a, b } = fleet; // instA < instB → A is the elected dialer

@@ -975,7 +975,7 @@ function installBundleSkills(bundleId, destDir, manifest, job) {
  * version has moved past the installed manifest's version.
  *
  * Prior incident (2026-04-14): the Companion bundle's docker service was migrated
- * from grackle to crow, but ~/.crow/bundles/companion/settings-section.js was
+ * from the home server to crow, but ~/.crow/bundles/companion/settings-section.js was
  * absent on crow because only the docker volumes moved over. This meant the
  * Settings → Companion section disappeared until the file was manually copied.
  *
@@ -2772,7 +2772,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
-        // shared by more than one gateway on a host (e.g. grackle runs a
+        // shared by more than one gateway on a host (e.g. the home server runs a
         // main gateway + a separate-DB instance off the same ~/.crow), so a
         // hard-coded path is correct for one and a cross-instance DB leak for
         // the other — which crash-loops the wrong gateway on "database is

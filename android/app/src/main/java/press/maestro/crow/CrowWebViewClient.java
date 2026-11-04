@@ -30,7 +30,7 @@ public class CrowWebViewClient extends WebViewClient {
 
         // Cross-origin but on the SAME Tailscale tailnet as the page we're
         // currently on — i.e. another of the user's own Crow instances. Keep it
-        // in the WebView so cross-instance single sign-on (a grackle→MPA
+        // in the WebView so cross-instance single sign-on (a home-server→MPA
         // redirect, for example) lands its session cookie in THIS app's cookie
         // jar instead of an external browser, where the login would be useless
         // to the app. Scoped to the current tailnet (not any *.ts.net) so a
@@ -49,7 +49,7 @@ public class CrowWebViewClient extends WebViewClient {
      * True when {@code requestHost} is on the same Tailscale tailnet as
      * {@code currentHost} (the page already loaded — the user's own gateway):
      *  - MagicDNS: both share the tailnet domain, e.g. a request to
-     *    {@code crow.<tailnet>.ts.net} while on {@code grackle.<tailnet>.ts.net}.
+     *    {@code crow.<tailnet>.ts.net} while on {@code server-b.<tailnet>.ts.net}.
      *  - CGNAT: both are 100.64.0.0/10 addresses (only meaningful when the
      *    current page is itself reached over the tailnet).
      * Anchored to the current tailnet rather than any {@code *.ts.net} host.

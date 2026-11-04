@@ -153,7 +153,7 @@ test("tool: upstreams must be containers on crow-federation; Caddy itself, its a
     const cases = [
       ["caddy_add_federation_site", { domain: "l.example.com", upstream: "crow-lemmy-ui:1234", profile: "lemmy" }, /crow-lemmy is not a container/],
       ["caddy_add_federation_site", { domain: "l.example.com", upstream: "crow-lemmy-ui:1234", profile: "lemmy", backend_upstream: "crow-lemmy-ui:2019" }, /2019/],
-      ["caddy_add_federation_site", { domain: "g.example.com", upstream: "grackle:3002", profile: "activitypub" }, /not a container/],
+      ["caddy_add_federation_site", { domain: "g.example.com", upstream: "host-b:3002", profile: "activitypub" }, /not a container/],
       ["caddy_add_site", { domain: "a.example.com", upstream: "localhost:2019" }, /Caddy/],
       ["caddy_add_site", { domain: "a.example.com", upstream: "127.0.0.1:3001" }, /upstream/],
       ["caddy_add_matrix_federation_port", { domain: "m.example.com", upstream_8448: "crow-caddy:2019" }, /2019|Caddy/],

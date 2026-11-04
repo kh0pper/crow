@@ -22,7 +22,7 @@
  *   !ready && (nowMs - (lastReadyAt ?? firstOwnedAt)) >= threshold.
  * firstOwnedAt is stamped once, when ownership is taken, and NEVER moves on a
  * repeat not-ready — it is the origin for a provider that has never answered in
- * this process (the grackle case). lastReadyAt is stamped on every success and
+ * this process (the home server case). lastReadyAt is stamped on every success and
  * is what the clock restarts from once the provider has answered at least once.
  */
 
@@ -115,7 +115,7 @@ export function getProviderHealth() {
  *   firstSeenAt  stamped once, on first probe (or after a baseUrl change)
  *   lastReadyAt  last 2xx; null = has NEVER answered in this process — the
  *                nest signal shows that as info, never warn (a firewalled
- *                peer like black-swan must not carry a permanent warning)
+ *                peer like the cloud VM must not carry a permanent warning)
  */
 export function recordExternal(name, { ready, nowMs, baseUrl, engineHost = null, label = null, error = null } = {}) {
   let e = _state.external[name];

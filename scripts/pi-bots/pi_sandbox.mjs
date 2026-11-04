@@ -71,7 +71,7 @@
  *    no_new_privs, so no escalation was found, but it stays open;
  *  - reading anything the uid can read (crow.db, tokens, ~/.claude) - S6.
  *
- * Without bubblewrap (e.g. black-swan), the fallback is
+ * Without bubblewrap (e.g. the cloud VM), the fallback is
  * `setpriv --no-new-privs`: no masks, but sudo/setuid are still blocked.
  *
  * Contain tier (opt-in, queue item 19 step 2a): pi_contain.mjs. With

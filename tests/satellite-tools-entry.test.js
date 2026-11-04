@@ -217,7 +217,7 @@ test("a revoked satellite is not available here; an unreachable one names the ti
   const before = down.fake.state.requests.length;
   const r2 = await asOwner(() => down.entry.client.callTool({ name: "demo_list", arguments: {} }));
   assert.equal(r2.isError, true);
-  assert.match(r2.content[0].text, /^black-swan-test is unreachable \(since 10:33 UTC\)\.$/);
+  assert.match(r2.content[0].text, /^vps-1-test is unreachable \(since 10:33 UTC\)\.$/);
   assert.equal(down.fake.state.requests.length, before);
 });
 

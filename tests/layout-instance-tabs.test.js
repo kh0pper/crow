@@ -18,7 +18,7 @@ const base = {
 };
 const tabs = [
   { id: "local", name: "Crow", status: "online", isLocal: true },
-  { id: "abc123def", name: "Grackle", status: "online", isLocal: false },
+  { id: "abc123def", name: "Host-b", status: "online", isLocal: false },
 ];
 
 test("instance strip is NOT data-turbo-permanent", () => {
@@ -34,7 +34,7 @@ test("instance strip is NOT data-turbo-permanent", () => {
 test("strip populated + visible when instanceTabs passed", () => {
   const html = renderLayout({ ...base, instanceTabs: tabs });
   assert.ok(html.includes('data-instance-id="abc123def"'), "peer tab missing");
-  assert.ok(html.includes("Grackle"), "peer name missing");
+  assert.ok(html.includes("Host-b"), "peer name missing");
   const bodyTag = html.match(/<body[^>]*>/)[0];
   assert.ok(!bodyTag.includes("unified-off"), "strip must be visible with >1 tabs");
 });

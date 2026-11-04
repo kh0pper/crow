@@ -85,7 +85,7 @@ export function botsWorkspaceRoot() {
  * instance-data-dir resource, so it anchors on resolveDataDir() — the SAME
  * anchor servers/sharing/identity.js uses for the instance's own federation
  * identity — and deliberately NOT on CROW_DB_PATH: that var asserts where the
- * sqlite file is, not where the instance lives. On grackle the two legitimately
+ * sqlite file is, not where the instance lives. On the home server the two legitimately
  * differ (repo .env points CROW_DB_PATH at repo/data/crow.db while identity.json
  * lives only in ~/.crow/data, whose crow.db is a symlink to the repo file); the
  * old dirname(botsDbPath()) anchor made every bot-identity derivation throw

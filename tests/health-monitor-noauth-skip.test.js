@@ -3,7 +3,7 @@
  *
  * QW1 (Crow Messages usability arc, Phase 0): a gateway started with
  * --no-auth must never run the W2 health monitor — it's never the primary
- * dashboard (e.g. grackle's loopback companion MCP bridge), so it shouldn't
+ * dashboard (e.g. the home server's loopback companion MCP bridge), so it shouldn't
  * evaluate its own --no-auth flag as an exposure warn and push "the password
  * requirement is turned off" notifications.
  *

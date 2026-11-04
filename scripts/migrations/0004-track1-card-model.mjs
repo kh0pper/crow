@@ -18,7 +18,7 @@
 // `plan_ref` retires (D-T1.7): DROP COLUMN is the last statement, and it is
 // PROBE-GUARDED — the bundle's own CREATE TABLE never had the column (only
 // pre-Track-1 code that lived through 0001-board-stages did), so an
-// unconditional DROP throws on any bundle-created or grackle-empty store.
+// unconditional DROP throws on any bundle-created or server-b-empty store.
 // Any non-NULL plan_ref value found on a per-project store is logged loudly
 // before the drop — recordPlanRef wrote to per-project stores, so "all-NULL"
 // is verified only for the instance-global copy (spec D-T1.4 migration
