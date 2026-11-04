@@ -395,19 +395,9 @@ test("re-invite an accepted member while it is offline: the old instance hears t
      * unshare (epoch E1, aimed at B's instance) and the new invite (a new epoch,
      * on the "*" stream). The visitor must hear the first, then the second.
      *
-     * A flush walks a contact's rows in (project, epoch, stream, seq) order, so the
-     * two streams' RANDOM epochs decide which goes first on the wire. Every
-     * re-invite runs the same code, so the gate takes re-invites until the new
-     * epoch sorts after E1: the plan's order is then the deterministic one. (Each
-     * earlier invite is cancelled by the next re-invite's cancelEpoch pass, S6, so
-     * only the last one is left queued.) */
-    let second = null;
-    let ordered = false;
-    for (let i = 0; i < 16 && !ordered; i++) {
-      second = await a.c2c("inviteContact", { projectId, contactId: aContactOfB, role: "editor" });
-      ordered = inv.memberUuid < second.memberUuid;
-    }
-    assert.ok(ordered, "16 re-invites and the new epoch never sorted after the old one (2^-16)");
+     * A flush walks a contact's rows in enqueue order (row id), so the unshare,
+     * queued first in that transaction, always leaves first. */
+    const second = await a.c2c("inviteContact", { projectId, contactId: aContactOfB, role: "editor" });
     assert.notEqual(second.memberUuid, inv.memberUuid, "a re-invite is a new membership");
 
     const queued = await outbox(a, projectUuid);
@@ -419,7 +409,7 @@ test("re-invite an accepted member while it is offline: the old instance hears t
     assert.equal(unshare.acked_at, null, "both frames wait for B");
     assert.equal(invite[0].epoch, second.memberUuid);
     assert.equal(invite[0].to_instance_id, null, "an invite rides the '*' stream");
-    assert.ok(unshare.epoch < invite[0].epoch, "so the unshare is flushed first");
+    assert.ok(Number(unshare.id) < Number(invite[0].id), "the unshare was queued first, so it is flushed first");
 
     bBack = await node("c2c2n5-b", { home: bHome });
     assert.ok(await until(async () => (await visitRow(bBack, bContactOfA, projectUuid))?.epoch === second.memberUuid, 60_000),

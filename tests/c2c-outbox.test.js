@@ -1063,3 +1063,15 @@ test("restart resends unacked in order; receiver applies once", async () => {
     peer.dispose();
   }
 });
+test("flush sends frames in the order they were enqueued, across streams, whatever the epochs sort to", async () => {
+  await withDb(async ({ db }) => {
+    // The old membership's targeted unshare is queued first, then the new invite on '*', with
+    // epochs chosen so the old one sorts AFTER the new one: enqueue order must still win.
+    const OLD = "f".repeat(32), NEW = "0".repeat(32);
+    await enq(db, { kind: "project.unshare", epoch: OLD, toInstanceId: PEER, body: {} });
+    await enq(db, { ...invite(), epoch: NEW });
+    const sent = [];
+    await flush(db, async (frame) => { sent.push([frame.kind, frame.epoch]); }, { contactId: CONTACT });
+    assert.deepEqual(sent, [["project.unshare", OLD], ["project.invite", NEW]]);
+  });
+});

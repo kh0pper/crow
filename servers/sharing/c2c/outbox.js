@@ -472,8 +472,12 @@ export async function enqueue(db, { contactId, projectUuid, kind, epoch, toInsta
 }
 
 /**
- * Send every unacked frame for a contact, ordered by (project, epoch, stream, seq)
- * so each stream stays FIFO. `send(frame)` is the transport
+ * Send every unacked frame for a contact in the order it was ENQUEUED (row id),
+ * per project. Within one stream the id rises with the seq (the seq and the row are
+ * claimed in the same serialized transaction), so each stream stays FIFO, and frames
+ * one transaction queued together leave in that order across streams too: a
+ * re-invite's unshare of the old membership (V6) always goes before its new invite,
+ * instead of an order decided by two random epochs. `send(frame)` is the transport
  * (`peerManager.send(crowId, frame)`); it may be async and it throws when the
  * peer is not connected.
  *
@@ -506,7 +510,7 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
       sql: `SELECT id, project_uuid, seq, frame_json, last_refusal, last_attempt_at
               FROM c2c_outbox
              WHERE contact_id = ? AND acked_at IS NULL
-             ORDER BY project_uuid, epoch, COALESCE(to_instance_id, '*'), seq`,
+             ORDER BY project_uuid, id`,
       args: [contactId],
     })).rows);
     const held = new Set();
