@@ -309,7 +309,7 @@ export async function runPostListenSetup(server, app, deps) {
         // drowning a new deferral in a line per migration.
         const rows = readDeferrals(inst.dbPath).filter((r) => known.includes(r.id));
         const since = rows.map((r) => r.first_deferred_at).sort()[0];
-        console.log(`[migrations:post-settle] waiting on absent tables: ${known.join(", ")} (known since ${since})`);
+        console.log(`[migrations:post-settle] waiting on absent tables: ${known.join(", ")}${since ? ` (known since ${since})` : ""}`);
       }
     } catch (err) {
       console.warn("[migrations:post-settle] skipped:", err.message);

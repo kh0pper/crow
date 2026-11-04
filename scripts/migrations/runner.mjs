@@ -150,8 +150,14 @@ export async function runMigrations({
         if (known && known.reason === reason) {
           // KNOWN: same wait as last boot. Re-stamp and stay quiet — a restored
           // DB missing the row only costs one extra log line, never a retry.
-          book.prepare("UPDATE schema_migrations_deferred SET last_checked_at = ? WHERE id = ?")
-            .run(at, mod.id);
+          try {
+            book.prepare("UPDATE schema_migrations_deferred SET last_checked_at = ? WHERE id = ?")
+              .run(at, mod.id);
+          } catch (err) {
+            // The stamp is informational only: a busy crow.db must not stop the
+            // migrations after this one.
+            if (err?.code !== "SQLITE_BUSY") throw err;
+          }
           continue; // its held lines are dropped
         }
 
