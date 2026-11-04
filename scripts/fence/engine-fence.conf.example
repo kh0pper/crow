@@ -1,0 +1,41 @@
+# /etc/crow/engine-fence.conf — the fence's only input besides `tailscale ip`.
+# Install it root-owned, mode 0640 (docs/guide/engine-fence.md). Every address
+# below is a documentation placeholder: this file is private to the host and
+# holds the real ones.
+#
+# One directive per line; `#` starts a comment; blank lines are ignored. An
+# unknown directive, a bad port, a bad address or a port published twice refuses
+# the whole conf, and a refused conf changes no rule.
+#
+# Nothing here is wildcard: a port is listed because the engine publishes it,
+# and the fence decides who may reach it. There is no directive for docker0.
+
+# The one inbound interface allowed to reach a published port. Tailscale's host
+# interface is the product default; a host whose tailnet is a container has no
+# host-side address and uses the port-only lines plus the fail-open unit variant.
+interface tailscale0
+
+# A bridge Crow itself created for one engine, named by its
+# com.docker.network.bridge.name. `docker0`, Docker's gateway bridge, the
+# hypervisor/CNI defaults and `lo` are refused: a RETURN for a shared interface
+# fences nothing. The interactive `check` reads the network's Crow label and its
+# com.docker.network.bridge.name and records both in the facts file; `apply --boot`
+# reads that record instead of asking docker. A Linux interface name is at most 15 characters.
+bridge crow-eng-ex
+
+# Published on this host's tailnet address, v4 and v6, resolved at apply time:
+# never write the address here. A tailnet-IP publish carries NO source
+# exemptions — only loopback and the engine bridges.
+publish tailnet 8003
+
+# No destination match at all. Protects a wildcard or unknown-address publish
+# during a migration, and what the fence falls back to for one family when
+# tailscale reports no address. Stricter than the addressed rule: it drops that
+# port number from every non-allowed interface. It takes no consumer.
+publish port-only 8030
+
+# A publish on a LAN address. Source exemptions are allowed here only: one
+# address per consumer, and every process on the consumer host counts as the
+# consumer. A range needs the operator's explicit `confirm-range` token at the
+# end of the line, because it widens who may reach the port.
+publish lan 192.0.2.10 8030 consumer 192.0.2.20

@@ -1,0 +1,19 @@
+# TEMPLATE — installed by the operator (docs/guide/engine-fence.md).
+#
+# The re-apply cadence: a fast trigger right after boot, where the race is, and a
+# calendar sweep afterwards. Once every `publish tailnet` entry has an addressed
+# rule the run does no work at all: no docker call, identical rules and an
+# untouched state file (so the snapshot the dashboard reads is never made stale
+# by a rewrite). The interval is never used to restart anything.
+[Unit]
+Description=Timer for the Crow engine fence re-apply
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+OnCalendar=*-*-* *:00/15:00
+AccuracySec=15s
+Unit=crow-engine-fence-reapply.service
+
+[Install]
+WantedBy=timers.target

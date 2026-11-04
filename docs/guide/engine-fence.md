@@ -7,7 +7,174 @@ description: The raw-table fence in front of a published engine port, and the ro
 
 An engine that answers on this host's **tailnet address** is protected by an interface-pinned rule in the `iptables` raw table: traffic to the published port arriving on anything but loopback, the engine's own Docker network, or the tailnet interface is dropped. Crow never writes those rules itself — they are installed, changed and removed by the operator.
 
-What Crow does do is **report**. The `publishedPorts` health signal in the Nest audits what this host publishes beyond loopback and whether each tailnet-address publish carries that rule. It reads one root-written file and runs nothing itself; that file is what this page documents.
+What Crow does do is **report**. The `publishedPorts` health signal in the Nest audits what this host publishes beyond loopback and whether each tailnet-address publish carries that rule. It reads one root-written file and runs nothing itself; that file is what the second half of this page documents.
+
+## The fence: what it puts in the ruleset
+
+The script is `scripts/fence/crow-engine-fence`. It writes one chain in the **raw** table, `CROW-ENGINE-FENCE`, and for every published engine port one rule per address family:
+
+```
+-A CROW-ENGINE-FENCE -d <tailnet address> -p tcp -m tcp --dport <port> ! -i tailscale0 \
+   -m comment --comment "crow-engine-fence:<id>:g<generation>" -j DROP
+```
+
+Why the raw table: raw `PREROUTING` runs before conntrack, before Docker's DNAT and before `FORWARD`, so the rule matches the destination address and the port only — no connection state, no source match on a tailnet-IP publish — and it covers the userland-proxy and IPv6 paths as well as the DNAT one.
+
+Ahead of that DROP, in the same chain, are the exemptions, as `RETURN`s: `-i lo`, one per `bridge` line in the conf, and — for a `publish lan` line only — one per consumer address. They are `RETURN` and not `ACCEPT` on purpose: a `RETURN` ends only this chain, while an `ACCEPT` in raw `PREROUTING` would end raw processing and skip Docker's own raw drops for other ports. A tailnet-IP publish carries **no** source exemptions.
+
+The chain is filled first and jumped to from `PREROUTING` at position 1 only afterwards (`-C`, then `-I`), so the jump never points at an empty or half-built chain. The whole chain is loaded in one `iptables-restore --noflush` transaction per family, so there is no RETURN-only interval.
+
+When tailscale reports no address for a family — logged out, or the boot race — every tailnet port gets the stricter **port-only** rule for that family instead of a failed unit:
+
+```
+-A CROW-ENGINE-FENCE -p tcp -m tcp --dport <port> -m addrtype --dst-type LOCAL \
+   ! -i tailscale0 -m comment --comment "crow-engine-fence:<id>:g<generation>:portonly" -j DROP
+```
+
+The address is resolved on every apply (`tailscale ip -4` / `-6`) and is never stored in the conf or the script. `publish lan` never falls back: its address is in the conf.
+
+## The conf
+
+`/etc/crow/engine-fence.conf`, root-owned, mode 0640, one directive per line. The shipped example is `scripts/fence/engine-fence.conf.example`:
+
+```
+interface tailscale0
+bridge crow-eng-ex
+publish tailnet 8003
+publish port-only 8030
+publish lan 192.0.2.10 8011 consumer 192.0.2.20
+```
+
+- `interface` — the one inbound interface allowed to reach a published port. Exactly one, required.
+- `bridge` — a bridge Crow itself created for one engine, by its `com.docker.network.bridge.name` (at most 15 characters). `docker0`, Docker's gateway bridge and the well-known hypervisor/CNI defaults are refused: a `RETURN` for a shared interface fences nothing.
+- `publish tailnet <port>` — a publish on this host's tailnet address. A `consumer` clause on this line refuses the conf.
+- `publish port-only <port>` — no destination match. Protects a wildcard or unknown-address publish during a migration. No consumer clause.
+- `publish lan <addr> <port> consumer <addr> …` — a LAN-address publish, the only place source exemptions are allowed. One address per consumer, and every process on the consumer host counts as the consumer. A range needs the operator's explicit `confirm-range` token at the end of the line, because it widens who may reach the port.
+
+An unknown directive, a port outside 1-65535, a port published twice, a malformed address or a refused combination fails the whole conf, and a failed conf changes no rule. There is no directive for `docker0` and none for a wildcard address.
+
+## Install (operator, as root)
+
+```bash
+install -m 0755 scripts/fence/crow-engine-fence /usr/local/sbin/crow-engine-fence
+install -m 0644 scripts/fence/crow-engine-fence.service /etc/systemd/system/
+install -m 0644 scripts/fence/crow-engine-fence-reapply.service /etc/systemd/system/
+install -m 0644 scripts/fence/crow-engine-fence-reapply.timer /etc/systemd/system/
+[ -d /etc/crow ] || install -d -m 0750 /etc/crow
+install -m 0640 scripts/fence/engine-fence.conf.example /etc/crow/engine-fence.conf
+printf 'CROW_ENGINE_FENCE_GROUP=%s\n' '<group>' > /etc/crow/engine-fence.env
+chmod 0640 /etc/crow/engine-fence.env
+systemctl daemon-reload
+systemd-analyze verify crow-engine-fence.service crow-engine-fence-reapply.service crow-engine-fence-reapply.timer
+```
+
+Edit `/etc/crow/engine-fence.conf` first: the example holds placeholders only.
+
+`<group>` is the group of the user the gateway runs as (`id -gn <gateway-user>`). The unit's `RuntimeDirectory=crow-engine-fence` creates `/run/crow-engine-fence` as `root:root` 0750 before the sandbox namespace is built, and the script then sets that group on the directory and the state file (it has `CAP_CHOWN`). Without it the state file stays root-only and the start block cannot read it. The group is never written into the shipped units — they read `/etc/crow/engine-fence.env`.
+
+Then, with docker up:
+
+```bash
+crow-engine-fence check      # validates the conf, reads the backend and the bridges, saves the facts
+crow-engine-fence apply      # check + the rules
+crow-engine-fence status     # the live rules, the addresses used, the generation
+systemctl enable crow-engine-fence.service crow-engine-fence-reapply.timer
+```
+
+`check` is the only mode that talks to docker (`iptables --version`, `docker info` for the firewall backend, `docker network inspect` for each `bridge`). `apply --boot` is what the units run and makes **no** docker call at all: it reads the firewall backend from `/etc/docker/daemon.json` (an absent file or key means Docker's default backend; an explicit `nftables` backend or an unreadable file is refused), the iptables flavour from `iptables --version`, and the bridge facts from `/etc/crow/engine-fence.facts.json`.
+
+That facts file is written by `check` and by an interactive `apply`. `apply --boot` refuses when it is missing, when the conf changed since it was written, or when `/etc/docker/daemon.json` or a `docker.service` drop-in changed: re-run `check` after any of those edits. `status` warns about the same mismatches.
+
+- `/etc/crow/engine-fence.facts.json` — root, 0640: the backend, the per-bridge facts, the conf hash, the Docker-flags hash, `saved_at`.
+- `/run/crow-engine-fence/state.json` — root, 0640, group `<group>`, inside the unit's `0750` RuntimeDirectory: the generation, `applied_at`, the backend, the resolved tailnet addresses, and one entry per rule (`id`, family, address, `addressed`/`port-only`, port, interface, exemptions). Nothing else — no process names, no environment.
+
+### RequiredBy or WantedBy
+
+The shipped `crow-engine-fence.service` is `RequiredBy=docker.service`: docker does not start unless the fence applied (fail closed). Use it on any host whose tailnet comes from the host's own `tailscaled`.
+
+Hosts whose tailnet is provided by the `tailscale` **bundle** (a docker container) cannot have an address before dockerd starts. There, `RequiredBy` is the wrong link, and the shipped `crow-engine-fence-wantedby.service` variant is installed instead — identical except for its `[Install]` line (`WantedBy=docker.service`, fail open: docker starts even if the fence failed). On such a host the port-only rule still applies at boot, the re-apply timer upgrades it once tailscale is up, and the dashboard's `publishedPorts` warn plus Crow's own refusal to start a published engine while the fence is inactive are the remaining guards.
+
+| host's tailnet comes from | unit | failure mode |
+|---|---|---|
+| host `tailscaled` | `crow-engine-fence.service` | fail closed: docker waits for the fence |
+| the `tailscale` bundle (container) | `crow-engine-fence-wantedby.service` | fail open: docker starts anyway |
+
+Install exactly one of the two under `/etc/systemd/system/crow-engine-fence.service`.
+
+### The re-apply timer
+
+`crow-engine-fence-reapply.timer` re-runs `crow-engine-fence apply --boot` (idempotent, no docker) until an addressed rule exists for every `publish tailnet` entry, and after that its run does nothing at all: identical rules and an untouched state file. It declares **no** `RuntimeDirectory=` — `/run/crow-engine-fence` belongs to the fence unit — and it never restarts or stops the fence unit or docker.
+
+### Sandbox and the strict variant
+
+The shipped unit deliberately has no `ProtectSystem=strict`: `iptables` creates `/run/xtables.lock` even to list rules, which a strict namespace forbids. If you want strict anyway, install both files, exactly as for the snapshot job:
+
+```
+# /etc/tmpfiles.d/crow-xtables-lock.conf
+f /run/xtables.lock 0600 root root
+```
+
+```
+# /etc/systemd/system/crow-engine-fence.service.d/strict.conf
+[Service]
+ProtectSystem=strict
+ReadWritePaths=/run/xtables.lock /run/crow-engine-fence
+```
+
+then `systemd-tmpfiles --create` and `systemctl daemon-reload`. The `ReadWritePaths=` entries have no `-` prefix on purpose: with the tmpfiles line in place the lock exists, and if it ever does not the unit should fail loudly rather than run in a namespace that cannot create it.
+
+## Changing rules, and the break-glass
+
+**To change rules: `crow-engine-fence apply`** — never `systemctl restart crow-engine-fence`: `docker.service` requires this unit, so a restart is passed along to docker and restarts it, and a stop of the unit stops docker.
+
+**Break-glass, when a bad conf or an unreadable backend keeps docker down:**
+
+```bash
+systemctl disable crow-engine-fence
+systemctl start docker
+```
+
+`disable` removes the `docker.service.requires` link, so docker starts without the fence. Fix the conf, run `crow-engine-fence check` and `crow-engine-fence apply`, then `systemctl enable crow-engine-fence` again. The break-glass is never `mask`: masking `crow-engine-fence` keeps docker down (docker requires the unit), which is the outage the break-glass exists to end. A late, dead or logged-out `tailscaled` does **not** block docker — that is what the port-only rule and the timer are for. Only a conf that fails validation, an unknown backend or a missing/stale facts file blocks it.
+
+## Acceptance probes (once per install, in a window)
+
+1. From the tailnet: connect to the published port. It must answer.
+2. From loopback on the host: it must answer.
+3. From a LAN host that is **not** the consumer, add a route for the tailnet address via the engine host's LAN address and connect to the port. It can succeed without the fence; with the fence it must not.
+4. From a container on the default bridge, dial the tailnet address and the port. It must not answer: `docker0` is never exempt.
+5. Repeat 1-4 for IPv6 on a host with a v6 tailnet address.
+6. `crow-engine-fence status` shows the rules, the addresses used and no `WARN`.
+7. A `systemctl restart docker` and a reboot, in a registered window: the fence is present before the engine container is up.
+
+## Converting an existing fence
+
+`crow-engine-fence swap-check --old-tag <tag>` prints the old rules and compares **destination coverage**, not just ports. A `-d` rule covers one address; a wildcard publish is reachable on more than one, so an addressed rule never covers it and the old rules stay until the new set has a port-only rule for that port. It deletes nothing: the operator removes the old rules by hand, one at a time, re-probing after each.
+
+## Removal
+
+```bash
+crow-engine-fence remove <id>        # one publish's rules, live only; the conf still lists it
+crow-engine-fence status             # warns about a conf entry with no live rule
+```
+
+`remove <id>` edits the live rules only, never the conf: the conf is the operator's file, and the next apply puts the rule back. To retire a publish for good, edit the conf too; to stop using the fence entirely:
+
+```bash
+systemctl disable --now crow-engine-fence-reapply.timer
+systemctl disable crow-engine-fence
+crow-engine-fence remove <id>        # for every published port
+rm -f /etc/systemd/system/crow-engine-fence.service \
+      /etc/systemd/system/crow-engine-fence-reapply.service \
+      /etc/systemd/system/crow-engine-fence-reapply.timer
+rm -f /usr/local/sbin/crow-engine-fence /etc/crow/engine-fence.conf /etc/crow/engine-fence.facts.json
+systemctl daemon-reload
+```
+
+Removing the chain from the raw table is `iptables -t raw -D PREROUTING -j CROW-ENGINE-FENCE` and `iptables -t raw -F CROW-ENGINE-FENCE` (plus the `ip6tables` equivalents) — the script itself never deletes a chain.
+
+### Exit codes
+
+`0` ok, `2` usage, `10` conf unreadable, `11` a conf line is invalid, `12` the conf is refused on principle, `13` unknown iptables flavour, `14` docker unreadable, `15` unknown Docker firewall backend, `16` a Docker bridge fact is wrong or missing, `17` the facts file is missing, `18` the facts are stale, `19` the restore transaction failed, `20` a check refused, `21` another run holds the lock, `22` the state directory is unusable.
 
 ## The published-ports snapshot
 

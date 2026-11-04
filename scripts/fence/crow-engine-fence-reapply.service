@@ -1,0 +1,28 @@
+# TEMPLATE — installed by the operator (docs/guide/engine-fence.md), driven by
+# crow-engine-fence-reapply.timer.
+#
+# Why it exists: at boot tailscale often has no address before the fence's
+# bounded wait ends, so the boot apply installs the port-only rule (stricter, and
+# safe) and the state file carries no address. This unit re-runs the same
+# idempotent, docker-free `apply --boot` until an addressed rule exists for every
+# `publish tailnet` entry, and after that its run changes nothing.
+#
+# It declares NO RuntimeDirectory=: /run/crow-engine-fence belongs to
+# crow-engine-fence.service, and a second unit declaring the same directory would
+# delete the state file when it stopped. It has no Requires=/PartOf= on
+# docker.service or on crow-engine-fence.service: it never restarts or stops
+# either of them. Its only command is the script.
+[Unit]
+Description=Re-apply the Crow engine fence until its rules are addressed
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/crow/engine-fence.env
+ExecStart=/usr/local/sbin/crow-engine-fence apply --boot
+TimeoutStartSec=120
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0027
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN

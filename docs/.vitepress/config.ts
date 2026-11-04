@@ -370,6 +370,7 @@ export default defineConfig({
           { text: 'Browser Automation', link: '/guide/browser-automation' },
           { text: 'Multi-Instance Chaining', link: '/guide/instances' },
           { text: 'Satellite Servers', link: '/guide/satellites' },
+          { text: 'Engine Fence', link: '/guide/engine-fence' },
           { text: 'Data Dashboard', link: '/guide/data-dashboard' },
           { text: 'Data Sharing', link: '/guide/data-sharing' },
           { text: 'Contacts', link: '/guide/contacts' },
