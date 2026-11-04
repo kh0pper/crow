@@ -486,6 +486,21 @@
     const stutterLeft = new Float32Array(ringFrames);
     const stutterRight = new Float32Array(ringFrames);
 
+    // --- the reverb's lines and the tape stop's ring, made once -------------
+    //
+    // A hold never allocates on the audio thread: the reverb's delay lines and
+    // a tape-stop ring long enough for one beat at the slowest tempo are made
+    // here and cleared (not replaced) each time an effect starts.
+    const reverbLines = {
+      combsLeft: REVERB_COMB_FRAMES.map((frames) => createComb(scaledDelay(frames, sampleRate))),
+      combsRight: REVERB_COMB_FRAMES.map((frames) => createComb(scaledDelay(frames, sampleRate))),
+      allpassesLeft: REVERB_ALLPASS_FRAMES.map((frames) => createAllpass(scaledDelay(frames, sampleRate))),
+      allpassesRight: REVERB_ALLPASS_FRAMES.map((frames) => createAllpass(scaledDelay(frames, sampleRate))),
+    };
+    const tapeCapacity = Math.max(1, Math.ceil(beatFramesAt(SLOWEST_BPM, sampleRate))) + 2;
+    const tapeLeft = new Float32Array(tapeCapacity);
+    const tapeRight = new Float32Array(tapeCapacity);
+
     // --- the looper's state ------------------------------------------------
 
     /**
@@ -567,26 +582,19 @@
         state.division = STUTTER_EIGHTH;
         state.position = 0;
       } else if (name === "tape_stop") {
-        state.ringLeft = new Float32Array(0);
-        state.ringRight = new Float32Array(0);
+        state.ringLeft = tapeLeft;
+        state.ringRight = tapeRight;
         state.ringFrames = 0;
         state.writeIndex = 0;
         state.readPosition = 0;
         state.startFrame = 0;
         state.rampFrames = 1;
       } else {
-        state.combsLeft = [];
-        state.combsRight = [];
-        state.allpassesLeft = [];
-        state.allpassesRight = [];
-        for (let at = 0; at < REVERB_COMB_FRAMES.length; at += 1) {
-          state.combsLeft.push(createComb(scaledDelay(REVERB_COMB_FRAMES[at], sampleRate)));
-          state.combsRight.push(createComb(scaledDelay(REVERB_COMB_FRAMES[at], sampleRate)));
-        }
-        for (let at = 0; at < REVERB_ALLPASS_FRAMES.length; at += 1) {
-          state.allpassesLeft.push(createAllpass(scaledDelay(REVERB_ALLPASS_FRAMES[at], sampleRate)));
-          state.allpassesRight.push(createAllpass(scaledDelay(REVERB_ALLPASS_FRAMES[at], sampleRate)));
-        }
+        state.combsLeft = reverbLines.combsLeft;
+        state.combsRight = reverbLines.combsRight;
+        state.allpassesLeft = reverbLines.allpassesLeft;
+        state.allpassesRight = reverbLines.allpassesRight;
+        clearReverb(state);
         // A tail cannot be finished before its longest comb plus its longest
         // allpass has had time to empty: the lines hold the loudest part of the
         // return, and a block of quiet output over a full line is not a tail's end.
@@ -695,14 +703,11 @@
       if (state.name === "tape_stop") {
         const beatFrames = Math.max(1, Math.round(beatFramesAt(transport.bpm, sampleRate)));
         const ring = beatFrames + 2;
-        if (state.ringFrames !== ring) {
-          state.ringLeft = new Float32Array(ring);
-          state.ringRight = new Float32Array(ring);
-          state.ringFrames = ring;
-        } else {
-          state.ringLeft.fill(0);
-          state.ringRight.fill(0);
-        }
+        // The ring is the one made with the bus, long enough for a beat at the
+        // slowest tempo; this beat uses its first `ring` frames.
+        state.ringFrames = Math.min(ring, tapeCapacity);
+        state.ringLeft.fill(0, 0, state.ringFrames);
+        state.ringRight.fill(0, 0, state.ringFrames);
         state.writeIndex = 0;
         state.readPosition = 0;
         state.startFrame = frame;
