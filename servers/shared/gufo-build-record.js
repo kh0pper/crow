@@ -1,6 +1,6 @@
 /**
  * gufo engine build record — schema v1 validator, build id, collision and
- * selectionMode checks (the private engineering notes, §5, §6.4, §10).
+ * selectionMode checks (the private engineering notes, §2, §5, §6.4, §10).
  *
  * A gufo "plugin" in Crow is an immutable recorded engine build. The record is
  * a local file (`<build dir>/build.json`, mode 0444) that names the gufo commit,
@@ -37,18 +37,24 @@
  *     diagnose: { argv: [...], returncode: 0, stdout_sha256, json: {...verbatim...} },
  *     check_install: { report_path, report_sha256, status: "PASS", mode: "lock" },
  *     toolchain: {
- *       id: <sha256 of flake.lock>,
- *       flake_lock_sha256,
+ *       id: <sha256 of flake.lock>,               // MUST equal flake_lock_sha256
+ *       flake_lock_sha256: <64-hex>,
  *       nix_image: <ref>@sha256:<64-hex>,         // never a floating tag
  *       closure_volume, closure_manifest_sha256, rocm_version,
  *       rocr_library_dir: <the exact GUFO_ROCR_LIBRARY_DIR string>,
  *     },
  *     cmake: { preset, defines: [...], gpu_targets: [...] },
- *     binary: { path, bytes, sha256, version_output },
+ *     binary: { path, bytes, sha256: <64-hex>, version_output },
  *     flags_needed: [...],
  *     tests: {...},
  *     trust: "official-lock",                     // the only accepted value
  *   }
+ *
+ * §2's cmake command line is part of the record, not of the toolchain: the
+ * defines must select the official lock exactly once
+ * (`-DGUFO_EXTENSIONS_FROM_LOCK=ON`), must name exactly the recorded commit
+ * (`-DGUFO_REVISION=<source.commit>`), and must never hand gufo an extension
+ * list of its own (`-DGUFO_EXTENSIONS=`, `-DGUFO_EXTENSION_DIRS=`).
  *
  * Out of v1 on purpose (they were considered and dropped): a
  * `nix-build-derivation` recipe, `nix.substituters` and
@@ -68,7 +74,8 @@ import { createHash } from "node:crypto";
 
 /**
  * One code per refusal. A caller switches on these; a boolean is never enough.
- * `PROVIDER_KEY_COLLISION` carries the artifact key after a ":".
+ * `PROVIDER_KEY_COLLISION` and `PROVIDER_KEYS_MISSING` from `collisionCheck`
+ * carry the artifact key / provider id after a ":".
  */
 export const REASONS = Object.freeze({
   RECORD_NOT_OBJECT: "record_not_object",
@@ -79,6 +86,9 @@ export const REASONS = Object.freeze({
   SOURCE_COMMIT_INVALID: "source_commit_invalid",
   SOURCE_DIRTY: "source_dirty",
   SOURCE_UNTRACKED: "source_untracked",
+  DEFINES_LOCK_MISSING: "defines_lock_missing",
+  DEFINES_REVISION_MISMATCH: "defines_revision_mismatch",
+  DEFINES_FORBIDDEN: "defines_forbidden",
   SELECTION_NOT_LOCK: "selection_not_lock",
   LOCK_HASH_INVALID: "lock_hash_invalid",
   LOCK_NAMES_INVALID: "lock_names_invalid",
@@ -86,13 +96,22 @@ export const REASONS = Object.freeze({
   EXTENSION_MISSING: "extension_missing",
   EXTENSION_SOURCE_OUTSIDE_TREE: "extension_source_outside_tree",
   API_VERSION_MISMATCH: "api_version_mismatch",
+  DIAGNOSE_EXTENSIONS_MISMATCH: "diagnose_extensions_mismatch",
+  PROVIDER_IDS_INVALID: "provider_ids_invalid",
   PROVIDER_KEYS_MISSING: "provider_keys_missing",
   PROVIDER_KEYS_UNKNOWN: "provider_keys_unknown",
+  PROVIDER_KEYS_INVALID: "provider_keys_invalid",
   PROVIDER_KEY_COLLISION: "provider_key_collision",
   CHECK_INSTALL_NOT_PASS: "check_install_not_pass",
   CHECK_INSTALL_NOT_LOCK: "check_install_not_lock",
+  REPORT_HASH_INVALID: "report_hash_invalid",
+  DIAGNOSE_RETURNCODE: "diagnose_returncode",
+  DIAGNOSE_HASH_INVALID: "diagnose_hash_invalid",
   IMAGE_FLOATING_TAG: "image_floating_tag",
   IMAGE_NOT_DIGEST_PINNED: "image_not_digest_pinned",
+  FLAKE_LOCK_HASH_INVALID: "flake_lock_hash_invalid",
+  TOOLCHAIN_ID_MISMATCH: "toolchain_id_mismatch",
+  BINARY_HASH_INVALID: "binary_hash_invalid",
   BINARY_VERSION_MISSING_COMMIT: "binary_version_missing_commit",
 });
 
@@ -112,14 +131,48 @@ export const OFFICIAL_LOCK_MODE = "lock";
  */
 export const BUILD_ID_RE = /^gufo-[0-9][0-9A-Za-z._+-]*-[0-9a-f]{7}-(?:lock|discovery|explicit)-[0-9a-f]{8}$/;
 
+/** §2: the only way the official lock is selected, and the revision pin. */
+const LOCK_DEFINE = "-DGUFO_EXTENSIONS_FROM_LOCK=ON";
+const REVISION_DEFINE_PREFIX = "-DGUFO_REVISION=";
+/** §2: a record that hands gufo its own extension list is refused. */
+const FORBIDDEN_DEFINE_PREFIXES = Object.freeze(["-DGUFO_EXTENSIONS=", "-DGUFO_EXTENSION_DIRS="]);
+
 const HEX40_RE = /^[0-9a-f]{40}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST_RE = /@sha256:[0-9a-f]{64}$/;
 /** A built extension's source is the official tree's own directory for it. */
 const EXTENSION_SOURCE_RE = /^src\/models\/([A-Za-z0-9_.-]+)$/;
+/** A build id that is safe to print verbatim (no path, no host, no user). */
+const DISPLAY_ID_RE = /^[A-Za-z0-9._+-]{1,64}$/;
+/** The trust levels a displayed record may name; anything else is "unrecorded". */
+const DISPLAY_TRUSTS = Object.freeze([OFFICIAL_TRUST, "unrecorded"]);
 
 /** The recipe-name marker mixed into the build id, so a schema change is visible. */
 const BUILD_ID_DOMAIN = "gufo-build-id-v1";
+
+/**
+ * A reason that already refuses one of the fields the build id is derived from.
+ * When one of them fired, the id is not recomputed: the fault would otherwise be
+ * reported twice, once as itself and once as a build id mismatch.
+ */
+const ID_INPUT_REASONS = Object.freeze([
+  REASONS.RECIPE_UNKNOWN,
+  REASONS.SOURCE_COMMIT_INVALID,
+  REASONS.LOCK_HASH_INVALID,
+  REASONS.IMAGE_FLOATING_TAG,
+  REASONS.IMAGE_NOT_DIGEST_PINNED,
+  REASONS.DEFINES_LOCK_MISSING,
+  REASONS.DEFINES_REVISION_MISMATCH,
+  REASONS.DEFINES_FORBIDDEN,
+  REASONS.FLAKE_LOCK_HASH_INVALID,
+]);
+
+/** An object whose prototype is Object.prototype (or none) — not an array, not a Map. */
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
 
 /** Required, non-empty string input, or a TypeError naming it. */
 function requiredInput(inputs, name) {
@@ -128,6 +181,46 @@ function requiredInput(inputs, name) {
     throw new TypeError(`computeBuildId: ${name} must be a non-empty string`);
   }
   return value;
+}
+
+function escapeRegex(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whether `--version` output names the commit: the full 40-hex form, or its
+ * 7-hex abbreviation. Both are anchored on a non-hex boundary at either end, so
+ * a longer hex run (a store path hash, a different revision) cannot stand in for
+ * the record's own commit.
+ */
+function mentionsCommit(versionOutput, commit) {
+  const full = new RegExp(`(^|[^0-9a-f])${escapeRegex(commit)}([^0-9a-f]|$)`);
+  const short = new RegExp(`(^|[^0-9a-f])${escapeRegex(commit.slice(0, 7))}([^0-9a-f]|$)`);
+  return full.test(versionOutput) || short.test(versionOutput);
+}
+
+/** `{name, version, source}` for each entry, sorted by name — or null if unusable. */
+function extensionProjection(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const entry of list) {
+    if (!isPlainObject(entry)) return null;
+    out.push({ name: entry.name ?? null, version: entry.version ?? null, source: entry.source ?? null });
+  }
+  out.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return out;
+}
+
+/**
+ * Whether two extension lists name the same extensions, in any order: the
+ * record's list and the diagnose output's list are compared by name, version and
+ * source, so neither a dropped, an added nor an edited extension passes.
+ */
+function sameExtensions(a, b) {
+  const left = extensionProjection(a);
+  const right = extensionProjection(b);
+  if (!left || !right) return false;
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**
@@ -139,6 +232,10 @@ function requiredInput(inputs, name) {
  * that agree on the id agree on the recipe, and the two recipe options could
  * never collide on one id. Binary bytes are not an input: the record carries the
  * binary sha256 separately and pre-flight compares it against the pin.
+ *
+ * The inputs are hashed as one JSON array with a domain tag, never as a joined
+ * string: `["a\nb"]` and `["a", "b"]` are different recipes and must not share
+ * an id.
  *
  * @param {{version: string, commit: string, recipe: string, lock_file_sha256: string,
  *          flake_lock_sha256: string, nix_image: string, rocr_library_dir: string,
@@ -163,7 +260,7 @@ export function computeBuildId(inputs) {
     throw new TypeError("computeBuildId: commit must be 40 lowercase hex characters (git rev-parse HEAD)");
   }
 
-  const material = [
+  const material = JSON.stringify([
     BUILD_ID_DOMAIN,
     recipe,
     commit,
@@ -171,8 +268,8 @@ export function computeBuildId(inputs) {
     flakeLockSha,
     nixImage,
     rocrDir,
-    ...[...defines].sort(),
-  ].join("\n");
+    [...defines].sort(),
+  ]);
   const recipe8 = createHash("sha256").update(material, "utf8").digest("hex").slice(0, 8);
   const id = `gufo-${version}-${commit.slice(0, 7)}-${mode}-${recipe8}`;
   if (!BUILD_ID_RE.test(id)) {
@@ -218,57 +315,80 @@ export function selectionModeCheck(diagnose) {
  * providers is a refusal, because in lock mode the tie is resolved by gufo's own
  * probe order, which Crow can neither predict nor enforce.
  *
- * An UNAVAILABLE provider still counts: the key is still claimed, and the probe
- * order is still what the caller cannot see. Keys are reported in sorted order,
- * and a reason names the key (`provider_key_collision:<key>`).
+ * Fails CLOSED: a provider list that is not an array, a `provider_keys` that is
+ * not a plain object, a provider without a string id and a listed provider with
+ * no key list are all refusals, because a collision can then not be judged at
+ * all. An UNAVAILABLE provider still counts: the key is still claimed, and the
+ * probe order is still what the caller cannot see. A missing key list is
+ * reported as `provider_keys_missing:<id>`; colliding keys are reported in
+ * sorted order as `provider_key_collision:<key>`. The value shape of a present
+ * key list (strings, non-empty) is the record validator's business.
  *
  * @param {Array<{id: string, available?: boolean}>} providers diagnose provider list
  * @param {Record<string, string[]>} providerKeys provider id -> artifact keys
  * @returns {{ok: boolean, reasons: string[]}}
  */
 export function collisionCheck(providers, providerKeys) {
-  const list = Array.isArray(providers) ? providers : [];
-  const keys = providerKeys && typeof providerKeys === "object" && !Array.isArray(providerKeys)
-    ? providerKeys
-    : {};
+  const reasons = [];
+  const add = (code) => {
+    if (!reasons.includes(code)) reasons.push(code);
+  };
+
+  const list = Array.isArray(providers) ? providers : null;
+  const keys = isPlainObject(providerKeys) ? providerKeys : null;
+  if (!list) add(REASONS.PROVIDER_IDS_INVALID);
+  if (!keys) add(REASONS.PROVIDER_KEYS_INVALID);
+
+  const ids = [];
+  for (const p of list ?? []) {
+    if (!isPlainObject(p) || typeof p.id !== "string" || p.id === "") {
+      add(REASONS.PROVIDER_IDS_INVALID);
+      continue;
+    }
+    if (!ids.includes(p.id)) ids.push(p.id);
+  }
+
+  if (keys) {
+    for (const id of ids) {
+      if (!Array.isArray(keys[id])) add(`${REASONS.PROVIDER_KEYS_MISSING}:${id}`);
+    }
+  }
 
   const ownersByKey = new Map();
-  for (const p of list) {
-    const id = p && typeof p === "object" && typeof p.id === "string" ? p.id : null;
-    if (!id) continue;
-    const own = Array.isArray(keys[id])
-      ? keys[id].filter((k) => typeof k === "string" && k !== "")
-      : [];
-    for (const key of new Set(own)) {
+  for (const id of ids) {
+    const own = keys && Array.isArray(keys[id]) ? keys[id] : [];
+    for (const key of new Set(own.filter((k) => typeof k === "string" && k !== ""))) {
       if (!ownersByKey.has(key)) ownersByKey.set(key, []);
       const owners = ownersByKey.get(key);
       if (!owners.includes(id)) owners.push(id);
     }
   }
 
-  const reasons = [];
-  for (const key of [...ownersByKey.keys()].sort()) {
-    if (ownersByKey.get(key).length > 1) {
-      reasons.push(`${REASONS.PROVIDER_KEY_COLLISION}:${key}`);
-    }
-  }
+  const colliding = [...ownersByKey.entries()]
+    .filter(([, owners]) => owners.length > 1)
+    .map(([key]) => key)
+    .sort();
+  for (const key of colliding) add(`${REASONS.PROVIDER_KEY_COLLISION}:${key}`);
+
   return { ok: reasons.length === 0, reasons };
 }
 
 /**
- * Validate one build record in isolation: every hard refusal of §6.4 that can be
- * judged from the record alone. `reasons` is empty iff `ok`.
+ * Validate one build record in isolation: every hard refusal of §2, §6.4 and
+ * §10 that can be judged from the record alone. `reasons` is empty iff `ok`.
  *
  * The collision check is separate (see `collisionCheck`) and the on-disk hashes
  * (record, binary, report) are the caller's, because this module never reads a
  * file. `reasons` is deduplicated and, for a record refused by one bad field, is
- * exactly that field's code.
+ * exactly that field's code: a check whose inputs were already refused is
+ * skipped rather than reported a second time (the build id is the last check and
+ * is only recomputed from a record whose recipe inputs are accepted).
  *
  * @param {unknown} record parsed build.json
  * @returns {{ok: boolean, reasons: string[]}}
  */
 export function validateBuildRecord(record) {
-  if (!record || typeof record !== "object" || Array.isArray(record)) {
+  if (!isPlainObject(record)) {
     return { ok: false, reasons: [REASONS.RECORD_NOT_OBJECT] };
   }
 
@@ -285,18 +405,39 @@ export function validateBuildRecord(record) {
   }
 
   // --- source: a clean checkout of a full commit ---------------------------
-  const source = record.source && typeof record.source === "object" ? record.source : {};
+  const source = isPlainObject(record.source) ? record.source : {};
   const commit = typeof source.commit === "string" && HEX40_RE.test(source.commit) ? source.commit : null;
   if (!commit) add(REASONS.SOURCE_COMMIT_INVALID);
   if (source.dirty !== false) add(REASONS.SOURCE_DIRTY);
   if (source.untracked_files !== 0) add(REASONS.SOURCE_UNTRACKED);
 
-  // --- extensions: lock mode, asserted twice (field + diagnose output) -----
-  const ext = record.extensions && typeof record.extensions === "object" ? record.extensions : {};
-  const diagnoseBlock = record.diagnose && typeof record.diagnose === "object" ? record.diagnose : {};
-  const diagnoseJson = diagnoseBlock.json && typeof diagnoseBlock.json === "object" && !Array.isArray(diagnoseBlock.json)
-    ? diagnoseBlock.json
+  // --- §2 defines: official lock, own revision, no extension list ----------
+  const cmake = isPlainObject(record.cmake) ? record.cmake : {};
+  const defines = Array.isArray(cmake.defines) && cmake.defines.every((d) => typeof d === "string")
+    ? cmake.defines
     : null;
+  if (!defines) {
+    // No usable command line at all: the lock define is what is missing.
+    add(REASONS.DEFINES_LOCK_MISSING);
+  } else {
+    if (defines.filter((d) => d === LOCK_DEFINE).length !== 1) add(REASONS.DEFINES_LOCK_MISSING);
+    if (commit) {
+      // Only judged against a valid commit: the mismatch would repeat
+      // SOURCE_COMMIT_INVALID and say nothing new.
+      const revisions = defines.filter((d) => d.startsWith(REVISION_DEFINE_PREFIX));
+      if (revisions.length !== 1 || revisions[0] !== `${REVISION_DEFINE_PREFIX}${commit}`) {
+        add(REASONS.DEFINES_REVISION_MISMATCH);
+      }
+    }
+    if (defines.some((d) => FORBIDDEN_DEFINE_PREFIXES.some((prefix) => d.startsWith(prefix)))) {
+      add(REASONS.DEFINES_FORBIDDEN);
+    }
+  }
+
+  // --- extensions: lock mode, asserted twice (field + diagnose output) -----
+  const ext = isPlainObject(record.extensions) ? record.extensions : {};
+  const diagnoseBlock = isPlainObject(record.diagnose) ? record.diagnose : {};
+  const diagnoseJson = isPlainObject(diagnoseBlock.json) ? diagnoseBlock.json : null;
 
   if (ext.selection_mode !== OFFICIAL_LOCK_MODE) add(REASONS.SELECTION_NOT_LOCK);
   if (!diagnoseJson || diagnoseJson.selectionMode !== OFFICIAL_LOCK_MODE) add(REASONS.SELECTION_NOT_LOCK);
@@ -305,20 +446,27 @@ export function validateBuildRecord(record) {
     add(REASONS.LOCK_HASH_INVALID);
   }
 
-  const lockNames = Array.isArray(ext.lock_names)
-    ? ext.lock_names.filter((n) => typeof n === "string" && n !== "")
+  // --- the lock's names, in full, without duplicates ----------------------
+  const lockNames = Array.isArray(ext.lock_names) && ext.lock_names.every((n) => typeof n === "string" && n !== "")
+    ? ext.lock_names
     : null;
-  if (!lockNames || lockNames.length === 0 || new Set(lockNames).size !== lockNames.length) {
-    add(REASONS.LOCK_NAMES_INVALID);
-  }
-  const lockSet = new Set(lockNames || []);
-  const built = Array.isArray(ext.built) ? ext.built.filter((b) => b && typeof b === "object") : [];
+  const lockNamesOk = lockNames !== null && lockNames.length > 0 && new Set(lockNames).size === lockNames.length;
+  if (!lockNamesOk) add(REASONS.LOCK_NAMES_INVALID);
+  const lockSet = new Set(lockNamesOk ? lockNames : []);
 
-  if (built.some((b) => typeof b.name !== "string" || !lockSet.has(b.name))) add(REASONS.EXTENSION_EXTRA);
-  for (const name of lockSet) {
-    if (!built.some((b) => b.name === name)) {
-      add(REASONS.EXTENSION_MISSING);
-      break;
+  // --- what was built must be exactly the lock, nothing else --------------
+  const rawBuilt = ext.built;
+  const built = Array.isArray(rawBuilt) ? rawBuilt.filter(isPlainObject) : [];
+  if (Array.isArray(rawBuilt) && rawBuilt.some((b) => !isPlainObject(b))) add(REASONS.EXTENSION_EXTRA);
+  const builtNames = built.map((b) => b.name);
+  if (new Set(builtNames).size !== builtNames.length) add(REASONS.EXTENSION_EXTRA);
+  if (lockNamesOk) {
+    if (built.some((b) => typeof b.name !== "string" || !lockSet.has(b.name))) add(REASONS.EXTENSION_EXTRA);
+    for (const name of lockSet) {
+      if (!built.some((b) => b.name === name)) {
+        add(REASONS.EXTENSION_MISSING);
+        break;
+      }
     }
   }
 
@@ -330,38 +478,125 @@ export function validateBuildRecord(record) {
     }
   }
 
-  if (!diagnoseJson || diagnoseJson.extensionApiVersion !== ext.api_version) {
+  // --- the extension API version, on both sides ---------------------------
+  const apiVersion = typeof ext.api_version === "string" && ext.api_version !== "" ? ext.api_version : null;
+  const diagnoseApiVersion =
+    typeof diagnoseJson?.extensionApiVersion === "string" && diagnoseJson.extensionApiVersion !== ""
+      ? diagnoseJson.extensionApiVersion
+      : null;
+  if (!apiVersion || !diagnoseApiVersion || apiVersion !== diagnoseApiVersion) {
     add(REASONS.API_VERSION_MISMATCH);
   }
 
-  // --- provider_keys must cover exactly the diagnose provider ids ----------
-  const providerKeys = ext.provider_keys && typeof ext.provider_keys === "object" && !Array.isArray(ext.provider_keys)
-    ? ext.provider_keys
-    : null;
-  const diagnoseIds = Array.isArray(diagnoseJson?.providers)
-    ? diagnoseJson.providers.map((p) => (p && typeof p.id === "string" ? p.id : null)).filter(Boolean)
-    : [];
+  // --- the record's extension lists must be the diagnose output's ---------
+  const builtRefused = reasons.includes(REASONS.EXTENSION_EXTRA) ||
+    reasons.includes(REASONS.EXTENSION_MISSING) ||
+    reasons.includes(REASONS.EXTENSION_SOURCE_OUTSIDE_TREE);
+  if (!builtRefused && !sameExtensions(diagnoseJson?.builtExtensions, rawBuilt)) {
+    add(REASONS.DIAGNOSE_EXTENSIONS_MISMATCH);
+  }
+  if (!sameExtensions(diagnoseJson?.excludedExtensions, ext.excluded)) {
+    add(REASONS.DIAGNOSE_EXTENSIONS_MISMATCH);
+  }
+
+  // --- provider_keys must cover exactly the diagnose provider ids ---------
+  const providers = Array.isArray(diagnoseJson?.providers) ? diagnoseJson.providers : null;
+  const providerKeys = isPlainObject(ext.provider_keys) ? ext.provider_keys : null;
+
+  let diagnoseIds = null;
+  if (!providers) {
+    add(REASONS.PROVIDER_IDS_INVALID);
+  } else {
+    diagnoseIds = [];
+    for (const p of providers) {
+      if (!isPlainObject(p) || typeof p.id !== "string" || p.id === "") {
+        add(REASONS.PROVIDER_IDS_INVALID);
+        continue;
+      }
+      if (diagnoseIds.includes(p.id)) {
+        add(REASONS.PROVIDER_IDS_INVALID);
+        continue;
+      }
+      diagnoseIds.push(p.id);
+    }
+  }
+
   const keyIds = providerKeys ? Object.keys(providerKeys) : [];
-  if (diagnoseIds.some((id) => !keyIds.includes(id))) add(REASONS.PROVIDER_KEYS_MISSING);
-  if (keyIds.some((id) => !diagnoseIds.includes(id))) add(REASONS.PROVIDER_KEYS_UNKNOWN);
+  if (diagnoseIds) {
+    if (diagnoseIds.some((id) => !keyIds.includes(id))) add(REASONS.PROVIDER_KEYS_MISSING);
+    if (keyIds.some((id) => !diagnoseIds.includes(id))) add(REASONS.PROVIDER_KEYS_UNKNOWN);
+  }
+  if (!providerKeys) {
+    add(REASONS.PROVIDER_KEYS_INVALID);
+  } else {
+    for (const id of keyIds) {
+      const own = providerKeys[id];
+      // An empty list is refused too: a provider with no keys cannot be
+      // collision-checked, so it cannot be accepted either.
+      if (!Array.isArray(own) || own.length === 0 || own.some((k) => typeof k !== "string" || k === "")) {
+        add(REASONS.PROVIDER_KEYS_INVALID);
+        break;
+      }
+    }
+  }
 
   // --- gufo's own check_install report ------------------------------------
-  const checkInstall = record.check_install && typeof record.check_install === "object" ? record.check_install : {};
+  const checkInstall = isPlainObject(record.check_install) ? record.check_install : {};
   if (checkInstall.status !== "PASS") add(REASONS.CHECK_INSTALL_NOT_PASS);
   if (checkInstall.mode !== OFFICIAL_LOCK_MODE) add(REASONS.CHECK_INSTALL_NOT_LOCK);
+  if (typeof checkInstall.report_sha256 !== "string" || !HEX64_RE.test(checkInstall.report_sha256)) {
+    add(REASONS.REPORT_HASH_INVALID);
+  }
 
-  // --- toolchain image: pinned by digest, never a floating tag -------------
-  const imageReason = checkRecordImage(record.toolchain?.nix_image);
+  // --- the diagnose run itself --------------------------------------------
+  if (diagnoseBlock.returncode !== 0) add(REASONS.DIAGNOSE_RETURNCODE);
+  if (typeof diagnoseBlock.stdout_sha256 !== "string" || !HEX64_RE.test(diagnoseBlock.stdout_sha256)) {
+    add(REASONS.DIAGNOSE_HASH_INVALID);
+  }
+
+  // --- toolchain: image pinned by digest, one flake.lock identity ----------
+  const toolchain = isPlainObject(record.toolchain) ? record.toolchain : {};
+  const imageReason = checkRecordImage(toolchain.nix_image);
   if (imageReason) add(imageReason);
+  const flakeLockSha =
+    typeof toolchain.flake_lock_sha256 === "string" && HEX64_RE.test(toolchain.flake_lock_sha256)
+      ? toolchain.flake_lock_sha256
+      : null;
+  if (!flakeLockSha) add(REASONS.FLAKE_LOCK_HASH_INVALID);
+  else if (toolchain.id !== flakeLockSha) add(REASONS.TOOLCHAIN_ID_MISMATCH);
 
-  // --- binary reports the commit it was built from (§6.4) ------------------
-  // Only judged against a valid commit: an invalid one is already refused above,
-  // and guessing a substring from it would report a second, confusing reason.
+  // --- binary: a digest, reporting the commit it was built from -----------
+  const binary = isPlainObject(record.binary) ? record.binary : {};
+  if (typeof binary.sha256 !== "string" || !HEX64_RE.test(binary.sha256)) {
+    add(REASONS.BINARY_HASH_INVALID);
+  }
   if (commit) {
-    const versionOutput = typeof record.binary?.version_output === "string" ? record.binary.version_output : "";
-    if (!versionOutput.includes(commit) && !versionOutput.includes(commit.slice(0, 7))) {
-      add(REASONS.BINARY_VERSION_MISSING_COMMIT);
+    const versionOutput = typeof binary.version_output === "string" ? binary.version_output : "";
+    if (!mentionsCommit(versionOutput, commit)) add(REASONS.BINARY_VERSION_MISSING_COMMIT);
+  }
+
+  // --- the id names this exact recipe, so recompute it --------------------
+  // Only judged when the fields it hashes were not refused above: the record is
+  // otherwise self-contradictory in a way the other codes already name.
+  if (!ID_INPUT_REASONS.some((code) => reasons.includes(code))) {
+    let computed = null;
+    try {
+      computed = computeBuildId({
+        version: source.version_txt,
+        commit: source.commit,
+        recipe: record.recipe,
+        lock_file_sha256: ext.lock_file_sha256,
+        flake_lock_sha256: toolchain.flake_lock_sha256,
+        nix_image: toolchain.nix_image,
+        rocr_library_dir: toolchain.rocr_library_dir,
+        defines: cmake.defines,
+        mode: OFFICIAL_LOCK_MODE,
+      });
+    } catch {
+      // A field the id cannot be built from is a bad id, not a bad input here.
+      computed = null;
     }
+    if (computed === null || computed !== record.build_id) add(REASONS.BUILD_ID_INVALID);
   }
 
   return { ok: reasons.length === 0, reasons };
@@ -373,16 +608,20 @@ export function validateBuildRecord(record) {
  *
  * It carries no path, no host label, no user and no hash past 12 hex: the build
  * id, the trust level, the commit prefix, the extension count and the binary
- * digest prefix only. Tolerates a partial or garbage record (a legacy directory
- * has almost nothing) and never throws.
+ * digest prefix only. The build id is printed only when it is a plain id and
+ * never a path or a label; the trust level is mapped onto the two known values,
+ * so a new or a garbage trust string is shown as "unrecorded". Tolerates a
+ * partial or garbage record (a legacy directory has almost nothing) and never
+ * throws.
  *
  * @param {unknown} record
  * @returns {string}
  */
 export function displayBuildRecord(record) {
-  const r = record && typeof record === "object" && !Array.isArray(record) ? record : {};
-  const id = typeof r.build_id === "string" && r.build_id.trim() !== "" ? r.build_id.trim() : "build unknown";
-  const trust = typeof r.trust === "string" && r.trust.trim() !== "" ? r.trust.trim() : "unrecorded";
+  const r = isPlainObject(record) ? record : {};
+  const rawId = typeof r.build_id === "string" ? r.build_id : "";
+  const id = DISPLAY_ID_RE.test(rawId) ? rawId : "build unknown";
+  const trust = typeof r.trust === "string" && DISPLAY_TRUSTS.includes(r.trust) ? r.trust : "unrecorded";
   const commit = typeof r.source?.commit === "string" && HEX40_RE.test(r.source.commit)
     ? r.source.commit.slice(0, 7)
     : null;

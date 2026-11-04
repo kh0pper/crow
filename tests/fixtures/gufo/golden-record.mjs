@@ -12,7 +12,7 @@
  * not name. The validator judges shape and cross-field consistency, never a real
  * digest, and the paths here are neutral ("/opt/gufo"). `build_id` is computed
  * from the record's own recipe inputs, so the fixture carries no invented
- * recipe hash.
+ * recipe hash. The repository is a placeholder too: "example/gufo".
  *
  * No fs writes: reading the sample is the only I/O, and the module under test
  * stays pure.
@@ -87,7 +87,7 @@ function baseRecord() {
     reproducible: "unchecked",
     builder: { host_label: "example", user: "example" },
     source: {
-      repo: "gufo-org/gufo",
+      repo: "example/gufo",
       commit: COMMIT,
       describe: `v${VERSION}`,
       dirty: false,
