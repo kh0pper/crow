@@ -77,6 +77,8 @@ export async function load(ctx) {
 - All other fields are dropped, so an add-on widget cannot act: there are no buttons and no actions in this release.
 - Add-on widgets are never part of a page's default layout. They appear once the owner adds them from "+ Add widget" in Edit mode.
 - The loader runs in the gateway process, with the same trust as a bundle panel. It is code you ship, not a sandboxed script.
+- Unlike a panel, a widget is not loaded once at boot: its code is imported on page views, so a newly installed version goes live with no restart.
+- A widget runs whenever its bundle is installed, even if the bundle's panel is switched off.
 - Like every bundle change, a new or edited widget needs a `version` bump, or an installed copy keeps running the old file.
 
 ### Running from the installed copy

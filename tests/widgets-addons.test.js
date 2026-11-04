@@ -28,7 +28,10 @@ import { join } from "node:path";
 import { parseHTML } from "linkedom";
 import { WIDGETS, widgetOf, widgetsForPage, loadWidgets } from "../servers/gateway/widgets/registry.js";
 import { gridHtml, widgetTitle } from "../servers/gateway/widgets/grid-html.js";
-import { addonWidgets, normalizeAddonSummary, ADDON_WIDGET_TIMEOUT_MS } from "../servers/gateway/widgets/addons.js";
+import {
+  addonWidgets, normalizeAddonSummary, ADDON_WIDGET_TIMEOUT_MS, ADDON_WIDGET_FAIL_TTL_MS,
+  _resetAddonWidgetStateForTest,
+} from "../servers/gateway/widgets/addons.js";
 import { addonWidgetHtml } from "../servers/gateway/widgets/addon-html.js";
 import { validateManifest, detectSurfaces } from "../scripts/lib/bundle-contract.mjs";
 import { forYouClientJs } from "../servers/gateway/dashboard/panels/for-you/client.js";
@@ -46,6 +49,9 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 beforeEach(() => {
   rmSync(join(HOME, "bundles"), { recursive: true, force: true });
   writeFileSync(join(HOME, "installed.json"), "[]");
+  // The module cache and the failure map outlive one case: a bundle id is unique per case, but a
+  // stale failure would still answer for a file this case just wrote.
+  _resetAddonWidgetStateForTest();
 });
 
 /** Unique per bundle, so a module imported by one case can never answer another's file. */
@@ -117,6 +123,7 @@ test("discovery skips what it cannot trust, and keeps the good sibling in the sa
     manifest: manifestFor(id, [
       { id: "good", title: "Good", sizes: [[2, 1]] },
       { id: "../x", title: "Traversal", sizes: [[2, 1]] },
+      { id: "../../other/widgets/cams", title: "Out of the bundle", sizes: [[2, 1]] },
       { id: "A", title: "Upper", sizes: [[2, 1]] },
       { id: "wide", title: "Wide", sizes: [[3, 1]] },
       { id: "tall", title: "Tall", sizes: [[2, 3]] },
@@ -127,8 +134,18 @@ test("discovery skips what it cannot trust, and keeps the good sibling in the sa
       { id: "extra", title: "Extra key", sizes: [[2, 1]], module: "server/x.js" },
       { id: "good", title: "Duplicate", sizes: [[2, 1]] },
     ]),
-    widgets: { good: OK_MODULE, wide: OK_MODULE, tall: OK_MODULE, nosize: OK_MODULE, loud: OK_MODULE, sneaky: OK_MODULE },
+    // Every refused declaration below that COULD name a real file gets that file: the skip must
+    // come from the id / keys rule, not from the missing-file rule doing the work for it.
+    widgets: {
+      good: OK_MODULE, A: OK_MODULE, wide: OK_MODULE, tall: OK_MODULE, nosize: OK_MODULE,
+      loud: OK_MODULE, extra: OK_MODULE, sneaky: OK_MODULE,
+    },
   });
+  // `widgets/../x.js` is the bundle's own x.js, and `widgets/../../other/widgets/cams.js` is a
+  // sibling bundle's widget: both exist, both stay outside this bundle's widgets/ dir.
+  writeFileSync(join(bdir, "x.js"), OK_MODULE);
+  mkdirSync(join(HOME, "bundles", "other", "widgets"), { recursive: true });
+  writeFileSync(join(HOME, "bundles", "other", "widgets", "cams.js"), OK_MODULE);
   // A file outside the bundle, and a widget file that symlinks to it.
   const outside = join(dir, "outside.js");
   writeFileSync(outside, OK_MODULE);
@@ -158,6 +175,60 @@ test("discovery never throws, whatever sits in the home", () => {
   installBundle(stranger, { manifest: { ...manifestFor(stranger, null), widgets: "cams" }, widgets: { cams: OK_MODULE } });
   setInstalled([stranger]);
   assert.deepEqual(addonWidgets(HOME), [], "a widgets value that is not an array: nothing");
+});
+
+test("discovery: two bundles that spell one grid id — the first claim wins, the second is skipped", () => {
+  // `a-b` + `c` and `a` + `b-c` both land on addon-a-b-c.
+  const longer = "coll-a-b";
+  const shorter = "coll-a";
+  installBundle(longer, {
+    manifest: manifestFor(longer, [{ id: "c", title: "From the longer bundle", sizes: [[2, 1]] }]),
+    widgets: { c: OK_MODULE },
+  });
+  installBundle(shorter, {
+    manifest: manifestFor(shorter, [{ id: "b-c", title: "From the shorter bundle", sizes: [[2, 1]] }]),
+    widgets: { "b-c": OK_MODULE },
+  });
+
+  setInstalled([longer, shorter]);
+  const list = addonWidgets(HOME);
+  assert.equal(list.length, 1, "one cell, whichever bundle got there first");
+  assert.equal(list[0].id, "addon-coll-a-b-c");
+  assert.equal(list[0].title, "From the longer bundle");
+
+  // Install order decides, not the bundle id's shape or length.
+  setInstalled([shorter, longer]);
+  const reversed = addonWidgets(HOME);
+  assert.equal(reversed.length, 1);
+  assert.equal(reversed[0].title, "From the shorter bundle");
+});
+
+test("limits: a manifest offers at most 8 widgets, and the grid takes at most 24 in total", () => {
+  const nine = Array.from({ length: 9 }, (_, i) => `w${i}`);
+  const first = bundleId("nine");
+  installBundle(first, {
+    manifest: manifestFor(first, nine.map((wid) => ({ id: wid, title: wid, sizes: [[2, 1]] }))),
+    widgets: Object.fromEntries(nine.map((wid) => [wid, OK_MODULE])),
+  });
+  setInstalled([first]);
+  const capped = addonWidgets(HOME);
+  assert.equal(capped.length, 8, "the schema's own ceiling is 8 declarations per manifest");
+  assert.deepEqual(capped.map((w) => w.addon.widget), nine.slice(0, 8), "the ninth declaration is dropped");
+
+  // Four bundles declaring 8 + 8 + 8 + 1 = 25 valid widgets between them.
+  const many = [bundleId("many-a"), bundleId("many-b"), bundleId("many-c"), bundleId("many-d")];
+  const counts = [8, 8, 8, 1];
+  for (let b = 0; b < many.length; b++) {
+    const ids = Array.from({ length: counts[b] }, (_, i) => `w${i}`);
+    installBundle(many[b], {
+      manifest: manifestFor(many[b], ids.map((wid) => ({ id: wid, title: wid, sizes: [[1, 1]] }))),
+      widgets: Object.fromEntries(ids.map((wid) => [wid, OK_MODULE])),
+    });
+  }
+  setInstalled(many);
+  const total = addonWidgets(HOME);
+  assert.equal(total.length, 24, "25 valid declarations, 24 cells: the grid's own ceiling wins");
+  assert.equal(new Set(total.map((w) => w.id)).size, 24, "24 distinct ids");
 });
 
 // ─── loading ────────────────────────────────────────────────────────────────
@@ -194,6 +265,88 @@ test("loading: a valid answer, a throw, a hang, no loader, a wrong shape — eac
   assert.doesNotMatch(html, /the bundle is unhappy/);
   assert.equal(html.split("This widget couldn't load just now").length - 1, 4);
   assert.equal(ADDON_WIDGET_TIMEOUT_MS, 3000, "the shipped budget is three seconds");
+});
+
+test("loading: a hung loader costs the next page view almost nothing, and is called once", async () => {
+  const id = bundleId("hung");
+  installBundle(id, {
+    manifest: manifestFor(id, [{ id: "hang", title: "Hang", sizes: [[2, 1]] }]),
+    widgets: {
+      hang: "export async function load() {\n"
+        + "  globalThis.__addonHangCalls = (globalThis.__addonHangCalls || 0) + 1;\n"
+        + "  return new Promise(() => {});\n"
+        + "}\n",
+    },
+  });
+  setInstalled([id]);
+  try {
+    const started = Date.now();
+    const first = await loadWidgets(addonWidgets(HOME, { timeoutMs: 150 }), { lang: "en", now: NOW }, { log: () => {} });
+    const firstTook = Date.now() - started;
+    assert.equal(first[0].failed, true, "the hang is that cell's error line");
+    assert.ok(firstTook >= 100, `the first call waited out its own budget (${firstTook} ms)`);
+
+    // A second page view, a second discovery of the same module url: the failure answers.
+    const again = Date.now();
+    const second = await loadWidgets(addonWidgets(HOME, { timeoutMs: 150 }), { lang: "en", now: NOW }, { log: () => {} });
+    const secondTook = Date.now() - again;
+    assert.equal(second[0].failed, true, "still that cell's error line");
+    assert.ok(secondTook < 50, `a remembered failure does not wait on the stuck import (${secondTook} ms)`);
+    assert.equal(globalThis.__addonHangCalls, 1, "the module's load ran exactly once");
+    assert.equal(ADDON_WIDGET_FAIL_TTL_MS, 60_000, "a failure is remembered for a minute");
+  } finally {
+    delete globalThis.__addonHangCalls;
+  }
+});
+
+test("loading: a module that throws is not called again within the failure TTL", async () => {
+  const id = bundleId("once");
+  installBundle(id, {
+    manifest: manifestFor(id, [{ id: "boom", title: "Boom", sizes: [[2, 1]] }]),
+    widgets: {
+      boom: "export async function load() {\n"
+        + "  globalThis.__addonBoomCalls = (globalThis.__addonBoomCalls || 0) + 1;\n"
+        + '  throw new Error("the bundle is unhappy");\n'
+        + "}\n",
+    },
+  });
+  setInstalled([id]);
+  try {
+    const first = await loadWidgets(addonWidgets(HOME, { timeoutMs: 500 }), { lang: "en", now: NOW }, { log: () => {} });
+    assert.equal(first[0].failed, true);
+    assert.equal(globalThis.__addonBoomCalls, 1);
+
+    const started = Date.now();
+    const second = await loadWidgets(addonWidgets(HOME, { timeoutMs: 500 }), { lang: "en", now: NOW }, { log: () => {} });
+    assert.equal(second[0].failed, true);
+    assert.ok(Date.now() - started < 50, "the TTL answers instead of the module");
+    assert.equal(globalThis.__addonBoomCalls, 1, "the loader was not asked a second time");
+  } finally {
+    delete globalThis.__addonBoomCalls;
+  }
+});
+
+test("loading: a wrong-shaped answer is remembered too", async () => {
+  const id = bundleId("shape");
+  installBundle(id, {
+    manifest: manifestFor(id, [{ id: "bogus", title: "Bogus", sizes: [[2, 1]] }]),
+    widgets: {
+      bogus: "export async function load() {\n"
+        + "  globalThis.__addonBogusCalls = (globalThis.__addonBogusCalls || 0) + 1;\n"
+        + '  return { state: "bogus" };\n'
+        + "}\n",
+    },
+  });
+  setInstalled([id]);
+  try {
+    const first = await loadWidgets(addonWidgets(HOME), { lang: "en", now: NOW }, { log: () => {} });
+    assert.equal(first[0].failed, true);
+    const second = await loadWidgets(addonWidgets(HOME), { lang: "en", now: NOW }, { log: () => {} });
+    assert.equal(second[0].failed, true);
+    assert.equal(globalThis.__addonBogusCalls, 1, "an invalid summary is a failure like any other");
+  } finally {
+    delete globalThis.__addonBogusCalls;
+  }
 });
 
 test("loading: a validated summary comes back as the cell's data", async () => {

@@ -17,13 +17,17 @@
  *   - the module is imported and called under ONE 3000 ms budget (Promise.race), and the answer goes
  *     through normalizeAddonSummary: a throw, a hang or a wrong shape is that cell's error line
  *     (widgets/registry.js turns a throw into one), never the page's;
+ *   - a failure is remembered per module (file + version) for ADDON_WIDGET_FAIL_TTL_MS, so a broken
+ *     add-on is not imported again on every page view meanwhile; a hung import is dropped from the
+ *     module cache at the timeout, so a stuck promise is never reused after the TTL;
  *   - the loader gets a FROZEN ctx of exactly { lang, now } — no database, no host, no request, no
  *     settings. Add-on widgets cannot act: every field of an item other than its key, title, kind,
  *     href and image is dropped, and a link or an image must be same-site (widgets/more.js
  *     sameSiteHref) or it is null;
  *   - a throw anywhere in one bundle's discovery costs that bundle only: `addonWidgets` never throws.
  *
- * Grid ids are `addon-<bundle>-<widget>` and never change once shipped. The built-in `camera` widget
+ * Grid ids are `addon-<bundle>-<widget>` and never change once shipped; two bundles can still spell
+ * the same one (`a-b` + `c`, `a` + `b-c`), so the first claim wins and a later repeat is skipped. The built-in `camera` widget
  * moved onto this contract (Frigate's `widgets/cameras.js`), so a device that had saved the old
  * `camera` cell simply loses that one cell: the grid client drops an id no widget carries any more
  * and keeps the rest of the layout (widgets/grid-client.js).
@@ -41,6 +45,12 @@ import { addonWidgetHtml } from "./addon-html.js";
 
 /** How long one add-on's import AND its load may take before that cell is its own error line. */
 export const ADDON_WIDGET_TIMEOUT_MS = 3000;
+/**
+ * How long a failed add-on widget is remembered. Every offered widget loads on every page view,
+ * so an add-on that threw (or hung) is not asked again until this has passed: without it a broken
+ * add-on costs every page the full budget, for as long as it stays installed.
+ */
+export const ADDON_WIDGET_FAIL_TTL_MS = 60_000;
 /** How many add-on widgets may join the grid in total, whatever is installed. */
 export const ADDON_WIDGET_LIMIT = 24;
 /** How many widgets one manifest may declare (the schema's own ceiling). */
@@ -151,6 +161,14 @@ export function normalizeAddonSummary(raw) {
 
 /** Imported modules, per (file, version): a version bump loads the new copy, a reload does not. */
 const moduleCache = new Map();
+/** Failed widgets, per module url: `failedUntil` (an epoch ms). Cleared by the TTL, never by success. */
+const failureCache = new Map();
+
+/** Drop both maps (a module cache entry and a failure outlive one test otherwise). Test-only. */
+export function _resetAddonWidgetStateForTest() {
+  moduleCache.clear();
+  failureCache.clear();
+}
 
 function moduleUrl(file, version) {
   return pathToFileURL(file).href + "?v=" + encodeURIComponent(version);
@@ -161,7 +179,12 @@ async function importAddon(file, version) {
   let pending = moduleCache.get(url);
   if (!pending) {
     // A failed import is forgotten, so the next page view tries again.
-    pending = import(url).catch((err) => { moduleCache.delete(url); throw err; });
+    pending = import(url).catch((err) => {
+      // Only if this is still the entry: a timed-out import was already dropped and may have been
+      // replaced by a newer one, which this stale rejection must not remove.
+      if (moduleCache.get(url) === pending) moduleCache.delete(url);
+      throw err;
+    });
     moduleCache.set(url, pending);
   }
   return pending;
@@ -175,23 +198,39 @@ function loaderOf(mod) {
 }
 
 async function loadAddonWidget({ file, version }, ctx, timeoutMs) {
+  const url = moduleUrl(file, version);
+  // A recent failure answers at once: the module is neither imported nor called. Every offered
+  // widget loads on every page view, so asking a broken add-on again would cost every page.
+  const failedUntil = failureCache.get(url);
+  if (failedUntil && failedUntil > Date.now()) throw new Error("add-on widget failed recently");
   // Exactly these two, and frozen: a loader has no way to reach the database, the host or a session.
   const frozen = Object.freeze({
     lang: ctx && ctx.lang === "es" ? "es" : "en",
     now: ctx && Number.isFinite(Number(ctx.now)) ? Number(ctx.now) : Date.now(),
   });
   let timer = null;
+  let hung = false;
   const work = (async () => {
     const fn = loaderOf(await importAddon(file, version));
     if (!fn) throw new Error("add-on widget has no load export");
     return fn(frozen);
   })();
   const budget = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error("add-on widget timed out")), timeoutMs);
+    timer = setTimeout(() => {
+      hung = true;
+      reject(new Error("add-on widget timed out"));
+    }, timeoutMs);
     try { timer?.unref?.(); } catch { /* a test's timer need not support unref */ }
   });
   try {
     return normalizeAddonSummary(await Promise.race([work, budget]));
+  } catch (err) {
+    // A throw, a timeout or a wrong shape alike: remembered for the TTL, never the page's problem.
+    failureCache.set(url, Date.now() + ADDON_WIDGET_FAIL_TTL_MS);
+    // A hung import must not be reused once the TTL is over: its own .catch never fires, so the
+    // entry would otherwise stay in the cache forever and every later request would wait on it.
+    if (hung) moduleCache.delete(url);
+    throw err;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -258,12 +297,17 @@ export function addonWidgets(crowHome, { timeoutMs = ADDON_WIDGET_TIMEOUT_MS } =
   let ids = [];
   try { ids = installedBundleIds(home); } catch { return []; }
   const out = [];
+  // Grid ids are `<bundle>-<widget>` joined, which two bundles can spell the same way
+  // (`a-b` + `c`, `a` + `b-c`): the first claim wins, a later repeat is not a second cell.
+  const seen = new Set();
   for (const bundleId of ids) {
     if (out.length >= ADDON_WIDGET_LIMIT) break;
     let mine = [];
     try { mine = bundleWidgets(home, bundleId, budget); } catch { mine = []; }
     for (const widget of mine) {
       if (out.length >= ADDON_WIDGET_LIMIT) break;
+      if (seen.has(widget.id)) continue;
+      seen.add(widget.id);
       out.push(widget);
     }
   }
