@@ -305,3 +305,24 @@ test("a legacy store with rows keeps them through 0000 then 0001-0004", async ()
     );
   } finally { db.close(); }
 });
+test("0000 alone writes the LEGACY bundle shape, not the converged one", () => {
+  const d = mkdtempSync(join(tmpdir(), "tb-raw-"));
+  dirs.push(d);
+  const tasksDbPath = join(d, "tasks.db");
+  base.run({ tasksDbPath });
+  const db = new Database(tasksDbPath, { readonly: true });
+  try {
+    const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks_items'").get().sql;
+    // 0002's deriveNewDdl is written against this exact text; 0001-0004 stay the
+    // only path to the converged shape.
+    assert.match(sql, /CHECK \(status IN \('pending','in_progress','done','cancelled'\)\)/);
+    const cols = db.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+    for (const c of ["data_json", "stage", "assigned_bot", "board_id", "archived_at"]) {
+      assert.ok(!cols.includes(c), `0000 must not add ${c}: that is the chain's job`);
+    }
+    const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_tasks_%' ORDER BY name").all().map((r) => r.name);
+    assert.equal(idx.length, 7, "the bundle's seven indexes");
+  } finally {
+    db.close();
+  }
+});
