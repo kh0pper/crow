@@ -1,7 +1,7 @@
 {
   "id": "studio",
   "name": "Crow Studio",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
   "type": "mcp-server",
   "author": "Crow",
