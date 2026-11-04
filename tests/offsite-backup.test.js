@@ -762,3 +762,15 @@ test("scripts/offsite-run.mjs: usage, a host with no satellite, and a missing ex
   assert.deepEqual(JSON.parse(up.stdout.split("\n")[0]), { ok: false, code: "no_key_export" });
   assert.equal(/at .*\.js:/.test(up.stderr), false, "no stack trace");
 });
+test("a satellite list with an absurd size or a malformed hash is refused before any download", async () => {
+  const { downloadVaultFile, MAX_VAULT_FILE_BYTES } = await import("../servers/gateway/satellites/offsite.js");
+  let fetched = 0;
+  const fetchImpl = async () => { fetched++; throw new Error("must not fetch"); };
+  const base = { sat: { id: "sat-x", tailnet_host: "satellite.example.ts.net" }, name: "crow-db-20261101.vault", dest: "/nonexistent/x", mgmtKey: { ed25519_priv: "00".repeat(32) }, fetchImpl };
+  const good = "a".repeat(64);
+  for (const [size, sha] of [[Infinity, good], [Number.MAX_SAFE_INTEGER, good], [MAX_VAULT_FILE_BYTES + 1, good], [-1, good], ["100", good], [1.5, good], [100, "nothex"], [100, "A".repeat(64)], [100, undefined]]) {
+    const r = await downloadVaultFile({ ...base, size, sha256: sha });
+    assert.equal(r.code, "bad_manifest", `size=${String(size)} sha=${String(sha)}`);
+  }
+  assert.equal(fetched, 0, "nothing was fetched");
+});

@@ -386,7 +386,15 @@ export async function putVaultFile({ sat, file, size, sha256, mgmtKey = null, fe
  * Signed GET of one vault file, streamed to `dest` at 0600 and kept only when its size and sha256
  * match the signed manifest entry. Returns {ok:true, size, sha256} or {ok:false, code}.
  */
+/** One vault file can never be larger than the satellite's whole 2 GB quota. */
+export const MAX_VAULT_FILE_BYTES = 2 * 1024 ** 3;
+
 export async function downloadVaultFile({ sat, name, dest, size, sha256, mgmtKey = null, fetchImpl = globalThis.fetch, env = process.env, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {}) {
+  // The size and hash come from the satellite's (signed, but satellite-written) list: a huge or
+  // non-numeric size would disable the byte cap below and let a download fill crow's disk.
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_VAULT_FILE_BYTES || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) {
+    return { ok: false, code: "bad_manifest" };
+  }
   const key = mgmtKey || loadMgmtKey(sat.id, { env });
   if (!key) return { ok: false, code: "no_mgmt_key" };
   const path = `/satellite/v1/vault/${encodeURIComponent(name)}`;
