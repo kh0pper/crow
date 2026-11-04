@@ -70,7 +70,7 @@ function servePerchApi(req, res) {
   if (m) {
     tileCalls.push(m[1]);
     if (m[1] !== "studio") return send(res, 404, { error: "not_desktop" });
-    return send(res, 200, { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: offered });
+    return send(res, 200, { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", takeOver: offered });
   }
   return send(res, 200, {});
 }
@@ -226,11 +226,11 @@ test("opening a desktop app from the launcher shows a watch-only tile", async (t
     assert.equal(await s.evalIn("location.pathname"), "/dashboard/perch", "no navigation");
     assert.equal(m.app, "studio");
     assert.equal(m.name, "Studio");
-    assert.equal(m.src, "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", "watch-only noVNC");
+    assert.equal(m.src, "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", "watch-only noVNC, with its own websockify path");
     assert.equal(m.takeHidden, false); assert.equal(m.takeVisible, true, "Take over is offered");
     assert.equal(m.focusIn, true, `focus is in the new tile, not on the apps button (${m.active})`);
     assert.ok(m.l >= 0 && m.r <= m.vw + 0.5 && m.sw <= m.vw, "the tile fits 390 px, no sideways scroll");
-    await s.waitFor("(function(){ var f=document.querySelector('#perch-transcript .ph-atile iframe'); try{ return f.contentWindow.location.search; }catch(e){ return ''; } })()==='?view_only=true&autoconnect=true&resize=scale'", "the viewer page to load watch-only");
+    await s.waitFor("(function(){ var f=document.querySelector('#perch-transcript .ph-atile iframe'); try{ return f.contentWindow.location.search; }catch(e){ return ''; } })()==='?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify'", "the viewer page to load watch-only");
     assert.deepEqual(tileCalls, ["studio"], "the server confirmed the app");
 
     // Opening the same app again keeps one tile.
