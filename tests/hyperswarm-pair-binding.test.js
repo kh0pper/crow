@@ -704,10 +704,12 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
  * One mixed-version leg. `which`: "pt3" | "pre". `newInit`: the new node is
  * the Noise initiator. `setup`: "auto" | "pinned" (the new side has the pair
  * pin) | "cbPinned" (the new side has PT-3's instance_hs_cb: pin) | "require".
- * `expect`: "admit" or the new side's refusal reason.
+ * `expect`: "admit" or the new side's refusal reason. `oldMuxDelayMs`: the
+ * old node's replicate() (where old code puts its muxer on the stream) starts
+ * that much later, as on a loaded box (a slow DB read or feed open).
  */
-async function mixedLeg(t, { which, newInit, setup, expect }) {
-  const label = `U-H3 ${which} ${newInit ? "new-init" : "old-init"} ${setup}`;
+async function mixedLeg(t, { which, newInit, setup, expect, oldMuxDelayMs = 0 }) {
+  const label = `U-H3 ${which} ${newInit ? "new-init" : "old-init"} ${setup}${oldMuxDelayMs ? ` old mux +${oldMuxDelayMs}ms` : ""}`;
   _resetPeerTrustHealth();
   logs.length = 0;
   const { a: n, b: o } = await makePair(t, { bISM: trees[which].InstanceSyncManager });
@@ -723,6 +725,10 @@ async function mixedLeg(t, { which, newInit, setup, expect }) {
   assert.equal(O.pm.instanceBinding, undefined, `${label}: the old node has no instanceBinding`);
   assert.equal(typeof N.pm.admitGuards.instance, "function", `${label}: the new node is wired`);
 
+  if (oldMuxDelayMs) {
+    const rep = o.mgr.replicate.bind(o.mgr);
+    o.mgr.replicate = async (...a) => { await sleep(oldMuxDelayMs); return rep(...a); };
+  }
   if (setup === "pinned") await markPairPinned(n.db, n.id, o.id);
   if (setup === "cbPinned") await markInstanceCbPinned(n.db, n.id, n.identity.crowId);
 
@@ -773,6 +779,18 @@ for (const newInit of [true, false]) {
     await mixedLeg(t, { which: "pre", newInit, setup: "auto", expect: "admit" });
     await mixedLeg(t, { which: "pre", newInit, setup: "cbPinned", expect: "cb_required_pinned" });
     await mixedLeg(t, { which: "pre", newInit, setup: "require", expect: "guard:pb_required" });
+  });
+}
+
+// U-H3s: an old sibling puts its muxer on the stream only inside its own
+// replicate(), so the new side must not open its channels before the old
+// side's first Protomux frame (the old side lost them: no replication, or
+// "Invalid open message"). The CI flake, made deterministic by a late attach.
+for (const which of ["pt3", "pre"]) {
+  test(`U-H3s ${which} ↔ new, the old side's muxer attached 300 ms late (both Noise role orders): markers still flow both ways`, T, async (t) => {
+    for (const newInit of [false, true]) {
+      await mixedLeg(t, { which, newInit, setup: "auto", expect: "admit", oldMuxDelayMs: 300 });
+    }
   });
 }
 

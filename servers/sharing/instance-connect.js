@@ -65,6 +65,31 @@ export async function handleInstanceConnection({ db, instanceSyncManager, crowId
   return targets;
 }
 
+/** How long a link to a pre-admission-muxer sibling waits for its first Protomux frame. */
+export const PEER_MUX_WAIT_MS = 5000;
+
+/**
+ * Settles on `conn`'s first Protomux frame (a message not starting with "{":
+ * every handshake line is JSON, every Protomux message starts with a varint
+ * channel id, 0 for an open), on close, or after `capMs`. Never rejects.
+ */
+function firstMuxFrame(conn, capMs) {
+  return new Promise((resolve) => {
+    let timer = null;
+    const done = () => {
+      clearTimeout(timer);
+      conn.off?.("data", onData);
+      conn.off?.("close", done);
+      resolve();
+    };
+    const onData = (d) => { if (d?.length && d[0] !== 0x7b) done(); };
+    conn.on("data", onData);
+    conn.once("close", done);
+    timer = setTimeout(done, capMs);
+    timer.unref?.();
+  });
+}
+
 /**
  * The Hyperswarm pair-binding guard and MAC hook (PT-2a, private engineering
  * notes §3.5). `localId()` is read at call time.
@@ -150,11 +175,24 @@ function makeInstanceBinding({ db, localId, pairKeyLookup, mode }) {
  * @param {(peerId:string)=>string|null} [o.pairKeyLookup] the pair's signing_key hex
  * @param {"auto"|"require"} [o.mode]
  * @param {number} [o.pairBindingWaitMs] how long to wait for a sibling's pair-binding frame (PeerManager default 10 s)
+ * @param {number} [o.peerMuxWaitMs] cap on waiting for a pre-admission-muxer sibling's first Protomux frame
  */
-export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKeyLookup = defaultPairKey, mode = pairBindingMode(), pairBindingWaitMs } = {}) {
+export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKeyLookup = defaultPairKey, mode = pairBindingMode(), pairBindingWaitMs, peerMuxWaitMs = PEER_MUX_WAIT_MS } = {}) {
+  // conn -> a promise that settles on the peer's first Protomux frame (armed
+  // at admission, before our `authenticated`, so it cannot miss that frame).
+  const peerMuxSeen = new WeakMap();
+
   // Wire instance-to-instance connections for Hypercore replication
-  peerManager.onInstanceConnected = async (crowId, conn, remoteInstanceId = null) => {
+  peerManager.onInstanceConnected = async (crowId, conn, remoteInstanceId = null, { peerMuxEarly = true } = {}) => {
     console.log(`[sharing] Instance peer connected: ${crowId}`);
+
+    // A sibling from before the admission-time muxer (no `mux: 1` on its
+    // `authenticated`) attaches its muxer only inside its own replicate(),
+    // after a DB read and a feed open. Our channel opens sent before that are
+    // lost and its replication never starts ("Invalid open message", or a
+    // silent stall). Such a peer always opens its own feeds once its muxer
+    // is on, so its first frame is the signal; capped, never a deadlock.
+    if (!peerMuxEarly) await peerMuxSeen.get(conn);
 
     // One connection = one instance when the peer advertised its id
     // (servers/sharing/instance-connect.js, review I2).
@@ -167,7 +205,11 @@ export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKey
 
   // Synchronous, from PeerManager._admit before our `authenticated` frame:
   // put the Hypercore muxer on the stream before the peer can replicate.
-  peerManager.onInstanceAdmitting = (conn) => instanceSyncManager.attachMuxer?.(conn);
+  peerManager.onInstanceAdmitting = (conn) => {
+    const mux = instanceSyncManager.attachMuxer?.(conn);
+    if (mux && !peerMuxSeen.has(conn)) peerMuxSeen.set(conn, firstMuxFrame(conn, peerMuxWaitMs));
+    return mux;
+  };
 
   // peer-manager asks us for OUR outgoing feed key to a specific peer
   // instance (remoteInstanceId is the peer's local id, which matches the
