@@ -14,13 +14,21 @@
  * hand it back. That is the same MediaStream shape a real input hands the
  * recorder, so the recorder, the take store and the upload are the real ones.
  *
- * What the tests prove (plan Task 7):
+ * What the tests prove (plan Task 7, and the review fixes on it):
  *   1. an armed track, Record and a scene launch make an audio clip with a take;
  *   2. a one-bar loop recorded over three passes makes three takes;
  *   3. a take recorded while the take routes fail uploads once they answer;
  *   4. a take this device still owes resumes on the next page load;
  *   5. recording with no calibration says so first;
- *   6. the monitor toggle states the measured delay.
+ *   6. the monitor toggle states the measured delay;
+ *   7. a teardown mid-take still keeps and uploads the take;
+ *   8. every loop pass uploads as soon as it ends;
+ *   9. an interrupted recording is recovered on the next load, and one
+ *      uploader per take wins a Web Lock race;
+ *  10. a gone row is quiet, the counter never outruns the chunk count, a
+ *      permanent refusal offers its two buttons, and a full take store stops
+ *      the recording and uploads what was kept;
+ *  11. loop splits land on the frames the sequencer's own rounding gives.
  *
  * No browser: the tests skip, unless CROW_REQUIRE_TEST_CHROME=1, which makes the
  * fixture throw instead.
@@ -830,11 +838,11 @@ function panelDb() {
 }
 
 /** The document the mock client draws: one audio track and one scene. */
-async function recordingDoc() {
+async function recordingDoc(bpm = 240) {
   const { newSongDoc } = await import("../bundles/studio/server/doc.js");
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
   await import("../bundles/studio/server/commands/core.js");
-  const doc = newSongDoc({ title: "Recording song", bpm: 240 });
+  const doc = newSongDoc({ title: "Recording song", bpm });
   runCommand(doc, "track.add", { id: AUDIO_TRACK, name: "Guitar", kind: "audio" });
   runCommand(doc, "scene.add", { id: SCENE, name: "Verse" });
   return doc;
@@ -862,6 +870,20 @@ function fakeTakeStore({ latency = null, log = [] } = {}) {
     },
     async getChunk(takeId, index) {
       return chunks.get(takeId + ":" + index) || null;
+    },
+    async countChunks(takeId) {
+      let count = 0;
+      let bytes = 0;
+      for (;;) {
+        const chunk = chunks.get(takeId + ":" + count);
+        if (!chunk) break;
+        bytes += typeof chunk.byteLength === "number" ? chunk.byteLength : 0;
+        count += 1;
+      }
+      return { count, bytes };
+    },
+    async getPending(takeId) {
+      return pendings.get(takeId) || null;
     },
     async listPending() {
       return Array.from(pendings.values());
@@ -898,17 +920,44 @@ function fakeTakeStore({ latency = null, log = [] } = {}) {
 }
 
 /** A context stand-in: the three nodes the panel builds, and its clock. */
-function fakeContext() {
+function fakeContext(nowSeconds = 0) {
   const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
   return {
     sampleRate: 48000,
     state: "running",
-    currentTime: 0,
+    currentTime: nowSeconds,
     destination: {},
     createGain: () => gain,
     createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
     resume: async () => {},
     close() {},
+  };
+}
+
+/**
+ * The Web Locks API, in memory: a name is either held or free, and an
+ * `ifAvailable` request whose name is held runs its callback with null — the
+ * same answer a real browser gives the second tab.
+ * @returns {{request: Function, held: Set<string>}}
+ */
+function fakeLocks() {
+  const held = new Set();
+  return {
+    held,
+    async request(name, options, run) {
+      const callback = typeof options === "function" ? options : run;
+      const settings = typeof options === "function" ? {} : options || {};
+      if (held.has(name)) {
+        if (settings.ifAvailable && typeof callback === "function") return callback(null);
+        return undefined;
+      }
+      held.add(name);
+      try {
+        return typeof callback === "function" ? await callback({ name }) : undefined;
+      } finally {
+        held.delete(name);
+      }
+    },
   };
 }
 
@@ -984,7 +1033,12 @@ function fakeEngine() {
 /**
  * Boot the emitted client script against the page the handler renders, with a
  * fake browser around it.
- * @param {{latency?: object, gateFinish?: boolean}} [options]
+ *
+ * @param {{latency?: object, gateFinish?: boolean, bpm?: number,
+ *          store?: object, locks?: object, pending?: object[],
+ *          chunks?: Array<[string, number, ArrayBuffer]>, clock?: number,
+ *          hold?: Promise<void>, confirm?: boolean,
+ *          respond?: (url: string, init: object) => ({status: number, body: object}|null)}} [options]
  */
 async function bootPanel(options = {}) {
   const { parseHTML } = await import("linkedom");
@@ -993,7 +1047,7 @@ async function bootPanel(options = {}) {
   const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
   const { TAKE_STORE_SCRIPT } = await import("../bundles/studio/panel/take-store.js");
 
-  const doc = await recordingDoc();
+  const doc = await recordingDoc(options.bpm);
   const res = {
     html: "",
     headersSent: false,
@@ -1010,7 +1064,11 @@ async function bootPanel(options = {}) {
   const { document, window: domWindow } = parseHTML(res.html);
 
   const log = [];
-  const store = fakeTakeStore({ latency: options.latency || null, log });
+  const store = options.store || fakeTakeStore({ latency: options.latency || null, log });
+  // A take the previous page left behind, and the chunks it kept: what a
+  // resumed upload and an interrupted recording are made of.
+  for (const row of options.pending || []) store.pendings.set(row.take_id, row);
+  for (const [takeId, index, bytes] of options.chunks || []) store.chunks.set(takeId + ":" + index, bytes);
   const engine = fakeEngine();
   const sent = [];
   const requests = [];
@@ -1032,8 +1090,18 @@ async function bootPanel(options = {}) {
 
   const fetchStub = async (url, init = {}) => {
     const target = String(url);
-    requests.push({ url: target, method: init.method || "GET" });
+    requests.push({
+      url: target,
+      method: init.method || "GET",
+      body: typeof init.body === "string" ? init.body : null,
+    });
     log.push("fetch " + target);
+    // A test may hold the take routes open to look at the panel mid-upload.
+    if (options.hold && target.startsWith("/api/studio/takes")) await options.hold;
+    if (typeof options.respond === "function") {
+      const custom = options.respond(target, init);
+      if (custom) return response(custom.status, custom.body);
+    }
     if (target.includes("/finish")) {
       if (options.gateFinish) await finishGate;
       return response(200, { take: { id: "0a1b2c3d-0000-4000-8000-000000000000" } });
@@ -1073,8 +1141,9 @@ async function bootPanel(options = {}) {
     crypto: globalThis.crypto,
     location: { protocol: "http:", host: "127.0.0.1:1", reload() {} },
     atob: globalThis.atob,
+    confirm: () => options.confirm !== false,
     AudioContext: function AudioContextStub() {
-      return fakeContext();
+      return fakeContext(options.clock || 0);
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
@@ -1114,7 +1183,7 @@ async function bootPanel(options = {}) {
   run(
     document,
     windowStub,
-    { mediaDevices },
+    { mediaDevices, locks: options.locks || null },
     function WebSocketStub() {
       return socket;
     },
@@ -1155,7 +1224,44 @@ async function bootPanel(options = {}) {
     return node;
   };
 
-  return { document, store, engine, sent, requests, log, page, click, settle, frame, releaseFinish };
+  return { document, store, engine, sent, requests, log, page, click, settle, frame, releaseFinish, timers };
+}
+
+/**
+ * @param {object} ui a booted panel
+ * @returns {number} how many finishes it asked the gateway for
+ */
+function finishCount(ui) {
+  return ui.requests.filter((request) => request.url.includes("/finish")).length;
+}
+
+/**
+ * @param {object} ui a booted panel
+ * @returns {number} how many chunk PUTs it sent
+ */
+function chunkPuts(ui) {
+  return ui.requests.filter((request) => request.url.includes("/chunks/")).length;
+}
+
+/**
+ * Arm the fake panel's audio track, press Record, and report the launch that
+ * arms the recorder — everything a take needs before its first chunk.
+ * @param {object} ui a booted panel
+ * @param {number} [frame] the frame the launch reports
+ * @returns {Promise<object>} the fake recorder
+ */
+async function startFakeRecording(ui, frame = 48000) {
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[ui.engine.recorders.length - 1];
+  assert.ok(recorder, "the panel built a recorder");
+  ui.engine.launches.forEach((listener) =>
+    listener({ track_id: AUDIO_TRACK, clip_id: null, scene_id: SCENE, bar: 0, frame: frame }),
+  );
+  await ui.settle();
+  return recorder;
 }
 
 test("the take store is a classic script the page inlines before the client", async () => {
@@ -1242,6 +1348,22 @@ test("a stored measurement shows in the header and in the monitor sentence", asy
     "You'll hear yourself about 71 ms late. Your interface's direct-monitor knob has no delay.",
     "the sentence states the measured delay",
   );
+
+  // With no measurement the sentence says so, rather than printing a number it
+  // does not have (an empty one would read as a measurement of zero).
+  const unmeasured = await bootPanel();
+  unmeasured.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await unmeasured.settle();
+  unmeasured.click(`[data-track-id=${AUDIO_TRACK}] [data-act=monitor]`);
+  await unmeasured.settle(24);
+  const unmeasuredWarning = unmeasured.document.querySelector('[data-role=monitor-warning]');
+  assert.ok(unmeasuredWarning, "monitoring an unmeasured input still draws the warning");
+  assert.equal(
+    unmeasuredWarning.textContent,
+    "You'll hear yourself late by an amount Studio hasn't measured yet. "
+      + "Your interface's direct-monitor knob has no delay.",
+    "an unmeasured input is described in words",
+  );
 });
 
 test("a recorded chunk is kept on this device before it is uploaded", async () => {
@@ -1303,4 +1425,392 @@ test("a recorded chunk is kept on this device before it is uploaded", async () =
   ui.releaseFinish();
   await ui.settle(24);
   assert.equal(ui.store.pendings.size, 0, "a finished take leaves nothing pending on this device");
+});
+
+test("an interrupted recording is recovered on the next load", async () => {
+  // A page that closed mid-take left a row with no chunk count and the chunks it
+  // kept. The next load makes a take of them: audio the operator played.
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000aa";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-recovered",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 240,
+    chunk_count: null,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  const store = fakeTakeStore({ log: [] });
+  const put = store.putPending.bind(store);
+  const saved = [];
+  store.putPending = async (value) => {
+    saved.push({ chunk_count: value.chunk_count, frames: value.frames, recovered: value.recovered === true });
+    return put(value);
+  };
+  // The take routes are held open, so the row can be read before the upload
+  // starts — the state the sentence describes.
+  let releaseUpload = () => {};
+  const heldOpen = new Promise((resolve) => {
+    releaseUpload = resolve;
+  });
+  const ui = await bootPanel({
+    store,
+    hold: heldOpen,
+    pending: [row],
+    chunks: [
+      [takeId, 0, new Uint8Array(24).buffer],
+      [takeId, 1, new Uint8Array(24).buffer],
+    ],
+  });
+  await ui.settle(24);
+
+  const text = ui.document.querySelector("[data-role=recordings] .st-pending-text");
+  assert.ok(text, "the recovered take has a row while it uploads");
+  assert.equal(
+    text.textContent,
+    "Recovered from an interrupted recording \u2014 will upload.",
+    "the row says where the take came from",
+  );
+
+  releaseUpload();
+  await ui.settle(24);
+
+  const stored = saved.find((entry) => entry.recovered === true);
+  assert.ok(stored, "the recovered row was written back to this device");
+  assert.equal(stored.chunk_count, 2, "the chunks it kept became its chunk count");
+  assert.equal(stored.frames, 8, "48 bytes of 24-bit stereo is eight frames");
+  assert.equal(chunkPuts(ui), 2, "both kept chunks were sent");
+  assert.equal(finishCount(ui), 1, "and the recovered take was finished");
+  assert.equal(ui.store.pendings.size, 0, "a finished take leaves nothing on this device");
+});
+
+test("two uploaders for one take: only one runs", async () => {
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000bb";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-shared",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 240,
+    chunk_count: 1,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  const store = fakeTakeStore({ log: [] });
+  store.pendings.set(takeId, row);
+  store.chunks.set(takeId + ":0", new Uint8Array(12).buffer);
+  const locks = fakeLocks();
+
+  const first = await bootPanel({ store, locks, gateFinish: true, pending: [row] });
+  await first.settle(24);
+  assert.equal(finishCount(first), 1, "the first view is uploading the take");
+  assert.equal(locks.held.has("studio-take-" + takeId), true, "and it holds the take's lock");
+
+  const second = await bootPanel({ store, locks, pending: [row] });
+  await second.settle(24);
+  assert.equal(finishCount(second), 0, "the second view leaves the upload alone");
+  assert.equal(finishCount(first), 1, "so the take is finished once, not twice");
+
+  first.releaseFinish();
+  await first.settle(24);
+  assert.equal(store.pendings.size, 0, "the finished take left nothing on this device");
+});
+
+test("a vanished pending row ends the upload quietly", async () => {
+  // Another view finished the take and deleted the row: the chunks are gone
+  // with it, and this view must not report a missing piece or retry.
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000cc";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-gone",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 240,
+    chunk_count: 1,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  const store = fakeTakeStore({ log: [] });
+  store.pendings.set(takeId, row);
+  store.getPending = async () => null;
+
+  const ui = await bootPanel({ store });
+  await ui.settle(24);
+
+  assert.equal(
+    ui.document.querySelector(`[data-role=recordings] [data-take-id=${takeId}]`),
+    null,
+    "the row is gone, not stuck on an error",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-role=rec-notice]").textContent,
+    "",
+    "and nothing is reported to the operator",
+  );
+  assert.equal(finishCount(ui), 0, "nothing was finished twice");
+  assert.equal(ui.timers.length, 0, "and no retry was scheduled");
+});
+
+test("loop splits follow the sequencer's absolute rounding at 130 bpm", async () => {
+  // 130 bpm at 48 kHz is 22153.846… frames a beat, so a split computed from a
+  // rounded pass length drifts off the sequencer's bars. Every split is
+  // rounded once, on its own absolute position.
+  const ui = await bootPanel({ bpm: 130 });
+  const recorder = await startFakeRecording(ui, 48000);
+  const fpb = (48000 * 60) / 130;
+  const bars = 4;
+
+  assert.ok(recorder.splits.length > 10, "every loop boundary is a split");
+  for (let pass = 1; pass <= 10; pass += 1) {
+    assert.equal(
+      recorder.splits[pass - 1],
+      48000 + Math.round(pass * bars * 4 * fpb),
+      `pass ${pass} starts on the frame the sequencer gives that bar`,
+    );
+  }
+
+  const roundedLoop = Math.round(bars * 4 * fpb);
+  let drifted = false;
+  for (let pass = 1; pass <= 10; pass += 1) {
+    if (48000 + pass * roundedLoop !== recorder.splits[pass - 1]) drifted = true;
+  }
+  assert.ok(drifted, "a rounded pass length would drift off the bars it should land on");
+});
+
+test("the upload counter never exceeds the chunk count on resume", async () => {
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000dd";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-counter",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 240,
+    chunk_count: 1,
+    begun: true,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  // The gateway says it holds three indexes, but the take has one chunk: the
+  // row must never read "Uploading 3 of 1".
+  const ui = await bootPanel({
+    gateFinish: true,
+    pending: [row],
+    chunks: [[takeId, 0, new Uint8Array(12).buffer]],
+    respond: (target) =>
+      target.endsWith(takeId)
+        ? {
+            status: 200,
+            body: {
+              begun: true,
+              frames: 6,
+              received: [
+                { index: 0, sha256: "0".repeat(64) },
+                { index: 1, sha256: "1".repeat(64) },
+                { index: 2, sha256: "2".repeat(64) },
+              ],
+            },
+          }
+        : null,
+  });
+  await ui.settle(24);
+
+  const text = ui.document.querySelector("[data-role=recordings] .st-pending-text");
+  assert.ok(text, "the resumed take has a row");
+  assert.equal(text.textContent, "Uploading 1 of 1", "the count stops at the take's own chunk count");
+
+  ui.releaseFinish();
+  await ui.settle(24);
+});
+
+test("a permanent refusal stops retrying and offers Try again and Remove", async () => {
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000ee";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-refused",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 240,
+    chunk_count: 1,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  let asks = 0;
+  const ui = await bootPanel({
+    pending: [row],
+    chunks: [[takeId, 0, new Uint8Array(12).buffer]],
+    respond: (target) => {
+      if (!target.endsWith(takeId)) return null;
+      asks += 1;
+      return { status: 422, body: { error: "That take was refused." } };
+    },
+  });
+  await ui.settle(24);
+
+  const text = ui.document.querySelector(`[data-role=recordings] [data-take-id=${takeId}] .st-pending-text`);
+  assert.ok(text, "the refused take keeps its row");
+  assert.equal(
+    text.textContent,
+    "This take could not be uploaded: That take was refused.",
+    "the row carries the gateway's own words",
+  );
+  const retry = ui.document.querySelector("[data-act=take-retry]");
+  const remove = ui.document.querySelector("[data-act=take-remove]");
+  assert.ok(retry, "the row offers Try again");
+  assert.ok(remove, "the row offers Remove from this device");
+  assert.equal(retry.textContent, "Try again");
+  assert.equal(remove.textContent, "Remove from this device");
+
+  const asked = asks;
+  await ui.settle(24);
+  assert.equal(asks, asked, "a refusal this firm is not retried by itself");
+  assert.equal(ui.timers.length, 0, "and no retry timer was left behind");
+
+  ui.click("[data-act=take-retry]");
+  await ui.settle(24);
+  assert.ok(asks > asked, "Try again asks the gateway once more");
+
+  ui.click("[data-act=take-remove]");
+  await ui.settle(24);
+  assert.equal(ui.store.pendings.has(takeId), false, "Remove from this device gave the space back");
+  assert.equal(
+    ui.document.querySelector(`[data-role=recordings] [data-take-id=${takeId}]`),
+    null,
+    "and its row is gone",
+  );
+});
+
+test("a store failure mid-record stops and uploads what was kept", async () => {
+  const store = fakeTakeStore({ log: [] });
+  const kept = store.putChunk.bind(store);
+  store.putChunk = async (takeId, index, bytes) => {
+    if (index === 1) throw new Error("The take store is full.");
+    return kept(takeId, index, bytes);
+  };
+  const put = store.putPending.bind(store);
+  const saved = [];
+  store.putPending = async (value) => {
+    saved.push({ chunk_count: value.chunk_count, frames: value.frames, partial: value.partial === true });
+    return put(value);
+  };
+
+  // The context's clock reads 0.75 s, so "stop on this frame" has a frame.
+  const ui = await bootPanel({ store, clock: 0.75 });
+  const recorder = await startFakeRecording(ui, 48000);
+
+  recorder.chunk(new Uint8Array(12).buffer, 0, 0);
+  await ui.settle();
+  recorder.chunk(new Uint8Array(12).buffer, 1, 0);
+  await ui.settle(24);
+
+  const notice = ui.document.querySelector("[data-role=rec-notice]").textContent;
+  assert.ok(
+    notice.includes(
+      "This device could not keep the recording (its storage may be full). What was kept will upload.",
+    ),
+    `the panel says what happened (got: ${notice})`,
+  );
+  assert.equal(recorder.stopFrame, 36000, "the recording stops on the frame the audio thread is on");
+
+  // The recorder posts what it had; the pass uploads up to its last kept chunk.
+  recorder.done({ segments: [{ segment: 0, start_frame: 48000, frames: 96000 }], frames: 96000, start_frame: 48000 });
+  await ui.settle(24);
+
+  const partial = saved.find((entry) => entry.partial === true);
+  assert.ok(partial, "the take was counted from what this device kept");
+  assert.equal(partial.chunk_count, 1, "up to the last chunk that was kept");
+  assert.equal(partial.frames, 2, "and described by the bytes it kept");
+  assert.equal(chunkPuts(ui), 1, "the kept chunk was uploaded");
+  const finished = ui.requests.filter((request) => request.url.includes("/finish"));
+  assert.equal(finished.length, 1, "and the partial take was finished");
+  assert.equal(
+    JSON.parse(finished[0].body).chunk_hashes.length,
+    1,
+    "finish was given one hash: the chunk that was kept",
+  );
+  assert.equal(ui.store.pendings.size, 0, "a finished take leaves nothing on this device");
+});
+
+test("each loop pass uploads as soon as it ends", async () => {
+  const ui = await bootPanel({ gateFinish: true });
+  const recorder = await startFakeRecording(ui, 48000);
+
+  recorder.chunk(new Uint8Array(12).buffer, 0, 0);
+  await ui.settle();
+  assert.equal(finishCount(ui), 0, "one chunk of a pass is not a finished pass");
+
+  // The first chunk of the second pass closes the first one.
+  recorder.chunk(new Uint8Array(12).buffer, 0, 1);
+  await ui.settle(24);
+
+  const stored = Array.from(ui.store.pendings.values());
+  assert.equal(stored.length, 2, "each pass has its own take on this device");
+  assert.equal(stored[0].chunk_count, 1, "the first pass is counted the moment it ends");
+  assert.equal(stored[0].frames, 2, "with the frame count its own bytes give");
+  assert.equal(stored[1].chunk_count, null, "the second pass is still being recorded");
+  assert.equal(finishCount(ui), 1, "and the first pass is already uploading");
+
+  ui.releaseFinish();
+  await ui.settle(24);
+});
+
+test("teardown mid-record keeps every chunk and uploads the take", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  takesDown = false;
+
+  const beforeSnap = (await hub.openSong(songId)).snapshot;
+  const beforeClip = audioClipOf(beforeSnap);
+  const takesBefore = beforeClip ? takesOfClip(beforeSnap, beforeClip.id).length : 0;
+
+  const page = await openPage(studioUrl());
+  t.after(() => page.close());
+  await waitForStudio(page);
+  await armAudioTrack(page);
+  await armRecorder(page);
+  await launchScene(page);
+
+  // The take is on this device before the page goes away.
+  const kept = await waitFor(
+    page,
+    "window.StudioTakeStore.listPending().then(function (rows) { return rows.length > 0; })",
+    20000,
+  );
+  assert.ok(kept, "the recording has a pending row on this device");
+
+  // The dashboard leaves the page: Turbo caches it, which tears the session
+  // down in the middle of the take.
+  await page.evaluate("document.dispatchEvent(new Event('turbo:before-cache')), true");
+
+  const snap = await waitForSong((state) => {
+    const clip = audioClipOf(state);
+    return !!clip && takesOfClip(state, clip.id).length > takesBefore;
+  }, 30000);
+  const clip = audioClipOf(snap);
+  assert.ok(clip, "the clip is in the song");
+  const takes = takesOfClip(snap, clip.id);
+  assert.ok(
+    takes.length > takesBefore,
+    `leaving the page mid-take still made a take (was ${takesBefore}, is ${takes.length})`,
+  );
+  const newest = takes[takes.length - 1];
+  assert.ok(newest.frames > 0, "and the take holds audio");
 });
