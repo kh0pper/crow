@@ -22,6 +22,7 @@ const SAMPLE_RATE = 48000;
 const BPM = 120;
 const FRAMES_PER_BEAT = (SAMPLE_RATE * 60) / BPM; // 24,000
 const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4; // 96,000
+const FRAMES_PER_SIXTEENTH = FRAMES_PER_BEAT / 4; // 6,000
 
 /** @returns {{t: number, d: number, p: number, v: number}} a note in beats. */
 function note(t, d, p, v = 100) {
@@ -55,7 +56,16 @@ function clip(id, trackId, sceneId, lengthBars, notes) {
 }
 
 /** A whole song snapshot, keyed by clip id the way `doc.js` writes it. */
-function song({ bpm = BPM, tracks = [], scenes = [], clips = [], takes = [], arrangement = null } = {}) {
+function song({
+  bpm = BPM,
+  tracks = [],
+  scenes = [],
+  clips = [],
+  takes = [],
+  patterns = [],
+  steps = [],
+  arrangement = null,
+} = {}) {
   const snapshot = {
     meta: { title: "Test song", bpm, meter: [4, 4], key: "C major" },
     tracks,
@@ -63,8 +73,62 @@ function song({ bpm = BPM, tracks = [], scenes = [], clips = [], takes = [], arr
     clips: Object.fromEntries(clips.map((item) => [item.id, item])),
   };
   if (takes.length > 0) snapshot.takes = Object.fromEntries(takes.map((item) => [item.id, item]));
+  if (patterns.length > 0) {
+    snapshot.patterns = Object.fromEntries(patterns.map((item) => [item.clip_id + "/" + item.id, item]));
+  }
+  if (steps.length > 0) {
+    snapshot.steps = Object.fromEntries(
+      steps.map((item) => [
+        `${item.clip_id}/${item.pattern_id}/${item.at}/${item.bank_id}.${item.index}`,
+        item,
+      ]),
+    );
+  }
   if (arrangement) snapshot.arrangement = arrangement;
   return snapshot;
+}
+
+/** A track whose clips are patterns: no SunVox, no notes, just pads. */
+function samplerTrack(id = "t1") {
+  return track(id, { device: { engine: "sampler" } });
+}
+
+/**
+ * A pattern clip: one step grid, one swing and one chain of pattern ids, with
+ * the very fields `doc.js`'s `normalizeClip` writes.
+ */
+function patternClip(id, trackId, sceneId, over = {}) {
+  const lengthSteps = over.length_steps === undefined ? 16 : over.length_steps;
+  const stepBeats = over.step_beats === undefined ? 0.25 : over.step_beats;
+  return {
+    id,
+    track_id: trackId,
+    scene_id: sceneId,
+    name: id,
+    length_bars: Math.max(1, Math.ceil((lengthSteps * stepBeats) / 4)),
+    notes: [],
+    kind: "pattern",
+    length_steps: lengthSteps,
+    step_beats: stepBeats,
+    swing: 0,
+    chain: [],
+    ...over,
+  };
+}
+
+/** One pattern of one clip, as the song's `patterns` container holds it. */
+function pattern(clipId, id, order = 0) {
+  return { id, clip_id: clipId, name: id, order };
+}
+
+/** One step: one pad at one position of one pattern. */
+function step(clipId, patternId, at, index, bankId = "b1") {
+  return { clip_id: clipId, pattern_id: patternId, at, bank_id: bankId, index, v: 100, locks: {} };
+}
+
+/** Pad triggers as [frame, pad index] rows, easy to read. */
+function padRows(events) {
+  return events.map((event) => [event.frame, event.index]);
 }
 
 /** An audio clip: a comp over the clip's own beats, and no notes at all. */
@@ -1102,4 +1166,241 @@ test("seek in session mode does not touch the session transport", () => {
   timeline.setMode("arrangement");
   timeline.play();
   assert.deepEqual(brief(timeline.block(0, 128)), [{ frame: 0, track_id: "t1", type: "on", p: 65 }]);
+});
+
+// --- pattern clips: steps, swing, chains ------------------------------------
+
+test("steps land on their 16ths", () => {
+  const seq = sequencer(
+    song({
+      tracks: [samplerTrack("t1")],
+      scenes: [scene("s1")],
+      // 16 steps of a 16th each: one bar, one pattern.
+      clips: [patternClip("c1", "t1", "s1")],
+      patterns: [pattern("c1", "a", 0)],
+      steps: [
+        step("c1", "a", 0, 0),
+        step("c1", "a", 1, 1),
+        step("c1", "a", 2, 2),
+        step("c1", "a", 3, 3),
+        step("c1", "a", 15, 4),
+      ],
+    }),
+  );
+
+  seq.launchClip("c1");
+  seq.play();
+  const events = collect(seq, FRAMES_PER_BAR, 128);
+
+  // Each step is at `at × step_beats` beats, i.e. on its 16th.
+  assert.deepEqual(padRows(events), [
+    [0, 0],
+    [FRAMES_PER_SIXTEENTH, 1],
+    [FRAMES_PER_SIXTEENTH * 2, 2],
+    [FRAMES_PER_SIXTEENTH * 3, 3],
+    [FRAMES_PER_SIXTEENTH * 15, 4],
+  ]);
+  for (const event of events) {
+    assert.equal(event.type, "pad");
+    assert.equal(event.track_id, "t1");
+    assert.equal(event.bank_id, "b1");
+    assert.equal(event.v, 100);
+    // The gate is the plain step length: one 16th of frames.
+    assert.equal(event.gate_frames, FRAMES_PER_SIXTEENTH);
+  }
+  // A pad trigger is not a note: nothing is released.
+  assert.equal(events.some((event) => event.type !== "pad"), false);
+
+  // And the pattern loops, so the next bar plays the same steps again.
+  assert.deepEqual(padRows(collectFrom(seq, FRAMES_PER_BAR, FRAMES_PER_BAR, 128)), [
+    [FRAMES_PER_BAR, 0],
+    [FRAMES_PER_BAR + FRAMES_PER_SIXTEENTH, 1],
+    [FRAMES_PER_BAR + FRAMES_PER_SIXTEENTH * 2, 2],
+    [FRAMES_PER_BAR + FRAMES_PER_SIXTEENTH * 3, 3],
+    [FRAMES_PER_BAR + FRAMES_PER_SIXTEENTH * 15, 4],
+  ]);
+});
+
+/** A one-bar pattern clip of four 16th steps on pads 0..3, over a swing. */
+function swungSong(swing, bpm = BPM) {
+  return song({
+    bpm,
+    tracks: [samplerTrack("t1")],
+    scenes: [scene("s1")],
+    clips: [patternClip("c1", "t1", "s1", { swing })],
+    patterns: [pattern("c1", "a", 0)],
+    steps: [step("c1", "a", 0, 0), step("c1", "a", 1, 1), step("c1", "a", 2, 2), step("c1", "a", 3, 3)],
+  });
+}
+
+test("swing 0.5 delays odd 16ths by 0.125 beat", () => {
+  const seq = sequencer(swungSong(0.5));
+  seq.launchClip("c1");
+  seq.play();
+  const events = collect(seq, FRAMES_PER_BAR, 128);
+
+  // 0.5 × a 16th is a 32nd, i.e. 0.125 beat = 3,000 frames: the even steps keep
+  // their place and the odd ones move by exactly that much.
+  const delay = FRAMES_PER_BEAT * 0.125;
+  assert.deepEqual(padRows(events), [
+    [0, 0],
+    [FRAMES_PER_SIXTEENTH + delay, 1],
+    [FRAMES_PER_SIXTEENTH * 2, 2],
+    [FRAMES_PER_SIXTEENTH * 3 + delay, 3],
+  ]);
+  // The swing delays the onset, not the gate.
+  for (const event of events) assert.equal(event.gate_frames, FRAMES_PER_SIXTEENTH);
+
+  // A swing change is read at the next block: the step already played keeps its
+  // frame, and the ones still ahead move — nothing is emitted twice.
+  const live = sequencer(swungSong(0));
+  live.launchClip("c1");
+  live.play();
+  assert.deepEqual(padRows(collect(live, FRAMES_PER_SIXTEENTH, 128)), [[0, 0]]);
+  live.setSong(swungSong(0.5));
+  assert.deepEqual(padRows(collectFrom(live, FRAMES_PER_SIXTEENTH, FRAMES_PER_BAR - FRAMES_PER_SIXTEENTH, 128)), [
+    [FRAMES_PER_SIXTEENTH + delay, 1],
+    [FRAMES_PER_SIXTEENTH * 2, 2],
+    [FRAMES_PER_SIXTEENTH * 3 + delay, 3],
+  ]);
+
+  // At a tempo whose beat is not a whole number of frames the delay is rounded
+  // together with the absolute position, never added as its own rounded delta.
+  const odd = StudioSequencer.create({ sampleRate: 44100 });
+  odd.setSong(swungSong(0.5, 97));
+  odd.launchClip("c1");
+  odd.play();
+  const framesPerBeat = (44100 * 60) / 97;
+  assert.deepEqual(padRows(collect(odd, framesPerBeat * 4, 512)), [
+    [0, 0],
+    [Math.round(framesPerBeat * 0.375), 1],
+    [Math.round(framesPerBeat * 0.5), 2],
+    [Math.round(framesPerBeat * 0.875), 3],
+  ]);
+  assert.notEqual(
+    Math.round(framesPerBeat * 0.375),
+    Math.round(framesPerBeat * 0.25) + Math.round(framesPerBeat * 0.125),
+    "the swung onset must be rounded as one absolute position",
+  );
+});
+
+/** A one-bar-per-pattern clip whose chain is the given list. */
+function chainSong(chain) {
+  return song({
+    tracks: [samplerTrack("t1")],
+    scenes: [scene("s1")],
+    clips: [patternClip("c1", "t1", "s1", { chain })],
+    patterns: [pattern("c1", "a", 0), pattern("c1", "b", 1)],
+    // The two patterns are told apart by their pad: "a" plays pad 0, "b" 1.
+    steps: [step("c1", "a", 0, 0), step("c1", "b", 0, 1)],
+  });
+}
+
+test("a chain plays its patterns in order and loops", () => {
+  const seq = sequencer(chainSong(["a", "b", "a"]));
+  seq.launchClip("c1");
+  seq.play();
+
+  // One pattern is one bar here, so the chain reads a, b, a and then starts
+  // over: the fourth bar is "a" again, the first pattern of the chain.
+  const events = collect(seq, FRAMES_PER_BAR * 4, 128);
+  assert.deepEqual(padRows(events), [
+    [0, 0],
+    [FRAMES_PER_BAR, 1],
+    [FRAMES_PER_BAR * 2, 0],
+    [FRAMES_PER_BAR * 3, 0],
+  ]);
+  // A pattern change inside a chain cuts nothing: a pad is never released.
+  assert.equal(events.some((event) => event.type !== "pad"), false);
+
+  // A chain edit lands from the next block, at the clip-relative beat the
+  // playhead reached: the fifth bar now plays the one-pattern chain "a".
+  seq.setSong(chainSong(["a"]));
+  assert.deepEqual(padRows(collectFrom(seq, FRAMES_PER_BAR * 4, FRAMES_PER_BAR, 128)), [
+    [FRAMES_PER_BAR * 4, 0],
+  ]);
+});
+
+test("a placement of a pattern clip plays its chain on the timeline", () => {
+  const seq = sequencer(
+    song({
+      tracks: [samplerTrack("t1")],
+      scenes: [scene("s1")],
+      clips: [patternClip("c1", "t1", "s1", { chain: ["a", "b"] })],
+      patterns: [pattern("c1", "a", 0), pattern("c1", "b", 1)],
+      steps: [step("c1", "a", 0, 0), step("c1", "b", 0, 1)],
+      // Sixteen beats into its clip: the placement starts on the chain's second
+      // pattern, four beats into the cycle.
+      arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 2, { offset_beats: 4 })]),
+    }),
+  );
+
+  seq.setMode("arrangement");
+  seq.play();
+
+  // The placement is two bars and one pattern is one bar, so it plays "b" and
+  // then the "a" its cycle comes round to — and never the "a" step that sits
+  // before the placement began.
+  assert.deepEqual(padRows(collect(seq, FRAMES_PER_BAR * 2, 128)), [
+    [0, 1],
+    [FRAMES_PER_BAR, 0],
+  ]);
+});
+
+function firstOfClipSong() {
+  return song({
+    tracks: [samplerTrack("t1")],
+    scenes: [scene("s1")],
+    clips: [patternClip("c1", "t1", "s1")],
+    // Written out of order and with the same order on two of them: the first
+    // pattern is the lowest `order`, then the lowest id — "a".
+    patterns: [pattern("c1", "b", 0), pattern("c1", "c", 1), pattern("c1", "a", 0)],
+    steps: [step("c1", "a", 0, 0), step("c1", "b", 0, 1), step("c1", "c", 0, 2)],
+  });
+}
+
+test("an empty chain plays the first pattern", () => {
+  const seq = sequencer(firstOfClipSong());
+  seq.launchClip("c1");
+  seq.play();
+
+  assert.deepEqual(padRows(collect(seq, FRAMES_PER_BAR * 3, 128)), [
+    [0, 0],
+    [FRAMES_PER_BAR, 0],
+    [FRAMES_PER_BAR * 2, 0],
+  ]);
+});
+
+test("seeking into a chain lands on the right pattern", () => {
+  const seq = sequencer(
+    song({
+      tracks: [samplerTrack("t1")],
+      scenes: [scene("s1")],
+      clips: [patternClip("c1", "t1", "s1", { chain: ["a", "b"] })],
+      patterns: [pattern("c1", "a", 0), pattern("c1", "b", 1)],
+      steps: [step("c1", "a", 0, 0), step("c1", "b", 0, 1)],
+      arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 4)]),
+    }),
+  );
+
+  seq.setMode("arrangement");
+  seq.play();
+  assert.deepEqual(padRows(collect(seq, FRAMES_PER_BAR * 2, 128)), [
+    [0, 0],
+    [FRAMES_PER_BAR, 1],
+  ]);
+
+  // Seeking to bar 1 lands on the chain's SECOND pattern: which pattern sounds
+  // follows from the beat the playhead reached, not from what played before.
+  seq.seek(1);
+  assert.deepEqual(padRows(collectFrom(seq, FRAMES_PER_BAR * 2, FRAMES_PER_BAR * 2, 128)), [
+    [FRAMES_PER_BAR * 2, 1],
+    [FRAMES_PER_BAR * 3, 0],
+  ]);
+
+  // And bar 3 is the cycle's second pattern again, "b".
+  seq.seek(3);
+  assert.deepEqual(padRows(collectFrom(seq, FRAMES_PER_BAR * 4, FRAMES_PER_BAR, 128)), [
+    [FRAMES_PER_BAR * 4, 1],
+  ]);
 });
