@@ -1136,32 +1136,64 @@ test("arrangement render bit-identical in Chromium and Node", async (t) => {
   };
 
   const audio = [{ id: "take-1", channels: [guitar], rate: SAMPLE_RATE }];
-  const seconds = 2.5;
-  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE, audio, mode: "arrangement" });
-  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
-  assert.ok(nodePeak > 0.01, `the Node arrangement render has to be audible, peak was ${nodePeak}`);
-  const nodeHash = hashChannels(node.left, node.right);
-
   // The page takes plain JSON, so the take travels as number arrays.
-  const payload = [
-    { id: "take-1", rate: SAMPLE_RATE, channels: [Array.from(guitar)] },
+  const payload = [{ id: "take-1", rate: SAMPLE_RATE, channels: [Array.from(guitar)] }];
+
+  // Two cases: the whole timeline from bar 0, and a seek to bar 1 of a
+  // timeline whose split fades on both sides — the first half's fade out runs
+  // into the second half's fade in, which starts exactly where the render
+  // lands.
+  const split = {
+    ...song,
+    arrangement: {
+      placements: {
+        p1: { ...song.arrangement.placements.p1 },
+        p2: { ...song.arrangement.placements.p2, fade_out_beats: 0.5 },
+        p3: { ...song.arrangement.placements.p3, fade_in_beats: 1 },
+      },
+      markers: {},
+      sections: {},
+    },
+  };
+  const cases = [
+    { song: song, fromBar: 0, seconds: 2.5 },
+    { song: split, fromBar: 1, seconds: 1.5 },
   ];
 
   const tab = await openTab();
   try {
     await tab.navigate(origin + "/");
     assert.equal(await tab.evaluate("typeof window.studioRenderArrangement"), "function", "the engine page did not load");
-    const browser = await tab.evaluate(
-      `window.studioRenderArrangement(${JSON.stringify(song)}, ${JSON.stringify(payload)}, ${seconds}, ${SAMPLE_RATE}, 0)`,
-    );
-    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
-    assert.equal(browser.sampleRate, SAMPLE_RATE);
-    assert.ok(browser.peak > 0.01, `the Chromium arrangement render has to be audible, peak was ${browser.peak}`);
-    assert.equal(
-      browser.hash,
-      nodeHash,
-      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an arrangement render`,
-    );
+    for (const item of cases) {
+      const node = await renderSong(item.song, {
+        seconds: item.seconds,
+        sampleRate: SAMPLE_RATE,
+        audio,
+        mode: "arrangement",
+        fromBar: item.fromBar,
+      });
+      const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+      assert.ok(
+        nodePeak > 0.01,
+        `the Node arrangement render from bar ${item.fromBar} has to be audible, peak was ${nodePeak}`,
+      );
+      const nodeHash = hashChannels(node.left, node.right);
+
+      const browser = await tab.evaluate(
+        `window.studioRenderArrangement(${JSON.stringify(item.song)}, ${JSON.stringify(payload)}, ${item.seconds}, ${SAMPLE_RATE}, ${item.fromBar})`,
+      );
+      assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+      assert.equal(browser.sampleRate, SAMPLE_RATE);
+      assert.ok(
+        browser.peak > 0.01,
+        `the Chromium arrangement render from bar ${item.fromBar} has to be audible, peak was ${browser.peak}`,
+      );
+      assert.equal(
+        browser.hash,
+        nodeHash,
+        `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an arrangement render from bar ${item.fromBar}`,
+      );
+    }
   } finally {
     tab.close();
   }

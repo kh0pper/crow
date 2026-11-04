@@ -550,6 +550,119 @@ test("fade in ramps linearly from silence", async () => {
   }
 });
 
+test("a comp boundary inside a fade out keeps fading", async () => {
+  // One two-bar placement that fades out over its last four beats, with the
+  // comp switching takes half way through that fade: the ramp has to carry on
+  // on the voice the comp boundary starts, not restart at full gain and not
+  // drop out with the voice that stops.
+  const frames = 2 * 4 * FRAMES_PER_BEAT;
+  const song = audioSong({
+    comp: [
+      { take_id: "first", from_beat: 0, to_beat: 6 },
+      { take_id: "second", from_beat: 6, to_beat: 8 },
+    ],
+    takes: [take("first", { frames }), take("second", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([placement("p1", "track-1", "clip-1", 0, 2, { fade_out_beats: 4 })]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 3.6,
+    mode: "arrangement",
+    audio: [
+      { id: "first", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE },
+      { id: "second", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE },
+    ],
+  });
+
+  // The fade out runs over the placement's last four beats (frames 96000 to
+  // 192000), and clip beat 6 — the comp boundary — is frame 144000 of it.
+  const fadeStart = 4 * FRAMES_PER_BEAT;
+  const boundary = 6 * FRAMES_PER_BEAT;
+  const fadeFrames = 4 * FRAMES_PER_BEAT;
+  for (const at of [fadeStart + 1000, boundary - 100, boundary + 64, boundary + 1000, boundary + 20000]) {
+    const gain = 1 - (at - fadeStart) / fadeFrames;
+    const want = 0.5 * gain * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-3,
+      `frame ${at}: expected ${want} (the fade is at ${gain}), got ${left[at]} — the ramp has to continue on the take the comp switched to`,
+    );
+  }
+
+  // The level cannot have jumped back to full gain at the boundary either.
+  assert.ok(left[boundary - 100] < 0.5 * CENTRE, "the fade out is still ramping down before the comp boundary");
+});
+
+test("seek into a fade in starts at the faded gain", async () => {
+  // A two-bar clip under a four-bar placement that fades in over eight beats:
+  // seeking to bar 1 lands on the half-way point of that ramp, so the first
+  // frame of the render has to be the take at half level, not at full. The
+  // take is three bars long, so nothing runs out under the ramp.
+  const frames = 3 * 4 * FRAMES_PER_BEAT;
+  const song = audioSong({
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+    takes: [take("take-1", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([placement("p1", "track-1", "clip-1", 0, 4, { fade_in_beats: 8 })]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 2.1,
+    mode: "arrangement",
+    fromBar: 1,
+    audio: [{ id: "take-1", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE }],
+  });
+
+  // Four of the eight beats of the fade are behind the seek: the gain there is
+  // 0.5, and the four beats that are left ramp it back to 1.
+  const remaining = 4 * FRAMES_PER_BEAT;
+  assert.ok(Math.abs(left[0] - 0.5 * 0.5 * CENTRE) < 1e-6, `frame 0 should be at half the gain, got ${left[0]}`);
+  for (const at of [1, 100, 5000, remaining - 1]) {
+    const want = 0.5 * (0.5 + 0.5 * (at / remaining)) * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-6,
+      `frame ${at}: expected ${want}, got ${left[at]} (the ramp continues from where the seek landed)`,
+    );
+  }
+  const past = 0.5 * CENTRE;
+  assert.ok(
+    Math.abs(left[remaining + 100] - past) < 1e-6,
+    `past the fade the take is at full level, got ${left[remaining + 100]}`,
+  );
+});
+
+test("a split half with a fade out does not silence the next half", async () => {
+  // A split where the first half fades out over its own bar: the second half
+  // continues the clip exactly, so joining the two would put the whole take on
+  // one voice whose gain has reached 0 at the seam — and the second half would
+  // play silence. A fade at the seam has to keep the two halves on two voices.
+  const frames = 2 * 4 * FRAMES_PER_BEAT;
+  const song = audioSong({
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+    takes: [take("take-1", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([
+      placement("p1", "track-1", "clip-1", 0, 1, { fade_out_beats: 4 }),
+      placement("p2", "track-1", "clip-1", 1, 1, { offset_beats: 4 }),
+    ]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 4.1,
+    mode: "arrangement",
+    audio: [{ id: "take-1", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE }],
+  });
+
+  const seam = 4 * FRAMES_PER_BEAT;
+  const want = 0.5 * CENTRE;
+  for (const at of [seam + 100, seam + 1000, seam + 30000, seam + 90000]) {
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-3,
+      `frame ${at} is the second half of the split and has to sound at full level ${want}, got ${left[at]}`,
+    );
+  }
+});
+
 test("split audio placements play without a click", async () => {
   // Two bars of audio in a two-bar clip, so the second half of a split starts
   // four beats into the take — exactly where the first half stopped.

@@ -75,13 +75,18 @@
  *
  * `seek(bar)` moves the arrangement playhead: the next block plays from that
  * bar, and the notes and voices that were sounding are closed first. `play()`
- * starts from the seek bar, which is bar 0 until it is moved.
+ * starts from the seek bar, which is bar 0 until it is moved. A seek in the
+ * session view changes nothing that is playing: it only remembers the bar a
+ * later switch to the arrangement starts at, and `setMode()` keeps that bar
+ * rather than resetting it.
  *
  * The placements are played, not the placement list: two adjacent placements
  * of one clip whose clip time continues exactly — the two halves
  * `arrangement.split` makes — are joined into one segment, so a note keeps its
  * off across the split and a take keeps playing without a restart or a
- * crossfade.
+ * crossfade. Two placements that fade at the seam are never joined: the earlier
+ * one's fade out ramps its own voice down, and the later one's fade in has to
+ * start a new voice at silence.
  *
  * A placement's fades are linear gain ramps, and only audio placements have
  * them. They are emitted as
@@ -90,7 +95,12 @@
  *
  * where `frame` is the frame the ramp starts at and `frames` its length: at
  * offset `i` inside it the voice's gain is `from + (to - from) * i / frames`.
- * The host multiplies that with the voice's crossfade envelope.
+ * The host multiplies that with the voice's crossfade envelope. Every voice a
+ * window covers gets one: a fade is placed on the voice that sounds at its
+ * first frame (so a comp boundary inside a fade out moves the rest of the ramp
+ * to the voice that plays on), and a voice started inside a window picks the
+ * ramp up where it is — `from` is the gain the window holds at that frame and
+ * `frames` what is left of it.
  *
  * ## Audio clips
  *
@@ -264,6 +274,13 @@
     /** track id → the voice its last segment start took, so the next one takes the other. */
     const lastVoice = new Map();
 
+    /**
+     * The fades that start inside the block being built, each waiting for the
+     * voice that sounds at its first frame (see `placeFades`). Reused like
+     * `events`.
+     */
+    const fadeQueue = [];
+
     /** The events of the block being built. Reused; a block allocates nothing. */
     const events = [];
 
@@ -338,7 +355,17 @@
       takes = next.takes;
       framesPerBeat = next.framesPerBeat;
       placements = next.placements;
-      if (mode === "arrangement") rebuildArrangement();
+      if (mode === "arrangement") {
+        rebuildArrangement();
+        if (playing) {
+          // A rebuild makes new segment objects for everything it had to
+          // change. The voices that still hold their placement and their take
+          // are pointed at them rather than cut, and the next block starts
+          // whatever the new timeline holds at the playhead.
+          followVoices(frameNow());
+          resync = true;
+        }
+      }
       prunePending();
 
       reconcile(currentFrame === null ? 0 : currentFrame);
@@ -650,7 +677,6 @@
       const wanted = nextMode === "arrangement" ? "arrangement" : "session";
       if (wanted === mode) return;
       mode = wanted;
-      arrangementBeat = 0;
       forceCloseAll(frameNow());
       forceCloseAllAudio();
       pending.length = 0;
@@ -669,17 +695,20 @@
      * Move the arrangement playhead to a bar: the next block plays from that
      * bar, and the notes and voices that were sounding are closed first. A
      * seek while the transport is stopped only moves the bar `play()` starts
-     * from.
+     * from, and a seek in the session view only stores the bar: the session's
+     * transport, its sounding notes and its scheduled launches are none of a
+     * timeline seek's business.
      * @param {number} bar the 0-based bar; anything below 0 is bar 0
      */
     function seek(bar) {
       const value = Number(bar);
       if (!Number.isFinite(value)) return;
       arrangementBeat = Math.max(0, Math.trunc(value)) * BEATS_PER_BAR;
+      if (mode !== "arrangement") return;
       forceCloseAll(frameNow());
       forceCloseAllAudio();
       pending.length = 0;
-      if (mode === "arrangement") rebuildArrangement();
+      rebuildArrangement();
       if (playing) {
         // The next block re-anchors beat 0 so that the playhead sits on the bar
         // that was asked for, and starts the takes the timeline holds there.
@@ -696,7 +725,9 @@
      * One segment per placement, except that two adjacent placements of one
      * clip whose clip time continues exactly — the two halves
      * `arrangement.split` makes — are joined into one: that is what makes a
-     * split inaudible.
+     * split inaudible. A seam either side fades at is never joined: those two
+     * halves need two voices, one ramping down at the seam and one starting
+     * clean after it.
      *
      * A segment is reused from the previous build when nothing it depends on
      * changed, so a song update that touches something else does not cut the
@@ -726,8 +757,17 @@
         }
 
         const previous = list.length > 0 ? list[list.length - 1] : null;
+        // A fade at the seam means the two halves have to be two voices: the
+        // earlier one ramps down on its own voice and the later one starts
+        // clean, so joining them would fade the second half into silence.
+        // Fades only apply to audio placements; a note clip keeps its split.
+        const seamFades =
+          previous !== null &&
+          clip.audio &&
+          (previous.parts[previous.parts.length - 1].fade_out_beats > 0 || placement.fade_in_beats > 0);
         if (
           previous &&
+          !seamFades &&
           previous.clipId === clip.id &&
           previous.endBeat === start &&
           continuesClip(previous, placement, clip.lengthBeats)
@@ -831,17 +871,17 @@
     }
 
     /**
-     * Emit the fades that start inside this block: a linear gain ramp on the
-     * voice the track last started (see the header).
+     * Collect the fades of one segment that start inside this block. They are
+     * placed on the voice that sounds at the fade's own first frame, which is
+     * only known once every comp boundary of this block has been laid down, so
+     * `placeFades()` runs after the segment loop (see the header).
      * @param {object} seg
      * @param {number} frameStart
      * @param {number} frames
      */
-    function emitFades(seg, frameStart, frames) {
+    function queueFades(seg, frameStart, frames) {
       const fades = seg.fades;
       if (!fades || fades.length === 0) return;
-      const voice = lastVoice.get(seg.track_id);
-      if (voice === undefined) return;
       const frameEnd = frameStart + frames;
       for (let at = 0; at < fades.length; at += 1) {
         const fade = fades[at];
@@ -849,16 +889,185 @@
         if (!(length > 0)) continue;
         const frame = beatToFrame(fade.beat);
         if (frame < frameStart || frame >= frameEnd) continue;
-        events.push({
-          frame: frame - frameStart,
+        fadeQueue.push({
           track_id: seg.track_id,
-          type: "fade",
-          voice: voice,
+          fade: fade,
+          frame: frame,
           from: fade.from,
           to: fade.to,
           frames: length,
         });
       }
+    }
+
+    /**
+     * Emit the fades collected this block, each on the voice that sounds at its
+     * first frame. A comp boundary inside a fade out moves the rest of the ramp
+     * to the voice that plays on, which is why the voice is looked up here
+     * instead of remembered from the last start.
+     * @param {number} frameStart
+     */
+    function placeFades(frameStart) {
+      for (let at = 0; at < fadeQueue.length; at += 1) {
+        const item = fadeQueue[at];
+        const voice = voiceSoundingAt(item.track_id, item.frame);
+        if (voice === null) continue;
+        events.push({
+          frame: item.frame - frameStart,
+          track_id: item.track_id,
+          type: "fade",
+          voice: voice,
+          from: item.from,
+          to: item.to,
+          frames: item.frames,
+        });
+      }
+      fadeQueue.length = 0;
+    }
+
+    /**
+     * Give a voice that starts inside a fade window the rest of that ramp: the
+     * gain the window holds at its first frame becomes the ramp's `from` and
+     * what is left of the window its `frames`.
+     * @param {object} seg the segment the voice plays
+     * @param {number} voice the voice it starts on
+     * @param {number} startFrame the absolute frame it starts at
+     * @param {number} frameStart the block's first frame
+     */
+    function emitFadeAtStart(seg, voice, startFrame, frameStart) {
+      const fades = seg.fades;
+      if (!fades || fades.length === 0) return;
+      for (let at = 0; at < fades.length; at += 1) {
+        const fade = fades[at];
+        const length = Math.round(fade.beats * framesPerBeat);
+        if (!(length > 0)) continue;
+        const fadeFrame = beatToFrame(fade.beat);
+        // A window that starts at (or after) this frame belongs to the voice
+        // that sounds then: `queueFades()`/`startAudio()` of that start places
+        // it, so this one only takes the windows already running.
+        if (fadeFrame >= startFrame) continue;
+        const remaining = fadeFrame + length - startFrame;
+        if (!(remaining > 0)) continue;
+        events.push({
+          frame: startFrame - frameStart,
+          track_id: seg.track_id,
+          type: "fade",
+          voice: voice,
+          from: fadeGainAt(fade, startFrame, length),
+          to: fade.to,
+          frames: remaining,
+        });
+      }
+    }
+
+    /**
+     * @param {{beat: number, from: number, to: number, beats: number}} fade
+     * @param {number} frame the absolute frame to read
+     * @param {number} length the fade's length in frames
+     * @returns {number} the gain the linear ramp holds at that frame
+     */
+    function fadeGainAt(fade, frame, length) {
+      const passed = frame - beatToFrame(fade.beat);
+      if (passed <= 0) return fade.from;
+      if (passed >= length) return fade.to;
+      return fade.from + ((fade.to - fade.from) * passed) / length;
+    }
+
+    /**
+     * @param {string} trackId
+     * @param {number} frame an absolute frame
+     * @returns {number|null} the voice of that track which sounds at that frame,
+     *   the one that started last when two are crossfading
+     */
+    function voiceSoundingAt(trackId, frame) {
+      let found = null;
+      for (const entry of openAudio.values()) {
+        if (entry.track_id !== trackId) continue;
+        if (entry.startFrame > frame) continue;
+        if (entry.offFrame <= frame) continue;
+        if (found === null || entry.startFrame >= found.startFrame) found = entry;
+      }
+      return found === null ? null : found.voice;
+    }
+
+    /**
+     * Keep the voices the timeline still holds after a rebuild: one whose
+     * placement and take still cover the playhead is pointed at the segment the
+     * rebuild made for it (so a fade or a name change does not cut it), and one
+     * whose placement, take or clip changed is closed, so the next block starts
+     * the take the new timeline has there.
+     * @param {number} frameStart the frame the playhead sits at
+     */
+    function followVoices(frameStart) {
+      if (openAudio.size === 0) return;
+      const soloMode = anySoloed();
+      const beat = (frameStart - originFrame) / framesPerBeat;
+      for (const entry of Array.from(openAudio.values())) {
+        const segs = segments.get(entry.track_id);
+        const clip = clips.get(entry.clipId);
+        const take = takes.get(entry.takeId);
+        const seg = segs ? audibleSegment(segs, beat) : null;
+        const holding =
+          seg !== null &&
+          seg.clipId === entry.clipId &&
+          clip !== undefined &&
+          clip.audio &&
+          clip.lengthBeats > 0 &&
+          audible(entry.track_id, soloMode) &&
+          !(take && take.discarded);
+        const at = holding ? clipPositionAt(seg, clip, beat) : null;
+        const part = at === null ? null : compPartAt(clip, entry.takeId, at.clipBeat);
+        if (!part) {
+          forceCloseAudio(entry, frameStart);
+          continue;
+        }
+        const segEndBeat = seg.endBeat === null ? Infinity : seg.endBeat;
+        entry.seg = seg;
+        entry.clipId = clip.id;
+        entry.fromBeat = part.from_beat;
+        entry.loopStart = at.loopStart;
+        entry.offBeat = Math.min(at.loopStart + part.to_beat, segEndBeat);
+        entry.offFrame = beatToFrame(entry.offBeat);
+        // The take frame it is already reading stays: the voice plays on.
+      }
+    }
+
+    /**
+     * @param {object} clip an audio clip
+     * @param {string} takeId
+     * @param {number} clipBeat how far into the clip the playhead sits
+     * @returns {object|null} the comp segment of that take holding that beat
+     */
+    function compPartAt(clip, takeId, clipBeat) {
+      const parts = clip.comp;
+      for (let at = 0; at < parts.length; at += 1) {
+        const part = parts[at];
+        if (part.take_id !== takeId) continue;
+        if (part.from_beat <= clipBeat && clipBeat < part.to_beat) return part;
+      }
+      return null;
+    }
+
+    /**
+     * Where a playhead sits inside the clip a segment plays.
+     * @param {object} seg
+     * @param {object} clip
+     * @param {number} beat the transport beat of the playhead
+     * @returns {{loopStart: number, clipBeat: number}} the beat that loop
+     *   iteration started at, and how far into the clip the playhead is
+     */
+    function clipPositionAt(seg, clip, beat) {
+      let loop = Math.max(0, Math.floor((beat - seg.startBeat) / clip.lengthBeats));
+      let loopStart = seg.startBeat + loop * clip.lengthBeats;
+      let clipBeat = beat - loopStart;
+      // A playhead a hair below a loop boundary belongs to the next pass.
+      if (clipBeat >= clip.lengthBeats - EPSILON_BEATS) {
+        loop += 1;
+        loopStart += clip.lengthBeats;
+        clipBeat = beat - loopStart;
+      }
+      if (clipBeat < 0) clipBeat = 0;
+      return { loopStart: loopStart, clipBeat: clipBeat };
     }
 
     /**
@@ -874,31 +1083,24 @@
       const beat = (frameStart - originFrame) / framesPerBeat;
       for (const segs of segments.values()) {
         if (segs.length === 0) continue;
+        // The placement the playhead is IN: a placement that starts part-way
+        // into its clip has a segment beginning before it is audible, so the
+        // segment with the highest start beat behind the playhead can be one
+        // whose own bars have not begun yet.
         const seg = audibleSegment(segs, beat);
         if (!seg || seg.clipId === null) continue;
         if (!audible(seg.track_id, soloMode)) continue;
-        if (seg.audibleFrom !== undefined && beat < seg.audibleFrom - EPSILON_BEATS) continue;
         const clip = clips.get(seg.clipId);
         if (!clip || !clip.audio || !(clip.lengthBeats > 0)) continue;
 
-        let loop = Math.max(0, Math.floor((beat - seg.startBeat) / clip.lengthBeats));
-        let loopStart = seg.startBeat + loop * clip.lengthBeats;
-        let clipBeat = beat - loopStart;
-        // A playhead a hair below a loop boundary belongs to the next pass.
-        if (clipBeat >= clip.lengthBeats - EPSILON_BEATS) {
-          loop += 1;
-          loopStart += clip.lengthBeats;
-          clipBeat = beat - loopStart;
-        }
-        if (clipBeat < 0) clipBeat = 0;
-
+        const at = clipPositionAt(seg, clip, beat);
         const segEndBeat = seg.endBeat === null ? Infinity : seg.endBeat;
-        for (let at = 0; at < clip.comp.length; at += 1) {
-          const part = clip.comp[at];
-          if (!(part.from_beat <= clipBeat && clipBeat < part.to_beat)) continue;
-          const stopBeat = Math.min(loopStart + part.to_beat, segEndBeat);
+        for (let index = 0; index < clip.comp.length; index += 1) {
+          const part = clip.comp[index];
+          if (!(part.from_beat <= at.clipBeat && at.clipBeat < part.to_beat)) continue;
+          const stopBeat = Math.min(at.loopStart + part.to_beat, segEndBeat);
           if (!(stopBeat > beat)) continue;
-          startAudio(seg, clip, part, loopStart, clipBeat, stopBeat, frameStart, frameStart);
+          startAudio(seg, clip, part, at.loopStart, at.clipBeat, stopBeat, frameStart, frameStart);
         }
       }
     }
@@ -1254,6 +1456,7 @@
      */
     function emitBlock(frameStart, frames) {
       events.length = 0;
+      fadeQueue.length = 0;
       const frameEnd = frameStart + frames;
 
       emitForced();
@@ -1301,7 +1504,7 @@
 
             if (clip.audio) {
               emitAudio(seg, clip, first, last, segEndBeat, frameStart, frameEnd);
-              emitFades(seg, frameStart, frames);
+              queueFades(seg, frameStart, frames);
               continue;
             }
 
@@ -1337,6 +1540,10 @@
             }
           }
         }
+
+        // Every comp boundary of this block has been laid down, so the fades
+        // that start inside it can go to the voice that sounds then.
+        placeFades(frameStart);
       }
 
       // Offs come from the open set alone. One that fell before this block was
@@ -1455,10 +1662,12 @@
 
       // A start that lands on a voice already playing that take at that very
       // position is not a start at all: the sound continues. That is what
-      // joins a placement to the one before it when their clip time continues
-      // (a split), and what stops a seek's own start from being doubled.
+      // joins the two halves of a split, which `rebuildArrangement` keeps in
+      // ONE segment (two placements that fade at the seam are two segments, so
+      // they get two voices), and what stops a seek's own start from being
+      // doubled.
       if (mode === "arrangement") {
-        const continuing = continuingVoice(trackId, part.take_id, startFrame, takeFrame);
+        const continuing = continuingVoice(seg, part.take_id, startFrame, takeFrame);
         if (continuing) {
           continuing.clipId = clip.id;
           continuing.seg = seg;
@@ -1505,19 +1714,25 @@
         take_frame: takeFrame,
         voice: voice,
       });
+
+      // A voice that starts inside a fade window plays the rest of that ramp:
+      // the window's gain at this frame is where it picks up.
+      emitFadeAtStart(seg, voice, startFrame, frameStart);
     }
 
     /**
-     * @param {string} trackId
+     * @param {object} seg the segment the new comp segment would play in
      * @param {string} takeId
      * @param {number} startFrame the frame a new comp segment would start at
      * @param {number} takeFrame the take frame that start would read
      * @returns {object|null} the open voice that is already playing that very
-     *   take frame, if there is one
+     *   take frame in that very segment, if there is one
      */
-    function continuingVoice(trackId, takeId, startFrame, takeFrame) {
+    function continuingVoice(seg, takeId, startFrame, takeFrame) {
       for (const entry of openAudio.values()) {
-        if (entry.track_id !== trackId) continue;
+        // Only inside one segment: a start in the segment after it is a new
+        // sound (a split that fades at the seam is two of them).
+        if (entry.seg !== seg) continue;
         if (entry.takeId !== takeId) continue;
         const position = entry.takeFrame + (startFrame - entry.startFrame);
         // One frame of slack: the frame a beat lands on is rounded, so a
@@ -1726,7 +1941,15 @@
     function audibleSegment(segs, beat) {
       let found = null;
       for (const seg of segs) {
-        if (seg.startBeat <= beat && (seg.endBeat === null || seg.endBeat > beat)) found = seg;
+        // A placement that begins part-way into its clip has a segment whose
+        // own bars start before it is audible (its `startBeat` is where clip
+        // beat 0 of it would sit): the playhead is in it only from
+        // `audibleFrom` on, and the placement before it holds the playhead
+        // until then.
+        if (seg.startBeat > beat) continue;
+        if (seg.endBeat !== null && seg.endBeat <= beat) continue;
+        if (seg.audibleFrom !== undefined && beat < seg.audibleFrom - EPSILON_BEATS) continue;
+        found = seg;
       }
       return found;
     }

@@ -133,6 +133,9 @@ const MAX_NAME_LENGTH = 60;
  */
 const MAX_TAKE_SAMPLES = 115200000;
 
+/** The longest arrangement a song may have, in bars (bar 999 is its last). */
+const MAX_FROM_BAR = 998;
+
 /** The largest a take's WAV file can be: its 44-byte header plus 3 bytes a sample. */
 const MAX_TAKE_BYTES = 44 + MAX_TAKE_SAMPLES * 3;
 
@@ -153,7 +156,9 @@ let cachedReleaseSymbol;
  *
  * `{ mode: "arrangement", from_bar }` renders the song's timeline instead: the
  * engine plays the song's placements from that bar, and the scene and clip ids
- * are not used.
+ * are not used. A mode that is neither `"session"` nor `"arrangement"`, or a
+ * `from_bar` that is not a whole bar between 0 and 998, is refused by name
+ * rather than quietly rendered as something else.
  *
  * Before the render starts, the takes the render can hear are loaded into the
  * engine through `options.takeAudio`, so a song with recorded audio renders as
@@ -174,7 +179,7 @@ let cachedReleaseSymbol;
  */
 export async function renderSong(snapshot, options = {}) {
   const { scene_id = null, clip_id = null, seconds = 1, sampleRate = SAMPLE_RATE } = options;
-  const mode = options.mode === "arrangement" ? "arrangement" : "session";
+  const mode = renderMode(options.mode);
   if (scene_id != null && clip_id != null) {
     throw new Error("A render takes a scene_id or a clip_id, not both.");
   }
@@ -182,7 +187,7 @@ export async function renderSong(snapshot, options = {}) {
   if (!Number.isFinite(rate) || rate <= 0) throw new Error("A render needs a positive sample rate.");
   const span = Number(seconds);
   if (!Number.isFinite(span) || span <= 0) throw new Error("A render needs a positive number of seconds.");
-  const fromBar = mode === "arrangement" ? wholeBar(options.from_bar) : 0;
+  const fromBar = mode === "arrangement" ? renderFromBar(options.from_bar) : 0;
 
   const length = Math.max(1, Math.round(span * rate));
   const context = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: rate });
@@ -312,6 +317,10 @@ export function createRenderer({
    * @param {string|null} [request.scene_id] render this scene
    * @param {string|null} [request.clip_id] render this clip
    * @param {number} request.seconds how much to render
+   * @param {"session"|"arrangement"} [request.mode] render the session grid
+   *   (the default) or the song's timeline
+   * @param {number} [request.from_bar] the bar an arrangement render starts at
+   *   (a whole bar from 0 to 998; ignored for a session render)
    * @param {{kind?: string, id?: string, label?: string}|null} [request.author]
    *   who asked; a human author is audited as `local`, anything else as `bot`
    * @returns {Promise<{storage_key: string, url: string, seconds: number,
@@ -327,6 +336,10 @@ export function createRenderer({
     // storage prefix both need it, so a render without one is refused clearly.
     if (project_id == null) throw new Error("A render needs the song's project.");
     const span = checkSeconds(seconds, longest);
+    // Which view, and where in the timeline: refused here, before a slot is
+    // taken, so a bad request never holds the render queue.
+    const mode = renderMode(request.mode);
+    const fromBar = renderFromBar(request.from_bar);
 
     await acl.assertLocalCapability(db, project_id, "write_files");
     await acquire();
@@ -335,7 +348,14 @@ export function createRenderer({
       // read once, before anything is rendered.
       const prefix = await storagePrefixFor(db, project_id);
       const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
-      const audio = await renderAudio(snapshot, { scene_id, clip_id, seconds: span, takeAudio });
+      const audio = await renderAudio(snapshot, {
+        scene_id,
+        clip_id,
+        seconds: span,
+        mode,
+        from_bar: fromBar,
+        takeAudio,
+      });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
       const renderedSeconds = audio.seconds;
       const lufs = integratedLufs(audio.left, audio.right, rate);
@@ -556,13 +576,31 @@ function barsOf(seconds, snapshot) {
 }
 
 /**
- * A `from_bar` option as a whole bar: 0 when it is missing or not a number.
+ * A `from_bar` option as a whole bar. A bar the engine cannot have is refused
+ * here, before any audio is rendered: bar 0 is the first one and 999 bars is
+ * the longest arrangement a song may have.
  * @param {unknown} value
  * @returns {number}
  */
-function wholeBar(value) {
+function renderFromBar(value) {
+  if (value === undefined || value === null) return 0;
   const bar = Number(value);
-  return Number.isFinite(bar) && bar > 0 ? Math.trunc(bar) : 0;
+  if (!Number.isInteger(bar) || bar < 0 || bar > MAX_FROM_BAR) {
+    throw new Error(`A render can start at a whole bar from 0 to ${MAX_FROM_BAR}.`);
+  }
+  return bar;
+}
+
+/**
+ * The view a render plays: the session grid or the song's timeline. A mode the
+ * engine does not have is refused rather than rendered as the session.
+ * @param {unknown} value
+ * @returns {"session"|"arrangement"}
+ */
+function renderMode(value) {
+  if (value === undefined || value === null) return "session";
+  if (value === "session" || value === "arrangement") return value;
+  throw new Error('A render plays "session" or "arrangement".');
 }
 
 /**

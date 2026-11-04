@@ -457,6 +457,49 @@ test("render over max seconds refused", async () => {
   assert.deepEqual(db.statements, [], "nothing is written past the limit");
 });
 
+test("render passes arrangement mode and from_bar through", async () => {
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const asked = [];
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    maxSeconds: 300,
+    now: () => CLOCK,
+    renderAudio: async (snapshot, options) => {
+      asked.push({ snapshot, options });
+      return stubAudio();
+    },
+  });
+
+  const request = { song_id: "song-1", project_id: PROJECT, snapshot: oneTrackSong(), seconds: 1 };
+  await renderer.render({ ...request, mode: "arrangement", from_bar: 9 });
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].options.mode, "arrangement", "the timeline view has to reach the renderer");
+  assert.equal(asked[0].options.from_bar, 9, "the bar the render starts at has to reach the renderer");
+
+  // A session render says so, and starts at bar 0.
+  await renderer.render(request);
+  assert.equal(asked[1].options.mode, "session");
+  assert.equal(asked[1].options.from_bar, 0);
+
+  // A mode or a bar the engine does not have is refused before anything runs.
+  await assert.rejects(renderer.render({ ...request, mode: "solo" }), {
+    message: 'A render plays "session" or "arrangement".',
+  });
+  await assert.rejects(renderer.render({ ...request, mode: "arrangement", from_bar: 1.5 }), {
+    message: "A render can start at a whole bar from 0 to 998.",
+  });
+  await assert.rejects(renderer.render({ ...request, mode: "arrangement", from_bar: 999 }), {
+    message: "A render can start at a whole bar from 0 to 998.",
+  });
+  assert.equal(asked.length, 2, "a refused render never reaches the audio renderer");
+  assert.equal(storage.uploads.length, 2, "only the two accepted renders are stored");
+  assert.equal(acl.audits.length, 2, "only the two accepted renders are audited");
+});
+
 test("render queue full on fifth concurrent call", async () => {
   const db = fakeDb();
   const storage = fakeStorage();

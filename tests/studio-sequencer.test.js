@@ -55,15 +55,31 @@ function clip(id, trackId, sceneId, lengthBars, notes) {
 }
 
 /** A whole song snapshot, keyed by clip id the way `doc.js` writes it. */
-function song({ bpm = BPM, tracks = [], scenes = [], clips = [], arrangement = null } = {}) {
+function song({ bpm = BPM, tracks = [], scenes = [], clips = [], takes = [], arrangement = null } = {}) {
   const snapshot = {
     meta: { title: "Test song", bpm, meter: [4, 4], key: "C major" },
     tracks,
     scenes,
     clips: Object.fromEntries(clips.map((item) => [item.id, item])),
   };
+  if (takes.length > 0) snapshot.takes = Object.fromEntries(takes.map((item) => [item.id, item]));
   if (arrangement) snapshot.arrangement = arrangement;
   return snapshot;
+}
+
+/** An audio clip: a comp over the clip's own beats, and no notes at all. */
+function audioClip(id, trackId, sceneId, lengthBars, comp) {
+  return { id, track_id: trackId, scene_id: sceneId, name: id, length_bars: lengthBars, kind: "audio", notes: [], comp };
+}
+
+/** A recorded take, as an audio clip's comp names it. */
+function take(id, clipId, over = {}) {
+  return { id, clip_id: clipId, rate: SAMPLE_RATE, offset_frames: 0, discarded: false, ...over };
+}
+
+/** A track that plays takes instead of notes. */
+function audioTrack(id = "t1") {
+  return track(id, { device: { engine: "audio" } });
 }
 
 /** A placement in the snapshot's shape, with 0 fades unless a test sets them. */
@@ -953,4 +969,137 @@ test("launches are ignored in arrangement mode", () => {
   seq.stopAll();
   assert.equal(seq.isPlaying(), true, "stopAll is a session gesture and does not halt the timeline");
   assert.ok(collectFrom(seq, FRAMES_PER_BAR * 2, FRAMES_PER_BEAT, 128).length > 0);
+});
+
+test("seek before a placement with an offset still plays the current one", () => {
+  // A two-bar take from bar 0, and a second take placed at bar 2 that starts
+  // six beats into its clip: its clip beat 0 sits at beat 2, but nothing of it
+  // sounds before beat 8. Seeking to bar 1 (beat 4) lands in the FIRST
+  // placement, whose take has to start at its beat 4.
+  const seq = sequencer(
+    song({
+      tracks: [audioTrack("t1")],
+      scenes: [scene("s1")],
+      clips: [
+        audioClip("a", "t1", "s1", 2, [{ take_id: "k1", from_beat: 0, to_beat: 8 }]),
+        audioClip("b", "t1", "s1", 2, [{ take_id: "k2", from_beat: 0, to_beat: 8 }]),
+      ],
+      takes: [take("k1", "a"), take("k2", "b")],
+      arrangement: arrangementOf([
+        placement("p1", "t1", "a", 0, 2),
+        placement("p2", "t1", "b", 2, 2, { offset_beats: 6 }),
+      ]),
+    }),
+  );
+
+  seq.setMode("arrangement");
+  seq.seek(1);
+  seq.play();
+
+  const audio = seq.block(0, 128).filter((event) => event.type === "audio");
+  assert.equal(audio.length, 1, "the placement the playhead is in has to start its take");
+  assert.equal(audio[0].take_id, "k1", "the seek is inside the first placement, not the one before it is audible");
+  assert.equal(audio[0].take_frame, FRAMES_PER_BEAT * 4, "the take starts four beats into the clip");
+  assert.equal(audio[0].voice, 0);
+});
+
+test("changing a sounding placement's fade does not drop its audio", () => {
+  const make = (fadeOut) =>
+    song({
+      tracks: [audioTrack("t1")],
+      scenes: [scene("s1")],
+      clips: [audioClip("a", "t1", "s1", 2, [{ take_id: "k1", from_beat: 0, to_beat: 8 }])],
+      takes: [take("k1", "a")],
+      arrangement: arrangementOf([placement("p1", "t1", "a", 0, 2, { fade_out_beats: fadeOut })]),
+    });
+
+  const seq = sequencer(make(0));
+  seq.setMode("arrangement");
+  seq.play();
+
+  const first = collect(seq, FRAMES_PER_BAR, 128);
+  assert.ok(
+    first.some((event) => event.type === "audio" && event.take_id === "k1"),
+    "the take has to be sounding before the edit",
+  );
+
+  // Half way through the placement a fade out is added to it.
+  seq.setSong(make(4));
+  const after = collectFrom(seq, FRAMES_PER_BAR, FRAMES_PER_BAR, 128);
+
+  assert.deepEqual(
+    after.filter((event) => event.type === "audio" || event.type === "audio_stop"),
+    [],
+    "a placement that only changed its fade keeps the voice it was playing on",
+  );
+
+  // The new fade reaches that voice: it starts on beat 4 of the placement and
+  // ramps its gain down from 1 to 0 over its last four beats.
+  const fades = after.filter((event) => event.type === "fade");
+  assert.equal(fades.length, 1, `expected one fade, got ${JSON.stringify(fades)}`);
+  assert.deepEqual(fades[0], {
+    frame: FRAMES_PER_BAR,
+    track_id: "t1",
+    type: "fade",
+    voice: 0,
+    from: 1,
+    to: 0,
+    frames: 4 * FRAMES_PER_BEAT,
+  });
+});
+
+test("seek in session mode does not touch the session transport", () => {
+  const snapshot = song({
+    tracks: [track("t1")],
+    scenes: [scene("s1"), scene("s2")],
+    clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)]), clip("c2", "t1", "s2", 1, [note(0, 2, 72)])],
+  });
+
+  /** Play to bar 2, schedule the other clip for the next bar, seek, play on. */
+  function run(withSeek) {
+    const seq = sequencer(snapshot);
+    seq.launchClip("c1");
+    seq.play();
+    const events = [];
+    const reports = [];
+    const step = (from, to) => {
+      for (let at = from; at < to; at += 128) {
+        const block = seq.block(at, 128);
+        for (const event of block) events.push({ ...event, frame: at + event.frame });
+        for (const report of launchesOf(block)) reports.push({ ...report, frame: at + report.frame });
+      }
+    };
+    step(0, FRAMES_PER_BAR * 2);
+    seq.launchClip("c2");
+    if (withSeek) seq.seek(7);
+    const position = seq.position();
+    step(FRAMES_PER_BAR * 2, FRAMES_PER_BAR * 3);
+    return { events, reports, position };
+  }
+
+  const plain = run(false);
+  const seeked = run(true);
+  assert.ok(plain.events.length > 0, "the session has to be making some sound");
+  assert.deepEqual(seeked.events, plain.events, "a session seek changes nothing about what plays");
+  assert.deepEqual(seeked.position, plain.position, "a session seek does not put the transport back to 1.1.1");
+  assert.deepEqual(seeked.reports, plain.reports, "a launch scheduled before the seek still lands at its bar");
+  assert.ok(
+    plain.reports.some((report) => report.clip_id === "c2" && report.bar === 2),
+    "the scheduled launch has to be reported at bar 2",
+  );
+
+  // The bar is only stored, for a later switch to the timeline: the arrangement
+  // starts there instead of at bar 0.
+  const timeline = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c3", "t1", "s1", 1, [note(0, 1, 65)])],
+      arrangement: arrangementOf([placement("p1", "t1", "c3", 2, 1)]),
+    }),
+  );
+  timeline.seek(2);
+  timeline.setMode("arrangement");
+  timeline.play();
+  assert.deepEqual(brief(timeline.block(0, 128)), [{ frame: 0, track_id: "t1", type: "on", p: 65 }]);
 });
