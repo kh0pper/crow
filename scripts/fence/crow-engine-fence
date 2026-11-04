@@ -30,16 +30,20 @@
 #   apply --boot     apply only, with ZERO docker calls (the unit's mode: the
 #                    daemon may not exist yet, and `docker info` here would
 #                    deadlock boot through docker.socket activation).
-#   status           print the live rules, the addresses used, the generation;
-#                    warn on a facts/conf/Docker-flags hash mismatch and on a
-#                    conf entry whose rule is no longer live. READ-ONLY: it
-#                    never writes the state file (apply and remove write it).
+#   status           print the live rules, the addresses used, the generation and
+#                    each family's state; warn on a facts/conf/Docker-flags hash
+#                    mismatch, on an unfenced family and on a conf entry whose
+#                    rule is no longer live. READ-ONLY: it never writes the state
+#                    file (apply and remove write it).
 #   remove <id>      drop one publish's rules from the live table. It edits the
 #                    live rules only: the conf is the operator's file, and an
 #                    interactive `apply` — or any conf edit — puts the rule
 #                    back. The re-apply run skips a transaction that is
 #                    byte-identical to the last applied one, so a removal
-#                    survives the timer.
+#                    survives the timer. The rules it leaves behind are built
+#                    from the CONF minus that id, never from the live chain (a
+#                    drifted chain is not a baseline), and it refuses to run on
+#                    a chain that no longer matches the last apply.
 #   swap-check       compare an old fence's destination coverage with this
 #                    conf's, before the operator deletes the old rules. It
 #                    never deletes anything.
@@ -61,9 +65,9 @@
 # Exit codes: 0 ok, 2 usage, 10 conf unreadable, 11 conf line invalid, 12 conf
 # refused on principle, 13 unknown iptables flavour, 14 docker unreadable,
 # 15 unknown Docker firewall backend, 16 Docker bridge facts wrong or missing,
-# 17 facts file missing, 18 facts stale, 19 the restore transaction failed,
-# 20 a check refused, 21 the lock is held elsewhere, 22 the state directory is
-# unusable.
+# 17 facts file missing, 18 facts stale, 19 the restore transaction failed or a
+# family that has to be fenced cannot be, 20 a check refused, 21 the lock is held
+# elsewhere, 22 the state directory is unusable.
 set -euo pipefail
 umask 0027
 export LC_ALL=C
@@ -107,6 +111,11 @@ XT_WAIT=${CROW_ENGINE_FENCE_XT_WAIT:-10}
 # a host whose v6 module is disabled, and rules for a family the kernel does not
 # run are noise. The path is overridable so tests can model both hosts.
 V6_STACK=${CROW_ENGINE_FENCE_V6_STACK:-/proc/net/if_inet6}
+# `ipv6 unfenced` in the conf: the operator's explicit acceptance of a v6 stack
+# whose publishes are not fenced (a host without ip6tables-restore). Set by
+# parse_conf; without it a v6 publish on a stack this script cannot restore is a
+# refusal, never a silent gap.
+V6_OPT_OUT=0
 
 INTERFACE=
 GENERATION=0
@@ -136,7 +145,7 @@ usage: $PROGNAME <command> [args]
   apply              check, then apply the rules
   apply --boot       apply with no docker call at all (the unit's mode)
   status             show the live rules, the tailnet addresses, the generation
-                     (read-only: it writes nothing)
+                     and each family's state (read-only: it writes nothing)
   remove <id>        drop one publish's rules from the live table (the conf is
                      left alone)
   swap-check [--old-tag <tag>]
@@ -154,6 +163,11 @@ The conf holds one directive per line:
   publish lan <addr> <port> consumer <addr> [<addr> ...]
                               a LAN-address publish; source exemptions are
                               allowed here only
+  ipv6 unfenced               accept that a v6 stack is left unfenced (no
+                              ip6tables-restore installed): no v6 rules, and a
+                              v6-reachable publish stays reachable from every
+                              interface. Without this line that host is refused
+                              (exit 19).
 
 Exit codes are listed in the script header and in docs/guide/engine-fence.md.
 EOF
@@ -334,6 +348,7 @@ parse_conf() {
   PUB_ID=()
   PUB_CONSUMERS=()
   BRIDGES=()
+  V6_OPT_OUT=0
 
   local line no=0 port kind addr
   local -a tok=()
@@ -371,6 +386,13 @@ parse_conf() {
           [ "$b" = "${tok[1]}" ] && conf_fail "$no" "bridge ${tok[1]} is listed twice"
         done
         BRIDGES+=("${tok[1]}")
+        ;;
+      ipv6)
+        [ "${#tok[@]}" -eq 2 ] || conf_fail "$no" "ipv6 takes exactly one word: 'ipv6 unfenced'"
+        [ "${tok[1]}" = unfenced ] ||
+          conf_fail "$no" "unknown ipv6 setting: ${tok[1]} (the only one is 'ipv6 unfenced')"
+        [ "$V6_OPT_OUT" -eq 0 ] || conf_fail "$no" "ipv6 unfenced is listed twice"
+        V6_OPT_OUT=1
         ;;
       publish)
         kind=${tok[1]:-}
@@ -626,10 +648,55 @@ resolve_tailnet() { # <family> -> the address on stdout, or exit 1
 has_v6_stack() { [ -e "$V6_STACK" ]; }
 
 # The restore binary, not the bare `ip6tables` one: a host can carry one half of
-# the pair. A family this script cannot restore is a family it must not write,
-# and a stack without the binary is a warning, never a failed unit.
+# the pair. A family this script cannot restore is a family it must not write.
 has_v6_restore() { command -v ip6tables-restore >/dev/null 2>&1; }
-v6_rules_enabled() { has_v6_stack && has_v6_restore; }
+
+# `ipv6 unfenced` is the operator's own decision, so it wins over a binary that
+# happens to be installed: the conf says this family is not fenced.
+v6_rules_enabled() { [ "$V6_OPT_OUT" -eq 0 ] && has_v6_stack && has_v6_restore; }
+
+# Does any publish in the conf have rules in the v6 family? A tailnet publish
+# does (addressed, or port-only when tailscale reports no v6 address), so does a
+# port-only one, and a LAN publish whose address is v6. A LAN publish on a v4
+# address never produces a v6 rule.
+v6_publishes_apply() {
+  local i
+  for i in "${!PUB_KIND[@]}"; do
+    publish_in_family "$i" 6 && return 0
+  done
+  return 1
+}
+
+# One family's state, as state.json records it and as `status` prints it.
+# `fenced` is the only word that means this family's rules are written; every
+# other word leaves something unfenced, and status warns about it — except where
+# there is nothing to fence at all (no v6 stack, or no publish that applies to
+# v6).
+family_state() { # <4|6>
+  local fam=$1
+  if [ "$fam" = 4 ]; then
+    local bin=iptables
+    # Spelled from the binary name, so this file never carries a restore
+    # invocation of its own (the only one is `"${bin}-restore"` in apply_family).
+    if command -v "${bin}-restore" >/dev/null 2>&1; then
+      printf 'fenced'
+    else
+      printf 'unfenced-no-restore'
+    fi
+    return 0
+  fi
+  if ! has_v6_stack; then
+    printf 'no-stack'
+  elif [ "$V6_OPT_OUT" -eq 1 ]; then
+    printf 'unfenced-by-operator'
+  elif has_v6_restore; then
+    printf 'fenced'
+  elif v6_publishes_apply; then
+    printf 'unfenced-no-restore'
+  else
+    printf 'no-v6-publish'
+  fi
+}
 
 json_str() { # <text> -> a JSON string literal
   local s=$1
@@ -644,6 +711,10 @@ state_json() { # <flavour> <backend> <tn4> <tn6> -> the whole document
   printf '{\n'
   printf '  "generation": %s,\n' "$(json_str "g$GENERATION")"
   printf '  "applied_at": %s,\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+  # What the last apply made of the v6 family: `unfenced-by-operator` when the
+  # conf carries `ipv6 unfenced`, so a reader never has to guess whether a
+  # missing v6 rule set was decided or missed.
+  printf '  "v6": %s,\n' "$(json_str "$(family_state 6)")"
   printf '  "backend": { "iptables_flavour": %s, "docker_firewall_backend": %s },\n' \
     "$(json_str "$flavour")" "$(json_str "$backend")"
   printf '  "tailnet": { "v4": %s, "v6": %s },\n' \
@@ -891,13 +962,19 @@ boot_facts_or_die() {
 apply_rules_now() { # <flavour> <backend> <skip-a-byte-identical-transaction 0|1>
   local flavour=$1 backend=$2 skip=$3 tn4= tn6= text4 text6 v6=0 hash
   tn4=$(resolve_tailnet 4) || tn4=
-  if v6_rules_enabled; then
+  if ! has_v6_stack; then
+    warn "no IPv6 stack ($V6_STACK is absent): no v6 rules were written"
+  elif [ "$V6_OPT_OUT" -eq 1 ]; then
+    warn "ipv6 unfenced is set in $CONF: no v6 rules were written, so a v6-reachable publish stays reachable from every interface (the operator accepted that)"
+  elif v6_rules_enabled; then
     v6=1
     tn6=$(resolve_tailnet 6) || tn6=
-  elif has_v6_stack; then
-    warn "the IPv6 stack is present but ip6tables-restore is not installed: no v6 rules were written"
+  elif v6_publishes_apply; then
+    # Fail closed. A stack that carries a publish this script cannot fence is an
+    # unfenced publish, not a warning: the unit fails, and docker waits.
+    die 19 "$V6_STACK exists and a publish in $CONF applies to v6, but ip6tables-restore is not installed: refusing to leave it unfenced (install ip6tables, or write 'ipv6 unfenced' in $CONF to take that risk deliberately)"
   else
-    warn "no IPv6 stack ($V6_STACK is absent): no v6 rules were written"
+    warn "the IPv6 stack is present but ip6tables-restore is not installed: no v6 rules were written (no publish in the conf applies to v6)"
   fi
   if [ -z "$tn4" ]; then
     warn "no tailnet v4 address: the v4 rules are port-only (tailnet address unresolved)"
@@ -1174,6 +1251,23 @@ cmd_status() {
   fi
   printf 'generation: g%s\n' "$GENERATION"
 
+  # Each family's state, in the same words state.json uses. A family that is not
+  # fenced is a warning, except where there is nothing to fence there.
+  local fam4 fam6
+  fam4=$(family_state 4)
+  fam6=$(family_state 6)
+  printf 'family: v4 %s\n' "$fam4"
+  printf 'family: v6 %s\n' "$fam6"
+  if [ "$fam4" != fenced ]; then
+    printf 'WARN: the v4 family is %s: no v4 rule is live, so nothing is fenced\n' "$fam4"
+  fi
+  case $fam6 in
+    fenced | no-stack | no-v6-publish) ;;
+    *)
+      printf 'WARN: the v6 family is unfenced (%s): a v6-reachable publish is reachable from every interface\n' "$fam6"
+      ;;
+  esac
+
   local live4= live6=
   live4=$(iptables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null) || live4=''
   if [ "$v6" -eq 1 ]; then
@@ -1213,18 +1307,18 @@ cmd_status() {
   printf 'to change rules: %s apply (never: systemctl restart crow-engine-fence, which restarts docker)\n' "$PROGNAME"
 }
 
-live_chain() { # <4|6> -> the chain's live lines
-  case "$1" in
-    4) iptables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null || true ;;
-    6) ip6tables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null || true ;;
-  esac
-}
-
-# A real `-S <chain>` prints the chain's own `-N` line first. That line is not a
-# rule and must never reach a restore transaction that already declares the
-# chain, which the restore binary would refuse.
-chain_lines() { # <4|6> -> only the chain's `-A` lines
-  live_chain "$1" | grep -E -- "^-A $CHAIN " || true
+# The baseline `remove` builds on: the transaction the last real apply restored,
+# still live, unchanged. `remove` writes rules it derives from the CONF (never
+# from the live chain), so a chain that had already drifted would be recorded as
+# the new baseline — it refuses instead, and names the command that
+# re-establishes the baseline.
+assert_applied_baseline() { # <v4-text> <v6-text>
+  [ -r "$APPLIED_HASH" ] && [ -r "$APPLIED_COUNTS" ] ||
+    die 20 "no applied transaction is recorded in $STATE_DIR: run '$PROGNAME apply' first, then remove"
+  applied_hash_matches "$(transaction_hash "$1" "$2")" ||
+    die 20 "the transaction $CONF produces is not the one that is live (the conf or the resolved tailnet address changed): run '$PROGNAME apply' first, then remove"
+  applied_rules_live ||
+    die 20 "the live chain does not match the rule count the last apply recorded ($APPLIED_COUNTS): run '$PROGNAME apply' first, then remove"
 }
 
 cmd_remove() {
@@ -1235,36 +1329,40 @@ cmd_remove() {
   esac
   take_lock
   parse_conf
-  SKIP_ID=$id
   local tag="crow-engine-fence:$id:"
-  local fam lines kept text removed=0 text4='' text6=''
-  for fam in 4 6; do
-    if [ "$fam" = 6 ] && ! v6_rules_enabled; then
-      continue
-    fi
-    lines=$(chain_lines "$fam")
-    [ -n "$lines" ] || continue
-    kept=$(printf '%s\n' "$lines" | grep -v -F "$tag") || kept=''
-    if [ "$kept" != "$lines" ]; then
-      removed=1
-    fi
-    text=$(printf '*raw\n:%s - [0:0]' "$CHAIN")
-    text="$text"$'\n'
-    if [ -n "$kept" ]; then
-      text="$text$kept"$'\n'
-    fi
-    text="$text"'COMMIT'$'\n'
-    apply_family "$fam" "$text"
-    if [ "$fam" = 4 ]; then text4=$text; else text6=$text; fi
-  done
-
-  [ "$removed" -eq 1 ] || die 20 "no live rule is tagged $tag"
   local tn4= tn6= v6=0
   tn4=$(resolve_tailnet 4) || tn4=
   if v6_rules_enabled; then
     v6=1
     tn6=$(resolve_tailnet 6) || tn6=
   fi
+
+  # The whole set the conf declares, and then the same set with this id skipped:
+  # both come from the conf, so the counts recorded below are the conf's, not a
+  # drifted chain's.
+  local pre4 pre6 text4 text6
+  pre4=$(restore_text 4 "$tn4")
+  pre6=''
+  if [ "$v6" -eq 1 ]; then pre6=$(restore_text 6 "$tn6"); fi
+  assert_applied_baseline "$pre4" "$pre6"
+
+  SKIP_ID=$id
+  text4=$(restore_text 4 "$tn4")
+  text6=''
+  if [ "$v6" -eq 1 ]; then text6=$(restore_text 6 "$tn6"); fi
+  if [ "$text4" = "$pre4" ] && [ "$text6" = "$pre6" ]; then
+    die 20 "no live rule is tagged $tag"
+  fi
+
+  # Only a family the conf changed is restored: a publish that lives in one
+  # family leaves the other family's chain alone.
+  if [ "$text4" != "$pre4" ]; then
+    apply_family 4 "$text4"
+  fi
+  if [ "$v6" -eq 1 ] && [ "$text6" != "$pre6" ]; then
+    apply_family 6 "$text6"
+  fi
+
   build_state_rules "$tn4" "$tn6"
   local flavour backend
   flavour=$(iptables_flavour)
@@ -1272,10 +1370,12 @@ cmd_remove() {
   write_state "${flavour:-unknown}" "${backend:-unknown}" "$tn4" "$tn6"
   # The applied-hash file is deliberately NOT touched: the conf's transaction is
   # unchanged, so the re-apply run skips and this removal survives it. The
-  # reduced per-family counts ARE recorded, so the timer's live check accepts
-  # the chain `remove` left behind. A conf edit, an interactive `apply`, a
-  # reboot (the files live on /run) or a new tailnet address (a different
-  # transaction) puts the rule back.
+  # reduced per-family counts ARE recorded — counted from the conf's own text
+  # minus this id, never from the live chain — so the timer's live check accepts
+  # the chain `remove` left behind without adopting a drifted one. A family this
+  # host does not fence keeps the 0 `apply` records for it. A conf edit, an
+  # interactive `apply`, a reboot (the files live on /run) or a new tailnet
+  # address (a different transaction) puts the rule back.
   write_applied_counts "$text4" "$text6"
   printf '%s: removed %s from the live rules\n' "$PROGNAME" "$id"
   local i

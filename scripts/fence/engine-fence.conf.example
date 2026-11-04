@@ -43,3 +43,12 @@ publish port-only 8030
 # range or its ULA prefix) is refused here: that is what `publish tailnet` is
 # for, and a tailnet publish carries no source exemptions.
 publish lan 192.0.2.10 8011 consumer 192.0.2.20
+
+# Deliberately leave IPv6 unfenced. Only for a host that runs a v6 stack but has
+# no ip6tables-restore: without this line such a host is REFUSED (exit 19),
+# because a v6-reachable publish would be open to every interface while the v4
+# rules looked healthy. With it, no v6 rule is written, state.json records
+# "v6": "unfenced-by-operator", and `status` warns that the family is unfenced.
+# This is a risk the operator takes on purpose; the safe answer is to install
+# ip6tables and delete this line.
+#ipv6 unfenced

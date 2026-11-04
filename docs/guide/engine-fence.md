@@ -33,7 +33,7 @@ When tailscale reports no address for a family — logged out, or the boot race 
 
 The address is resolved on every apply (`tailscale ip -4` / `-6`, each call bounded by `timeout 3` — a wedged daemon means the address is unresolvable, not that the unit hangs) and is never stored in the conf or the script. `publish lan` never falls back: its address is in the conf.
 
-IPv6 rules exist only when the kernel runs a v6 stack (`/proc/net/if_inet6` exists) **and** `ip6tables-restore` is installed. That is decided by the stack, not by whether `ip6tables` is installed: a host with the binary and no v6 module gets no v6 rules and no warning about them. A host with the stack but no `ip6tables-restore` gets a warning and no v6 rules; it never fails the unit. When a family does end up with no rules at all — a publish that moved family, the last LAN publish removed — the chain is restored empty, so a stale DROP never lingers; a family whose chain never existed is left alone, so a v4-only host gains no empty v6 chain.
+IPv6 rules exist when the kernel runs a v6 stack (`/proc/net/if_inet6` exists) **and** `ip6tables-restore` is installed, unless the conf carries `ipv6 unfenced`. That is decided by the stack, not by whether `ip6tables` is installed: a host with the binary and no v6 module gets no v6 rules and no warning about them. A host **with** the stack, **without** `ip6tables-restore`, and with any publish that applies to v6 — a `publish tailnet`, a `publish port-only`, or a `publish lan` on a v6 address — is refused with exit `19`: the v4 rules would look healthy while a v6-reachable publish stayed reachable from every interface, so the fence fails closed. A host whose conf carries `ipv6 unfenced` writes no v6 rules instead, records `"v6": "unfenced-by-operator"` in the state file, and `status` warns that the family is unfenced. A host with no v6 stack is unchanged: no v6 rules, no error. When a family does end up with no rules at all — a publish that moved family, the last LAN publish removed — the chain is restored empty, so a stale DROP never lingers; a family whose chain never existed is left alone, so a v4-only host gains no empty v6 chain.
 
 Every call that touches a table passes `-w 10`: the xtables lock, so a call waits for another holder (tailscaled takes it at boot) instead of failing outright, as iptables-legacy does.
 
@@ -47,6 +47,7 @@ bridge crow-eng-ex
 publish tailnet 8003
 publish port-only 8030
 publish lan 192.0.2.10 8011 consumer 192.0.2.20
+#ipv6 unfenced
 ```
 
 - `interface` — the one inbound interface allowed to reach a published port. Exactly one, required. `lo`, `docker0`, Docker's gateway bridge and the well-known hypervisor/CNI defaults are refused (a fence pinned to a shared interface fences nothing), and so is any name beginning with `-` (it would be read as an option).
@@ -54,6 +55,7 @@ publish lan 192.0.2.10 8011 consumer 192.0.2.20
 - `publish tailnet <port>` — a publish on this host's tailnet address. A `consumer` clause on this line refuses the conf.
 - `publish port-only <port>` — no destination match. Protects a wildcard or unknown-address publish during a migration. No consumer clause.
 - `publish lan <addr> <port> consumer <addr> …` — a LAN-address publish, the only place source exemptions are allowed. One address per consumer, and every process on the consumer host counts as the consumer. A range needs the operator's explicit `confirm-range` token at the end of the line, because it widens who may reach the port; its prefix must be a number in range (1–32 for v4, 1–128 for v6) and `/0` is refused, since an exemption that matches everything makes the DROP beside it unreachable. Every consumer must be an address of the publish's own family. A tailnet address as the publish destination is refused: that is `publish tailnet`, which carries no source exemptions.
+- `ipv6 unfenced` — the operator's explicit acceptance of an unfenced v6 family. On a host that runs a v6 stack but has no `ip6tables-restore`, a conf with a publish that applies to v6 is refused (exit `19`) unless this line is present. With it, no v6 rule is written, `state.json` records `"v6": "unfenced-by-operator"`, and `status` warns. This is a risk taken on purpose: a v6-reachable publish is then reachable from every interface. The safe answer is to install `ip6tables` and delete the line.
 
 An unknown directive, a port outside 1-65535, a port published twice, a malformed address or a refused combination fails the whole conf, and a failed conf changes no rule. There is no directive for `docker0` and none for a wildcard address.
 
@@ -89,10 +91,10 @@ systemctl enable crow-engine-fence.service crow-engine-fence-reapply.timer
 
 That facts file is written by `check` and by an interactive `apply`. `apply --boot` refuses when it is missing, when the conf changed since it was written, or when `/etc/docker/daemon.json` or a `docker.service` drop-in changed: re-run `check` after any of those edits. `status` warns about the same mismatches. **Any edit to `daemon.json`, to a file in `/etc/systemd/system/docker.service.d/`, or to the unit's `ExecStart` makes the next boot fail closed — docker will not start — until `crow-engine-fence check` is re-run.** The facts file stores the hash of exactly that text, and the boot path compares it before it touches a rule.
 
-`status` is read-only: it prints the live rules, the addresses and the generation, and it never writes the state file. The state file is written by `apply` and by `remove`, so what it holds is what was last applied, not what a look at the host would like it to say.
+`status` is read-only: it prints the live rules, the addresses, the generation and each family's state (`fenced`, or the reason that family is not), and it never writes the state file. It warns on any family that is unfenced — an `ipv6 unfenced` conf, a v6 stack with publishes but no `ip6tables-restore` — so a gap is never silent. The state file is written by `apply` and by `remove`, so what it holds is what was last applied, not what a look at the host would like it to say.
 
 - `/etc/crow/engine-fence.facts.json` — root, 0640: the backend, the per-bridge facts, the conf hash, the Docker-flags hash, `saved_at`.
-- `/run/crow-engine-fence/state.json` — root, 0640, group `<group>`, inside the unit's `0750` RuntimeDirectory: the generation, `applied_at`, the backend, the resolved tailnet addresses, and one entry per rule (`id`, family, address, `addressed`/`port-only`, port, interface, exemptions). Nothing else — no process names, no environment.
+- `/run/crow-engine-fence/state.json` — root, 0640, group `<group>`, inside the unit's `0750` RuntimeDirectory: the generation, `applied_at`, the backend, the v6 family's state (`fenced`, `unfenced-by-operator`, `no-stack`, …), the resolved tailnet addresses, and one entry per rule (`id`, family, address, `addressed`/`port-only`, port, interface, exemptions). Nothing else — no process names, no environment.
 - `/run/crow-engine-fence/applied.sha256` — root, 0640, group `<group>`: the hash of the transaction text that was last really restored. A re-apply run that would restore the same bytes restores nothing (see the timer below). It lives on `/run`, so a reboot starts without it and the boot apply always writes its rules.
 - `/run/crow-engine-fence/applied.counts` — root, 0640, group `<group>`: the number of rules the last apply or `remove` left in each family. The skip compares it with the live chain, so a flushed chain or a deleted jump is restored even when the transaction text has not changed, and `remove` records its reduced count here so the timer leaves the removal alone.
 
@@ -173,7 +175,7 @@ crow-engine-fence remove <id>        # one publish's rules, live only; the conf 
 crow-engine-fence status             # warns about a conf entry with no live rule
 ```
 
-`remove <id>` edits the live rules only, never the conf: the conf is the operator's file. It records the reduced live rule count next to the applied hash, so the re-apply timer's run keeps skipping and the removal stands. A removal also comes back after a reboot (the applied hash and counts live on `/run`) and after any change in the resolved tailnet address (the transaction is then no longer the one that was applied); an interactive `crow-engine-fence apply` or any edit to the conf restores the rule as well. To retire a publish for good, edit the conf too; to stop using the fence entirely:
+`remove <id>` edits the live rules only, never the conf: the conf is the operator's file. The rules it leaves behind are built from **the conf** with that id skipped, never from the live chain — a chain that had already drifted would otherwise be recorded as the new baseline — and it records those conf-derived counts next to the applied hash, so the re-apply timer's run keeps skipping and the removal stands. Before it removes anything it compares the live chain with the rule count the last `apply` recorded and refuses (non-zero) if they differ, naming the command to run: a host whose chain was flushed or edited by hand needs `crow-engine-fence apply` first. A removal also comes back after a reboot (the applied hash and counts live on `/run`) and after any change in the resolved tailnet address (the transaction is then no longer the one that was applied); an interactive `crow-engine-fence apply` or any edit to the conf restores the rule as well. To retire a publish for good, edit the conf too; to stop using the fence entirely:
 
 ```bash
 systemctl disable --now crow-engine-fence-reapply.timer
@@ -190,7 +192,7 @@ Removing the chain from the raw table is `iptables -t raw -D PREROUTING -j CROW-
 
 ### Exit codes
 
-`0` ok, `2` usage, `10` conf unreadable, `11` a conf line is invalid, `12` the conf is refused on principle, `13` unknown iptables flavour, `14` docker unreadable, `15` unknown Docker firewall backend, `16` a Docker bridge fact is wrong or missing, `17` the facts file is missing, `18` the facts are stale, `19` the restore transaction failed, `20` a check refused, `21` another run holds the lock, `22` the state directory is unusable.
+`0` ok, `2` usage, `10` conf unreadable, `11` a conf line is invalid, `12` the conf is refused on principle, `13` unknown iptables flavour, `14` docker unreadable, `15` unknown Docker firewall backend, `16` a Docker bridge fact is wrong or missing, `17` the facts file is missing, `18` the facts are stale, `19` the restore transaction failed, or a family that has to be fenced cannot be (a v6 stack with v6 publishes and no `ip6tables-restore`), `20` a check refused (including `remove` on a chain that no longer matches the last apply), `21` another run holds the lock, `22` the state directory is unusable.
 
 ## The published-ports snapshot
 

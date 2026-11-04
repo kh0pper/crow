@@ -1041,6 +1041,7 @@ test("v6 comes from the stack, not the binary: no /proc entry means no ip6tables
   );
   assert.equal(existsSync(join(ctx.fixtures, "restore-input-ip6tables.txt")), false);
   assert.equal(stateOf(ctx).rules.every((rule) => rule.family === "v4"), true);
+  assert.equal(stateOf(ctx).v6, "no-stack", "a host with no v6 stack is unchanged");
 
   // The same box with the stack present writes them: only the stack decides.
   clearCalls(ctx);
@@ -1178,6 +1179,82 @@ test("remove refuses an id that is not live", () => {
   assert.equal(run(ctx, ["remove"]).status, 2);
 });
 
+test("remove refuses a chain that drifted instead of baselining it", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  const countsBefore = readFileSync(join(ctx.stateDir, "applied.counts"), "utf8");
+  const stateBefore = readFileSync(ctx.state, "utf8");
+
+  // Flushed behind the script's back: the counts no longer describe this host.
+  writeFileSync(join(ctx.fixtures, "model-iptables.txt"), "");
+  const flushed = run(ctx, ["remove", "tailnet-8003"]);
+  assert.equal(flushed.status, 20, flushed.stderr);
+  assert.match(flushed.stderr, /run 'crow-engine-fence apply' first/);
+  assert.equal(readFileSync(join(ctx.stateDir, "applied.counts"), "utf8"), countsBefore, "no new baseline was recorded");
+  assert.equal(readFileSync(ctx.state, "utf8"), stateBefore, "the state file was left alone");
+
+  // A hand-deleted jump is drift too.
+  assert.equal(run(ctx, ["apply"]).status, 0, "apply re-establishes the baseline");
+  rmSync(join(ctx.fixtures, "jump-ip6tables"));
+  const noJump = run(ctx, ["remove", "tailnet-8003"]);
+  assert.equal(noJump.status, 20, noJump.stderr);
+  assert.match(noJump.stderr, /run 'crow-engine-fence apply' first/);
+
+  // A conf edit the operator applied nothing for is not a baseline either.
+  assert.equal(run(ctx, ["apply"]).status, 0);
+  writeFileSync(ctx.conf, BASE_CONF + "# an edit that was never applied\n");
+  const edited = run(ctx, ["remove", "tailnet-8003"]);
+  assert.equal(edited.status, 20, edited.stderr);
+  assert.match(edited.stderr, /run 'crow-engine-fence apply' first/);
+});
+
+test("remove records conf-derived counts, and the timer keeps the removal", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+
+  // The counts come from the conf minus that id: 10 - 3 v4 rules, 6 - 3 v6.
+  assert.deepEqual(
+    readFileSync(join(ctx.stateDir, "applied.counts"), "utf8").trimEnd().split("\n"),
+    ["4 7", "6 3"],
+  );
+
+  // The chain `remove` left is the one the conf alone would produce without
+  // that line: same rules, same order, only the generation tag differs.
+  const without = setup({ conf: BASE_CONF.replace("publish tailnet 8003\n", "") });
+  applyGolden(without);
+  const norm = (lines) => lines.map((line) => line.replace(/:g\d+/, ":gN"));
+  assert.deepEqual(norm(rulesOf(ctx)), norm(rulesOf(without)), "v4 is the conf's own set");
+  assert.deepEqual(norm(rulesOf(ctx, "ip6tables")), norm(rulesOf(without, "ip6tables")));
+
+  clearCalls(ctx);
+  const timer = run(ctx, ["apply", "--boot"]);
+  assert.equal(timer.status, 0, timer.stderr);
+  assert.match(timer.stdout, /byte-identical/);
+  assert.equal(calls(ctx).filter((line) => line.includes("-restore")).length, 0);
+  assert.equal(
+    liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
+    false,
+    "the removal holds through the timer's run",
+  );
+
+  // A later drift is still repaired: the conf's whole set comes back.
+  writeFileSync(join(ctx.fixtures, "model-iptables.txt"), "");
+  clearCalls(ctx);
+  const repaired = run(ctx, ["apply", "--boot"]);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  assert.doesNotMatch(repaired.stdout, /byte-identical/);
+  assert.ok(
+    liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
+    "the drift is repaired from the conf, removal and all",
+  );
+  assert.equal(
+    liveRules(ctx).filter((line) => line.startsWith("-A CROW-ENGINE-FENCE")).length,
+    10,
+    "the full conf set is live again",
+  );
+});
+
 test("a re-apply run skips a byte-identical transaction, and a remove survives it", () => {
   const ctx = setup();
   applyGolden(ctx);
@@ -1262,28 +1339,83 @@ test("a deleted PREROUTING jump is restored by the next timer run, not skipped",
   assert.ok(liveRules(ctx).includes("-A PREROUTING -j CROW-ENGINE-FENCE"));
 });
 
-test("a v6 stack without ip6tables-restore warns and writes no v6 rules", () => {
+test("a v6 stack without ip6tables-restore refuses a v6 publish (fail closed)", () => {
   const ctx = setup();
+  assert.equal(run(ctx, ["check"]).status, 0);
+  clearCalls(ctx);
+  const r = run(ctx, ["apply", "--boot"], { PATH: pathWithout(ctx, "ip6tables-restore") });
+  assert.equal(r.status, 19, r.stderr);
+  assert.match(r.stderr, /ip6tables-restore is not installed/);
+  assert.match(r.stderr, /ipv6 unfenced/, "the message names the operator's opt-out");
+  assert.equal(existsSync(join(ctx.fixtures, "restore-input-iptables.txt")), false, "nothing was applied");
+  assert.equal(existsSync(ctx.state), false, "no state file was written");
+  assert.equal(
+    calls(ctx).filter((line) => line.startsWith("ip6tables") && !line.includes("--version")).length,
+    0,
+    "no v6 rule was written on the way to the refusal",
+  );
+});
+
+test("ipv6 unfenced accepts the gap: exit 0, the state records it, and status warns", () => {
+  const ctx = setup({ conf: `${BASE_CONF}ipv6 unfenced\n` });
   assert.equal(run(ctx, ["check"]).status, 0);
   const noRestore = pathWithout(ctx, "ip6tables-restore");
   clearCalls(ctx);
   const r = run(ctx, ["apply", "--boot"], { PATH: noRestore });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /ip6tables-restore is not installed/);
+  assert.match(r.stderr, /ipv6 unfenced is set/);
   assert.deepEqual(
-    calls(ctx).filter((line) => line.startsWith("ip6tables")),
+    calls(ctx).filter((line) => line.startsWith("ip6tables") && !line.includes("--version")),
     [],
-    "no ip6tables call of any kind",
+    "no v6 call of any kind",
   );
   assert.equal(existsSync(join(ctx.fixtures, "restore-input-ip6tables.txt")), false);
-  assert.equal(stateOf(ctx).rules.every((rule) => rule.family === "v4"), true);
+  const state = stateOf(ctx);
+  assert.equal(state.v6, "unfenced-by-operator");
+  assert.equal(state.rules.every((rule) => rule.family === "v4"), true);
 
-  // The same host with the binary present writes them.
-  clearCalls(ctx);
-  const withRestore = run(ctx, ["apply", "--boot"]);
-  assert.equal(withRestore.status, 0, withRestore.stderr);
-  assert.ok(calls(ctx).some((line) => line.startsWith("ip6tables-restore")));
-  assert.ok(stateOf(ctx).rules.some((rule) => rule.family === "v6"));
+  const status = run(ctx, ["status"], { PATH: noRestore });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /^family: v4 fenced$/m);
+  assert.match(status.stdout, /^family: v6 unfenced-by-operator$/m);
+  assert.match(status.stdout, /WARN: the v6 family is unfenced/);
+});
+
+test("a stack with no v6-applicable publish needs no ip6tables-restore", () => {
+  const ctx = setup({ conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.20\n" });
+  assert.equal(run(ctx, ["check"]).status, 0);
+  const noRestore = pathWithout(ctx, "ip6tables-restore");
+  const r = run(ctx, ["apply", "--boot"], { PATH: noRestore });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /no publish in the conf applies to v6/);
+  assert.equal(stateOf(ctx).v6, "no-v6-publish");
+  const status = run(ctx, ["status"], { PATH: noRestore });
+  assert.equal(status.status, 0, status.stderr);
+  assert.doesNotMatch(status.stdout, /WARN: the v6 family is unfenced/, "nothing to fence, no warning");
+
+  // A v6 port-only publish is v6-applicable even with no v6 address in sight.
+  const portOnly = setup({ conf: "interface tailscale0\npublish port-only 8030\n" });
+  assert.equal(run(portOnly, ["check"]).status, 0);
+  const r2 = run(portOnly, ["apply", "--boot"], { PATH: pathWithout(portOnly, "ip6tables-restore") });
+  assert.equal(r2.status, 19, r2.stderr);
+
+  // So is a LAN publish on a v6 address.
+  const lan6 = setup({ conf: "interface tailscale0\npublish lan 2001:db8::10 8011 consumer 2001:db8::20\n" });
+  assert.equal(run(lan6, ["check"]).status, 0);
+  const r3 = run(lan6, ["apply", "--boot"], { PATH: pathWithout(lan6, "ip6tables-restore") });
+  assert.equal(r3.status, 19, r3.stderr);
+});
+
+test("ipv6 unfenced is a conf directive like any other", () => {
+  for (const line of ["ipv6", "ipv6 fenced", "ipv6 unfenced extra"]) {
+    const ctx = setup({ conf: `interface tailscale0\npublish tailnet 8003\n${line}\n` });
+    const r = run(ctx, ["check"]);
+    assert.equal(r.status, 11, `${line}: ${r.stderr}`);
+  }
+  const twice = setup({ conf: `interface tailscale0\npublish tailnet 8003\nipv6 unfenced\nipv6 unfenced\n` });
+  const r = run(twice, ["check"]);
+  assert.equal(r.status, 11);
+  assert.match(r.stderr, /listed twice/);
 });
 
 // ─── swap-check ─────────────────────────────────────────────────────────────
