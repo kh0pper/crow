@@ -25,7 +25,11 @@
  * `exec` also seeds a project (and its local owner row) besides a memory, and
  * `c2c` calls ONE allowlisted function of servers/sharing/c2c/{owner,visitor}.js
  * with this node's real db, local instance id and a live-peer `send` (so the
- * action's own flush runs after its commit). Nothing else is reachable from the
+ * action's own flush runs after its commit). The send is the PRODUCTION resolver
+ * (`c2cSendForContact` in servers/sharing/c2c/transport.js, the same one the
+ * dashboard routes use), so the gate exercises the real `sendTo`/`send` choice.
+ * `peerRouting`/`isConnected` read the manager's per-instance index, which is how
+ * a test proves WHICH sibling is primary. Nothing else is reachable from the
  * channel: `sql` stays read-only and no op can send a frame directly.
  */
 import net from "node:net";
@@ -155,13 +159,21 @@ function loadC2cModule(file) {
   return c2cModules.get(file);
 }
 
-/** `(frame) => peerManager.send(crowId, frame)` for one contact, or null. */
+/**
+ * The production c2c transport, loaded on demand: an old tree (tests/fixtures/
+ * old-tree.mjs) has no servers/sharing/c2c yet, and this child must still start
+ * against one (the `c2c` op is never used there).
+ */
+let transportModule = null;
+async function transport() {
+  if (!transportModule) transportModule = await imp("servers/sharing/c2c/transport.js");
+  return transportModule;
+}
+
+/** `(frame) => c2cSend(peerManager, crowId, frame)` for one contact, or null. */
 async function sendForContact(contactId) {
-  if (!Number.isSafeInteger(contactId) || contactId <= 0) return null;
-  const rows = toObjects(await db.execute({ sql: "SELECT crow_id FROM contacts WHERE id = ? LIMIT 1", args: [contactId] }));
-  const crowId = rows[0]?.crow_id;
-  if (typeof crowId !== "string" || !crowId) return null;
-  return (frame) => peerManager.send(crowId, frame);
+  const { c2cSendForContact } = await transport();
+  return c2cSendForContact(db, peerManager, contactId);
 }
 
 /** The owner contact of a visit: the queue its answer flushes onto. */
@@ -238,8 +250,21 @@ const ops = {
     // For a positive-control harness only (an "honest" second holder of this seed).
     return Buffer.from(identity.seed).toString("hex");
   },
-  async isConnected({ crowId }) {
-    return peerManager.isConnected(crowId);
+  async isConnected({ crowId, instanceId }) {
+    // No instance id: the contact-level answer (the newest live connection).
+    return peerManager.isConnected(crowId, instanceId);
+  },
+  /**
+   * The per-instance index, read-only: `primary` is the instance `send()` would use
+   * (`connections.get(crowId)`, i.e. the NEWEST connection — the wrong sibling, when
+   * a test wants it to be), `instances` everything `sendTo` can reach, newest first.
+   */
+  async peerRouting({ crowId }) {
+    const primary = peerManager.connections?.get?.(crowId)?.instanceId ?? null;
+    const instances = typeof peerManager.connectedInstances === "function"
+      ? peerManager.connectedInstances(crowId)
+      : [];
+    return { primary, instances };
   },
   async stop() {
     setTimeout(async () => {

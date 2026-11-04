@@ -302,7 +302,9 @@ export class PeerManager {
     // connections never reach onPeerData.)
     // reply writes on THIS connection — the one the frame arrived on — and is a
     // no-op once it has closed (Z1: send(crowId, …) reaches the NEWEST live
-    // connection of that Crow id, which may be another instance).
+    // connection of that Crow id, which may be another instance). A c2c frame that
+    // names its target does not rely on that: c2c/transport.js routes it through
+    // sendTo(), and only a '*' frame (and the shares path) uses send() as before.
     this.onPeerData = null;
     // callback(crowId) — the LAST connection of that Crow id is gone. A sibling
     // closing while another connection stays up does not fire it. No server code

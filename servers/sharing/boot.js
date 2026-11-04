@@ -38,6 +38,7 @@ import { isPeerLineOverCap } from "./peer-manager.js";
 import { importedShareSource } from "../shared/summary-source.js";
 import { handleC2cFrame } from "./c2c/receive.js";
 import { flush as flushC2cOutbox } from "./c2c/outbox.js";
+import { c2cSend, c2cSendFor } from "./c2c/transport.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
@@ -1041,10 +1042,11 @@ export async function initSharingRuntime(managers, helpers) {
     }
 
     // Crow-to-Crow: the contact just came online, so its unacked frames go out
-    // (including any that piled up while it was away). Never throws into the
-    // connection callback; an old DB without 0016 only warns.
+    // (including any that piled up while it was away) — every frame through the
+    // c2c transport, so a targeted one reaches the instance it names (S11).
+    // Never throws into the connection callback; an old DB without 0016 only warns.
     try {
-      const sent = await flushC2cOutbox(db, (frame) => peerManager.send(crowId, frame), { contactId: Number(c.id) });
+      const sent = await flushC2cOutbox(db, c2cSendFor(peerManager, crowId), { contactId: Number(c.id) });
       if (sent > 0) console.log(`[c2c] sent ${sent} queued frame(s) to ${crowId}`);
     } catch (err) {
       console.warn(`[c2c] flush on connect for ${crowId}: ${err?.message || err}`);
@@ -1072,7 +1074,9 @@ export async function initSharingRuntime(managers, helpers) {
       try {
         await handleC2cFrame({
           db,
-          send: (toCrowId, frame) => peerManager.send(toCrowId, frame),
+          // The transport, not `send`: an ack or a refusal names its asker's INSTANCE,
+          // and a targeted frame rides `sendTo` (a '*' one still goes to `send`).
+          send: (toCrowId, frame) => c2cSend(peerManager, toCrowId, frame),
           localInstanceId: localIdOf(managers),
           contactByCrowId: async (id) => {
             const { rows } = await db.execute({
@@ -1241,10 +1245,11 @@ export async function initSharingRuntime(managers, helpers) {
   };
 
   // Crow-to-Crow: retry the unacked frames of CONNECTED contacts every 60 s. A
-  // `not_home` from a sibling, a `busy` hold or a link that dropped mid-flush all
-  // leave rows queued, and this tick is what eventually gets them out. It runs
-  // outside any transaction (S4) and the timer is unref'd, so it never holds the
-  // process open; `managers.c2cFlushStop()` is the shutdown hook.
+  // frame whose target instance is not connected (S11 holds its stream), a `busy`
+  // hold or a link that dropped mid-flush all leave rows queued, and this tick is
+  // what eventually gets them out. It runs outside any transaction (S4) and the
+  // timer is unref'd, so it never holds the process open; `managers.c2cFlushStop()`
+  // is the shutdown hook.
   let c2cFlushing = false;
   const flushConnectedC2c = async () => {
     if (c2cFlushing) return;
@@ -1260,7 +1265,7 @@ export async function initSharingRuntime(managers, helpers) {
             args: [crowId],
           });
           if (!rows[0]) continue; // a paired sibling, not a contact
-          await flushC2cOutbox(db, (frame) => peerManager.send(crowId, frame), { contactId: Number(rows[0].id) });
+          await flushC2cOutbox(db, c2cSendFor(peerManager, crowId), { contactId: Number(rows[0].id) });
         } catch (err) {
           console.warn(`[c2c] flush for ${crowId}: ${err?.message || err}`);
         }

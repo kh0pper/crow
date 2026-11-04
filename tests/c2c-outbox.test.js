@@ -11,7 +11,7 @@ import { createDbClient } from "../servers/db.js";
 import { C2C_TABLES_SQL } from "../scripts/migrations/0016-crow-to-crow.mjs";
 import {
   enqueue, flush, onAck, onRefuse, acceptInbound, commitInbound, consumeInbound,
-  pruneAcked, streamOf, withTransaction, BUSY_HOLD_MS,
+  pruneAcked, streamOf, withTransaction, BUSY_HOLD_MS, HOLD_LOG_EVERY_MS,
   cancelEpoch, nextInviteGeneration, inviteSupersedes, ackIsForMe,
 } from "../servers/sharing/c2c/outbox.js";
 import { buildFrame, parseFrame } from "../servers/sharing/c2c/frames.js";
@@ -327,6 +327,126 @@ test("flush stops at the first send error and keeps the rest queued", async () =
     assert.equal(calls, 1, "the later frames are not even attempted");
     const rows = await rowsOf(db);
     assert.deepEqual(rows.map((r) => r.attempts), [0, 0]);
+  });
+});
+
+test("S11: a stream whose target is absent waits while the others send, and no later row of it is sent", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db);                                        // P1 PEER seq 1
+    await enq(db);                                        // P1 PEER seq 2 (same stream)
+    await enq(db, invite());                              // P1 '*' seq 1 (another stream)
+    await enq(db, { projectUuid: P2 });                   // P2 PEER seq 1 (another project)
+
+    const calls = [];
+    let firstTargeted = true;
+    const warnings = [];
+    const real = console.warn;
+    console.warn = (...a) => { warnings.push(a.map(String).join(" ")); };
+    let n;
+    try {
+      n = await flush(db, (f) => {
+        calls.push(`${f.project_uuid}:${streamOf(f.to_instance_id)}:${f.seq}`);
+        if (f.project_uuid !== P1 || f.to_instance_id !== PEER) return undefined; // sent
+        const first = firstTargeted;
+        firstTargeted = false;
+        // S11: the target instance has no live connection here — even on the
+        // second call, which must never happen.
+        return first ? false : true;
+      }, { contactId: CONTACT });
+    } finally {
+      console.warn = real;
+    }
+
+    assert.equal(n, 2, "the '*' frame and the other project's frame went out");
+    assert.deepEqual(calls, [`${P1}:${PEER}:1`, `${P1}:*:1`, `${P2}:${PEER}:1`],
+      "P1 PEER seq 2 was never even attempted: its stream is held");
+
+    const rows = await rowsOf(db);
+    const heldRows = rows.filter((r) => r.project_uuid === P1 && streamOf(r.to_instance_id) === PEER);
+    assert.deepEqual(heldRows.map((r) => r.attempts), [0, 0], "a held frame takes no attempt");
+    assert.deepEqual(heldRows.map((r) => r.last_attempt_at), [null, null]);
+    assert.deepEqual(heldRows.map((r) => r.last_refusal), [null, null], "and the peer refused nothing (no last_refusal)");
+    assert.ok(heldRows.every((r) => r.acked_at === null), "the frames are still queued");
+    const sentRow = rows.find((r) => r.project_uuid === P2);
+    assert.equal(sentRow.attempts, 1, "the row that really went out took its attempt");
+
+    // R2-5: one line per (contact, stream) per hour, naming only the instance.
+    const held = warnings.filter((w) => w.includes("holding frames"));
+    assert.equal(held.length, 1, JSON.stringify(warnings));
+    assert.equal(held[0], `[c2c] holding frames for instance ${PEER.slice(0, 8)}: not connected`);
+    // The two-node gate treats these words as trouble; a hold must never say one.
+    assert.equal(/\[c2c\][^\n]*(?:refus|closed with|failed|not_home|stale_epoch|busy|\bgap\b|bad frame|legacy-proof)/i.test(held[0]), false);
+  });
+});
+
+test("S11: a held frame keeps its attempts and last_refusal, and goes out once its target is back", async () => {
+  await withDb(async ({ db }) => {
+    const seq = await enq(db);
+    // A real attempt first (the frame was sent, the wrong instance answered not_home).
+    assert.equal(await flush(db, () => {}, { contactId: CONTACT }), 1);
+    assert.equal(await refuse(db, seq, "not_home"), null);
+
+    // The target instance is away now: the transport answers false.
+    let attempts = 0;
+    assert.equal(await flush(db, () => { attempts += 1; return false; }, { contactId: CONTACT }), 0);
+    assert.equal(attempts, 1, "the frame was attempted once (and answered false)");
+    let [row] = await rowsOf(db);
+    assert.equal(row.attempts, 1, "the hold did not bump the attempts");
+    assert.equal(row.last_refusal, "not_home", "the hold did not overwrite the peer's refusal");
+    assert.equal(row.acked_at, null);
+
+    // The target is back: the same row goes out on the next flush.
+    const sent = [];
+    assert.equal(await flush(db, (f) => { sent.push(f.seq); }, { contactId: CONTACT }), 1);
+    assert.deepEqual(sent, [seq]);
+    [row] = await rowsOf(db);
+    assert.equal(row.attempts, 2, "a frame that was really sent takes its attempt");
+  });
+});
+
+test("S11/R2-5: the hold line is rate-limited to once per (contact, stream) per hour", async () => {
+  await withDb(async ({ db }) => {
+    // A stream of its own (P2 + the sibling instance), so the limiter's other keys
+    // from the S11 tests above cannot interfere.
+    await enq(db, { projectUuid: P2, toInstanceId: SIBLING });
+    await enq(db, { projectUuid: P2, toInstanceId: SIBLING }); // same stream, a later seq
+    const lines = [];
+    const real = console.warn;
+    console.warn = (...a) => { if (String(a[0]).includes("holding frames")) lines.push(String(a[0])); };
+    const t0 = 1_700_000_000_000;
+    try {
+      assert.equal(await flush(db, () => false, { contactId: CONTACT, now: t0 }), 0);
+      assert.equal(lines.length, 1, JSON.stringify(lines));
+      assert.equal(lines[0], `[c2c] holding frames for instance ${SIBLING.slice(0, 8)}: not connected`);
+      assert.equal(await flush(db, () => false, { contactId: CONTACT, now: t0 + 60_000 }), 0);
+      assert.equal(lines.length, 1, "once per hour, not once per flush");
+      assert.equal(await flush(db, () => false, { contactId: CONTACT, now: t0 + HOLD_LOG_EVERY_MS + 1 }), 0);
+      assert.equal(lines.length, 2, "an hour later it may say so again");
+    } finally {
+      console.warn = real;
+    }
+    // Every flush held both rows: no attempt, no refusal, nothing written.
+    const rows = (await rowsOf(db)).filter((r) => r.project_uuid === P2);
+    assert.deepEqual(rows.map((r) => r.attempts), [0, 0]);
+    assert.deepEqual(rows.map((r) => r.last_refusal), [null, null]);
+    assert.deepEqual(rows.map((r) => r.acked_at), [null, null]);
+  });
+});
+
+test("S11: only false holds; undefined and true both count as sent", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db);                                              // P1 PEER seq 1
+    await enq(db, invite());                                    // P1 '*' seq 1
+    const sent = [];
+    const n = await flush(db, (f) => {
+      sent.push(f.seq);
+      return f.to_instance_id === null ? undefined : true;
+    }, { contactId: CONTACT });
+    assert.equal(n, 2);
+    assert.deepEqual(sent, [1, 1]);
+    const rows = await rowsOf(db);
+    assert.deepEqual(rows.map((r) => r.attempts), [1, 1], "both rows count as sent");
+    assert.deepEqual(rows.map((r) => r.last_refusal), [null, null]);
   });
 });
 

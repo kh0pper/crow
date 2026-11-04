@@ -33,11 +33,11 @@
  * body (contact text).
  *
  * DELIVERY: every action queues its frame in the outbox inside its own
- * transaction (S4) and flushes AFTER COMMIT. `send` here is the live peer
- * manager's, bound to the one contact the request is about; when the sharing
- * runtime is not up (an early boot, a test) `send` is null, the frame stays
- * queued and boot.js's 60 s tick sends it — the membership change itself has
- * already committed either way.
+ * transaction (S4) and flushes AFTER COMMIT. `send` here is the c2c transport bound
+ * to the one contact the request is about (a targeted frame rides `sendTo`, so it
+ * reaches the instance it names); when the sharing runtime is not up (an early
+ * boot, a test) `send` is null, the frame stays queued and boot.js's 60 s tick
+ * sends it — the membership change itself has already committed either way.
  *
  * MOUNT: `/dashboard/c2c-api`, dashboardAuth first, mounted in dashboard/index.js
  * AFTER csrfMiddleware (the real CSRF rail), never public. The router also
@@ -54,6 +54,7 @@ import { isLocalPasswordSessionOn } from "../dashboard/local-session.js";
 import { ROLES as C2C_ROLES } from "../../sharing/c2c/frames.js";
 import { inviteContact, listLiveMembers, setRole, unshareContact } from "../../sharing/c2c/owner.js";
 import { acceptVisit, declineVisit, leaveVisit, listVisits } from "../../sharing/c2c/visitor.js";
+import { c2cSendForContact } from "../../sharing/c2c/transport.js";
 
 const P = "/dashboard/c2c-api";
 
@@ -92,28 +93,16 @@ function localIdNow() {
 }
 
 /**
- * The outbox's `send` for one contact: `(frame) => peerManager.send(crowId, frame)`,
- * or null when the sharing runtime is not up or the contact has no crow id. Null is
- * not an error — the frame stays queued for boot.js's tick (S4), and an action must
- * not fail because a peer happens to be unreachable.
+ * The outbox's `send` for one contact, through the c2c transport (a targeted frame
+ * rides `sendTo`, a `'*'` one `send`), or null when the sharing runtime is not up or
+ * the contact has no crow id. The resolver itself lives in c2c/transport.js, shared
+ * with the two-node fixture, so the gate runs the production send path. Null is not
+ * an error — the frame stays queued for boot.js's tick (S4), and an action must not
+ * fail because a peer happens to be unreachable.
  * @returns {Promise<Function|null>}
  */
 async function sendFor(db, contactId) {
-  if (!Number.isSafeInteger(contactId) || contactId <= 0) return null;
-  const peerManager = getManagersOrNull()?.peerManager;
-  if (!peerManager || typeof peerManager.send !== "function") return null;
-  try {
-    const { rows } = await db.execute({
-      sql: "SELECT crow_id FROM contacts WHERE id = ? LIMIT 1",
-      args: [contactId],
-    });
-    const crowId = rows[0]?.crow_id;
-    if (typeof crowId !== "string" || !crowId) return null;
-    return (frame) => peerManager.send(crowId, frame);
-  } catch (err) {
-    console.warn(`[c2c-api] could not resolve a contact's crow id for the flush: ${err?.message || err}`);
-    return null;
-  }
+  return c2cSendForContact(db, getManagersOrNull()?.peerManager, contactId);
 }
 
 /** The owner contact of a visit, for the answer's flush; null when there is no such visit. */

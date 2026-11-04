@@ -52,10 +52,11 @@
  *
  * Every ack and every refusal goes back on the CONNECTION the frame arrived on
  * (`meta.reply`, Z1 of the final-review fix wave) when the transport offers one, and
- * falls back to `ctx.send(crowId, …)` otherwise. `send(crowId, …)` reaches whichever
- * connection of that Crow id is live, and paired siblings share one — so an ack sent
- * that way can answer the sibling that never asked. Frames the outbox flushes are
- * NOT affected: a flush is a fresh send, not a reply.
+ * falls back to `ctx.send(crowId, …)` otherwise. `ctx.send` is the c2c transport
+ * (`c2c/transport.js`): a reply names its asker's INSTANCE (`to_instance_id`), so it
+ * rides `sendTo` and reaches the sibling that asked — not whichever sibling of that
+ * Crow id is newest. Frames the outbox flushes use the same transport: a flush is a
+ * fresh send (S11), not a reply.
  *
  * The kind modules (owner.js, visitor.js) are injected through `ctx.handlers`, so
  * this pipeline is testable with stubs. Logs say `[c2c]` and never carry a body.
@@ -133,8 +134,10 @@ function routesHere(toInstanceId, kind, localInstanceId) {
  *
  * Z1: `meta.reply`, when the transport offers one, writes on the connection the frame
  * ARRIVED on — the only connection that belongs to the sibling which asked. Only a
- * transport without it falls back to `ctx.send(crowId, …)`, which writes on whichever
- * connection of that Crow id is live (`send`'s docblock).
+ * transport without it falls back to `ctx.send(crowId, …)`, which is the c2c
+ * transport (`c2cSend`): it routes a targeted reply to the asker's instance through
+ * `sendTo`, so even a reply that was never bound to a connection does not land on a
+ * sibling.
  */
 async function safeSend(ctx, crowId, meta, frame) {
   if (typeof meta?.reply === "function") {
@@ -364,8 +367,9 @@ async function handleEnvelopeOnly(ctx, crowId, meta, contactId, envelope, reason
  *   connection's proof and CLAIMED instance id (routing only, never authorization),
  *   plus `reply(payload)`, when the transport offers one: the way back on the
  *   connection this frame ARRIVED on (Z1). Every ack and refusal uses it when it is
- *   there, and `ctx.send(crowId, …)` only as the fallback — paired siblings share a
- *   crow id, so `send` can reach the sibling that never asked.
+ *   there, and `ctx.send(crowId, …)` only as the fallback — that is the c2c
+ *   transport, which sends a targeted reply through `sendTo` (the asker's instance),
+ *   never to whichever sibling of the crow id is newest.
  */
 export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
   const { db, localInstanceId, handlers = {} } = ctx;
@@ -544,7 +548,8 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
 
   // S4: ack, then flush, never inside the transaction. The handler may have
   // queued frames (a role change, an accept), and those go now. A flushed frame is
-  // a new send, not a reply: it goes through `ctx.send` (unchanged, Z1/L1).
+  // a new send, not a reply, but it uses the same transport: a targeted frame rides
+  // `sendTo` (S11), a `'*'` one `send`.
   try {
     await flush(db, (outbound) => ctx.send(crowId, outbound), { contactId });
   } catch (err) {
