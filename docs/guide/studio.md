@@ -69,6 +69,18 @@ Hear yourself through your interface's **direct-monitor knob**: it has no delay.
 
 **What the bot can do with takes.** It can list them, keep one, comp them, restore a discarded one and correct a take's timing, and it hears them in its renders. It can never record, add or discard a take, or remove a clip, track or scene that holds takes: those need you.
 
+## The timeline
+
+Switch from **Session** to **Arrangement** to lay the song out on bars. Each track gets a lane, and each block on a lane is a **placement** of one of that track's clips, outlined in the colour of whoever placed it (you, or the bot).
+
+- **Place a clip** by dragging it from the Session grid onto its lane, or with **Place on timeline** in the clip editor. Drag a placement to move it and its right edge to make it longer: a placement longer than its clip loops it.
+- **Split at playhead** cuts the selected placement in two; the halves play exactly as before until you change one. Audio placements also have **fade in** and **fade out** handles on their top corners.
+- **Sections and markers** sit on the ruler: drag on the section row to add a section, click the marker row to add a marker, and use their buttons to rename or remove them.
+- **Record to timeline** records a performance: turn it on, launch scenes in Session view as you play, and press Stop. Every launch becomes a placement, as one step you can undo. If the performance clashes with placements already there, Studio keeps it and offers **Place what fits** or **Discard**.
+- An audio lane's **Takes** button opens that clip's takes under the lane, so you can comp on the timeline.
+
+Every timeline change is one undoable step, and the bot can do all of it too (place, move, split, fade, add sections and markers), and render the arrangement from any bar.
+
 ## Limits
 
 | Limit | Value | Setting |
@@ -83,6 +95,9 @@ Hear yourself through your interface's **direct-monitor knob**: it has no delay.
 | Take length | 1200 s of 48 kHz stereo (115,200,000 samples) | `STUDIO_MAX_TAKE_SECONDS` |
 | Takes per clip | 64 | — |
 | Recording channels and rates | 1 or 2 channels; 44.1, 48, 88.2 or 96 kHz | — |
+| Placements on the timeline | 2048 | — |
+| Timeline length | 999 bars | — |
+| Markers / sections | 256 / 128 | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
 

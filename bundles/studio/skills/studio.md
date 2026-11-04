@@ -47,7 +47,8 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | Limits | 16 tracks, 64 scenes, 64 bars and 4096 notes per clip, plus the render length limit. Refused, never truncated — the message names the limit. |
 | Audio tracks | A track is either a SunVox instrument or an audio track (`studio_track_add` with `kind: "audio"`). An audio clip holds **takes** the operator recorded and a **comp**: which take plays over which beats (`from_beat`–`to_beat`, sorted, never overlapping). |
 | Takes | Only the operator records. You can read takes (`studio_takes`), keep one (`studio_take_keep`: it alone plays over the whole clip), comp (`studio_clip_set_comp`), restore a discarded one (`studio_take_restore`) and fix its timing (`studio_take_set_offset`). You cannot add or discard a take, and you cannot remove a clip, track or scene that holds takes — ask the operator. |
-| Missing | No insert effects, sends, EQ, compressor, master bus or timeline yet. Say "Studio cannot yet …" rather than improvising. |
+| Timeline | The arrangement: clips **placed** on bars, one lane per track, plus **markers** and **sections** on the ruler. A placement longer than its clip loops it; `offset_beats` starts it part-way into the clip; audio placements can fade in and out. The operator switches Session / Arrangement; you edit either. |
+| Missing | No insert effects, sends, EQ, compressor or master bus yet. Say "Studio cannot yet …" rather than improvising. |
 
 ## Request → tools
 
@@ -55,7 +56,11 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 |---|---|
 | "add a drum / pad / bass track" | `studio_track_add` with `device.type` and `params` from the catalogue, then `studio_clip_write` for its first clip |
 | "rename this track / scene / clip" | `studio_track_rename` / `studio_scene_rename` / `studio_clip_rename` |
-| "add a section / a bridge" | `studio_scene_add` |
+| "add a section / a bridge" | `studio_scene_add` for its clips, then on the timeline `studio_section_add` (`start_bar`, `end_bar`, `name`) and `studio_arrangement_place` for each track's clip in it |
+| "lay the song out / arrange it" | read the scenes, then one `studio_arrangement_place` per track and section in bar order; `studio_marker_add` for cues. Placements on one track never overlap — the refusal names the clash |
+| "make the chorus twice as long / cut bar 5 out" | `studio_arrangement_resize` (a longer placement loops its clip), or `studio_arrangement_split` at the bar and `studio_arrangement_remove` one half |
+| "fade the guitar in" | `studio_arrangement_set_fades` on the audio placement (`fade_in_beats`, `fade_out_beats`; linear) |
+| "how does the whole song sound?" | `studio_render` with `mode: "arrangement"` (and `from_bar` to start later), then report LUFS and peak per section from separate renders |
 | "delete that track / scene / clip" | `studio_track_remove`, `studio_scene_remove` (both take their clips too) or `studio_clip_remove` — confirm first when notes would go |
 | "change the instrument" | `studio_track_set_device`: `params` **replace** the old set, so pass every value you want kept |
 | "darker / brighter / open the filter / shorten a drum" | `studio_track_set_param` with one real name from `studio_module_types`: `F.freq` or `F.resonance` (Analog generator), `Bass tone`, `Bass length`, `Snare tone`, `Snare length`, `Hihat length` (DrumSynth has no Attack or Release), `Volume` on every generator, `Attack`/`Release` only on Analog generator, Generator and SpectraVoice |
