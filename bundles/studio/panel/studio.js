@@ -605,6 +605,13 @@ const STYLES = `
   }
   .studio .st-slice-marker { cursor: col-resize; stroke-linecap: round; }
   .studio .st-chop-error { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-danger); }
+  .studio .st-chop-read-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .studio .st-step-lock-strip {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 6px 10px; border: 1px solid var(--st-human); border-radius: 8px;
+    background: #2A2418; font-size: 12px;
+  }
+  .studio .st-step-lock-text { color: var(--st-text); }
   /* The steps, the clip's loop, the patterns and the chain. */
   .studio .st-steps {
     border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
@@ -631,6 +638,7 @@ const STYLES = `
   .studio .st-step-on { border-color: #FFFFFF; }
   .studio .st-step-sel { border-color: var(--st-human); }
   .studio .st-step-held { border-color: var(--st-human); background: #2A2418; }
+  .studio .st-step-lock { border-color: var(--st-human); background: #2A2418; box-shadow: inset 0 0 0 1px var(--st-human); }
   .studio .st-step-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #B6D98A; }
   .studio .st-step-num {
     position: relative; z-index: 1; font-family: 'JetBrains Mono', ui-monospace, monospace;

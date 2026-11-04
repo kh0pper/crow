@@ -495,6 +495,7 @@ function fakeLocks() {
  * engine was asked to do.
  * @param {{doc?: object, holdChunks?: boolean, holdRecorder?: boolean, rate?: number,
  *          holdInput?: boolean, store?: object, locks?: object, sampleAudio?: Uint8Array,
+ *          sampleAudioStatus?: number,
  *          putChunkProblem?: (takeId: string, index: number) => boolean}} [options]
  */
 async function bootSampler(options = {}) {
@@ -559,6 +560,9 @@ async function bootSampler(options = {}) {
       return response(200, [{ id: "song-1", project_id: PROJECT, title: "Beat box" }]);
     }
     if (target.includes("/samples/") && target.endsWith("/audio")) {
+      if (Number(options.sampleAudioStatus) >= 400) {
+        return response(Number(options.sampleAudioStatus), { error: "could_not_read" });
+      }
       const bytes = options.sampleAudio || SAMPLE_AUDIO;
       return response(200, {}, bytes.slice(0).buffer);
     }
@@ -773,6 +777,17 @@ async function bootSampler(options = {}) {
         handler(event("pointerup", props || {}));
       }
     },
+    /** Cancel the pointer: a drag or hold the browser took away. */
+    cancel(props) {
+      for (const handler of [...(windowListeners.pointercancel || [])]) {
+        handler(event("pointercancel", props || {}));
+      }
+    },
+    /** Run the timers the page queued (a held step's quarter second). */
+    runTimers() {
+      const pending = timers.splice(0, timers.length);
+      for (const fn of pending) fn();
+    },
     /** Push one transport position, as the engine's own frames do. */
     playhead(bar, beat, sixteenth = 1) {
       assert.ok(engine.positionListener, "the page follows the engine's position");
@@ -815,10 +830,11 @@ async function bootSampler(options = {}) {
     markers() {
       return [...ui.slot("sampler-chop").querySelectorAll("[data-act=slice-marker]")];
     },
-    /** Press a step, the way a pointer would, and hold it. */
+    /** Press a step, the way a pointer would, and hold it a quarter second. */
     holdStep(at) {
       const node = ui.step(at);
       node.dispatchEvent(event("pointerdown", { button: 0, clientX: 0 }));
+      ui.runTimers();
       return node;
     },
     /** Drag a slice marker from one x to another and let go. */
@@ -1691,6 +1707,12 @@ test("holding a step and turning cutoff sets a lock", async () => {
   assert.equal(cleared.length, 1, "one step.clear_locks");
   assert.equal(cleared[0].args.at, 2, "on the step that has the lock");
 
+  // Lock mode ends with Done, so the next control belongs to the pad again.
+  const done = ui.view().querySelector("[data-act=step-lock-done]");
+  assert.ok(done, "the strip offers Done to leave lock mode");
+  done.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+
   // A control turned with no step held is the pad's own, as it always was.
   const gain = ui.view().querySelector("[data-pad-field=gain_db]");
   gain.value = "-3";
@@ -1698,6 +1720,91 @@ test("holding a step and turning cutoff sets a lock", async () => {
   await ui.settle();
   assert.equal(commands(ui, "step.set").length, 1, "no lock without a held step");
   assert.equal(commands(ui, "pad.set").length, 1, "the pad takes that change instead");
+});
+
+test("a slider changed after the step is released still sets the step's lock", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 2));
+
+  // A press of a quarter second enters lock mode, and the pointer comes up
+  // before the range reports its change, exactly as Chrome orders it.
+  ui.holdStep(2);
+  ui.release();
+  await ui.settle();
+
+  const strip = ui.view().querySelector("[data-role=step-lock]");
+  assert.ok(strip, "the press of a quarter second entered lock mode");
+  assert.match(String(strip.textContent), /Locking step 3/, "the strip names the step");
+  assert.match(
+    String(strip.textContent),
+    /the pad controls set this step only/,
+    "and says what the pad controls do now",
+  );
+  assert.ok(String(ui.step(2).className).includes("st-step-lock"), "the step shows it is the one being locked");
+
+  // The change arrives after the release: it is still that step's lock.
+  const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  assert.ok(cutoff, "the pad's filter cutoff is a control");
+  cutoff.value = "800";
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  const locks = commands(ui, "step.set");
+  assert.equal(locks.length, 1, "the late change is one step.set");
+  assert.deepEqual(locks[0].args, {
+    clip_id: CLIP,
+    pattern_id: "a",
+    at: 2,
+    bank_id: bankId,
+    index: 0,
+    locks: { cutoff_hz: 800 },
+  }, "carrying that one lock on the step that was locked");
+  assert.equal(commands(ui, "pad.set").length, 0, "the pad itself is never changed in lock mode");
+});
+
+test("a long press does not toggle the step", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 2));
+
+  ui.holdStep(2);
+  ui.release();
+  await ui.settle();
+  // The click a browser sends after the release is swallowed: a long press is
+  // a lock gesture, never a toggle.
+  ui.step(2).dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+
+  assert.equal(commands(ui, "step.toggle").length, 0, "the long press sent no step.toggle");
+  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "and lock mode is still on");
+});
+
+test("Done leaves lock mode", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 2));
+
+  ui.holdStep(2);
+  ui.release();
+  await ui.settle();
+  const done = ui.view().querySelector("[data-act=step-lock-done]");
+  assert.ok(done, "the strip offers Done");
+  assert.equal(String(done.textContent), "Done");
+  done.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(ui.view().querySelector("[data-role=step-lock]"), null, "Done leaves lock mode");
+
+  // A pad control is the pad's own again.
+  const gain = ui.view().querySelector("[data-pad-field=gain_db]");
+  gain.value = "-3";
+  gain.dispatchEvent(ui.event("change", { target: gain }));
+  await ui.settle();
+  assert.equal(commands(ui, "step.set").length, 0, "no step is locked any more");
+  assert.equal(commands(ui, "pad.set").length, 1, "the pad takes the change instead");
 });
 
 test("auto-chop then assign fills the pads in order", async () => {
@@ -1791,6 +1898,9 @@ test("auto-chop then assign fills the pads in order", async () => {
 
 test("chain editor sends one chain.set", async () => {
   const ui = await bootSampler();
+  // Two patterns of its own, so a wrong reorder cannot pass by swapping two
+  // identical chips.
+  await ui.apply("pattern.add", { id: "b", clip_id: CLIP });
   await ui.openSampler();
 
   // An empty chain plays the clip's first pattern on repeat.
@@ -1812,29 +1922,41 @@ test("chain editor sends one chain.set", async () => {
   await ui.apply("chain.set", sent[0].args);
   assert.match(String(ui.chain().textContent), /A/, "the chip is drawn");
 
-  // A second add is another whole chain, not a patch of the first.
+  // The second pattern is shown, then added: the chain is A then B.
+  const tabB = ui.patternTabs().find((node) => node.getAttribute("data-pattern-id") === "b");
+  assert.ok(tabB, "the second pattern has its own tab");
+  tabB.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
   add().dispatchEvent(ui.event("click", { bubbles: true }));
   await ui.settle();
   sent = commands(ui, "chain.set");
   assert.equal(sent.length, 2, "one chain.set per change");
-  assert.deepEqual(sent[1].args.chain, ["a", "a"], "the whole new chain");
+  assert.deepEqual(sent[1].args.chain, ["a", "b"], "the whole new chain");
   await ui.apply("chain.set", sent[1].args);
   assert.equal(ui.chain().querySelectorAll(".st-chain-chip").length, 2, "two chips are drawn");
   assert.deepEqual(
     [...ui.chain().querySelectorAll(".st-chain-name")].map((node) => String(node.textContent)),
-    ["A", "A"],
+    ["A", "B"],
     "in the order they play, joined by an arrow",
   );
   assert.match(String(ui.chain().textContent), /\u2192/, "the chips are chained in order");
 
-  // Moving one is one chain.set; so is taking one out.
+  // Moving the second chip earlier is one chain.set carrying B then A: with two
+  // different patterns a wrong reorder fails here.
   ui.chain().querySelectorAll("[data-act=chain-left]")[1]
     .dispatchEvent(ui.event("click", { bubbles: true }));
   await ui.settle();
   sent = commands(ui, "chain.set");
   assert.equal(sent.length, 3, "moving a chip is one chain.set");
-  assert.deepEqual(sent[2].args.chain, ["a", "a"], "the whole chain, reordered");
+  assert.deepEqual(sent[2].args.chain, ["b", "a"], "the whole chain, reordered");
+  await ui.apply("chain.set", sent[2].args);
+  assert.deepEqual(
+    [...ui.chain().querySelectorAll(".st-chain-name")].map((node) => String(node.textContent)),
+    ["B", "A"],
+    "the reordering is drawn",
+  );
 
+  // Taking the first chip out leaves the other one.
   ui.chain().querySelector("[data-act=chain-remove]")
     .dispatchEvent(ui.event("click", { bubbles: true }));
   await ui.settle();
@@ -1887,6 +2009,57 @@ test("dragging a slice marker sends one slice.set on release", async () => {
   assert.equal(next[3].end_frame, frames, "the last slice still runs to the end");
 });
 
+test("a waveform that cannot be read is fetched once", async () => {
+  const ui = await bootSampler({ sampleAudioStatus: 500 });
+  const { sampleId } = await putSample(ui);
+  await ui.openSampler();
+  await ui.settle(60);
+
+  const fetches = () => ui.requests.filter(
+    (request) => request.method === "GET" && request.url.includes(`/samples/${sampleId}/audio`),
+  ).length;
+  assert.equal(fetches(), 1, "the sound was read once");
+  const chop = ui.slot("sampler-chop");
+  const error = chop.querySelector(".st-chop-error");
+  assert.ok(error, "the editor says the sound could not be read");
+  assert.match(String(error.textContent), /This sound could not be read \(/, "with the sentence the plan fixes");
+  const again = chop.querySelector("[data-act=chop-retry]");
+  assert.ok(again, "and offers Try again");
+
+  // Redrawing the editor does not fetch it in a loop.
+  await ui.settle(60);
+  assert.equal(fetches(), 1, "a failed read is remembered, not retried");
+
+  // Try again is the operator's own retry: one more read.
+  again.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(60);
+  assert.equal(fetches(), 2, "Try again reads it once more");
+});
+
+test("a cancelled marker drag sends nothing", async () => {
+  const audio = hitsWav(4);
+  const ui = await bootSampler({ sampleAudio: audio.bytes });
+  const { sampleId } = await putSample(ui, { frames: audio.frames });
+  const quarter = Math.round(audio.frames / 4);
+  const fixed = Array.from({ length: 4 }, (_, at) => ({
+    id: `sl-${at + 1}`,
+    start_frame: at * quarter,
+    end_frame: at === 3 ? audio.frames : (at + 1) * quarter,
+  }));
+  await ui.apply("slice.set", { sample_id: sampleId, slices: fixed });
+  await ui.openSampler();
+  await ui.settle(60);
+
+  ui.dragMarker(1, 200, 300);
+  await ui.settle();
+  assert.equal(ui.markers()[1].getAttribute("x1"), "300", "the marker follows the pointer");
+
+  ui.cancel();
+  await ui.settle();
+  assert.equal(commands(ui, "slice.set").length, 0, "a cancelled drag writes nothing");
+  assert.equal(ui.markers()[1].getAttribute("x1"), "200", "and the marker is back where the document has it");
+});
+
 test("a pattern longer than 16 steps pages its steps", async () => {
   const ui = await bootSampler({ doc: await samplerDoc({ lengthSteps: 32 }) });
   await ui.openSampler();
@@ -1928,6 +2101,34 @@ test("a pattern longer than 16 steps pages its steps", async () => {
   await ui.settle();
   assert.equal(tabs()[1].getAttribute("aria-pressed"), "true", "the playhead's page is turned to");
   assert.equal(ui.steps()[0].getAttribute("data-at"), "16", "and starts at position 17");
+});
+
+test("rename from the Rename button sends one pattern.rename", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  // A click on the tab already shown changes nothing: the tab is not redrawn
+  // away under the click that may be the first of a double-click.
+  const selected = ui.patternTabs()[0];
+  selected.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(ui.patternTabs()[0], selected, "the selected tab is not drawn again");
+
+  // The selected tab carries a Rename button beside it.
+  const rename = ui.slot("sampler-steps").querySelector("[data-act=rename-pattern]");
+  assert.ok(rename, "the selected tab offers Rename");
+  rename.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+
+  // It is a prompt-free inline input: Enter commits one pattern.rename.
+  const input = ui.slot("sampler-steps").querySelector(".st-inline");
+  assert.ok(input, "Rename opens an inline text input");
+  input.value = "Verse beat";
+  input.dispatchEvent(ui.event("keydown", { key: "Enter" }));
+  await ui.settle();
+  const sent = commands(ui, "pattern.rename");
+  assert.equal(sent.length, 1, "one pattern.rename for one Enter");
+  assert.deepEqual(sent[0].args, { clip_id: CLIP, pattern_id: "a", name: "Verse beat" });
 });
 
 test("a refused chop shows the refusal and draws the document's slices", async () => {
