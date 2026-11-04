@@ -241,6 +241,18 @@ const STYLES = `
     flex: 1 1 100%; font-size: 12px; line-height: 1.45; color: var(--st-human);
   }
   .studio .st-recordings { display: flex; flex-direction: column; gap: 6px; }
+  /* A performance the timeline refused: the server's sentence and the two
+     buttons that settle it, above the lanes and never hidden by a render. */
+  .studio .st-perf-notice {
+    flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    border: 1px solid var(--st-edge); border-radius: 8px; background: var(--st-head);
+    padding: 8px 10px;
+  }
+  .studio .st-perf-notice[hidden] { display: none; }
+  .studio .st-perf-notice .st-perf-text {
+    margin: 0; flex: 1 1 260px; font-size: 12px; line-height: 1.45; color: var(--st-human);
+  }
+  .studio .st-perf-notice .st-th-btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .studio .st-pending {
     border: 1px solid var(--st-line); border-radius: 8px; background: var(--st-head); padding: 8px 10px;
   }
@@ -450,6 +462,19 @@ const STYLES = `
     white-space: nowrap; overflow: hidden;
   }
   .studio .st-tl-section-new { opacity: 0.6; pointer-events: none; }
+  /* A marker's and a section's name is a button (so the keyboard can reach it),
+     and the small one beside it removes it after a yes. */
+  .studio .st-tl-tag-btn {
+    min-height: 22px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent;
+    color: inherit; font: inherit; font-weight: inherit; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;
+  }
+  .studio .st-tl-tag-btn:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }
+  .studio .st-tl-tag-x {
+    min-height: 22px; min-width: 22px; padding: 0 4px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--st-danger); font: inherit; cursor: pointer;
+  }
+  .studio .st-tl-tag-x:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }
   .studio .st-tl-markers { position: absolute; top: 32px; left: 0; right: 0; height: 18px; cursor: copy; }
   .studio .st-tl-marker {
     position: absolute; top: 0; display: flex; align-items: center; gap: 4px;
@@ -624,6 +649,7 @@ function studioPage({ songId, render, res }) {
           <span class="st-legend"><span class="st-dot st-dot-agent" aria-hidden="true"></span>Crow agent</span>
         </div>
         <span class="st-tl-notice" data-role="timeline-notice" hidden></span>
+        <div class="st-perf-notice" data-role="performance-notice" hidden></div>
         <div class="st-presence" data-role="presence"></div>
       </header>
       <div class="st-body">

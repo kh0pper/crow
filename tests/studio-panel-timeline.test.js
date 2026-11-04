@@ -1,12 +1,16 @@
 /**
  * Studio panel — the timeline (arrangement) view.
  *
- * Six of the seven tests run everywhere: the emitted client script against a
+ * All but the last test run everywhere: the emitted client script against a
  * linkedom document built from the page the handler renders, a real Yjs song
  * with two tracks, an audio clip holding takes and a small arrangement, and a
  * fake engine that reports positions and records the modes and seeks it was
  * given. What they prove is what the page draws and what a drag, a click or a
- * Stop sends — the GUI half of the timeline's commands.
+ * Stop sends — the GUI half of the timeline's commands — including the review's
+ * own cases: a refused performance that can still be placed, a transport that
+ * stops some other way, a cancelled or torn-down drag, Delete in the clip
+ * editor, an agent moving a placement, the keyboard after a render, and a
+ * recording that needs a free scene slot.
  *
  * The last one needs the networked half: a real session hub on a scratch
  * database behind the panel's own WebSocket, and a private headless Chrome
@@ -284,14 +288,64 @@ function fakeEngine() {
     },
     async loadAudio() {},
     unloadAudio() {},
+    /** Every recorder the page built, so a test can end a take from the input side. */
+    recorders: [],
+    createRecorder() {
+      const recorder = {
+        armed: null,
+        stopped_at: null,
+        splits: [],
+        chunks: [],
+        chunk: null,
+        done: null,
+        disposals: 0,
+        onChunk(listener) {
+          recorder.chunk = listener;
+        },
+        onDone(listener) {
+          recorder.done = listener;
+        },
+        armAt(frame) {
+          recorder.armed = frame;
+        },
+        stopAt(frame) {
+          recorder.stopped_at = frame;
+        },
+        splitAt(list) {
+          recorder.splits = list;
+        },
+        dispose() {
+          recorder.disposals += 1;
+        },
+      };
+      engine.recorders.push(recorder);
+      return Promise.resolve(recorder);
+    },
   };
   return engine;
+}
+
+/** The navigator stand-in: one raw stereo input, and no Web Locks. */
+function fakeNavigator() {
+  const track = { label: "Test input", getSettings: () => ({ deviceId: "in-1" }), stop() {} };
+  const stream = { getAudioTracks: () => [track], getTracks: () => [track] };
+  return {
+    locks: null,
+    mediaDevices: {
+      async enumerateDevices() {
+        return [{ kind: "audioinput", deviceId: "in-1", label: "Test input" }];
+      },
+      async getUserMedia() {
+        return stream;
+      },
+    },
+  };
 }
 
 /**
  * Boot the emitted client script against the page the handler renders, with a
  * fake browser around it, and hand back what it drew and what it sent.
- * @param {{doc?: object, storage?: object}} [options]
+ * @param {{doc?: object, storage?: object, history?: object[]}} [options]
  */
 async function bootTimeline(options = {}) {
   const { parseHTML } = await import("linkedom");
@@ -312,6 +366,16 @@ async function bootTimeline(options = {}) {
   });
   assert.ok(res.html.includes('data-studio-song="song-1"'), "the handler rendered the song page");
   const { document, window: domWindow } = parseHTML(res.html);
+
+  // linkedom's focus() does nothing; every call is recorded here instead, so a
+  // test can see which button the page handed the keyboard to after a render.
+  const focusCalls = [];
+  const ElementProto = domWindow.Element && domWindow.Element.prototype;
+  if (ElementProto && typeof ElementProto.focus === "function") {
+    ElementProto.focus = function focus() {
+      focusCalls.push(this);
+    };
+  }
 
   const store = fakeTakeStore();
   const engine = fakeEngine();
@@ -401,7 +465,7 @@ async function bootTimeline(options = {}) {
   run(
     document,
     windowStub,
-    { mediaDevices: null, locks: null },
+    fakeNavigator(),
     function WebSocketStub() {
       return socket;
     },
@@ -437,7 +501,7 @@ async function bootTimeline(options = {}) {
   frame({
     type: "state",
     update: Buffer.from(encodeDocState(doc)).toString("base64"),
-    history: [],
+    history: options.history || [],
     presence: [],
   });
   await settle();
@@ -465,6 +529,8 @@ async function bootTimeline(options = {}) {
     frame,
     fireWindow,
     timers,
+    focusCalls,
+    windowListeners,
     /** Press on an element and let the page see it, the way a pointer would. */
     press(selector, props) {
       const node = document.querySelector(selector);
@@ -518,6 +584,19 @@ function stubLanes(ui) {
 function compBarBox() {
   return { left: 0, top: 0, width: 160, height: 34, right: 160, bottom: 34, x: 0, y: 0 };
 }
+
+/** @returns {object} a 160 px, four-bar placement block, 40 px a bar */
+function placementBox() {
+  return { left: 0, top: 0, width: 160, height: 36, right: 160, bottom: 36, x: 0, y: 0 };
+}
+
+/** @returns {object} the piano roll of the fixture's two-bar note clip */
+function rollBox() {
+  return { left: 0, top: 0, width: 1000, height: KEY_ROLL_HEIGHT, right: 1000, bottom: KEY_ROLL_HEIGHT, x: 0, y: 0 };
+}
+
+/** How tall the piano roll is: 128 rows of 12 px, as the client draws it. */
+const KEY_ROLL_HEIGHT = 128 * 12;
 
 // ---- the tests that need no browser ---------------------------------------
 
@@ -817,6 +896,422 @@ test("the mode switch keeps the choice per song", async () => {
     false,
     "the switch works without storage",
   );
+});
+
+// ---- the review's own cases ----------------------------------------------
+
+test("a refused performance can still be placed", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=rec-timeline]");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  for (const bar of [0, 4, 8]) {
+    ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar, frame: bar * 96000 });
+  }
+  ui.position({ bar: 11, beat: 1, sixteenth: 1 });
+  ui.click("[data-act=stop]");
+  await ui.settle();
+
+  const sent = commands(ui, "arrangement.record_performance");
+  assert.equal(sent.length, 1, "Stop sent the performance");
+  const cmdId = sent[0].cmd_id;
+  assert.equal(typeof cmdId, "string", "under a cmd_id the page keeps");
+
+  // The fixture already plays the note clip over bars 5 to 8, so the hub
+  // refuses the whole performance.
+  const refusal = 'Placement at bar 5 on "Bass" overlaps the one there.';
+  ui.frame({ type: "result", cmd_id: cmdId, ok: false, error: refusal });
+  await ui.settle();
+
+  const notice = ui.document.querySelector("[data-role=performance-notice]");
+  assert.ok(notice, "the page has somewhere to keep a refused performance");
+  assert.equal(notice.hidden, false, "the refusal stays on the page, not in a toast");
+  assert.ok(String(notice.textContent).includes(refusal), "with the server's own sentence");
+  const fit = notice.querySelector("[data-act=performance-fit]");
+  const discard = notice.querySelector("[data-act=performance-discard]");
+  assert.ok(fit, "Place what fits is offered");
+  assert.equal(String(fit.textContent), "Place what fits");
+  assert.ok(discard, "Discard is offered");
+
+  fit.dispatchEvent(ui.event("click", {}));
+  await ui.settle();
+  const again = commands(ui, "arrangement.record_performance");
+  assert.equal(again.length, 2, "Place what fits is one more record_performance");
+  assert.deepEqual(
+    again[1].args.placements,
+    [
+      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 0, bars: 4 },
+      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 8, bars: 2 },
+    ],
+    "only the bars nothing already plays, in bar order",
+  );
+
+  ui.frame({ type: "result", cmd_id: again[1].cmd_id, ok: true });
+  await ui.settle();
+  assert.equal(notice.hidden, true, "an accepted performance is dropped");
+
+  // Discard drops a refused performance without sending anything else.
+  const other = await bootTimeline();
+  other.click("[data-act=rec-timeline]");
+  other.click("[data-act=play]");
+  await other.settle(24);
+  other.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 4, frame: 0 });
+  other.position({ bar: 7, beat: 1, sixteenth: 1 });
+  other.click("[data-act=stop]");
+  await other.settle();
+  const refused = commands(other, "arrangement.record_performance");
+  assert.equal(refused.length, 1);
+  other.frame({ type: "result", cmd_id: refused[0].cmd_id, ok: false, error: "It overlaps." });
+  await other.settle();
+  other.click("[data-act=performance-discard]");
+  await other.settle();
+  assert.equal(
+    commands(other, "arrangement.record_performance").length,
+    1,
+    "Discard sends nothing more",
+  );
+  assert.equal(
+    other.document.querySelector("[data-role=performance-notice]").hidden,
+    true,
+    "and the notice goes",
+  );
+});
+
+test("stopping the transport another way closes the performance", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=rec-timeline]");
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 0, frame: 0 });
+  ui.launch({ track_id: NOTE_TRACK, clip_id: NOTE_CLIP, scene_id: SCENE, bar: 4, frame: 4 * 96000 });
+  ui.position({ bar: 7, beat: 1, sixteenth: 1 });
+
+  // A take on the audio track. Its input goes away, so the take ends by
+  // itself — and that ends the transport, which is the other way to stop it.
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "Record built the recorder");
+  assert.notEqual(recorder.armed, null, "and armed it on the next bar");
+
+  recorder.done({ segments: [] });
+  await ui.settle();
+
+  const sent = commands(ui, "arrangement.record_performance");
+  assert.equal(sent.length, 1, "the transport's stop wrote the performance");
+  assert.deepEqual(
+    sent[0].args.placements,
+    [
+      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 0, bars: 4 },
+      { track_id: NOTE_TRACK, clip_id: NOTE_CLIP, start_bar: 4, bars: 2 },
+    ],
+    "each launch closed by the next one, the last by the stop bar",
+  );
+});
+
+test("a cancelled drag sends nothing", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  block.getBoundingClientRect = () => placementBox();
+  block.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 20 }));
+  await ui.settle();
+  ui.fireWindow("pointermove", ui.event("pointermove", { clientX: 100 }));
+  await ui.settle();
+  assert.match(
+    String(block.getAttribute("style")),
+    /left:18\.75%/,
+    "the drag has drawn the block two bars further on",
+  );
+
+  // The browser takes the pointer away instead of letting it go.
+  ui.fireWindow("pointercancel", ui.event("pointercancel", {}));
+  await ui.settle();
+
+  assert.deepEqual(allCommands(ui), [], "a cancelled drag writes nothing");
+  const again = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  assert.match(
+    String(again.getAttribute("style")),
+    /left:12\.5%/,
+    "and the block is drawn where the song puts it",
+  );
+  assert.equal((ui.windowListeners.pointermove || []).length, 0, "the drag's listeners came off");
+});
+
+test("teardown during a drag leaves no listeners", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  block.getBoundingClientRect = () => placementBox();
+  block.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 20 }));
+  await ui.settle();
+  assert.ok((ui.windowListeners.pointermove || []).length > 0, "the drag listens on the window");
+
+  // Turbo caches the page (or a visit starts): the session is torn down with
+  // the drag still in the air.
+  ui.document.dispatchEvent(ui.event("turbo:before-cache"));
+  await ui.settle();
+
+  for (const name of ["pointermove", "pointerup", "pointercancel"]) {
+    assert.equal((ui.windowListeners[name] || []).length, 0, `no ${name} listener is left behind`);
+  }
+});
+
+test("delete in the clip editor removes the note, not the placement", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  ui.click(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  await ui.settle();
+  ui.click("[data-act=open-placement-clip]");
+  await ui.settle();
+  assert.match(
+    String(ui.document.querySelector("[data-role=placement-bar]").textContent),
+    /No placement selected/,
+    "opening the clip lets go of the placement",
+  );
+
+  // A note is selected in the roll.
+  const svg = ui.document.querySelector(".st-roll-svg");
+  assert.ok(svg, "the note clip's piano roll is open");
+  svg.getBoundingClientRect = () => rollBox();
+  svg.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 60, clientY: 810 }));
+  await ui.settle();
+  ui.release({ clientX: 60, clientY: 810 });
+  await ui.settle();
+  const removeNote = ui.document.querySelector("[data-act=delete-note]");
+  assert.equal(removeNote.disabled, false, "the note is selected");
+
+  // The placement is selected as well now: Delete still means the note.
+  ui.click(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  await ui.settle();
+  ui.document.dispatchEvent(ui.event("keydown", { key: "Delete" }));
+  await ui.settle();
+
+  const edits = commands(ui, "clip.edit_notes");
+  assert.equal(edits.length, 1, "Delete removed the note");
+  assert.deepEqual(edits[0].args.remove, [0]);
+  assert.equal(commands(ui, "arrangement.remove").length, 0, "and left the placement alone");
+});
+
+test("an agent moving your placement keeps it outlined as yours", async () => {
+  const at = "2026-03-01T10:00:00.000Z";
+  const ui = await bootTimeline({
+    history: [
+      {
+        id: "h-place",
+        seq: 1,
+        created_at: at,
+        summary: "Placed a clip on Bass",
+        author: { kind: "human", id: "local", label: "You" },
+        touched: [`placement:${NOTE_PLACEMENT}`],
+      },
+      {
+        id: "h-move",
+        seq: 2,
+        created_at: at,
+        summary: "Moved a placement on Bass",
+        author: { kind: "agent", id: "agent:mcp", label: "Agent (MCP)" },
+        touched: [`placement:${NOTE_PLACEMENT}`],
+      },
+    ],
+  });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  assert.ok(block, "the placement is drawn");
+  assert.match(
+    String(block.getAttribute("style")),
+    /(242|f2a541)/i,
+    "outlined in the operator's amber, not the agent's blue",
+  );
+  assert.match(String(block.textContent), /by you/, "and it says who placed it");
+
+  ui.click(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  await ui.settle();
+  assert.match(
+    String(ui.document.querySelector("[data-role=placement-bar]").textContent),
+    /placed by you/,
+    "the placement bar says the same",
+  );
+});
+
+test("arrow keys keep focus on the placement", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const block = ui.document.querySelector(`[data-placement-id=${NOTE_PLACEMENT}]`);
+  block.getBoundingClientRect = () => placementBox();
+  block.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 20 }));
+  await ui.settle();
+  ui.release({ clientX: 20 });
+  await ui.settle();
+  assert.equal(ui.focusCalls.length > 0, true, "pressing a block gives it the keyboard");
+  assert.equal(
+    ui.focusCalls[ui.focusCalls.length - 1].getAttribute("data-placement-id"),
+    NOTE_PLACEMENT,
+    "on the block that was pressed",
+  );
+
+  ui.document.dispatchEvent(ui.event("keydown", { key: "ArrowRight" }));
+  await ui.settle();
+  const moved = commands(ui, "arrangement.move");
+  assert.equal(moved.length, 1, "the arrow key moved the selected placement");
+  assert.equal(moved[0].args.start_bar, 5);
+
+  // The hub's answer draws every block again; the keyboard goes back on the
+  // button that carries the same data-placement-id.
+  const { encodeDocState } = await import("../bundles/studio/server/doc.js");
+  ui.frame({
+    type: "state",
+    update: Buffer.from(encodeDocState(ui.doc)).toString("base64"),
+    history: [],
+    presence: [],
+  });
+  await ui.settle();
+
+  const focused = ui.focusCalls[ui.focusCalls.length - 1];
+  assert.equal(focused.getAttribute("data-placement-id"), NOTE_PLACEMENT, "the keyboard stayed on the placement");
+  assert.equal(
+    [...ui.document.querySelectorAll("[data-placement-id]")].includes(focused),
+    true,
+    "and on the button the page draws now, not the one it threw away",
+  );
+});
+
+test("recording on the timeline picks a free scene slot", async () => {
+  const doc = await timelineDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "scene.add", { id: "chorus", name: "Chorus" });
+
+  const ui = await bootTimeline({ doc });
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  ui.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await ui.settle();
+  ui.click("[data-act=record]");
+  await ui.settle(24);
+
+  const added = commands(ui, "clip.add_audio");
+  assert.equal(added.length, 1, "the recording made its clip");
+  assert.equal(added[0].args.track_id, AUDIO_TRACK);
+  assert.equal(added[0].args.scene_id, "chorus", "in the first scene whose slot on that track is empty");
+  assert.equal(added[0].args.length_bars, 4, "four bars, the empty scene's length");
+  assert.equal(commands(ui, "arrangement.place").length, 1, "and it is placed at the playhead");
+  assert.notEqual(ui.engine.recorders[0].armed, null, "the take is armed on the next bar");
+
+  // The fixture song has one scene and both its slots are full: there is
+  // nowhere for a clip, so nothing is written and nothing is armed.
+  const blocked = await bootTimeline();
+  blocked.click("[data-act=mode-arrangement]");
+  await blocked.settle();
+  blocked.click(`[data-track-id=${AUDIO_TRACK}] [data-act=arm-audio]`);
+  await blocked.settle();
+  blocked.click("[data-act=record]");
+  await blocked.settle(24);
+
+  assert.equal(commands(blocked, "clip.add_audio").length, 0, "no clip was written");
+  assert.equal(commands(blocked, "arrangement.place").length, 0, "and nothing was placed");
+  assert.equal(blocked.engine.recorders.length, 1, "the recorder was built");
+  assert.equal(blocked.engine.recorders[0].armed, null, "but the take was not armed");
+  const toast = blocked.document.querySelector("[data-role=toast]");
+  assert.equal(toast.hidden, false, "the page says why");
+  assert.equal(
+    toast.textContent,
+    "There is no free scene slot on this track for a new recording; add a scene first.",
+    "word for word",
+  );
+});
+
+test("session view places a clip at bar 1 and the timeline keeps its playhead", async () => {
+  const ui = await bootTimeline();
+  ui.click(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  await ui.settle();
+
+  const place = ui.document.querySelector("[data-act=place-on-timeline]");
+  assert.ok(place, "the clip editor offers the keyboard path onto the timeline");
+  assert.equal(
+    place.getAttribute("title"),
+    "Place this clip on its track at bar 1",
+    "Session view has no playhead, and the button says so",
+  );
+
+  ui.click("[data-act=place-on-timeline]");
+  await ui.settle();
+  const sent = commands(ui, "arrangement.place");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].args.start_bar, 0, "bar 1 is start bar 0");
+  assert.equal(ui.document.querySelector("[data-role=timeline]").hidden, false, "and the timeline opens");
+
+  // A click on the ruler seeks; pressing Arrangement again keeps that bar.
+  const strip = ui.document.querySelector("[data-role=bar-ruler]");
+  strip.getBoundingClientRect = () => ({
+    left: 0, top: 0, width: 320, height: 18, right: 320, bottom: 18,
+  });
+  strip.dispatchEvent(ui.event("pointerdown", { button: 0, clientX: 45 }));
+  await ui.settle();
+  ui.release();
+  assert.equal(ui.document.querySelector("[data-role=playhead]").style.left, "12.5%");
+
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector("[data-role=playhead]").style.left,
+    "12.5%",
+    "pressing Arrangement while it is the view keeps the playhead where it was",
+  );
+
+  ui.click(`[data-act=open-clip][data-clip-id=${NOTE_CLIP}]`);
+  await ui.settle();
+  assert.equal(
+    ui.document.querySelector("[data-act=place-on-timeline]").getAttribute("title"),
+    "Place this clip on its track at the playhead bar",
+    "from the timeline the button names the playhead's bar",
+  );
+});
+
+test("a marker and a section are renamed and removed from their own buttons", async () => {
+  const ui = await bootTimeline();
+  ui.click("[data-act=mode-arrangement]");
+  await ui.settle();
+
+  const rename = ui.document.querySelector(
+    "[data-role=marker][data-marker-id=m-key] [data-act=marker-rename]",
+  );
+  assert.ok(rename, "the marker's name is a button, so the keyboard can reach it");
+  assert.equal(String(rename.tagName), "BUTTON");
+
+  ui.window.prompt = () => "Turnaround";
+  rename.dispatchEvent(ui.event("click", {}));
+  await ui.settle();
+  const renamed = commands(ui, "marker.rename");
+  assert.equal(renamed.length, 1, "the marker's button renamed it");
+  assert.deepEqual(renamed[0].args, { id: "m-key", name: "Turnaround" });
+
+  ui.click("[data-role=marker][data-marker-id=m-key] [data-act=marker-remove]");
+  await ui.settle();
+  const removed = commands(ui, "marker.remove");
+  assert.equal(removed.length, 1, "its remove button asked marker.remove, after a yes");
+  assert.deepEqual(removed[0].args, { id: "m-key" });
+
+  const section = ui.document.querySelector(
+    "[data-role=section][data-section-id=sec-intro] [data-act=section-rename]",
+  );
+  assert.ok(section, "the section's name is a button too");
+  ui.click("[data-role=section][data-section-id=sec-intro] [data-act=section-remove]");
+  await ui.settle();
+  const gone = commands(ui, "section.remove");
+  assert.equal(gone.length, 1, "and it can be removed");
+  assert.deepEqual(gone[0].args, { id: "sec-intro" });
 });
 
 // ---- the same timeline against a real hub, in a real browser ---------------
