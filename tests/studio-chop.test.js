@@ -212,3 +212,10 @@ test("byHits is deterministic (same input → same slices)", () => {
   assert.deepEqual(second, first);
   assert.ok(first.length > 1, "the loop is actually chopped, not empty");
 });
+test("a very short loud sample is one slice", () => {
+  const frames = 255;
+  const mono = new Float32Array(frames);
+  for (let i = 0; i < frames; i += 1) mono[i] = Math.sin(i / 3) * 0.8;
+  const slices = StudioChop.byHits([mono], 48000, {});
+  assert.deepEqual(slices, [{ start_frame: 0, end_frame: frames }]);
+});

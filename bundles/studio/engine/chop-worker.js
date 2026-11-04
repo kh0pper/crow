@@ -38,7 +38,8 @@ self.onmessage = function (event) {
     var op = message.op;
     var slices;
     if (op === "hits") {
-      var channels = Array.isArray(message.channels) ? message.channels : [];
+      if (!Array.isArray(message.channels)) throw new Error("a chop by hits needs channels: an array of Float32Arrays");
+      var channels = message.channels;
       slices = StudioChop.byHits(channels, Number(message.rate), message.options || {});
     } else if (op === "grid") {
       slices = StudioChop.byGrid(Number(message.frames), Number(message.divisions));

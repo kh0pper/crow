@@ -408,10 +408,14 @@
       // length is not a slice, and two onsets refined onto one crossing are not
       // two onsets.
       if (onset.start_frame - previous < Math.max(1, minGapFrames)) continue;
+      // An onset on the very last frame would leave an empty slice behind it.
+      if (onset.start_frame >= mono.length) continue;
       spaced.push(onset);
       previous = onset.start_frame;
     }
-    if (spaced.length === 0) return [];
+    // A sound too short for the analysis to find an onset in (a few hundred
+    // frames) is still a sound: it is one slice, the whole of it.
+    if (spaced.length === 0) return [{ start_frame: 0, end_frame: mono.length }];
 
     let onsets = spaced;
     if (onsets.length > MAX_SLICES) {
