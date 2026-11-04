@@ -79,6 +79,9 @@ done
 # This instance's container and compose project, from ITS .env (a co-hosted instance sets
 # CROW_BROWSER_CONTAINER_NAME; compose's project then follows it, see docker-compose.yml).
 CNAME="$(sed -n 's/^CROW_BROWSER_CONTAINER_NAME=\([a-z0-9][a-z0-9_-]\{0,63\}\)$/\1/p' "$ENV_FILE" | tail -n 1)"
+if [ -z "$CNAME" ] && grep -q '^CROW_BROWSER_CONTAINER_NAME=' "$ENV_FILE"; then
+  fail "CROW_BROWSER_CONTAINER_NAME in $ENV_FILE is set but not a plain lowercase name (quoted, CRLF or trailing space?): refusing to guess which instance this is"
+fi
 SERVICE="${CNAME:-crow-browser}"
 EXPECTED_PROJECT="${CNAME:-browser}"
 [ "$PROJECT" = "$EXPECTED_PROJECT" ] \

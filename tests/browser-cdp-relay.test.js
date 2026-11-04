@@ -226,7 +226,7 @@ test("the design constants: 16 KB of headers, 10 s handshake, 32 connections, 32
   assert.equal(m.MAX_CONNECTIONS, 32);
   assert.equal(m.MAX_FRAME_BYTES, 256 * 1024 * 1024, "the pipe cap matches Playwright, so one page message cannot stop the browser");
   assert.ok(m.MAX_FRAME_BYTES >= 24 * 1024 * 1024, "at least 24 MB, per the review");
-  assert.ok(m.MAX_CLIENT_BUFFER_BYTES > m.MAX_FRAME_BYTES, "one maximum frame never drops an idle client");
+  assert.equal(m.MAX_CLIENT_BUFFER_BYTES, 64 * 1024 * 1024, "a slow client's backlog is capped at 64 MB");
   assert.match(m.TOKEN_RE.source, /\[A-Za-z0-9_-\]\{32,256\}/);
 });
 
@@ -739,13 +739,18 @@ test("an unauthenticated upgrade that resets while the 401 is written never cras
 
 test("a client that resets right after its close frame never crashes the relay", async (t) => {
   await withRelay(t, {}, async ({ ctx, ready, wsUrl }) => {
-    for (let i = 0; i < 10; i++) {
-      const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${TOKEN}` }, perMessageDeflate: false });
-      await new Promise((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
-      ws.close(1000);
-      // The close frame is out; reset the TCP connection before the relay's 1 s destroy timer.
-      setTimeout(() => { try { ws._socket?.resetAndDestroy(); } catch { /* gone */ } }, 5);
-      await sleep(30);
+    // A raw socket, so nothing answers the relay's own close: the reset lands while the relay
+    // still holds the socket open to flush its close frame (the window the fix covers).
+    const path = new URL(wsUrl).pathname;
+    const closeFrame = Buffer.from([0x88, 0x82, 1, 2, 3, 4, 0x03 ^ 1, 0xe8 ^ 2]);
+    for (let i = 0; i < 20; i++) {
+      const s = net.connect(ready.port, "127.0.0.1", () => {
+        s.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${ready.port}\r\nAuthorization: Bearer ${TOKEN}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+        setTimeout(() => { s.write(closeFrame); setTimeout(() => s.resetAndDestroy(), i % 4); }, 30);
+      });
+      s.on("error", () => {});
+      s.on("data", () => {});
+      await sleep(80);
     }
     assert.equal(await alive(ctx, 1500), true, `the relay is still running; log:\n${ctx.logs()}`);
     assert.equal((await request(ready.port, { token: TOKEN })).status, 200);

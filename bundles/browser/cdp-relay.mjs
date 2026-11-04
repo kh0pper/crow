@@ -43,9 +43,11 @@ export const MAX_CONNECTIONS = 32;
  *  pipe framer closes (and so the browser stops) past it, so it matches Playwright's own
  *  client limit: a page cannot make one message big enough to stop the browser below that. */
 export const MAX_FRAME_BYTES = 256 * 1024 * 1024;
-/** Per-client output buffer; past it that client alone is dropped (close 1009). Room for one
- *  maximum frame plus some backlog, so a single large message never drops an idle client. */
-export const MAX_CLIENT_BUFFER_BYTES = MAX_FRAME_BYTES + 16 * 1024 * 1024;
+/** Per-client output BACKLOG; past it that client alone is dropped (close 1009). A client whose
+ *  buffer is empty may still take one message up to MAX_FRAME_BYTES, so a single large message
+ *  never drops an idle client, while a slow one cannot pile up hundreds of MB in a container
+ *  whose memory limit is shared with Chromium. */
+export const MAX_CLIENT_BUFFER_BYTES = 64 * 1024 * 1024;
 /** How long a graceful stop waits for Chromium to close itself after `Browser.close`. */
 export const CLOSE_TIMEOUT_MS = 10_000;
 /** The token shape Crow mints (hex32 or base64url) — the same rule the entrypoint applies. */
@@ -382,7 +384,8 @@ export async function createRelay(config) {
     // Outbound frame cap, and then the per-client buffer cap: past either one, that client
     // alone goes (close 1009). The pipe and its siblings never wait on it.
     if (size + 10 > maxFrameBytes) { dropClient(client, 1009, "outbound frame over the cap"); return false; }
-    if (client.ws.bufferedBytes() + size + 10 > maxClientBuffer) {
+    const buffered = client.ws.bufferedBytes();
+    if (buffered > 0 && buffered + size + 10 > maxClientBuffer) {
       stats.slowDropped++;
       dropClient(client, 1009, "output buffer over the cap");
       return false;
@@ -688,6 +691,9 @@ export async function createRelay(config) {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server.address().port));
   });
+  // After listen, a server error (an accept failure such as EMFILE) is logged, never thrown:
+  // an uncaught one would stop the relay and the browser with it.
+  server.on("error", (err) => { try { console.error(`[cdp-relay] server error: ${err && err.code ? err.code : "error"}`); } catch { /* ignore */ } });
 
   // Readiness is "Chromium answered over the pipe": nothing is served before that.
   const version = await readVersion();
