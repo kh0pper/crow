@@ -404,7 +404,8 @@ export function forYouClientJs() {
   }
   // The page as the server drew it, and the hook a lazy cell's fill calls for markup it fetched.
   bindWidgetMarkup(root);
-  if (typeof window.crowBindWidgetMarkup !== 'function') window.crowBindWidgetMarkup = bindWidgetMarkup;
+  // Assigned on every visit: Turbo keeps the window, and this visit's root is the one to bind against.
+  window.crowBindWidgetMarkup = bindWidgetMarkup;
 
   // Open sheets close before Turbo caches the page. The snapshot keeps attributes, not listeners, so
   // the binding markers come off too: a restored page binds its sheets and audio again.
@@ -413,7 +414,8 @@ export function forYouClientJs() {
     document.addEventListener('turbo:before-cache', function () {
       var open = document.querySelectorAll('dialog.fy-sheet[open]');
       for (var j = 0; j < open.length; j++) closeSheet(open[j]);
-      var marked = root.querySelectorAll('[data-fy-bound]');
+      // The document, not this visit's root: the listener is bound once, on the first visit.
+      var marked = document.querySelectorAll('[data-fy-bound]');
       for (var k = 0; k < marked.length; k++) marked[k].removeAttribute('data-fy-bound');
     });
   }

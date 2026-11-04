@@ -687,6 +687,21 @@ function pageRig({ respond }) {
   return { document, window, calls, run, cellOf };
 }
 
+test("a second Turbo visit binds against its own page: the cache tidy and the binding hook follow the new root", async () => {
+  const r = pageRig({ respond: () => ({ ok: true, json: async () => ({ id: "lazy", html: FETCHED_BODY }) }) });
+  await settle();
+  const firstHook = r.window.crowBindWidgetMarkup;
+  // A later visit: Turbo keeps the document and the window and swaps the body, then runs the scripts.
+  r.document.body.innerHTML = '<div class="fy" data-fy data-fy-play-label="Play" data-fy-pause-label="Pause">'
+    + '<dialog class="fy-sheet" id="fy-sheet-9"></dialog></div>';
+  vm.runInContext(CLIENT_FOR_YOU, vm.createContext({ window: r.window, document: r.document, fetch: r.window.fetch, JSON, Number, Object, Array, String, isFinite, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent, Promise }));
+  const sheet = r.document.getElementById("fy-sheet-9");
+  assert.equal(sheet.getAttribute("data-fy-bound"), "sheet", "the second visit's sheet is bound");
+  assert.notEqual(r.window.crowBindWidgetMarkup, firstHook, "the hook is this visit's, not the first one's");
+  r.document.dispatchEvent(new r.window.Event("turbo:before-cache"));
+  assert.equal(sheet.hasAttribute("data-fy-bound"), false, "the snapshot of the second visit carries no binding marker");
+});
+
 test("a fetched cell gets For You's own per-element bindings", async () => {
   const r = pageRig({ respond: () => ({ ok: true, json: async () => ({ id: "lazy", html: FETCHED_BODY }) }) });
   await settle();

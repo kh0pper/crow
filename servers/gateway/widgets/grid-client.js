@@ -131,8 +131,8 @@ export function gridClientJs() {
 
   function bind(grid) {
     if (!grid || grid.getAttribute('data-wg-ready') === '1') {
-      // A grid Turbo restored is already wired — its handlers, its layout, its edit mode are the
-      // snapshot's. Only a fill that never finished is run again.
+      // A grid Turbo restored from its snapshot: copied markup with no listeners. Only the lazy fill
+      // is run again here (it needs the elements, not the grid's handlers).
       fillShownLazy(grid);
       return;
     }
