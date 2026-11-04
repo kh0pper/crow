@@ -531,6 +531,60 @@ const STYLES = `
   .studio .st-tl-placement-help {
     flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
   }
+  /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
+     track's clip is a pattern, so opening one shows the kit instead of the
+     piano roll. Pads are real buttons, at least 72 px square, and the pad's
+     own settings sit beside them. */
+  .studio .st-sampler {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+    display: flex; flex-direction: column; gap: 10px; padding: 12px;
+  }
+  .studio .st-sampler[hidden] { display: none; }
+  .studio .st-sampler-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .studio .st-sampler-title { margin: 0; font-size: 15px; font-weight: 700; }
+  .studio .st-sampler-meta { font-size: 12px; color: var(--st-muted); }
+  .studio .st-sampler-body { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+  .studio .st-sampler-pads { flex: 1 1 380px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
+  .studio .st-sampler-right { flex: 999 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  .studio .st-sampler-sub { margin: 0; font-size: 12px; font-weight: 600; color: var(--st-muted); }
+  .studio .st-bank-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-bank-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
+  .studio .st-pad-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .studio .st-pad {
+    aspect-ratio: 1 / 1; min-height: 72px; padding: 8px; border-radius: 10px;
+    border: 2px solid #121417; background: #24282D; color: var(--st-text);
+    font: inherit; text-align: left; cursor: pointer;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 4px;
+  }
+  .studio .st-pad:hover { border-color: var(--st-edge); }
+  .studio .st-pad.st-pad-sel { border-color: #FFFFFF; }
+  .studio .st-pad-num {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px;
+    font-weight: 600; color: var(--st-muted);
+  }
+  .studio .st-pad-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+  .studio .st-sampler-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .studio .st-import { position: relative; display: inline-flex; align-items: center; }
+  .studio .st-file { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+  .studio .st-btn.st-on { background: #3D3420; border-color: #5C4A1E; }
+  .studio .st-pad-settings {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-pad-title { margin: 0; font-size: 13px; font-weight: 600; }
+  .studio .st-pad-fields {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px 12px;
+  }
+  .studio .st-pad-range { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
+  .studio .st-pad-range-input { width: 100%; min-height: 44px; accent-color: var(--st-human); }
+  .studio .st-pad-select { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
+  .studio .st-pad-check {
+    display: flex; align-items: center; gap: 6px; min-height: 44px;
+    font-size: 12px; color: var(--st-muted);
+  }
+  .studio .st-pad-check input { width: 20px; height: 20px; accent-color: var(--st-human); }
+  .studio .st-resample-target { max-width: 180px; }
+  .studio .st-sampler-slot:empty { display: none; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
@@ -661,6 +715,7 @@ function studioPage({ songId, render, res }) {
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
+          <section class="st-sampler" data-role="sampler" hidden></section>
         </main>
         <aside class="st-side">
           <div class="st-side-head">
