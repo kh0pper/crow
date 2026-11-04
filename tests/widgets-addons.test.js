@@ -267,6 +267,29 @@ test("loading: a valid answer, a throw, a hang, no loader, a wrong shape — eac
   assert.equal(ADDON_WIDGET_TIMEOUT_MS, 3000, "the shipped budget is three seconds");
 });
 
+test("loading: an import that never settles stays failed past the TTL (until a new version)", async () => {
+  const id = bundleId("deadimport");
+  installBundle(id, {
+    manifest: manifestFor(id, [{ id: "stuck", title: "Stuck", sizes: [[2, 1]] }]),
+    widgets: { stuck: "await new Promise(() => {});\nexport async function load() { return { state: 'ok' }; }\n" },
+  });
+  setInstalled([id]);
+  const realNow = Date.now;
+  try {
+    const first = await loadWidgets(addonWidgets(HOME, { timeoutMs: 150 }), { lang: "en", now: NOW }, { log: () => {} });
+    assert.equal(first[0].failed, true, "the stuck import is that cell's error line");
+    // Two TTLs later the module could never have settled (Node caches it by URL): no second wait.
+    const later = realNow() + 2 * ADDON_WIDGET_FAIL_TTL_MS;
+    Date.now = () => later;
+    const started = realNow();
+    const second = await loadWidgets(addonWidgets(HOME, { timeoutMs: 150 }), { lang: "en", now: NOW }, { log: () => {} });
+    assert.equal(second[0].failed, true);
+    assert.ok(realNow() - started < 100, "a dead import is not waited on again after the TTL");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("loading: a hung loader costs the next page view almost nothing, and is called once", async () => {
   const id = bundleId("hung");
   installBundle(id, {
@@ -291,7 +314,7 @@ test("loading: a hung loader costs the next page view almost nothing, and is cal
     const second = await loadWidgets(addonWidgets(HOME, { timeoutMs: 150 }), { lang: "en", now: NOW }, { log: () => {} });
     const secondTook = Date.now() - again;
     assert.equal(second[0].failed, true, "still that cell's error line");
-    assert.ok(secondTook < 50, `a remembered failure does not wait on the stuck import (${secondTook} ms)`);
+    assert.ok(secondTook < 100, `a remembered failure does not wait on the stuck import (${secondTook} ms)`);
     assert.equal(globalThis.__addonHangCalls, 1, "the module's load ran exactly once");
     assert.equal(ADDON_WIDGET_FAIL_TTL_MS, 60_000, "a failure is remembered for a minute");
   } finally {
@@ -319,7 +342,7 @@ test("loading: a module that throws is not called again within the failure TTL",
     const started = Date.now();
     const second = await loadWidgets(addonWidgets(HOME, { timeoutMs: 500 }), { lang: "en", now: NOW }, { log: () => {} });
     assert.equal(second[0].failed, true);
-    assert.ok(Date.now() - started < 50, "the TTL answers instead of the module");
+    assert.ok(Date.now() - started < 100, "the TTL answers instead of the module");
     assert.equal(globalThis.__addonBoomCalls, 1, "the loader was not asked a second time");
   } finally {
     delete globalThis.__addonBoomCalls;

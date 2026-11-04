@@ -210,8 +210,11 @@ async function loadAddonWidget({ file, version }, ctx, timeoutMs) {
   });
   let timer = null;
   let hung = false;
+  let imported = false;
   const work = (async () => {
-    const fn = loaderOf(await importAddon(file, version));
+    const mod = await importAddon(file, version);
+    imported = true;
+    const fn = loaderOf(mod);
     if (!fn) throw new Error("add-on widget has no load export");
     return fn(frozen);
   })();
@@ -226,10 +229,14 @@ async function loadAddonWidget({ file, version }, ctx, timeoutMs) {
     return normalizeAddonSummary(await Promise.race([work, budget]));
   } catch (err) {
     // A throw, a timeout or a wrong shape alike: remembered for the TTL, never the page's problem.
-    failureCache.set(url, Date.now() + ADDON_WIDGET_FAIL_TTL_MS);
+    // An import that never settled can never settle: Node caches the module by its URL for the
+    // life of the process. It stays failed until a new version (a new URL) is installed. A hang in
+    // the call itself may recover, so that keeps the TTL.
+    const deadImport = hung && !imported;
+    failureCache.set(url, deadImport ? Infinity : Date.now() + ADDON_WIDGET_FAIL_TTL_MS);
     // A hung import must not be reused once the TTL is over: its own .catch never fires, so the
     // entry would otherwise stay in the cache forever and every later request would wait on it.
-    if (hung) moduleCache.delete(url);
+    if (deadImport) moduleCache.delete(url);
     throw err;
   } finally {
     if (timer) clearTimeout(timer);
