@@ -2337,6 +2337,11 @@ export const translations = {
     en: "This contact is a live member: change it in the Crow-to-Crow sharing controls.",
     es: "Este contacto es un miembro en vivo: cámbialo en los controles de compartición de Crow a Crow.",
   },
+  // A status change (archiving is a soft delete) is the project owner's alone.
+  "projects.status.notOwner": {
+    en: "Only this project's owner can change its status.",
+    es: "Solo el propietario de este proyecto puede cambiar su estado.",
+  },
 
   // ─── Projects Panel: fetch status per source (lane D, research fetch-before-cite) ───
   "projects.fetch.fetched": { en: "fetched", es: "obtenida" },

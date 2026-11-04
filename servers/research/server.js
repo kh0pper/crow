@@ -23,6 +23,7 @@ import {
 } from "../shared/project-acl.js";
 import { slugify } from "../shared/slugify.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
+import { assertCanChangeStatus } from "../shared/project-lifecycle.js";
 import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
@@ -563,7 +564,8 @@ export function createProjectServer(dbPath, options = {}) {
       type: z.string().max(100).optional().describe("Project type"),
       tags: z.string().max(500).optional(),
     },
-    async ({ id, name, description, status, type, tags }) => {
+    async ({ id, name, description, status, type, tags }, extra) => {
+      const actor = callActor(extra);
       const patch = {};
       if (name !== undefined) patch.name = name;
       if (description !== undefined) patch.description = description;
@@ -575,6 +577,20 @@ export function createProjectServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "No updates provided." }] };
       }
 
+      // An archived project is hidden, so a status change is the owner's alone (delete's rule).
+      // The status read is here, before the write, so the audit row can say what changed.
+      let statusFrom = null;
+      if (status !== undefined) {
+        try {
+          await assertCanChangeStatus(db, id);
+        } catch (err) {
+          if (err instanceof AclError) return aclErrorToToolResult(err);
+          throw err;
+        }
+        const cur = await db.execute({ sql: "SELECT status FROM project_spaces WHERE id = ?", args: [Number(id)] });
+        statusFrom = cur.rows[0] ? cur.rows[0].status : null;
+      }
+
       let rowsAffected;
       try {
         rowsAffected = await updateProjectSpaceMeta(db, id, patch);
@@ -583,6 +599,11 @@ export function createProjectServer(dbPath, options = {}) {
       }
       if (rowsAffected === 0) {
         return { content: [{ type: "text", text: `Project #${id} not found.` }], isError: true };
+      }
+      if (status !== undefined) {
+        await appendAudit(db, {
+          project_id: Number(id), ...auditActor(actor), action: "status_changed", payload: { from: statusFrom, to: status },
+        });
       }
       return { content: [{ type: "text", text: `Project #${id} updated.` }] };
     }
