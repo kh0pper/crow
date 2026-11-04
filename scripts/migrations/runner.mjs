@@ -156,7 +156,7 @@ export async function runMigrations({
           } catch (err) {
             // The stamp is informational only: a busy crow.db must not stop the
             // migrations after this one.
-            if (err?.code !== "SQLITE_BUSY") throw err;
+            if (!String(err?.code || "").startsWith("SQLITE_BUSY")) throw err;
           }
           continue; // its held lines are dropped
         }
