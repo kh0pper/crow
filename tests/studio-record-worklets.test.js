@@ -22,6 +22,7 @@
  * frame 0, so a buffer sample's index is its frame.
  */
 import { test } from "node:test";
+import vm from "node:vm";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -427,4 +428,84 @@ test("splitAt makes takes that start on the given frames", async () => {
       );
     }
   }
+});
+/**
+ * Load recorder-processor.js in a bare worklet-like scope and return a
+ * processor that the test drives block by block. `currentFrame` is the
+ * scope's, so the test decides what "now" is when a message arrives.
+ * @param {number} channels
+ */
+function bareRecorder(channels) {
+  const source = readFileSync(join(ENGINE_DIR, "recorder-processor.js"), "utf8");
+  let Processor = null;
+  const scope = {
+    sampleRate: SAMPLE_RATE,
+    currentFrame: 0,
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = { postMessage: (message) => scope.posted.push(message), onmessage: null };
+      }
+    },
+    registerProcessor: (_name, ctor) => {
+      Processor = ctor;
+    },
+    posted: [],
+  };
+  vm.runInNewContext(source, scope);
+  const processor = new Processor({ processorOptions: { channels } });
+  return {
+    scope,
+    send: (message) => processor.port.onmessage({ data: message }),
+    run(fromFrame, frames, sampleOf) {
+      for (let at = 0; at < frames; at += 128) {
+        scope.currentFrame = fromFrame + at;
+        const input = new Float32Array(128);
+        for (let i = 0; i < 128; i += 1) input[i] = sampleOf(fromFrame + at + i);
+        processor.process([[input]], [[new Float32Array(128)]]);
+      }
+    },
+  };
+}
+
+test("an arm frame that already played starts the take exactly there, from the pre-roll", () => {
+  const rec = bareRecorder(1);
+  const ramp = (frame) => ((frame % 4096) - 2048) / 4096;
+  // The launch happened at frame 9600; its report reaches the recorder about
+  // 0.5 s later, as a real launch report does (after the frame has played).
+  // Blocks are 128 frames, so "now" is a whole number of blocks.
+  const now = 263 * 128; // 33664
+  rec.run(0, now, ramp);
+  rec.send({ type: "arm", frame: 9600 });
+  rec.send({ type: "stop", frame: 9600 + 48000 });
+  rec.run(now, 48000, ramp);
+
+  const done = rec.scope.posted.find((message) => message.type === "done");
+  assert.ok(done, "the recorder reported done");
+  assert.equal(done.segments[0].start_frame, 9600);
+  assert.equal(done.segments[0].frames, 48000, "the whole take, from its arm frame");
+  const bytes = new Uint8Array(rec.scope.posted.find((message) => message.type === "chunk" && message.index === 0).bytes);
+  const samples = decode24(bytes.buffer, 1);
+  for (const at of [0, 1, 1000, 23999, 24000, 47999]) {
+    assert.ok(
+      Math.abs(samples[at] - ramp(9600 + at)) <= 3 / 8388607,
+      `take sample ${at} should be input frame ${9600 + at}`,
+    );
+  }
+});
+
+test("an arm frame older than the pre-roll starts on its frame with silence for the missing part", () => {
+  const rec = bareRecorder(1);
+  const one = () => 0.5;
+  const preroll = 4 * SAMPLE_RATE;
+  const now = Math.ceil((1024 + preroll + 4096) / 128) * 128;
+  rec.run(0, now, one);
+  rec.send({ type: "arm", frame: 1024 });
+  rec.send({ type: "stop", frame: 1024 + preroll + 8192 });
+  rec.run(now, 8192 + 1024, one);
+  const done = rec.scope.posted.find((message) => message.type === "done");
+  assert.equal(done.segments[0].start_frame, 1024);
+  assert.equal(done.segments[0].frames, preroll + 8192);
+  const first = decode24(rec.scope.posted.find((message) => message.type === "chunk" && message.index === 0).bytes, 1);
+  assert.equal(first[0], 0, "frames older than the pre-roll are silence");
+  assert.ok(Math.abs(first[first.length - 1] - 0.5) < 1e-6, "kept frames are the input");
 });

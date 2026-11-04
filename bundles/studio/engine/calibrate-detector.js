@@ -29,8 +29,11 @@
  *
  * ## Buffering
  *
- * The detector keeps the last 0.5 s of its mono input in a ring buffer and only
- * ever reads what it has buffered: an expectation for a window that has not
+ * The detector keeps the last 10 s of its mono input in a ring buffer and only
+ * ever reads what it has buffered. The expectations come from the main thread,
+ * which can fall behind the audio thread (a busy page, or an offline render
+ * that runs faster than real time), so the buffer is long enough to hold a
+ * whole calibration run: a late expectation still finds its click. Within that: an expectation for a window that has not
  * arrived yet waits, and one for a window that has been overwritten is answered
  * `missed` rather than measured against the wrong audio. The full lag scan is
  * about `0.25 × sampleRate × 48` multiply-adds per click; calibration runs at
@@ -65,8 +68,8 @@
   /** The lowest peak correlation that counts as the click. */
   const MIN_CORRELATION = 0.5;
 
-  /** How much input the ring buffer keeps, in seconds. */
-  const BUFFER_SECONDS = 0.5;
+  /** How much input the ring buffer keeps, in seconds: a whole calibration run. */
+  const BUFFER_SECONDS = 10;
 
   /** Slack on top of the search window, so a block never splits a needed sample. */
   const SLACK_SAMPLES = 256;

@@ -59,6 +59,14 @@
   /** Bytes in one 24-bit sample. */
   const BYTES_PER_SAMPLE = 3;
 
+  /**
+   * How much input the recorder keeps before it is armed, in seconds. An arm
+   * frame always arrives late: it comes from a launch report the engine posts
+   * after that frame has played, plus the trip through the main thread. With
+   * the last few seconds kept, the take still starts exactly on its frame.
+   */
+  const PREROLL_SECONDS = 4;
+
   /** 24-bit signed full scale, 2^23 − 1 — the same as `server/wav.js`. */
   const FULL_SCALE = 8388607;
 
@@ -103,6 +111,14 @@
       /** Samples waiting for their chunk, interleaved, and how many frames that is. */
       this.pending = new Float32Array(this.chunkFrames * this.channels);
       this.pendingFrames = 0;
+
+      /**
+       * The pre-roll ring: the most recent input frames, interleaved, and the
+       * absolute frame just after the newest one kept.
+       */
+      this.prerollFrames = Math.max(128, Math.round(PREROLL_SECONDS * sampleRate));
+      this.preroll = new Float32Array(this.prerollFrames * this.channels);
+      this.prerollEnd = null;
 
       /** The chunk number inside the current segment (it restarts at each split). */
       this.chunkIndex = 0;
@@ -205,44 +221,106 @@
       const base = this.contextOffset() + this.frame;
       const first = input && input[0] ? input[0] : null;
 
-      for (let at = 0; at < count; at += 1) {
-        const frame = base + at;
-
-        if (!this.started) {
-          if (this.armFrame === null || frame < this.armFrame) continue;
-          this.started = true;
-          this.segment = 0;
-          this.segmentStart = this.armFrame;
-          this.segmentFrames = 0;
-          this.chunkIndex = 0;
+      // Armed on a frame that has already gone by: start there from the
+      // pre-roll. Frames older than the pre-roll are silence, so the take still
+      // begins on its frame and lines up with the song.
+      if (!this.started && this.armFrame !== null && this.armFrame < base) {
+        this.begin();
+        let past = this.armFrame;
+        const pastAt = (channel) => this.prerollSample(past, channel);
+        for (; past < base; past += 1) {
+          if (this.step(past, pastAt)) return;
         }
-
-        // A split closes the open segment and opens the next one on its own
-        // frame. A split at or before the segment's own start is history.
-        while (this.nextSplit < this.splits.length) {
-          const split = this.splits[this.nextSplit];
-          if (this.segmentStart !== null && split <= this.segmentStart) {
-            this.nextSplit += 1;
-            continue;
-          }
-          if (split > frame) break;
-          this.closeSegment(split);
-          this.nextSplit += 1;
-        }
-
-        if (this.stopFrame !== null && frame >= this.stopFrame) {
-          this.finish();
-          return;
-        }
-
-        for (let channel = 0; channel < this.channels; channel += 1) {
-          const data = input && input[channel] ? input[channel] : first;
-          this.pending[this.pendingFrames * this.channels + channel] = data && at < data.length ? data[at] : 0;
-        }
-        this.pendingFrames += 1;
-        this.segmentFrames += 1;
-        if (this.pendingFrames >= this.chunkFrames) this.flushChunk();
       }
+
+      // One reader for the whole block (no closure per frame on the audio
+      // thread); it reads the frame `at` points to.
+      let at = 0;
+      const sampleAt = (channel) => {
+        const data = input && input[channel] ? input[channel] : first;
+        return data && at < data.length ? data[at] : 0;
+      };
+      for (at = 0; at < count; at += 1) {
+        const frame = base + at;
+        if (!this.started) {
+          this.keepPreroll(frame, sampleAt);
+          if (this.armFrame === null || frame < this.armFrame) continue;
+          this.begin();
+        }
+        if (this.step(frame, sampleAt)) return;
+      }
+    }
+
+    /** Capture begins: the first segment opens on the arm frame. */
+    begin() {
+      this.started = true;
+      this.segment = 0;
+      this.segmentStart = this.armFrame;
+      this.segmentFrames = 0;
+      this.chunkIndex = 0;
+    }
+
+    /**
+     * Keep one input frame in the pre-roll ring.
+     * @param {number} frame the absolute frame
+     * @param {(channel: number) => number} sampleAt
+     * @returns {void}
+     */
+    keepPreroll(frame, sampleAt) {
+      const slot = frame % this.prerollFrames;
+      for (let channel = 0; channel < this.channels; channel += 1) {
+        this.preroll[slot * this.channels + channel] = sampleAt(channel);
+      }
+      this.prerollEnd = frame + 1;
+    }
+
+    /**
+     * One channel of a past frame from the pre-roll, or silence when that
+     * frame is older than the pre-roll (or was never seen).
+     * @param {number} frame
+     * @param {number} channel
+     * @returns {number}
+     */
+    prerollSample(frame, channel) {
+      if (this.prerollEnd === null || frame >= this.prerollEnd || frame < this.prerollEnd - this.prerollFrames) {
+        return 0;
+      }
+      return this.preroll[(frame % this.prerollFrames) * this.channels + channel];
+    }
+
+    /**
+     * Capture one frame: apply the splits that fall on it, stop on the stop
+     * frame, otherwise add its samples to the open chunk.
+     * @param {number} frame the absolute frame
+     * @param {(channel: number) => number} sampleAt
+     * @returns {boolean} true when the recording finished on this frame
+     */
+    step(frame, sampleAt) {
+      // A split closes the open segment and opens the next one on its own
+      // frame. A split at or before the segment's own start is history.
+      while (this.nextSplit < this.splits.length) {
+        const split = this.splits[this.nextSplit];
+        if (this.segmentStart !== null && split <= this.segmentStart) {
+          this.nextSplit += 1;
+          continue;
+        }
+        if (split > frame) break;
+        this.closeSegment(split);
+        this.nextSplit += 1;
+      }
+
+      if (this.stopFrame !== null && frame >= this.stopFrame) {
+        this.finish();
+        return true;
+      }
+
+      for (let channel = 0; channel < this.channels; channel += 1) {
+        this.pending[this.pendingFrames * this.channels + channel] = sampleAt(channel);
+      }
+      this.pendingFrames += 1;
+      this.segmentFrames += 1;
+      if (this.pendingFrames >= this.chunkFrames) this.flushChunk();
+      return false;
     }
 
     /**
