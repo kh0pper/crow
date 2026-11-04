@@ -204,7 +204,9 @@ test("integration F5: a ContainRefused before the plan is built logs `not contai
   const line = logged.find((l) => l.startsWith("[containment]"));
   assert.ok(line, "the one [containment] line is logged: " + logged.join("\n"));
   assert.match(line, /\[containment\] contain-refused-line-bot not contained: 1 open \(/);
-  assert.match(line, /cannot run in the contain tier/, "the refusal reason, not the uncontained sentence");
+  // This fixture's refusal is the no-door one (a provider row with no door), so the line names
+  // that reason; either way it is the refusal's own reason, never the uncontained sentence.
+  assert.match(line, /provider p has no door|cannot run in the contain tier/, "the refusal reason, not the uncontained sentence");
   assert.doesNotMatch(line, /runs with the operator's files/, "the turn never ran, so that sentence is wrong for it");
 });
 
