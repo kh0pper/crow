@@ -5,6 +5,11 @@
  * - Topic = hash(sorted pubkey pair) — unique per contact
  * - Challenge-response auth on connect: a contact proves the key pinned in its
  *   contact row, a sibling proves our own key (PT-3, private engineering notes)
+ * - One Crow ID can hold SEVERAL connections at once (a Crow's instances share
+ *   one identity, and a contact may be online in more than one place):
+ *   `connections` keeps the newest ("the contact", what send() reads) and
+ *   `peerConns` the whole bucket, so `sendTo(crowId, instanceId, …)` can reach a
+ *   named instance and a close promotes the survivor instead of going dark.
  * - Connection state tracking and reconnection
  */
 
@@ -34,6 +39,17 @@ export function hyperswarmInstanceSyncEnabled(env = process.env) {
 }
 
 const REFUSE_LOG_EVERY_MS = 60_000;
+// An eviction at the per-Crow cap is a steady-state condition on a busy
+// contact, so it is logged once per Crow id per HOUR (not the 60 s above).
+const EVICT_LOG_EVERY_MS = 3_600_000;
+
+/**
+ * The most live connections ONE Crow id may hold here (a Crow's instances share
+ * one crowId, so contacts and siblings share this bucket). At the cap the
+ * OLDEST connection is destroyed: an unroutable-but-live link would hold one of
+ * Hyperswarm's 64 global peers and could be missed by leaveContact.
+ */
+export const MAX_CONNS_PER_CROW = 16;
 
 // "contact <id> is on older Crow" is logged once per Crow ID per process.
 // Bounded by the contact list: only a peer that proved a pinned key gets here.
@@ -65,6 +81,51 @@ function verifies(fn) {
 /** Call a callback without awaiting it; a throw or rejection is contained. */
 function fire(fn) {
   try { Promise.resolve(fn()).catch(() => {}); } catch {}
+}
+
+/**
+ * The instance id a CONTACT claimed in its challenge, normalised exactly like
+ * the `meta.instanceId` handed to onPeerData (null unless it is in the enroll-id
+ * shape). Nothing proves it — every instance of one Crow shares one key — so
+ * the entry built from it is used for routing only, never for authorization.
+ */
+function claimedInstanceIdOf(state) {
+  const claimed = state?.peerInstanceId;
+  return typeof claimed === "string" && ENROLL_ID_RE.test(claimed) ? claimed : null;
+}
+
+/**
+ * An entry still worth routing to: not destroyed, not being destroyed, not
+ * closed, not refused. (The Noise streams here are streamx duplexes: destroy()
+ * sets `destroying` at once and `destroyed` only a tick later, so a frame sent
+ * in the same tick as a close must not be written into the dying stream.)
+ */
+function isLive(entry) {
+  const conn = entry?.conn;
+  return !!conn && conn.destroyed !== true && conn.destroying !== true
+    && entry.state?.closed !== true && entry.state?.refused !== true;
+}
+
+/** The newest live entry of a bucket, or null. */
+function newestLive(bucket) {
+  for (let i = (bucket?.length ?? 0) - 1; i >= 0; i--) if (isLive(bucket[i])) return bucket[i];
+  return null;
+}
+
+/**
+ * The newest live entry of a bucket that `sendTo` may route to: its instanceId
+ * matches AND the connection proved itself with a cb_sig. A contact's id is only
+ * a CLAIM, and a bare signature can be relayed from another connection, so an
+ * unbound connection never picks which of one Crow's connections gets its
+ * frames.
+ */
+function instanceEntry(bucket, instanceId) {
+  if (typeof instanceId !== "string" || !instanceId) return null;
+  for (let i = (bucket?.length ?? 0) - 1; i >= 0; i--) {
+    const e = bucket[i];
+    if (isLive(e) && e.instanceId === instanceId && e.state?.proof === "cb") return e;
+  }
+  return null;
 }
 
 /** A plausible Crow ID (checked before any lookup): a short printable token. */
@@ -175,6 +236,8 @@ export class PeerManager {
    * @param {number} [opts.postAdmitLineMax] bytes one line of an admitted peer
    *   may reach (default 16,711,679, or CROW_PEER_LINE_MAX_BYTES in opts.env;
    *   always clamped to [1 MiB, 16,711,679])
+   * @param {number} [opts.maxConnsPerCrow] live connections one Crow id may hold
+   *   (MAX_CONNS_PER_CROW); at the cap the oldest is destroyed
    */
   constructor(identity, {
     env = process.env,
@@ -184,6 +247,7 @@ export class PeerManager {
     preAuthMs = 15_000,
     pairBindingWaitMs = 10_000,
     postAdmitLineMax = postAdmitLineMaxFromEnv(env),
+    maxConnsPerCrow = MAX_CONNS_PER_CROW,
   } = {}) {
     this.identity = identity;
     this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
@@ -213,8 +277,18 @@ export class PeerManager {
     this._refusalLog = new RefusalLog({ max: 256, intervalMs: REFUSE_LOG_EVERY_MS });
     this._noBindingLogged = false;
     this._lastRefuseLog = 0;
+    this.maxConnsPerCrow = Number.isSafeInteger(maxConnsPerCrow) && maxConnsPerCrow > 0
+      ? maxConnsPerCrow : MAX_CONNS_PER_CROW;
     this.swarm = null;
-    this.connections = new Map(); // crowId -> { conn, authenticated }
+    // crowId -> the NEWEST live entry. "The contact": what send(),
+    // isConnected(crowId) and getConnectedPeers() read, unchanged.
+    this.connections = new Map();
+    // crowId -> entry[], every admitted live connection, oldest -> newest. A
+    // Crow's instances share one crowId, so the bucket key is the AUTHENTICATED
+    // crowId and a claimed instance id only picks a connection INSIDE it.
+    this.peerConns = new Map();
+    this._admitSeq = 0; // orders entries inside a bucket (admit order)
+    this._evictLog = new RefusalLog({ max: 256, intervalMs: EVICT_LOG_EVERY_MS });
     this.topics = new Map(); // crowId -> topic buffer
     this.instanceSyncTopic = null; // Buffer — the instance sync DHT topic
     this.onPeerConnected = null; // callback(crowId, conn)
@@ -227,10 +301,13 @@ export class PeerManager {
     // state.remoteInstanceId can be proven, by PT-2a pair binding; sibling
     // connections never reach onPeerData.)
     // reply writes on THIS connection — the one the frame arrived on — and is a
-    // no-op once it has closed (Z1: send(crowId, …) can reach a sibling, because
-    // this.connections holds one connection per Crow id).
+    // no-op once it has closed (Z1: send(crowId, …) reaches the NEWEST live
+    // connection of that Crow id, which may be another instance).
     this.onPeerData = null;
-    this.onPeerDisconnected = null; // callback(crowId)
+    // callback(crowId) — the LAST connection of that Crow id is gone. A sibling
+    // closing while another connection stays up does not fire it. No server code
+    // consumes it today (the review of the per-instance plan confirmed that).
+    this.onPeerDisconnected = null;
     this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null, { peerMuxEarly }) — instance-to-instance connections
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — a proven sibling advertised its outgoing Hypercore feed key
     this.onInstanceAdmitting = null; // sync (conn) => muxer|null — a sibling is being admitted: put the replication muxer on the stream before our `authenticated`
@@ -299,7 +376,9 @@ export class PeerManager {
   }
 
   /**
-   * Leave a contact's topic (disconnect).
+   * Leave a contact's topic (disconnect) — and destroy EVERY connection of it:
+   * one Crow id can hold several (its instances), and leaving must not leave one
+   * live but unrouteable.
    */
   async leaveContact(crowId) {
     const topic = this.topics.get(crowId);
@@ -307,10 +386,12 @@ export class PeerManager {
       await this.swarm.leave(topic);
       this.topics.delete(crowId);
     }
-    const conn = this.connections.get(crowId);
-    if (conn) {
-      conn.conn.destroy();
-      this.connections.delete(crowId);
+    const bucket = this.peerConns.get(crowId) ?? [];
+    // Clear the index first: the closes that follow are no-ops, not promotions.
+    this.peerConns.delete(crowId);
+    this.connections.delete(crowId);
+    for (const entry of bucket) {
+      try { entry.conn.destroy(); } catch { /* already gone */ }
     }
   }
 
@@ -404,7 +485,7 @@ export class PeerManager {
       held: [],
       preBytes: 0,
       preLines: 0,
-      hadEntry: false,
+      lastGone: false, // onPeerDisconnected already fired for this connection
     };
 
     // On instance-sync connections the instance_id lets the peer find OUR row
@@ -511,26 +592,26 @@ export class PeerManager {
       }
     });
 
-    // Remove only OUR entry: a refused or superseded connection closing must
-    // never knock the live connection for the same Crow ID offline.
-    const dropEntry = () => {
-      const id = state.remoteCrowId;
-      if (id && this.connections.get(id)?.conn === conn) {
-        this.connections.delete(id);
-        state.hadEntry = true;
-      }
+    // Remove only OUR entry (matched by connection, never by crowId): a
+    // refused, superseded or evicted connection leaving must never knock a live
+    // one out of routing. `_dropConnection` promotes a survivor when the entry
+    // that owned `connections` goes; onPeerDisconnected fires once, on the last.
+    const onGone = () => {
+      const { last } = this._dropConnection(state.remoteCrowId, conn);
+      if (!last || state.lastGone) return;
+      state.lastGone = true;
+      if (this.onPeerDisconnected) this.onPeerDisconnected(state.remoteCrowId);
     };
     conn.on("close", () => {
       state.closed = true;
       for (const w of state.pbWaiters) w(null);
       state.pbWaiters = [];
       clearTimeout(timer);
-      dropEntry();
-      if (state.hadEntry && this.onPeerDisconnected) this.onPeerDisconnected(state.remoteCrowId);
+      onGone();
     });
 
     conn.on("error", () => {
-      dropEntry();
+      onGone();
     });
   }
 
@@ -885,12 +966,37 @@ export class PeerManager {
     const msg = state.admitMsg;
     const crowId = state.remoteCrowId;
 
-    this.connections.set(crowId, {
+    const entry = {
       conn,
+      state,
       authenticated: true,
       pubkey: state.kind === "contact" ? state.pinnedKey : this.identity.ed25519Pubkey,
       peerLineMax: state.peerLineMax ?? null, // null: an older peer, send() uses our own cap
-    });
+      // contact: the id it CLAIMED in its challenge (unproven, routing only);
+      // sibling: the id PT-2a pair binding proved (state.remoteInstanceId).
+      instanceId: state.kind === "instance" ? state.remoteInstanceId : claimedInstanceIdOf(state),
+      admitSeq: ++this._admitSeq,
+    };
+
+    let bucket = this.peerConns.get(crowId);
+    if (!bucket) {
+      bucket = [];
+      this.peerConns.set(crowId, bucket);
+    }
+    bucket.push(entry);
+    this.connections.set(crowId, entry); // "the contact": the newest admission wins
+
+    // At the cap the OLDEST connection is destroyed, not left open: an
+    // unroutable live link would hold one of Hyperswarm's 64 global peers and
+    // could be missed by leaveContact. Its later `close` finds no entry here.
+    if (bucket.length > this.maxConnsPerCrow) {
+      for (const old of bucket.splice(0, bucket.length - this.maxConnsPerCrow)) {
+        try { old.conn.destroy(); } catch { /* already gone */ }
+      }
+      if (this._evictLog.shouldLog(crowId)) {
+        console.warn(`[peer-manager] ${logSafe(crowId)}: connection bucket at cap ${this.maxConnsPerCrow}, destroyed the oldest`);
+      }
+    }
 
     if (state.kind === "instance") {
       // An old sibling piggybacks its feed key on its (now verified)
@@ -910,6 +1016,36 @@ export class PeerManager {
       if (state.refused || state.closed) break;
       await this._dispatchAdmitted(conn, m, state);
     }
+  }
+
+  /**
+   * One connection of `crowId` is going away (close or error): remove exactly
+   * its entry — matched by connection, so a superseded or evicted connection
+   * never knocks a live one out of routing — and, when the entry that owned
+   * `connections` goes, promote the newest live survivor (the invisible-sibling
+   * fix: before this the sibling stayed open but unreachable).
+   * @returns {{removed:boolean, last:boolean}} `last`: no connection of this Crow is left.
+   */
+  _dropConnection(crowId, conn) {
+    const bucket = crowId ? this.peerConns.get(crowId) : null;
+    if (!bucket) return { removed: false, last: false };
+    const i = bucket.findIndex((e) => e.conn === conn);
+    if (i < 0) return { removed: false, last: false };
+    bucket.splice(i, 1);
+    if (bucket.length === 0) {
+      this.peerConns.delete(crowId);
+      this.connections.delete(crowId);
+      return { removed: true, last: true };
+    }
+    if (this.connections.get(crowId)?.conn === conn) this._promote(crowId, bucket);
+    return { removed: true, last: false };
+  }
+
+  /** Re-point `connections` at the newest live survivor of its bucket. */
+  _promote(crowId, bucket) {
+    const live = newestLive(bucket);
+    if (live) this.connections.set(crowId, live);
+    else this.connections.delete(crowId);
   }
 
   /** Answer an older asker's challenge, held until _admit (see _onChallenge). */
@@ -971,11 +1107,10 @@ export class PeerManager {
     if (!state.mutual || state.refused) return;
     if (state.kind === "contact" && msg.type === "data") {
       if (state.remoteCrowId && this.onPeerData) {
-        // The claimed id is passed only in the enroll-id shape; anything else is null.
-        const claimed = state.peerInstanceId;
         const meta = {
           proof: state.proof,
-          instanceId: typeof claimed === "string" && ENROLL_ID_RE.test(claimed) ? claimed : null,
+          // The same normalisation the connections entry uses (claimedInstanceIdOf).
+          instanceId: claimedInstanceIdOf(state),
           // Z1: bound to THIS connection, not to `connections.get(crowId)`. Paired
           // siblings share one Crow id, so `send(crowId, …)` may reach the sibling
           // that did not ask; an ack or a refusal must answer the asker.
@@ -1031,6 +1166,10 @@ export class PeerManager {
    * peer's advertised line_max if lower) is refused BEFORE anything is
    * written (PeerLineOverCapError): the receiver would kill the link on it,
    * and the item would be lost.
+   *
+   * Unchanged semantics: this writes on the NEWEST live connection of `crowId`
+   * ("the contact"), which may be another instance of it. A frame addressed to
+   * one instance goes through sendTo().
    */
   send(crowId, payload) {
     const peer = this.connections.get(crowId);
@@ -1040,8 +1179,39 @@ export class PeerManager {
     peer.conn.write(dataLine(payload, this.lineMaxFor(crowId)));
   }
 
-  /** The longest line we may send `crowId`: our cap, or the peer's advertised line_max if lower. */
-  lineMaxFor(crowId) {
+  /**
+   * Send `payload` to the connection of `crowId` whose instance id is
+   * `instanceId`. Never throws for "not there" and never falls back: a frame
+   * addressed to one instance must not land on another (or on a connection with
+   * no id) — it waits for its target instead.
+   *
+   * The id is read from the peer's challenge INSIDE the Noise channel
+   * (_onChallenge -> state.peerInstanceId), so only the endpoint can set it; for
+   * a contact it is still a CLAIM (all of one Crow's instances share a key),
+   * which is why only a cb_sig-bound connection is routed to: a bare signature
+   * can be relayed from another connection. Siblings carry their pair-binding
+   * proven remoteInstanceId.
+   *
+   * @returns {boolean} whether a line was written; a frame over that
+   *   connection's cap throws PeerLineOverCapError before anything is written.
+   */
+  sendTo(crowId, instanceId, payload) {
+    const entry = instanceEntry(this.peerConns.get(crowId), instanceId);
+    if (!entry) return false;
+    entry.conn.write(dataLine(payload, this.lineMaxForPeer(entry)));
+    return true;
+  }
+
+  /**
+   * The longest line we may send `crowId`: our cap, or the peer's advertised
+   * line_max if lower. With `instanceId`: the cap of THAT connection (the one
+   * sendTo would write on); not routed there, our own cap.
+   */
+  lineMaxFor(crowId, instanceId) {
+    if (instanceId !== undefined) {
+      const entry = instanceEntry(this.peerConns.get(crowId), instanceId);
+      return entry ? this.lineMaxForPeer(entry) : this.postAdmitLineMax;
+    }
     return this.lineMaxForPeer(this.connections.get(crowId));
   }
 
@@ -1082,11 +1252,31 @@ export class PeerManager {
   }
 
   /**
-   * Check if a peer is connected.
+   * Without `instanceId`: unchanged — is the newest live connection of this Crow
+   * up? With it: can `sendTo` reach that instance right now (the very same
+   * predicate, so a claim on an unbound connection answers false).
    */
-  isConnected(crowId) {
+  isConnected(crowId, instanceId) {
+    if (instanceId !== undefined) return !!instanceEntry(this.peerConns.get(crowId), instanceId);
     const peer = this.connections.get(crowId);
     return peer?.authenticated || false;
+  }
+
+  /**
+   * The instance ids `sendTo` can reach right now, newest first, each once.
+   * A contact's ids are claims, a sibling's are pair-binding proven; a
+   * connection that claims no id (an older peer) never appears.
+   */
+  connectedInstances(crowId) {
+    const bucket = this.peerConns.get(crowId);
+    const out = [];
+    for (let i = (bucket?.length ?? 0) - 1; i >= 0; i--) {
+      const e = bucket[i];
+      if (!isLive(e) || e.state?.proof !== "cb") continue;
+      const id = e.instanceId;
+      if (typeof id === "string" && id && !out.includes(id)) out.push(id);
+    }
+    return out;
   }
 
   /**
@@ -1107,6 +1297,7 @@ export class PeerManager {
       this.swarm = null;
     }
     this.connections.clear();
+    this.peerConns.clear();
     this.topics.clear();
   }
 }
