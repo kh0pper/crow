@@ -1,0 +1,1472 @@
+#!/usr/bin/env bash
+# Crow engine fence (implementation plan PR S4). A root-run product file: the
+# operator installs it, writes the conf and applies it. Crow never writes a
+# firewall rule and never restarts a service.
+#
+# WHY a raw-table rule. Docker publishes a port by DNAT, which matches on the
+# DESTINATION only, and Linux accepts a packet for a local address arriving on
+# any interface. So an engine published on this host's tailnet address is also
+# reachable from the LAN and from every container bridge. The fence drops those
+# packets in the raw table's PREROUTING — before conntrack, before Docker's DNAT
+# and before FORWARD — for the published ports, allowing only loopback, the
+# engine's own bridge and the tailnet interface.
+#
+# WHY a dedicated chain. The exemptions have to be RETURNs: an ACCEPT in raw
+# PREROUTING would end raw processing and skip Docker's own raw drops for other
+# ports. CROW-ENGINE-FENCE is filled first and jumped to from PREROUTING at
+# position 1 only after it is complete.
+#
+# Everything runs under flock, so the re-apply timer and an interactive apply
+# never overlap, and every iptables call passes `-w` so a call waits for the
+# xtables lock instead of failing when another process (tailscaled, at boot)
+# holds it. No address appears in this file: they come from the conf or from
+# `tailscale ip` at apply time.
+#
+# Commands:
+#   check            validate the conf, read the Docker facts, save the facts
+#                    file. Interactive only: this is the one mode that runs
+#                    docker, so it needs the daemon up.
+#   apply            check, then apply the rules.
+#   apply --boot     apply only, with ZERO docker calls (the unit's mode: the
+#                    daemon may not exist yet, and `docker info` here would
+#                    deadlock boot through docker.socket activation).
+#   status           print the live rules, the addresses used, the generation;
+#                    warn on a facts/conf/Docker-flags hash mismatch and on a
+#                    conf entry whose rule is no longer live. READ-ONLY: it
+#                    never writes the state file (apply and remove write it).
+#   remove <id>      drop one publish's rules from the live table. It edits the
+#                    live rules only: the conf is the operator's file, and an
+#                    interactive `apply` — or any conf edit — puts the rule
+#                    back. The re-apply run skips a transaction that is
+#                    byte-identical to the last applied one, so a removal
+#                    survives the timer.
+#   swap-check       compare an old fence's destination coverage with this
+#                    conf's, before the operator deletes the old rules. It
+#                    never deletes anything.
+#
+# Files (every path is overridable, see the environment below):
+#   conf   /etc/crow/engine-fence.conf         0640  operator-written, the only
+#                                                    input besides `tailscale ip`
+#   facts  /etc/crow/engine-fence.facts.json   0640  written by check and by an
+#                                                    interactive apply, read by
+#                                                    `apply --boot`
+#   state  /run/crow-engine-fence/state.json   0640  the unit's RuntimeDirectory,
+#                                                    group-readable by the
+#                                                    gateway's group (F1)
+#   hash   /run/crow-engine-fence/applied.sha256 0640 the transaction hash of the
+#                                                    last real apply: a run that
+#                                                    would restore the same bytes
+#                                                    restores nothing
+#
+# Exit codes: 0 ok, 2 usage, 10 conf unreadable, 11 conf line invalid, 12 conf
+# refused on principle, 13 unknown iptables flavour, 14 docker unreadable,
+# 15 unknown Docker firewall backend, 16 Docker bridge facts wrong or missing,
+# 17 facts file missing, 18 facts stale, 19 the restore transaction failed,
+# 20 a check refused, 21 the lock is held elsewhere, 22 the state directory is
+# unusable.
+set -euo pipefail
+umask 0027
+export LC_ALL=C
+
+PROGNAME=${0##*/}
+CHAIN=CROW-ENGINE-FENCE
+
+CONF=${CROW_ENGINE_FENCE_CONF:-/etc/crow/engine-fence.conf}
+FACTS=${CROW_ENGINE_FENCE_FACTS:-/etc/crow/engine-fence.facts.json}
+STATE=${CROW_ENGINE_FENCE_STATE:-/run/crow-engine-fence/state.json}
+case "$STATE" in
+  */*) STATE_DIR=${STATE%/*} ;;
+  *) STATE_DIR=. ;;
+esac
+APPLIED_HASH=$STATE_DIR/applied.sha256
+# The live rule count the last apply (or remove) left in each family. The skip
+# below compares it with the live chain: a flushed chain or a deleted jump is
+# invisible to the transaction hash, so a byte-identical run must not skip over
+# it. `remove` records its reduced count here so the timer leaves it alone.
+APPLIED_COUNTS=$STATE_DIR/applied.counts
+# The gateway's group, from /etc/crow/engine-fence.env. Never a literal here:
+# a group name in a shipped file would be a host detail. It reaches chgrp, so it
+# is checked as a name before it is used, exactly as crow-publish-snapshot does.
+FENCE_GROUP=${CROW_ENGINE_FENCE_GROUP:-}
+GROUP_RE='^[a-z_][a-z0-9_-]*\$?$'
+DAEMON_JSON=${CROW_ENGINE_FENCE_DAEMON_JSON:-/etc/docker/daemon.json}
+DOCKER_DROPIN_DIR=${CROW_ENGINE_FENCE_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d}
+DOCKER_UNIT_FILE=${CROW_ENGINE_FENCE_DOCKER_UNIT:-/lib/systemd/system/docker.service}
+# Seconds to keep asking tailscale for an address before falling back to the
+# port-only rule (the boot race; never a failed unit).
+TAILSCALE_WAIT=${CROW_ENGINE_FENCE_TAILSCALE_WAIT:-5}
+LOCK_WAIT=${CROW_ENGINE_FENCE_LOCK_WAIT:-30}
+# One wedged `tailscale ip` means the address is unresolvable, not that the unit
+# should hang: the call is bounded by coreutils timeout.
+TAILSCALE_TIMEOUT=${CROW_ENGINE_FENCE_TAILSCALE_TIMEOUT:-3}
+# The xtables lock (--wait seconds). On iptables-legacy a call fails immediately
+# when another process holds /run/xtables.lock — tailscaled does, at boot — so
+# every call that touches a table waits for it.
+XT_WAIT=${CROW_ENGINE_FENCE_XT_WAIT:-10}
+# IPv6 is decided by the STACK, not by the binary: ip6tables can be installed on
+# a host whose v6 module is disabled, and rules for a family the kernel does not
+# run are noise. The path is overridable so tests can model both hosts.
+V6_STACK=${CROW_ENGINE_FENCE_V6_STACK:-/proc/net/if_inet6}
+
+INTERFACE=
+GENERATION=0
+SKIP_ID=
+PUB_KIND=()
+PUB_PORT=()
+PUB_ADDR=()
+PUB_ID=()
+PUB_CONSUMERS=()
+BRIDGES=()
+STATE_RULES=()
+
+warn() { printf '%s: %s\n' "$PROGNAME" "$*" >&2; }
+die() {
+  local code=$1
+  shift
+  printf '%s: %s\n' "$PROGNAME" "$*" >&2
+  exit "$code"
+}
+
+usage() {
+  cat <<EOF
+usage: $PROGNAME <command> [args]
+
+  check              validate $CONF, read the Docker facts, save $FACTS
+                     (needs the Docker daemon up; the only mode that runs it)
+  apply              check, then apply the rules
+  apply --boot       apply with no docker call at all (the unit's mode)
+  status             show the live rules, the tailnet addresses, the generation
+                     (read-only: it writes nothing)
+  remove <id>        drop one publish's rules from the live table (the conf is
+                     left alone)
+  swap-check [--old-tag <tag>]
+                     compare an old fence's destination coverage with this
+                     conf's before the old rules are deleted
+
+The conf holds one directive per line:
+
+  interface <ifname>          inbound interface allowed to reach the port
+  bridge <ifname>             a bridge Crow created for one engine
+  publish tailnet <port>      published on this host's tailnet address (resolved
+                              at apply time; no source exemptions)
+  publish port-only <port>    no destination match: protects a wildcard or
+                              unknown-address publish
+  publish lan <addr> <port> consumer <addr> [<addr> ...]
+                              a LAN-address publish; source exemptions are
+                              allowed here only
+
+Exit codes are listed in the script header and in docs/guide/engine-fence.md.
+EOF
+}
+
+# ─── Validators ─────────────────────────────────────────────────────────────
+
+is_uint_port() {
+  local p=$1
+  [[ $p =~ ^[0-9]{1,5}$ ]] || return 1
+  [ "$((10#$p))" -ge 1 ] && [ "$((10#$p))" -le 65535 ]
+}
+
+is_ipv4() {
+  local a=$1 o
+  [[ $a =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1:4}"; do
+    [ "$((10#$o))" -le 255 ] || return 1
+  done
+  return 0
+}
+
+is_ipv6() {
+  local a=$1 head= tail= seg count=0 double=0
+  [[ $a == *:* ]] || return 1
+  [[ $a =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  # `:::`, and a second `::`, are not spellings iptables accepts.
+  case $a in
+    *:::*) return 1 ;;
+  esac
+  if [[ $a == *::* ]]; then
+    double=1
+    head=${a%%::*}
+    tail=${a#*::}
+    [[ $tail == *::* ]] && return 1
+  else
+    head=$a
+  fi
+  local IFS=:
+  for seg in $head $tail; do
+    [ -n "$seg" ] || continue
+    [ ${#seg} -le 4 ] || return 1
+    count=$((count + 1))
+  done
+  if [ "$double" -eq 1 ]; then
+    [ "$count" -lt 8 ]
+  else
+    [ "$count" -eq 8 ]
+  fi
+}
+
+is_ip() { is_ipv4 "$1" || is_ipv6 "$1"; }
+
+is_wildcard() {
+  case "$1" in
+    '' | '*') return 0 ;;
+  esac
+  # Every-octet-zero v4 spelling (a CIDR form is refused by the address check
+  # later) and the v6 unspecified address, spelled the ways it is written.
+  [[ $1 =~ ^0+(\.0+){3}$ ]] && return 0
+  [[ $1 =~ ^:+$ ]] && return 0
+  [[ $1 =~ ^0*(:0*)+$ ]] && return 0
+  return 1
+}
+
+is_loopback_addr() {
+  case "$1" in
+    '::1') return 0 ;;
+  esac
+  [[ $1 =~ ^127\. ]] && is_ipv4 "$1"
+}
+
+is_ifname() {
+  [[ $1 =~ ^[A-Za-z0-9_.-]{1,15}$ ]]
+}
+
+# A name is spliced into `-i <name>`, so one that begins with `-` would be read
+# as an option by iptables instead of as an interface.
+ifname_starts_with_dash() {
+  case "$1" in
+    -*) return 0 ;;
+  esac
+  return 1
+}
+
+# Tailscale numbers every tailnet from its own CGNAT range and its own ULA
+# prefix. A `publish lan` inside either is a tailnet publish wearing a LAN
+# address, and its consumer exemptions would hand tailnet peers a source match —
+# exactly what `publish tailnet` promises never to have. Written as arithmetic
+# and as group values on purpose: this shipped file carries no address literal.
+is_tailnet_v4() { # Tailscale's CGNAT /10: first octet fixed, second from 64
+  local a=$1 first rest second
+  is_ipv4 "$a" || return 1
+  first=${a%%.*}
+  [ "$((10#$first))" -eq 100 ] || return 1
+  rest=${a#*.}
+  second=${rest%%.*}
+  second=$((10#$second))
+  [ "$second" -ge 64 ] && [ "$second" -le 127 ]
+}
+
+# Tailscale's ULA range is a fixed /48, spelled here from its three 16-bit
+# group values so that no v6 literal appears in this file.
+TAILNET_ULA=$(printf '%x:%x:%x' $((0xfd7a)) $((0x115c)) $((0xa1e0)))
+
+is_tailnet_v6() {
+  local a=$1
+  is_ipv6 "$a" || return 1
+  a=$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')
+  # The first three groups are never compressed: the run of zeros a `::` stands
+  # for can only start after them.
+  [[ $a == "$TAILNET_ULA":* ]]
+}
+
+is_tailnet_addr() { is_tailnet_v4 "$1" || is_tailnet_v6 "$1"; }
+
+# Names that can never be exempted: the default bridge, Docker's own gateway
+# bridge and the other well-known hypervisor/CNI defaults. A fence that returns
+# for one of these protects nothing.
+bridge_denied() {
+  case "$1" in
+    lo | docker0 | docker_gwbridge | virbr0 | virbr0-nic | lxcbr0 | cni0 | podman0) return 0 ;;
+  esac
+  return 1
+}
+
+is_consumer_ok() { # <addr-or-cidr> <publish-addr> -> 0 when usable as an exemption
+  local a=$1 pub=$2 base prefix max=128
+  case "$a" in
+    */*)
+      base=${a%/*}
+      prefix=${a#*/}
+      # A prefix is a NUMBER in range, never a word, and never /0: a /0
+      # exemption makes the DROP beside it unreachable.
+      [[ $prefix =~ ^[0-9]{1,3}$ ]] || return 1
+      is_ip "$base" || return 1
+      if is_ipv4 "$base"; then max=32; fi
+      prefix=$((10#$prefix))
+      [ "$prefix" -ge 1 ] && [ "$prefix" -le "$max" ] || return 1
+      ;;
+    *)
+      base=$a
+      is_ip "$base" || return 1
+      ;;
+  esac
+  # An exemption is spliced into its publish's DROP rule, so it has to be an
+  # address of that publish's own family.
+  if is_ipv4 "$pub"; then
+    is_ipv4 "$base"
+    return
+  fi
+  is_ipv6 "$base"
+}
+
+# ─── Conf ───────────────────────────────────────────────────────────────────
+
+conf_fail() { # <line> <message>
+  local no=$1
+  shift
+  die 11 "$CONF:$no: $*"
+}
+
+conf_refuse() { # <line> <message>
+  local no=$1
+  shift
+  die 12 "$CONF:$no: $*"
+}
+
+parse_conf() {
+  [ -e "$CONF" ] || die 10 "no conf at $CONF (write one from docs/guide/engine-fence.md)"
+  [ -r "$CONF" ] || die 10 "the conf is not readable: $CONF"
+  [ -f "$CONF" ] && [ ! -L "$CONF" ] || die 10 "the conf is not a regular file: $CONF"
+
+  INTERFACE=
+  PUB_KIND=()
+  PUB_PORT=()
+  PUB_ADDR=()
+  PUB_ID=()
+  PUB_CONSUMERS=()
+  BRIDGES=()
+
+  local line no=0 port kind addr
+  local -a tok=()
+  local seen_ports=' '
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    no=$((no + 1))
+    line=${line%%#*}
+    line=$(printf '%s' "$line" | tr -s '[:space:]' ' ')
+    line=${line# }
+    line=${line% }
+    [ -n "$line" ] || continue
+    read -r -a tok <<<"$line"
+
+    case ${tok[0]} in
+      interface)
+        [ "${#tok[@]}" -eq 2 ] || conf_fail "$no" "interface takes exactly one name"
+        is_ifname "${tok[1]}" || conf_fail "$no" "not a valid interface name: ${tok[1]}"
+        ifname_starts_with_dash "${tok[1]}" &&
+          conf_fail "$no" "an interface name may not start with '-': ${tok[1]}"
+        bridge_denied "${tok[1]}" &&
+          conf_refuse "$no" "${tok[1]} can never be the fence interface: a RETURN for it fences nothing"
+        [ -z "$INTERFACE" ] || conf_fail "$no" "only one interface directive is allowed"
+        INTERFACE=${tok[1]}
+        ;;
+      bridge)
+        [ "${#tok[@]}" -eq 2 ] || conf_fail "$no" "bridge takes exactly one name"
+        is_ifname "${tok[1]}" || conf_fail "$no" "not a valid bridge name: ${tok[1]}"
+        ifname_starts_with_dash "${tok[1]}" &&
+          conf_fail "$no" "a bridge name may not start with '-': ${tok[1]}"
+        bridge_denied "${tok[1]}" &&
+          conf_refuse "$no" "${tok[1]} can never be exempted: it is the default bridge or a well-known shared interface"
+        local b
+        for b in ${BRIDGES[@]+"${BRIDGES[@]}"}; do
+          [ "$b" = "${tok[1]}" ] && conf_fail "$no" "bridge ${tok[1]} is listed twice"
+        done
+        BRIDGES+=("${tok[1]}")
+        ;;
+      publish)
+        kind=${tok[1]:-}
+        addr=''
+        port=''
+        case $kind in
+          tailnet)
+            [ "${#tok[@]}" -eq 3 ] ||
+              conf_refuse "$no" "publish tailnet takes exactly one port: a tailnet-IP publish carries no source exemptions"
+            port=${tok[2]}
+            is_uint_port "$port" || conf_fail "$no" "not a port: $port"
+            ;;
+          port-only)
+            [ "${#tok[@]}" -eq 3 ] ||
+              conf_refuse "$no" "publish port-only takes exactly one port: it has no destination to scope a consumer to"
+            port=${tok[2]}
+            is_uint_port "$port" || conf_fail "$no" "not a port: $port"
+            ;;
+          lan)
+            [ "${#tok[@]}" -ge 6 ] && [ "${tok[4]}" = consumer ] ||
+              conf_refuse "$no" "publish lan needs a consumer list: 'publish lan <addr> <port> consumer <addr> ...'"
+            addr=${tok[2]}
+            port=${tok[3]}
+            is_uint_port "$port" || conf_fail "$no" "not a port: $port"
+            if is_wildcard "$addr"; then
+              conf_refuse "$no" "a wildcard or empty address is not a publish address"
+            fi
+            is_ip "$addr" || conf_fail "$no" "not an address: $addr"
+            is_loopback_addr "$addr" && conf_refuse "$no" "$addr is loopback: nothing is published beyond loopback to fence"
+            is_tailnet_addr "$addr" &&
+              conf_refuse "$no" "$addr is a tailnet address: use 'publish tailnet', which carries no source exemptions"
+            ;;
+          *)
+            conf_fail "$no" "unknown publish kind: ${kind:-<none>}"
+            ;;
+        esac
+
+        local pnum=$((10#$port))
+        local seen=" $pnum "
+        case "$seen_ports" in
+          *"$seen"*) conf_refuse "$no" "port $port is published twice (one rule set per port)" ;;
+        esac
+        seen_ports="$seen_ports$pnum "
+
+        local id
+        case $kind in
+          tailnet) id="tailnet-$port" ;;
+          port-only) id="portonly-$port" ;;
+          lan) id="lan-$port" ;;
+        esac
+
+        local consumers=
+        if [ "$kind" = lan ]; then
+          local allow=0 i a
+          for i in "${!tok[@]}"; do
+            [ "$i" -ge 5 ] || continue
+            a=${tok[i]}
+            [ "$a" = confirm-range ] && allow=1
+          done
+          local count=0
+          for i in "${!tok[@]}"; do
+            [ "$i" -ge 5 ] || continue
+            a=${tok[i]}
+            [ "$a" = confirm-range ] && continue
+            case "$a" in
+              */*)
+                [ "$allow" -eq 1 ] ||
+                  conf_refuse "$no" "consumer $a is not a single address (a range needs an explicit confirm-range token)"
+                ;;
+            esac
+            is_consumer_ok "$a" "$addr" ||
+              conf_fail "$no" "consumer $a must be an address or a CIDR of the publish's own family ($addr), with a numeric prefix from 1 to 32/128 (/0 is refused)"
+            count=$((count + 1))
+            consumers="$consumers${consumers:+ }$a"
+          done
+          [ "$count" -ge 1 ] || conf_refuse "$no" "publish lan needs at least one consumer address"
+        fi
+
+        PUB_KIND+=("$kind")
+        PUB_PORT+=("$pnum")
+        PUB_ADDR+=("$addr")
+        PUB_ID+=("$id")
+        PUB_CONSUMERS+=("$consumers")
+        ;;
+      *)
+        conf_fail "$no" "unknown directive: ${tok[0]}"
+        ;;
+    esac
+  done <"$CONF"
+
+  [ -n "$INTERFACE" ] ||
+    die 11 "$CONF: no 'interface' directive: the fence pins every rule to one allowed inbound interface"
+  if [ "${#PUB_KIND[@]}" -eq 0 ]; then
+    die 11 "$CONF: no 'publish' directive: there is nothing to fence"
+  fi
+
+  GENERATION=$((16#$(sha256sum -- "$CONF" | cut -c1-7)))
+}
+
+conf_sha() { sha256sum -- "$CONF" | cut -d' ' -f1; }
+
+# ─── Rule text ──────────────────────────────────────────────────────────────
+
+rule_tag() { printf '%s' "crow-engine-fence:$1:g$GENERATION"; }
+
+# The rule the operator approved: destination, protocol, port and the pinned
+# inbound interface, nothing else (no conntrack, no source, no other protocol).
+drop_rule() { # <addr|""> <port> <id>
+  local addr=$1 port=$2 id=$3
+  if [ -n "$addr" ]; then
+    printf -- '-A %s -d %s -p tcp -m tcp --dport %s ! -i %s -m comment --comment "%s" -j DROP\n' \
+      "$CHAIN" "$addr" "$port" "$INTERFACE" "$(rule_tag "$id")"
+  else
+    printf -- '-A %s -p tcp -m tcp --dport %s -m addrtype --dst-type LOCAL ! -i %s -m comment --comment "%s" -j DROP\n' \
+      "$CHAIN" "$port" "$INTERFACE" "$(rule_tag "$id"):portonly"
+  fi
+}
+
+# An exemption: the same destination match as its DROP, then RETURN, so only the
+# fence chain ends. It must come before the DROP in the chain.
+return_rule() { # <addr|""> <port> <id> <suffix> <match>
+  local addr=$1 port=$2 id=$3 suffix=$4 match=$5
+  if [ -n "$addr" ]; then
+    printf -- '-A %s -d %s -p tcp -m tcp --dport %s %s -m comment --comment "%s" -j RETURN\n' \
+      "$CHAIN" "$addr" "$port" "$match" "$(rule_tag "$id"):$suffix"
+  else
+    printf -- '-A %s -p tcp -m tcp --dport %s -m addrtype --dst-type LOCAL %s -m comment --comment "%s" -j RETURN\n' \
+      "$CHAIN" "$port" "$match" "$(rule_tag "$id"):$suffix"
+  fi
+}
+
+publish_in_family() { # <idx> <family> -> 0 when this publish has rules there
+  local i=$1 fam=$2
+  case ${PUB_KIND[i]} in
+    lan)
+      if [ "$fam" = 4 ]; then is_ipv4 "${PUB_ADDR[i]}"; else is_ipv6 "${PUB_ADDR[i]}"; fi
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+publish_addr() { # <idx> <family> <tailnet-addr> -> effective -d (empty = port-only)
+  local i=$1
+  case ${PUB_KIND[i]} in
+    lan) printf '%s' "${PUB_ADDR[i]}" ;;
+    port-only) printf '' ;;
+    *) printf '%s' "$3" ;;
+  esac
+}
+
+family_rule_text() { # <family> <tailnet-addr>
+  local fam=$1 tn=$2
+  local i addr port id c
+  local n=0
+  for i in "${!PUB_KIND[@]}"; do
+    [ "${PUB_ID[i]}" = "${SKIP_ID:-}" ] && continue
+    publish_in_family "$i" "$fam" || continue
+    addr=$(publish_addr "$i" "$fam" "$tn")
+    port=${PUB_PORT[i]}
+    id=${PUB_ID[i]}
+
+    return_rule "$addr" "$port" "$id" "exempt-lo" "-i lo"
+    n=$((n + 1))
+    local b k=0
+    for b in ${BRIDGES[@]+"${BRIDGES[@]}"}; do
+      k=$((k + 1))
+      return_rule "$addr" "$port" "$id" "exempt-br$k" "-i $b"
+      n=$((n + 1))
+    done
+    local j=0
+    for c in ${PUB_CONSUMERS[i]:-}; do
+      j=$((j + 1))
+      return_rule "$addr" "$port" "$id" "exempt-src$j" "-s $c"
+      n=$((n + 1))
+    done
+    drop_rule "$addr" "$port" "$id"
+    n=$((n + 1))
+  done
+  [ "$n" -gt 0 ]
+}
+
+restore_text() { # <family> <tailnet-addr> -> one restore transaction
+  local fam=$1 tn=$2 rules
+  rules=$(family_rule_text "$fam" "$tn") || rules=''
+  if [ -n "$rules" ]; then
+    printf '*raw\n:%s - [0:0]\n%s\nCOMMIT\n' "$CHAIN" "$rules"
+  else
+    # A family with no rules still gets a transaction: it declares the chain
+    # empty, which is how a chain that lost its last rule (a publish that moved
+    # family, a removal) is emptied instead of kept.
+    printf '*raw\n:%s - [0:0]\nCOMMIT\n' "$CHAIN"
+  fi
+}
+
+transaction_hash() { # <v4-text> <v6-text> -> the hash the skip compares
+  printf '%s\n--v6--\n%s\n' "$1" "$2" | sha256sum | cut -d' ' -f1
+}
+
+# ─── Applying ───────────────────────────────────────────────────────────────
+
+apply_family() { # <family> <restore-text>
+  local fam=$1 text=$2 bin has_rules=0
+  [ -n "$text" ] || return 0
+  case "$fam" in
+    4) bin=iptables ;;
+    6) bin=ip6tables ;;
+  esac
+  if printf '%s\n' "$text" | grep -E '^-A ' >/dev/null; then
+    has_rules=1
+  fi
+  # No rules for this family: the chain is emptied when it exists (so a stale
+  # DROP never lingers) and left alone when it never did (so a v4-only host
+  # gains no empty v6 chain, and a v6-less host gains nothing at all).
+  if [ "$has_rules" -eq 0 ]; then
+    if ! "$bin" -w "$XT_WAIT" -t raw -S "$CHAIN" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  printf '%s' "$text" | "${bin}-restore" -w "$XT_WAIT" --noflush ||
+    die 19 "${bin}-restore failed: the live rules were left as they were"
+  [ "$has_rules" -eq 1 ] || return 0
+  # Only now that the chain is complete is it reachable: never jump to a chain
+  # that is empty or half built.
+  if ! "$bin" -w "$XT_WAIT" -t raw -C PREROUTING -j "$CHAIN" >/dev/null 2>&1; then
+    "$bin" -w "$XT_WAIT" -t raw -I PREROUTING 1 -j "$CHAIN" ||
+      die 19 "$bin: cannot jump PREROUTING to $CHAIN"
+  fi
+}
+
+resolve_tailnet() { # <family> -> the address on stdout, or exit 1
+  local fam=$1 out addr started now
+  started=$(date +%s)
+  while :; do
+    out=''
+    # A wedged tailscale means the address is unresolvable: bounded, so the
+    # apply falls back to the port-only rule instead of hanging the unit.
+    out=$(timeout "$TAILSCALE_TIMEOUT" tailscale ip -"$fam" 2>/dev/null) || out=''
+    while IFS= read -r addr; do
+      addr=$(printf '%s' "$addr" | tr -d '[:space:]')
+      [ -n "$addr" ] || continue
+      case "$fam" in
+        4) if is_ipv4 "$addr"; then printf '%s' "$addr"; return 0; fi ;;
+        6) if is_ipv6 "$addr"; then printf '%s' "$addr"; return 0; fi ;;
+      esac
+    done <<<"$out"
+    now=$(date +%s)
+    [ $((now - started)) -lt "$TAILSCALE_WAIT" ] || return 1
+    sleep 1
+  done
+}
+
+# IPv6 comes from the stack, never from `ip6tables --version`.
+has_v6_stack() { [ -e "$V6_STACK" ]; }
+
+# The restore binary, not the bare `ip6tables` one: a host can carry one half of
+# the pair. A family this script cannot restore is a family it must not write,
+# and a stack without the binary is a warning, never a failed unit.
+has_v6_restore() { command -v ip6tables-restore >/dev/null 2>&1; }
+v6_rules_enabled() { has_v6_stack && has_v6_restore; }
+
+json_str() { # <text> -> a JSON string literal
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '"%s"' "$s"
+}
+
+state_json() { # <flavour> <backend> <tn4> <tn6> -> the whole document
+  local flavour=$1 backend=$2 tn4=$3 tn6=$4
+  local first=1 r
+  printf '{\n'
+  printf '  "generation": %s,\n' "$(json_str "g$GENERATION")"
+  printf '  "applied_at": %s,\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+  printf '  "backend": { "iptables_flavour": %s, "docker_firewall_backend": %s },\n' \
+    "$(json_str "$flavour")" "$(json_str "$backend")"
+  printf '  "tailnet": { "v4": %s, "v6": %s },\n' \
+    "$([ -n "$tn4" ] && json_str "$tn4" || printf 'null')" \
+    "$([ -n "$tn6" ] && json_str "$tn6" || printf 'null')"
+  printf '  "rules": ['
+  for r in ${STATE_RULES[@]+"${STATE_RULES[@]}"}; do
+    if [ "$first" -eq 1 ]; then
+      first=0
+      printf '\n%s' "$r"
+    else
+      printf ',\n%s' "$r"
+    fi
+  done
+  [ "$first" -eq 1 ] && printf ']' || printf '\n  ]'
+  printf '\n}\n'
+}
+
+state_rule_json() { # <id> <family> <addr|""> <port> <exempt...>
+  local id=$1 fam=$2 addr=$3 port=$4
+  shift 4
+  local kind=addressed addr_json=null ex='' e first=1
+  [ -n "$addr" ] && addr_json=$(json_str "$addr") || kind=port-only
+  for e in "$@"; do
+    if [ "$first" -eq 1 ]; then first=0; else ex="$ex, "; fi
+    ex="$ex$(json_str "$e")"
+  done
+  printf '    { "id": %s, "family": %s, "addr": %s, "kind": %s, "port": %d, "if": %s, "exempt": [%s] }' \
+    "$(json_str "$id")" "$(json_str "v$fam")" "$addr_json" "$(json_str "$kind")" "$port" \
+    "$(json_str "$INTERFACE")" "$ex"
+}
+
+build_state_rules() { # <tn4> <tn6>
+  local tn4=$1 tn6=$2
+  STATE_RULES=()
+  local i fam tn addr port id
+  for fam in 4 6; do
+    if [ "$fam" = 6 ] && ! v6_rules_enabled; then
+      continue
+    fi
+    [ "$fam" = 4 ] && tn=$tn4 || tn=$tn6
+    for i in "${!PUB_KIND[@]}"; do
+      [ "${PUB_ID[i]}" = "${SKIP_ID:-}" ] && continue
+      publish_in_family "$i" "$fam" || continue
+      addr=$(publish_addr "$i" "$fam" "$tn")
+      port=${PUB_PORT[i]}
+      id=${PUB_ID[i]}
+      local -a exempt=("lo")
+      local b c
+      for b in ${BRIDGES[@]+"${BRIDGES[@]}"}; do exempt+=("$b"); done
+      for c in ${PUB_CONSUMERS[i]:-}; do exempt+=("$c"); done
+      STATE_RULES+=("$(state_rule_json "$id" "$fam" "$addr" "$port" "${exempt[@]}")")
+    done
+  done
+}
+
+strip_applied_at() { grep -v '"applied_at"' || true; }
+
+write_state() { # <flavour> <backend> <tn4> <tn6>
+  local flavour=$1 backend=$2 tn4=$3 tn6=$4 text current tmp
+  mkdir -p -- "$STATE_DIR" || die 22 "cannot create the state directory: $STATE_DIR"
+  if [ -n "$FENCE_GROUP" ]; then
+    # `--` first: a group value is never read as an option.
+    chgrp -- "$FENCE_GROUP" "$STATE_DIR" || die 22 "cannot set group $FENCE_GROUP on $STATE_DIR"
+  fi
+  chmod 0750 -- "$STATE_DIR" || die 22 "cannot set the mode of $STATE_DIR"
+
+  text=$(state_json "$flavour" "$backend" "$tn4" "$tn6")
+  current=''
+  if [ -f "$STATE" ]; then
+    current=$(cat -- "$STATE" 2>/dev/null) || current=''
+  fi
+  # Nothing changed: leave the file (and its applied_at) alone, so the re-apply
+  # timer is a real no-op and does not make every snapshot look stale to S6b.
+  if [ -n "$current" ] &&
+    [ "$(printf '%s' "$current" | strip_applied_at)" = "$(printf '%s' "$text" | strip_applied_at)" ]; then
+    return 0
+  fi
+  tmp=$(mktemp -- "$STATE_DIR/.state.XXXXXX") || die 22 "cannot write in $STATE_DIR"
+  printf '%s' "$text" >"$tmp"
+  chmod 0640 -- "$tmp" || die 22 "cannot set the state file's mode"
+  if [ -n "$FENCE_GROUP" ]; then
+    chgrp -- "$FENCE_GROUP" "$tmp" || die 22 "cannot set the state file's group"
+  fi
+  mv -f -- "$tmp" "$STATE" || die 22 "cannot install $STATE"
+}
+
+# ─── the transaction hash: what makes a re-apply run a real no-op ──────────
+
+write_applied_hash() { # <hash>
+  local hash=$1 tmp
+  mkdir -p -- "$STATE_DIR" || die 22 "cannot create the state directory: $STATE_DIR"
+  tmp=$(mktemp -- "$STATE_DIR/.applied.XXXXXX") || die 22 "cannot write in $STATE_DIR"
+  printf '%s\n' "$hash" >"$tmp"
+  chmod 0640 -- "$tmp" || die 22 "cannot set the applied-hash file's mode"
+  if [ -n "$FENCE_GROUP" ]; then
+    chgrp -- "$FENCE_GROUP" "$tmp" || die 22 "cannot set the applied-hash file's group"
+  fi
+  mv -f -- "$tmp" "$APPLIED_HASH" || die 22 "cannot install $APPLIED_HASH"
+}
+
+applied_hash_matches() { # <hash>
+  local saved
+  [ -r "$APPLIED_HASH" ] || return 1
+  saved=$(cat -- "$APPLIED_HASH" 2>/dev/null) || return 1
+  [ "$saved" = "$1" ]
+}
+
+restore_rule_count() { # <restore-text> -> the -A lines it declares
+  printf '%s\n' "$1" | grep -cE -- "^-A $CHAIN " || true
+}
+
+write_applied_counts() { # <v4-text> <v6-text>
+  local text4=$1 text6=$2 tmp
+  mkdir -p -- "$STATE_DIR" || die 22 "cannot create the state directory: $STATE_DIR"
+  tmp=$(mktemp -- "$STATE_DIR/.counts.XXXXXX") || die 22 "cannot write in $STATE_DIR"
+  printf '4 %s\n6 %s\n' "$(restore_rule_count "$text4")" "$(restore_rule_count "$text6")" >"$tmp"
+  chmod 0640 -- "$tmp" || die 22 "cannot set the applied-counts file's mode"
+  if [ -n "$FENCE_GROUP" ]; then
+    chgrp -- "$FENCE_GROUP" "$tmp" || die 22 "cannot set the applied-counts file's group"
+  fi
+  mv -f -- "$tmp" "$APPLIED_COUNTS" || die 22 "cannot install $APPLIED_COUNTS"
+}
+
+# The hash says "the transaction has not changed"; this says "the live chain is
+# still what that transaction left". For every family that should have rules,
+# the PREROUTING jump must exist and the chain must carry exactly the recorded
+# number of rules. Anything else means a flush or a hand-deleted jump that a
+# byte-identical skip would silently preserve.
+applied_rules_live() {
+  local fam expected bin count
+  [ -r "$APPLIED_COUNTS" ] || return 1
+  while read -r fam expected; do
+    case $fam in
+      4 | 6) ;;
+      *) return 1 ;;
+    esac
+    [[ ${expected:-} =~ ^[0-9]+$ ]] || return 1
+    [ "$expected" -gt 0 ] || continue
+    if [ "$fam" = 6 ] && ! has_v6_stack; then
+      continue
+    fi
+    case $fam in
+      4) bin=iptables ;;
+      6) bin=ip6tables ;;
+    esac
+    "$bin" -w "$XT_WAIT" -t raw -C PREROUTING -j "$CHAIN" >/dev/null 2>&1 || return 1
+    count=$("$bin" -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null |
+      grep -cE -- "^-A $CHAIN " || true)
+    [ "$count" = "$expected" ] || return 1
+  done <"$APPLIED_COUNTS"
+  return 0
+}
+
+# ─── boot path: no docker call of any kind ─────────────────────────────────
+
+boot_backend() { # prints the backend word from daemon.json
+  local text key
+  if [ ! -e "$DAEMON_JSON" ]; then
+    printf 'default'
+    return 0
+  fi
+  [ -r "$DAEMON_JSON" ] || {
+    printf 'unreadable'
+    return 0
+  }
+  text=$(tr -d ' \t\n\r' <"$DAEMON_JSON") || text=''
+  case $text in
+    \{*\}) ;;
+    *)
+      printf 'unparseable'
+      return 0
+      ;;
+  esac
+  key=$(printf '%s' "$text" | sed -n 's/.*"firewall-backend":"\([^"]*\)".*/\1/p')
+  case $key in
+    '') printf 'default' ;;
+    iptables) printf 'iptables' ;;
+    nftables) printf 'nftables' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+facts_field() { # <key> -> the first string value, or nothing
+  [ -r "$FACTS" ] || return 1
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" -- "$FACTS" | head -n1
+}
+
+facts_bridge_label_ok() { # <name> -> true | false | missing
+  local name=$1 line
+  [ -r "$FACTS" ] || {
+    printf 'missing'
+    return 0
+  }
+  line=$(grep -F "\"$name\": {" -- "$FACTS" 2>/dev/null | head -n1) || line=''
+  case $line in
+    '') printf 'missing' ;;
+    *'"label_ok": true'*) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
+# The Docker firewall flags, read from FILES only: daemon.json, every drop-in in
+# the docker.service drop-in directory, and the unit's ExecStart lines. This is
+# what makes an edit to any of them invalidate the facts — and it lives on the
+# boot path because the boot path must hash it without asking docker anything.
+docker_flags_text() {
+  local f
+  printf 'daemon: '
+  if [ -r "$DAEMON_JSON" ]; then cat -- "$DAEMON_JSON"; else printf '(absent)'; fi
+  printf '\n'
+  if [ -d "$DOCKER_DROPIN_DIR" ]; then
+    for f in "$DOCKER_DROPIN_DIR"/*.conf; do
+      [ -f "$f" ] || continue
+      printf 'dropin %s\n' "${f##*/}"
+      cat -- "$f"
+      printf '\n'
+    done
+  fi
+  if [ -r "$DOCKER_UNIT_FILE" ]; then
+    printf 'unit %s\n' "${DOCKER_UNIT_FILE##*/}"
+    grep -E '^[[:space:]]*ExecStart=' -- "$DOCKER_UNIT_FILE" || true
+  fi
+}
+
+docker_flags_sha() { docker_flags_text | sha256sum | cut -d' ' -f1; }
+
+boot_facts_or_die() {
+  [ -e "$FACTS" ] ||
+    die 17 "no facts file ($FACTS): run 'crow-engine-fence check' while the daemon is up, then re-run this"
+  local saved flags saved_flags
+  saved=$(facts_field conf_sha256) || saved=''
+  [ -n "$saved" ] ||
+    die 17 "the facts file ($FACTS) carries no conf hash: re-run 'crow-engine-fence check'"
+  [ "$saved" = "$(conf_sha)" ] ||
+    die 18 "the conf changed since the last check: run 'crow-engine-fence check' (then apply) before this can apply anything"
+  saved_flags=$(facts_field docker_flags_sha256) || saved_flags=''
+  [ -n "$saved_flags" ] ||
+    die 17 "the facts file ($FACTS) carries no Docker-flags hash: re-run 'crow-engine-fence check'"
+  flags=$(docker_flags_sha)
+  [ "$saved_flags" = "$flags" ] ||
+    die 18 "the Docker firewall flags changed since the last check: run 'crow-engine-fence check' before this can apply anything"
+}
+
+apply_rules_now() { # <flavour> <backend> <skip-a-byte-identical-transaction 0|1>
+  local flavour=$1 backend=$2 skip=$3 tn4= tn6= text4 text6 v6=0 hash
+  tn4=$(resolve_tailnet 4) || tn4=
+  if v6_rules_enabled; then
+    v6=1
+    tn6=$(resolve_tailnet 6) || tn6=
+  elif has_v6_stack; then
+    warn "the IPv6 stack is present but ip6tables-restore is not installed: no v6 rules were written"
+  else
+    warn "no IPv6 stack ($V6_STACK is absent): no v6 rules were written"
+  fi
+  if [ -z "$tn4" ]; then
+    warn "no tailnet v4 address: the v4 rules are port-only (tailnet address unresolved)"
+  fi
+  if [ "$v6" -eq 1 ] && [ -z "$tn6" ]; then
+    warn "no tailnet v6 address: the v6 rules are port-only (tailnet address unresolved)"
+  fi
+
+  text4=$(restore_text 4 "$tn4")
+  text6=''
+  if [ "$v6" -eq 1 ]; then
+    text6=$(restore_text 6 "$tn6")
+  fi
+
+  # The re-apply path is a no-op when the transaction it would restore is
+  # byte-identical to the last applied one AND the live chain still matches
+  # what that transaction left. An interactive apply never skips — it is the
+  # documented way to put back a rule that `remove` took out.
+  hash=$(transaction_hash "$text4" "$text6")
+  if [ "$skip" -eq 1 ] && applied_hash_matches "$hash" && applied_rules_live; then
+    printf '%s: the rules are byte-identical to the last apply (g%s): nothing was restored\n' \
+      "$PROGNAME" "$GENERATION"
+    return 0
+  fi
+
+  apply_family 4 "$text4"
+  if [ "$v6" -eq 1 ]; then
+    apply_family 6 "$text6"
+  fi
+
+  build_state_rules "$tn4" "$tn6"
+  write_state "$flavour" "$backend" "$tn4" "$tn6"
+  write_applied_hash "$hash"
+  write_applied_counts "$text4" "$text6"
+
+  printf '%s: applied generation g%s (%s rules in %s)\n' \
+    "$PROGNAME" "$GENERATION" "${#STATE_RULES[@]}" "$CHAIN"
+}
+# ─── end of the boot path ──────────────────────────────────────────────────
+
+# ─── Docker facts: interactive only ────────────────────────────────────────
+
+docker_call() { docker "$@"; }
+
+iptables_flavour() { # prints nf_tables | legacy | nothing
+  local v
+  v=$(iptables --version 2>/dev/null) || {
+    printf ''
+    return 0
+  }
+  case $v in
+    *nf_tables*) printf 'nf_tables' ;;
+    *legacy*) printf 'legacy' ;;
+    *) printf '' ;;
+  esac
+}
+
+backend_word() { # <raw docker info FirewallBackend> -> iptables | nftables | nothing
+  local raw=$1 word
+  word=$(printf '%s' "$raw" | tr -d '\n' |
+    sed -n 's/.*"Driver"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  if [ -z "$word" ]; then
+    word=$(printf '%s' "$raw" | tr -d ' \t\n"{}' | tr '[:upper:]' '[:lower:]')
+  fi
+  word=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
+  case $word in
+    iptables | iptables-legacy | legacy) printf 'iptables' ;;
+    nftables) printf 'nftables' ;;
+    *) printf '' ;;
+  esac
+}
+
+docker_bridges() { # prints the facts' bridges object text, or dies
+  local -a lines=()
+  local name id line bridge_name label found
+  if [ "${#BRIDGES[@]}" -eq 0 ]; then
+    printf '{}'
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 ||
+    die 14 "docker is not installed: the interactive check needs it to read the backend and the bridges"
+  local networks
+  networks=$(docker_call network ls --format '{{.ID}}') ||
+    die 14 "cannot list Docker networks: is the daemon up?"
+  local i
+  for i in "${!BRIDGES[@]}"; do
+    name=${BRIDGES[i]}
+    found=''
+    for id in $networks; do
+      line=$(docker_call network inspect "$id" \
+        --format '{{index .Options "com.docker.network.bridge.name"}}|{{index .Labels "crow.runtime"}}') ||
+        die 16 "cannot inspect Docker network $id"
+      bridge_name=${line%%|*}
+      label=${line#*|}
+      [ "$bridge_name" = "$name" ] || continue
+      found=$id
+      if [ -n "$label" ] && [ "$label" != '<no value>' ]; then
+        lines+=("    \"$name\": { \"network_id\": \"$id\", \"label_ok\": true }")
+      else
+        lines+=("    \"$name\": { \"network_id\": \"$id\", \"label_ok\": false }")
+      fi
+      break
+    done
+    [ -n "$found" ] ||
+      die 16 "no Docker network uses the bridge name $name (start the engine's bundle first, then re-run check)"
+  done
+  printf '{\n'
+  local first=1 l
+  for l in "${lines[@]}"; do
+    if [ "$first" -eq 1 ]; then first=0; printf '%s' "$l"; else printf ',\n%s' "$l"; fi
+  done
+  printf '\n  }'
+}
+
+write_facts() { # <flavour> <backend> <bridges-object>
+  local flavour=$1 backend=$2 bridges=$3 dir tmp
+  dir=${FACTS%/*}
+  [ "$dir" = "$FACTS" ] && dir=.
+  mkdir -p -- "$dir" || die 17 "cannot create $dir for the facts file"
+  tmp=$(mktemp -- "$dir/.engine-fence-facts.XXXXXX") || die 17 "cannot write in $dir"
+  {
+    printf '{\n'
+    printf '  "backend": { "iptables_flavour": "%s", "docker_firewall_backend": "%s" },\n' "$flavour" "$backend"
+    printf '  "bridges": %s,\n' "$bridges"
+    printf '  "docker_flags_sha256": "%s",\n' "$(docker_flags_sha)"
+    printf '  "saved_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "conf_sha256": "%s"\n' "$(conf_sha)"
+    printf '}\n'
+  } >"$tmp"
+  chmod 0640 -- "$tmp" || die 17 "cannot set the facts file's mode"
+  mv -f -- "$tmp" "$FACTS" || die 17 "cannot install $FACTS"
+}
+
+# Read everything the boot path needs from files, then keep it: the caller
+# applies from FACTS_BACKEND / FACTS_FLAVOUR.
+interactive_check() { # sets FACTS_FLAVOUR FACTS_BACKEND
+  FACTS_FLAVOUR=$(iptables_flavour)
+  [ -n "$FACTS_FLAVOUR" ] ||
+    die 13 "unknown iptables flavour: 'iptables --version' said nothing this fence recognises (nf_tables or legacy)"
+
+  command -v docker >/dev/null 2>&1 ||
+    die 14 "docker is not installed: run 'apply --boot' for the boot path, or install docker first"
+  local raw word bridges
+  raw=$(docker_call info --format '{{json .FirewallBackend}}') ||
+    die 14 "cannot read the Docker firewall backend: is the daemon up?"
+  word=$(backend_word "$raw")
+  case $word in
+    iptables) FACTS_BACKEND=iptables ;;
+    nftables)
+      die 15 "the Docker firewall backend is nftables: this fence only supports the iptables backend"
+      ;;
+    *)
+      die 15 "unknown Docker firewall backend (read '${raw:-nothing}'): refusing to guess where the rules would land"
+      ;;
+  esac
+
+  bridges=$(docker_bridges)
+
+  local saved_flags
+  saved_flags=$(facts_field docker_flags_sha256) || saved_flags=''
+  local now_flags
+  now_flags=$(docker_flags_sha)
+  write_facts "$FACTS_FLAVOUR" "$FACTS_BACKEND" "$bridges"
+  if [ -n "$saved_flags" ] && [ "$saved_flags" != "$now_flags" ]; then
+    warn "the Docker firewall flags changed since the last check; the facts file now records the new ones"
+  fi
+}
+
+validate_group() { # a group name reaches chgrp, so it is checked as a name
+  [ -n "$FENCE_GROUP" ] || return 0
+  [[ $FENCE_GROUP =~ $GROUP_RE ]] || die 22 "invalid group name: $FENCE_GROUP"
+  if command -v getent >/dev/null 2>&1 && ! getent group "$FENCE_GROUP" >/dev/null 2>&1; then
+    die 22 "no such group: $FENCE_GROUP"
+  fi
+}
+
+take_lock() {
+  validate_group
+  mkdir -p -- "$STATE_DIR" || die 22 "cannot create the state directory: $STATE_DIR"
+  exec 9>"$STATE_DIR/.lock" || die 22 "cannot open the lock file in $STATE_DIR"
+  flock -w "$LOCK_WAIT" 9 || die 21 "another crow-engine-fence run holds the lock on $STATE_DIR"
+}
+
+# ─── Commands ──────────────────────────────────────────────────────────────
+
+cmd_check() {
+  take_lock
+  parse_conf
+  interactive_check
+  printf '%s: the conf is valid (backend %s, iptables %s, generation g%s); facts saved to %s\n' \
+    "$PROGNAME" "$FACTS_BACKEND" "$FACTS_FLAVOUR" "$GENERATION" "$FACTS"
+}
+
+cmd_apply() {
+  local boot=0 flavour backend word verdict b
+  [ "$#" -le 1 ] || die 2 "apply takes --boot or nothing"
+  case ${1:-} in
+    '') ;;
+    --boot) boot=1 ;;
+    *) die 2 "apply takes --boot or nothing" ;;
+  esac
+  take_lock
+  parse_conf
+  if [ "$boot" -eq 1 ]; then
+    boot_facts_or_die
+    word=$(boot_backend)
+    case $word in
+      nftables)
+        die 15 "$DAEMON_JSON selects the nftables firewall backend: this fence only supports the iptables backend"
+        ;;
+      iptables | default) ;;
+      *)
+        die 15 "unknown Docker firewall backend in $DAEMON_JSON ($word): refusing to guess where the rules would land"
+        ;;
+    esac
+    backend=$(facts_field docker_firewall_backend) || backend=''
+    [ "$backend" = iptables ] ||
+      die 15 "the facts file records backend '${backend:-<none>}', which this fence does not support: re-run 'crow-engine-fence check'"
+    flavour=$(iptables_flavour)
+    [ -n "$flavour" ] || die 13 "unknown iptables flavour: 'iptables --version' said nothing this fence recognises"
+    for b in ${BRIDGES[@]+"${BRIDGES[@]}"}; do
+      verdict=$(facts_bridge_label_ok "$b")
+      case $verdict in
+        true) ;;
+        missing) die 16 "the facts file knows nothing about the bridge $b: run 'crow-engine-fence check'" ;;
+        *) die 16 "the bridge $b has no recorded Crow label: run 'crow-engine-fence check' after the engine's bundle is up" ;;
+      esac
+    done
+  else
+    interactive_check
+    flavour=$FACTS_FLAVOUR
+    backend=$FACTS_BACKEND
+  fi
+  # --boot is the timer's and the boot unit's mode, and it is the one that skips
+  # a byte-identical transaction; an interactive apply always restores, which is
+  # the documented way to put back a rule that `remove` took out.
+  apply_rules_now "$flavour" "$backend" "$boot"
+}
+
+cmd_status() {
+  take_lock
+  parse_conf
+  local flavour word saved_conf saved_flags
+  flavour=$(iptables_flavour)
+  [ -n "$flavour" ] && printf 'iptables: %s\n' "$flavour" || printf 'iptables: unknown\n'
+
+  if [ -r "$FACTS" ]; then
+    saved_conf=$(facts_field conf_sha256) || saved_conf=''
+    saved_flags=$(facts_field docker_flags_sha256) || saved_flags=''
+    if [ -n "$saved_conf" ] && [ "$saved_conf" != "$(conf_sha)" ]; then
+      printf 'WARN: the conf changed since the last check: run %s check, then apply\n' "$PROGNAME"
+    fi
+    if [ -n "$saved_flags" ] && [ "$saved_flags" != "$(docker_flags_sha)" ]; then
+      printf 'WARN: the Docker firewall flags changed since the last check: run %s check, then apply\n' "$PROGNAME"
+    fi
+    word=$(facts_field docker_firewall_backend) || word=''
+    printf 'backend: %s\n' "${word:-unknown}"
+  else
+    printf 'WARN: no facts file at %s: run %s check\n' "$FACTS" "$PROGNAME"
+    printf 'backend: unknown\n'
+  fi
+
+  local tn4= tn6= v6=0
+  tn4=$(resolve_tailnet 4) || tn4=
+  if has_v6_stack; then
+    v6=1
+    tn6=$(resolve_tailnet 6) || tn6=
+  fi
+  printf 'tailnet: v4 %s\n' "${tn4:-none}"
+  if [ "$v6" -eq 1 ]; then
+    printf 'tailnet: v6 %s\n' "${tn6:-none}"
+  else
+    printf 'tailnet: v6 not inspected (no IPv6 stack at %s)\n' "$V6_STACK"
+  fi
+  printf 'generation: g%s\n' "$GENERATION"
+
+  local live4= live6=
+  live4=$(iptables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null) || live4=''
+  if [ "$v6" -eq 1 ]; then
+    live6=$(ip6tables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null) || live6=''
+  fi
+  printf '\nlive rules (v4):\n'
+  if [ -n "$live4" ]; then printf '%s\n' "$live4"; else printf '  (none)\n'; fi
+  if [ "$v6" -eq 1 ]; then
+    printf '\nlive rules (v6):\n'
+    if [ -n "$live6" ]; then printf '%s\n' "$live6"; else printf '  (none)\n'; fi
+  fi
+
+  printf '\npublishes in the conf:\n'
+  local i fam addr id tag
+  for i in "${!PUB_KIND[@]}"; do
+    id=${PUB_ID[i]}
+    case ${PUB_KIND[i]} in
+      lan) fam=4; is_ipv6 "${PUB_ADDR[i]}" && fam=6 ;;
+      *) fam=4 ;;
+    esac
+    [ "$fam" = 4 ] && addr=$(publish_addr "$i" 4 "$tn4") || addr=$(publish_addr "$i" 6 "$tn6")
+    if [ -n "$addr" ]; then
+      printf '  %s port %s: addressed (%s)\n' "$id" "${PUB_PORT[i]}" "$addr"
+    else
+      printf '  %s port %s: port-only (tailnet address unresolved)\n' "$id" "${PUB_PORT[i]}"
+    fi
+    tag="crow-engine-fence:$id:"
+    if ! printf '%s\n%s\n' "$live4" "$live6" | grep -qF "$tag"; then
+      printf '  WARN: %s is in the conf but no live rule carries its tag: a removed rule comes back on the next apply\n' "$id"
+    fi
+  done
+
+  # status is READ-ONLY: the state file is written by apply and by remove. A
+  # status run must never refresh it, or the file would claim the conf had been
+  # applied when it had not.
+  printf '\nstate: %s (written by apply and by remove, never by status)\n' "$STATE"
+  printf 'to change rules: %s apply (never: systemctl restart crow-engine-fence, which restarts docker)\n' "$PROGNAME"
+}
+
+live_chain() { # <4|6> -> the chain's live lines
+  case "$1" in
+    4) iptables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null || true ;;
+    6) ip6tables -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null || true ;;
+  esac
+}
+
+# A real `-S <chain>` prints the chain's own `-N` line first. That line is not a
+# rule and must never reach a restore transaction that already declares the
+# chain, which the restore binary would refuse.
+chain_lines() { # <4|6> -> only the chain's `-A` lines
+  live_chain "$1" | grep -E -- "^-A $CHAIN " || true
+}
+
+cmd_remove() {
+  local id=${1:-}
+  [ -n "$id" ] || die 2 "remove needs an id (see the ids in $PROGNAME status)"
+  case $id in
+    *:* | *'"'* | *' '*) die 2 "not an id: $id" ;;
+  esac
+  take_lock
+  parse_conf
+  SKIP_ID=$id
+  local tag="crow-engine-fence:$id:"
+  local fam lines kept text removed=0 text4='' text6=''
+  for fam in 4 6; do
+    if [ "$fam" = 6 ] && ! v6_rules_enabled; then
+      continue
+    fi
+    lines=$(chain_lines "$fam")
+    [ -n "$lines" ] || continue
+    kept=$(printf '%s\n' "$lines" | grep -v -F "$tag") || kept=''
+    if [ "$kept" != "$lines" ]; then
+      removed=1
+    fi
+    text=$(printf '*raw\n:%s - [0:0]' "$CHAIN")
+    text="$text"$'\n'
+    if [ -n "$kept" ]; then
+      text="$text$kept"$'\n'
+    fi
+    text="$text"'COMMIT'$'\n'
+    apply_family "$fam" "$text"
+    if [ "$fam" = 4 ]; then text4=$text; else text6=$text; fi
+  done
+
+  [ "$removed" -eq 1 ] || die 20 "no live rule is tagged $tag"
+  local tn4= tn6= v6=0
+  tn4=$(resolve_tailnet 4) || tn4=
+  if v6_rules_enabled; then
+    v6=1
+    tn6=$(resolve_tailnet 6) || tn6=
+  fi
+  build_state_rules "$tn4" "$tn6"
+  local flavour backend
+  flavour=$(iptables_flavour)
+  backend=$(facts_field docker_firewall_backend) || backend=''
+  write_state "${flavour:-unknown}" "${backend:-unknown}" "$tn4" "$tn6"
+  # The applied-hash file is deliberately NOT touched: the conf's transaction is
+  # unchanged, so the re-apply run skips and this removal survives it. The
+  # reduced per-family counts ARE recorded, so the timer's live check accepts
+  # the chain `remove` left behind. A conf edit, an interactive `apply`, a
+  # reboot (the files live on /run) or a new tailnet address (a different
+  # transaction) puts the rule back.
+  write_applied_counts "$text4" "$text6"
+  printf '%s: removed %s from the live rules\n' "$PROGNAME" "$id"
+  local i
+  for i in "${!PUB_ID[@]}"; do
+    if [ "${PUB_ID[i]}" = "$id" ]; then
+      printf '%s: WARN: the conf still lists %s, so the next real apply puts it back, and a reboot or a change in the resolved tailnet address puts it back too (edit %s to keep it removed; the re-apply timer leaves it out while the conf and the address are unchanged)\n' \
+        "$PROGNAME" "$id" "$CONF"
+      break
+    fi
+  done
+}
+
+old_fence_ports() { # <tag> -> the ports the old rules cover, one per line
+  local tag=$1
+  {
+    iptables -w "$XT_WAIT" -t filter -S 2>/dev/null || true
+    ip6tables -w "$XT_WAIT" -t filter -S 2>/dev/null || true
+  } | grep -F -- "$tag" |
+    grep -o -E -- '--(ctorigdstport|dport|dports)[[:space:]]+[0-9]+' |
+    grep -o -E '[0-9]+$' | sort -un
+}
+
+publish_host_ips() { # <port> -> the HostIp values the live publish has (empty = wildcard)
+  local port=$1 ids id out line ip hp
+  ids=$(docker_call ps -q --no-trunc) || die 14 "cannot list containers: is the daemon up?"
+  for id in $ids; do
+    out=$(docker_call inspect \
+      --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}|{{.HostPort}}{{"\n"}}{{end}}{{end}}' \
+      "$id" 2>/dev/null) || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      ip=${line%%|*}
+      hp=${line#*|}
+      hp=${hp%$'\r'}
+      [ "$hp" = "$port" ] || continue
+      printf '%s\n' "${ip:--}"
+    done <<<"$out"
+  done
+}
+
+new_rule_covers() { # <port> <address|-> -> 0 when this conf covers that address
+  local port=$1 addr=$2
+  local i a
+  for i in "${!PUB_KIND[@]}"; do
+    [ "${PUB_PORT[i]}" = "$port" ] || continue
+    case ${PUB_KIND[i]} in
+      port-only) return 0 ;;
+      lan) [ "${PUB_ADDR[i]}" = "$addr" ] && return 0 ;;
+      tailnet)
+        if [ "$addr" = - ]; then
+          return 1
+        fi
+        if is_ipv6 "$addr"; then
+          a=$(resolve_tailnet 6) || a=
+        else
+          a=$(resolve_tailnet 4) || a=
+        fi
+        [ -n "$a" ] && [ "$a" = "$addr" ] && return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+cmd_swap_check() {
+  local old_tag=crow-engine-fence
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+      --old-tag)
+        [ "$#" -ge 2 ] || die 2 "--old-tag needs a value"
+        old_tag=$2
+        shift 2
+        ;;
+      *) die 2 "swap-check: unknown argument $1" ;;
+    esac
+  done
+  take_lock
+  parse_conf
+  command -v docker >/dev/null 2>&1 ||
+    die 14 "swap-check reads the live publish addresses and needs docker"
+
+  local ports port verdict any=0 failed=0
+  ports=$(old_fence_ports "$old_tag") || ports=''
+  if [ -z "$ports" ]; then
+    printf 'no live rule in the filter table carries %s: nothing to compare\n' "$old_tag"
+    return 0
+  fi
+
+  printf 'old rules tagged %s:\n' "$old_tag"
+  {
+    iptables -w "$XT_WAIT" -t filter -S 2>/dev/null || true
+    ip6tables -w "$XT_WAIT" -t filter -S 2>/dev/null || true
+  } | grep -F -- "$old_tag" | sed 's/^/  /'
+
+  printf '\nnew set (from %s):\n' "$CONF"
+  local i newaddr
+  for i in "${!PUB_KIND[@]}"; do
+    case ${PUB_KIND[i]} in
+      port-only) newaddr=port-only ;;
+      lan) newaddr=${PUB_ADDR[i]} ;;
+      tailnet)
+        newaddr=$(resolve_tailnet 4) || newaddr=''
+        [ -n "$newaddr" ] || newaddr='tailnet address unresolved'
+        ;;
+    esac
+    printf '  %s port %s: %s\n' "${PUB_ID[i]}" "${PUB_PORT[i]}" "$newaddr"
+  done
+
+  printf '\ncoverage (destination, not only port):\n'
+  for port in $ports; do
+    any=1
+    local in_conf=0 i
+    for i in "${!PUB_PORT[@]}"; do
+      [ "${PUB_PORT[i]}" = "$port" ] && in_conf=1
+    done
+    if [ "$in_conf" -eq 0 ]; then
+      printf '  port %s: MISSING from the conf: add a publish line for it (refusing)\n' "$port"
+      failed=1
+      continue
+    fi
+    local ips ip covered=1 seen=0
+    ips=$(publish_host_ips "$port") || ips=''
+    if [ -z "$ips" ]; then
+      # A port in the conf with no live publish: nothing to enumerate. Only a
+      # port-only rule covers every address it could appear on.
+      if new_rule_covers "$port" -; then
+        printf '  port %s: COVERED (port-only rule)\n' "$port"
+      else
+        printf '  port %s: NOT COVERED (no live publish to enumerate and no port-only rule)\n' "$port"
+        failed=1
+      fi
+      continue
+    fi
+    for ip in $ips; do
+      seen=1
+      if ! new_rule_covers "$port" "$ip"; then
+        covered=0
+      fi
+    done
+    if [ "$seen" -eq 1 ] && [ "$covered" -eq 1 ]; then
+      printf '  port %s: COVERED (addressed rules for every live address)\n' "$port"
+    elif new_rule_covers "$port" -; then
+      printf '  port %s: COVERED (port-only rule)\n' "$port"
+    else
+      printf '  port %s: NOT COVERED (a -d rule covers one address; a wildcard publish has more)\n' "$port"
+      failed=1
+    fi
+  done
+
+  [ "$any" -eq 1 ] || {
+    printf 'no old rules to compare\n'
+    return 0
+  }
+  if [ "$failed" -ne 0 ]; then
+    printf '\nrefusing: keep the old rules until every old port is covered\n'
+    return 20
+  fi
+  printf '\nall old ports are covered: the operator may now delete the old rules by hand\n'
+  return 0
+}
+
+# ─── Dispatch ──────────────────────────────────────────────────────────────
+
+FACTS_FLAVOUR=
+FACTS_BACKEND=
+
+case ${1:-} in
+  '' | -h | --help | help)
+    usage
+    exit 0
+    ;;
+esac
+cmd=$1
+shift
+case $cmd in
+  check)
+    cmd_check "$@"
+    ;;
+  apply)
+    cmd_apply "$@"
+    ;;
+  status)
+    cmd_status "$@"
+    ;;
+  remove)
+    cmd_remove "$@"
+    ;;
+  swap-check)
+    cmd_swap_check "$@"
+    ;;
+  *)
+    die 2 "unknown command: $cmd (see $PROGNAME --help)"
+    ;;
+esac

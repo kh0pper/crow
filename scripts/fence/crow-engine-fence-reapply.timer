@@ -1,0 +1,39 @@
+# TEMPLATE — installed by the operator (docs/guide/engine-fence.md).
+#
+# The re-apply cadence has two phases, and both are plain timer triggers:
+#
+#   the first 15 minutes after boot — one run a minute (each OnBootSec= line is
+#   its own monotonic trigger). That is the window in which tailscaled may still
+#   have no address, so the boot apply installed the stricter port-only rule.
+#
+#   from then on — every 15 minutes, on the calendar.
+#
+# A run whose transaction is byte-identical to the last applied one does nothing
+# at all: no restore, no docker call, and an untouched state file and applied-hash
+# file (so the snapshot the dashboard reads is never made stale by a rewrite).
+# The interval is never used to restart anything.
+[Unit]
+Description=Timer for the Crow engine fence re-apply
+
+[Timer]
+OnBootSec=1min
+OnBootSec=2min
+OnBootSec=3min
+OnBootSec=4min
+OnBootSec=5min
+OnBootSec=6min
+OnBootSec=7min
+OnBootSec=8min
+OnBootSec=9min
+OnBootSec=10min
+OnBootSec=11min
+OnBootSec=12min
+OnBootSec=13min
+OnBootSec=14min
+OnBootSec=15min
+OnCalendar=*:0/15
+AccuracySec=15s
+Unit=crow-engine-fence-reapply.service
+
+[Install]
+WantedBy=timers.target

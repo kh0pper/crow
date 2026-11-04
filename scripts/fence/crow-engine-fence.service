@@ -1,0 +1,52 @@
+# TEMPLATE — installed by the operator (docs/guide/engine-fence.md).
+#
+# The fence that keeps a published engine port reachable only from loopback, the
+# engine's own bridge and the tailnet interface. It runs the script's boot mode,
+# which makes NO docker call: with docker.socket activation even `docker info`
+# here would start dockerd, and this unit runs before it.
+#
+# FAIL CLOSED: docker.service Requires= this unit, so docker does not start
+# unless the fence applied. The script validates the conf before touching a rule,
+# and the documented break-glass is `systemctl disable crow-engine-fence` (which
+# removes the docker.service.requires link), never `mask` (a masked unit that
+# docker requires keeps docker down). To change rules: `crow-engine-fence apply`.
+# Never `systemctl restart crow-engine-fence`: the restart is passed along to
+# docker, and a stop of this unit stops docker.
+#
+# Hosts whose tailnet comes from the tailscale *bundle* (a docker container)
+# cannot get an address before docker starts: they install the shipped
+# crow-engine-fence-wantedby.service variant instead, which fails open.
+[Unit]
+Description=Crow engine fence (loopback, engine bridge and tailnet interface only)
+Before=docker.service
+After=tailscaled.service network-pre.target
+Wants=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The group that may read the state file (the gateway's) is the installer's,
+# never a literal in this file.
+EnvironmentFile=-/etc/crow/engine-fence.env
+ExecStart=/usr/local/sbin/crow-engine-fence apply --boot
+# systemd creates this before the sandbox namespace is built; the script sets the
+# gateway's group on it so S6b can read the state file without root.
+RuntimeDirectory=crow-engine-fence
+RuntimeDirectoryMode=0750
+# Covers the bounded wait for `tailscale ip` before the port-only fallback.
+TimeoutStartSec=90
+# No ExecStartPre= that runs `check`: check talks to docker.
+# No ExecStop=: stopping or restarting docker must not drop the fence. Removal is
+# an explicit `crow-engine-fence remove`, and a stop of docker is not a reason.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0027
+# CAP_CHOWN for the state file's group, CAP_NET_ADMIN/CAP_NET_RAW for the raw
+# table. Deliberately no ProtectSystem=strict: iptables creates
+# /run/xtables.lock, which a strict namespace forbids (the documented strict
+# variant adds a tmpfiles.d line for the lock — see docs/guide/engine-fence.md).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+
+[Install]
+RequiredBy=docker.service

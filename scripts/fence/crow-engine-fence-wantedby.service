@@ -1,0 +1,33 @@
+# TEMPLATE — the fail-OPEN variant of crow-engine-fence.service, for a host whose
+# tailnet is provided by the tailscale *bundle* (a docker container) rather than a
+# host `tailscaled`: there `tailscale ip` cannot succeed before dockerd, so
+# RequiredBy would never get an address before docker starts. This unit is
+# identical to crow-engine-fence.service except for the [Install] line.
+#
+# FAIL OPEN means docker starts even when the fence failed to apply. On such a
+# host the dashboard's publishedPorts warn and Crow's own refusal to start a
+# published engine are the only guards, and the port-only fallback still applies
+# until the re-apply timer upgrades it. Read docs/guide/engine-fence.md before
+# choosing this file.
+[Unit]
+Description=Crow engine fence (loopback, engine bridge and tailnet interface only)
+Before=docker.service
+After=tailscaled.service network-pre.target
+Wants=tailscaled.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/crow/engine-fence.env
+ExecStart=/usr/local/sbin/crow-engine-fence apply --boot
+RuntimeDirectory=crow-engine-fence
+RuntimeDirectoryMode=0750
+TimeoutStartSec=90
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0027
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+
+[Install]
+WantedBy=docker.service
