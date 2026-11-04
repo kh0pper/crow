@@ -38,9 +38,29 @@
  *      line, override with CROW_PUBLIC_DENYLIST). Skipped when CI is set.
  *      Denylisted tokens are never printed — only their line number.
  *
+ * A `host: <name>` line in that file is NOT a substring token. Private host
+ * names are ordinary words — bird names the product itself uses for a game's
+ * species — and turn up inside identifiers that have to stay (`<name>-embed`,
+ * `<NAME>_TAILSCALE_IP`, a JSON value), so a bare word cannot tell a host from
+ * a bird. A host name is therefore flagged only when it is host-SHAPED:
+ *
+ *   - ssh target:      ssh [user@]<name>
+ *   - user@host:       <user>@<name>
+ *   - host.domain:     <name>.<letter>, file extensions (.md, .svg, .ts, …)
+ *                      excluded; not when glued to a word, `-` or `/`
+ *   - host:port:       <name>:<2-5 digits>
+ *   - url authority:   //<name> followed by `:`, `/`, `.` or end of line
+ *
+ * Anything else is prose and passes. Paths are never checked for host names
+ * (file names may legitimately contain one), and the name is never printed: a
+ * violation reads `private host name #2 (host-shaped: ssh target)`, naming the
+ * line in the denylist file and the shape that matched.
+ *
  * Usage: node scripts/check-public-hygiene.mjs [--no-denylist] [--rev <commit>] [--messages <range>]
  *   --rev scans the committed tree of <commit> instead of the working tree;
  *   --messages also scans the commit messages in <range> (e.g. origin/main..HEAD).
+ *   Denylist file lines: <token> (substring match) or `host: <name>` (the
+ *   host-shaped checks above).
  * Exit 0 clean, 1 on any violation.
  */
 
@@ -156,9 +176,35 @@ export function loadAllowlist(text) {
   return { tailnets, secrets, emails, phones };
 }
 
+// `host: <name>` lines name a private host; every other line is a substring token.
+const HOST_PREFIX = /^host:/i;
+const HOST_LINE = /^host:\s*(\S+)$/i;
+
+const denylistLines = (text) => text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+
+// A malformed `host:` line is dropped, not demoted to a substring token.
 export function parseDenylist(text) {
-  return text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#") && l.length >= 3);
+  return denylistLines(text).filter((l) => !HOST_PREFIX.test(l) && l.length >= 3);
 }
+
+export function parseDenylistHosts(text) {
+  return denylistLines(text).map((l) => HOST_LINE.exec(l)).filter(Boolean).map((m) => m[1].toLowerCase());
+}
+
+// A host name only counts in a host shape: a bare word is prose (bird species,
+// an identifier stem), so these regexes stay narrow and never report the name.
+const FILE_EXTENSIONS = "md|mjs|cjs|js|json|svg|png|jpg|webp|txt|yml|yaml|sh|py|ts|html|css";
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const HOST_SHAPES = (host) => {
+  const h = escapeRe(host);
+  return [
+    ["ssh target", new RegExp(String.raw`\bssh\s+(?:[^\s@]+@)?${h}\b`, "i")],
+    ["user@host", new RegExp(String.raw`@${h}(?![\w-])`, "i")],
+    ["host.domain", new RegExp(String.raw`(?<![\w/-])${h}\.(?!(?:${FILE_EXTENSIONS})\b)(?=[A-Za-z])`, "i")],
+    ["host:port", new RegExp(String.raw`(?<![\w-])${h}:\d{2,5}\b`, "i")],
+    ["url authority", new RegExp(String.raw`//${h}(?=[:/.]|$)`, "i")],
+  ];
+};
 
 export function checkPath(path, denylist = []) {
   const out = [];
@@ -177,10 +223,11 @@ export function checkPath(path, denylist = []) {
 
 const EMPTY_ALLOW = { tailnets: new Set(), secrets: new Set(), emails: new Set(), phones: new Set() };
 
-export function checkContent(path, text, { allow = EMPTY_ALLOW, denylist = [], light = false } = {}) {
+export function checkContent(path, text, { allow = EMPTY_ALLOW, denylist = [], hosts = [], light = false } = {}) {
   allow = { ...EMPTY_ALLOW, ...allow };
   const out = [];
   const lowered = denylist.map((t) => t.toLowerCase());
+  const hostChecks = hosts.filter(Boolean).map((host, k) => ({ k, shapes: HOST_SHAPES(host) }));
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -218,6 +265,11 @@ export function checkContent(path, text, { allow = EMPTY_ALLOW, denylist = [], l
       lowered.forEach((tok, k) => {
         if (l.includes(tok)) out.push({ path, line: n, rule: `denylisted token #${k + 1}` });
       });
+    }
+    for (const { k, shapes } of hostChecks) {
+      for (const [shape, re] of shapes) {
+        if (re.test(line)) out.push({ path, line: n, rule: `private host name #${k + 1} (host-shaped: ${shape})` });
+      }
     }
   }
   return out;
@@ -311,10 +363,11 @@ export function binaryTextParts(path, buf) {
 }
 
 export function loadDenylist(env = process.env) {
-  if (env.CI) return { list: [], source: "skipped (CI)" };
+  if (env.CI) return { list: [], hosts: [], source: "skipped (CI)" };
   const file = env.CROW_PUBLIC_DENYLIST || join(homedir(), ".crow-public-denylist");
-  if (!existsSync(file)) return { list: [], source: `none (${file} absent)` };
-  return { list: parseDenylist(readFileSync(file, "utf8")), source: file };
+  if (!existsSync(file)) return { list: [], hosts: [], source: `none (${file} absent)` };
+  const text = readFileSync(file, "utf8");
+  return { list: parseDenylist(text), hosts: parseDenylistHosts(text), source: file };
 }
 
 function readTree(root, rev) {
@@ -339,7 +392,7 @@ function readTree(root, rev) {
  * of `rev` (what a push would publish), plus optionally the commit messages
  * in `messages` (a rev range such as origin/main..HEAD).
  */
-export function scanRepo({ root = REPO_ROOT, denylist = [], rev = null, messages = null } = {}) {
+export function scanRepo({ root = REPO_ROOT, denylist = [], hosts = [], rev = null, messages = null } = {}) {
   const allowText = rev
     ? (() => { try { return execFileSync("git", ["show", `${rev}:scripts/public-hygiene-allowlist.txt`], { cwd: root, stdio: ["ignore", "pipe", "ignore"] }).toString("utf8"); } catch { return ""; } })()
     : (existsSync(join(root, "scripts/public-hygiene-allowlist.txt")) ? readFileSync(join(root, "scripts/public-hygiene-allowlist.txt"), "utf8") : "");
@@ -352,19 +405,19 @@ export function scanRepo({ root = REPO_ROOT, denylist = [], rev = null, messages
   const violations = [];
   for (const { path, buf } of entries) {
     violations.push(...checkPath(path, denylist));
-    if (!buf || buf.length < 4) { if (buf) violations.push(...checkContent(path, buf.toString("utf8"), { allow, denylist })); continue; }
+    if (!buf || buf.length < 4) { if (buf) violations.push(...checkContent(path, buf.toString("utf8"), { allow, denylist, hosts })); continue; }
     if (isBinary(buf) || buf.readUInt32LE(0) === 0x04034b50) {
       // Binary: office/zip containers, UTF-16 text, PNG text chunks, PDF metadata, and printable runs of anything else.
       for (const part of binaryTextParts(path, buf)) {
-        violations.push(...checkContent(`${path}!${part.name}`, part.text, { allow, denylist, light: part.light }));
+        violations.push(...checkContent(`${path}!${part.name}`, part.text, { allow, denylist, hosts, light: part.light }));
       }
       continue;
     }
-    violations.push(...checkContent(path, buf.toString("utf8"), { allow, denylist }));
+    violations.push(...checkContent(path, buf.toString("utf8"), { allow, denylist, hosts }));
   }
   if (messages) {
     const log = execFileSync("git", ["log", "--format=%H%n%B", messages], { cwd: root, maxBuffer: 64 * 1024 * 1024 }).toString("utf8");
-    violations.push(...checkContent(`commit messages ${messages}`, log, { allow, denylist }));
+    violations.push(...checkContent(`commit messages ${messages}`, log, { allow, denylist, hosts }));
   }
   return { files: entries.length, violations };
 }
@@ -376,9 +429,9 @@ function argValue(name) {
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  const { list, source } = process.argv.includes("--no-denylist") ? { list: [], source: "disabled" } : loadDenylist();
+  const { list, hosts, source } = process.argv.includes("--no-denylist") ? { list: [], hosts: [], source: "disabled" } : loadDenylist();
   const rev = argValue("--rev");
-  const { files, violations } = scanRepo({ denylist: list, rev, messages: argValue("--messages") });
+  const { files, violations } = scanRepo({ denylist: list, hosts, rev, messages: argValue("--messages") });
   const what = rev ? `files at ${rev}` : "tracked files";
   if (violations.length) {
     console.error(`public-hygiene: ${violations.length} violation(s) in ${files} ${what} (denylist: ${source})`);

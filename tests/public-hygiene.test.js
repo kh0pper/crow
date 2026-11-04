@@ -14,15 +14,15 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { deflateRawSync } from "node:zlib";
 import {
-  checkPath, checkContent, loadAllowlist, parseDenylist, loadDenylist, scanRepo, zipTextParts, isFictionalPhone, binaryTextParts,
+  checkPath, checkContent, loadAllowlist, parseDenylist, parseDenylistHosts, loadDenylist, scanRepo, zipTextParts, isFictionalPhone, binaryTextParts,
 } from "../scripts/check-public-hygiene.mjs";
 
 const J = (...p) => p.join("");
 const allow = loadAllowlist("tailnet: example\ntailnet: your-tailnet\nsecret: " + J("sk-", "fake-value-for-tests-0001"));
 
 test("the tracked tree is clean (denylist applies locally, skipped in CI)", () => {
-  const { list } = loadDenylist();
-  const { files, violations } = scanRepo({ denylist: list });
+  const { list, hosts } = loadDenylist();
+  const { files, violations } = scanRepo({ denylist: list, hosts });
   assert.ok(files > 1000, "scanned the real tracked tree");
   assert.deepEqual(violations.map((v) => `${v.path}:${v.line} ${v.rule}`), []);
 });
@@ -122,8 +122,69 @@ test("CI skips the denylist; CROW_PUBLIC_DENYLIST points at an explicit file", (
     const f = join(dir, "deny");
     writeFileSync(f, "tokenone\n");
     assert.deepEqual(loadDenylist({ CI: "true", CROW_PUBLIC_DENYLIST: f }).list, []);
+    assert.deepEqual(loadDenylist({ CI: "true", CROW_PUBLIC_DENYLIST: f }).hosts, []);
     assert.deepEqual(loadDenylist({ CROW_PUBLIC_DENYLIST: f }).list, ["tokenone"]);
     assert.deepEqual(loadDenylist({ CROW_PUBLIC_DENYLIST: join(dir, "missing") }).list, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("`host:` denylist lines are private host names, parsed case-insensitively and kept out of the token list", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hygiene-hosts-"));
+  try {
+    const f = join(dir, "deny");
+    writeFileSync(f, "# private hosts\nHost: Zeta-Node\ntokenone\n  host: quill  \nhost:\n");
+    const d = loadDenylist({ CROW_PUBLIC_DENYLIST: f });
+    assert.deepEqual(d.list, ["tokenone"], "a host line never becomes a substring token, malformed ones included");
+    assert.deepEqual(d.hosts, ["zeta-node", "quill"]);
+    assert.deepEqual(parseDenylist("host: quill\ntokenone\n"), ["tokenone"]);
+    assert.deepEqual(parseDenylistHosts("HOST: Zeta-Node\n# host: commented\ntokenone\n"), ["zeta-node"]);
+    assert.deepEqual(parseDenylistHosts("tokenone\n"), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a private host name is flagged only in host-shaped uses, and never printed", () => {
+  const flagged = [
+    "ssh quill", "ssh admin@quill", "admin@quill", "quill.example.org", "quill:8444",
+    "https://quill/x", "https://quill.example.ts.net:8444",
+  ];
+  for (const line of flagged) assert.ok(checkContent("notes.md", line, { hosts: ["quill"] }).length >= 1, line);
+  // one violation per shape found, no repeats of the same shape
+  for (const line of ["ssh quill", "admin@quill", "quill.example.org", "quill:8444", "https://quill/x"]) {
+    const v = checkContent("notes.md", line, { hosts: ["quill"] });
+    assert.equal(v.length, 1, `one shape on: ${line}`);
+    assert.match(v[0].rule, /^private host name #1 \(host-shaped: [a-z:.@ ]+\)$/, line);
+  }
+  assert.deepEqual(checkContent("n.md", "ssh admin@quill", { hosts: ["quill"] }).map((v) => v.rule), [
+    "private host name #1 (host-shaped: ssh target)", "private host name #1 (host-shaped: user@host)",
+  ]);
+  const idx = checkContent("n.md", "ssh quill", { hosts: ["zeta-node", "quill"] });
+  assert.deepEqual(idx.map((v) => v.rule), ["private host name #2 (host-shaped: ssh target)"], "index is the host line's position");
+  for (const line of [
+    "the quill sang", "quill-embed", "QUILL_TAILSCALE_IP", '"species": "quill"',
+    "quill-pattern.svg", "quill.md", "a quill. Then",
+  ]) assert.deepEqual(checkContent("notes.md", line, { hosts: ["quill"] }), [], line);
+  const all = flagged.map((l) => checkContent("notes.md", l, { hosts: ["quill"] })).flat();
+  assert.ok(all.length >= flagged.length);
+  for (const v of all) assert.ok(!v.rule.toLowerCase().includes("quill"), "the host name itself is never reported");
+  assert.deepEqual(checkPath("fixtures/quill/quill-notes.md", ["tokenone"]), [], "paths are not checked for host names");
+  assert.equal(checkContent("n.md", "the quill sang", { denylist: ["quill"] }).length, 1, "plain tokens are still substrings");
+});
+
+test("a commit message is scanned for host-shaped private host names too", () => {
+  const dir = mkdtempSync(join(tmpdir(), "hygiene-msg-host-"));
+  try {
+    const git = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.org", ...a], { cwd: dir, stdio: "pipe" }).toString().trim();
+    git("init", "-q");
+    writeFileSync(join(dir, "a.md"), "clean\n");
+    git("add", "a.md"); git("commit", "-q", "-m", "base");
+    const base = git("rev-parse", "HEAD");
+    writeFileSync(join(dir, "a.md"), "still clean\n");
+    git("commit", "-q", "-am", "sync with quill:8444 for the demo");
+    assert.deepEqual(scanRepo({ root: dir, messages: `${base}..HEAD` }).violations, [], "no host configured, nothing flagged");
+    const { violations } = scanRepo({ root: dir, messages: `${base}..HEAD`, hosts: ["quill"] });
+    assert.equal(violations.length, 1);
+    assert.equal(violations[0].rule, "private host name #1 (host-shaped: host:port)");
+    assert.ok(!violations[0].rule.includes("quill"), "the host name is never reported");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
