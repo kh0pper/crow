@@ -54,6 +54,10 @@ Visita `http://localhost:3001/setup` para ver el estado de las integraciones y l
 
 La primera vez que visites `/dashboard`, se te pedirá establecer una contraseña. También puedes establecerla desde la página `/setup` o pidiéndoselo a tu IA: "Establece mi contraseña del Crow's Nest."
 
+::: tip Enlace de configuración inicial
+Mientras no exista una contraseña, las páginas de configuración inicial piden un token de un solo uso, para que nadie más en tu red pueda establecer la contraseña primero. El instalador imprime la URL de configuración con `?token=…` ya incluido; ese mismo token se guarda en `~/.crow/setup-token` (solo tu cuenta puede leerlo) por si lo necesitas de nuevo. Abrir la página en la máquina misma — `http://localhost:3001/setup` — no requiere token. El token deja de funcionar en cuanto estableces la contraseña.
+:::
+
 ## Conectar Tu IA
 
 Una vez que el gateway esté funcionando, conecta tu plataforma de IA:

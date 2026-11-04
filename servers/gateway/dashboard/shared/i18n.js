@@ -59,6 +59,11 @@ export const translations = {
   "login.loginButton": { en: "Login", es: "Iniciar sesión" },
   "login.setPasswordButton": { en: "Set Password", es: "Establecer contraseña" },
   "login.setupTokenError": { en: "Use the link you were sent to set up your password.", es: "Usa el enlace que te enviaron para establecer tu contraseña." },
+  // First-run gate (servers/gateway/dashboard/setup-token.js): shown on the login
+  // page while no password is set and the request carried no setup token. {path}
+  // is replaced with this instance's token file path.
+  "login.setupTokenGated": { en: "Use the link you were sent to set up your password. The setup link is printed by the installer, and saved in {path} on this machine.", es: "Usa el enlace que te enviaron para establecer tu contraseña. El enlace de configuración lo imprime el instalador y se guarda en {path} en esta máquina." },
+  "login.setupTokenInvalid": { en: "Invalid setup token. Use the link you were sent to set up your password. The setup link is printed by the installer, and saved in {path} on this machine.", es: "Token de configuración inválido. Usa el enlace que te enviaron para establecer tu contraseña. El enlace de configuración lo imprime el instalador y se guarda en {path} en esta máquina." },
   "login.2faTitle": { en: "Two-Factor Authentication", es: "Autenticación de dos factores" },
   "login.2faSubtitle": { en: "Enter the code from your authenticator app", es: "Ingresa el código de tu aplicación autenticadora" },
   "login.2faPlaceholder": { en: "000000", es: "000000" },

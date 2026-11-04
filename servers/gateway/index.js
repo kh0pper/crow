@@ -701,6 +701,18 @@ try {
   app.use(dashboardRouter(authMiddleware));
   console.log("Crow's Nest mounted at /dashboard");
 
+  // First run: with no dashboard password yet, make sure the one-time setup
+  // token file exists and say where it is — the FILE PATH only, never the token
+  // (the journal is broader than the owner). Silent once a password exists
+  // (servers/gateway/dashboard/setup-token.js).
+  try {
+    const { announceSetupToken } = await import("./dashboard/setup-token.js");
+    const { isPasswordSet } = await import("./dashboard/auth.js");
+    announceSetupToken({ passwordSet: await isPasswordSet().catch(() => false) });
+  } catch (err) {
+    console.warn("[setup] could not prepare the first-run setup token:", err.message);
+  }
+
   // Mount external panel routes at app root (preserves /api/* paths).
   //
   // GOTCHA: bundles mounted here share the app-root namespace. A panel that

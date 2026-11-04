@@ -522,18 +522,44 @@ header "Installation Complete"
 echo ""
 echo "  Crow is ready!"
 echo ""
+
+# First-run setup link. While no dashboard password exists the gateway writes a
+# one-time token to $CROW_HOME/setup-token (mode 0600, readable only by this
+# account) and every first-run path demands it from anything but the machine
+# itself, so a neighbour on the same LAN cannot claim this Crow first.
+SETUP_TOKEN_FILE="$CROW_HOME/setup-token"
+SETUP_TOKEN=""
+if [ -r "$SETUP_TOKEN_FILE" ]; then
+  SETUP_TOKEN="$(cat "$SETUP_TOKEN_FILE" 2>/dev/null || true)"
+fi
+# The token is base64url (A-Z a-z 0-9 - _), so it needs no quoting inside a URL.
+SETUP_QS=""
+if [ -n "$SETUP_TOKEN" ]; then
+  SETUP_QS="?token=${SETUP_TOKEN}"
+fi
+
 if [ "$IS_CLOUD_HOST" = true ] && [ -z "${GATEWAY_HTTPS_URL:-}" ]; then
   echo "  This is a cloud server: ${MDNS_HOST} is not reachable from your browser."
-  echo "  Open an SSH tunnel from your own computer, then browse to http://localhost:3001/setup :"
+  echo "  Open an SSH tunnel from your own computer, then browse to http://localhost:3001/setup${SETUP_QS} :"
   echo "    ssh -L 3001:localhost:3001 ${USER}@<this-server's-public-IP>"
   echo "  (Or re-run this installer and accept Tailscale Serve for a permanent URL.)"
 else
   echo "  Open in your browser:"
-  echo "    https://${MDNS_HOST}/setup"
+  echo "    https://${MDNS_HOST}/setup${SETUP_QS}"
   if [ -n "${GATEWAY_HTTPS_URL:-}" ]; then
-    echo "    ${GATEWAY_HTTPS_URL}/setup   (any device on your tailnet)"
+    echo "    ${GATEWAY_HTTPS_URL}/setup${SETUP_QS}   (any device on your tailnet)"
   fi
 fi
+echo ""
+if [ -n "$SETUP_TOKEN" ]; then
+  echo "  That link works once, and anyone who has it can claim this Crow — don't share it."
+else
+  echo "  The one-time setup token is not written yet. The gateway saves it to:"
+  echo "    ${SETUP_TOKEN_FILE}"
+  echo "  Read it on this machine and add it to the URL as ?token=<that value>."
+fi
+echo "  Opening the setup page on this machine itself (http://localhost:3001/setup)"
+echo "  needs no token."
 echo ""
 echo "  Everything else happens there — the setup wizard walks you through"
 echo "  passwords, your AI model, and connecting devices."
