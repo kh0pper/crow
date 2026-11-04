@@ -49,6 +49,16 @@ const sideEffect = (id, file) =>
    export const id = ${JSON.stringify(id)};
    export function run() { appendFileSync(${JSON.stringify(file)}, ${JSON.stringify(id + "\n")}); }`;
 
+/** Put 0000-tasks-base on file, so a fixture can model a store whose tasks_items
+ *  is absent AFTER 0000 ran (otherwise 0000 creates it in the same pass). */
+function recordBaseApplied(dbPath) {
+  const d = new Database(dbPath);
+  try {
+    d.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
+    d.prepare("INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES ('0000-tasks-base', datetime('now'))").run();
+  } finally { d.close(); }
+}
+
 test("runs migrations in filename order, not creation order", async () => {
   const f = fixture();
   try {
@@ -160,24 +170,40 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
   try {
     const r = await runMigrations({ migrationsDir: dir, dbPath: bare.dbPath, tasksDbPath: bare.tasksDbPath });
     assert.ok(r.deferred.includes("0001-board-stages"),
-      "a fresh instance has no tasks_items yet — recording this as applied is the original bug");
+      "crow.db's targets are absent here — recording this as applied is the original bug");
     assert.ok(!r.applied.includes("0001-board-stages"));
   } finally { rmSync(bare.root, { recursive: true, force: true }); }
 
-  // (a2) THE PRODUCTION SHAPE: crow.db tables exist (init-db has run at boot),
-  // tasks_items does not (the tasks bundle has not started). This is every real
-  // instance at boot — an "all absent" rule would wrongly record it as applied
-  // here, and the tasks_items columns would never land.
+  // (a1) A FRESH instance: crow.db's tables exist (init-db ran at boot) and
+  // tasks.db is empty. 0000-tasks-base creates tasks_items in the same pass, so
+  // 0001 converges it instead of deferring.
+  const fresh = fixture();
+  try {
+    const c = new Database(fresh.dbPath);
+    c.prepare("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY)").run();
+    c.prepare("CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)").run();
+    c.close();
+    const r = await runMigrations({ migrationsDir: dir, dbPath: fresh.dbPath, tasksDbPath: fresh.tasksDbPath });
+    assert.ok(r.applied.includes("0000-tasks-base") && r.applied.includes("0001-board-stages"),
+      "0000 built the store, so 0001 applies in the same pass");
+    assert.ok(!r.deferred.includes("0001-board-stages"));
+  } finally { rmSync(fresh.root, { recursive: true, force: true }); }
+
+  // (a2) crow.db tables exist but tasks_items does NOT, with 0000 already on
+  // file (a store lost or swapped after 0000 ran). An "all absent" rule would
+  // wrongly record 0001 as applied here, and the tasks_items columns would
+  // never land.
   const mixed = fixture();
   try {
     const c = new Database(mixed.dbPath);
     c.prepare("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY)").run();
     c.prepare("CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)").run();
     c.close();
+    recordBaseApplied(mixed.dbPath);
 
     const r = await runMigrations({ migrationsDir: dir, dbPath: mixed.dbPath, tasksDbPath: mixed.tasksDbPath });
     assert.ok(r.deferred.includes("0001-board-stages"),
-      "crow.db tables present + tasks_items absent MUST defer — this is the real-instance shape");
+      "crow.db tables present + tasks_items absent MUST defer");
     assert.ok(!r.applied.includes("0001-board-stages"));
 
     // The crow.db half still applied its column — deferral is about the RECORD.
@@ -390,14 +416,16 @@ test("0001-0004 name the absent table in their deferral reason", async () => {
   const dir = join(import.meta.dirname, "..", "scripts", "migrations");
   const f = fixture();
   try {
-    // The production shape for a paired instance with no board: crow.db is
-    // initialized, tasks.db exists and holds only board_defs — never tasks_items.
+    // A store with no tasks_items while 0000 is already on file (before 0000
+    // existed, this was every paired instance with no board): crow.db is
+    // initialized, tasks.db holds only board_defs.
     const t = new Database(f.tasksDbPath);
     t.exec("CREATE TABLE board_defs (id INTEGER PRIMARY KEY, slug TEXT UNIQUE)");
     t.close();
     const c = new Database(f.dbPath);
     c.exec("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY); CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)");
     c.close();
+    recordBaseApplied(f.dbPath);
 
     const lines = [];
     const r = await runMigrations({
