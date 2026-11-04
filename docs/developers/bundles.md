@@ -31,6 +31,7 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | entry file checked **only** when `command` is `node` and `args[0]` is a path (external `npx`/`uv` servers are exempt) |
 | `panel` | `"panel/<id>.js"` **or** `{ "id": "...", "extends": "..." }` | string form: the file exists; object form: shape-only (resolved at runtime) |
 | `panelRoutes` | `"panel/routes.js"` | the file exists |
+| `widgets` | `[{ "id": "…", "title": "…", "sizes": [[2, 2]] }]` | each declaration's `widgets/<id>.js` exists |
 | `skills` | `["skills/<id>.md", ...]` | every path exists |
 | `ports` / `port` / `webUI.port` | integers (1–65535); `webUI` may also be `null` | — |
 | `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id is a `bundles/<id>` dir with a `manifest.json` (a real bundle) |
@@ -41,6 +42,44 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 **Skills stay current.** On every boot (version bump or not) the gateway syncs each installed bundle's `skills` into `~/.crow/skills/`. A copy is replaced only when it is provably unedited: it matches what Crow last wrote (`~/.crow/skill-installs.json`) or a past shipped version listed in `bundles/skill-history.json`. An edited copy is kept and the owner is notified once per new version; a copy that matches nothing known is kept without a notification; a symlink is never touched. After editing a bundle skill, run `node scripts/build-skill-history.mjs` and commit the ledger (CI runs `--check`, which also requires the ledger to stay append-only against the base commit). `CROW_SKILL_SYNC=on|report|off` sets the mode per gateway (`report` logs and writes nothing). `node scripts/ops/skill-sync-report.mjs --home <CROW_HOME>` is a read-only dry run for one instance.
 
 **Opting an installed copy out.** An installed copy that you maintain by hand (for example a fork deployed over a first-party bundle id) is skipped when its *installed* manifest (`~/.crow/bundles/<id>/manifest.json`) carries `"refresh": false`. The gateway logs the skip on each boot while the versions differ. Only the literal `false` opts out, and the missing-file repair (a deleted `panel/`, `settings-section.js` or `manifest.json`) still runs.
+
+### Widgets
+
+A bundle can put its own widget on the dashboard widget grid (For You and `/dashboard/widgets`). It declares the widget in its manifest and ships its code beside it:
+
+```json
+"widgets": [
+  { "id": "cameras", "title": { "en": "Cameras", "es": "Cámaras" }, "sizes": [[2, 2], [4, 2]] }
+]
+```
+
+- `id` is a short slug (`a-z`, `0-9`, `-`), unique inside the manifest.
+- `title` is a string of 1 to 60 characters, or `{ "en": "…", "es": "…" }` with `en` required.
+- `sizes` lists 1 to 4 sizes. Each size is `[w, h]` with `w` of 1, 2 or 4 and `h` of 1 or 2. The first one is the size the widget starts at. A manifest may declare at most 8 widgets.
+- There is no path field. The code for a widget is always `widgets/<id>.js` in the bundle.
+
+That file exports one loader:
+
+```js
+export async function load(ctx) {
+  return { state: "ok", headline: "", items: [], more_href: "/dashboard/your-page" };
+}
+```
+
+- `ctx` holds exactly `lang` ("en" or "es") and `now` (the page request's clock in milliseconds). It is frozen. There is no database, no session and no host path to reach for.
+- The gateway imports the file from the installed copy of your bundle, and gives the import and the call three seconds together. A loader that throws, hangs or answers with the wrong shape costs only its own cell: the page draws the other widgets, and yours says it could not load.
+- The answer is a widget summary:
+  - `state` is `"ok"`, `"empty"` or `"error"`.
+  - `headline` is one short line of text.
+  - `items` is up to 12 entries. Each needs a `title`, and may add `key`, `kind`, a same-site `href` and a same-site `image`. An item with an image is drawn as a still that reloads when it is tapped; one without is a row.
+  - `more_href` is a same-site link, drawn as "Open" at the bottom of the card.
+- Only same-site links (`/dashboard/…` and the like) are used. Anything else is dropped. Every string is escaped before it reaches the page.
+- All other fields are dropped, so an add-on widget cannot act: there are no buttons and no actions in this release.
+- Add-on widgets are never part of a page's default layout. They appear once the owner adds them from "+ Add widget" in Edit mode.
+- The loader runs in the gateway process, with the same trust as a bundle panel. It is code you ship, not a sandboxed script.
+- Unlike a panel, a widget is not loaded once at boot: its code is imported on page views, so a newly installed version goes live with no restart.
+- A widget runs whenever its bundle is installed, even if the bundle's panel is switched off.
+- Like every bundle change, a new or edited widget needs a `version` bump, or an installed copy keeps running the old file.
 
 ### Running from the installed copy
 

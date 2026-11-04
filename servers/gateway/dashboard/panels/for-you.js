@@ -209,7 +209,7 @@ export default {
       new Promise((resolve) => { wxTimer = setTimeout(() => resolve(null), WIDGET_TIMEOUT_MS); wxTimer.unref?.(); }),
     ]).finally(() => clearTimeout(wxTimer));
     // Each widget degrades alone: a failed read is its own one-line error cell, never the page's.
-    // `crowHome` lets a widget that needs an add-on (the camera and Frigate) be offered only there.
+    // `crowHome` is where the installed add-ons' own widgets come from (widgets/addons.js).
     const cells = await loadWidgets(widgetsForPage("for-you", { settings, crowHome }), context);
     return layout({
       title: t("forYou.title", lang),

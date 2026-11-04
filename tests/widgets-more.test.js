@@ -1,26 +1,25 @@
 /**
- * Widgets phase 3, PR 2: the in-Crow widgets — Messages, cameras and the three launchers (apps,
- * projects, bots).
+ * Widgets phase 3, PR 2: the in-Crow widgets — Messages and the three launchers (apps, projects,
+ * bots).
  *
  * The first half needs no browser:
- *   - the registry: five new ids, offered on both pages but on neither page's DEFAULT layout (the
+ *   - the registry: four new ids, offered on both pages but on neither page's DEFAULT layout (the
  *     defaults are asserted against the same list the pages drew before this PR), with the sizes the
  *     plan names and a title in both languages;
  *   - Messages: the five latest conversations from the Messages panel's own reader, each with the
  *     deep link its kind has (?open= a peer, ?openRoom= a room, ?ai= an AI chat), an unread dot and
  *     a relative age; the empty list is "No conversations yet", and a missing database is an ERROR
  *     cell (the registry's), never an empty one;
- *   - the camera: NOT offered without Frigate, offered with a fixture install, and then one
- *     `<img loading="lazy">` of the bundle's still route per camera — never a video; a read that
- *     throws is its own error cell; a bundle with no server module draws the panel link instead;
  *   - the launchers: tile grids of at most twelve, a tile whose href is not same-site is DROPPED,
  *     names are escaped, apps/projects/bots read the real sources (disabled bots left out);
  *   - one live-Chrome check at 390×844: the Apps widget added through "+ Add widget" on
  *     /dashboard/widgets, drawn, with no sideways scroll.
  *
+ * The camera widget that shipped beside these is now an ADD-ON widget: the installed Frigate bundle
+ * provides it (bundles/frigate/widgets/cameras.js) and tests/widgets-addons.test.js covers it.
+ *
  * Nothing here reaches the network: the Messages reader, the launcher, the project list and the bot
- * rows are taken as arguments (widgets/more.js), and the Frigate list is either a test seam
- * (_setFrigateModuleForTest) or a fixture bundle written into the scratch CROW_HOME.
+ * rows are taken as arguments (widgets/more.js).
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -35,17 +34,15 @@ import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 import { WIDGETS, widgetOf, widgetsForPage, loadWidgets } from "../servers/gateway/widgets/registry.js";
 import { gridHtml, defaultOnFor } from "../servers/gateway/widgets/grid-html.js";
 import {
-  loadMessages, loadCameras, loadApps, loadProjects, loadBots, launcherItems, messagesHref,
-  cameraNames, sameSiteHref, frigateInstalled, _setFrigateModuleForTest, _resetCameraFailureForTest,
+  loadMessages, loadApps, loadProjects, loadBots, launcherItems, messagesHref, sameSiteHref,
   MESSAGES_LIMIT, TILES_LIMIT,
 } from "../servers/gateway/widgets/more.js";
-import { messagesHtml, cameraHtml, appsHtml, projectsHtml, botsHtml, widgetsMoreCss } from "../servers/gateway/widgets/more-html.js";
-import { forYouClientJs } from "../servers/gateway/dashboard/panels/for-you/client.js";
+import { messagesHtml, appsHtml, projectsHtml, botsHtml, widgetsMoreCss } from "../servers/gateway/widgets/more-html.js";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 import { _setTodaySeamsForTest } from "../servers/gateway/for-you/today.js";
 actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
 
-const NEW_IDS = ["messages", "camera", "apps", "projects", "bots"];
+const NEW_IDS = ["messages", "apps", "projects", "bots"];
 
 const dir = mkdtempSync(join(tmpdir(), "widgets-more-"));
 process.env.CROW_DATA_DIR = dir;
@@ -68,7 +65,7 @@ const emptyDb = { execute: async () => ({ rows: [] }) };
 
 // ─── the registry ────────────────────────────────────────────────────────────
 
-test("the registry: the five in-Crow widgets, offered on both pages, on neither default layout", () => {
+test("the registry: the four in-Crow widgets, offered on both pages, on neither default layout", () => {
   for (const id of NEW_IDS) {
     const w = widgetOf(id);
     assert.ok(w, `${id} is registered`);
@@ -86,12 +83,11 @@ test("the registry: the five in-Crow widgets, offered on both pages, on neither 
     }
   }
   assert.deepEqual(widgetOf("messages").sizes.map((s) => s.join("x")), ["2x2", "4x2"]);
-  assert.deepEqual(widgetOf("camera").sizes.map((s) => s.join("x")), ["2x2", "4x2"]);
   for (const id of ["apps", "projects", "bots"]) {
     assert.deepEqual(widgetOf(id).sizes.map((s) => s.join("x")), ["2x1", "2x2", "4x1", "4x2"], id);
   }
   // Every new widget is drawn hidden by both pages (the "+ Add widget" entry), whatever this host
-  // has installed — the camera's offer gate is a separate, later filter.
+  // has installed — an add-on's own offer gate is a separate, later filter.
   for (const id of NEW_IDS) {
     for (const page of ["for-you", "widgets"]) {
       assert.equal(defaultOnFor(widgetOf(id), page), false, `${id} is hidden on ${page}`);
@@ -177,134 +173,6 @@ test("messages: a conversation's name is escaped, never markup", async () => {
   }, "en", NOW);
   assert.ok(!html.includes("<script>"), "a name cannot open a script tag");
   assert.match(html, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
-});
-
-// ─── the camera ──────────────────────────────────────────────────────────────
-
-const FRIGATE_CONFIG = {
-  cameras: {
-    front: { enabled: true, detect: { width: 1280 } },
-    garden: { enabled: true },
-    off: { enabled: false }, // switched off: its latest.jpg has nothing to show
-  },
-};
-
-/** The fixture add-on: the installed Frigate's own server module, with the one read it makes. */
-function installFrigateFixture(config = FRIGATE_CONFIG) {
-  const serverDir = join(HOME, "bundles", "frigate", "server");
-  mkdirSync(serverDir, { recursive: true });
-  writeFileSync(join(serverDir, "frigate-api.js"),
-    `export async function frigateFetch(path) {\n  if (path !== "/api/config") throw new Error("unexpected path " + path);\n  return ${JSON.stringify(config)};\n}\n`);
-  writeFileSync(join(HOME, "installed.json"), JSON.stringify(["frigate"]));
-}
-
-function removeFrigateFixture() {
-  writeFileSync(join(HOME, "installed.json"), "[]");
-  rmSync(join(HOME, "bundles"), { recursive: true, force: true });
-}
-
-test("the camera is NOT offered without Frigate, and reads no list at all", async () => {
-  removeFrigateFixture();
-  _setFrigateModuleForTest(null);
-  assert.equal(frigateInstalled(HOME), false);
-  assert.equal(widgetsForPage("for-you", { crowHome: HOME }).some((w) => w.id === "camera"), false);
-  assert.equal(widgetsForPage("widgets", { crowHome: HOME }).some((w) => w.id === "camera"), false);
-  // No module to read with: the loader says so, and the widget is a link to the panel — never a tile
-  // pointing at a route the bundle is not serving.
-  const data = await loadCameras({ crowHome: HOME });
-  assert.deepEqual(data, { cameras: [], total: 0, state: "panel" });
-  const html = cameraHtml(data, "en");
-  assert.match(html, /href="\/dashboard\/frigate"/);
-  assert.doesNotMatch(html, /latest\.jpg/);
-});
-
-test("with a fixture install the camera is offered, and draws one lazy still per camera, never video", async () => {
-  installFrigateFixture();
-  try {
-    _setFrigateModuleForTest(null);
-    assert.equal(frigateInstalled(HOME), true);
-    assert.equal(widgetsForPage("for-you", { crowHome: HOME }).some((w) => w.id === "camera"), true, "offered on For You");
-    assert.equal(widgetsForPage("widgets", { crowHome: HOME }).some((w) => w.id === "camera"), true, "offered on the widget page");
-
-    const data = await loadCameras({ crowHome: HOME });
-    assert.deepEqual(data, { cameras: ["front", "garden"], total: 2, state: "ok" }, "a disabled camera is left out");
-    const html = cameraHtml(data, "en");
-    assert.equal(html.split("<img ").length - 1, 2, "one still per camera");
-    assert.match(html, /<img class="wg-cam-img" loading="lazy" src="\/api\/frigate\/front\/latest\.jpg" alt="front">/);
-    assert.match(html, /data-wg-cam/, "the tap target the client reloads");
-    assert.match(html, /aria-label="Refresh garden"/);
-    assert.doesNotMatch(html, /<video|<source/, "never live video");
-    assert.match(html, /href="\/dashboard\/frigate"/);
-
-    // The page itself, through the real dashboard router: the cell appears only with the add-on.
-    await withFlag(async () => {
-      const withFrigate = await get("/dashboard/for-you");
-      assert.equal(withFrigate.status, 200);
-      assert.match(withFrigate.body, /data-widget="camera"/);
-      assert.match(withFrigate.body, /src="\/api\/frigate\/front\/latest\.jpg"/);
-      assert.match(withFrigate.body, /\.wg-cam-img \{/, "the widget's own styles ship with the page");
-      removeFrigateFixture();
-      const without = await get("/dashboard/for-you");
-      assert.equal(without.status, 200);
-      assert.doesNotMatch(without.body, /data-widget="camera"/, "an uninstalled add-on is not offered");
-      assert.doesNotMatch(without.body, /data-wg-add="camera"/, "nor is it in the picker");
-    });
-  } finally {
-    removeFrigateFixture();
-    _setFrigateModuleForTest(null);
-  }
-});
-
-test("the camera: an empty list says so, a module without the read is the panel link, a throw is the error cell", async () => {
-  // A seam, not a second fixture file: the installed module is cached by its path, so every variant
-  // of "what Frigate answered" is a stand-in here (widgets/more.js _setFrigateModuleForTest).
-  _setFrigateModuleForTest({ frigateFetch: async () => ({ cameras: {} }) });
-  const empty = await loadCameras({ crowHome: HOME });
-  assert.deepEqual(empty, { cameras: [], total: 0, state: "empty" });
-  assert.match(cameraHtml(empty, "en"), /No cameras yet/);
-
-  // An installed copy with no frigateFetch (a half-installed bundle): the panel link, not a crash.
-  _setFrigateModuleForTest({});
-  assert.deepEqual(await loadCameras({ crowHome: HOME }), { cameras: [], total: 0, state: "panel" });
-
-  // A Frigate that throws: this cell's error line, and the page is untouched.
-  _setFrigateModuleForTest({ frigateFetch: async () => { throw new Error("frigate is down"); } });
-  const cells = await loadWidgets([widgetOf("camera")], { crowHome: HOME, lang: "en" }, { log: () => {} });
-  assert.equal(cells[0].failed, true);
-  const html = gridHtml("widgets", cells, "en");
-  assert.match(html, /data-widget="camera"/);
-  assert.match(html, /This widget couldn't load just now/);
-  assert.doesNotMatch(html, /frigate is down/, "the failure's own words never reach the page");
-
-  // A Frigate read that never answers costs this cell only, at the registry's timeout
-  // (Review focus 3). Nothing about the still images is read here: the browser loads those.
-  _resetCameraFailureForTest(); // the throw above is remembered for a minute; start this case fresh
-  _setFrigateModuleForTest({ frigateFetch: () => new Promise(() => {}) });
-  const quick = { id: "fine", titleKey: "forYou.morning", sizes: [[2, 1]], defaultSize: [2, 1], load: async () => ({}), render: () => "<p id=\"fine-body\">fine</p>" };
-  const started = Date.now();
-  const hung = await loadWidgets([quick, widgetOf("camera")], { crowHome: HOME, lang: "en" }, { log: () => {}, timeoutMs: 40 });
-  assert.ok(Date.now() - started < 2000, "the page did not wait for the hung read");
-  assert.deepEqual(hung.map((c) => (c.failed ? "failed" : "ok")), ["ok", "failed"]);
-  const hungHtml = gridHtml("widgets", hung, "en");
-  assert.match(hungHtml, /id="fine-body"/);
-  assert.match(hungHtml, /data-widget="camera"/);
-  _setFrigateModuleForTest(null);
-});
-
-test("cameraNames: config order, trimmed names, a disabled camera left out, junk tolerated", () => {
-  assert.deepEqual(cameraNames(FRIGATE_CONFIG), ["front", "garden"]);
-  assert.deepEqual(cameraNames({ cameras: { b: {}, a: {} } }), ["b", "a"], "the config's own order");
-  assert.deepEqual(cameraNames({ cameras: { " ": {}, x: { enabled: true } } }), ["x"]);
-  assert.deepEqual(cameraNames({}), []);
-  assert.deepEqual(cameraNames(null), []);
-  assert.deepEqual(cameraNames({ cameras: "not a map" }), []);
-});
-
-test("a camera's name is escaped in its still's src and alt", () => {
-  const html = cameraHtml({ cameras: ['x"><script>alert(1)</script>'], total: 1, state: "ok" }, "en");
-  assert.ok(!html.includes("<script>alert(1)"));
-  assert.match(html, /alt="x&quot;&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;"/);
-  assert.match(html, /src="\/api\/frigate\/x%22%3E%3Cscript%3Ealert\(1\)%3C%2Fscript%3E\/latest\.jpg"/);
 });
 
 // ─── the launchers ───────────────────────────────────────────────────────────
@@ -406,59 +274,21 @@ test("the launchers' empty states say so, in both languages", async () => {
 
 test("each in-Crow loader's failure is its own cell, and the rest of the grid still draws", async () => {
   const ok = { id: "fine", titleKey: "forYou.morning", sizes: [[2, 1]], defaultSize: [2, 1], load: async () => ({}), render: () => "<p id=\"fine-body\">fine</p>" };
-  _setFrigateModuleForTest({ frigateFetch: async () => { throw new Error("down"); } });
-  try {
-    const cells = await loadWidgets(
-      [ok, widgetOf("messages"), widgetOf("camera"), widgetOf("apps"), widgetOf("projects"), widgetOf("bots")],
-      { db: null, crowHome: HOME, lang: "en" },
-      { log: () => {} },
-    );
-    assert.deepEqual(cells.map((c) => (c.failed ? "failed" : "ok")), ["ok", "failed", "failed", "failed", "failed", "failed"]);
-    const html = gridHtml("widgets", cells, "en");
-    assert.match(html, /id="fine-body"/, "the healthy widget is untouched");
-    for (const id of NEW_IDS) {
-      assert.match(html, new RegExp(`data-widget="${id}"`), `${id} keeps its cell`);
-    }
-    assert.equal(html.split("This widget couldn't load just now").length - 1, 5, "one error line per failed cell");
-  } finally {
-    _setFrigateModuleForTest(null);
+  const cells = await loadWidgets(
+    [ok, widgetOf("messages"), widgetOf("apps"), widgetOf("projects"), widgetOf("bots")],
+    { db: null, crowHome: HOME, lang: "en" },
+    { log: () => {} },
+  );
+  assert.deepEqual(cells.map((c) => (c.failed ? "failed" : "ok")), ["ok", "failed", "failed", "failed", "failed"]);
+  const html = gridHtml("widgets", cells, "en");
+  assert.match(html, /id="fine-body"/, "the healthy widget is untouched");
+  for (const id of NEW_IDS) {
+    assert.match(html, new RegExp(`data-widget="${id}"`), `${id} keeps its cell`);
   }
+  assert.equal(html.split("This widget couldn't load just now").length - 1, 4, "one error line per failed cell");
 });
 
-// ─── the camera's tap, and the widgets' styles ───────────────────────────────
-
-test("a tap on a camera still reloads that image with a fresh ?t=<now>, and nothing else", async () => {
-  const js = forYouClientJs();
-  assert.ok(!js.includes("`"), "the client is emitted inside a template literal: no backtick");
-  assert.ok(!js.includes("${"), "and no ${");
-  const { parseHTML } = await import("linkedom");
-  const { document, window } = parseHTML(`<!doctype html><html><body>
-    <div class="fy" data-fy data-fy-failed="That action failed.">
-      <section class="fy-card fy-tile">
-        <button type="button" class="wg-cam" data-wg-cam aria-label="Refresh front">
-          <img class="wg-cam-img" loading="lazy" src="/api/frigate/front/latest.jpg" alt="front">
-          <span class="wg-cam-name">front</span>
-        </button>
-      </section>
-    </div>
-  </body></html>`);
-  const vm = await import("node:vm");
-  const ctx = vm.createContext({ window, document, JSON, Number, Object, Array, String, Date, isFinite, setTimeout, clearTimeout });
-  vm.runInContext(js.replace(/^<script>\s*/, "").replace(/<\/script>\s*$/, ""), ctx);
-  const img = document.querySelector(".wg-cam-img");
-  const tap = () => document.querySelector("[data-wg-cam]").dispatchEvent(new window.Event("click", { bubbles: true }));
-  tap();
-  const once = img.getAttribute("src");
-  assert.match(once, /^\/api\/frigate\/front\/latest\.jpg\?t=\d+$/, "the same still URL, with a clock on the end");
-  assert.equal(once.split("?t=").length - 1, 1, "one query, not a growing chain");
-  const first = once.split("?t=")[1];
-  await new Promise((r) => setTimeout(r, 5));
-  tap();
-  const twice = img.getAttribute("src");
-  assert.equal(twice.split("?t=").length - 1, 1, "and still one after a second tap");
-  assert.notEqual(twice.split("?t=")[1], first, "a later tap asks for a newer frame");
-  assert.equal(document.querySelector("video"), null, "never a video element");
-});
+// ─── the widgets' styles ────────────────────────────────────────────────────
 
 test("the widgets' styles: 44 px targets, a still that fits its box, one style tag", () => {
   const css = widgetsMoreCss();
@@ -503,7 +333,6 @@ before(async () => {
 after(() => {
   delete process.env.CROW_FOR_YOU;
   _setTodaySeamsForTest({});
-  _setFrigateModuleForTest(null);
   server?.closeAllConnections?.();
   server?.close();
   rmSync(dir, { recursive: true, force: true });
@@ -629,18 +458,4 @@ test("sameSiteHref refuses a second slash or backslash, a scheme, and control ch
     assert.equal(sameSiteHref(bad), null, JSON.stringify(bad));
   }
   for (const good of ["/dashboard/x", "/dashboard/messages?open=3"]) assert.equal(sameSiteHref(good), good);
-});
-
-test("an unreachable Frigate costs the camera widget a short budget once, then a remembered failure", async () => {
-  _resetCameraFailureForTest();
-  let calls = 0;
-  _setFrigateModuleForTest({ frigateFetch: () => { calls++; return new Promise(() => {}); } }); // hangs
-  const t0 = Date.now();
-  await assert.rejects(() => loadCameras({ budgetMs: 50 }), /timed out/);
-  assert.ok(Date.now() - t0 < 1000, "bounded by its own short budget");
-  const again = await loadCameras({ budgetMs: 50 });
-  assert.equal(again.state, "panel", "within a minute the widget links to the panel at once");
-  assert.equal(calls, 1, "and Frigate is not asked again");
-  _setFrigateModuleForTest(null);
-  _resetCameraFailureForTest();
 });

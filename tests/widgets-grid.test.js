@@ -62,8 +62,9 @@ test("the registry: unique ids in For You's order, sizes that include the defaul
   assert.equal(ids.length, new Set(ids).size, "every id is unique");
   assert.deepEqual(ids, [
     "needs-me", "morning", "moves", "listen", "news", "today", "weather",
-    // Widgets phase 3, PR 2: offered on both pages, on neither default layout.
-    "messages", "camera", "apps", "projects", "bots",
+    // Widgets phase 3, PR 2: offered on both pages, on neither default layout. The camera widget
+    // moved onto the add-on contract (widgets/addons.js) with PR 3, so it is not a built-in.
+    "messages", "apps", "projects", "bots",
   ], "For You's default order, then Today + Ramble, then the weather, then the in-Crow widgets");
   for (const w of WIDGETS) {
     assert.ok(Array.isArray(w.sizes) && w.sizes.length > 0, `${w.id} lists its sizes`);
@@ -88,7 +89,7 @@ test("the offer: a section's customize switch off means not offered, and never c
   const settings = { sections: { morning: true, moves: false, listen: false, news: false, weather: true } };
   // The in-Crow widgets (widgets phase 3, PR 2) carry no switch either, so they are always offered —
   // from "+ Add widget" on either page (they are part of neither page's DEFAULT layout).
-  const inCrow = ["messages", "camera", "apps", "projects", "bots"];
+  const inCrow = ["messages", "apps", "projects", "bots"];
   // `today` carries no customize switch, so it is always offered — from "+ Add widget" on either page
   // (it is only part of the generic page's DEFAULT layout; see the widget page's own test).
   assert.deepEqual(widgetsForPage("for-you", { settings }).map((w) => w.id), ["needs-me", "morning", "today", "weather", ...inCrow]);

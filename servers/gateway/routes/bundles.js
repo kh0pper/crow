@@ -839,6 +839,9 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
   if (typeof repoManifest.panel === "string") declare(repoManifest.panel);
   else if (repoManifest.panel && typeof repoManifest.panel === "object") declaredRoots.add("panel");
   if (repoManifest.panelRoutes) declare(repoManifest.panelRoutes);
+  // A bundle's widgets are code: widgets/<id>.js files the gateway imports at page time. The
+  // contract has no path key for them (the file is always widgets/<id>.js), so the root is literal.
+  if (Array.isArray(repoManifest.widgets) && repoManifest.widgets.length) declaredRoots.add("widgets");
   // The post-install hook's directory is code — refreshed on a version bump like panel/.
   if (repoManifest.postInstall?.script) declare(repoManifest.postInstall.script);
   if (Array.isArray(repoManifest.skills)) {

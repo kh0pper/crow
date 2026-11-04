@@ -28,9 +28,20 @@ import { t, fill } from "../dashboard/shared/i18n.js";
 
 const e = escapeHtml;
 
-/** A widget's name in the page's language. */
+/**
+ * A widget's name in the page's language: its `titleKey` through i18n, or — for an add-on widget —
+ * the literal title its manifest declares (a string, or { en, es } with `en` always there).
+ */
 export function widgetTitle(widget, lang = "en") {
-  return widget && widget.titleKey ? t(widget.titleKey, lang) : "";
+  if (!widget) return "";
+  if (widget.titleKey) return t(widget.titleKey, lang);
+  if (typeof widget.title === "string") return widget.title;
+  if (widget.title && typeof widget.title === "object") {
+    const named = widget.title[String(lang == null ? "en" : lang)];
+    if (typeof named === "string" && named) return named;
+    return typeof widget.title.en === "string" ? widget.title.en : "";
+  }
+  return "";
 }
 
 /**

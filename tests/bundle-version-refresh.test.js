@@ -340,6 +340,28 @@ describe("4b — docker-type restriction + declared-root traversal rejection", (
     assert.equal(readAt(destBundleDir(id), "scripts/bootstrap.sh"), "#!/bin/sh\necho repo script\n");
   });
 
+  test("a docker bundle's declared widgets/ is code: the version bump ships widgets/x.js", async () => {
+    const id = "widget-docker-widgets";
+    const repoRoot = freshRoot("crowrepo-dockerwidgets-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "DW", version: "2.0.0", type: "bundle", category: "misc", description: "d",
+      docker: { composefile: "docker-compose.yml" },
+      widgets: [{ id: "x", title: "X", sizes: [[2, 1]] }],
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, "services: {}\n");
+    put(repoRoot, `${id}/widgets/x.js`, "export async function load() { return { state: 'ok' }; }\n");
+
+    // Installed at the older version, from before the bundle shipped a widget.
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle" }));
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "widgets/x.js"), "export async function load() { return { state: 'ok' }; }\n",
+      "a manifest-declared widgets/ is code, so it refreshes even on a docker bundle");
+    assert.ok(!existsSync(join(destBundleDir(id), "docker-compose.yml")), "the compose file is still not swept in");
+  });
+
   test("a manifest-declared root of \"../x\" is rejected — no copy outside the bundle dir", async () => {
     const id = "widget-traversal";
     const repoRoot = freshRoot("crowrepo-traversal-");
