@@ -1750,6 +1750,35 @@ test("holding a step and turning cutoff sets a lock", async () => {
   assert.equal(commands(ui, "pad.set").length, 1, "the pad takes that change instead");
 });
 
+test("a long press counts even when the page is too busy to run its timer first", async () => {
+  // Chrome runs input before an overdue timer: on a busy page the release of a
+  // 400 ms press arrives before the quarter-second timer has run. The release
+  // measures the hold by the events' own clock, so the press still locks.
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 2));
+
+  const at = (made, stamp) => {
+    Object.defineProperty(made, "timeStamp", { value: stamp });
+    return made;
+  };
+  ui.step(2).dispatchEvent(at(ui.event("pointerdown", { button: 0, clientX: 0 }), 1000));
+  // No timer runs: the release comes first.
+  ui.release({ timeStamp: 1400 });
+  await ui.settle();
+  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "the 400 ms press entered lock mode");
+  assert.equal(commands(ui, "step.toggle").length, 0, "and did not toggle the step");
+
+  // A short press on a busy page is still a short press.
+  ui.view().querySelector("[data-act=step-lock-done]").dispatchEvent(ui.event("click", {}));
+  await ui.settle();
+  ui.step(2).dispatchEvent(at(ui.event("pointerdown", { button: 0, clientX: 0 }), 5000));
+  ui.release({ timeStamp: 5100 });
+  await ui.settle();
+  assert.equal(ui.view().querySelector("[data-role=step-lock]"), null, "a 100 ms press is not a long press");
+});
+
 test("a slider changed after the step is released still sets the step's lock", async () => {
   const ui = await bootSampler();
   const bankId = await bankIdOf(ui.doc);
