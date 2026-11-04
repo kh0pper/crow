@@ -68,9 +68,9 @@ const CROW_SERVE = {
   },
   AllowFunnel: { "crow.example.ts.net:443": true },
 };
-const BLACKSWAN_SERVE = { // a PRIVATE Serve on :443, proxying "/" to the gateway
+const VPS1_SERVE = { // a PRIVATE Serve on :443, proxying "/" to the gateway
   TCP: { 443: { HTTPS: true } },
-  Web: { "black-swan.example.ts.net:443": { Handlers: { "/": { Proxy: "http://localhost:3001" } } } },
+  Web: { "vps-1.example.ts.net:443": { Handlers: { "/": { Proxy: "http://localhost:3001" } } } },
 };
 const FUNNEL_ON_8444 = {
   Web: { "x.example.ts.net:8444": { Handlers: { "/": { Proxy: "http://localhost:3001" } } } },
@@ -87,19 +87,19 @@ function fakeTailscale({ serve = null, ip = "100.64.0.5", status = null } = {}) 
   };
 }
 
-test("unit: the derived self dial address is never the :443 door (crow / black-swan / funnel shapes)", () => {
+test("unit: the derived self dial address is never the :443 door (crow / vps-1 / funnel shapes)", () => {
   assert.equal(serveUrlForPort(CROW_SERVE, 3001), "https://crow.example.ts.net:8444", "crow: the :8444 Serve for its port, not the Funnel :443");
   assert.equal(serveUrlForPort(CROW_SERVE, 3008), "https://crow.example.ts.net:8449", "r4 on the same host gets ITS Serve port");
-  assert.equal(serveUrlForPort(BLACKSWAN_SERVE, 3001), "https://black-swan.example.ts.net", "black-swan: its PRIVATE :443 Serve is a fine browser/HTTP URL");
-  assert.equal(serveUrlForPort({ ...BLACKSWAN_SERVE, Web: { ...BLACKSWAN_SERVE.Web, "black-swan.example.ts.net:8460": { Handlers: { "/": { Proxy: "http://127.0.0.1:3001" } } } } }, 3001),
-    "https://black-swan.example.ts.net:8460", "a non-443 private Serve is preferred");
+  assert.equal(serveUrlForPort(VPS1_SERVE, 3001), "https://vps-1.example.ts.net", "vps-1: its PRIVATE :443 Serve is a fine browser/HTTP URL");
+  assert.equal(serveUrlForPort({ ...VPS1_SERVE, Web: { ...VPS1_SERVE.Web, "vps-1.example.ts.net:8460": { Handlers: { "/": { Proxy: "http://127.0.0.1:3001" } } } } }, 3001),
+    "https://vps-1.example.ts.net:8460", "a non-443 private Serve is preferred");
   assert.equal(serveUrlForPort(FUNNEL_ON_8444, 3001), null, "a Funnel-enabled host:port is never advertised");
 
   const env = { CROW_GATEWAY_URL: "https://crow.example.ts.net" };
   const crow = deriveSelfDialAddress({ port: 3001, env, execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE, ip: "100.64.20.1" }) });
   assert.deepEqual(crow, { gateway_url: "https://crow.example.ts.net:8444", tailscale_ip: "100.64.20.1", sync_port: 3001, source: "serve" });
-  const bs = deriveSelfDialAddress({ port: 3001, env: { CROW_GATEWAY_URL: "https://black-swan.example.ts.net" }, execFileSyncImpl: fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.64.20.3" }) });
-  assert.deepEqual(bs, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.64.20.3", sync_port: 3001, source: "serve" });
+  const bs = deriveSelfDialAddress({ port: 3001, env: { CROW_GATEWAY_URL: "https://vps-1.example.ts.net" }, execFileSyncImpl: fakeTailscale({ serve: VPS1_SERVE, ip: "100.64.20.3" }) });
+  assert.deepEqual(bs, { gateway_url: "https://vps-1.example.ts.net", tailscale_ip: "100.64.20.3", sync_port: 3001, source: "serve" });
   const bare = deriveSelfDialAddress({ port: 3009, env: {}, execFileSyncImpl: fakeTailscale({ serve: null, ip: "100.64.20.4" }) });
   assert.deepEqual(bare, { gateway_url: "http://100.64.20.4:3009", tailscale_ip: "100.64.20.4", sync_port: 3009, source: "tailnet-ip" }, "no Serve → the direct backend");
   const pinned = deriveSelfDialAddress({ port: 3001, env, configuredUrl: "https://pin.example.ts.net:9000", execFileSyncImpl: fakeTailscale({ serve: CROW_SERVE }) });
@@ -116,10 +116,10 @@ test("unit: the derived self dial address is never the :443 door (crow / black-s
 
   const status = {
     Self: { DNSName: "crow.example.ts.net.", TailscaleIPs: ["100.64.20.1", "fd7a:115c:a1e0::1"] },
-    Peer: { k: { DNSName: "black-swan.example.ts.net.", TailscaleIPs: ["fd7a:115c:a1e0::2", "100.64.20.3"] } },
+    Peer: { k: { DNSName: "vps-1.example.ts.net.", TailscaleIPs: ["fd7a:115c:a1e0::2", "100.64.20.3"] } },
   };
-  assert.equal(lookupTailnetIpForHost("black-swan.example.ts.net", { status }), "100.64.20.3");
-  assert.equal(lookupTailnetIpForHost("BLACK-SWAN.example.ts.net", { status }), "100.64.20.3");
+  assert.equal(lookupTailnetIpForHost("vps-1.example.ts.net", { status }), "100.64.20.3");
+  assert.equal(lookupTailnetIpForHost("VPS-1.example.ts.net", { status }), "100.64.20.3");
   assert.equal(lookupTailnetIpForHost("nope.example.ts.net", { status }), null);
   assert.equal(lookupTailnetIpForHost("example.com", { status }), null, "only MagicDNS names are looked up");
 });
@@ -147,9 +147,9 @@ test("self row: a self row with NO usable address (empty / localhost) is repaire
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.20.4:3009", tailscaleIp: "100.64.20.4" });
     assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "http://100.64.20.4:3009", tailscale_ip: "100.64.20.4" });
   });
-  await withScratchSelf("https://black-swan.example.ts.net", async (db) => {
+  await withScratchSelf("https://vps-1.example.ts.net", async (db) => {
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.20.3:3001", tailscaleIp: "100.64.20.3" });
-    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.64.20.3" }, "browser URL kept; tailscale_ip filled");
+    assert.deepEqual({ ...(await row(db, "self")) }, { gateway_url: "https://vps-1.example.ts.net", tailscale_ip: "100.64.20.3" }, "browser URL kept; tailscale_ip filled");
   });
   await withScratchSelf("https://r4.example.ts.net:8448", async (db) => {
     await ensureLocalInstanceRegistered(db, { crowId: "c", gatewayUrl: "http://100.64.0.5:3008" });
@@ -171,10 +171,10 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
   process.env.PORT = "3001";
   try {
     await withScratchSelf(undefined, async (db) => {
-      // Black-swan's host shape: only a :443 Serve, no self row yet.
-      const exec = fakeTailscale({ serve: BLACKSWAN_SERVE, ip: "100.64.20.3" });
+      // The cloud VM's host shape: only a :443 Serve, no self row yet.
+      const exec = fakeTailscale({ serve: VPS1_SERVE, ip: "100.64.20.3" });
       const before = await selfPairingAddress(db, { execFileSyncImpl: exec });
-      assert.deepEqual(before, { gateway_url: "https://black-swan.example.ts.net", tailscale_ip: "100.64.20.3", sync_port: 3001 },
+      assert.deepEqual(before, { gateway_url: "https://vps-1.example.ts.net", tailscale_ip: "100.64.20.3", sync_port: 3001 },
         "its private Serve for HTTP + the tailnet IP and port sync will dial");
 
       // Crow's host shape through the REAL route, over real HTTP.
@@ -218,7 +218,7 @@ test("pairing (enroll route + selfPairingAddress) advertises the tailnet dial ad
 
         // An OLD peer re-pairing with its :443 CROW_GATEWAY_URL never replaces a dialable row.
         await allowRePair(3);
-        const r2 = await post({ ...base, source_gateway_url: "https://black-swan.example.ts.net", source_tailscale_ip: "8.8.8.8" });
+        const r2 = await post({ ...base, source_gateway_url: "https://vps-1.example.ts.net", source_tailscale_ip: "8.8.8.8" });
         assert.equal(r2.status, 200);
         assert.deepEqual({ ...(await row(db, "peerB")) }, { gateway_url: "http://100.64.20.3:3001", tailscale_ip: "100.64.20.3" }, "dialable row kept; non-tailnet IP ignored");
       } finally {

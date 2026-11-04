@@ -1589,7 +1589,7 @@
         "path": "/",
         "label": "Frigate"
       },
-      "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — grackle baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed.",
+      "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed.",
       "official": true
     },
     {
@@ -3141,7 +3141,7 @@
           ]
         }
       ],
-      "notes": "CPU-only; the first request downloads the ~640MB GGUF and caches it in a Docker volume. After install, select it as the embedding provider — set dashboard_settings 'embed_provider' = 'llamacpp-cpu-embed' (or export CROW_EMBED_PROVIDER=llamacpp-cpu-embed). 1024-dim, vector-space compatible with grackle-embed / vllm-cuda-embed (same model).",
+      "notes": "CPU-only; the first request downloads the ~640MB GGUF and caches it in a Docker volume. After install, select it as the embedding provider — set dashboard_settings 'embed_provider' = 'llamacpp-cpu-embed' (or export CROW_EMBED_PROVIDER=llamacpp-cpu-embed). 1024-dim, vector-space compatible with the vllm-cuda-embed bundle (same model).",
       "official": true
     },
     {
@@ -3150,7 +3150,7 @@
       "type": "bundle",
       "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
       "category": "ai",
-      "description": "Dedicated embedding endpoint. Qwen3-Embedding-0.6B Q8_0 GGUF via llama.cpp on Strix Halo gfx1151, OpenAI-compatible /v1/embeddings on port 8004. Registers as crow-embed provider so KB MCP and any other consumer can request 1024-dim vectors without depending on grackle's Ollama.",
+      "description": "Dedicated embedding endpoint. Qwen3-Embedding-0.6B Q8_0 GGUF via llama.cpp on Strix Halo gfx1151, OpenAI-compatible /v1/embeddings on port 8004. Registers as crow-embed provider so KB MCP and any other consumer can request 1024-dim vectors without depending on the home server's Ollama.",
       "host": "local",
       "requires": {
         "gpu": true,
@@ -7179,7 +7179,7 @@
       "type": "bundle",
       "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
       "category": "ai",
-      "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory/research/blog. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
+      "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory/research/blog. Runs on the home server's RTX 5060 Ti via vLLM-CUDA.",
       "host": "local",
       "requires": {
         "gpu": true,
@@ -7207,7 +7207,7 @@
           "id": "grackle-embed",
           "baseUrlTemplate": "http://{host_ip}:{port}/v1",
           "apiKey": "none",
-          "description": "Text embeddings via Qwen3-Embedding-0.6B (grackle, always warm)",
+          "description": "Text embeddings via Qwen3-Embedding-0.6B (the home server, always warm)",
           "models": [
             {
               "id": "qwen3-embedding-0.6b",
@@ -7233,7 +7233,7 @@
       "type": "bundle",
       "name": "vLLM Reranker — Qwen3-Reranker-0.6B",
       "category": "ai",
-      "description": "Cross-encoder reranker for hybrid FTS+vector retrieval top-K reordering. Multilingual, instruction-aware. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
+      "description": "Cross-encoder reranker for hybrid FTS+vector retrieval top-K reordering. Multilingual, instruction-aware. Runs on the home server's RTX 5060 Ti via vLLM-CUDA.",
       "host": "local",
       "requires": {
         "gpu": true,
@@ -7261,7 +7261,7 @@
           "id": "grackle-rerank",
           "baseUrlTemplate": "http://{host_ip}:{port}/v1",
           "apiKey": "none",
-          "description": "Cross-encoder reranking via Qwen3-Reranker-0.6B (grackle, always warm)",
+          "description": "Cross-encoder reranking via Qwen3-Reranker-0.6B (the home server, always warm)",
           "models": [
             {
               "id": "qwen3-reranker-0.6b",
@@ -7280,7 +7280,7 @@
       "type": "bundle",
       "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
       "category": "ai",
-      "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with grackle-embed/rerank during burst.",
+      "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with the CUDA host's embed/rerank providers during burst.",
       "host": "local",
       "requires": {
         "gpu": true,
@@ -7308,7 +7308,7 @@
           "id": "grackle-vision",
           "baseUrlTemplate": "http://{host_ip}:{port}/v1",
           "apiKey": "none",
-          "description": "Vision-language inference via Qwen3-VL-8B-Instruct-FP8 (grackle, on-demand)",
+          "description": "Vision-language inference via Qwen3-VL-8B-Instruct-FP8 (the home server, on-demand)",
           "models": [
             {
               "id": "qwen3-vl-4b-instruct-fp8",

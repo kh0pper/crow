@@ -2,11 +2,11 @@
  * This gateway's address for paired instances, and the tailnet lookups that
  * repair a peer row the sync transport cannot dial.
  *
- * Root cause (black-swan's six-week stall, 2026-08..10): pairing handed peers
+ * Root cause (the cloud VM's six-week stall, 2026-08..10): pairing handed peers
  * CROW_GATEWAY_URL when CROW_PEER_GATEWAY_URL was unset, and self-
  * registration fell back to "the first HTTPS URL" in `tailscale serve
  * status`. Both are typically the :443 endpoint — the public Funnel on crow
- * (which refuses private routes), a private Serve on black-swan — and
+ * (which refuses private routes), a private Serve on the cloud VM — and
  * instance sync never dials :443. A peer that stored that URL with no
  * tailscale_ip had nothing to dial.
  *
@@ -73,7 +73,7 @@ export function gatewayUrlHost(raw) {
 /**
  * True when a gateway_url can be handed to a peer at all: http(s), a real,
  * non-loopback, non-wildcard host. Port 443 is fine HERE — a private :443
- * Serve (black-swan) is the right URL for browsers and HTTP peer calls; the
+ * Serve (the cloud VM) is the right URL for browsers and HTTP peer calls; the
  * sync transport simply dials tailscale_ip + backend port instead of it.
  */
 export function isPeerUsableUrl(raw) {

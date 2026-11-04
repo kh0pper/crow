@@ -31,7 +31,7 @@ detectors:
     num_threads: 3
 
 # Disk discipline — 7-day retention default. Raise at your own disk-pressure risk.
-# On grackle the baseline is 85-90% disk usage — see ~/.crow/CLAUDE.md.
+# On the home server the baseline is 85-90% disk usage — see ~/.crow/CLAUDE.md.
 record:
   enabled: true
   retain:

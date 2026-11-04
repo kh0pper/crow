@@ -154,9 +154,9 @@ export function registerInstancesTools(server, ctx) {
     {
       name: z.string().max(100).describe("Display name for this instance (e.g., 'Main', 'Finance', 'Cloud Blog')"),
       directory: z.string().max(500).optional().describe("Installation directory path (e.g., ~/crow)"),
-      hostname: z.string().max(100).optional().describe("Machine hostname (e.g., grackle, black-swan)"),
+      hostname: z.string().max(100).optional().describe("Machine hostname (e.g., server-b, vps-1)"),
       tailscale_ip: z.string().max(50).optional().describe("Tailscale IP for cross-machine access"),
-      gateway_url: z.string().max(500).optional().describe("Gateway URL if running (e.g., https://grackle:3001)"),
+      gateway_url: z.string().max(500).optional().describe("Gateway URL if running (e.g., https://server-b:3001)"),
       sync_profile: z.enum(["full", "memory-only", "blog-only", "custom"]).optional()
         .describe("What to sync: full (everything), memory-only, blog-only, or custom"),
       topics: z.string().max(500).optional()

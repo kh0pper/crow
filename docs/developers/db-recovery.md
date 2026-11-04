@@ -70,8 +70,8 @@ Flags:
   (`sudo systemctl restart crow-gateway` + the pi-bots unit, etc.).
 - The corrupt original stays at `<db>.CORRUPT-<ts>`; delete it once you trust
   the recovery.
-- If the warning fired, re-pair each federation peer (grackle sync,
-  black-swan, …) — they will be rejected until they re-enroll.
+- If the warning fired, re-pair each federation peer (the home server sync,
+  the cloud VM, …) — they will be rejected until they re-enroll.
 
 ## The other two hardening layers
 

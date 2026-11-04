@@ -30,7 +30,7 @@ const PROJECTS = [
 ];
 const PERCH = JSON.stringify({ gateways: [{ type: "perch" }] });
 const BOT_DEFS = [
-  { bot_id: "grackle-assistant", display_name: "Grackle assistant", definition: PERCH, project_id: null },
+  { bot_id: "fern-assistant", display_name: "Fern assistant", definition: PERCH, project_id: null },
   { bot_id: "hank", display_name: "Hank", definition: PERCH, project_id: 2 },
   { bot_id: "watcher", display_name: "Watcher", definition: "{}", project_id: null },
 ];
@@ -71,7 +71,7 @@ function serveApi(req, res) {
     roosts.push(req.url.replace(/^\/dashboard\/perch-api/, ""));
     return send(res, 200, {
       birds: [
-        { id: "grackle-assistant", name: "Grackle assistant", perch_attached: true, state: "hibernating", sessions: [
+        { id: "fern-assistant", name: "Fern assistant", perch_attached: true, state: "hibernating", sessions: [
           { sessionId: SIDS.planned, state: "awake", cardId: 12, pendingUi: false, control: "run", label: "Plan the garden beds", projectId: 1, lastActivityAt: stamp(0) },
           { sessionId: SIDS.untitled, state: "hibernating", cardId: null, pendingUi: false, control: "run", label: null, projectId: null, lastActivityAt: stamp(1) },
         ] },
@@ -241,8 +241,8 @@ for (const lang of ["en", "es"]) {
       const at = (what) => `${what} (${lang}) ${JSON.stringify({ cards: m.cards, targets: m.targets })}`;
       // Start a session, in plain words; the classic launcher is gone.
       assert.equal(m.start, tr("shell.startSession", lang));
-      assert.equal(m.lead, "Grackle assistant", "the lead by name (the first attachable bot)");
-      assert.deepEqual(m.pick, ["Grackle assistant", "Hank"], "the attachable bots, the lead first; never the observing bot");
+      assert.equal(m.lead, "Fern assistant", "the lead by name (the first attachable bot)");
+      assert.deepEqual(m.pick, ["Fern assistant", "Hank"], "the attachable bots, the lead first; never the observing bot");
       assert.equal(m.oldLauncher, false, "no bot select, model picker or More options");
       assert.ok(!/More options|Más opciones|GLM/.test(m.text), "no model or options on the page");
       assert.equal(m.heading, tr("perch.sessionsHeading", lang), "the Chat tab's heading is Sessions");
@@ -262,7 +262,7 @@ for (const lang of ["en", "es"]) {
       assert.equal(m.cards[1].live, true, "a running session shows the live dot");
       assert.equal(m.cards[1].liveLabel, tr("shell.liveSession", lang), "with a visually hidden Live");
       assert.equal(m.cards[2].live, false);
-      assert.equal(m.cards[1].meta.split(" · ").slice(0, 2).join(" · "), "Grackle assistant · Backyard garden", "bot · project");
+      assert.equal(m.cards[1].meta.split(" · ").slice(0, 2).join(" · "), "Fern assistant · Backyard garden", "bot · project");
       assert.equal(m.cards[1].meta.split(" · ")[2], tr("shell.today", lang), "a relative day");
       assert.equal(m.cards[2].meta.split(" · ")[1], tr("shell.yesterday", lang), "an unfiled session: bot · day");
       assert.equal(m.cards[0].meta.split(" · ")[1], "Sunvox");

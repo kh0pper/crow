@@ -63,7 +63,7 @@ services:
       # ~65k ViT patches → a 65k² attention matrix) triggers a 256 GiB HIP OOM on
       # gfx1151 (no flash-attn ViT kernel on ROCm). Disabling image/video input
       # skips that profiling so the text tower serves. Vision-bearing turns route
-      # to the multimodal 35B (crow-chat, llama.cpp Vulkan) or grackle-vision.
+      # to the multimodal 35B (crow-chat, llama.cpp Vulkan) or the CUDA host's vision provider.
       - --limit-mm-per-prompt
       - '{"image":0,"video":0}'
     restart: unless-stopped

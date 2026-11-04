@@ -6,7 +6,7 @@
  * machine" is whether its baseUrl points at loopback or one of our own
  * interface addresses. The providers `host` column cannot be used: it syncs
  * fleet-wide with the seeding instance's perspective baked in (historically,
- * grackle's own embed row carried host='grackle-5fc01ac74463b6f4' while
+ * the home server's own embed row carried host='host-b-5fc01ac74463b6f4' while
  * crow's bundles said 'local' everywhere), so a host-string gate either
  * breaks a peer keeping its own bundle resident or lets a fresh install
  * start the maintainer-lab's bundles.

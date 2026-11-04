@@ -32,8 +32,8 @@
  *
  * USABILITY, though, IS decided here. `annotateAvailability()` answers
  * "did anything answer at this address", which an embedding endpoint does —
- * on this instance `grackle-embed/qwen3-embedding-0.6b` and
- * `grackle-rerank/qwen3-reranker-0.6b` were listed reading "up" and were one
+ * on this instance the CUDA host's `qwen3-embedding-0.6b` and
+ * `qwen3-reranker-0.6b` providers were listed reading "up" and were one
  * tap from becoming a session's model, which would fail every turn. Provider
  * rows tag those entries (`task: "embed"`, `task: "score"`; the model catalog
  * spells the same vocabulary "embedding"/"rerank" —

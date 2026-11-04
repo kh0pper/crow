@@ -148,7 +148,7 @@ async function loadBindingMod() {
 }
 
 /**
- * 2c hotfix: per-step cap for unwireContact. On grackle (2026-07-15) a contact-
+ * 2c hotfix: per-step cap for unwireContact. On the home server (2026-07-15) a contact-
  * delete apply awaited a teardown step (hypercore feed-close / hyperswarm-leave)
  * that NEVER resolved. Because this teardown runs inside the inbound apply chain
  * (onContactDeleted), a step that never resolves wedges ALL subsequent sync from

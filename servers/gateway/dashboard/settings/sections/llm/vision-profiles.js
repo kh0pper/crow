@@ -126,7 +126,7 @@ export default {
         <input type="hidden" id="vpf-id" value="">
         <div class="vp-field">
           <label class="vp-label">Profile name</label>
-          <input type="text" id="vpf-name" placeholder="e.g. Grackle vision" class="vp-input">
+          <input type="text" id="vpf-name" placeholder="e.g. Home server vision" class="vp-input">
         </div>
 
         <div class="vp-field">

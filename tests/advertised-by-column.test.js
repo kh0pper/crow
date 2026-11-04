@@ -77,11 +77,11 @@ test("the migration is additive — re-running init-db preserves existing contac
 test("advertised_by_instance_id round-trips the advertising peer's instance_id", async () => {
   await db.execute({
     sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, origin, advertised_by_instance_id) VALUES (?,?,?,?,?,?)",
-    args: ["crow:advbot", "Bot", "c".repeat(64), "d".repeat(66), "advertised", "inst-grackle-1"],
+    args: ["crow:advbot", "Bot", "c".repeat(64), "d".repeat(66), "advertised", "inst-host-b-1"],
   });
   const { rows } = await db.execute({
     sql: "SELECT advertised_by_instance_id FROM contacts WHERE crow_id = ?",
     args: ["crow:advbot"],
   });
-  assert.equal(rows[0].advertised_by_instance_id, "inst-grackle-1");
+  assert.equal(rows[0].advertised_by_instance_id, "inst-host-b-1");
 });

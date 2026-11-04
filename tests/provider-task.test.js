@@ -15,7 +15,7 @@ test("task synonym sets", () => {
 });
 
 test("pickProviderByTask: lowest enabled id wins (map and array forms); synonyms match", () => {
-  const map = { "grackle-embed": withTask("embed"), "crow-embed": withTask("embedding"), "crow-chat": { models: [{ id: "x" }] } };
+  const map = { "host-b-embed": withTask("embed"), "crow-embed": withTask("embedding"), "crow-chat": { models: [{ id: "x" }] } };
   assert.equal(pickProviderByTask(map, EMBED_TASKS), "crow-embed");
   const arr = [{ id: "zz-rr", ...withTask("score") }, { id: "aa-rr", ...withTask("rerank") }];
   assert.equal(pickProviderByTask(arr, RERANK_TASKS), "aa-rr");
@@ -30,8 +30,8 @@ test("pickProviderByTask: any model in the row counts; JSON-string models parse"
 });
 
 test("pickProviderByTask: disabled (1 or true) skipped; missing/empty/garbage models ignored; no match -> null", () => {
-  const map = { "crow-embed": withTask("embed", { disabled: true }), "d1": withTask("embed", { disabled: 1 }), "grackle-embed": withTask("embed", { disabled: 0 }), a: { models: [] }, b: {}, c: { models: "not json" } };
-  assert.equal(pickProviderByTask(map, EMBED_TASKS), "grackle-embed");
+  const map = { "crow-embed": withTask("embed", { disabled: true }), "d1": withTask("embed", { disabled: 1 }), "host-b-embed": withTask("embed", { disabled: 0 }), a: { models: [] }, b: {}, c: { models: "not json" } };
+  assert.equal(pickProviderByTask(map, EMBED_TASKS), "host-b-embed");
   assert.equal(pickProviderByTask(map, RERANK_TASKS), null);
   assert.equal(pickProviderByTask({}, EMBED_TASKS), null);
   assert.equal(pickProviderByTask(null, EMBED_TASKS), null);
@@ -75,8 +75,8 @@ test("resolveProviderForTask: setting wins over the task pick; whitespace settin
 });
 
 test("resolveProviderForTask: task pick; none -> null; DB failure -> null", async () => {
-  const r = fakeDb({ rows: [dbRow("grackle-embed", "embed"), dbRow("crow-embed", "embed", 1), dbRow("crow-rerank", "score")] });
-  assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_2", settingKey: "embed_provider", dbFactory: r.factory }), "grackle-embed");
+  const r = fakeDb({ rows: [dbRow("host-b-embed", "embed"), dbRow("crow-embed", "embed", 1), dbRow("crow-rerank", "score")] });
+  assert.equal(await resolveProviderForTask({ tasks: EMBED_TASKS, envVar: "X_UNSET_2", settingKey: "embed_provider", dbFactory: r.factory }), "host-b-embed");
   assert.equal(await resolveProviderForTask({ tasks: RERANK_TASKS, envVar: "X_UNSET_2", settingKey: "rerank_provider", dbFactory: r.factory }), "crow-rerank");
   assert.equal(await resolveProviderForTask({ tasks: ["vision"], envVar: "X_UNSET_2", settingKey: "vision_x", dbFactory: r.factory }), null);
   _resetProviderTaskCacheForTest();

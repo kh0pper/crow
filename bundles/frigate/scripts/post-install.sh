@@ -3,7 +3,7 @@
 #
 # 1. Create host data directories (config + media).
 # 2. Seed config.yml from example if absent.
-# 3. Soft disk check: warn if < 50 GB free, abort only if < 10 GB (matches host reality on grackle-class hosts).
+# 3. Soft disk check: warn if < 50 GB free, abort only if < 10 GB (matches host reality on server-b-class hosts).
 # 4. Wait for crow-frigate to report healthy.
 # 5. Print next-step guidance.
 

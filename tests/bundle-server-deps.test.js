@@ -7,7 +7,7 @@
  * COPYING it to ~/.crow/bundles/<id>/ and running `npm install` there only
  * when a package.json declares dependencies. The ramble bundle imported
  * `@modelcontextprotocol/sdk` and `zod` but shipped no package.json, so the
- * installed copy on grackle crashed at spawn with ERR_MODULE_NOT_FOUND
+ * installed copy on the home server crashed at spawn with ERR_MODULE_NOT_FOUND
  * (`Cannot find package '@modelcontextprotocol/sdk'`) while the same code ran
  * fine from the app repo, whose node_modules happens to resolve. Four other
  * bundles had the identical gap. Node's resolver walks UP from the installed

@@ -4,7 +4,7 @@
  *
  * Simulates the exact production failure the branch fixes: the fleet is in a
  * post-war state where the owner's DB row carries a NON-OWNER's stale
- * metadata at a HIGH lamport (grackle's 181-conflict assert war), and proves
+ * metadata at a HIGH lamport (the home server's 181-conflict assert war), and proves
  * the D6 self-heal transition end-to-end across two real DBs:
  *
  *   1. Owner A re-asserts truth → the emitted envelope lamport strictly
@@ -39,7 +39,7 @@ import * as ed from "../node_modules/@noble/ed25519/index.js";
 import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
 const A_ID = "aaaaaaaa-0000-0000-0000-00000000000a"; // owner (crow)
-const B_ID = "bbbbbbbb-0000-0000-0000-00000000000b"; // non-owner (grackle)
+const B_ID = "bbbbbbbb-0000-0000-0000-00000000000b"; // non-owner (the home server)
 
 const dirA = mkdtempSync(join(tmpdir(), "war-sim-A-"));
 const dirB = mkdtempSync(join(tmpdir(), "war-sim-B-"));

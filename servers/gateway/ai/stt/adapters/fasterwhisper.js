@@ -3,9 +3,9 @@
  *
  * https://github.com/fedirz/faster-whisper-server exposes an
  * /v1/audio/transcriptions endpoint with the same schema as OpenAI.
- * GPU-accelerated; great for grackle.
+ * GPU-accelerated; great for the home server.
  *
- * config.baseUrl — e.g. http://grackle:8000/v1
+ * config.baseUrl — e.g. http://server-b:8000/v1
  * config.defaultModel — e.g. "Systran/faster-whisper-large-v3"
  */
 

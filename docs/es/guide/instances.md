@@ -59,7 +59,7 @@ Ambas instancias ahora comparten el mismo Crow ID y los mismos pares de claves.
 En la instancia home, registra el satélite:
 
 ```
-"Registra mi servidor black-swan como instancia satélite"
+"Registra mi servidor vps-1 como instancia satélite"
 ```
 
 La IA usa `crow_register_instance` para agregar el satélite al registro de instancias. Necesitas la URL del gateway del satélite (p. ej., `http://100.64.20.2:3001` vía Tailscale).

@@ -190,7 +190,7 @@ export { forwardedAddrs };
  * `trust proxy` setting (index.js: CROW_TRUSTED_PROXIES) never changes; `req.ip` is the value
  * that setting rewrites from X-Forwarded-For, so it is never consulted here.
  * The socket must be loopback or tailnet, AND — because a same-box reverse
- * proxy (Tailscale Serve, or r4's sslip.io front door: black-swan Caddy ->
+ * proxy (Tailscale Serve, or r4's sslip.io front door: the cloud VM Caddy ->
  * crow Serve :8449 -> r4 on loopback) makes every client look like loopback —
  * every address any forwarding header names must be loopback or tailnet too.
  * A header can only take trust away, never grant it (final review I1). */

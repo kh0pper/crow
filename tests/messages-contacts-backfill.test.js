@@ -74,7 +74,7 @@ test("backfillContactsOnce: no armed peers → emits nothing but stays RETRYABLE
   await m.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:solo', 'ed', ?)", args: [SECP] });
   assert.equal(await m.backfillContactsOnce(), 0);
   assert.equal(emitted.length, 0);
-  // Observed live on grackle 2026-07-06: peers existed but boot raced feed-init,
+  // Observed live on the home server 2026-07-06: peers existed but boot raced feed-init,
   // and the old code marked 'no-peers' TERMINALLY — backfill never ran. Now the
   // no-peers path must NOT set the flag: once feeds arm, a later run backfills.
   m.outFeeds.set("peer-1", { append: async () => {} });

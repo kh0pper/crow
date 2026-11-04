@@ -92,14 +92,14 @@ test("the default source really is loadProviders — the established session-fre
 // ---------------------------------------------------------------------------
 
 test("embedding and reranker entries are not offered as session models", async () => {
-  // Measured on the live R4 registry: grackle-embed/qwen3-embedding-0.6b and
-  // grackle-rerank/qwen3-reranker-0.6b were listed reading "— up", because
+  // Measured on the live R4 registry: host-b-embed/qwen3-embedding-0.6b and
+  // host-b-rerank/qwen3-reranker-0.6b were listed reading "— up", because
   // annotateAvailability answers "did anything answer at this address" and an
   // embedding server does. One tap from being a session's model, and every
   // turn on it would fail.
   const list = providerModelList(cfg({
-    "grackle-embed": { baseUrl: "http://g:9100/v1", models: [{ id: "qwen3-embedding-0.6b", task: "embed", dim: 1024 }] },
-    "grackle-rerank": { baseUrl: "http://g:9101/v1", models: [{ id: "qwen3-reranker-0.6b", task: "score" }] },
+    "host-b-embed": { baseUrl: "http://g:9100/v1", models: [{ id: "qwen3-embedding-0.6b", task: "embed", dim: 1024 }] },
+    "host-b-rerank": { baseUrl: "http://g:9101/v1", models: [{ id: "qwen3-reranker-0.6b", task: "score" }] },
     "crow-local": { baseUrl: "http://c:8003/v1", models: [{ id: "qwen3.6-35b-a3b" }] },
   }));
   assert.deepEqual(list.map(modelKey), ["crow-local/qwen3.6-35b-a3b"]);
@@ -164,7 +164,7 @@ test("scopeOf: loopback, LAN, tailnet and bare host names are on your network; t
   for (const u of ["http://127.0.0.1:18100/v1", "http://localhost:3001/llm/v1", "http://10.0.0.203:8030/v1",
                    "http://192.168.1.5/v1", "http://172.20.0.2/v1", "http://100.64.20.1:8003/v1",
                    "https://crow.example.ts.net:8444/v1", "http://[::1]:8000/v1",
-                   "http://[fd7a:115c:a1e0::1]/v1", "http://grackle:9100/v1", "http://nas.local/v1"]) {
+                   "http://[fd7a:115c:a1e0::1]/v1", "http://host-b:9100/v1", "http://nas.local/v1"]) {
     assert.equal(scopeOf(u), "network", u);
   }
   for (const u of ["https://api.z.ai/api/coding/paas/v4", "https://coding-intl.dashscope.aliyuncs.com/v1",

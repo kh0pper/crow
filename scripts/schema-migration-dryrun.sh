@@ -37,8 +37,8 @@
 #   scripts/schema-migration-dryrun.sh \
 #     crow    ~/.crow/data/crow.db \
 #     mpa     ~/.crow-mpa/data/crow.db \
-#     grackle /tmp/grackle.db \
-#     bswan   /tmp/bswan.db
+#     server-b /tmp/server-b.db \
+#     vps-1   /tmp/vps-1.db
 #
 # EXPECTED OUTPUT for a well-behaved additive migration: the only schema delta is
 # your new column/table, user_version advances, and every row count is unchanged.

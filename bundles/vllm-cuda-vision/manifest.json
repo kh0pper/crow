@@ -4,7 +4,7 @@
   "type": "bundle",
   "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
   "category": "ai",
-  "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with grackle-embed/rerank during burst.",
+  "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with the CUDA host's embed/rerank providers during burst.",
   "host": "local",
   "requires": {
     "gpu": true,
@@ -21,7 +21,7 @@
       "id": "grackle-vision",
       "baseUrlTemplate": "http://{host_ip}:{port}/v1",
       "apiKey": "none",
-      "description": "Vision-language inference via Qwen3-VL-8B-Instruct-FP8 (grackle, on-demand)",
+      "description": "Vision-language inference via Qwen3-VL-8B-Instruct-FP8 (the home server, on-demand)",
       "models": [
         {
           "id": "qwen3-vl-4b-instruct-fp8",

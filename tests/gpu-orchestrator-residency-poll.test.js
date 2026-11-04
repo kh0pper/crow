@@ -11,7 +11,7 @@ import {
 // --- helpers ------------------------------------------------------------
 
 const CROW_IP = "100.64.20.1";
-const GRACKLE_IP = "100.64.20.2";
+const HOST_B_IP = "100.64.20.2";
 const OTHER_IP = "10.9.9.9";
 
 const own = (...ips) => new Set(["localhost", "127.0.0.1", "::1", ...ips]);
@@ -68,7 +68,7 @@ test('composeFile("..") throws instead of resolving to the repo-root docker-comp
 test("localAlwaysResident returns only declared+locally-orchestratable names, and does not log", () => {
   const cfg = { providers: {
     "crow-voice": prov(`http://${CROW_IP}:8011/v1`),
-    "grackle-embed": prov(`http://${GRACKLE_IP}:9100/v1`),
+    "host-b-embed": prov(`http://${HOST_B_IP}:9100/v1`),
   } };
   const logs = [];
   const orig = console.log; console.log = (m) => logs.push(String(m));
@@ -83,7 +83,7 @@ test("localAlwaysResident returns only declared+locally-orchestratable names, an
 test("trap 1: probes only owned providers; a peer's provider is never probed nor recorded", async () => {
   const cfg = { providers: {
     "crow-voice": prov(`http://${CROW_IP}:8011/v1`),
-    "grackle-embed": prov(`http://${GRACKLE_IP}:9100/v1`),
+    "host-b-embed": prov(`http://${HOST_B_IP}:9100/v1`),
   } };
   const probe = makeProbe(true);
   const probed = await pollResidency({ cfg, ownAddrs: CROW, probe, now: () => 1000, composeExists: yes });
@@ -91,7 +91,7 @@ test("trap 1: probes only owned providers; a peer's provider is never probed nor
   assert.deepEqual(probe.seen, [`http://${CROW_IP}:8011/v1`]);
   const h = getProviderHealth().providers;
   assert.ok(h["crow-voice"], "crow-voice recorded");
-  assert.equal(h["grackle-embed"], undefined, "peer provider never recorded");
+  assert.equal(h["host-b-embed"], undefined, "peer provider never recorded");
 });
 
 test("trap 2: a provider that becomes local on tick 2 is stamped firstOwnedAt at tick 2's clock", async () => {
@@ -187,7 +187,7 @@ test("a composeExists that throws is treated as not-orchestratable (guarded, no 
 test("pollResidency emits NO '[gpu-orchestrator] skipping' log line", async () => {
   const cfg = { providers: {
     "crow-voice": prov(`http://${CROW_IP}:8011/v1`),
-    "grackle-embed": prov(`http://${GRACKLE_IP}:9100/v1`), // skipped from crow
+    "host-b-embed": prov(`http://${HOST_B_IP}:9100/v1`), // skipped from crow
   } };
   const logs = [];
   const orig = console.log; console.log = (m) => logs.push(String(m));

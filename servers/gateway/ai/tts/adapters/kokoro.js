@@ -5,7 +5,7 @@
  * endpoint with the same shape as OpenAI TTS. We delegate to the same
  * streaming pattern as the openai adapter.
  *
- * config.baseUrl       — e.g. http://grackle:8880
+ * config.baseUrl       — e.g. http://server-b:8880
  * config.defaultVoice  — e.g. af_bella
  */
 

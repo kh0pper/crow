@@ -36,10 +36,10 @@ test("overview-cache sanitizes the gossip peers roster", async () => {
   _setFetchImpl(async () => ({
     ok: true,
     body: {
-      instance: { id: "49cf71ca", name: "Grackle", is_home: true },
+      instance: { id: "49cf71ca", name: "Host-b", is_home: true },
       tiles: [],
       peers: [
-        { id: "77ac9c01", name: "black-swan", gateway_url: "https://bs.ts.net:8444", status: "active", is_home: false },
+        { id: "77ac9c01", name: "vps-1", gateway_url: "https://bs.ts.net:8444", status: "active", is_home: false },
         { id: "BADID!!", name: "x", gateway_url: "https://x.ts.net" },        // bad id
         { id: "abcdef12", name: "noUrl" },                                     // no url
         { id: "abcdef34", name: "evil", gateway_url: "javascript:alert(1)" },  // bad scheme
@@ -70,10 +70,10 @@ test("overview-cache caps the roster at 50", async () => {
 });
 
 test("mergeDiscoveredPeers excludes self, known, dups, and no-url entries", () => {
-  const trusted = [{ id: "49cf71ca", name: "Grackle" }];
+  const trusted = [{ id: "49cf71ca", name: "Host-b" }];
   const overviews = [{
     instanceId: "49cf71ca", status: "ok", peers: [
-      { id: "77ac9c01", name: "black-swan", gateway_url: "https://bs", is_home: false, status: "active" },
+      { id: "77ac9c01", name: "vps-1", gateway_url: "https://bs", is_home: false, status: "active" },
       { id: "0867ac28", name: "me", gateway_url: "https://me" },     // == localId
       { id: "49cf71ca", name: "already", gateway_url: "https://g" }, // already trusted
       { id: "77ac9c01", name: "dup", gateway_url: "https://bs2" },   // duplicate
@@ -99,8 +99,8 @@ test("buildNestHTML renders a discovered instance as a link-only section", () =>
     pinnedItems: [], bundles: [], dockerInfo: { available: false }, dbStats: {},
     recentChats: [], recentSessions: [], instances: [],
     trustedInstances: [
-      { id: "49cf71ca", name: "Grackle", paired: true, gateway_url: "https://g" },
-      { id: "77ac9c01", name: "black-swan", discovered: true, paired: false, gateway_url: "https://bs.ts.net:8444" },
+      { id: "49cf71ca", name: "Host-b", paired: true, gateway_url: "https://g" },
+      { id: "77ac9c01", name: "vps-1", discovered: true, paired: false, gateway_url: "https://bs.ts.net:8444" },
     ],
     peerOverviews: [
       { instanceId: "49cf71ca", status: "ok", tiles: [] },
@@ -111,7 +111,7 @@ test("buildNestHTML renders a discovered instance as a link-only section", () =>
   const html = buildNestHTML(data, "en");
   assert.ok(html.includes("nest-instance-section--discovered"), "renders discovered section");
   assert.ok(html.includes("https://bs.ts.net:8444"), "open link points at gateway_url");
-  assert.ok(html.includes("black-swan"), "shows the discovered instance name");
+  assert.ok(html.includes("vps-1"), "shows the discovered instance name");
 });
 
 test("buildNestHTML escapes a malicious discovered gateway label", () => {
@@ -120,7 +120,7 @@ test("buildNestHTML escapes a malicious discovered gateway label", () => {
     pinnedItems: [], bundles: [], dockerInfo: { available: false }, dbStats: {},
     recentChats: [], recentSessions: [], instances: [],
     trustedInstances: [
-      { id: "49cf71ca", name: "Grackle", paired: true, gateway_url: "https://g" },
+      { id: "49cf71ca", name: "Host-b", paired: true, gateway_url: "https://g" },
       { id: "ab000001", name: '<img src=x onerror=alert(1)>', discovered: true, paired: false, gateway_url: "https://ok.ts.net" },
     ],
     peerOverviews: [

@@ -8,13 +8,13 @@
  * the spec §4.2 and the real crow DB (2026-10-02 backup):
  *   - BOTH sides hold a local-owner project_members row (contact_id NULL)
  *     for every project, created independently (different uuids);
- *   - crow_instances on crow lists self, grackle ("Primary"), black-swan,
+ *   - crow_instances on crow lists self, the home server ("Primary"), the cloud VM,
  *     raven ("unknown") and MPA;
  *   - memory id collisions, one replicated-then-edited memory (same id and
  *     created_at, different content);
- *   - the grackle-6 = crow-6 project, a source-only research_sources.s3_key,
+ *   - the home server's project 6 = crow-6 project, a source-only research_sources.s3_key,
  *     a reordered chat_messages, natural-key Ramble rows (incl. synced rows
- *     only grackle has), unowned tables, bot history, an unmapped table,
+ *     only the home server has), unowned tables, bot history, an unmapped table,
  *     and bundle tables crow does not have (media, data-dashboard).
  */
 import Database from "better-sqlite3";
@@ -106,7 +106,7 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
     INSERT INTO ramble_pet (owner, mood) VALUES ('self', 'crow-mood');
     -- crow's own incubating egg (one per user; N3)
     INSERT INTO ramble_eggs (egg_id, status, species, created_at) VALUES ('egg-c1', 'incubating', 'wren', 90);
-    -- a contact Casey deleted on crow; the delete never reached grackle (N1)
+    -- a contact Casey deleted on crow; the delete never reached the home server (N1)
     INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at) VALUES ('crow:deleted', 7, 1700000000);
     -- blog: crow already has a post at slug post-nine (same post) and a DIFFERENT post at post-eight (minor d)
     INSERT INTO blog_posts (id, slug, title, content, status) VALUES (20, 'post-nine', 'Nine', 'body nine', 'draft');
@@ -122,7 +122,7 @@ export async function buildTarget(dir, { media = false, dashboard = false, grack
   return path;
 }
 
-/** grackle's crow.db as the W3 API backup would hold it. */
+/** the home server's crow.db as the W3 API backup would hold it. */
 export async function buildSource(dir) {
   const path = initDb(dir);
   const db = new Database(path);
@@ -133,9 +133,9 @@ export async function buildSource(dir) {
     await bundleInit(db, "bundles/data-dashboard/server/init-tables.js", "initDataDashboardTables");
   });
   ensureLamportOrigin(db);
-  // grackle's research_sources carries two columns crow lacks (map: 16 rows filled)
+  // the home server's research_sources carries two columns crow lacks (map: 16 rows filled)
   db.exec(`ALTER TABLE research_sources ADD COLUMN file_path TEXT; ALTER TABLE research_sources ADD COLUMN s3_key TEXT;`);
-  // grackle's chat_messages has a different column ORDER (map) — rebuild it so
+  // the home server's chat_messages has a different column ORDER (map) — rebuild it so
   // SELECT * order != the target's.
   db.exec(`
     DROP TABLE chat_messages;
@@ -169,7 +169,7 @@ export async function buildSource(dir) {
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (5, 'g-uuid-5', 'proj-five', 'Five', '/home/alex/.crow/data/projects/5');
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (6, 'g-uuid-6', 'tea-data', 'TEA data', '/home/alex/.crow/data/projects/6');
     INSERT INTO project_spaces (id, uuid, slug, name, workspace_dir) VALUES (7, 'g-uuid-7', 'clash', 'Grackle clash', '/elsewhere/7');
-    -- real shape: grackle's OWN local-owner rows, with their own uuids
+    -- real shape: the home server's OWN local-owner rows, with their own uuids
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-own-1', 1, NULL, 'owner');
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-own-5', 5, NULL, 'owner');
     INSERT INTO project_members (uuid, project_id, contact_id, role) VALUES ('g-own-6', 6, NULL, 'owner');
@@ -184,7 +184,7 @@ export async function buildSource(dir) {
     INSERT INTO project_audit_log (project_id, actor_type, action, created_at) VALUES (5, 'local', 'create', '2026-05-01 00:00:00');
 
     -- memories: 1 matches crow's content (different created_at); 2 and 3 collide on id only;
-    -- 4 is crow's 4 (same id + created_at) edited on grackle; 6..8 are new
+    -- 4 is crow's 4 (same id + created_at) edited on the home server; 6..8 are new
     INSERT INTO memories (id, content, category, created_at) VALUES (1, 'shared memory', 'general', '2026-01-02 00:00:01');
     INSERT INTO memories (id, content, category, project_id, created_at) VALUES (2, 'grackle memory two', 'general', 6, '2026-01-02 00:00:02');
     INSERT INTO memories (id, content, category, project_id, created_at) VALUES (3, 'grackle memory three', 'project', 5, '2026-01-02 00:00:03');
@@ -205,7 +205,7 @@ export async function buildSource(dir) {
     INSERT INTO note_embeddings (note_id, model, dim, vec) VALUES (1, 'qwen3-embedding-0.6b', 4, x'0a0a0a0a');
     INSERT INTO glasses_note_sessions (id, device_id, mode, started_at, project_id, note_id) VALUES (1, 'glasses-1', 'session', '2026-06-01 10:00:00', 5, 2);
 
-    -- already-synced tables: one row crow has, one only grackle has
+    -- already-synced tables: one row crow has, one only the home server has
     INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (9, 'ev-shared', 'hello both', 'received', '2026-02-01 00:00:00');
     INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (9, 'ev-grackle', 'only on grackle', 'sent', '2026-02-02 00:00:00');
     INSERT INTO messages (contact_id, nostr_event_id, content, direction, created_at) VALUES (11, 'ev-bot', 'bot chatter', 'received', '2026-02-03 00:00:00');
@@ -236,7 +236,7 @@ export async function buildSource(dir) {
     INSERT INTO bot_runs (run_id, bot_id, status) VALUES ('run-1', 'grackle-assistant', 'done');
     INSERT INTO job_search_sites (id, name, source_type, url, scrape_strategy, tier) VALUES ('edjoin', 'EdJoin', 'board', 'https://edjoin.example', 'html', 1);
 
-    -- ramble: one cell + one wallet row crow already has (crow wins), the rest grackle-only
+    -- ramble: one cell + one wallet row crow already has (crow wins), the rest only on the home server
     INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vg4zzz', 50);
     INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vg4yyy', 60);
     INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vg4xxx', 70);
@@ -249,7 +249,7 @@ export async function buildSource(dir) {
     INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9vg4yyy', '2026-W30', 'egg-g1', 60);
     -- synced ramble rows that never reached crow (I7)
     INSERT INTO ramble_eggs (egg_id, status, species, created_at, lamport_ts, lamport_origin) VALUES ('egg-g1', 'shelf', 'robin', 60, 41, '${GRACKLE_ID}');
-    -- grackle minted its own incubating egg while cut off (N3)
+    -- the home server minted its own incubating egg while cut off (N3)
     INSERT INTO ramble_eggs (egg_id, status, species, created_at) VALUES ('egg-g2', 'incubating', 'finch', 95);
     INSERT INTO ramble_settings (key, value) VALUES ('shared', 'grackle-value');
     INSERT INTO ramble_settings (key, value) VALUES ('only_grackle', 'g');
@@ -303,7 +303,7 @@ export async function buildPair(root, opts = {}) {
   return { source, target, crowDataDir: join(root, "crow") };
 }
 
-/** Peer flags covering every live peer of the fixture target (black-swan, raven; MPA excluded). */
+/** Peer flags covering every live peer of the fixture target (the cloud VM, raven; MPA excluded). */
 export function fixturePeerFlags({ blackSwan = 1, raven = 0 } = {}) {
   const peerMaxId = [];
   for (const t of ["memories", "research_notes", "glasses_note_sessions"]) {

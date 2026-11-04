@@ -15,10 +15,10 @@ const LOOP_ONLY = new Set(["localhost", "127.0.0.1", "::1"]);
 test("isInstanceIdShape / isValidHost", () => {
   assert.equal(isInstanceIdShape(OWN_ID), true);
   assert.equal(isInstanceIdShape(OWN_ID.toUpperCase()), false);
-  assert.equal(isInstanceIdShape("grackle-5fc01ac74463b6f4"), false);
+  assert.equal(isInstanceIdShape("host-b-5fc01ac74463b6f4"), false);
   assert.equal(isInstanceIdShape("aaaaaaaa-0000-0000-0000-00000000000a"), false);
   for (const v of ["local", "cloud", OWN_ID]) assert.equal(isValidHost(v), true, v);
-  for (const v of ["raven", "external", "grackle-5fc01ac74463b6f4", "", null, undefined, "LOCAL", 42]) {
+  for (const v of ["raven", "external", "host-b-5fc01ac74463b6f4", "", null, undefined, "LOCAL", 42]) {
     assert.equal(isValidHost(v), false, String(v));
   }
 });
@@ -56,14 +56,14 @@ test("inferHost: valid existing host short-circuits; invalid falls through", () 
   assert.equal(inferHost("http://10.0.0.203:8030/v1", "local", { ownAddrs: CROW }), "local");
   assert.equal(inferHost("http://10.0.0.203:8030/v1", PEER_ID, { ownAddrs: CROW }), PEER_ID);
   assert.equal(inferHost("http://10.0.0.203:8030/v1", "raven", { ownAddrs: CROW }), "cloud");
-  assert.equal(inferHost("http://100.64.20.2:9100/v1", "grackle-5fc01ac74463b6f4",
+  assert.equal(inferHost("http://100.64.20.2:9100/v1", "host-b-5fc01ac74463b6f4",
     { ownAddrs: new Set(["127.0.0.1", "100.64.20.2"]) }), "local");
 });
 
 test("isForeignInstanceHost: only a DIFFERENT 32-hex id is foreign; id read lazily", () => {
   let reads = 0;
   const own = () => { reads++; return OWN_ID; };
-  for (const h of ["local", "cloud", "raven", "grackle-5fc01ac74463b6f4", null, undefined]) {
+  for (const h of ["local", "cloud", "raven", "host-b-5fc01ac74463b6f4", null, undefined]) {
     assert.equal(isForeignInstanceHost(h, own), false, String(h));
   }
   assert.equal(reads, 0, "never reads the instance id for non-id hosts");
@@ -99,10 +99,10 @@ test("repairHostDecision D3: another instance's write is never touched", () => {
 });
 
 test("repairHostDecision scope: re-stamped BUNDLE row (the live crow-chat case) is never touched", () => {
-  // On grackle: crow-chat is host=local, base_url crow's 100.64.20.1, instance_id = grackle
-  const GRACKLE = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.202", "100.64.20.2"]);
+  // On host-b: crow-chat is host=local, base_url crow's 100.64.20.1, instance_id = host-b
+  const HOST_B = new Set(["127.0.0.1", "::1", "localhost", "10.0.0.202", "100.64.20.2"]);
   const crowChat = row("local", "http://100.64.20.1:8003/v1", { bundleId: "llamacpp-vulkan-qwen36-35b-a3b" });
-  assert.equal(repairHostDecision(crowChat, { ownInstanceId: OWN_ID, ownAddrs: GRACKLE }), null);
+  assert.equal(repairHostDecision(crowChat, { ownInstanceId: OWN_ID, ownAddrs: HOST_B }), null);
 });
 
 test("repairHostDecision: never touches valid non-local hosts, own addresses, DNS names (G2)", () => {
@@ -164,7 +164,7 @@ test("addressClass", () => {
 
 test("isPrivateHost (display only)", () => {
   for (const h of ["10.0.0.203", "100.64.20.2", "fd00::5", "raven", "localhost",
-                   "grackle.example.ts.net", "nas.local", "box.lan", "x.home.arpa", "y.internal"]) {
+                   "host-b.example.ts.net", "nas.local", "box.lan", "x.home.arpa", "y.internal"]) {
     assert.equal(isPrivateHost(h), true, h);
   }
   for (const h of ["8.8.8.8", "api.z.ai", "api.together.xyz", "", null]) {

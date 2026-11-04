@@ -5,7 +5,7 @@
  * Gated on `CROW_LIVE_PEER=1` so this doesn't run in default CI.
  *
  * Prerequisites:
- *   - Peer (usually grackle) is paired via `crow instance pair`
+ *   - Peer (usually the home server) is paired via `crow instance pair`
  *   - Peer's gateway is reachable over Tailscale
  *   - crow_instances table contains a trusted=1 row for the peer
  *   - ~/.crow/peer-tokens.json has {auth_token, signing_key} for the peer

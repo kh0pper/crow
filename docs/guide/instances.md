@@ -59,7 +59,7 @@ Both instances now share the same Crow ID and keypairs.
 On the home instance, register the satellite:
 
 ```
-"Register my black-swan server as a satellite instance"
+"Register my vps-1 server as a satellite instance"
 ```
 
 The AI uses `crow_register_instance` to add the satellite to the instance registry. You need the satellite's gateway URL (e.g., `http://100.64.20.2:3001` via Tailscale).

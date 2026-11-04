@@ -202,8 +202,8 @@ describe("rehearse against a copy of crow's real API backup", () => {
     const selfId = readFileSync(idFile, "utf8").trim();
     writeFileSync(join(dataDir, "instance-id"), selfId);
     process.env.CROW_DATA_DIR = dataDir;
-    // grackle-shaped source: the same schema and projects, but every
-    // project_members row created independently (fresh uuids), grackle as
+    // host-b-shaped source: the same schema and projects, but every
+    // project_members row created independently (fresh uuids), the home server as
     // its own home, plus a grant to a contact crow has never seen.
     const source = join(root, "grackle.db");
     copyFileSync(target, source);

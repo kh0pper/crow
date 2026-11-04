@@ -66,11 +66,11 @@ beforeEach(() => {
 });
 
 test("embed: two enabled embed rows -> lowest id; disabling it -> the other", async () => {
-  await seed([["grackle-embed", "embed"], ["crow-embed", "embed"], ["crow-chat", "chat"]]);
+  await seed([["host-b-embed", "embed"], ["crow-embed", "embed"], ["crow-chat", "chat"]]);
   assert.equal(await resolveDefaultProvider(), "crow-embed");
   _resetProviderTaskCacheForTest();
-  await seed([["grackle-embed", "embed"], ["crow-embed", "embed", 1]]);
-  assert.equal(await resolveDefaultProvider(), "grackle-embed");
+  await seed([["host-b-embed", "embed"], ["crow-embed", "embed", 1]]);
+  assert.equal(await resolveDefaultProvider(), "host-b-embed");
 });
 
 test("embed: dashboard_settings.embed_provider wins; whitespace value ignored", async () => {

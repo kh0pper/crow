@@ -95,7 +95,7 @@ test("auto-detect prefers an always-resident candidate this instance wrote and t
 
 test("auto-detect ignores peer-synced rows: foreign host OR written by another instance", () => {
   const foreignHost = { ...voice, id: "a1", host: PEER_ID };
-  const peerWritten = { ...voice, id: "a2", instance_id: PEER_ID }; // e.g. crow-voice written by grackle
+  const peerWritten = { ...voice, id: "a2", instance_id: PEER_ID }; // e.g. crow-voice written by host-b
   const r = sel({ setting: null, providers: [foreignHost, peerWritten] });
   assert.equal(r.ok, false);
   assert.equal(r.reason, "none");

@@ -11,20 +11,20 @@ import {
 // Real fleet shapes (models.json fallback on a fresh install):
 const CFG = { providers: {
   "crow-voice":    { baseUrl: "http://100.64.20.1:8011/v1", host: "local", bundleId: "vllm-rocm-qwen35-4b", gpuPolicy: { alwaysResident: true } },
-  "grackle-embed": { baseUrl: "http://100.64.20.2:9100/v1", host: "grackle-5fc01ac74463b6f4", bundleId: "vllm-cuda-embed", gpuPolicy: { alwaysResident: true } },
+  "host-b-embed": { baseUrl: "http://100.64.20.2:9100/v1", host: "host-b-5fc01ac74463b6f4", bundleId: "vllm-cuda-embed", gpuPolicy: { alwaysResident: true } },
   "crow-llm":      { baseUrl: "http://localhost:3001/llm/v1", host: "local", bundleId: null },
   "cloud-alias":   { baseUrl: "https://api.together.xyz/v1", host: "cloud" },
   "loop-bundle":   { baseUrl: "http://127.0.0.1:8004/v1", bundleId: "llamacpp-cpu-qwen3-embed", gpuPolicy: { alwaysResident: true } },
 } };
 const CROW = new Set(["localhost", "127.0.0.1", "::1", "100.64.20.1"]);
-const GRACKLE = new Set(["localhost", "127.0.0.1", "::1", "100.64.20.2"]);
+const HOST_B = new Set(["localhost", "127.0.0.1", "::1", "100.64.20.2"]);
 const FRESH = new Set(["localhost", "127.0.0.1", "::1", "10.0.0.5"]);
 
 test("isLocallyOrchestratable is physical: own-IP or loopback, never the host string", () => {
   assert.equal(isLocallyOrchestratable(CFG.providers["crow-voice"], CROW), true);
-  assert.equal(isLocallyOrchestratable(CFG.providers["crow-voice"], GRACKLE), false);   // host:"local" LIES on grackle
-  assert.equal(isLocallyOrchestratable(CFG.providers["grackle-embed"], GRACKLE), true); // host:"grackle-…" LIES on grackle (C1)
-  assert.equal(isLocallyOrchestratable(CFG.providers["grackle-embed"], CROW), false);
+  assert.equal(isLocallyOrchestratable(CFG.providers["crow-voice"], HOST_B), false);   // host:"local" LIES on host-b
+  assert.equal(isLocallyOrchestratable(CFG.providers["host-b-embed"], HOST_B), true); // host:"host-b-…" LIES on host-b (C1)
+  assert.equal(isLocallyOrchestratable(CFG.providers["host-b-embed"], CROW), false);
   assert.equal(isLocallyOrchestratable(CFG.providers["loop-bundle"], FRESH), true);     // loopback is local everywhere
   assert.equal(isLocallyOrchestratable(CFG.providers["cloud-alias"], FRESH), false);
   assert.equal(isLocallyOrchestratable({ baseUrl: "not a url" }, FRESH), false);
@@ -32,28 +32,28 @@ test("isLocallyOrchestratable is physical: own-IP or loopback, never the host st
 });
 
 test("F-10 headline: a FRESH install ensures NO alwaysResident bundles from the shipped models.json", () => {
-  // loop-bundle is synthetic; the real shipped set (crow-voice, grackle-embed) must be empty on fresh
-  const shipped = { providers: { "crow-voice": CFG.providers["crow-voice"], "grackle-embed": CFG.providers["grackle-embed"] } };
+  // loop-bundle is synthetic; the real shipped set (crow-voice, host-b-embed) must be empty on fresh
+  const shipped = { providers: { "crow-voice": CFG.providers["crow-voice"], "host-b-embed": CFG.providers["host-b-embed"] } };
   assert.deepEqual(alwaysResidentProviders(shipped, FRESH), []);
 });
 
-test("C1 closed: grackle keeps its own embed resident; crow keeps its own voice; neither ensures the other's", () => {
+test("C1 closed: host-b keeps its own embed resident; crow keeps its own voice; neither ensures the other's", () => {
   // NOTE (deviation from brief, see report): loop-bundle's baseUrl is loopback
   // (127.0.0.1), which the brief's own physical-gate design treats as
-  // "local everywhere" (see the isLocallyOrchestratable test above) — GRACKLE's
+  // "local everywhere" (see the isLocallyOrchestratable test above) — HOST_B's
   // ownAddrs also always contains 127.0.0.1, so it necessarily matches there
-  // too. The literal brief expected only ["grackle-embed"] here, which
+  // too. The literal brief expected only ["host-b-embed"] here, which
   // contradicts the loopback-is-universal invariant it asserts elsewhere;
   // this expectation includes loop-bundle to stay consistent with that
   // invariant rather than silently special-casing loopback out of this one
   // assertion.
-  assert.deepEqual(alwaysResidentProviders(CFG, GRACKLE).sort(), ["grackle-embed", "loop-bundle"]);
+  assert.deepEqual(alwaysResidentProviders(CFG, HOST_B).sort(), ["host-b-embed", "loop-bundle"]);
   const crowNames = alwaysResidentProviders(CFG, CROW).sort();
   assert.deepEqual(crowNames, ["crow-voice", "loop-bundle"]);
 });
 
 test("resolveWarmableProviderName refuses foreign bundles even though they HAVE a bundleId", () => {
-  assert.equal(resolveWarmableProviderName(CFG, "grackle-embed", CROW), null);
+  assert.equal(resolveWarmableProviderName(CFG, "host-b-embed", CROW), null);
   assert.equal(resolveWarmableProviderName(CFG, "crow-voice", CROW), "crow-voice");
   // bundle-less alias resolves only to a PHYSICALLY-local sibling
   assert.equal(resolveWarmableProviderName(CFG, "cloud-alias", CROW), null);
@@ -79,7 +79,7 @@ test("R2-C1 self-heal: a resident deferred at boot is ensured once its IP appear
 });
 
 test("R2-C1: a peer's resident parks forever without ensure calls or errors", async () => {
-  _setDeferredResidentsForTest(["grackle-embed"]);
+  _setDeferredResidentsForTest(["host-b-embed"]);
   const calls = [];
   const ensure = async (name) => { calls.push(name); return false; };
   assert.deepEqual(await retryDeferredResidents({ cfg: CFG, ownAddrs: CROW, ensure }), []);
@@ -140,7 +140,7 @@ test("D9: an own bundle marked cloud (boot-race seed) or with own id is still wa
     assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("cloud"), ...ready }), true);
     assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk(SELF), ...ready }), true);
     assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("local"), ...ready }), true);
-    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("grackle-5fc01ac74463b6f4"), ...ready }), true);
+    assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk("host-b-5fc01ac74463b6f4"), ...ready }), true);
     assert.equal(await maybeAcquireLocalProvider("p", { cfg: mk(OTHER), ...ready }), null);
   } finally {
     _setOwnInstanceIdForTest(null);

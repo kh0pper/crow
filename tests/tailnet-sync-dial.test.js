@@ -3,12 +3,12 @@
  *
  * Regression net for the L3 outage (2026-07-06): peerToWsUrl preferred the
  * port embedded in gateway_url — on this fleet that's a Tailscale Serve
- * HTTPS port (e.g. grackle 8444 → backend 3002) — and dialed it as plain
+ * HTTPS port (e.g. the home server 8444 → backend 3002) — and dialed it as plain
  * ws:// on the raw tailnet IP. Plain WS into a TLS-terminating Serve
  * listener fails (HTTP 400 / TLS alert), the error lands in a swallowed
  * ws.on("error"), and the dialer retries silently forever. Net effect: the
  * NAT-independent fallback transport never carried a single byte, so when
- * Hyperswarm's same-NAT hole-punch broke at the router, crow↔grackle
+ * Hyperswarm's same-NAT hole-punch broke at the router, crow↔host-b
  * instance sync went fully dark.
  *
  * The fix derives the dial from gateway_url's scheme: https → wss://host:port
@@ -27,12 +27,12 @@ import { peerToWsUrlCandidates, setupTailnetSyncServer } from "../servers/sharin
 
 const WS_PATH = "/api/instance-sync/stream";
 
-test("https gateway_url with Serve port → wss on the HOSTNAME (grackle row shape)", () => {
+test("https gateway_url with Serve port → wss on the HOSTNAME (host-b row shape)", () => {
   const urls = peerToWsUrlCandidates({
-    gateway_url: "https://grackle.example.ts.net:8444",
+    gateway_url: "https://host-b.example.ts.net:8444",
     tailscale_ip: "100.64.20.2",
   });
-  assert.equal(urls[0], `wss://grackle.example.ts.net:8444${WS_PATH}`);
+  assert.equal(urls[0], `wss://host-b.example.ts.net:8444${WS_PATH}`);
   // Never the broken combination: plain ws into the Serve HTTPS port.
   assert.ok(!urls.includes(`ws://100.64.20.2:8444${WS_PATH}`));
 });
@@ -40,13 +40,13 @@ test("https gateway_url with Serve port → wss on the HOSTNAME (grackle row sha
 test("tailnet-IP fallback candidate uses the backend fallbackPort, not the Serve port", () => {
   const urls = peerToWsUrlCandidates(
     {
-      gateway_url: "https://grackle.example.ts.net:8444",
+      gateway_url: "https://host-b.example.ts.net:8444",
       tailscale_ip: "100.64.20.2",
     },
     3002
   );
   assert.deepEqual(urls, [
-    `wss://grackle.example.ts.net:8444${WS_PATH}`,
+    `wss://host-b.example.ts.net:8444${WS_PATH}`,
     `ws://100.64.20.2:3002${WS_PATH}`,
     `ws://100.64.20.2:3001${WS_PATH}`,
   ]);
@@ -59,7 +59,7 @@ test("http gateway_url dials plain ws on its own port", () => {
 
 test("port 443 (public Funnel) is never dialed — falls back to tailnet IP", () => {
   const urls = peerToWsUrlCandidates(
-    { gateway_url: "https://grackle.example.ts.net", tailscale_ip: "100.64.20.2" },
+    { gateway_url: "https://host-b.example.ts.net", tailscale_ip: "100.64.20.2" },
     3002
   );
   assert.deepEqual(urls, [

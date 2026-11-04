@@ -8,7 +8,7 @@
 #   1. UI answers 200 on 127.0.0.1:3061 (host path via docker-proxy)
 #   2. model answers from INSIDE the container (the one allowed egress)
 #   3. internet egress dead   (raw-IP probe, no DNS dependency)
-#   4. tailnet hop dead       (grackle probe)
+#   4. tailnet hop dead       (the home server probe)
 #   5. other published container ports dead (35b :8003) + host INPUT dead
 #      (bridge-gateway :22)
 #   6. vendor connection ABSENT: no ESTABLISHED socket in the container's

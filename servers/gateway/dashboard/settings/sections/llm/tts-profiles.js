@@ -144,7 +144,7 @@ export default {
         </div>
         <div class="ttsp-field">
           <label class="ttsp-label">Base URL (optional — for self-hosted / region endpoint)</label>
-          <input type="text" id="ttsf-url" placeholder="e.g. http://grackle:5000 or https://eastus.tts.speech.microsoft.com" class="ttsp-input ttsp-input-mono">
+          <input type="text" id="ttsf-url" placeholder="e.g. http://server-b:5000 or https://eastus.tts.speech.microsoft.com" class="ttsp-input ttsp-input-mono">
         </div>
         <div class="ttsp-field">
           <label class="ttsp-label">Default voice</label>

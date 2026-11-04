@@ -187,7 +187,7 @@ Elimina una sobrescritura de dispositivo para restaurar la versión global en es
 
 ### Detalles técnicos
 
-- Los **IDs de dispositivo** son cadenas de texto libres que tú eliges (p. ej., `"phone"`, `"grackle"`, `"work-laptop"`)
+- Los **IDs de dispositivo** son cadenas de texto libres que tú eliges (p. ej., `"phone"`, `"server-b"`, `"work-laptop"`)
 - Las secciones globales tienen `device_id = NULL`; las secciones de dispositivo tienen un `device_id` no nulo
 - Las secciones protegidas (identity, memory_protocol, etc.) pueden tener sobrescrituras de dispositivo, pero la versión global no se puede eliminar
 - Eliminar una sobrescritura de dispositivo restaura la versión global — no elimina la sección por completo
@@ -199,7 +199,7 @@ Para habilitar el contexto por dispositivo, establece la variable de entorno `CR
 
 ```bash
 # En tu archivo .env
-CROW_DEVICE_ID=grackle
+CROW_DEVICE_ID=server-b
 ```
 
 Esto le dice a Crow en qué dispositivo está corriendo. El gateway y los servidores stdio aplican automáticamente las sobrescrituras de dispositivo correspondientes a las instrucciones MCP y a `crow.md`.

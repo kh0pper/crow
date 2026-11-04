@@ -642,7 +642,7 @@ export function shouldSyncRowForTest(table, row) { return shouldSyncRow(table, r
 
 /**
  * Whether this process should participate in cross-instance sync feeds.
- * A `--no-auth` gateway is a loopback companion (e.g. grackle's crow-mcp-bridge),
+ * A `--no-auth` gateway is a loopback companion (e.g. the home server's crow-mcp-bridge),
  * NEVER the primary instance — it must NOT open the instance-sync Hypercore feeds,
  * or it grabs the on-disk feed lock and starves the PRIMARY gateway ("File
  * descriptor could not be locked"), silently breaking the primary's replication.
@@ -1333,7 +1333,7 @@ export class InstanceSyncManager {
 
     // 2c hotfix: hard cap on how long the boot-path contact-tombstone re-emit
     // will AWAIT a per-peer inbound drain (reemitContactTombstones). A wedged
-    // apply chain (grackle 2026-07-15: a contact-delete apply awaiting a
+    // apply chain (the home server 2026-07-15: a contact-delete apply awaiting a
     // hypercore feed-close / hyperswarm-leave that never resolves) must never
     // block the gateway from reaching HTTP listen. Overridable in tests.
     this._drainCapMs = 10_000;
@@ -1775,7 +1775,7 @@ export class InstanceSyncManager {
     // Only a real completed run ("done:<n>") is terminal. The boot call races
     // the async sharing boot that opens the sync feeds — on a slow host the
     // peers exist but outFeeds is still empty when we run (observed live on
-    // grackle 2026-07-06: flag stuck at 'no-peers' with 4 paired peers).
+    // the home server 2026-07-06: flag stuck at 'no-peers' with 4 paired peers).
     // Treating no-peers as retryable makes the next boot backfill correctly;
     // a genuinely peer-less instance just re-runs two cheap queries per boot.
     let alreadyRan = false;
@@ -1894,7 +1894,7 @@ export class InstanceSyncManager {
     // re-add-as-insert clears our tombstone before we re-emit it (rule order is
     // load-bearing; design §3 C4). BUT each per-peer drain await is CAPPED at
     // this._drainCapMs (2c hotfix): this runs on the boot-to-HTTP-listen path
-    // (backfillContactsOnce's finally), and on grackle a contact-delete apply
+    // (backfillContactsOnce's finally), and on the home server a contact-delete apply
     // WEDGED FOREVER (its onContactDeleted → unwireContact → hypercore feed-close
     // / hyperswarm-leave never resolved) ⇒ the gateway never listened ⇒ prod down.
     // Pre-2c the backfill early-returned before draining, so this await was never
@@ -1938,7 +1938,7 @@ export class InstanceSyncManager {
 
   /**
    * 2c hotfix: await a per-peer inbound drain but never longer than
-   * this._drainCapMs. If the underlying apply chain is wedged (grackle: a
+   * this._drainCapMs. If the underlying apply chain is wedged (server-b: a
    * contact-delete apply awaiting a hypercore feed-close / hyperswarm-leave that
    * never resolves), we stop AWAITING it and proceed — the _processNewEntries
    * promise stays chained in the background exactly as pre-2c (we do NOT cancel
@@ -1982,7 +1982,7 @@ export class InstanceSyncManager {
    * "done:*" value is terminal; a stale non-done value is overwritten by the
    * UPSERT done-mark. Zero armed peers → return WITHOUT writing any flag
    * (feeds may not have opened yet this boot — retry next boot; contacts
-   * lesson, observed live on grackle 2026-07-06). Inbound backlog is drained
+   * lesson, observed live on the home server 2026-07-06). Inbound backlog is drained
    * first (I-B1) so a peer's already-delivered newer provider edit is applied
    * before we re-emit with a fresh lamport. T3 (F2/C2b): that drain is now
    * CAPPED; a capped (incomplete) drain defers the whole backfill with a

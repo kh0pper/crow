@@ -157,7 +157,7 @@ test("companion-overview: peer returning sentinel surfaces as status=unavailable
   app2.use(express.json());
   app2.use("/dashboard", federationCompanionRouterFactory({
     createDbClient: () => makeDb([
-      { id: "peer-b", name: "black-swan", hostname: "bs.ts.net", trusted: 1, status: "offline" },
+      { id: "peer-b", name: "vps-1", hostname: "bs.ts.net", trusted: 1, status: "offline" },
     ]),
   }));
   const s2 = await new Promise((resolve) => {

@@ -2,7 +2,7 @@
 
 Status: 4 of 5 spikes resolved. Spike 5 (Ollama benchmark) needs user decision before running — flagged at the bottom.
 
-Evidence was gathered against the running `crow-companion` container (image `crow-companion`, uptime 45h on grackle). Open-LLM-VTuber is checked out at `/app/` inside the container via `git clone --recursive https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git`.
+Evidence was gathered against the running `crow-companion` container (image `crow-companion`, uptime 45h on the home server). Open-LLM-VTuber is checked out at `/app/` inside the container via `git clone --recursive https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git`.
 
 ---
 
@@ -137,7 +137,7 @@ Attribution (required by the Live2D agreement):
 
 ## Spike 5 — Ollama concurrency baseline: **done, with caveats** ✅
 
-**Hardware:** grackle, RTX 5060 Ti 16 GB, llama3.2:3b, Q8 KV cache, flash attention on. Pulled to `/mnt/ollama-models/ollama` (external drive, 184 GB free). Prompt: "Explain a for-loop to a 7-year-old in 40 words or fewer." `num_predict=150`, `temperature=0.7`.
+**Hardware:** the home server, RTX 5060 Ti 16 GB, llama3.2:3b, Q8 KV cache, flash attention on. Pulled to `/mnt/ollama-models/ollama` (external drive, 184 GB free). Prompt: "Explain a for-loop to a 7-year-old in 40 words or fewer." `num_predict=150`, `temperature=0.7`.
 
 Each row is the result of firing N concurrent `/api/generate` calls after a warm-up.
 
@@ -191,12 +191,12 @@ Ollama does **not** scale well for classroom mode. Continuous batching is not pa
 
 **Status:** Cannot run yet. Two blockers:
 
-1. **Model not pulled.** `ollama list` on grackle shows no `llama3.2:3b`. Per user CLAUDE.md rule ("If you need to install a package in order to complete the tasks as prompted, ask me for permission"), I need approval before `ollama pull llama3.2:3b` (~2 GB download).
+1. **Model not pulled.** `ollama list` on the home server shows no `llama3.2:3b`. Per user CLAUDE.md rule ("If you need to install a package in order to complete the tasks as prompted, ask me for permission"), I need approval before `ollama pull llama3.2:3b` (~2 GB download).
 2. **GPU currently saturated.** `nvidia-smi` reports the RTX 5060 Ti at 15,141 / 16,311 MiB used (93%) from other Ollama-loaded models. A fair benchmark needs a clean GPU; running now would spill to CPU or evict another model and skew all numbers.
 
 **Hardware context for the eventual benchmark:**
 
-- Host: grackle (32 GB RAM)
+- Host: the home server (32 GB RAM)
 - GPU: NVIDIA RTX 5060 Ti, 16 GB VRAM, driver 580.126.09, CUDA 13.0
 - Ollama: `/usr/local/bin/ollama`, HTTP API responsive on `localhost:11434`
 - Existing models in range: `qwen3:8b` (5.2 GB), `dolphin3:8b` (4.9 GB), `qwen3.5:0.8b` (1 GB) — can serve as relative reference points but the plan specifically targets `llama3.2:3b` as the minimum recommended model.

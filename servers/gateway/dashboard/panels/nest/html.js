@@ -51,7 +51,7 @@ function statusDotHtml(isRunning, lang) {
 
 /**
  * Disambiguate colliding peer names by appending a short hostname suffix.
- * Two peers both named "crow" → "crow (grackle-a)" and "crow (node-b21)".
+ * Two peers both named "crow" → "crow (server-b-a)" and "crow (node-b21)".
  */
 function disambiguatePeerNames(peerOverviews, trustedInstances) {
   const nameCounts = new Map();

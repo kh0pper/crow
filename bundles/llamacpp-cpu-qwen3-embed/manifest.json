@@ -40,5 +40,5 @@
       ]
     }
   ],
-  "notes": "CPU-only; the first request downloads the ~640MB GGUF and caches it in a Docker volume. After install, select it as the embedding provider — set dashboard_settings 'embed_provider' = 'llamacpp-cpu-embed' (or export CROW_EMBED_PROVIDER=llamacpp-cpu-embed). 1024-dim, vector-space compatible with grackle-embed / vllm-cuda-embed (same model)."
+  "notes": "CPU-only; the first request downloads the ~640MB GGUF and caches it in a Docker volume. After install, select it as the embedding provider — set dashboard_settings 'embed_provider' = 'llamacpp-cpu-embed' (or export CROW_EMBED_PROVIDER=llamacpp-cpu-embed). 1024-dim, vector-space compatible with the vllm-cuda-embed bundle (same model)."
 }

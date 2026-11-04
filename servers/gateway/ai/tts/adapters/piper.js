@@ -9,7 +9,7 @@
  * This adapter targets the common piper-http shape: GET or POST with
  * `text` and `voice` query/form params returning audio/wav.
  *
- * config.baseUrl     — e.g. http://grackle:5000
+ * config.baseUrl     — e.g. http://server-b:5000
  * config.defaultVoice — e.g. en_US-amy-medium
  */
 

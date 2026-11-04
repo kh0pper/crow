@@ -164,7 +164,7 @@ test("1. FK rebuild correctness — data-carrying path with adversarial seed", a
   await rawDb.execute("ALTER TABLE research_sources ADD COLUMN uuid TEXT");
   await rawDb.execute("ALTER TABLE research_sources ADD COLUMN origin_instance_id TEXT");
   await rawDb.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_research_sources_uuid ON research_sources(uuid)");
-  // Legacy host-local columns found on grackle (real data) — the rebuild must carry them
+  // Legacy host-local columns found on the home server (real data) — the rebuild must carry them
   await rawDb.execute("ALTER TABLE research_sources ADD COLUMN file_path TEXT");
   await rawDb.execute("ALTER TABLE research_sources ADD COLUMN s3_key TEXT");
 
@@ -239,7 +239,7 @@ test("1. FK rebuild correctness — data-carrying path with adversarial seed", a
     (id, project_id, title, source_type, citation_apa, full_text, backend_id, uuid, origin_instance_id)
     VALUES (1, 1, 'Searchable Source Alpha', 'web_article', 'Alpha (2024)', 'alpha content', 1,
       lower(hex(randomblob(16))), 'inst-a')`);
-  // Legacy-column data must survive the rebuild (the grackle case)
+  // Legacy-column data must survive the rebuild (the home server case)
   await rawDb.execute("UPDATE research_sources SET file_path = '/old/path/a.pdf', s3_key = 'bucket/a.pdf' WHERE id = 1");
 
   await rawDb.execute(`INSERT INTO research_sources

@@ -47,7 +47,7 @@ export function resolveGuardDbPath(dataDirResolver) {
 }
 
 /** Backups + marker anchor: the DB's own directory (CROW_DB_PATH may diverge
- *  from resolveDataDir — grackle's F2 incident). */
+ *  from resolveDataDir — the home server's F2 incident). */
 export function guardAnchor(dbPath) {
   return dirname(resolve(dbPath));
 }

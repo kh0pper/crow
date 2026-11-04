@@ -47,7 +47,7 @@ function initInstance(label) {
   const dir = mkdtempSync(join(tmpdir(), `crow-2c-reemit-${label}-`));
   execFileSync(process.execPath, ["scripts/init-db.js"], {
     // CROW_DB_PATH outranks CROW_DATA_DIR in init-db (init-db.js:11) — blank it, or a
-    // shell exporting it (grackle's .env did, PR #180) would run the migration
+    // shell exporting it (the home server's .env did, PR #180) would run the migration
     // against the REAL DB, outside the deploy rail's backups.
     env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: "", CROW_DISABLE_NOSTR: "1", CROW_DISABLE_INSTANCE_SYNC: "1" },
     stdio: "pipe",
@@ -604,7 +604,7 @@ test("G10: restoreConflict refuses ALL natural-key tables (contacts, contact_gro
 
 // ── 2c hotfix (boot-liveness): bounded awaits — G11/G12 ────────────────────────
 // PR #194 put reemitContactTombstones on the boot-to-HTTP-listen path (its drain
-// awaits _processNewEntries). On grackle a contact-delete apply WEDGED FOREVER
+// awaits _processNewEntries). On the home server a contact-delete apply WEDGED FOREVER
 // (hypercore feed-close / hyperswarm-leave never resolving) ⇒ the gateway never
 // reached listen ⇒ prod down. Two bounded-await caps fix it. These gates prove the
 // caps unblock a wedged chain and still do their real work (re-emit / step-tolerant).
@@ -624,7 +624,7 @@ test("G11: boot-drain cap -- a wedged apply chain cannot block tombstone re-emit
   await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g11', 12, 1, NULL)", args: [] });
   // Gated backfill body done ⇒ ONLY the finally-path reemitContactTombstones fires.
   await setBackfillDone(f.A.db);
-  // Wedge the inbound drain: _processNewEntries never resolves (the grackle class).
+  // Wedge the inbound drain: _processNewEntries never resolves (the home server class).
   f.A.mgr._processNewEntries = () => new Promise(() => {});
   f.A.mgr._drainCapMs = 200;
   // Arm an inFeeds entry so the drain loop actually iterates and awaits the wedge.

@@ -21,7 +21,7 @@ import { createDbClient } from "../../db.js";
 import { upgradeLocalMarksAtBoot } from "./admin-api.js";
 
 // QW1 (Crow Messages usability arc, Phase 0): a gateway started with
-// --no-auth (e.g. grackle's loopback companion MCP bridge) is never the
+// --no-auth (e.g. the home server's loopback companion MCP bridge) is never the
 // primary dashboard and must never run the W2 health monitor — otherwise it
 // evaluates its own --no-auth flag as an exposure warn and pushes "the
 // password requirement is turned off" notifications every dedupe cycle.
@@ -157,7 +157,7 @@ export async function runPostListenSetup(server, app, deps) {
         db: createDbClient(),
         // Standard Crow gateway port — used only as a fallback when the peer's
         // gateway_url has no usable port (e.g. Funnel URLs). Each Crow may
-        // run on a different port (crow:3001, grackle:3002), so we derive
+        // run on a different port (crow:3001, server-b:3002), so we derive
         // each peer's port from THEIR gateway_url, not ours.
         gatewayPort: 3002,
         // This gateway's own backend port, advertised (signed) in the
@@ -492,7 +492,7 @@ export async function runPostListenSetup(server, app, deps) {
   // home/primary instance. cross_host_calls is written per-instance by
   // auditCrossHostCall into each instance's OWN local crow.db; there is no
   // shared/central audit table. Gating on is_home would leave non-home peers
-  // (grackle, black-swan) never pruning their own table → unbounded growth →
+  // (the home server, the cloud VM) never pruning their own table → unbounded growth →
   // the exact corruption this fix exists to prevent. Same-host multi-process
   // gateways use SEPARATE data dirs (crow-mpa → CROW_DATA_DIR=~/.crow-mpa/data),
   // so there is no shared-file contention to avoid; and if two processes ever
@@ -579,7 +579,7 @@ export async function runPostListenSetup(server, app, deps) {
       // (non-Funnel, non-:443) Serve endpoint proxying to our port, else
       // http://<tailnet ip>:<port>. Never "the first HTTPS URL" in serve
       // status — that picked the :443 door (Funnel on crow, the private
-      // :443 Serve on black-swan), which instance sync never dials.
+      // :443 Serve on the cloud VM), which instance sync never dials.
       const configuredUrl = configuredSelfGatewayUrl();
       const { deriveSelfDialAddress } = await import("../../shared/self-dial-address.js");
       const derived = deriveSelfDialAddress({ port: PORT, configuredUrl });

@@ -70,8 +70,8 @@ before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: process.env, stdio: "pipe", cwd: join(import.meta.dirname, "..") });
   raw((d) => {
     const ins = d.prepare("INSERT INTO satellites (id, name, tailnet_host, satellite_pubkey, mgmt_pubkey, cert_json, cert_serial, cert_expires_at, primary_url, status) VALUES (?,?,?,?,?,?,?,?,?,?)");
-    ins.run(SAT_A, "black-swan-test", "satellite.example.ts.net", "a".repeat(64), "b".repeat(64), "{}", "s1", "2027-01-01T00:00:00Z", "https://crow.example.ts.net:8444", "active");
-    ins.run(SAT_B, "black-swan-test-2", "satellite.example.ts.net", "c".repeat(64), "d".repeat(64), "{}", "s2", "2027-01-01T00:00:00Z", "https://crow.example.ts.net:8444", "active");
+    ins.run(SAT_A, "vps-1-test", "satellite.example.ts.net", "a".repeat(64), "b".repeat(64), "{}", "s1", "2027-01-01T00:00:00Z", "https://crow.example.ts.net:8444", "active");
+    ins.run(SAT_B, "vps-1-test-2", "satellite.example.ts.net", "c".repeat(64), "d".repeat(64), "{}", "s2", "2027-01-01T00:00:00Z", "https://crow.example.ts.net:8444", "active");
     d.prepare("INSERT INTO satellite_bot_optins (bot_id, any_turn) VALUES ('opted', 1)").run();
   });
   writeInstalled();
@@ -165,7 +165,7 @@ test("a revoked satellite emits nothing; a satellite row that is gone emits noth
     assert.ok(prep.piRpcOpts.mcpConfig.mcpServers[BUNDLE]);
   } finally {
     raw((d) => d.prepare("INSERT INTO satellites (id, name, tailnet_host, satellite_pubkey, mgmt_pubkey, cert_json, cert_serial, cert_expires_at, primary_url, status) VALUES (?,?,?,?,?,?,?,?,?,?)")
-      .run(SAT_B, "black-swan-test-2", "satellite.example.ts.net", "c".repeat(64), "d".repeat(64), "{}", "s2", "2027-01-01T00:00:00Z", "https://crow.example.ts.net:8444", "active"));
+      .run(SAT_B, "vps-1-test-2", "satellite.example.ts.net", "c".repeat(64), "d".repeat(64), "{}", "s2", "2027-01-01T00:00:00Z", "https://crow.example.ts.net:8444", "active"));
   }
 });
 

@@ -4,7 +4,7 @@
   "type": "bundle",
   "name": "vLLM Reranker — Qwen3-Reranker-0.6B",
   "category": "ai",
-  "description": "Cross-encoder reranker for hybrid FTS+vector retrieval top-K reordering. Multilingual, instruction-aware. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
+  "description": "Cross-encoder reranker for hybrid FTS+vector retrieval top-K reordering. Multilingual, instruction-aware. Runs on the home server's RTX 5060 Ti via vLLM-CUDA.",
   "host": "local",
   "requires": {
     "gpu": true,
@@ -21,7 +21,7 @@
       "id": "grackle-rerank",
       "baseUrlTemplate": "http://{host_ip}:{port}/v1",
       "apiKey": "none",
-      "description": "Cross-encoder reranking via Qwen3-Reranker-0.6B (grackle, always warm)",
+      "description": "Cross-encoder reranking via Qwen3-Reranker-0.6B (the home server, always warm)",
       "models": [
         {
           "id": "qwen3-reranker-0.6b",

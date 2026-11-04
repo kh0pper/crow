@@ -83,11 +83,11 @@ test("not-ready OVER the threshold → one warn issue id=providers", async () =>
   assert.equal(issue.severity, "warn");
 });
 
-test("never-ready-since-ownership clocks from firstOwnedAt (grackle case)", async () => {
+test("never-ready-since-ownership clocks from firstOwnedAt (host-b case)", async () => {
   _resetProviderHealth();
   setResidencyInitialized();
   // lastReadyAt stays null; firstOwnedAt = NOW
-  recordResidency("grackle-embed", { ready: false, nowMs: NOW, baseUrl: "http://y:9100/v1", embed: true });
+  recordResidency("host-b-embed", { ready: false, nowMs: NOW, baseUrl: "http://y:9100/v1", embed: true });
   const { detail, issue } = await providers({ now: at(NOW + THRESHOLD + MIN) });
   assert.equal(detail.state, "warn");
   assert.ok(issue);
@@ -111,7 +111,7 @@ test("embed vs non-embed down → different issue copy; non-embed omits 'embed'"
   // embed provider down → EMBED issue copy
   _resetProviderHealth();
   setResidencyInitialized();
-  recordResidency("grackle-embed", { ready: false, nowMs: NOW, baseUrl: "http://y:9100/v1", embed: true });
+  recordResidency("host-b-embed", { ready: false, nowMs: NOW, baseUrl: "http://y:9100/v1", embed: true });
   const embedIssue = (await providers({ now: at(NOW + THRESHOLD + MIN) })).issue;
   assert.ok(embedIssue);
   const embedLabel = embedIssue.label;
@@ -128,7 +128,7 @@ test("embed vs non-embed down → different issue copy; non-embed omits 'embed'"
   assert.doesNotMatch(voiceLabel, /embed/i, "non-embed issue copy must not mention embedding");
   // The issue label becomes the notification title, so a lone down provider
   // must be named in it — no unresolved {name} placeholder either.
-  assert.match(embedLabel, /grackle-embed/);
+  assert.match(embedLabel, /host-b-embed/);
   assert.match(voiceLabel, /crow-voice/);
   for (const l of [embedLabel, voiceLabel]) assert.doesNotMatch(l, /\{name\}/);
 });

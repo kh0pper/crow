@@ -67,7 +67,7 @@ registry but `urlForPeerApp()` returns null for them.
   user to disambiguate — do not silently pick one.
 - If only one peer hosts the requested app (single-peer bundle like
   "Jellyfin" on crow), auto-target that instance.
-- If multiple peers host the same app (both grackle and crow have
+- If multiple peers host the same app (both the home server and crow have
   Navidrome), default to local and offer a choice.
 - If the user asks for an app that only exists on a peer, auto-target
   that peer.

@@ -298,7 +298,7 @@ async function agentsSignal(db) {
 // A paired peer whose gateway URL has failed /health this long is a WARN
 // (pushed via the health monitor, 24 h dedupe). Long enough that a rolling
 // restart or a reboot never pages; short enough that a box logged out of
-// Tailscale is caught the same day, not 5 days later (grackle, 2026-09).
+// Tailscale is caught the same day, not 5 days later (the home server, 2026-09).
 export const PEER_UNREACHABLE_WARN_MS = 2 * 60 * 60 * 1000;
 
 function parseSqliteUtc(ts) {
@@ -414,7 +414,7 @@ function peerTrustSignal(lang = "en", nowFn = () => Date.now()) {
 
 // DIALER-RETRY (2026-10-03): a paired peer the tailnet instance-sync dialer
 // has NO usable address for, with no link to it from either side, is a WARN —
-// crow sat six weeks like this for black-swan with 928 entries queued and no
+// crow sat six weeks like this for the cloud VM with 928 entries queued and no
 // signal anywhere. One issue per peer (id "peers-dial:<id>", own 24 h push
 // window). The grace keeps a boot that is still learning addresses quiet.
 export const NO_DIAL_ADDRESS_WARN_MS = 10 * 60 * 1000;

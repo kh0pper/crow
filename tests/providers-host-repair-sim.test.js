@@ -37,7 +37,7 @@ import * as ed from "../node_modules/@noble/ed25519/index.js";
 import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
 const A_ID = "a".repeat(32); // crow
-const B_ID = "b".repeat(32); // grackle
+const B_ID = "b".repeat(32); // host-b
 
 const dirA = mkdtempSync(join(tmpdir(), "host-repair-sim-A-"));
 const dirB = mkdtempSync(join(tmpdir(), "host-repair-sim-B-"));
@@ -181,30 +181,30 @@ test("scenario B: the owner asserts local and the non-owner never fights it", as
   await reset();
   writeFixtures("B", EMPTY, {
     providers: {
-      "grackle-embed": { baseUrl: "http://100.64.20.2:9100/v1", host: "local", models: [{ id: "e" }] },
+      "host-b-embed": { baseUrl: "http://100.64.20.2:9100/v1", host: "local", models: [{ id: "e" }] },
     },
   });
   for (const db of [dbA, dbB]) {
     await db.execute({
       sql: `INSERT INTO providers (id, base_url, host, models, bundle_id, gpu_policy, lamport_ts, instance_id)
-            VALUES ('grackle-embed', 'http://100.64.20.2:9100/v1', 'local', '[{"id":"e"}]', NULL, NULL, 50, ?)`,
+            VALUES ('host-b-embed', 'http://100.64.20.2:9100/v1', 'local', '[{"id":"e"}]', NULL, NULL, 50, ?)`,
       args: [B_ID],
     });
   }
 
   await round("B", ADDRS_A, ADDRS_B);
   await round("B", ADDRS_A, ADDRS_B);
-  const lampB2 = Number((await row(dbB, "grackle-embed")).lamport_ts);
+  const lampB2 = Number((await row(dbB, "host-b-embed")).lamport_ts);
   await round("B", ADDRS_A, ADDRS_B);
   await round("B", ADDRS_A, ADDRS_B);
-  const lampB4 = Number((await row(dbB, "grackle-embed")).lamport_ts);
+  const lampB4 = Number((await row(dbB, "host-b-embed")).lamport_ts);
 
   // 1. Clock-climb check FIRST: a fight shows up as B's lamport rising round over round.
   assert.equal(lampB4, lampB2, `B's lamport climbed between round 2 (${lampB2}) and round 4 (${lampB4}) — sync war`);
   assert.equal(lampB2, 50, "B's lamport stays 50 (owned assert is a no-op)");
   // 2. Both rows local.
-  assert.equal((await row(dbA, "grackle-embed")).host, "local", "A's copy stays local");
-  assert.equal((await row(dbB, "grackle-embed")).host, "local", "B's copy stays local");
+  assert.equal((await row(dbA, "host-b-embed")).host, "local", "A's copy stays local");
+  assert.equal((await row(dbB, "host-b-embed")).host, "local", "B's copy stays local");
   // 3. Nothing on the wire.
   assert.equal(feedAtoB.length, 0, "A never emitted (D3: not its write)");
   assert.equal(feedBtoA.length, 0, "B's owned assert was a no-op");

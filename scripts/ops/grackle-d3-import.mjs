@@ -107,7 +107,7 @@ const contactSyncable = (r) => r.origin !== "local-bot" && (r.request_status == 
  */
 export const IMPORT_SPECS = [
   // ---- contacts first: members, messages and comments point at them.
-  // Already synced; grackle-only, syncable contacts are imported by crow_id.
+  // Already synced; server-b-only, syncable contacts are imported by crow_id.
   {
     table: "contacts", group: "core", pk: "id", idPolicy: "keep-if-free",
     where: contactSyncable,
@@ -224,7 +224,7 @@ export const IMPORT_SPECS = [
     goNoGo: (row, original) => ({ id: row.id, source_app: row.source_app, source_trigger: row.source_trigger, target_app: row.target_app, active_on_grackle: original.active }),
   },
   {
-    // nothing grackle-scheduled runs on crow until someone switches it on (N2):
+    // nothing server-b-scheduled runs on crow until someone switches it on (N2):
     // pipeline:botcron rows would otherwise fire every overdue run at once
     table: "schedules", group: "core", pk: "id", idPolicy: "keep-if-free",
     dedupe: [{ cols: ["task", "cron_expression"] }],
@@ -385,7 +385,7 @@ export const ARCHIVE_ONLY = [
   [/^data_dashboard_items$/, "points at grackle's data_backends (not imported)"],
 ];
 
-/** Settings: blog settings move to crow (Casey, 09-22) — grackle wins. */
+/** Settings: blog settings move to crow (Casey, 09-22) — the home server wins. */
 const SETTINGS_UPSERT = /^blog_/;
 const SETTINGS_INSERT_IF_ABSENT = new Set(["tts_voice", "meta_glasses_devices"]);
 const OVERRIDE_KEYS = { meta_glasses_default_project_id: "project_spaces" };
@@ -1603,7 +1603,7 @@ export async function run(opts, deps = {}) {
     try {
       tgt.pragma("busy_timeout = 30000");
       if (mode === "rehearse" && plan.ctx.sourceInstanceId && plan.sourceStatus && plan.sourceStatus !== "revoked") {
-        // W3 revokes grackle before the import; simulate it on the COPY so
+        // W3 revokes the home server before the import; simulate it on the COPY so
         // phase B is exercised. Reported, never done to a real target.
         tgt.prepare("UPDATE crow_instances SET status = 'revoked' WHERE id = ?").run(plan.ctx.sourceInstanceId);
         simulatedRevoke = true;

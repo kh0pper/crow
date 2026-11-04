@@ -146,7 +146,7 @@ export default function createOpenAIAdapter(config) {
         // prompt_tokens_details.cached_tokens. We deliberately do NOT send the
         // llama.cpp-specific `timings_per_token` field — it is unnecessary
         // (llama.cpp reports cached_tokens from include_usage alone) and would
-        // be an unknown field to vLLM endpoints (grackle-vision, crow-dispatch).
+        // be an unknown field to vLLM endpoints (the CUDA host's vision provider, crow-dispatch).
         stream_options: { include_usage: true },
       };
       if (openaiTools) {

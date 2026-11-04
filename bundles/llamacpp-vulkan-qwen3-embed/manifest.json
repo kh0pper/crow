@@ -4,7 +4,7 @@
   "type": "bundle",
   "name": "llama.cpp Qwen3-Embedding-0.6B (Vulkan/ROCm)",
   "category": "ai",
-  "description": "Dedicated embedding endpoint. Qwen3-Embedding-0.6B Q8_0 GGUF via llama.cpp on Strix Halo gfx1151, OpenAI-compatible /v1/embeddings on port 8004. Registers as crow-embed provider so KB MCP and any other consumer can request 1024-dim vectors without depending on grackle's Ollama.",
+  "description": "Dedicated embedding endpoint. Qwen3-Embedding-0.6B Q8_0 GGUF via llama.cpp on Strix Halo gfx1151, OpenAI-compatible /v1/embeddings on port 8004. Registers as crow-embed provider so KB MCP and any other consumer can request 1024-dim vectors without depending on the home server's Ollama.",
   "host": "local",
   "requires": {
     "gpu": true,

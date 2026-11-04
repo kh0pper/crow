@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 // Port order matches servers/gateway/index.js (PORT first): a host can set both to
-// different values (grackle: bridge CROW_GATEWAY_PORT=3004, gateway PORT=3002).
+// different values (server-b: bridge CROW_GATEWAY_PORT=3004, gateway PORT=3002).
 export function createKioskServer({
   fetchImpl = fetch,
   baseUrl = `http://127.0.0.1:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`,

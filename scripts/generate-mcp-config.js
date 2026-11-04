@@ -26,7 +26,7 @@ const COMBINED = args.includes("--combined");
 // at the already-running gateway's /router/mcp over HTTP. Zero per-session DB
 // openers; the gateway is the sole owner. Needs CROW_LOCAL_MCP_TOKEN in env/.env
 // (a local-MCP bearer token, see docs) and optionally CROW_MCP_URL to target a
-// non-default gateway (e.g. grackle's :3002).
+// non-default gateway (e.g. the home server's :3002).
 const HTTP = args.includes("--http");
 
 // This file is the owner's own client config, so its project server runs as the owner. Added here

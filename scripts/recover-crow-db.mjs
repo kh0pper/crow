@@ -426,7 +426,7 @@ log("     breaker (see docs/developers/db-recovery.md).");
 if (crowInstancesSkipped) {
   log("");
   log("  ⚠️⚠️  FEDERATION: crow_instances was corrupt and could NOT be salvaged.");
-  log("      All federation peers (grackle sync, black-swan, etc.) will be REJECTED");
+  log("      All federation peers (the home server sync, the cloud VM, etc.) will be REJECTED");
   log("      until they RE-ENROLL / re-pair with this instance. Re-run the pairing");
   log("      flow for each peer.");
 } else {

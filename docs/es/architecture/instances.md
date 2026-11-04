@@ -18,7 +18,7 @@ Cada instalación de Crow mantiene un registro local de instancias conocidas.
 ```sql
 CREATE TABLE crow_instances (
   id TEXT PRIMARY KEY,            -- UUID
-  name TEXT NOT NULL,             -- Etiqueta legible ("grackle", "black-swan")
+  name TEXT NOT NULL,             -- Etiqueta legible ("server-b", "vps-1")
   role TEXT NOT NULL,             -- "home" o "satellite"
   gateway_url TEXT,               -- Endpoint HTTP (p. ej., "http://100.64.20.2:3001")
   public_key TEXT NOT NULL,       -- Clave pública Ed25519 (debe coincidir con la identidad compartida)
@@ -61,7 +61,7 @@ Cada cambio se anexa como una entrada JSON:
   "row_id": "uuid-here",
   "data": { "content": "...", "category": "project", "importance": 7 },
   "lamport": 42,
-  "instance_id": "grackle-uuid",
+  "instance_id": "server-b-uuid",
   "timestamp": 1711000000
 }
 ```

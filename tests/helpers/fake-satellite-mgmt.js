@@ -123,7 +123,7 @@ export function createMgmtFake({ host = MGMT_HOST, routes = {}, clock = () => Da
  * crow's side of an already-paired satellite: mgmt key file, cert, satellites row. The fake
  * pins the mgmt key. Returns {row, identity, mgmtKey, cert}.
  */
-export async function makeSatelliteRow(db, fake, { name = "black-swan-test", env = process.env, now = Date.now(), identity = fakeIdentity(), status = "active", agent_protocol = AGENT_PROTOCOL, certNow = now } = {}) {
+export async function makeSatelliteRow(db, fake, { name = "vps-1-test", env = process.env, now = Date.now(), identity = fakeIdentity(), status = "active", agent_protocol = AGENT_PROTOCOL, certNow = now } = {}) {
   const mgmtKey = createMgmtKey(fake.satId, { env, replace: true });
   const cert = issueCert({
     identity, instanceId: "inst-primary", primaryUrl: PRIMARY_URL, satellite_id: fake.satId,

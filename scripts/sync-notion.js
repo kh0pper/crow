@@ -6,7 +6,7 @@
  * over the `memories` table — not over Notion live. This script bridges the two:
  * it fetches every page shared with your Notion integration, converts it to
  * Markdown, and stores it as a memory (category=learning, tags=notion,sync).
- * The existing embedding pipeline (grackle-embed by default) then makes the
+ * The existing embedding pipeline (the CUDA host's embedding provider by default) then makes the
  * content semantically searchable via crow_search_memories / crow_deep_recall.
  *
  * Idempotent: dedups on `source = "notion:<pageId>"` and only re-embeds a page
