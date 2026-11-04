@@ -64,6 +64,8 @@ import {
 import "./commands/core.js";
 // The 1b take commands, registered the same way.
 import "./commands/takes.js";
+// The 1b timeline commands — placements, markers and sections — likewise.
+import "./commands/arrangement.js";
 import {
   REDO_COMMAND,
   UNDO_COMMAND,
@@ -452,6 +454,9 @@ function trackIdForRef(snap, ref) {
   if (!target) return null;
   if (target.kind === "track") return target.id;
   if (target.kind === "clip") return snap.clips?.[target.id]?.track_id ?? null;
+  // A placement is a block on a track's lane, so a locked track's placements
+  // are off-limits the way its clips are. A marker or a section names no track.
+  if (target.kind === "placement") return snap.arrangement?.placements?.[target.id]?.track_id ?? null;
   return null;
 }
 
@@ -471,6 +476,12 @@ function labelForRef(snap, ref) {
   if (target.kind === "scene") {
     return snap.scenes?.find((scene) => scene.id === target.id)?.name ?? target.id;
   }
+  if (target.kind === "placement") {
+    const placement = snap.arrangement?.placements?.[target.id];
+    return placement ? `placement at bar ${placement.start_bar}` : target.id;
+  }
+  if (target.kind === "marker") return snap.arrangement?.markers?.[target.id]?.name ?? target.id;
+  if (target.kind === "section") return snap.arrangement?.sections?.[target.id]?.name ?? target.id;
   return "the song";
 }
 

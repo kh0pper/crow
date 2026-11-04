@@ -15,11 +15,25 @@
  *   takes   Y.Map of take id → Y.Map {id, clip_id, storage_key, rate,
  *                            channels, frames, offset_frames, compensated,
  *                            bpm, recorded_at, author_label, discarded}
+ *   arrangement  Y.Map of three Y.Maps:
+ *                placements  placement id → Y.Map {id, track_id, clip_id,
+ *                            start_bar, bars, offset_beats, fade_in_beats,
+ *                            fade_out_beats}
+ *                markers     marker id → Y.Map {id, bar, name}
+ *                sections    section id → Y.Map {id, start_bar, end_bar, name}
  *
  * A take is one recording on disk that an audio clip comps from. A segment is
  * `{take_id, from_beat, to_beat}` and says which take plays over which beats
  * of its clip. A song written before takes existed has no `takes` container:
  * every reader treats that as an empty map (see `readContainer`).
+ *
+ * The arrangement is the song laid out on a timeline instead of in scenes: a
+ * placement puts a clip on a track at a bar, a marker names one bar, and a
+ * section names a range of bars. A song written before the timeline existed
+ * has no `arrangement` container either, and then it has no placements,
+ * markers or sections (see `readArrangement`). Bars are whole numbers from 0;
+ * a placement's `offset_beats` says how far into its clip it starts, and its
+ * fades are in beats (linear, and only meaningful on an audio placement).
  *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
@@ -44,7 +58,8 @@ import * as Y from "yjs";
  * cap and the per-clip take cap of 1b. Commands refuse past these with a
  * plain-English message naming the limit.
  * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number,
- *         params: number, takesPerClip: number}}
+ *         params: number, takesPerClip: number, placements: number,
+ *         arrangementBars: number, markers: number, sections: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -61,7 +76,19 @@ export const LIMITS = Object.freeze({
   clipBars: 64,
   params: 64,
   takesPerClip: 64,
+  // The timeline: 2048 blocks on it, ending at bar 999, with 256 markers and
+  // 128 sections along the way (plan 1b, Global Constraints).
+  placements: 2048,
+  arrangementBars: 999,
+  markers: 256,
+  sections: 128,
 });
+
+/**
+ * The smallest step a placement's offset into its clip may take: a sixteenth
+ * of a beat, so a split lands on the grid every sequencer draws.
+ */
+export const OFFSET_STEP_BEATS = 1 / 16;
 
 /**
  * The device of an audio track: the one track kind that plays recorded takes
@@ -120,7 +147,7 @@ export const STEP_GUARDS = Symbol("studio.step-guards");
 
 /**
  * The ref a command, a lock or a history entry names one object by.
- * @param {"song"|"track"|"scene"|"clip"|"take"} kind
+ * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"} kind
  * @param {string} id
  * @returns {string} e.g. `"clip:abc"`, `"take:abc"`, or `"song:meta"` for the song itself
  */
@@ -217,6 +244,14 @@ export function newSongDoc({ title = "Untitled song", bpm = 120, key = "C major"
     song.set("scenes", new Y.Array());
     song.set("clips", new Y.Map());
     song.set("takes", new Y.Map());
+    song.set(
+      "arrangement",
+      new Y.Map([
+        ["placements", new Y.Map()],
+        ["markers", new Y.Map()],
+        ["sections", new Y.Map()],
+      ]),
+    );
   }, "studio:new-song");
   return doc;
 }
@@ -304,6 +339,166 @@ export function getTake(doc, id) {
  */
 export function takesForClip(doc, clipId) {
   return takeEntries(doc).filter(({ take }) => take.get("clip_id") === clipId);
+}
+
+/**
+ * The arrangement container — placements, markers and sections. Writers use
+ * this; a song written before the timeline existed gets it on first write.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<any>}
+ */
+export function arrangementContainer(doc) {
+  return ensureContainer(doc, "arrangement", () => new Y.Map());
+}
+
+/**
+ * The placements map, keyed by placement id. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function placementMap(doc) {
+  return ensureArrangementMap(doc, "placements");
+}
+
+/**
+ * The markers map, keyed by marker id. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function markerMap(doc) {
+  return ensureArrangementMap(doc, "markers");
+}
+
+/**
+ * The sections map, keyed by section id. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function sectionMap(doc) {
+  return ensureArrangementMap(doc, "sections");
+}
+
+/**
+ * Every placement in the song, in the order the map holds them. A song without
+ * an arrangement has none.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, placement: Y.Map<any>}>}
+ */
+export function placementEntries(doc) {
+  return objectEntries(readArrangementMap(doc, "placements"), "placement");
+}
+
+/**
+ * Every marker in the song. A song without an arrangement has none.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, marker: Y.Map<any>}>}
+ */
+export function markerEntries(doc) {
+  return objectEntries(readArrangementMap(doc, "markers"), "marker");
+}
+
+/**
+ * Every section in the song. A song without an arrangement has none.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, section: Y.Map<any>}>}
+ */
+export function sectionEntries(doc) {
+  return objectEntries(readArrangementMap(doc, "sections"), "section");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live placement object, or null
+ */
+export function getPlacement(doc, id) {
+  return liveObject(readArrangementMap(doc, "placements"), id);
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live marker object, or null
+ */
+export function getMarker(doc, id) {
+  return liveObject(readArrangementMap(doc, "markers"), id);
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live section object, or null
+ */
+export function getSection(doc, id) {
+  return liveObject(readArrangementMap(doc, "sections"), id);
+}
+
+/**
+ * Every placement that puts one clip on the timeline.
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @returns {Array<{id: string, placement: Y.Map<any>}>}
+ */
+export function placementsForClip(doc, clipId) {
+  return placementEntries(doc).filter(({ placement }) => placement.get("clip_id") === clipId);
+}
+
+/**
+ * Every placement sitting on one track.
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @returns {Array<{id: string, placement: Y.Map<any>}>}
+ */
+export function placementsForTrack(doc, trackId) {
+  return placementEntries(doc).filter(({ placement }) => placement.get("track_id") === trackId);
+}
+
+/**
+ * Whether a value sits on the sixteenth-of-a-beat grid a placement's offset
+ * uses. A float sum can land a hair off the grid, so the comparison allows a
+ * thousandth of a step.
+ * @param {number} beats
+ * @returns {boolean}
+ */
+export function onOffsetGrid(beats) {
+  if (typeof beats !== "number" || !Number.isFinite(beats)) return false;
+  const steps = beats / OFFSET_STEP_BEATS;
+  return Math.abs(steps - Math.round(steps)) < 1e-6;
+}
+
+/** @returns {Y.Map<any>} the named sub-map of the arrangement, created when missing. */
+function ensureArrangementMap(doc, key) {
+  const arrangement = arrangementContainer(doc);
+  const current = arrangement.get(key);
+  if (current instanceof Y.Map) return current;
+  const created = new Y.Map();
+  arrangement.set(key, created);
+  return created;
+}
+
+/** @returns {Y.Map<any>|null} the named sub-map of the arrangement, or null. */
+function readArrangementMap(doc, key) {
+  const arrangement = songMap(doc).get("arrangement");
+  if (!(arrangement instanceof Y.Map)) return null;
+  const current = arrangement.get(key);
+  return current instanceof Y.Map ? current : null;
+}
+
+/** @returns {Array<{id: string, [key]: Y.Map<any>}>} the live Y.Maps of one container. */
+function objectEntries(map, key) {
+  if (!(map instanceof Y.Map)) return [];
+  const out = [];
+  for (const [id, value] of map.entries()) {
+    if (value instanceof Y.Map) out.push({ id, [key]: value });
+  }
+  return out;
+}
+
+/** @returns {Y.Map<any>|null} one live object of a container, or null. */
+function liveObject(map, id) {
+  if (!(map instanceof Y.Map)) return null;
+  const value = map.get(id);
+  return value instanceof Y.Map ? value : null;
 }
 
 /**
@@ -456,10 +651,17 @@ export function clipsForScene(doc, sceneId) {
 /**
  * The whole song as plain JSON — the shape clients, the sequencer and a render
  * read, and the value two hubs compare after a restart.
+ *
+ * The arrangement is always there, even on a song written before the timeline
+ * existed: an empty `{placements: {}, markers: {}, sections: {}}` reads the
+ * same as a song with no arrangement container.
  * @param {Y.Doc} doc
  * @returns {{meta: {title: string, bpm: number, meter: number[], key: string},
  *            tracks: object[], scenes: object[], clips: Object<string, object>,
- *            takes: Object<string, object>}}
+ *            takes: Object<string, object>,
+ *            arrangement: {placements: Object<string, object>,
+ *                          markers: Object<string, object>,
+ *                          sections: Object<string, object>}}}
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -498,6 +700,42 @@ export function snapshot(doc) {
     // stays an ordinary key instead of touching the object's prototype.
     clips: Object.fromEntries(clips),
     takes: Object.fromEntries(takes),
+    arrangement: snapshotArrangement(doc),
+  };
+}
+
+/**
+ * The arrangement as a snapshot carries it: three plain objects keyed by id.
+ * @param {Y.Doc} doc
+ * @returns {{placements: Object<string, object>, markers: Object<string, object>,
+ *            sections: Object<string, object>}}
+ */
+function snapshotArrangement(doc) {
+  const placements = [];
+  const placementsValue = readArrangementMap(doc, "placements");
+  if (placementsValue instanceof Y.Map) {
+    for (const [id, placement] of placementsValue.entries()) {
+      placements.push([id, normalizePlacement(id, placement)]);
+    }
+  }
+  const markers = [];
+  const markersValue = readArrangementMap(doc, "markers");
+  if (markersValue instanceof Y.Map) {
+    for (const [id, marker] of markersValue.entries()) {
+      markers.push([id, normalizeMarker(id, marker)]);
+    }
+  }
+  const sections = [];
+  const sectionsValue = readArrangementMap(doc, "sections");
+  if (sectionsValue instanceof Y.Map) {
+    for (const [id, section] of sectionsValue.entries()) {
+      sections.push([id, normalizeSection(id, section)]);
+    }
+  }
+  return {
+    placements: Object.fromEntries(placements),
+    markers: Object.fromEntries(markers),
+    sections: Object.fromEntries(sections),
   };
 }
 
@@ -515,7 +753,13 @@ export function snapshot(doc) {
  *   - every take names an audio clip the song still has;
  *   - an audio clip's comp is in beat order, inside the clip, and every one of
  *     its segments names a take of that clip that is not discarded — the rule
- *     `clip.set_comp` enforces on its own edits.
+ *     `clip.set_comp` enforces on its own edits;
+ *   - the arrangement holds at most `LIMITS.placements` placements,
+ *     `LIMITS.markers` markers and `LIMITS.sections` sections, ends at bar
+ *     `LIMITS.arrangementBars`, has no two placements overlapping on one
+ *     track and no two sections overlapping each other, and every placement
+ *     still names a clip of its own track — the rules the arrangement
+ *     commands enforce on their own edits.
  *
  * The history dry-runs an undo's plan on a clone of the document and calls
  * this, so a plan that would leave the song in one of these states is refused
@@ -584,6 +828,118 @@ export function checkInvariants(doc) {
         break;
       }
     }
+  }
+
+  reasons.push(...arrangementReasons(song));
+
+  return reasons;
+}
+
+/**
+ * What is wrong with a song's arrangement, in plain English.
+ *
+ * Placements are checked against the tracks and clips they name, against the
+ * 999-bar end of the timeline and against each other on one track; markers and
+ * sections against the same end, their own counts, and each other. Overlaps
+ * are found by sorting each track's (or the sections') ranges by start, so a
+ * full 2048-placement song is one pass, not a quadratic scan.
+ * @param {object} song - a snapshot
+ * @returns {string[]}
+ */
+function arrangementReasons(song) {
+  const arrangement = song.arrangement ?? { placements: {}, markers: {}, sections: {} };
+  const placements = Object.values(arrangement.placements ?? {});
+  const markers = Object.values(arrangement.markers ?? {});
+  const sections = Object.values(arrangement.sections ?? {});
+  const reasons = [];
+
+  if (placements.length > LIMITS.placements) {
+    reasons.push(
+      `The arrangement would hold ${placements.length} placements; an arrangement can hold at most ${LIMITS.placements} placements.`,
+    );
+  }
+  if (markers.length > LIMITS.markers) {
+    reasons.push(
+      `The song would hold ${markers.length} markers; a song can hold at most ${LIMITS.markers} markers.`,
+    );
+  }
+  if (sections.length > LIMITS.sections) {
+    reasons.push(
+      `The song would hold ${sections.length} sections; a song can hold at most ${LIMITS.sections} sections.`,
+    );
+  }
+
+  reasons.push(...duplicateIdReasons(placements, "placement"));
+  reasons.push(...duplicateIdReasons(markers, "marker"));
+  reasons.push(...duplicateIdReasons(sections, "section"));
+
+  const byTrack = new Map();
+  for (const placement of placements) {
+    const which = `The placement "${placement.id}"`;
+    const track = song.tracks.find((item) => item.id === placement.track_id);
+    const clip = song.clips[placement.clip_id];
+    if (!track) {
+      reasons.push(`${which} would be left without its track: there is no track "${placement.track_id}" in the song.`);
+    }
+    if (!clip) {
+      reasons.push(`${which} would be left without its clip: there is no clip "${placement.clip_id}" in the song.`);
+    } else if (clip.track_id !== placement.track_id) {
+      reasons.push(
+        `${which} would play clip "${clip.id}", which sits on track "${clip.track_id}", not "${placement.track_id}".`,
+      );
+    }
+    if (placement.start_bar + placement.bars > LIMITS.arrangementBars) {
+      reasons.push(
+        `${which} would end at bar ${placement.start_bar + placement.bars}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+      );
+    }
+    if (!onOffsetGrid(placement.offset_beats)) {
+      reasons.push(
+        `${which} would start at an offset of ${placement.offset_beats} beats, which is off the sixteenth-of-a-beat grid.`,
+      );
+    }
+    if (placement.fade_in_beats + placement.fade_out_beats > placement.bars * BEATS_PER_BAR) {
+      reasons.push(
+        `${which} would fade in over ${placement.fade_in_beats} and out over ${placement.fade_out_beats} beats, longer than its ${barsText(placement.bars)}.`,
+      );
+    }
+    const lane = byTrack.get(placement.track_id) ?? [];
+    lane.push(placement);
+    byTrack.set(placement.track_id, lane);
+  }
+  for (const [trackId, lane] of byTrack) {
+    lane.sort((a, b) => a.start_bar - b.start_bar);
+    for (let index = 1; index < lane.length; index += 1) {
+      const previous = lane[index - 1];
+      const current = lane[index];
+      if (current.start_bar >= previous.start_bar + previous.bars) continue;
+      reasons.push(`The placements "${previous.id}" and "${current.id}" would overlap on track "${trackId}".`);
+    }
+  }
+
+  for (const marker of markers) {
+    if (marker.bar > LIMITS.arrangementBars) {
+      reasons.push(
+        `The marker "${marker.id}" would sit at bar ${marker.bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+      );
+    }
+  }
+
+  for (const section of sections) {
+    const which = `The section "${section.id}"`;
+    if (!(section.start_bar < section.end_bar)) {
+      reasons.push(`${which} would end at bar ${section.end_bar}, before it starts at bar ${section.start_bar}.`);
+    }
+    if (section.end_bar > LIMITS.arrangementBars) {
+      reasons.push(`${which} would end at bar ${section.end_bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`);
+    }
+  }
+  const ordered = [...sections].sort((a, b) => a.start_bar - b.start_bar);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const current = ordered[index];
+    if (current.start_bar >= previous.end_bar) continue;
+    reasons.push(`The sections "${previous.id}" and "${current.id}" would overlap.`);
   }
 
   return reasons;
@@ -679,6 +1035,9 @@ function barsText(bars) {
  *     `null` deletes it;
  *   - `"take:abc|*"` does the same for a take, and `"take:abc|offset_frames"`
  *     writes one field of it;
+ *   - `"placement:abc|*"`, `"marker:abc|*"` and `"section:abc|*"` do the same
+ *     for the three arrangement objects, and `"placement:abc|bars"` (and its
+ *     siblings) writes one field of one of them;
  *   - `"track:abc|*"` and `"scene:abc|*"` do the same at the object's original
  *     position, carried inside the object JSON as `_index`, `_after` and
  *     `_before` (stripped again on the way in and out, so they never show up
@@ -723,6 +1082,11 @@ export function applyBeforeAfter(doc, plan) {
         break;
       case "take":
         writeTake(doc, target.id, split.field, value);
+        break;
+      case "placement":
+      case "marker":
+      case "section":
+        writeArrangementObject(doc, target.kind, target.id, split.field, value);
         break;
       default:
         throw new Error(`Studio: "${target.kind}" is not an object kind`);
@@ -769,6 +1133,13 @@ export function readField(doc, ref, field = "*") {
     if (!take) return ABSENT;
     if (field === "*") return toPlain(take);
     return readPath(take, fieldPath(field));
+  }
+
+  if (target.kind === "placement" || target.kind === "marker" || target.kind === "section") {
+    const object = arrangementObject(doc, target.kind, target.id);
+    if (!object) return ABSENT;
+    if (field === "*") return toPlain(object);
+    return readPath(object, fieldPath(field));
   }
 
   if (target.kind === "track" || target.kind === "scene") {
@@ -979,6 +1350,39 @@ function writeTake(doc, id, field, value) {
   writeField(take, field, value);
 }
 
+/** Which sub-map of the arrangement each arrangement object kind lives in. */
+const ARRANGEMENT_MAP_OF = Object.freeze({
+  placement: "placements",
+  marker: "markers",
+  section: "sections",
+});
+
+/** @returns {Y.Map<any>|null} one live placement, marker or section, or null. */
+function arrangementObject(doc, kind, id) {
+  const key = ARRANGEMENT_MAP_OF[kind];
+  if (!key) return null;
+  return liveObject(readArrangementMap(doc, key), id);
+}
+
+/** Write one field of a placement, marker or section, or recreate/delete it whole. */
+function writeArrangementObject(doc, kind, id, field, value) {
+  const key = ARRANGEMENT_MAP_OF[kind];
+  const map = ensureArrangementMap(doc, key);
+  if (field === "*") {
+    if (value === ABSENT) {
+      map.delete(id);
+      return;
+    }
+    const object = cloneJson(value) ?? {};
+    delete object._index;
+    map.set(id, objectMap({ ...object, id: object.id ?? id }));
+    return;
+  }
+  const object = map.get(id);
+  if (!(object instanceof Y.Map)) throw new Error(`Studio: there is no ${kind} "${id}" to write to`);
+  writeField(object, field, value);
+}
+
 /** @returns {any} the value without its internal `_index`/`_after`/`_before` hints. */
 function stripHints(value) {
   const object = toPlain(value) ?? {};
@@ -1093,6 +1497,42 @@ function normalizeTake(id, value) {
     recorded_at: typeof plain.recorded_at === "string" ? plain.recorded_at : "",
     author_label: typeof plain.author_label === "string" ? plain.author_label : "",
     discarded: plain.discarded === true,
+  };
+}
+
+/** A placement as a snapshot carries it: every field present, nothing extra. */
+function normalizePlacement(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    track_id: typeof plain.track_id === "string" ? plain.track_id : "",
+    clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
+    start_bar: integerOr(plain.start_bar, 0),
+    bars: integerOr(plain.bars, 1),
+    offset_beats: numberOr(plain.offset_beats, 0),
+    fade_in_beats: numberOr(plain.fade_in_beats, 0),
+    fade_out_beats: numberOr(plain.fade_out_beats, 0),
+  };
+}
+
+/** A marker as a snapshot carries it: every field present, nothing extra. */
+function normalizeMarker(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    bar: integerOr(plain.bar, 0),
+    name: typeof plain.name === "string" ? plain.name : "",
+  };
+}
+
+/** A section as a snapshot carries it: every field present, nothing extra. */
+function normalizeSection(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    start_bar: integerOr(plain.start_bar, 0),
+    end_bar: integerOr(plain.end_bar, 0),
+    name: typeof plain.name === "string" ? plain.name : "",
   };
 }
 /**

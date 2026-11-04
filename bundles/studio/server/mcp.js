@@ -57,6 +57,8 @@ import { listCommands } from "./commands/registry.js";
 import "./commands/core.js";
 // The 1b take commands, registered the same way.
 import "./commands/takes.js";
+// The 1b timeline commands — placements, markers and sections — likewise.
+import "./commands/arrangement.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */

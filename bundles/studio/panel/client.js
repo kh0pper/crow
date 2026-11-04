@@ -123,6 +123,9 @@
  * The take commands follow the 1a ones. `take.add` is not here because a take
  * is never something the GUI sends: the gateway's upload finish route adds it
  * as Studio's own step once the WAV is in storage.
+ *
+ * The timeline commands close the list: `arrangement.*` lays clips out on the
+ * bars, and `marker.*` and `section.*` name bars and ranges of them.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -149,6 +152,19 @@ export const COMMANDS = Object.freeze([
   "take.set_offset",
   "clip.set_comp",
   "clip.add_audio",
+  "arrangement.place",
+  "arrangement.move",
+  "arrangement.resize",
+  "arrangement.split",
+  "arrangement.set_fades",
+  "arrangement.remove",
+  "arrangement.record_performance",
+  "marker.add",
+  "marker.rename",
+  "marker.remove",
+  "section.add",
+  "section.set",
+  "section.remove",
 ]);
 
 /** The `var COMMANDS = [...]` declaration, built from the one list above. */

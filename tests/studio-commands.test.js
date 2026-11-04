@@ -26,6 +26,7 @@ import {
 } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/takes.js";
+import "../bundles/studio/server/commands/arrangement.js";
 
 /** A take id, the way the recording client generates one. */
 const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
@@ -49,6 +50,13 @@ const TAKE_ARGS = {
 
 /** Every registered command: the contract the GUI, the MCP tools and history share. */
 const COMMAND_IDS = [
+  "arrangement.move",
+  "arrangement.place",
+  "arrangement.record_performance",
+  "arrangement.remove",
+  "arrangement.resize",
+  "arrangement.set_fades",
+  "arrangement.split",
   "clip.add_audio",
   "clip.edit_notes",
   "clip.remove",
@@ -56,9 +64,15 @@ const COMMAND_IDS = [
   "clip.set_comp",
   "clip.set_length",
   "clip.write",
+  "marker.add",
+  "marker.remove",
+  "marker.rename",
   "scene.add",
   "scene.remove",
   "scene.rename",
+  "section.add",
+  "section.remove",
+  "section.set",
   "song.set_meta",
   "take.add",
   "take.discard",
@@ -101,6 +115,21 @@ const MINIMAL_ARGS = {
   "take.restore": { clip_id: "c1", take_id: TAKE_ID },
   "take.keep": { clip_id: "c1", take_id: TAKE_ID },
   "take.set_offset": { clip_id: "c1", take_id: TAKE_ID, offset_frames: 960, compensated: true },
+  "arrangement.place": { track_id: "t1", clip_id: "c1", start_bar: 0 },
+  "arrangement.move": { id: "p1", start_bar: 4 },
+  "arrangement.resize": { id: "p1", bars: 2 },
+  "arrangement.split": { id: "p1", at_bar: 1 },
+  "arrangement.set_fades": { id: "p1", fade_in_beats: 0.5, fade_out_beats: 0.5 },
+  "arrangement.remove": { id: "p1" },
+  "arrangement.record_performance": {
+    placements: [{ track_id: "t1", clip_id: "c1", start_bar: 0, bars: 2 }],
+  },
+  "marker.add": { bar: 4, name: "Bridge" },
+  "marker.rename": { id: "m1", name: "Bridge" },
+  "marker.remove": { id: "m1" },
+  "section.add": { start_bar: 0, end_bar: 8, name: "Verse" },
+  "section.set": { id: "s1", name: "Intro" },
+  "section.remove": { id: "s1" },
 };
 
 /** A song document that is destroyed when the test ends. */
@@ -422,6 +451,58 @@ test("apply returns before/after for every touched field", (t) => {
       args: { clip_id: "gtr-verse", take_id: OTHER_TAKE_ID },
       keys: [`take:${OTHER_TAKE_ID}|discarded`],
     },
+    // The timeline commands: one placement that is moved, resized, split,
+    // faded and removed again, a performance written in one step, and a marker
+    // and a section that come and go.
+    {
+      id: "arrangement.place",
+      args: { id: "gtr-p1", track_id: audioTrack, clip_id: "gtr-verse", start_bar: 0 },
+      keys: ["placement:gtr-p1|*"],
+    },
+    {
+      id: "arrangement.move",
+      args: { id: "gtr-p1", start_bar: 4 },
+      keys: ["placement:gtr-p1|start_bar"],
+    },
+    {
+      id: "arrangement.resize",
+      args: { id: "gtr-p1", bars: 4 },
+      keys: ["placement:gtr-p1|bars"],
+    },
+    {
+      id: "arrangement.split",
+      args: { id: "gtr-p1", at_bar: 6, new_id: "gtr-p1b" },
+      keys: ["placement:gtr-p1|bars", "placement:gtr-p1b|*"],
+    },
+    {
+      id: "arrangement.set_fades",
+      args: { id: "gtr-p1b", fade_in_beats: 1, fade_out_beats: 1 },
+      keys: ["placement:gtr-p1b|fade_in_beats", "placement:gtr-p1b|fade_out_beats"],
+    },
+    { id: "arrangement.remove", args: { id: "gtr-p1b" }, keys: ["placement:gtr-p1b|*"] },
+    {
+      id: "arrangement.record_performance",
+      args: {
+        placements: [
+          { id: "gtr-p3", track_id: audioTrack, clip_id: "gtr-verse", start_bar: 20, bars: 2 },
+        ],
+      },
+      keys: ["placement:gtr-p3|*"],
+    },
+    {
+      id: "marker.add",
+      args: { id: "m-intro", bar: 8, name: "Verse" },
+      keys: ["marker:m-intro|*"],
+    },
+    { id: "marker.rename", args: { id: "m-intro", name: "Intro" }, keys: ["marker:m-intro|name"] },
+    { id: "marker.remove", args: { id: "m-intro" }, keys: ["marker:m-intro|*"] },
+    {
+      id: "section.add",
+      args: { id: "sec-verse", start_bar: 0, end_bar: 8, name: "Verse" },
+      keys: ["section:sec-verse|*"],
+    },
+    { id: "section.set", args: { id: "sec-verse", name: "Intro" }, keys: ["section:sec-verse|name"] },
+    { id: "section.remove", args: { id: "sec-verse" }, keys: ["section:sec-verse|*"] },
     { id: "clip.remove", args: { clip_id: clipId }, keys: [`${cl}|*`] },
     { id: "scene.remove", args: { scene_id: chorus }, keys: [`scene:${chorus}|*`] },
     { id: "track.remove", args: { track_id: "drums" }, keys: ["track:drums|*"] },

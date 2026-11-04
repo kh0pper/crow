@@ -41,6 +41,8 @@ import {
   isAudioTrack,
   objectMap,
   objectRef,
+  placementEntries,
+  placementMap,
   songMap,
   takeEntries,
   takeMap,
@@ -144,6 +146,11 @@ function takeRef(id) {
   return objectRef("take", id);
 }
 
+/** @returns {string} the ref of a placement. */
+function placementRef(id) {
+  return objectRef("placement", id);
+}
+
 /** @returns {number} "1 bar" vs "8 bars" without the plural bug. */
 function barsText(bars) {
   return bars === 1 ? "1 bar" : `${bars} bars`;
@@ -238,6 +245,63 @@ function takeRefsOfClip(snap, clipId) {
     if (take.clip_id === clipId) refs.push(takeRef(take.id));
   }
   return refs;
+}
+
+/**
+ * The placements that put a clip on the timeline, as refs a lock/focus check
+ * has to see with the clip.
+ * @param {object} snap
+ * @param {string} clipId
+ * @returns {string[]}
+ */
+function placementRefsOfClip(snap, clipId) {
+  const refs = [];
+  for (const placement of Object.values(snap.arrangement?.placements ?? {})) {
+    if (placement.clip_id === clipId) refs.push(placementRef(placement.id));
+  }
+  return refs;
+}
+
+/**
+ * The placements sitting on a track, as refs a lock/focus check has to see
+ * with the track.
+ * @param {object} snap
+ * @param {string} trackId
+ * @returns {string[]}
+ */
+function placementRefsOfTrack(snap, trackId) {
+  const refs = [];
+  for (const placement of Object.values(snap.arrangement?.placements ?? {})) {
+    if (placement.track_id === trackId) refs.push(placementRef(placement.id));
+  }
+  return refs;
+}
+
+/**
+ * Delete the placements of the clips a removal takes with it (and those of a
+ * removed track), recording each one for the same undo step as the clip.
+ *
+ * A placement is the clip's other place in the song beside its scene: leaving
+ * one behind would point the timeline at a clip that is gone, so it goes in
+ * the same step and comes back with the clip. Nothing is created when the song
+ * has no arrangement at all (see doc.js `placementEntries`).
+ * @param {Y.Doc} doc
+ * @param {{clipIds: Set<string>, trackIds?: Set<string>}} doomed - the clips
+ *   being removed, and the tracks whose placements go too
+ * @param {Object<string, any>} before - the removal's before map, filled in
+ * @param {Object<string, any>} after - the removal's after map, filled in
+ * @returns {void}
+ */
+function removePlacements(doc, { clipIds, trackIds = new Set() }, before, after) {
+  const doomed = placementEntries(doc).filter(({ placement }) =>
+    clipIds.has(placement.get("clip_id")) || trackIds.has(placement.get("track_id")));
+  if (doomed.length === 0) return;
+  const placements = placementMap(doc);
+  for (const { id, placement } of doomed) {
+    before[fieldKey(placementRef(id), "*")] = cloneJson(toPlain(placement));
+    after[fieldKey(placementRef(id), "*")] = ABSENT;
+    placements.delete(id);
+  }
 }
 
 /**
@@ -484,6 +548,12 @@ defineCommand({
       if (clip.track_id !== args.track_id) continue;
       refs.push(clipRef(clip.id));
       refs.push(...takeRefsOfClip(snap, clip.id));
+      refs.push(...placementRefsOfClip(snap, clip.id));
+    }
+    // A placement on this track whose clip has drifted elsewhere is still that
+    // track's block, and it goes with the track.
+    for (const ref of placementRefsOfTrack(snap, args.track_id)) {
+      if (!refs.includes(ref)) refs.push(ref);
     }
     return refs;
   },
@@ -510,8 +580,11 @@ defineCommand({
       after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
     // A recorded take belongs to its clip, so it goes with it and comes back
-    // with it, in the same step.
-    removeTakes(doc, new Set(clips.map(({ id }) => id)), before, after);
+    // with it, in the same step. So does every placement that put the clip on
+    // the timeline, and every placement sitting on the track itself.
+    const removedClips = new Set(clips.map(({ id }) => id));
+    removeTakes(doc, removedClips, before, after);
+    removePlacements(doc, { clipIds: removedClips, trackIds: new Set([args.track_id]) }, before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
@@ -775,6 +848,7 @@ defineCommand({
       refs.push(clipRef(clip.id));
       refs.push(trackRef(clip.track_id));
       refs.push(...takeRefsOfClip(snap, clip.id));
+      refs.push(...placementRefsOfClip(snap, clip.id));
     }
     return refs;
   },
@@ -800,7 +874,11 @@ defineCommand({
       before[fieldKey(clipRef(id), "*")] = cloneJson(toPlain(clip));
       after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
-    removeTakes(doc, new Set(clips.map(({ id }) => id)), before, after);
+    // The clips' takes and the placements that put those clips on the
+    // timeline go with them, captured for the same undo step.
+    const removedClips = new Set(clips.map(({ id }) => id));
+    removeTakes(doc, removedClips, before, after);
+    removePlacements(doc, { clipIds: removedClips }, before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
@@ -1078,7 +1156,7 @@ defineCommand({
   },
   touches(args, snap) {
     const clip = snap.clips[args.clip_id];
-    const refs = [clipRef(args.clip_id), ...takeRefsOfClip(snap, args.clip_id)];
+    const refs = [clipRef(args.clip_id), ...takeRefsOfClip(snap, args.clip_id), ...placementRefsOfClip(snap, args.clip_id)];
     if (clip) refs.push(trackRef(clip.track_id));
     return refs;
   },
@@ -1087,8 +1165,10 @@ defineCommand({
     const ref = clipRef(args.clip_id);
     const before = { [fieldKey(ref, "*")]: cloneJson(toPlain(clip)) };
     const after = { [fieldKey(ref, "*")]: ABSENT };
-    // Its recorded takes go with it, captured for the same undo step.
+    // Its recorded takes go with it, captured for the same undo step, and so
+    // does every placement that put it on the timeline.
     removeTakes(doc, new Set([args.clip_id]), before, after);
+    removePlacements(doc, { clipIds: new Set([args.clip_id]) }, before, after);
     clipMap(doc).delete(args.clip_id);
     return { before, after };
   },
