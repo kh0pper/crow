@@ -4901,6 +4901,39 @@ export const translations = {
   // Fallbacks when a stored name cannot be shown (sanitizeDisplayName refuses it).
   "c2c.notify.someone": { en: "A contact", es: "Un contacto" },
   "c2c.notify.aProject": { en: "a project", es: "un proyecto" },
+  // Crow-to-Crow, the Projects panel (plan 1, task 7B; panels/projects.js). The
+  // owner's side: the sharing form in the Members area, the live-members list and
+  // its controls. Only a contact who has bound this Crow is offered (owner.js O4),
+  // so these strings never explain a failure of the picker itself.
+  "projects.c2c.shareTitle": { en: "Share with a contact's Crow", es: "Compartir con el Crow de un contacto" },
+  "projects.c2c.contact": { en: "Contact", es: "Contacto" },
+  "projects.c2c.roleLabel": { en: "Role", es: "Rol" },
+  "projects.c2c.role.viewer": { en: "Can view", es: "Puede ver" },
+  "projects.c2c.role.commenter": { en: "Can comment", es: "Puede comentar" },
+  "projects.c2c.role.editor": { en: "Can edit", es: "Puede editar" },
+  "projects.c2c.share": { en: "Share", es: "Compartir" },
+  "projects.c2c.noBoundContacts": { en: "No contact's Crow is ready to share with yet. A contact has to pair with this Crow first.", es: "Todavía ningún Crow de un contacto está listo para compartir. Un contacto tiene que emparejarse antes con este Crow." },
+  "projects.c2c.membersTitle": { en: "Shared with contacts", es: "Compartido con contactos" },
+  "projects.c2c.noMembers": { en: "Nothing is shared with another Crow yet.", es: "Todavía no compartes nada con otro Crow." },
+  "projects.c2c.state.invited": { en: "Invited", es: "Invitación pendiente" },
+  "projects.c2c.state.active": { en: "Active", es: "Activo" },
+  "projects.c2c.state.declined": { en: "Declined", es: "Rechazada" },
+  "projects.c2c.state.left": { en: "Left", es: "Ya no participas" },
+  "projects.c2c.state.unshared": { en: "No longer shared", es: "Ya no se comparte" },
+  "projects.c2c.updateRequired": { en: "Ask them to update Crow to share with them.", es: "Pídeles que actualicen Crow para compartir con ellos." },
+  "projects.c2c.updateRole": { en: "Update role", es: "Actualizar rol" },
+  "projects.c2c.unshare": { en: "Stop sharing", es: "Dejar de compartir" },
+  "projects.c2c.unshareConfirm": { en: "Their Crow will be asked to delete it. We can't guarantee a copy wasn't kept.", es: "Se le pedirá a su Crow que lo borre. No podemos garantizar que no se haya guardado una copia." },
+  "projects.c2c.working": { en: "Working…", es: "Procesando…" },
+  "projects.c2c.failed": { en: "That didn't work. Nothing was changed.", es: "No funcionó. No se cambió nada." },
+  // The visitor's side: what another Crow has shared with this one.
+  "projects.c2c.sharedTitle": { en: "Shared with you", es: "Compartido contigo" },
+  "projects.c2c.noneShared": { en: "Nothing is shared with you.", es: "No hay nada compartido contigo." },
+  "projects.c2c.sharedBy": { en: "from {name}", es: "de {name}" },
+  "projects.c2c.untitled": { en: "An untitled project", es: "Un proyecto sin título" },
+  "projects.c2c.accept": { en: "Accept", es: "Aceptar" },
+  "projects.c2c.decline": { en: "Decline", es: "Rechazar" },
+  "projects.c2c.leave": { en: "Leave", es: "Salir" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

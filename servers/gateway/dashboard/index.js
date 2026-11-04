@@ -102,6 +102,7 @@ import perchApiRouter from "../routes/perch.js";
 import { shellApiRouter } from "../routes/shell-api.js";
 import { appsApiRouter } from "../routes/apps-api.js";
 import { makeApiRouter } from "../routes/make-api.js";
+import { c2cApiRouter } from "../routes/c2c-api.js";
 import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 import perchDictationRouter from "../routes/perch-dictation.js";
 import voiceHandoffsRouter from "../routes/voice-handoffs.js";
@@ -770,6 +771,13 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // Make tab: create a blank Workspace file in the current project. Same slot and rails.
   router.use(makeApiRouter(dashboardAuth));
+
+  // Crow-to-Crow sharing (plan 1, task 7B): invite a contact's Crow, change the
+  // role, unshare, read the live members, and answer an invitation. Same slot and
+  // rails as the Make API above (session + CSRF, Funnel refused upstream); the
+  // router's own owner check (isLocalPasswordSessionOn) is what keeps a peer-SSO or
+  // instance-auth request out. See routes/c2c-api.js's header.
+  router.use(c2cApiRouter(dashboardAuth));
 
   // Perch Hub P2 (C-15): the interactive ("spawn as bot") API. Same mount
   // slot, same reasons — see perch.js's header above and this file's own

@@ -26,6 +26,14 @@ import {
 } from "../shared/project-lifecycle-ui.js";
 import { statSync } from "node:fs";
 import { statusCode } from "../../../research/fetch-labels.js";
+// Crow-to-Crow sharing (plan 1, task 7B). The owner's side lives in the sharing
+// runtime (owner.js) and the visitor's in visitor.js; this panel only draws what
+// those two read back, and its client posts to /dashboard/c2c-api (routes/c2c-api.js).
+import { listLiveMembers } from "../../../sharing/c2c/owner.js";
+import { listVisits } from "../../../sharing/c2c/visitor.js";
+import { ROLES as C2C_ROLES } from "../../../sharing/c2c/frames.js";
+import { isCbPinnedStrict } from "../../../sharing/contact-binding.js";
+import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 
 const PAGE_SIZE = 20;
 
@@ -433,7 +441,17 @@ async function renderListView(db, query, layout, lang, req) {
     }
   </style>`;
 
-  const content = `${css}<style>${lifecycleRules()}</style>${resultBannerHtml(query, lang)}${createForm}${filterBar}${projectsHtml}${paginationHtml}`;
+  // Crow-to-Crow (task 7B): the visitor's side lives here, on the projects list,
+  // because a visit is not a local project (visitor.js keeps it in c2c_visits, never
+  // a project_spaces row) and the invite notification links to this panel.
+  const visits = await c2cSafe("visits", () => listVisits(db), []);
+  const visitsSection = section(
+    t("projects.c2c.sharedTitle", lang),
+    c2cVisitsHtml(visits, lang),
+    { delay: 25 },
+  );
+
+  const content = `${css}<style>${lifecycleRules()}</style>${resultBannerHtml(query, lang)}${visitsSection}${createForm}${filterBar}${projectsHtml}${paginationHtml}${c2cClientJs(lang)}`;
   return layout({ title: `Projects (${totalCount})`, content });
 }
 
@@ -496,6 +514,13 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   const members = membersResult.rows;
   const contacts = contactsResult.rows;
   const auditEntries = auditResult.rows;
+
+  // Crow-to-Crow (task 7B): only a contact whose Crow has proved the bound key on
+  // THIS instance may be offered a live share (owner.js O4 reads the same strict
+  // pin), and the live-member list is the sharing runtime's own read — role, state
+  // and the legacy-proof flag. An old DB without 0016 renders neither.
+  const c2cContacts = await c2cSafe("bound contacts", () => c2cBoundContacts(db), []);
+  const c2cMembers = await c2cSafe("live members", () => listLiveMembers(db, Number(project.id)), []);
 
   // Back link + status controls
   const backLink = `<a href="/dashboard/projects" style="color:var(--crow-accent);text-decoration:none;font-size:0.85rem">← All Projects</a>`;
@@ -697,14 +722,14 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   const content = `
     ${memberNotice}
     ${section("Overview", overviewHtml + workspaceInfo)}
-    ${section(`Members (${members.length})`, membersHtml + addMemberForm, { delay: 50 })}
+    ${section(`Members (${members.length})`, membersHtml + addMemberForm + c2cOwnerSectionHtml(project.id, c2cContacts, c2cMembers, lang), { delay: 50 })}
     ${section(`Sources (${sourceTotal})`, sourcesHtml, { delay: 100 })}
     ${section(`Notes (${notes.length})`, notesHtml, { delay: 200 })}
     ${backendsHtml}
     ${section(`Audit log (${auditEntries.length})`, auditHtml, { delay: 350 })}
   `;
 
-  return layout({ title: project.name, content });
+  return layout({ title: project.name, content: content + c2cClientJs(lang) });
 }
 
 /**
@@ -780,4 +805,277 @@ export function renderBackendApproval(projectId, b, req = {}) {
     <div style="margin-top:0.25rem">${form}</div>
     ${label}
   </div>`;
+}
+
+/* ---------------------------------------------------------------- Crow-to-Crow */
+
+/**
+ * Read one of the sharing runtime's lists, or `fallback` when it cannot be read.
+ *
+ * A host whose 0016 migration was deferred (or an old DB) has no c2c tables and no
+ * `accepted_at` column: the panel must still render, so a failed read costs that
+ * section and never the page. The reason is logged with ids only.
+ */
+async function c2cSafe(label, read, fallback) {
+  try {
+    return await read();
+  } catch (err) {
+    console.warn(`[projects] ${label} could not be read: ${err?.message || err}`);
+    return fallback;
+  }
+}
+
+/**
+ * The contacts the "Share with a contact's Crow" picker may offer: a full, unblocked
+ * contact that has proved the bound key on THIS instance.
+ *
+ * That is exactly the pair of checks owner.js's `inviteContact` makes (O4) — the
+ * contact's pinned Ed25519 key (`lookupPinnedContactKey`'s predicate, spelled as the
+ * query below) and this instance's PT-3 pin (`isCbPinnedStrict`: false on a read
+ * error, false on a missing table, so a broken DB can never read as "bound"). The
+ * strict variants are used deliberately: a picker that offered a contact the invite
+ * would then refuse, or a pin that read as bound on an unreadable DB, is worse than
+ * an empty picker.
+ */
+async function c2cBoundContacts(db) {
+  const localId = getOrCreateLocalInstanceId();
+  const { rows } = await db.execute({
+    sql: `SELECT id, display_name, crow_id FROM contacts
+           WHERE is_blocked = 0 AND request_status IS NULL
+             AND ed25519_pubkey IS NOT NULL AND ed25519_pubkey != ''
+           ORDER BY display_name, id LIMIT 200`,
+    args: [],
+  });
+  const out = [];
+  for (const row of rows) {
+    if (await isCbPinnedStrict(db, localId, row.crow_id)) out.push(row);
+  }
+  return out;
+}
+
+/** The three Crow-to-Crow roles, as option elements ("Can view" / "Can comment" / "Can edit"). */
+function c2cRoleOptionsHtml(selected, lang) {
+  return C2C_ROLES.map((role) =>
+    `<option value="${role}"${role === selected ? " selected" : ""}>${escapeHtml(t(`projects.c2c.role.${role}`, lang))}</option>`
+  ).join("");
+}
+
+const C2C_BTN = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem;background:var(--crow-bg-elevated);color:var(--crow-text-secondary)";
+const C2C_SELECT = "padding:0.3rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);font-size:0.8rem";
+const C2C_ROW = "display:flex;justify-content:space-between;align-items:start;gap:0.5rem;flex-wrap:wrap;padding:0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);margin-top:0.4rem";
+
+/** One live member: who, the state, the update-required line, and the two controls. */
+function c2cMemberRowHtml(projectId, member, lang) {
+  const role = C2C_ROLES.includes(member.role) ? member.role : "viewer";
+  const active = member.state === "active";
+  const stateLabel = t(active ? "projects.c2c.state.active" : "projects.c2c.state.invited", lang);
+  // The receive pipeline records this when the contact's Crow still proves itself
+  // with the legacy signature (receive.js R5/S10): until they update, frames are
+  // held, so the owner is told why nothing is moving.
+  const updateRequired = member.updateRequired
+    ? `<div data-c2c-update-required style="font-size:0.75rem;color:var(--crow-warning,var(--crow-text-secondary));margin-top:0.2rem">${escapeHtml(t("projects.c2c.updateRequired", lang))}</div>`
+    : "";
+  return `<div data-c2c-member="${Number(member.contactId)}" data-project="${Number(projectId)}" style="${C2C_ROW}">
+    <div>
+      <div style="font-weight:600;font-size:0.85rem">${escapeHtml(member.displayName)}</div>
+      <div style="margin-top:0.15rem">${badge(stateLabel, active ? "connected" : "draft")}</div>
+      ${updateRequired}
+    </div>
+    <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+      <select data-c2c-member-role aria-label="${escapeHtml(t("projects.c2c.roleLabel", lang))}" style="${C2C_SELECT}">${c2cRoleOptionsHtml(role, lang)}</select>
+      <button type="button" data-c2c-member-save style="${C2C_BTN}">${escapeHtml(t("projects.c2c.updateRole", lang))}</button>
+      <button type="button" data-c2c-unshare style="${C2C_BTN}">${escapeHtml(t("projects.c2c.unshare", lang))}</button>
+      <span data-c2c-member-status role="status" style="font-size:0.75rem;color:var(--crow-text-muted)"></span>
+    </div>
+  </div>`;
+}
+
+/**
+ * The owner's half of the Members area: the live members, then the invite form.
+ *
+ * The form offers ONLY the bound contacts (`c2cBoundContacts`); when there are none
+ * it says so instead of printing a picker that cannot succeed. Every action posts
+ * to /dashboard/c2c-api with the dashboard's CSRF token (`c2cClientJs`).
+ */
+function c2cOwnerSectionHtml(projectId, contacts, members, lang) {
+  const title = `<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--crow-border);font-size:0.85rem;font-weight:600">${escapeHtml(t("projects.c2c.membersTitle", lang))}</div>`;
+  const list = members.length === 0
+    ? `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin:0.4rem 0">${escapeHtml(t("projects.c2c.noMembers", lang))}</p>`
+    : members.map((m) => c2cMemberRowHtml(projectId, m, lang)).join("");
+
+  const form = contacts.length === 0
+    ? `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin:0.6rem 0 0 0">${escapeHtml(t("projects.c2c.noBoundContacts", lang))}</p>`
+    : `<form data-c2c-invite data-project="${Number(projectId)}" style="margin-top:0.6rem;padding:0.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);display:flex;gap:0.5rem;flex-wrap:wrap;align-items:end">
+        <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary)">${escapeHtml(t("projects.c2c.contact", lang))}
+          <select name="contact_id" data-c2c-contact required style="${C2C_SELECT};min-width:180px">
+            ${contacts.map((c) => `<option value="${Number(c.id)}">${escapeHtml(c.display_name || c.crow_id || `contact #${c.id}`)}</option>`).join("")}
+          </select>
+        </label>
+        <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary)">${escapeHtml(t("projects.c2c.roleLabel", lang))}
+          <select name="role" data-c2c-role style="${C2C_SELECT}">${c2cRoleOptionsHtml("viewer", lang)}</select>
+        </label>
+        <button type="submit" style="padding:0.45rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer;font-size:0.8rem">${escapeHtml(t("projects.c2c.share", lang))}</button>
+        <span data-c2c-status role="status" style="font-size:0.75rem;color:var(--crow-text-muted)"></span>
+      </form>`;
+
+  return `${title}${list}${form}`;
+}
+
+/**
+ * The visitor's "Shared with you" list: one row per live visit (an invitation still
+ * to answer, or one already accepted), with the buttons that state allows.
+ *
+ * Ended visits (declined / left / unshared) are not drawn — there is nothing to do
+ * with them — but the route returns them all, so a caller that wants the history
+ * has it. The project name is the owner's text and the owner's name is a remote
+ * display name; visitor.js sanitizes both, and escapeHtml is the last word here.
+ */
+function c2cVisitsHtml(visits, lang) {
+  const live = visits.filter((v) => v.state === "invited" || v.state === "active");
+  if (live.length === 0) {
+    return `<p style="color:var(--crow-text-muted);font-size:0.85rem">${escapeHtml(t("projects.c2c.noneShared", lang))}</p>`;
+  }
+  return live.map((v) => {
+    const active = v.state === "active";
+    const state = active ? "active" : "invited";
+    const role = C2C_ROLES.includes(v.role) ? v.role : "viewer";
+    const button = (act, text, hidden) =>
+      `<button type="button" data-c2c-act="${act}"${hidden ? " hidden" : ""} style="${C2C_BTN}">${escapeHtml(text)}</button>`;
+    const from = fill(t("projects.c2c.sharedBy", lang), { name: v.ownerName || "" });
+    return `<div data-c2c-visit="${Number(v.id)}" style="${C2C_ROW}">
+      <div>
+        <div style="font-weight:600;font-size:0.85rem">${escapeHtml(v.projectName || t("projects.c2c.untitled", lang))}</div>
+        <div style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.15rem">${escapeHtml(from)} · ${escapeHtml(t(`projects.c2c.role.${role}`, lang))} · <span data-c2c-visit-state>${escapeHtml(t(`projects.c2c.state.${state}`, lang))}</span></div>
+      </div>
+      <div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">
+        ${button("accept", t("projects.c2c.accept", lang), active)}
+        ${button("decline", t("projects.c2c.decline", lang), active)}
+        ${button("leave", t("projects.c2c.leave", lang), !active)}
+        <span data-c2c-visit-status role="status" style="font-size:0.75rem;color:var(--crow-text-muted)"></span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+/**
+ * The panel's Crow-to-Crow client: the invite form, each member's role/unshare, and
+ * the visitor's accept/decline/leave.
+ *
+ * Emitted inside a template literal, so it carries NO backtick and no dollar-brace of
+ * its own (every interpolation below is the build's, through `tJs`), and every string
+ * that reaches the page at runtime goes through `textContent` — never a markup sink.
+ * Listeners bind to the elements of the run that bound them, so a Turbo swap cannot
+ * leave a stale handler behind, and the page is reloaded after an owner mutation (the
+ * server draws the members and their state). A visitor's answer updates its own row
+ * in place, because nothing else on the page depends on it.
+ *
+ * Exported so the client can be read and parsed on its own (tests/c2c-api.test.js).
+ */
+export function c2cClientJs(lang) {
+  return `<script>
+(function () {
+  var T = {
+    working: '${tJs("projects.c2c.working", lang)}',
+    failed: '${tJs("projects.c2c.failed", lang)}',
+    unshareConfirm: '${tJs("projects.c2c.unshareConfirm", lang)}',
+    state: {
+      invited: '${tJs("projects.c2c.state.invited", lang)}',
+      active: '${tJs("projects.c2c.state.active", lang)}',
+      declined: '${tJs("projects.c2c.state.declined", lang)}',
+      left: '${tJs("projects.c2c.state.left", lang)}',
+      unshared: '${tJs("projects.c2c.state.unshared", lang)}'
+    }
+  };
+  /* The actions each visit state offers. Anything else hides every button. */
+  var VISIT_ACTS = { invited: ['accept', 'decline'], active: ['leave'] };
+  var API = '/dashboard/c2c-api';
+
+  function csrf() {
+    var parts = document.cookie.split(';');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].trim().split('=');
+      if (kv[0] === 'crow_csrf') return decodeURIComponent(kv.slice(1).join('='));
+    }
+    return '';
+  }
+  function say(el, text) { if (el) el.textContent = text || ''; }
+  function post(url, body) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Crow-Csrf': csrf() }, body: JSON.stringify(body || {}) })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) { return { ok: r.ok, data: d }; });
+      });
+  }
+  function reload() { window.location.reload(); }
+  function failure(status) { return function () { say(status, T.failed); }; }
+
+  /* The owner's invite form: one contact, one role. */
+  var invite = document.querySelector('[data-c2c-invite]');
+  if (invite) {
+    var inviteStatus = invite.querySelector('[data-c2c-status]');
+    invite.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var contactSel = invite.querySelector('[data-c2c-contact]');
+      var roleSel = invite.querySelector('[data-c2c-role]');
+      if (!contactSel || !roleSel) return;
+      say(inviteStatus, T.working);
+      var url = API + '/projects/' + encodeURIComponent(invite.getAttribute('data-project')) + '/invite';
+      post(url, { contact_id: Number(contactSel.value), role: roleSel.value })
+        .then(function (r) { if (r.ok) reload(); else say(inviteStatus, T.failed); })
+        .catch(failure(inviteStatus));
+    });
+  }
+
+  /* One row per shared member: change the role, or stop sharing. */
+  Array.prototype.forEach.call(document.querySelectorAll('[data-c2c-member]'), function (row) {
+    var status = row.querySelector('[data-c2c-member-status]');
+    var base = API + '/projects/' + encodeURIComponent(row.getAttribute('data-project'))
+      + '/members/' + encodeURIComponent(row.getAttribute('data-c2c-member'));
+    var save = row.querySelector('[data-c2c-member-save]');
+    if (save) save.addEventListener('click', function () {
+      var roleSel = row.querySelector('[data-c2c-member-role]');
+      if (!roleSel) return;
+      say(status, T.working);
+      post(base + '/role', { role: roleSel.value })
+        .then(function (r) { if (r.ok) reload(); else say(status, T.failed); })
+        .catch(failure(status));
+    });
+    var unshare = row.querySelector('[data-c2c-unshare]');
+    if (unshare) unshare.addEventListener('click', function () {
+      if (!window.confirm(T.unshareConfirm)) return;
+      say(status, T.working);
+      post(base + '/unshare', {})
+        .then(function (r) { if (r.ok) reload(); else say(status, T.failed); })
+        .catch(failure(status));
+    });
+  });
+
+  /* The visitor's list: accept, decline, or leave, then redraw just this row. */
+  function applyState(row, state) {
+    var stateEl = row.querySelector('[data-c2c-visit-state]');
+    if (stateEl) stateEl.textContent = T.state[state] || state;
+    var allowed = VISIT_ACTS[state] || [];
+    Array.prototype.forEach.call(row.querySelectorAll('[data-c2c-act]'), function (b) {
+      if (allowed.indexOf(b.getAttribute('data-c2c-act')) >= 0) b.removeAttribute('hidden');
+      else b.setAttribute('hidden', '');
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-c2c-visit]'), function (row) {
+    var status = row.querySelector('[data-c2c-visit-status]');
+    var url = API + '/visits/' + encodeURIComponent(row.getAttribute('data-c2c-visit'));
+    Array.prototype.forEach.call(row.querySelectorAll('[data-c2c-act]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var act = btn.getAttribute('data-c2c-act');
+        say(status, T.working);
+        post(url + '/' + act, {})
+          .then(function (r) {
+            if (!r.ok) { say(status, T.failed); return; }
+            say(status, '');
+            applyState(row, (r.data && r.data.state) || (act === 'accept' ? 'active' : 'declined'));
+          })
+          .catch(failure(status));
+      });
+    });
+  });
+})();
+</script>`;
 }

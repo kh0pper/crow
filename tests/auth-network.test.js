@@ -304,6 +304,53 @@ test("rejectFunneled middleware: the voice hand-off confirm page is never funnel
   for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
 });
 
+// Crow-to-Crow plan 1, task 7B: the sharing API names contacts, projects and visits —
+// who shares what with whom — so not one of its routes may be reachable from Funnel.
+test("rejectFunneled middleware: the Crow-to-Crow sharing API is never funnel-exposed", async () => {
+  const server = await startTestApp();
+  const paths = [
+    "/dashboard/c2c-api/projects/1/invite",
+    "/dashboard/c2c-api/projects/1/members",
+    "/dashboard/c2c-api/projects/1/members/2/role",
+    "/dashboard/c2c-api/projects/1/members/2/unshare",
+    "/dashboard/c2c-api/visits",
+    "/dashboard/c2c-api/visits/1/accept",
+    "/dashboard/c2c-api/visits/1/decline",
+    "/dashboard/c2c-api/visits/1/leave",
+  ];
+  try {
+    const port = server.address().port;
+    for (const path of paths) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+  const { PUBLIC_FUNNEL_PREFIXES } = await import("../servers/gateway/funnel.js");
+  for (const path of paths) assert.ok(!PUBLIC_FUNNEL_PREFIXES.some((p) => path.startsWith(p)), path);
+});
+
+// The same mount rule as the Perch / apps / widgets APIs: the router installs
+// dashboardAuth on its own prefix, so it is closed wherever it is mounted.
+test("the Crow-to-Crow sharing API needs a session", async () => {
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+  const { c2cApiRouter } = await import("../servers/gateway/routes/c2c-api.js");
+  let authCalls = 0;
+  const spy = (req, res, next) => { authCalls++; return dashboardAuth(req, res, next); };
+  const app = express();
+  app.use(c2cApiRouter(spy));
+  const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const r = await request(server.address().port, "/dashboard/c2c-api/visits");
+    assert.equal(authCalls, 1, "the router runs dashboardAuth on its prefix");
+    assert.equal(r.status, 403);
+    assert.doesNotMatch(String(r.body || ""), /"visits"/);
+  } finally {
+    server.close();
+  }
+});
+
 test("dashboardAuth refuses an unauthenticated /dashboard/perch-api request instead of calling next()", async () => {
   // The perch API mounts behind dashboardAuth (bot-board-api idiom). Proven
   // here at the middleware, since a session-less caller must never reach a
