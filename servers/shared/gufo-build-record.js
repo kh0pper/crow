@@ -489,8 +489,12 @@ export function validateBuildRecord(record) {
       }
 
       // §2: any form of an extension list is refused, typed or not, whichever
-      // value it carries.
-      if (FORBIDDEN_VARIABLES.some((name) => named(name).length > 0)) add(REASONS.DEFINES_FORBIDDEN);
+      // value it carries. And no other GUFO_* variable at all: only the lock
+      // switch and the revision are allowed, so an option gufo adds later that
+      // changes which extensions are built cannot slip past by name.
+      const otherGufo = parsed.some((d) => d.name.startsWith("GUFO_")
+        && d.name !== LOCK_VARIABLE && d.name !== REVISION_VARIABLE);
+      if (otherGufo || FORBIDDEN_VARIABLES.some((name) => named(name).length > 0)) add(REASONS.DEFINES_FORBIDDEN);
     }
   }
 

@@ -144,6 +144,9 @@ const ONE_FIELD_REFUSALS = [
   ["a typed extension directory list on the cmake command line", (r) => {
     r.cmake.defines.push("-DGUFO_EXTENSION_DIRS:PATH=/x");
   }, REASONS.DEFINES_FORBIDDEN],
+  ["any other GUFO_* variable on the cmake command line", (r) => {
+    r.cmake.defines.push("-DGUFO_EXTENSIONS_LOCK_FILE=/x/other.lock");
+  }, REASONS.DEFINES_FORBIDDEN],
   ["a typed revision define naming another commit", (r) => {
     r.cmake.defines.push(`-DGUFO_REVISION:STRING=${"0".repeat(40)}`);
   }, REASONS.DEFINES_REVISION_MISMATCH],
