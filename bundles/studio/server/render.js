@@ -34,7 +34,7 @@
  * worklet thread by hand (`startRendering()` is what normally releases it, and
  * a leaked worklet would keep the process alive).
  *
- * ## Takes
+ * ## Takes and samples
  *
  * An audio clip plays recorded takes (see `server/commands/takes.js`), and
  * those are WAV files in storage, not part of the song document. A render
@@ -46,14 +46,34 @@
  * own `studio/<song_id>/takes/` prefix: a render may read nothing of a song but
  * that song's own recordings.
  *
+ * A sampler track's patterns play samples, which are WAV files in storage in
+ * the same way. A render loads every sample its playing patterns' steps trigger
+ * — through `options.sampleAudio`, built like `takeAudio` and pinned to the
+ * song's own `studio/<song_id>/samples/` — and hands each one to the engine
+ * (`engine.loadSample`). A sample a render cannot read is not fatal — a pad
+ * whose sample is missing plays silence (the spec's Review Focus 1), and one
+ * dangling pad must not turn into a failed render of the whole song — but it is
+ * never silently dropped either: the render's answer carries
+ * `missing_samples: [{id, reason}]`, the renderer repeats it in its result and
+ * in the `studio.render` audit line, and `studio_render` hands it to the agent.
+ * A pad that names a sample the song does not hold at all is reported the same
+ * way. The key rule still holds — such an object is never read.
+ *
+ * A render's samples are never trimmed away. The browser panel's engine holds a
+ * 256 MB cap and unloads its least-recently-played sample past it, reloading it
+ * when a pattern asks again; an offline render has no reader to ask, so its
+ * engine is built with a cap the size of every PCM byte its window's samples
+ * take at the render's rate (`sampleCapFor`), and a window whose samples need
+ * more than a render may hold (1 GiB) is refused before it starts.
+ *
  * ## The arrangement
  *
  * `{ mode: "arrangement", from_bar, seconds }` renders the song's timeline
  * instead of a scene: the engine is put in arrangement mode, seeked to
- * `from_bar` and played. The takes it loads are the ones the comps of the audio
- * clips placed inside the rendered window use — the window in bars is
- * `seconds` at the song's own tempo, four beats to the bar — so a render of the
- * third verse does not read the first verse's recordings.
+ * `from_bar` and played. The takes and samples it loads are the ones the audio
+ * comps and the pattern clips placed inside the rendered window use — the
+ * window in bars is `seconds` at the song's own tempo, four beats to the bar —
+ * so a render of the third verse does not read the first verse's recordings.
  *
  * ## Renders are serialized, and there is no timeout
  *
@@ -136,8 +156,39 @@ const MAX_TAKE_SAMPLES = 115200000;
 /** The longest arrangement a song may have, in bars (bar 999 is its last). */
 const MAX_FROM_BAR = 998;
 
-/** The largest a take's WAV file can be: its 44-byte header plus 3 bytes a sample. */
+/**
+ * The largest a take's WAV file can be: its 44-byte header plus 3 bytes a sample.
+ */
 const MAX_TAKE_BYTES = 44 + MAX_TAKE_SAMPLES * 3;
+
+/**
+ * The most samples (frames × channels) one sample may hold: 60 s of 48 kHz
+ * stereo, the cap `server/commands/sampler.js` and the upload route enforce.
+ */
+const MAX_SAMPLE_SAMPLES = 5760000;
+
+/** The largest a sample's WAV file can be: its header plus 3 bytes a sample. */
+const MAX_SAMPLE_BYTES = 44 + MAX_SAMPLE_SAMPLES * 3;
+
+/**
+ * The browser panel's own cap on the decoded samples one engine holds (see
+ * `engine/studio-processor.js`). A render is not the panel: it raises its
+ * engine's cap to fit the window it plays, and refuses to start past
+ * `RENDER_SAMPLE_BUDGET_BYTES`. Tests lower this through `sampleCapBytes`, so a
+ * handful of tiny samples can stand in for a window past the browser's cap.
+ */
+const BROWSER_SAMPLE_CAP_BYTES = 256 * 1024 * 1024;
+
+/**
+ * What one render may hold in decoded samples. Past this the render is refused
+ * before it starts: the MCP host renders one song at a time and does not have
+ * the memory for more, and a render that quietly dropped samples would be a
+ * lie about the song.
+ */
+const RENDER_SAMPLE_BUDGET_BYTES = 1024 * 1024 * 1024;
+
+/** Bytes in a megabyte, for the sentence a refused render gets. */
+const BYTES_PER_MB = 1024 * 1024;
 
 /** The asset map handed to `engine-client.create()`, read once per process. */
 let cachedAssets = null;
@@ -160,22 +211,36 @@ let cachedReleaseSymbol;
  * `from_bar` that is not a whole bar between 0 and 998, is refused by name
  * rather than quietly rendered as something else.
  *
- * Before the render starts, the takes the render can hear are loaded into the
- * engine through `options.takeAudio`, so a song with recorded audio renders as
- * it sounds rather than as silence. A take that cannot be read stops the render
- * with its id in the sentence (`Take <id> could not be loaded for this
- * render: …`): a render that quietly dropped a performance would be a lie.
+ * Before the render starts, the takes and samples the render can hear are
+ * loaded into the engine through `options.takeAudio` and `options.sampleAudio`,
+ * so a song with recorded audio or a kit renders as it sounds rather than as
+ * silence. A take that cannot be read stops the render with its id in the
+ * sentence (`Take <id> could not be loaded for this render: …`): a render that
+ * quietly dropped a performance would be a lie. A sample that cannot be read is
+ * reported instead, in `missing_samples` (see "Takes and samples" above); the
+ * render itself still happens.
  *
  * @param {object} snapshot the song as the hub's `snapshot()` returns it
  * @param {{scene_id?: string|null, clip_id?: string|null, seconds?: number,
  *          sampleRate?: number, mode?: "session"|"arrangement", from_bar?: number,
  *          takeAudio?: (take: object) => Promise<{rate: number,
- *            channels: Float32Array[]}|null>}} [options]
+ *            channels: Float32Array[]}|null>,
+ *          sampleAudio?: (sample: object) => Promise<{rate: number,
+ *            channels: Float32Array[]}|null>,
+ *          sampleCapBytes?: number}} [options]
  *   `takeAudio` reads and decodes one take's WAV; it is only called for takes
- *   the render can hear, and only when the song has any; `mode` and `from_bar`
- *   render the arrangement (see above)
+ *   the render can hear, and only when the song has any. `sampleAudio` does the
+ *   same for a sample the playing patterns' steps trigger. `mode` and `from_bar`
+ *   render the arrangement (see above). `sampleCapBytes` is the cap a render's
+ *   engine is never built under (the browser's 256 MB unless a test lowers it):
+ *   the engine's real cap is that or the window's own sample bytes, whichever
+ *   is larger, so no sample a render loads is trimmed away under it
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number,
- *                    seconds: number}>} the rendered stereo channels
+ *                    seconds: number,
+ *                    missing_samples: Array<{id: string, reason: string}>}>}
+ *   the rendered stereo channels, and every sample the render could not load
+ *   (empty when there was none, or the song plays no sampler track)
+ * @throws {Error} when the window's samples need more than a render may hold
  */
 export async function renderSong(snapshot, options = {}) {
   const { scene_id = null, clip_id = null, seconds = 1, sampleRate = SAMPLE_RATE } = options;
@@ -188,26 +253,47 @@ export async function renderSong(snapshot, options = {}) {
   const span = Number(seconds);
   if (!Number.isFinite(span) || span <= 0) throw new Error("A render needs a positive number of seconds.");
   const fromBar = mode === "arrangement" ? renderFromBar(options.from_bar) : 0;
-
   const length = Math.max(1, Math.round(span * rate));
+
+  // What this render can hear is worked out before anything is built: the
+  // samples those clips play decide the engine's sample cap, and a window past
+  // the render budget is refused before its engine exists at all.
+  let launch = null;
+  let takes;
+  let samples;
+  if (mode === "arrangement") {
+    const toBar = fromBar + barsOf(span, snapshot);
+    const windowed = windowClips(snapshot, fromBar, toBar);
+    takes = takesOfClips(snapshot, windowed);
+    samples = samplesOfClips(snapshot, windowed);
+  } else {
+    launch = pickLaunch(snapshot, scene_id, clip_id);
+    const playing = playingClips(snapshot, launch);
+    takes = takesOfClips(snapshot, playing);
+    samples = samplesOfClips(snapshot, playing);
+  }
+  const askedCap = Number(options.sampleCapBytes);
+  const baseCap = Number.isFinite(askedCap) && askedCap > 0 ? askedCap : BROWSER_SAMPLE_CAP_BYTES;
+  const sampleCap = sampleCapFor(samples.samples, rate, baseCap);
+
   const context = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: rate });
   let engine = null;
   let rendered = false;
   try {
-    engine = await studioEngine.create(context, { assetBytes: engineAssets() });
+    engine = await studioEngine.create(context, {
+      assetBytes: engineAssets(),
+      maxSampleBytes: sampleCap,
+    });
     engine.setSong(snapshot);
-    let takes;
     if (mode === "arrangement") {
       engine.setMode("arrangement");
       engine.seek(fromBar);
-      takes = takesInWindow(snapshot, fromBar, fromBar + barsOf(span, snapshot));
     } else {
-      const launch = pickLaunch(snapshot, scene_id, clip_id);
       if (launch.scene) engine.launchScene(launch.scene);
       if (launch.clip) engine.launchClip(launch.clip);
-      takes = takesToLoad(snapshot, launch);
     }
     await loadTakes(engine, takes, options.takeAudio);
+    const missingSamples = await loadSamples(engine, samples.samples, options.sampleAudio);
     engine.play();
     engine.node.connect(context.destination);
     // Without this the render can begin before the song reaches the processor.
@@ -223,7 +309,15 @@ export async function renderSong(snapshot, options = {}) {
     const right = new Float32Array(length);
     buffer.copyFromChannel(left, 0);
     buffer.copyFromChannel(right, 1);
-    return { left, right, sampleRate: rate, seconds: length / rate };
+    return {
+      left,
+      right,
+      sampleRate: rate,
+      seconds: length / rate,
+      // A pad whose sample is missing plays silence (Review Focus 1); this says
+      // which one, and why, so the agent can name it rather than guess.
+      missing_samples: [...samples.missing, ...missingSamples],
+    };
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
@@ -243,7 +337,7 @@ export async function renderSong(snapshot, options = {}) {
  *          getObject?: Function}} options.storage
  *   the S3 client's calls, injected so this module imports no app code;
  *   `getObject(key, {bucket})` (returning `{stream, stat}`) is what a render
- *   plays recorded takes through
+ *   plays recorded takes and samples through
  * @param {{assertLocalCapability: Function, appendAudit: Function}} options.acl
  *   the project ACL, injected for the same reason
  * @param {number} [options.maxSeconds] the longest render allowed; defaults to
@@ -253,7 +347,8 @@ export async function renderSong(snapshot, options = {}) {
  * @param {Function} [options.renderAudio] the audio renderer (defaults to
  *   `renderSong`); tests and alternate hosts inject their own
  * @returns {{render: (request: object) => Promise<{storage_key: string, url: string,
- *            seconds: number, lufs: number, true_peak_db: number}>}}
+ *            seconds: number, lufs: number, true_peak_db: number,
+ *            missing_samples: Array<{id: string, reason: string}>}>}}
  */
 export function createRenderer({
   db,
@@ -324,7 +419,10 @@ export function createRenderer({
    * @param {{kind?: string, id?: string, label?: string}|null} [request.author]
    *   who asked; a human author is audited as `local`, anything else as `bot`
    * @returns {Promise<{storage_key: string, url: string, seconds: number,
-   *                    lufs: number, true_peak_db: number}>}
+   *                    lufs: number, true_peak_db: number,
+   *                    missing_samples: Array<{id: string, reason: string}>}>}
+   *   where the render landed, how it measures, and every sample it could not
+   *   load (a pad with a missing sample plays silence; this names it)
    */
   async function render(request = {}) {
     const { song_id, project_id = null, snapshot, scene_id = null, clip_id = null, seconds, author = null } = request;
@@ -348,6 +446,7 @@ export function createRenderer({
       // read once, before anything is rendered.
       const prefix = await storagePrefixFor(db, project_id);
       const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
+      const sampleAudio = (sample) => sampleAudioFrom({ storage, bucket, prefix, songId: song_id, sample });
       const audio = await renderAudio(snapshot, {
         scene_id,
         clip_id,
@@ -355,9 +454,13 @@ export function createRenderer({
         mode,
         from_bar: fromBar,
         takeAudio,
+        sampleAudio,
       });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
       const renderedSeconds = audio.seconds;
+      // A pad whose sample could not be loaded plays silence; this is the list
+      // the agent is told about, in the result and in the audit line.
+      const missingSamples = Array.isArray(audio.missing_samples) ? audio.missing_samples : [];
       const lufs = integratedLufs(audio.left, audio.right, rate);
       const truePeak = truePeakDb(audio.left, audio.right, rate);
       const wav = encodeWav24(audio.left, audio.right, rate);
@@ -402,11 +505,19 @@ export function createRenderer({
           storage_key: key,
           lufs,
           true_peak_db: truePeak,
+          missing_samples: missingSamples,
         },
       });
 
       const url = await storage.getPresignedUrl(key, { bucket, expiry: URL_EXPIRY_SECONDS });
-      return { storage_key: key, url, seconds: renderedSeconds, lufs, true_peak_db: truePeak };
+      return {
+        storage_key: key,
+        url,
+        seconds: renderedSeconds,
+        lufs,
+        true_peak_db: truePeak,
+        missing_samples: missingSamples,
+      };
     } finally {
       release();
     }
@@ -453,8 +564,8 @@ function checkSeconds(seconds, longest) {
  * on unchanged, because they name what the operator has to fix.
  *
  * @param {object} engine the engine `studioEngine.create()` returned
- * @param {object[]} takes the takes this render hears (see `takesToLoad` and
- *   `takesInWindow`)
+ * @param {object[]} takes the takes this render hears (see `takesOfClips` and
+ *   the clip helpers above)
  * @param {Function|undefined} takeAudio the caller's reader
  * @returns {Promise<void>}
  */
@@ -472,17 +583,14 @@ async function loadTakes(engine, takes, takeAudio) {
 }
 
 /**
- * The takes a session render can hear: every take named by the comp of an audio
- * clip the launch plays, without the discarded ones, each once.
- *
- * A scene launch plays that scene's clips, a clip launch just that clip, and a
- * render that launches neither (silence) hears no takes at all.
+ * The clips a session render plays: that scene's clips, that one clip, or none
+ * at all for a render that launches neither (silence).
  *
  * @param {object} snapshot the song
  * @param {{scene?: string, clip?: string}} launch what the render launches
- * @returns {object[]} the takes, as the snapshot holds them
+ * @returns {object[]} the clips, as the snapshot holds them
  */
-function takesToLoad(snapshot, launch) {
+function playingClips(snapshot, launch) {
   const clips = snapshot && snapshot.clips && typeof snapshot.clips === "object" ? snapshot.clips : {};
   const playing = [];
   if (launch.clip) {
@@ -493,22 +601,23 @@ function takesToLoad(snapshot, launch) {
       if (clip && clip.scene_id === launch.scene) playing.push(clip);
     }
   }
-  return takesOfClips(snapshot, playing);
+  return playing;
 }
 
 /**
- * The takes an arrangement render can hear: every take named by the comp of an
- * audio clip that has a placement intersecting the rendered window of bars.
+ * The clips an arrangement render plays: every clip with a placement
+ * intersecting the rendered window of bars.
  *
  * @param {object} snapshot the song
  * @param {number} fromBar the first bar the render plays
  * @param {number} toBar the bar it stops at (exclusive)
- * @returns {object[]} the takes, as the snapshot holds them
+ * @returns {object[]} the clips, as the snapshot holds them
  */
-function takesInWindow(snapshot, fromBar, toBar) {
+function windowClips(snapshot, fromBar, toBar) {
   const clips = snapshot && snapshot.clips && typeof snapshot.clips === "object" ? snapshot.clips : {};
   const placements = placementsOf(snapshot);
   const playing = [];
+  const seen = new Set();
   for (const placement of placements) {
     const start = Number(placement.start_bar);
     const bars = Number(placement.bars);
@@ -517,9 +626,11 @@ function takesInWindow(snapshot, fromBar, toBar) {
     // behind it, and one that starts where it ends is past it.
     if (!(start < toBar && fromBar < start + bars)) continue;
     const clip = clips[placement.clip_id];
-    if (clip) playing.push(clip);
+    if (!clip || seen.has(clip.id)) continue;
+    seen.add(clip.id);
+    playing.push(clip);
   }
-  return takesOfClips(snapshot, playing);
+  return playing;
 }
 
 /**
@@ -547,6 +658,182 @@ function takesOfClips(snapshot, clips) {
     }
   }
   return wanted;
+}
+
+/**
+ * The samples the pads of some pattern clips' playing steps trigger, each once,
+ * and the ids a pad plays that the song does not hold at all.
+ *
+ * A pattern clip plays its chain, or — with no chain — its first pattern. Every
+ * step of those patterns names a pad of the clip's track, the pad names a
+ * sample, and that sample has to be in the engine before the steps can sound.
+ * The order is the song's own: clips as the snapshot holds them, patterns in
+ * chain order, steps in the map's order; nothing is read twice.
+ *
+ * @param {object} snapshot the song
+ * @param {object[]} clips the clips being played
+ * @returns {{samples: object[], missing: Array<{id: string, reason: string}>}}
+ *   the samples as the snapshot holds them, and the sample ids a pad plays that
+ *   the song has no sample object for (a dangling pad, reported not skipped)
+ */
+function samplesOfClips(snapshot, clips) {
+  const pads = snapshot && snapshot.pads && typeof snapshot.pads === "object" ? snapshot.pads : {};
+  const samples = snapshot && snapshot.samples && typeof snapshot.samples === "object" ? snapshot.samples : {};
+  const patterns = snapshot && snapshot.patterns && typeof snapshot.patterns === "object" ? snapshot.patterns : {};
+  const steps = snapshot && snapshot.steps && typeof snapshot.steps === "object" ? snapshot.steps : {};
+
+  // One walk of the steps, grouped by the pattern they belong to, so a clip's
+  // chain does not have to scan every step of the song once per pattern.
+  const stepsByPattern = new Map();
+  for (const step of Object.values(steps)) {
+    if (!step || typeof step.pattern_id !== "string") continue;
+    const key = `${step.clip_id}\n${step.pattern_id}`;
+    const list = stepsByPattern.get(key);
+    if (list) list.push(step);
+    else stepsByPattern.set(key, [step]);
+  }
+
+  const wanted = [];
+  const seen = new Set();
+  const missing = [];
+  for (const clip of clips) {
+    if (!clip || clip.kind !== "pattern") continue;
+    for (const pattern of patternsPlaying(clip, patterns)) {
+      for (const step of stepsByPattern.get(`${clip.id}\n${pattern.id}`) ?? []) {
+        const pad = pads[`${clip.track_id}/${step.bank_id}/${step.index}`];
+        const sampleId = pad && typeof pad.sample_id === "string" ? pad.sample_id : "";
+        if (sampleId === "" || seen.has(sampleId)) continue;
+        seen.add(sampleId);
+        const sample = samples[sampleId];
+        if (sample) {
+          wanted.push(sample);
+          continue;
+        }
+        // A pad that names a sound the song does not hold: nothing to read, and
+        // nothing to guess — it is reported as missing.
+        missing.push({ id: sampleId, reason: "the song has no such sample" });
+      }
+    }
+  }
+  return { samples: wanted, missing };
+}
+
+/**
+ * The PCM bytes one sample takes in the engine at a render's rate.
+ *
+ * The processor holds decoded float32 frames, one array per channel, and the
+ * engine client resamples a sample recorded at another rate to the context's
+ * rate before it loads it, so the bytes are counted at the render's rate. One
+ * extra frame is allowed per sample for the resampler's own rounding: a cap is
+ * only useful if it is never smaller than what the engine really holds.
+ *
+ * @param {object} sample a sample as the snapshot carries it
+ * @param {number} rate the render's sample rate
+ * @returns {number} bytes, or 0 for a sample with no frames
+ */
+function sampleBytesAt(sample, rate) {
+  const frames = Number(sample && sample.frames);
+  if (!Number.isFinite(frames) || frames <= 0) return 0;
+  const channels = Math.max(1, Math.trunc(Number(sample && sample.channels)) || 1);
+  const source = Number(sample && sample.rate);
+  const from = Number.isFinite(source) && source > 0 ? source : rate;
+  const held = Math.ceil((frames * rate) / from) + 1;
+  return held * channels * 4;
+}
+
+/**
+ * The sample cap a render's engine is built with: every byte the window's
+ * samples take at the render's rate, so nothing the render loads is trimmed
+ * away under it, and never below `base` (the browser's own cap, or the smaller
+ * one a test passes as `sampleCapBytes`).
+ *
+ * A window that needs more than `RENDER_SAMPLE_BUDGET_BYTES` is refused here,
+ * with the megabytes it would need — before a context, an engine or a read.
+ *
+ * @param {object[]} samples the samples this render hears (see `samplesOfClips`)
+ * @param {number} rate the render's sample rate
+ * @param {number} base the cap a render is never built under
+ * @returns {number} the cap, in bytes
+ * @throws {Error} when the samples need more than a render may hold
+ */
+function sampleCapFor(samples, rate, base) {
+  let bytes = 0;
+  for (const sample of samples) bytes += sampleBytesAt(sample, rate);
+  if (bytes > RENDER_SAMPLE_BUDGET_BYTES) {
+    throw new Error(
+      `This render needs ${Math.ceil(bytes / BYTES_PER_MB)} MB of samples; a render holds at most ${RENDER_SAMPLE_BUDGET_BYTES / BYTES_PER_MB} MB.`,
+    );
+  }
+  return Math.max(base, bytes);
+}
+
+/**
+ * The patterns of one pattern clip that actually play: its chain in order, or
+ * its first pattern when no entry names one.
+ *
+ * A chain is followed exactly as the sequencer follows it — an entry that names
+ * no pattern of this clip keeps its slot and plays silence, and the entries that
+ * do name one are played in their order — and, like the sequencer, a chain that
+ * names no pattern of the clip at all falls back to the clip's own first
+ * pattern (an empty chain, or one whose patterns are gone).
+ *
+ * @param {object} clip the pattern clip
+ * @param {Object<string, object>} patterns the song's patterns, keyed by ref id
+ * @returns {object[]}
+ */
+function patternsPlaying(clip, patterns) {
+  const own = Object.values(patterns).filter((pattern) => pattern && pattern.clip_id === clip.id);
+  const chain = Array.isArray(clip.chain) ? clip.chain : [];
+  const playing = [];
+  for (const id of chain) {
+    const pattern = own.find((candidate) => candidate.id === id);
+    if (pattern) playing.push(pattern);
+  }
+  if (playing.length > 0) return playing;
+  const first = own.sort((left, right) => Number(left.order) - Number(right.order))[0];
+  return first ? [first] : [];
+}
+
+/**
+ * Hand the engine every sample the render can hear, and name the ones it cannot.
+ *
+ * `sampleAudio` is the caller's reader (built like the take one), and its own
+ * refusals — a key outside the song's own `samples/` directory — are never read.
+ * A sample it cannot produce is reported as missing, not thrown: a pad whose
+ * sample is missing plays silence (the same answer the audio thread gives), and
+ * one dangling pad does not fail a whole render. A render with no reader at all
+ * reports every sample it wanted the same way. `engine.loadSample` arrives with
+ * the sampler voices; an engine without it simply does not take the audio.
+ *
+ * @param {object} engine the engine `studioEngine.create()` returned
+ * @param {object[]} samples the samples this render hears (see `samplesOfClips`)
+ * @param {Function|undefined} sampleAudio the caller's reader
+ * @returns {Promise<Array<{id: string, reason: string}>>} what could not be loaded
+ */
+async function loadSamples(engine, samples, sampleAudio) {
+  const missing = [];
+  for (const sample of samples) {
+    const id = typeof sample.id === "string" ? sample.id : "";
+    if (typeof sampleAudio !== "function") {
+      missing.push({ id, reason: "this render cannot read samples" });
+      continue;
+    }
+    let audio = null;
+    try {
+      audio = await sampleAudio(sample);
+    } catch (error) {
+      missing.push({ id, reason: sampleMissingReason(error) });
+      continue;
+    }
+    if (!audio || !Array.isArray(audio.channels) || audio.channels.length === 0 || !(Number(audio.rate) > 0)) {
+      missing.push({ id, reason: "the file could not be read" });
+      continue;
+    }
+    if (typeof engine.loadSample === "function") {
+      await engine.loadSample(sample.id, audio.channels, Number(audio.rate));
+    }
+  }
+  return missing;
 }
 
 /**
@@ -615,14 +902,35 @@ function takeLoadFailure(id, reason) {
 }
 
 /**
+ * The one sentence a sample that could not be loaded fails with.
+ * @param {string} id the sample's id
+ * @param {unknown} reason why, in plain English
+ * @returns {string}
+ */
+function sampleLoadFailure(id, reason) {
+  const text = String(reason ?? "").trim().replace(/[.\s]+$/, "");
+  return `Sample ${id} could not be loaded for this render: ${text === "" ? "the file could not be read" : text}.`;
+}
+
+/**
+ * Why one sample is missing from a render, in a reader's own words when it has
+ * any: the sentence `sampleLoadFailure` wrote, or a plain one.
+ * @param {unknown} error
+ * @returns {string}
+ */
+function sampleMissingReason(error) {
+  const text = error && typeof error.message === "string" ? error.message.trim() : "";
+  return text === "" ? "the file could not be read" : text;
+}
+
+/**
  * Read one take's WAV back out of storage and decode it, refusing anything
  * that is not exactly where Studio keeps this song's takes.
  *
  * The key is built here, from the song's project prefix and the song's own id,
  * and the take's `storage_key` has to equal it: a document that named some
  * other object — another song's take, a render, a file outside the project —
- * is refused by name rather than read. The file is read whole, but only after
- * its size is known, and a file past the take cap is refused unread.
+ * is refused by name rather than read.
  *
  * @param {object} options
  * @param {object} options.storage the S3 client (needs `getObject`)
@@ -638,36 +946,86 @@ async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
   if (!take || take.storage_key !== key) {
     throw new Error(`Take ${id} is not stored where Studio keeps this song's takes.`);
   }
+  return readStoredWav({
+    storage,
+    bucket,
+    key,
+    maxBytes: MAX_TAKE_BYTES,
+    tooBig: "its file is larger than a take can be",
+    fail: (reason) => takeLoadFailure(id, reason),
+  });
+}
+
+/**
+ * Read one sample's WAV back out of storage and decode it, on the take reader's
+ * terms and with the same exact-key rule: only an object under this song's own
+ * `studio/<song_id>/samples/`, named for this exact sample, is read.
+ *
+ * @param {object} options
+ * @param {object} options.storage the S3 client (needs `getObject`)
+ * @param {string} options.bucket the bucket samples live in
+ * @param {string} options.prefix the song's project storage prefix
+ * @param {string} options.songId the song the render is of
+ * @param {object} options.sample the sample, as the snapshot holds it
+ * @returns {Promise<{rate: number, channels: Float32Array[]}>}
+ */
+async function sampleAudioFrom({ storage, bucket, prefix, songId, sample }) {
+  const id = sample && typeof sample.id === "string" ? sample.id : "";
+  const key = `${prefix}studio/${songId}/samples/${id}.wav`;
+  if (!sample || sample.storage_key !== key) {
+    throw new Error(`Sample ${id} is not stored where Studio keeps this song's samples.`);
+  }
+  return readStoredWav({
+    storage,
+    bucket,
+    key,
+    maxBytes: MAX_SAMPLE_BYTES,
+    tooBig: "its file is larger than a sample can be",
+    fail: (reason) => sampleLoadFailure(id, reason),
+  });
+}
+
+/**
+ * Read one stored WAV whole and decode it, but only after its size is known and
+ * under the kind's cap. `fail` writes the sentence a caller gets, so each kind
+ * names what it could not load.
+ *
+ * @param {object} options
+ * @param {object} options.storage the S3 client (needs `getObject`)
+ * @param {string} options.bucket
+ * @param {string} options.key the object's exact key
+ * @param {number} options.maxBytes the kind's own cap on a file
+ * @param {string} options.tooBig why a file past the cap cannot be read
+ * @param {(reason: unknown) => string} options.fail the sentence to throw
+ * @returns {Promise<{rate: number, channels: Float32Array[]}>}
+ */
+async function readStoredWav({ storage, bucket, key, maxBytes, tooBig, fail }) {
   if (!storage || typeof storage.getObject !== "function") {
-    throw new Error(takeLoadFailure(id, "this Studio cannot read files from storage"));
+    throw new Error(fail("this Studio cannot read files from storage"));
   }
 
   let opened;
   try {
     opened = await storage.getObject(key, { bucket });
   } catch (error) {
-    throw new Error(takeLoadFailure(id, reasonText(error)));
+    throw new Error(fail(reasonText(error)));
   }
 
   const size = Number(opened && opened.stat ? opened.stat.size : NaN);
-  if (Number.isFinite(size) && size > MAX_TAKE_BYTES) {
-    throw new Error(takeLoadFailure(id, "its file is larger than a take can be"));
-  }
+  if (Number.isFinite(size) && size > maxBytes) throw new Error(fail(tooBig));
 
   let bytes;
   try {
     bytes = await streamBytes(opened && opened.stream);
   } catch (error) {
-    throw new Error(takeLoadFailure(id, reasonText(error)));
+    throw new Error(fail(reasonText(error)));
   }
-  if (bytes.length > MAX_TAKE_BYTES) {
-    throw new Error(takeLoadFailure(id, "its file is larger than a take can be"));
-  }
+  if (bytes.length > maxBytes) throw new Error(fail(tooBig));
 
   try {
     return decodeWav(bytes);
   } catch (error) {
-    throw new Error(takeLoadFailure(id, reasonText(error)));
+    throw new Error(fail(reasonText(error)));
   }
 }
 

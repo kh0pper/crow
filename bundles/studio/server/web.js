@@ -46,14 +46,19 @@
  * take whose id it chose in 1 MiB pieces (`PUT /api/studio/takes/:take_id`,
  * then `PUT .../chunks/:index` with raw bytes), asks
  * `GET /api/studio/takes/:take_id` what has arrived after a reload, and says
- * `POST .../finish` once the last piece is in. The service behind those routes
- * (`takes-upload.js`: staging on disk, the streamed WAV, the internal
- * `take.add`) arrives injected as `takeUploads`; when it is null — an instance
- * that cannot stage takes — every take route answers 503 with one fixed
- * sentence. What it produces is played back through
- * `GET /api/studio/songs/:id/takes/:take_id/audio`, which streams the WAV from
- * object storage (the injected `takeStorage`) and only from the exact key
- * `finish` wrote under the song's own `studio/<song_id>/takes/`.
+ * `POST .../finish` once the last piece is in. A sample import or recording
+ * uses the very same four routes with `kind: "sample"` in the begin body; the
+ * service behind them files it under the song's `samples/` directory and puts
+ * it in the song with `sample.add`. The service (`takes-upload.js`: staging on
+ * disk, the streamed WAV, the internal `take.add`/`sample.add`) arrives
+ * injected as `takeUploads`; when it is null — an instance that cannot stage
+ * uploads — every take route answers 503 with one fixed sentence. What it
+ * produces is played back through
+ * `GET /api/studio/songs/:id/takes/:take_id/audio` and
+ * `GET /api/studio/songs/:id/samples/:sample_id/audio`, which stream the WAV
+ * from object storage (the injected `takeStorage`) and only from the exact key
+ * `finish` wrote under the song's own `studio/<song_id>/takes/` or
+ * `studio/<song_id>/samples/`.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -120,10 +125,22 @@ const TAKES_UNAVAILABLE_TEXT = "Studio cannot take recordings on this instance."
 const STORAGE_UNAVAILABLE_TEXT = "Crow storage is not available on this instance.";
 
 /**
- * A take's WAV never changes under its key — the key is fixed per take id — so
- * a browser may keep it for as long as it likes, and only in private caches.
+ * A stored WAV never changes under its key — the key is fixed per take or
+ * sample id — so a browser may keep it for as long as it likes, and only in
+ * private caches.
  */
-const TAKE_CACHE_CONTROL = "private, max-age=31536000, immutable";
+const AUDIO_CACHE_CONTROL = "private, max-age=31536000, immutable";
+
+/**
+ * The two kinds of stored audio an audio route streams: the container a song
+ * holds it in, the directory `finish` files it under, and the answer a caller
+ * gets for one this song does not hold.
+ * @type {Readonly<Object<string, {container: string, dir: string, noun: string, param: string}>>}
+ */
+const AUDIO_KINDS = Object.freeze({
+  take: { container: "takes", dir: "takes", noun: "take", param: "take_id" },
+  sample: { container: "samples", dir: "samples", noun: "sample", param: "sample_id" },
+});
 
 /**
  * The prefix `agentAuthor` puts on a bot's author id. The MCP layer resolves a
@@ -159,7 +176,10 @@ const STATUS_BY_CODE = Object.freeze({
 const ASSET_FILES = new Map([
   ["sequencer.js", join("engine", "sequencer.js")],
   ["resample.js", join("engine", "resample.js")],
+  ["sampler-voice.js", join("engine", "sampler-voice.js")],
   ["resample-worker.js", join("engine", "resample-worker.js")],
+  ["chop.js", join("engine", "chop.js")],
+  ["chop-worker.js", join("engine", "chop-worker.js")],
   ["calibrate-emitter.js", join("engine", "calibrate-emitter.js")],
   ["calibrate-detector.js", join("engine", "calibrate-detector.js")],
   ["recorder-processor.js", join("engine", "recorder-processor.js")],
@@ -360,16 +380,17 @@ function statusForCode(code) {
 }
 
 /**
- * The one answer a take its song does not hold gets.
+ * The one answer a take or sample its song does not hold gets.
  *
- * The same body is used for a take of another song and for a take whose
- * storage key names anything but this song's own takes directory, so a caller
- * cannot tell which of the two it met.
- * @param {string} takeId
+ * The same body is used for a take (or sample) of another song and for one
+ * whose storage key names anything but this song's own `takes/` (or `samples/`)
+ * directory, so a caller cannot tell which of the two it met.
+ * @param {string} noun "take" or "sample"
+ * @param {string} id
  * @returns {{error: string}}
  */
-function noSuchTake(takeId) {
-  return { error: `There is no take ${takeId} in this song.` };
+function noSuchAudio(noun, id) {
+  return { error: `There is no ${noun} ${id} in this song.` };
 }
 
 /**
@@ -501,16 +522,17 @@ function refuse(socket, status, text) {
  *   project bot, so the ask box stays disabled.
  * @param {{begin: Function, putChunk: Function, status: Function,
  *          finish: Function, sweepStale: Function}|null} [options.takeUploads]
- *   the take upload service (`createTakeUploads`). Null means this instance
- *   cannot stage recordings, and every take route then answers 503.
+ *   the upload service (`createTakeUploads`), which stages takes and samples.
+ *   Null means this instance cannot stage uploads, and every upload route then
+ *   answers 503.
  * @param {{getObject: Function, defaultBucket: Function,
  *          storagePrefixFor?: Function}|null} [options.takeStorage]
- *   object storage for the finished take: `getObject(key, {bucket})` resolves
- *   to `{stream, stat}`, `defaultBucket()` names the bucket, and the optional
- *   `storagePrefixFor(projectId)` answers the project's
+ *   object storage for the finished take or sample: `getObject(key, {bucket})`
+ *   resolves to `{stream, stat}`, `defaultBucket()` names the bucket, and the
+ *   optional `storagePrefixFor(projectId)` answers the project's
  *   `project_spaces.storage_prefix` (this module owns no database, so the
  *   adapter answers it; without it only keys under the empty prefix match).
- *   Null means the audio route answers 503.
+ *   Null means the audio routes answer 503.
  * @param {((limit: number) => Function)|null} [options.rawBody] a factory for
  *   an `express.raw`-shaped parser, used for the take chunk body only (the
  *   gateway passes `(limit) => express.raw({type: () => true, limit,
@@ -1048,27 +1070,29 @@ export function createStudioWeb({
   }
 
   /**
-   * The storage key one take may be played from, exactly as `finish` wrote it:
-   * `<prefix>studio/<song_id>/takes/<take_id>.wav`.
+   * The storage key one stored object may be played from, exactly as `finish`
+   * wrote it: `<prefix>studio/<song_id>/<dir>/<id>.wav`, where `dir` is `takes`
+   * for a take and `samples` for a sample.
    *
    * The prefix is the song project's `project_spaces.storage_prefix`, which
    * this module cannot read (it owns no database), so the injected storage
-   * adapter answers it. Without that answer the prefix is empty, and a take
+   * adapter answers it. Without that answer the prefix is empty, and an object
    * whose key names any prefix at all is then refused rather than fetched —
-   * the route never streams an object it cannot place inside the song's own
-   * takes directory.
+   * the route never streams something it cannot place inside the song's own
+   * `takes/` or `samples/` directory.
    *
    * @param {number|null} projectId the project the song lives in
    * @param {string} songId
-   * @param {string} takeId
+   * @param {string} dir the kind's directory, "takes" or "samples"
+   * @param {string} id the take or sample id
    * @returns {Promise<string>}
    */
-  async function takeKeyOf(projectId, songId, takeId) {
+  async function audioKeyOf(projectId, songId, dir, id) {
     const prefix =
       typeof takeStorage?.storagePrefixFor === "function"
         ? String((await takeStorage.storagePrefixFor(projectId)) ?? "")
         : "";
-    return `${prefix}studio/${songId}/takes/${takeId}.wav`;
+    return `${prefix}studio/${songId}/${dir}/${id}.wav`;
   }
 
   /** @returns {{project_ids?: number[]}} the filter a `project_id` query asks for. */
@@ -1300,14 +1324,19 @@ export function createStudioWeb({
       });
     }
 
-    // Begin (or re-begin) one take's upload. Idempotent for the same details,
-    // so a client that lost the answer can simply ask again.
+    // Begin (or re-begin) one upload: a take, or — with `kind: "sample"` — a
+    // sample. Idempotent for the same details, so a client that lost the answer
+    // can simply ask again.
     r.put(`${TAKES_BASE}/:take_id`, dashboardAuth, requireCsrf, takesHandled(async (req, res) => {
       const body = req.body ?? {};
       const begun = await takeUploads.begin(String(req.params.take_id ?? ""), {
+        kind: body.kind,
         song_id: body.song_id,
         project_id: body.project_id,
         clip_id: body.clip_id,
+        name: body.name,
+        origin: body.origin,
+        target: body.target,
         rate: body.rate,
         channels: body.channels,
         offset_frames: body.offset_frames,
@@ -1338,71 +1367,76 @@ export function createStudioWeb({
       res.json(await takeUploads.status(String(req.params.take_id ?? "")));
     }));
 
-    // The last piece is in: stream the WAV into storage and put the take in the
-    // song. A retried finish returns the same take without uploading again.
+    // The last piece is in: stream the WAV into storage and put the take (or
+    // the sample, with its pad assignment) in the song. A retried finish
+    // returns the same object without uploading again.
     r.post(`${TAKES_BASE}/:take_id/finish`, dashboardAuth, requireCsrf, takesHandled(async (req, res) => {
       const finished = await takeUploads.finish(String(req.params.take_id ?? ""), {
         chunk_hashes: req.body?.chunk_hashes,
       });
-      res.json({ take: finished.take });
+      res.json(finished);
     }));
 
-    // One take's recorded audio, for the panel to play and for a render to
-    // fetch. The read check is the one every other read route makes: the hub's
-    // own `openSong`, which throws for an unknown song and for a project the
-    // caller may not see (its AclError becomes a 403 in `handled`).
+    // One stored WAV of a song — a take's or a sample's — for the panel to play
+    // and for a render to fetch. The read check is the one every other read
+    // route makes: the hub's own `openSong`, which throws for an unknown song
+    // and for a project the caller may not see (its AclError becomes a 403 in
+    // `handled`).
     //
     // Storage is the one dependency that can fail at any point in this route,
     // and its errors are answered here rather than in `handled`: an S3 error's
     // message names the bucket and the key it was asked for, and its `code` is
     // a string, which `errorText` would take for a caller-safe StudioError.
-    // A missing object is the take this song does not have (404); anything
-    // else about the store is a 503 with one fixed sentence. The audio headers
-    // go out only with the first byte of the WAV, because a Content-Length the
-    // response will not honour is the one answer that cannot be taken back.
-    r.get("/api/studio/songs/:id/takes/:take_id/audio", dashboardAuth, handled(async (req, res) => {
+    // A missing object is the take (or sample) this song does not have (404);
+    // anything else about the store is a 503 with one fixed sentence. The
+    // audio headers go out only with the first byte of the WAV, because a
+    // Content-Length the response will not honour is the one answer that
+    // cannot be taken back.
+    async function serveAudio(req, res, kind) {
+      const spec = AUDIO_KINDS[kind] ?? AUDIO_KINDS.take;
       const songId = String(req.params.id ?? "");
-      const takeId = String(req.params.take_id ?? "");
+      const objectId = String(req.params[spec.param] ?? "");
+      const missing = () => noSuchAudio(spec.noun, objectId);
       if (!takeStorage || typeof takeStorage.getObject !== "function") {
         return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       }
 
       const row = await readSongRow(songId);
-      if (!row) return res.status(404).json(noSuchTake(takeId));
+      if (!row) return res.status(404).json(missing());
 
       const opened = await hub.openSong(songId);
-      const takes = opened?.snapshot?.takes;
-      const take = takes && typeof takes === "object" ? takes[takeId] : null;
-      if (!take || typeof take.storage_key !== "string") {
-        return res.status(404).json(noSuchTake(takeId));
+      const container = opened?.snapshot?.[spec.container];
+      const stored = container && typeof container === "object" ? container[objectId] : null;
+      if (!stored || typeof stored.storage_key !== "string") {
+        return res.status(404).json(missing());
       }
 
       // Only the key `finish` writes may be streamed: one under this song's own
-      // `studio/<song_id>/takes/`, named for this exact take. A key anywhere
-      // else — another song's, another project's, or one with a `..` in it — is
-      // a take this song does not hold.
-      const expected = await takeKeyOf(Number(row.project_id), songId, takeId);
-      if (take.storage_key !== expected) return res.status(404).json(noSuchTake(takeId));
+      // `studio/<song_id>/<dir>/`, named for this exact take (or sample). A key
+      // anywhere else — another song's, another project's, or one with a `..`
+      // in it — is an object this song does not hold.
+      const expected = await audioKeyOf(Number(row.project_id), songId, spec.dir, objectId);
+      if (stored.storage_key !== expected) return res.status(404).json(missing());
 
       const bucket = typeof takeStorage.defaultBucket === "function" ? takeStorage.defaultBucket() : undefined;
 
       let object = null;
       try {
-        object = await takeStorage.getObject(take.storage_key, { bucket });
+        object = await takeStorage.getObject(stored.storage_key, { bucket });
       } catch (err) {
         const code = String(err?.code ?? "");
         if (code === "NotFound" || code === "NoSuchKey") {
-          // The song points at a take whose audio is not in the bucket: for
-          // this route that is a take that cannot be played, not a bug.
-          return res.status(404).json(noSuchTake(takeId));
+          // The song points at an object whose audio is not in the bucket: for
+          // this route that is something that cannot be played, not a bug.
+          return res.status(404).json(missing());
         }
-        console.warn("[studio] take audio:", err);
+        console.warn(`[studio] ${spec.noun} audio:`, err);
         return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       }
 
       const stream = object?.stream;
       if (!stream || typeof stream.pipe !== "function" || typeof stream.on !== "function") {
-        console.warn("[studio] take audio: storage returned no stream for take", takeId);
+        console.warn(`[studio] ${spec.noun} audio: storage returned no stream for`, objectId);
         return res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       }
 
@@ -1414,7 +1448,7 @@ export function createStudioWeb({
         if (headed) return;
         headed = true;
         res.setHeader("Content-Type", "audio/wav");
-        res.setHeader("Cache-Control", TAKE_CACHE_CONTROL);
+        res.setHeader("Cache-Control", AUDIO_CACHE_CONTROL);
         if (Number.isFinite(size) && size >= 0) res.setHeader("Content-Length", String(size));
       }
 
@@ -1438,7 +1472,7 @@ export function createStudioWeb({
           res.destroy();
           return;
         }
-        console.warn("[studio] take audio stream:", err);
+        console.warn(`[studio] ${spec.noun} audio stream:`, err);
         dropAudioHeaders();
         res.status(503).json({ error: STORAGE_UNAVAILABLE_TEXT });
       });
@@ -1452,6 +1486,16 @@ export function createStudioWeb({
         if (typeof stream.destroy === "function") stream.destroy();
       });
       return stream.pipe(res);
+    }
+
+    // One take's recorded audio, and one sample's imported or recorded audio, on
+    // the same rules (an exact key, immutable caching, the storage errors above).
+    r.get("/api/studio/songs/:id/takes/:take_id/audio", dashboardAuth, handled(async (req, res) => {
+      await serveAudio(req, res, "take");
+    }));
+
+    r.get("/api/studio/songs/:id/samples/:sample_id/audio", dashboardAuth, handled(async (req, res) => {
+      await serveAudio(req, res, "sample");
     }));
 
     // ---- the Studio MCP process -----------------------------------------

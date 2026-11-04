@@ -1,5 +1,6 @@
 /**
- * Take uploads — staging on disk, the streamed WAV, and the internal `take.add`.
+ * Take and sample uploads — staging on disk, the streamed WAV, and the internal
+ * `take.add` / `sample.add`.
  *
  * A recording is made in a browser that may be offline, may lose the network
  * mid-take, or may have its tab closed. So the panel sends a take it chose the
@@ -62,6 +63,47 @@
  *   5. the `studio.take` audit line;
  *   6. mark the staging finished and drop its chunks.
  *
+ * ## Two kinds of upload, one pipeline
+ *
+ * `begin` takes a `kind`, and everything downstream follows it:
+ *
+ *   take    belongs to one clip (`clip_id`), is filed under
+ *           `${prefix}studio/<song_id>/takes/<id>.wav` with the reference type
+ *           `studio_take`, and `finish` issues `take.add`.
+ *   sample  belongs to the song, carries a `name`, an `origin` ("import",
+ *           "record" or "resample") and optionally a target pad
+ *           (`{track_id, bank_id, index}`), is filed under
+ *           `${prefix}studio/<song_id>/samples/<id>.wav` with the reference type
+ *           `studio_sample`, and `finish` issues `sample.add` — then, if it named
+ *           a pad, `pad.assign_if_empty` as the same author with `cmd_id`
+ *           `<id>:assign`. That command is Studio's own (`internal: true`) and
+ *           it is the one that decides whether the pad is still free, inside
+ *           the hub's per-song queue: a pad the operator filled or cleared
+ *           while the upload ran is theirs, and the sample simply stays in the
+ *           song (`pad_assign` "skipped"). Both commands are idempotent by
+ *           `cmd_id`.
+ *           A sample is capped at 60 s of 48 kHz stereo (5,760,000 samples,
+ *           frames × channels) and a song may have 128 of them uploading at
+ *           once; a take keeps 1b's cap and its 32.
+ *
+ * ## One upload id belongs to one kind
+ *
+ * An id names one upload for good, so an id whose finished meta is a take is
+ * not a new sample's (or the other way round): `begin` refuses it with a
+ * conflict that names the kind already there.
+ *
+ * ## A sample's pad outcome is recorded before the finish answers
+ *
+ * Whether the sample reached its pad (`"done"`) or the pad was left as the
+ * operator had it (`"skipped"`) is written into the staged meta *before* the
+ * finish returns, and a retried finish answers with what that record says. So a
+ * retried finish never assigns again: a pad the operator cleared or re-filled
+ * in between stays exactly as they left it.
+ *
+ * Everything the take rules protect — the staging directory as the only copy of
+ * a recording, fail-closed snapshot reads, one finish at a time, never deleting
+ * an object a re-read says the song holds — applies to both kinds unchanged.
+ *
  * ## No app modules
  *
  * This file imports nothing from `servers/…`. The database, the storage client,
@@ -70,10 +112,10 @@
  * installed.
  *
  * Errors that have an HTTP meaning carry `error.status` for the routes: 400 for
- * an invalid request, 403 for a refusal from the ACL, 404 for an unknown take or
- * song, 409 for a conflict (a different chunk, a different meta, a missing
- * chunk, a take another process is finishing), 413 past a limit, 503 when the
- * song cannot be read, 507 when the project is out of storage quota.
+ * an invalid request, 403 for a refusal from the ACL, 404 for an unknown upload
+ * or song, 409 for a conflict (a different chunk, a different meta, a missing
+ * chunk, an upload another process is finishing), 413 past a limit, 503 when
+ * the song cannot be read, 507 when the project is out of storage quota.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -100,8 +142,47 @@ const TAKE_RATES = Object.freeze([44100, 48000, 88200, 96000]);
 /** How many channels a recording may have. */
 const MAX_CHANNELS = 2;
 
-/** How many un-finished uploads one song may have at a time. */
-const MAX_OPEN_UPLOADS = 32;
+/**
+ * How many un-finished uploads one song may have at a time, by kind. A take is
+ * a long recording and 32 is plenty; an import session can queue many short
+ * hits at once, so a sample gets its own, larger cap.
+ * @type {Readonly<Object<string, number>>}
+ */
+const MAX_OPEN_BY_KIND = Object.freeze({ take: 32, sample: 128 });
+
+/** The two kinds of upload this service stages. */
+const UPLOAD_KINDS = Object.freeze(["take", "sample"]);
+
+/** The `storage_files.reference_type` each kind is filed under. */
+const REFERENCE_TYPES = Object.freeze({ take: "studio_take", sample: "studio_sample" });
+
+/**
+ * What became of a sample's pad: the sample is on it, or the pad was left as
+ * the operator had it. Recorded in the meta before the finish answers.
+ * @type {Readonly<Object<string, string>>}
+ */
+const PAD_ASSIGN = Object.freeze({ done: "done", skipped: "skipped" });
+
+/** The audit action a finished upload of each kind is recorded with. */
+const AUDIT_ACTIONS = Object.freeze({ take: "studio.take", sample: "studio.sample" });
+
+/** The directory of `studio/<song_id>/` each kind's WAV lives in. */
+const KEY_DIRS = Object.freeze({ take: "takes", sample: "samples" });
+
+/** The most samples (frames × channels) one sample may hold: 60 s, 48 kHz stereo. */
+const SAMPLE_MAX_SAMPLES = 5760000;
+
+/** The length the sample cap is stated in, for the refusal's own words. */
+const SAMPLE_MAX_SECONDS = 60;
+
+/** How a sample came to be in the song, as `sample.add` accepts it. */
+const SAMPLE_ORIGINS = Object.freeze(["import", "record", "resample"]);
+
+/** The longest name a sample may carry (the `sample.add` schema's limit). */
+const MAX_NAME = 80;
+
+/** The most pads one bank holds, so a target pad is in range. */
+const MAX_PADS = 16;
 
 /** The default cap of one take: 1200 s of 48 kHz stereo. */
 const DEFAULT_MAX_TAKE_SECONDS = 1200;
@@ -114,12 +195,6 @@ const CAP_CHANNELS = 2;
 
 /** Bytes in one 24-bit sample. */
 const BYTES_PER_SAMPLE = 3;
-
-/** The `storage_files.reference_type` a take is filed under. */
-const REFERENCE_TYPE = "studio_take";
-
-/** The audit action a finished take is recorded with. */
-const AUDIT_ACTION = "studio.take";
 
 /** How long staged chunks nobody finished are kept. */
 const STALE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -136,8 +211,15 @@ const LOCK_STALE_MS = 15 * 60 * 1000;
 /** The longest author label a take carries (the `take.add` schema's limit). */
 const MAX_AUTHOR_LABEL = 80;
 
-/** What a caller is told when the song cannot be read mid-finish. */
-const SONG_UNREADABLE = "Studio could not read the song; the take is kept and will finish later.";
+/**
+ * What a caller is told when the song cannot be read mid-finish: the upload's
+ * own kind names what is being kept.
+ * @param {string} kind the upload's kind
+ * @returns {string}
+ */
+function songUnreadable(kind) {
+  return `Studio could not read the song; the ${kindNoun(kind)} is kept and will finish later.`;
+}
 
 /**
  * A take id: the client-generated UUID. It names a staging directory and a
@@ -197,6 +279,123 @@ function withStatus(message, status) {
 /** @returns {string} a count with its thousands separators, e.g. 115,200,000. */
 function groupThousands(value) {
   return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * The kind of an upload, refusing anything else by name.
+ * @param {unknown} value
+ * @returns {"take"|"sample"}
+ */
+function uploadKind(value) {
+  if (value === undefined || value === null || value === "") return "take";
+  if (value === "take" || value === "sample") return value;
+  throw badRequest(`An upload is a ${UPLOAD_KINDS.join(" or ")}, not "${String(value)}".`);
+}
+
+/**
+ * The kind a staged meta belongs to. A meta written before samples existed has
+ * none, and is a take.
+ * @param {object|null|undefined} meta
+ * @returns {"take"|"sample"}
+ */
+function kindOf(meta) {
+  return meta && meta.kind === "sample" ? "sample" : "take";
+}
+
+/** @returns {string} "take" or "sample", for a refusal's own words. */
+function kindNoun(kind) {
+  return kind === "sample" ? "sample" : "take";
+}
+
+/**
+ * Whether a staged meta already records what became of a sample's pad. A retried
+ * finish answers with that record and never assigns again.
+ * @param {object|null|undefined} meta
+ * @returns {boolean}
+ */
+function isPadAssignRecorded(meta) {
+  return meta?.pad_assign === PAD_ASSIGN.done || meta?.pad_assign === PAD_ASSIGN.skipped;
+}
+
+/** @returns {string} "Take" or "Sample", for a sentence's first word. */
+function kindName(kind) {
+  return kind === "sample" ? "Sample" : "Take";
+}
+
+/**
+ * The most samples (frames × channels) one upload of a kind may hold.
+ * @param {string} kind
+ * @param {number} takeCap the service's take cap
+ * @returns {number}
+ */
+function uploadCap(kind, takeCap) {
+  return kind === "sample" ? SAMPLE_MAX_SAMPLES : takeCap;
+}
+
+/**
+ * The refusal for an upload of a kind that would hold too many samples. Every
+ * limit is named in the words the spec states it in.
+ * @param {string} kind the upload's kind
+ * @param {number} actual how many samples (frames × channels) it would hold
+ * @param {number} takeCap the service's take cap
+ * @returns {Error} 413
+ */
+function capRefusal(kind, actual, takeCap) {
+  const cap = uploadCap(kind, takeCap);
+  if (kind === "sample") {
+    return tooLarge(
+      `A sample can be at most ${SAMPLE_MAX_SECONDS} s (${groupThousands(cap)} samples at 48 kHz stereo); this one would hold ${groupThousands(actual)}.`,
+    );
+  }
+  return tooLarge(
+    `A take can hold at most ${groupThousands(cap)} samples (frames × channels); this one would hold ${groupThousands(actual)}.`,
+  );
+}
+
+/**
+ * The name a sample upload carries, which `sample.add` needs and shows.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function sampleNameOf(value) {
+  const name = typeof value === "string" ? value.trim().slice(0, MAX_NAME) : "";
+  if (name === "") throw badRequest("A sample upload needs a name.");
+  return name;
+}
+
+/**
+ * How a sample came to be in the song: an import, a recording, or a resample of
+ * the engine's own output.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function sampleOriginOf(value) {
+  const origin = value === undefined || value === null || value === "" ? "import" : String(value);
+  if (!SAMPLE_ORIGINS.includes(origin)) {
+    throw badRequest(`A sample's origin is one of ${SAMPLE_ORIGINS.join(", ")}.`);
+  }
+  return origin;
+}
+
+/**
+ * The pad a finished sample lands on, or null when the upload names none. The
+ * fields are written in one fixed order, so a retried `begin` compares equal.
+ * @param {unknown} value
+ * @returns {{track_id: string, bank_id: string, index: number}|null}
+ */
+function uploadTarget(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object") throw badRequest("A sample's target pad is an object, or left out.");
+  const trackId = typeof value.track_id === "string" ? value.track_id : "";
+  const bankId = typeof value.bank_id === "string" ? value.bank_id : "";
+  const index = Number(value.index);
+  if (!/^[A-Za-z0-9_-]{1,40}$/.test(trackId) || !/^[A-Za-z0-9_-]{1,40}$/.test(bankId)) {
+    throw badRequest("A sample's target pad needs a track id and a bank id.");
+  }
+  if (!Number.isInteger(index) || index < 0 || index >= MAX_PADS) {
+    throw badRequest(`A sample's target pad is a whole number from 1 to ${MAX_PADS}.`);
+  }
+  return { track_id: trackId, bank_id: bankId, index };
 }
 
 /** @returns {string} the SHA-256 of a buffer, lower-case hex. */
@@ -466,24 +665,36 @@ export function createTakeUploads({
   }
 
   /**
-   * The song's takes, from the hub's snapshot, failing closed.
+   * One song's snapshot, failing closed.
    *
    * A finish decides what it may delete from this answer, so an unreadable song
-   * is never treated as an empty one: it throws instead, and the staged take
+   * is never treated as an empty one: it throws instead, and the staged upload
    * and everything already uploaded stay where they are.
    * @param {string} songId
-   * @returns {Promise<Object<string, object>>}
+   * @param {string} kind the upload's kind, for the refusal's own words
+   * @returns {Promise<object>} the snapshot (empty when the hub has none)
    * @throws {Error} 503 when the song cannot be read
    */
-  async function songTakes(songId) {
+  async function readSong(songId, kind) {
     let opened;
     try {
       opened = await hub.openSong(songId);
     } catch {
-      throw withStatus(SONG_UNREADABLE, 503);
+      throw withStatus(songUnreadable(kind), 503);
     }
-    const takes = opened?.snapshot?.takes;
-    return takes && typeof takes === "object" ? takes : {};
+    const snapshot = opened?.snapshot;
+    return snapshot && typeof snapshot === "object" ? snapshot : {};
+  }
+
+  /**
+   * One container out of a snapshot: a song's takes or its samples.
+   * @param {object} snapshot
+   * @param {string} kind
+   * @returns {Object<string, object>} empty when the song has none
+   */
+  function songContainer(snapshot, kind) {
+    const container = kind === "sample" ? snapshot?.samples : snapshot?.takes;
+    return container && typeof container === "object" ? container : {};
   }
 
   /**
@@ -504,20 +715,24 @@ export function createTakeUploads({
   }
 
   /**
-   * How many uploads one song has begun and not finished.
+   * How many uploads of one kind one song has begun and not finished. The two
+   * kinds are counted apart: a long import session never uses up the takes' 32.
    * @param {string} songId
+   * @param {string} kind
    * @returns {Promise<number>}
    */
-  async function openUploadsFor(songId) {
+  async function openUploadsFor(songId, kind) {
+    const limit = MAX_OPEN_BY_KIND[kind] ?? MAX_OPEN_BY_KIND.take;
     const entries = await readdir(stagingDir, { withFileTypes: true }).catch(() => []);
     let count = 0;
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const meta = await readMeta(entry.name);
       if (!meta || meta.song_id !== songId || meta.finished === true) continue;
+      if (kindOf(meta) !== kind) continue;
       count += 1;
       // There is no reason to count past the limit.
-      if (count >= MAX_OPEN_UPLOADS) break;
+      if (count >= limit) break;
     }
     return count;
   }
@@ -540,24 +755,31 @@ export function createTakeUploads({
   }
 
   /**
-   * Record the beginning of one take's upload.
+   * Record the beginning of one upload — a recorded take or a sample.
    *
    * It must come before the chunks: without it the gateway would not know whose
-   * take it is staging, and a chunk is never accepted without a song and a
+   * upload it is staging, and a chunk is never accepted without a song and a
    * project to check.
    *
    * Idempotent on the same details, so a client that lost the network after its
    * request went out can simply ask again. The same id with different details
-   * is a conflict, because the take that id already owns the staged bytes.
+   * is a conflict, because the upload that id already owns the staged bytes.
    *
-   * @param {string} takeId
-   * @param {{song_id: string, project_id: number, clip_id: string,
+   * A take names the clip it was recorded into. A sample names no clip: it
+   * belongs to the song, and may name the pad it should land on.
+   *
+   * @param {string} uploadId
+   * @param {{kind?: "take"|"sample", song_id: string, project_id: number,
+   *          clip_id?: string, name?: string, origin?: string,
+   *          target?: {track_id: string, bank_id: string, index: number}|null,
    *          rate: number, channels: number, author?: object,
    *          offset_frames?: number, compensated?: boolean, bpm?: number}} request
    * @returns {Promise<{chunk_bytes: number}>}
    */
-  async function begin(takeId, request = {}) {
-    requireTakeId(takeId);
+  async function begin(uploadId, request = {}) {
+    requireTakeId(uploadId);
+    const body = request ?? {};
+    const kind = uploadKind(body.kind);
     const {
       song_id: songId,
       project_id: requestedProjectRaw,
@@ -568,12 +790,17 @@ export function createTakeUploads({
       offset_frames: offsetFrames = 0,
       compensated = false,
       bpm: statedBpm,
-    } = request ?? {};
+    } = body;
+    const noun = kindNoun(kind);
+    // A sample's own details, each checked only where the kind uses it.
+    const sampleName = kind === "sample" ? sampleNameOf(body.name) : null;
+    const origin = kind === "sample" ? sampleOriginOf(body.origin) : null;
+    const target = kind === "sample" ? uploadTarget(body.target) : null;
 
     if (typeof songId !== "string" || !SONG_ID_PATTERN.test(songId)) {
       throw badRequest("That is not a valid song id.");
     }
-    if (typeof clipId !== "string" || clipId === "") {
+    if (kind === "take" && (typeof clipId !== "string" || clipId === "")) {
       throw badRequest("An upload needs the clip the take was recorded into.");
     }
     const requestedProject = Number(requestedProjectRaw);
@@ -582,23 +809,25 @@ export function createTakeUploads({
     }
     const sampleRate = Number(rate);
     if (!TAKE_RATES.includes(sampleRate)) {
-      throw badRequest(`A take's rate is one of ${TAKE_RATES.join(", ")} samples per second.`);
+      throw badRequest(`A ${noun}'s rate is one of ${TAKE_RATES.join(", ")} samples per second.`);
     }
     const channelCount = Number(channels);
     if (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > MAX_CHANNELS) {
-      throw badRequest(`A take has 1 or ${MAX_CHANNELS} channels.`);
+      throw badRequest(`A ${noun} has 1 or ${MAX_CHANNELS} channels.`);
     }
-    const offset = Number(offsetFrames);
-    if (!Number.isInteger(offset) || offset < 0) {
+    // A take is a place in a clip, so where in the timeline it was captured
+    // matters; a sample is a one-shot that starts where the operator starts it.
+    const offset = kind === "take" ? Number(offsetFrames) : 0;
+    if (kind === "take" && (!Number.isInteger(offset) || offset < 0)) {
       throw badRequest("A take's offset is a whole, non-negative number of frames.");
     }
-    if (typeof compensated !== "boolean") {
+    if (kind === "take" && typeof compensated !== "boolean") {
       throw badRequest("A take's compensated flag is true or false.");
     }
     const actor = normalizeAuthor(author);
 
     // The project is the song's own. A caller that names another project is
-    // asking to file this take somewhere it does not belong, so it is refused
+    // asking to file this upload somewhere it does not belong, so it is refused
     // before anything is written.
     const projectId = await songProjectOf(songId);
     if (projectId !== requestedProject) {
@@ -607,79 +836,121 @@ export function createTakeUploads({
     // And the caller must be allowed to put files in that project.
     await assertWrite(projectId);
 
+    // A sample has no tempo of its own: it is a sound, not a place in a bar.
     const stated = Number(statedBpm);
-    const bpm = Number.isFinite(stated) && stated >= 20 && stated <= 300 ? stated : null;
+    const bpm = kind === "take" && Number.isFinite(stated) && stated >= 20 && stated <= 300 ? stated : null;
 
-    const existing = await readMeta(takeId);
+    const existing = await readMeta(uploadId);
     if (existing && existing.finished !== true) {
-      if (!sameUpload(existing, { songId, projectId, clipId, sampleRate, channelCount, actor, offset, compensated, bpm })) {
-        throw conflict(`Take "${takeId}" is already being uploaded with different details.`);
+      const same = sameUpload(existing, {
+        kind,
+        songId,
+        projectId,
+        clipId,
+        sampleName,
+        origin,
+        target,
+        sampleRate,
+        channelCount,
+        actor,
+        offset,
+        compensated,
+        bpm,
+      });
+      if (!same) {
+        throw conflict(`${kindName(kind)} "${uploadId}" is already being uploaded with different details.`);
       }
       return { chunk_bytes: CHUNK_BYTES };
     }
     if (existing && existing.finished === true) {
-      // A finished upload whose take has since left the song (an undo, or the
+      // An id names one upload for good. A finished take's id is not a new
+      // sample's, and a finished sample's id is not a new take's: the staged
+      // meta, the storage key and the reference type all belong to the first.
+      const previousKind = kindOf(existing);
+      if (previousKind !== kind) {
+        throw conflict(`That id belongs to a ${kindNoun(previousKind)} upload.`);
+      }
+      // A finished upload whose object has since left the song (an undo, or the
       // clip was removed): start over in a clean directory. The song is read
       // fail-closed, because only its own answer may drop that meta.
-      const takes = await songTakes(existing.song_id);
-      if (takes[takeId]) return { chunk_bytes: CHUNK_BYTES };
-      await rm(takeDir(takeId), { recursive: true, force: true });
+      const inSong = songContainer(await readSong(existing.song_id, previousKind), previousKind);
+      if (inSong[uploadId]) return { chunk_bytes: CHUNK_BYTES };
+      await rm(takeDir(uploadId), { recursive: true, force: true });
     }
 
-    const open = await openUploadsFor(songId);
-    if (open >= MAX_OPEN_UPLOADS) {
+    const openLimit = MAX_OPEN_BY_KIND[kind] ?? MAX_OPEN_BY_KIND.take;
+    const open = await openUploadsFor(songId, kind);
+    if (open >= openLimit) {
       throw tooLarge(
-        `A song can have at most ${MAX_OPEN_UPLOADS} uploads in progress; finish or abandon one before starting another.`,
+        kind === "sample"
+          ? `A song can have at most ${openLimit} sample uploads in progress; finish or abandon one before starting another.`
+          : `A song can have at most ${openLimit} uploads in progress; finish or abandon one before starting another.`,
       );
     }
 
     const frameBytes = channelCount * BYTES_PER_SAMPLE;
-    const staged = await stagedBytes(takeId);
+    const staged = await stagedBytes(uploadId);
     if (staged % frameBytes !== 0) {
       throw badRequest(
         `The chunks already sent are not whole ${channelCount}-channel frames: ${staged} bytes is not a multiple of ${frameBytes}.`,
       );
     }
 
-    const tempo = bpm ?? (await songTempo(songId)) ?? 120;
     const meta = {
-      take_id: takeId,
+      take_id: uploadId,
+      kind,
       song_id: songId,
       project_id: projectId,
-      clip_id: clipId,
       rate: sampleRate,
       channels: channelCount,
-      offset_frames: offset,
-      compensated,
-      bpm: tempo,
       author: actor,
       recorded_at: nowIso(),
       created_at: millisNow(),
     };
-    await writeMeta(takeId, meta);
+    if (kind === "sample") {
+      meta.name = sampleName;
+      meta.origin = origin;
+      meta.target = target;
+    } else {
+      meta.clip_id = clipId;
+      meta.offset_frames = offset;
+      meta.compensated = compensated;
+      meta.bpm = bpm ?? (await songTempo(songId)) ?? 120;
+    }
+    await writeMeta(uploadId, meta);
     return { chunk_bytes: CHUNK_BYTES };
   }
 
   /**
-   * Whether a staged meta describes the same upload as this request. `bpm` is
-   * only compared when the caller stated one, because a retry that leaves it
-   * out means "the same take", not "a different tempo".
+   * Whether a staged meta describes the same upload as this request, compared
+   * on the fields its kind carries. `bpm` is only compared when the caller
+   * stated one, because a retry that leaves it out means "the same take", not
+   * "a different tempo".
    * @param {object} meta
-   * @param {{songId: string, projectId: number, clipId: string, sampleRate: number,
-   *          channelCount: number, actor: object, offset: number, compensated: boolean,
+   * @param {{kind: string, songId: string, projectId: number, clipId?: string,
+   *          sampleName: (string|null), origin: (string|null),
+   *          target: (object|null), sampleRate: number, channelCount: number,
+   *          actor: object, offset: number, compensated: boolean,
    *          bpm: number|null}} request
    * @returns {boolean}
    */
   function sameUpload(meta, request) {
+    if (kindOf(meta) !== request.kind) return false;
     if (meta.song_id !== request.songId) return false;
     if (Number(meta.project_id) !== request.projectId) return false;
-    if (meta.clip_id !== request.clipId) return false;
     if (Number(meta.rate) !== request.sampleRate) return false;
     if (Number(meta.channels) !== request.channelCount) return false;
+    if (JSON.stringify(normalizeAuthor(meta.author)) !== JSON.stringify(request.actor)) return false;
+    if (request.kind === "sample") {
+      if (meta.name !== request.sampleName) return false;
+      if (meta.origin !== request.origin) return false;
+      return JSON.stringify(meta.target ?? null) === JSON.stringify(request.target ?? null);
+    }
+    if (meta.clip_id !== request.clipId) return false;
     if (Number(meta.offset_frames ?? 0) !== request.offset) return false;
     if ((meta.compensated === true) !== request.compensated) return false;
     if (request.bpm !== null && Number(meta.bpm) !== request.bpm) return false;
-    return JSON.stringify(normalizeAuthor(meta.author)) === JSON.stringify(request.actor);
+    return true;
   }
 
   /**
@@ -753,26 +1024,33 @@ export function createTakeUploads({
 
     const meta = await readMeta(takeId);
     if (!meta) {
-      throw notFound("Begin the take before sending its audio.");
+      throw notFound("Begin the upload before sending its audio.");
     }
-    // The gate is the song's project, read now: a take cannot be extended by
+    const kind = kindOf(meta);
+    // The gate is the song's project, read now: an upload cannot be extended by
     // someone who may not write where its song lives.
     await assertWrite(await songProjectOf(meta.song_id));
     if (meta.finished === true) {
-      throw conflict(`Take "${takeId}" is already finished, so nothing more can be sent to it.`);
+      throw conflict(`${kindName(kind)} "${takeId}" is already finished, so nothing more can be sent to it.`);
     }
     const channelCount = Number(meta.channels);
     if (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > MAX_CHANNELS) {
-      throw conflict(`Take "${takeId}" has no readable channel count; begin it again.`);
+      throw conflict(`${kindName(kind)} "${takeId}" has no readable channel count; begin it again.`);
     }
 
     const frameBytes = channelCount * BYTES_PER_SAMPLE;
     const maxBytes = CHUNK_BYTES + frameBytes;
-    // No take this size can need a chunk past this index.
-    const lastIndex = Math.ceil((sampleCap * BYTES_PER_SAMPLE) / CHUNK_BYTES);
+    // No upload of this kind's size can need a chunk past this index.
+    const cap = uploadCap(kind, sampleCap);
+    const lastIndex = Math.ceil((cap * BYTES_PER_SAMPLE) / CHUNK_BYTES);
     if (at > lastIndex) {
+      if (kind === "sample") {
+        throw tooLarge(
+          `A sample can be at most ${SAMPLE_MAX_SECONDS} s (${groupThousands(cap)} samples at 48 kHz stereo), so it never needs chunk ${at}.`,
+        );
+      }
       throw tooLarge(
-        `A take can hold at most ${groupThousands(sampleCap)} samples (frames × channels), so it never needs chunk ${at}.`,
+        `A take can hold at most ${groupThousands(cap)} samples (frames × channels), so it never needs chunk ${at}.`,
       );
     }
     if (bytes.byteLength > maxBytes) {
@@ -786,8 +1064,8 @@ export function createTakeUploads({
       );
     }
 
-    // The take's own cap, in samples: a staged byte is one channel's 24-bit
-    // sample, so `maxSamples` samples of PCM weigh `maxSamples × 3` bytes.
+    // The upload's own cap, in samples: a staged byte is one channel's 24-bit
+    // sample, so `cap` samples of PCM weigh `cap × 3` bytes.
     const staged = await stagedBytes(takeId);
     const buffer = Buffer.from(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength);
     const sha256 = sha256Of(buffer);
@@ -802,10 +1080,8 @@ export function createTakeUploads({
       throw conflict(`chunk ${at} was already received with different bytes`);
     }
 
-    if (staged + bytes.byteLength > sampleCap * BYTES_PER_SAMPLE) {
-      throw tooLarge(
-        `A take can hold at most ${groupThousands(sampleCap)} samples (frames × channels); this chunk would take it past that.`,
-      );
+    if (staged + bytes.byteLength > cap * BYTES_PER_SAMPLE) {
+      throw capRefusal(kind, Math.ceil((staged + bytes.byteLength) / BYTES_PER_SAMPLE), sampleCap);
     }
 
     const placed = await linkIntoPlace(dir, "tmp", buffer, file);
@@ -835,7 +1111,7 @@ export function createTakeUploads({
     requireTakeId(takeId);
     const meta = await readMeta(takeId);
     if (!meta) {
-      throw notFound(`There is no upload in progress for take "${takeId}"; begin it before asking after it.`);
+      throw notFound(`There is no upload in progress for "${takeId}"; begin it before asking after it.`);
     }
     await assertWrite(await songProjectOf(meta.song_id));
     const chunks = await listChunks(takeId);
@@ -930,25 +1206,26 @@ export function createTakeUploads({
         if (!error || error.code !== "EEXIST") throw error;
         const info = await stat(file).catch(() => null);
         if (info && millisNow() - info.mtimeMs < LOCK_STALE_MS) {
-          throw conflict(`Take "${takeId}" is being finished by another process.`);
+          throw conflict(`Upload "${takeId}" is being finished by another process.`);
         }
         // A stale lock: the process that held it is gone.
         await unlink(file).catch(() => {});
       }
     }
-    throw conflict(`Take "${takeId}" is being finished by another process.`);
+    throw conflict(`Upload "${takeId}" is being finished by another process.`);
   }
 
   /**
-   * Finish one take: stream its WAV into storage, file it, and add it to the
+   * Finish one upload: stream its WAV into storage, file it, and add it to the
    * song through the hub.
    *
-   * One finish per take at a time: a second call for the same id while one is
+   * One finish per upload at a time: a second call for the same id while one is
    * running in this process awaits it and returns its result.
    *
    * @param {string} takeId
    * @param {{chunk_hashes: string[]}} request the SHA-256 of every chunk, in order
-   * @returns {Promise<{take: object}>} the take now in the song
+   * @returns {Promise<{take: object}|{sample: object, pad_assigned: boolean}>}
+   *   the object now in the song; a sample also says whether its pad holds it
    */
   async function finish(takeId, request = {}) {
     requireTakeId(takeId);
@@ -966,24 +1243,27 @@ export function createTakeUploads({
   }
 
   /**
-   * The body of `finish`, run under the take's in-process entry and its lock.
+   * The body of `finish`, run under the upload's in-process entry and its lock.
    * @param {string} takeId
    * @param {string[]} hashes
-   * @returns {Promise<{take: object}>}
+   * @returns {Promise<{take: object}|{sample: object, pad_assigned: boolean}>}
    */
   async function finishOnce(takeId, hashes) {
     const staged = await readMeta(takeId);
     if (!staged) {
-      throw notFound(`There is no upload in progress for take "${takeId}"; begin it before finishing it.`);
+      throw notFound(`There is no upload in progress for "${takeId}"; begin it before finishing it.`);
     }
+    const kind = kindOf(staged);
+    const Noun = kindName(kind);
+    const noun = kindNoun(kind);
 
-    // The project is the song's, re-read now: a take begun in one project must
-    // not land in storage after its song moved to another.
+    // The project is the song's, re-read now: an upload begun in one project
+    // must not land in storage after its song moved to another.
     const projectId = await songProjectOf(staged.song_id);
     const begunIn = Number(staged.project_id);
     if (projectId !== begunIn) {
       throw conflict(
-        `Take "${takeId}" was begun in project ${begunIn}, but its song is in project ${projectId} now; the take is kept.`,
+        `${Noun} "${takeId}" was begun in project ${begunIn}, but its song is in project ${projectId} now; the ${noun} is kept.`,
       );
     }
     await assertWrite(projectId);
@@ -993,12 +1273,31 @@ export function createTakeUploads({
       const meta = (await readMeta(takeId)) ?? staged;
 
       // A retried finish — after a timeout, a reload, or a gateway restart —
-      // must not upload the same audio twice or apply `take.add` again. If the
-      // song cannot be read, this throws and nothing is touched.
-      const inSong = await songTakes(meta.song_id);
-      if (inSong[takeId]) return { take: inSong[takeId] };
+      // must not upload the same audio twice nor apply the command again. If
+      // the song cannot be read, this throws and nothing is touched.
+      const song = await readSong(meta.song_id, kind);
+      const inSong = songContainer(song, kind);
+      if (inSong[takeId]) {
+        // The sound (or take) is in. A sample also answers what became of its
+        // pad, and that answer is the one its first finish recorded BEFORE it
+        // returned: the pad is never assigned twice, so a pad the operator
+        // cleared or re-filled since keeps what they chose. Only an attempt
+        // that stopped between `sample.add` and its own record has none, and it
+        // lands the sample now and records that.
+        if (kind !== "sample") return finishResult(kind, inSong[takeId]);
+        if (isPadAssignRecorded(meta)) return finishResult(kind, inSong[takeId], meta.pad_assign);
+        const record = inSong[takeId];
+        const padAssign = await landOnPad(meta);
+        return await completeFinish(takeId, meta, record, {
+          kind,
+          frames: Number(meta.frames) || Number(record.frames) || 0,
+          key: typeof meta.storage_key === "string" ? meta.storage_key : String(record.storage_key ?? ""),
+          chunks: hashes.length,
+          padAssign,
+        });
+      }
       if (meta.finished === true) {
-        throw conflict(`Take "${takeId}" was finished, but it is no longer in the song.`);
+        throw conflict(`${Noun} "${takeId}" was finished, but it is no longer in the song.`);
       }
 
       const channelCount = Number(meta.channels);
@@ -1035,15 +1334,13 @@ export function createTakeUploads({
 
       const frames = totalBytes / frameBytes;
       const samples = frames * channelCount;
-      if (samples > sampleCap) {
-        throw tooLarge(
-          `A take can hold at most ${groupThousands(sampleCap)} samples (frames × channels); this one would hold ${groupThousands(samples)}.`,
-        );
+      if (samples > uploadCap(kind, sampleCap)) {
+        throw capRefusal(kind, samples, sampleCap);
       }
 
       const bucket = typeof storage.defaultBucket === "function" ? storage.defaultBucket() : undefined;
       const prefix = await storagePrefixFor(db, projectId);
-      const key = `${prefix}studio/${meta.song_id}/takes/${takeId}.wav`;
+      const key = `${prefix}studio/${meta.song_id}/${KEY_DIRS[kind]}/${takeId}.wav`;
       const rate = Number(meta.rate);
 
       // The header and then the staged files, streamed: a 1200 s take is 346 MB,
@@ -1062,8 +1359,8 @@ export function createTakeUploads({
         await storage.putObjectStream(key, stream, size, { bucket, contentType: "audio/wav" });
 
         try {
-          // The key is fixed per take, so a row a crashed attempt left behind is
-          // this take's own row: keep it and carry on.
+          // The key is fixed per upload, so a row a crashed attempt left behind
+          // is this upload's own row: keep it and carry on.
           await db.execute({
             sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1074,7 +1371,7 @@ export function createTakeUploads({
               "audio/wav",
               size,
               bucket,
-              REFERENCE_TYPE,
+              REFERENCE_TYPES[kind],
               meta.song_id,
               projectId,
             ],
@@ -1082,98 +1379,198 @@ export function createTakeUploads({
         } catch (error) {
           // A row that never landed must not leave an untracked object behind —
           // but only once a re-read says the song does not point at it.
-          const afterInsert = await songTakes(meta.song_id);
+          const afterInsert = songContainer(await readSong(meta.song_id, kind), kind);
           if (!afterInsert[takeId]) await deleteObjectQuietly(storage, key, bucket);
           throw error;
         }
       });
 
-      const take = {
-        id: takeId,
-        clip_id: meta.clip_id,
-        storage_key: key,
-        rate,
-        channels: channelCount,
-        frames,
-        offset_frames: Number(meta.offset_frames ?? 0),
-        compensated: meta.compensated === true,
-        bpm: Number(meta.bpm),
-        recorded_at: typeof meta.recorded_at === "string" ? meta.recorded_at : nowIso(),
-        author_label: authorLabelOf(meta.author),
-        discarded: false,
-      };
+      const record =
+        kind === "sample"
+          ? {
+              id: takeId,
+              storage_key: key,
+              rate,
+              channels: channelCount,
+              frames,
+              name: typeof meta.name === "string" ? meta.name : takeId,
+              origin: SAMPLE_ORIGINS.includes(meta.origin) ? meta.origin : SAMPLE_ORIGINS[0],
+              author_label: authorLabelOf(meta.author),
+            }
+          : {
+              id: takeId,
+              clip_id: meta.clip_id,
+              storage_key: key,
+              rate,
+              channels: channelCount,
+              frames,
+              offset_frames: Number(meta.offset_frames ?? 0),
+              compensated: meta.compensated === true,
+              bpm: Number(meta.bpm),
+              recorded_at: typeof meta.recorded_at === "string" ? meta.recorded_at : nowIso(),
+              author_label: authorLabelOf(meta.author),
+              discarded: false,
+            };
 
       // `internal: true`: only the gateway's own finish route may issue
-      // `take.add`, and no caller gets to name the storage key.
+      // `take.add`/`sample.add`, and no caller gets to name the storage key.
       const applied = await hub.runCommand({
         song_id: meta.song_id,
         cmd_id: takeId,
-        command: "take.add",
-        args: { clip_id: meta.clip_id, take },
+        command: kind === "sample" ? "sample.add" : "take.add",
+        args: kind === "sample" ? { sample: record } : { clip_id: meta.clip_id, take: record },
         author: meta.author,
         internal: true,
       });
 
       // Whatever the hub said, the song is the judge; a re-read is the only
       // answer a cleanup may act on.
-      const afterAdd = await songTakes(meta.song_id);
-      const confirmed = afterAdd[takeId] ?? null;
+      const afterAdd = await readSong(meta.song_id, kind);
+      const confirmed = songContainer(afterAdd, kind)[takeId] ?? null;
 
       if (!applied || applied.ok !== true) {
         if (confirmed) {
           // The refusal is a replay of a step an earlier attempt applied and
-          // never got to clean up after: the take is in the song, so complete
+          // never got to clean up after: the upload is in the song, so complete
           // it. The earlier attempt wrote the audit line.
-          return await completeFinish(takeId, meta, confirmed, { frames, key, chunks: hashes.length });
+          const padAssign = kind === "sample" ? await padAssignFor(meta) : PAD_ASSIGN.skipped;
+          return await completeFinish(takeId, meta, confirmed, {
+            kind,
+            frames,
+            key,
+            chunks: hashes.length,
+            padAssign,
+          });
         }
-        // The song does not point at the take, so the object and its row may go.
-        // The staged audio is the only copy of the recording: it stays, so the
-        // next finish can try again.
+        // The song does not point at the upload, so the object and its row may
+        // go. The staged audio is the only copy of the recording: it stays, so
+        // the next finish can try again.
         await deleteObjectQuietly(storage, key, bucket);
-        await deleteRowQuietly(db, key);
-        throw withStatus(String(applied?.error ?? "The song refused that take."), statusForCode(applied?.code));
+        await deleteRowQuietly(db, key, kind);
+        throw withStatus(
+          String(applied?.error ?? `The song refused that ${noun}.`),
+          statusForCode(applied?.code),
+        );
       }
 
       if (!confirmed) {
         // Applied, but the song does not show it: deleting anything now could
-        // lose the take, so everything stays for a later finish.
+        // lose the upload, so everything stays for a later finish.
         throw conflict(
-          `Take "${takeId}" was applied, but the song does not show it; the take is kept and will finish later.`,
+          `${Noun} "${takeId}" was applied, but the song does not show it; the ${noun} is kept and will finish later.`,
         );
+      }
+
+      const payload = {
+        storage_key: key,
+        seconds: Math.round((frames / rate) * 1000) / 1000,
+      };
+      if (kind === "sample") {
+        payload.sample_id = takeId;
+        if (meta.target && typeof meta.target === "object") payload.pad = meta.target;
+      } else {
+        payload.take_id = takeId;
+        payload.clip_id = meta.clip_id;
       }
 
       await acl.appendAudit(db, {
         project_id: projectId,
         ...auditActor(meta.author),
-        action: AUDIT_ACTION,
+        action: AUDIT_ACTIONS[kind],
         target: `song:${meta.song_id}`,
-        payload: {
-          take_id: takeId,
-          clip_id: meta.clip_id,
-          storage_key: key,
-          seconds: Math.round((frames / rate) * 1000) / 1000,
-        },
+        payload,
       });
 
-      return await completeFinish(takeId, meta, confirmed, { frames, key, chunks: hashes.length });
+      // A finished sample may belong on a pad. The pad is asked for inside the
+      // command, on the hub's own queue, so a pad the operator filled meanwhile
+      // is kept and the sample stays in the song. The outcome is recorded in the
+      // meta by `completeFinish`, before this answer goes out.
+      const padAssign = kind === "sample" ? await padAssignFor(meta) : PAD_ASSIGN.skipped;
+      return await completeFinish(takeId, meta, confirmed, {
+        kind,
+        frames,
+        key,
+        chunks: hashes.length,
+        padAssign,
+      });
     } finally {
       await unlink(lock).catch(() => {});
     }
   }
 
   /**
-   * Close out a take the song has confirmed: mark its meta finished (so a
-   * retried finish can find its song) and only then drop the staged audio.
+   * Put a finished sample on the pad its upload named — if that pad is still
+   * free, or already holds this exact sample.
+   *
+   * The "is it still free?" question is the command's, not this function's: a
+   * snapshot read here would answer with the song as it was a moment ago, and
+   * the operator's own `pad.assign` may have landed since. So the upload asks
+   * `pad.assign_if_empty` — Studio's own command, `internal: true` — and its
+   * check runs inside the hub's per-song queue, against the pad as it is now. A
+   * pad that holds another sound is refused there ("conflict"), and that
+   * refusal is this upload's "skipped": the sample is in the song, the pad is
+   * the operator's. `cmd_id` is the upload's id with `":assign"`, so the same
+   * assignment cannot apply twice.
+   *
+   * @param {object} meta the upload's staged meta
+   * @returns {Promise<string>} `PAD_ASSIGN.done` or `PAD_ASSIGN.skipped`
+   */
+  async function landOnPad(meta) {
+    const target = meta && typeof meta.target === "object" ? meta.target : null;
+    if (!target) return PAD_ASSIGN.skipped;
+    const id = String(meta.take_id ?? "");
+    const result = await hub.runCommand({
+      song_id: meta.song_id,
+      cmd_id: `${id}:assign`,
+      command: "pad.assign_if_empty",
+      args: { track_id: target.track_id, bank_id: target.bank_id, index: target.index, sample_id: id },
+      author: meta.author,
+      internal: true,
+    });
+    return result && result.ok === true ? PAD_ASSIGN.done : PAD_ASSIGN.skipped;
+  }
+
+  /**
+   * What a sample's pad came to: the outcome an earlier attempt recorded, or
+   * the assignment made now.
+   * @param {object} meta the upload's staged meta
+   * @returns {Promise<string>} `PAD_ASSIGN.done` or `PAD_ASSIGN.skipped`
+   */
+  async function padAssignFor(meta) {
+    return isPadAssignRecorded(meta) ? meta.pad_assign : landOnPad(meta);
+  }
+
+  /**
+   * The answer one finished upload gives its caller: the take itself, or a
+   * sample with whether its pad holds it now.
+   * @param {string} kind
+   * @param {object} record the object as the song holds it
+   * @param {string} [padAssign] what became of the sample's pad
+   * @returns {{take: object}|{sample: object, pad_assigned: boolean}}
+   */
+  function finishResult(kind, record, padAssign = PAD_ASSIGN.skipped) {
+    return kind === "sample"
+      ? { sample: record, pad_assigned: padAssign === PAD_ASSIGN.done }
+      : { take: record };
+  }
+
+  /**
+   * Close out an upload the song has confirmed: mark its meta finished — with
+   * what became of a sample's pad, so a retried finish never assigns again —
+   * and only then drop the staged audio.
    * @param {string} takeId
    * @param {object} meta
-   * @param {object} songTake the take as the song holds it
-   * @param {{frames: number, key: string, chunks: number}} finished
-   * @returns {Promise<{take: object}>}
+   * @param {object} record the object as the song holds it
+   * @param {{kind: string, frames: number, key: string, chunks: number,
+   *          padAssign?: string}} finished
+   * @returns {Promise<{take: object}|{sample: object, pad_assigned: boolean}>}
    */
-  async function completeFinish(takeId, meta, songTake, { frames, key, chunks }) {
-    await writeMeta(takeId, { ...meta, finished: true, frames, storage_key: key, finished_at: nowIso() });
+  async function completeFinish(takeId, meta, record, { kind, frames, key, chunks, padAssign = PAD_ASSIGN.skipped }) {
+    const settled = { ...meta, finished: true, frames, storage_key: key, finished_at: nowIso() };
+    if (kind === "sample") settled.pad_assign = padAssign;
+    await writeMeta(takeId, settled);
     await dropChunks(takeId, chunks);
-    return { take: songTake };
+    return finishResult(kind, record, padAssign);
   }
 
   /**
@@ -1282,16 +1679,17 @@ async function deleteObjectQuietly(storage, key, bucket) {
 }
 
 /**
- * Delete the `storage_files` row of a take the song does not reference.
+ * Delete the `storage_files` row of an upload the song does not reference.
  * @param {object} db
  * @param {string} key
+ * @param {string} [kind] the upload's kind, which says what the row is filed as
  * @returns {Promise<void>}
  */
-async function deleteRowQuietly(db, key) {
+async function deleteRowQuietly(db, key, kind = "take") {
   try {
     await db.execute({
-      sql: "DELETE FROM storage_files WHERE s3_key = ? AND reference_type = 'studio_take'",
-      args: [key],
+      sql: "DELETE FROM storage_files WHERE s3_key = ? AND reference_type = ?",
+      args: [key, REFERENCE_TYPES[kind] ?? REFERENCE_TYPES.take],
     });
   } catch {
     /* the caller's error is the one that matters */

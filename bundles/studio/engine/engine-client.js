@@ -6,11 +6,12 @@
  * glues four sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sunvox.js + studio-processor.js
+ *     sequencer.js + resample.js + sampler-voice.js + sunvox.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
- * the client side of the port, before the PCM is handed over.
+ * the client side of the port, before the PCM is handed over. `sampler-voice.js`
+ * is the sampler's voice DSP, which the processor uses in that same scope.
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -97,12 +98,36 @@
  *   resampled here to the context's rate when the take was recorded at another
  *   one, and resolves when the processor has it. `unloadAudio(take_id)` drops
  *   it again.
+ * - `loadSample(sample_id, channels, rate)` does the very same for one sampled
+ *   pad's PCM, into the processor's own sample store, and
+ *   `unloadSample(sample_id)` drops it again. The song may hold 256 MB of
+ *   decoded samples at once (the browser's cap; `create()` takes
+ *   `maxSampleBytes` for a host that knows how much its own song needs, which
+ *   an offline render does): past that the engine drops the least-recently
+ *   played one, and `onSampleNeeded(listener)` says which sample a trigger
+ *   wanted so the page can load it back.
+ * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
+ *   audition a pad from the panel: straight to the voice, never through a
+ *   command or a history step, and never quantized.
+ * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
+ *   own output (`track_id`) on, per block, as `{type:"tap_block", target, frame,
+ *   channels}`: `frame` is the context frame the block's first sample sits on,
+ *   the same clock `launched` and `nextBarFrame` report in. What record-into-pad
+ *   and resampling listen to. Off by default. `onTap(listener)` follows those
+ *   blocks as `{target, frame, channels}`; it resolves to an unsubscribe. A tap
+ *   never changes the mix it copies.
  */
 (function () {
   "use strict";
 
   /** The files that make up the worklet module, in concatenation order. */
-  const SOURCE_FILES = ["sequencer.js", "resample.js", "sunvox.js", "studio-processor.js"];
+  const SOURCE_FILES = [
+    "sequencer.js",
+    "resample.js",
+    "sampler-voice.js",
+    "sunvox.js",
+    "studio-processor.js",
+  ];
 
   /**
    * The audio contexts that already have the Studio processor registered. A
@@ -575,11 +600,13 @@
    *
    * @param {BaseAudioContext} context an AudioContext or OfflineAudioContext
    * @param {{assetBase?: string, assetBytes?: object, readyTimeoutMs?: number,
-   *          testHooks?: boolean}} options
+   *          testHooks?: boolean, maxSampleBytes?: number}} options
    *   `assetBase` is a URL prefix the engine files are fetched from;
    *   `assetBytes` is a map of file name → string/Uint8Array, which wins over
    *   `assetBase` for the names it holds (Node callers read the files
-   *   themselves); `testHooks` arms the processor's test-only faults
+   *   themselves); `testHooks` arms the processor's test-only faults;
+   *   `maxSampleBytes` is the song-wide cap on decoded samples, the browser's
+   *   256 MB when omitted (an offline render passes the bytes its window needs)
    * @returns {Promise<{node: AudioWorkletNode,
    *                    setSong: function(object): void,
    *                    launchScene: function(string): void,
@@ -1046,13 +1073,20 @@
       numberOfOutputs: 1,
       outputChannelCount: [2],
       // `testHooks` is off unless a caller asks for it; it arms the processor's
-      // two test-only faults (see `throwForTest`).
-      processorOptions: { wasmBinary: wasmBinary, testHooks: opts.testHooks === true },
+      // two test-only faults (see `throwForTest`). `maxSampleBytes` is left out
+      // when the caller names none, so the processor keeps its own 256 MB cap.
+      processorOptions: {
+        wasmBinary: wasmBinary,
+        testHooks: opts.testHooks === true,
+        ...(Number(opts.maxSampleBytes) > 0 ? { maxSampleBytes: Number(opts.maxSampleBytes) } : {}),
+      },
     });
 
     const listeners = new Set();
     const launchListeners = new Set();
     const errorListeners = new Set();
+    const sampleNeededListeners = new Set();
+    const tapListeners = new Set();
     /**
      * Hand one failure to the error listeners and the console: a fault after
      * start-up has no caller to throw to.
@@ -1077,6 +1111,8 @@
     let barSeq = 0;
     /** take id → resolvers waiting for the processor's `audio_loaded`. */
     const pendingAudio = new Map();
+    /** sample id → resolvers waiting for the processor's `sample_loaded`. */
+    const pendingSamples = new Map();
     const post = (message, transfer) => {
       if (transfer && transfer.length > 0) {
         try {
@@ -1159,6 +1195,48 @@
         }
         return;
       }
+      if (message.type === "sample_loaded") {
+        const waiting = pendingSamples.get(message.sample_id);
+        if (waiting && waiting.length > 0) {
+          const resolveSample = waiting.shift();
+          if (waiting.length === 0) pendingSamples.delete(message.sample_id);
+          resolveSample();
+        }
+        return;
+      }
+      if (message.type === "tap_block") {
+        // A tap's copy of one block, for record-into-pad and resampling. The
+        // frame is the context frame of the block's first sample: a resample
+        // cuts what it keeps on that frame, never by counting blocks.
+        const frame = Number(message.frame);
+        const tap = {
+          target: String(message.target),
+          frame: Number.isFinite(frame) ? Math.trunc(frame) : 0,
+          channels: Array.isArray(message.channels) ? message.channels : [],
+        };
+        for (const listener of tapListeners) {
+          try {
+            listener(tap);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "sample_needed") {
+        // A trigger wanted a sample the engine does not have (it was unloaded
+        // to stay inside the song's byte cap, or it never arrived): the page
+        // owns the decoded PCM, so it loads it again.
+        const id = String(message.sample_id);
+        for (const listener of sampleNeededListeners) {
+          try {
+            listener(id);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
       // A failure after start-up (a device that cannot be built, a refused
       // song) has no caller to throw to; it is handed to whoever registered an
       // error listener and logged, instead of stopping the audio thread.
@@ -1168,6 +1246,65 @@
         // an error listener and logged, instead of stopping the audio thread.
         notifyError(String(message.error));
       }
+    };
+
+    /**
+     * Hand the processor one object's channels, resampled to the context's rate
+     * when they are at another one, and resolve when it acknowledges them.
+     *
+     * The conversion is `resample.js`'s (the parity rule: no Web Audio node and
+     * no `decodeAudioData` ever resamples), in the page's worker when there is
+     * one and inline otherwise. `type`/`field` name the port message and the
+     * field that carries the id, so takes and samples take the very same path.
+     * @param {string} type the port message type ("audio" or "sample")
+     * @param {string} field the message field naming the object
+     * @param {string} id the take or sample id
+     * @param {Map<string, Function[]>} pending the acks still waited for
+     * @param {Float32Array[]} channels
+     * @param {number} rate the rate those channels are at, in Hz
+     * @returns {Promise<void>}
+     */
+    const sendPcm = (type, field, id, pending, channels, rate) => {
+      const list = [];
+      for (const channel of Array.isArray(channels) ? channels : []) {
+        // A view into a larger buffer is copied: transferring it would hand
+        // the processor (and detach here) the whole underlying buffer.
+        if (channel instanceof Float32Array) {
+          list.push(channel.byteLength === channel.buffer.byteLength ? channel : channel.slice());
+        } else {
+          list.push(Float32Array.from(channel));
+        }
+      }
+      const from = Number(rate);
+
+      const deliver = (pcm) => {
+        // One transfer per underlying buffer: two views of one buffer would ask
+        // the port to transfer it twice.
+        const transfer = [];
+        for (const channel of pcm) {
+          if (channel.buffer instanceof ArrayBuffer && transfer.indexOf(channel.buffer) === -1) {
+            transfer.push(channel.buffer);
+          }
+        }
+        return new Promise((resolve) => {
+          const waiting = pending.get(id) || [];
+          waiting.push(resolve);
+          pending.set(id, waiting);
+          const message = { type: type, channels: pcm };
+          message[field] = id;
+          post(message, transfer);
+        });
+      };
+
+      if (!Number.isFinite(from) || from <= 0 || from === context.sampleRate) return deliver(list);
+
+      const convert =
+        opts.assetBase && !isNode()
+          ? resampleInWorker(opts.assetBase, list, from, context.sampleRate).catch(() =>
+              resamplerOf().toRate(list, from, context.sampleRate),
+            )
+          : Promise.resolve(resamplerOf().toRate(list, from, context.sampleRate));
+      return convert.then(deliver);
     };
 
     return {
@@ -1305,15 +1442,15 @@
       },
 
       /**
-       * Hand the engine one take's PCM, already decoded.
+       * Hand the processor one object's PCM, already decoded.
        *
-       * The processor plays takes at the context's own rate, so a take recorded
-       * at another rate is converted here first, on the client, with
-       * `resample.js` — never by the context or by `decodeAudioData` (the parity
-       * rule). In a browser the conversion runs in the page's resampling worker
-       * (`${assetBase}resample-worker.js`), so a long take does not block the
-       * panel; a host without one (Node, a worker that would not load) converts
-       * inline with the very same file.
+       * The processor plays takes and samples at the context's own rate, so
+       * PCM recorded (or imported) at another rate is converted here first, on
+       * the client, with `resample.js` — never by the context or by
+       * `decodeAudioData` (the parity rule). In a browser the conversion runs in
+       * the page's resampling worker (`${assetBase}resample-worker.js`), so a
+       * long take does not block the panel; a host without one (Node, a worker
+       * that would not load) converts inline with the very same file.
        *
        * The converted channels are transferred to the processor rather copied,
        * so the caller must not use the arrays it passed after the promise
@@ -1324,44 +1461,24 @@
        * @returns {Promise<void>} resolves when the processor has the PCM
        */
       loadAudio(takeId, channels, rate) {
-        const id = String(takeId);
-        const list = [];
-        for (const channel of Array.isArray(channels) ? channels : []) {
-          // A view into a larger buffer is copied: transferring it would hand
-          // the processor (and detach here) the whole underlying buffer.
-          if (channel instanceof Float32Array) {
-            list.push(channel.byteLength === channel.buffer.byteLength ? channel : channel.slice());
-          } else {
-            list.push(Float32Array.from(channel));
-          }
-        }
-        const from = Number(rate);
+        return sendPcm("audio", "take_id", String(takeId), pendingAudio, channels, rate);
+      },
 
-        const deliver = (pcm) => {
-          // One transfer per underlying buffer: two views of one buffer would
-          // ask the port to transfer it twice.
-          const transfer = [];
-          for (const channel of pcm) {
-            if (channel.buffer instanceof ArrayBuffer && transfer.indexOf(channel.buffer) === -1) {
-              transfer.push(channel.buffer);
-            }
-          }
-          return new Promise((resolve) => {
-            const waiting = pendingAudio.get(id) || [];
-            waiting.push(resolve);
-            pendingAudio.set(id, waiting);
-            post({ type: "audio", take_id: id, channels: pcm }, transfer);
-          });
-        };
-
-        if (!Number.isFinite(from) || from <= 0 || from === context.sampleRate) return deliver(list);
-
-        const convert = opts.assetBase && !isNode()
-          ? resampleInWorker(opts.assetBase, list, from, context.sampleRate).catch(() =>
-              resamplerOf().toRate(list, from, context.sampleRate),
-            )
-          : Promise.resolve(resamplerOf().toRate(list, from, context.sampleRate));
-        return convert.then(deliver);
+      /**
+       * Hand the engine one sampled pad's PCM, resampled to the context's rate
+       * exactly as `loadAudio` does, into the processor's sample store. The
+       * promise resolves when the processor has it.
+       *
+       * The channels are transferred, so the caller must not use the arrays it
+       * passed once this resolves (the page keeps its own copy, which is what a
+       * reload after a `sample_needed` needs).
+       * @param {string} sampleId
+       * @param {Float32Array[]} channels the sample's decoded PCM, one per channel
+       * @param {number} rate the rate those samples are at, in Hz
+       * @returns {Promise<void>} resolves when the processor has the PCM
+       */
+      loadSample(sampleId, channels, rate) {
+        return sendPcm("sample", "sample_id", String(sampleId), pendingSamples, channels, rate);
       },
 
       /**
@@ -1371,6 +1488,104 @@
        */
       unloadAudio(takeId) {
         post({ type: "audio_unload", take_id: String(takeId) });
+      },
+
+      /**
+       * Drop one sampled pad's PCM from the engine.
+       * @param {string} sampleId
+       * @returns {void}
+       */
+      unloadSample(sampleId) {
+        post({ type: "sample_unload", sample_id: String(sampleId) });
+      },
+
+      /**
+       * Follow the samples a trigger wanted but the engine did not have: the
+       * song holds at most 256 MB of decoded samples, so the least-recently
+       * played one is unloaded and the page loads it back when a pattern asks
+       * for it again.
+       * @param {(sampleId: string) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onSampleNeeded(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        sampleNeededListeners.add(listener);
+        return function unsubscribe() {
+          sampleNeededListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Audition one pad: a live trigger that goes straight to a voice, never
+       * through a command or a history step, and is never quantized to the bar.
+       * A `oneshot` pad plays to its end; a `gate` pad holds until
+       * `liveRelease`.
+       * @param {string} trackId
+       * @param {string} bankId
+       * @param {number} index the pad, 0-15
+       * @param {number} velocity 1-127
+       * @returns {void}
+       */
+      livePad(trackId, bankId, index, velocity) {
+        const v = Number(velocity);
+        post({
+          type: "live",
+          track_id: String(trackId),
+          bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
+          index: Math.trunc(Number(index) || 0),
+          v: Number.isFinite(v) ? v : 127,
+          on: true,
+        });
+      },
+
+      /**
+       * Release the `gate` voices one pad's live presses started. A `oneshot`
+       * voice is left alone: a one-shot pad plays to the end of its range, as
+       * `livePad` says.
+       * @param {string} trackId
+       * @param {string} bankId
+       * @param {number} index the pad, 0-15
+       * @returns {void}
+       */
+      liveRelease(trackId, bankId, index) {
+        post({
+          type: "live",
+          track_id: String(trackId),
+          bank_id: bankId === undefined || bankId === null ? "" : String(bankId),
+          index: Math.trunc(Number(index) || 0),
+          v: 0,
+          on: false,
+        });
+      },
+
+      /**
+       * Turn a tap on or off: `"master"` for the mix, or a track's id for that
+       * track's own output. While a tap is on the processor posts one
+       * `{type:"tap_block", target, frame, channels}` per block, which is what
+       * record-into-pad and resampling record. Off by default, and off costs
+       * nothing.
+       * @param {string} target "master" or a track id
+       * @param {boolean} on
+       * @returns {void}
+       */
+      tap(target, on) {
+        post({ type: "tap", target: String(target), on: on === true });
+      },
+
+      /**
+       * Follow a tap: one `{target, frame, channels}` per block while one is on,
+       * `target` being "master" or the tapped track's id, `frame` the context
+       * frame of the block's first sample, and `channels` the block's own copies
+       * (the tap never shares its mix's buffers).
+       * @param {(tap: {target: string, frame: number, channels: Float32Array[]}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onTap(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        tapListeners.add(listener);
+        return function unsubscribe() {
+          tapListeners.delete(listener);
+        };
       },
 
       /**
@@ -1442,7 +1657,10 @@
         listeners.clear();
         launchListeners.clear();
         errorListeners.clear();
+        sampleNeededListeners.clear();
+        tapListeners.clear();
         pendingAudio.clear();
+        pendingSamples.clear();
         node.port.onmessage = null;
       },
     };

@@ -57,6 +57,7 @@ const { kWorkletRelease } = await import(pathToFileURL(SYMBOLS_FILE).href);
 const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
   "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
+  "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
@@ -253,12 +254,13 @@ function hashChannels(left, right) {
  * @param {object} song
  * @param {{seconds?: number, sampleRate?: number, audio?: object[],
  *          mode?: "session"|"arrangement", fromBar?: number}} [options]
- *   `audio` is one `{id, channels, rate}` per take to load
+ *   `audio` is one `{id, channels, rate}` per take to load, and `samples` one
+ *   `{id, channels, rate}` per sampled pad's PCM
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
 async function renderSong(
   song,
-  { seconds = 2, sampleRate = SAMPLE_RATE, audio = [], mode = "session", fromBar = 0 } = {},
+  { seconds = 2, sampleRate = SAMPLE_RATE, audio = [], samples = [], mode = "session", fromBar = 0 } = {},
 ) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
@@ -275,6 +277,14 @@ async function renderSong(
         take.id,
         take.channels.map((channel) => Float32Array.from(channel)),
         take.rate,
+      );
+    }
+    for (const sample of samples) {
+      // Same contract as loadAudio: the buffers are transferred to the worklet.
+      await engine.loadSample(
+        sample.id,
+        sample.channels.map((channel) => Float32Array.from(channel)),
+        sample.rate,
       );
     }
     engine.setSong(song);
@@ -687,6 +697,31 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderSampler = async function (song, samples, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  "  for (var t = 0; t < samples.length; t++) {",
+  "    var channels = samples[t].channels.map(function (list) { return Float32Array.from(list); });",
+  "    await engine.loadSample(samples[t].id, channels, samples[t].rate);",
+  "  }",
+  "  engine.setSong(song);",
+  "  engine.launchScene(song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -696,6 +731,7 @@ const SERVED = {
   "/assets/engine-client.js": ["text/javascript; charset=utf-8", () => readFileSync(join(ENGINE_DIR, "engine-client.js"), "utf8")],
   "/assets/sequencer.js": ["text/javascript; charset=utf-8", () => ASSETS["sequencer.js"]],
   "/assets/resample.js": ["text/javascript; charset=utf-8", () => ASSETS["resample.js"]],
+  "/assets/sampler-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["sampler-voice.js"]],
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
@@ -1194,6 +1230,314 @@ test("arrangement render bit-identical in Chromium and Node", async (t) => {
         `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an arrangement render from bar ${item.fromBar}`,
       );
     }
+  } finally {
+    tab.close();
+  }
+});
+
+test("sampler pattern bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  /** A mono sample whose every frame is its own level, with a sine body. */
+  const mono = new Float32Array(24000);
+  for (let at = 0; at < mono.length; at += 1) {
+    mono[at] = Math.sin((2 * Math.PI * 220 * at) / SAMPLE_RATE) * 0.6 * (1 - at / mono.length);
+  }
+  /** A stereo sample: the two channels differ, so a swap would show. */
+  const stereoLeft = new Float32Array(12000);
+  const stereoRight = new Float32Array(12000);
+  for (let at = 0; at < stereoLeft.length; at += 1) {
+    stereoLeft[at] = Math.sin((2 * Math.PI * 330 * at) / SAMPLE_RATE) * 0.5;
+    stereoRight[at] = Math.sin((2 * Math.PI * 440 * at) / SAMPLE_RATE) * 0.4;
+  }
+
+  // Two sampler tracks: one-shots and a gate, a choke group, a slice, a
+  // reversed voice, three filter kinds and per-step locks — so the sampler's
+  // voice DSP, its mix and its stealing rules are all part of the hash.
+  const song = {
+    meta: { title: "Sampler parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "track-1",
+        name: "Kit",
+        color: "#E8C07A",
+        device: { engine: "sampler" },
+        mute: false,
+        solo: false,
+        gain_db: -3,
+        pan: -0.4,
+        locked: false,
+      },
+      {
+        id: "track-2",
+        name: "Hats",
+        color: "#8FC1E8",
+        device: { engine: "sampler" },
+        mute: false,
+        solo: false,
+        gain_db: -2,
+        pan: 0.3,
+        locked: false,
+      },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Kit",
+        length_bars: 1,
+        notes: [],
+        kind: "pattern",
+        length_steps: 16,
+        step_beats: 0.25,
+        swing: 0,
+        chain: [],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "Hats",
+        length_bars: 1,
+        notes: [],
+        kind: "pattern",
+        length_steps: 8,
+        step_beats: 0.5,
+        swing: 0,
+        chain: [],
+      },
+    },
+    samples: {
+      "sample-a": {
+        id: "sample-a",
+        storage_key: "studio/song-1/samples/sample-a.wav",
+        rate: SAMPLE_RATE,
+        channels: 1,
+        frames: mono.length,
+        name: "a",
+        origin: "record",
+        author_label: "the operator",
+      },
+      "sample-b": {
+        id: "sample-b",
+        storage_key: "studio/song-1/samples/sample-b.wav",
+        rate: SAMPLE_RATE,
+        channels: 2,
+        frames: stereoLeft.length,
+        name: "b",
+        origin: "import",
+        author_label: "the operator",
+      },
+    },
+    slices: {
+      "sample-b/s1": { id: "s1", sample_id: "sample-b", start_frame: 1000, end_frame: 8000 },
+    },
+    banks: {
+      "track-1/bank-a": { id: "bank-a", track_id: "track-1", name: "A", order: 0 },
+      "track-2/bank-a": { id: "bank-a", track_id: "track-2", name: "A", order: 0 },
+    },
+    pads: {
+      "track-1/bank-a/0": {
+        track_id: "track-1",
+        bank_id: "bank-a",
+        index: 0,
+        sample_id: "sample-a",
+        slice_id: null,
+        name: "",
+        mode: "oneshot",
+        pitch: 0,
+        gain_db: 0,
+        pan: 0,
+        attack_ms: 0,
+        decay_ms: 0,
+        sustain: 1,
+        release_ms: 0,
+        filter: { type: "lp", cutoff_hz: 2500, resonance: 0.6 },
+        choke: 0,
+        reverse: false,
+      },
+      "track-1/bank-a/1": {
+        track_id: "track-1",
+        bank_id: "bank-a",
+        index: 1,
+        sample_id: "sample-a",
+        slice_id: null,
+        name: "",
+        mode: "gate",
+        pitch: -5,
+        gain_db: -2,
+        pan: 0.25,
+        attack_ms: 5,
+        decay_ms: 120,
+        sustain: 0.5,
+        release_ms: 200,
+        filter: { type: "hp", cutoff_hz: 400, resonance: 0.2 },
+        choke: 0,
+        reverse: false,
+      },
+      "track-2/bank-a/0": {
+        track_id: "track-2",
+        bank_id: "bank-a",
+        index: 0,
+        sample_id: "sample-b",
+        slice_id: null,
+        name: "",
+        mode: "oneshot",
+        pitch: 0,
+        gain_db: 0,
+        pan: 0,
+        attack_ms: 0,
+        decay_ms: 0,
+        sustain: 1,
+        release_ms: 0,
+        filter: { type: "off", cutoff_hz: 20000, resonance: 0 },
+        choke: 2,
+        reverse: true,
+      },
+      "track-2/bank-a/1": {
+        track_id: "track-2",
+        bank_id: "bank-a",
+        index: 1,
+        sample_id: "sample-b",
+        slice_id: "s1",
+        name: "",
+        mode: "gate",
+        pitch: 0,
+        gain_db: 0,
+        pan: 0.5,
+        attack_ms: 0,
+        decay_ms: 60,
+        sustain: 0.7,
+        release_ms: 40,
+        filter: { type: "bp", cutoff_hz: 1200, resonance: 0.4 },
+        choke: 2,
+        reverse: false,
+      },
+    },
+    patterns: {
+      "clip-1/a": { id: "a", clip_id: "clip-1", name: "A", order: 0 },
+      "clip-2/a": { id: "a", clip_id: "clip-2", name: "A", order: 0 },
+    },
+    steps: {
+      "clip-1/a/0/bank-a.0": {
+        clip_id: "clip-1",
+        pattern_id: "a",
+        at: 0,
+        bank_id: "bank-a",
+        index: 0,
+        v: 120,
+        locks: {},
+      },
+      "clip-1/a/2/bank-a.1": {
+        clip_id: "clip-1",
+        pattern_id: "a",
+        at: 2,
+        bank_id: "bank-a",
+        index: 1,
+        v: 90,
+        locks: { cutoff_hz: 900, pitch: 7, release_ms: 80 },
+      },
+      "clip-1/a/8/bank-a.0": {
+        clip_id: "clip-1",
+        pattern_id: "a",
+        at: 8,
+        bank_id: "bank-a",
+        index: 0,
+        v: 64,
+        locks: { pitch: 12, gain_db: -6, pan: -0.75 },
+      },
+      "clip-2/a/0/bank-a.0": {
+        clip_id: "clip-2",
+        pattern_id: "a",
+        at: 0,
+        bank_id: "bank-a",
+        index: 0,
+        v: 127,
+        locks: {},
+      },
+      "clip-2/a/1/bank-a.1": {
+        clip_id: "clip-2",
+        pattern_id: "a",
+        at: 1,
+        bank_id: "bank-a",
+        index: 1,
+        v: 100,
+        locks: { reverse: true },
+      },
+      "clip-2/a/3/bank-a.0": {
+        clip_id: "clip-2",
+        pattern_id: "a",
+        at: 3,
+        bank_id: "bank-a",
+        index: 0,
+        v: 80,
+        locks: { pitch: -7 },
+      },
+    },
+  };
+
+  const samples = [
+    { id: "sample-a", channels: [mono], rate: SAMPLE_RATE },
+    { id: "sample-b", channels: [stereoLeft, stereoRight], rate: SAMPLE_RATE },
+  ];
+  // The page takes plain JSON, so the PCM travels as number arrays.
+  const payload = samples.map((item) => ({
+    id: item.id,
+    rate: item.rate,
+    channels: item.channels.map((channel) => Array.from(channel)),
+  }));
+
+  const seconds = 2;
+  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE, samples });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node sampler render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  // Every pad in the song has to contribute: a silent voice path, or a pad
+  // whose step never starts a voice, would hide inside the hash. Each pad is
+  // rendered alone (its track's clip, one step at position 0) and has to sound.
+  for (const key of Object.keys(song.pads)) {
+    const [trackId, bankId, index] = key.split("/");
+    const clipId = trackId === "track-1" ? "clip-1" : "clip-2";
+    const alone = {
+      ...song,
+      steps: {
+        [`${clipId}/a/0/${bankId}.${index}`]: {
+          clip_id: clipId,
+          pattern_id: "a",
+          at: 0,
+          bank_id: bankId,
+          index: Number(index),
+          v: 127,
+          locks: {},
+        },
+      },
+    };
+    const one = await renderSong(alone, { seconds: 0.6, sampleRate: SAMPLE_RATE, samples });
+    const padPeak = Math.max(peakOf(one.left), peakOf(one.right));
+    assert.ok(padPeak > 0.001, `pad ${key} has to contribute sound of its own, peak was ${padPeak}`);
+  }
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderSampler"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderSampler(${JSON.stringify(song)}, ${JSON.stringify(payload)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium sampler render has to be audible too, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a sampler render`,
+    );
   } finally {
     tab.close();
   }

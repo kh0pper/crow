@@ -531,9 +531,142 @@ const STYLES = `
   .studio .st-tl-placement-help {
     flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
   }
+  /* The pad-and-steps view (the approved design, mockup screen 2): a sampler
+     track's clip is a pattern, so opening one shows the kit instead of the
+     piano roll. Pads are real buttons, at least 72 px square, and the pad's
+     own settings sit beside them. */
+  .studio .st-sampler {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+    display: flex; flex-direction: column; gap: 10px; padding: 12px;
+  }
+  .studio .st-sampler[hidden] { display: none; }
+  .studio .st-sampler-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .studio .st-sampler-title { margin: 0; font-size: 15px; font-weight: 700; }
+  .studio .st-sampler-meta { font-size: 12px; color: var(--st-muted); }
+  .studio .st-sampler-body { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+  .studio .st-sampler-pads { flex: 1 1 380px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
+  .studio .st-sampler-right { flex: 999 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  .studio .st-sampler-sub { margin: 0; font-size: 12px; font-weight: 600; color: var(--st-muted); }
+  .studio .st-bank-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-bank-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
+  .studio .st-pad-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .studio .st-pad {
+    aspect-ratio: 1 / 1; min-height: 72px; padding: 8px; border-radius: 10px;
+    border: 2px solid #121417; background: #24282D; color: var(--st-text);
+    font: inherit; text-align: left; cursor: pointer;
+    display: flex; flex-direction: column; justify-content: space-between; gap: 4px;
+  }
+  .studio .st-pad:hover { border-color: var(--st-edge); }
+  .studio .st-pad.st-pad-sel { border-color: #FFFFFF; }
+  .studio .st-pad-num {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px;
+    font-weight: 600; color: var(--st-muted);
+  }
+  .studio .st-pad-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+  .studio .st-sampler-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .studio .st-import { position: relative; display: inline-flex; align-items: center; }
+  .studio .st-file { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+  .studio .st-btn.st-on { background: #3D3420; border-color: #5C4A1E; }
+  .studio .st-pad-settings {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-pad-title { margin: 0; font-size: 13px; font-weight: 600; }
+  .studio .st-pad-fields {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px 12px;
+  }
+  .studio .st-pad-range { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
+  .studio .st-pad-range-input { width: 100%; min-height: 44px; accent-color: var(--st-human); }
+  .studio .st-pad-select { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--st-muted); }
+  .studio .st-pad-check {
+    display: flex; align-items: center; gap: 6px; min-height: 44px;
+    font-size: 12px; color: var(--st-muted);
+  }
+  .studio .st-pad-check input { width: 20px; height: 20px; accent-color: var(--st-human); }
+  .studio .st-resample-target { max-width: 180px; }
+  .studio .st-sampler-slot:empty { display: none; }
+  /* The chop editor: the sample's waveform, one marker per slice start, and the
+     two ways to chop it plus Assign slices to pads. A marker is dragged on the
+     SVG itself, so the whole strip takes no touch scrolling. */
+  .studio .st-chop {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-chop-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .studio .st-chop-meta { font-size: 12px; color: var(--st-muted); }
+  .studio .st-chop-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+  .studio .st-chop-sens {
+    display: flex; flex-direction: column; gap: 2px; min-width: 150px;
+    font-size: 11px; color: var(--st-muted);
+  }
+  .studio .st-wave {
+    display: block; width: 100%; height: 110px; border-radius: 6px;
+    background: #121417; touch-action: none;
+  }
+  .studio .st-slice-marker { cursor: col-resize; stroke-linecap: round; }
+  .studio .st-chop-error { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-danger); }
+  .studio .st-chop-read-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .studio .st-step-lock-strip {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 6px 10px; border: 1px solid var(--st-human); border-radius: 8px;
+    background: #2A2418; font-size: 12px;
+  }
+  .studio .st-step-lock-text { color: var(--st-text); }
+  /* The steps, the clip's loop, the patterns and the chain. */
+  .studio .st-steps {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-pattern-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-pattern-tabs .st-toggle { flex: 0 0 auto; min-width: 44px; }
+  .studio .st-loop { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; }
+  .studio .st-swing { min-width: 160px; }
+  .studio .st-steps-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .studio .st-step-pages { display: flex; gap: 4px; }
+  .studio .st-step-pages .st-toggle { flex: 0 0 auto; min-width: 56px; font-size: 11px; }
+  .studio .st-step-locks { font-size: 11px; color: var(--st-muted); }
+  .studio .st-step-strip {
+    display: grid; grid-template-columns: repeat(16, minmax(28px, 1fr));
+    gap: 4px; overflow-x: auto;
+  }
+  .studio .st-step {
+    position: relative; height: 48px; min-height: 48px; padding: 4px 3px;
+    border-radius: 6px; border: 1px solid #2F343A; background: #1B1E22;
+    color: var(--st-text); font: inherit; cursor: pointer; overflow: hidden;
+  }
+  .studio .st-step:nth-child(4n + 1) { background: #22262B; }
+  .studio .st-step-on { border-color: #FFFFFF; }
+  .studio .st-step-sel { border-color: var(--st-human); }
+  .studio .st-step-held { border-color: var(--st-human); background: #2A2418; }
+  .studio .st-step-lock { border-color: var(--st-human); background: #2A2418; box-shadow: inset 0 0 0 1px var(--st-human); }
+  .studio .st-step-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #B6D98A; }
+  .studio .st-step-num {
+    position: relative; z-index: 1; font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+  }
+  .studio .st-step-lock-dot {
+    position: absolute; top: 2px; right: 4px; z-index: 1;
+    color: var(--st-human); font-weight: 700;
+  }
+  .studio .st-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12px; }
+  .studio .st-chain-label { color: var(--st-muted); }
+  .studio .st-chain-empty { color: var(--st-muted); }
+  .studio .st-chain-arrow { color: var(--st-muted); }
+  .studio .st-chain-chip {
+    display: inline-flex; align-items: center; gap: 2px; padding: 2px 6px;
+    border: 1px solid #3A3F46; border-radius: 999px; background: #24282D;
+  }
+  .studio .st-chain-name { font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; }
+  .studio .st-chain-btn {
+    padding: 0 3px; border: 0; background: transparent; color: var(--st-muted);
+    font: inherit; cursor: pointer;
+  }
+  .studio .st-chain-btn:disabled { opacity: 0.35; cursor: default; }
+  .studio .st-chain-add { margin-left: 4px; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
+    .studio .st-step-strip { grid-template-columns: repeat(8, minmax(0, 1fr)); overflow-x: hidden; }
   }
 `;
 
@@ -661,6 +794,7 @@ function studioPage({ songId, render, res }) {
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
+          <section class="st-sampler" data-role="sampler" hidden></section>
         </main>
         <aside class="st-side">
           <div class="st-side-head">

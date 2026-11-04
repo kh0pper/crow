@@ -40,6 +40,11 @@
  * recorded — length, tempo, latency, who recorded it, whether the comp plays it
  * — and the `studio_take_keep` / `studio_clip_set_comp` commands to use it.
  *
+ * `studio_samples` is the sampler's read, for the same reason: a sample is a
+ * recording or an import and only the operator brings one in, so the agent gets
+ * the song's sounds with their slices and the pads that play them, and the
+ * chop and pad commands to work with them — never a way to add or drop a sound.
+ *
  * `studio_session_summary` exists because a song does not fit in a prompt: it
  * returns the tracks, scenes and a page of clips with note counts, and the
  * agent asks for one clip's notes with `studio_get_clip` when it needs them.
@@ -59,6 +64,8 @@ import "./commands/core.js";
 import "./commands/takes.js";
 // The 1b timeline commands — placements, markers and sections — likewise.
 import "./commands/arrangement.js";
+// The 1c sampler commands — kits, pads, samples, patterns and steps.
+import "./commands/sampler.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
@@ -267,6 +274,110 @@ export function takeList(snapshot, clipId = null) {
   // Newest first: `recorded_at` is ISO 8601, so its text order is its time
   // order. Ties keep the document's own order (the sort is stable).
   rows.sort((a, b) => (a.recorded_at < b.recorded_at ? 1 : a.recorded_at > b.recorded_at ? -1 : 0));
+  return rows;
+}
+
+/**
+ * The samples of a song, the way `studio_samples` reports them.
+ *
+ * A sample's stored shape is what the document and the engine need (frames, a
+ * rate, a storage key); its readers want seconds and the things a musician
+ * counts — how long it is, where it came from, which pads play it, and the
+ * slices its chop left, in the order they play. A pad that plays a slice says
+ * so; a pad that plays the whole sample has `slice_id: null`.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {string|null} [sampleId] - only this sample, when given
+ * @returns {object[]} one row per sample, in the song's own order
+ */
+export function sampleList(snapshot, sampleId = null) {
+  const samples = snapshot?.samples && typeof snapshot.samples === "object" ? snapshot.samples : {};
+  const slices = snapshot?.slices && typeof snapshot.slices === "object" ? snapshot.slices : {};
+  const pads = snapshot?.pads && typeof snapshot.pads === "object" ? snapshot.pads : {};
+  const banks = snapshot?.banks && typeof snapshot.banks === "object" ? snapshot.banks : {};
+  const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
+
+  /** @returns {string} a track's name, or its id when the song no longer holds it. */
+  const trackName = (id) => tracks.find((track) => track?.id === id)?.name ?? id;
+  /** @returns {object|null} the bank a pad sits in, or null. */
+  const bankOf = (pad) =>
+    Object.values(banks).find((bank) => bank?.track_id === pad.track_id && bank?.id === pad.bank_id) ?? null;
+
+  /** @type {Map<string, object[]>} */
+  const slicesOf = new Map();
+  for (const slice of Object.values(slices)) {
+    if (!slice || typeof slice !== "object") continue;
+    const list = slicesOf.get(slice.sample_id) ?? [];
+    list.push(slice);
+    slicesOf.set(slice.sample_id, list);
+  }
+
+  /** @type {Map<string, object[]>} */
+  const padsOf = new Map();
+  for (const pad of Object.values(pads)) {
+    if (!pad || typeof pad !== "object") continue;
+    if (typeof pad.sample_id !== "string" || pad.sample_id === "") continue;
+    const list = padsOf.get(pad.sample_id) ?? [];
+    list.push(pad);
+    padsOf.set(pad.sample_id, list);
+  }
+
+  const rows = [];
+  // In a fixed order (name, then id), whatever order the document's map holds
+  // them in after a reload or a merge.
+  const ordered = Object.values(samples)
+    .filter((sample) => sample && typeof sample === "object")
+    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id).localeCompare(String(b.id)));
+  for (const sample of ordered) {
+    if (sampleId !== null && sample.id !== sampleId) continue;
+    const rate = Number(sample.rate) > 0 ? Number(sample.rate) : 48000;
+    const frames = Number(sample.frames) || 0;
+    /** @returns {number} one frame position in seconds, to the millisecond. */
+    const seconds = (value) => Math.round((value / rate) * 1000) / 1000;
+
+    rows.push({
+      id: sample.id,
+      name: typeof sample.name === "string" ? sample.name : "",
+      // Two decimals, like a take's length: enough to see a sound's size at a
+      // glance, and stable in a JSON answer.
+      seconds: Math.round((frames / rate) * 100) / 100,
+      channels: Number(sample.channels) || 1,
+      rate,
+      origin: typeof sample.origin === "string" ? sample.origin : "",
+      author_label: typeof sample.author_label === "string" ? sample.author_label : "",
+      slices: (slicesOf.get(sample.id) ?? [])
+        .map((slice) => ({
+          id: slice.id,
+          start_frame: Number(slice.start_frame) || 0,
+          end_frame: Number(slice.end_frame) || 0,
+          start_seconds: seconds(Number(slice.start_frame) || 0),
+          end_seconds: seconds(Number(slice.end_frame) || 0),
+        }))
+        // A slice id names one slice, so the order is total: start first, then id.
+        .sort((a, b) => a.start_frame - b.start_frame || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+      pads: (padsOf.get(sample.id) ?? [])
+        .map((pad) => {
+          const bank = bankOf(pad);
+          const index = Number(pad.index) || 0;
+          return {
+            track_id: pad.track_id,
+            track: trackName(pad.track_id),
+            bank_id: pad.bank_id,
+            bank: typeof bank?.name === "string" ? bank.name : pad.bank_id,
+            index,
+            // Numbered the way the operator counts them, like every refusal does.
+            pad: index + 1,
+            slice_id: typeof pad.slice_id === "string" ? pad.slice_id : null,
+          };
+        })
+        .sort(
+          (a, b) =>
+            a.track_id.localeCompare(b.track_id) ||
+            a.bank_id.localeCompare(b.bank_id) ||
+            a.index - b.index,
+        ),
+    });
+  }
   return rows;
 }
 
@@ -514,6 +625,31 @@ export function createStudioServer({
     },
   );
 
+  // ---- the sampler -------------------------------------------------------
+
+  server.registerTool(
+    "studio_samples",
+    {
+      title: "List the song's samples and slices",
+      description:
+        "The song's samples: id, name, length in seconds, channels, sample rate, where each came from (import, record or resample), who brought it in, which pads play it, and its slices in order (id, start and end in frames and seconds). Read-only; pass sample_id to narrow it to one. You can chop a sample (studio_slice_set), put a slice or a whole sample on an empty pad (studio_pad_assign) and set that pad's fields (studio_pad_set), but only the operator brings a sound in — importing a file, recording into a pad or resampling — and no step of yours may drop the sound a pad plays.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song whose samples to list"),
+        sample_id: z.string().min(1).optional().describe("only this sample"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        return textResult(sampleList(opened.snapshot, args.sample_id ?? null));
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
   // ---- history -----------------------------------------------------------
 
   server.registerTool(
@@ -635,11 +771,15 @@ export function createStudioServer({
           from_bar: args.from_bar ?? 0,
           author,
         });
+        // A pad whose sample could not be loaded plays silence; the render
+        // still happened, so the agent is told which sound it did not hear.
+        const missing = Array.isArray(out.missing_samples) ? out.missing_samples : [];
         return textResult({
           url: out.url,
           lufs: out.lufs,
           true_peak_db: out.true_peak_db,
           seconds: out.seconds,
+          ...(missing.length > 0 ? { missing_samples: missing } : {}),
         });
       } catch (err) {
         return errorResult(errorText(err));

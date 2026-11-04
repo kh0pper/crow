@@ -12,13 +12,27 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { renderSong, createRenderer } from "../bundles/studio/server/render.js";
+import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js";
 import { decodeWav, encodeWav24 } from "../bundles/studio/server/wav.js";
 
 const SAMPLE_RATE = 48000;
+
+/**
+ * The engine client `render.js` itself builds its engines with (the same
+ * CommonJS module, so the same object): the cap test wraps its `create` to see
+ * what a render asks for.
+ */
+const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
+const studioEngine = createRequire(join(ENGINE_DIR, "x.js"))(join(ENGINE_DIR, "engine-client.js"));
 
 /** The project every song in these tests belongs to. */
 const PROJECT = 7;
@@ -792,4 +806,429 @@ test("render loads only the takes the launched scene uses", async () => {
   const peak = peakOf(rendered.left, rendered.right);
   const expected = expectedMixedPeak();
   assert.ok(Math.abs(peak - expected) <= expected * 0.01, `expected a peak of ${expected} ±1%, got ${peak}`);
+});
+
+// --- renders with samples ---------------------------------------------------
+
+/** The sample ids the sampler song below holds. */
+const SAMPLE_A = "3f2a1b0c-4d5e-4f60-8a71-9b2c3d4e5f60";
+const SAMPLE_B = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+const SAMPLE_C = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+const SAMPLE_UNUSED = "9e8d7c6b-5a49-4382-9170-6f5e4d3c2b1a";
+
+/**
+ * The key a sample of one song is stored at: the song's project prefix, then
+ * `studio/<song_id>/samples/<sample_id>.wav`.
+ * @param {string} sampleId
+ * @returns {string}
+ */
+function sampleKey(sampleId) {
+  return `${PREFIX}studio/song-1/samples/${sampleId}.wav`;
+}
+
+/** @returns {object} a sample as a snapshot carries it. */
+function sampleOf(id, name) {
+  return {
+    id,
+    storage_key: sampleKey(id),
+    rate: SAMPLE_RATE,
+    channels: 2,
+    frames: 4800,
+    name,
+    origin: "import",
+    author_label: "the operator",
+    slices: [],
+  };
+}
+
+/** @returns {object} a pad as a snapshot carries it. */
+function padOf(index, sampleId) {
+  return {
+    track_id: "sampler-1",
+    bank_id: "a",
+    index,
+    sample_id: sampleId,
+    slice_id: null,
+    name: `Pad ${index + 1}`,
+    mode: "oneshot",
+    pitch: 0,
+    gain_db: 0,
+    pan: 0,
+    attack_ms: 0,
+    decay_ms: 0,
+    sustain: 1,
+    release_ms: 0,
+    filter: { type: "off", cutoff_hz: 20000, resonance: 0 },
+    choke: 0,
+    reverse: false,
+  };
+}
+
+/** @returns {object} a step as a snapshot carries it. */
+function stepOf(clipId, patternId, at, index) {
+  return { clip_id: clipId, pattern_id: patternId, at, bank_id: "a", index, v: 100, locks: {} };
+}
+
+/**
+ * A sampler song with two pattern clips: one in scene 1 whose chain plays two
+ * patterns over pads 1 and 2, and one in scene 2 over pad 3. A fourth sample is
+ * in the song and on no pad a step triggers.
+ * @returns {object}
+ */
+function samplerSong() {
+  return {
+    meta: { title: "Sampler", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "sampler-1",
+        name: "Drums",
+        color: "#E8A07A",
+        device: { engine: "sampler" },
+        mute: false,
+        solo: false,
+        gain_db: 0,
+        pan: 0,
+        locked: false,
+      },
+    ],
+    scenes: [
+      { id: "scene-1", name: "A" },
+      { id: "scene-2", name: "B" },
+    ],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "sampler-1",
+        scene_id: "scene-1",
+        name: "Drums",
+        kind: "pattern",
+        length_steps: 16,
+        step_beats: 0.25,
+        swing: 0,
+        chain: ["a", "b"],
+        length_bars: 1,
+        notes: [],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "sampler-1",
+        scene_id: "scene-2",
+        name: "Fill",
+        kind: "pattern",
+        length_steps: 16,
+        step_beats: 0.25,
+        swing: 0,
+        chain: [],
+        length_bars: 1,
+        notes: [],
+      },
+    },
+    samples: {
+      [SAMPLE_A]: sampleOf(SAMPLE_A, "Kick"),
+      [SAMPLE_B]: sampleOf(SAMPLE_B, "Snare"),
+      [SAMPLE_C]: sampleOf(SAMPLE_C, "Fill hit"),
+      [SAMPLE_UNUSED]: sampleOf(SAMPLE_UNUSED, "Unused"),
+    },
+    pads: {
+      "sampler-1/a/0": padOf(0, SAMPLE_A),
+      "sampler-1/a/1": padOf(1, SAMPLE_B),
+      "sampler-1/a/2": padOf(2, SAMPLE_C),
+      "sampler-1/a/3": padOf(3, SAMPLE_UNUSED),
+    },
+    patterns: {
+      "clip-1/a": { id: "a", clip_id: "clip-1", name: "A", order: 0 },
+      "clip-1/b": { id: "b", clip_id: "clip-1", name: "B", order: 1 },
+      "clip-2/a": { id: "a", clip_id: "clip-2", name: "A", order: 0 },
+    },
+    steps: {
+      // Two sounds on chain pattern A, the same pad twice, and one on B: three
+      // steps, two samples.
+      "clip-1/a/0/a.0": stepOf("clip-1", "a", 0, 0),
+      "clip-1/a/4/a.1": stepOf("clip-1", "a", 4, 1),
+      "clip-1/a/8/a.1": stepOf("clip-1", "a", 8, 1),
+      "clip-1/b/0/a.0": stepOf("clip-1", "b", 0, 0),
+      // The other scene's clip plays a third sound; pad 4 holds a fourth that no
+      // step triggers at all.
+      "clip-2/a/0/a.2": stepOf("clip-2", "a", 0, 2),
+    },
+    arrangement: {
+      placements: {
+        // Scene 2's clip on the timeline from bar 4, so a window there hears it
+        // and a window at bar 0 does not.
+        "place-1": { id: "place-1", clip_id: "clip-2", track_id: "sampler-1", start_bar: 4, bars: 4 },
+      },
+      markers: {},
+      sections: {},
+    },
+  };
+}
+
+/** @returns {object} a decoded sample's audio, as a sample reader answers it. */
+function sampleAudioOf() {
+  return { rate: SAMPLE_RATE, channels: [new Float32Array(4800), new Float32Array(4800)] };
+}
+
+/**
+ * @param {Float32Array} channel
+ * @param {number} from the first frame of the window
+ * @param {number} to the frame it stops at (exclusive)
+ * @returns {number} the largest absolute sample in that window
+ */
+function peakIn(channel, from, to) {
+  let peak = 0;
+  const start = Math.max(0, Math.trunc(from));
+  const end = Math.min(channel.length, Math.trunc(to));
+  for (let at = start; at < end; at += 1) {
+    const value = Math.abs(channel[at]);
+    if (value > peak) peak = value;
+  }
+  return peak;
+}
+
+/**
+ * The smallest hub client `createStudioServer`'s render tool reads: one song,
+ * in one project. A render issues no commands, so nothing else is needed.
+ * @param {object} snapshot the song to render
+ * @param {number} [projectId]
+ * @returns {object}
+ */
+function renderHub(snapshot, projectId = PROJECT) {
+  return {
+    async snapshot() {
+      return { snapshot, project_id: projectId };
+    },
+    async command() {
+      throw new Error("the render tool issues no commands");
+    },
+    async listSongs() {
+      return [{ id: "song-1", project_id: projectId, title: "Sampler", updated_at: "2026-11-05T00:00:00.000Z" }];
+    },
+  };
+}
+
+test("render loads only the samples its patterns use", async () => {
+  const song = samplerSong();
+  const asked = [];
+
+  // Session: the launched scene's pattern clip, through its chain. The pads its
+  // steps trigger name two samples; the fourth pad's sample is never read.
+  const session = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      asked.push(sample.id);
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(asked, [SAMPLE_A, SAMPLE_B], "only the samples the chain's steps trigger");
+  assert.equal(session.seconds, 1);
+
+  // The other scene's clip plays a different sample, and the launch decides:
+  // a clip launch reads only that clip's samples.
+  const second = [];
+  await renderSong(song, {
+    clip_id: "clip-2",
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      second.push(sample.id);
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(second, [SAMPLE_C], "only the launched clip's sample");
+
+  // Arrangement: the window decides. Clip 2's placement starts at bar 4, so a
+  // render from bar 4 hears its sample and one from bar 0 hears none.
+  const windowAsked = [];
+  await renderSong(song, {
+    mode: "arrangement",
+    from_bar: 4,
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      windowAsked.push(sample.id);
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(windowAsked, [SAMPLE_C], "the arrangement loads the samples of the clips it plays");
+
+  const beforeAsked = [];
+  await renderSong(song, {
+    mode: "arrangement",
+    from_bar: 0,
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      beforeAsked.push(sample.id);
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(beforeAsked, [], "a window before the placement reads nothing");
+  assert.deepEqual(session.missing_samples, [], "every sample this render heard was loaded");
+
+  // A chain whose entries name no pattern of the clip falls back to the clip's
+  // first pattern, exactly as the sequencer does: the steps have to sound.
+  const dangling = structuredClone(song);
+  dangling.clips["clip-1"].chain = ["gone"];
+  const fallback = [];
+  await renderSong(dangling, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      fallback.push(sample.id);
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(fallback, [SAMPLE_A, SAMPLE_B], "the clip's first pattern still loads its samples");
+});
+
+test("a render whose samples pass 256 MB keeps every one", async (t) => {
+  // Three samples on three steps of one pattern. `sampleCapBytes` stands in for
+  // the browser's 256 MB, lowered so three tiny samples pass it: an engine built
+  // with that cap would drop the first sample when the third one loads, and its
+  // step would play silence.
+  const song = samplerSong();
+  song.steps["clip-1/a/12/a.2"] = stepOf("clip-1", "a", 12, 2);
+
+  const frames = 4800;
+  // The engine counts one frame of slack per sample for the resampler's rounding.
+  const oneSampleBytes = (frames + 1) * 2 * 4;
+  const constant = () => new Float32Array(frames).fill(0.3);
+  const asked = [];
+
+  // The engine the render builds is watched here: its cap is the window's own
+  // sample bytes, not the (lowered) cap it would otherwise start under.
+  const built = [];
+  const realCreate = studioEngine.create;
+  studioEngine.create = async (context, options) => {
+    built.push(options);
+    return realCreate(context, options);
+  };
+  t.after(() => {
+    studioEngine.create = realCreate;
+  });
+
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 6,
+    sampleCapBytes: 2 * oneSampleBytes,
+    sampleAudio: async (sample) => {
+      asked.push(sample.id);
+      return { rate: SAMPLE_RATE, channels: [constant(), constant()] };
+    },
+  });
+
+  assert.equal(built.length, 1, "the render built one engine");
+  assert.equal(
+    built[0].maxSampleBytes,
+    3 * oneSampleBytes,
+    "its cap is room for every sample it loads, not the cap it started under",
+  );
+  assert.deepEqual(asked, [SAMPLE_A, SAMPLE_B, SAMPLE_C], "every sample the pattern triggers was read");
+  assert.deepEqual(rendered.missing_samples, []);
+
+  // Each step sounds. A 16th is 6000 frames at 120 bpm and 48 kHz, and pattern A
+  // plays at beats 0-4 and 8-12, so its steps land on 0, 24000, 48000 and
+  // 264000 frames. The first one proves the earliest sample was not trimmed
+  // away when a later load went past the cap the engine started with.
+  assert.ok(peakIn(rendered.left, 0, frames) > 0.05, "the first step sounds, so its sample is still loaded");
+  assert.ok(peakIn(rendered.left, 24000, 24000 + frames) > 0.05, "the second step sounds");
+  assert.ok(peakIn(rendered.left, 264000, 264000 + frames) > 0.05, "the third step sounds");
+});
+
+test("a render needing more than 1 GiB of samples is refused before it starts", async () => {
+  const song = samplerSong();
+  // Declared frames alone put the window past the budget: the refusal is
+  // arithmetic, so nothing is read, decoded or allocated.
+  song.samples[SAMPLE_A] = { ...song.samples[SAMPLE_A], frames: 200000000, channels: 2 };
+  const asked = [];
+
+  await assert.rejects(
+    renderSong(song, {
+      scene_id: "scene-1",
+      seconds: 1,
+      sampleAudio: async (sample) => {
+        asked.push(sample.id);
+        return sampleAudioOf();
+      },
+    }),
+    { message: /^This render needs \d+ MB of samples; a render holds at most 1024 MB\.$/ },
+  );
+  assert.deepEqual(asked, [], "no sample is read for a render that cannot hold them");
+});
+
+test("a render reports a missing sample", async () => {
+  const song = samplerSong();
+
+  // The renderer keeps going — a pad whose sample is gone plays silence (Review
+  // Focus 1) — and says which sample it could not hear, and why.
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      if (sample.id === SAMPLE_B) {
+        throw new Error(`Sample ${sample.id} could not be loaded for this render: no such key.`);
+      }
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(rendered.missing_samples, [
+    { id: SAMPLE_B, reason: `Sample ${SAMPLE_B} could not be loaded for this render: no such key.` },
+  ]);
+  assert.equal(rendered.seconds, 1, "the render still happened");
+  assert.equal(rendered.left.length, SAMPLE_RATE);
+
+  // A pad that names a sample the song does not hold at all is reported too,
+  // rather than skipped: the id is all the song can tell us.
+  const orphaned = structuredClone(song);
+  delete orphaned.samples[SAMPLE_A];
+  const orphan = await renderSong(orphaned, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async () => sampleAudioOf(),
+  });
+  assert.deepEqual(orphan.missing_samples, [{ id: SAMPLE_A, reason: "the song has no such sample" }]);
+
+  // Through the storage rail: storage has neither sample, so the load names
+  // each one, the WAV is still filed and the audit line carries the list.
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({ db, storage, acl, maxSeconds: 300, now: () => CLOCK });
+  const stored = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(stored.missing_samples.map((item) => item.id), [SAMPLE_A, SAMPLE_B]);
+  for (const item of stored.missing_samples) {
+    assert.match(item.reason, new RegExp(`Sample ${item.id} could not be loaded for this render`));
+  }
+  assert.equal(storage.uploads.length, 1, "the render is still stored");
+  const audit = acl.audits.find((entry) => entry.action === "studio.render");
+  assert.ok(audit, "the render is audited");
+  assert.deepEqual(audit.payload.missing_samples, stored.missing_samples);
+  assert.equal(storage.gets.length, 2, "only the two samples the render plays were read");
+  assert.deepEqual(
+    storage.gets.map((get) => get.key).sort(),
+    [sampleKey(SAMPLE_A), sampleKey(SAMPLE_B)].sort(),
+  );
+
+  // And the MCP tool hands the list to the agent, in the same words.
+  const server = createStudioServer({ hub: renderHub(song), renderer });
+  const client = new Client({ name: "studio-render-test", version: "0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const answer = await client.callTool({
+      name: "studio_render",
+      arguments: { song_id: "song-1", scene_id: "scene-1", seconds: 1 },
+    });
+    assert.notEqual(answer.isError, true, answer.content?.[0]?.text);
+    const body = JSON.parse(answer.content[0].text);
+    assert.deepEqual(body.missing_samples, stored.missing_samples, "the agent is told what it did not hear");
+    assert.ok(body.url, "the render's url still comes back");
+  } finally {
+    await client.close();
+  }
 });

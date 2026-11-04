@@ -74,6 +74,12 @@ const TAKE = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
 /** A second take id, for the take that belongs to the other song. */
 const OTHER_TAKE = "1b3c5d7e-9f10-4a2b-8c4d-6e8f0a2b4c6d";
 
+/** One sample id: a UUID an import or recording client generated. */
+const SAMPLE = "3f2a1b0c-4d5e-4f60-8a71-9b2c3d4e5f60";
+
+/** A second sample id, for the sample that belongs to the other song. */
+const OTHER_SAMPLE = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+
 /** The chunk size the routes advertise (1 MiB). */
 const CHUNK_BYTES = 1048576;
 
@@ -95,6 +101,11 @@ const STORAGE_UNAVAILABLE = "Crow storage is not available on this instance.";
 /** @returns {string} the one storage key a take of a song may be played from. */
 function takeKey(songId, takeId) {
   return `${PREFIX}studio/${songId}/takes/${takeId}.wav`;
+}
+
+/** @returns {string} the one storage key a sample of a song may be played from. */
+function sampleKey(songId, sampleId) {
+  return `${PREFIX}studio/${songId}/samples/${sampleId}.wav`;
 }
 
 /** @returns {string} the SHA-256 a client would send for one chunk. */
@@ -265,19 +276,20 @@ function fakeAcl() {
 
 /**
  * A session hub with what the web layer asks of it: the song list (a song's
- * project) and a song's snapshot (its takes). `take.add` stores the take in the
- * song and refuses an id the song already has, as the real hub's
- * de-duplication does. `songRow(id)` is the single-row lookup the routes
- * prefer, so a test can prove the audio route asks for one song instead of
- * listing them all.
- * @param {{takes?: object, otherTakes?: object}} [options]
+ * project) and a song's snapshot (its takes, samples and pads). `take.add`
+ * stores the take in the song and refuses an id the song already has, as the
+ * real hub's de-duplication does. `songRow(id)` is the single-row lookup the
+ * routes prefer, so a test can prove the audio route asks for one song instead
+ * of listing them all.
+ * @param {{takes?: object, otherTakes?: object, samples?: object,
+ *          otherSamples?: object, pads?: object}} [options]
  */
-function fakeHub({ takes = {}, otherTakes = {} } = {}) {
+function fakeHub({ takes = {}, otherTakes = {}, samples = {}, otherSamples = {}, pads = {} } = {}) {
   const commands = [];
   const songRows = [];
   const state = {
-    [SONG]: { project_id: PROJECT, takes: { ...takes } },
-    [OTHER_SONG]: { project_id: PROJECT, takes: { ...otherTakes } },
+    [SONG]: { project_id: PROJECT, takes: { ...takes }, samples: { ...samples }, pads: { ...pads } },
+    [OTHER_SONG]: { project_id: PROJECT, takes: { ...otherTakes }, samples: { ...otherSamples }, pads: {} },
   };
   return {
     commands,
@@ -305,7 +317,13 @@ function fakeHub({ takes = {}, otherTakes = {} } = {}) {
       }
       return {
         doc: null,
-        snapshot: { meta: { title: songId, bpm: 120 }, takes: song.takes, clips: {} },
+        snapshot: {
+          meta: { title: songId, bpm: 120 },
+          takes: song.takes,
+          samples: song.samples,
+          pads: song.pads,
+          clips: {},
+        },
         snapshot_version: 1,
       };
     },
@@ -354,18 +372,28 @@ function dashboardAuth(req, res, next) {
  * scratch staging directory, a real express app, and the fakes above.
  * @param {import("node:test").TestContext} t
  * @param {{uploadUnavailable?: boolean, playback?: boolean, takes?: object,
- *          otherTakes?: object, audioStorage?: object|null}} [options]
+ *          otherTakes?: object, samples?: object, otherSamples?: object,
+ *          pads?: object, audioStorage?: object|null}} [options]
  *   `audioStorage` replaces the playback adapter the audio route streams
  *   through, so a test can make storage refuse, hide an object, or stream
  *   slowly; null with `playback: false` is an instance with no storage.
  */
 async function boot(
   t,
-  { uploadUnavailable = false, playback = true, takes = {}, otherTakes = {}, audioStorage = null } = {},
+  {
+    uploadUnavailable = false,
+    playback = true,
+    takes = {},
+    otherTakes = {},
+    samples = {},
+    otherSamples = {},
+    pads = {},
+    audioStorage = null,
+  } = {},
 ) {
   const db = fakeDb();
   const acl = fakeAcl();
-  const hub = fakeHub({ takes, otherTakes });
+  const hub = fakeHub({ takes, otherTakes, samples, otherSamples, pads });
   const storage = fakeStorage({ uploadUnavailable });
   const playbackStorage = audioStorage ?? (playback ? takeStorageOf(storage) : null);
   const staging = mkdtempSync(join(tmpdir(), "studio-takes-routes-"));
@@ -492,7 +520,17 @@ async function sendChunk(base, takeId, index, bytes, headers = {}) {
 
 /** GET one take's audio, keeping the headers and the bytes. */
 async function fetchAudio(base, songId, takeId, headers = {}) {
-  const response = await fetch(`${base}/api/studio/songs/${songId}/takes/${takeId}/audio`, {
+  return fetchAudioAt(base, `/api/studio/songs/${songId}/takes/${takeId}/audio`, headers);
+}
+
+/** GET one sample's audio, keeping the headers and the bytes. */
+async function fetchSampleAudio(base, songId, sampleId, headers = {}) {
+  return fetchAudioAt(base, `/api/studio/songs/${songId}/samples/${sampleId}/audio`, headers);
+}
+
+/** GET one stored audio route, keeping the headers and the bytes. */
+async function fetchAudioAt(base, path, headers = {}) {
+  const response = await fetch(`${base}${path}`, {
     headers: { cookie: SESSION, ...FORWARDED, ...headers },
   });
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -610,6 +648,58 @@ test("audio route refuses a take of another song", async (t) => {
   // Neither request reached storage: the key was refused, not fetched and then
   // hidden.
   assert.deepEqual(playbackStorage.requested, []);
+});
+
+test("the sample route refuses another song's sample", async (t) => {
+  const { base, playbackStorage } = await boot(t, {
+    // This song holds a sample whose key names the other song's samples
+    // directory, and the other song holds a perfectly good sample of its own.
+    samples: {
+      [SAMPLE]: { id: SAMPLE, storage_key: sampleKey(OTHER_SONG, SAMPLE), rate: 48000, channels: 2, frames: 8 },
+    },
+    otherSamples: {
+      [OTHER_SAMPLE]: {
+        id: OTHER_SAMPLE,
+        storage_key: sampleKey(OTHER_SONG, OTHER_SAMPLE),
+        rate: 48000,
+        channels: 2,
+        frames: 8,
+      },
+    },
+  });
+  const otherSongsSample = await fetchSampleAudio(base, SONG, OTHER_SAMPLE);
+  assert.equal(otherSongsSample.status, 404);
+  assert.deepEqual(otherSongsSample.body, { error: `There is no sample ${OTHER_SAMPLE} in this song.` });
+
+  const keyOutsideTheSong = await fetchSampleAudio(base, SONG, SAMPLE);
+  assert.equal(keyOutsideTheSong.status, 404);
+  assert.deepEqual(keyOutsideTheSong.body, { error: `There is no sample ${SAMPLE} in this song.` });
+
+  // Neither request reached storage: the key was refused, not fetched and then
+  // hidden. `samples/` and `takes/` are separate: a take route cannot reach a
+  // sample either.
+  assert.deepEqual(playbackStorage.requested, []);
+
+  // A sample of this song, at the key `finish` writes, streams back the way a
+  // take does.
+  const good = await boot(t, {
+    samples: {
+      [SAMPLE]: { id: SAMPLE, storage_key: sampleKey(SONG, SAMPLE), rate: 48000, channels: 2, frames: 8 },
+    },
+  });
+  const bytes = pcm24(8);
+  good.storage.objects.set(sampleKey(SONG, SAMPLE), bytes);
+
+  const played = await fetchSampleAudio(good.base, SONG, SAMPLE);
+  assert.equal(played.status, 200);
+  assert.equal(played.headers.get("content-type"), "audio/wav");
+  assert.equal(played.headers.get("cache-control"), "private, max-age=31536000, immutable");
+  assert.equal(played.headers.get("content-length"), String(bytes.length));
+  assert.deepEqual(played.bytes, bytes);
+  assert.deepEqual(
+    good.playbackStorage.requested.map((entry) => entry.key),
+    [sampleKey(SONG, SAMPLE)],
+  );
 });
 
 test("audio route streams the take with immutable caching", async (t) => {
@@ -777,6 +867,7 @@ test("funnel header refused on every take route", async (t) => {
       headers: FUNNEL,
     }),
     await fetchAudio(base, SONG, TAKE, FUNNEL),
+    await fetchSampleAudio(base, SONG, SAMPLE, FUNNEL),
   ];
   for (const response of responses) assert.equal(response.status, 403);
 
