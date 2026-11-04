@@ -11,6 +11,11 @@
  *   - on load: applies the stored order, size and removals. Anything odd — no value, broken JSON, a
  *     wrong version, an id no widget carries any more — falls back to the server's default, never to
  *     a blank page;
+ *   - fills a LAZY cell the first moment this device shows it: a widget the page offers but its own
+ *     default layout does not hold is drawn by the server as a hidden cell with one loading line
+ *     (`data-wg-lazy="1"`), and its body is fetched from GET /dashboard/widgets-api/cell on this
+ *     page. An empty answer is the grid's "nothing to show" line, a failed one its error line (and
+ *     the cell is marked lazy again, so a later show tries once more);
  *   - Edit: shows Remove on each cell and a Size button that steps through the sizes that widget is
  *     allowed (`data-sizes`) and nothing else. Pointer events move a cell: the mouse drags at once,
  *     a touch starts after a long press, so a scroll or the shell's swipe is never mistaken for a
@@ -120,6 +125,57 @@ export function gridClientJs() {
       }
       var next = list[(at + 1) % list.length];
       return putSize(cell, next[0], next[1]);
+    }
+
+    // ---- a lazy cell's body ----
+
+    // The grid carries the two lines the client may have to draw itself: the server's "nothing to
+    // show" and its "couldn't load". Both are page text, so they go in as text, never as markup.
+    function bodyOf(cell) { return cell.querySelector('.wg-cell-body'); }
+    function setNote(cell, text) {
+      var body = bodyOf(cell);
+      if (!body) return;
+      body.textContent = '';
+      var p = document.createElement('p');
+      p.className = 'fy-note';
+      p.textContent = text;
+      body.appendChild(p);
+    }
+    function fillLazy(cell) {
+      if (!cell || !grid.contains(cell)) return;
+      // '1' is "not fetched yet"; 'loading' is "a fetch is on its way" (so a second show cannot
+      // start a second one). A fetched cell carries no attribute at all.
+      if (cell.getAttribute('data-wg-lazy') !== '1') return;
+      if (hiddenOf(cell)) return;
+      var id = cell.getAttribute('data-widget');
+      if (!id) return;
+      var page = grid.getAttribute('data-wg-page') || '';
+      cell.setAttribute('data-wg-lazy', 'loading');
+      function failed() {
+        setNote(cell, grid.getAttribute('data-wg-error') || '');
+        cell.setAttribute('data-wg-lazy', '1');
+      }
+      if (typeof window.fetch !== 'function') { failed(); return; }
+      var url = '/dashboard/widgets-api/cell?page=' + encodeURIComponent(page) + '&id=' + encodeURIComponent(id);
+      var request;
+      try {
+        request = window.fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+      } catch (err) { failed(); return; }
+      Promise.resolve(request).then(function (res) {
+        if (!res || !res.ok) throw new Error('cell request refused');
+        return res.json();
+      }).then(function (data) {
+        if (!data || typeof data.html !== 'string') throw new Error('cell request answered oddly');
+        var body = bodyOf(cell);
+        if (!body) throw new Error('cell has no body');
+        if (data.html) body.innerHTML = data.html;
+        else setNote(cell, grid.getAttribute('data-wg-nothing') || '');
+        cell.removeAttribute('data-wg-lazy');
+      }).catch(function () { failed(); });
+    }
+    function fillShownLazy() {
+      var list = shown();
+      for (var i = 0; i < list.length; i++) fillLazy(list[i]);
     }
 
     // ---- the device's layout ----
@@ -338,6 +394,7 @@ export function gridClientJs() {
         putSize(cell, size[0], size[1]);
         show(cell);
         grid.appendChild(cell);
+        fillLazy(cell);
       }
       closePicker();
     }
@@ -402,6 +459,7 @@ export function gridClientJs() {
     }
 
     applyLayout(readLayout());
+    fillShownLazy();
   }
 
   function boot() {

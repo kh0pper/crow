@@ -4680,6 +4680,10 @@ export const translations = {
   "widgets.grid.saved": { en: "Layout saved on this device.", es: "Diseño guardado en este dispositivo." },
   "widgets.grid.none": { en: "Every widget is already on the page.", es: "Todos los widgets ya están en la página." },
   "widgets.grid.error": { en: "This widget couldn't load just now.", es: "Este widget no se pudo cargar ahora mismo." },
+  // Widgets phase 4: a widget that is not on the page's default layout is drawn as a lazy cell and
+  // fetched when the device shows it (widgets/grid-html.js, widgets/grid-client.js).
+  "widgets.grid.loading": { en: "Loading…", es: "Cargando…" },
+  "widgets.grid.nothing": { en: "Nothing to show here right now.", es: "Nada que mostrar por ahora." },
   // Widgets phase 2, Task 3: the generic widget page (/dashboard/widgets) and its "Today + Ramble"
   // card (panels/widgets.js, for-you/today.js, panels/for-you/html.js todayHtml).
   "widgets.page.title": { en: "Widgets", es: "Tus widgets" },
