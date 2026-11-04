@@ -36,6 +36,10 @@ const STUB_CATALOGUE = async () => ({
   },
 });
 
+/** Two recorded takes, for the takes read and the tools around them. */
+const TAKE_A = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
+const TAKE_B = "0c9c3d2a-1b4e-4f6a-8d7c-5e4f3a2b1c0d";
+
 /**
  * A fake hub client: the same seven methods `createHubClient` returns.
  *
@@ -425,6 +429,143 @@ test("a call carrying a forwarded non-bot actor (a peer) is not the operator", a
     assert.equal(seen.calls.listSongs.at(-1).author.id, "other", "a peer gets the fail-closed author");
     await client.callTool({ name: "studio_list_songs", arguments: {} });
     assert.equal(seen.calls.listSongs.at(-1).author.id, "mcp", "no forwarded actor is the operator's session");
+  } finally {
+    await client.close();
+  }
+});
+
+test("agent can keep and comp but not add or discard takes", async () => {
+  const { hub, calls } = makeHub();
+  // A song with two recorded takes, one on each of two clips, the newer one
+  // discarded. Both clips' comps are read for `in_comp`.
+  hub.snapshot = async (songId, author = null) => {
+    calls.snapshot.push({ song_id: songId, author });
+    return {
+      song_id: songId,
+      project_id: 4,
+      snapshot: {
+        meta: { title: "Takes", bpm: 112, key: "A minor" },
+        tracks: [{ id: "audio-1", name: "Guitar", device: { engine: "audio" }, mute: false, solo: false, locked: false }],
+        scenes: [{ id: "scene-1", name: "A" }],
+        clips: {
+          "clip-1": {
+            id: "clip-1",
+            track_id: "audio-1",
+            scene_id: "scene-1",
+            name: "Guitar",
+            length_bars: 1,
+            kind: "audio",
+            notes: [],
+            comp: [{ take_id: TAKE_A, from_beat: 0, to_beat: 4 }],
+          },
+          "clip-2": {
+            id: "clip-2",
+            track_id: "audio-1",
+            scene_id: "scene-1",
+            name: "Voice",
+            length_bars: 1,
+            kind: "audio",
+            notes: [],
+            comp: [],
+          },
+        },
+        takes: {
+          [TAKE_A]: {
+            id: TAKE_A,
+            clip_id: "clip-1",
+            storage_key: `projects/4/studio/song-1/takes/${TAKE_A}.wav`,
+            rate: 48000,
+            channels: 2,
+            frames: 96000,
+            offset_frames: 1200,
+            compensated: true,
+            bpm: 112,
+            recorded_at: "2026-11-02T10:00:00.000Z",
+            author_label: "the operator",
+            discarded: false,
+          },
+          [TAKE_B]: {
+            id: TAKE_B,
+            clip_id: "clip-2",
+            storage_key: `projects/4/studio/song-1/takes/${TAKE_B}.wav`,
+            rate: 48000,
+            channels: 1,
+            frames: 48000,
+            offset_frames: 0,
+            compensated: false,
+            bpm: 112,
+            recorded_at: "2026-11-03T10:00:00.000Z",
+            author_label: "the operator",
+            discarded: true,
+          },
+        },
+      },
+      state: "",
+    };
+  };
+
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+  const expectedAuthor = { kind: "agent", id: "mcp", label: "Agent (MCP)" };
+  try {
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    assert.ok(names.includes("studio_take_keep"), "an agent may keep a take");
+    assert.ok(names.includes("studio_clip_set_comp"), "an agent may comp takes");
+    assert.ok(names.includes("studio_takes"), "an agent may list takes");
+    assert.equal(names.includes("studio_take_add"), false, "adding a take is Studio's own step");
+    assert.equal(names.includes("studio_take_discard"), false, "discarding a take needs the operator");
+
+    const listed = await client.callTool({ name: "studio_takes", arguments: { song_id: "song-1" } });
+    assert.notEqual(listed.isError, true, textOf(listed));
+    assert.deepEqual(calls.snapshot.at(-1).author, expectedAuthor, "the read is scoped by the caller's author");
+
+    const rows = JSON.parse(textOf(listed));
+    assert.equal(rows.length, 2);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      [TAKE_B, TAKE_A],
+      "the newest recording comes first",
+    );
+
+    const kept = rows.find((row) => row.id === TAKE_A);
+    assert.deepEqual(Object.keys(kept).sort(), [
+      "author_label",
+      "bpm",
+      "channels",
+      "clip_id",
+      "compensated",
+      "discarded",
+      "id",
+      "in_comp",
+      "offset_ms",
+      "rate",
+      "recorded_at",
+      "seconds",
+    ]);
+    assert.equal(kept.clip_id, "clip-1");
+    assert.equal(kept.seconds, 2, "96000 frames at 48 kHz is 2 s");
+    assert.equal(kept.channels, 2);
+    assert.equal(kept.rate, 48000);
+    assert.equal(kept.bpm, 112);
+    assert.equal(kept.compensated, true);
+    assert.equal(kept.offset_ms, 25, "1200 frames at 48 kHz is 25 ms");
+    assert.equal(kept.author_label, "the operator");
+    assert.equal(kept.recorded_at, "2026-11-02T10:00:00.000Z");
+    assert.equal(kept.discarded, false);
+    assert.equal(kept.in_comp, true, "clip-1's comp plays it");
+
+    const discarded = rows.find((row) => row.id === TAKE_B);
+    assert.equal(discarded.discarded, true);
+    assert.equal(discarded.compensated, false);
+    assert.equal(discarded.offset_ms, 0);
+    assert.equal(discarded.in_comp, false, "nothing plays it");
+
+    const oneClip = await client.callTool({ name: "studio_takes", arguments: { song_id: "song-1", clip_id: "clip-2" } });
+    assert.notEqual(oneClip.isError, true, textOf(oneClip));
+    assert.deepEqual(
+      JSON.parse(textOf(oneClip)).map((row) => row.id),
+      [TAKE_B],
+      "clip_id narrows the listing",
+    );
   } finally {
     await client.close();
   }

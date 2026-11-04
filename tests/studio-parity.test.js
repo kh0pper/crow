@@ -29,7 +29,8 @@ import { CLIENT_SCRIPT, COMMANDS } from "../bundles/studio/panel/client.js";
 
 /**
  * The tools that are not registry commands: the song/history reads, the two
- * history steps, the render and the engine reference (plan Task 9).
+ * history steps, the render and the engine reference (plan Task 9), plus the
+ * takes read Task 8 adds.
  * @type {ReadonlySet<string>}
  */
 const DOCUMENTED_TOOLS = new Set([
@@ -37,6 +38,7 @@ const DOCUMENTED_TOOLS = new Set([
   "studio_create_song",
   "studio_session_summary",
   "studio_get_clip",
+  "studio_takes",
   "studio_history",
   "studio_undo",
   "studio_redo",
