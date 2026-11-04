@@ -147,7 +147,7 @@ test("crow_browser_launch: CROW_BROWSER_CDP_URL override still wins and still ge
 // static: the token travels in a header, never in argv or a URL
 // ---------------------------------------------------------------------------
 
-test("manifest: the token is generated and minted, never required yet, never handed to the MCP server", () => {
+test("manifest: the token is generated and minted, required by the bundle, never handed to the MCP server", () => {
   const mf = JSON.parse(readFileSync(join(ROOT, "bundles/browser/manifest.json"), "utf8"));
   const v = mf.env_vars.find((e) => e.name === "CROW_BROWSER_CDP_TOKEN");
   assert.ok(v, "the manifest declares CROW_BROWSER_CDP_TOKEN");
@@ -155,10 +155,11 @@ test("manifest: the token is generated and minted, never required yet, never han
     { required: v.required, secret: v.secret, generate: v.generate, propagate: v.propagate, mint_if_missing: v.mint_if_missing },
     { required: false, secret: true, generate: "hex32", propagate: false, mint_if_missing: true },
   );
-  assert.doesNotMatch(JSON.stringify(mf.requires.env), /CDP_TOKEN/, "not required yet: the container only demands it after the next browser update");
+  assert.match(JSON.stringify(mf.requires.env), /CDP_TOKEN/, "the bundle requires it: 1.5.0's container refuses to start without it");
   assert.ok(!mf.server.envKeys.includes("CROW_BROWSER_CDP_TOKEN"), "the server reads the bundle .env, so its own env never holds the token");
   assert.match(v.description, /settings file/, "says where it lives");
-  assert.match(v.description, /next browser update/, "says when the container starts requiring it");
+  assert.match(v.description, /bearer token/, "says how the container uses it");
+  assert.doesNotMatch(v.description, /next browser update/, "the gate has shipped: no 'not yet' wording left");
 });
 
 const CODE_EXT = /\.(js|mjs|cjs|sh|py)$/;

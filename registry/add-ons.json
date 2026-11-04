@@ -479,7 +479,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.4.2",
+      "version": "1.5.0",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -496,10 +496,16 @@
       "docker": {
         "composefile": "docker-compose.yml"
       },
+      "refreshFiles": [
+        "docker-compose.yml",
+        "Dockerfile",
+        "entrypoint.sh",
+        "cdp-relay.mjs"
+      ],
       "privileged": true,
       "install_consent_messages": {
-        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools) listens on 127.0.0.1 only. The VNC viewer has no password prompt: you open it from the Crow dashboard, behind your Crow sign-in. Its web port (6080) listens on 127.0.0.1 only and shows the browser's screen only with a key that Crow generates and the Crow gateway adds; the screen itself (VNC and X) is on no network port. This keeps web pages and other machines out. It does not keep out programs already running on this machine: the browser's control port (Chrome DevTools, 9222) has no password, so any program here can drive the browser and read its cookies. It saves downloads under your Crow folder.",
-        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools) escucha solo en 127.0.0.1. El visor VNC no pide contraseña: lo abres desde el panel de Crow, con tu inicio de sesión de Crow. Su puerto web (6080) escucha solo en 127.0.0.1 y solo muestra la pantalla del navegador con una clave que Crow genera y que añade el gateway de Crow; la pantalla en sí (VNC y X) no está en ningún puerto de red. Esto deja fuera a las páginas web y a otras máquinas. No deja fuera a los programas que ya se ejecutan en esta máquina: el puerto de control del navegador (Chrome DevTools, 9222) no tiene contraseña, así que cualquier programa de aquí puede manejar el navegador y leer sus cookies. Guarda las descargas dentro de tu carpeta de Crow."
+        "en": "The browser container uses host networking, so the browser it runs can reach every service on this machine that listens only on 127.0.0.1, as well as the internet. Its control port (Chrome DevTools, 9222) listens on 127.0.0.1 only and needs a key that Crow generates: the browser itself opens no port at all, and a small relay inside the container refuses any request without that key, so other programs and web pages cannot drive the browser. The VNC viewer has no password prompt: you open it from the Crow dashboard, behind your Crow sign-in. Its web port (6080) listens on 127.0.0.1 only and shows the browser's screen only with a key that Crow generates and the Crow gateway adds; the screen itself (VNC and X) is on no network port. This keeps web pages, other machines and other users out. It does not keep out a program that can read this Crow folder's browser settings, where the two keys are kept. It saves downloads under your Crow folder.",
+        "es": "El contenedor del navegador usa la red del host, así que el navegador que ejecuta puede llegar a todos los servicios de esta máquina que escuchan solo en 127.0.0.1, además de a internet. Su puerto de control (Chrome DevTools, 9222) escucha solo en 127.0.0.1 y necesita una clave que genera Crow: el navegador en sí no abre ningún puerto, y un pequeño relay dentro del contenedor rechaza cualquier petición sin esa clave, así que otros programas y las páginas web no pueden manejar el navegador. El visor VNC no pide contraseña: lo abres desde el panel de Crow, con tu inicio de sesión de Crow. Su puerto web (6080) escucha solo en 127.0.0.1 y solo muestra la pantalla del navegador con una clave que Crow genera y que añade el gateway de Crow; la pantalla en sí (VNC y X) no está en ningún puerto de red. Esto deja fuera a las páginas web, a otras máquinas y a otros usuarios. No deja fuera a un programa que pueda leer los ajustes del navegador en tu carpeta de Crow, donde están las dos claves. Guarda las descargas dentro de tu carpeta de Crow."
       },
       "server": {
         "command": "node",
@@ -530,7 +536,8 @@
       ],
       "requires": {
         "env": [
-          "CROW_BROWSER_VNC_TOKEN"
+          "CROW_BROWSER_VNC_TOKEN",
+          "CROW_BROWSER_CDP_TOKEN"
         ],
         "min_ram_mb": 1024,
         "min_disk_mb": 512
@@ -546,7 +553,7 @@
         },
         {
           "name": "CROW_BROWSER_CDP_TOKEN",
-          "description": "The control key for Chrome DevTools. Crow generates it and keeps it in this bundle's settings file; Crow's own browser clients send it. The browser container will require it after the next browser update. You never type or copy it.",
+          "description": "The control key for Chrome DevTools. Crow generates it and keeps it in this bundle's settings file; compose hands it to the container as a root-only file, and only a caller that sends it as a bearer token can reach the browser's control port. Crow's own browser clients send it. You never type or copy it. After changing it, recreate the container.",
           "required": false,
           "secret": true,
           "generate": "hex32",
@@ -580,8 +587,7 @@
         }
       ],
       "ports": [
-        6080,
-        9222
+        6080
       ],
       "webUI": {
         "port": 6080,
@@ -590,7 +596,7 @@
         "label": "VNC Viewer",
         "wsHostTokenEnv": "CROW_BROWSER_VNC_TOKEN"
       },
-      "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. CDP and noVNC bind to 127.0.0.1 only and RFB is a unix socket inside the container; the viewer has no password prompt and is reached through the signed-in Crow dashboard (/proxy/browser/), which adds the per-instance noVNC token server-side.",
+      "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. Since 1.5.0 Chromium runs on a pipe (--remote-debugging-pipe) and opens no port: a small relay inside the container serves 127.0.0.1:9222 to clients that send CROW_BROWSER_CDP_TOKEN as a bearer token, and refuses everything else. noVNC binds 127.0.0.1 only and RFB is a unix socket inside the container; the viewer has no password prompt and is reached through the signed-in Crow dashboard (/proxy/browser/), which adds the per-instance noVNC token server-side. The CDP gate keeps out other uids, other containers and web pages; it does not keep out a program that can read this bundle's .env (where the token lives).",
       "official": true
     },
     {

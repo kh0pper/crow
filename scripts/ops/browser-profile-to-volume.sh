@@ -477,7 +477,10 @@ say "deadman disarmed."
 WAIT="${CROW_MIGRATE_CDP_WAIT:-90}"
 ok=0
 for i in $(seq 1 "$WAIT"); do
-  if curl -fsS "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then ok=1; break; fi
+  # 200 = an ungated Chromium (before 1.5.0); 401 = the token-gated relay (1.5.0+).
+  # Both mean "listening"; a bare -f would take the new, gated answer for "down".
+  CDP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${CDP_PORT}/json/version" || true)
+  if [ "$CDP_CODE" = "200" ] || [ "$CDP_CODE" = "401" ]; then ok=1; break; fi
   sleep 1
 done
 if [ "$ok" = 1 ]; then

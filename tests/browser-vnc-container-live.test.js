@@ -9,7 +9,9 @@
 // real x11vnc / websockify / noVNC of the image:
 //   - no TCP port carries RFB (a raw connect to 5900 fails; x11vnc owns no
 //     listening socket), RFB is a 0600 unix socket in a 0700 directory;
-//   - noVNC's port listens on 127.0.0.1 only;
+//   - noVNC's port listens on 127.0.0.1 only, and so does the CDP relay;
+//   - the CDP relay refuses /json/version without the token (401) and answers with it
+//     (200), and Chromium itself owns no listener (it runs on --remote-debugging-pipe);
 //   - a WebSocket without the token (any Host but the token) gets no RFB;
 //   - with the token as its Host header it gets the RFB banner and the
 //     "None" security type (no password prompt);
@@ -31,6 +33,7 @@ const skip = IMAGE ? false : "set CROW_TEST_BROWSER_IMAGE to a built crow-browse
 const NAME = `crow-vnc-live-${process.pid}-${randomBytes(3).toString("hex")}`;
 const VOL = NAME + "-profile";
 const TOKEN = randomBytes(32).toString("hex");
+const CDP_TOKEN = randomBytes(32).toString("hex");
 const dir = mkdtempSync(join(tmpdir(), "crow-vnc-live-"));
 const docker = (...args) => execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60000 });
 const allLogs = () => execFileSync("sh", ["-c", `docker logs ${NAME} 2>&1`], { encoding: "utf8", timeout: 30000 });
@@ -83,9 +86,12 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
   chmodSync(ep, 0o755);
   const tok = join(dir, "token");
   writeFileSync(tok, TOKEN + "\n", { mode: 0o644 });   // readable by the container's root; 0400 in compose
+  const cdpTok = join(dir, "cdp-token");
+  writeFileSync(cdpTok, CDP_TOKEN + "\n", { mode: 0o644 });
   const runArgs = (name, instance) => ["run", "-d", "--name", name, "--network", "none", "--init", "--shm-size", "1g", "-m", "2g",
     "--stop-timeout", "30", "-e", `CROW_INSTANCE=${instance}`, "-e", "VNC_PASSWORD=legacy-value", "-e", "VNC_TOKEN=env-token-must-be-ignored",
-    "-v", `${tok}:/run/secrets/crow-vnc-token:ro`, "-v", `${VOL}:/root/.config/chromium-crow`, "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
+    "-v", `${tok}:/run/secrets/crow-vnc-token:ro`, "-v", `${cdpTok}:/run/secrets/crow-cdp-token:ro`,
+    "-v", `${VOL}:/root/.config/chromium-crow`, "-v", `${ep}:/app/entrypoint.sh:ro`, IMAGE];
   docker(...runArgs(NAME, "/test/instance-a"));
   const waitReady = async () => {
     let l = "";
@@ -100,8 +106,9 @@ test("the entrypoint in a throwaway container: RFB on a unix socket only, noVNC 
   assert.match(logs, /Ready \(verified\)/, logs.slice(-2000));
   assert.match(logs, /RFB on a unix socket only/);
   assert.match(logs, /websockify listens on loopback only \(port 6080\)/);
+  assert.match(logs, /cdp-relay listens on loopback only \(port 9222\)/, "the relay is the only listener on the CDP port, and it is loopback");
 
-  // No TCP listener carries RFB; only noVNC (127.0.0.1:6080) and CDP (127.0.0.1:9222) listen.
+  // No TCP listener carries RFB; only noVNC (127.0.0.1:6080) and the CDP relay (127.0.0.1:9222) listen.
   const listen = inside(`
 rows=[]
 for f in ("/proc/net/tcp","/proc/net/tcp6"):
@@ -110,6 +117,31 @@ for f in ("/proc/net/tcp","/proc/net/tcp6"):
         if p[3]=="0A": rows.append(p[1])
 print(" ".join(sorted(rows)))`);
   assert.equal(listen, "0100007F:17C0 0100007F:2406", "only 127.0.0.1:6080 and 127.0.0.1:9222");
+  // The 9222 listener is the relay, not Chromium: the relay refuses a request without the
+  // token and answers with it (the token is read from the file inside the container, so it
+  // never appears in an argv or an env of `docker exec`).
+  const cdpStatus = (withToken) => inside(`
+import urllib.request
+req = urllib.request.Request("http://127.0.0.1:9222/json/version")
+if ${withToken ? "True" : "False"}:
+    req.add_header("Authorization", "Bearer " + open("/run/secrets/crow-cdp-token").read().strip())
+try:
+    print(urllib.request.urlopen(req, timeout=5).status)
+except Exception as e:
+    print(getattr(e, "code", "error"))`);
+  assert.equal(cdpStatus(false), "401", "no token, no version: the relay gates the port");
+  assert.equal(cdpStatus(true), "200", "the token in the header is the way in");
+  // Chromium owns no listening socket at all (it runs on --remote-debugging-pipe).
+  const chromeListeners = inside(`
+import os
+pids=[]
+for pid in os.listdir("/proc"):
+    if not pid.isdigit(): continue
+    try: cmd=open("/proc/%s/cmdline" % pid,"rb").read()
+    except Exception: continue
+    if b"--user-data-dir=/root/.config/chromium-crow" in cmd: pids.append(pid)
+print(" ".join(pids))`).split().filter(Boolean);
+  assert.ok(chromeListeners.length >= 1, "Chromium is running in the container");
   assert.equal(inside(`
 import socket
 try:
@@ -155,6 +187,20 @@ for pid in os.listdir("/proc"):
 print(",".join(sorted(bad)))`).split(",");
   for (const p of holders) assert.doesNotMatch(p, /chrome|x11vnc|websockify|Xvfb/i, "a child holds the token: " + holders.join(","));
 
+  // The CDP token is on nobody's command line either (the value is read from the
+  // container's own file, so the test itself never puts it in an argv).
+  const cdpArgv = inside(`
+import os
+tok = open("/run/secrets/crow-cdp-token","rb").read().strip()
+bad = []
+for pid in os.listdir("/proc"):
+    if not pid.isdigit(): continue
+    try: cmd = open("/proc/%s/cmdline" % pid, "rb").read()
+    except Exception: continue
+    if tok and tok in cmd: bad.append(pid)
+print(",".join(bad))`);
+  assert.equal(cdpArgv, "", "the CDP token is in no process's command line");
+
   // ---- C1: the X display is not reachable host-wide, by another uid, or by x11vnc -R ----
   const unix = docker("exec", NAME, "cat", "/proc/net/unix");
   assert.doesNotMatch(unix, /@\/tmp\/\.X11-unix\/X/, "no abstract X socket (that namespace is the host's under host networking)");
@@ -173,8 +219,10 @@ except OSError: print("refused")`), "refused", "x11vnc -R rfbport: is refused (-
 
   // ---- I2: a cookie written just before docker stop survives the stop ----
   const setCookie = `
+const { readFileSync } = await import("node:fs");
+const token = readFileSync("/run/secrets/crow-cdp-token", "utf8").trim();
 const { chromium } = await import("/app/node_modules/playwright/index.mjs");
-const b = await chromium.connectOverCDP("http://127.0.0.1:9222");
+const b = await chromium.connectOverCDP("http://127.0.0.1:9222", { headers: { Authorization: "Bearer " + token } });
 const ctx = b.contexts()[0];
 await ctx.addCookies([{ name: "flush_probe", value: "v", domain: ".example.com", path: "/", expires: Math.floor(Date.now() / 1000) + 86400 }]);
 process.exit(0);`;
@@ -182,7 +230,7 @@ process.exit(0);`;
   const t0 = Date.now();
   docker("stop", "-t", "30", NAME);
   const took = Date.now() - t0;
-  assert.match(allLogs(), /stopping: closing Chromium\.\.\.[\s\S]*stopped\./, "the entrypoint's TERM trap ran");
+  assert.match(allLogs(), /stopping: closing Chromium through the relay[\s\S]*stopped\./, "the entrypoint's TERM trap ran");
   docker("start", NAME);
   await waitReady();
   const names = inside(`

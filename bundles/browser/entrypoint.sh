@@ -16,9 +16,12 @@ NOVNC_PORT="${NOVNC_PORT:-6080}"
 VNC_DIR=/run/crow-vnc
 RFB_SOCK="${VNC_DIR}/rfb.sock"
 TOKEN_FILE="${VNC_DIR}/tokens"
-# The token arrives as a file (compose `configs`, mode 0400, copied into the
-# container at create), never as an environment variable.
+# The tokens arrive as files (compose `configs`, mode 0400, copied into the
+# container at create), never as environment variables.
 TOKEN_SRC=/run/secrets/crow-vnc-token
+CDP_TOKEN_SRC=/run/secrets/crow-cdp-token
+# The relay writes this once Chromium's pipe answers Browser.getVersion.
+CDP_READY_FILE=/tmp/cdp-relay.ready
 PROFILE_DIR=/root/.config/chromium-crow
 INSTANCE_MARKER="${PROFILE_DIR}/.crow-instance"
 SCREEN="1920x1080x24"
@@ -40,9 +43,20 @@ die() { echo "[crow-browser] FATAL: $*" >&2; exit 1; }
 #     and no abstract socket (abstract sockets belong to the network namespace,
 #     which is the host's here): only the unix socket in this container's own
 #     /tmp. x11vnc runs -noremote.
-# NOT covered here: Chrome DevTools (CDP) on 127.0.0.1:${CDP_PORT} has no
-# authentication, so any process of any uid on this machine can drive the
-# browser through it. That is tracked separately.
+# Chrome DevTools is not a network port at all (1.5.0): Chromium runs with
+# --remote-debugging-pipe, and the only door is cdp-relay.mjs, which owns fds 3/4
+# and serves 127.0.0.1:${CDP_PORT} ONLY to a caller holding this instance's
+# CROW_BROWSER_CDP_TOKEN (constant-time bearer check; /json/version and one
+# WebSocket path, everything else 404; header cap, connection cap, handshake
+# timeout; no header value is ever logged). Chromium gets no
+# --remote-debugging-port and no --remote-allow-origins, so there is no
+# unauthenticated door and no Origin check to disable.
+# What that keeps out: other uids, other containers, web pages (including pages
+# this browser itself loads), and a bot whose network is unshared. What it does
+# NOT keep out: a same-uid process that can read this bundle's .env, which is
+# where the token lives — a default (`auto`-tier) bot can, until the CROW_BOT_UID
+# containment work lands. The token arrives as a 0400 file, is never in any argv,
+# and is stripped from the environment Chromium inherits.
 # An older install's .env may still pass VNC_PASSWORD: it is ignored, and
 # never printed.
 if [ -n "${VNC_PASSWORD:-}" ]; then
@@ -61,6 +75,14 @@ rm -rf "$VNC_DIR"
 mkdir -m 700 "$VNC_DIR" || die "cannot create ${VNC_DIR}"
 ( umask 077; printf '%s: unix_socket:%s\n' "$VNC_TOKEN_VALUE" "$RFB_SOCK" > "$TOKEN_FILE" ) || die "cannot write the token file"
 unset VNC_TOKEN_VALUE
+
+# The CDP token: the relay reads this file itself, so the value is never a shell
+# variable, never an argv and never an environment variable. Checked here only to
+# fail fast and say why; the relay applies the same rule and refuses to open a port
+# without it (compose passes ${CROW_BROWSER_CDP_TOKEN:-}, so an unminted one arrives
+# as an empty file rather than a compose error).
+[ -s "$CDP_TOKEN_SRC" ] || die "the CDP token (${CDP_TOKEN_SRC}) is missing or empty. Crow generates CROW_BROWSER_CDP_TOKEN at install, in this bundle's .env, and compose hands it in as that file; the container does not start without it."
+grep -qE '^[A-Za-z0-9_-]{32,256}$' "$CDP_TOKEN_SRC" || die "the CDP token (${CDP_TOKEN_SRC}) is malformed (32-256 characters of A-Za-z0-9_-). Crow generates it at install; fix this bundle's .env and recreate the container."
 
 # websockify's token lookup that never echoes the token it was handed: stock
 # websockify logs "Token '<value>' not found", which would print a valid token
@@ -138,7 +160,7 @@ require_loopback() {
     sleep 0.5
   done
   loopback_only "$1" /proc/net/tcp /proc/net/tcp6 || true
-  die "$2 on port $1 is not loopback-only. Refusing to run: the viewer must never be reachable from the network."
+  die "$2 on port $1 is not loopback-only. Refusing to run: nothing here may be reachable from the network."
 }
 
 # --- Clean stale X locks/sockets (root cause of the 2026-05 crash loop) ---
@@ -220,109 +242,85 @@ sleep 1
 kill -0 "$WEBSOCKIFY_PID" 2>/dev/null || die "websockify failed to start"
 require_loopback "${NOVNC_PORT}" websockify
 
-# --- Chromium with CDP ---
+# --- Chromium, behind the CDP relay ---
 CHROME_PATH=$(find /root/.cache/ms-playwright -name "chrome" -type f 2>/dev/null | head -1)
 [ -n "$CHROME_PATH" ] || die "Chrome not found in Playwright cache"
 
 # Optional upstream proxy (http://host:port or socks5://host:port). Empty = direct.
-PROXY_FLAG=""
+# The relay turns CHROME_PROXY into Chromium's --proxy-server flag (it is the one that
+# execs Chromium now).
 if [ -n "${CHROME_PROXY:-}" ]; then
   log "Routing through proxy: ${CHROME_PROXY}"
-  PROXY_FLAG="--proxy-server=${CHROME_PROXY}"
 fi
 
-log "Launching Chromium ($CHROME_PATH) with CDP on 127.0.0.1:${CDP_PORT}..."
-"$CHROME_PATH" \
-  --no-sandbox --disable-setuid-sandbox \
-  --remote-debugging-port="$CDP_PORT" \
-  --remote-debugging-address=127.0.0.1 \
-  --remote-allow-origins=* \
-  --disable-blink-features=AutomationControlled \
-  --window-size=1920,1080 --start-maximized \
-  --no-first-run --no-default-browser-check \
-  --disable-infobars --disable-extensions \
-  --user-data-dir=/root/.config/chromium-crow \
-  ${PROXY_FLAG} \
-  "about:blank" &
-CHROME_PID=$!
+RELAY="$(dirname "$0")/cdp-relay.mjs"
+[ -f "$RELAY" ] || die "the CDP relay (${RELAY}) is missing from the image: rebuild the browser image"
+# Paths only: the relay reads the token from its 0400 file and strips any
+# token-shaped variable from the environment Chromium inherits.
+export CHROME_PATH
+export CROW_CHROMIUM_PROFILE="$PROFILE_DIR"
+export CROW_CDP_TOKEN_FILE="$CDP_TOKEN_SRC"
+export CROW_CDP_READY_FILE="$CDP_READY_FILE"
+# docker start keeps /tmp: a ready file from an earlier run of this container would
+# let the readiness loop pass before Chromium has answered.
+rm -f "$CDP_READY_FILE"
 
-# Wait for the CDP endpoint to actually answer.
+log "Launching Chromium on a pipe (CDP relay on 127.0.0.1:${CDP_PORT})..."
+node "$RELAY" &
+RELAY_PID=$!
+
+# Readiness is the relay's ready file: it appears only once Chromium's pipe has
+# answered Browser.getVersion, so a pass means the browser really is there.
 ready=0
-for i in $(seq 1 40); do
-  if ! kill -0 "$CHROME_PID" 2>/dev/null; then
-    die "Chromium exited during startup (X server / flags problem)"
+for i in $(seq 1 120); do
+  if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+    die "the CDP relay exited during startup (token, Chromium or flags; see the log above)"
   fi
-  if curl -fsS "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
+  if [ -s "$CDP_READY_FILE" ]; then
     ready=1; break
   fi
   sleep 0.5
 done
-[ "$ready" = 1 ] || die "CDP did not come up on 127.0.0.1:${CDP_PORT} within 20s"
+[ "$ready" = 1 ] || die "the CDP relay did not report ready on 127.0.0.1:${CDP_PORT} within 60s"
+# The relay is the only listener; Chromium itself opens no port at all.
+require_loopback "${CDP_PORT}" cdp-relay
 
 echo ""
 echo "============================================="
 echo "  Crow Browser — Ready (verified)"
 echo "  noVNC:     http://127.0.0.1:${NOVNC_PORT}/vnc.html (loopback; open it through the Crow dashboard)"
-echo "  CDP:       http://127.0.0.1:${CDP_PORT}/json/version"
+echo "  CDP:       http://127.0.0.1:${CDP_PORT}/json/version (bearer token required)"
 echo "============================================="
 echo ""
 
 # --- Graceful stop: docker stop (SIGTERM via init) reaches this shell only.
-# Hand it to Chromium and wait, so it flushes cookies and logins to the profile
-# (compose stop_grace_period: 30s) instead of being SIGKILLed with the rest. ---
-# Chromium's own SIGTERM path exits WITHOUT committing its cookie store (proven
-# in a throwaway container), so close it the way a user would: CDP
-# Browser.close, then fall back to SIGTERM.
-cdp_close() {
-  timeout 10 python3 - "$CDP_PORT" <<'PY' >/dev/null 2>&1
-import base64, json, os, socket, sys, urllib.request
-port = int(sys.argv[1])
-url = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=3))["webSocketDebuggerUrl"]
-path = url.split(":%d" % port, 1)[1]
-s = socket.create_connection(("127.0.0.1", port), timeout=5)
-s.sendall(("GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (path, port, base64.b64encode(os.urandom(16)).decode())).encode())
-head = b""
-while b"\r\n\r\n" not in head:
-    d = s.recv(4096)
-    if not d:
-        sys.exit(1)
-    head += d
-if b" 101 " not in head.split(b"\r\n")[0]:
-    sys.exit(1)
-msg = json.dumps({"id": 1, "method": "Browser.close"}).encode()
-mask = os.urandom(4)
-s.sendall(bytes([0x81, 0x80 | len(msg)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(msg)))
-try:
-    s.recv(4096)
-except OSError:
-    pass
-PY
-}
-
+# The relay owns the graceful part (Chromium's own SIGTERM path exits WITHOUT
+# committing its cookie store): it sends Browser.close over the pipe, waits up to
+# 10 s for Chromium to exit, then kills it. We allow 15 s here, inside compose's
+# 30 s stop_grace_period, and stop the display only after the browser is gone.
 shutdown() {
-  log "stopping: closing Chromium..."
-  cdp_close || true
+  log "stopping: closing Chromium through the relay..."
+  kill -TERM "$RELAY_PID" 2>/dev/null || true
   for i in $(seq 1 30); do
-    kill -0 "$CHROME_PID" 2>/dev/null || break
+    kill -0 "$RELAY_PID" 2>/dev/null || break
     sleep 0.5
   done
-  if kill -0 "$CHROME_PID" 2>/dev/null; then
-    kill -TERM "$CHROME_PID" 2>/dev/null
-    for i in $(seq 1 10); do
-      kill -0 "$CHROME_PID" 2>/dev/null || break
-      sleep 0.5
-    done
+  if kill -0 "$RELAY_PID" 2>/dev/null; then
+    log "the relay did not stop within 15s; killing it"
+    kill -KILL "$RELAY_PID" 2>/dev/null || true
   fi
+  rm -f "$CDP_READY_FILE"
   kill "$X11VNC_PID" "$WEBSOCKIFY_PID" "$XVFB_PID" 2>/dev/null || true
   log "stopped."
   exit 0
 }
 trap shutdown TERM INT
 
-# --- Supervise: if Chromium dies, take the container down so it restarts ---
-wait "$CHROME_PID"
+# --- Supervise: the relay owns Chromium's fate (it exits with Chromium's code), so a
+# dead relay means a dead browser: take the container down so it restarts.
+wait "$RELAY_PID"
 EXIT_CODE=$?
-log "Chromium exited (code ${EXIT_CODE}); shutting down so the container restarts."
+log "the CDP relay exited (code ${EXIT_CODE}); shutting down so the container restarts."
+rm -f "$CDP_READY_FILE"
 kill "$X11VNC_PID" "$WEBSOCKIFY_PID" "$XVFB_PID" 2>/dev/null || true
 exit "${EXIT_CODE:-1}"
