@@ -142,7 +142,7 @@ No authentication required — doesn't expose secrets.
 
 - **Never use `--no-auth` in production** — it disables all authentication. The gateway refuses `--no-auth` when `NODE_ENV=production` or when `CROW_GATEWAY_URL` contains a public domain
 - **Always deploy behind HTTPS** — Render and Railway provide this automatically. If self-hosting, use a reverse proxy (nginx, Caddy) with TLS, or Tailscale Funnel
-- The **`/setup` page** is unauthenticated by design — it only shows a password form (no secrets). Gate it with `CROW_SETUP_TOKEN` for hosted instances
+- The **`/setup` page** shows only a password form (no secrets). Until a password exists, it and the first-run login require a one-time setup token, generated in `<CROW_HOME>/setup-token` (mode 0600) or taken from `CROW_SETUP_TOKEN` when set; a request from the machine itself (loopback, no forwarding headers) is exempt, unless `CROW_SETUP_TOKEN` is set — that token is required from every source
 - **`/api/health`** is protected by dashboard session auth — it exposes system metrics (RAM, disk, CPU). The public **`/health`** endpoint returns only server status (no system info)
 - **OAuth tokens** are stored in the SQLite database and persist across restarts
 - **Rate limiting** is built in — 200 requests per 15 minutes (general) and 20 requests per 15 minutes (auth endpoints: `/authorize`, `/token`, `/register`). For high-traffic deployments, add additional rate limiting via your reverse proxy or hosting provider. Limits key on the client address, and `X-Forwarded-For` is trusted only from Tailscale Serve/Funnel (verified by socket owner) and from proxies listed in `CROW_TRUSTED_PROXIES` (see [Dashboard › Network Security](./dashboard.md#network-security))

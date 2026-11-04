@@ -209,8 +209,11 @@ test("the real login route: a login from the box is 'dashboard onhost', still si
   await withServer(app, async (port) => {
     const login = (headers, body) => request(port, { method: "POST", path: "/dashboard/login", headers: { ...headers, "content-type": "application/x-www-form-urlencoded" }, body: form(body) });
     // First-time setup, from the box through Serve (the shared browser carries the owner's login).
+    // Serve is proxied loopback, not direct loopback, so the first-run POST carries the
+    // one-time setup token (servers/gateway/dashboard/setup-token.js).
     const fromBox = serveHeaders("owner@example.invalid", "100.64.20.1");
-    const r1 = await login(fromBox, { password: PW, confirm: PW });
+    const { getSetupToken } = await import("../servers/gateway/dashboard/setup-token.js");
+    const r1 = await login(fromBox, { password: PW, confirm: PW, setup_token: getSetupToken().token });
     assert.equal(r1.status, 303, r1.text.slice(0, 200));
     const boxTok = sessionOf(r1);
     assert.ok(boxTok, "a session cookie");

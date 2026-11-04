@@ -138,6 +138,10 @@ Para acceso remoto seguro, instala Tailscale en la máquina anfitriona (no dentr
 
 La primera vez que visites el Crow's Nest (`/dashboard`), se te pedirá definir una contraseña. También puedes definirla desde la página `/setup` o pidiéndoselo a tu IA: "Define mi contraseña del Crow's Nest."
 
+::: tip Enlace de configuración inicial
+Mientras no exista una contraseña, las páginas de configuración inicial piden un token de un solo uso, para que nadie más en tu red pueda definir la contraseña primero. El instalador imprime la URL de configuración con `?token=…` ya incluido; ese mismo token se guarda en `~/.crow/setup-token` (solo tu cuenta puede leerlo) por si lo necesitas de nuevo. Abrir la página en la máquina misma — `http://localhost:3001/setup`, o mediante un túnel SSH — no requiere token. El token deja de funcionar en cuanto defines la contraseña.
+:::
+
 ### Autenticación de Dos Factores (Opcional)
 
 Puedes habilitar 2FA basada en TOTP desde **Configuración → Autenticación de Dos Factores** en el Crow's Nest. Esto agrega un segundo paso de verificación usando una app de autenticación (Google Authenticator, Authy, etc.).

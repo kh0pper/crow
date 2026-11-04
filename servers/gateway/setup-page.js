@@ -11,6 +11,7 @@
  */
 
 import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
+import { allowFirstRun } from "./dashboard/setup-token.js";
 import { CROW_HERO_SVG } from "./dashboard/shared/crow-hero.js";
 
 /** Escape a string for safe interpolation into HTML attributes. */
@@ -23,7 +24,7 @@ const translations = {
     subtitle: "Set up your Crow instance",
     step1Password: "Set Crow\u2019s Nest Password",
     useInviteLink: "Use the link you were sent.",
-    setupTokenRequired: "This instance requires a setup token. Check your invite email for the correct link.",
+    setupTokenRequired: "The setup link is printed by the installer, and the same token is saved as setup-token in Crow's home directory — on this machine, or inside the Crow container. If you are on the machine itself and it is not behind Docker, open /setup from it directly — no link is needed.",
     protectPassword: "Protect your Crow\u2019s Nest with a password. This is required before you can access the control panel.",
     choosePassword: "Choose a password (12+ characters)",
     confirmPassword: "Confirm password",
@@ -34,7 +35,7 @@ const translations = {
     subtitle: "Configura tu instancia Crow",
     step1Password: "Establecer Contraseña del Nido",
     useInviteLink: "Usa el enlace que te enviaron.",
-    setupTokenRequired: "Esta instancia requiere un token de configuración. Revisa tu correo de invitación para el enlace correcto.",
+    setupTokenRequired: "El enlace de configuración lo imprime el instalador, y ese mismo token se guarda como setup-token en el directorio home de Crow — en esta máquina o dentro del contenedor de Crow. Si estás en la máquina misma y no está detrás de Docker, abre /setup desde ella directamente — no hace falta ningún enlace.",
     protectPassword: "Protege tu Nido de Crow con una contraseña. Esto es necesario antes de poder acceder al panel de control.",
     choosePassword: "Elige una contraseña (12+ caracteres)",
     confirmPassword: "Confirmar contraseña",
@@ -72,10 +73,11 @@ export async function setupPageHandler(req, res) {
     : (langCookie || dbLang || browserLang);
   const t = translations[lang] || translations.en;
 
-  // Setup token gating for hosted instances
-  const setupToken = process.env.CROW_SETUP_TOKEN;
-  const queryToken = req.query.token;
-  const tokenBlocked = setupToken && queryToken !== setupToken;
+  // First-run gate (setup-token.js): with no password set, only direct loopback
+  // or a request carrying the matching one-time token sees the password form.
+  const gate = allowFirstRun(req, { from: "query" });
+  const { token: setupToken, allowed: tokenAllowed } = gate;
+  const tokenBlocked = !tokenAllowed;
 
   const html = `<!DOCTYPE html>
 <html lang="${lang}">
@@ -112,8 +114,8 @@ export async function setupPageHandler(req, res) {
 </head>
 <body>
   <div class="lang-toggle">
-    <a href="?lang=en${setupToken && queryToken ? '&token=' + escapeAttr(queryToken) : ''}" class="lang-btn${lang === "en" ? " active" : ""}" onclick="setLang('en');return false;">EN</a>
-    <a href="?lang=es${setupToken && queryToken ? '&token=' + escapeAttr(queryToken) : ''}" class="lang-btn${lang === "es" ? " active" : ""}" onclick="setLang('es');return false;">ES</a>
+    <a href="?lang=en${setupToken ? '&token=' + escapeAttr(setupToken) : ''}" class="lang-btn${lang === "en" ? " active" : ""}" onclick="setLang('en');return false;">EN</a>
+    <a href="?lang=es${setupToken ? '&token=' + escapeAttr(setupToken) : ''}" class="lang-btn${lang === "es" ? " active" : ""}" onclick="setLang('es');return false;">ES</a>
   </div>
 
   <div style="text-align:center;margin-bottom:8px"><div style="width:80px;height:80px;margin:0 auto">${CROW_HERO_SVG}</div></div>

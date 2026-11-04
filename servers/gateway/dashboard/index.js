@@ -46,6 +46,7 @@ import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
 import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
+import { allowFirstRun, clearSetupToken } from "./setup-token.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -113,6 +114,12 @@ import { isLocalPasswordSessionOn } from "./local-session.js";
 import { withForYouOwner } from "./shell/chrome.js";
 import { forYouEnabled } from "../for-you/flag.js";
 
+/** A first-run gate message: where the token lives is described (this machine or
+ * the container), never as a host path the browser could be told to read. */
+function setupTokenMessage(key, lang) {
+  return t(key, lang);
+}
+
 /** A retried 2FA step's pending token keeps the SSO context and the on-host flag (auth.js). */
 function retryPendingCtx(ssoCtx, onHost) {
   const ctx = {};
@@ -169,17 +176,21 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
   // --- Public routes (no auth) ---
 
-  // Login page
+  // Login page. First run only (no password yet): a request that is not direct
+  // loopback must carry the setup token, or it gets the gated message instead of
+  // the password form — a LAN neighbour cannot claim the instance (setup-token.js).
   router.get("/dashboard/login", async (req, res) => {
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const hasPassword = await isPasswordSet();
-    const setupToken = process.env.CROW_SETUP_TOKEN;
-    if (!hasPassword && setupToken && req.query.token !== setupToken) {
-      // Setup token required but not provided — show gated message
-      return res.type("html").send(renderLogin({ isSetup: true, error: "Use the link you were sent to set up your password.", lang }));
+    if (!hasPassword) {
+      const gate = allowFirstRun(req, { from: "query" });
+      if (!gate.allowed) {
+        return res.type("html").send(renderLogin({ isSetup: true, error: setupTokenMessage("login.setupTokenGated", lang), lang }));
+      }
+      return res.type("html").send(renderLogin({ isSetup: true, setupToken: gate.token || undefined, lang }));
     }
-    res.type("html").send(renderLogin({ isSetup: !hasPassword, setupToken: !hasPassword ? setupToken : undefined, lang }));
+    res.type("html").send(renderLogin({ isSetup: false, lang }));
   });
 
   // Login handler
@@ -191,20 +202,27 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const wasFirstSetup = !hasPassword; // capture before setPassword() runs below
 
     if (!hasPassword) {
-      // First-time setup
+      // First-time setup. The setup token comes first: while no password exists,
+      // only direct loopback (the owner on this machine or through an SSH
+      // tunnel) may set it, or a request carrying the matching one-time token.
+      // CROW_SETUP_TOKEN (hosted) has no loopback exemption (setup-token.js).
+      const gate = allowFirstRun(req, { from: "body" });
+      if (!gate.allowed) {
+        return res.type("html").send(renderLogin({ isSetup: true, error: setupTokenMessage("login.setupTokenInvalid", lang), lang }));
+      }
+      // Every error render below carries the validated token back into the form:
+      // without it the retry would be refused, since the peer is not loopback.
+      const retryToken = gate.token || undefined;
       const strength = validatePasswordStrength(password);
       if (!strength.valid) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: strength.message, lang }));
+        return res.type("html").send(renderLogin({ isSetup: true, setupToken: retryToken, error: strength.message, lang }));
       }
       if (password !== confirm) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: "Passwords don't match.", lang }));
-      }
-      // Setup token gating: if CROW_SETUP_TOKEN is set and no password exists, require it
-      const setupToken = process.env.CROW_SETUP_TOKEN;
-      if (setupToken && req.body.setup_token !== setupToken) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: "Invalid setup token. Use the link you were sent.", lang }));
+        return res.type("html").send(renderLogin({ isSetup: true, setupToken: retryToken, error: "Passwords don't match.", lang }));
       }
       await setPassword(password);
+      // The first password exists: the one-time token has done its job.
+      clearSetupToken();
     }
 
     const deviceTrustToken = cookies.crow_2fa_trusted || null;
