@@ -323,8 +323,12 @@ export function sampleList(snapshot, sampleId = null) {
   }
 
   const rows = [];
-  for (const sample of Object.values(samples)) {
-    if (!sample || typeof sample !== "object") continue;
+  // In a fixed order (name, then id), whatever order the document's map holds
+  // them in after a reload or a merge.
+  const ordered = Object.values(samples)
+    .filter((sample) => sample && typeof sample === "object")
+    .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")) || String(a.id).localeCompare(String(b.id)));
+  for (const sample of ordered) {
     if (sampleId !== null && sample.id !== sampleId) continue;
     const rate = Number(sample.rate) > 0 ? Number(sample.rate) : 48000;
     const frames = Number(sample.frames) || 0;
