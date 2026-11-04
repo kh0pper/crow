@@ -41,8 +41,16 @@
  *     next_gen)` is the owner's local-only counter with NO contact foreign key, so
  *     deleting a contact never rewinds it; `nextInviteGeneration` takes the next
  *     value inside the caller's transaction and `project.invite` carries it as the
- *     required body field `gen`. `c2c_visits.gen` remembers the generation a visit
- *     was created from, and the visitor rule (Task 5/7) is the pure helper
+ *     required body field `gen`. The generation is a HYBRID CLOCK:
+ *     `gen = max(next_gen, Date.now())`, then `next_gen = gen + 1`. It is a
+ *     millisecond wall clock, so the owner's sibling instances (paired Crows, O1 and
+ *     O2, each with their own local-only counter) hand out generations that agree to
+ *     within clock skew: an O2 re-invite after O1's generation comes out greater than
+ *     it, instead of being refused for a smaller local count. The stored counter is
+ *     the floor, so the generation stays strictly increasing on one instance even if
+ *     the wall clock goes backwards, and it is a positive safe integer (frames.js
+ *     validates the same). `c2c_visits.gen` remembers the generation a visit was
+ *     created from, and the visitor rule (Task 5/7) is the pure helper
  *     `inviteSupersedes(visit, frame)`:
  *       - an invite whose `gen` is <= the visit's `gen` is refused `stale_epoch`;
  *       - a greater `gen` supersedes the visit whatever its state — an `active`
@@ -51,14 +59,23 @@
  *         first.
  *     Epoch equality alone cannot tell an old invite still in flight from a new
  *     one; the generation can, which is why the visitor rule is a generation and
- *     not an epoch comparison.
+ *     not an epoch comparison. The cost of a clock: a re-invite from a sibling whose
+ *     clock is more than the time since the last invite behind that last invite's
+ *     generation is refused `stale_epoch`, and the owner UI shows the refusal
+ *     (Task 6/7).
  *
  * S3. Acks and refusals name their frame's stream. `project.ack`'s body is
  *     `{ epoch, stream, seqs }` and `project.refuse`'s is
  *     `{ epoch, stream, seq, reason[, detail] }` (frames.js validates both, and an
  *     ack or refusal carries no envelope epoch). `onAck` / `onRefuse` REQUIRE
  *     `epoch` and `stream` and match them exactly: a seq names a frame only inside
- *     its stream (S1), so there is no "match every stream" default.
+ *     its stream (S1), so there is no "match every stream" default. An ack or a
+ *     refusal ALSO names the instance it answers: `to_instance_id` is required and
+ *     non-null (frames.js: a null one is `bad_frame`), and it is the answered
+ *     frame's `from_instance_id`. Task 5 DROPS an ack or refusal whose
+ *     `to_instance_id` is not the local instance (`ackIsForMe`): no `onAck` /
+ *     `onRefuse` call and no reply — a sibling of the asker that happens to see the
+ *     frame must never apply it to its own queue.
  *
  * R4. A terminal refusal of a well-formed sequenced frame still consumes its seq.
  *     `consumeInbound` advances the mark exactly like a commit, with no effect.
@@ -97,18 +114,41 @@
  *     flush runs per (handle, contact) at a time — a concurrent flush for the same
  *     contact returns 0 and sends nothing, because the in-flight one is already
  *     walking that contact's queue (a row enqueued meanwhile goes on the next
- *     tick). A flush called from inside the caller's own live transaction reads
- *     directly: those rows are its own.
+ *     tick). FLUSH AFTER COMMIT: a flush called from inside a live transaction is a
+ *     `bad_state` error. The rows of an open transaction are not on the queue yet,
+ *     so there is nothing legitimate to read there, and a flush that joined it would
+ *     send a frame the transaction may still roll back.
  *
  * S5. Commit the mark before the effect. Task 5 calls `commitInbound` FIRST inside
  *     its `withTransaction`, and runs the kind's effect only when it returns true.
  *     A false result (another delivery took the seq) returns at once, before any
  *     effect or enqueue. The effect and the mark still commit or roll back
  *     together (R6, R7).
+ *     The failure path (Task 5), as the exact sequence:
+ *       1. authorization runs BEFORE `commitInbound`, so a frame the rules refuse
+ *          is never committed: the refusal is a `consumeInbound` with no effect
+ *          (R4), in the same transaction;
+ *       2. if the kind's handler throws, the transaction rolls back — the mark
+ *          included, so the seq is free again and the frame was not applied;
+ *       3. a NEW `withTransaction` runs `consumeInbound` for that seq (R4: it takes
+ *          the seq with no effect, so one bad frame never wedges the stream);
+ *       4. then the frame is refused `unsupported` — after step 3, never before.
  *
  * S6. `cancelEpoch` is an optimisation, not a correctness rule (S1, S2 do not need
  *     it): it ends the still-queued frames of an earlier membership so fewer dead
  *     frames are sent.
+ *
+ * R9 (follow-up). Inbound marks are never pruned: `c2c_inbound_seq` keeps one row
+ *     per (contact, sender instance, project, epoch, stream) for good, and a new
+ *     epoch adds a row instead of resetting one. Dropping the marks of dead
+ *     memberships is a follow-up, not this task's.
+ *
+ * Every write the module makes outside a transaction goes through the same
+ * per-handle serialization (`write`): `flush`'s attempt bump, `onAck`, `onRefuse`,
+ * `cancelEpoch` and `pruneAcked`. The writes that run INSIDE `withTransaction`
+ * (`enqueue`'s claim and insert, `nextInviteGeneration`'s counter) are serialized by
+ * that transaction — it holds the handle's turn — so no statement in this module
+ * has a path to the handle that skips the chain.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { buildFrame, parseFrame, REFUSALS } from "./frames.js";
@@ -135,6 +175,19 @@ const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
 /** S1: the stream a frame is numbered in. */
 export function streamOf(toInstanceId) {
   return toInstanceId ?? WILDCARD_STREAM;
+}
+
+/**
+ * S3: is this ack or refusal meant for this instance? Pure (no DB), so Task 5 can
+ * ask before it touches the queue. `frame.to_instance_id` is the answered frame's
+ * `from_instance_id` (frames.js requires one), and only the instance it names may
+ * answer it: a sibling of the asker that sees the frame drops it instead — no
+ * `onAck` / `onRefuse` call and no reply.
+ * @returns {boolean}
+ */
+export function ackIsForMe(frame, localInstanceId) {
+  if (typeof localInstanceId !== "string" || !localInstanceId) return false;
+  return frame?.to_instance_id === localInstanceId;
 }
 
 function c2cError(message, code) {
@@ -200,7 +253,11 @@ function inLiveTransaction(db) {
   return Boolean(open?.live && open.db === db);
 }
 
-/** One statement on the handle's turn: never inside somebody else's transaction (S4). */
+/**
+ * One statement on the handle's turn: serialized behind every other write, unless
+ * this async context's own live transaction already holds the handle (then it rides
+ * it — R7). Every write outside a transaction goes through here (S4, T5).
+ */
 function write(db, sql, args) {
   const run = () => db.execute({ sql, args });
   return inLiveTransaction(db) ? run() : serialize(db, run);
@@ -309,27 +366,33 @@ export async function enqueue(db, { contactId, projectUuid, kind, epoch, toInsta
  * pile up behind it. R8: a frame that cannot be read does the same, so no later
  * row is sent past the hole.
  *
- * S4: the read is serialized behind any open transaction, and a second concurrent
- * flush for the same contact returns 0 (see the contract).
+ * S4: flush after COMMIT. The read is serialized behind any open transaction, and a
+ * second concurrent flush for the same contact returns 0 (see the contract). A call
+ * from inside a live transaction is a `bad_state` error.
  *
  * @returns {Promise<number>} how many frames were sent
+ * @throws {Error & { code: "bad_state" }} when called inside a live transaction (S4)
  */
 export async function flush(db, send, { contactId, now = Date.now() } = {}) {
+  // S4: flush after COMMIT. Inside the caller's transaction the rows are not on the
+  // queue yet (and may still roll back), so there is nothing legitimate to read.
+  if (inLiveTransaction(db)) {
+    throw c2cError("c2c outbox: flush must run after COMMIT, not inside a transaction", "bad_state");
+  }
   let walking = flushing.get(db);
   if (!walking) { walking = new Set(); flushing.set(db, walking); }
   if (walking.has(contactId)) return 0; // S4: the in-flight flush owns this queue
   walking.add(contactId);
   try {
-    const read = async () => (await db.execute({
+    // S4: never send a row another transaction has not committed (and so never one
+    // that is about to roll back). The read takes the handle's turn like any write.
+    const rows = await serialize(db, async () => (await db.execute({
       sql: `SELECT id, project_uuid, seq, frame_json, last_refusal, last_attempt_at
               FROM c2c_outbox
              WHERE contact_id = ? AND acked_at IS NULL
              ORDER BY project_uuid, epoch, COALESCE(to_instance_id, '*'), seq`,
       args: [contactId],
-    })).rows;
-    // S4: never send a row another transaction has not committed (and so never one
-    // that is about to roll back).
-    const rows = inLiveTransaction(db) ? await read() : await serialize(db, read);
+    })).rows);
     const held = new Set();
     let sent = 0;
     for (const row of rows) {
@@ -379,13 +442,12 @@ export async function onAck(db, { contactId, projectUuid, epoch, stream, seqs })
   const list = normalizeSeqs(seqs);
   if (!list.length) return 0;
   const marks = list.map(() => "?").join(",");
-  const res = await db.execute({
-    sql: `UPDATE c2c_outbox SET acked_at = datetime('now')
-           WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND acked_at IS NULL
-             AND COALESCE(to_instance_id, '*') = ?
-             AND seq IN (${marks})`,
-    args: [contactId, projectUuid, epoch, stream, ...list],
-  });
+  const res = await write(db,
+    `UPDATE c2c_outbox SET acked_at = datetime('now')
+      WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND acked_at IS NULL
+        AND COALESCE(to_instance_id, '*') = ?
+        AND seq IN (${marks})`,
+    [contactId, projectUuid, epoch, stream, ...list]);
   return res.rowsAffected ?? 0;
 }
 
@@ -410,14 +472,13 @@ export async function onRefuse(db, { contactId, projectUuid, epoch, stream, seq,
   requireStream(stream);
   if (!isSeq(seq)) throw c2cError("c2c outbox: seq is required", "bad_argument");
   const terminal = TERMINAL.has(reason);
-  await db.execute({
-    sql: `UPDATE c2c_outbox
-             SET last_refusal = ?,
-                 acked_at = CASE WHEN ? = 1 THEN datetime('now') ELSE acked_at END
-           WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND seq = ?
-             AND COALESCE(to_instance_id, '*') = ?`,
-    args: [reason, terminal ? 1 : 0, contactId, projectUuid, epoch, seq, stream],
-  });
+  await write(db,
+    `UPDATE c2c_outbox
+       SET last_refusal = ?,
+           acked_at = CASE WHEN ? = 1 THEN datetime('now') ELSE acked_at END
+     WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND seq = ?
+       AND COALESCE(to_instance_id, '*') = ?`,
+    [reason, terminal ? 1 : 0, contactId, projectUuid, epoch, seq, stream]);
   if (terminal) console.log(`[c2c] frame ${seq} closed with ${reason}`);
   return terminal ? reason : null;
 }
@@ -432,11 +493,10 @@ export async function onRefuse(db, { contactId, projectUuid, epoch, stream, seq,
  */
 export async function cancelEpoch(db, { contactId, projectUuid, keepEpoch }) {
   if (typeof keepEpoch !== "string" || !keepEpoch) throw c2cError("c2c outbox: keepEpoch is required", "bad_argument");
-  const res = await db.execute({
-    sql: `UPDATE c2c_outbox SET acked_at = datetime('now'), last_refusal = 'cancelled'
-           WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL AND epoch <> ?`,
-    args: [contactId, projectUuid, keepEpoch],
-  });
+  const res = await write(db,
+    `UPDATE c2c_outbox SET acked_at = datetime('now'), last_refusal = 'cancelled'
+      WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL AND epoch <> ?`,
+    [contactId, projectUuid, keepEpoch]);
   const n = res.rowsAffected ?? 0;
   if (n) console.log(`[c2c] cancelled ${n} queued frame(s) of an earlier membership`);
   return n;
@@ -450,10 +510,9 @@ export async function cancelEpoch(db, { contactId, projectUuid, keepEpoch }) {
  */
 export async function pruneAcked(db, { olderThanDays = 30 } = {}) {
   const days = Number.isSafeInteger(olderThanDays) && olderThanDays > 0 ? olderThanDays : 30;
-  const res = await db.execute({
-    sql: "DELETE FROM c2c_outbox WHERE acked_at IS NOT NULL AND acked_at < datetime('now', ?)",
-    args: [`-${days} days`],
-  });
+  const res = await write(db,
+    "DELETE FROM c2c_outbox WHERE acked_at IS NOT NULL AND acked_at < datetime('now', ?)",
+    [`-${days} days`]);
   return res.rowsAffected ?? 0;
 }
 
@@ -461,23 +520,35 @@ export async function pruneAcked(db, { olderThanDays = 30 } = {}) {
 
 /**
  * S2: take the next invite generation for a project and publish the one after it.
+ *
+ * S2's hybrid clock: `gen = max(next_gen, clock)`, then `next_gen = gen + 1`. The
+ * clock is wall time in milliseconds, so the owner's sibling instances hand out
+ * comparable generations, and the stored counter is the floor, so one instance never
+ * goes backwards even if its clock does. `now` is the clock seam (`Date.now()` by
+ * default); tests pass it to keep the numbers small and deterministic.
+ *
  * Local-only and never reset by a contact delete (no contact foreign key), so a
  * generation stays comparable across memberships of the same project. It runs in
  * the caller's transaction when there is one (the invite and its generation then
  * roll back together), otherwise it opens its own.
+ * @param {{ now?: number }} [opts] the clock seam (S2)
  * @returns {Promise<number>} the generation to put in the invite body
  */
-export async function nextInviteGeneration(db, projectUuid) {
+export async function nextInviteGeneration(db, projectUuid, opts = {}) {
   if (typeof projectUuid !== "string" || !projectUuid) {
     throw c2cError("c2c invite: projectUuid is required", "bad_argument");
   }
+  const clock = opts?.now === undefined ? Date.now() : opts.now;
+  if (!isSeq(clock)) throw c2cError("c2c invite: the clock is not a positive safe integer", "bad_argument");
   return withTransaction(db, async () => {
     const { rows } = await db.execute({
       sql: "SELECT next_gen FROM c2c_invite_gen WHERE project_uuid = ?",
       args: [projectUuid],
     });
-    const gen = rows.length ? Number(rows[0].next_gen) : 1;
-    if (!isSeq(gen)) throw c2cError("c2c invite: the generation counter is unreadable", "bad_state");
+    const stored = rows.length ? Number(rows[0].next_gen) : 1;
+    if (!isSeq(stored)) throw c2cError("c2c invite: the generation counter is unreadable", "bad_state");
+    const gen = Math.max(stored, clock);
+    if (!Number.isSafeInteger(gen + 1)) throw c2cError("c2c invite: the generation would overflow", "bad_state");
     await db.execute({
       sql: `INSERT INTO c2c_invite_gen (project_uuid, next_gen) VALUES (?, ?)
             ON CONFLICT (project_uuid) DO UPDATE SET next_gen = excluded.next_gen`,

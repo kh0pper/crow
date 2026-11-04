@@ -117,8 +117,11 @@ export function parseFrame(payload) {
     const frame = { type: C2C_TYPE, v: 1, kind, project_uuid };
     if (NO_SEQ.has(kind)) {
       // S3: an ack or refusal names its stream in the body only, so it carries
-      // neither an envelope seq nor an envelope epoch.
+      // neither an envelope seq nor an envelope epoch. It also names the instance it
+      // answers: its target is the answered frame's from_instance_id and is required
+      // (a null target is a frame nobody could have sent it about).
       if (seq !== undefined || epoch !== undefined) return bad;
+      if (!isId(to_instance_id)) return bad;
     } else {
       if (!isSeq(seq) || typeof epoch !== "string" || !HEX32.test(epoch)) return bad;
       frame.epoch = epoch;

@@ -111,6 +111,15 @@ test("S3: a refusal names its frame's stream: epoch and stream are required", ()
   assert.deepEqual(ref({ epoch: E, stream: "a b", seq: 4, reason: "gap" }), BAD);
   assert.deepEqual(ref({ epoch: E, stream: "*", seq: 4, reason: "nope" }), BAD);
 });
+test("S3: an ack or refusal must name the instance it answers", () => {
+  for (const kind of ["project.ack", "project.refuse"]) {
+    assert.deepEqual(parseFrame(mk(kind, { toInstanceId: null })), BAD, `${kind} with a null target`);
+    assert.deepEqual(parseFrame(mk(kind, { toInstanceId: undefined })), BAD, `${kind} with no target`);
+    assert.equal(parseFrame(mk(kind, { toInstanceId: "i-a" })).ok, true, `${kind} aimed at its asker`);
+  }
+  // Every other kind may still carry a null target (S1: the "*" stream).
+  assert.equal(parseFrame(mk("project.invite", { toInstanceId: null })).ok, true);
+});
 test("S2: an invite's gen is required and positive", () => {
   const inv = (gen) => parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], gen } }));
   const { gen: _drop, ...noGen } = bodies["project.invite"];

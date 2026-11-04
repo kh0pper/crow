@@ -12,8 +12,9 @@ import { C2C_TABLES_SQL } from "../scripts/migrations/0016-crow-to-crow.mjs";
 import {
   enqueue, flush, onAck, onRefuse, acceptInbound, commitInbound, consumeInbound,
   pruneAcked, streamOf, withTransaction, BUSY_HOLD_MS,
-  cancelEpoch, nextInviteGeneration, inviteSupersedes,
+  cancelEpoch, nextInviteGeneration, inviteSupersedes, ackIsForMe,
 } from "../servers/sharing/c2c/outbox.js";
+import { buildFrame, parseFrame } from "../servers/sharing/c2c/frames.js";
 
 const P1 = "1".repeat(32);
 const P2 = "2".repeat(32);
@@ -387,6 +388,27 @@ test("S4: two concurrent flushes for one contact never send a row twice", async 
   });
 });
 
+test("S4: flush inside a live transaction is bad_state; after COMMIT it sends", async () => {
+  await withDb(async ({ db }) => {
+    const sent = [];
+    await assert.rejects(
+      withTransaction(db, async () => {
+        assert.equal(await enq(db), 1);
+        // S4: the rows of an open transaction are not on the queue yet.
+        await flush(db, (f) => { sent.push(f.seq); }, { contactId: CONTACT });
+      }),
+      (err) => err.code === "bad_state",
+    );
+    assert.deepEqual(sent, [], "nothing was sent from inside the transaction");
+    assert.equal((await rowsOf(db)).length, 0, "the throw rolled the enqueue back with it");
+
+    // The same shape, done the way S4 asks: enqueue, COMMIT, then flush.
+    await withTransaction(db, async () => { assert.equal(await enq(db), 1); });
+    assert.equal(await flush(db, (f) => { sent.push(f.seq); }, { contactId: CONTACT }), 1);
+    assert.deepEqual(sent, [1], "the committed row goes out after COMMIT");
+  });
+});
+
 test("not_home keeps the frame; forbidden ends it", async () => {
   await withDb(async ({ db }) => {
     const seq = await enq(db);
@@ -553,6 +575,55 @@ test("S3: ack and refuse require the epoch and the stream", async () => {
     assert.equal(row.acked_at, null);
     assert.equal(row.last_refusal, null);
   });
+});
+
+test("S3: an ack aimed at O1 is dropped at O2 and leaves O2's queue untouched", async () => {
+  const o1 = await fresh();
+  const o2 = await fresh();
+  try {
+    const O1 = "inst-o1";
+    const O2 = "inst-o2";
+    // Both are owner instances of the same Crow (paired siblings), each with its own
+    // outbox. O2 has a frame queued for the visitor.
+    assert.equal(await enq(o2.db, { localInstanceId: O2 }), 1);
+
+    // The ack the visitor sends answers O1's frame: it names O1, its asker.
+    const acked = parseFrame(buildFrame({
+      kind: "project.ack", projectUuid: P1, fromInstanceId: PEER, toInstanceId: O1,
+      body: { epoch: EPOCH, stream: PEER, seqs: [1] },
+    }));
+    assert.equal(acked.ok, true);
+    assert.equal(ackIsForMe(acked.frame, O1), true);
+    assert.equal(ackIsForMe(acked.frame, O2), false, "not for this sibling");
+    assert.equal(ackIsForMe(acked.frame, null), false, "no local instance: never ours");
+    assert.equal(ackIsForMe(null, O2), false);
+    // A refusal names its asker the same way.
+    const refused = parseFrame(buildFrame({
+      kind: "project.refuse", projectUuid: P1, fromInstanceId: PEER, toInstanceId: O1,
+      body: { epoch: EPOCH, stream: PEER, seq: 1, reason: "unsupported" },
+    }));
+    assert.equal(refused.ok, true);
+    assert.equal(ackIsForMe(refused.frame, O2), false);
+
+    // Task 5's rule as the contract states it: drop before onAck/onRefuse, no reply.
+    const applyAck = (db, frame, localInstanceId) => ackIsForMe(frame, localInstanceId)
+      ? onAck(db, { contactId: CONTACT, projectUuid: frame.project_uuid, ...frame.body })
+      : "dropped";
+
+    assert.equal(await applyAck(o2.db, acked.frame, O2), "dropped");
+    assert.equal((await rowsOf(o2.db))[0].acked_at, null, "O2's queue was not touched");
+    const sent = [];
+    assert.equal(await flush(o2.db, (f) => { sent.push(f.seq); }, { contactId: CONTACT }), 1,
+      "the frame is still queued on O2 and goes out");
+    assert.deepEqual(sent, [1]);
+
+    // The same ack at O1, where it was aimed, is applied.
+    assert.equal(await enq(o1.db, { localInstanceId: O1 }), 1);
+    assert.equal(await applyAck(o1.db, acked.frame, O1), 1);
+    assert.ok((await rowsOf(o1.db))[0].acked_at);
+  } finally {
+    o1.dispose(); o2.dispose();
+  }
 });
 
 test("cancelEpoch ends only the earlier membership's queued frames (S6 optimisation)", async () => {
@@ -797,22 +868,67 @@ test("two siblings: a targeted stream is independent of the '*' stream (S1)", as
 
 test("S2: nextInviteGeneration increases and survives a contact delete", async () => {
   await withDb(async ({ db }) => {
-    assert.equal(await nextInviteGeneration(db, P1), 1);
-    assert.equal(await nextInviteGeneration(db, P1), 2);
-    assert.equal(await nextInviteGeneration(db, P2), 1, "another project has its own generation");
+    // S2's hybrid clock: `now` is the seam, the stored counter is the floor.
+    const gen = (now) => nextInviteGeneration(db, P1, { now });
+    assert.equal(await gen(1000), 1000);
+    assert.equal(await gen(1001), 1001);
+    assert.equal(await nextInviteGeneration(db, P2, { now: 1000 }), 1000, "another project has its own generation");
 
     // No contact foreign key on purpose: deleting the contact who held a generation
     // must not hand that generation out again.
     await db.execute({ sql: "DELETE FROM contacts WHERE id = ?", args: [CONTACT] });
-    assert.equal(await nextInviteGeneration(db, P1), 3, "the generation never rewinds");
-    assert.equal(await nextInviteGeneration(db, P1), 4);
+    assert.equal(await gen(1002), 1002, "the generation never rewinds");
+    assert.equal(await gen(1003), 1003);
 
     // It runs in the caller's transaction: a rollback un-takes the number.
     await assert.rejects(withTransaction(db, async () => {
-      assert.equal(await nextInviteGeneration(db, P1), 5);
+      assert.equal(await gen(1004), 1004);
       throw new Error("boom");
     }), /boom/);
-    assert.equal(await nextInviteGeneration(db, P1), 5, "the rolled-back generation is handed out again");
+    assert.equal(await gen(1004), 1004, "the rolled-back generation is handed out again");
+  });
+});
+
+test("S2: two owner siblings hand out comparable generations (a clock, not a local count)", async () => {
+  const o1 = await fresh();
+  const o2 = await fresh();
+  const o3 = await fresh();
+  try {
+    const t = 1_700_000_000_000;
+    // O1 sends an invite. O2 never saw it: `c2c_invite_gen` is local-only, so its own
+    // counter is still at 1 and a local count would hand out 1 — refused stale_epoch.
+    const a = await nextInviteGeneration(o1.db, P1, { now: t });
+    assert.equal(a, t);
+    // Three seconds later, with O2's clock 200 ms behind O1's: still greater than A.
+    const b = await nextInviteGeneration(o2.db, P1, { now: t + 3000 - 200 });
+    assert.equal(b, t + 2800);
+    assert.ok(b > a, `a sibling re-invite supersedes: ${b} > ${a}`);
+    assert.equal(inviteSupersedes({ gen: a, state: "active" }, { body: { gen: b } }), true,
+      "so the visitor supersedes the visit instead of refusing the re-invite");
+
+    // The limit the contract states: a sibling whose clock is more than the time since
+    // the last invite behind gives gen <= A, which the visitor refuses stale_epoch.
+    const behind = await nextInviteGeneration(o3.db, P1, { now: t - 5000 });
+    assert.ok(behind <= a, `${behind} <= ${a}`);
+    assert.equal(inviteSupersedes({ gen: a, state: "active" }, { body: { gen: behind } }), false,
+      "behind the last invite's generation: refused stale_epoch");
+  } finally {
+    o1.dispose(); o2.dispose(); o3.dispose();
+  }
+});
+
+test("S2: the generation never goes backwards when the wall clock does", async () => {
+  await withDb(async ({ db }) => {
+    const t = 1_700_000_000_000;
+    assert.equal(await nextInviteGeneration(db, P1, { now: t }), t);
+    // The stored counter is the floor, so a clock that jumped back cannot re-issue a
+    // generation (which the visitor would refuse stale_epoch).
+    assert.equal(await nextInviteGeneration(db, P1, { now: t - 60_000 }), t + 1);
+    assert.equal(await nextInviteGeneration(db, P1, { now: t - 60_000 }), t + 2);
+    // Still a positive safe integer: frames.js validates exactly that.
+    const gen = await nextInviteGeneration(db, P1, { now: t - 120_000 });
+    assert.equal(gen, t + 3);
+    assert.ok(Number.isSafeInteger(gen) && gen > 0);
   });
 });
 
@@ -832,8 +948,8 @@ test("S2: inviteSupersedes refuses an equal or lower gen and supersedes an activ
 
 test("S2: an old invite (gen 1) arriving after gen 2 is refused", async () => {
   await withDb(async ({ db }) => {
-    assert.equal(await nextInviteGeneration(db, P1), 1);
-    assert.equal(await nextInviteGeneration(db, P1), 2);
+    assert.equal(await nextInviteGeneration(db, P1, { now: 1 }), 1);
+    assert.equal(await nextInviteGeneration(db, P1, { now: 2 }), 2);
     // The visitor's visit row (Task 7's upsert) carries the generation it came from.
     const before = { gen: 1, state: "unshared", epoch: EPOCH };
     const current = { gen: 2, state: "active", epoch: NEW_EPOCH };
