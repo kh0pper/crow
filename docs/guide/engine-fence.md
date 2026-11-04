@@ -33,7 +33,7 @@ When tailscale reports no address for a family — logged out, or the boot race 
 
 The address is resolved on every apply (`tailscale ip -4` / `-6`, each call bounded by `timeout 3` — a wedged daemon means the address is unresolvable, not that the unit hangs) and is never stored in the conf or the script. `publish lan` never falls back: its address is in the conf.
 
-IPv6 rules exist only when the kernel runs a v6 stack (`/proc/net/if_inet6` exists). That is decided by the stack and not by whether `ip6tables` is installed: a host with the binary and no v6 module gets no v6 rules and no warning about them. When a family does end up with no rules at all — a publish that moved family, the last LAN publish removed — the chain is restored empty, so a stale DROP never lingers; a family whose chain never existed is left alone, so a v4-only host gains no empty v6 chain.
+IPv6 rules exist only when the kernel runs a v6 stack (`/proc/net/if_inet6` exists) **and** `ip6tables-restore` is installed. That is decided by the stack, not by whether `ip6tables` is installed: a host with the binary and no v6 module gets no v6 rules and no warning about them. A host with the stack but no `ip6tables-restore` gets a warning and no v6 rules; it never fails the unit. When a family does end up with no rules at all — a publish that moved family, the last LAN publish removed — the chain is restored empty, so a stale DROP never lingers; a family whose chain never existed is left alone, so a v4-only host gains no empty v6 chain.
 
 Every call that touches a table passes `-w 10`: the xtables lock, so a call waits for another holder (tailscaled takes it at boot) instead of failing outright, as iptables-legacy does.
 
@@ -74,7 +74,7 @@ systemd-analyze verify crow-engine-fence.service crow-engine-fence-reapply.servi
 
 Edit `/etc/crow/engine-fence.conf` first: the example holds placeholders only.
 
-`<group>` is the group of the user the gateway runs as (`id -gn <gateway-user>`). The unit's `RuntimeDirectory=crow-engine-fence` creates `/run/crow-engine-fence` as `root:root` 0750 before the sandbox namespace is built, and the script then sets that group on the directory and the state file (it has `CAP_CHOWN`). Without it the state file stays root-only and the start block cannot read it. The group is never written into the shipped units — they read `/etc/crow/engine-fence.env`.
+`<group>` is the group of the user the gateway runs as (`id -gn <gateway-user>`). It must be a local `/etc/group` entry: a directory-service group can make the unit fail at early boot, before the directory service is up. The unit's `RuntimeDirectory=crow-engine-fence` creates `/run/crow-engine-fence` as `root:root` 0750 before the sandbox namespace is built, and the script then sets that group on the directory and the state file (it has `CAP_CHOWN`). Without it the state file stays root-only and the start block cannot read it. The group is never written into the shipped units — they read `/etc/crow/engine-fence.env`.
 
 Then, with docker up:
 
@@ -94,6 +94,7 @@ That facts file is written by `check` and by an interactive `apply`. `apply --bo
 - `/etc/crow/engine-fence.facts.json` — root, 0640: the backend, the per-bridge facts, the conf hash, the Docker-flags hash, `saved_at`.
 - `/run/crow-engine-fence/state.json` — root, 0640, group `<group>`, inside the unit's `0750` RuntimeDirectory: the generation, `applied_at`, the backend, the resolved tailnet addresses, and one entry per rule (`id`, family, address, `addressed`/`port-only`, port, interface, exemptions). Nothing else — no process names, no environment.
 - `/run/crow-engine-fence/applied.sha256` — root, 0640, group `<group>`: the hash of the transaction text that was last really restored. A re-apply run that would restore the same bytes restores nothing (see the timer below). It lives on `/run`, so a reboot starts without it and the boot apply always writes its rules.
+- `/run/crow-engine-fence/applied.counts` — root, 0640, group `<group>`: the number of rules the last apply or `remove` left in each family. The skip compares it with the live chain, so a flushed chain or a deleted jump is restored even when the transaction text has not changed, and `remove` records its reduced count here so the timer leaves the removal alone.
 
 ### RequiredBy or WantedBy
 
@@ -115,7 +116,7 @@ Install exactly one of the two under `/etc/systemd/system/crow-engine-fence.serv
 - the first 15 minutes after boot, **once a minute** — one `OnBootSec=` trigger per minute, because that is the window in which tailscaled may still have no address and the boot apply installed the stricter port-only rule;
 - from then on, **every 15 minutes** on the calendar (`OnCalendar=*:0/15`).
 
-Either phase does nothing at all when the transaction it would restore is byte-identical to the last applied one: no `iptables-restore`, no `ip6tables-restore`, no state rewrite. The applied hash is `/run/crow-engine-fence/applied.sha256`. That is what makes the minute-by-minute window cheap, and it is also why `remove <id>` survives the timer: the conf's transaction is unchanged, so the run skips. A conf edit changes the transaction (a new generation) and the next run restores the full set — the removed rule included, if the conf still lists it — and so does an interactive `crow-engine-fence apply`, which never skips.
+Either phase does nothing at all when the transaction it would restore is byte-identical to the last applied one **and** the live chain still matches the rule count that apply left (the PREROUTING jump present, the expected number of `-A` lines): no `iptables-restore`, no `ip6tables-restore`, no state rewrite. The applied hash is `/run/crow-engine-fence/applied.sha256`, and `/run/crow-engine-fence/applied.counts` records the counts. That is what makes the minute-by-minute window cheap, and it is also why `remove <id>` survives the timer: the conf's transaction is unchanged and `remove` writes the reduced counts, so the run skips. A conf edit changes the transaction (a new generation) and the next run restores the full set — the removed rule included, if the conf still lists it — and so does an interactive `crow-engine-fence apply`, which never skips. A flush or a hand-deleted jump is restored on the next run even without a conf edit.
 
 The unit declares **no** `RuntimeDirectory=` — `/run/crow-engine-fence` belongs to the fence unit — and it never restarts or stops the fence unit or docker.
 
@@ -172,7 +173,7 @@ crow-engine-fence remove <id>        # one publish's rules, live only; the conf 
 crow-engine-fence status             # warns about a conf entry with no live rule
 ```
 
-`remove <id>` edits the live rules only, never the conf: the conf is the operator's file. It also leaves the applied hash alone, so the re-apply timer's run keeps skipping and the removal stands; an interactive `crow-engine-fence apply` or any edit to the conf restores the rule. To retire a publish for good, edit the conf too; to stop using the fence entirely:
+`remove <id>` edits the live rules only, never the conf: the conf is the operator's file. It records the reduced live rule count next to the applied hash, so the re-apply timer's run keeps skipping and the removal stands. A removal also comes back after a reboot (the applied hash and counts live on `/run`) and after any change in the resolved tailnet address (the transaction is then no longer the one that was applied); an interactive `crow-engine-fence apply` or any edit to the conf restores the rule as well. To retire a publish for good, edit the conf too; to stop using the fence entirely:
 
 ```bash
 systemctl disable --now crow-engine-fence-reapply.timer

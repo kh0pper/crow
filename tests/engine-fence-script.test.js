@@ -34,7 +34,9 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -382,6 +384,33 @@ const run = (ctx, args = [], extra = {}) =>
     env: envOf(ctx, extra),
     timeout: 60_000,
   });
+
+/**
+ * A PATH directory that carries every fake and every coreutil the script needs
+ * except `missing`, so a host that happens to have that binary cannot leak into
+ * the run. Used to model a stack that has no restore binary.
+ */
+function pathWithout(ctx, missing) {
+  const dir = join(ctx.root, `bin-no-${missing}`);
+  mkdirSync(dir, { recursive: true });
+  const link = (name, target) => {
+    const dest = join(dir, name);
+    if (!existsSync(dest)) symlinkSync(target, dest);
+  };
+  for (const name of readdirSync(ctx.bin)) {
+    if (name === missing) continue;
+    link(name, join(ctx.bin, name));
+  }
+  for (const tool of [
+    "bash", "cat", "chgrp", "chmod", "cut", "date", "getent", "grep", "head",
+    "mkdir", "mktemp", "mv", "sed", "sha256sum", "sleep", "sort", "stat", "tail",
+    "timeout", "touch", "tr",
+  ]) {
+    const found = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" });
+    if (found.status === 0 && found.stdout.trim()) link(tool, found.stdout.trim());
+  }
+  return dir;
+}
 
 const calls = (ctx) => readFileSync(ctx.log, "utf8").split("\n").filter(Boolean);
 const clearCalls = (ctx) => writeFileSync(ctx.log, "");
@@ -1193,6 +1222,68 @@ test("a re-apply run skips a byte-identical transaction, and a remove survives i
     liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
     "an interactive apply restores it",
   );
+});
+
+// ─── the live check behind the byte-identical skip ────────────────────────
+
+test("a flushed chain is restored by the next timer run, not skipped", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.ok(liveRules(ctx).some((line) => line.startsWith("-A CROW-ENGINE-FENCE")));
+
+  // The live chain is emptied behind the script's back: the transaction text is
+  // still the one in applied.sha256, so the skip must look at the chain too.
+  writeFileSync(join(ctx.fixtures, "model-iptables.txt"), "");
+  clearCalls(ctx);
+  const r = run(ctx, ["apply", "--boot"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /byte-identical/);
+  assert.equal(calls(ctx).filter((line) => line.startsWith("iptables-restore")).length, 1);
+  assert.ok(
+    liveRules(ctx).some((line) => line.startsWith("-A CROW-ENGINE-FENCE")),
+    "the flushed rules are back",
+  );
+});
+
+test("a deleted PREROUTING jump is restored by the next timer run, not skipped", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  rmSync(join(ctx.fixtures, "jump-iptables"));
+  assert.equal(liveRules(ctx).some((line) => line === "-A PREROUTING -j CROW-ENGINE-FENCE"), false);
+
+  clearCalls(ctx);
+  const r = run(ctx, ["apply", "--boot"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stdout, /byte-identical/);
+  assert.ok(
+    calls(ctx).includes("iptables -w 10 -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE"),
+    "the jump is put back",
+  );
+  assert.ok(liveRules(ctx).includes("-A PREROUTING -j CROW-ENGINE-FENCE"));
+});
+
+test("a v6 stack without ip6tables-restore warns and writes no v6 rules", () => {
+  const ctx = setup();
+  assert.equal(run(ctx, ["check"]).status, 0);
+  const noRestore = pathWithout(ctx, "ip6tables-restore");
+  clearCalls(ctx);
+  const r = run(ctx, ["apply", "--boot"], { PATH: noRestore });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /ip6tables-restore is not installed/);
+  assert.deepEqual(
+    calls(ctx).filter((line) => line.startsWith("ip6tables")),
+    [],
+    "no ip6tables call of any kind",
+  );
+  assert.equal(existsSync(join(ctx.fixtures, "restore-input-ip6tables.txt")), false);
+  assert.equal(stateOf(ctx).rules.every((rule) => rule.family === "v4"), true);
+
+  // The same host with the binary present writes them.
+  clearCalls(ctx);
+  const withRestore = run(ctx, ["apply", "--boot"]);
+  assert.equal(withRestore.status, 0, withRestore.stderr);
+  assert.ok(calls(ctx).some((line) => line.startsWith("ip6tables-restore")));
+  assert.ok(stateOf(ctx).rules.some((rule) => rule.family === "v6"));
 });
 
 // ─── swap-check ─────────────────────────────────────────────────────────────

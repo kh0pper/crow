@@ -79,6 +79,11 @@ case "$STATE" in
   *) STATE_DIR=. ;;
 esac
 APPLIED_HASH=$STATE_DIR/applied.sha256
+# The live rule count the last apply (or remove) left in each family. The skip
+# below compares it with the live chain: a flushed chain or a deleted jump is
+# invisible to the transaction hash, so a byte-identical run must not skip over
+# it. `remove` records its reduced count here so the timer leaves it alone.
+APPLIED_COUNTS=$STATE_DIR/applied.counts
 # The gateway's group, from /etc/crow/engine-fence.env. Never a literal here:
 # a group name in a shipped file would be a host detail. It reaches chgrp, so it
 # is checked as a name before it is used, exactly as crow-publish-snapshot does.
@@ -620,6 +625,12 @@ resolve_tailnet() { # <family> -> the address on stdout, or exit 1
 # IPv6 comes from the stack, never from `ip6tables --version`.
 has_v6_stack() { [ -e "$V6_STACK" ]; }
 
+# The restore binary, not the bare `ip6tables` one: a host can carry one half of
+# the pair. A family this script cannot restore is a family it must not write,
+# and a stack without the binary is a warning, never a failed unit.
+has_v6_restore() { command -v ip6tables-restore >/dev/null 2>&1; }
+v6_rules_enabled() { has_v6_stack && has_v6_restore; }
+
 json_str() { # <text> -> a JSON string literal
   local s=$1
   s=${s//\\/\\\\}
@@ -670,7 +681,7 @@ build_state_rules() { # <tn4> <tn6>
   STATE_RULES=()
   local i fam tn addr port id
   for fam in 4 6; do
-    if [ "$fam" = 6 ] && ! has_v6_stack; then
+    if [ "$fam" = 6 ] && ! v6_rules_enabled; then
       continue
     fi
     [ "$fam" = 4 ] && tn=$tn4 || tn=$tn6
@@ -739,6 +750,52 @@ applied_hash_matches() { # <hash>
   [ -r "$APPLIED_HASH" ] || return 1
   saved=$(cat -- "$APPLIED_HASH" 2>/dev/null) || return 1
   [ "$saved" = "$1" ]
+}
+
+restore_rule_count() { # <restore-text> -> the -A lines it declares
+  printf '%s\n' "$1" | grep -cE -- "^-A $CHAIN " || true
+}
+
+write_applied_counts() { # <v4-text> <v6-text>
+  local text4=$1 text6=$2 tmp
+  mkdir -p -- "$STATE_DIR" || die 22 "cannot create the state directory: $STATE_DIR"
+  tmp=$(mktemp -- "$STATE_DIR/.counts.XXXXXX") || die 22 "cannot write in $STATE_DIR"
+  printf '4 %s\n6 %s\n' "$(restore_rule_count "$text4")" "$(restore_rule_count "$text6")" >"$tmp"
+  chmod 0640 -- "$tmp" || die 22 "cannot set the applied-counts file's mode"
+  if [ -n "$FENCE_GROUP" ]; then
+    chgrp -- "$FENCE_GROUP" "$tmp" || die 22 "cannot set the applied-counts file's group"
+  fi
+  mv -f -- "$tmp" "$APPLIED_COUNTS" || die 22 "cannot install $APPLIED_COUNTS"
+}
+
+# The hash says "the transaction has not changed"; this says "the live chain is
+# still what that transaction left". For every family that should have rules,
+# the PREROUTING jump must exist and the chain must carry exactly the recorded
+# number of rules. Anything else means a flush or a hand-deleted jump that a
+# byte-identical skip would silently preserve.
+applied_rules_live() {
+  local fam expected bin count
+  [ -r "$APPLIED_COUNTS" ] || return 1
+  while read -r fam expected; do
+    case $fam in
+      4 | 6) ;;
+      *) return 1 ;;
+    esac
+    [[ ${expected:-} =~ ^[0-9]+$ ]] || return 1
+    [ "$expected" -gt 0 ] || continue
+    if [ "$fam" = 6 ] && ! has_v6_stack; then
+      continue
+    fi
+    case $fam in
+      4) bin=iptables ;;
+      6) bin=ip6tables ;;
+    esac
+    "$bin" -w "$XT_WAIT" -t raw -C PREROUTING -j "$CHAIN" >/dev/null 2>&1 || return 1
+    count=$("$bin" -w "$XT_WAIT" -t raw -S "$CHAIN" 2>/dev/null |
+      grep -cE -- "^-A $CHAIN " || true)
+    [ "$count" = "$expected" ] || return 1
+  done <"$APPLIED_COUNTS"
+  return 0
 }
 
 # ─── boot path: no docker call of any kind ─────────────────────────────────
@@ -834,9 +891,11 @@ boot_facts_or_die() {
 apply_rules_now() { # <flavour> <backend> <skip-a-byte-identical-transaction 0|1>
   local flavour=$1 backend=$2 skip=$3 tn4= tn6= text4 text6 v6=0 hash
   tn4=$(resolve_tailnet 4) || tn4=
-  if has_v6_stack; then
+  if v6_rules_enabled; then
     v6=1
     tn6=$(resolve_tailnet 6) || tn6=
+  elif has_v6_stack; then
+    warn "the IPv6 stack is present but ip6tables-restore is not installed: no v6 rules were written"
   else
     warn "no IPv6 stack ($V6_STACK is absent): no v6 rules were written"
   fi
@@ -854,11 +913,11 @@ apply_rules_now() { # <flavour> <backend> <skip-a-byte-identical-transaction 0|1
   fi
 
   # The re-apply path is a no-op when the transaction it would restore is
-  # byte-identical to the last applied one: no restore, no state rewrite. An
-  # interactive apply never skips — it is the documented way to put back a rule
-  # that `remove` took out.
+  # byte-identical to the last applied one AND the live chain still matches
+  # what that transaction left. An interactive apply never skips — it is the
+  # documented way to put back a rule that `remove` took out.
   hash=$(transaction_hash "$text4" "$text6")
-  if [ "$skip" -eq 1 ] && applied_hash_matches "$hash"; then
+  if [ "$skip" -eq 1 ] && applied_hash_matches "$hash" && applied_rules_live; then
     printf '%s: the rules are byte-identical to the last apply (g%s): nothing was restored\n' \
       "$PROGNAME" "$GENERATION"
     return 0
@@ -872,6 +931,7 @@ apply_rules_now() { # <flavour> <backend> <skip-a-byte-identical-transaction 0|1
   build_state_rules "$tn4" "$tn6"
   write_state "$flavour" "$backend" "$tn4" "$tn6"
   write_applied_hash "$hash"
+  write_applied_counts "$text4" "$text6"
 
   printf '%s: applied generation g%s (%s rules in %s)\n' \
     "$PROGNAME" "$GENERATION" "${#STATE_RULES[@]}" "$CHAIN"
@@ -1177,9 +1237,9 @@ cmd_remove() {
   parse_conf
   SKIP_ID=$id
   local tag="crow-engine-fence:$id:"
-  local fam lines kept text removed=0
+  local fam lines kept text removed=0 text4='' text6=''
   for fam in 4 6; do
-    if [ "$fam" = 6 ] && ! has_v6_stack; then
+    if [ "$fam" = 6 ] && ! v6_rules_enabled; then
       continue
     fi
     lines=$(chain_lines "$fam")
@@ -1195,12 +1255,13 @@ cmd_remove() {
     fi
     text="$text"'COMMIT'$'\n'
     apply_family "$fam" "$text"
+    if [ "$fam" = 4 ]; then text4=$text; else text6=$text; fi
   done
 
   [ "$removed" -eq 1 ] || die 20 "no live rule is tagged $tag"
   local tn4= tn6= v6=0
   tn4=$(resolve_tailnet 4) || tn4=
-  if has_v6_stack; then
+  if v6_rules_enabled; then
     v6=1
     tn6=$(resolve_tailnet 6) || tn6=
   fi
@@ -1210,13 +1271,17 @@ cmd_remove() {
   backend=$(facts_field docker_firewall_backend) || backend=''
   write_state "${flavour:-unknown}" "${backend:-unknown}" "$tn4" "$tn6"
   # The applied-hash file is deliberately NOT touched: the conf's transaction is
-  # unchanged, so the re-apply run skips and this removal survives it. A conf
-  # edit or an interactive `apply` puts the rule back.
+  # unchanged, so the re-apply run skips and this removal survives it. The
+  # reduced per-family counts ARE recorded, so the timer's live check accepts
+  # the chain `remove` left behind. A conf edit, an interactive `apply`, a
+  # reboot (the files live on /run) or a new tailnet address (a different
+  # transaction) puts the rule back.
+  write_applied_counts "$text4" "$text6"
   printf '%s: removed %s from the live rules\n' "$PROGNAME" "$id"
   local i
   for i in "${!PUB_ID[@]}"; do
     if [ "${PUB_ID[i]}" = "$id" ]; then
-      printf '%s: WARN: the conf still lists %s, so the next real apply puts it back (edit %s to keep it removed; the re-apply timer leaves it out while the conf is unchanged)\n' \
+      printf '%s: WARN: the conf still lists %s, so the next real apply puts it back, and a reboot or a change in the resolved tailnet address puts it back too (edit %s to keep it removed; the re-apply timer leaves it out while the conf and the address are unchanged)\n' \
         "$PROGNAME" "$id" "$CONF"
       break
     fi
