@@ -32,6 +32,23 @@ export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-
   ".then(function(r){if(r.ok){location.reload();}else{b.disabled=false;}},function(){b.disabled=false;});});})();";
 
 /**
+ * A noVNC page URL with `path` pinned to that page's own websockify.
+ *
+ * The bundled noVNC (1.0.0) defaults the WebSocket path to "websockify" and
+ * resolves it from the page's ORIGIN root, so a viewer at /proxy/browser/… would
+ * open wss://<host>/websockify, which the gateway never upgrades (it answers
+ * only /proxy/<id>/…). Copied from servers/shared/novnc-url.js: this panel is
+ * deployed on its own to <CROW_HOME>/panels/, so it imports nothing from
+ * servers/.
+ */
+export function novncUrl(page, query) {
+  const bare = page.replace(/^\/+/, "");
+  const cut = bare.lastIndexOf("/");
+  const sock = (cut < 0 ? "" : bare.slice(0, cut + 1)) + "websockify";
+  return page + "?" + query + "&path=" + encodeURIComponent(sock).replace(/%2F/g, "/");
+}
+
+/**
  * The noVNC viewer URLs. The bundled noVNC (Ubuntu 22.04's novnc 1:1.0.0)
  * reads view_only from the query string and then KEEPS it in localStorage
  * (WebUtil.writeSetting), shared by every viewer on this origin, so the
@@ -40,8 +57,8 @@ export const HAND_BACK_JS = "(function(){var b=document.getElementById('browser-
  * password (1.4.0: loopback VNC behind the Crow sign-in), so every link
  * autoconnects; none ever carries a password parameter.
  */
-export const VNC_VIEW_ONLY = "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale";
-export const VNC_INTERACTIVE = "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false";
+export const VNC_VIEW_ONLY = novncUrl("/proxy/browser/vnc.html", "view_only=true&autoconnect=true&resize=scale");
+export const VNC_INTERACTIVE = novncUrl("/proxy/browser/vnc.html", "autoconnect=true&resize=scale&view_only=false");
 
 export default {
   id: "browser",

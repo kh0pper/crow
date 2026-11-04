@@ -190,7 +190,7 @@ test("Take over (the tile's button or a tap on the picture) opens a full-screen 
   assert.equal(one(s, "to-host").textContent, "shop.example.test");
   const vnc = one(s, "to-vnc");
   assert.ok(vnc, "the viewer loads once held");
-  assert.equal(vnc.getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
+  assert.equal(vnc.getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/browser/websockify");
   const back = one(s, "to-back");
   assert.equal(back.textContent, "Hand back");
   assert.ok(back.focused > 0, "focus lands on Hand back");
@@ -285,7 +285,7 @@ test("no VNC password: the sheet has no Copy row or re-auth, never asks the keyc
   }
   assert.equal(h.calls.filter((c) => c.url.includes("/keychain/")).length, 0, "no keychain request");
   const src = one(s, "to-vnc").getAttribute("src");
-  assert.equal(src, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false", "autoconnects through the proxy");
+  assert.equal(src, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/browser/websockify", "autoconnects through the proxy, naming its websockify");
   assert.doesNotMatch(src, /password/i);
   assert.deepEqual(h.written, [], "nothing goes to the clipboard");
   h.api.closeTakeOver();

@@ -9,6 +9,7 @@ import { getManifest, getProxiedExtensions, readInstalled } from "../routes/exte
 import { getPanelForBundle } from "../dashboard/panel-registry.js";
 import { effectiveCrowMcp } from "../../../scripts/pi-bots/skill-tools.mjs";
 import { remoteServersForBot, remoteBlockName } from "../../../scripts/pi-bots/remote-blocks.mjs";
+import { novncUrl } from "../../shared/novnc-url.js";
 import bus from "../../shared/event-bus.js";
 
 const TTL_MS = 30_000;
@@ -33,9 +34,9 @@ export function cleanPath(p) {
  * origin (app/ui.js initSetting/updateSetting) and every /proxy/<id>/ page
  * shares the dashboard's origin, so after one watch-only tile any later noVNC
  * page would open view-only unless its link says otherwise (the Take over
- * sheet pins the same thing).
+ * sheet pins the same thing). Its websockify `path` comes from novncUrl.
  */
-export const NOVNC_PAGE_QUERY = "?autoconnect=true&resize=scale&view_only=false";
+export const NOVNC_PAGE_PARAMS = Object.freeze({ autoconnect: "true", resize: "scale", view_only: "false" });
 const cache = new Map(); // crowHome -> { at, apps }
 
 // appsForProject's answers: db -> Map("<crowHome>\0<projectId>" -> { at, apps }).
@@ -86,8 +87,8 @@ function build(crowHome) {
         // A desktop app's page is its noVNC page; a page app whose web UI is
         // itself a noVNC page (a browser from before 1.3.11) gets the same pin.
         const webPath = cleanPath(ext.path);
-        const href = desktopPath ? `/proxy/${id}/${desktopPath}${NOVNC_PAGE_QUERY}`
-          : webPath ? `/proxy/${id}/${webPath}${NOVNC_PAGE_QUERY}` : `/proxy/${id}${ext.path}`;
+        const href = desktopPath ? novncUrl(`/proxy/${id}/${desktopPath}`, NOVNC_PAGE_PARAMS)
+          : webPath ? novncUrl(`/proxy/${id}/${webPath}`, NOVNC_PAGE_PARAMS) : `/proxy/${id}${ext.path}`;
         apps.push({
           ...base,
           kind: desktopPath ? "desktop" : "page",

@@ -93,7 +93,7 @@ test("drawer lists This project and All apps", async () => {
   const grid = html.match(/data-apps-grid="project"[^>]*>(.*?)<\/div>/s)[1];
   assert.deepEqual([...grid.matchAll(/data-app-id="([^"]+)"/g)].map((m) => m[1]), ["browser"]);
   // I2: a desktop app's link pins noVNC's settings (view_only is saved per origin).
-  assert.match(grid, /href="\/proxy\/browser\/vnc.html\?autoconnect=true&amp;resize=scale&amp;view_only=false" class="shell-app" data-app-id="browser" data-app-kind="desktop" data-turbo="false"/);
+  assert.match(grid, /href="\/proxy\/browser\/vnc.html\?autoconnect=true&amp;resize=scale&amp;view_only=false&amp;path=proxy\/browser\/websockify" class="shell-app" data-app-id="browser" data-app-kind="desktop" data-turbo="false"/);
   assert.match(grid, /<span class="shell-app-icon" aria-hidden="true"><svg /, "the manifest's icon key, from the app-icons table");
   assert.match(html, /data-apps-grid="all" hidden><\/div>/, "All is fetched on switch, not rendered");
 

@@ -12,8 +12,9 @@ process.env.CROW_DATA_DIR = dir;
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 const REPO = new URL("..", import.meta.url).pathname;
 
-const { listApps, appsForBots, grantedServers, appsForProject, invalidateAppCatalog, invalidateProjectApps, cleanPath, NOVNC_PAGE_QUERY, _resetCatalogCache, _setClock } =
+const { listApps, appsForBots, grantedServers, appsForProject, invalidateAppCatalog, invalidateProjectApps, cleanPath, NOVNC_PAGE_PARAMS, _resetCatalogCache, _setClock } =
   await import("../servers/gateway/apps/catalog.js");
+const { novncUrl, novncSocketPath } = await import("../servers/shared/novnc-url.js");
 const { registerPanel } = await import("../servers/gateway/dashboard/panel-registry.js");
 
 const home = join(dir, "bundles-home");
@@ -63,7 +64,7 @@ test("listApps reads webUI, desktop and panel bundles", () => {
   assert.deepEqual(apps.map((a) => a.id).sort(), ["browser", "climber", "dunder", "nested", "notes", "ntfy", "pager"]); // "hidden" has no registered panel
   const b = apps.find((a) => a.id === "browser");
   assert.equal(b.kind, "desktop");
-  assert.equal(b.href, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
+  assert.equal(b.href, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/browser/websockify");
   assert.equal(b.label, "browser", "the manifest's name, not webUI.label (\"VNC Viewer\")");
   assert.equal(b.desktopPath, "vnc.html");
   assert.equal(b.leaseDeclared, true);
@@ -91,12 +92,15 @@ test("the catalog marks an app desktop only when its desktop.path is a clean noV
   }
 });
 
-// I2: noVNC saves view_only per origin, so every launcher link to a noVNC page pins it off.
-test("every launcher link to a desktop app's noVNC page pins autoconnect, scale and view_only=false", () => {
-  assert.equal(NOVNC_PAGE_QUERY, "?autoconnect=true&resize=scale&view_only=false");
+// I2: noVNC saves view_only per origin, so every launcher link to a noVNC page pins it off,
+// and every such link names the websockify path of its own page.
+test("every launcher link to a desktop app's noVNC page pins autoconnect, scale, view_only=false and its websockify path", () => {
+  assert.deepEqual({ ...NOVNC_PAGE_PARAMS }, { autoconnect: "true", resize: "scale", view_only: "false" });
   for (const a of listApps({ crowHome: home }).filter((x) => x.kind === "desktop")) {
-    assert.equal(a.href, "/proxy/" + a.id + "/" + a.desktopPath + NOVNC_PAGE_QUERY, a.id);
-    assert.equal(new URL(a.href, "https://x.example").searchParams.get("view_only"), "false");
+    assert.equal(a.href, novncUrl("/proxy/" + a.id + "/" + a.desktopPath, NOVNC_PAGE_PARAMS), a.id);
+    const q = new URL(a.href, "https://x.example").searchParams;
+    assert.equal(q.get("view_only"), "false");
+    assert.equal(q.get("path"), novncSocketPath("/proxy/" + a.id + "/" + a.desktopPath), a.id + ": the page's own websockify");
   }
   // A page app whose web UI is not a noVNC page keeps its href as it was.
   assert.equal(listApps({ crowHome: home }).find((a) => a.id === "dunder").href, "/proxy/dunder/");

@@ -448,6 +448,7 @@ export function perchBrowserTileJs(lang = "en") {
          div.at-bar > span.at-name (the app's name), span.at-state (Watching)
          div.at-view > iframe.at-vnc  watch-only noVNC, a src built here from
                                       the server's /proxy/<id>/<path> (checked)
+                                      and naming its own websockify
          div.at-note                  "can't be shown here" (the server said no)
          div.at-actions > button.at-take (only when offered), a.at-open (the
                                       app's page, whenever Take over is not
@@ -490,6 +491,23 @@ export function perchBrowserTileJs(lang = "en") {
     var str=String(src||''), q=str.indexOf('?'), base=q>=0?str.slice(0,q):str, pre='/proxy/'+appId+'/';
     if(base.indexOf(pre)!==0||base.length>300||base.indexOf('..')>=0||!AT_PATH.test(base.slice(pre.length))) return null;
     return base;
+  }
+  /* The viewer must name its own websockify: noVNC 1.0.0 defaults the WebSocket
+     path to "websockify" at the origin ROOT, and the gateway upgrades only
+     /proxy/<id>/... , so an unnamed page never connects (see
+     servers/shared/novnc-url.js for the same rule). Plain ES5: this runs in the
+     page, inside a template literal, with no backtick and no dollar-brace. */
+  function atViewUrl(base){
+    var page=String(base||''), at=page.indexOf('?');
+    var href=at<0?page:page.slice(0,at), q=at<0?'':page.slice(at+1);
+    var sock=href;
+    while(sock.charAt(0)==='/') sock=sock.slice(1);
+    var cut=sock.lastIndexOf('/');
+    sock=(cut<0?'':sock.slice(0,cut+1))+'websockify';
+    var pin='path='+encodeURIComponent(sock).replace(/%2F/gi,'/');
+    var named=/(^|&)path=/.test(q);
+    var rest='view_only=true&autoconnect=true&resize=scale';
+    return href+'?'+rest+(q?'&'+q:'')+(named?'':'&'+pin);
   }
   function atOpen(appId,label,href){
     var tr=el('perch-transcript'); if(!tr) return null;
@@ -535,7 +553,7 @@ export function perchBrowserTileJs(lang = "en") {
       if(typeof j.label==='string'&&j.label){ t.label=j.label; t.name.textContent=j.label; t.node.setAttribute('aria-label',j.label); }
       var f=document.createElement('iframe'); f.className='at-vnc';
       f.setAttribute('title',t.label);
-      f.setAttribute('src',base+'?view_only=true&autoconnect=true&resize=scale');
+      f.setAttribute('src',atViewUrl(base));
       t.view.appendChild(f); t.frame=f;
       t.takeOver=j.takeOver===true; t.take.hidden=!t.takeOver;
       /* never a dead end: no Take over, so the app's own page */

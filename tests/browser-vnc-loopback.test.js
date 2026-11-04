@@ -166,7 +166,7 @@ test("compose passes the token (required), no VNC password, and its downloads mo
 });
 
 test("the manifest declares no VNC password and says the viewer is loopback-only behind sign-in", () => {
-  assert.equal(MANIFEST.version, "1.4.0");
+  assert.equal(MANIFEST.version, "1.4.1");
   assert.doesNotMatch(JSON.stringify(MANIFEST), /VNC_PASSWORD/);
   assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN"]);
   const tok = MANIFEST.env_vars.find((v) => v.name === "CROW_BROWSER_VNC_TOKEN");
@@ -186,7 +186,7 @@ test("the manifest declares no VNC password and says the viewer is loopback-only
   const reg = JSON.parse(read("registry/add-ons.json"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "browser");
   assert.ok(entry, "the registry lists the browser");
-  assert.equal(entry.version, "1.4.0");
+  assert.equal(entry.version, "1.4.1");
   assert.doesNotMatch(JSON.stringify(entry), /VNC_PASSWORD/);
   assert.doesNotMatch(read("bundles/browser/.env.example"), /VNC_PASSWORD/);
 });
@@ -214,11 +214,12 @@ test("no noVNC URL built anywhere carries a password, and the full-page links au
   for (const k of ["VNC_VIEW_ONLY", "VNC_INTERACTIVE"]) {
     assert.match(panel[k], /^\/proxy\/browser\/vnc\.html\?/, k);
     assert.match(panel[k], /autoconnect=true/, k);
+    assert.match(panel[k], /[?&]path=proxy\/browser\/websockify(&|$)/, k + ": names its own websockify");
     assert.doesNotMatch(panel[k], /password/i, k);
   }
-  const { NOVNC_PAGE_QUERY } = await import("../servers/gateway/apps/catalog.js");
-  assert.match(NOVNC_PAGE_QUERY, /autoconnect=true/);
-  assert.doesNotMatch(NOVNC_PAGE_QUERY, /password/i);
+  const { NOVNC_PAGE_PARAMS } = await import("../servers/gateway/apps/catalog.js");
+  assert.equal(NOVNC_PAGE_PARAMS.autoconnect, "true");
+  assert.doesNotMatch(JSON.stringify(NOVNC_PAGE_PARAMS), /password/i);
   // The skill and docs never send a raw-port VNC URL or ask for a VNC password.
   const skill = read("bundles/browser/skills/crow-browser.md");
   assert.doesNotMatch(skill, /localhost:6080|and the VNC password/);

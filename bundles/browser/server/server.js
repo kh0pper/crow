@@ -39,6 +39,24 @@ export function canonicalCrowHome(env = process.env) {
   try { return { CROW_HOME: realpathSync(env.CROW_HOME) }; } catch { return { CROW_HOME: resolvePath(env.CROW_HOME) }; }
 }
 
+/**
+ * A noVNC page URL with `path` pinned to that page's own websockify.
+ *
+ * The container's noVNC (1.0.0) defaults the WebSocket path to "websockify" and
+ * resolves it from the page's ORIGIN root, so a viewer at /proxy/browser/… would
+ * open wss://<host>/websockify, which the gateway never upgrades (it answers
+ * only /proxy/<id>/…). Copied from servers/shared/novnc-url.js: an installed
+ * copy of this bundle resolves nothing outside its own directory.
+ */
+export function novncUrl(page) {
+  const href = String(page);
+  const bare = href.replace(/^\/+/, "");
+  const cut = bare.lastIndexOf("/");
+  const sock = (cut < 0 ? "" : bare.slice(0, cut + 1)) + "websockify";
+  return href + "?autoconnect=true&resize=scale&view_only=false&path=" +
+    encodeURIComponent(sock).replace(/%2F/g, "/");
+}
+
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
     `http://127.0.0.1:${cdpPort()}`;
@@ -46,7 +64,7 @@ export function createBrowserServer(options = {}) {
   // The viewer's address on the Crow dashboard (same origin, signed in). The
   // container's own noVNC port listens on 127.0.0.1 only, so a raw
   // http://localhost:<port> URL never works from the operator's device.
-  const vncUrl = "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false";
+  const vncUrl = novncUrl("/proxy/browser/vnc.html");
   const container = containerName();
 
   const server = new McpServer(
