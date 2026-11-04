@@ -377,6 +377,44 @@ const STYLES = `
     font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.4;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
   }
+  .studio .st-takes { display: flex; flex-direction: column; gap: 8px; }
+  .studio .st-takes-hint { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-muted); }
+  .studio .st-comp {
+    position: relative; height: 34px; border-radius: 8px; border: 1px solid var(--st-line);
+    background: var(--st-bg); overflow: hidden; touch-action: none; cursor: crosshair;
+  }
+  .studio .st-comp-line {
+    position: absolute; top: 0; bottom: 0; width: 1px; background: var(--st-line-soft);
+  }
+  .studio .st-comp-seg {
+    position: absolute; top: 3px; bottom: 3px; border-radius: 5px; overflow: hidden;
+    display: flex; align-items: center; justify-content: flex-start; padding: 0 6px;
+    font-size: 11px; font-weight: 600; color: #17191C; white-space: nowrap;
+  }
+  .studio .st-comp-pick {
+    position: absolute; top: 0; bottom: 0; background: rgba(242, 165, 65, 0.35);
+    border-left: 2px solid var(--st-human); border-right: 2px solid var(--st-human);
+    pointer-events: none;
+  }
+  .studio .st-take-list { display: flex; flex-direction: column; gap: 6px; }
+  .studio .st-take {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px;
+    border: 1px solid var(--st-line); border-radius: 8px; background: var(--st-head);
+    color: var(--st-text); font: inherit; cursor: pointer;
+  }
+  .studio .st-take.st-take-sel { border-color: var(--st-human); box-shadow: inset 0 0 0 1px var(--st-human); }
+  .studio .st-take.st-take-off { opacity: 0.5; }
+  .studio .st-take-color { width: 8px; align-self: stretch; min-height: 28px; border-radius: 3px; flex: 0 0 auto; }
+  .studio .st-take-main { display: flex; flex-direction: column; min-width: 0; flex: 1 1 120px; }
+  .studio .st-take-name { font-size: 13px; font-weight: 600; }
+  .studio .st-take-meta { font-size: 11px; color: var(--st-muted); }
+  .studio .st-take-badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 2px 6px; border-radius: 6px; border: 1px solid #5C4A1E; background: #3D3420;
+    color: var(--st-human);
+  }
+  .studio .st-take-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+  .studio .st-takes-foot { display: flex; flex-wrap: wrap; gap: 8px; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
