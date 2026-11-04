@@ -570,7 +570,8 @@ async function syncConflictsSignal(db) {
     // expiry columns counts every unresolved row, its old behaviour.
     const cols = await expiryColumns(db);
     let query = { sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0", args: [] };
-    if (cols.has("opened_at")) {
+    const filtered = cols.has("opened_at");
+    if (filtered) {
       const { sql: where, args } = expirableWhere(await readExpireDays(db));
       query = {
         sql: `SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0 AND NOT (${where})`,
@@ -584,7 +585,7 @@ async function syncConflictsSignal(db) {
       // The expiry predicate failed (e.g. a malformed snapshot): count every
       // unresolved row rather than report "none" — a broken query must not
       // hide conflicts. A missing table still throws here and lands below.
-      if (query.args.length === 0) throw err;
+      if (!filtered) throw err;
       ({ rows } = await db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0", args: [] }));
     }
     count = Number(rows[0]?.n ?? 0);
