@@ -30,6 +30,7 @@ import { actAsServe, serveHeaders } from "./fixtures/serve-peer.mjs";
 import { widgetOf, widgetsForPage, loadWidgets } from "../servers/gateway/widgets/registry.js";
 import { splitForPage, gridHtml, gridCellHtml, defaultOnFor } from "../servers/gateway/widgets/grid-html.js";
 import { gridClientJs } from "../servers/gateway/widgets/grid-client.js";
+import { forYouClientJs } from "../servers/gateway/dashboard/panels/for-you/client.js";
 import { forYouPageHtml } from "../servers/gateway/dashboard/panels/for-you/html.js";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 actAsServe(); // this process's HTTP client stands in for tailscaled (the Serve socket owner)
@@ -165,6 +166,7 @@ test("a lazy cell is drawn hidden with one loading line, and its loader and rend
   const grid = document.querySelector(".wg-grid");
   assert.equal(grid.getAttribute("data-wg-nothing"), t("widgets.grid.nothing", "en"));
   assert.equal(grid.getAttribute("data-wg-error"), t("widgets.grid.error", "en"));
+  assert.equal(grid.getAttribute("data-wg-loading"), t("widgets.grid.loading", "en"), "and the loading line a snapshot puts back");
   assert.equal(grid.getAttribute("data-wg-page"), "widgets");
 });
 
@@ -176,6 +178,7 @@ test("Spanish: the same loading, nothing and error lines, from the page's own la
   const grid = document.querySelector(".wg-grid");
   assert.equal(grid.getAttribute("data-wg-nothing"), t("widgets.grid.nothing", "es"));
   assert.equal(grid.getAttribute("data-wg-error"), t("widgets.grid.error", "es"));
+  assert.equal(grid.getAttribute("data-wg-loading"), t("widgets.grid.loading", "es"));
   // A page that draws its own cells (forYouCells, widgets phase 2's other caller) is untouched: no
   // cell it draws is a lazy placeholder.
   const pageHtml = forYouPageHtml({
@@ -387,12 +390,41 @@ test("cell route: an unknown page, a page whose flag is off, and an id the page 
       assert.equal(r.status, 404, JSON.stringify(id));
       assert.equal(r.json?.code, "no_widget", JSON.stringify(id));
     }
+    // A query that is not exactly one name for each: an array id, an array page, a repeated page.
+    // The route takes only a string, so these are the same 404 as an unknown page or id.
+    for (const qs of ["page=widgets&id[]=x", "page=widgets&page=for-you&id=today", "page[]=widgets&id=today"]) {
+      const r = await fetch(`${base}/dashboard/widgets-api/cell?${qs}`, {
+        redirect: "manual", headers: { ...NET, cookie: jar("owner-sess"), accept: "application/json" },
+      });
+      assert.equal(r.status, 404, qs);
+      const json = await r.json().catch(() => null);
+      assert.equal(json?.html, undefined, qs);
+    }
   });
   // The page's own gate applies to the route too: no flag, no cell.
   const off = await cell("widgets", "today");
   assert.equal(process.env.CROW_FOR_YOU, undefined);
   assert.equal(off.status, 404);
   assert.equal(off.json?.html, undefined);
+});
+
+test("cell route: HEAD is the same gate, with no body", async () => {
+  await withFlag(async () => {
+    const head = await fetch(`${base}/dashboard/widgets-api/cell?page=widgets&id=today`, {
+      method: "HEAD", redirect: "manual", headers: { ...NET, cookie: jar("owner-sess") },
+    });
+    assert.equal(head.status, 200, "the owner's own request answers as a GET would");
+    assert.equal(await head.text(), "", "and carries no body");
+
+    // No session at all: the dashboard's own door, and it redirects to the login page as it does
+    // for every other dashboard path. A HEAD never reaches the route's own owner check.
+    const noSession = await fetch(`${base}/dashboard/widgets-api/cell?page=widgets&id=today`, {
+      method: "HEAD", redirect: "manual", headers: { ...NET },
+    });
+    assert.equal(noSession.status, 303);
+    assert.match(String(noSession.headers.get("location")), /\/dashboard\/login$/);
+    assert.equal(await noSession.text(), "");
+  });
 });
 
 test("cell route: it answers exactly the body the page draws, uncached, for either page", async () => {
@@ -603,6 +635,138 @@ test("the client does not start a second fetch for a cell already being fetched"
   release();
   await settle();
   assert.equal(r.cellOf("lazy").hasAttribute("data-wg-lazy"), false);
+});
+
+// ─── the two clients together: a fetched cell, and a Turbo snapshot ─────────
+
+const CLIENT_FOR_YOU = (() => {
+  const js = forYouClientJs();
+  assert.ok(!js.includes("`"), "for-you's client may carry no backtick: it is emitted inside a template literal");
+  assert.ok(!js.includes("${"), "and no ${ either");
+  return js.replace(/^<script>\s*/, "").replace(/<\/script>\s*$/, "");
+})();
+
+/** The lazy cell's fetched markup: a story's sheet, a tile's own audio and its play button. */
+const FETCHED_BODY = [
+  '<div class="fy-story"><dialog class="fy-sheet" id="fy-sheet-1"></dialog></div>',
+  '<audio id="fy-audio-1" data-fy-played="art-1"></audio>',
+  '<button type="button" data-fy-play="fy-audio-1">Play</button>',
+].join("");
+
+/**
+ * Both widget pages in one document: For You's client, the grid's client, and a fetch stub for the
+ * lazy cell. `run()` is what Turbo does with a restored body — the page's scripts run again over the
+ * DOM it cached.
+ */
+function pageRig({ respond }) {
+  const widget = { id: "lazy", titleKey: "forYou.news", sizes: [[2, 1]], defaultSize: [2, 1], pages: ["for-you"], defaultOn: false, render: () => "" };
+  const parsed = parseHTML(`<!doctype html><html><body><div class="fy" data-fy data-fy-play-label="Play" data-fy-pause-label="Pause">${gridHtml("for-you", [{ widget, lazy: true }], "en")}</div></body></html>`);
+  const document = parsed.document;
+  // linkedom hands every parse the same window object, and the clients keep their own flags on it (a
+  // cache listener bound once, the binding hook). Each case here needs its own page, so each gets a
+  // window of its own over the shared one, with none of those flags inherited.
+  const window = Object.create(parsed.window);
+  window.__crowWidgetsGridCacheBound = false;
+  window.__crowWidgetsGridTidies = [];
+  window.__crowForYouCacheBound = false;
+  window.crowBindWidgetMarkup = undefined;
+  Object.defineProperty(document, "cookie", { value: "crow_csrf=tok", configurable: true });
+  const store = new Map();
+  store.set(KEY, JSON.stringify({ v: 1, cells: [{ id: "lazy", w: 2, h: 1 }] }));
+  window.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: (k) => { store.delete(k); },
+  };
+  const calls = [];
+  window.fetch = (url, opts) => { calls.push({ url: String(url), opts }); return Promise.resolve(respond(String(url), opts)); };
+  const ctx = vm.createContext({ window, document, fetch: window.fetch, JSON, Number, Object, Array, String, isFinite, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent, Promise });
+  const run = () => { vm.runInContext(CLIENT_FOR_YOU, ctx); vm.runInContext(CLIENT, ctx); };
+  run();
+  const cellOf = (id) => document.querySelector(`[data-widget="${id}"]`);
+  return { document, window, calls, run, cellOf };
+}
+
+test("a fetched cell gets For You's own per-element bindings", async () => {
+  const r = pageRig({ respond: () => ({ ok: true, json: async () => ({ id: "lazy", html: FETCHED_BODY }) }) });
+  await settle();
+  const body = r.cellOf("lazy").querySelector(".wg-cell-body");
+  assert.match(body.innerHTML, /id="fy-sheet-1"/, "the fetched markup is in place");
+  const sheet = body.querySelector("dialog.fy-sheet");
+  assert.equal(sheet.getAttribute("data-fy-bound"), "sheet", "the fetched sheet was bound");
+  const audio = body.querySelector("audio");
+  assert.equal(audio.getAttribute("data-fy-bound"), "audio");
+
+  // Closing the sheet returns focus to the story that opened it.
+  const opener = r.document.createElement("button");
+  r.document.body.appendChild(opener);
+  let focused = 0;
+  opener.focus = () => { focused++; };
+  sheet.__fyOpener = opener;
+  sheet.dispatchEvent(new r.window.Event("close"));
+  assert.equal(focused, 1, "the fetched sheet's close handler ran");
+
+  // A play labels the tile's own button from the page's words, and marks the episode read.
+  const btn = body.querySelector('[data-fy-play="fy-audio-1"]');
+  assert.equal(btn.textContent, "Play");
+  audio.dispatchEvent(new r.window.Event("play"));
+  assert.equal(btn.textContent, "Pause", "the fetched tile's audio drives its button");
+  assert.ok(r.calls.some((c) => c.url.includes("/api/media/articles/art-1/action")), "and marks the episode read");
+});
+
+test("bindWidgetMarkup binds each element once, however often it runs", () => {
+  const r = pageRig({ respond: () => ({ ok: true, json: async () => ({ id: "lazy", html: "" }) }) });
+  const scope = r.document.createElement("div");
+  const sheet = r.document.createElement("dialog");
+  sheet.className = "fy-sheet";
+  const sheetBound = [];
+  sheet.addEventListener = (type) => { sheetBound.push(type); };
+  const audio = r.document.createElement("audio");
+  audio.id = "fy-audio-9";
+  const audioBound = [];
+  audio.addEventListener = (type) => { audioBound.push(type); };
+  scope.appendChild(sheet);
+  scope.appendChild(audio);
+  r.window.crowBindWidgetMarkup(scope);
+  r.window.crowBindWidgetMarkup(scope);
+  assert.deepEqual(sheetBound, ["close"], "one close listener, not two");
+  assert.deepEqual(audioBound, ["play", "pause", "ended"], "one listener per audio event");
+  assert.equal(sheet.getAttribute("data-fy-bound"), "sheet", "the marker is what stops a second bind");
+  assert.equal(audio.getAttribute("data-fy-bound"), "audio");
+});
+
+test("a cell mid-fetch at the snapshot goes back to loading, and a restored grid fetches it again", async () => {
+  let answer = false;
+  const r = pageRig({ respond: () => (answer
+    ? { ok: true, json: async () => ({ id: "lazy", html: '<p id="h-lazy">Fetched</p>' }) }
+    : new Promise(() => {})) });
+  const cell = r.cellOf("lazy");
+  assert.equal(cell.getAttribute("data-wg-lazy"), "loading", "the fetch is on its way");
+  assert.equal(r.calls.filter((c) => c.url.includes("widgets-api/cell")).length, 1);
+
+  // Turbo takes its snapshot here.
+  r.document.dispatchEvent(new r.window.Event("turbo:before-cache"));
+  assert.equal(cell.getAttribute("data-wg-lazy"), "1", "never cached mid-fetch");
+  assert.equal(cell.querySelector(".wg-cell-body").textContent, t("widgets.grid.loading", "en"), "the loading line is back");
+
+  // The restore: Turbo renders the cached body and runs the page's scripts again. The grid is already
+  // wired, so only the fill runs — and this time it lands.
+  answer = true;
+  r.run();
+  await settle();
+  assert.equal(cell.hasAttribute("data-wg-lazy"), false, "the restored cell was fetched");
+  assert.match(cell.querySelector(".wg-cell-body").innerHTML, /id="h-lazy"/);
+});
+
+test("a cell showing the fill's error line is put back to the loading line at the snapshot", async () => {
+  const r = pageRig({ respond: () => ({ ok: false, json: async () => ({ error: "Not found" }) }) });
+  await settle();
+  const cell = r.cellOf("lazy");
+  assert.equal(cell.getAttribute("data-wg-lazy"), "1", "still lazy, for a later try");
+  assert.equal(cell.querySelector(".wg-cell-body").textContent, t("widgets.grid.error", "en"));
+  r.document.dispatchEvent(new r.window.Event("turbo:before-cache"));
+  assert.equal(cell.getAttribute("data-wg-lazy"), "1");
+  assert.equal(cell.querySelector(".wg-cell-body").textContent, t("widgets.grid.loading", "en"), "a restored page shows the loading line, not a stale error");
 });
 
 // ─── the page, in a real browser ────────────────────────────────────────────

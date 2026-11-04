@@ -11,7 +11,9 @@
  *
  * Rules this file owns:
  *   - a widget whose `render` returns "" draws NO cell (the Move card without Ramble, Listen with
- *     nothing in it: For You v1 left those sections out, and so does the grid);
+ *     nothing in it: For You v1 left those sections out, and so does the grid). A LAZY cell is drawn
+ *     regardless: the page never asked that widget's loader, so it cannot know — the device fetches
+ *     the body and shows the grid's own "nothing to show" line when the answer is empty;
  *   - a widget that is offered but not part of THIS page's default layout is drawn with `hidden`
  *     (`defaultOnFor`): the weather on For You, Your morning on the generic page. It is the "+ Add
  *     widget" entry until this device adds it, and it is NOT loaded with the page: `splitForPage`
@@ -172,8 +174,9 @@ function pickerHtml(drawn, lang) {
  * renderer that wants the request's clock. The grid is one element: the client finds it by its
  * `data-wg-page`, and so does the shell when it must keep a swipe from starting inside it.
  *
- * When any cell is lazy, the grid also carries the two page lines a lazy fill may have to draw
- * itself (`data-wg-nothing`, `data-wg-error`): the client sets one of them as TEXT, never as markup.
+ * When any cell is lazy, the grid also carries the three page lines a lazy fill may have to draw
+ * itself (`data-wg-nothing`, `data-wg-error`, `data-wg-loading`): the client sets one of them as TEXT,
+ * never as markup, and puts the loading line back before a Turbo snapshot if the fill was still out.
  * A page with nothing lazy has no use for them, so it does not carry them.
  */
 export function gridHtml(pageId, cells, lang = "en", opts = {}) {
@@ -187,6 +190,7 @@ export function gridHtml(pageId, cells, lang = "en", opts = {}) {
   const body = drawn.map((c) => c.html).join("\n    ");
   const lazyLines = drawn.some((c) => c.entry && c.entry.lazy)
     ? ` data-wg-nothing="${e(t("widgets.grid.nothing", lang))}" data-wg-error="${e(t("widgets.grid.error", lang))}"`
+      + ` data-wg-loading="${e(t("widgets.grid.loading", lang))}"`
     : "";
   return `<div class="wg-grid" data-wg-page="${e(page)}" data-wg-saved="${e(t("widgets.grid.saved", lang))}"${lazyLines}>
     ${toolbarHtml(lang)}

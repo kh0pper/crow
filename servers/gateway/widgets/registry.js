@@ -31,7 +31,10 @@
  *   load(ctx)   reads the data, or returns null when nothing came back (the grid draws the widget's
  *               own one-line error instead). A throw is the same as null;
  *   render      draws the widget from that data; "" means "nothing to show": no cell at all (the
- *               Move card without Ramble, Listen with nothing in it), exactly as For You v1 did.
+ *               Move card without Ramble, Listen with nothing in it), exactly as For You v1 did. A
+ *               lazy cell is the exception — the page never ran that widget's loader, so the cell is
+ *               drawn anyway and the device shows the grid's "nothing to show" line when the
+ *               fetched answer is empty.
  *
  * The loaders and renderers are For You's own (for-you/*.js, panels/for-you/html.js) — no logic
  * moves here, the registry only names them. `render` may take a third `{ now }` argument; every
