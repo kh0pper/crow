@@ -361,11 +361,11 @@ test("live: the full-tab viewer has a way out (Library, Crow's Nest) that the hu
   try {
     await t.nav(base + viewUrl);
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-cacts')`)) === true, 15000), `comment actions drawn (page errors: ${JSON.stringify(t.errors)})`);
-    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/artifacts", "/dashboard/nest"]));
+    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/artifacts", "/dashboard/nest?open=1"]));
     // P6: opened from Make, the way back to Make takes the Library's place (still two ways out).
     await t.nav(base + viewUrl + "?from=make");
     assert.ok(await waitFor(async () => (await t.evalIn(`!!document.querySelector('.cv-nav')`)) === true, 15000));
-    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/make", "/dashboard/nest"]));
+    assert.equal(await t.evalIn(`JSON.stringify([...document.querySelectorAll('.cv-nav a')].map((a) => a.getAttribute('href')))`), JSON.stringify(["/dashboard/make", "/dashboard/nest?open=1"]));
     assert.equal(await t.evalIn(`!!document.getElementById('cv-links')`), false, "the server-rendered holder is gone once moved");
     assert.ok((await t.evalIn(`document.querySelector('.cv-back').getBoundingClientRect().height`)) >= 44, "a 44px tap target");
     await t.nav(base + viewUrl);
@@ -419,7 +419,7 @@ test("live QW4 B2/B3: the full-tab viewer's way out is a slim full-bleed bar (ti
       assert.equal(m.borderBottom, "1px", `a 1px bottom line ${at}`);
       assert.equal(m.title, "Artifacts", `the bar carries the title ${at}`);
       assert.equal(m.titleIsLink, false, "the title is not a link");
-      assert.deepEqual(m.links.map((l) => l.href), ["/dashboard/artifacts", "/dashboard/nest"], "still exactly the two ways out");
+      assert.deepEqual(m.links.map((l) => l.href), ["/dashboard/artifacts", "/dashboard/nest?open=1"], "still exactly the two ways out");
       for (const l of m.links) assert.ok(l.h >= 44 && l.w >= 44, `tappable ${at}`);
       assert.ok(m.links[1].right >= m.innerWidth - 24, `Crow's Nest sits at the right edge ${at}`);
       assert.equal(m.sendDisabled, true, "no comments yet: Send is disabled");

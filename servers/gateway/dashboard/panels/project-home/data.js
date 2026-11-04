@@ -271,9 +271,11 @@ export async function loadProjectHome(db, project, { engine = null, tasksDbPath,
 
 /**
  * The Board's card-link rule for this page: (card) -> { href, conversation }.
- * A card that opens its conversation carries the project like a session row
- * does (Perch scopes to it) and is never prefetched (the visit writes the
- * scope cookie); otherwise its drawer (board/card-link.js).
+ * A card that opens its conversation carries its project (`slugByProject`, the
+ * project this page IS, handed to cardHref) like a session row does — Perch
+ * scopes to it — and is never prefetched (the visit writes the scope cookie);
+ * otherwise its drawer (board/card-link.js). The link is never patched after
+ * the fact: one rule, cardHref's.
  */
 async function cardLinks(db, project, cards) {
   let threads = new Map();
@@ -282,13 +284,10 @@ async function cardLinks(db, project, cards) {
     threads = await threadsByCard(db, cards.map((c) => Number(c.id)));
     hrefs = await drawerHrefs(db, cards);
   } catch (err) { console.warn("[project-home] card links failed:", err && err.message); }
+  const slugByProject = new Map([[Number(project.id), String(project.slug)]]);
   return (c) => {
-    const href = cardHref(c, threads, hrefs);
-    const conversation = href.startsWith("/dashboard/perch#");
-    return {
-      conversation,
-      href: conversation ? `/dashboard/perch?project=${encodeURIComponent(project.slug)}#${href.slice("/dashboard/perch#".length)}` : href,
-    };
+    const href = cardHref(c, threads, hrefs, slugByProject);
+    return { conversation: href.startsWith("/dashboard/perch"), href };
   };
 }
 

@@ -395,3 +395,23 @@ test("a card with more than 50 Workspace files says only the first 50 show", asy
   const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
   assert.notEqual(t("shell.makeCardCapped", "es"), t("shell.makeCardCapped", "en"));
 });
+
+// The sheet's own redirect, run as the browser would: the one line out of the
+// inline client that sends the operator to the new chat.
+function redirectTo(body) {
+  const m = /location\.href = ('\/dashboard\/perch'[^;]*);/.exec(body);
+  assert.ok(m, "the client redirects to the new chat once the message lands");
+  return new Function("projectId", "sid", "return " + m[1]);
+}
+
+test("starting a session in a project redirects to Chat with that project", async () => {
+  seam({ items: [item()], ...OK });
+  const r = await get("/dashboard/make?project=garden");
+  assert.equal(r.status, 200);
+  const to = redirectTo(r.body);
+  // A link without ?project= would open whatever scope the operator last had.
+  assert.equal(to(7, "perchlive-aaaa0001"), "/dashboard/perch?project=7#perchlive-aaaa0001");
+  assert.equal(to("unassigned", "perchlive-aaaa0001"), "/dashboard/perch#perchlive-aaaa0001", "Unassigned opens in place");
+  const all = await get("/dashboard/make?project=all");
+  assert.equal(redirectTo(all.body)("unassigned", "s1"), "/dashboard/perch#s1", "no project at all: the bare link");
+});
