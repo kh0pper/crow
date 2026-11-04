@@ -82,9 +82,17 @@
  *     Task 5 calls it for every terminal refusal — `forbidden`, `stale_epoch`,
  *     `unsupported`, and `bad_frame` on a frame whose envelope parsed and whose
  *     seq is the next one — so one refused frame never wedges the frames after it.
+ *     F3 of the Task 5 fix wave: a KNOWN kind whose envelope parsed and whose BODY
+ *     failed is `bad_frame` and is consumed exactly like an unknown kind
+ *     (`unsupported`); `parseFrame` hands back its envelope for that, while a
+ *     broken envelope still gives no envelope, nothing to consume and no reply.
+ *     Such an envelope-only frame consumes only AFTER the proof and routing checks
+ *     (F4), which hold it instead of consuming it.
  *
  * R5. `update_required` HOLDS instead of ending: the sender keeps the frame until
- *     the peer updates, and a later `flush` re-sends it.
+ *     the peer updates, and a later `flush` re-sends it. `busy` and `not_home` are
+ *     holding refusals for the same reason (see S8 and S3's routing rule), and a
+ *     held frame never consumes its seq.
  *
  * R6. Advancing is conditional, so a frame is applied at most once.
  *     `commitInbound` / `consumeInbound` take the seq only when it is exactly
@@ -127,7 +135,8 @@
  *     The failure path (Task 5), as the exact sequence:
  *       1. authorization runs BEFORE `commitInbound`, so a frame the rules refuse
  *          is never committed: the refusal is a `consumeInbound` with no effect
- *          (R4), in the same transaction;
+ *          (R4), in the same transaction. S7: the rules run INSIDE that
+ *          transaction and read the membership/visit there;
  *       2. if the kind's handler throws, the transaction rolls back — the mark
  *          included, so the seq is free again and the frame was not applied;
  *       3. a NEW `withTransaction` runs `consumeInbound` for that seq (R4: it takes
@@ -137,6 +146,34 @@
  *          may have applied the frame): re-ack it as a dup, never refuse it
  *          `unsupported`.
  *
+ * S7. Authorization runs inside the transaction on the mark. Task 5 authorizes
+ *     FIRST inside its `withTransaction`, and the owner rule (`project_members`,
+ *     mode='live', `frame.epoch === member.uuid`) and the visitor rule
+ *     (`c2c_visits`, `inviteSupersedes`) therefore read the row in the same
+ *     transaction that consumes or commits the seq. A re-invite or unshare that
+ *     commits between a frame's arrival and its transaction is seen: the frame is
+ *     `stale_epoch`/`forbidden` and its effect never runs. The refusal that
+ *     decision produced is SENT only after COMMIT.
+ *
+ * S8. A missing handler holds the frame. Task 5 looks the kind's handler up
+ *     BEFORE the transaction; when the module that owns the kind has not loaded
+ *     (owner.js/visitor.js) it refuses `busy` (a holding refusal, R5) and consumes
+ *     nothing, so the sender keeps the frame and re-sends it once the module is
+ *     there. A handler that THROWS is a different case, and follows S5.
+ *
+ * S9. A contact's inbound marks are CAPPED (`C2C_MARK_CAP`, 512 rows). Before a
+ *     consume or commit would CREATE a new `c2c_inbound_seq` row, Task 5 counts
+ *     that contact's rows; at or above the cap the frame is dropped whole — no
+ *     reply, no consume, so the sender keeps it — and `[c2c] mark cap reached for
+ *     contact <id>` is logged once per contact per hour. A stream that already has
+ *     a mark always keeps working: only a NEW (sender, project, epoch, stream) can
+ *     grow the table.
+ *
+ * S10. A `cb`-proof frame clears the update flag. When a frame arrives on the
+ *     bound proof from a contact whose `c2c_update_required:<crow_id>` flag (R5's
+ *     UI marker) is set, Task 5 deletes that flag: the row means "this contact is
+ *     on the legacy proof", and the frame itself disproves it.
+ *
  * S6. `cancelEpoch` is an optimisation, not a correctness rule (S1, S2 do not need
  *     it): it ends the still-queued frames of an earlier membership so fewer dead
  *     frames are sent.
@@ -144,7 +181,9 @@
  * R9 (follow-up). Inbound marks are never pruned: `c2c_inbound_seq` keeps one row
  *     per (contact, sender instance, project, epoch, stream) for good, and a new
  *     epoch adds a row instead of resetting one. Dropping the marks of dead
- *     memberships is a follow-up, not this task's.
+ *     memberships is a follow-up, not this task's. S9's cap bounds the table in the
+ *     meantime: a new stream past 512 rows is dropped (with no mark and no reply)
+ *     rather than growing it or resetting anyone's marks.
  *
  * Every write the module makes outside a transaction goes through the same
  * per-handle serialization (`write`): `flush`'s attempt bump, `onAck`, `onRefuse`,

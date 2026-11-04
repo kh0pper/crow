@@ -2,26 +2,42 @@
  * Crow-to-Crow receive pipeline (plan 1, task 5; spec §9–§10).
  *
  * `handleC2cFrame` runs every frame that arrives on a contact's admitted peer
- * channel, in this order (the amended order of 2026-11-03 is binding):
+ * channel, in this order (the amended order of 2026-11-03, plus the Task 5 fix
+ * wave, is binding):
  *
- *   1. parse; a broken envelope is dropped with no reply, an unknown kind whose
- *      envelope parses consumes its seq (R4) and is refused `unsupported`;
+ *   1. parse; an envelope that does not parse is dropped with no reply (a refusal
+ *      needs the frame's epoch, stream, seq and sender, which it lacks). A known
+ *      kind whose BODY failed and an unknown kind both keep their parsed
+ *      envelope, and continue as envelope-only frames (F3);
  *   2. a legacy (`sig`) proof is refused `update_required` (R5: a holding
- *      refusal) and flagged for the UI;
- *   3. acks/refusals are applied only by the instance they name (S3), before any
+ *      refusal) and flagged for the UI, WITHOUT consuming a seq (F4); a `cb`
+ *      proof clears that flag again (F6);
+ *   3. envelope-only frames then pass the routing check (F4: a foreign target is
+ *      the holding `not_home`) and dedupe, and only then consume their seq and
+ *      are refused `bad_frame` (a known kind whose body failed) or `unsupported`
+ *      (an unknown kind) — R4;
+ *   4. acks/refusals are applied only by the instance they name (S3), before any
  *      routing reply, so a sibling never answers them;
- *   4. a frame aimed at another instance is refused `not_home` (a null target is
+ *   5. a frame aimed at another instance is refused `not_home` (a null target is
  *      allowed only for an invite);
- *   5. dedupe against the stream's high-water mark: dup → re-ack, gap → refuse;
- *   6. authorize against the live membership (owner side) or the visit (visitor
- *      side); a refusal is a consume with no effect, then the refusal reply;
- *   7. one transaction commits the mark FIRST (S5) and runs the handler only when
- *      it took the seq; after COMMIT ack, then flush (never inside, S4).
+ *   6. dedupe against the stream's high-water mark: dup → re-ack, gap → refuse;
+ *   7. the kind's handler is looked up BEFORE any transaction (F1): a kind whose
+ *      module has not loaded is refused the holding `busy`, so the sender keeps
+ *      its frame and the seq is not consumed;
+ *   8. one transaction authorizes FIRST, reading the membership or visit inside
+ *      it (F2) — a refusal consumes the seq in that same transaction and the
+ *      refusal is sent after COMMIT; otherwise it commits the mark FIRST (S5) and
+ *      runs the handler with the in-transaction `member`/`visit`. After COMMIT:
+ *      ack, then flush (never inside, S4).
  *
  * A throwing handler follows the outbox contract's failure path (S5/R4): the
  * transaction rolls back with the mark, a new transaction consumes the seq, then
  * the frame is refused `unsupported`. If that consume takes nothing (another
  * delivery already took the seq), the frame is re-acked as a dup instead.
+ *
+ * A contact may create at most C2C_MARK_CAP mark rows (F5): a frame that would
+ * create one more is dropped whole — no reply, no consume — so an existing stream
+ * keeps working while a new one cannot grow the table.
  *
  * The kind modules (owner.js, visitor.js) are injected through `ctx.handlers`, so
  * this pipeline is testable with stubs. Logs say `[c2c]` and never carry a body.
@@ -35,6 +51,13 @@ import { authorizeOwnerFrame, authorizeVisitorFrame } from "./authz.js";
 
 /** The local dashboard_settings_overrides key prefix the UI reads (never synced). */
 export const C2C_UPDATE_REQUIRED_PREFIX = "c2c_update_required:";
+
+/** F5: how many `c2c_inbound_seq` rows one contact may ever create. */
+export const C2C_MARK_CAP = 512;
+
+/** F5: the cap line is logged once per contact per hour, never once per frame. */
+const MARK_CAP_LOG_MS = 3_600_000;
+const markCapLoggedAt = new Map();
 
 /** Kinds the owner side receives (the visitor's accept/decline of an invite). */
 const OWNER_KINDS = new Set(["project.accept", "project.decline"]);
@@ -62,7 +85,7 @@ function addressOf(frame) {
   };
 }
 
-/** The stream address of an unknown kind's parsed envelope (nothing else exists). */
+/** The stream address of a parsed envelope (an unknown kind, or a failed body). */
 function envelopeAddress(envelope) {
   return {
     projectUuid: envelope.project_uuid,
@@ -71,6 +94,17 @@ function envelopeAddress(envelope) {
     stream: streamOf(envelope.to_instance_id),
     seq: envelope.seq,
   };
+}
+
+/**
+ * The routing rule (S1/S3): a frame aimed at this instance belongs here, and a
+ * null target is allowed only for an invite (sent before the visitor's instance
+ * is known). An unknown kind's null target cannot be judged, so it is allowed
+ * (F4: "null where allowed").
+ */
+function routesHere(toInstanceId, kind, localInstanceId) {
+  if (toInstanceId === null) return kind === null || kind === "project.invite";
+  return toInstanceId === localInstanceId;
 }
 
 /** Send a reply without letting a dead link break the receive path. */
@@ -126,6 +160,26 @@ async function recordUpdateRequired(db, localInstanceId, crowId) {
   }
 }
 
+/**
+ * F6: the contact just sent a `cb`-proof frame, so it is on the bound proof
+ * again (or never was on the legacy one) and the UI's "ask them to update Crow"
+ * row must go away. Same LOCAL scope as the flag; a failure never breaks the
+ * receive path.
+ */
+async function clearUpdateRequired(db, localInstanceId, crowId) {
+  if (!localInstanceId) return;
+  try {
+    await db.execute({
+      sql: "DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?",
+      args: [C2C_UPDATE_REQUIRED_PREFIX + crowId, localInstanceId],
+    });
+  } catch (err) {
+    if (!/no such table/i.test(String(err?.message || err))) {
+      console.warn(`[c2c] could not clear update_required: ${err?.message}`);
+    }
+  }
+}
+
 /** The address fields a parsed frame shares with the inbound mark (S1). */
 function inboundKey(contactId, address) {
   return {
@@ -139,19 +193,57 @@ function inboundKey(contactId, address) {
 }
 
 /**
+ * F5: would this consume/commit CREATE a new `c2c_inbound_seq` row? A stream that
+ * already has a mark always keeps working, so only a new (contact, sender,
+ * project, epoch, stream) can push a contact's table past the cap. At or above it
+ * the frame is dropped whole (no reply, no consume): the sender keeps it, and the
+ * contact's epoch churn — not this frame — is the problem. The line is logged once
+ * per contact per hour, never once per frame.
+ *
+ * Runs on the caller's handle, inside its transaction, so two frames cannot both
+ * see "under the cap" and then both create a row.
+ */
+async function markCapReached(db, contactId, key) {
+  const { rows: existing } = await db.execute({
+    sql: `SELECT 1 AS present FROM c2c_inbound_seq
+           WHERE contact_id = ? AND sender_instance_id = ? AND project_uuid = ? AND epoch = ? AND stream = ?
+           LIMIT 1`,
+    args: [key.contactId, key.senderInstanceId, key.projectUuid, key.epoch, key.stream],
+  });
+  if (existing.length > 0) return false; // an existing stream is always allowed
+  const { rows } = await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM c2c_inbound_seq WHERE contact_id = ?",
+    args: [contactId],
+  });
+  if (Number(rows[0]?.n ?? 0) < C2C_MARK_CAP) return false;
+  const now = Date.now();
+  if (now - (markCapLoggedAt.get(contactId) ?? 0) >= MARK_CAP_LOG_MS) {
+    markCapLoggedAt.set(contactId, now);
+    console.warn(`[c2c] mark cap reached for contact ${contactId}`);
+  }
+  return true;
+}
+
+/**
  * The outbox contract's failure path (S5/R4): the effect transaction rolled back
  * with the mark, so consume the seq in a new transaction and refuse the frame
  * `unsupported`. A false consume means another delivery took the seq (and may
  * have applied it): re-ack as a dup instead, never refuse it.
  */
 async function recoverFailedFrame(ctx, crowId, contactId, address) {
+  const key = inboundKey(contactId, address);
   let took = false;
+  let capped = false;
   try {
-    took = await withTransaction(ctx.db, () => consumeInbound(ctx.db, inboundKey(contactId, address)));
+    await withTransaction(ctx.db, async () => {
+      if (await markCapReached(ctx.db, contactId, key)) { capped = true; return; }
+      took = await consumeInbound(ctx.db, key);
+    });
   } catch (err) {
     console.warn(`[c2c] could not consume a failed frame: ${err?.message}`);
     return;
   }
+  if (capped) return; // F5: no row, no reply, no consume
   if (!took) {
     await sendAck(ctx, crowId, address);
     return;
@@ -160,38 +252,69 @@ async function recoverFailedFrame(ctx, crowId, contactId, address) {
 }
 
 /**
- * Step 1's unknown-kind branch: the envelope parsed, so its seq is consumable
- * even though the kind is not (R4) — a newer Crow's frame must not wedge the
- * stream. The refusal follows. With no epoch/seq there is no stream to name, so
- * there is no refusal to send either.
+ * F3/F4: a frame whose envelope parsed but which carries no usable body — an
+ * unknown kind (`reason === "unsupported"`, R4) or a known kind whose body failed
+ * (`reason === "bad_frame"`). It passes the same proof gate as a full frame (the
+ * caller already ran it, so a legacy proof held it without consuming), then the
+ * routing check and dedupe, and only then consumes its seq and is refused. A
+ * frame aimed at another instance is HELD (`not_home`) for that instance instead.
+ *
+ * With no epoch/seq there is no stream to name: nothing to consume, no refusal.
  */
-async function handleUnknownKind(ctx, crowId, contactId, envelope) {
+async function handleEnvelopeOnly(ctx, crowId, contactId, envelope, reason, kind) {
+  const { db } = ctx;
   const address = envelopeAddress(envelope);
   if (!address.epoch || !address.seq) {
-    console.warn("[c2c] unsupported frame with no stream address dropped");
+    console.warn(`[c2c] ${reason} frame with no stream address dropped`);
     return;
   }
+
+  if (!routesHere(envelope.to_instance_id, kind, ctx.localInstanceId)) {
+    await sendRefusal(ctx, crowId, address, "not_home");
+    return;
+  }
+
+  const key = inboundKey(contactId, address);
+  const verdict = await acceptInbound(db, key);
+  if (verdict === "dup") {
+    await sendAck(ctx, crowId, address);
+    return;
+  }
+  if (verdict === "gap") {
+    await sendRefusal(ctx, crowId, address, "gap");
+    return;
+  }
+
   let took = false;
+  let capped = false;
   try {
-    took = await withTransaction(ctx.db, () => consumeInbound(ctx.db, inboundKey(contactId, address)));
+    await withTransaction(db, async () => {
+      if (await markCapReached(db, contactId, key)) { capped = true; return; }
+      took = await consumeInbound(db, key);
+    });
   } catch (err) {
-    console.warn(`[c2c] could not consume an unsupported frame: ${err?.message}`);
+    console.warn(`[c2c] could not consume a ${reason} frame: ${err?.message}`);
     return;
   }
+  if (capped) return; // F5: no reply, no consume
   if (!took) {
     await sendAck(ctx, crowId, address);
     return;
   }
-  await sendRefusal(ctx, crowId, address, "unsupported");
+  await sendRefusal(ctx, crowId, address, reason);
 }
 
 /**
  * Handle one frame from an admitted contact session.
  *
- * @param {{db:object, send:Function, localInstanceId:string, contactByCrowId:Function, handlers:object}} ctx
+ * @param {{db:object, send:Function, localInstanceId:string, contactByCrowId:Function,
+ *   handlers:object, beforeTransaction?:Function}} ctx
  *   `send(crowId, frame)` is the transport. `contactByCrowId(crowId)` resolves the
  *   admitted contact row (or null). `handlers` maps onInvite/onAccept/onDecline/
- *   onRole/onUnshare (Tasks 6/7) plus an optional onRefusal.
+ *   onRole/onUnshare (Tasks 6/7) plus an optional onRefusal; a kind whose handler
+ *   is not loaded is refused `busy` (F1). `beforeTransaction` is a TEST SEAM (F2):
+ *   it runs once, just before the frame's transaction opens, so a test can commit
+ *   a write (a re-invite) that the in-transaction authorization must see.
  * @param {string} crowId the ADMITTED contact's crow id
  * @param {object} payload the raw frame
  * @param {{proof:"cb"|"sig", instanceId:string|null}} meta the connection's proof
@@ -203,13 +326,7 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
   // 1. Parse. An envelope that does not parse is dropped without a reply: a
   // refusal needs the frame's epoch, stream, seq and sender, which it lacks.
   const parsed = parseFrame(payload);
-  if (!parsed.ok) {
-    if (parsed.reason === "unsupported" && parsed.envelope) {
-      const contact = await ctx.contactByCrowId(crowId);
-      if (!contact) return;
-      await handleUnknownKind(ctx, crowId, Number(contact.id), parsed.envelope);
-      return;
-    }
+  if (!parsed.ok && !parsed.envelope) {
     console.warn("[c2c] bad frame");
     return;
   }
@@ -218,19 +335,38 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
   const contact = await ctx.contactByCrowId(crowId);
   if (!contact) return;
   const contactId = Number(contact.id);
-  const frame = parsed.frame;
-  const address = addressOf(frame);
 
-  // 2. Legacy proof: a holding refusal (R5) and a UI flag. An ack or refusal from
-  // that session has no stream to hold or answer, so it is dropped.
+  const frame = parsed.ok ? parsed.frame : null;
+  const envelope = parsed.ok ? null : parsed.envelope;
+  const address = frame ? addressOf(frame) : envelopeAddress(envelope);
+  // A known kind's body failure still names its kind; an unknown one does not.
+  const kind = frame ? frame.kind : (typeof payload?.kind === "string" ? payload.kind : null);
+
+  // 2. Legacy proof: a holding refusal (R5) and a UI flag. F4: nothing is
+  // consumed here — the frame may still apply once its sender updates. An ack or
+  // refusal from that session has no stream to hold or answer, so it is dropped.
   if (meta?.proof !== "cb") {
     await recordUpdateRequired(db, localInstanceId, crowId);
-    if (isUnsequenced(frame.kind)) return;
+    if (frame && isUnsequenced(frame.kind)) return;
+    if (!address.epoch || !address.seq) {
+      console.warn("[c2c] legacy-proof frame with no stream address dropped");
+      return;
+    }
     await sendRefusal(ctx, crowId, address, "update_required");
     return;
   }
 
-  // 3. Acks/refusals are answered by the named instance only (S3), and this runs
+  // F6: a bound-proof frame means this contact is no longer on the legacy proof.
+  await clearUpdateRequired(db, localInstanceId, crowId);
+
+  // 3. F3/F4: an unknown kind or a known kind whose body failed. Proof has
+  // passed; routing and dedupe decide, then the seq is consumed.
+  if (envelope) {
+    await handleEnvelopeOnly(ctx, crowId, contactId, envelope, parsed.reason, kind);
+    return;
+  }
+
+  // 4. Acks/refusals are answered by the named instance only (S3), and this runs
   // BEFORE the not_home check: a sibling applies nothing and sends no reply.
   if (isUnsequenced(frame.kind)) {
     if (!ackIsForMe(frame, localInstanceId)) return;
@@ -261,20 +397,16 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
     return;
   }
 
-  // 4. Routing: only an invite may be sent before the visitor's instance is known.
-  if (frame.to_instance_id === null) {
-    if (frame.kind !== "project.invite") {
-      await sendRefusal(ctx, crowId, address, "not_home");
-      return;
-    }
-  } else if (frame.to_instance_id !== localInstanceId) {
+  // 5. Routing: only an invite may be sent before the visitor's instance is known.
+  if (!routesHere(frame.to_instance_id, frame.kind, localInstanceId)) {
     await sendRefusal(ctx, crowId, address, "not_home");
     return;
   }
 
-  // 5. Dedupe against the frame's own stream (S1). A dup is re-acked; a gap is
+  // 6. Dedupe against the frame's own stream (S1). A dup is re-acked; a gap is
   // refused and leaves the mark alone so the missing frame can still land.
-  const verdict = await acceptInbound(db, inboundKey(contactId, address));
+  const key = inboundKey(contactId, address);
+  const verdict = await acceptInbound(db, key);
   if (verdict === "dup") {
     await sendAck(ctx, crowId, address);
     return;
@@ -284,35 +416,48 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
     return;
   }
 
-  // 6. Authorize. KNOWN_KINDS is closed by frames.js, so every kind reaches one
-  // rule. A refusal consumes the seq with no effect (R4), then is sent.
-  const auth = OWNER_KINDS.has(frame.kind)
-    ? await authorizeOwnerFrame(db, { frame, contactId })
-    : VISITOR_KINDS.has(frame.kind)
-      ? await authorizeVisitorFrame(db, { frame, contactId })
-      : { ok: false, reason: "unsupported" };
-  if (!auth.ok) {
-    let took = false;
-    try {
-      took = await withTransaction(db, () => consumeInbound(db, inboundKey(contactId, address)));
-    } catch (err) {
-      console.warn(`[c2c] could not consume a refused frame: ${err?.message}`);
-      return;
-    }
-    if (took) await sendRefusal(ctx, crowId, address, auth.reason);
-    else await sendAck(ctx, crowId, address);
+  // 7. F1: the kind's handler must exist before anything is committed. A host
+  // whose owner.js/visitor.js has not (or not yet successfully) loaded HOLDS the
+  // frame with `busy` instead: the seq is not consumed, so the sender re-sends it
+  // once the module is there.
+  const handler = handlers[HANDLER_BY_KIND[frame.kind]];
+  if (typeof handler !== "function") {
+    console.warn(`[c2c] ${frame.kind} handler not loaded`);
+    await sendRefusal(ctx, crowId, address, "busy");
     return;
   }
 
-  // 7. S5: commit the mark FIRST, and run the effect only when it took the seq.
-  // A false commit means another delivery took it: re-ack as a dup, no effect.
-  const handlerName = HANDLER_BY_KIND[frame.kind];
+  // 8. One transaction. F2: authorization runs INSIDE it and re-reads the live
+  // membership/visit there, so a re-invite (or unshare) that commits between the
+  // frame's arrival and this transaction is seen by the rules. S5: the mark is
+  // committed before the effect, and the effect only runs when it took the seq.
   let committed = false;
+  let consumed = false;
+  let refusal = null;
+  let capped = false;
+  // F2's test seam: a write committed just before BEGIN (a re-invite) must be seen
+  // by the authorization INSIDE the transaction below.
+  if (typeof ctx.beforeTransaction === "function") await ctx.beforeTransaction();
   try {
-    committed = await withTransaction(db, async () => {
-      if (!(await commitInbound(db, inboundKey(contactId, address)))) return false;
-      const handler = handlers[handlerName];
-      if (typeof handler !== "function") throw new Error(`no handler for ${frame.kind}`);
+    await withTransaction(db, async () => {
+      // F5: a frame that would create one mark row too many is dropped whole.
+      if (await markCapReached(db, contactId, key)) { capped = true; return; }
+
+      const auth = OWNER_KINDS.has(frame.kind)
+        ? await authorizeOwnerFrame(db, { frame, contactId })
+        : VISITOR_KINDS.has(frame.kind)
+          ? await authorizeVisitorFrame(db, { frame, contactId })
+          : { ok: false, reason: "unsupported" };
+
+      if (!auth.ok) {
+        // R4: a refused frame is consumed with no effect, in this transaction, so
+        // one refused frame never wedges the frames after it.
+        refusal = auth.reason;
+        consumed = await consumeInbound(db, key);
+        return;
+      }
+
+      if (!(await commitInbound(db, key))) return; // another delivery took the seq: a dup
       await handler(db, {
         frame,
         member: auth.member ?? null,
@@ -320,7 +465,7 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
         contactId,
         localInstanceId,
       });
-      return true;
+      committed = true;
     });
   } catch (err) {
     // Never the body: it is the contact's own words. The failure path consumes
@@ -330,10 +475,21 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
     return;
   }
 
-  // After COMMIT: ack, then flush (S4: never inside the transaction). The handler
-  // may have queued frames (a role change, an accept), and those go now.
+  // After COMMIT. F5: a capped frame gets no reply at all.
+  if (capped) return;
+  if (refusal) {
+    // F2: the refusal was decided (and its seq consumed) inside the transaction;
+    // it is sent only now, after COMMIT.
+    if (consumed) await sendRefusal(ctx, crowId, address, refusal);
+    else await sendAck(ctx, crowId, address); // already taken: a dup, not a refusal
+    return;
+  }
+  // A false commit means another delivery took the seq: re-ack as a dup, no effect.
   await sendAck(ctx, crowId, address);
   if (!committed) return;
+
+  // S4: ack, then flush, never inside the transaction. The handler may have
+  // queued frames (a role change, an accept), and those go now.
   try {
     await flush(db, (outbound) => ctx.send(crowId, outbound), { contactId });
   } catch (err) {

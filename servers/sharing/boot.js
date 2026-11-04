@@ -13,6 +13,8 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createNotification } from "../shared/notifications.js";
 import bus from "../shared/event-bus.js";
 import { wireInstanceSync } from "./instance-connect.js";
@@ -39,6 +41,74 @@ import { flush as flushC2cOutbox } from "./c2c/outbox.js";
 
 /** PT-3 N-5: the label a non-contact's notification title carries (server titles are English). */
 export const NOT_IN_CONTACTS = "(not in your contacts)";
+
+/** The kind modules the receive pipeline needs (Tasks 6 and 7). */
+export const C2C_HANDLER_SPECS = Object.freeze(["./c2c/owner.js", "./c2c/visitor.js"]);
+/** F1: how long a failed or partial handler load waits before it is retried. */
+export const C2C_HANDLER_RETRY_MS = 30_000;
+
+/**
+ * F1: the lazy owner/visitor handler loader.
+ *
+ * A load that is incomplete — a module that is not there yet (owner.js and
+ * visitor.js land in Tasks 6 and 7), or one that fails to import — is NOT
+ * cached: the next frame retries, at most once per `retryMs`, so a module that
+ * lands later is picked up without a restart. The handlers that DID load are
+ * returned meanwhile (the kinds they own keep working), and the kinds of a
+ * module that did not load stay absent — the receive pipeline then refuses those
+ * frames `busy`, a holding refusal, so the sender keeps them.
+ *
+ * `ERR_MODULE_NOT_FOUND` is swallowed only when the handler module ITSELF is
+ * missing (`handlerModuleExists` checks the resolved file); a missing dependency
+ * is logged like any other failure, so a broken install is visible instead of
+ * looking like an unlanded task.
+ */
+export function createC2cHandlerLoader({
+  importModule = (spec) => import(spec),
+  handlerModuleExists = (spec) => {
+    try { return existsSync(fileURLToPath(import.meta.resolve(spec))); } catch { return false; }
+  },
+  specs = C2C_HANDLER_SPECS,
+  retryMs = C2C_HANDLER_RETRY_MS,
+  now = () => Date.now(),
+} = {}) {
+  let loaded = null;                 // the merged handlers, once every module loaded
+  let partial = Object.freeze({});   // the last incomplete load's handlers
+  let nextAttemptAt = 0;
+  let inflight = null;
+
+  const attempt = async () => {
+    const handlers = {};
+    let complete = true;
+    for (const spec of specs) {
+      try {
+        Object.assign(handlers, await importModule(spec));
+      } catch (err) {
+        complete = false;
+        const absent = err?.code === "ERR_MODULE_NOT_FOUND" && !handlerModuleExists(spec);
+        if (!absent) console.warn(`[c2c] handler module ${spec} failed: ${err?.message || err}`);
+      }
+    }
+    return { handlers, complete };
+  };
+
+  return async function loadC2cHandlers() {
+    if (loaded) return loaded;
+    if (inflight) return inflight;
+    if (now() < nextAttemptAt) return partial; // retry at most once per retryMs
+    nextAttemptAt = now() + retryMs;
+    inflight = attempt().then(({ handlers, complete }) => {
+      if (complete) loaded = handlers;
+      else partial = handlers;
+      return handlers;
+    }).catch((err) => {
+      // attempt() never throws today; a failure must never wedge the receive path.
+      console.warn(`[c2c] handler load failed: ${err?.message || err}`);
+      return partial;
+    }).finally(() => { inflight = null; });
+    return inflight;
+  };
+}
 
 /**
  * A remote-chosen string for a notification title: sanitized (controls, bidi
@@ -983,27 +1053,11 @@ export async function initSharingRuntime(managers, helpers) {
 
   // The owner (owner.js) and visitor (visitor.js) handlers, loaded lazily: those
   // modules land in Tasks 6 and 7, and a host whose migration was deferred must
-  // still boot. With neither present, a sequenced kind is refused `unsupported`
-  // (the receive pipeline's failure path), never dropped.
-  let c2cHandlersPromise = null;
-  const loadC2cHandlers = () => {
-    if (!c2cHandlersPromise) {
-      c2cHandlersPromise = (async () => {
-        const handlers = {};
-        for (const spec of ["./c2c/owner.js", "./c2c/visitor.js"]) {
-          try {
-            Object.assign(handlers, await import(spec));
-          } catch (err) {
-            if (err?.code !== "ERR_MODULE_NOT_FOUND") {
-              console.warn(`[c2c] handler module ${spec} failed: ${err?.message || err}`);
-            }
-          }
-        }
-        return handlers;
-      })();
-    }
-    return c2cHandlersPromise;
-  };
+  // still boot. F1: a missing or failed load is NEVER cached as if it were final
+  // — the next frame retries it, at most once per 30 s — and a kind whose module
+  // is not loaded is refused the holding `busy`, never the terminal `unsupported`,
+  // so the sender keeps its frame and re-sends it once the module is there.
+  const loadC2cHandlers = createC2cHandlerLoader();
 
   // Handle data from connected peers (shares, revokes, etc.)
   // meta = { proof, instanceId } (instanceId is claimed, routing only).

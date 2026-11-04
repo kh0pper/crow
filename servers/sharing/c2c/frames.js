@@ -88,6 +88,23 @@ function parseEnvelope(payload) {
   return envelope;
 }
 
+/**
+ * The envelope this KIND requires, or null when the envelope itself is broken.
+ * A sequenced kind needs its epoch and seq (they name its stream, S1); an ack or
+ * refusal carries neither and must name the instance it answers (S3).
+ */
+function envelopeForKind(kind, payload) {
+  const envelope = parseEnvelope(payload);
+  if (!envelope) return null;
+  if (NO_SEQ.has(kind)) {
+    if (envelope.epoch !== undefined || envelope.seq !== undefined) return null;
+    if (!isId(envelope.to_instance_id)) return null;
+    return envelope;
+  }
+  if (envelope.epoch === undefined || envelope.seq === undefined) return null;
+  return envelope;
+}
+
 /** Rebuild a body from known keys only; null when invalid. */
 function cleanBody(kind, b) {
   switch (kind) {
@@ -126,9 +143,17 @@ function cleanBody(kind, b) {
 /**
  * Validate an untrusted payload. On success returns a REBUILT frame (known
  * fields only), never the raw payload. Never throws.
+ *
  * An unknown kind returns `unsupported` together with its parsed envelope (when
- * the envelope is valid) so the receive pipeline can consume its seq; a broken
- * envelope is `bad_frame` with no envelope (there is no stream to name).
+ * the envelope is valid) so the receive pipeline can consume its seq. A broken
+ * envelope is `bad_frame` with NO envelope: there is no stream to name, so there
+ * is nothing to consume and no refusal to send (the pipeline drops it).
+ *
+ * F3: a KNOWN kind whose envelope parsed but whose BODY failed is `bad_frame`
+ * WITH its envelope, so the pipeline can hold it for the right instance, dedupe
+ * it, consume its seq and then refuse it — an unknown role must not wedge the
+ * stream behind it. (An ack or refusal is exempt: its envelope names no stream of
+ * its own, so there is nothing to consume and it stays the bare `bad_frame`.)
  * @returns {{ok:true, frame:object}|{ok:false, reason:"bad_frame"|"unsupported", envelope?:object}}
  */
 export function parseFrame(payload) {
@@ -142,28 +167,20 @@ export function parseFrame(payload) {
       const envelope = parseEnvelope(payload);
       return envelope ? { ok: false, reason: "unsupported", envelope } : bad;
     }
-    const { project_uuid, from_instance_id, to_instance_id, epoch, seq, body } = payload;
-    if (typeof project_uuid !== "string" || !HEX32.test(project_uuid)) return bad;
-    if (!isId(from_instance_id) || !(to_instance_id === null || isId(to_instance_id))) return bad;
-    const frame = { type: C2C_TYPE, v: 1, kind, project_uuid };
-    if (NO_SEQ.has(kind)) {
-      // S3: an ack or refusal names its stream in the body only, so it carries
-      // neither an envelope seq nor an envelope epoch. It also names the instance it
-      // answers: its target is the answered frame's from_instance_id and is required
-      // (a null target is a frame nobody could have sent it about).
-      if (seq !== undefined || epoch !== undefined) return bad;
-      if (!isId(to_instance_id)) return bad;
-    } else {
-      if (!isSeq(seq) || typeof epoch !== "string" || !HEX32.test(epoch)) return bad;
-      frame.epoch = epoch;
-      frame.seq = seq;
-    }
-    frame.from_instance_id = from_instance_id;
-    frame.to_instance_id = to_instance_id;
-    if (!isObj(body)) return bad;
-    if (Buffer.byteLength(JSON.stringify(body)) > BODY_CAPS[kind]) return bad;
+    const envelope = envelopeForKind(kind, payload);
+    if (!envelope) return bad;
+    const frame = { type: C2C_TYPE, v: 1, kind, ...envelope };
+    // F3: from here on the envelope is trusted, so a bad body is consumed, not dropped.
+    // An ack/refusal is the exception: its envelope names no stream of its own, so a
+    // failed body has nothing to consume and no refusal to send — the bare bad_frame.
+    const bodyFailed = NO_SEQ.has(kind)
+      ? bad
+      : { ok: false, reason: "bad_frame", envelope };
+    const body = payload.body;
+    if (!isObj(body)) return bodyFailed;
+    if (Buffer.byteLength(JSON.stringify(body)) > BODY_CAPS[kind]) return bodyFailed;
     const clean = cleanBody(kind, body);
-    if (!clean) return bad;
+    if (!clean) return bodyFailed;
     frame.body = clean;
     return { ok: true, frame };
   } catch {

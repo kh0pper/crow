@@ -28,8 +28,30 @@ for (const kind of PLAN1_KINDS) {
 }
 
 test("an oversized body is bad_frame", () => {
+  // F3: the envelope parsed, so it comes back with the refusal and the receiver
+  // can hold, dedupe and consume the seq instead of dropping the frame.
   const r = parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], pad: "x".repeat(5000) } }));
-  assert.deepEqual(r, { ok: false, reason: "bad_frame" });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "bad_frame");
+  assert.deepEqual(r.envelope, { project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b" });
+});
+test("F3: a known kind's body failure returns the parsed envelope", () => {
+  for (const [kind, body] of [
+    ["project.role", { role: "owner" }],
+    ["project.decline", { reason: "nope" }],
+    ["project.invite", { ...bodies["project.invite"], gen: 0 }],
+    ["project.unshare", "not an object"],
+    ["project.accept", new Map()],
+  ]) {
+    const r = parseFrame(mk(kind, { body }));
+    assert.equal(r.ok, false, kind);
+    assert.equal(r.reason, "bad_frame", kind);
+    assert.deepEqual(r.envelope, {
+      project_uuid: U, epoch: E, seq: 1, from_instance_id: "i-a", to_instance_id: "i-b",
+    }, `${kind}: the envelope is what lets the receiver consume the seq`);
+  }
+  // An ack/refusal body failure names no envelope stream of its own: nothing to consume.
+  assert.deepEqual(parseFrame(mk("project.ack", { body: { epoch: E, stream: "*", seqs: [0] } })), BAD);
 });
 test("an unknown kind is unsupported, with its parsed envelope", () => {
   // The receiver consumes the seq of a kind it does not know (R4), so it needs the
@@ -91,6 +113,17 @@ test("weird input never throws", () => {
 
 const BAD = { ok: false, reason: "bad_frame" };
 
+/**
+ * F3: a KNOWN kind whose body failed keeps its parsed envelope (the receiver
+ * holds, dedupes, consumes and refuses it), while a broken envelope is still the
+ * bare `BAD` above.
+ */
+function assertBodyFailed(r, msg) {
+  assert.equal(r.ok, false, msg);
+  assert.equal(r.reason, "bad_frame", msg);
+  assert.ok(r.envelope, `F3: the parsed envelope comes back (${msg})`);
+}
+
 test("v other than 1 is unsupported", () => {
   assert.deepEqual(parseFrame({ ...mk("project.role"), v: 2 }), { ok: false, reason: "unsupported" });
 });
@@ -115,7 +148,9 @@ test("__proto__ and extra keys are stripped; Object.prototype untouched", () => 
 });
 test("non-plain objects are bad_frame", () => {
   assert.deepEqual(parseFrame(Object.create({ type: "c2c" })), BAD);
-  assert.deepEqual(parseFrame(mk("project.role", { body: new Map() })), BAD);
+  const r = parseFrame(mk("project.role", { body: new Map() }));
+  assert.equal(r.reason, "bad_frame");
+  assert.ok(r.envelope, "F3: the envelope parsed, so the frame is consumable");
 });
 test("ack seqs validation", () => {
   const ack = (seqs) => parseFrame(mk("project.ack", { body: { ...bodies["project.ack"], seqs } }));
@@ -167,8 +202,8 @@ test("S3: an ack or refusal must name the instance it answers", () => {
 test("S2: an invite's gen is required and positive", () => {
   const inv = (gen) => parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], gen } }));
   const { gen: _drop, ...noGen } = bodies["project.invite"];
-  assert.deepEqual(parseFrame(mk("project.invite", { body: noGen })), BAD, "missing gen");
-  for (const gen of [0, -1, "1", 1.5, null, true, 2 ** 53]) assert.deepEqual(inv(gen), BAD, String(gen));
+  assertBodyFailed(parseFrame(mk("project.invite", { body: noGen })), "missing gen");
+  for (const gen of [0, -1, "1", 1.5, null, true, 2 ** 53]) assertBodyFailed(inv(gen), String(gen));
   assert.equal(inv(1).ok, true);
   assert.equal(inv(7).frame.body.gen, 7);
 });
@@ -196,12 +231,12 @@ test("instance ids are restricted", () => {
     assert.deepEqual(parseFrame(mk("project.role", { fromInstanceId: id })), BAD);
     assert.deepEqual(parseFrame(mk("project.accept", { toInstanceId: id })), BAD);
   }
-  assert.deepEqual(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], owner_instance_id: "a b" } })), BAD);
-  assert.deepEqual(parseFrame(mk("project.accept", { body: { visitor_instance_id: "a/b" } })), BAD);
+  assertBodyFailed(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], owner_instance_id: "a b" } })), "invite owner instance");
+  assertBodyFailed(parseFrame(mk("project.accept", { body: { visitor_instance_id: "a/b" } })), "accept visitor instance");
 });
 test("invite name rejects control chars and lone surrogates", () => {
   for (const name of ["a\u0007b", "a\u007f", "a\ud83d", "\udc00x"]) {
-    assert.deepEqual(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], name } })), BAD);
+    assertBodyFailed(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], name } })), name);
   }
   assert.equal(parseFrame(mk("project.invite", { body: { ...bodies["project.invite"], name: "café \u{1F426}" } })).ok, true);
 });
@@ -229,7 +264,13 @@ test("every cap is exact: at the limit passes, one byte over fails", () => {
     const ok = sized(cap);
     assert.equal(ok.ok, true, kind);
     assert.equal(Object.hasOwn(ok.frame.body, "p"), false);
-    assert.deepEqual(sized(cap + 1), BAD, kind);
+    const over = sized(cap + 1);
+    assert.equal(over.ok, false, kind);
+    assert.equal(over.reason, "bad_frame", kind);
+    // F3: a sequenced kind's body failure keeps the envelope; an ack/refusal has
+    // no stream of its own to name, so it stays the bare bad_frame.
+    if (kind === "project.ack" || kind === "project.refuse") assert.equal(over.envelope, undefined, kind);
+    else assert.ok(over.envelope, kind);
   }
 });
 
