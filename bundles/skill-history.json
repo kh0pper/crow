@@ -60,7 +60,8 @@
   ],
   "companion/skills/companion.md": [
     "1c7e9faa451283be9baf2ea9bf0aadb70540d291fc6e0ac94181e30670ffe0e4",
-    "4f09b92edef91b803bedf040d1fcf20d8b65d40fbd9188543e292de2305a64aa"
+    "4f09b92edef91b803bedf040d1fcf20d8b65d40fbd9188543e292de2305a64aa",
+    "853565e0e39d8d63db5880ab82c3845edebf0bb9cd583ff8e97e4299062547e5"
   ],
   "crowdsec/skills/crowdsec.md": [
     "b7a53a93c1d4b3c53ab59534c86f549b6efd690fe8c1b1022d93e8a2a9d88d17"
@@ -93,7 +94,8 @@
     "99601d9e114f465f6f1079e4d28ab102088638d868988ffebb3ea48ddfa08ecb"
   ],
   "frigate/skills/frigate.md": [
-    "683196e3953985a861d1218040ea756193ceb2fb5b7ab88f2471313db60970c5"
+    "683196e3953985a861d1218040ea756193ceb2fb5b7ab88f2471313db60970c5",
+    "d1d29cf71b5d872288e1acfe4769f420c2ff2c1535c6a32cc291e586d7fa3b19"
   ],
   "funkwhale/skills/funkwhale.md": [
     "012622fd0f3847289df99cee03785d199f839bfff4ce05a2bb850432842a79a3",
