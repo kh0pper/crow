@@ -77,7 +77,9 @@
  *       - `"unreachable"` when a row of that epoch is still unacked after more than
  *         10 attempts, or after 24 hours queued — a holding refusal (`busy`,
  *         `not_home`, `gap`, `update_required`) does not change that, it is exactly
- *         a frame that has not got through;
+ *         a frame that has not got through. S11: a frame whose TARGET instance is
+ *         not connected takes no attempt at all (nothing was written), so for that
+ *         case the 24-hour clock, not the attempt count, is what surfaces it;
  *       - `null` otherwise.
  *     The Projects panel draws both lines (en + es, escaped as everything else there),
  *     and a read error or a missing table is `null`: the panel must render anyway.
@@ -212,6 +214,22 @@
  *     UI marker) is set, Task 5 deletes that flag: the row means "this contact is
  *     on the legacy proof", and the frame itself disproves it.
  *
+ * S11. `send(frame)` may answer `false`: the frame's TARGET is not reachable here and
+ *     now (a frame aimed at an instance whose connection is not up —
+ *     `PeerManager.sendTo` says so without writing). The frame is KEPT: no attempt
+ *     bump, no `last_refusal` (the peer refused nothing), and its stream —
+ *     `(project_uuid, epoch, COALESCE(to_instance_id, '*'))` — joins `heldStreams`, so
+ *     no later seq of that stream is sent past it. The flush continues with the
+ *     contact's other streams and projects and returns what it really sent; the held
+ *     frames go out on a later flush, once the target is connected. Any other return
+ *     value (`undefined`, `true`, an object) counts as SENT, and an exception still
+ *     stops the flush (the link, or the frame's fit, is gone — R5's shape). The
+ *     transport is `c2c/transport.js`: `sendTo` for a targeted frame, `send` for a
+ *     `'*'` one. R2-5: each held stream logs `[c2c] holding frames for instance
+ *     <id8>: not connected`, once per (contact, stream) per hour — a target that is
+ *     away is a steady state, and the wording carries none of the refusal words the
+ *     two-node gate treats as trouble.
+ *
  * S6. `cancelEpoch` is an optimisation, not a correctness rule (S1, S2 do not need
  *     it): it ends the still-queued frames of an earlier membership so fewer dead
  *     frames are sent. `keepStreams` names the streams it must NOT cancel
@@ -236,18 +254,20 @@
  *     meantime: a new stream past 512 rows is dropped (with no mark and no reply)
  *     rather than growing it or resetting anyone's marks.
  *
- * L1 (documented limitation; plan 2's sync-layer work). `flush` hands each frame to
- *     the transport's `send(crowId, frame)`, and PeerManager keeps ONE connection per
- *     crowId — paired siblings share a crowId, so a flush goes to whichever sibling
- *     connected LAST. A frame aimed at a specific instance (an accept to the owner
- *     instance O1 while its sibling O2 holds the connection) is therefore refused
- *     `not_home` by O2 (the routing rule, receive.js step 5), which is a HOLDING
- *     refusal (R5): it stays queued and is delivered only when the connections change
- *     (O1 connects, or O2's link drops). Nothing is lost. Replies are NOT affected:
- *     an ack or a refusal answers the CONNECTION its frame arrived on (`meta.reply`,
- *     receive.js), not `send(crowId, …)`. Fixing L1 needs connections tracked per
- *     INSTANCE in PeerManager (crowId → instanceId → conn); that is a sync-layer
- *     change, scheduled before plan 2, not part of this plan's receive pipeline.
+ * L1 (CLOSED by S11). Before S11 a flush handed every frame to
+ *     `send(crowId, frame)`, and PeerManager kept ONE connection per crowId — paired
+ *     siblings share a crowId, so a flush went to whichever sibling connected LAST.
+ *     A frame aimed at a specific instance (an accept to the owner instance O1 while
+ *     its sibling O2 held the connection) was therefore refused `not_home` by O2 (the
+ *     routing rule, receive.js step 5): a HOLDING refusal (R5), so nothing was lost,
+ *     but the frame waited for the connections to change. PeerManager now indexes
+ *     connections per (crowId, instance id) and `sendTo` picks the named one; every
+ *     c2c send site goes through `c2c/transport.js`, which uses `sendTo` for a
+ *     targeted frame and `send` for a `'*'` one (S11). `not_home` stays the
+ *     receiver's guard against a wrong or stale claim (a hostile or older peer), not
+ *     the normal path. Replies are NOT affected: an ack or a refusal answers the
+ *     CONNECTION its frame arrived on (`meta.reply`, receive.js), and the transport
+ *     is only the fallback.
  *
  *     Two notes for plan 2 from the same review:
  *       - an UNKNOWN kind is refused `unsupported` TERMINALLY by a plan-1 Crow (R4:
@@ -268,9 +288,13 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { buildFrame, parseFrame, REFUSALS } from "./frames.js";
+import { RefusalLog } from "../contact-binding.js";
 
 /** How long a `busy` refusal holds its project's run (plan 1, task 4). */
 export const BUSY_HOLD_MS = 60_000;
+
+/** S11/R2-5: how long a held stream stays quiet after one log line. */
+export const HOLD_LOG_EVERY_MS = 3_600_000;
 
 /** The stream key of a frame with no target instance yet (S1). */
 export const WILDCARD_STREAM = "*";
@@ -292,6 +316,20 @@ const isSeq = (x) => Number.isSafeInteger(x) && x > 0;
 export function streamOf(toInstanceId) {
   return toInstanceId ?? WILDCARD_STREAM;
 }
+
+/**
+ * S11: the full stream identity a row belongs to — (project, epoch, target) — so a
+ * hold on one stream never stops another (an invite's `'*'` stream keeps flowing
+ * while the accept it precedes waits for its instance).
+ */
+function fullStreamOf(row) {
+  return `${row.project_uuid}\u0000${row.epoch}\u0000${streamOf(row.to_instance_id ?? null)}`;
+}
+
+// R2-5: a held stream is a steady state, not an incident, so each (contact, stream)
+// logs once an hour. ONE limiter per process: a flush can run on a short-lived
+// handle (c2c-api opens a client per request), and the hour must hold across them.
+const holdLog = new RefusalLog({ max: 512, intervalMs: HOLD_LOG_EVERY_MS });
 
 /**
  * S3: is this ack or refusal meant for this instance? Pure (no DB), so Task 5 can
@@ -478,13 +516,17 @@ export async function enqueue(db, { contactId, projectUuid, kind, epoch, toInsta
  * one transaction queued together leave in that order across streams too: a
  * re-invite's unshare of the old membership (V6) always goes before its new invite,
  * instead of an order decided by two random epochs. `send(frame)` is the transport
- * (`peerManager.send(crowId, frame)`); it may be async and it throws when the
- * peer is not connected.
+ * (`c2c/transport.js`'s `c2cSend`, which uses `sendTo` for a targeted frame and
+ * `send` for a `'*'` one); it may be async, it throws when the link is gone, and it
+ * may answer `false` (S11): the target instance is not reachable now, so the frame
+ * and the rest of its stream wait for a later flush while the other streams go.
  *
  * A project whose next unacked frame was refused `busy` under 60 s ago is skipped
  * whole — the receiver's queue is full, so later frames of that project would only
  * pile up behind it. R8: a frame that cannot be read does the same, so no later
- * row is sent past the hole.
+ * row is sent past the hole. S11: a stream whose target is absent is held by
+ * STREAM, so a targeted frame that has to wait never stops the `'*'` frames of the
+ * same project.
  *
  * S4: flush after COMMIT. The read is serialized behind any open transaction, and a
  * second concurrent flush for the same contact returns 0 (see the contract). A call
@@ -507,16 +549,22 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
     // S4: never send a row another transaction has not committed (and so never one
     // that is about to roll back). The read takes the handle's turn like any write.
     const rows = await serialize(db, async () => (await db.execute({
-      sql: `SELECT id, project_uuid, seq, frame_json, last_refusal, last_attempt_at
+      sql: `SELECT id, project_uuid, epoch, seq, to_instance_id, frame_json, last_refusal, last_attempt_at
               FROM c2c_outbox
              WHERE contact_id = ? AND acked_at IS NULL
              ORDER BY project_uuid, id`,
       args: [contactId],
     })).rows);
     const held = new Set();
+    // S11: streams whose TARGET is not reachable now (send answered false). Their
+    // later rows wait too — a stream is FIFO, and skipping ahead would make the
+    // receiver hold the gap.
+    const heldStreams = new Set();
     let sent = 0;
     for (const row of rows) {
       if (held.has(row.project_uuid)) continue;
+      const stream = fullStreamOf(row);
+      if (heldStreams.has(stream)) continue;
       if (row.last_refusal === "busy" && now - sqlTimeToMs(row.last_attempt_at) < BUSY_HOLD_MS) {
         held.add(row.project_uuid);
         continue;
@@ -529,13 +577,25 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
         held.add(row.project_uuid); // R8: never send later seqs past a hole
         continue;
       }
+      let outcome;
       try {
-        await send(frame);
+        outcome = await send(frame);
       } catch (err) {
         // The link is gone (or the frame cannot fit it). Stop: nothing after this
         // one could be sent either, and the rows stay queued for the next flush.
         console.warn(`[c2c] flush stopped for contact ${contactId}: ${err?.code || err?.message || "send failed"}`);
         break;
+      }
+      if (outcome === false) {
+        // S11: the named instance has no live connection here. Nothing was written
+        // and the peer refused nothing, so the row takes no attempt and no refusal:
+        // it simply waits, in order, for its target to come back.
+        heldStreams.add(stream);
+        if (holdLog.shouldLog(`${contactId}\u0000${stream}`, now)) {
+          // An instance id, never a frame body. R2-5: rate-limited above.
+          console.warn(`[c2c] holding frames for instance ${String(streamOf(row.to_instance_id ?? null)).slice(0, 8)}: not connected`);
+        }
+        continue;
       }
       await write(db,
         "UPDATE c2c_outbox SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?",

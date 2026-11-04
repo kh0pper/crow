@@ -173,13 +173,13 @@ async function liveRowOf(db, { projectId, contactId }) {
 /**
  * S4: the flush runs AFTER COMMIT, never inside the transaction.
  *
- * `send` is the shape boot.js builds for the outbox flush — a per-contact send,
- * `(frame) => peerManager.send(crowId, frame)`. `flushAfter` is the optional
- * control: a function replaces the flush itself (a caller that owns its own tick,
- * or a test that only wants to know WHEN the flush ran), and `false` opts out even
- * when a `send` was given. With neither, the frame stays queued and boot.js's 60 s
- * tick sends it; a flush failure never fails the membership change, which is
- * already committed.
+ * `send` is the shape the c2c transport builds for the outbox flush — a per-contact
+ * send, `(frame) => c2cSend(peerManager, crowId, frame)` (a targeted frame rides
+ * `sendTo`, S11). `flushAfter` is the optional control: a function replaces the
+ * flush itself (a caller that owns its own tick, or a test that only wants to know
+ * WHEN the flush ran), and `false` opts out even when a `send` was given. With
+ * neither, the frame stays queued and boot.js's 60 s tick sends it; a flush failure
+ * never fails the membership change, which is already committed.
  * @returns {Promise<number>} frames sent
  */
 async function flushAfterCommit(db, { contactId, send, flushAfter }) {

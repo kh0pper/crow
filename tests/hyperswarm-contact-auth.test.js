@@ -732,6 +732,9 @@ const SIDE_EFFECTS = [
   // A member access after the name (`= this.connections.get(…)`) is a read, not
   // an alias, so it is not matched; so is a comparison (`=== this.connections`).
   { what: "alias this.connections", re: /(?<![=!<>])\s*=\s*this\s*\.\s*connections\b(?!\s*(?:\?\.|\.|\[))/g, allowed: ["constructor"] },
+  // Destructuring `connections` out of `this` is the same handout as an alias: the
+  // local name carries the Map itself, mutation path included.
+  { what: "destructure this.connections", re: /\{[^}]*\bconnections\b[^}]*\}\s*=\s*this\b/g, allowed: ["constructor"] },
   { what: "alias this.peerConns", re: /(?<![=!<>])\s*=\s*this\s*\.\s*peerConns\b(?!\s*(?:\?\.|\.|\[))/g, allowed: ["constructor"] },
   // The per-instance bucket (crowId -> entry[]) is private to the index: these
   // are the only methods that may touch it — by name, or destructured from
@@ -845,6 +848,7 @@ test("H-C11 positive control: a planted side effect in a temp copy fails the sca
     ["peerConns in _handleConnection", at(HC, "    const { peerConns } = this;\n")],
     // An alias is the same handout: set()/delete() through a local copy.
     ["alias this.connections in _handleConnection", at(HC, "    const conns = this.connections;\n")],
+    ["destructure this.connections in _handleConnection", at(HC, "    const { connections } = this;\n")],
     ["alias this.peerConns in _handleConnection", at(HC, "    const buckets = this.peerConns;\n")],
     // Promotion is the only other `connections.set`, and only inside _dropConnection.
     ["connections.set in _dropConnection", at(DROP, "    this.connections.set(crowId, bucket[0]);\n")],

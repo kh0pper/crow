@@ -24,12 +24,21 @@
  *   1. invite → accept → role → unshare end to end (both sides' rows at each step,
  *      and not one refusal in either log);
  *   2. an invite queued while the visitor is offline is delivered when it starts;
- *   3. a paired SIBLING of the visitor (same identity, another instance) answers
- *      `not_home`, the frame stays queued, and the target instance gets it;
+ *   3. a paired SIBLING of the visitor, ALONE: a frame aimed at the missing instance
+ *      is never sent to the sibling at all (S11 holds its stream: no attempt, no
+ *      refusal) and waits for its target, while a `'*'` frame queued for the same
+ *      contact goes out through the same flush — so the hold is a hold, not a flush
+ *      that did nothing;
  *   4. the owner restarts with an unacked frame: it is re-sent and applied ONCE
  *      (the receiver's mark advances to exactly that frame's seq);
  *   5. a re-invite of an ACCEPTED member while it is offline: the old instance
- *      hears the old membership's unshare, then the new invite.
+ *      hears the old membership's unshare, then the new invite;
+ *   6. BOTH visitor instances online: a frame aimed at the older instance reaches it
+ *      at once, even though the newest connection owns the contact entry on A (the
+ *      assertion `peerRouting` proves, right before the action);
+ *   7. MUTUAL, all four instances online: the WRONG sibling is the primary
+ *      connection on each side, and the accept (B → A1) and the role change (A1 →
+ *      the accepting visitor) still reach the instance each frame names.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -42,6 +51,8 @@ import {
 const T = { timeout: 150_000 };
 /** Tests that start a sibling or restart a node take a little longer. */
 const TL = { timeout: 180_000 };
+/** The four-instance gate starts six children and may restart two of them. */
+const T4 = { timeout: 240_000 };
 
 const tag = () => randomBytes(4).toString("hex");
 
@@ -75,8 +86,27 @@ async function pair(prefix) {
   return { a, b };
 }
 
-/* ------------------------------------------------------------------- reads */
+/**
+ * R2-4(a): the WRONG sibling must be the primary connection right before an action,
+ * or "the frame reached the instance it named" would only prove that the newest
+ * connection happened to be the right one.
+ *
+ * Waits for `want` via `peerRouting`, and when it is not there, calls `restartWrong`
+ * (bounded to three attempts): restarting the wrong sibling makes its admission the
+ * newest again, which is what owns the contact entry. Never returns on a maybe — a
+ * precondition that cannot be set up fails the test, with the routing it saw.
+ */
+async function ensurePrimary(n, crowId, want, restartWrong = null) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await until(async () => (await n.peerRouting(crowId)).primary === want, 20_000)) return;
+    if (!restartWrong) break;
+    await restartWrong();
+  }
+  const routing = await n.peerRouting(crowId);
+  assert.fail(`${n.name}: the wrong sibling ${want} never became the primary connection (routing: ${JSON.stringify(routing)})`);
+}
 
+/* ------------------------------------------------------------------- reads */
 const contactIdOf = async (n, crowId) => {
   const rows = await n.sql("SELECT id FROM contacts WHERE crow_id = ? LIMIT 1", [crowId]);
   return Number(rows[0]?.id);
@@ -279,7 +309,7 @@ test("offline: an invite queued while B is stopped is delivered when B starts", 
   }
 });
 
-test("sibling gets not_home, frame waits for the target", TL, async () => {
+test("sibling alone: a frame aimed at another instance is never sent to it, and waits for the target", TL, async () => {
   const { a, b } = await pair("c2c2n3");
   let b2 = null;
   let bBack = null;
@@ -297,15 +327,29 @@ test("sibling gets not_home, frame waits for the target", TL, async () => {
     await inviteAndAccept(a, b2);
     assert.ok(await waitConnected(a, b2), "A and B2 never admitted each other");
 
-    /* A frame aimed at B's instance reaches the sibling, which says not_home. */
+    /* S11: the sibling is not the target, so the frame is never sent to it AT ALL.
+     * sendTo answers false, the outbox holds the stream, and nothing is refused
+     * because nothing was asked. */
     const role = await a.c2c("setRole", { projectId, contactId: aContactOfB, role: "editor" });
     assert.equal(role.memberUuid, inv.memberUuid);
-    assert.ok(await until(async () => outboxRow(await outbox(a, projectUuid), "project.role")?.last_refusal === "not_home", 30_000),
-      "the sibling never answered not_home");
     let row = outboxRow(await outbox(a, projectUuid), "project.role");
     assert.equal(row.to_instance_id, bInstance, "the frame is aimed at the instance that accepted");
-    assert.equal(row.acked_at, null, "a not_home HOLDS the frame, it does not end it");
-    assert.ok(Number(row.attempts) >= 1, "it was really sent (and answered)");
+    assert.equal(Number(row.attempts), 0, "it was never sent: the sibling is not its target");
+    assert.equal(row.last_attempt_at, null);
+    assert.equal(row.last_refusal, null, "the peer refused nothing; there was nothing to refuse");
+    assert.equal(row.acked_at, null, "the frame is held, not ended");
+    assert.deepEqual(trouble(b2), [], "B2 was never asked to apply it (no not_home)");
+
+    /* (R2-4d) A SECOND frame for the same contact really goes out, through a flush
+     * that walks the same queue: a '*' invite goes to whichever instance is there.
+     * Without the S11 hold the first frame would have stopped this whole run. */
+    const other = await newProject(a);
+    const inv2 = await a.c2c("inviteContact", { projectId: other.projectId, contactId: aContactOfB, role: "viewer" });
+    assert.ok(await until(async () => (await visitRow(b2, bContactOfA, other.projectUuid))?.epoch === inv2.memberUuid, 30_000),
+      "the '*' invite never reached the sibling — the flush did not run");
+    row = outboxRow(await outbox(a, projectUuid), "project.role");
+    assert.equal(Number(row.attempts), 0, "the held frame is still waiting, untouched by that flush");
+    assert.equal(row.acked_at, null);
 
     /* The right instance comes back: the held frame is delivered and applied there. */
     await b2.stop();
@@ -317,17 +361,163 @@ test("sibling gets not_home, frame waits for the target", TL, async () => {
     assert.ok(await until(async () => outboxRow(await outbox(a, projectUuid), "project.role")?.acked_at !== null, 30_000),
       "A never saw the role acked");
     row = outboxRow(await outbox(a, projectUuid), "project.role");
-    assert.equal(row.last_refusal, "not_home", "the only refusal the frame got was the sibling's hold");
+    assert.equal(row.last_refusal, null, "the frame was never refused: it waited for its target");
+    assert.ok(Number(row.attempts) >= 1, "it was really sent once the target was back");
     const visit = await visitRow(bBack, bContactOfA, projectUuid);
     assert.equal(visit.state, "active");
     assert.equal(visit.epoch, inv.memberUuid, "the epoch never moved");
     assert.equal(visit.role, "editor");
+    assert.deepEqual(trouble(a), [], "A logged a refusal for a frame it held");
     assertGuardsQuiet(a, bBack);
   } finally {
     await b2?.stop();
     await bBack?.stop();
     await a.stop();
     await b.stop();
+  }
+});
+
+test("both siblings online: a frame aimed at the older sibling reaches it at once, never the newest connection", TL, async () => {
+  const { a, b } = await pair("c2c2n6");
+  let b2 = null;
+  try {
+    const { projectId, projectUuid, aContactOfB, bContactOfA, inv, bInstance } = await acceptedMember({ a, b }, "c2c2n6");
+
+    /* B's paired sibling comes online and is admitted AFTER B, so it owns the
+     * contact entry on A: plain send() would reach it, and it has no membership. */
+    b2 = await node("c2c2n6-b2", { seedFrom: b });
+    assert.equal(b2.crowId, b.crowId, "B2 is the same person (one seed)");
+    await inviteAndAccept(a, b2);
+    assert.ok(await waitConnected(a, b2), "A and B2 never admitted each other");
+    await ensurePrimary(a, b.crowId, b2.instanceId, async () => {
+      b2 = await b2.restart();
+      assert.ok(await waitConnected(a, b2), "A and B2 never reconnected");
+    });
+    const routing = await a.peerRouting(b.crowId);
+    assert.equal(routing.primary, b2.instanceId, "the WRONG sibling owns the contact entry on A");
+    assert.ok(routing.instances.includes(bInstance), "the instance the frame names is still reachable");
+
+    /* The frame names B's instance, so it goes there at once — not to the newest one. */
+    const role = await a.c2c("setRole", { projectId, contactId: aContactOfB, role: "editor" });
+    assert.equal(role.memberUuid, inv.memberUuid);
+    assert.ok(await until(async () => (await visitRow(b, bContactOfA, projectUuid))?.role === "editor", 10_000),
+      "the role change never reached the instance it named");
+    const row = outboxRow(await outbox(a, projectUuid), "project.role");
+    assert.equal(row.to_instance_id, bInstance);
+    assert.ok(Number(row.attempts) >= 1, "the frame was really sent");
+    assert.equal(row.last_refusal, null, "and never refused not_home — the routing proof");
+    assert.ok(await until(async () => outboxRow(await outbox(a, projectUuid), "project.role")?.acked_at !== null, 10_000),
+      "A never saw the role acked");
+    assert.deepEqual(trouble(a), [], "A logged a refusal or a failure");
+    assert.deepEqual(trouble(b2), [], "the newest connection was never asked about the frame");
+    assertGuardsQuiet(a, b, b2);
+  } finally {
+    await b2?.stop();
+    await a.stop();
+    await b.stop();
+  }
+});
+
+test("mutual, all four instances online: accept and role change reach the instance they name, wrong sibling primary on each side", T4, async () => {
+  let a1 = await node("c2c2n7-a1");
+  let b1 = await node("c2c2n7-b1");
+  let a2 = null;
+  let b2 = null;
+  try {
+    await inviteAndAccept(a1, b1);
+    assert.ok(await waitConnected(a1, b1), "A1 and B1 never admitted each other");
+    assert.ok(await until(() => isPinned(a1, b1.crowId), 30_000), "A1 never pinned B");
+
+    /* A sibling instance of EACH Crow, each on its own DB with the same identity. */
+    a2 = await node("c2c2n7-a2", { seedFrom: a1 });
+    b2 = await node("c2c2n7-b2", { seedFrom: b1 });
+    assert.equal(a2.crowId, a1.crowId);
+    assert.notEqual(a2.instanceId, a1.instanceId, "two owner instances");
+    assert.equal(b2.crowId, b1.crowId);
+    assert.notEqual(b2.instanceId, b1.instanceId, "two visitor instances");
+
+    /* R2-4(b): every leg this test crosses needs a contact row, or the frame is
+     * refused `not_contact` before any routing happens. A1↔B1 came from the
+     * pairing; these three fill in the rest. */
+    await inviteAndAccept(a2, b1);
+    await inviteAndAccept(a1, b2);
+    await inviteAndAccept(a2, b2);
+
+    assert.ok(await until(async () => (await a1.peerRouting(b1.crowId)).instances.length >= 2, 60_000),
+      "A1 never saw both visitor instances");
+
+    const project = await newProject(a1);
+    const a1ContactOfB = await contactIdOf(a1, b1.crowId);
+    const inv = await a1.c2c("inviteContact", { projectId: project.projectId, contactId: a1ContactOfB, role: "viewer" });
+
+    /* The invite rides '*' (send), so it goes to whichever visitor instance is A1's
+     * newest connection: that instance is the visitor of this test (Bv). */
+    const b1ContactOfA = await contactIdOf(b1, a1.crowId);
+    const b2ContactOfA = await contactIdOf(b2, a1.crowId);
+    let bv = null;
+    let bvContactOfA = null;
+    if (await until(async () => (await visitRow(b2, b2ContactOfA, project.projectUuid))?.epoch === inv.memberUuid, 30_000)) {
+      bv = b2; bvContactOfA = b2ContactOfA;
+    } else if (await until(async () => (await visitRow(b1, b1ContactOfA, project.projectUuid))?.epoch === inv.memberUuid, 5_000)) {
+      bv = b1; bvContactOfA = b1ContactOfA;
+    }
+    assert.ok(bv, "no visitor instance received the '*' invite");
+    let otherB = bv === b1 ? b2 : b1;
+    let visit = await visitRow(bv, bvContactOfA, project.projectUuid);
+    assert.equal(visit.owner_instance_id, a1.instanceId, "the visit names A1, the instance that invited");
+
+    /* R2-4(a): on the visitor, the WRONG owner instance (A2) must be the primary
+     * connection right before the accept — which names A1. */
+    await ensurePrimary(bv, a1.crowId, a2.instanceId, async () => {
+      a2 = await a2.restart();
+      assert.ok(await waitConnected(a2, bv), "A2 and the visitor never reconnected");
+    });
+    const onVisitor = await bv.peerRouting(a1.crowId);
+    assert.equal(onVisitor.primary, a2.instanceId, "the wrong sibling owns the contact entry on the visitor");
+    assert.ok(onVisitor.instances.includes(a1.instanceId), "A1 is still reachable there");
+
+    await bv.c2c("acceptVisit", { visitId: visit.id });
+    assert.ok(await until(async () => Boolean((await memberRow(a1, project.projectId, a1ContactOfB))?.accepted_at), 10_000),
+      "the accept never reached A1 — it must ride sendTo, not the newest connection");
+    const member = await memberRow(a1, project.projectId, a1ContactOfB);
+    assert.equal(member.origin_instance_id, bv.instanceId, "A1 now targets the accepting instance");
+    const acceptRow = outboxRow(await outbox(bv, project.projectUuid), "project.accept");
+    assert.equal(acceptRow.to_instance_id, a1.instanceId, "the accept names A1");
+    assert.ok(Number(acceptRow.attempts) >= 1, "the accept was really sent");
+    assert.equal(acceptRow.last_refusal, null, "and never refused not_home — the routing proof");
+
+    /* The mirror: on A1 the WRONG visitor instance is primary right before the role
+     * change, which names the accepting visitor. */
+    await ensurePrimary(a1, b1.crowId, otherB.instanceId, async () => {
+      const wasB1 = otherB === b1;
+      otherB = await otherB.restart();
+      if (wasB1) b1 = otherB; else b2 = otherB;
+      assert.ok(await waitConnected(a1, otherB), "A1 and the wrong visitor never reconnected");
+    });
+    const onOwner = await a1.peerRouting(b1.crowId);
+    assert.equal(onOwner.primary, otherB.instanceId, "the wrong visitor owns the contact entry on A1");
+    assert.ok(onOwner.instances.includes(bv.instanceId), "the accepting visitor is still reachable");
+
+    const role = await a1.c2c("setRole", { projectId: project.projectId, contactId: a1ContactOfB, role: "editor" });
+    assert.equal(role.memberUuid, inv.memberUuid, "a role change keeps the membership");
+    assert.ok(await until(async () => (await visitRow(bv, bvContactOfA, project.projectUuid))?.role === "editor", 10_000),
+      "the role change never reached the accepting visitor");
+    const roleRow = outboxRow(await outbox(a1, project.projectUuid), "project.role");
+    assert.equal(roleRow.to_instance_id, bv.instanceId, "the role frame names the accepting visitor");
+    assert.ok(Number(roleRow.attempts) >= 1, "the role frame was really sent");
+    assert.equal(roleRow.last_refusal, null, "no not_home: the routing proof");
+
+    visit = await visitRow(bv, bvContactOfA, project.projectUuid);
+    assert.equal(visit.state, "active");
+    assert.equal(visit.epoch, inv.memberUuid, "the epoch never moved");
+    assert.equal(visit.role, "editor");
+    for (const n of [a1, a2, b1, b2]) assert.deepEqual(trouble(n), [], `${n.name} logged c2c trouble`);
+    assertGuardsQuiet(a1, a2, b1, b2);
+  } finally {
+    await b2?.stop();
+    await a2?.stop();
+    await b1.stop();
+    await a1.stop();
   }
 });
 

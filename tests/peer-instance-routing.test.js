@@ -421,23 +421,28 @@ test("PI-12 error then close on the only connection fires onPeerDisconnected exa
   assert.equal(a.pm.peerConns.has(contact.crowId), false, "the empty bucket is gone");
 });
 
-test("PI-13 a superseded connection's close after a newer admission does not promote; the newer one stays primary", T, async (t) => {
+test("PI-13 a superseded connection's removal does not promote an older one over the newer admission", T, async (t) => {
   const { contact, ownerPeer, contactPeer } = scene();
   const a = ownerPeer();
   const b1 = contactPeer("inst-visitor-1");
   const b2 = contactPeer("inst-visitor-2");
   const b3 = contactPeer("inst-visitor-3");
-  const first = await link(t, a, b1);
-  await link(t, a, b2); // b2 is the newest, so b2 owns `connections`
-  first.connA.destroy(); // b1's close is now in flight...
-  const third = await link(t, a, b3); // ...and a newer admission lands first
+  await link(t, a, b1);
+  await link(t, a, b2);
+  const oldPrimary = a.pm.connections.get(contact.crowId);
+  assert.equal(oldPrimary.conn, a.pm.peerConns.get(contact.crowId)[1].conn, "b2 owns `connections`");
 
-  assert.equal(a.pm.connections.get(contact.crowId).conn, third.connA, "the newer admission is primary");
-  assert.ok(await until(() => a.pm.peerConns.get(contact.crowId)?.length === 2), "b1's close was handled (two entries are left)");
-  assert.equal(a.pm.connections.get(contact.crowId).conn, third.connA, "the late close did not promote b2 over the newer admission");
-  assert.deepEqual(a.pm.connectedInstances(contact.crowId), ["inst-visitor-3", "inst-visitor-2"], "newest first");
+  // b3 is admitted LAST, so it becomes the primary. Then the SUPERSEDED connection
+  // (b2) goes away: its entry leaves the bucket, and because it no longer owns
+  // `connections` no promotion happens — b1 must not be put back over b3.
+  const third = await link(t, a, b3);
+  assert.equal(a.pm.connections.get(contact.crowId).conn, third.connA, "the newer admission took over");
+  assert.deepEqual(a.pm._dropConnection(contact.crowId, oldPrimary.conn), { removed: true, last: false });
+  assert.equal(a.pm.connections.get(contact.crowId).conn, third.connA, "the newer admission is still primary");
+  assert.deepEqual(a.pm.connectedInstances(contact.crowId), ["inst-visitor-3", "inst-visitor-1"], "the superseded entry left, newest first");
   assert.equal(a.pm.isConnected(contact.crowId), true, "the contact never went away");
-  assert.deepEqual(a.disconnected, [], "one connection of several closing is not a disconnect");
+  assert.equal(a.pm.isConnected(contact.crowId, "inst-visitor-2"), false, "the removed connection is not routable");
+  assert.deepEqual(a.disconnected, [], "one connection of several leaving is not a disconnect");
 });
 
 test("PI-14 _promote with no live survivor clears the primary; the later closes fire the event once", T, async (t) => {

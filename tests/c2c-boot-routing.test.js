@@ -18,11 +18,13 @@ import {
   initSharingRuntime, createC2cHandlerLoader, C2C_HANDLER_RETRY_MS,
 } from "../servers/sharing/boot.js";
 import { buildFrame } from "../servers/sharing/c2c/frames.js";
+import { enqueue } from "../servers/sharing/c2c/outbox.js";
 
 const CROW = "crow:peer";
 const LOCAL = "inst-local";
 const PEER = "inst-peer";
 const P1 = "1".repeat(32);
+const P2 = "2".repeat(32);
 const EPOCH = "a".repeat(32);
 
 /* --------------------------------------------------- F1: the handler loader */
@@ -127,7 +129,7 @@ async function fresh() {
     CREATE TABLE contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT, crow_id TEXT, display_name TEXT,
       is_blocked INTEGER DEFAULT 0, ed25519_pubkey TEXT, secp256k1_pubkey TEXT,
-      request_status TEXT);
+      request_status TEXT, last_seen TEXT);
     CREATE TABLE shared_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id INTEGER, share_type TEXT,
       item_id INTEGER, permissions TEXT, direction TEXT, delivery_status TEXT);
@@ -209,6 +211,86 @@ test("F7: a type:'c2c' payload reaches handleC2cFrame and never the share branch
       type: "share", share_type: "memory", payload: { content: "hello" },
     }, { proof: "cb", instanceId: PEER });
     assert.equal(await memoryCount(), 1, "a type:'share' payload still reaches the share branch");
+  } finally {
+    managers.c2cFlushStop?.();
+    s.dispose();
+  }
+});
+
+/* ------------------------------------- T3: the flush on connect (S11) */
+
+/**
+ * The flush-on-connect is the first c2c send site a returning contact meets. It
+ * must hand a TARGETED frame to `sendTo` (the instance it names) and a `'*'` frame
+ * to `send`, or every frame of a reconnecting sibling pair would land on whichever
+ * instance connected last.
+ */
+test("T3: the flush on connect hands a targeted frame to sendTo, a '*' frame to send", async () => {
+  const s = await fresh();
+  const calls = [];
+  const managers = {
+    db: s.db,
+    identity: {
+      crowId: "crow:local", ed25519Pubkey: "c".repeat(64),
+      secp256k1Pubkey: "02" + "d".repeat(64), secp256k1Priv: new Uint8Array(32),
+    },
+    peerManager: {
+      start: async () => {},
+      joinContact: async () => {},
+      joinInstanceSync: async () => {},
+      getConnectedPeers: () => [],
+      identity: { crowId: "crow:local" },
+      send: (crowId, frame) => { calls.push({ via: "send", crowId, frame }); },
+      sendTo: (crowId, instanceId, frame) => {
+        calls.push({ via: "sendTo", crowId, instanceId, frame });
+        return true;
+      },
+    },
+    syncManager: { initContact: async () => {}, onEntry: null },
+    instanceSyncManager: { localInstanceId: LOCAL, feedsDisabled: true },
+    nostrManager: { subscribeToContact: async () => {}, subscribeToIncoming: async () => {} },
+  };
+
+  try {
+    await initSharingRuntime(managers, {
+      applyProjectCloneBundle: async () => ({}),
+      buildProjectCloneBundle: async () => ({}),
+      bindingAdvertDelayMs: 60 * 60 * 1000, // never fires in the test
+    });
+    const onPeerConnected = managers.peerManager.onPeerConnected;
+    assert.equal(typeof onPeerConnected, "function", "the runtime wired the connection callback");
+
+    // Both fleet types queued for the contact (id 1): the invite rides '*', the role
+    // names the instance that must apply it.
+    await enqueue(s.db, {
+      contactId: 1, projectUuid: P1, kind: "project.invite", epoch: EPOCH,
+      toInstanceId: null,
+      body: { name: "Labs", role: "viewer", owner_instance_id: LOCAL, gen: 1 },
+      localInstanceId: LOCAL,
+    });
+    await enqueue(s.db, {
+      contactId: 1, projectUuid: P1, kind: "project.role", epoch: EPOCH,
+      toInstanceId: PEER, body: { role: "viewer" }, localInstanceId: LOCAL,
+    });
+
+    await onPeerConnected(CROW, {});
+
+    assert.deepEqual(calls.map((c) => (c.via === "sendTo" ? [c.via, c.crowId, c.instanceId] : [c.via, c.crowId])), [
+      ["send", CROW],
+      ["sendTo", CROW, PEER],
+    ], "the '*' invite used send, the targeted role used sendTo");
+    assert.equal(calls[0].frame.kind, "project.invite");
+    assert.equal(calls[0].frame.to_instance_id, null);
+    assert.equal(calls[1].frame.kind, "project.role");
+    assert.equal(calls[1].frame.to_instance_id, PEER);
+
+    // The rows were counted as sent, so a second connect does not resend them.
+    const rows = (await s.db.execute({
+      sql: "SELECT attempts, acked_at FROM c2c_outbox WHERE contact_id = 1 ORDER BY id",
+      args: [],
+    })).rows;
+    assert.deepEqual(rows.map((r) => r.attempts), [1, 1]);
+    assert.deepEqual(rows.map((r) => r.acked_at), [null, null], "unacked until the peer answers");
   } finally {
     managers.c2cFlushStop?.();
     s.dispose();
