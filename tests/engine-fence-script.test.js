@@ -342,6 +342,8 @@ function setup({ conf = BASE_CONF, fixtures = {}, daemonJson = '{"log-driver":"j
     facts: join(root, "etc", "engine-fence.facts.json"),
     state: join(stateDir, "state.json"),
     appliedHash: join(stateDir, "applied.sha256"),
+    appliedCounts: join(stateDir, "applied.counts"),
+    appliedRemoved: join(stateDir, "applied.removed"),
     daemonJson: join(dir, "daemon.json"),
     unit: join(dir, "docker.service"),
     // The v6 stack is a file the script probes. A scratch file stands in for
@@ -1255,6 +1257,112 @@ test("remove records conf-derived counts, and the timer keeps the removal", () =
   );
 });
 
+test("a second remove keeps the first one out (B1)", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+  const second = run(ctx, ["remove", "portonly-8030"]);
+  assert.equal(second.status, 0, second.stderr);
+
+  // Both ids are gone: the new text is the conf minus the recorded set minus the
+  // new id, never the conf minus just the new id (which would put 8003 back).
+  const live = liveRules(ctx);
+  for (const id of ["tailnet-8003", "portonly-8030"]) {
+    assert.equal(
+      live.some((line) => line.includes(`crow-engine-fence:${id}:`)),
+      false,
+      `${id} is not live`,
+    );
+  }
+  assert.ok(live.some((line) => line.includes("crow-engine-fence:lan-8011:")), "8011 is untouched");
+  assert.equal(
+    live.filter((line) => line.startsWith("-A CROW-ENGINE-FENCE")).length,
+    4,
+    "the conf's 10 v4 rules minus both removals",
+  );
+  assert.equal(
+    liveRules(ctx, "v6").filter((line) => line.startsWith("-A CROW-ENGINE-FENCE")).length,
+    0,
+    "every v6 publish was removed",
+  );
+
+  // The recorded counts are the conf's, minus both ids.
+  assert.deepEqual(
+    readFileSync(ctx.appliedCounts, "utf8").trimEnd().split("\n"),
+    ["4 4", "6 0"],
+  );
+  assert.deepEqual(readFileSync(ctx.appliedRemoved, "utf8").trimEnd().split("\n"), [
+    "tailnet-8003",
+    "portonly-8030",
+  ]);
+  assert.equal(statSync(ctx.appliedRemoved).mode & 0o777, 0o640, "the removed set is 0640");
+
+  // The timer then skips: the conf's transaction is unchanged and the live
+  // chain still matches the counts remove recorded.
+  clearCalls(ctx);
+  const timer = run(ctx, ["apply", "--boot"]);
+  assert.equal(timer.status, 0, timer.stderr);
+  assert.match(timer.stdout, /byte-identical/);
+  assert.equal(calls(ctx).filter((line) => line.includes("-restore")).length, 0);
+  assert.equal(
+    liveRules(ctx).some(
+      (line) => line.includes("crow-engine-fence:tailnet-8003:") || line.includes("crow-engine-fence:portonly-8030:"),
+    ),
+    false,
+    "both removals hold through the timer's run",
+  );
+});
+
+test("removing the same id twice is refused as already removed", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+  const countsBefore = readFileSync(ctx.appliedCounts, "utf8");
+  const liveBefore = liveRules(ctx);
+
+  const again = run(ctx, ["remove", "tailnet-8003"]);
+  assert.equal(again.status, 20, again.stderr);
+  assert.match(again.stderr, /already removed/);
+  assert.equal(readFileSync(ctx.appliedRemoved, "utf8"), "tailnet-8003\n", "the set is unchanged");
+  assert.equal(readFileSync(ctx.appliedCounts, "utf8"), countsBefore, "no new counts were recorded");
+  assert.deepEqual(liveRules(ctx), liveBefore, "nothing was restored");
+});
+
+test("a real apply clears the removed set and restores every rule", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+  assert.equal(run(ctx, ["remove", "portonly-8030"]).status, 0);
+  assert.match(readFileSync(ctx.appliedRemoved, "utf8"), /tailnet-8003/);
+
+  const r = run(ctx, ["apply"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(ctx.appliedRemoved, "utf8"), "", "a real apply clears the set");
+  assert.deepEqual(
+    readFileSync(ctx.appliedCounts, "utf8").trimEnd().split("\n"),
+    ["4 10", "6 6"],
+    "the conf's own counts are back",
+  );
+
+  const live = liveRules(ctx);
+  for (const id of ["tailnet-8003", "portonly-8030", "lan-8011"]) {
+    assert.ok(live.some((line) => line.includes(`crow-engine-fence:${id}:`)), `${id} is back`);
+  }
+  assert.equal(live.filter((line) => line.startsWith("-A CROW-ENGINE-FENCE")).length, 10);
+  assert.ok(
+    liveRules(ctx, "v6").some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
+    "the v6 rules are back too",
+  );
+
+  // With the set cleared, a remove starts from the whole conf again.
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0, "the id can be removed again after an apply");
+  assert.deepEqual(
+    readFileSync(ctx.appliedCounts, "utf8").trimEnd().split("\n"),
+    ["4 7", "6 3"],
+  );
+});
+
 test("a re-apply run skips a byte-identical transaction, and a remove survives it", () => {
   const ctx = setup();
   applyGolden(ctx);
@@ -1346,7 +1454,9 @@ test("a v6 stack without ip6tables-restore refuses a v6 publish (fail closed)", 
   const r = run(ctx, ["apply", "--boot"], { PATH: pathWithout(ctx, "ip6tables-restore") });
   assert.equal(r.status, 19, r.stderr);
   assert.match(r.stderr, /ip6tables-restore is not installed/);
-  assert.match(r.stderr, /ipv6 unfenced/, "the message names the operator's opt-out");
+  assert.match(r.stderr, /install ip6tables/, "the message names the fix");
+  assert.match(r.stderr, /remove the v6-reachable publish/, "and the other way out");
+  assert.doesNotMatch(r.stderr, /unfenced is set/, "there is no opt-out to take");
   assert.equal(existsSync(join(ctx.fixtures, "restore-input-iptables.txt")), false, "nothing was applied");
   assert.equal(existsSync(ctx.state), false, "no state file was written");
   assert.equal(
@@ -1356,29 +1466,20 @@ test("a v6 stack without ip6tables-restore refuses a v6 publish (fail closed)", 
   );
 });
 
-test("ipv6 unfenced accepts the gap: exit 0, the state records it, and status warns", () => {
-  const ctx = setup({ conf: `${BASE_CONF}ipv6 unfenced\n` });
-  assert.equal(run(ctx, ["check"]).status, 0);
-  const noRestore = pathWithout(ctx, "ip6tables-restore");
-  clearCalls(ctx);
-  const r = run(ctx, ["apply", "--boot"], { PATH: noRestore });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /ipv6 unfenced is set/);
-  assert.deepEqual(
-    calls(ctx).filter((line) => line.startsWith("ip6tables") && !line.includes("--version")),
-    [],
-    "no v6 call of any kind",
-  );
-  assert.equal(existsSync(join(ctx.fixtures, "restore-input-ip6tables.txt")), false);
-  const state = stateOf(ctx);
-  assert.equal(state.v6, "unfenced-by-operator");
-  assert.equal(state.rules.every((rule) => rule.family === "v4"), true);
-
-  const status = run(ctx, ["status"], { PATH: noRestore });
-  assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /^family: v4 fenced$/m);
-  assert.match(status.stdout, /^family: v6 unfenced-by-operator$/m);
-  assert.match(status.stdout, /WARN: the v6 family is unfenced/);
+test("a conf that still carries `ipv6 unfenced` is refused, never quietly read", () => {
+  for (const line of ["ipv6 unfenced", "ipv6 fenced", "ipv6", "ipv6 unfenced extra"]) {
+    const ctx = setup({ conf: `interface tailscale0\npublish tailnet 8003\n${line}\n` });
+    const r = run(ctx, ["check"]);
+    assert.equal(r.status, 12, `${line}: ${r.stderr}`);
+    assert.match(r.stderr, /opt-out was removed/, line);
+    assert.match(r.stderr, /install ip6tables/);
+    assert.deepEqual(dockerCalls(ctx), [], "refused before docker is asked anything");
+  }
+  // Twice is the same refusal: the directive is not a setting any more.
+  const twice = setup({ conf: `interface tailscale0\npublish tailnet 8003\nipv6 unfenced\nipv6 unfenced\n` });
+  const r = run(twice, ["check"]);
+  assert.equal(r.status, 12);
+  assert.doesNotMatch(r.stderr, /listed twice/);
 });
 
 test("a stack with no v6-applicable publish needs no ip6tables-restore", () => {
@@ -1391,6 +1492,7 @@ test("a stack with no v6-applicable publish needs no ip6tables-restore", () => {
   assert.equal(stateOf(ctx).v6, "no-v6-publish");
   const status = run(ctx, ["status"], { PATH: noRestore });
   assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /^family: v6 no-v6-publish$/m, "each family's state is still reported");
   assert.doesNotMatch(status.stdout, /WARN: the v6 family is unfenced/, "nothing to fence, no warning");
 
   // A v6 port-only publish is v6-applicable even with no v6 address in sight.
@@ -1404,18 +1506,6 @@ test("a stack with no v6-applicable publish needs no ip6tables-restore", () => {
   assert.equal(run(lan6, ["check"]).status, 0);
   const r3 = run(lan6, ["apply", "--boot"], { PATH: pathWithout(lan6, "ip6tables-restore") });
   assert.equal(r3.status, 19, r3.stderr);
-});
-
-test("ipv6 unfenced is a conf directive like any other", () => {
-  for (const line of ["ipv6", "ipv6 fenced", "ipv6 unfenced extra"]) {
-    const ctx = setup({ conf: `interface tailscale0\npublish tailnet 8003\n${line}\n` });
-    const r = run(ctx, ["check"]);
-    assert.equal(r.status, 11, `${line}: ${r.stderr}`);
-  }
-  const twice = setup({ conf: `interface tailscale0\npublish tailnet 8003\nipv6 unfenced\nipv6 unfenced\n` });
-  const r = run(twice, ["check"]);
-  assert.equal(r.status, 11);
-  assert.match(r.stderr, /listed twice/);
 });
 
 // ─── swap-check ─────────────────────────────────────────────────────────────
@@ -1658,5 +1748,6 @@ test("no temp file is left behind in the state directory", () => {
   applyGolden(ctx);
   assert.deepEqual(readdirSync(ctx.stateDir).filter((name) => name.startsWith(".state.")), []);
   assert.deepEqual(readdirSync(ctx.stateDir).filter((name) => name.startsWith(".applied.")), []);
+  assert.deepEqual(readdirSync(ctx.stateDir).filter((name) => name.startsWith(".removed.")), []);
   assert.deepEqual(readdirSync(join(ctx.root, "etc")).filter((name) => name.startsWith(".engine-fence-facts.")), []);
 });

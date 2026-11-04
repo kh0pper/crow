@@ -44,11 +44,11 @@ publish port-only 8030
 # for, and a tailnet publish carries no source exemptions.
 publish lan 192.0.2.10 8011 consumer 192.0.2.20
 
-# Deliberately leave IPv6 unfenced. Only for a host that runs a v6 stack but has
-# no ip6tables-restore: without this line such a host is REFUSED (exit 19),
-# because a v6-reachable publish would be open to every interface while the v4
-# rules looked healthy. With it, no v6 rule is written, state.json records
-# "v6": "unfenced-by-operator", and `status` warns that the family is unfenced.
-# This is a risk the operator takes on purpose; the safe answer is to install
-# ip6tables and delete this line.
-#ipv6 unfenced
+# IPv6 has NO directive and fails closed. A host that runs a v6 stack
+# (`/proc/net/if_inet6` exists), has a publish that applies to v6 (any `publish
+# tailnet`, any `publish port-only`, or a `publish lan` on a v6 address) and no
+# `ip6tables-restore` is REFUSED (exit 19): the v4 rules would look healthy
+# while a v6-reachable publish stayed open to every interface. The two ways out
+# are to install ip6tables (which provides ip6tables-restore) or to remove the
+# v6-reachable publish. There is no opt-out: a conf that still carries the old
+# `ipv6 unfenced` line is refused (exit 12), never quietly read.
