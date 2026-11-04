@@ -112,6 +112,14 @@ const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
 const TAKE_STORE_SCRIPT = await loadPanelScript("take-store.js", "TAKE_STORE_SCRIPT");
 
 /**
+ * Web MIDI access, loaded once: like the take store it reaches the page BEFORE
+ * the client, which asks `window.StudioMidi` for the devices and for the
+ * messages a controller sends. It is the only thing that ever calls
+ * `navigator.requestMIDIAccess`, and only from the Connect controllers button.
+ */
+const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
+
+/**
  * Escape a value for use in HTML text or a double-quoted attribute.
  * @param {unknown} value
  * @returns {string}
@@ -241,6 +249,44 @@ const STYLES = `
     flex: 1 1 100%; font-size: 12px; line-height: 1.45; color: var(--st-human);
   }
   .studio .st-recordings { display: flex; flex-direction: column; gap: 6px; }
+  /* The controllers (mockup screen 4, the part the router and Learn need): the
+     two header buttons, and in the body the devices, the Learn line and one row
+     per mapping — the device and its message, what it does, and who set it. A
+     row lights for a moment when its own message arrives. */
+  .studio .st-midi-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .studio .st-midi-state { font-size: 12px; line-height: 1.4; color: var(--st-muted); }
+  .studio .st-midi-state:empty { display: none; }
+  .studio .st-midi {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+    display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  }
+  .studio .st-midi:empty { display: none; }
+  .studio .st-midi-title { margin: 0; font-size: 14px; font-weight: 600; }
+  .studio .st-midi-note { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-muted); }
+  .studio .st-midi-notice { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-human); }
+  .studio .st-midi-target { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-text); }
+  .studio .st-midi-devices { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-midi-device {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border: 1px solid var(--st-edge); border-radius: 8px; background: var(--st-head);
+    font-size: 12px;
+  }
+  .studio .st-midi-device-name { font-weight: 600; }
+  .studio .st-midi-device-state { color: var(--st-muted); font-size: 11px; }
+  .studio .st-midi-list { display: flex; flex-direction: column; gap: 4px; }
+  .studio .st-midi-row {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+    padding: 6px 10px; border: 1px solid var(--st-line); border-radius: 8px;
+    background: var(--st-head); font-size: 12px;
+  }
+  .studio .st-midi-hit { border-color: var(--st-human); background: #2A2418; }
+  .studio .st-midi-row .st-midi-device-name { min-width: 96px; }
+  .studio .st-midi-msg { color: var(--st-muted); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; }
+  .studio .st-midi-does { flex: 1 1 160px; }
+  .studio .st-midi-by { color: var(--st-muted); font-size: 11px; margin-left: auto; }
+  /* The control Learn is waiting on: outlined until its message arrives. */
+  .studio .st-learn { outline: 2px solid var(--st-human); outline-offset: 2px; }
+  .studio .st-midi-bar .st-btn { min-height: 40px; }
   /* A performance the timeline refused: the server's sentence and the two
      buttons that settle it, above the lanes and never hidden by a render. */
   .studio .st-perf-notice {
@@ -743,6 +789,7 @@ async function libraryPage({ db, render, res }) {
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
       <script>${TAKE_STORE_SCRIPT}
+${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
     </div>`;
 
@@ -772,6 +819,13 @@ function studioPage({ songId, render, res }) {
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
         </div>
+        <div class="st-midi-bar">
+          <button class="st-btn st-small" type="button" data-act="midi-connect" aria-pressed="false"
+            title="Let this browser show Studio the MIDI controllers plugged in">Connect controllers</button>
+          <button class="st-btn st-small" type="button" data-act="midi-learn" aria-pressed="false"
+            title="Click a control, then move a knob or press a pad on your controller">Learn</button>
+          <span class="st-midi-state" data-role="midi-state"></span>
+        </div>
         <span class="st-rec-notice" data-role="rec-notice" hidden></span>
         <div class="st-tl-tools">
           <button class="st-btn st-tl-rec" type="button" data-act="rec-timeline" aria-pressed="false" title="Collect the scene launches you play into the timeline">
@@ -795,6 +849,7 @@ function studioPage({ songId, render, res }) {
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
           <section class="st-sampler" data-role="sampler" hidden></section>
+          <section class="st-midi" data-role="midi"></section>
         </main>
         <aside class="st-side">
           <div class="st-side-head">
@@ -816,6 +871,7 @@ function studioPage({ songId, render, res }) {
            client converts a take recorded at another rate with it, and so does
            its worker. -->
       <script>${TAKE_STORE_SCRIPT}
+${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>
     </div>`;
