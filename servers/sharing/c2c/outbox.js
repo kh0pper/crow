@@ -140,12 +140,29 @@
  *
  * S4. `flush` reads through the same per-handle serialization `withTransaction`
  *     uses, so it never sees a row another transaction has not committed: it waits
- *     for that transaction, and a row that then rolls back is never sent. One
- *     flush runs per (handle, contact) at a time — a concurrent flush for the same
+ *     for that transaction, and a row that then rolls back is never sent. One walk
+ *     runs per (handle, contact) at a time — a concurrent flush for the same
  *     contact returns 0 and sends nothing, because the in-flight one is already
- *     walking that contact's queue (a row enqueued meanwhile goes on the next
- *     tick). FLUSH AFTER COMMIT: a flush called from inside a live transaction is a
- *     `bad_state` error. The rows of an open transaction are not on the queue yet,
+ *     walking that contact's queue. Instead it RECORDS A RE-WALK of that contact,
+ *     keeping the latest requester's `send` and clock (a later request replaces an
+ *     earlier one): the caller usually has news the running walk cannot see, a
+ *     connection that formed while it was walking (its flush on connect). Before
+ *     the running walk releases the guard it takes the request and walks again with
+ *     that send, and no row goes twice: it skips every row this call already sent
+ *     (R2-1, which is why an unchanged queue is simply walked over). Every other
+ *     rule is the first walk's, re-read from the rows — a busy hold is re-checked
+ *     and the S11 stream holds start empty, because the new send may reach a target
+ *     the last one could not. At most 8 re-walks run per call; past that the request
+ *     is left for the next flush of that contact (whose own send is later, so it
+ *     wins) and `[c2c] flush re-walk limit reached for contact <id>` is logged once.
+ *     A walk that stopped on a send error still re-walks: a new request usually
+ *     means a new connection, which is exactly what that error was about. The
+ *     return value is every frame the first walk and all its re-walks sent; the
+ *     second caller still gets 0. A row enqueued during the walk goes out on the
+ *     re-walk, when one was requested; otherwise it waits for the next flush. The
+ *     guard is released in a `finally`, so no path leaves the contact marked as
+ *     walking. FLUSH AFTER COMMIT: a flush called from inside a live transaction is
+ *     a `bad_state` error. The rows of an open transaction are not on the queue yet,
  *     so there is nothing legitimate to read there, and a flush that joined it would
  *     send a frame the transaction may still roll back.
  *
@@ -296,6 +313,9 @@ export const BUSY_HOLD_MS = 60_000;
 /** S11/R2-5: how long a held stream stays quiet after one log line. */
 export const HOLD_LOG_EVERY_MS = 3_600_000;
 
+/** S4: how many re-walks one `flush` call runs for requests that arrived meanwhile. */
+export const FLUSH_REWALK_LIMIT = 8;
+
 /** The stream key of a frame with no target instance yet (S1). */
 export const WILDCARD_STREAM = "*";
 
@@ -391,6 +411,26 @@ const chains = new WeakMap();
 const txScope = new AsyncLocalStorage();
 // The contacts whose queue a flush is walking right now, per handle (S4).
 const flushing = new WeakMap();
+// S4: the walk a running flush was asked for when it ends, per handle → contact id →
+// { send, now } of the LATEST requester (a later request replaces an earlier one).
+const rewalkRequests = new WeakMap();
+
+/** S4: remember that `request.send` wants this contact's queue walked when the walk ends. */
+function requestRewalk(db, contactId, request) {
+  let byContact = rewalkRequests.get(db);
+  if (!byContact) { byContact = new Map(); rewalkRequests.set(db, byContact); }
+  byContact.set(contactId, request);
+}
+
+/** S4: take the pending request for this contact (forgetting it), or null. */
+function takeRewalk(db, contactId) {
+  const byContact = rewalkRequests.get(db);
+  const request = byContact?.get(contactId);
+  if (!request) return null;
+  byContact.delete(contactId);
+  if (byContact.size === 0) rewalkRequests.delete(db);
+  return request;
+}
 
 function serialize(db, fn) {
   const prev = chains.get(db) ?? Promise.resolve();
@@ -529,8 +569,11 @@ export async function enqueue(db, { contactId, projectUuid, kind, epoch, toInsta
  * same project.
  *
  * S4: flush after COMMIT. The read is serialized behind any open transaction, and a
- * second concurrent flush for the same contact returns 0 (see the contract). A call
- * from inside a live transaction is a `bad_state` error.
+ * second concurrent flush for the same contact returns 0 and records a re-walk: the
+ * running walk walks again with that (later) `send` when it ends, skipping the rows
+ * this call already sent, at most `FLUSH_REWALK_LIMIT` times. The return value is
+ * every frame the first walk and all its re-walks sent together. A call from inside
+ * a live transaction is a `bad_state` error.
  *
  * @returns {Promise<number>} how many frames were sent
  * @throws {Error & { code: "bad_state" }} when called inside a live transaction (S4)
@@ -543,69 +586,113 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
   }
   let walking = flushing.get(db);
   if (!walking) { walking = new Set(); flushing.set(db, walking); }
-  if (walking.has(contactId)) return 0; // S4: the in-flight flush owns this queue
+  if (walking.has(contactId)) {
+    // S4: the in-flight walk owns this queue. This caller usually has news it cannot
+    // see — a connection that formed while it was walking — so record a re-walk with
+    // THIS send and clock and leave. A later request replaces this one.
+    requestRewalk(db, contactId, { send, now });
+    return 0;
+  }
   walking.add(contactId);
+  // This call's own send is later than anything a previous call left behind, so a
+  // request left by the re-walk limit below is taken up by the walk here: replaying
+  // it would send with an older transport and could hit the limit a second time.
+  takeRewalk(db, contactId);
   try {
-    // S4: never send a row another transaction has not committed (and so never one
-    // that is about to roll back). The read takes the handle's turn like any write.
-    const rows = await serialize(db, async () => (await db.execute({
-      sql: `SELECT id, project_uuid, epoch, seq, to_instance_id, frame_json, last_refusal, last_attempt_at
-              FROM c2c_outbox
-             WHERE contact_id = ? AND acked_at IS NULL
-             ORDER BY project_uuid, id`,
-      args: [contactId],
-    })).rows);
-    const held = new Set();
-    // S11: streams whose TARGET is not reachable now (send answered false). Their
-    // later rows wait too — a stream is FIFO, and skipping ahead would make the
-    // receiver hold the gap.
-    const heldStreams = new Set();
-    let sent = 0;
-    for (const row of rows) {
-      if (held.has(row.project_uuid)) continue;
-      const stream = fullStreamOf(row);
-      if (heldStreams.has(stream)) continue;
-      if (row.last_refusal === "busy" && now - sqlTimeToMs(row.last_attempt_at) < BUSY_HOLD_MS) {
-        held.add(row.project_uuid);
-        continue;
-      }
-      let frame;
-      try {
-        frame = JSON.parse(row.frame_json);
-      } catch {
-        console.warn(`[c2c] outbox row ${row.id} is unreadable; its project is held`);
-        held.add(row.project_uuid); // R8: never send later seqs past a hole
-        continue;
-      }
-      let outcome;
-      try {
-        outcome = await send(frame);
-      } catch (err) {
-        // The link is gone (or the frame cannot fit it). Stop: nothing after this
-        // one could be sent either, and the rows stay queued for the next flush.
-        console.warn(`[c2c] flush stopped for contact ${contactId}: ${err?.code || err?.message || "send failed"}`);
+    const sentIds = new Set(); // S4/R2-1: the rows this CALL sent, across every walk
+    let current = { send, now };
+    let total = 0;
+    for (let rewalks = 0; ; rewalks += 1) {
+      total += await walkQueue(db, current.send, current.now, contactId, sentIds);
+      // S4: a request that arrived during the walk, even a walk that stopped on a
+      // send error — a new request usually means a new connection, which is exactly
+      // what that error was about.
+      const next = takeRewalk(db, contactId);
+      if (!next) break;
+      if (rewalks >= FLUSH_REWALK_LIMIT) {
+        // A burst of connects is absorbed here; past the limit the next flush for
+        // this contact does it. Keep the request, so its news is not lost.
+        requestRewalk(db, contactId, next);
+        console.warn(`[c2c] flush re-walk limit reached for contact ${contactId}`);
         break;
       }
-      if (outcome === false) {
-        // S11: the named instance has no live connection here. Nothing was written
-        // and the peer refused nothing, so the row takes no attempt and no refusal:
-        // it simply waits, in order, for its target to come back.
-        heldStreams.add(stream);
-        if (holdLog.shouldLog(`${contactId}\u0000${stream}`, now)) {
-          // An instance id, never a frame body. R2-5: rate-limited above.
-          console.warn(`[c2c] holding frames for instance ${String(streamOf(row.to_instance_id ?? null)).slice(0, 8)}: not connected`);
-        }
-        continue;
-      }
-      await write(db,
-        "UPDATE c2c_outbox SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?",
-        [row.id]);
-      sent += 1;
+      current = next;
     }
-    return sent;
+    return total;
   } finally {
-    walking.delete(contactId);
+    walking.delete(contactId); // S4: released on every path
   }
+}
+
+/**
+ * S4: one walk of a contact's queue. `sentIds` is shared by every walk of one
+ * `flush` call, so a re-walk never sends a row this call already sent (R2-1) — which
+ * is also why a queue the first walk already cleared is simply walked over. Every
+ * other rule is the first walk's. `held` and `heldStreams` are fresh per walk on
+ * purpose: the new send may reach a target the last one could not, so a busy hold is
+ * re-read from its row and an S11 stream hold is not inherited.
+ * @returns {Promise<number>} frames this walk sent
+ */
+async function walkQueue(db, send, now, contactId, sentIds) {
+  // S4: never send a row another transaction has not committed (and so never one
+  // that is about to roll back). The read takes the handle's turn like any write.
+  const rows = await serialize(db, async () => (await db.execute({
+    sql: `SELECT id, project_uuid, epoch, seq, to_instance_id, frame_json, last_refusal, last_attempt_at
+            FROM c2c_outbox
+           WHERE contact_id = ? AND acked_at IS NULL
+           ORDER BY project_uuid, id`,
+    args: [contactId],
+  })).rows);
+  const held = new Set();
+  // S11: streams whose TARGET is not reachable now (send answered false). Their
+  // later rows wait too — a stream is FIFO, and skipping ahead would make the
+  // receiver hold the gap.
+  const heldStreams = new Set();
+  let sent = 0;
+  for (const row of rows) {
+    if (sentIds.has(row.id)) continue; // R2-1: this call sent it on an earlier walk
+    if (held.has(row.project_uuid)) continue;
+    const stream = fullStreamOf(row);
+    if (heldStreams.has(stream)) continue;
+    if (row.last_refusal === "busy" && now - sqlTimeToMs(row.last_attempt_at) < BUSY_HOLD_MS) {
+      held.add(row.project_uuid);
+      continue;
+    }
+    let frame;
+    try {
+      frame = JSON.parse(row.frame_json);
+    } catch {
+      console.warn(`[c2c] outbox row ${row.id} is unreadable; its project is held`);
+      held.add(row.project_uuid); // R8: never send later seqs past a hole
+      continue;
+    }
+    let outcome;
+    try {
+      outcome = await send(frame);
+    } catch (err) {
+      // The link is gone (or the frame cannot fit it). Stop: nothing after this
+      // one could be sent either, and the rows stay queued for the next flush.
+      console.warn(`[c2c] flush stopped for contact ${contactId}: ${err?.code || err?.message || "send failed"}`);
+      break;
+    }
+    if (outcome === false) {
+      // S11: the named instance has no live connection here. Nothing was written
+      // and the peer refused nothing, so the row takes no attempt and no refusal:
+      // it simply waits, in order, for its target to come back.
+      heldStreams.add(stream);
+      if (holdLog.shouldLog(`${contactId}\u0000${stream}`, now)) {
+        // An instance id, never a frame body. R2-5: rate-limited above.
+        console.warn(`[c2c] holding frames for instance ${String(streamOf(row.to_instance_id ?? null)).slice(0, 8)}: not connected`);
+      }
+      continue;
+    }
+    await write(db,
+      "UPDATE c2c_outbox SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE id = ?",
+      [row.id]);
+    sentIds.add(row.id);
+    sent += 1;
+  }
+  return sent;
 }
 
 /**

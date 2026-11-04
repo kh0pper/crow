@@ -11,7 +11,7 @@ import { createDbClient } from "../servers/db.js";
 import { C2C_TABLES_SQL } from "../scripts/migrations/0016-crow-to-crow.mjs";
 import {
   enqueue, flush, onAck, onRefuse, acceptInbound, commitInbound, consumeInbound,
-  pruneAcked, streamOf, withTransaction, BUSY_HOLD_MS, HOLD_LOG_EVERY_MS,
+  pruneAcked, streamOf, withTransaction, BUSY_HOLD_MS, HOLD_LOG_EVERY_MS, FLUSH_REWALK_LIMIT,
   cancelEpoch, nextInviteGeneration, inviteSupersedes, ackIsForMe,
 } from "../servers/sharing/c2c/outbox.js";
 import { buildFrame, parseFrame } from "../servers/sharing/c2c/frames.js";
@@ -505,6 +505,230 @@ test("S4: two concurrent flushes for one contact never send a row twice", async 
     const again = [];
     assert.equal(await flush(db, (f) => { again.push(f.seq); }, { contactId: CONTACT }), 2);
     assert.deepEqual(again, [1, 2]);
+  });
+});
+
+/* ------------------------------------------------- S4: the re-walk (PR3) */
+
+// The target of a frame the first walk cannot reach: its connection is not up yet.
+const T = "inst-target";
+
+/** The rows of one project (row order is the queue's own: project, then id). */
+const rowsFor = async (db, projectUuid) => (await rowsOf(db)).filter((r) => r.project_uuid === projectUuid);
+
+test("S4 re-walk: a connect during a walk is not lost", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db, { toInstanceId: T });                 // P1, stream T: no connection yet
+    await enq(db, { ...invite(), projectUuid: P2 });     // P2, stream '*': goes out on the first walk
+
+    const via1 = [];
+    const via2 = [];
+    let again;
+    const send2 = (f) => { via2.push(`${f.project_uuid}:${streamOf(f.to_instance_id)}:${f.seq}`); return true; };
+    const send1 = (f) => {
+      via1.push(`${f.project_uuid}:${streamOf(f.to_instance_id)}:${f.seq}`);
+      if (f.to_instance_id === T) return false; // S11: this send cannot reach T
+      // The connection to T forms WHILE this walk runs, and its flush on connect
+      // asks for a walk it can serve. It must not be dropped.
+      again = flush(db, send2, { contactId: CONTACT });
+      return undefined;
+    };
+
+    assert.equal(await flush(db, send1, { contactId: CONTACT }), 2,
+      "the '*' frame and, on the re-walk, the targeted one");
+    assert.equal(await again, 0, "the concurrent flush sends nothing itself (S4)");
+    assert.deepEqual(via1, [`${P1}:${T}:1`, `${P2}:*:1`], "the first walk held T's stream and sent the rest");
+    assert.deepEqual(via2, [`${P1}:${T}:1`], "the re-walk used the new send for the held frame, once");
+
+    const [targeted] = await rowsFor(db, P1);
+    assert.equal(targeted.attempts, 1, "the held frame was really sent by the re-walk");
+    assert.ok(targeted.last_attempt_at);
+    assert.equal(targeted.acked_at, null);
+    const [wildcard] = await rowsFor(db, P2);
+    assert.equal(wildcard.attempts, 1, "the '*' frame went once, through the first send only");
+  });
+});
+
+test("S4 re-walk sends no row twice", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db); // one stream, seqs 1-3
+    await enq(db);
+    await enq(db);
+
+    const firstPass = [];
+    const rewalk = [];
+    let again;
+    const send2 = (f) => { rewalk.push(f.seq); return undefined; };
+    const send1 = (f) => {
+      firstPass.push(f.seq);
+      if (f.seq === 1) again = flush(db, send2, { contactId: CONTACT }); // a connect mid-walk
+      return undefined;
+    };
+
+    assert.equal(await flush(db, send1, { contactId: CONTACT }), 3);
+    assert.equal(await again, 0);
+    assert.deepEqual(firstPass, [1, 2, 3], "the first walk sends the whole stream");
+    // The re-walk DID run (its send is simply never reached): every row of this call
+    // is in the sent set, so none of them goes a second time (R2-1).
+    assert.deepEqual(rewalk, [], "the re-walk sends no row the first walk already sent");
+    assert.deepEqual([...firstPass, ...rewalk].sort(), [1, 2, 3], "each seq exactly once");
+    assert.deepEqual((await rowsOf(db)).map((r) => r.attempts), [1, 1, 1], "one attempt per row");
+  });
+});
+
+test("S4 re-walk uses the latest requester's send", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db, { toInstanceId: T });                 // held by the first walk (S11 false)
+    await enq(db, { ...invite(), projectUuid: P2 });     // goes out, and asks twice meanwhile
+
+    const viaA = [];
+    const viaB = [];
+    const sendA = (f) => { viaA.push(f.seq); return true; };
+    const sendB = (f) => { viaB.push(f.seq); return true; };
+    const send1 = (f) => {
+      if (f.to_instance_id === T) return false; // no connection to T on this walk
+      flush(db, sendA, { contactId: CONTACT });  // the first request...
+      flush(db, sendB, { contactId: CONTACT });  // ...replaced by this one
+      return undefined;
+    };
+
+    assert.equal(await flush(db, send1, { contactId: CONTACT }), 2,
+      "the '*' frame and, on the re-walk, the held one");
+    assert.deepEqual(viaA, [], "the replaced request's send is never used");
+    assert.deepEqual(viaB, [1], "the re-walk used the latest requester's send");
+    const [targeted] = await rowsFor(db, P1);
+    assert.equal(targeted.attempts, 1);
+  });
+});
+
+test("S4 re-walk picks up a row enqueued during the walk", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db); // P1 seq 1
+
+    const via1 = [];
+    const via2 = [];
+    let enqueued = false;
+    const send2 = (f) => { via2.push(`${f.project_uuid}:${f.seq}`); return undefined; };
+    const send1 = async (f) => {
+      via1.push(f.seq);
+      if (!enqueued) {
+        enqueued = true;
+        // A frame queued while the walk runs, and a connect that asks for a re-walk:
+        // the re-walk reads the queue again, so the new row is not left for a tick.
+        assert.equal(await enq(db, { projectUuid: P2 }), 1);
+        flush(db, send2, { contactId: CONTACT });
+      }
+      return undefined;
+    };
+
+    assert.equal(await flush(db, send1, { contactId: CONTACT }), 2);
+    assert.deepEqual(via1, [1], "the first walk only saw the row that was queued");
+    assert.deepEqual(via2, [`${P2}:1`], "the re-walk picked up the row enqueued during the walk");
+    assert.deepEqual((await rowsOf(db)).map((r) => r.attempts), [1, 1]);
+  });
+});
+
+test(`S4 re-walk limit: ${FLUSH_REWALK_LIMIT} re-walks, one line, guard released`, async () => {
+  await withDb(async ({ db }) => {
+    await enq(db);
+    const lines = [];
+    const real = console.warn;
+    let calls = 0;
+    console.warn = (...a) => { if (String(a[0]).includes("re-walk limit")) lines.push(String(a[0])); };
+    let n;
+    try {
+      // S11 `false` keeps the row unsent, so every walk calls this send again — and
+      // that send asks for yet another walk each time (the same one: what a connect's
+      // flush looks like). The limit is what ends the call.
+      const asking = () => {
+        calls += 1;
+        flush(db, asking, { contactId: CONTACT });
+        return false;
+      };
+      n = await flush(db, asking, { contactId: CONTACT });
+    } finally {
+      console.warn = real;
+    }
+    assert.equal(n, 0, "nothing was ever really sent");
+    assert.equal(calls, 1 + FLUSH_REWALK_LIMIT, "the first walk and exactly the limit of re-walks");
+    assert.deepEqual(lines, [`[c2c] flush re-walk limit reached for contact ${CONTACT}`],
+      "one line, and the pending request is left for the next flush");
+
+    // The guard is released: a later flush walks the queue normally (the request the
+    // limit left behind is taken up by this call's own, later, send).
+    const sent = [];
+    assert.equal(await flush(db, (f) => { sent.push(f.seq); }, { contactId: CONTACT }), 1);
+    assert.deepEqual(sent, [1]);
+    assert.equal(lines.length, 1, "and does not hit the limit");
+    assert.deepEqual((await rowsOf(db)).map((r) => r.attempts), [1]);
+  });
+});
+
+test("S4 re-walk: a send error does not drop a pending request", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db);
+    await enq(db);
+
+    const via1 = [];
+    const via2 = [];
+    let again;
+    const send2 = (f) => { via2.push(f.seq); return undefined; };
+    const send1 = (f) => {
+      via1.push(f.seq);
+      // The link breaks, and the connection that replaces it (its flush on connect)
+      // asks for a walk while it does: the request outlives the error.
+      again = flush(db, send2, { contactId: CONTACT });
+      throw Object.assign(new Error("Not connected to peer"), { code: "not_connected" });
+    };
+
+    const real = console.warn;
+    console.warn = () => {}; // the "flush stopped" line is expected here
+    let n;
+    try {
+      n = await flush(db, send1, { contactId: CONTACT });
+    } finally {
+      console.warn = real;
+    }
+    assert.equal(await again, 0);
+    assert.equal(n, 2, "the re-walk sent both frames with the new send");
+    assert.deepEqual(via1, [1], "the first walk stopped at the error");
+    assert.deepEqual(via2, [1, 2], "the re-walk starts over and misses nothing");
+    assert.deepEqual((await rowsOf(db)).map((r) => r.attempts), [1, 1]);
+  });
+});
+
+test("S4: the guard is released after a re-walk whose send throws", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db, { toInstanceId: T });                 // held by the first walk
+    await enq(db, { ...invite(), projectUuid: P2 });     // goes out and asks for a re-walk
+
+    const via1 = [];
+    const real = console.warn;
+    const send2 = () => { throw new Error("the new link broke too"); };
+    const send1 = (f) => {
+      via1.push(`${f.project_uuid}`);
+      if (f.to_instance_id === T) return false;
+      flush(db, send2, { contactId: CONTACT });
+      return undefined;
+    };
+
+    console.warn = () => {}; // both "flush stopped" lines are expected here
+    let n;
+    try {
+      n = await flush(db, send1, { contactId: CONTACT });
+    } finally {
+      console.warn = real;
+    }
+    assert.equal(n, 1, "only the '*' frame went out");
+    assert.deepEqual(via1, [P1, P2]);
+
+    // The re-walk threw on the held frame: the walk ended there and the guard is gone.
+    const sent = [];
+    assert.equal(await flush(db, (f) => { sent.push(f.seq); }, { contactId: CONTACT }), 2);
+    assert.deepEqual(sent, [1, 1]);
+    const [targeted] = await rowsFor(db, P1);
+    assert.equal(targeted.attempts, 1, "a fresh flush after the throw really sends the held row");
+    assert.equal(targeted.acked_at, null);
   });
 });
 
