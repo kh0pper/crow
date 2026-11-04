@@ -948,8 +948,9 @@ export function routeFor(snap, message) {
     const kind = mapping.action?.kind;
     const answer = { id: mapping.id, action: cloneJson(mapping.action) };
     if (kind === "keys.play") {
-      // One row, the whole channel: the notes no pad mapping takes.
-      if (keys === null) keys = answer;
+      // One row, the whole channel: the notes no pad mapping takes — and only
+      // notes, whatever a document holds.
+      if (stored.type === "note" && keys === null) keys = answer;
       continue;
     }
     if (Number(stored.number) !== wanted.number) continue;
