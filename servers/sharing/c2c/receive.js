@@ -19,7 +19,8 @@
  *   4. acks/refusals are applied only by the instance they name (S3), before any
  *      routing reply, so a sibling never answers them;
  *   5. a frame aimed at another instance is refused `not_home` (a null target is
- *      allowed only for an invite);
+ *      allowed only for an invite and for an unshare of a member that never
+ *      accepted, which has no instance to aim at);
  *   6. dedupe against the stream's high-water mark: dup → re-ack, gap → refuse;
  *   7. the kind's handler is looked up BEFORE any transaction (F1): a kind whose
  *      module has not loaded is refused the holding `busy`, so the sender keeps
@@ -98,12 +99,15 @@ function envelopeAddress(envelope) {
 
 /**
  * The routing rule (S1/S3): a frame aimed at this instance belongs here, and a
- * null target is allowed only for an invite (sent before the visitor's instance
- * is known). An unknown kind's null target cannot be judged, so it is allowed
- * (F4: "null where allowed").
+ * null target is allowed for an invite (sent before the visitor's instance is
+ * known) and for an unshare (a member that never accepted has no instance to aim
+ * at, so its unshare rides the "*" stream — O2 of task 6). An unknown kind's null
+ * target cannot be judged, so it is allowed (F4: "null where allowed").
  */
 function routesHere(toInstanceId, kind, localInstanceId) {
-  if (toInstanceId === null) return kind === null || kind === "project.invite";
+  if (toInstanceId === null) {
+    return kind === null || kind === "project.invite" || kind === "project.unshare";
+  }
   return toInstanceId === localInstanceId;
 }
 

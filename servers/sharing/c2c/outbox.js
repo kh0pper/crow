@@ -19,7 +19,8 @@
  *
  * S1. A stream is (contact, project, epoch, target). Target is the frame's
  *     `to_instance_id`, or "*" when that is null (an invite before the visitor is
- *     known). The sender's counter `c2c_outbox_seq` is keyed by
+ *     known; and the unshare of a member that never accepted, which has no instance
+ *     to aim at — task 6's O2). The sender's counter `c2c_outbox_seq` is keyed by
  *     (contact_id, project_uuid, epoch, stream), and the receiver's mark
  *     `c2c_inbound_seq` by (contact_id, sender_instance_id, project_uuid, epoch,
  *     stream): the epoch is part of the KEY, never a stored field to compare. So a
