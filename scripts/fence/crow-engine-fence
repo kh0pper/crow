@@ -174,8 +174,7 @@ The conf holds one directive per line:
 
 IPv6 fails closed. A host that runs a v6 stack, has a publish that applies to
 v6 and no ip6tables-restore is refused (exit 19): install ip6tables, or remove
-the v6-reachable publish. The former 'ipv6 unfenced' opt-out is gone, and a
-conf that still carries it is refused (exit 12).
+the v6-reachable publish. There is no opt-out.
 
 Exit codes are listed in the script header and in docs/guide/engine-fence.md.
 EOF
@@ -397,7 +396,7 @@ parse_conf() {
       ipv6)
         # The opt-out is gone. A conf written against it must not be read as if
         # it still worked: the family fails closed now, so say how to fix it.
-        conf_refuse "$no" "the 'ipv6 unfenced' opt-out was removed and IPv6 now fails closed: delete this line and either install ip6tables and ip6tables-restore, or remove every publish that applies to v6"
+        conf_refuse "$no" "there is no IPv6 opt-out: IPv6 fails closed. Delete this line and either install ip6tables and ip6tables-restore, or remove every publish that applies to v6"
         ;;
       publish)
         kind=${tok[1]:-}

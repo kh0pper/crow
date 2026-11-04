@@ -50,5 +50,4 @@ publish lan 192.0.2.10 8011 consumer 192.0.2.20
 # `ip6tables-restore` is REFUSED (exit 19): the v4 rules would look healthy
 # while a v6-reachable publish stayed open to every interface. The two ways out
 # are to install ip6tables (which provides ip6tables-restore) or to remove the
-# v6-reachable publish. There is no opt-out: a conf that still carries the old
-# `ipv6 unfenced` line is refused (exit 12), never quietly read.
+# v6-reachable publish. There is no opt-out.

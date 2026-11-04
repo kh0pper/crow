@@ -1466,12 +1466,12 @@ test("a v6 stack without ip6tables-restore refuses a v6 publish (fail closed)", 
   );
 });
 
-test("a conf that still carries `ipv6 unfenced` is refused, never quietly read", () => {
+test("an ipv6 line is refused: there is no IPv6 opt-out", () => {
   for (const line of ["ipv6 unfenced", "ipv6 fenced", "ipv6", "ipv6 unfenced extra"]) {
     const ctx = setup({ conf: `interface tailscale0\npublish tailnet 8003\n${line}\n` });
     const r = run(ctx, ["check"]);
     assert.equal(r.status, 12, `${line}: ${r.stderr}`);
-    assert.match(r.stderr, /opt-out was removed/, line);
+    assert.match(r.stderr, /no IPv6 opt-out/, line);
     assert.match(r.stderr, /install ip6tables/);
     assert.deepEqual(dockerCalls(ctx), [], "refused before docker is asked anything");
   }
