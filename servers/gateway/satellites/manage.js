@@ -19,6 +19,7 @@
  *
  * Errors are ManageError {status, code, extra}; routes answer {error: code, ...extra}.
  */
+import { stripBotGrantsForBundle } from "./grants.js";
 import { execFile } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -184,6 +185,8 @@ export function createSatelliteManager({
       }
       const r = recordSatelliteInstall({ id, satelliteId: sat.id, version: manifestOf(id)?.version ?? null, appBundles: appBundlesDir(), paths: P(), now, skillMode, log });
       if (!r.ok) log(`[satellites] ${sat.id}: install of ${id} finished but not recorded: ${r.code}`);
+      // Never auto-granted (§9.4): a bundle that is satellite-hosted now starts with no bot grants.
+      else { try { await stripBotGrantsForBundle(db, id, { log }); } catch { /* the mount still checks grants and opt-ins */ } }
       return r;
     }
     if (rec.action === "uninstall") return removeRecords(db, sat, id);
