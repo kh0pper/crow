@@ -30,6 +30,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -113,6 +114,19 @@ if (sub === "info") {
   process.exit(0);
 }
 if (sub === "ps") {
+  const filterIndex = args.indexOf("--filter");
+  if (filterIndex >= 0) {
+    const wanted = String(args[filterIndex + 1] || "").replace(/^id=/, "");
+    // The test marks a container the daemon no longer knows with gone-<id>.
+    if (wanted && fs.existsSync(path.join(dir, "gone-" + wanted))) {
+      process.exit(0);
+    }
+    const ids = fixture("docker-ps.txt")
+      .split("\n")
+      .filter((line) => line.trim() && (!wanted || line.trim().startsWith(wanted)));
+    if (ids.length) process.stdout.write(ids.join("\n") + "\n");
+    process.exit(0);
+  }
   out(fixture("docker-ps.txt"));
   process.exit(0);
 }
@@ -143,6 +157,11 @@ cat "$FAKE_FIXTURES/${fixture}"
 const FAKE_SYSTEMCTL = `#!/usr/bin/env bash
 set -u
 printf 'systemctl %s\\n' "$*" >> "$FAKE_LOG"
+if [ "$#" -ge 2 ] && [ "$1" = "is-active" ] && [ "$2" = "--quiet" ]; then
+  # --quiet prints nothing; the exit status is the answer.
+  [ -f "$FAKE_FIXTURES/docker-inactive" ] && exit 3
+  exit 0
+fi
 cat "$FAKE_FIXTURES/fence-unit.txt"
 `;
 
@@ -334,6 +353,7 @@ test("the commands the script runs are the read-only ones, with no -p and no pro
   snapshotOf(ctx);
   const log = calls(ctx);
   for (const expected of [
+    "systemctl is-active --quiet docker.service",
     "ss -ltn",
     "iptables -t raw -S",
     "ip6tables -t raw -S",
@@ -360,6 +380,31 @@ test("an inactive fence unit is written as a fact, not omitted", () => {
   assert.deepEqual(doc.fence, { unit_active: false, unit_state: "inactive" });
 });
 
+test("B1: while docker.service is inactive, no docker CLI call is made and every docker section is null", () => {
+  const ctx = setup();
+  writeFileSync(join(ctx.fixtures, "docker-inactive"), "");
+  const doc = snapshotOf(ctx);
+
+  assert.deepEqual(doc.docker, { version: null, firewall_backend: null, userland_proxy: null });
+  assert.equal(doc.containers, null, "containers is null, not an empty list");
+  assert.ok(
+    doc.errors.some((e) => e.message === "docker.service not active"),
+    "the reason is stated",
+  );
+  assert.equal(doc.errors.some((e) => e.command.startsWith("docker ")), false);
+
+  // The socket is what starts dockerd: not even `docker version` may run.
+  assert.deepEqual(
+    calls(ctx).filter((line) => line.startsWith("docker ")),
+    [],
+    "the fake docker's call log stays empty",
+  );
+
+  // Only docker is skipped; the fence unit is still a fact about the host.
+  assert.equal(doc.fence.unit_active, true);
+  assert.equal(doc.raw_rules.v4.length, 3);
+});
+
 // ─── Failure handling ───────────────────────────────────────────────────────
 
 test("a failing docker: the snapshot is still written, the section is null, an error is recorded", () => {
@@ -373,6 +418,10 @@ test("a failing docker: the snapshot is still written, the section is null, an e
   assert.equal(doc.containers, null, "an unreadable container list is null, never an empty list");
   assert.ok(doc.errors.length >= 3, "each failed command is one entry");
   assert.ok(doc.errors.some((e) => e.command.startsWith("docker")), "the errors name the command");
+  // The command's stderr is diagnostics for the journal, never snapshot data.
+  for (const entry of doc.errors) {
+    assert.doesNotMatch(`${entry.command}\t${entry.message}`, /cannot connect to the daemon/, entry.message);
+  }
 
   // The sections that did read are still there.
   assert.equal(doc.raw_rules.v4.length, 3);
@@ -429,12 +478,65 @@ test("a failing or empty tailscale is null plus an error, and the rest of the ru
   assert.ok(empty.errors.some((e) => e.command === "tailscale ip -6"), "an absent family is recorded");
 });
 
+test("M5: an inspect failure re-checks docker ps; a gone container is dropped, a live one stays", () => {
+  const gone = setup();
+  rmSync(join(gone.fixtures, `inspect-${ID_EMBED}.json`));
+  writeFileSync(join(gone.fixtures, `gone-${ID_EMBED}`), "");
+  const goneDoc = snapshotOf(gone);
+  assert.deepEqual(goneDoc.containers.map((c) => c.id), ["aaaabbbbcccc"], "the exited container is dropped");
+  assert.equal(
+    goneDoc.errors.some((e) => e.command.includes(ID_EMBED)),
+    false,
+    "a container that exited after `docker ps` is not an error",
+  );
+  assert.ok(
+    calls(gone).includes(`docker ps -q --no-trunc --filter id=${ID_EMBED}`),
+    "the re-check ran",
+  );
+
+  const present = setup();
+  rmSync(join(present.fixtures, `inspect-${ID_EMBED}.json`));
+  const presentDoc = snapshotOf(present);
+  assert.equal(presentDoc.containers.length, 2, "a container that is still there is kept");
+  const unknown = presentDoc.containers.find((c) => c.id === "dddddeeeefff");
+  assert.ok(unknown, JSON.stringify(presentDoc.containers));
+  assert.equal(unknown.host_config, undefined, "no host_config: the reader reports an unknown shape");
+  assert.ok(
+    presentDoc.errors.some((e) => e.command === `docker inspect ${ID_EMBED}`),
+    "the unresolved failure is recorded",
+  );
+});
+
+test("M7: a failing ss nulls listeners, and its stderr text never reaches errors[]", () => {
+  const ctx = setup();
+  writeFileSync(join(ctx.fixtures, "fail-ss"), "");
+  const doc = snapshotOf(ctx);
+
+  assert.equal(doc.listeners, null, "an unreadable socket table is null, never empty");
+  assert.ok(doc.errors.some((e) => e.command === "ss -ltn"));
+  assert.equal(doc.containers.length, 2, "the rest of the run continues");
+  for (const entry of doc.errors) {
+    assert.doesNotMatch(`${entry.command}\t${entry.message}`, /fake failure/, entry.message);
+  }
+});
+
+test("M7: a failing ip6tables nulls only the v6 rules", () => {
+  const ctx = setup();
+  writeFileSync(join(ctx.fixtures, "fail-ip6tables"), "");
+  const doc = snapshotOf(ctx);
+
+  assert.equal(doc.raw_rules.v6, null);
+  assert.equal(doc.raw_rules.v4.length, 3, "the other family is untouched");
+  assert.ok(doc.errors.some((e) => e.command === "ip6tables -t raw -S"));
+});
+
 // ─── Write semantics ────────────────────────────────────────────────────────
 
 test("the file is written to a temp name beside the target and renamed into place", () => {
   const ctx = setup();
   writeFileSync(ctx.out, '{"taken_at":"2000-01-01T00:00:00Z"}\n');
   const before = statSync(ctx.out).ino;
+  const dirModeBefore = statSync(ctx.outDir).mode & 0o777;
 
   const doc = snapshotOf(ctx);
   assert.ok(doc.containers.length > 0);
@@ -447,14 +549,69 @@ test("the file is written to a temp name beside the target and renamed into plac
 
   const mode = statSync(ctx.out).mode & 0o777;
   assert.equal(mode, 0o640, "the snapshot is 0640");
-  assert.equal(statSync(ctx.outDir).mode & 0o777, 0o750, "its directory is 0750 for the given group");
+  assert.equal(
+    statSync(ctx.outDir).mode & 0o777,
+    dirModeBefore,
+    "a directory that is not the dedicated state directory keeps its mode",
+  );
 
   // The same two steps, at the source level: a temp file in the target's own
   // directory (so the rename cannot cross a filesystem) and a rename.
   const script = readFileSync(SCRIPT, "utf8");
-  assert.match(script, /mktemp "\$OUTPUT_DIR\/\.crow-publish-snapshot\.XXXXXX"/);
+  assert.match(script, /mktemp -- "\$OUTPUT_DIR\/\.crow-publish-snapshot\.XXXXXX"/);
   assert.match(script, /mv -f -- "\$TMP_JSON" "\$OUTPUT"/);
   assert.match(script, /^umask 0077$/m);
+
+  // M2: the temp file is acted on as a regular file, never through a symlink.
+  assert.ok(
+    script.includes('[ -f "$TMP_JSON" ] && [ ! -L "$TMP_JSON" ]'),
+    "the temp file is checked as a regular file before chmod/chgrp",
+  );
+  assert.ok(
+    script.indexOf('[ ! -L "$TMP_JSON" ]') < script.indexOf('chmod 0640 -- "$TMP_JSON"'),
+    "the check comes first",
+  );
+});
+
+test("M1: an --output directory that is sticky or world-writable is refused, and never re-moded", () => {
+  for (const [mode, reason] of [[0o1777, /sticky/], [0o777, /world-writable/]]) {
+    const ctx = setup();
+    chmodSync(ctx.outDir, mode);
+    const r = run(ctx, ["--output", ctx.out, "--group", GROUP]);
+    assert.notEqual(r.status, 0, `mode ${mode.toString(8)} is refused`);
+    assert.match(r.stderr, reason);
+    assert.equal(existsSync(ctx.out), false, "nothing is written");
+    assert.deepEqual(readdirSync(ctx.outDir), [], "no temp file is left behind");
+    assert.equal(statSync(ctx.outDir).mode & 0o777, mode & 0o777, "the directory keeps its own mode");
+  }
+});
+
+test("M3: a group name is validated as a name before anything uses it", () => {
+  const ctx = setup();
+  for (const bad of ["has space", "../root", "Upper", "-x", "a;b", ""]) {
+    const r = run(ctx, ["--output", ctx.out, "--group", bad]);
+    if (bad === "") {
+      assert.equal(r.status, 0, "an empty group is no group at all");
+      continue;
+    }
+    assert.notEqual(r.status, 0, `${bad} is refused`);
+    assert.match(r.stderr, /invalid group name/);
+    assert.equal(existsSync(ctx.out), false);
+  }
+});
+
+test("M4: every external capture is bounded by timeout 15", () => {
+  const script = readFileSync(SCRIPT, "utf8");
+  assert.match(script, /^CAPTURE_TIMEOUT=15$/m);
+  for (const needle of [
+    'timeout "$CAPTURE_TIMEOUT" "$@" 2>"$out.err"',
+    'timeout "$CAPTURE_TIMEOUT" "$@" >"$out" 2>"$out.err"',
+    'timeout "$CAPTURE_TIMEOUT" systemctl is-active --quiet docker.service',
+    'timeout "$CAPTURE_TIMEOUT" docker inspect',
+    'timeout "$CAPTURE_TIMEOUT" docker ps -q --no-trunc --filter',
+  ]) {
+    assert.ok(script.includes(needle), needle);
+  }
 });
 
 test("an unwritable group fails loudly and leaves the previous snapshot in place", () => {
@@ -521,14 +678,20 @@ function directives(text) {
 }
 const first = (dirs, key) => (dirs[key] || [])[0] ?? null;
 
-test("unit lint: root oneshot, StateDirectory, the exact capability set, no User=, no strict sandbox", () => {
+test("unit lint: root oneshot, no StateDirectory, the exact capability set, no User=, no strict sandbox", () => {
   const text = readFileSync(UNIT, "utf8");
   const dirs = directives(text);
 
   assert.equal(first(dirs, "Type"), "oneshot");
   assert.equal(first(dirs, "ExecStart"), "/usr/local/sbin/crow-publish-snapshot");
-  assert.equal(first(dirs, "StateDirectory"), "crow-fence");
-  assert.equal(first(dirs, "StateDirectoryMode"), "0750");
+  // B2: systemd would re-chown a StateDirectory= to root:root on every start
+  // (there is no User=/Group=), locking the gateway out of the snapshot.
+  assert.equal(dirs.StateDirectory, undefined, "no StateDirectory=");
+  assert.equal(dirs.StateDirectoryMode, undefined, "no StateDirectoryMode=");
+  assert.ok(
+    readFileSync(SCRIPT, "utf8").includes('install -d -m 0750 -o root -g "$GROUP" -- "$STATE_DIR"'),
+    "the script prepares the dedicated directory itself",
+  );
   assert.equal(first(dirs, "NoNewPrivileges"), "yes");
   assert.equal(first(dirs, "CapabilityBoundingSet"), "CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN");
   assert.ok(Number(first(dirs, "TimeoutStartSec")?.replace(/\D/g, "")) > 0, "a start timeout");
@@ -599,7 +762,10 @@ test("the install doc covers the snapshot: paths, group, timer, removal, and no 
     "crow-publish-snapshot",
     "crow-publish-snapshot.timer",
     "/var/lib/crow-fence/snapshot.json",
-    "StateDirectory",
+    "install -d -m 0750 -o root",
+    "d /var/lib/crow-fence 0750 root <group>",
+    // M6: an existing /etc/crow keeps its mode.
+    "[ -d /etc/crow ] || install -d -m 0750 /etc/crow",
     "<group>",
     "disable --now crow-publish-snapshot.timer",
   ]) {

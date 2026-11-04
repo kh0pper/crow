@@ -46,9 +46,10 @@ Stopped containers are not listed — a stopped container publishes nothing.
 install -m 0755 scripts/fence/crow-publish-snapshot /usr/local/sbin/crow-publish-snapshot
 install -m 0644 scripts/fence/crow-publish-snapshot.service /etc/systemd/system/
 install -m 0644 scripts/fence/crow-publish-snapshot.timer /etc/systemd/system/
-install -d -m 0750 /etc/crow
+[ -d /etc/crow ] || install -d -m 0750 /etc/crow
 printf 'CROW_SNAPSHOT_GROUP=%s\n' '<group>' > /etc/crow/publish-snapshot.env
 chmod 0640 /etc/crow/publish-snapshot.env
+install -d -m 0750 -o root -g '<group>' /var/lib/crow-fence
 systemctl daemon-reload
 systemd-analyze verify crow-publish-snapshot.service crow-publish-snapshot.timer
 systemctl enable --now crow-publish-snapshot.timer
@@ -57,7 +58,7 @@ systemctl start crow-publish-snapshot.service
 
 The first run writes the file immediately; the timer then refreshes it every 5 minutes of uptime (the first fire is 2 minutes after boot). Read the result with `cat /var/lib/crow-fence/snapshot.json`.
 
-The job never starts or stops anything: neither docker nor tailscaled is pulled up on its behalf, so a daemon that is down becomes a `null` section with an error entry rather than a failed unit.
+The job never starts or stops anything: not docker, not tailscaled. It asks `systemctl is-active --quiet docker.service` first, and while docker is not active it runs **no** docker CLI call at all — docker.service is socket activated, so even `docker version` would bring dockerd back. In that state the `docker` object and `containers` are `null` with one `docker.service not active` error entry. The same holds for tailscaled: a daemon that is down becomes a `null` section with an error entry rather than a failed unit.
 
 ### Choosing the group
 
@@ -71,7 +72,16 @@ CROW_SNAPSHOT_GROUP=<group>
 
 The group is never written into the shipped script or unit — the unit reads it from that env file, and a host without the file simply leaves the snapshot root-only (the job warns about it in the journal, and the audit says unknown). To change the group later, edit the env file and `systemctl start crow-publish-snapshot.service`; the timer picks the next run up anyway.
 
-`StateDirectory=crow-fence` makes systemd create `/var/lib/crow-fence` as `root:root 0750` before the job's namespace is built; the job then applies the group to the directory as well, so the gateway's group can traverse it. The directory keeps `0750`: the group may read, others may not.
+The job creates and prepares its own dedicated directory — `install -d -m 0750 -o root -g <group> /var/lib/crow-fence` — and applies the group only there, so the gateway's group can traverse it. The directory keeps `0750`: the group may read, others may not. The unit deliberately has **no** `StateDirectory=`: with no `User=`/`Group=` systemd would re-chown the directory to `root:root` on every start, which makes the snapshot unreadable to the gateway during the run and for good after a failed one.
+
+If you prefer tmpfiles to create it, install this line instead (or as well; the job's `install -d` is idempotent):
+
+```
+# /etc/tmpfiles.d/crow-fence.conf
+d /var/lib/crow-fence 0750 root <group>
+```
+
+then `systemd-tmpfiles --create`. An `--output` outside `/var/lib/crow-fence` is used exactly as it is: the job changes the mode and group of the dedicated directory only, and refuses an output directory that is sticky, world-writable or not owned by root rather than writing a snapshot into it.
 
 ### The strict sandbox variant (optional)
 
@@ -86,10 +96,10 @@ f /run/xtables.lock 0600 root root
 # /etc/systemd/system/crow-publish-snapshot.service.d/strict.conf
 [Service]
 ProtectSystem=strict
-ReadWritePaths=/run/xtables.lock
+ReadWritePaths=/run/xtables.lock /var/lib/crow-fence
 ```
 
-then `systemd-tmpfiles --create` and `systemctl daemon-reload`. The `ReadWritePaths=` entry has no `-` prefix on purpose: with the tmpfiles line in place the lock exists, and if it ever does not, the unit should fail loudly instead of running in a namespace that cannot create it. The state directory needs no entry — `StateDirectory=` is writable under `strict` by construction.
+then `systemd-tmpfiles --create` and `systemctl daemon-reload`. The `ReadWritePaths=` entries have no `-` prefix on purpose: with the tmpfiles line in place the lock exists, and if it ever does not, the unit should fail loudly instead of running in a namespace that cannot create it. The state directory is listed because there is no `StateDirectory=` to make it writable under `strict`; without the entry the job could neither write the snapshot nor apply the directory's mode and group.
 
 ## What the audit makes of it
 

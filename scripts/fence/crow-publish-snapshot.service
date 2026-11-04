@@ -15,10 +15,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/crow-publish-snapshot
-# systemd creates /var/lib/crow-fence (0750) before the namespace is built, so
-# no ReadWritePaths= entry is needed and nothing else on disk has to exist yet.
-StateDirectory=crow-fence
-StateDirectoryMode=0750
+# No StateDirectory=: with no User=/Group=, systemd would re-chown the
+# directory to root:root on every start, which locks the gateway out of the
+# snapshot. The script creates /var/lib/crow-fence itself as root:<group> 0750.
 # The group that may read the snapshot is the installer's, never a literal in
 # this file: CROW_SNAPSHOT_GROUP=<group> in /etc/crow/publish-snapshot.env.
 EnvironmentFile=-/etc/crow/publish-snapshot.env
