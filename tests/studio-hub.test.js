@@ -2445,7 +2445,7 @@ test("agent undo cannot change an accepted mapping", async (t) => {
   // An agent cannot accept it, and cannot edit a proposal it already made: a
   // second `midi.map` under that id is refused rather than re-purposed.
   const refuseAccept = refuses(
-    await hub.runCommand({ song_id, cmd_id: "agent-accept", command: "midi.accept", args: { id: mappingId }, author: AGENT }),
+    await hub.runCommand({ song_id, cmd_id: "agent-accept", command: "midi.accept", args: { id: mappingId, expect: { device_name: "FCB1010", message: pedal, action: { kind: "scene.launch", scene_id: "verse" } } }, author: AGENT }),
     "human_only",
   );
   assert.match(refuseAccept.error, /midi\.accept/);
@@ -2462,7 +2462,7 @@ test("agent undo cannot change an accepted mapping", async (t) => {
   assert.match(refuseEdit.error, /An agent proposes a new mapping/);
 
   // The operator's yes makes it live.
-  const accepted = await applies(hub, song_id, "operator-accept", "midi.accept", { id: mappingId }, HUMAN);
+  const accepted = await applies(hub, song_id, "operator-accept", "midi.accept", { id: mappingId, expect: { device_name: "FCB1010", message: pedal, action: { kind: "scene.launch", scene_id: "verse" } } }, HUMAN);
   mappings = (await hub.openSong(song_id)).snapshot.midi_maps;
   assert.equal(mappings[mappingId].proposed, false);
   assert.deepEqual(mappings[mappingId].accepted_action, { kind: "scene.launch", scene_id: "verse" });

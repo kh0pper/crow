@@ -407,7 +407,7 @@ function actionRefusal(action) {
   if (typeof kind !== "string" || kind === "") {
     return `A MIDI mapping needs an action kind; the actions a mapping may run are ${kindList()}.`;
   }
-  const schema = MIDI_ACTIONS[kind];
+  const schema = Object.hasOwn(MIDI_ACTIONS, kind) ? MIDI_ACTIONS[kind] : null;
   if (!schema) {
     return `"${kind}" cannot be mapped to a MIDI control; the actions a mapping may run are ${kindList()}.`;
   }
@@ -497,12 +497,20 @@ function sameMessage(left, right) {
  * @param {string|null} exceptId - the mapping being written, left out of the search
  * @returns {void}
  */
-function checkOneLive(doc, deviceName, message, exceptId = null) {
+function checkOneLive(doc, deviceName, message, exceptId = null, keysAction = false) {
   for (const { id, mapping } of midiEntries(doc)) {
     if (id === exceptId) continue;
     if (mapping.get("proposed") === true) continue;
     if (mapping.get("device_name") !== deviceName) continue;
-    if (!sameMessage(toPlain(mapping.get("message")), message)) continue;
+    const stored = toPlain(mapping.get("message"));
+    // keys.play claims a whole channel's notes, so two of them on one channel
+    // would both answer every note.
+    const keysClash =
+      keysAction === true &&
+      toPlain(mapping.get("action"))?.kind === "keys.play" &&
+      stored?.type === "note" &&
+      Number(stored?.channel) === Number(message?.channel);
+    if (!keysClash && !sameMessage(stored, message)) continue;
     refuseConflict(
       `"${deviceName}" already drives something with ${storedMessageText(message)}; one message has one live action, so remove the mapping "${id}" first.`,
     );
@@ -538,6 +546,9 @@ defineCommand({
     .superRefine((args, ctx) => {
       const refusal = actionRefusal(args.action);
       if (refusal) ctx.addIssue({ code: "custom", message: refusal });
+      if (args.action?.kind === "keys.play" && args.message?.type !== "note") {
+        ctx.addIssue({ code: "custom", message: "keys.play plays notes, so it maps a note message (its channel's notes), not a CC or a program change." });
+      }
     }),
   summary(args, snap, context) {
     const message = messageText({ ...args.message, device_name: args.device_name });
@@ -571,7 +582,7 @@ defineCommand({
     if (!existing && mappingCount(doc) >= LIMITS.midiMaps) {
       refuseLimit(`A song can hold at most ${LIMITS.midiMaps} MIDI mappings.`);
     }
-    if (operator) checkOneLive(doc, args.device_name, args.message, args.id);
+    if (operator) checkOneLive(doc, args.device_name, args.message, args.id, args.action.kind === "keys.play");
 
     const ref = midiRef(args.id);
     if (!existing) {
@@ -621,7 +632,22 @@ defineCommand({
   // Focus 4).
   humanOnly: true,
   title: "Accept a proposed MIDI mapping (people only)",
-  schema: z.object({ id: idSchema.describe("the mapping to accept") }).strict(),
+  schema: z
+    .object({
+      id: idSchema.describe("the mapping to accept"),
+      // What the operator was shown when they said yes. A proposal can be
+      // removed and proposed again under the same id with another action, so
+      // the yes is bound to what was reviewed, not to the id alone.
+      expect: z
+        .object({
+          device_name: z.string().min(1).max(MAX_NAME),
+          message: messageSchema,
+          action: z.object({ kind: z.string().min(1) }).passthrough(),
+        })
+        .strict()
+        .describe("the device, message and action the operator reviewed"),
+    })
+    .strict(),
   summary(args, snap) {
     // The summary is written from the snapshot the step was prepared on, so the
     // mapping is still a proposal here; its own action is what it will run.
@@ -640,7 +666,16 @@ defineCommand({
       refuseConflict(`The mapping "${args.id}" is live already; only a proposal is accepted.`);
     }
     const message = toPlain(mapping.get("message"));
-    checkOneLive(doc, mapping.get("device_name"), message, args.id);
+    if (
+      mapping.get("device_name") !== args.expect.device_name ||
+      !isDeepEqual(message, args.expect.message) ||
+      !isDeepEqual(toPlain(mapping.get("action")), args.expect.action)
+    ) {
+      refuseConflict(
+        `The mapping "${args.id}" is not the proposal you were shown any more; look at it again before accepting it.`,
+      );
+    }
+    checkOneLive(doc, mapping.get("device_name"), message, args.id, toPlain(mapping.get("action"))?.kind === "keys.play");
     const ref = midiRef(args.id);
     const action = cloneJson(toPlain(mapping.get("action")));
     const before = {
@@ -900,6 +935,10 @@ export function routeFor(snap, message) {
   for (const mapping of Object.values(snap?.midi_maps ?? {})) {
     if (!mapping || mapping.proposed !== false) continue;
     if (!isDeepEqual(mapping.action, mapping.accepted_action)) continue;
+    // The router is the last gate before an action runs: whatever a document
+    // holds (an old or hand-synced one), only an allow-listed action with valid
+    // arguments is ever routed.
+    if (actionRefusal(mapping.action) !== null) continue;
     if (mapping.device_name !== wanted.device_name) continue;
     const stored = mapping.message;
     if (!stored) continue;

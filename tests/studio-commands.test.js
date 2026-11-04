@@ -202,7 +202,10 @@ const MINIMAL_ARGS = {
     action: { kind: "transport.play" },
   },
   // The operator's yes to a proposal: people-only, like a track's lock.
-  "midi.accept": { id: "m1" },
+  "midi.accept": {
+    id: "m1",
+    expect: { device_name: "FCB1010", message: { type: "pc", channel: 1, number: 0 }, action: { kind: "transport.play" } },
+  },
   "midi.remove": { id: "m1" },
   "midi.propose_profile": { device: "fcb1010", device_name: "FCB1010" },
 };
@@ -731,7 +734,14 @@ test("apply returns before/after for every touched field", (t) => {
     },
     {
       id: "midi.accept",
-      args: { id: "mm-1" },
+      args: {
+        id: "mm-1",
+        expect: {
+          device_name: "FCB1010",
+          message: { type: "pc", channel: 1, number: 0 },
+          action: { kind: "scene.launch", scene_id: scene },
+        },
+      },
       author: HUMAN,
       keys: ["midi:mm-1|proposed", "midi:mm-1|accepted_action"],
     },

@@ -229,7 +229,7 @@ test("the agent proposes but cannot apply a mapping", (t) => {
 
   // A proposal is never routed, and the agent cannot make it live...
   assert.equal(routed(s.doc, { device_name: "FCB1010", ...pedal }), null);
-  const refuseAccept = refuses(() => s.run("midi.accept", { id: "m1" }, AGENT), "human_only");
+  const refuseAccept = refuses(() => s.run("midi.accept", { id: "m1", expect: { device_name: "FCB1010", message: pedal, action } }, AGENT), "human_only");
   assert.equal(refuseAccept.message, MIDI_NEEDS_A_YES);
   // ...nor change the proposal it made a moment ago: it proposes a new one.
   const refuseEdit = refuses(
@@ -244,7 +244,7 @@ test("the agent proposes but cannot apply a mapping", (t) => {
   assert.equal(refuseEdit.message, "An agent proposes a new mapping; it cannot change mapping m1.");
 
   // The operator's yes is what makes it live, and then it routes at once.
-  const accepted = s.run("midi.accept", { id: "m1" }, HUMAN);
+  const accepted = s.run("midi.accept", { id: "m1", expect: { device_name: "FCB1010", message: pedal, action } }, HUMAN);
   assert.match(accepted.result.summary, /^Accepted the mapping program change 0 on "FCB1010"/);
   const live = snapshot(s.doc).midi_maps.m1;
   assert.equal(live.proposed, false);
@@ -255,7 +255,7 @@ test("the agent proposes but cannot apply a mapping", (t) => {
   const refuseRemove = refuses(() => s.run("midi.remove", { id: "m1" }, AGENT), "human_only");
   assert.equal(refuseRemove.message, MIDI_NEEDS_A_YES);
   // ...nor accept it twice.
-  refuses(() => s.run("midi.accept", { id: "m1" }, HUMAN), "conflict");
+  refuses(() => s.run("midi.accept", { id: "m1", expect: { device_name: "FCB1010", message: pedal, action } }, HUMAN), "conflict");
   assert.ok(snapshot(s.doc).midi_maps.m1, "the refused removal left the mapping");
 
   // The operator removes it, and nothing routes any more.
@@ -589,4 +589,66 @@ test("the router prefers a pad mapping over the keys mapping", (t) => {
     action: { kind: "pad.play", track_id: kit, bank_id: bankId, index: 0 },
   });
   assert.equal(getCommand("midi.accept").humanOnly, true, "only the operator accepts a proposal");
+});
+test("an accept is bound to the proposal the operator was shown", (t) => {
+  const s = studio(t);
+  const verse = addScene(s.doc, "Verse");
+  const pedal = message("pc", 1, 0);
+  const shown = { kind: "scene.launch", scene_id: verse };
+  s.run("midi.map", { id: "p1", device_name: "FCB1010", message: pedal, action: shown }, AGENT);
+  // The agent takes its proposal back and proposes something else under the
+  // same id before the operator's yes arrives.
+  s.run("midi.remove", { id: "p1" }, AGENT);
+  s.run("midi.map", { id: "p1", device_name: "FCB1010", message: pedal, action: { kind: "record.toggle" } }, AGENT);
+
+  const refused = refuses(
+    () => s.run("midi.accept", { id: "p1", expect: { device_name: "FCB1010", message: pedal, action: shown } }, HUMAN),
+    "conflict",
+  );
+  assert.match(refused.message, /not the proposal you were shown/);
+  assert.equal(snapshot(s.doc).midi_maps.p1.proposed, true, "nothing went live");
+  assert.equal(routed(s.doc, { device_name: "FCB1010", ...pedal }), null);
+});
+
+test("an inherited name is not an action kind", (t) => {
+  const s = studio(t);
+  for (const kind of ["constructor", "__proto__", "hasOwnProperty", "toString"]) {
+    refuses(
+      () => s.run("midi.map", { device_name: "FCB1010", message: message("pc", 1, 0), action: { kind } }, HUMAN),
+      "invalid",
+    );
+  }
+});
+
+test("the router routes only allow-listed actions, whatever the document holds", (t) => {
+  const s = studio(t);
+  // A hand-made document with a live mapping no command could have written.
+  const maps = midiMap(s.doc);
+  s.doc.transact(() => {
+    const row = new (maps.constructor)();
+    maps.set("bad", row);
+    row.set("id", "bad");
+    row.set("device_name", "FCB1010");
+    row.set("message", { type: "pc", channel: 1, number: 0 });
+    row.set("action", { kind: "track.remove", track_id: "x" });
+    row.set("accepted_action", { kind: "track.remove", track_id: "x" });
+    row.set("set_by", "operator");
+    row.set("proposed", false);
+  });
+  assert.equal(routed(s.doc, { device_name: "FCB1010", type: "pc", channel: 1, number: 0 }), null);
+});
+
+test("one live keys mapping per channel, and only on notes", (t) => {
+  const s = studio(t);
+  s.run("midi.map", { id: "k1", device_name: "MPK mini", message: message("note", 1, 0), action: { kind: "keys.play" } }, HUMAN);
+  refuses(
+    () => s.run("midi.map", { id: "k2", device_name: "MPK mini", message: message("note", 1, 5), action: { kind: "keys.play" } }, HUMAN),
+    "conflict",
+  );
+  refuses(
+    () => s.run("midi.map", { id: "k3", device_name: "MPK mini", message: message("cc", 2, 5), action: { kind: "keys.play" } }, HUMAN),
+    "invalid",
+  );
+  // Another channel is another set of keys.
+  s.run("midi.map", { id: "k4", device_name: "MPK mini", message: message("note", 2, 0), action: { kind: "keys.play" } }, HUMAN);
 });
