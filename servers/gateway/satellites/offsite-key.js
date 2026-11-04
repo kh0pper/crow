@@ -51,6 +51,7 @@ async function createOrRead(db, keychainKey) {
   }
   const key = randomBytes(32);
   const { id } = await saveExtensionSecret(db, keychainKey, {
+    systemOwner: true, // the one caller allowed to write the reserved id
     bundleId: OFFSITE_KEY.bundleId,
     envKey: OFFSITE_KEY.envKey,
     label: OFFSITE_KEY.label,

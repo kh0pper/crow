@@ -1,0 +1,12 @@
+# TEMPLATE — not installed and not enabled by this repository (deploy-time work).
+[Unit]
+Description=Crow off-site backup check, weekly on Sunday at 03:40
+
+[Timer]
+OnCalendar=Sun *-*-* 03:40:00
+Persistent=true
+AccuracySec=1min
+Unit=crow-offsite-verify.service
+
+[Install]
+WantedBy=timers.target

@@ -78,11 +78,23 @@ export function createMgmtFake({ host = MGMT_HOST, routes = {}, clock = () => Da
   async function fetchImpl(url, init = {}) {
     const u = new URL(url);
     const method = (init.method || "GET").toUpperCase();
-    const body = typeof init.body === "string" ? init.body : init.body == null ? "" : String(init.body);
-    state.requests.push({ url: String(url), method, path: u.pathname, search: u.search, headers: { ...(init.headers || {}) }, body });
+    // A streamed body (the vault PUT) is read whole here: this fake stands in for the agent,
+    // which hashes it as it arrives. Everything else arrives as a string.
+    let raw = Buffer.alloc(0);
+    const sent = init.body;
+    if (typeof sent === "string") raw = Buffer.from(sent, "utf8");
+    else if (sent && typeof sent[Symbol.asyncIterator] === "function") {
+      const parts = [];
+      for await (const c of sent) parts.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+      raw = Buffer.concat(parts);
+    } else if (sent instanceof Uint8Array) raw = Buffer.from(sent);
+    const body = raw.toString("utf8");
+    state.requests.push({ url: String(url), method, path: u.pathname, search: u.search, headers: { ...(init.headers || {}) }, body, raw });
     if (state.unreachable || u.host !== host || u.protocol !== "https:") throw new TypeError("fetch failed");
     if (u.pathname === "/health") return json(200, { ok: true, protocol: AGENT_PROTOCOL, time: new Date(state.healthTime ?? clock()).toISOString() });
-    const v = verifyRequest(state.mgmtPub, { method, pathQuery: u.pathname + u.search, body, headers: init.headers || {}, satelliteId: satId, now: verifyNow() });
+    // The streamed vault PUT signs the body's hash given up front, not bytes it never held.
+    const declared = (init.headers || {})["X-Crow-Sat-Body-Sha256"];
+    const v = verifyRequest(state.mgmtPub, { method, pathQuery: u.pathname + u.search, body, bodySha256: declared || null, headers: init.headers || {}, satelliteId: satId, now: verifyNow() });
     const signedJson = (status, obj, nonce) => {
       const text = JSON.stringify(obj);
       const sig = signResponse(key.privHex, { requestNonce: nonce, status, bodySha256: sha256Hex(text) });
@@ -94,7 +106,11 @@ export function createMgmtFake({ host = MGMT_HOST, routes = {}, clock = () => Da
       return /^[0-9a-f]{32}$/.test(n || "") ? signedJson(401, { error: v.code }, n) : json(401, { error: v.code });
     }
     const hit = match(method, u.pathname);
-    const out = hit ? await hit.fn({ params: hit.params, body: body ? JSON.parse(body) : {}, caller: v.caller, query: Object.fromEntries(u.searchParams), state }) : { status: 404, json: { error: "not_found" } };
+    // A JSON body as before; a binary one (the streamed vault PUT) leaves `body` empty and the
+    // bytes in `raw`.
+    let parsed = {};
+    if (body) { try { parsed = JSON.parse(body); } catch { parsed = {}; } }
+    const out = hit ? await hit.fn({ params: hit.params, body: parsed, raw, caller: v.caller, query: Object.fromEntries(u.searchParams), state }) : { status: 404, json: { error: "not_found" } };
     if (out.drop) throw new TypeError("fetch failed"); // processed, but the answer is lost
     if (out.raw !== undefined) return new Response(out.raw, { status: out.status, headers: { "content-type": out.contentType || "application/octet-stream" } });
     return signedJson(out.status, out.json, v.nonce);

@@ -11,6 +11,8 @@ import { parseHTML } from "linkedom";
 import { buildExtensionsHTML } from "../servers/gateway/dashboard/panels/extensions/html.js";
 import { extensionsClientJS } from "../servers/gateway/dashboard/panels/extensions/client.js";
 import { serversClientJS } from "../servers/gateway/dashboard/panels/extensions/servers-client.js";
+import { serversPanelData } from "../servers/gateway/dashboard/panels/extensions/servers-data.js";
+import { formatDate } from "../servers/gateway/dashboard/shared/components.js";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 import { readFileSync } from "node:fs";
 
@@ -123,6 +125,49 @@ test("client script has no backtick; every extensions.servers.* / signals.satell
   }
   const used = readFileSync(new URL("../servers/gateway/dashboard/panels/extensions/servers-client.js", import.meta.url), "utf8");
   for (const m of used.matchAll(/T\("([A-Za-z]+)"\)/g)) assert.ok(keys.includes(`extensions.servers.${m[1]}`), m[1]);
+});
+
+test("the off-site backup line in the Servers view: dates when set up, the export prompt when not, nothing when unknown", () => {
+  const build = (offsite) => buildExtensionsHTML({
+    installed: {}, available: AVAILABLE, collections: [], registrySource: "local", communityStores: [],
+    bundleStatus: {}, lang: "en", satellites: SATS, satelliteEligibleIds: [], ...(offsite === undefined ? {} : { offsite }),
+  }).viewsHtml;
+  const lineOf = (html) => (/<p class="ext-section-sub" data-testid="offsite-status">([^<]*)<\/p>/.exec(html) || [])[1];
+
+  const uploaded = "2026-11-02T03:10:00.000Z";
+  const verified = "2026-11-01T03:40:00.000Z";
+  const line = lineOf(build({ exported: true, uploaded_at: uploaded, verified_at: verified }));
+  assert.ok(line, "the line is rendered");
+  assert.ok(line.includes(formatDate(uploaded, "en")) && line.includes(formatDate(verified, "en")), line);
+  assert.ok(!line.includes("2026-11-02T"), "a date, not a raw timestamp");
+
+  const never = lineOf(build({ exported: true, uploaded_at: null, verified_at: null }));
+  assert.ok(never.includes(t("extensions.offsite.never", "en")));
+
+  assert.equal(lineOf(build({ exported: false, uploaded_at: null, verified_at: null })), t("extensions.offsite.notSetUp", "en"));
+
+  assert.equal(lineOf(build(undefined)), undefined, "no status read, no line");
+  assert.equal(lineOf(build(null)), undefined);
+});
+
+test("serversPanelData: the off-site line's data comes from the recorded status and the export gate", async () => {
+  const row = { id: "sat_aaaaaaaaaaaaaaaaaaaa", name: "box", status: "active", created_at: "2026-11-01T00:00:00Z" };
+  const db = { execute: async () => ({ rows: [row] }) };
+  const data = await serversPanelData(db, {
+    eligible: () => [],
+    status: async () => ({ last_uploaded_at: "2026-11-02T03:10:00.000Z", last_verified_at: "2026-11-01T03:40:00.000Z", last_error: "upload_failed" }),
+    exported: async () => true,
+  });
+  assert.deepEqual(data.offsite, { uploaded_at: "2026-11-02T03:10:00.000Z", verified_at: "2026-11-01T03:40:00.000Z", exported: true });
+  const fresh = await serversPanelData(db, { eligible: () => [], status: async () => ({}), exported: async () => false });
+  assert.deepEqual(fresh.offsite, { uploaded_at: null, verified_at: null, exported: false });
+  // A read failure is "unknown", never a broken page.
+  const broken = await serversPanelData(db, { eligible: () => [], status: async () => { throw new Error("nope"); }, exported: async () => true });
+  assert.equal(broken.offsite, null);
+  assert.deepEqual(broken.satellites, [row].map((r) => ({ id: r.id, name: r.name, status: r.status })));
+  // No paired server: no off-site line at all (there is nowhere for the vault to live).
+  const none = await serversPanelData({ execute: async () => ({ rows: [] }) }, { eligible: () => [], status: async () => ({}), exported: async () => true });
+  assert.equal(none.offsite, null);
 });
 
 test("L4: the approval dialog shows each tool's argument names and annotations as text", async () => {

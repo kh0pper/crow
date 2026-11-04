@@ -188,6 +188,10 @@ export function buildExtensionsHTML({
   // installed on one (satellite-eligible manifests in crow's own checkout).
   satellites = [],
   satelliteEligibleIds = [],
+  // SAT-8: crow's own off-site backup line for the Servers view
+  // ({uploaded_at, verified_at, exported}), or null when it is unknown. Computed in
+  // panels/extensions.js; html.js stays pure.
+  offsite = null,
   lang,
 }) {
   // Models plan 3a: model bundles (inference: true) leave Browse — they are
@@ -295,6 +299,18 @@ export function buildExtensionsHTML({
           <a href="/dashboard/settings?section=passwords">${t("keychain.openPasswords", lang)}</a>
         </div>
       </div>`).join("");
+  // ─── Crow's off-site backup line (SAT-8, spec §12.3) ───
+  // One sentence in the Servers view: the vault lives on a paired server, so this is where an
+  // owner looks when asking "is my database copied somewhere off this machine?".
+  const offsiteTruthy = offsite && typeof offsite === "object";
+  const offsiteHtml = !offsiteTruthy ? ""
+    : offsite.exported !== true
+      ? `<p class="ext-section-sub" data-testid="offsite-status">${t("extensions.offsite.notSetUp", lang)}</p>`
+      : `<p class="ext-section-sub" data-testid="offsite-status">${escapeHtml(fill(t("extensions.offsite.line", lang), {
+        uploaded: offsite.uploaded_at ? formatDate(offsite.uploaded_at, lang) : t("extensions.offsite.never", lang),
+        verified: offsite.verified_at ? formatDate(offsite.verified_at, lang) : t("extensions.offsite.never", lang),
+      }))}</p>`;
+
   // ─── Segmented control ───
   const viewTabsHtml = `<div class="ext-viewtabs" id="ext-viewtabs" role="tablist" aria-label="${t("extensions.pageTitle", lang)}">
       <button type="button" class="ext-viewtab ext-viewtab--active" data-view="browse" role="tab" aria-selected="true" aria-controls="ext-view-browse">${t("extensions.viewBrowse", lang)}</button>
@@ -511,6 +527,7 @@ export function buildExtensionsHTML({
       <div class="ext-servers__head">
         <h2 class="ext-section-title">${t("extensions.servers.title", lang)}</h2>
         <p class="ext-section-sub">${t("extensions.servers.subtitle", lang)}</p>
+        ${offsiteHtml}
         <button type="button" class="btn btn-primary" id="ext-servers-add" data-testid="add-server">${t("extensions.servers.add", lang)}</button>
       </div>
       <div id="ext-servers-list" class="ext-servers__list" aria-live="polite"></div>

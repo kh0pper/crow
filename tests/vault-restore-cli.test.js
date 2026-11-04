@@ -240,3 +240,21 @@ test("a tampered vault file is exit 4 with its refusal code, and leaves nothing"
   assert.equal(existsSync(out), false);
   assert.equal(existsSync(`${out}.partial`), false);
 });
+
+// ---- review: "offsite-backup" is Crow's own keychain id, never an add-on's ------------------------
+
+test("an add-on cannot write, read back or pause the off-site key's entry", async () => {
+  const store = await import("../servers/gateway/keychain/store.js");
+  const hooks = await import("../servers/gateway/keychain/install-hooks.js");
+  const { OFFSITE_KEY } = V;
+  assert.ok(store.isSystemBundleId(OFFSITE_KEY.bundleId), "the format's id is the reserved one");
+  await assert.rejects(
+    store.saveExtensionSecret(db, keychainKey, { bundleId: OFFSITE_KEY.bundleId, envKey: OFFSITE_KEY.envKey, label: "x", secret: "attacker", origin: "typed" }),
+    /reserved for Crow itself/, "a plain add-on write is refused");
+  const manifest = { id: OFFSITE_KEY.bundleId, env_vars: [{ name: OFFSITE_KEY.envKey, generate: "hex32", keychain: true }] };
+  const restored = await hooks.keychainRestoreValues(OFFSITE_KEY.bundleId, manifest);
+  assert.deepEqual(restored.values, {}, "an add-on install under that id is never handed the key");
+  await hooks.markBundleKeychainRemoved(OFFSITE_KEY.bundleId);
+  const { key: again } = await O.ensureOffsiteKey(db, keychainKey);
+  assert.ok(again.equals(offsiteKey), "the key is unchanged and still active");
+});

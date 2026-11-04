@@ -9,6 +9,23 @@ A **satellite** is a small Crow installation on a second machine that Crow manag
 
 The satellite also cannot lose your only copy — Crow keeps its own local backups — but the off-site copy is what survives a dead primary machine.
 
+## Nightly upload, retention and the weekly check
+
+Crow keeps the off-site copy current by itself, once a satellite is paired and a keychain export holds the key:
+
+- **Nightly (03:10)** Crow encrypts the newest `crow.db` backup and uploads it to the satellite. Only after the server confirms the same size and checksum does Crow delete older copies, keeping the last **7 daily** and the Sunday of each of the last **4 weeks**.
+- **Weekly (Sunday 03:40)** Crow downloads the newest copy, decrypts it, runs SQLite's integrity check and compares the memory count with its live database. A failure, or a copy older than 36 hours, raises one notification a day.
+
+Both runs are systemd **user** units. The repository ships them as templates under `scripts/systemd/` (`crow-offsite-vault.timer`, `crow-offsite-verify.timer`) and **they are not installed or enabled** — that is a deploy-time step. To turn them on:
+
+```bash
+cp scripts/systemd/crow-offsite-{vault,verify}.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now crow-offsite-vault.timer crow-offsite-verify.timer
+```
+
+Run one by hand with `systemctl --user start crow-offsite-vault.service` (or `node scripts/offsite-run.mjs upload`).
+
 ## Restore without a running Crow
 
 A restore is possible on **any** machine that has Crow's code and your keychain export. No gateway, no database, no network, and no satellite agent are involved: the backup key is read straight out of the export.
@@ -20,6 +37,7 @@ The restore needs the passphrase-encrypted keychain export that contains Crow's 
 - If you already keep an export offline, use that one.
 - If Crow is still running, make a fresh export first: **Settings → Security & passwords → Saved passwords & keys → Export**. Until an export holds that key, Crow says so on the Nest and does not upload any backup, because a backup nobody can decrypt is worse than no backup.
 - The export file and its passphrase belong together. Without both, the off-site copy cannot be opened — that is the point of the design.
+- Only import a keychain export you made yourself: an import can bring back an off-site key, and a key you did not make would encrypt future backups for someone else.
 
 ### 2. Copy the vault file off the satellite
 
@@ -63,3 +81,4 @@ Afterwards, put the restored `crow.db` in place by hand: stop Crow, move the old
 ::: tip Keep a second way onto the satellite
 The restore reads a file that sits on the satellite, so you need *some* way to log in there that does not depend on the primary machine — an ssh key kept with the keychain export, or the hosting provider's console. Keep it wherever you keep the export, and test it once before you need it.
 :::
+- Before enabling the off-site timers on a machine, check that its systemd can sandbox a user service: `systemd-run --user --wait -p PrivateTmp=yes -p ProtectSystem=strict -p ReadWritePaths=$HOME/.crow "$(command -v node)" -e 1` must exit 0. If it fails (some kernels restrict unprivileged user namespaces), the timers would never start and never warn you.

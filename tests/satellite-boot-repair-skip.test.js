@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { rmScratch } from "./helpers/safe-rm.js";
 
 const put = (root, rel, c) => { const p = join(root, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); };
 let HOME, B;
@@ -14,7 +15,10 @@ before(async () => {
   process.env.CROW_HOME = HOME;
   B = await import("../servers/gateway/routes/bundles.js");
 });
-after(() => { rmSync(HOME, { recursive: true, force: true }); delete process.env.CROW_HOME; });
+after(() => {
+  rmScratch(HOME);
+  delete process.env.CROW_HOME;
+});
 const run = async () => { throw new Error("no command may run for a satellite bundle"); };
 
 test("repairInstalledBundleAssets skips satellite entries (skills only)", async () => {

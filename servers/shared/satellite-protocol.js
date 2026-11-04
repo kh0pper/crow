@@ -265,7 +265,7 @@ function header(headers, name) {
   return undefined;
 }
 
-export function verifyRequest(mgmtPubHex, { method, pathQuery, body = "", headers, satelliteId, now = Date.now() } = {}) {
+export function verifyRequest(mgmtPubHex, { method, pathQuery, body = "", bodySha256 = null, headers, satelliteId, now = Date.now() } = {}) {
   const no = (code) => ({ ok: false, code, caller: undefined, nonce: undefined });
   try {
     const caller = header(headers, "X-Crow-Sat-Caller");
@@ -275,7 +275,10 @@ export function verifyRequest(mgmtPubHex, { method, pathQuery, body = "", header
     const nonce = header(headers, "X-Crow-Sat-Nonce");
     const sig = header(headers, "X-Crow-Sat-Sig");
     if (typeof nonce !== "string" || !NONCE_RE.test(nonce) || typeof sig !== "string") return no("bad_signature");
-    const str = requestSigningString({ method, pathQuery, bodySha256: bodyHash(body), ts, nonce, satelliteId, caller });
+    // `bodySha256` is the one exception to "the signature covers the bytes": a streamed upload
+    // (the vault PUT) declares its body's hash in a header, and the route checks the bytes against
+    // it after the stream ends. Nothing else passes it.
+    const str = requestSigningString({ method, pathQuery, bodySha256: bodySha256 ?? bodyHash(body), ts, nonce, satelliteId, caller });
     if (!verifyBytes(mgmtPubHex, Buffer.from(str, "utf8"), sig)) return no("bad_signature");
     return { ok: true, code: undefined, caller, nonce };
   } catch {

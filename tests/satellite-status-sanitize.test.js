@@ -2,15 +2,17 @@
 // satellite's status, and the Servers card never throws on hostile shapes.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { rmScratch } from "./helpers/safe-rm.js";
 
 const HOME = mkdtempSync(join(tmpdir(), "satsan-home-"));
 process.env.CROW_HOME = HOME;
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "satsan-data-"));
+const DATA = mkdtempSync(join(tmpdir(), "satsan-data-"));
+process.env.CROW_DATA_DIR = DATA;
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
-after(() => { rmSync(HOME, { recursive: true, force: true }); rmSync(process.env.CROW_DATA_DIR, { recursive: true, force: true }); });
+after(() => { rmScratch(HOME); rmScratch(DATA); });
 
 const { sanitizeStatus, MAX_INSTALLED } = await import("../servers/gateway/satellites/status-sanitize.js");
 const { createSatelliteManager } = await import("../servers/gateway/satellites/manage.js");

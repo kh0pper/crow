@@ -39,7 +39,7 @@ export default {
     // Config completeness is computed HERE, never in html.js (which stays pure and
     // is unit-tested without ~/.crow).
     const needsConfig = fetchNeedsConfig(localInstalled);
-    const { satellites, satelliteEligibleIds } = await serversPanelData(db);
+    const { satellites, satelliteEligibleIds, offsite } = await serversPanelData(db);
     // Installed service add-ons already configured Crow-wide (legacy, before project
     // connections): Configure keeps their account fields (project services Task 12).
     let legacyAccounts = {};
@@ -84,7 +84,7 @@ export default {
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
       installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, legacyAccounts, dockerOk, keychainPending, vaultSecure, localModels, lang,
-      satellites, satelliteEligibleIds,
+      satellites, satelliteEligibleIds, offsite,
       // A skill's "Go to <extension>" arrives as ?q=<id>: the search box starts filled in.
       searchQuery: typeof req.query?.q === "string" ? req.query.q.slice(0, 100) : "",
     });

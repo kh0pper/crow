@@ -1,0 +1,12 @@
+# TEMPLATE — not installed and not enabled by this repository (deploy-time work).
+[Unit]
+Description=Crow off-site backup upload, nightly at 03:10
+
+[Timer]
+OnCalendar=*-*-* 03:10:00
+Persistent=true
+AccuracySec=1min
+Unit=crow-offsite-vault.service
+
+[Install]
+WantedBy=timers.target

@@ -4,15 +4,17 @@
 // each problem gets, so the health monitor (warn-only pushes) must not push them again.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { rmScratch } from "./helpers/safe-rm.js";
 
 const HOME = mkdtempSync(join(tmpdir(), "satnest-home-"));
 process.env.CROW_HOME = HOME;
-process.env.CROW_DATA_DIR = mkdtempSync(join(tmpdir(), "satnest-data-"));
+const DATA = mkdtempSync(join(tmpdir(), "satnest-data-"));
+process.env.CROW_DATA_DIR = DATA;
 process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
-after(() => { rmSync(HOME, { recursive: true, force: true }); rmSync(process.env.CROW_DATA_DIR, { recursive: true, force: true }); });
+after(() => { rmScratch(HOME); rmScratch(DATA); });
 
 const { createDbClient } = await import("../servers/db.js");
 const { SATELLITE_DDL } = await import("../servers/shared/satellite-schema.js");

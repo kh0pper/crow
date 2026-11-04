@@ -11,7 +11,10 @@
  *                 counted in memory and logged as one summary line at most once a minute, so an
  *                 unauthenticated caller cannot grow satellite.db.
  *   2. express.raw — the body is kept as the exact bytes received: sha256(body) is in the signed
- *                 string, and a re-serialised JSON value would not hash the same.
+ *                 string, and a re-serialised JSON value would not hash the same. The ONE exception
+ *                 is the streamed vault PUT: agent.js skips the raw parser for it and vault.js's
+ *                 pre-parser puts the declared `X-Crow-Sat-Body-Sha256` on `req.satBodySha256`, so
+ *                 here the signature covers that value instead of bytes nobody has read yet.
  *   3. `verify`   in order: paired at all (else 403 not_paired); verifyRequest against the PINNED mgmt
  *                 key (401 clock_skew | bad_signature | bad_caller); the nonce unseen (401 replay);
  *                 the cert valid, or in the 30-day grace for POST cert / POST unpair only
@@ -151,7 +154,7 @@ export function createSatAuth({ db, key, now = Date.now, getState, log = console
     if (state === "unpaired") return refuse(res, 403, "not_paired");
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const v = verifyRequest(pinned.mgmt_pubkey, {
-      method: req.method, pathQuery: req.originalUrl, body, headers: req.headers, satelliteId: key.satellite_id, now: t,
+      method: req.method, pathQuery: req.originalUrl, body, bodySha256: req.satBodySha256 || null, headers: req.headers, satelliteId: key.satellite_id, now: t,
     });
     if (!v.ok) return refuse(res, 401, v.code);
     Object.assign(res.locals.satAudit, { caller: v.caller, verified: true });

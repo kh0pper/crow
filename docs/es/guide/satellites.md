@@ -9,6 +9,23 @@ Un **satélite** es una instalación pequeña de Crow en una segunda máquina qu
 
 El satélite tampoco es tu única copia — Crow conserva sus propios respaldos locales — pero la copia fuera del sitio es la que sobrevive a la muerte de la máquina principal.
 
+## Subida nocturna, retención y la comprobación semanal
+
+Crow mantiene la copia al día por sí solo en cuanto hay un satélite emparejado y una exportación del llavero contiene la clave:
+
+- **Cada noche (03:10)** Crow cifra el respaldo más reciente de `crow.db` y lo sube al satélite. Solo cuando el servidor confirma el mismo tamaño y la misma suma de comprobación borra las copias antiguas, conservando los **7 días** más recientes y el domingo de cada una de las últimas **4 semanas**.
+- **Cada domingo (03:40)** Crow descarga la copia más reciente, la descifra, ejecuta la comprobación de integridad de SQLite y compara el número de memorias con su base de datos en vivo. Un fallo, o una copia de más de 36 horas, genera un aviso al día.
+
+Ambas tareas son unidades **de usuario** de systemd. El repositorio las trae como plantillas en `scripts/systemd/` (`crow-offsite-vault.timer`, `crow-offsite-verify.timer`) y **no están instaladas ni habilitadas**: eso es un paso de despliegue. Para activarlas:
+
+```bash
+cp scripts/systemd/crow-offsite-{vault,verify}.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now crow-offsite-vault.timer crow-offsite-verify.timer
+```
+
+Ejecuta una a mano con `systemctl --user start crow-offsite-vault.service` (o `node scripts/offsite-run.mjs upload`).
+
 ## Restaurar sin un Crow en ejecución
 
 La restauración es posible en **cualquier** máquina que tenga el código de Crow y tu exportación del llavero. No intervienen ni el gateway, ni la base de datos, ni la red, ni el agente del satélite: la clave del respaldo se lee directamente de la exportación.
@@ -20,6 +37,7 @@ La restauración necesita la exportación del llavero cifrada con contraseña qu
 - Si ya guardas una exportación fuera de línea, usa esa.
 - Si Crow todavía funciona, haz primero una exportación nueva: **Ajustes → Seguridad y contraseñas → Contraseñas y claves guardadas → Exportar**. Mientras una exportación no contenga esa clave, Crow lo indica en el Nest y no sube ningún respaldo, porque un respaldo que nadie puede descifrar es peor que no tener respaldo.
 - El archivo de exportación y su contraseña van juntos. Sin ambos, la copia fuera del sitio no se puede abrir — ese es el objetivo del diseño.
+- Importa solo las exportaciones del llavero que hayas hecho tú: una importación puede recuperar una clave fuera del sitio, y una clave que no hiciste tú cifraría los próximos respaldos para otra persona.
 
 ### 2. Copia el archivo vault desde el satélite
 
@@ -63,3 +81,4 @@ Después, coloca el `crow.db` restaurado en su sitio a mano: detén Crow, aparta
 ::: tip Mantén una segunda vía de acceso al satélite
 La restauración lee un archivo que está en el satélite, así que necesitas *alguna* forma de entrar allí que no dependa de la máquina principal — una clave ssh guardada junto con la exportación del llavero, o la consola de tu proveedor de hosting. Guárdala donde guardes la exportación y pruébala una vez antes de necesitarla.
 :::
+- Antes de activar los temporizadores de la copia externa en una máquina, comprueba que su systemd puede aislar un servicio de usuario: `systemd-run --user --wait -p PrivateTmp=yes -p ProtectSystem=strict -p ReadWritePaths=$HOME/.crow "$(command -v node)" -e 1` debe terminar con 0. Si falla (algunos núcleos restringen los espacios de nombres de usuario sin privilegios), los temporizadores nunca arrancarían ni te avisarían.
