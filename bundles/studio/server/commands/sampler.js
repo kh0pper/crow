@@ -567,10 +567,12 @@ defineCommand({
     const which = args.slice_id === undefined ? "sample" : "a slice of the sample";
     return `Put ${which} "${labelOfSample(snap, args.sample_id)}" on pad ${args.index + 1} of bank "${labelOfBank(snap, args.track_id, args.bank_id)}"`;
   },
+  // The sample is read, not written: naming it here would make the lock check
+  // treat every track that plays it as touched, so a shared sample could not be
+  // put on an unlocked track's pad while a locked track also played it.
   touches(args) {
     return [
       padRef(args.track_id, args.bank_id, args.index),
-      sampleRef(args.sample_id),
       trackRef(args.track_id),
     ];
   },

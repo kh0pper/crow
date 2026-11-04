@@ -1941,6 +1941,46 @@ function padPath(track_id, bank_id, index) {
   return `${track_id}/${bank_id}/${index}`;
 }
 
+test("agent cannot narrow a whole-sample pad to a slice", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, track_id, bank_id } = await seedSampleSong(hub);
+  // A slice of the sample the pad plays whole.
+  await applies(hub, song_id, "slice-tiny", "slice.set", {
+    sample_id: SAMPLE_A,
+    slices: [{ id: "tiny", start_frame: 0, end_frame: 1 }],
+  });
+  const narrowed = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-narrow",
+      command: "pad.assign",
+      args: { track_id, bank_id, index: 0, sample_id: SAMPLE_A, slice_id: "tiny" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(narrowed.error, SOUNDS_NEED_A_YES);
+  const pad = (await hub.openSong(song_id)).snapshot.pads[padPath(track_id, bank_id, 0)];
+  assert.equal(pad.slice_id ?? null, null, "the pad still plays the whole sample");
+});
+
+test("an agent can put a shared sample on an unlocked track while a locked track plays it", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id } = await seedSampleSong(hub);
+  await applies(hub, song_id, "kit2", "track.add", { id: "kit2", name: "Kit two", kind: "sampler" });
+  await applies(hub, song_id, "lock-kit", "track.lock", { track_id: "kit" });
+  const bank2 = Object.values((await hub.openSong(song_id)).snapshot.banks).find((b) => b.track_id === "kit2");
+  await applies(
+    hub,
+    song_id,
+    "agent-share",
+    "pad.assign",
+    { track_id: "kit2", bank_id: bank2.id, index: 0, sample_id: SAMPLE_A },
+    AGENT,
+  );
+  assert.equal((await hub.openSong(song_id)).snapshot.pads[padPath("kit2", bank2.id, 0)].sample_id, SAMPLE_A);
+});
+
 test("agent cannot drop a pad's sample", async (t) => {
   const { hub } = await setup(t);
   const { song_id, track_id, bank_id, assigned } = await seedSampleSong(hub);

@@ -535,13 +535,15 @@ function padWriteLosesSound(snap, key, field, value) {
   if (field === "*") {
     if (value === null) return playsSound(pad);
     if (!isPlainObject(value)) return false;
-    return (
-      takesAway(pad.sample_id ?? null, value.sample_id ?? null)
-      || takesAway(pad.slice_id ?? null, value.slice_id ?? null)
-    );
+    if (takesAway(pad.sample_id ?? null, value.sample_id ?? null)) return true;
+    // On a pad that plays a sample, no slice means the WHOLE sample: narrowing
+    // it to a slice changes the sound as much as clearing it, so any change of
+    // slice counts.
+    return playsSound(pad) && (pad.slice_id ?? null) !== (value.slice_id ?? null);
   }
-  if (field !== "sample_id" && field !== "slice_id") return false;
-  return takesAway(pad[field] ?? null, value ?? null);
+  if (field === "sample_id") return takesAway(pad.sample_id ?? null, value ?? null);
+  if (field === "slice_id") return playsSound(pad) && (pad.slice_id ?? null) !== (value ?? null);
+  return false;
 }
 
 /**
