@@ -41,7 +41,7 @@ You cannot hear. A render returns `lufs` (integrated), `true_peak_db` and a WAV 
 | `gain_db` −60..+12 (0 = unity), `pan` −1..+1, `mute`, `solo` | inserts, sends, EQ, compressor, reverb, delay, sidechain |
 | SunVox controllers via `studio_track_set_param` | master fader, bus processing, limiter |
 | `studio_render`: WAV url + integrated LUFS + true peak, per song, scene or clip | per-track render, short-term LUFS, LRA, spectrum |
-| `studio_history`, `studio_undo`, `studio_redo` | recording, dither, MP3/AAC export, upload |
+| `studio_history`, `studio_undo`, `studio_redo`; audio tracks play the operator's recorded takes through the same gain and pan | recording by the agent, dither, MP3/AAC export, upload |
 
 There is no per-track render. To measure one part, set `solo: true`, render the scene, then `solo: false` — two undoable steps per part. Warn first; offer the full-mix route.
 

@@ -8,6 +8,7 @@
  *     id: "clip.write",                 // the contract: GUI, MCP and history use it
  *     title: "Write a clip's notes",
  *     humanOnly: false,                 // true: only a person may run it
+ *     internal: false,                  // true: only Studio itself may run it
  *     idField: "clip_id",               // the argument naming an object it creates
  *     schema,                           // zod, .strict() so typos are refused
  *     summary(args, snap) -> string,    // one human line for the history panel
@@ -32,6 +33,10 @@
  * `runCommand()` does both, for callers that need no lock check (tests, the
  * tools that only build documents).
  *
+ * A command that is `internal` is not offered to anyone outside the process:
+ * no MCP tool is built from it, the panel never sends it, and the hub refuses
+ * it unless the call says it comes from Studio (see `hub.runCommand`).
+ *
  * Commands are registered by importing `./core.js` for its side effect. A
  * consumer that imports only this module gets an empty registry, and
  * `getCommand` says so.
@@ -50,6 +55,7 @@ export const REFUSAL_CODES = Object.freeze([
   "invalid",
   "not_found",
   "human_only",
+  "studio_only",
   "locked",
   "focused",
   "acl",
@@ -81,9 +87,9 @@ const COMMANDS = new Map();
 /**
  * Register a command. Re-registering an id replaces it, so a module that is
  * loaded twice does not double-list its commands.
- * @param {{id: string, title: string, humanOnly?: boolean, idField?: string|null,
- *          schema: {safeParse: Function}, summary: Function, touches: Function,
- *          apply: Function}} spec
+ * @param {{id: string, title: string, humanOnly?: boolean, internal?: boolean,
+ *          idField?: string|null, schema: {safeParse: Function},
+ *          summary: Function, touches: Function, apply: Function}} spec
  * @returns {Readonly<object>} the registered command
  */
 export function defineCommand(spec) {
@@ -114,6 +120,7 @@ export function defineCommand(spec) {
     id,
     title,
     humanOnly: spec.humanOnly === true,
+    internal: spec.internal === true,
     idField: typeof spec.idField === "string" && spec.idField !== "" ? spec.idField : null,
     schema,
     summary,
@@ -152,10 +159,18 @@ export function hasCommand(id) {
 /**
  * Every registered command, sorted by id — the GUI's list, the MCP server's
  * tool list and the parity test all read this.
+ *
+ * With `{public: true}` the commands only Studio itself may run are left out:
+ * that is the list the outside world is allowed to see, so it is the one
+ * mcp.js builds its tools from.
+ * @param {{public?: boolean}} [options]
  * @returns {Array<Readonly<object>>}
  */
-export function listCommands() {
-  return [...COMMANDS.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+export function listCommands(options = {}) {
+  const commands = options?.public === true
+    ? [...COMMANDS.values()].filter((command) => command.internal !== true)
+    : [...COMMANDS.values()];
+  return commands.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /**

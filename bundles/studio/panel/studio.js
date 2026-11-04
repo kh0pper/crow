@@ -78,24 +78,38 @@ function findBundleDir() {
 }
 
 /**
- * Import the panel's client script from the bundle directory.
- * @returns {Promise<string>} the inline script the page carries
- * @throws {Error} when no bundle directory has the script
+ * Import one of the panel's inline scripts from the bundle directory.
+ *
+ * Both of them travel as strings and are emitted as their own `<script>` in the
+ * page (see the file header for why a relative import would not resolve in the
+ * installed case). `name` is a module file name inside `panel/`; `exportName`
+ * is the string it must export.
+ * @param {string} name e.g. "client.js"
+ * @param {string} exportName e.g. "CLIENT_SCRIPT"
+ * @returns {Promise<string>} the script the page carries
+ * @throws {Error} when no bundle directory has the file, or it exports nothing
  */
-async function loadClientScript() {
+async function loadPanelScript(name, exportName) {
   const dir = findBundleDir();
   if (!dir) {
     throw new Error("Studio panel: panel/client.js was not found in the bundle");
   }
-  const module = await import(pathToFileURL(join(dir, "panel", "client.js")).href);
-  if (typeof module.CLIENT_SCRIPT !== "string" || module.CLIENT_SCRIPT === "") {
-    throw new Error("Studio panel: panel/client.js exports no CLIENT_SCRIPT");
+  const module = await import(pathToFileURL(join(dir, "panel", name)).href);
+  if (typeof module[exportName] !== "string" || module[exportName] === "") {
+    throw new Error(`Studio panel: panel/${name} exports no ${exportName}`);
   }
-  return module.CLIENT_SCRIPT;
+  return module[exportName];
 }
 
 /** The client script, loaded once when the panel module is imported. */
-const CLIENT_SCRIPT = await loadClientScript();
+const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
+
+/**
+ * The local-first take store, loaded once: it must reach the page BEFORE the
+ * client, because the client asks `window.StudioTakeStore` for the takes this
+ * device kept.
+ */
+const TAKE_STORE_SCRIPT = await loadPanelScript("take-store.js", "TAKE_STORE_SCRIPT");
 
 /**
  * Escape a value for use in HTML text or a double-quoted attribute.
@@ -212,6 +226,38 @@ const STYLES = `
     background: var(--st-bg); color: var(--st-text); font: inherit; font-size: 12px; padding: 0 6px;
   }
   .studio .st-th-manage { display: flex; gap: 4px; }
+  .studio .st-audio { display: flex; flex-direction: column; gap: 6px; }
+  .studio .st-arm { flex: 0 0 auto; }
+  .studio .st-latchip {
+    display: inline-flex; align-items: center; min-height: 32px; padding: 0 8px; border-radius: 6px;
+    border: 1px solid var(--st-edge); background: #24282D; color: var(--st-muted);
+    font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .studio .st-latchip[data-role=latency] { color: var(--st-text); }
+  .studio .st-warn { margin: 0; font-size: 11px; line-height: 1.45; color: var(--st-human); }
+  .studio .st-record-btn { color: var(--st-danger); font-size: 18px; }
+  .studio .st-rec { font-size: 12px; color: var(--st-human); }
+  .studio .st-rec-notice {
+    flex: 1 1 100%; font-size: 12px; line-height: 1.45; color: var(--st-human);
+  }
+  .studio .st-recordings { display: flex; flex-direction: column; gap: 6px; }
+  .studio .st-pending {
+    border: 1px solid var(--st-line); border-radius: 8px; background: var(--st-head); padding: 8px 10px;
+  }
+  .studio .st-pending-text { margin: 0; font-size: 12px; line-height: 1.4; color: var(--st-muted); }
+  .studio .st-dialog {
+    position: fixed; inset: 0; z-index: 1300; display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: rgba(0, 0, 0, 0.55); font-family: Inter, system-ui, sans-serif;
+  }
+  .studio .st-dialog-box {
+    max-width: min(520px, 94vw); display: flex; flex-direction: column; gap: 10px;
+    padding: 16px; border-radius: 12px; border: 1px solid var(--st-edge); background: var(--st-panel);
+    color: var(--st-text); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  }
+  .studio .st-dialog-title { margin: 0; font-size: 15px; font-weight: 700; }
+  .studio .st-dialog-text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--st-muted); }
+  .studio .st-dialog-status { margin: 0; font-size: 13px; line-height: 1.5; min-height: 20px; }
+  .studio .st-dialog .st-th-btns { gap: 8px; }
   .studio .st-icon {
     flex: 1 1 0; min-width: 44px; min-height: 44px; border-radius: 6px;
     border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
@@ -331,6 +377,44 @@ const STYLES = `
     font-family: Inter, system-ui, sans-serif; font-size: 13px; line-height: 1.4;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
   }
+  .studio .st-takes { display: flex; flex-direction: column; gap: 8px; }
+  .studio .st-takes-hint { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-muted); }
+  .studio .st-comp {
+    position: relative; height: 34px; border-radius: 8px; border: 1px solid var(--st-line);
+    background: var(--st-bg); overflow: hidden; touch-action: none; cursor: crosshair;
+  }
+  .studio .st-comp-line {
+    position: absolute; top: 0; bottom: 0; width: 1px; background: var(--st-line-soft);
+  }
+  .studio .st-comp-seg {
+    position: absolute; top: 3px; bottom: 3px; border-radius: 5px; overflow: hidden;
+    display: flex; align-items: center; justify-content: flex-start; padding: 0 6px;
+    font-size: 11px; font-weight: 600; color: #17191C; white-space: nowrap;
+  }
+  .studio .st-comp-pick {
+    position: absolute; top: 0; bottom: 0; background: rgba(242, 165, 65, 0.35);
+    border-left: 2px solid var(--st-human); border-right: 2px solid var(--st-human);
+    pointer-events: none;
+  }
+  .studio .st-take-list { display: flex; flex-direction: column; gap: 6px; }
+  .studio .st-take {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px;
+    border: 1px solid var(--st-line); border-radius: 8px; background: var(--st-head);
+    color: var(--st-text); font: inherit; cursor: pointer;
+  }
+  .studio .st-take.st-take-sel { border-color: var(--st-human); box-shadow: inset 0 0 0 1px var(--st-human); }
+  .studio .st-take.st-take-off { opacity: 0.5; }
+  .studio .st-take-color { width: 8px; align-self: stretch; min-height: 28px; border-radius: 3px; flex: 0 0 auto; }
+  .studio .st-take-main { display: flex; flex-direction: column; min-width: 0; flex: 1 1 120px; }
+  .studio .st-take-name { font-size: 13px; font-weight: 600; }
+  .studio .st-take-meta { font-size: 11px; color: var(--st-muted); }
+  .studio .st-take-badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 2px 6px; border-radius: 6px; border: 1px solid #5C4A1E; background: #3D3420;
+    color: var(--st-human);
+  }
+  .studio .st-take-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+  .studio .st-takes-foot { display: flex; flex-wrap: wrap; gap: 8px; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
@@ -409,7 +493,8 @@ async function libraryPage({ db, render, res }) {
         </form>
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
-      <script>${CLIENT_SCRIPT}</script>
+      <script>${TAKE_STORE_SCRIPT}
+${CLIENT_SCRIPT}</script>
     </div>`;
 
   res.send(render({ title: "Studio", content }));
@@ -427,11 +512,14 @@ function studioPage({ songId, render, res }) {
         <div class="st-transport">
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
           <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
+          <button class="st-btn st-transport-btn st-record-btn" type="button" data-act="record" title="Record into the armed track" aria-label="Record" disabled>●</button>
+          <span class="st-rec" data-role="rec-status" hidden></span>
           <label class="st-bpm">bpm
             <input data-role="bpm" type="number" min="20" max="300" step="1" value="120" aria-label="Tempo in beats per minute">
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
         </div>
+        <span class="st-rec-notice" data-role="rec-notice" hidden></span>
         <div class="st-presence" data-role="presence"></div>
       </header>
       <div class="st-body">
@@ -440,6 +528,7 @@ function studioPage({ songId, render, res }) {
             <div class="st-grid" data-role="grid"></div>
           </div>
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
+          <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
         </main>
         <aside class="st-side">
@@ -458,7 +547,12 @@ function studioPage({ songId, render, res }) {
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
       <script type="importmap">{"imports":{"lib0/":"/dashboard/studio/assets/lib0/"}}</script>
-      <script>${CLIENT_SCRIPT}</script>
+      <!-- The resampler is a page-level global (StudioResample): the engine
+           client converts a take recorded at another rate with it, and so does
+           its worker. -->
+      <script>${TAKE_STORE_SCRIPT}
+${CLIENT_SCRIPT}</script>
+      <script src="/dashboard/studio/assets/resample.js"></script>
     </div>`;
 
   res.send(render({ title: "Studio", content }));

@@ -25,12 +25,20 @@
  *
  * ## The three kinds of tool
  *
- *   - one per non-humanOnly registry command, `studio_` + the id with dots
- *     turned into underscores (`studio_clip_write`), input `{song_id, ...args}`;
+ *   - one per public, non-humanOnly registry command, `studio_` + the id with
+ *     dots turned into underscores (`studio_clip_write`), input
+ *     `{song_id, ...args}`. A command marked `internal` is Studio's own —
+ *     `take.add` is issued by the gateway's upload finish route — so it gets no
+ *     tool at all;
  *   - the song and history reads and the history steps that are not commands
- *     (list/create/summary/get_clip/history/undo/redo);
+ *     (list/create/summary/get_clip/takes/history/undo/redo);
  *   - the two tools that answer questions about the engine instead of editing
  *     (render, module types).
+ *
+ * `studio_takes` is a read: a take is added by the gateway's upload finish
+ * route and discarded by a person, so the agent gets a listing of what is
+ * recorded — length, tempo, latency, who recorded it, whether the comp plays it
+ * — and the `studio_take_keep` / `studio_clip_set_comp` commands to use it.
  *
  * `studio_session_summary` exists because a song does not fit in a prompt: it
  * returns the tracks, scenes and a page of clips with note counts, and the
@@ -47,6 +55,8 @@ import { z } from "zod";
 import { listCommands } from "./commands/registry.js";
 // Registering the 1a commands is a side effect of importing them.
 import "./commands/core.js";
+// The 1b take commands, registered the same way.
+import "./commands/takes.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
@@ -203,6 +213,62 @@ export function sessionSummary(songId, snapshot, page = 1) {
 }
 
 /**
+ * The takes of a song, newest first, the way `studio_takes` reports them.
+ *
+ * A take's stored shape is what the document needs (frames, an offset in the
+ * host's frames, a storage key); its readers want seconds and milliseconds,
+ * because that is what a musician compares. `in_comp` says whether the clip's
+ * comp plays any of it right now, so the agent can tell a kept take from one
+ * that is only sitting in the clip.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {string|null} [clipId] - only takes of this clip, when given
+ * @returns {object[]} one row per take, newest `recorded_at` first
+ */
+export function takeList(snapshot, clipId = null) {
+  const takes = snapshot?.takes && typeof snapshot.takes === "object" ? snapshot.takes : {};
+  const clips = snapshot?.clips && typeof snapshot.clips === "object" ? snapshot.clips : {};
+
+  const comped = new Set();
+  for (const clip of Object.values(clips)) {
+    const segments = Array.isArray(clip?.comp) ? clip.comp : [];
+    for (const segment of segments) {
+      if (segment && typeof segment.take_id === "string") comped.add(segment.take_id);
+    }
+  }
+
+  const rows = [];
+  for (const take of Object.values(takes)) {
+    if (!take || typeof take !== "object") continue;
+    if (clipId !== null && take.clip_id !== clipId) continue;
+    const rate = Number(take.rate) > 0 ? Number(take.rate) : 48000;
+    const frames = Number(take.frames) || 0;
+    const offsetFrames = Number(take.offset_frames) || 0;
+    rows.push({
+      id: take.id,
+      clip_id: take.clip_id,
+      // Two decimals of seconds and one of milliseconds: enough to see a take's
+      // length and its latency at a glance, and stable in a JSON answer.
+      seconds: Math.round((frames / rate) * 100) / 100,
+      channels: Number(take.channels) || 1,
+      rate: rate,
+      bpm: Number(take.bpm) || 0,
+      compensated: take.compensated === true,
+      offset_ms: Math.round((offsetFrames / rate) * 1000 * 10) / 10,
+      author_label: typeof take.author_label === "string" ? take.author_label : "",
+      recorded_at: typeof take.recorded_at === "string" ? take.recorded_at : "",
+      discarded: take.discarded === true,
+      in_comp: comped.has(take.id),
+    });
+  }
+
+  // Newest first: `recorded_at` is ISO 8601, so its text order is its time
+  // order. Ties keep the document's own order (the sort is stable).
+  rows.sort((a, b) => (a.recorded_at < b.recorded_at ? 1 : a.recorded_at > b.recorded_at ? -1 : 0));
+  return rows;
+}
+
+/**
  * The project a song belongs to, for a render (which is filed under it).
  *
  * The project comes from the hub and only from the hub: the song's snapshot
@@ -287,7 +353,7 @@ export function createStudioServer({
 
   // ---- one tool per registry command the agent may run --------------------
 
-  for (const command of listCommands()) {
+  for (const command of listCommands({ public: true })) {
     if (command.humanOnly) continue;
     const name = `studio_${command.id.replace(/\./g, "_")}`;
     server.registerTool(
@@ -417,6 +483,29 @@ export function createStudioServer({
         const clip = opened?.snapshot?.clips?.[args.clip_id] ?? null;
         if (!clip) return errorResult(`There is no clip "${args.clip_id}" in this song.`);
         return textResult(clip);
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "studio_takes",
+    {
+      title: "List recorded takes",
+      description:
+        "The song's recorded takes, newest first: id, clip, length in seconds, channels, sample rate, the tempo it was recorded at, whether its latency was compensated (with the offset in ms), who recorded it, when, whether it is discarded, and whether the clip's comp plays it. Read-only; pass clip_id to narrow it to one clip. You can keep or comp a take (studio_take_keep, studio_clip_set_comp) and re-offset it, but only the operator adds or discards one.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song whose takes to list"),
+        clip_id: z.string().min(1).optional().describe("only takes of this clip"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        return textResult(takeList(opened.snapshot, args.clip_id ?? null));
       } catch (err) {
         return errorResult(errorText(err));
       }

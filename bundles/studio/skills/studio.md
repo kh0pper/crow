@@ -45,7 +45,9 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | Scenes | A column; launching one starts that row on the next bar. One clip per track sounds at a time. |
 | Track mix | `gain_db` −60..+12 (0 = unity), `pan` −1..+1, `mute`, `solo`. |
 | Limits | 16 tracks, 64 scenes, 64 bars and 4096 notes per clip, plus the render length limit. Refused, never truncated — the message names the limit. |
-| Missing | No insert effects, sends, EQ, compressor, master bus, timeline or audio recording yet. Say "Studio cannot yet …" rather than improvising. |
+| Audio tracks | A track is either a SunVox instrument or an audio track (`studio_track_add` with `kind: "audio"`). An audio clip holds **takes** the operator recorded and a **comp**: which take plays over which beats (`from_beat`–`to_beat`, sorted, never overlapping). |
+| Takes | Only the operator records. You can read takes (`studio_takes`), keep one (`studio_take_keep`: it alone plays over the whole clip), comp (`studio_clip_set_comp`), restore a discarded one (`studio_take_restore`) and fix its timing (`studio_take_set_offset`). You cannot add or discard a take, and you cannot remove a clip, track or scene that holds takes — ask the operator. |
+| Missing | No insert effects, sends, EQ, compressor, master bus or timeline yet. Say "Studio cannot yet …" rather than improvising. |
 
 ## Request → tools
 
@@ -69,6 +71,10 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | "undo that" / "redo it" | `studio_history`, then `studio_undo` with that entry's `id` as `entry_id`, on the newest entry authored by you (unless the operator names another); `studio_redo` takes the same `entry_id` and puts it back |
 | "how loud is it / is it balanced?" | `studio_render` with `seconds` plus `scene_id` or `clip_id`; report `lufs` and `true_peak_db` |
 | "tempo / key / title" | `studio_song_set_meta` (`bpm` 20–300) |
+| "which take is best / keep take 2" | `studio_takes` for the clip (seconds, author, `in_comp`), render the scene once per candidate after `studio_take_keep`, report LUFS and peak, and let the operator's ear choose; restore the previous comp if they prefer it |
+| "use the first half of take 1 and the end of take 3" | `studio_clip_set_comp` with two segments that meet exactly (e.g. `0–8` and `8–16` beats); the switch has a 64-sample crossfade |
+| "that take is late / early" | `studio_takes` shows `compensated` and `offset_ms`. If `compensated` is false, ask the operator to calibrate the input and read you the milliseconds on the track's latency chip, then `studio_take_set_offset` with `offset_frames = round(ms × rate / 1000)` (the take's own `rate`) and `compensated: true` |
+| "record a guitar part" | You cannot record. Say what to do instead: arm the audio track, press Record, launch the scene; each loop pass becomes its own take |
 
 Refusals are information: a locked track (`locked`) or the clip the operator has open (`focused`) is off-limits. Say which one, and offer an alternative — another track, a new clip, or waiting for them to unlock it. Never reach around it.
 

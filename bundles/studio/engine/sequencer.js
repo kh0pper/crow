@@ -63,6 +63,55 @@
  * is cut there. Notes are emitted only for tracks that are not muted and, when
  * any track is soloed, only for the soloed ones.
  *
+ * ## Audio clips
+ *
+ * A clip whose `kind` is `"audio"` holds no notes: it plays recorded takes
+ * through a comp, `comp: [{take_id, from_beat, to_beat}]` over the clip's own
+ * beats. For every comp segment that starts sounding — on a launch, on a loop
+ * restart, or when the playhead crosses its `from_beat` — this file emits
+ *
+ *     {frame, type: "audio", track_id, take_id, take_frame, voice}
+ *
+ * and for the end of that segment (or of the clip, or of the transport) an
+ * `{frame, type: "audio_stop", track_id, voice}`. The take is laid out so that
+ * take frame `offset_frames` (scaled to this host's rate) sounds at clip beat
+ * 0, so at clip beat `b` the take frame is
+ * `round(b * framesPerBeat) + round(offset_frames * rate / take.rate)`. A take
+ * that the song marks `discarded` never sounds at all; a take the song does
+ * not have still starts, so a host can say which one it is missing.
+ *
+ * Each audio track has TWO voices, taken in turn (0, 1, 0, …) at consecutive
+ * segment starts, so the host can crossfade one segment into the next. The
+ * stops travel through an open set of their own, with the same rules as the
+ * notes above (re-trigger offs first at one frame, never released twice, never
+ * left sounding, forced stops paid at frame 0 of the next block).
+ *
+ * The takes a song carries arrive in `snapshot.takes` (see `server/doc.js`):
+ * the comp only needs their rate and their recorded offset, which are read
+ * once per `setSong()` like the rest of the song.
+ *
+ * ## Launch reports
+ *
+ * Every launch this file APPLIES is reported in the very block it takes effect
+ * in. The array `block()` returns carries that block's reports as a
+ * non-enumerable `launches` property, so the events themselves keep the shape
+ * every caller already reads. One report is
+ * `{track_id, clip_id|null, scene_id|null, bar, frame}`:
+ *
+ * - `frame` is the offset inside that block of the boundary frame
+ *   (`0 <= frame < frames`), so a host adds its own frame at the block's start
+ *   to get an absolute frame;
+ * - `bar` is the 0-based bar the launch took effect at;
+ * - `clip_id` is `null` for a stop;
+ * - a scene launch reports one entry per track it changed, all with that
+ *   scene's id, and a track already playing the clip it is asked for is not a
+ *   change and is not reported. A `stopTrack` / `stopAll` report carries the
+ *   scene of the clip it replaces, when that clip is known.
+ *
+ * A launch scheduled while the transport is stopped takes effect at beat 0, so
+ * it is reported in the block that starts the transport, not in the block the
+ * launch was asked in.
+ *
  * `stop()` halts the transport: every sounding note gets its off at the
  * current frame, the position goes back to 1.1.1, and the clips that were
  * sounding stay armed so `play()` starts them again from the transport's
@@ -78,9 +127,11 @@
  * ## Song shape
  *
  * The snapshot is `bundles/studio/server/doc.js`'s: `meta.bpm`,
- * `tracks[{id, mute, solo}]`, `scenes[{id}]`, and
- * `clips{id: {id, track_id, scene_id, length_bars, notes[{t, d, p, v}]}}` with
- * `t`/`d` in beats, `p` a MIDI pitch and `v` a velocity.
+ * `tracks[{id, mute, solo}]`, `scenes[{id}]`,
+ * `clips{id: {id, track_id, scene_id, length_bars, notes[{t, d, p, v}],
+ * kind?, comp?}}` with `t`/`d` in beats, `p` a MIDI pitch and `v` a velocity,
+ * and `takes{id: {id, clip_id, rate, offset_frames, discarded}}` for the takes
+ * an audio clip's comp plays.
  */
 (function () {
   "use strict";
@@ -119,6 +170,7 @@
    *            play: function(): void,
    *            stop: function(): void,
    *            block: function(number, number): Array<object>,
+   *            nextBarFrame: function(): {bar: number, beat: number, frame: number},
    *            position: function(): {bar: number, beat: number, sixteenth: number},
    *            isPlaying: function(): boolean}}
    */
@@ -130,6 +182,8 @@
     let tracks = [];
     let trackIndex = new Map();
     let clips = new Map();
+    /** take id → {id, clip_id, rate, offsetFrames (in this host's frames), discarded}. */
+    let takes = new Map();
     let framesPerBeat = framesPerBeatFor(sampleRate, DEFAULT_BPM);
 
     /** Transport state. */
@@ -151,8 +205,42 @@
     /** Entries closed by a state change: owed an off at frame 0 of the next block. */
     const forced = [];
 
+    /**
+     * The sounding audio voices, `track_id + ":" + voice` → entry. The audio
+     * twin of `open`: an entry holds the take it plays and the frame its stop
+     * is owed at, so a voice is stopped exactly once and never left sounding.
+     */
+    const openAudio = new Map();
+
+    /** Audio voices a state change closed: owed a stop at frame 0 of the next block. */
+    const forcedAudio = [];
+
+    /** track id → the voice its last segment start took, so the next one takes the other. */
+    const lastVoice = new Map();
+
     /** The events of the block being built. Reused; a block allocates nothing. */
     const events = [];
+
+    /**
+     * The launches applied in the block being built, in block frames. Reused
+     * like `events`, and hung off it as a non-enumerable `launches` property:
+     * the events array keeps exactly the shape callers already iterate.
+     */
+    const launches = [];
+    Object.defineProperty(events, "launches", {
+      value: launches,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    /**
+     * Launches scheduled but not yet inside a processed block, in the order
+     * they were asked for: `{track_id, clip_id, scene_id, atBeat}`. The
+     * boundary frame is derived from `atBeat` when the block is built, so a
+     * tempo change moves a scheduled launch with the bars.
+     */
+    const pending = [];
 
     // --- song ------------------------------------------------------------
 
@@ -197,7 +285,9 @@
       tracks = next.tracks;
       trackIndex = next.trackIndex;
       clips = next.clips;
+      takes = next.takes;
       framesPerBeat = next.framesPerBeat;
+      prunePending();
 
       reconcile(currentFrame === null ? 0 : currentFrame);
     }
@@ -246,7 +336,43 @@
         if (clip) byId.set(id, clip);
       }
 
-      return { bpm: bpm, framesPerBeat: framesPerBeatFor(sampleRate, bpm), tracks: list, trackIndex: index, clips: byId };
+      const takesById = new Map();
+      const rawTakes = snap.takes && typeof snap.takes === "object" ? snap.takes : {};
+      for (const id of Object.keys(rawTakes)) {
+        const value = rawTakes[id];
+        const take = readTake(id, value);
+        if (take) takesById.set(id, take);
+      }
+
+      return {
+        bpm: bpm,
+        framesPerBeat: framesPerBeatFor(sampleRate, bpm),
+        tracks: list,
+        trackIndex: index,
+        clips: byId,
+        takes: takesById,
+      };
+    }
+
+    /**
+     * Read one recorded take: the comp needs its rate (to scale the offset it
+     * was recorded with onto this host's frames) and whether a person threw it
+     * away. A take without a usable rate is assumed to be at this host's rate.
+     * @returns {{id: string, clip_id: string, rate: number, offsetFrames: number, discarded: boolean}|null}
+     */
+    function readTake(id, value) {
+      if (!value || typeof value !== "object") return null;
+      const rate = positive(value.rate) || sampleRate;
+      const offset = Number(value.offset_frames);
+      const offsetFrames = Number.isFinite(offset) ? Math.round(offset) : 0;
+      return {
+        id: typeof value.id === "string" && value.id !== "" ? value.id : id,
+        clip_id: typeof value.clip_id === "string" ? value.clip_id : "",
+        rate: rate,
+        // The very frame of the take that sounds at clip beat 0 in this host.
+        offsetFrames: Math.round((offsetFrames * sampleRate) / rate),
+        discarded: value.discarded === true,
+      };
     }
 
     /**
@@ -280,8 +406,34 @@
         track_id: typeof value.track_id === "string" ? value.track_id : "",
         scene_id: typeof value.scene_id === "string" ? value.scene_id : "",
         lengthBeats: lengthBeats,
+        audio: value.kind === "audio",
         notes: notes,
+        comp: value.kind === "audio" ? readComp(value.comp, lengthBeats) : [],
       };
+    }
+
+    /**
+     * Read an audio clip's comp: the segments that can sound, in beat order.
+     * A segment outside the clip or without a length is dropped here, so the
+     * block path never has to check one again.
+     * @param {unknown} value
+     * @param {number} lengthBeats the clip's length
+     * @returns {Array<{take_id: string, from_beat: number, to_beat: number}>}
+     */
+    function readComp(value, lengthBeats) {
+      const parts = [];
+      const raw = Array.isArray(value) ? value : [];
+      for (const item of raw) {
+        if (!item || typeof item !== "object") continue;
+        if (typeof item.take_id !== "string" || item.take_id === "") continue;
+        const from = Number(item.from_beat);
+        const to = Number(item.to_beat);
+        if (!Number.isFinite(from) || !Number.isFinite(to)) continue;
+        if (from < 0 || to > lengthBeats || !(to > from)) continue;
+        parts.push({ take_id: item.take_id, from_beat: from, to_beat: to });
+      }
+      parts.sort(byFromBeat);
+      return parts;
     }
 
     // --- launch ----------------------------------------------------------
@@ -297,7 +449,10 @@
       const at = launchBeat();
       for (const track of tracks) {
         const clip = clipFor(track.id, sceneId);
-        scheduleAt(track.id, clip ? clip.id : null, at);
+        // Every track of the row is reported, an empty slot included (as a
+        // stop): a recording armed on an empty audio slot starts on this
+        // very frame, and Record to timeline sees the whole row.
+        applyLaunch(track.id, clip ? clip.id : null, sceneId, at, true);
       }
       reconcile(frameNow());
     }
@@ -312,7 +467,7 @@
       const clip = clips.get(clip_id === null || clip_id === undefined ? "" : String(clip_id));
       if (!clip) return;
       if (!trackIndex.has(clip.track_id)) return;
-      scheduleAt(clip.track_id, clip.id, launchBeat());
+      applyLaunch(clip.track_id, clip.id, sceneOf(clip), launchBeat());
       reconcile(frameNow());
     }
 
@@ -324,7 +479,9 @@
     function stopTrack(track_id) {
       const trackId = track_id === null || track_id === undefined ? "" : String(track_id);
       if (!trackIndex.has(trackId)) return;
-      scheduleAt(trackId, null, launchBeat());
+      // No scene is named: the report falls back to the scene of the clip the
+      // stop replaces (see `applyLaunch`).
+      applyLaunch(trackId, null, undefined, launchBeat());
       reconcile(frameNow());
     }
 
@@ -333,15 +490,19 @@
       const at = launchBeat();
       if (!playing || originFrame === null) {
         forceCloseAll(frameNow());
+        forceCloseAllAudio();
         segments.clear();
+        // Nothing is scheduled any more, so no scheduled launch can land.
+        pending.length = 0;
         return;
       }
       for (const track of tracks) {
         if (!segments.has(track.id)) continue;
-        scheduleAt(track.id, null, at);
+        applyLaunch(track.id, null, undefined, at);
       }
-      // A note whose segment was already gone still stops here.
+      // A note (or voice) whose segment was already gone still stops here.
       for (const entry of open.values()) capOff(entry, at);
+      for (const entry of openAudio.values()) capAudioOff(entry, at);
       reconcile(frameNow());
     }
 
@@ -352,10 +513,12 @@
     function play() {
       const keep = currentClips();
       forceCloseAll(frameNow());
+      forceCloseAllAudio();
       segments.clear();
       for (const [trackId, clipId] of keep) {
         segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
       }
+      keepFirstBarLaunches();
       playing = true;
       originFrame = null;
       currentFrame = null;
@@ -370,13 +533,116 @@
     function stop() {
       const keep = currentClips();
       forceCloseAll(frameNow());
+      forceCloseAllAudio();
       segments.clear();
       for (const [trackId, clipId] of keep) {
         segments.set(trackId, [{ track_id: trackId, clipId: clipId, startBeat: 0, endBeat: null }]);
       }
+      keepFirstBarLaunches();
       playing = false;
       originFrame = null;
       lastFrame = null;
+    }
+
+    /**
+     * Apply one launch and remember to report it.
+     *
+     * The report is made when the block that holds the boundary frames is
+     * built, so a launch that changes nothing — the track already plays that
+     * clip, or a stop for a track that is already silent — is not reported.
+     * @param {string} trackId
+     * @param {string|null} clipId the clip to play, `null` to stop
+     * @param {string|null|undefined} sceneId the scene being launched, or
+     *   `undefined` to fall back to the scene of the clip being replaced
+     * @param {number} atBeat the boundary the launch takes effect at
+     */
+    function applyLaunch(trackId, clipId, sceneId, atBeat, always = false) {
+      const segs = segments.get(trackId);
+      const replaced = segs ? clipAtBeat(segs, atBeat) : null;
+      scheduleAt(trackId, clipId, atBeat);
+      const applied = clipAtBeat(segmentsOf(trackId), atBeat);
+      if (applied === replaced && !always) return;
+
+      let scene = sceneId;
+      if (scene === undefined || scene === null) {
+        // A stop names no scene of its own, so the report carries the one of
+        // the clip it replaced; a track that played nothing has none.
+        const replacedClip = replaced === null ? null : clips.get(replaced);
+        scene = replacedClip ? sceneOf(replacedClip) : null;
+      }
+      // A launch for a boundary that has not been reached yet supersedes the
+      // one already waiting for it on this track: only the launch the track
+      // actually ends up playing took effect.
+      for (let at = pending.length - 1; at >= 0; at -= 1) {
+        if (pending[at].track_id === trackId && pending[at].atBeat === atBeat) pending.splice(at, 1);
+      }
+      pending.push({ track_id: trackId, clip_id: applied, scene_id: scene, atBeat: atBeat });
+    }
+
+    /**
+     * Report the launches whose boundary frame falls inside this block.
+     * @param {number} frameStart
+     * @param {number} frames
+     */
+    function reportLaunches(frameStart, frames) {
+      // Nothing takes effect while the transport is not running: a launch for
+      // bar 0 waits for the block that actually starts it.
+      if (pending.length === 0 || !playing || originFrame === null) return;
+      const frameEnd = frameStart + frames;
+      let kept = 0;
+      for (let at = 0; at < pending.length; at += 1) {
+        const entry = pending[at];
+        const frame = beatToFrame(entry.atBeat);
+        if (frame >= frameEnd) {
+          pending[kept] = entry;
+          kept += 1;
+          continue;
+        }
+        launches.push({
+          track_id: entry.track_id,
+          clip_id: entry.clip_id,
+          scene_id: entry.scene_id === undefined ? null : entry.scene_id,
+          bar: Math.round(entry.atBeat / BEATS_PER_BAR),
+          // A boundary the transport has already gone past (a tempo change can
+          // bring one forward) takes effect at the block's first frame.
+          frame: frame <= frameStart ? 0 : frame - frameStart,
+        });
+      }
+      pending.length = kept;
+      if (launches.length > 1) launches.sort(byLaunchFrame);
+    }
+
+    /**
+     * Drop the scheduled launches that have no target in the song any more.
+     */
+    function prunePending() {
+      if (pending.length === 0) return;
+      let kept = 0;
+      for (let at = 0; at < pending.length; at += 1) {
+        const entry = pending[at];
+        if (!trackIndex.has(entry.track_id)) continue;
+        if (entry.clip_id !== null && !clips.has(entry.clip_id)) continue;
+        pending[kept] = entry;
+        kept += 1;
+      }
+      pending.length = kept;
+    }
+
+    /**
+     * Keep only the launches scheduled for bar 0: `play()` and `stop()` both
+     * put the playhead back at beat 0, so those are the only boundaries that
+     * still exist. A bar-0 launch is reported in the block that starts the new
+     * run.
+     */
+    function keepFirstBarLaunches() {
+      if (pending.length === 0) return;
+      let kept = 0;
+      for (let at = 0; at < pending.length; at += 1) {
+        if (pending[at].atBeat !== 0) continue;
+        pending[kept] = pending[at];
+        kept += 1;
+      }
+      pending.length = kept;
     }
 
     /**
@@ -418,6 +684,11 @@
         if (atFrame <= now) forceClose(entry, atFrame);
         else capOff(entry, atBeat);
       }
+      for (const entry of openAudio.values()) {
+        if (entry.seg !== seg) continue;
+        if (atFrame <= now) forceCloseAudio(entry, atFrame);
+        else capAudioOff(entry, atBeat);
+      }
     }
 
     /**
@@ -429,6 +700,7 @@
      * @param {number} atFrame the frame a closed note's off is owed at
      */
     function reconcile(atFrame) {
+      reconcileAudio(atFrame);
       if (open.size === 0) return;
       const soloMode = anySoloed();
       const beat = currentBeat();
@@ -451,6 +723,49 @@
         // playhead; it stops where the playhead is.
         if (entry.offFrame <= atFrame) forceClose(entry, atFrame);
       }
+    }
+
+    /**
+     * The audio twin of `reconcile`: a sounding voice survives only while its
+     * clip still plays on its track, its take is still not discarded, and its
+     * comp segment is still there (with the same start; a segment that only
+     * got shorter pulls its stop forward instead of closing it).
+     * @param {number} atFrame the frame a closed voice's stop is owed at
+     */
+    function reconcileAudio(atFrame) {
+      if (openAudio.size === 0) return;
+      for (const entry of openAudio.values()) {
+        const clip = clips.get(entry.clipId);
+        const segs = segments.get(entry.track_id);
+        const take = takes.get(entry.takeId);
+        const alive =
+          clip !== undefined &&
+          clip.audio &&
+          entry.seg.clipId === entry.clipId &&
+          segs !== undefined &&
+          segs.indexOf(entry.seg) !== -1 &&
+          !(take && take.discarded);
+        const part = alive ? compPartOf(clip, entry) : null;
+        if (!part) {
+          forceCloseAudio(entry, atFrame);
+          continue;
+        }
+        const partEnd = entry.loopStart + part.to_beat;
+        const segEnd = entry.seg.endBeat === null ? Infinity : entry.seg.endBeat;
+        capAudioOff(entry, Math.min(partEnd, segEnd));
+      }
+    }
+
+    /**
+     * @returns {object|null} the comp segment an open voice is playing, matched
+     *   by take and start beat (its length may have changed since)
+     */
+    function compPartOf(clip, entry) {
+      const parts = clip.comp;
+      for (let at = 0; at < parts.length; at += 1) {
+        if (parts[at].take_id === entry.takeId && parts[at].from_beat === entry.fromBeat) return parts[at];
+      }
+      return null;
     }
 
     /**
@@ -487,35 +802,47 @@
     /** @returns {number} the bar boundary a launch takes effect at, in beats. */
     function launchBeat() {
       if (!playing || originFrame === null) return 0;
-      const beat = currentBeat();
-      if (beat <= 0) return 0;
+      return nextBarFrom(frameNow(), originFrame, framesPerBeat).beat;
+    }
 
-      // Found in frames, not in beats: at most tempos a bar is not a whole
-      // number of frames, so a position one frame past the rounded boundary
-      // still reads as slightly more than the bar and `ceil` would skip a
-      // whole bar. The frame at or after the boundary is the first with
-      // `round(x) >= frame`, i.e. `x >= frame - 0.5`.
-      const barFrames = BEATS_PER_BAR * framesPerBeat;
-      const bar = Math.max(1, Math.ceil((frameNow() - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
-      const at = bar * BEATS_PER_BAR;
-      // A boundary the next block has already passed is no boundary at all.
-      return beatToFrame(at) < frameNow() ? at + BEATS_PER_BAR : at;
+    /**
+     * The next bar boundary from the transport position right now, in this
+     * sequencer's own frames — the answer to a host's `nextBarFrame` request.
+     *
+     * While the transport runs it is the boundary the next launch would take
+     * effect at (the same rounding `launchBeat` uses). While it is stopped, or
+     * before its first block, bar 0 starts at the next block's first frame.
+     * @returns {{bar: number, beat: number, frame: number}} `bar` is 0-based
+     */
+    function nextBarFrame() {
+      if (playing && originFrame !== null) {
+        return nextBarFrom(frameNow(), originFrame, framesPerBeat);
+      }
+      return { bar: 0, beat: 0, frame: frameNow() };
     }
 
     // --- block -----------------------------------------------------------
 
     /**
-     * One block of audio: the note events whose frame falls inside it.
+     * One block of audio: the note and audio events whose frame falls inside it.
      * @param {number} frameStart absolute frame of the block's first frame
      * @param {number} frames how many frames the block holds
-     * @returns {Array<{frame: number, track_id: string, type: "on"|"off",
-     *                  p: number, v: number}>} events in block-relative
-     *   frames, sorted by frame with offs before ons at one frame
+     * @returns {Array<{frame: number, track_id: string, type: string,
+     *                  p?: number, v?: number, take_id?: string,
+     *                  take_frame?: number, voice?: number}>} events in
+     *   block-relative frames, sorted by frame with the stops ("off",
+     *   "audio_stop") before the starts at one frame. The array also carries
+     *   this block's launch reports as a non-enumerable `launches` property
+     *   (see the header).
      */
     function block(frameStart, frames) {
       const start = Math.trunc(Number(frameStart));
       const count = Math.trunc(Number(frames));
-      if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return [];
+      launches.length = 0;
+      if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) {
+        events.length = 0;
+        return events;
+      }
 
       if (playing) {
         if (originFrame === null) originFrame = start;
@@ -570,6 +897,11 @@
             const first = Math.max(0, Math.floor((winStart - seg.startBeat) / length) - 1);
             const last = Math.floor((winEnd - seg.startBeat) / length) + 1;
 
+            if (clip.audio) {
+              emitAudio(seg, clip, first, last, segEndBeat, frameStart, frameEnd);
+              continue;
+            }
+
             for (let loop = first; loop <= last; loop += 1) {
               const loopStart = seg.startBeat + loop * length;
               if (loopStart >= segEndBeat) break;
@@ -615,7 +947,24 @@
         });
       }
 
+      // An audio voice stops where its comp segment ends, exactly like a note's
+      // off, and one that fell behind is paid at frame 0 rather than dropped.
+      for (const entry of openAudio.values()) {
+        if (entry.offFrame >= frameEnd) continue;
+        openAudio.delete(entry.key);
+        events.push({
+          frame: entry.offFrame <= frameStart ? 0 : entry.offFrame - frameStart,
+          track_id: entry.track_id,
+          type: "audio_stop",
+          voice: entry.voice,
+        });
+      }
+
       events.sort(compareEvents);
+      // The launches this block applied, reported after the notes they brought
+      // in: a host posts them as they are, so their offsets are framed against
+      // the very block start the events use.
+      reportLaunches(frameStart, frames);
       return events;
     }
 
@@ -623,11 +972,135 @@
      * Emit the offs a state change owes, at frame 0 of this block.
      */
     function emitForced() {
-      if (forced.length === 0) return;
+      if (forced.length === 0 && forcedAudio.length === 0) return;
       for (const entry of forced) {
         events.push({ frame: 0, track_id: entry.track_id, type: "off", p: entry.p, v: entry.v });
       }
       forced.length = 0;
+      for (const stop of forcedAudio) {
+        events.push({ frame: 0, track_id: stop.track_id, type: "audio_stop", voice: stop.voice });
+      }
+      forcedAudio.length = 0;
+    }
+
+    /**
+     * Emit the audio events of one audio clip's segments inside this block:
+     * one start per comp segment whose first frame falls in it. The stop is
+     * owed through the open set below, so a segment that also ends in this
+     * block still leaves in the right order.
+     * @param {object} seg the track's segment playing the clip
+     * @param {object} clip an audio clip
+     * @param {number} first the first loop iteration to look at
+     * @param {number} last the last loop iteration to look at
+     * @param {number} segEndBeat the beat the segment is cut at (`Infinity` for none)
+     * @param {number} frameStart
+     * @param {number} frameEnd
+     */
+    function emitAudio(seg, clip, first, last, segEndBeat, frameStart, frameEnd) {
+      const parts = clip.comp;
+      for (let loop = first; loop <= last; loop += 1) {
+        const loopStart = seg.startBeat + loop * clip.lengthBeats;
+        if (loopStart >= segEndBeat) break;
+        for (let at = 0; at < parts.length; at += 1) {
+          const part = parts[at];
+          const startBeat = loopStart + part.from_beat;
+          if (startBeat >= segEndBeat) continue;
+          const startFrame = beatToFrame(startBeat);
+          if (startFrame < frameStart || startFrame >= frameEnd) continue;
+          const stopBeat = Math.min(loopStart + part.to_beat, segEndBeat);
+          if (!(stopBeat > startBeat)) continue;
+          startAudio(seg, clip, part, loopStart, startFrame, stopBeat, frameStart);
+        }
+      }
+    }
+
+    /**
+     * Start one comp segment on the next voice of its track, register its stop
+     * in the open set, and emit the event.
+     *
+     * A take the song marks discarded is skipped: the comp still names it (the
+     * document refuses that, but a song can arrive mid-edit), and no voice
+     * should ever be started for it.
+     * @param {object} seg
+     * @param {object} clip
+     * @param {{take_id: string, from_beat: number, to_beat: number}} part
+     * @param {number} loopStart the beat this loop iteration starts at
+     * @param {number} startFrame the absolute frame the segment starts sounding at
+     * @param {number} stopBeat the beat its stop is owed at
+     * @param {number} frameStart the block's first frame
+     */
+    function startAudio(seg, clip, part, loopStart, startFrame, stopBeat, frameStart) {
+      const trackId = seg.track_id;
+      const take = takes.get(part.take_id);
+      if (take && take.discarded) return;
+
+      const takeFrame = Math.round(part.from_beat * framesPerBeat) + (take ? take.offsetFrames : 0);
+      const voice = lastVoice.get(trackId) === 0 ? 1 : 0;
+      lastVoice.set(trackId, voice);
+
+      // A third start inside one take's lifetime re-uses a voice that is still
+      // sounding: it is released first, at this very frame (the sort puts the
+      // stop in front of the start).
+      const key = audioKey(trackId, voice);
+      if (openAudio.has(key)) {
+        openAudio.delete(key);
+        events.push({ frame: startFrame - frameStart, track_id: trackId, type: "audio_stop", voice: voice });
+      }
+
+      openAudio.set(key, {
+        key: key,
+        track_id: trackId,
+        voice: voice,
+        clipId: clip.id,
+        seg: seg,
+        takeId: part.take_id,
+        fromBeat: part.from_beat,
+        loopStart: loopStart,
+        offBeat: stopBeat,
+        offFrame: beatToFrame(stopBeat),
+      });
+
+      events.push({
+        frame: startFrame - frameStart,
+        track_id: trackId,
+        type: "audio",
+        take_id: part.take_id,
+        take_frame: takeFrame,
+        voice: voice,
+      });
+    }
+
+    /**
+     * Close one sounding voice now: its stop is owed at frame 0 of the next
+     * block, like a forced note off.
+     * @param {object} entry an entry of the open audio set
+     * @param {number} atFrame the frame the state change happened at
+     */
+    function forceCloseAudio(entry, atFrame) {
+      if (openAudio.get(entry.key) !== entry) return;
+      openAudio.delete(entry.key);
+      entry.offFrame = atFrame;
+      forcedAudio.push({ track_id: entry.track_id, voice: entry.voice });
+    }
+
+    /** Close every sounding voice now, for a stop or a restart. */
+    function forceCloseAllAudio() {
+      if (openAudio.size === 0) return;
+      for (const entry of openAudio.values()) {
+        forcedAudio.push({ track_id: entry.track_id, voice: entry.voice });
+      }
+      openAudio.clear();
+    }
+
+    /**
+     * Bring one open voice's stop forward, never later.
+     * @param {object} entry
+     * @param {number} beat
+     */
+    function capAudioOff(entry, beat) {
+      if (!(beat < entry.offBeat)) return;
+      entry.offBeat = beat;
+      entry.offFrame = beatToFrame(beat);
     }
 
     /**
@@ -812,6 +1285,25 @@
       return out;
     }
 
+    /**
+     * @param {object[]} segs a track's segments, in beat order
+     * @param {number} beat
+     * @returns {string|null} the clip these segments sound at `beat`, `null`
+     *   for a stop (or no segment at all)
+     */
+    function clipAtBeat(segs, beat) {
+      const seg = audibleSegment(segs, beat);
+      return seg ? seg.clipId : null;
+    }
+
+    /**
+     * @param {object} clip a clip of `clips`
+     * @returns {string|null} the clip's scene, `null` when it names none
+     */
+    function sceneOf(clip) {
+      return clip && clip.scene_id !== "" ? clip.scene_id : null;
+    }
+
     /** @returns {object|null} the clip on one track and scene, if any. */
     function clipFor(trackId, sceneId) {
       for (const clip of clips.values()) {
@@ -838,16 +1330,29 @@
     }
 
     /**
-     * Frame first, then offs before ons (a note that ends where the next
-     * begins must be released first), then the song's track order, then pitch.
+     * Frame first, then stops before starts (a note or a voice that ends where
+     * the next begins must be released first — which is exactly what lets a
+     * host crossfade one comp segment into the next), then the song's track
+     * order, then the voice or the pitch.
      */
     function compareEvents(a, b) {
       if (a.frame !== b.frame) return a.frame - b.frame;
-      if (a.type !== b.type) return a.type === "off" ? -1 : 1;
+      const ar = eventRank(a.type);
+      const br = eventRank(b.type);
+      if (ar !== br) return ar - br;
       const at = trackIndex.has(a.track_id) ? trackIndex.get(a.track_id) : Number.MAX_SAFE_INTEGER;
       const bt = trackIndex.has(b.track_id) ? trackIndex.get(b.track_id) : Number.MAX_SAFE_INTEGER;
       if (at !== bt) return at - bt;
+      if (a.voice !== undefined || b.voice !== undefined) return (a.voice || 0) - (b.voice || 0);
       return a.p - b.p;
+    }
+
+    /** @returns {number} the order of an event type inside one frame. */
+    function eventRank(type) {
+      if (type === "off") return 0;
+      if (type === "audio_stop") return 1;
+      if (type === "on") return 2;
+      return 3; // "audio"
     }
 
     return {
@@ -859,11 +1364,60 @@
       play: play,
       stop: stop,
       block: block,
+      nextBarFrame: nextBarFrame,
       position: position,
       isPlaying: function isPlaying() {
         return playing;
       },
     };
+  }
+
+  /**
+   * The next bar boundary at or after a frame, on a timeline whose beat 0 sits
+   * at `originFrame`.
+   *
+   * This is the ONE place the boundary rounding lives: the launch quantizer
+   * (`launchBeat`) and the `nextBarFrame` answer both come from it, so a host
+   * asking where the next bar begins and the block that reports a launch
+   * landing there can never disagree by a frame.
+   *
+   * It is found in frames, not in beats: at most tempos a bar is not a whole
+   * number of frames, so a position one frame past the rounded boundary still
+   * reads as slightly more than the bar and `ceil` would skip a whole bar. The
+   * frame at or after the boundary is the first with `round(x) >= frame`, i.e.
+   * `x >= frame - 0.5`.
+   *
+   * @param {number} frame the frame to start from (a block's first frame)
+   * @param {number} originFrame the absolute frame of beat 0
+   * @param {number} framesPerBeat how many frames one beat lasts
+   * @returns {{bar: number, beat: number, frame: number}} the boundary, with a
+   *   0-based `bar`, the boundary in `beat`s and its rounded `frame`
+   */
+  function nextBarFrom(frame, originFrame, framesPerBeat) {
+    const barFrames = BEATS_PER_BAR * framesPerBeat;
+    let bar = Math.max(0, Math.ceil((frame - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
+    let boundary = Math.round(originFrame + bar * barFrames);
+    // A boundary the caller has already gone past is no boundary at all.
+    if (boundary < frame) {
+      bar += 1;
+      boundary = Math.round(originFrame + bar * barFrames);
+    }
+    return { bar: bar, beat: bar * BEATS_PER_BAR, frame: boundary };
+  }
+
+  /** @returns {number} launch reports in the order of their block frames. */
+  function byLaunchFrame(a, b) {
+    return a.frame - b.frame;
+  }
+
+  /**
+   * The open-audio key for one track and voice.
+   * @param {string} trackId
+   * @param {number} voice
+   * @returns {string}
+   */
+  function audioKey(trackId, voice) {
+    return trackId + "\n" + voice;
   }
 
   /**
@@ -887,6 +1441,11 @@
     return a.t - b.t;
   }
 
+  /** @returns {number} the beat order of two comp segments. */
+  function byFromBeat(a, b) {
+    return a.from_beat - b.from_beat;
+  }
+
   /** @returns {number} frames one beat lasts at a tempo. */
   function framesPerBeatFor(sampleRate, bpm) {
     return (sampleRate * 60) / bpm;
@@ -905,7 +1464,7 @@
     return value;
   }
 
-  const api = { create: create, BEATS_PER_BAR: BEATS_PER_BAR };
+  const api = { create: create, nextBarFrom: nextBarFrom, BEATS_PER_BAR: BEATS_PER_BAR };
 
   if (typeof globalThis !== "undefined") globalThis.StudioSequencer = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

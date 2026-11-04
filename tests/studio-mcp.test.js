@@ -36,6 +36,10 @@ const STUB_CATALOGUE = async () => ({
   },
 });
 
+/** Two recorded takes, for the takes read and the tools around them. */
+const TAKE_A = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
+const TAKE_B = "0c9c3d2a-1b4e-4f6a-8d7c-5e4f3a2b1c0d";
+
 /**
  * A fake hub client: the same seven methods `createHubClient` returns.
  *
@@ -158,7 +162,7 @@ function textOf(result) {
     .join("\n");
 }
 
-test("every non-humanOnly command has exactly one tool and humanOnly ones have none", async () => {
+test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
   const { hub } = makeHub();
   const client = await connect({ hub, renderer: makeRenderer().renderer });
   try {
@@ -166,14 +170,15 @@ test("every non-humanOnly command has exactly one tool and humanOnly ones have n
     for (const command of listCommands()) {
       const expected = `studio_${command.id.replace(/\./g, "_")}`;
       const count = names.filter((name) => name === expected).length;
-      if (command.humanOnly) {
-        assert.equal(count, 0, `${expected} should not exist: ${command.id} is people-only`);
+      if (command.humanOnly || command.internal) {
+        assert.equal(count, 0, `${expected} should not exist: ${command.id} is people-only or Studio's own`);
       } else {
         assert.equal(count, 1, `${expected} should be exposed exactly once for ${command.id}`);
       }
     }
     assert.ok(names.includes("studio_clip_write"), "the clip writer should be a tool");
     assert.ok(!names.includes("studio_track_lock"), "a people-only command must not be a tool");
+    assert.ok(!names.includes("studio_take_add"), "a take is Studio's own step, so it must not be a tool");
   } finally {
     await client.close();
   }
@@ -372,6 +377,32 @@ test("an internal refusal reaches the agent as one fixed sentence, logged in ful
     await client.close();
   }
 });
+test("MCP client sees the studio-only message, not \"internal error\"", async () => {
+  const refusal = { ok: false, code: "studio_only", error: "This command can only be run by Studio itself." };
+  const { hub } = makeHub({ command: async () => refusal });
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+  try {
+    const result = await client.callTool({
+      name: "studio_clip_write",
+      arguments: {
+        song_id: "song-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Verse bass",
+        notes: [{ t: 0, d: 1, p: 40, v: 100 }],
+      },
+    });
+    assert.equal(result.isError, true, "a refusal must be a tool error");
+    const text = textOf(result);
+    // The sentence is the agent's own answer: it says what the command is for,
+    // so it reaches the caller unchanged with only its code after it.
+    assert.equal(text, "This command can only be run by Studio itself. (studio_only)");
+    assert.equal(text.includes("internal error"), false, "a studio-only refusal is not a server bug");
+  } finally {
+    await client.close();
+  }
+});
+
 test("a read-only caller (Crow's voice) cannot file a render", async () => {
   const voice = makeHub({ snapshotProject: 4, readOnly: true });
   const rendered = makeRenderer();
@@ -398,6 +429,143 @@ test("a call carrying a forwarded non-bot actor (a peer) is not the operator", a
     assert.equal(seen.calls.listSongs.at(-1).author.id, "other", "a peer gets the fail-closed author");
     await client.callTool({ name: "studio_list_songs", arguments: {} });
     assert.equal(seen.calls.listSongs.at(-1).author.id, "mcp", "no forwarded actor is the operator's session");
+  } finally {
+    await client.close();
+  }
+});
+
+test("agent can keep and comp but not add or discard takes", async () => {
+  const { hub, calls } = makeHub();
+  // A song with two recorded takes, one on each of two clips, the newer one
+  // discarded. Both clips' comps are read for `in_comp`.
+  hub.snapshot = async (songId, author = null) => {
+    calls.snapshot.push({ song_id: songId, author });
+    return {
+      song_id: songId,
+      project_id: 4,
+      snapshot: {
+        meta: { title: "Takes", bpm: 112, key: "A minor" },
+        tracks: [{ id: "audio-1", name: "Guitar", device: { engine: "audio" }, mute: false, solo: false, locked: false }],
+        scenes: [{ id: "scene-1", name: "A" }],
+        clips: {
+          "clip-1": {
+            id: "clip-1",
+            track_id: "audio-1",
+            scene_id: "scene-1",
+            name: "Guitar",
+            length_bars: 1,
+            kind: "audio",
+            notes: [],
+            comp: [{ take_id: TAKE_A, from_beat: 0, to_beat: 4 }],
+          },
+          "clip-2": {
+            id: "clip-2",
+            track_id: "audio-1",
+            scene_id: "scene-1",
+            name: "Voice",
+            length_bars: 1,
+            kind: "audio",
+            notes: [],
+            comp: [],
+          },
+        },
+        takes: {
+          [TAKE_A]: {
+            id: TAKE_A,
+            clip_id: "clip-1",
+            storage_key: `projects/4/studio/song-1/takes/${TAKE_A}.wav`,
+            rate: 48000,
+            channels: 2,
+            frames: 96000,
+            offset_frames: 1200,
+            compensated: true,
+            bpm: 112,
+            recorded_at: "2026-11-02T10:00:00.000Z",
+            author_label: "the operator",
+            discarded: false,
+          },
+          [TAKE_B]: {
+            id: TAKE_B,
+            clip_id: "clip-2",
+            storage_key: `projects/4/studio/song-1/takes/${TAKE_B}.wav`,
+            rate: 48000,
+            channels: 1,
+            frames: 48000,
+            offset_frames: 0,
+            compensated: false,
+            bpm: 112,
+            recorded_at: "2026-11-03T10:00:00.000Z",
+            author_label: "the operator",
+            discarded: true,
+          },
+        },
+      },
+      state: "",
+    };
+  };
+
+  const client = await connect({ hub, renderer: makeRenderer().renderer });
+  const expectedAuthor = { kind: "agent", id: "mcp", label: "Agent (MCP)" };
+  try {
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    assert.ok(names.includes("studio_take_keep"), "an agent may keep a take");
+    assert.ok(names.includes("studio_clip_set_comp"), "an agent may comp takes");
+    assert.ok(names.includes("studio_takes"), "an agent may list takes");
+    assert.equal(names.includes("studio_take_add"), false, "adding a take is Studio's own step");
+    assert.equal(names.includes("studio_take_discard"), false, "discarding a take needs the operator");
+
+    const listed = await client.callTool({ name: "studio_takes", arguments: { song_id: "song-1" } });
+    assert.notEqual(listed.isError, true, textOf(listed));
+    assert.deepEqual(calls.snapshot.at(-1).author, expectedAuthor, "the read is scoped by the caller's author");
+
+    const rows = JSON.parse(textOf(listed));
+    assert.equal(rows.length, 2);
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      [TAKE_B, TAKE_A],
+      "the newest recording comes first",
+    );
+
+    const kept = rows.find((row) => row.id === TAKE_A);
+    assert.deepEqual(Object.keys(kept).sort(), [
+      "author_label",
+      "bpm",
+      "channels",
+      "clip_id",
+      "compensated",
+      "discarded",
+      "id",
+      "in_comp",
+      "offset_ms",
+      "rate",
+      "recorded_at",
+      "seconds",
+    ]);
+    assert.equal(kept.clip_id, "clip-1");
+    assert.equal(kept.seconds, 2, "96000 frames at 48 kHz is 2 s");
+    assert.equal(kept.channels, 2);
+    assert.equal(kept.rate, 48000);
+    assert.equal(kept.bpm, 112);
+    assert.equal(kept.compensated, true);
+    assert.equal(kept.offset_ms, 25, "1200 frames at 48 kHz is 25 ms");
+    assert.equal(kept.author_label, "the operator");
+    assert.equal(kept.recorded_at, "2026-11-02T10:00:00.000Z");
+    assert.equal(kept.discarded, false);
+    assert.equal(kept.in_comp, true, "clip-1's comp plays it");
+
+    const discarded = rows.find((row) => row.id === TAKE_B);
+    assert.equal(discarded.discarded, true);
+    assert.equal(discarded.compensated, false);
+    assert.equal(discarded.offset_ms, 0);
+    assert.equal(discarded.in_comp, false, "nothing plays it");
+
+    const oneClip = await client.callTool({ name: "studio_takes", arguments: { song_id: "song-1", clip_id: "clip-2" } });
+    assert.notEqual(oneClip.isError, true, textOf(oneClip));
+    assert.deepEqual(
+      JSON.parse(textOf(oneClip)).map((row) => row.id),
+      [TAKE_B],
+      "clip_id narrows the listing",
+    );
   } finally {
     await client.close();
   }

@@ -25,18 +25,46 @@ import {
   runCommand,
 } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
+import "../bundles/studio/server/commands/takes.js";
 
-/** The 1a command list: the contract the GUI, the MCP tools and history share. */
+/** A take id, the way the recording client generates one. */
+const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
+
+/** A second take id, for the comp cases. */
+const OTHER_TAKE_ID = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d";
+
+/** The take object `take.add` accepts, as the gateway builds it. */
+const TAKE_ARGS = {
+  storage_key: `studio/song-1/takes/${TAKE_ID}.wav`,
+  rate: 48000,
+  channels: 2,
+  frames: 48000,
+  offset_frames: 0,
+  compensated: false,
+  bpm: 120,
+  recorded_at: "2026-11-02T12:00:00.000Z",
+  author_label: "the operator",
+  discarded: false,
+};
+
+/** Every registered command: the contract the GUI, the MCP tools and history share. */
 const COMMAND_IDS = [
+  "clip.add_audio",
   "clip.edit_notes",
   "clip.remove",
   "clip.rename",
+  "clip.set_comp",
   "clip.set_length",
   "clip.write",
   "scene.add",
   "scene.remove",
   "scene.rename",
   "song.set_meta",
+  "take.add",
+  "take.discard",
+  "take.keep",
+  "take.restore",
+  "take.set_offset",
   "track.add",
   "track.lock",
   "track.remove",
@@ -66,6 +94,13 @@ const MINIMAL_ARGS = {
   "clip.set_length": { clip_id: "c1", length_bars: 4 },
   "clip.rename": { clip_id: "c1", name: "Verse bass" },
   "clip.remove": { clip_id: "c1" },
+  "clip.add_audio": { track_id: "t1", scene_id: "s1", length_bars: 4 },
+  "clip.set_comp": { clip_id: "c1", segments: [] },
+  "take.add": { clip_id: "c1", take: { id: TAKE_ID, ...TAKE_ARGS } },
+  "take.discard": { clip_id: "c1", take_id: TAKE_ID },
+  "take.restore": { clip_id: "c1", take_id: TAKE_ID },
+  "take.keep": { clip_id: "c1", take_id: TAKE_ID },
+  "take.set_offset": { clip_id: "c1", take_id: TAKE_ID, offset_frames: 960, compensated: true },
 };
 
 /** A song document that is destroyed when the test ends. */
@@ -135,7 +170,7 @@ function refuses(fn, code) {
   assert.fail(`expected a refusal with code "${code}", but the call succeeded`);
 }
 
-test("the registry lists the 1a commands", () => {
+test("the registry lists every command", () => {
   assert.deepEqual(
     listCommands().map((command) => command.id),
     COMMAND_IDS,
@@ -144,6 +179,14 @@ test("the registry lists the 1a commands", () => {
   assert.equal(getCommand("clip.write").humanOnly, false);
   assert.equal(getCommand("track.lock").humanOnly, true);
   assert.equal(getCommand("track.unlock").humanOnly, true);
+  assert.equal(getCommand("take.discard").humanOnly, true);
+  // A take only ever arrives through the gateway's upload finish route.
+  assert.equal(getCommand("take.add").internal, true);
+  assert.equal(getCommand("clip.write").internal, false);
+  assert.deepEqual(
+    listCommands({ public: true }).map((command) => command.id),
+    COMMAND_IDS.filter((id) => id !== "take.add"),
+  );
   assert.equal(refuses(() => getCommand("clip.explode"), "not_found").code, "not_found");
 });
 
@@ -290,7 +333,12 @@ test("apply returns before/after for every touched field", (t) => {
   const tr = `track:${track}`;
   const cl = `clip:${clipId}`;
 
-  // Every 1a command, in the order they can run, with the exact key set its
+  // A track that plays recordings and the clip a take lands on, for the 1b
+  // take commands below.
+  const audioTrack = addTrack(doc, "Guitar", { kind: "audio" });
+  const au = "clip:gtr-verse";
+
+  // Every command, in the order they can run, with the exact key set its
   // before and after maps must carry.
   const cases = [
     { id: "song.set_meta", args: { bpm: 96 }, keys: ["song:meta|bpm"] },
@@ -326,13 +374,61 @@ test("apply returns before/after for every touched field", (t) => {
     { id: "clip.set_length", args: { clip_id: clipId, length_bars: 8 }, keys: [`${cl}|length_bars`] },
     { id: "clip.rename", args: { clip_id: clipId, name: "Verse bass 2" }, keys: [`${cl}|name`] },
     { id: "clip.edit_notes", args: { clip_id: clipId, add: [note(2, 1, 43, 90)] }, keys: [`${cl}|notes`] },
+    // The take commands, in the order a recording runs: the clip, its takes,
+    // the comp, and the discard/restore pair.
+    {
+      id: "clip.add_audio",
+      args: { clip_id: "gtr-verse", track_id: audioTrack, scene_id: scene, length_bars: 2, name: "Guitar take" },
+      keys: [`${au}|*`],
+    },
+    {
+      id: "take.add",
+      args: { clip_id: "gtr-verse", take: { id: TAKE_ID, ...TAKE_ARGS } },
+      keys: [`${au}|comp`, `take:${TAKE_ID}|*`],
+    },
+    {
+      id: "take.add",
+      args: { clip_id: "gtr-verse", take: { id: OTHER_TAKE_ID, ...TAKE_ARGS } },
+      keys: [`take:${OTHER_TAKE_ID}|*`],
+    },
+    {
+      id: "take.set_offset",
+      args: { clip_id: "gtr-verse", take_id: TAKE_ID, offset_frames: 960, compensated: true },
+      keys: [`take:${TAKE_ID}|compensated`, `take:${TAKE_ID}|offset_frames`],
+    },
+    {
+      id: "take.keep",
+      args: { clip_id: "gtr-verse", take_id: OTHER_TAKE_ID },
+      keys: [`${au}|comp`],
+    },
+    {
+      id: "clip.set_comp",
+      args: {
+        clip_id: "gtr-verse",
+        segments: [
+          { take_id: TAKE_ID, from_beat: 0, to_beat: 4 },
+          { take_id: OTHER_TAKE_ID, from_beat: 4, to_beat: 8 },
+        ],
+      },
+      keys: [`${au}|comp`],
+    },
+    {
+      id: "take.discard",
+      args: { clip_id: "gtr-verse", take_id: OTHER_TAKE_ID },
+      keys: [`${au}|comp`, `take:${OTHER_TAKE_ID}|discarded`],
+    },
+    {
+      id: "take.restore",
+      args: { clip_id: "gtr-verse", take_id: OTHER_TAKE_ID },
+      keys: [`take:${OTHER_TAKE_ID}|discarded`],
+    },
     { id: "clip.remove", args: { clip_id: clipId }, keys: [`${cl}|*`] },
     { id: "scene.remove", args: { scene_id: chorus }, keys: [`scene:${chorus}|*`] },
     { id: "track.remove", args: { track_id: "drums" }, keys: ["track:drums|*"] },
   ];
 
-  // The list covers the whole 1a contract: a new command cannot slip in
-  // without the expected key set being written down.
+  // The list covers the whole contract: a new command cannot slip in without
+  // the expected key set being written down.
   assert.deepEqual([...new Set(cases.map((entry) => entry.id))].sort(), COMMAND_IDS);
 
   for (const { id, args, keys } of cases) {

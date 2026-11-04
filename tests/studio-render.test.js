@@ -16,7 +16,7 @@ import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
 import { renderSong, createRenderer } from "../bundles/studio/server/render.js";
 import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js";
-import { encodeWav24 } from "../bundles/studio/server/wav.js";
+import { decodeWav, encodeWav24 } from "../bundles/studio/server/wav.js";
 
 const SAMPLE_RATE = 48000;
 
@@ -95,15 +95,20 @@ function fakeDb({ prefix = PREFIX, failInsert = false } = {}) {
   };
 }
 
-/** An S3 client that records what it was asked to do. */
+/** An S3 client that records what it was asked to do, and serves the objects a
+ * test puts in `objects` (a take a render has to read back). */
 function fakeStorage() {
   const uploads = [];
   const deleted = [];
   const urls = [];
+  const objects = new Map();
+  const gets = [];
   return {
     uploads,
     deleted,
     urls,
+    objects,
+    gets,
     async uploadObject(key, data, options) {
       uploads.push({ key, data, options });
     },
@@ -113,6 +118,22 @@ function fakeStorage() {
     },
     async deleteObject(key, bucket) {
       deleted.push({ key, bucket });
+    },
+    async getObject(key, options) {
+      gets.push({ key, options });
+      const bytes = objects.get(key);
+      if (!bytes) {
+        const error = new Error(`The specified key does not exist: ${key}`);
+        error.code = "NoSuchKey";
+        throw error;
+      }
+      return {
+        stat: { size: bytes.length, metaData: {} },
+        // An async iterable, the shape minio's readable stream is.
+        stream: (async function* streamOnce() {
+          yield bytes;
+        })(),
+      };
     },
   };
 }
@@ -171,6 +192,118 @@ function oneTrackSong() {
 /** @returns {object} a song with nothing in it at all. */
 function emptySong() {
   return { meta: { title: "Nothing yet", bpm: 120, meter: [4, 4], key: "C major" }, tracks: [], scenes: [], clips: {} };
+}
+
+// --- takes ------------------------------------------------------------------
+
+/** A take id: the UUID a recording client generates (spec §5.7). */
+const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
+
+/** A second take, for the scene that is not launched. */
+const OTHER_TAKE_ID = "0c9c3d2a-1b4e-4f6a-8d7c-5e4f3a2b1c0d";
+
+/** The silence a test take carries before its signal, in frames (50 ms). */
+const TAKE_LEAD_FRAMES = 2400;
+
+/** The level of the signal a test take holds after its lead-in. */
+const TAKE_LEVEL = 0.5;
+
+/**
+ * The key a take of one song is stored at: the song's project prefix, then
+ * `studio/<song_id>/takes/<take_id>.wav`.
+ * @param {string} takeId
+ * @param {{prefix?: string, songId?: string}} [options]
+ * @returns {string}
+ */
+function takeKey(takeId, { prefix = PREFIX, songId = "song-1" } = {}) {
+  return `${prefix}studio/${songId}/takes/${takeId}.wav`;
+}
+
+/**
+ * A 24-bit stereo take the wav encoder built: silence for `lead` frames, then a
+ * constant `level`. A step is a signal whose peak and whose first sounding
+ * frame are both exact, which is what the render checks below measure.
+ * @param {{lead?: number, level?: number, seconds?: number}} [options]
+ * @returns {Uint8Array}
+ */
+function takeWav({ lead = TAKE_LEAD_FRAMES, level = TAKE_LEVEL, seconds = 1 } = {}) {
+  const frames = Math.round(seconds * SAMPLE_RATE);
+  const left = new Float32Array(frames);
+  const right = new Float32Array(frames);
+  for (let frame = lead; frame < frames; frame += 1) {
+    left[frame] = level;
+    right[frame] = level;
+  }
+  return encodeWav24(left, right, SAMPLE_RATE);
+}
+
+/**
+ * A song whose one track is an audio track, with an audio clip and one take in
+ * each scene that is named.
+ * @param {Array<{scene_id: string, clip_id: string, take_id: string,
+ *                storage_key?: string, discarded?: boolean}>} parts
+ * @returns {object}
+ */
+function audioSong(parts) {
+  const clips = {};
+  const takes = {};
+  const scenes = [];
+  for (const part of parts) {
+    if (!scenes.some((scene) => scene.id === part.scene_id)) scenes.push({ id: part.scene_id, name: part.scene_id });
+    clips[part.clip_id] = {
+      id: part.clip_id,
+      track_id: "audio-1",
+      scene_id: part.scene_id,
+      name: part.clip_id,
+      length_bars: 1,
+      kind: "audio",
+      notes: [],
+      comp: [{ take_id: part.take_id, from_beat: 0, to_beat: 4 }],
+    };
+    takes[part.take_id] = {
+      id: part.take_id,
+      clip_id: part.clip_id,
+      storage_key: part.storage_key ?? takeKey(part.take_id),
+      rate: SAMPLE_RATE,
+      channels: 2,
+      frames: SAMPLE_RATE,
+      offset_frames: 0,
+      compensated: true,
+      bpm: 120,
+      recorded_at: "2026-11-03T12:00:00.000Z",
+      author_label: "the operator",
+      discarded: part.discarded === true,
+    };
+  }
+  return {
+    meta: { title: "Takes", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "audio-1",
+        name: "Guitar",
+        color: "#8FC1E8",
+        device: { engine: "audio" },
+        mute: false,
+        solo: false,
+        gain_db: 0,
+        pan: 0,
+        locked: false,
+      },
+    ],
+    scenes,
+    clips,
+    takes,
+  };
+}
+
+/**
+ * The peak a take's signal should reach in a render: the track mix is
+ * constant-power at pan 0, so one side gets 1/√2 of the take.
+ * @param {number} [level]
+ * @returns {number}
+ */
+function expectedMixedPeak(level = TAKE_LEVEL) {
+  return level * Math.SQRT1_2;
 }
 
 // --- loudness ---------------------------------------------------------------
@@ -515,4 +648,105 @@ test("a stored render is keyed, filed and audited the way the storage rail expec
   assert.equal(acl.audits[0].target, "song:song-1");
   assert.equal(acl.audits[0].actor_type, "local");
   assert.equal(acl.audits[0].project_id, PROJECT);
+});
+
+// --- renders with takes -----------------------------------------------------
+
+test("render of an audio clip includes its take", async () => {
+  const song = audioSong([{ scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID }]);
+  const take = decodeWav(takeWav());
+
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    takeAudio: async (asked) => {
+      assert.equal(asked.id, TAKE_ID);
+      return { rate: take.rate, channels: take.channels };
+    },
+  });
+
+  const expected = expectedMixedPeak();
+  const peak = peakOf(rendered.left, rendered.right);
+  assert.ok(Math.abs(peak - expected) <= expected * 0.01, `expected a peak of ${expected} ±1%, got ${peak}`);
+
+  // The take's own lead-in places its signal: the comp starts at beat 0, so
+  // the step lands exactly TAKE_LEAD_FRAMES into the render.
+  const firstSounding = rendered.left.findIndex((sample) => Math.abs(sample) > 0.001);
+  assert.ok(
+    Math.abs(firstSounding - TAKE_LEAD_FRAMES) <= 1,
+    `expected the take to sound from frame ${TAKE_LEAD_FRAMES}, it sounded from ${firstSounding}`,
+  );
+});
+
+test("render refuses a take key outside the song prefix", async () => {
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({ db, storage, acl, maxSeconds: 300, now: () => CLOCK });
+
+  // The take names another project's prefix, and that object really is there:
+  // the render must refuse the key rather than read it.
+  const outside = takeKey(TAKE_ID, { prefix: "projects/8/" });
+  storage.objects.set(outside, takeWav());
+
+  await assert.rejects(
+    renderer.render({
+      song_id: "song-1",
+      project_id: PROJECT,
+      snapshot: audioSong([
+        { scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID, storage_key: outside },
+      ]),
+      scene_id: "scene-1",
+      seconds: 1,
+    }),
+    { message: `Take ${TAKE_ID} is not stored where Studio keeps this song's takes.` },
+  );
+
+  assert.equal(storage.gets.length, 0, "nothing outside the song's own takes is read");
+  assert.equal(storage.uploads.length, 0, "nothing is rendered or uploaded");
+  assert.equal(acl.audits.length, 0, "a refused render is not audited");
+});
+
+test("render with a missing take object names the take", async () => {
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({ db, storage, acl, maxSeconds: 300, now: () => CLOCK });
+
+  await assert.rejects(
+    renderer.render({
+      song_id: "song-1",
+      project_id: PROJECT,
+      snapshot: audioSong([{ scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID }]),
+      scene_id: "scene-1",
+      seconds: 1,
+    }),
+    new RegExp(`Take ${TAKE_ID} could not be loaded for this render`),
+  );
+
+  assert.equal(storage.gets.length, 1, "the take's own key was read");
+  assert.equal(storage.gets[0].key, takeKey(TAKE_ID));
+  assert.equal(storage.uploads.length, 0, "nothing is uploaded");
+});
+
+test("render loads only the takes the launched scene uses", async () => {
+  const song = audioSong([
+    { scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID },
+    { scene_id: "scene-2", clip_id: "clip-2", take_id: OTHER_TAKE_ID },
+  ]);
+
+  const asked = [];
+  const rendered = await renderSong(song, {
+    scene_id: "scene-2",
+    seconds: 1,
+    takeAudio: async (take) => {
+      asked.push(take.id);
+      return { rate: SAMPLE_RATE, channels: decodeWav(takeWav()).channels };
+    },
+  });
+
+  assert.deepEqual(asked, [OTHER_TAKE_ID], "only the launched scene's take is read");
+  const peak = peakOf(rendered.left, rendered.right);
+  const expected = expectedMixedPeak();
+  assert.ok(Math.abs(peak - expected) <= expected * 0.01, `expected a peak of ${expected} ±1%, got ${peak}`);
 });

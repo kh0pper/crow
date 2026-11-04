@@ -34,6 +34,18 @@
  * worklet thread by hand (`startRendering()` is what normally releases it, and
  * a leaked worklet would keep the process alive).
  *
+ * ## Takes
+ *
+ * An audio clip plays recorded takes (see `server/commands/takes.js`), and
+ * those are WAV files in storage, not part of the song document. A render
+ * therefore has to load them before it starts: `renderSong()` works out which
+ * takes the launch can hear — every take in the comp of the audio clips the
+ * scene (or the clip) plays, discarded ones aside — and asks `options.takeAudio`
+ * for each one's decoded PCM. `createRenderer()` builds that function from the
+ * storage client, refusing any take whose key is not exactly under the song's
+ * own `studio/<song_id>/takes/` prefix: a render may read nothing of a song but
+ * that song's own recordings.
+ *
  * ## Renders are serialized, and there is no timeout
  *
  * Every render of one renderer runs alone: the queue holds one running job and
@@ -51,7 +63,7 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { encodeWav24 } from "./wav.js";
+import { decodeWav, encodeWav24 } from "./wav.js";
 import { integratedLufs, truePeakDb } from "./loudness.js";
 
 /** The bundle's own dependency: the offline renderer and the worklet host. */
@@ -99,6 +111,16 @@ const QUEUE_FULL_MESSAGE = "The render queue is full; try again when the current
 /** The longest file-name stem a render may carry (before `.wav`). */
 const MAX_NAME_LENGTH = 60;
 
+/**
+ * The most samples one take may hold (1200 s of 48 kHz stereo), the cap
+ * `server/commands/takes.js` and the upload route enforce. A render refuses a
+ * file bigger than this rather than reading it into memory.
+ */
+const MAX_TAKE_SAMPLES = 115200000;
+
+/** The largest a take's WAV file can be: its 44-byte header plus 3 bytes a sample. */
+const MAX_TAKE_BYTES = 44 + MAX_TAKE_SAMPLES * 3;
+
 /** The asset map handed to `engine-client.create()`, read once per process. */
 let cachedAssets = null;
 
@@ -114,9 +136,19 @@ let cachedReleaseSymbol;
  * dashboard's first scene button does — and a song with no clips at all renders
  * the requested length of silence rather than throwing.
  *
+ * Before the render starts, the takes the launch can hear are loaded into the
+ * engine through `options.takeAudio`, so a song with recorded audio renders as
+ * it sounds rather than as silence. A take that cannot be read stops the render
+ * with its id in the sentence (`Take <id> could not be loaded for this
+ * render: …`): a render that quietly dropped a performance would be a lie.
+ *
  * @param {object} snapshot the song as the hub's `snapshot()` returns it
  * @param {{scene_id?: string|null, clip_id?: string|null, seconds?: number,
- *          sampleRate?: number}} [options]
+ *          sampleRate?: number,
+ *          takeAudio?: (take: object) => Promise<{rate: number,
+ *            channels: Float32Array[]}|null>}} [options]
+ *   `takeAudio` reads and decodes one take's WAV; it is only called for takes
+ *   the render can hear, and only when the song has any
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number,
  *                    seconds: number}>} the rendered stereo channels
  */
@@ -140,6 +172,7 @@ export async function renderSong(snapshot, options = {}) {
     const launch = pickLaunch(snapshot, scene_id, clip_id);
     if (launch.scene) engine.launchScene(launch.scene);
     if (launch.clip) engine.launchClip(launch.clip);
+    await loadTakes(engine, snapshot, launch, options.takeAudio);
     engine.play();
     engine.node.connect(context.destination);
     // Without this the render can begin before the song reaches the processor.
@@ -171,8 +204,11 @@ export async function renderSong(snapshot, options = {}) {
  *
  * @param {object} options
  * @param {object} options.db a libsql-compatible client (`execute({sql, args})`)
- * @param {{uploadObject: Function, getPresignedUrl: Function, deleteObject: Function}} options.storage
- *   the S3 client's three calls, injected so this module imports no app code
+ * @param {{uploadObject: Function, getPresignedUrl: Function, deleteObject: Function,
+ *          getObject?: Function}} options.storage
+ *   the S3 client's calls, injected so this module imports no app code;
+ *   `getObject(key, {bucket})` (returning `{stream, stat}`) is what a render
+ *   plays recorded takes through
  * @param {{assertLocalCapability: Function, appendAudit: Function}} options.acl
  *   the project ACL, injected for the same reason
  * @param {number} [options.maxSeconds] the longest render allowed; defaults to
@@ -265,7 +301,11 @@ export function createRenderer({
     await acl.assertLocalCapability(db, project_id, "write_files");
     await acquire();
     try {
-      const audio = await renderAudio(snapshot, { scene_id, clip_id, seconds: span });
+      // The same prefix both puts the render and finds the song's takes; it is
+      // read once, before anything is rendered.
+      const prefix = await storagePrefixFor(db, project_id);
+      const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
+      const audio = await renderAudio(snapshot, { scene_id, clip_id, seconds: span, takeAudio });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
       const renderedSeconds = audio.seconds;
       const lufs = integratedLufs(audio.left, audio.right, rate);
@@ -277,7 +317,6 @@ export function createRenderer({
       audio.left = null;
       audio.right = null;
 
-      const prefix = await storagePrefixFor(db, project_id);
       const stem = renderName(snapshot, { scene_id, clip_id });
       const key = `${prefix}studio/${song_id}/${timestampOf(now)}-${stem}.wav`;
 
@@ -351,6 +390,186 @@ function checkSeconds(seconds, longest) {
     throw new Error(`A render can be at most ${longest} seconds long.`);
   }
   return value;
+}
+
+/**
+ * Hand the engine every take the launched scene (or clip) can hear.
+ *
+ * The engine plays a comp's segments by take id, so a take that was never
+ * loaded is silence; loading them all before `flush()` is what makes an audio
+ * clip render as it sounds. `takeAudio` is the caller's reader: it takes one
+ * take of the snapshot and answers its decoded PCM, or `null` when there is
+ * none. Its own refusals (a take stored outside the song's prefix) are passed
+ * on unchanged, because they name what the operator has to fix.
+ *
+ * @param {object} engine the engine `studioEngine.create()` returned
+ * @param {object} snapshot the song
+ * @param {{scene?: string, clip?: string}} launch what the render launches
+ * @param {Function|undefined} takeAudio the caller's reader
+ * @returns {Promise<void>}
+ */
+async function loadTakes(engine, snapshot, launch, takeAudio) {
+  for (const take of takesToLoad(snapshot, launch)) {
+    if (typeof takeAudio !== "function") {
+      throw new Error(takeLoadFailure(take.id, "this render has no way to read takes"));
+    }
+    const audio = await takeAudio(take);
+    if (!audio || !Array.isArray(audio.channels) || audio.channels.length === 0 || !(Number(audio.rate) > 0)) {
+      throw new Error(takeLoadFailure(take.id, "its audio was not found"));
+    }
+    await engine.loadAudio(take.id, audio.channels, Number(audio.rate));
+  }
+}
+
+/**
+ * The takes a render can hear: every take named by the comp of an audio clip
+ * the launch plays, without the discarded ones, each once.
+ *
+ * A scene launch plays that scene's clips, a clip launch just that clip, and a
+ * render that launches neither (silence) hears no takes at all.
+ *
+ * @param {object} snapshot the song
+ * @param {{scene?: string, clip?: string}} launch what the render launches
+ * @returns {object[]} the takes, as the snapshot holds them
+ */
+function takesToLoad(snapshot, launch) {
+  const clips = snapshot && snapshot.clips && typeof snapshot.clips === "object" ? snapshot.clips : {};
+  const takes = snapshot && snapshot.takes && typeof snapshot.takes === "object" ? snapshot.takes : {};
+
+  const playing = [];
+  if (launch.clip) {
+    const clip = clips[launch.clip];
+    if (clip) playing.push(clip);
+  } else if (launch.scene) {
+    for (const clip of Object.values(clips)) {
+      if (clip && clip.scene_id === launch.scene) playing.push(clip);
+    }
+  }
+
+  const wanted = [];
+  const seen = new Set();
+  for (const clip of playing) {
+    if (!clip || clip.kind !== "audio" || !Array.isArray(clip.comp)) continue;
+    for (const segment of clip.comp) {
+      const id = segment && typeof segment.take_id === "string" ? segment.take_id : "";
+      if (id === "" || seen.has(id)) continue;
+      seen.add(id);
+      const take = takes[id];
+      // A discarded take is out of the song as far as its sound goes, even if
+      // a comp still names it (the document refuses that, a mid-edit song may
+      // not have caught up yet).
+      if (!take || take.discarded === true) continue;
+      wanted.push(take);
+    }
+  }
+  return wanted;
+}
+
+/**
+ * The one sentence a take that could not be read fails a render with.
+ * @param {string} id the take's id
+ * @param {unknown} reason why, in plain English
+ * @returns {string}
+ */
+function takeLoadFailure(id, reason) {
+  const text = String(reason ?? "").trim().replace(/[.\s]+$/, "");
+  return `Take ${id} could not be loaded for this render: ${text === "" ? "the file could not be read" : text}.`;
+}
+
+/**
+ * Read one take's WAV back out of storage and decode it, refusing anything
+ * that is not exactly where Studio keeps this song's takes.
+ *
+ * The key is built here, from the song's project prefix and the song's own id,
+ * and the take's `storage_key` has to equal it: a document that named some
+ * other object — another song's take, a render, a file outside the project —
+ * is refused by name rather than read. The file is read whole, but only after
+ * its size is known, and a file past the take cap is refused unread.
+ *
+ * @param {object} options
+ * @param {object} options.storage the S3 client (needs `getObject`)
+ * @param {string} options.bucket the bucket takes live in
+ * @param {string} options.prefix the song's project storage prefix
+ * @param {string} options.songId the song the render is of
+ * @param {object} options.take the take, as the snapshot holds it
+ * @returns {Promise<{rate: number, channels: Float32Array[]}>}
+ */
+async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
+  const id = take && typeof take.id === "string" ? take.id : "";
+  const key = `${prefix}studio/${songId}/takes/${id}.wav`;
+  if (!take || take.storage_key !== key) {
+    throw new Error(`Take ${id} is not stored where Studio keeps this song's takes.`);
+  }
+  if (!storage || typeof storage.getObject !== "function") {
+    throw new Error(takeLoadFailure(id, "this Studio cannot read files from storage"));
+  }
+
+  let opened;
+  try {
+    opened = await storage.getObject(key, { bucket });
+  } catch (error) {
+    throw new Error(takeLoadFailure(id, reasonText(error)));
+  }
+
+  const size = Number(opened && opened.stat ? opened.stat.size : NaN);
+  if (Number.isFinite(size) && size > MAX_TAKE_BYTES) {
+    throw new Error(takeLoadFailure(id, "its file is larger than a take can be"));
+  }
+
+  let bytes;
+  try {
+    bytes = await streamBytes(opened && opened.stream);
+  } catch (error) {
+    throw new Error(takeLoadFailure(id, reasonText(error)));
+  }
+  if (bytes.length > MAX_TAKE_BYTES) {
+    throw new Error(takeLoadFailure(id, "its file is larger than a take can be"));
+  }
+
+  try {
+    return decodeWav(bytes);
+  } catch (error) {
+    throw new Error(takeLoadFailure(id, reasonText(error)));
+  }
+}
+
+/**
+ * Read a whole object stream into one buffer.
+ *
+ * The stream is a Node `Readable` from minio, or any other async iterable; a
+ * web `ReadableStream` (which answers `getReader()`) is read the same way. It
+ * is not assembled by any other means, so a caller's fake storage only has to
+ * hand over something iterable.
+ * @param {object} stream the object's stream
+ * @returns {Promise<Buffer>}
+ */
+async function streamBytes(stream) {
+  if (!stream || typeof stream !== "object") throw new Error("storage answered with no file");
+  const chunks = [];
+  if (typeof stream.getReader === "function") {
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
+  }
+  if (typeof stream[Symbol.asyncIterator] === "function") {
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks);
+  }
+  throw new Error("storage answered with something that is not a stream");
+}
+
+/**
+ * An error's own sentence, for a take that could not be read.
+ * @param {unknown} error
+ * @returns {string}
+ */
+function reasonText(error) {
+  const message = error && typeof error.message === "string" ? error.message.trim() : "";
+  return message === "" ? "storage could not read it" : message;
 }
 
 /**

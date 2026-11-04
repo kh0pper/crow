@@ -76,6 +76,16 @@ function brief(events) {
   return events.map((event) => ({ frame: event.frame, track_id: event.track_id, type: event.type, p: event.p }));
 }
 
+/**
+ * The launches one block applied, copied: the sequencer reuses the array, so a
+ * later block would otherwise overwrite what a test is holding.
+ * @param {object[]} events
+ * @returns {object[]}
+ */
+function launchesOf(events) {
+  return (events.launches || []).map((launch) => ({ ...launch }));
+}
+
 /** Run blocks of `size` frames from `from`, with events moved to absolute frames. */
 function collectFrom(seq, from, total, size) {
   const out = [];
@@ -577,4 +587,176 @@ test("a launch asked for on a bar boundary takes that boundary", () => {
   assert.deepEqual(brief(odd.block(0, barFrames)), []);
   odd.launchScene("s1");
   assert.deepEqual(brief(odd.block(barFrames, 128)), [{ frame: 0, track_id: "t1", type: "on", p: 60 }]);
+});
+
+test("launchScene queued mid-bar is reported at the next bar's frame offset", () => {
+  // 120 bpm at 48 kHz: a bar is exactly 96,000 frames, so the boundary is a
+  // whole frame and the report is that frame minus the block's first frame.
+  const even = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    }),
+  );
+  even.play();
+  assert.deepEqual(launchesOf(even.block(0, 10000)), [], "nothing is launched yet");
+
+  even.launchScene("s1");
+  assert.deepEqual(launchesOf(even.block(10000, FRAMES_PER_BAR - 10000)), [], "the launch waits for the bar");
+  assert.deepEqual(launchesOf(even.block(FRAMES_PER_BAR, 128)), [
+    { track_id: "t1", clip_id: "c1", scene_id: "s1", bar: 1, frame: 0 },
+  ]);
+
+  // 97 bpm at 44.1 kHz: a bar is 109,113.40… frames, so the boundary is a
+  // rounded position part-way into a block and has to be reported there.
+  const barFrames = (44100 * 60 * 4) / 97;
+  const boundary = Math.round(barFrames);
+  assert.notEqual(boundary, barFrames, "this tempo must leave a fractional bar");
+
+  const odd = StudioSequencer.create({ sampleRate: 44100 });
+  odd.setSong(
+    song({
+      bpm: 97,
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    }),
+  );
+  odd.play();
+  odd.block(0, 50000);
+  odd.launchScene("s1");
+
+  const offset = boundary - 50000;
+  const block = odd.block(50000, 60000);
+  assert.deepEqual(launchesOf(block), [
+    { track_id: "t1", clip_id: "c1", scene_id: "s1", bar: 1, frame: offset },
+  ]);
+  assert.ok(offset > 0 && offset < 60000, "the boundary has to be inside the block, not at its edge");
+});
+
+test("nextBarFrame matches the frame of the following bar while playing", () => {
+  const idle = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    }),
+  );
+  // Stopped: bar 0 starts at the next block's first frame.
+  assert.deepEqual(idle.nextBarFrame(), { bar: 0, beat: 0, frame: 0 });
+  idle.block(0, 128);
+  assert.deepEqual(idle.nextBarFrame(), { bar: 0, beat: 0, frame: 128 });
+
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    }),
+  );
+  seq.play();
+  seq.block(0, FRAMES_PER_BEAT);
+  const next = seq.nextBarFrame();
+  assert.deepEqual(next, { bar: 1, beat: 4, frame: FRAMES_PER_BAR });
+
+  // A launch queued mid-bar is reported at exactly the frame the helper names.
+  seq.launchScene("s1");
+  let at = FRAMES_PER_BEAT;
+  let reported = null;
+  while (reported === null && at < FRAMES_PER_BAR * 2) {
+    const frames = 4096;
+    const launches = launchesOf(seq.block(at, frames));
+    if (launches.length > 0) reported = { ...launches[0], frame: at + launches[0].frame };
+    at += frames;
+  }
+  assert.deepEqual(reported, {
+    track_id: "t1",
+    clip_id: "c1",
+    scene_id: "s1",
+    bar: next.bar,
+    frame: next.frame,
+  });
+
+  // The same at a fractional frames-per-beat, where the boundary is a rounded
+  // position and the helper could drift a frame if it rounded differently.
+  const odd = StudioSequencer.create({ sampleRate: 44100 });
+  odd.setSong(
+    song({
+      bpm: 97,
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    }),
+  );
+  odd.play();
+  odd.block(0, 12345);
+  const oddBoundary = Math.round((44100 * 60 * 4) / 97);
+  assert.deepEqual(odd.nextBarFrame(), { bar: 1, beat: 4, frame: oddBoundary }, "the frame must be the rounded boundary");
+});
+
+test("stopTrack is reported with clip_id null", () => {
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    }),
+  );
+  seq.launchScene("s1");
+  seq.play();
+
+  // Launched before the transport ran, so it takes effect in the block that
+  // starts the transport, at bar 0.
+  assert.deepEqual(launchesOf(seq.block(0, 1000)), [
+    { track_id: "t1", clip_id: "c1", scene_id: "s1", bar: 0, frame: 0 },
+  ]);
+
+  seq.stopTrack("t1");
+  assert.deepEqual(launchesOf(seq.block(1000, FRAMES_PER_BAR - 1000)), [], "the stop waits for the bar");
+  // A stop has no clip of its own: clip_id is null, and the scene is the one
+  // of the clip it replaced.
+  assert.deepEqual(launchesOf(seq.block(FRAMES_PER_BAR, 128)), [
+    { track_id: "t1", clip_id: null, scene_id: "s1", bar: 1, frame: 0 },
+  ]);
+});
+
+test("a scene launch reports every track in its row, empty slots included", () => {
+  const seq = sequencer(
+    song({
+      // The third track has no clip in either scene: a scene launch still
+      // reports it (as a stop), so a recording armed on an empty slot starts.
+      tracks: [track("t1"), track("t2"), track("t3")],
+      scenes: [scene("s1"), scene("s2")],
+      clips: [
+        clip("c1", "t1", "s1", 1, [note(0, 1, 60)]),
+        clip("c2", "t2", "s1", 1, [note(0, 1, 64)]),
+        clip("c3", "t1", "s2", 1, [note(0, 2, 72)]),
+      ],
+    }),
+  );
+
+  seq.launchScene("s1");
+  seq.play();
+  assert.deepEqual(launchesOf(seq.block(0, 128)), [
+    { track_id: "t1", clip_id: "c1", scene_id: "s1", bar: 0, frame: 0 },
+    { track_id: "t2", clip_id: "c2", scene_id: "s1", bar: 0, frame: 0 },
+    { track_id: "t3", clip_id: null, scene_id: "s1", bar: 0, frame: 0 },
+  ]);
+
+  // Scene 2 changes both: t1 gets its other clip, t2 stops. Every entry
+  // carries the scene that was launched, and the stop carries null as its
+  // clip.
+  seq.launchScene("s2");
+  assert.deepEqual(launchesOf(seq.block(128, FRAMES_PER_BAR - 128)), [], "the launch waits for the bar");
+  assert.deepEqual(launchesOf(seq.block(FRAMES_PER_BAR, 128)), [
+    { track_id: "t1", clip_id: "c3", scene_id: "s2", bar: 1, frame: 0 },
+    { track_id: "t2", clip_id: null, scene_id: "s2", bar: 1, frame: 0 },
+    { track_id: "t3", clip_id: null, scene_id: "s2", bar: 1, frame: 0 },
+  ]);
+
+  // Launching the scene that is already playing is still a launch of that
+  // row, so every track is reported again at the next bar.
+  seq.launchScene("s2");
+  assert.equal(launchesOf(seq.block(FRAMES_PER_BAR + 128, FRAMES_PER_BAR * 2)).length, 3);
 });

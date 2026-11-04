@@ -14,9 +14,15 @@
  * the same table for the song project's bot (`projectBotOf` below).
  *
  * Request bodies are left to the gateway: its global JSON parser (1 MB cap)
- * runs before the panel router, so nothing here adds one.
+ * runs before the panel router, so nothing here adds one — with one exception.
+ * A take chunk is 1 MiB of raw 24-bit PCM, which the JSON parser leaves alone,
+ * so the take upload service is wired here too: its storage adapter
+ * (`server/take-storage.js`, over `servers/storage/s3-client.js`), the song
+ * lookup on the gateway's client, its staging directory under CROW_HOME, and
+ * an `express.raw` parser that the web layer applies to the chunk route alone
+ * (its errors become JSON there).
  */
-import { Router } from "express";
+import { Router, raw } from "express";
 import { WebSocketServer } from "ws";
 import { existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -50,6 +56,20 @@ const { isVoiceBotId } = await appImport("servers/gateway/voice/crow-voice.js");
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
 const { createStudioWeb, ensureAgentToken } = await bImport("server/web.js");
+const { createTakeUploads } = await bImport("server/takes-upload.js");
+// The take storage adapter: the instance's object storage, narrowed to the
+// calls the uploads and the audio route make. It is built whether or not
+// storage is configured yet, and it asks on every call, so a Shared Storage
+// setting saved after boot works without a restart.
+const { createTakeStorage } = await bImport("server/take-storage.js");
+// The song table: a take's project is its song's project, never a caller's
+// word for it. The studio tables are created by the hub, so this is the same
+// function the hub itself reads a song row with.
+const { getSongRow } = await bImport("server/store.js");
+// The instance's object storage, wired to the database's Shared Storage
+// settings at boot by the gateway. A failure to load it must not stop the
+// panel: takes still stage on disk and only the upload to the bucket refuses.
+const s3 = await appImport("servers/storage/s3-client.js").catch(() => null);
 
 const db = createDbClient();
 const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
@@ -63,6 +83,75 @@ const hub = createHub({
   onBroadcast: (song_id, payload) => web?.broadcast(song_id, payload),
 });
 
+/** The one promise that makes sure the studio tables exist (see `ensureStudioTables`). */
+let studioTablesReady = null;
+
+/**
+ * The finished-take storage the audio route reads through and the uploads write
+ * through. Built unconditionally: `take-storage.js` decides availability per
+ * call, so an instance whose Shared Storage is configured later (the Nest's
+ * save handler calls `resetStorageClient()`) starts using it at once, and one
+ * with no storage at all answers 503 with one fixed sentence. When
+ * `servers/storage/s3-client.js` itself cannot be loaded, `s3` is null and the
+ * same adapter refuses every call, which is the same 503.
+ */
+const takeStorage = createTakeStorage({ client: s3, db });
+
+/**
+ * The studio tables are created by the hub before its own first use, and a
+ * take's song lookup reads `studio_songs` directly, so an upload that arrives
+ * before any other Studio call makes sure of them first. One attempt per
+ * process; a failure is retried by the next call.
+ * @returns {Promise<void>}
+ */
+function ensureStudioTables() {
+  if (!studioTablesReady) {
+    studioTablesReady = Promise.resolve()
+      .then(() => hub.listSongs({}))
+      .then(() => undefined)
+      .catch((error) => {
+        studioTablesReady = null;
+        throw error;
+      });
+  }
+  return studioTablesReady;
+}
+
+/**
+ * The take upload service: staging under `<CROW_HOME>/studio-staging`, the
+ * streamed WAV into project storage, the internal `take.add` through the hub.
+ * Null when it cannot be built, which makes every take route answer 503 — but
+ * staging works even with no storage, so a take recorded now is not lost.
+ */
+let takeUploads = null;
+try {
+  takeUploads = createTakeUploads({
+    stagingDir: join(crowHome, "studio-staging"),
+    storage: takeStorage,
+    db,
+    acl: projectAcl,
+    hub,
+    // A take is filed in its song's project, read on the gateway's own client
+    // through the function the hub itself reads a song row with.
+    songs: {
+      async projectOf(songId) {
+        await ensureStudioTables();
+        const row = await getSongRow(db, String(songId));
+        return row ? Number(row.project_id) : null;
+      },
+    },
+    now: () => Date.now(),
+  });
+  // Unfinished uploads nobody came back for are dropped once, at boot: the
+  // panel re-begins and re-sends from its own IndexedDB copy when that happens.
+  takeUploads.sweepStale().catch((error) => {
+    console.warn("[studio] take staging sweep failed:", error?.message || error);
+  });
+} catch (error) {
+  takeUploads = null;
+  console.warn("[studio] takes cannot be recorded on this instance:", error?.message || error);
+}
+
 web = createStudioWeb({
   hub,
   Router,
@@ -70,6 +159,17 @@ web = createStudioWeb({
   auth: { isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted, classifyPeer },
   crowHome,
   bundleDir: BUNDLE_DIR,
+  // The take upload routes (staging, the streamed WAV, the internal take.add)
+  // and the object storage the finished take is streamed back from. A chunk's
+  // raw body is the one body the gateway's JSON parser does not read, so the
+  // byte parser is built here too, and its errors become JSON in the web layer.
+  takeUploads,
+  takeStorage,
+  // The song's own row for one id, through the store's single-row lookup (the
+  // same function the hub reads a song with): the audio route needs one song's
+  // project, never the whole catalogue.
+  songRowOf: (songId) => getSongRow(db, String(songId)),
+  rawBody: (limit) => raw({ type: () => true, limit, inflate: false }),
   // Which songs a Crow bot may see. A bot's home project is the one its
   // `pi_bot_defs` row names — the same rule the Board applies to a bot's cards
   // — read on the gateway's own client. Without a project it sees no song.

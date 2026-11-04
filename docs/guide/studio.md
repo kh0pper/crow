@@ -52,6 +52,23 @@ A song page carries an **Ask the agent** box. It opens a chat with the song proj
 
 The bot can render the song, one scene, or one clip through the same engine your browser plays, and it hears the result through that render. Each render is written into the project's storage as a WAV and reports its **integrated loudness** (LUFS) and **true peak** (dBTP), so a mix can be compared by numbers rather than by memory. Renders are limited in length by the instance's setting (see below).
 
+## Recording takes
+
+Add an **audio track** (**+ Audio track**) to record a guitar, a voice or anything else through your audio interface.
+
+1. **Calibrate once per interface.** Connect a cable from an output of your interface to an input, open the track's latency chip (**Not calibrated — Calibrate…**) and press Start. Studio plays a few clicks and measures how late they come back, then uses that delay to line every take up with the song. A take recorded without calibration is marked *uncompensated*; calibrate later and ask the bot to correct its timing.
+2. **Arm** the audio track and pick its input. Studio asks your browser for the raw input, with echo cancellation, noise suppression and auto gain turned off, and warns you if the browser keeps any of them on.
+3. Press **Record**, then launch a scene. Recording starts on that scene's first bar (or on the next bar if the song is already playing). An empty slot gets an audio clip as long as the scene's longest clip.
+4. Press **Stop**. The take ends at the end of the loop pass you are in. If the clip looped while you played, **each pass becomes its own take**.
+
+Hear yourself through your interface's **direct-monitor knob**: it has no delay. **Monitor through Studio** is there too, and tells you how late you would hear yourself.
+
+**Nothing is lost if the connection drops.** Every piece of a take is saved on this device first and then uploaded to the project's storage. A take recorded offline, or interrupted by a reload, uploads (or is recovered) the next time the song is open. Until then its row says so.
+
+**Takes and comps.** Select an audio clip to see its takes, newest first. **Keep** plays one take over the whole clip; **Discard** and **Restore** hide and bring back a take; drag across the comp bar with a take selected to use it for just that part (Shift snaps to a quarter beat). Every change is one undoable step. **Remove from this device** clears the downloaded take audio from this browser; it stays on Crow.
+
+**What the bot can do with takes.** It can list them, keep one, comp them, restore a discarded one and correct a take's timing, and it hears them in its renders. It can never record, add or discard a take, or remove a clip, track or scene that holds takes: those need you.
+
 ## Limits
 
 | Limit | Value | Setting |
@@ -63,6 +80,9 @@ The bot can render the song, one scene, or one clip through the same engine your
 | Render length | 300 s | `STUDIO_MAX_RENDER_SECONDS` |
 | Concurrent renders per MCP process | 1 running, up to 3 waiting, then refused | — |
 | Songs per project | 500 | — |
+| Take length | 1200 s of 48 kHz stereo (115,200,000 samples) | `STUDIO_MAX_TAKE_SECONDS` |
+| Takes per clip | 64 | — |
+| Recording channels and rates | 1 or 2 channels; 44.1, 48, 88.2 or 96 kHz | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
 

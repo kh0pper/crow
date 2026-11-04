@@ -54,6 +54,7 @@ const { kWorkletRelease } = await import(pathToFileURL(SYMBOLS_FILE).href);
 /** The engine sources, read from the bundle exactly as a Node caller would. */
 const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
+  "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
@@ -244,12 +245,14 @@ function hashChannels(left, right) {
 
 /**
  * Render one song offline in Node, the way the MCP renderer will: build the
- * engine, hand it the song, launch the scene, play, render.
+ * engine, hand it the takes it plays, hand it the song, launch the scene, play,
+ * render.
  * @param {object} song
- * @param {{seconds?: number, sampleRate?: number}} [options]
+ * @param {{seconds?: number, sampleRate?: number, audio?: object[]}} [options]
+ *   `audio` is one `{id, channels, rate}` per take to load
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
-async function renderSong(song, { seconds = 2, sampleRate = SAMPLE_RATE } = {}) {
+async function renderSong(song, { seconds = 2, sampleRate = SAMPLE_RATE, audio = [] } = {}) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
     length: Math.round(seconds * sampleRate),
@@ -259,6 +262,14 @@ async function renderSong(song, { seconds = 2, sampleRate = SAMPLE_RATE } = {}) 
   let rendered = false;
   try {
     engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    for (const take of audio) {
+      // A fresh copy per render: loadAudio transfers the buffers to the worklet.
+      await engine.loadAudio(
+        take.id,
+        take.channels.map((channel) => Float32Array.from(channel)),
+        take.rate,
+      );
+    }
     engine.setSong(song);
     engine.launchScene(song.scenes[0].id);
     engine.play();
@@ -533,6 +544,58 @@ test("a device that fails to build is not retried until its type changes", async
   }
 });
 
+test("launch report carries the context frame of the bar it took effect", async () => {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(0.25 * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  const launches = [];
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    engine.setSong(makeSong());
+    const unsubscribe = engine.onLaunch((launch) => launches.push(launch));
+    assert.equal(typeof unsubscribe, "function", "onLaunch has to return an unsubscribe function");
+
+    // The other half of a recorder's clock: nextBarFrame answers on the same
+    // one, and its round trip works before a single block has been rendered.
+    // Nothing has played yet, so bar 0 starts at the next block.
+    await engine.flush();
+    assert.deepEqual(await engine.nextBarFrame(), { frame: 0, bar: 0 });
+
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
+    await context.startRendering();
+    rendered = true;
+
+    assert.ok(await waitFor(() => launches.length > 0), "expected the launch to be reported");
+    assert.equal(launches.length, 1, `expected one report, got ${launches.length}: ${JSON.stringify(launches)}`);
+    // The scene was launched before the transport started, so it took effect at
+    // the transport's first frame: bar 0, at the block's first frame. The
+    // reported frame is the CONTEXT frame the processor saw in that block,
+    // which is 0 for a render that starts at frame 0 — exactly the number a
+    // recorder on this context would arm at. The offset arithmetic itself is
+    // pinned by the sequencer test `launchScene queued mid-bar is reported at
+    // the next bar's frame offset`.
+    assert.deepEqual(launches[0], {
+      track_id: "track-1",
+      clip_id: "clip-1",
+      scene_id: "scene-1",
+      bar: 0,
+      frame: 0,
+    });
+
+    unsubscribe();
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
 // --- the browser side -------------------------------------------------------
 
 /** The engine page: render the song, hash it, hand the hash back. */
@@ -561,6 +624,31 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderAudio = async function (song, takes, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  "  for (var t = 0; t < takes.length; t++) {",
+  "    var channels = takes[t].channels.map(function (list) { return Float32Array.from(list); });",
+  "    await engine.loadAudio(takes[t].id, channels, takes[t].rate);",
+  "  }",
+  "  engine.setSong(song);",
+  "  engine.launchScene(song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -569,6 +657,7 @@ const SERVED = {
   "/": ["text/html; charset=utf-8", () => PAGE],
   "/assets/engine-client.js": ["text/javascript; charset=utf-8", () => readFileSync(join(ENGINE_DIR, "engine-client.js"), "utf8")],
   "/assets/sequencer.js": ["text/javascript; charset=utf-8", () => ASSETS["sequencer.js"]],
+  "/assets/resample.js": ["text/javascript; charset=utf-8", () => ASSETS["resample.js"]],
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
@@ -745,6 +834,145 @@ test("parity: headless Chromium and node renders are bit-identical", async (t) =
       browser.hash,
       nodeHash,
       `Chromium and Node rendered different bytes over ${node.left.length * 2} samples`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
+test("audio clip renders bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  /** @param {number} frames @returns {Float32Array} 1/20000, 2/20000, … */
+  const first = new Float32Array(8000);
+  for (let at = 0; at < first.length; at += 1) first[at] = (at + 1) / 20000;
+  /** @param {number} frames @returns {Float32Array} a ramp the other way, so the two differ */
+  const second = new Float32Array(8000);
+  for (let at = 0; at < second.length; at += 1) second[at] = (second.length - at) / 30000;
+
+  // One SunVox track and one audio track: the mix has to combine a wasm
+  // engine's output with the PCM voices the same way in both hosts, and the
+  // comp boundary at beat 0.25 lands inside a block, so the 64-frame crossfade
+  // is part of what is hashed.
+  const song = {
+    meta: { title: "Audio parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "track-1",
+        name: "Lead",
+        color: "#E8C07A",
+        device: { engine: "sunvox", type: "Analog generator", params: {} },
+        mute: false,
+        solo: false,
+        gain_db: -3,
+        pan: -0.3,
+        locked: false,
+      },
+      {
+        id: "track-2",
+        name: "Guitar",
+        color: "#8FC1E8",
+        device: { engine: "audio" },
+        mute: false,
+        solo: false,
+        gain_db: -2,
+        pan: 0.5,
+        locked: false,
+      },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Lead",
+        length_bars: 1,
+        notes: [{ t: 0, d: 2, p: 60, v: 100 }],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "Guitar",
+        length_bars: 1,
+        kind: "audio",
+        notes: [],
+        comp: [
+          { take_id: "take-first", from_beat: 0, to_beat: 0.25 },
+          { take_id: "take-second", from_beat: 0.25, to_beat: 4 },
+        ],
+      },
+    },
+    takes: {
+      "take-first": {
+        id: "take-first",
+        clip_id: "clip-2",
+        storage_key: "studio/song-1/takes/take-first.wav",
+        rate: SAMPLE_RATE,
+        channels: 2,
+        frames: 8000,
+        offset_frames: 0,
+        compensated: false,
+        bpm: 120,
+        recorded_at: "2026-11-02T12:00:00.000Z",
+        author_label: "the operator",
+        discarded: false,
+      },
+      "take-second": {
+        id: "take-second",
+        clip_id: "clip-2",
+        storage_key: "studio/song-1/takes/take-second.wav",
+        rate: SAMPLE_RATE,
+        channels: 2,
+        frames: 8000,
+        offset_frames: 64,
+        compensated: true,
+        bpm: 120,
+        recorded_at: "2026-11-02T12:00:00.000Z",
+        author_label: "the operator",
+        discarded: false,
+      },
+    },
+  };
+
+  // Stereo takes, so a swapped channel would be caught, and a non-zero offset
+  // on the second one, so the client's scaling of it is compared too.
+  const audio = [
+    { id: "take-first", channels: [first, first.map((value) => value / 2)], rate: SAMPLE_RATE },
+    { id: "take-second", channels: [second, second.map((value) => value / 3)], rate: SAMPLE_RATE },
+  ];
+
+  const seconds = 0.5;
+  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE, audio });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node audio render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  // The page takes plain JSON, so the takes travel as number arrays.
+  const payload = audio.map((take) => ({
+    id: take.id,
+    rate: take.rate,
+    channels: take.channels.map((channel) => Array.from(channel)),
+  }));
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderAudio"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderAudio(${JSON.stringify(song)}, ${JSON.stringify(payload)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium audio render has to be audible, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of audio-clip render`,
     );
   } finally {
     tab.close();
