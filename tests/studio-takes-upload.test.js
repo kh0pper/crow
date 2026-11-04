@@ -154,18 +154,64 @@ function fakeAcl({ deny = false } = {}) {
 }
 
 /**
- * A session hub: `openSong` answers with the song's takes and tempo,
- * `runCommand` remembers what it was asked, answers a repeated `cmd_id` with
- * the result it gave the first time, and refuses a take id the song already has.
+ * A session hub: `openSong` answers with the song's takes, samples and pads,
+ * `runCommand` remembers what it was asked, answers a repeated `cmd_id` with the
+ * result it gave the first time, and refuses an id the song already has.
+ *
+ * `take.add`, `sample.add` and `pad.assign` behave the way the real commands do
+ * where these tests depend on it: an object is added once, and a pad points at
+ * the sample an assignment names.
  *
  * `unreadable` makes `openSong` throw, the way a database or a locked song can.
- * @param {{takes?: object, bpm?: number, refuse?: {code: string, error: string},
- *          unreadable?: boolean}} [options]
+ * @param {{takes?: object, samples?: object, pads?: object, bpm?: number,
+ *          refuse?: {code: string, error: string}, unreadable?: boolean}} [options]
  */
-function fakeHub({ takes = {}, bpm = 124, refuse = null, unreadable = false } = {}) {
+function fakeHub({ takes = {}, samples = {}, pads = {}, bpm = 124, refuse = null, unreadable = false } = {}) {
   const commands = [];
-  const state = { takes: { ...takes } };
+  const state = { takes: { ...takes }, samples: { ...samples }, pads: { ...pads } };
   const answers = new Map();
+
+  /** @returns {object} the result of one command, as the hub would report it */
+  function apply(request) {
+    if (refuse) return { ok: false, code: refuse.code, error: refuse.error };
+    if (request.command === "sample.add") {
+      const sample = request.args.sample;
+      if (state.samples[sample.id]) {
+        return {
+          ok: false,
+          code: "invalid",
+          error: `A sample with id "${sample.id}" already exists in this song.`,
+        };
+      }
+      state.samples[sample.id] = { ...sample };
+      return { ok: true, entry: { command: request.command }, snapshot_version: 2 };
+    }
+    if (request.command === "pad.assign") {
+      const args = request.args;
+      const key = `${args.track_id}/${args.bank_id}/${args.index}`;
+      const pad = state.pads[key];
+      if (!pad) return { ok: false, code: "not_found", error: "there is no such pad" };
+      if (!state.samples[args.sample_id]) {
+        return { ok: false, code: "not_found", error: "there is no such sample" };
+      }
+      pad.sample_id = args.sample_id;
+      return { ok: true, entry: { command: request.command }, snapshot_version: 3 };
+    }
+    if (state.takes[request.args.take.id]) {
+      return {
+        ok: false,
+        code: "invalid",
+        error: `A take with id "${request.args.take.id}" already exists in this song.`,
+      };
+    }
+    state.takes[request.args.take.id] = {
+      ...request.args.take,
+      clip_id: request.args.clip_id,
+      discarded: false,
+    };
+    return { ok: true, entry: { command: request.command }, snapshot_version: 2 };
+  }
+
   return {
     commands,
     state,
@@ -173,7 +219,13 @@ function fakeHub({ takes = {}, bpm = 124, refuse = null, unreadable = false } = 
       if (unreadable) throw new Error("the song's document could not be loaded");
       return {
         doc: null,
-        snapshot: { meta: { title: "Test song", bpm }, takes: state.takes, clips: {} },
+        snapshot: {
+          meta: { title: "Test song", bpm },
+          takes: state.takes,
+          samples: state.samples,
+          pads: state.pads,
+          clips: {},
+        },
         snapshot_version: 1,
       };
     },
@@ -181,23 +233,7 @@ function fakeHub({ takes = {}, bpm = 124, refuse = null, unreadable = false } = 
       commands.push(request);
       const seen = answers.get(request.cmd_id);
       if (seen) return seen;
-      let result;
-      if (refuse) {
-        result = { ok: false, code: refuse.code, error: refuse.error };
-      } else if (state.takes[request.args.take.id]) {
-        result = {
-          ok: false,
-          code: "invalid",
-          error: `A take with id "${request.args.take.id}" already exists in this song.`,
-        };
-      } else {
-        state.takes[request.args.take.id] = {
-          ...request.args.take,
-          clip_id: request.args.clip_id,
-          discarded: false,
-        };
-        result = { ok: true, entry: { command: request.command }, snapshot_version: 2 };
-      }
+      const result = apply(request);
       answers.set(request.cmd_id, result);
       return result;
     },
@@ -251,6 +287,41 @@ function beginRequest(overrides = {}) {
     author: AUTHOR,
     ...overrides,
   };
+}
+
+/** The sampler track, bank and pad a sample upload lands on in these tests. */
+const TRACK = "track-1";
+const BANK = "a";
+const PAD_INDEX = 3;
+
+/** @returns {string} the key the song's pads are held under. */
+function padKeyOf(index = PAD_INDEX) {
+  return `${TRACK}/${BANK}/${index}`;
+}
+
+/** @returns {object} an empty pad, the way a snapshot holds one. */
+function emptyPad() {
+  return { track_id: TRACK, bank_id: BANK, index: PAD_INDEX, sample_id: null, slice_id: null, name: "Pad 4" };
+}
+
+/** @returns {object} the details a sample upload sends with `begin`. */
+function sampleRequest(overrides = {}) {
+  return {
+    kind: "sample",
+    song_id: SONG,
+    project_id: PROJECT,
+    rate: 48000,
+    channels: 2,
+    author: AUTHOR,
+    name: "Kick",
+    origin: "import",
+    ...overrides,
+  };
+}
+
+/** @returns {string} the storage key a sample is filed under. */
+function sampleKeyOf(sampleId) {
+  return `${PREFIX}studio/${SONG}/samples/${sampleId}.wav`;
 }
 
 /**
@@ -492,7 +563,7 @@ test("chunk before begin is refused", async () => {
     () => uploads.putChunk(takeId, 0, pcm24(signal(16, 2))),
     (error) => {
       assert.equal(error.status, 404);
-      assert.equal(error.message, "Begin the take before sending its audio.");
+      assert.equal(error.message, "Begin the upload before sending its audio.");
       return true;
     },
   );
@@ -989,4 +1060,160 @@ test("decodeWav refuses rate 0 and 9 channels", () => {
       return true;
     },
   );
+});
+
+// --- samples ----------------------------------------------------------------
+
+test("a sample upload finishes as sample.add under the samples prefix", async () => {
+  const { uploads, storage, db, acl, hub, staging } = setup();
+  const sampleId = randomUUID();
+  const audio = signal(300, 2);
+  await uploads.begin(sampleId, sampleRequest({ name: "Kick", origin: "import" }));
+  const hashes = await stageChunks(uploads, sampleId, [pcm24(audio)]);
+
+  const finished = await uploads.finish(sampleId, { chunk_hashes: hashes });
+  const key = sampleKeyOf(sampleId);
+
+  // One `sample.add`, internal, from the person at the page, under the id the
+  // client chose — never a caller's storage key.
+  assert.equal(hub.commands.length, 1);
+  const command = hub.commands[0];
+  assert.equal(command.command, "sample.add");
+  assert.equal(command.internal, true);
+  assert.equal(command.cmd_id, sampleId);
+  assert.equal(command.song_id, SONG);
+  assert.deepEqual(command.author, AUTHOR);
+  assert.deepEqual(command.args, {
+    sample: {
+      id: sampleId,
+      storage_key: key,
+      rate: 48000,
+      channels: 2,
+      frames: 300,
+      name: "Kick",
+      origin: "import",
+      author_label: "You",
+    },
+  });
+
+  // The audio went to the samples directory, filed as a sample.
+  assert.equal(storage.uploads.length, 1);
+  assert.equal(storage.uploads[0].key, key);
+  const decoded = decodeWav(storage.uploads[0].bytes);
+  assert.equal(decoded.rate, 48000);
+  assert.equal(decoded.channels.length, 2);
+  assert.deepEqual(decoded.channels[0], quantised(audio[0]));
+
+  const insert = db.statements.find(
+    (statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql),
+  );
+  assert.ok(insert, "a storage_files row was written");
+  assert.equal(insert.args[0], key);
+  assert.equal(insert.args[5], "studio_sample");
+  assert.equal(insert.args[6], SONG);
+  assert.equal(insert.args[7], PROJECT);
+
+  assert.equal(acl.audits.length, 1);
+  assert.equal(acl.audits[0].action, "studio.sample");
+  assert.equal(acl.audits[0].actor_type, "local");
+  assert.equal(acl.audits[0].payload.sample_id, sampleId);
+  assert.equal(acl.audits[0].payload.storage_key, key);
+  assert.equal(acl.audits[0].payload.seconds, 0.006);
+
+  assert.equal(finished.sample.id, sampleId);
+  assert.equal(finished.sample.storage_key, key);
+  assert.equal(finished.sample.frames, 300);
+  assert.equal(finished.pad_assigned, false, "an upload with no target pad assigns nothing");
+  assert.ok(hub.state.samples[sampleId], "the sample is in the song");
+  assert.deepEqual(stagedNames(staging, sampleId), ["meta.json"]);
+});
+
+test("a sample over 60 s is refused naming the limit", async () => {
+  const { uploads, staging } = setup();
+  const sampleId = randomUUID();
+  await uploads.begin(sampleId, sampleRequest());
+
+  // A sparse staged file as heavy as the whole cap — 5,760,000 samples of
+  // 24-bit PCM — so the next chunk would take the sample past it without this
+  // test writing seventeen megabytes.
+  const full = join(staging, sampleId, "000000.pcm");
+  writeFileSync(full, Buffer.alloc(0));
+  truncateSync(full, 5760000 * 3);
+
+  await assert.rejects(
+    () => uploads.putChunk(sampleId, 1, pcm24(signal(4, 2))),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.match(error.message, /60 s/);
+      assert.match(error.message, /5,760,000/);
+      return true;
+    },
+  );
+  assert.equal(existsSync(join(staging, sampleId, "000001.pcm")), false);
+});
+
+test("a sample finishes and lands on its pad even after the page closed", async () => {
+  const { uploads, hub } = setup({ hub: { pads: { [padKeyOf()]: emptyPad() } } });
+  const sampleId = randomUUID();
+  const target = { track_id: TRACK, bank_id: BANK, index: PAD_INDEX };
+  await uploads.begin(sampleId, sampleRequest({ target }));
+  const hashes = await stageChunks(uploads, sampleId, [pcm24(signal(64, 2))]);
+
+  // The finish runs from the staged chunks alone: the browser that sent them is
+  // gone, and the sample still reaches its pad.
+  const first = await uploads.finish(sampleId, { chunk_hashes: hashes });
+  assert.deepEqual(
+    hub.commands.map((command) => command.command),
+    ["sample.add", "pad.assign"],
+  );
+  const assign = hub.commands[1];
+  assert.equal(assign.cmd_id, `${sampleId}:assign`);
+  assert.deepEqual(assign.args, {
+    track_id: TRACK,
+    bank_id: BANK,
+    index: PAD_INDEX,
+    sample_id: sampleId,
+  });
+  assert.deepEqual(assign.author, AUTHOR, "the assignment is the begin author's");
+  assert.equal(first.pad_assigned, true);
+  assert.equal(hub.state.pads[padKeyOf()].sample_id, sampleId);
+
+  // A retried finish returns the same sample and assigns nothing again.
+  const second = await uploads.finish(sampleId, { chunk_hashes: hashes });
+  assert.equal(hub.commands.length, 2, "no second pad.assign");
+  assert.deepEqual(second, first);
+});
+
+test("a sample's pad assignment is skipped when the pad changed meanwhile", async () => {
+  const otherId = randomUUID();
+  const { uploads, hub } = setup({ hub: { pads: { [padKeyOf()]: { ...emptyPad(), sample_id: otherId } } } });
+  const sampleId = randomUUID();
+  await uploads.begin(sampleId, sampleRequest({ target: { track_id: TRACK, bank_id: BANK, index: PAD_INDEX } }));
+  const hashes = await stageChunks(uploads, sampleId, [pcm24(signal(64, 2))]);
+
+  const finished = await uploads.finish(sampleId, { chunk_hashes: hashes });
+
+  // The pad was given another sound while the upload ran: the sample stays in
+  // the song, and the pad is left exactly as it is.
+  assert.deepEqual(
+    hub.commands.map((command) => command.command),
+    ["sample.add"],
+  );
+  assert.equal(finished.pad_assigned, false);
+  assert.ok(hub.state.samples[sampleId], "the sample is in the song");
+  assert.equal(hub.state.pads[padKeyOf()].sample_id, otherId, "the pad keeps the sound it was given");
+});
+
+test("importing 40 hits at once does not hit the take cap", async () => {
+  const { uploads } = setup();
+
+  // 40 samples uploading at once is an ordinary import session, and samples are
+  // counted apart from takes.
+  for (let index = 0; index < 40; index += 1) {
+    const begun = await uploads.begin(randomUUID(), sampleRequest({ name: `Hit ${index + 1}` }));
+    assert.equal(begun.chunk_bytes, 1048576);
+  }
+  // The takes' own cap is untouched by them.
+  const take = await uploads.begin(randomUUID(), beginRequest());
+  assert.equal(take.chunk_bytes, 1048576);
 });
