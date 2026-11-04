@@ -143,7 +143,7 @@ const STUDIO_ENFORCES = Object.freeze({ studio: "2.0.0" });
 
 test("unconfirmed lease gets no take over", () => {
   const studio = () => appTileInfo("studio", { crowHome: home, enforcers: STUDIO_ENFORCES });
-  assert.deepEqual(studio(), { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: false },
+  assert.deepEqual(studio(), { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", takeOver: false },
     "lease declared, no enforced.json: a watch-only tile");
   enforce("studio", "2.0.0");
   assert.equal(studio().takeOver, true, "a known enforcer, declared and enforced for the installed version");
@@ -152,12 +152,12 @@ test("unconfirmed lease gets no take over", () => {
 
   enforce("canvas", "1.0.0");
   assert.equal(appTileInfo("canvas", { crowHome: home }).takeOver, false, "enforced but not declared (desktop.lease absent)");
-  assert.equal(appTileInfo("canvas", { crowHome: home }).src, "/proxy/canvas/vnc_lite.html?view_only=true&autoconnect=true&resize=scale");
+  assert.equal(appTileInfo("canvas", { crowHome: home }).src, "/proxy/canvas/vnc_lite.html?view_only=true&autoconnect=true&resize=scale&path=proxy/canvas/websockify");
 
   assert.equal(appTileInfo("wiki", { crowHome: home }), null, "a page app has no tile");
   assert.equal(appTileInfo("sneaky", { crowHome: home }), null, "a desktop path that climbs out is refused");
   assert.equal(appTileInfo("pager", { crowHome: home }), null, "a desktop path that is not a noVNC page is refused");
-  assert.equal(appTileInfo("nested", { crowHome: home }).src, "/proxy/nested/app/novnc/vnc_lite.html?view_only=true&autoconnect=true&resize=scale");
+  assert.equal(appTileInfo("nested", { crowHome: home }).src, "/proxy/nested/app/novnc/vnc_lite.html?view_only=true&autoconnect=true&resize=scale&path=proxy/nested/app/novnc/websockify");
   assert.equal(desktopApp("ghost", { crowHome: home }), null);
 });
 
@@ -253,7 +253,7 @@ test("take-over route refuses a non-desktop app", async () => {
     assert.deepEqual(await r.call("POST", "apps/canvas/take-over"), { status: 409, body: { error: "lease_not_enforced" } }, "no lease declared");
     assert.equal(await lease.readLease(join(home, "app-lease-studio")), null);
     assert.deepEqual((await r.call("GET", "apps/studio/tile")).body,
-      { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: false });
+      { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", takeOver: false });
     assert.deepEqual((await r.call("POST", "apps/studio/heartbeat")).body, { state: "idle" }, "never taken: idle");
 
     // A valid marker for a non-allowlisted app: still refused, nothing taken.
@@ -321,7 +321,7 @@ test("the real engine answers appTile from its own CROW_HOME", async () => {
   const engine = createInteractiveEngine({ crowHome: home, env: { CROW_HOME: home }, log: () => {}, notifications: {} });
   try {
     assert.deepEqual(engine.appTile("browser"),
-      { id: "browser", label: "Browser", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: true },
+      { id: "browser", label: "Browser", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/browser/websockify", takeOver: true },
       "the browser installed: offered with no enforced.json, as /browser/take-over would accept");
     assert.equal(engine.appTakeOverOffered("browser"), true);
     const off = createInteractiveEngine({ crowHome: home, env: { CROW_HOME: home }, log: () => {}, notifications: {}, browserLease: { installed: false } });
@@ -389,7 +389,7 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
   });
   const calls = [];
   const answer = tile || ((path) => {
-    if (path.endsWith("/apps/studio/tile")) return { status: 200, body: { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver: true } };
+    if (path.endsWith("/apps/studio/tile")) return { status: 200, body: { id: "studio", label: "Studio", src: "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", takeOver: true } };
     if (path.endsWith("/apps/studio/take-over") || path.endsWith("/apps/studio/heartbeat")) return { status: 200, body: { state: "held" } };
     if (path.endsWith("/apps/studio/hand-back")) return { status: 200, body: { state: "idle" } };
     return { status: 404, body: {} };
@@ -438,7 +438,7 @@ const PW_ENTRY = { id: 41, bundle_id: "browser", env_key: "CROW_BROWSER_VNC_PASS
 /* The keychain still answers with an old install's VNC entry: nothing may ask for it. */
 function browserServer({ takeOver = true } = {}) {
   return (path, call) => {
-    if (path.endsWith("/apps/browser/tile")) return { status: 200, body: { id: "browser", label: "Browser Automation", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale", takeOver } };
+    if (path.endsWith("/apps/browser/tile")) return { status: 200, body: { id: "browser", label: "Browser Automation", src: "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/browser/websockify", takeOver } };
     if (path.endsWith("/browser/take-over") || path.endsWith("/browser/heartbeat")) return { status: 200, body: { state: "held" } };
     if (path.endsWith("/browser/hand-back")) return { status: 200, body: { state: "idle" } };
     if (path.endsWith("/keychain/api/entries")) return { status: 200, body: { entries: [PW_ENTRY], reauth_method: "password" } };
@@ -460,7 +460,7 @@ test("the client opens a tile only for a known desktop app in an open new-mode s
   assert.equal(tile.getAttribute("data-app"), "studio");
   assert.equal(byClass(tile, "at-name")[0].textContent, "Studio");
   const frame = byClass(tile, "at-vnc")[0];
-  assert.equal(frame.getAttribute("src"), "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale");
+  assert.equal(frame.getAttribute("src"), "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", "the tile's own query, with its websockify named once");
   assert.equal(byClass(tile, "at-take")[0].hidden, false, "offered");
   await h.fireTimers();
   assert.ok(tile.focused >= 1, "focus moves into the tile");
@@ -491,6 +491,23 @@ test("the client opens a tile only for a known desktop app in an open new-mode s
   assert.equal(byClass(h.transcript, "ph-atile").length, 0);
 });
 
+// The tile's viewer names its own websockify (the page's directory, then
+// websockify) and never doubles a path the server's src already carries.
+test("the client tile's viewer is built with its own websockify path", async () => {
+  for (const [src, want] of [
+    ["/proxy/studio/vnc.html",
+      "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify"],
+    ["/proxy/studio/novnc/vnc_lite.html?path=proxy/studio/novnc/websockify",
+      "/proxy/studio/novnc/vnc_lite.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/novnc/websockify"],
+  ]) {
+    const h = await hub({ tile: () => ({ status: 200, body: { id: "studio", label: "Studio", src, takeOver: false } }) });
+    await h.open("studio");
+    const got = byClass(byClass(h.transcript, "ph-atile")[0], "at-vnc")[0].getAttribute("src");
+    assert.equal(got, want, src);
+    assert.equal((got.match(/path=/g) || []).length, 1, "one path in " + got);
+  }
+});
+
 test("the client: no session or old mode is not handled; an unconfirmed or refused app gets no Take over", async () => {
   assert.equal(await (await hub({ newMode: false })).open("studio"), false, "old mode");
   assert.equal(await (await hub({ sid: null })).open("studio"), false, "no open session");
@@ -499,7 +516,7 @@ test("the client: no session or old mode is not handled; an unconfirmed or refus
   await watch.open("studio");
   const t1 = byClass(watch.transcript, "ph-atile")[0];
   assert.equal(byClass(t1, "at-take")[0].hidden, true, "not offered: watch-only");
-  assert.equal(byClass(t1, "at-vnc")[0].getAttribute("src"), "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale", "the tile builds its own query");
+  assert.equal(byClass(t1, "at-vnc")[0].getAttribute("src"), "/proxy/studio/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/studio/websockify", "the tile builds its own query");
   byClass(t1, "at-take")[0].onclick();
   await tick();
   assert.equal(byClass(watch.root, "ph-tosheet").length, 0, "a hidden Take over does nothing");
@@ -575,7 +592,7 @@ test("the browser's watch-only tile has no password row, makes no keychain call,
   const tile = byClass(h.transcript, "ph-atile")[0];
   for (const cls of ["to-pw-row", "to-copy", "to-pw", "to-reauth"]) assert.equal(byClass(tile, cls).length, 0, "no " + cls);
   const src = byClass(tile, "at-vnc")[0].getAttribute("src");
-  assert.equal(src, "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale");
+  assert.equal(src, "/proxy/browser/vnc.html?view_only=true&autoconnect=true&resize=scale&path=proxy/browser/websockify");
   assert.doesNotMatch(src, /password/i);
   assert.ok(!h.calls.some((c) => c.path.includes("/keychain/")), "no keychain call");
   byClass(tile, "at-close")[0].onclick();

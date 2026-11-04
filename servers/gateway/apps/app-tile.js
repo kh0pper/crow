@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { listApps, cleanPath } from "./catalog.js";
 import { getManifest } from "../routes/extension-proxy.js";
 import { leaseDir, readEnforced, APP_ID_RE } from "../../shared/browser-lease.js";
+import { novncUrl } from "../../shared/novnc-url.js";
 import { defaultCrowHome } from "./launcher.js";
 import { browserInstalled } from "../browser-tile/session-hooks.js";
 
@@ -109,7 +110,8 @@ export function desktopBase(app) {
 
 /**
  * What the session's tile shows: { id, label, src, takeOver }, or null for an
- * app that is not an installed desktop app. src is the watch-only view.
+ * app that is not an installed desktop app. src is the watch-only view, its
+ * websockify path pinned to the page's own directory (novncUrl).
  */
 export function appTileInfo(appId, { crowHome = defaultCrowHome(), browserAccepts = null, enforcers } = {}) {
   const app = desktopApp(appId, { crowHome });
@@ -117,7 +119,7 @@ export function appTileInfo(appId, { crowHome = defaultCrowHome(), browserAccept
   return {
     id: app.id,
     label: String(app.label),
-    src: desktopBase(app) + "?view_only=true&autoconnect=true&resize=scale",
+    src: novncUrl(desktopBase(app), { view_only: "true", autoconnect: "true", resize: "scale" }),
     takeOver: takeOverOffered(app, { crowHome, browserAccepts, ...(enforcers ? { enforcers } : {}) }),
   };
 }
