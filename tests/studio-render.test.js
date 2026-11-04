@@ -14,7 +14,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { renderSong, createRenderer } from "../bundles/studio/server/render.js";
+import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js";
 import { decodeWav, encodeWav24 } from "../bundles/studio/server/wav.js";
 
@@ -954,6 +957,27 @@ function sampleAudioOf() {
   return { rate: SAMPLE_RATE, channels: [new Float32Array(4800), new Float32Array(4800)] };
 }
 
+/**
+ * The smallest hub client `createStudioServer`'s render tool reads: one song,
+ * in one project. A render issues no commands, so nothing else is needed.
+ * @param {object} snapshot the song to render
+ * @param {number} [projectId]
+ * @returns {object}
+ */
+function renderHub(snapshot, projectId = PROJECT) {
+  return {
+    async snapshot() {
+      return { snapshot, project_id: projectId };
+    },
+    async command() {
+      throw new Error("the render tool issues no commands");
+    },
+    async listSongs() {
+      return [{ id: "song-1", project_id: projectId, title: "Sampler", updated_at: "2026-11-05T00:00:00.000Z" }];
+    },
+  };
+}
+
 test("render loads only the samples its patterns use", async () => {
   const song = samplerSong();
   const asked = [];
@@ -1009,4 +1033,84 @@ test("render loads only the samples its patterns use", async () => {
     },
   });
   assert.deepEqual(beforeAsked, [], "a window before the placement reads nothing");
+  assert.deepEqual(session.missing_samples, [], "every sample this render heard was loaded");
+});
+
+test("a render reports a missing sample", async () => {
+  const song = samplerSong();
+
+  // The renderer keeps going — a pad whose sample is gone plays silence (Review
+  // Focus 1) — and says which sample it could not hear, and why.
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async (sample) => {
+      if (sample.id === SAMPLE_B) {
+        throw new Error(`Sample ${sample.id} could not be loaded for this render: no such key.`);
+      }
+      return sampleAudioOf();
+    },
+  });
+  assert.deepEqual(rendered.missing_samples, [
+    { id: SAMPLE_B, reason: `Sample ${SAMPLE_B} could not be loaded for this render: no such key.` },
+  ]);
+  assert.equal(rendered.seconds, 1, "the render still happened");
+  assert.equal(rendered.left.length, SAMPLE_RATE);
+
+  // A pad that names a sample the song does not hold at all is reported too,
+  // rather than skipped: the id is all the song can tell us.
+  const orphaned = structuredClone(song);
+  delete orphaned.samples[SAMPLE_A];
+  const orphan = await renderSong(orphaned, {
+    scene_id: "scene-1",
+    seconds: 1,
+    sampleAudio: async () => sampleAudioOf(),
+  });
+  assert.deepEqual(orphan.missing_samples, [{ id: SAMPLE_A, reason: "the song has no such sample" }]);
+
+  // Through the storage rail: storage has neither sample, so the load names
+  // each one, the WAV is still filed and the audit line carries the list.
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({ db, storage, acl, maxSeconds: 300, now: () => CLOCK });
+  const stored = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(stored.missing_samples.map((item) => item.id), [SAMPLE_A, SAMPLE_B]);
+  for (const item of stored.missing_samples) {
+    assert.match(item.reason, new RegExp(`Sample ${item.id} could not be loaded for this render`));
+  }
+  assert.equal(storage.uploads.length, 1, "the render is still stored");
+  const audit = acl.audits.find((entry) => entry.action === "studio.render");
+  assert.ok(audit, "the render is audited");
+  assert.deepEqual(audit.payload.missing_samples, stored.missing_samples);
+  assert.equal(storage.gets.length, 2, "only the two samples the render plays were read");
+  assert.deepEqual(
+    storage.gets.map((get) => get.key).sort(),
+    [sampleKey(SAMPLE_A), sampleKey(SAMPLE_B)].sort(),
+  );
+
+  // And the MCP tool hands the list to the agent, in the same words.
+  const server = createStudioServer({ hub: renderHub(song), renderer });
+  const client = new Client({ name: "studio-render-test", version: "0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const answer = await client.callTool({
+      name: "studio_render",
+      arguments: { song_id: "song-1", scene_id: "scene-1", seconds: 1 },
+    });
+    assert.notEqual(answer.isError, true, answer.content?.[0]?.text);
+    const body = JSON.parse(answer.content[0].text);
+    assert.deepEqual(body.missing_samples, stored.missing_samples, "the agent is told what it did not hear");
+    assert.ok(body.url, "the render's url still comes back");
+  } finally {
+    await client.close();
+  }
 });

@@ -50,10 +50,14 @@
  * the same way. A render loads every sample its playing patterns' steps trigger
  * — through `options.sampleAudio`, built like `takeAudio` and pinned to the
  * song's own `studio/<song_id>/samples/` — and hands each one to the engine
- * (`engine.loadSample`). A sample a render cannot read is skipped rather than
- * fatal: a pad whose sample is missing plays silence and says so (the spec's
- * Review Focus 1), and one dangling pad must not turn into a failed render of
- * the whole song. The key rule still holds — such an object is never read.
+ * (`engine.loadSample`). A sample a render cannot read is not fatal — a pad
+ * whose sample is missing plays silence (the spec's Review Focus 1), and one
+ * dangling pad must not turn into a failed render of the whole song — but it is
+ * never silently dropped either: the render's answer carries
+ * `missing_samples: [{id, reason}]`, the renderer repeats it in its result and
+ * in the `studio.render` audit line, and `studio_render` hands it to the agent.
+ * A pad that names a sample the song does not hold at all is reported the same
+ * way. The key rule still holds — such an object is never read.
  *
  * ## The arrangement
  *
@@ -186,7 +190,8 @@ let cachedReleaseSymbol;
  * silence. A take that cannot be read stops the render with its id in the
  * sentence (`Take <id> could not be loaded for this render: …`): a render that
  * quietly dropped a performance would be a lie. A sample that cannot be read is
- * skipped (see "Takes and samples" above).
+ * reported instead, in `missing_samples` (see "Takes and samples" above); the
+ * render itself still happens.
  *
  * @param {object} snapshot the song as the hub's `snapshot()` returns it
  * @param {{scene_id?: string|null, clip_id?: string|null, seconds?: number,
@@ -200,7 +205,10 @@ let cachedReleaseSymbol;
  *   same for a sample the playing patterns' steps trigger. `mode` and `from_bar`
  *   render the arrangement (see above)
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number,
- *                    seconds: number}>} the rendered stereo channels
+ *                    seconds: number,
+ *                    missing_samples: Array<{id: string, reason: string}>}>}
+ *   the rendered stereo channels, and every sample the render could not load
+ *   (empty when there was none, or the song plays no sampler track)
  */
 export async function renderSong(snapshot, options = {}) {
   const { scene_id = null, clip_id = null, seconds = 1, sampleRate = SAMPLE_RATE } = options;
@@ -239,7 +247,7 @@ export async function renderSong(snapshot, options = {}) {
       samples = samplesOfClips(snapshot, playing);
     }
     await loadTakes(engine, takes, options.takeAudio);
-    await loadSamples(engine, samples, options.sampleAudio);
+    const missingSamples = await loadSamples(engine, samples.samples, options.sampleAudio);
     engine.play();
     engine.node.connect(context.destination);
     // Without this the render can begin before the song reaches the processor.
@@ -255,7 +263,15 @@ export async function renderSong(snapshot, options = {}) {
     const right = new Float32Array(length);
     buffer.copyFromChannel(left, 0);
     buffer.copyFromChannel(right, 1);
-    return { left, right, sampleRate: rate, seconds: length / rate };
+    return {
+      left,
+      right,
+      sampleRate: rate,
+      seconds: length / rate,
+      // A pad whose sample is missing plays silence (Review Focus 1); this says
+      // which one, and why, so the agent can name it rather than guess.
+      missing_samples: [...samples.missing, ...missingSamples],
+    };
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
@@ -285,7 +301,8 @@ export async function renderSong(snapshot, options = {}) {
  * @param {Function} [options.renderAudio] the audio renderer (defaults to
  *   `renderSong`); tests and alternate hosts inject their own
  * @returns {{render: (request: object) => Promise<{storage_key: string, url: string,
- *            seconds: number, lufs: number, true_peak_db: number}>}}
+ *            seconds: number, lufs: number, true_peak_db: number,
+ *            missing_samples: Array<{id: string, reason: string}>}>}}
  */
 export function createRenderer({
   db,
@@ -356,7 +373,10 @@ export function createRenderer({
    * @param {{kind?: string, id?: string, label?: string}|null} [request.author]
    *   who asked; a human author is audited as `local`, anything else as `bot`
    * @returns {Promise<{storage_key: string, url: string, seconds: number,
-   *                    lufs: number, true_peak_db: number}>}
+   *                    lufs: number, true_peak_db: number,
+   *                    missing_samples: Array<{id: string, reason: string}>}>}
+   *   where the render landed, how it measures, and every sample it could not
+   *   load (a pad with a missing sample plays silence; this names it)
    */
   async function render(request = {}) {
     const { song_id, project_id = null, snapshot, scene_id = null, clip_id = null, seconds, author = null } = request;
@@ -392,6 +412,9 @@ export function createRenderer({
       });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
       const renderedSeconds = audio.seconds;
+      // A pad whose sample could not be loaded plays silence; this is the list
+      // the agent is told about, in the result and in the audit line.
+      const missingSamples = Array.isArray(audio.missing_samples) ? audio.missing_samples : [];
       const lufs = integratedLufs(audio.left, audio.right, rate);
       const truePeak = truePeakDb(audio.left, audio.right, rate);
       const wav = encodeWav24(audio.left, audio.right, rate);
@@ -436,11 +459,19 @@ export function createRenderer({
           storage_key: key,
           lufs,
           true_peak_db: truePeak,
+          missing_samples: missingSamples,
         },
       });
 
       const url = await storage.getPresignedUrl(key, { bucket, expiry: URL_EXPIRY_SECONDS });
-      return { storage_key: key, url, seconds: renderedSeconds, lufs, true_peak_db: truePeak };
+      return {
+        storage_key: key,
+        url,
+        seconds: renderedSeconds,
+        lufs,
+        true_peak_db: truePeak,
+        missing_samples: missingSamples,
+      };
     } finally {
       release();
     }
@@ -584,7 +615,8 @@ function takesOfClips(snapshot, clips) {
 }
 
 /**
- * The samples the pads of some pattern clips' playing steps trigger, each once.
+ * The samples the pads of some pattern clips' playing steps trigger, each once,
+ * and the ids a pad plays that the song does not hold at all.
  *
  * A pattern clip plays its chain, or — with no chain — its first pattern. Every
  * step of those patterns names a pad of the clip's track, the pad names a
@@ -594,7 +626,9 @@ function takesOfClips(snapshot, clips) {
  *
  * @param {object} snapshot the song
  * @param {object[]} clips the clips being played
- * @returns {object[]} the samples, as the snapshot holds them
+ * @returns {{samples: object[], missing: Array<{id: string, reason: string}>}}
+ *   the samples as the snapshot holds them, and the sample ids a pad plays that
+ *   the song has no sample object for (a dangling pad, reported not skipped)
  */
 function samplesOfClips(snapshot, clips) {
   const pads = snapshot && snapshot.pads && typeof snapshot.pads === "object" ? snapshot.pads : {};
@@ -615,6 +649,7 @@ function samplesOfClips(snapshot, clips) {
 
   const wanted = [];
   const seen = new Set();
+  const missing = [];
   for (const clip of clips) {
     if (!clip || clip.kind !== "pattern") continue;
     for (const pattern of patternsPlaying(clip, patterns)) {
@@ -624,11 +659,17 @@ function samplesOfClips(snapshot, clips) {
         if (sampleId === "" || seen.has(sampleId)) continue;
         seen.add(sampleId);
         const sample = samples[sampleId];
-        if (sample) wanted.push(sample);
+        if (sample) {
+          wanted.push(sample);
+          continue;
+        }
+        // A pad that names a sound the song does not hold: nothing to read, and
+        // nothing to guess — it is reported as missing.
+        missing.push({ id: sampleId, reason: "the song has no such sample" });
       }
     }
   }
-  return wanted;
+  return { samples: wanted, missing };
 }
 
 /**
@@ -656,36 +697,45 @@ function patternsPlaying(clip, patterns) {
 }
 
 /**
- * Hand the engine every sample the render can hear.
+ * Hand the engine every sample the render can hear, and name the ones it cannot.
  *
  * `sampleAudio` is the caller's reader (built like the take one), and its own
  * refusals — a key outside the song's own `samples/` directory — are never read.
- * A sample it cannot produce is skipped: a pad whose sample is missing plays
- * silence (the same answer the audio thread gives), so one dangling pad does not
- * fail a whole render. `engine.loadSample` arrives with the sampler voices; an
- * engine without it simply does not take the audio.
+ * A sample it cannot produce is reported as missing, not thrown: a pad whose
+ * sample is missing plays silence (the same answer the audio thread gives), and
+ * one dangling pad does not fail a whole render. A render with no reader at all
+ * reports every sample it wanted the same way. `engine.loadSample` arrives with
+ * the sampler voices; an engine without it simply does not take the audio.
  *
  * @param {object} engine the engine `studioEngine.create()` returned
  * @param {object[]} samples the samples this render hears (see `samplesOfClips`)
  * @param {Function|undefined} sampleAudio the caller's reader
- * @returns {Promise<void>}
+ * @returns {Promise<Array<{id: string, reason: string}>>} what could not be loaded
  */
 async function loadSamples(engine, samples, sampleAudio) {
-  if (typeof sampleAudio !== "function") return;
+  const missing = [];
   for (const sample of samples) {
+    const id = typeof sample.id === "string" ? sample.id : "";
+    if (typeof sampleAudio !== "function") {
+      missing.push({ id, reason: "this render cannot read samples" });
+      continue;
+    }
     let audio = null;
     try {
       audio = await sampleAudio(sample);
-    } catch {
-      audio = null;
+    } catch (error) {
+      missing.push({ id, reason: sampleMissingReason(error) });
+      continue;
     }
     if (!audio || !Array.isArray(audio.channels) || audio.channels.length === 0 || !(Number(audio.rate) > 0)) {
+      missing.push({ id, reason: "the file could not be read" });
       continue;
     }
     if (typeof engine.loadSample === "function") {
       await engine.loadSample(sample.id, audio.channels, Number(audio.rate));
     }
   }
+  return missing;
 }
 
 /**
@@ -762,6 +812,17 @@ function takeLoadFailure(id, reason) {
 function sampleLoadFailure(id, reason) {
   const text = String(reason ?? "").trim().replace(/[.\s]+$/, "");
   return `Sample ${id} could not be loaded for this render: ${text === "" ? "the file could not be read" : text}.`;
+}
+
+/**
+ * Why one sample is missing from a render, in a reader's own words when it has
+ * any: the sentence `sampleLoadFailure` wrote, or a plain one.
+ * @param {unknown} error
+ * @returns {string}
+ */
+function sampleMissingReason(error) {
+  const text = error && typeof error.message === "string" ? error.message.trim() : "";
+  return text === "" ? "the file could not be read" : text;
 }
 
 /**

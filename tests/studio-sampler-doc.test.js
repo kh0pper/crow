@@ -446,6 +446,64 @@ test("sample.add is refused outside Studio", () => {
   assert.equal(publicIds.includes("pad.assign"), true);
 });
 
+test("pad.assign if_empty is internal only", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const kick = addSample(s.doc, { name: "Kick" });
+  const snare = addSample(s.doc, { name: "Snare" });
+
+  // The empty-only check is a command of Studio's own, not a flag on
+  // `pad.assign`: it runs inside the hub's per-song queue, so it sees the pad as
+  // it is the moment the assignment lands. No caller outside the process can
+  // ask for it — the hub refuses it without `internal: true`, and the panel and
+  // the MCP tools are built from the public list, which leaves it out.
+  const guard = getCommand("pad.assign_if_empty");
+  assert.equal(guard.internal, true);
+  assert.equal(getCommand("pad.assign").internal, false, "filling a pad by hand stays open to everyone");
+  const publicIds = listCommands({ public: true }).map((item) => item.id);
+  assert.equal(publicIds.includes("pad.assign_if_empty"), false);
+
+  // And `pad.assign` has no such argument: its schema is strict, so the flag is
+  // refused as an unknown field rather than quietly ignored.
+  refuses(
+    () =>
+      s.run("pad.assign", {
+        track_id: trackId,
+        bank_id: bankId,
+        index: 0,
+        sample_id: kick,
+        if_empty: true,
+      }),
+    "invalid",
+  );
+  assert.equal(snapshot(s.doc).pads[padKey(trackId, bankId, 0)].sample_id, null);
+
+  // An empty pad takes the sound...
+  s.run("pad.assign_if_empty", { track_id: trackId, bank_id: bankId, index: 0, sample_id: kick });
+  assert.equal(snapshot(s.doc).pads[padKey(trackId, bankId, 0)].sample_id, kick);
+
+  // ...the same sample again is not a change, so a replayed finish is allowed
+  // and writes nothing...
+  s.run("pad.assign_if_empty", { track_id: trackId, bank_id: bankId, index: 1, sample_id: kick });
+  const replayed = s.run("pad.assign_if_empty", {
+    track_id: trackId,
+    bank_id: bankId,
+    index: 1,
+    sample_id: kick,
+  });
+  assert.deepEqual(replayed.result.before, {}, "the same sample on the pad writes nothing");
+  assert.deepEqual(replayed.result.after, {});
+
+  // ...and a pad holding another sound is refused by name, and left alone.
+  const refused = refuses(
+    () => s.run("pad.assign_if_empty", { track_id: trackId, bank_id: bankId, index: 0, sample_id: snare }),
+    "conflict",
+  );
+  assert.equal(refused.message, "That pad already holds a sound.");
+  assert.equal(snapshot(s.doc).pads[padKey(trackId, bankId, 0)].sample_id, kick);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
 test("an old song without samples reads empty", (t) => {
   const doc = newSongDoc({ title: "Older song" });
   t.after(() => doc.destroy());

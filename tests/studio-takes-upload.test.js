@@ -19,7 +19,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
@@ -158,9 +158,17 @@ function fakeAcl({ deny = false } = {}) {
  * `runCommand` remembers what it was asked, answers a repeated `cmd_id` with the
  * result it gave the first time, and refuses an id the song already has.
  *
- * `take.add`, `sample.add` and `pad.assign` behave the way the real commands do
- * where these tests depend on it: an object is added once, and a pad points at
- * the sample an assignment names.
+ * `take.add`, `sample.add` and the pad assignments behave the way the real ones
+ * do where these tests depend on it: an object is added once, a pad points at
+ * the sample an assignment names, and `pad.assign_if_empty` (Studio's own)
+ * refuses a pad that already holds another sound.
+ *
+ * `runCommand` is the hub's per-song queue: one command at a time, in arrival
+ * order, so a command's own check sees every write that reached the song before
+ * it — which is what makes the empty-only assignment a real guard and not a
+ * check against a stale read. `openSong` hands back a DEEP COPY of the song, as
+ * a snapshot read is: a test that wants to prove something was re-read cannot
+ * be fooled by a snapshot that changes under it.
  *
  * `unreadable` makes `openSong` throw, the way a database or a locked song can.
  * @param {{takes?: object, samples?: object, pads?: object, bpm?: number,
@@ -170,6 +178,7 @@ function fakeHub({ takes = {}, samples = {}, pads = {}, bpm = 124, refuse = null
   const commands = [];
   const state = { takes: { ...takes }, samples: { ...samples }, pads: { ...pads } };
   const answers = new Map();
+  let queue = Promise.resolve();
 
   /** @returns {object} the result of one command, as the hub would report it */
   function apply(request) {
@@ -186,13 +195,26 @@ function fakeHub({ takes = {}, samples = {}, pads = {}, bpm = 124, refuse = null
       state.samples[sample.id] = { ...sample };
       return { ok: true, entry: { command: request.command }, snapshot_version: 2 };
     }
-    if (request.command === "pad.assign") {
+    if (request.command === "pad.assign" || request.command === "pad.assign_if_empty") {
       const args = request.args;
       const key = `${args.track_id}/${args.bank_id}/${args.index}`;
+      if (request.command === "pad.assign_if_empty" && request.internal !== true) {
+        return {
+          ok: false,
+          code: "studio_only",
+          error: "This command can only be run by Studio itself.",
+        };
+      }
       const pad = state.pads[key];
       if (!pad) return { ok: false, code: "not_found", error: "there is no such pad" };
       if (!state.samples[args.sample_id]) {
         return { ok: false, code: "not_found", error: "there is no such sample" };
+      }
+      if (request.command === "pad.assign_if_empty") {
+        const held = pad.sample_id;
+        if (typeof held === "string" && held !== "" && held !== args.sample_id) {
+          return { ok: false, code: "conflict", error: "That pad already holds a sound." };
+        }
       }
       pad.sample_id = args.sample_id;
       return { ok: true, entry: { command: request.command }, snapshot_version: 3 };
@@ -219,23 +241,37 @@ function fakeHub({ takes = {}, samples = {}, pads = {}, bpm = 124, refuse = null
       if (unreadable) throw new Error("the song's document could not be loaded");
       return {
         doc: null,
-        snapshot: {
+        // A snapshot is a read of the song at one moment, never a live view.
+        snapshot: structuredClone({
           meta: { title: "Test song", bpm },
           takes: state.takes,
           samples: state.samples,
           pads: state.pads,
           clips: {},
-        },
+        }),
         snapshot_version: 1,
       };
     },
-    async runCommand(request) {
+    /**
+     * The hub's per-song queue, with its `cmd_id` de-duplication: a repeated
+     * id is answered with the result it gave the first time.
+     * @param {object} request
+     * @returns {Promise<object>}
+     */
+    runCommand(request) {
       commands.push(request);
-      const seen = answers.get(request.cmd_id);
-      if (seen) return seen;
-      const result = apply(request);
-      answers.set(request.cmd_id, result);
-      return result;
+      const run = queue.then(() => {
+        const seen = answers.get(request.cmd_id);
+        if (seen) return seen;
+        const result = apply(request);
+        answers.set(request.cmd_id, result);
+        return result;
+      });
+      queue = run.then(
+        () => {},
+        () => {},
+      );
+      return run;
     },
   };
 }
@@ -1164,10 +1200,11 @@ test("a sample finishes and lands on its pad even after the page closed", async 
   const first = await uploads.finish(sampleId, { chunk_hashes: hashes });
   assert.deepEqual(
     hub.commands.map((command) => command.command),
-    ["sample.add", "pad.assign"],
+    ["sample.add", "pad.assign_if_empty"],
   );
   const assign = hub.commands[1];
   assert.equal(assign.cmd_id, `${sampleId}:assign`);
+  assert.equal(assign.internal, true, "the empty-only assignment is Studio's own step");
   assert.deepEqual(assign.args, {
     track_id: TRACK,
     bank_id: BANK,
@@ -1193,15 +1230,170 @@ test("a sample's pad assignment is skipped when the pad changed meanwhile", asyn
 
   const finished = await uploads.finish(sampleId, { chunk_hashes: hashes });
 
-  // The pad was given another sound while the upload ran: the sample stays in
-  // the song, and the pad is left exactly as it is.
+  // The pad was given another sound while the upload ran. The assignment is
+  // still asked for — the question is settled inside the hub's queue — and it
+  // is refused there, so the sample stays in the song and the pad is left
+  // exactly as it is.
   assert.deepEqual(
     hub.commands.map((command) => command.command),
-    ["sample.add"],
+    ["sample.add", "pad.assign_if_empty"],
   );
   assert.equal(finished.pad_assigned, false);
   assert.ok(hub.state.samples[sampleId], "the sample is in the song");
   assert.equal(hub.state.pads[padKeyOf()].sample_id, otherId, "the pad keeps the sound it was given");
+  assert.equal(finished.sample.id, sampleId);
+});
+
+test("a pad filled by the operator just before the upload finishes keeps the operator's sound", async () => {
+  // The pad is free when the upload begins and the sample is in the song when
+  // the finish runs: the only thing between them is the operator's own choice.
+  const operatorPick = randomUUID();
+  const { uploads, hub } = setup({
+    hub: {
+      pads: { [padKeyOf()]: emptyPad() },
+      samples: { [operatorPick]: { id: operatorPick, name: "Operator hit" } },
+    },
+  });
+  const sampleId = randomUUID();
+  await uploads.begin(sampleId, sampleRequest({ target: { track_id: TRACK, bank_id: BANK, index: PAD_INDEX } }));
+  const hashes = await stageChunks(uploads, sampleId, [pcm24(signal(64, 2))]);
+
+  // The operator's pad edit reaches the song after the finish read it and
+  // before the upload's own assignment runs. A check against that read would
+  // hand the upload the pad; the check has to run where the write does.
+  const runCommand = hub.runCommand.bind(hub);
+  let raced = false;
+  hub.runCommand = (request) => {
+    if (!raced && request.command === "pad.assign_if_empty") {
+      raced = true;
+      hub.state.pads[padKeyOf()].sample_id = operatorPick;
+    }
+    return runCommand(request);
+  };
+
+  const finished = await uploads.finish(sampleId, { chunk_hashes: hashes });
+
+  assert.equal(raced, true, "the upload did ask for its pad");
+  assert.equal(finished.pad_assigned, false, "the assignment was skipped, not applied");
+  assert.equal(hub.state.pads[padKeyOf()].sample_id, operatorPick, "the operator's sound stayed");
+  assert.ok(hub.state.samples[sampleId], "the sample is still in the song");
+  assert.deepEqual(
+    hub.commands.map((command) => command.command),
+    ["sample.add", "pad.assign_if_empty"],
+  );
+});
+
+test("a retried finish does not refill a pad the operator cleared", async () => {
+  const { uploads, hub } = setup({ hub: { pads: { [padKeyOf()]: emptyPad() } } });
+  const sampleId = randomUUID();
+  await uploads.begin(sampleId, sampleRequest({ target: { track_id: TRACK, bank_id: BANK, index: PAD_INDEX } }));
+  const hashes = await stageChunks(uploads, sampleId, [pcm24(signal(64, 2))]);
+
+  const first = await uploads.finish(sampleId, { chunk_hashes: hashes });
+  assert.equal(first.pad_assigned, true);
+
+  // The operator takes the sound off the pad, then the client retries the
+  // finish (a reload, a lost answer). The first finish recorded what it did, so
+  // the retry answers with that record and never touches the pad again.
+  hub.state.pads[padKeyOf()].sample_id = null;
+  const second = await uploads.finish(sampleId, { chunk_hashes: hashes });
+
+  assert.equal(second.pad_assigned, true, "the retry reports what the first finish came to");
+  assert.deepEqual(second.sample, first.sample);
+  assert.equal(hub.state.pads[padKeyOf()].sample_id, null, "the pad the operator cleared stays cleared");
+  assert.equal(
+    hub.commands.filter((command) => command.command === "pad.assign_if_empty").length,
+    1,
+    "no second assignment was asked for",
+  );
+});
+
+test("a sample id that belongs to a take is refused", async () => {
+  const { uploads, staging } = setup();
+  const id = randomUUID();
+
+  // A finished take owns its id: the staging directory, the storage key and the
+  // reference type are all the take's, so the same id cannot become a sample.
+  await uploads.begin(id, beginRequest());
+  const hashes = await stageChunks(uploads, id, [pcm24(signal(64, 2))]);
+  await uploads.finish(id, { chunk_hashes: hashes });
+
+  await assert.rejects(
+    () => uploads.begin(id, sampleRequest()),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.equal(error.message, "That id belongs to a take upload.");
+      return true;
+    },
+  );
+  // Nothing of the take was disturbed by the attempt.
+  assert.deepEqual(stagedNames(staging, id), ["meta.json"]);
+  assert.equal(JSON.parse(readFileSync(join(staging, id, "meta.json"), "utf8")).kind, "take");
+});
+
+test("two finishes racing on one sample assign once", async () => {
+  // Two finishes of ONE upload: the second joins the first and answers with its
+  // result, so the pad is assigned once.
+  const { uploads, hub } = setup({ hub: { pads: { [padKeyOf()]: emptyPad() } } });
+  const sampleId = randomUUID();
+  await uploads.begin(sampleId, sampleRequest({ target: { track_id: TRACK, bank_id: BANK, index: PAD_INDEX } }));
+  const hashes = await stageChunks(uploads, sampleId, [pcm24(signal(64, 2))]);
+
+  const [first, second] = await Promise.all([
+    uploads.finish(sampleId, { chunk_hashes: hashes }),
+    uploads.finish(sampleId, { chunk_hashes: hashes }),
+  ]);
+  assert.equal(first.pad_assigned, true);
+  assert.deepEqual(second, first);
+  assert.equal(
+    hub.commands.filter((command) => command.command === "pad.assign_if_empty").length,
+    1,
+    "one assignment for one sample",
+  );
+
+  // Two DIFFERENT uploads finishing at once on one free pad: the empty-only
+  // check runs inside the hub's queue, so exactly one of them lands and the pad
+  // holds that one sound.
+  const raceIndex = 2;
+  const racePad = { ...emptyPad(), index: raceIndex };
+  hub.state.pads[padKeyOf(raceIndex)] = racePad;
+  const raceTarget = { track_id: TRACK, bank_id: BANK, index: raceIndex };
+  const rivals = [randomUUID(), randomUUID()];
+  const rivalHashes = [];
+  for (const [at, rival] of rivals.entries()) {
+    await uploads.begin(rival, sampleRequest({ name: `Rival ${at + 1}`, target: raceTarget }));
+    rivalHashes.push(await stageChunks(uploads, rival, [pcm24(signal(64, 2))]));
+  }
+  const racing = await Promise.all(
+    rivals.map((rival, at) => uploads.finish(rival, { chunk_hashes: rivalHashes[at] })),
+  );
+
+  const winners = racing.filter((result) => result.pad_assigned === true);
+  assert.equal(winners.length, 1, "exactly one of the two racing finishes took the pad");
+  assert.equal(hub.state.pads[padKeyOf(raceIndex)].sample_id, winners[0].sample.id);
+  for (const result of racing) assert.ok(hub.state.samples[result.sample.id], "both samples are in the song");
+});
+
+test("a hostile kind is refused", async () => {
+  const { uploads, staging } = setup();
+
+  // A kind is one of the two Studio has, and nothing else: a different case, a
+  // padded or empty-looking string, or a name inherited from Object.prototype
+  // (which a lookup table would answer for) is refused by name before a byte of
+  // meta is written.
+  for (const kind of ["Sample", "take ", " take", "__proto__", "constructor", "toString"]) {
+    const id = randomUUID();
+    await assert.rejects(
+      () => uploads.begin(id, sampleRequest({ kind })),
+      (error) => {
+        assert.equal(error.status, 400);
+        assert.match(error.message, /take or sample/);
+        assert.ok(error.message.includes(`"${kind}"`), `the refusal names "${kind}"`);
+        return true;
+      },
+    );
+    assert.deepEqual(readdirSync(staging), [], `"${kind}" staged nothing`);
+  }
 });
 
 test("importing 40 hits at once does not hit the take cap", async () => {

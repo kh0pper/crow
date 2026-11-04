@@ -637,11 +637,15 @@ export function createStudioServer({
           from_bar: args.from_bar ?? 0,
           author,
         });
+        // A pad whose sample could not be loaded plays silence; the render
+        // still happened, so the agent is told which sound it did not hear.
+        const missing = Array.isArray(out.missing_samples) ? out.missing_samples : [];
         return textResult({
           url: out.url,
           lufs: out.lufs,
           true_peak_db: out.true_peak_db,
           seconds: out.seconds,
+          ...(missing.length > 0 ? { missing_samples: missing } : {}),
         });
       } catch (err) {
         return errorResult(errorText(err));

@@ -8,7 +8,7 @@
  * MCP tools and the shared history:
  *
  *   bank.add  bank.rename
- *   pad.set  pad.assign
+ *   pad.set  pad.assign  pad.assign_if_empty (internal)
  *   sample.add (internal)  sample.rename  slice.set
  *   pattern.add  pattern.rename  pattern.remove  pattern.set_length
  *   pattern.set_steps_beat  pattern.set_swing
@@ -19,10 +19,17 @@
  * so one pad edit never rewrites the kit's device, and two edits to different
  * pads, different steps or different locks of one step undo independently.
  *
- * Two rules the rest of the sampler leans on:
+ * Three rules the rest of the sampler leans on:
  *   - `sample.add` is Studio's own: only the gateway's upload finish route
  *     issues it, so no caller outside the process decides where a sample's
  *     audio lives.
+ *   - `pad.assign_if_empty`, its empty-only twin, is Studio's own too. An
+ *     upload may name a pad that was free when it began; the "is it still
+ *     free?" question is decided inside the hub's per-song queue, by the
+ *     command, so an operator's own `pad.assign` that landed a moment earlier
+ *     is seen and kept. No caller outside the process can ask for that check
+ *     (`pad.assign`'s schema is strict, so `if_empty` is not an argument it
+ *     has), and the hub refuses the twin without `internal: true`.
  *   - a pad's sample and its slice are checked against the song before they are
  *     written, so a pad never points at a sound that is not there.
  *
@@ -166,6 +173,11 @@ function refuseInvalid(message) {
 /** Refuse with a "not_found" message. */
 function refuseMissing(message) {
   throw new StudioError("not_found", message);
+}
+
+/** Refuse with a "conflict" message: the object is not in the state hoped for. */
+function refuseConflict(message) {
+  throw new StudioError("conflict", message);
 }
 
 /**
@@ -551,55 +563,113 @@ defineCommand({
   },
 });
 
+/** The arguments `pad.assign` and its empty-only twin share. */
+const padAssignSchema = z
+  .object({
+    track_id: idSchema.describe("the sampler track"),
+    bank_id: idSchema.describe("the bank the pad sits in"),
+    index: z.number().int().min(0).max(LIMITS.padsPerBank - 1).describe("the pad, 0-15"),
+    sample_id: sampleIdSchema.describe("the sample the pad plays"),
+    slice_id: idSchema.optional().describe("one slice of that sample; the whole sample when omitted"),
+  })
+  .strict()
+  .describe("the pad to fill and the sound it should play");
+
+/** @returns {string} the history line of one pad assignment. */
+function assignSummary(args, snap) {
+  const which = args.slice_id === undefined ? "sample" : "a slice of the sample";
+  return `Put ${which} "${labelOfSample(snap, args.sample_id)}" on pad ${args.index + 1} of bank "${labelOfBank(snap, args.track_id, args.bank_id)}"`;
+}
+
+/**
+ * The refs an assignment touches. The sample is read, not written: naming it
+ * here would make the lock check treat every track that plays it as touched, so
+ * a shared sample could not be put on an unlocked track's pad while a locked
+ * track also played it.
+ * @param {object} args
+ * @returns {string[]}
+ */
+function assignTouches(args) {
+  return [padRef(args.track_id, args.bank_id, args.index), trackRef(args.track_id)];
+}
+
+/**
+ * Put a sample, or one of its slices, on a pad.
+ *
+ * `onlyIfFree` is the empty-only twin's rule: the pad may be filled when it
+ * plays nothing, or when it already plays exactly this sample (a replay of the
+ * same upload); a pad holding any other sound is refused with "conflict" and
+ * is never overwritten. The check reads the live pad inside the caller's
+ * transaction, which the hub runs on the song's own queue, so it is decided
+ * against every write that reached the song before it.
+ *
+ * @param {import("yjs").Doc} doc
+ * @param {object} args the validated arguments
+ * @param {{onlyIfFree?: boolean}} [options]
+ * @returns {{before: Object<string, any>, after: Object<string, any>}}
+ * @throws {StudioError}
+ */
+function assignPad(doc, args, { onlyIfFree = false } = {}) {
+  requireSamplerTrack(doc, args.track_id);
+  requireBank(doc, args.track_id, args.bank_id);
+  const pad = requirePad(doc, args.track_id, args.bank_id, args.index);
+  const sample = requireSample(doc, args.sample_id);
+
+  if (onlyIfFree) {
+    const held = pad.get("sample_id");
+    if (typeof held === "string" && held !== "" && held !== args.sample_id) {
+      refuseConflict("That pad already holds a sound.");
+    }
+  }
+
+  const sliceId = args.slice_id ?? ABSENT;
+  if (sliceId !== ABSENT) {
+    const known = sliceEntries(doc).some(
+      ({ slice }) => slice.get("sample_id") === args.sample_id && slice.get("id") === sliceId,
+    );
+    if (!known) refuseInvalid(`Sample "${sample.get("name")}" has no slice "${sliceId}".`);
+  }
+
+  const ref = padRef(args.track_id, args.bank_id, args.index);
+  const before = {};
+  const after = {};
+  for (const [field, value] of [["sample_id", args.sample_id], ["slice_id", sliceId]]) {
+    const current = fieldValue(pad, field);
+    if (current === value) continue;
+    before[fieldKey(ref, field)] = current;
+    after[fieldKey(ref, field)] = value;
+    pad.set(field, value);
+  }
+  return { before, after };
+}
+
 defineCommand({
   id: "pad.assign",
   title: "Put a sample or one of its slices on a pad",
-  schema: z
-    .object({
-      track_id: idSchema.describe("the sampler track"),
-      bank_id: idSchema.describe("the bank the pad sits in"),
-      index: z.number().int().min(0).max(LIMITS.padsPerBank - 1).describe("the pad, 0-15"),
-      sample_id: sampleIdSchema.describe("the sample the pad plays"),
-      slice_id: idSchema.optional().describe("one slice of that sample; the whole sample when omitted"),
-    })
-    .strict(),
-  summary(args, snap) {
-    const which = args.slice_id === undefined ? "sample" : "a slice of the sample";
-    return `Put ${which} "${labelOfSample(snap, args.sample_id)}" on pad ${args.index + 1} of bank "${labelOfBank(snap, args.track_id, args.bank_id)}"`;
-  },
-  // The sample is read, not written: naming it here would make the lock check
-  // treat every track that plays it as touched, so a shared sample could not be
-  // put on an unlocked track's pad while a locked track also played it.
-  touches(args) {
-    return [
-      padRef(args.track_id, args.bank_id, args.index),
-      trackRef(args.track_id),
-    ];
-  },
+  schema: padAssignSchema,
+  summary: assignSummary,
+  touches: assignTouches,
   apply(doc, args) {
-    requireSamplerTrack(doc, args.track_id);
-    requireBank(doc, args.track_id, args.bank_id);
-    const pad = requirePad(doc, args.track_id, args.bank_id, args.index);
-    const sample = requireSample(doc, args.sample_id);
-    const sliceId = args.slice_id ?? ABSENT;
-    if (sliceId !== ABSENT) {
-      const known = sliceEntries(doc).some(
-        ({ slice }) => slice.get("sample_id") === args.sample_id && slice.get("id") === sliceId,
-      );
-      if (!known) refuseInvalid(`Sample "${sample.get("name")}" has no slice "${sliceId}".`);
-    }
+    return assignPad(doc, args);
+  },
+});
 
-    const ref = padRef(args.track_id, args.bank_id, args.index);
-    const before = {};
-    const after = {};
-    for (const [field, value] of [["sample_id", args.sample_id], ["slice_id", sliceId]]) {
-      const current = fieldValue(pad, field);
-      if (current === value) continue;
-      before[fieldKey(ref, field)] = current;
-      after[fieldKey(ref, field)] = value;
-      pad.set(field, value);
-    }
-    return { before, after };
+defineCommand({
+  id: "pad.assign_if_empty",
+  // Only the gateway's sample upload finish route issues this, through the hub
+  // with `internal: true`. An upload names a pad that was free when it began;
+  // this is the same assignment with the "still free?" question asked here, in
+  // the hub's per-song queue, so the operator's own pad edit always wins. It is
+  // a command of its own rather than a flag on `pad.assign` because a flag
+  // would be an argument any caller could send: `pad.assign`'s schema is
+  // strict, so nobody outside the process can even name this rule.
+  internal: true,
+  title: "Put a sample on a pad that is still free",
+  schema: padAssignSchema,
+  summary: assignSummary,
+  touches: assignTouches,
+  apply(doc, args) {
+    return assignPad(doc, args, { onlyIfFree: true });
   },
 });
 

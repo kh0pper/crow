@@ -75,13 +75,30 @@
  *           (`{track_id, bank_id, index}`), is filed under
  *           `${prefix}studio/<song_id>/samples/<id>.wav` with the reference type
  *           `studio_sample`, and `finish` issues `sample.add` — then, if it named
- *           a pad that is still empty or already holds this sample,
- *           `pad.assign` as the same author with `cmd_id` `<id>:assign`.
- *           Both are `internal` only where the command says so, and both are
- *           idempotent by `cmd_id`, so a retried finish assigns nothing twice.
+ *           a pad, `pad.assign_if_empty` as the same author with `cmd_id`
+ *           `<id>:assign`. That command is Studio's own (`internal: true`) and
+ *           it is the one that decides whether the pad is still free, inside
+ *           the hub's per-song queue: a pad the operator filled or cleared
+ *           while the upload ran is theirs, and the sample simply stays in the
+ *           song (`pad_assign` "skipped"). Both commands are idempotent by
+ *           `cmd_id`.
  *           A sample is capped at 60 s of 48 kHz stereo (5,760,000 samples,
  *           frames × channels) and a song may have 128 of them uploading at
  *           once; a take keeps 1b's cap and its 32.
+ *
+ * ## One upload id belongs to one kind
+ *
+ * An id names one upload for good, so an id whose finished meta is a take is
+ * not a new sample's (or the other way round): `begin` refuses it with a
+ * conflict that names the kind already there.
+ *
+ * ## A sample's pad outcome is recorded before the finish answers
+ *
+ * Whether the sample reached its pad (`"done"`) or the pad was left as the
+ * operator had it (`"skipped"`) is written into the staged meta *before* the
+ * finish returns, and a retried finish answers with what that record says. So a
+ * retried finish never assigns again: a pad the operator cleared or re-filled
+ * in between stays exactly as they left it.
  *
  * Everything the take rules protect — the staging directory as the only copy of
  * a recording, fail-closed snapshot reads, one finish at a time, never deleting
@@ -138,6 +155,13 @@ const UPLOAD_KINDS = Object.freeze(["take", "sample"]);
 
 /** The `storage_files.reference_type` each kind is filed under. */
 const REFERENCE_TYPES = Object.freeze({ take: "studio_take", sample: "studio_sample" });
+
+/**
+ * What became of a sample's pad: the sample is on it, or the pad was left as
+ * the operator had it. Recorded in the meta before the finish answers.
+ * @type {Readonly<Object<string, string>>}
+ */
+const PAD_ASSIGN = Object.freeze({ done: "done", skipped: "skipped" });
 
 /** The audit action a finished upload of each kind is recorded with. */
 const AUDIT_ACTIONS = Object.freeze({ take: "studio.take", sample: "studio.sample" });
@@ -281,6 +305,16 @@ function kindOf(meta) {
 /** @returns {string} "take" or "sample", for a refusal's own words. */
 function kindNoun(kind) {
   return kind === "sample" ? "sample" : "take";
+}
+
+/**
+ * Whether a staged meta already records what became of a sample's pad. A retried
+ * finish answers with that record and never assigns again.
+ * @param {object|null|undefined} meta
+ * @returns {boolean}
+ */
+function isPadAssignRecorded(meta) {
+  return meta?.pad_assign === PAD_ASSIGN.done || meta?.pad_assign === PAD_ASSIGN.skipped;
 }
 
 /** @returns {string} "Take" or "Sample", for a sentence's first word. */
@@ -664,17 +698,6 @@ export function createTakeUploads({
   }
 
   /**
-   * The pads of a snapshot, keyed "<track_id>/<bank_id>/<index>" the way
-   * `doc.js` keys them; a song written before the sampler existed has none.
-   * @param {object} snapshot
-   * @returns {Object<string, object>}
-   */
-  function padsOf(snapshot) {
-    const pads = snapshot?.pads;
-    return pads && typeof pads === "object" ? pads : {};
-  }
-
-  /**
    * The song's tempo, for a take whose begin call did not name one (the route's
    * body does not carry it, and the take record has to say what tempo it was
    * recorded at).
@@ -840,10 +863,16 @@ export function createTakeUploads({
       return { chunk_bytes: CHUNK_BYTES };
     }
     if (existing && existing.finished === true) {
+      // An id names one upload for good. A finished take's id is not a new
+      // sample's, and a finished sample's id is not a new take's: the staged
+      // meta, the storage key and the reference type all belong to the first.
+      const previousKind = kindOf(existing);
+      if (previousKind !== kind) {
+        throw conflict(`That id belongs to a ${kindNoun(previousKind)} upload.`);
+      }
       // A finished upload whose object has since left the song (an undo, or the
       // clip was removed): start over in a clean directory. The song is read
       // fail-closed, because only its own answer may drop that meta.
-      const previousKind = kindOf(existing);
       const inSong = songContainer(await readSong(existing.song_id, previousKind), previousKind);
       if (inSong[uploadId]) return { chunk_bytes: CHUNK_BYTES };
       await rm(takeDir(uploadId), { recursive: true, force: true });
@@ -1249,10 +1278,23 @@ export function createTakeUploads({
       const song = await readSong(meta.song_id, kind);
       const inSong = songContainer(song, kind);
       if (inSong[takeId]) {
-        // The sound (or take) is in; a sample may still have to reach the pad
-        // its upload named, which is guarded (see `landOnPad`).
-        const assigned = kind === "sample" ? await landOnPad(meta, song) : false;
-        return finishResult(kind, inSong[takeId], assigned);
+        // The sound (or take) is in. A sample also answers what became of its
+        // pad, and that answer is the one its first finish recorded BEFORE it
+        // returned: the pad is never assigned twice, so a pad the operator
+        // cleared or re-filled since keeps what they chose. Only an attempt
+        // that stopped between `sample.add` and its own record has none, and it
+        // lands the sample now and records that.
+        if (kind !== "sample") return finishResult(kind, inSong[takeId]);
+        if (isPadAssignRecorded(meta)) return finishResult(kind, inSong[takeId], meta.pad_assign);
+        const record = inSong[takeId];
+        const padAssign = await landOnPad(meta);
+        return await completeFinish(takeId, meta, record, {
+          kind,
+          frames: Number(meta.frames) || Number(record.frames) || 0,
+          key: typeof meta.storage_key === "string" ? meta.storage_key : String(record.storage_key ?? ""),
+          chunks: hashes.length,
+          padAssign,
+        });
       }
       if (meta.finished === true) {
         throw conflict(`${Noun} "${takeId}" was finished, but it is no longer in the song.`);
@@ -1391,13 +1433,13 @@ export function createTakeUploads({
           // The refusal is a replay of a step an earlier attempt applied and
           // never got to clean up after: the upload is in the song, so complete
           // it. The earlier attempt wrote the audit line.
-          const assigned = kind === "sample" ? await landOnPad(meta, afterAdd) : false;
+          const padAssign = kind === "sample" ? await padAssignFor(meta) : PAD_ASSIGN.skipped;
           return await completeFinish(takeId, meta, confirmed, {
             kind,
             frames,
             key,
             chunks: hashes.length,
-            assigned,
+            padAssign,
           });
         }
         // The song does not point at the upload, so the object and its row may
@@ -1439,15 +1481,17 @@ export function createTakeUploads({
         payload,
       });
 
-      // A finished sample may belong on a pad: the pad is read again, and only
-      // a pad that is still free (or already holds this sample) takes it.
-      const assigned = kind === "sample" ? await landOnPad(meta, afterAdd) : false;
+      // A finished sample may belong on a pad. The pad is asked for inside the
+      // command, on the hub's own queue, so a pad the operator filled meanwhile
+      // is kept and the sample stays in the song. The outcome is recorded in the
+      // meta by `completeFinish`, before this answer goes out.
+      const padAssign = kind === "sample" ? await padAssignFor(meta) : PAD_ASSIGN.skipped;
       return await completeFinish(takeId, meta, confirmed, {
         kind,
         frames,
         key,
         chunks: hashes.length,
-        assigned,
+        padAssign,
       });
     } finally {
       await unlink(lock).catch(() => {});
@@ -1455,35 +1499,45 @@ export function createTakeUploads({
   }
 
   /**
-   * Put a finished sample on the pad its upload named, if that pad is still free
-   * or already holds this sample.
+   * Put a finished sample on the pad its upload named — if that pad is still
+   * free, or already holds this exact sample.
    *
-   * The pad comes from `song`, a snapshot read after `sample.add`, so a pad the
-   * operator pointed at another sound meanwhile is left alone: the sample stays
-   * in the song and nothing is overwritten. `cmd_id` is the upload's id with
-   * `":assign"`, so a retried finish cannot apply the same assignment twice.
+   * The "is it still free?" question is the command's, not this function's: a
+   * snapshot read here would answer with the song as it was a moment ago, and
+   * the operator's own `pad.assign` may have landed since. So the upload asks
+   * `pad.assign_if_empty` — Studio's own command, `internal: true` — and its
+   * check runs inside the hub's per-song queue, against the pad as it is now. A
+   * pad that holds another sound is refused there ("conflict"), and that
+   * refusal is this upload's "skipped": the sample is in the song, the pad is
+   * the operator's. `cmd_id` is the upload's id with `":assign"`, so the same
+   * assignment cannot apply twice.
    *
    * @param {object} meta the upload's staged meta
-   * @param {object} song the song's snapshot, read after `sample.add`
-   * @returns {Promise<boolean>} whether the pad now holds this sample
+   * @returns {Promise<string>} `PAD_ASSIGN.done` or `PAD_ASSIGN.skipped`
    */
-  async function landOnPad(meta, song) {
+  async function landOnPad(meta) {
     const target = meta && typeof meta.target === "object" ? meta.target : null;
-    if (!target) return false;
+    if (!target) return PAD_ASSIGN.skipped;
     const id = String(meta.take_id ?? "");
-    const pad = padsOf(song)[`${target.track_id}/${target.bank_id}/${target.index}`];
-    if (!pad) return false;
-    // A pad that already holds a sound is not repointed: it may be a sound the
-    // operator chose after the upload began.
-    if (typeof pad.sample_id === "string" && pad.sample_id !== "") return pad.sample_id === id;
     const result = await hub.runCommand({
       song_id: meta.song_id,
       cmd_id: `${id}:assign`,
-      command: "pad.assign",
+      command: "pad.assign_if_empty",
       args: { track_id: target.track_id, bank_id: target.bank_id, index: target.index, sample_id: id },
       author: meta.author,
+      internal: true,
     });
-    return Boolean(result && result.ok === true);
+    return result && result.ok === true ? PAD_ASSIGN.done : PAD_ASSIGN.skipped;
+  }
+
+  /**
+   * What a sample's pad came to: the outcome an earlier attempt recorded, or
+   * the assignment made now.
+   * @param {object} meta the upload's staged meta
+   * @returns {Promise<string>} `PAD_ASSIGN.done` or `PAD_ASSIGN.skipped`
+   */
+  async function padAssignFor(meta) {
+    return isPadAssignRecorded(meta) ? meta.pad_assign : landOnPad(meta);
   }
 
   /**
@@ -1491,27 +1545,32 @@ export function createTakeUploads({
    * sample with whether its pad holds it now.
    * @param {string} kind
    * @param {object} record the object as the song holds it
-   * @param {boolean} assigned whether the sample's pad holds it
+   * @param {string} [padAssign] what became of the sample's pad
    * @returns {{take: object}|{sample: object, pad_assigned: boolean}}
    */
-  function finishResult(kind, record, assigned) {
-    return kind === "sample" ? { sample: record, pad_assigned: assigned === true } : { take: record };
+  function finishResult(kind, record, padAssign = PAD_ASSIGN.skipped) {
+    return kind === "sample"
+      ? { sample: record, pad_assigned: padAssign === PAD_ASSIGN.done }
+      : { take: record };
   }
 
   /**
-   * Close out an upload the song has confirmed: mark its meta finished (so a
-   * retried finish can find its song) and only then drop the staged audio.
+   * Close out an upload the song has confirmed: mark its meta finished — with
+   * what became of a sample's pad, so a retried finish never assigns again —
+   * and only then drop the staged audio.
    * @param {string} takeId
    * @param {object} meta
    * @param {object} record the object as the song holds it
    * @param {{kind: string, frames: number, key: string, chunks: number,
-   *          assigned?: boolean}} finished
+   *          padAssign?: string}} finished
    * @returns {Promise<{take: object}|{sample: object, pad_assigned: boolean}>}
    */
-  async function completeFinish(takeId, meta, record, { kind, frames, key, chunks, assigned = false }) {
-    await writeMeta(takeId, { ...meta, finished: true, frames, storage_key: key, finished_at: nowIso() });
+  async function completeFinish(takeId, meta, record, { kind, frames, key, chunks, padAssign = PAD_ASSIGN.skipped }) {
+    const settled = { ...meta, finished: true, frames, storage_key: key, finished_at: nowIso() };
+    if (kind === "sample") settled.pad_assign = padAssign;
+    await writeMeta(takeId, settled);
     await dropChunks(takeId, chunks);
-    return finishResult(kind, record, assigned);
+    return finishResult(kind, record, padAssign);
   }
 
   /**

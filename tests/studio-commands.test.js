@@ -87,6 +87,7 @@ const COMMAND_IDS = [
   "marker.remove",
   "marker.rename",
   "pad.assign",
+  "pad.assign_if_empty",
   "pad.set",
   "pattern.add",
   "pattern.remove",
@@ -167,6 +168,9 @@ const MINIMAL_ARGS = {
   "bank.rename": { track_id: "t1", bank_id: "b1", name: "A" },
   "pad.set": { track_id: "t1", bank_id: "b1", index: 0, fields: { gain_db: 0 } },
   "pad.assign": { track_id: "t1", bank_id: "b1", index: 0, sample_id: SAMPLE_ID },
+  // Studio's own empty-only twin: the same arguments, a check that the pad is
+  // still free made inside the hub's queue.
+  "pad.assign_if_empty": { track_id: "t1", bank_id: "b1", index: 0, sample_id: SAMPLE_ID },
   "sample.add": { sample: { id: SAMPLE_ID, ...SAMPLE_ARGS } },
   "sample.rename": { sample_id: SAMPLE_ID, name: "Loop A" },
   "slice.set": { sample_id: SAMPLE_ID, slices: [{ start_frame: 0, end_frame: 100 }] },
@@ -267,7 +271,10 @@ test("the registry lists every command", () => {
   assert.equal(getCommand("clip.write").internal, false);
   assert.deepEqual(
     listCommands({ public: true }).map((command) => command.id),
-    COMMAND_IDS.filter((id) => id !== "take.add" && id !== "sample.add"),
+    COMMAND_IDS.filter(
+      (id) => id !== "take.add" && id !== "sample.add" && id !== "pad.assign_if_empty",
+    ),
+    "the public list is the rest: the upload finish route's own commands are not in it",
   );
   assert.equal(refuses(() => getCommand("clip.explode"), "not_found").code, "not_found");
 });
@@ -604,6 +611,11 @@ test("apply returns before/after for every touched field", (t) => {
       id: "pad.assign",
       args: { track_id: kitTrack, bank_id: "kit-b", index: 0, sample_id: SAMPLE_ID, slice_id: "s1" },
       keys: [`${padOf("kit-b", 0)}|sample_id`, `${padOf("kit-b", 0)}|slice_id`],
+    },
+    {
+      id: "pad.assign_if_empty",
+      args: { track_id: kitTrack, bank_id: "kit-b", index: 5, sample_id: SAMPLE_ID, slice_id: "s1" },
+      keys: [`${padOf("kit-b", 5)}|sample_id`, `${padOf("kit-b", 5)}|slice_id`],
     },
     {
       id: "pad.set",
