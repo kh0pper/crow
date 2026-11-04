@@ -58,7 +58,7 @@ test("websockify binds 127.0.0.1 and reaches RFB only through the token file (Ho
 test("the token: required and well-formed, out of the environment before any child starts, never printed", () => {
   const unset = CODE.indexOf("unset VNC_TOKEN\n");
   assert.ok(unset > -1);
-  for (const child of ["Xvfb \":", "x11vnc -display", "websockify --web", "--remote-debugging-port"]) {
+  for (const child of ["Xvfb \":", "x11vnc -display", "websockify --web", 'node "$RELAY"']) {
     assert.ok(unset < CODE.indexOf(child), "unset before " + child);
   }
   assert.ok(CODE.indexOf("unset VNC_TOKEN_VALUE") < CODE.indexOf("Xvfb \":"), "the copy is dropped too");
@@ -80,12 +80,12 @@ test("the entrypoint no longer needs VNC_PASSWORD, and an old one is ignored wit
   assert.doesNotMatch(CODE, /-passwd/);
 });
 
-test("before Chromium starts: x11vnc owns no TCP listener, noVNC listens on loopback only", () => {
+test("before the browser starts: x11vnc owns no TCP listener, noVNC listens on loopback only", () => {
   const rfb = CODE.indexOf('no_tcp_listeners "$X11VNC_PID" /proc/net/tcp /proc/net/tcp6');
   const web = CODE.indexOf('require_loopback "${NOVNC_PORT}"');
-  const chrome = CODE.indexOf("--remote-debugging-port");
-  assert.ok(rfb > -1 && web > -1);
-  assert.ok(rfb < chrome && web < chrome, "before Chromium launches");
+  const relay = CODE.indexOf('node "$RELAY"');
+  assert.ok(rfb > -1 && web > -1 && relay > -1);
+  assert.ok(rfb < relay && web < relay, "before the CDP relay (and so before the browser) starts");
   assert.ok(CODE.indexOf("x11vnc -display") < rfb, "after x11vnc starts");
   assert.ok(CODE.indexOf("websockify --web") < web, "after websockify starts");
   assert.match(CODE.slice(rfb, rfb + 200), /\|\| die "x11vnc is listening on a TCP port/);
@@ -162,13 +162,16 @@ test("compose passes the token (required), no VNC password, and its downloads mo
   assert.match(COMPOSE, /^\s+container_name: \$\{CROW_BROWSER_CONTAINER_NAME:-crow-browser\}$/m);
   assert.match(COMPOSE, /^\s+network_mode: host$/m);
   assert.doesNotMatch(COMPOSE, /^\s*ports:/m, "no published ports (host networking)");
-  assert.match(ENTRYPOINT, /--user-data-dir=\/root\/\.config\/chromium-crow/, "the profile path is unchanged");
+  // The profile path is unchanged; the relay (which starts Chromium now) defaults to it,
+  // and the entrypoint hands it the same value.
+  assert.match(read("bundles/browser/cdp-relay.mjs"), /CROW_CHROMIUM_PROFILE \|\| "\/root\/\.config\/chromium-crow"/, "the profile path is unchanged");
+  assert.match(ENTRYPOINT, /^export CROW_CHROMIUM_PROFILE="\$PROFILE_DIR"$/m, "the entrypoint passes the profile to the relay");
 });
 
 test("the manifest declares no VNC password and says the viewer is loopback-only behind sign-in", () => {
-  assert.equal(MANIFEST.version, "1.4.2");
+  assert.equal(MANIFEST.version, "1.5.0");
   assert.doesNotMatch(JSON.stringify(MANIFEST), /VNC_PASSWORD/);
-  assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN"]);
+  assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN", "CROW_BROWSER_CDP_TOKEN"], "both tokens are required: the viewer's, and the CDP gate's");
   const tok = MANIFEST.env_vars.find((v) => v.name === "CROW_BROWSER_VNC_TOKEN");
   assert.equal(tok.generate, "hex32", "Crow generates 32 random bytes per install");
   assert.equal(tok.secret, true);
@@ -186,7 +189,7 @@ test("the manifest declares no VNC password and says the viewer is loopback-only
   const reg = JSON.parse(read("registry/add-ons.json"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "browser");
   assert.ok(entry, "the registry lists the browser");
-  assert.equal(entry.version, "1.4.2");
+  assert.equal(entry.version, "1.5.0");
   assert.doesNotMatch(JSON.stringify(entry), /VNC_PASSWORD/);
   assert.doesNotMatch(read("bundles/browser/.env.example"), /VNC_PASSWORD/);
 });
@@ -250,29 +253,32 @@ test("the X display: a real per-start cookie, no TCP and no abstract (host-wide)
   assert.match(command("x11vnc"), /\s-noremote\s/);
 });
 
-test("a graceful stop: SIGTERM goes to Chromium, which gets time to flush before the rest stops", () => {
+test("a graceful stop: the relay closes the browser (Browser.close over the pipe) and gets time to do it", () => {
   const fn = CODE.slice(CODE.indexOf("shutdown() {"), CODE.indexOf("\n}\n", CODE.indexOf("shutdown() {")));
-  assert.match(fn, /cdp_close \|\| true/, "CDP Browser.close first: Chromium's SIGTERM path does not commit cookies");
-  assert.match(CODE, /"method": "Browser\.close"/);
-  assert.match(fn, /kill -TERM "\$CHROME_PID"/, "SIGTERM only as the fallback");
-  assert.ok(fn.indexOf("cdp_close") < fn.indexOf("kill -TERM"));
-  assert.match(fn, /kill -0 "\$CHROME_PID"/, "waits for Chromium");
-  assert.ok(fn.indexOf("kill -TERM") < fn.indexOf('kill "$X11VNC_PID"'), "Chromium first, the display after");
+  assert.match(fn, /kill -TERM "\$RELAY_PID"/, "the relay owns the graceful close");
+  assert.match(fn, /kill -KILL "\$RELAY_PID"/, "…with a hard stop if it will not go");
+  assert.ok(fn.indexOf("kill -TERM") < fn.indexOf('kill "$X11VNC_PID"'), "the browser first, the display after");
   assert.match(CODE, /^trap shutdown TERM INT$/m);
-  assert.ok(CODE.indexOf("trap shutdown TERM INT") < CODE.lastIndexOf('wait "$CHROME_PID"'));
+  assert.ok(CODE.indexOf("trap shutdown TERM INT") < CODE.lastIndexOf('wait "$RELAY_PID"'));
+  // The relay is Chromium's closest relative and speaks the pipe, so the shell's own CDP
+  // client (and any Browser.close in the entrypoint) is gone.
+  assert.doesNotMatch(CODE, /cdp_close/, "the shell's Python CDP client is gone");
+  assert.doesNotMatch(CODE, /Browser\.close/, "and the shell no longer speaks CDP at all");
 });
 
 test("the instance marker: the profile names its Crow instance, and a different one refuses to start", () => {
   assert.match(CODE, /^INSTANCE_MARKER="\$\{PROFILE_DIR\}\/\.crow-instance"$/m);
   assert.match(CODE, /\[ -n "\$CROW_INSTANCE" \] \|\| die/);
   assert.match(CODE, /\[ "\$\(realpath -m -- "\$\(cat "\$INSTANCE_MARKER"\)"\)" = "\$CROW_INSTANCE" \] \\\n\s+\|\| die "this browser profile belongs to the Crow instance/);
-  assert.ok(CODE.indexOf("INSTANCE_MARKER\" ]") < CODE.indexOf("--remote-debugging-port"), "checked before Chromium opens the profile");
+  assert.ok(CODE.indexOf("INSTANCE_MARKER\" ]") < CODE.indexOf('node "$RELAY"'), "checked before the browser opens the profile");
 });
 
-test("round 3: Browser.close is bounded (timeout 10), and the marker compares canonical paths on both sides", () => {
-  assert.match(CODE, /^  timeout 10 python3 - "\$CDP_PORT" <<'PY' >\/dev\/null 2>&1$/m);
+test("round 3: the browser's close is bounded (10 s in the relay), and the marker compares canonical paths on both sides", () => {
+  const relay = read("bundles/browser/cdp-relay.mjs");
+  assert.match(relay, /export const CLOSE_TIMEOUT_MS = 10_000;/, "Browser.close waits 10 s, then the relay kills Chromium");
+  assert.match(relay, /method: "Browser\.close"/);
   const fn = CODE.slice(CODE.indexOf("shutdown() {"), CODE.indexOf("\n}\n", CODE.indexOf("shutdown() {")));
-  assert.match(fn, /for i in \$\(seq 1 30\); do/, "15 s for Chromium to close itself, inside the 30 s grace period");
+  assert.match(fn, /for i in \$\(seq 1 30\); do/, "15 s for the relay to close Chromium, inside the 30 s grace period");
   assert.match(CODE, /CROW_INSTANCE="\$\(realpath -m -- "\$CROW_INSTANCE"\)"/);
   assert.match(CODE, /\[ "\$\(realpath -m -- "\$\(cat "\$INSTANCE_MARKER"\)"\)" = "\$CROW_INSTANCE" \]/);
   const script = readFileSync(new URL("scripts/ops/browser-profile-to-volume.sh", REPO), "utf8");

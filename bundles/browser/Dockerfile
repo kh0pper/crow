@@ -29,8 +29,11 @@ RUN npm install
 RUN npx playwright install chromium --with-deps
 
 COPY entrypoint.sh ./
+COPY cdp-relay.mjs ./
 RUN chmod +x entrypoint.sh
 
+# 6080 is noVNC; 9222 is the CDP relay (Chromium itself listens on no port — it
+# runs on --remote-debugging-pipe and only the relay answers, with a bearer token).
 EXPOSE 6080 9222
 
 ENTRYPOINT ["/app/entrypoint.sh"]

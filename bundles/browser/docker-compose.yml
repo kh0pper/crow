@@ -19,6 +19,9 @@ services:
     # CROW_HOME) can run its own browser container side-by-side. With
     # network_mode: host the ports must be overridden too — set
     # CROW_BROWSER_{VNC,CDP}_PORT in this bundle's .env alongside the name.
+    # Since 1.5.0 CDP_PORT is the CDP relay's listen port (Chromium itself opens
+    # no port: it runs on --remote-debugging-pipe and only the relay, which needs
+    # the bearer token, answers there). The host contract is unchanged.
     container_name: ${CROW_BROWSER_CONTAINER_NAME:-crow-browser}
     network_mode: host
     environment:
@@ -56,11 +59,20 @@ services:
     # so not in `docker inspect`). An old .env's VNC password line is harmless:
     # it is simply not passed any more. After changing the token in .env,
     # recreate the container (the gateway reads the new one on every upgrade).
+    # Since 1.5.0 the CDP token goes in the same way, as a second 0400 file: the
+    # relay reads it there, and it is never an env var, an argv or a compose
+    # command. `content: ${CROW_BROWSER_CDP_TOKEN:-}` (not `:?`) so a host whose
+    # mint has not run yet can still render this file — the container then stops
+    # with a clear FATAL instead of failing to start at the compose level, and
+    # the start-after-mint sequence in the bundle's own install path is intact.
     # `configs: content:` needs Docker Compose 2.23.1 or newer; an older Compose
     # refuses this file (it fails closed).
     configs:
       - source: vnc_token
         target: /run/secrets/crow-vnc-token
+        mode: 0400
+      - source: cdp_token
+        target: /run/secrets/crow-cdp-token
         mode: 0400
     init: true
     # Chromium gets SIGTERM (the entrypoint forwards it) and time to flush
@@ -82,3 +94,7 @@ volumes:
 configs:
   vnc_token:
     content: ${CROW_BROWSER_VNC_TOKEN:?CROW_BROWSER_VNC_TOKEN is required (Crow generates it at install)}
+  # No `:?` here (deliberately): an install made before this key existed must still
+  # render, and the container's entrypoint says plainly what is missing.
+  cdp_token:
+    content: ${CROW_BROWSER_CDP_TOKEN:-}

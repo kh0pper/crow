@@ -140,15 +140,16 @@ The VNC viewer is reached only through the Crow gateway, behind your dashboard s
 - **Embedded**: In the Browser panel's Status tab (iframe), the live browser tile, and the **Take over** sheet in a chat
 - **Full view**: `/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false` (same HTTPS as your dashboard)
 
-The viewer connects on its own: there is no separate VNC password. The screen (x11vnc, and the X display under it) is on no network port: x11vnc listens only on a root-only unix socket inside the container, and the X display needs a per-start cookie and has no TCP or host-wide socket. noVNC (port 6080) listens on `127.0.0.1` only, and connects a viewer only with a per-instance key that Crow generates at install (`CROW_BROWSER_VNC_TOKEN` in the bundle's `.env`, handed to the container as a root-only file). The Crow gateway adds the key on its side, after checking your sign-in and that the request comes from the dashboard's own page; no page or link contains it, and a wrong key is refused without being logged. This keeps **web pages and other machines** away from the screen. It does **not** keep out programs already running on this machine as any user: Chrome DevTools (CDP, `127.0.0.1:9222`) has no authentication, so a local program can drive the browser and read its cookies through it. Gating CDP is tracked separately. The container stops at startup if the screen is on any TCP port, an X socket is reachable host-wide, or noVNC is reachable on a non-loopback address. After changing the key in `.env`, recreate the container.
+The viewer connects on its own: there is no separate VNC password. The screen (x11vnc, and the X display under it) is on no network port: x11vnc listens only on a root-only unix socket inside the container, and the X display needs a per-start cookie and has no TCP or host-wide socket. noVNC (port 6080) listens on `127.0.0.1` only, and connects a viewer only with a per-instance key that Crow generates at install (`CROW_BROWSER_VNC_TOKEN` in the bundle's `.env`, handed to the container as a root-only file). The Crow gateway adds the key on its side, after checking your sign-in and that the request comes from the dashboard's own page; no page or link contains it, and a wrong key is refused without being logged. Chrome DevTools (CDP) works the same way since 1.5.0: the browser itself opens **no** port (it runs on a pipe), and a small relay inside the container serves `127.0.0.1:9222` only to a caller that sends this instance's `CROW_BROWSER_CDP_TOKEN` as a bearer token (`/json/version` and the debugger WebSocket; everything else is refused). So this keeps **web pages, other machines and other users** away from the screen and from the browser's controls. It does **not** keep out a program that can read the bundle's `.env`, where both keys live. The container stops at startup if the screen is on any TCP port, an X socket is reachable host-wide, noVNC or the CDP relay is reachable on a non-loopback address, or the CDP token is missing. After changing a key in `.env`, recreate the container.
 
 ## Docker Container
 
 The container runs:
 - **Ubuntu 22.04** with Xvfb (virtual framebuffer)
-- **Playwright Chromium** (latest)
+- **Playwright Chromium** (latest), on a DevTools pipe (`--remote-debugging-pipe`) instead of a debugging port
 - **x11vnc + noVNC** for browser viewing
-- **Host networking** (`network_mode: host`) for CDP access
+- **A small CDP relay** that serves `127.0.0.1:9222` for the browser's control clients, with the token check
+- **Host networking** (`network_mode: host`) so the browser can reach services that listen only on this machine
 
 Container limits: 2GB RAM, 1GB shared memory.
 
@@ -174,7 +175,7 @@ The Browser Automation extension includes a skill for filing taxes via IRS Free 
 
 ## Security
 
-- **CDP port (9222)** binds to `127.0.0.1` only, but has **no authentication**: any program running on this machine, as any user, can drive the browser and read its cookies through it (gating it is tracked separately)
+- **CDP port (9222)** binds to `127.0.0.1` only and is served by the container's CDP relay, not by Chromium (which opens no port at all: it runs on a pipe). A request without this instance's `CROW_BROWSER_CDP_TOKEN` as a bearer token gets 401; only `/json/version` and the debugger WebSocket exist; headers are capped, connections are capped, and no header value is ever logged. Crow's own browser clients (the Browser tools, the dashboard's browser tile) send the token themselves, so you never type it. What this does **not** stop: a program that can read the bundle's `.env`, where the token lives
 - **VNC**: x11vnc is on a unix socket inside the container (no TCP port); the X display needs a per-start cookie and has no TCP or host-wide socket; noVNC (6080) binds to `127.0.0.1` only and needs the per-instance key that the gateway adds, after the session and same-origin checks
 - **No ports exposed** to the network — everything goes through the gateway's HTTPS
 - No VNC password: for web pages and other machines, the dashboard sign-in is the gate (programs on this machine: see CDP above). A page served by another app under the dashboard's `/proxy/` shares the dashboard's origin, so a flaw in such an app reaches what the dashboard reaches. An older install's `CROW_BROWSER_VNC_PASSWORD` in the bundle's `.env` is ignored

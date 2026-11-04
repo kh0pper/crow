@@ -83,7 +83,8 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 5335 | 127.0.0.1 | adguard-home (DNS, TCP+UDP) | MVP PR 3 |
 | 5336 | — | pi-hole (DNS) | reserved (Phase 2 DNS) |
 | 5337 | — | technitium (DNS) | reserved (Phase 2 DNS) |
-| 6080 | 127.0.0.1 | browser (noVNC, existing) — since 1.4.0 noVNC binds 127.0.0.1 only and needs the per-instance `CROW_BROWSER_VNC_TOKEN` that the gateway's `/proxy/browser/` adds server-side; RFB is a unix socket inside the container, no TCP port (5900/5901 are no longer used; the entrypoint refuses to start otherwise). Overridable via `CROW_BROWSER_VNC_PORT`; CDP 9222 via `CROW_BROWSER_CDP_PORT`. Secondary instances on one host pick +1 offsets (6081/9223), and MUST also set a distinct X display number via `CROW_BROWSER_DISPLAY` (default 99, secondary 98) — under `network_mode: host` two instances on the same display collide | existing |
+| 6080 | 127.0.0.1 | browser (noVNC, existing) — since 1.4.0 noVNC binds 127.0.0.1 only and needs the per-instance `CROW_BROWSER_VNC_TOKEN` that the gateway's `/proxy/browser/` adds server-side; RFB is a unix socket inside the container, no TCP port (5900/5901 are no longer used; the entrypoint refuses to start otherwise). Overridable via `CROW_BROWSER_VNC_PORT`. Secondary instances on one host pick +1 offsets (6081/9223), and MUST also set a distinct X display number via `CROW_BROWSER_DISPLAY` (default 99, secondary 98) — under `network_mode: host` two instances on the same display collide | existing |
+| 9222 | 127.0.0.1 | browser (CDP relay) — since 1.5.0 this is the container's **relay**, not Chromium: Chromium runs on `--remote-debugging-pipe` and opens no port, and the relay answers only a caller with `CROW_BROWSER_CDP_TOKEN` as a bearer token. No compose `ports:` entry (the container is `network_mode: host`), so no `check-ports` mapping; the row is here because the number is a host allocation. Overridable via `CROW_BROWSER_CDP_PORT`; a co-hosted instance (r4) takes 9223 alongside its 6081/98. The browser manifest no longer lists 9222 in `ports`, so an install from before 1.5.0 still has a stale `ufw allow … port 9222` from the tailnet that the new one does not create | existing |
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
 | 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to the home server :8002) | external, freed |
@@ -145,7 +146,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 
 These bundles use `network_mode: host`. They consume whatever ports their upstream service expects directly on the host:
 
-- `browser` (Chrome DevTools — verify ports)
+- `browser` (noVNC 6080 and the CDP relay 9222, both `127.0.0.1`; Chromium itself opens no port)
 - `companion` (verify)
 - `coturn` (3478 UDP, plus turnserver listen ports)
 - `plex` (32400, plus discovery ports)
