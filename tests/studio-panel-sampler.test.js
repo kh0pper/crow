@@ -1090,6 +1090,70 @@ test("the input a pad recording opened is closed when it ends", async () => {
   assert.equal(ui.store.pendings.size, 0, "the sample went up and its row went with it");
 });
 
+test("with Web Locks, a pad recording uploads from the page that recorded it", async () => {
+  // The recording page holds its take's lock while the row has no count; its
+  // own upload must wait for that hold to go, not find the lock taken.
+  const locks = fakeLocks();
+  const ui = await bootSampler({ locks });
+  await ui.openSampler();
+  ui.view().querySelector("[data-act=pad-record]").dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(24);
+  const recorder = ui.engine.recorders[0];
+  recorder.chunk(new Uint8Array(12), 0);
+  await ui.settle();
+  assert.equal(locks.held.size, 1, "the take's lock is held while it records");
+  recorder.done({ segments: [{ segment: 0, frames: 4 }] });
+  await ui.settle(80);
+  assert.equal(ui.requests.filter((request) => request.url.includes("/finish")).length, 1, "it was finished");
+  assert.equal(ui.store.pendings.size, 0, "and nothing is left on this device");
+  assert.equal(locks.held.size, 0, "and the lock is let go");
+});
+
+test("with Web Locks, a resample uploads from the page that recorded it", async () => {
+  const locks = fakeLocks();
+  const ui = await bootSampler({ locks });
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  const BAR = RATE * 2;
+  ui.engine.barFrames = [{ frame: 0, bar: 0 }, { frame: BAR, bar: 1 }];
+  const press = () =>
+    ui.view().querySelector("[data-act=pad-resample]").dispatchEvent(ui.event("click", { bubbles: true }));
+  press();
+  await ui.settle(24);
+  ui.tapBlocks(BAR / 2 / 128, 128, 0);
+  await ui.settle();
+  press();
+  await ui.settle();
+  ui.tapBlocks(BAR / 128, 128, BAR / 2);
+  await ui.settle(80);
+  assert.equal(ui.requests.filter((request) => request.url.includes("/finish")).length, 1, "it was finished");
+  assert.equal(ui.store.pendings.size, 0, "and nothing is left on this device");
+  assert.equal(locks.held.size, 0, "and the lock is let go");
+});
+
+test("a late first block that starts on a bar line keeps that bar", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  const BAR = RATE * 2;
+  // The press resolved to bar 0, but the first block arrives exactly on bar 1.
+  ui.engine.barFrames = [{ frame: 0, bar: 0 }, { frame: BAR * 3, bar: 3 }];
+  const press = () =>
+    ui.view().querySelector("[data-act=pad-resample]").dispatchEvent(ui.event("click", { bubbles: true }));
+  press();
+  await ui.settle(24);
+  ui.tapBlocks(BAR / 128, 128, BAR);
+  await ui.settle();
+  press();
+  await ui.settle();
+  ui.tapBlocks((BAR * 2) / 128, 128, BAR * 2);
+  await ui.settle(80);
+  const rows = ui.store.saved.filter((row) => row.origin === "resample");
+  assert.equal(rows[rows.length - 1].frames, BAR * 2, "bars 1 and 2 were kept: bar 1 was not skipped");
+});
+
 test("resample with Snap to bar keeps whole bars", async () => {
   const ui = await bootSampler();
   await ui.openSampler();
@@ -1199,7 +1263,7 @@ test("a stop bar reached before the press resolves is not overrun", async () => 
 
   const BAR = RATE * 2;
   // The first press resolves to bar 0, and bar 0 is long gone by the time the
-  // first block arrives: the sample starts on the NEXT bar line after it.
+  // first block arrives (it starts on bar 1): the sample starts on bar 1.
   ui.engine.barFrames = [{ frame: 0, bar: 0 }, { frame: BAR * 3, bar: 3 }];
   const button = () => {
     const node = ui.view().querySelector("[data-act=pad-resample]");
@@ -1220,13 +1284,13 @@ test("a stop bar reached before the press resolves is not overrun", async () => 
   assert.equal(ui.engine.taps.at(-1).on, false, "the tap went off at once");
   const rows = ui.store.saved.filter((row) => row.origin === "resample");
   const last = rows[rows.length - 1] || {};
-  assert.equal(last.frames, BAR, "exactly one bar, from the next bar line after the first block");
+  assert.equal(last.frames, BAR * 2, "bars 1 and 2: from the first bar line not yet passed to the stop bar");
   const chunkPuts = ui.requests.filter(
     (request) => request.method === "PUT" && request.url.includes(last.take_id + "/chunks/"),
   );
   assert.equal(
     chunkPuts.reduce((sum, put) => sum + put.bytes, 0),
-    BAR * 6,
+    BAR * 2 * 6,
     "not one frame past the stop bar",
   );
 });
