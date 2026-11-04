@@ -72,11 +72,13 @@ function take(id, overrides = {}) {
 /**
  * One audio song: a single audio track, one scene, one audio clip holding the
  * comp, and the takes the comp names.
- * @param {{comp: object[], takes?: object[], lengthBars?: number, track?: object}} options
+ * @param {{comp: object[], takes?: object[], lengthBars?: number, track?: object,
+ *          arrangement?: object}} options `arrangement` puts the song on the
+ *   timeline instead of in a scene
  * @returns {object} a snapshot in the shape `server/doc.js` writes
  */
-function audioSong({ comp, takes = [], lengthBars = 1, track = {} }) {
-  return {
+function audioSong({ comp, takes = [], lengthBars = 1, track = {}, arrangement = null }) {
+  const song = {
     meta: { title: "Audio", bpm: 120, meter: [4, 4], key: "C major" },
     tracks: [
       {
@@ -106,6 +108,32 @@ function audioSong({ comp, takes = [], lengthBars = 1, track = {} }) {
       },
     },
     takes: Object.fromEntries(takes.map((item) => [item.id, item])),
+  };
+  if (arrangement) song.arrangement = arrangement;
+  return song;
+}
+
+/** A placement in the snapshot's shape, with 0 fades unless a test sets them. */
+function placement(id, trackId, clipId, startBar, bars, over = {}) {
+  return {
+    id,
+    track_id: trackId,
+    clip_id: clipId,
+    start_bar: startBar,
+    bars,
+    offset_beats: 0,
+    fade_in_beats: 0,
+    fade_out_beats: 0,
+    ...over,
+  };
+}
+
+/** A whole arrangement, keyed by placement id the way `doc.js` writes it. */
+function arrangementOf(items) {
+  return {
+    placements: Object.fromEntries(items.map((item) => [item.id, item])),
+    markers: {},
+    sections: {},
   };
 }
 
@@ -185,11 +213,16 @@ async function waitFor(predicate, ms = 2000) {
  * then the song, launch the scene, play, render.
  * @param {object} song
  * @param {{seconds?: number, sampleRate?: number, audio?: object[],
+ *          mode?: "session"|"arrangement", fromBar?: number,
  *          onError?: (text: string) => void}} [options] `audio` is one
- *   `{id, channels, rate}` per take to load
+ *   `{id, channels, rate}` per take to load; `mode: "arrangement"` plays the
+ *   song's timeline from `fromBar` instead of launching its scene
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
-async function renderAudioSong(song, { seconds = 1, sampleRate = SAMPLE_RATE, audio = [], onError } = {}) {
+async function renderAudioSong(
+  song,
+  { seconds = 1, sampleRate = SAMPLE_RATE, audio = [], mode = "session", fromBar = 0, onError } = {},
+) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
     length: Math.round(seconds * sampleRate),
@@ -206,7 +239,12 @@ async function renderAudioSong(song, { seconds = 1, sampleRate = SAMPLE_RATE, au
       await engine.loadAudio(item.id, channels, item.rate);
     }
     engine.setSong(song);
-    engine.launchScene("scene-1");
+    if (mode === "arrangement") {
+      engine.setMode("arrangement");
+      engine.seek(fromBar);
+    } else {
+      engine.launchScene("scene-1");
+    }
     engine.play();
     engine.node.connect(context.destination);
     await engine.flush();
@@ -471,4 +509,87 @@ test("resampler is identity at equal rates and preserves a 1 kHz sine's frequenc
       `${from} → ${to}: expected 1000 Hz within 0.1%, measured ${measured.toFixed(2)} Hz (${(error * 100).toFixed(3)}% off)`,
     );
   }
+});
+
+// --- the arrangement --------------------------------------------------------
+
+test("fade in ramps linearly from silence", async () => {
+  const frames = 2 * 4 * FRAMES_PER_BEAT; // two bars of take, so the ramp is inside it
+  const song = audioSong({
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+    takes: [take("take-1", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([
+      placement("p1", "track-1", "clip-1", 0, 2, { fade_in_beats: 1 }),
+    ]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 0.6,
+    mode: "arrangement",
+    audio: [{ id: "take-1", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE }],
+  });
+
+  // A fade in of one beat is FRAMES_PER_BEAT frames of linear gain, from 0 at
+  // the placement's first frame to 1 at the frame one beat later.
+  const ramp = FRAMES_PER_BEAT;
+  assert.equal(left[0], 0, "a fade in starts from silence");
+  for (const at of [1, 100, 3000, ramp / 2, ramp - 1]) {
+    const want = 0.5 * (at / ramp) * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-6,
+      `fade in frame ${at}: expected ${want}, got ${left[at]} (linear from silence to the take's own level)`,
+    );
+  }
+  for (const at of [ramp, ramp + 1, 28000, 28799]) {
+    const want = 0.5 * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-6,
+      `frame ${at} is past the fade and has to be the take at full level, got ${left[at]}`,
+    );
+  }
+});
+
+test("split audio placements play without a click", async () => {
+  // Two bars of audio in a two-bar clip, so the second half of a split starts
+  // four beats into the take — exactly where the first half stopped.
+  const frames = 2 * 4 * FRAMES_PER_BEAT;
+  const samples = new Float32Array(frames);
+  for (let at = 0; at < frames; at += 1) samples[at] = Math.sin(at / 100) * 0.5;
+
+  const songWith = (placements) =>
+    audioSong({
+      comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+      takes: [take("take-1", { frames })],
+      lengthBars: 2,
+      arrangement: arrangementOf(placements),
+    });
+  const audio = () => [{ id: "take-1", channels: [Float32Array.from(samples)], rate: SAMPLE_RATE }];
+
+  const whole = await renderAudioSong(songWith([placement("p1", "track-1", "clip-1", 0, 2)]), {
+    seconds: 2.5,
+    mode: "arrangement",
+    audio: audio(),
+  });
+  const halves = await renderAudioSong(
+    songWith([
+      placement("p1", "track-1", "clip-1", 0, 1),
+      placement("p2", "track-1", "clip-1", 1, 1, { offset_beats: 4 }),
+    ]),
+    { seconds: 2.5, mode: "arrangement", audio: audio() },
+  );
+
+  assert.ok(peakOf(whole.left) > 0.01, "the unsplit render has to be audible to compare anything");
+  let differing = -1;
+  for (let at = 0; at < whole.left.length; at += 1) {
+    if (whole.left[at] !== halves.left[at] || whole.right[at] !== halves.right[at]) {
+      differing = at;
+      break;
+    }
+  }
+  assert.equal(
+    differing,
+    -1,
+    `half ${differing} of the split render differs from the unsplit one (a restart or a crossfade at the split)`,
+  );
 });

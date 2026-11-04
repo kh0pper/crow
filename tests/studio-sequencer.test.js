@@ -55,12 +55,38 @@ function clip(id, trackId, sceneId, lengthBars, notes) {
 }
 
 /** A whole song snapshot, keyed by clip id the way `doc.js` writes it. */
-function song({ bpm = BPM, tracks = [], scenes = [], clips = [] } = {}) {
-  return {
+function song({ bpm = BPM, tracks = [], scenes = [], clips = [], arrangement = null } = {}) {
+  const snapshot = {
     meta: { title: "Test song", bpm, meter: [4, 4], key: "C major" },
     tracks,
     scenes,
     clips: Object.fromEntries(clips.map((item) => [item.id, item])),
+  };
+  if (arrangement) snapshot.arrangement = arrangement;
+  return snapshot;
+}
+
+/** A placement in the snapshot's shape, with 0 fades unless a test sets them. */
+function placement(id, trackId, clipId, startBar, bars, over = {}) {
+  return {
+    id,
+    track_id: trackId,
+    clip_id: clipId,
+    start_bar: startBar,
+    bars,
+    offset_beats: 0,
+    fade_in_beats: 0,
+    fade_out_beats: 0,
+    ...over,
+  };
+}
+
+/** A whole arrangement, keyed by placement id the way `doc.js` writes it. */
+function arrangementOf(items) {
+  return {
+    placements: Object.fromEntries(items.map((item) => [item.id, item])),
+    markers: {},
+    sections: {},
   };
 }
 
@@ -759,4 +785,172 @@ test("a scene launch reports every track in its row, empty slots included", () =
   // row, so every track is reported again at the next bar.
   seq.launchScene("s2");
   assert.equal(launchesOf(seq.block(FRAMES_PER_BAR + 128, FRAMES_PER_BAR * 2)).length, 3);
+});
+
+/** @returns {object[]} events as [frame, track, type, pitch] rows, easy to read. */
+function rowsOf(events) {
+  return events.map((event) => [event.frame, event.track_id, event.type, event.p]);
+}
+
+test("arrangement mode plays placements on their bars", () => {
+  const seq = sequencer(
+    song({
+      tracks: [track("t1"), track("t2")],
+      scenes: [scene("s1")],
+      clips: [
+        clip("c1", "t1", "s1", 1, [note(0, 1, 60)]),
+        clip("c2", "t2", "s1", 1, [note(0, 1, 64)]),
+      ],
+      arrangement: arrangementOf([
+        placement("p1", "t1", "c1", 1, 1),
+        placement("p2", "t2", "c2", 2, 1),
+      ]),
+    }),
+  );
+
+  seq.setMode("arrangement");
+  seq.play();
+
+  // Each track sounds only where its placement is: bar 1 for the first one,
+  // bar 2 for the second, and nothing in between.
+  assert.deepEqual(rowsOf(collect(seq, FRAMES_PER_BAR * 3, 128)), [
+    [FRAMES_PER_BAR, "t1", "on", 60],
+    [FRAMES_PER_BAR + FRAMES_PER_BEAT, "t1", "off", 60],
+    [FRAMES_PER_BAR * 2, "t2", "on", 64],
+    [FRAMES_PER_BAR * 2 + FRAMES_PER_BEAT, "t2", "off", 64],
+  ]);
+});
+
+test("a placement longer than its clip loops it", () => {
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+      arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 3)]),
+    }),
+  );
+
+  seq.setMode("arrangement");
+  seq.play();
+
+  // The clip is one bar long and the placement three, so it plays three times.
+  const events = collect(seq, FRAMES_PER_BAR * 3, 128);
+  assert.deepEqual(
+    events.filter((event) => event.type === "on").map((event) => event.frame),
+    [0, FRAMES_PER_BAR, FRAMES_PER_BAR * 2],
+  );
+  assert.deepEqual(
+    events.filter((event) => event.type === "off").map((event) => event.frame),
+    [FRAMES_PER_BEAT, FRAMES_PER_BAR + FRAMES_PER_BEAT, FRAMES_PER_BAR * 2 + FRAMES_PER_BEAT],
+  );
+});
+
+test("split placements are seamless", () => {
+  // A two-bar clip in one placement, then the same clip as `arrangement.split`
+  // leaves it: two one-bar halves, the second starting four beats into the
+  // clip, which is exactly where the first one stopped. One note crosses the
+  // split, so a cut at the boundary or a repeat of the clip would show.
+  const notes = [note(0, 1, 60), note(3, 4, 62), note(6, 1, 65)];
+  const make = (placements) =>
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      clips: [clip("c1", "t1", "s1", 2, notes)],
+      arrangement: arrangementOf(placements),
+    });
+
+  const whole = sequencer(make([placement("p1", "t1", "c1", 0, 2)]));
+  whole.setMode("arrangement");
+  whole.play();
+  const unsplit = collect(whole, FRAMES_PER_BAR * 2, 128);
+
+  const split = sequencer(
+    make([
+      placement("p1", "t1", "c1", 0, 1),
+      placement("p2", "t1", "c1", 1, 1, { offset_beats: 4 }),
+    ]),
+  );
+  split.setMode("arrangement");
+  split.play();
+  const halves = collect(split, FRAMES_PER_BAR * 2, 128);
+
+  assert.ok(unsplit.length > 0, "the clip has to make some sound");
+  assert.deepEqual(halves, unsplit, "a split has to play exactly what the one placement played");
+});
+
+test("seek starts mid-placement without stuck notes", () => {
+  const seq = sequencer(
+    song({
+      tracks: [track("t1")],
+      scenes: [scene("s1")],
+      // A long note from clip beat 0 and a short one at beat 4.
+      clips: [clip("c1", "t1", "s1", 2, [note(0, 8, 60), note(4, 1, 67)])],
+      arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 4)]),
+    }),
+  );
+
+  seq.setMode("arrangement");
+  seq.play();
+  assert.deepEqual(brief(seq.block(0, 128)), [{ frame: 0, track_id: "t1", type: "on", p: 60 }]);
+
+  // Bar 1 (the second bar) is four beats into the placement, in the middle of
+  // the long note: that note is closed, and the one that starts there begins.
+  seq.seek(1);
+  assert.deepEqual(brief(seq.block(128, 128)), [
+    { frame: 0, track_id: "t1", type: "off", p: 60 },
+    { frame: 0, track_id: "t1", type: "on", p: 67 },
+  ]);
+  // The transport reads the timeline's own bars after a seek.
+  assert.deepEqual(seq.position(), { bar: 2, beat: 1, sixteenth: 1 });
+
+  // The short note ends one beat later, and nothing else is left sounding.
+  assert.deepEqual(rowsOf(collectFrom(seq, 256, FRAMES_PER_BEAT, 128)), [
+    [128 + FRAMES_PER_BEAT, "t1", "off", 67],
+  ]);
+
+  // Seeking back to the start plays the whole placement again from its first
+  // frame: the long note comes back, and no note was left stuck in between.
+  seq.seek(0);
+  assert.deepEqual(brief(seq.block(256 + FRAMES_PER_BEAT, 128)), [
+    { frame: 0, track_id: "t1", type: "on", p: 60 },
+  ]);
+});
+
+test("launches are ignored in arrangement mode", () => {
+  const snapshot = song({
+    tracks: [track("t1")],
+    scenes: [scene("s1")],
+    clips: [clip("c1", "t1", "s1", 1, [note(0, 1, 60)])],
+    arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 3)]),
+  });
+
+  const reference = sequencer(snapshot);
+  reference.setMode("arrangement");
+  reference.play();
+  const expected = collect(reference, FRAMES_PER_BAR * 2, 128);
+  assert.ok(expected.length > 0, "the placement has to make some sound");
+
+  const seq = sequencer(snapshot);
+  seq.setMode("arrangement");
+  seq.launchScene("s1");
+  seq.launchClip("c1");
+  seq.stopTrack("t1");
+  seq.stopAll();
+  seq.play();
+
+  // Every transport gesture above is a session one: nothing is armed, nothing
+  // is reported, and the timeline plays as if they had never been asked for.
+  const events = [];
+  for (let at = 0; at < FRAMES_PER_BAR * 2; at += 128) {
+    const block = seq.block(at, 128);
+    assert.deepEqual(launchesOf(block), [], "an arrangement reports no launches");
+    for (const event of block) events.push({ ...event, frame: at + event.frame });
+  }
+  assert.deepEqual(events, expected);
+
+  // And a stop gesture in the middle of the timeline does not stop it either.
+  seq.stopAll();
+  assert.equal(seq.isPlaying(), true, "stopAll is a session gesture and does not halt the timeline");
+  assert.ok(collectFrom(seq, FRAMES_PER_BAR * 2, FRAMES_PER_BEAT, 128).length > 0);
 });

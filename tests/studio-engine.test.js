@@ -22,8 +22,10 @@
  *     instead of throwing into the audio thread;
  *   - a device that cannot be built is not retried on every `setSong`;
  *   - headless Chromium and Node render the same song bit-identically (one
- *     SHA-256 over the left+right float bytes). Gated like the other live
- *     tests: it skips without a browser unless CROW_REQUIRE_TEST_CHROME=1.
+ *     SHA-256 over the left+right float bytes), a song with an audio clip the
+ *     same way, and the same holds for an arrangement render (placements, a
+ *     split and a fade). Gated like the other live tests: it skips without a
+ *     browser unless CROW_REQUIRE_TEST_CHROME=1.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -246,13 +248,18 @@ function hashChannels(left, right) {
 /**
  * Render one song offline in Node, the way the MCP renderer will: build the
  * engine, hand it the takes it plays, hand it the song, launch the scene, play,
- * render.
+ * render. `mode: "arrangement"` plays the song's timeline from `fromBar`
+ * instead of launching its first scene.
  * @param {object} song
- * @param {{seconds?: number, sampleRate?: number, audio?: object[]}} [options]
+ * @param {{seconds?: number, sampleRate?: number, audio?: object[],
+ *          mode?: "session"|"arrangement", fromBar?: number}} [options]
  *   `audio` is one `{id, channels, rate}` per take to load
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
-async function renderSong(song, { seconds = 2, sampleRate = SAMPLE_RATE, audio = [] } = {}) {
+async function renderSong(
+  song,
+  { seconds = 2, sampleRate = SAMPLE_RATE, audio = [], mode = "session", fromBar = 0 } = {},
+) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
     length: Math.round(seconds * sampleRate),
@@ -271,7 +278,12 @@ async function renderSong(song, { seconds = 2, sampleRate = SAMPLE_RATE, audio =
       );
     }
     engine.setSong(song);
-    engine.launchScene(song.scenes[0].id);
+    if (mode === "arrangement") {
+      engine.setMode("arrangement");
+      engine.seek(fromBar);
+    } else {
+      engine.launchScene(song.scenes[0].id);
+    }
     engine.play();
     engine.node.connect(context.destination);
     await engine.flush();
@@ -649,6 +661,32 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderArrangement = async function (song, takes, seconds, sampleRate, fromBar) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  "  for (var t = 0; t < takes.length; t++) {",
+  "    var channels = takes[t].channels.map(function (list) { return Float32Array.from(list); });",
+  "    await engine.loadAudio(takes[t].id, channels, takes[t].rate);",
+  "  }",
+  "  engine.setSong(song);",
+  '  engine.setMode("arrangement");',
+  "  engine.seek(fromBar);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -973,6 +1011,156 @@ test("audio clip renders bit-identical in Chromium and Node", async (t) => {
       browser.hash,
       nodeHash,
       `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of audio-clip render`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
+test("arrangement render bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  /** @param {number} frames @returns {Float32Array} a ramp, so every frame is its own level */
+  const guitar = new Float32Array(2 * 4 * 24000);
+  for (let at = 0; at < guitar.length; at += 1) guitar[at] = Math.sin(at / 90) * 0.4;
+
+  // Two tracks on the timeline: SunVox notes placed on bars, and an audio clip
+  // split in two halves with a fade in on the first one — so the mix, the
+  // take's frames, the split's continuation and the fade ramp are all part of
+  // what is hashed.
+  const song = {
+    meta: { title: "Arrangement parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "track-1",
+        name: "Lead",
+        color: "#E8C07A",
+        device: { engine: "sunvox", type: "Analog generator", params: {} },
+        mute: false,
+        solo: false,
+        gain_db: -3,
+        pan: -0.4,
+        locked: false,
+      },
+      {
+        id: "track-2",
+        name: "Guitar",
+        color: "#8FC1E8",
+        device: { engine: "audio" },
+        mute: false,
+        solo: false,
+        gain_db: -2,
+        pan: 0.35,
+        locked: false,
+      },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Lead",
+        length_bars: 1,
+        notes: [
+          { t: 0, d: 1.5, p: 57, v: 110 },
+          { t: 2, d: 1, p: 64, v: 90 },
+        ],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "Guitar",
+        length_bars: 2,
+        kind: "audio",
+        notes: [],
+        comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+      },
+    },
+    takes: {
+      "take-1": {
+        id: "take-1",
+        clip_id: "clip-2",
+        storage_key: "studio/song-1/takes/take-1.wav",
+        rate: SAMPLE_RATE,
+        channels: 1,
+        frames: guitar.length,
+        offset_frames: 0,
+        compensated: false,
+        bpm: 120,
+        recorded_at: "2026-11-02T12:00:00.000Z",
+        author_label: "the operator",
+        discarded: false,
+      },
+    },
+    arrangement: {
+      placements: {
+        "p1": {
+          id: "p1",
+          track_id: "track-1",
+          clip_id: "clip-1",
+          start_bar: 0,
+          bars: 2,
+          offset_beats: 0,
+          fade_in_beats: 0,
+          fade_out_beats: 0,
+        },
+        "p2": {
+          id: "p2",
+          track_id: "track-2",
+          clip_id: "clip-2",
+          start_bar: 0,
+          bars: 1,
+          offset_beats: 0,
+          fade_in_beats: 0.5,
+          fade_out_beats: 0,
+        },
+        "p3": {
+          id: "p3",
+          track_id: "track-2",
+          clip_id: "clip-2",
+          start_bar: 1,
+          bars: 1,
+          offset_beats: 4,
+          fade_in_beats: 0,
+          fade_out_beats: 0,
+        },
+      },
+      markers: {},
+      sections: {},
+    },
+  };
+
+  const audio = [{ id: "take-1", channels: [guitar], rate: SAMPLE_RATE }];
+  const seconds = 2.5;
+  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE, audio, mode: "arrangement" });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node arrangement render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  // The page takes plain JSON, so the take travels as number arrays.
+  const payload = [
+    { id: "take-1", rate: SAMPLE_RATE, channels: [Array.from(guitar)] },
+  ];
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderArrangement"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderArrangement(${JSON.stringify(song)}, ${JSON.stringify(payload)}, ${seconds}, ${SAMPLE_RATE}, 0)`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium arrangement render has to be audible, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an arrangement render`,
     );
   } finally {
     tab.close();

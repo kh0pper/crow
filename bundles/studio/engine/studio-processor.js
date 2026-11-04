@@ -74,6 +74,12 @@
  * counted in frames and not in blocks. A voice that reaches the end of its
  * take goes silent.
  *
+ * A voice's gain can also be ramped by an arrangement placement's fade
+ * (`{type:"fade", track_id, voice, frame, from, to, frames}`): the ramp is
+ * counted in frames from the frame it was applied at and multiplies the
+ * crossfade envelope, so a fade in starts at silence and reaches its top
+ * exactly `frames` frames later, whatever block size the host asks for.
+ *
  * The PCM arrives already at the context's rate
  * (`{type:"audio", take_id, channels:[Float32Array…]}`, transferred), because
  * resampling is `engine/resample.js`'s business and runs on the client. A
@@ -109,7 +115,8 @@
  *
  * client → processor: `{type:"song", snapshot}`, `{type:"launchScene", id}`,
  * `{type:"launchClip", id}`, `{type:"stopTrack", id}`, `{type:"stopAll"}`,
- * `{type:"play"}`, `{type:"stop"}`, `{type:"flush", id}`,
+ * `{type:"play"}`, `{type:"stop"}`, `{type:"setMode", mode}`,
+ * `{type:"seek", bar}`, `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
  * `{type:"audio_unload", take_id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
@@ -257,7 +264,8 @@
    * A silent PCM voice. `position` is the frame of the take it will read next
    * (negative until the take starts); `gain` is its fade envelope. The ramp is
    * advanced once per rendered frame in `advanceFade()`, so it is the same 64
-   * frames whatever block size the host asks for.
+   * frames whatever block size the host asks for. `fade` is a placement's
+   * linear gain ramp on top of that envelope (see `startFade`).
    * @returns {object}
    */
   function newVoice() {
@@ -269,7 +277,32 @@
       fadeRemaining: 0,
       fadeStep: 0,
       fadeTarget: 1,
+      fade: null,
     };
+  }
+
+  /**
+   * The gain multiplier a voice's placement fade contributes at this frame
+   * (1 when it has none).
+   * @param {object} voice
+   * @returns {number}
+   */
+  function fadeGainOf(voice) {
+    const fade = voice.fade;
+    if (!fade) return 1;
+    if (fade.index >= fade.frames) return fade.to;
+    return fade.from + ((fade.to - fade.from) * fade.index) / fade.frames;
+  }
+
+  /**
+   * Advance a voice's placement fade by one frame, after that frame was
+   * rendered.
+   * @param {object} voice
+   */
+  function advanceVoiceFade(voice) {
+    const fade = voice.fade;
+    if (!fade || fade.index >= fade.frames) return;
+    fade.index += 1;
   }
 
   /**
@@ -715,6 +748,12 @@
           break;
         case "stop":
           this.sequencer.stop();
+          break;
+        case "setMode":
+          this.sequencer.setMode(message.mode);
+          break;
+        case "seek":
+          this.sequencer.seek(message.bar);
           break;
         case "audio":
           this.loadTake(message.take_id, message.channels);
@@ -1240,7 +1279,7 @@
         const length = channels && channels[0] ? channels[0].length : 0;
         const mono = !channels || channels.length < 2;
         for (let frame = 0; frame < frames; frame += 1) {
-          const gain = voice.gain;
+          const gain = voice.gain * fadeGainOf(voice);
           const position = voice.position;
           voice.position = position + 1;
           if (position >= 0 && position < length) {
@@ -1251,6 +1290,7 @@
             }
           }
           advanceFade(voice);
+          advanceVoiceFade(voice);
         }
         if (!voice.sounding || voice.position >= length) {
           voice.sounding = false;
@@ -1285,6 +1325,7 @@
     applyEvent(event) {
       if (event.type === "audio") this.startVoice(event);
       else if (event.type === "audio_stop") this.stopVoice(event);
+      else if (event.type === "fade") this.startFade(event);
       else this.sendNote(event);
     }
 
@@ -1312,6 +1353,9 @@
       voice.channels = channels;
       voice.position = Number.isFinite(frame) ? Math.trunc(frame) : 0;
       voice.sounding = true;
+      // A start begins a clean envelope: a fade belongs to the voice its own
+      // placement started.
+      voice.fade = null;
 
       const other = record.voices[index === 0 ? 1 : 0];
       if (other && other.sounding && other.gain > 0) {
@@ -1336,6 +1380,29 @@
       const voice = record.voices[event.voice === 1 ? 1 : 0];
       if (!voice) return;
       beginFadeOut(voice);
+    }
+
+    /**
+     * Start a placement's linear gain ramp on one voice.
+     *
+     * The ramp is counted in frames from this very frame, so it is the same
+     * whatever block size the host asks for. A voice that is not sounding has
+     * nothing to ramp — the event is ignored, which is right: a fade that runs
+     * over silence leaves the voice at its end value by the time it is heard.
+     * @param {{track_id: string, voice: number, from: number, to: number, frames: number}} event
+     * @returns {void}
+     */
+    startFade(event) {
+      const record = this.audioRecord(event.track_id);
+      if (!record) return;
+      const voice = record.voices[event.voice === 1 ? 1 : 0];
+      if (!voice || !voice.sounding) return;
+      const frames = Math.round(Number(event.frames));
+      const from = Number(event.from);
+      const to = Number(event.to);
+      if (!Number.isFinite(frames) || frames <= 0) return;
+      if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+      voice.fade = { from: from, to: to, frames: frames, index: 0 };
     }
 
     /**
