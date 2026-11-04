@@ -60,6 +60,29 @@ const SAMPLE_AUDIO = encodeWav24(
 /** The fixture WAV an import test hands the file input. */
 const IMPORT_FILE_BYTES = SAMPLE_AUDIO.slice(0);
 
+/**
+ * A stereo WAV of `frames` frames at the fixture's rate: long enough to need
+ * more than one staged chunk (a chunk holds floor(1 MiB / 6) frames).
+ * @param {number} frames
+ * @returns {Uint8Array}
+ */
+function longWav(frames) {
+  const left = Float32Array.from({ length: frames }, (_, at) => Math.sin((at / RATE) * 2 * Math.PI * 110) * 0.4);
+  const right = Float32Array.from({ length: frames }, (_, at) => Math.cos((at / RATE) * 2 * Math.PI * 220) * 0.3);
+  return encodeWav24(left, right, RATE);
+}
+
+/** The file input stand-in an import test hands its bytes to. */
+function fileStub(name, bytes) {
+  return {
+    name,
+    size: bytes.length,
+    async arrayBuffer() {
+      return bytes.slice(0).buffer;
+    },
+  };
+}
+
 // ---- the fixture document --------------------------------------------------
 
 /**
@@ -114,13 +137,19 @@ function minimalLayout({ title, content }) {
 }
 
 /** The panel's take store, in memory: every call answers, nothing is kept. */
-function fakeTakeStore() {
+function fakeTakeStore(options = {}) {
   const chunks = new Map();
   const pendings = new Map();
+  /** Every row the page wrote, in order (a deleted row keeps its history here). */
+  const saved = [];
   return {
     chunks,
     pendings,
+    saved,
     async putChunk(takeId, index, bytes) {
+      if (typeof options.putChunkProblem === "function" && options.putChunkProblem(takeId, index)) {
+        throw new Error("This device could not keep that piece.");
+      }
       chunks.set(takeId + ":" + index, bytes);
       return true;
     },
@@ -145,6 +174,7 @@ function fakeTakeStore() {
     },
     async putPending(row) {
       pendings.set(row.take_id, row);
+      saved.push({ ...row });
       return true;
     },
     async deletePending(takeId) {
@@ -177,11 +207,12 @@ function fakeTakeStore() {
 /**
  * A context stand-in: the nodes the page builds, its clock, and a
  * `decodeAudioData` that reads the generated WAV back into float channels.
+ * @param {{rate?: number}} [options]
  */
-function fakeContext() {
+function fakeContext(options = {}) {
   const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
   return {
-    sampleRate: RATE,
+    sampleRate: Number(options.rate) || RATE,
     state: "running",
     currentTime: 0,
     destination: {},
@@ -214,6 +245,10 @@ function fakeEngine() {
     samples: [],
     taps: [],
     tapListeners: [],
+    /** The frames `nextBarFrame` answers with, in order (then bar 1 at frame 0). */
+    barFrames: [],
+    /** When set, `createRecorder` waits on this before handing its recorder over. */
+    holdRecorder: null,
     node: { connect() {} },
     setSong(song) {
       engine.songs.push(song);
@@ -259,7 +294,7 @@ function fakeEngine() {
     },
     unloadSample() {},
     async nextBarFrame() {
-      return { frame: 0, bar: 1 };
+      return engine.barFrames.length ? engine.barFrames.shift() : { frame: 0, bar: 1 };
     },
     async loadAudio() {},
     unloadAudio() {},
@@ -283,9 +318,12 @@ function fakeEngine() {
           recorder.stopped_at = frame;
         },
         splitAt() {},
-        dispose() {},
+        dispose() {
+          recorder.disposed = true;
+        },
       };
       engine.recorders.push(recorder);
+      if (engine.holdRecorder) return engine.holdRecorder.then(() => recorder);
       return Promise.resolve(recorder);
     },
   };
@@ -294,9 +332,17 @@ function fakeEngine() {
 
 /** The navigator stand-in: one raw stereo input, and no Web Locks. */
 function fakeNavigator() {
-  const track = { label: "Test input", getSettings: () => ({ deviceId: "in-1" }), stop() {} };
+  const track = {
+    label: "Test input",
+    getSettings: () => ({ deviceId: "in-1" }),
+    stop() {
+      track.stopped = true;
+    },
+  };
   const stream = { getAudioTracks: () => [track], getTracks: () => [track] };
   return {
+    track,
+    stream,
     locks: null,
     mediaDevices: {
       async enumerateDevices() {
@@ -313,7 +359,8 @@ function fakeNavigator() {
  * Boot the emitted client script against the page the handler renders, with a
  * fake browser around it, and hand back what it drew, what it sent and what the
  * engine was asked to do.
- * @param {{doc?: object, holdChunks?: boolean}} [options]
+ * @param {{doc?: object, holdChunks?: boolean, holdRecorder?: boolean, rate?: number,
+ *          putChunkProblem?: (takeId: string, index: number) => boolean}} [options]
  */
 async function bootSampler(options = {}) {
   const { parseHTML } = await import("linkedom");
@@ -336,8 +383,16 @@ async function bootSampler(options = {}) {
   assert.ok(res.html.includes('data-role="sampler"'), "the page carries the sampler host");
   const { document, window: domWindow } = parseHTML(res.html);
 
-  const store = fakeTakeStore();
+  const store = fakeTakeStore(options);
   const engine = fakeEngine();
+  const navigatorStub = fakeNavigator();
+  let releaseRecorder = () => {};
+  if (options.holdRecorder) {
+    engine.holdRecorder = new Promise((resolve) => {
+      releaseRecorder = resolve;
+    });
+  }
+  const contexts = [];
   const sent = [];
   const requests = [];
   let heldChunks = null;
@@ -414,7 +469,9 @@ async function bootSampler(options = {}) {
     confirm: () => true,
     prompt: () => null,
     AudioContext: function AudioContextStub() {
-      return fakeContext();
+      const made = fakeContext({ rate: options.rate });
+      contexts.push(made);
+      return made;
     },
     StudioTakeStore: store,
     StudioEngine: { create: async () => engine },
@@ -453,7 +510,7 @@ async function bootSampler(options = {}) {
   run(
     document,
     windowStub,
-    fakeNavigator(),
+    navigatorStub,
     function WebSocketStub() {
       return socket;
     },
@@ -505,8 +562,11 @@ async function bootSampler(options = {}) {
     document,
     domWindow,
     window: windowStub,
+    windowListeners,
+    navigator: navigatorStub,
     store,
     engine,
+    contexts,
     sent,
     requests,
     page,
@@ -516,6 +576,24 @@ async function bootSampler(options = {}) {
     frame,
     stateFrame,
     timers,
+    /** The AudioContext the page built (the latest one). */
+    ctx() {
+      return contexts.length ? contexts[contexts.length - 1] : null;
+    },
+    /** Hand the played recorder the one it was waiting for. */
+    releaseRecorder() {
+      engine.holdRecorder = null;
+      releaseRecorder();
+    },
+    /** Push one tap block of whole frames to whatever is listening to the tap. */
+    tapBlock(frames) {
+      const channels = [new Float32Array(frames), new Float32Array(frames)];
+      for (const listener of [...engine.tapListeners]) listener({ target: "master", channels });
+    },
+    /** Push `count` tap blocks of `frames` frames each. */
+    tapBlocks(count, frames) {
+      for (let at = 0; at < count; at += 1) ui.tapBlock(frames);
+    },
     /** Open a pattern clip: the pad-and-steps view is its editor. */
     async openSampler() {
       click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
@@ -833,6 +911,223 @@ test("a pad still uploading says so", async () => {
   await ui.settle(24);
   assert.equal(ui.engine.livePads.length, before, "and a pad still uploading auditions nothing");
   assert.deepEqual(ui.engine.livePads.filter((call) => call.index === 4), [], "pad 5 never played");
+});
+
+test("an import longer than one chunk uploads in whole-frame chunks", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  ui.pressPad(3);
+  ui.release();
+  await ui.settle();
+
+  // Eight seconds of stereo: 384,000 frames, more than two whole chunks.
+  const FRAMES_LONG = RATE * 8;
+  const input = ui.view().querySelector("[data-act=sample-import]");
+  assert.ok(input, "the view offers Import a sound");
+  Object.defineProperty(input, "files", {
+    value: [fileStub("loop.wav", longWav(FRAMES_LONG))],
+    configurable: true,
+  });
+  input.dispatchEvent(ui.event("change", { target: input }));
+  await ui.settle(60);
+
+  // The chunks are whole frames, never raw byte cuts: 24-bit stereo is six
+  // bytes a frame, and the recorder's rule is floor(1 MiB / six) frames a chunk.
+  const begin = sampleBegin(ui);
+  assert.equal(begin.body.channels, 2, "the upload is stereo");
+  const chunkPuts = ui.requests.filter(
+    (request) => request.method === "PUT" && request.url.includes(begin.sampleId + "/chunks/"),
+  );
+  assert.ok(chunkPuts.length > 1, "the import went up in more than one chunk");
+  for (const put of chunkPuts) {
+    assert.equal(put.bytes % 6, 0, `every chunk holds whole stereo frames (${put.bytes} bytes)`);
+  }
+  assert.equal(
+    chunkPuts.reduce((sum, put) => sum + put.bytes, 0),
+    FRAMES_LONG * 6,
+    "the whole file, in whole frames",
+  );
+  assert.equal(
+    ui.requests.filter((request) => request.url.endsWith("/finish")).length,
+    1,
+    "and it finished exactly once",
+  );
+});
+
+test("an import whose chunk cannot be stored leaves nothing behind", async () => {
+  const ui = await bootSampler({ putChunkProblem: (_takeId, index) => index === 1 });
+  await ui.openSampler();
+
+  ui.pressPad(5);
+  ui.release();
+  await ui.settle();
+
+  const input = ui.view().querySelector("[data-act=sample-import]");
+  Object.defineProperty(input, "files", {
+    value: [fileStub("loop.wav", longWav(RATE * 8))],
+    configurable: true,
+  });
+  input.dispatchEvent(ui.event("change", { target: input }));
+  await ui.settle(60);
+
+  const toast = ui.document.querySelector("[data-role=toast]");
+  assert.equal(toast.hidden, false, "the page says the import failed");
+  assert.match(String(toast.textContent), /could not be imported/, "with the import's own sentence");
+  assert.equal(ui.store.pendings.size, 0, "the pending row is gone");
+  assert.deepEqual([...ui.store.chunks.keys()], [], "and the chunks it did keep went with it");
+  assert.equal(
+    ui.requests.filter((request) => request.method === "PUT" && /\/takes\/[^/]+$/.test(request.url)).length,
+    0,
+    "nothing was begun",
+  );
+  assert.equal(ui.padName(5), "Empty", "the pad is unchanged");
+});
+
+test("a second press while record into pad sets up starts no second recorder", async () => {
+  const ui = await bootSampler({ holdRecorder: true });
+  await ui.openSampler();
+
+  const record = () => {
+    const node = ui.view().querySelector("[data-act=pad-record]");
+    assert.ok(node, "the pad offers Record into pad");
+    return node;
+  };
+  record().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(ui.engine.recorders.length, 1, "the recorder is being built");
+  assert.equal(String(record().textContent), "Stop recording", "the page says it is recording already");
+
+  // A second press while the input and the recorder are still being set up
+  // cancels it: the one recorder is disposed instead of being left orphaned.
+  record().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  ui.releaseRecorder();
+  await ui.settle(24);
+
+  assert.equal(ui.engine.recorders.length, 1, "no second recorder was ever built");
+  assert.equal(ui.engine.recorders[0].armed, null, "the cancelled recorder never armed");
+  assert.equal(ui.engine.recorders[0].disposed, true, "and it was disposed");
+  assert.equal(ui.store.pendings.size, 0, "no pending row was left behind");
+  assert.equal(String(record().textContent), "Record into pad", "and the page is back to offering one");
+});
+
+test("the input a pad recording opened is closed when it ends", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  ui.view().querySelector("[data-act=pad-record]").dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(24);
+
+  const recorder = ui.engine.recorders[0];
+  assert.ok(recorder, "a recorder was built");
+  assert.equal(recorder.armed, 0, "armed on this very frame");
+  assert.equal(recorder.stopped_at, 5760000, "it ends by itself at 60 s of mono samples");
+  assert.notEqual(ui.navigator.track.stopped, true, "the input is open while it records");
+
+  // One chunk of four mono frames, then the recorder's own done.
+  recorder.chunk(new Uint8Array(12), 0);
+  recorder.done({ segments: [{ segment: 0, frames: 4 }] });
+  await ui.settle(60);
+
+  assert.equal(ui.navigator.track.stopped, true, "the input was closed when the recording ended");
+  assert.equal(ui.store.pendings.size, 0, "the sample went up and its row went with it");
+});
+
+test("resample with Snap to bar keeps whole bars", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  // The transport runs, so Snap to bar (on by default) quantizes the resample.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // The engine's clock: the bar the tap starts on, then the bar after the press.
+  const BAR = RATE * 2; // 120 BPM: four beats of half a second each
+  const WANT = BAR * 4;
+  ui.engine.barFrames = [{ frame: 0, bar: 0 }, { frame: WANT, bar: 4 }];
+
+  const button = () => {
+    const node = ui.view().querySelector("[data-act=pad-resample]");
+    assert.ok(node, "the pad offers Resample output");
+    return node;
+  };
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(24);
+  assert.equal(ui.engine.taps.at(-1).on, true, "the tap is on");
+
+  // One and a half bars arrive before the second press.
+  ui.tapBlocks((BAR * 3) / 2 / 128, 128);
+  await ui.settle();
+
+  // The second press asks for the next bar line; the blocks keep coming.
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  ui.tapBlocks(2000, 128);
+  await ui.settle(60);
+
+  assert.equal(ui.engine.taps.at(-1).on, false, "the tap went off on the stop bar line");
+
+  const rows = ui.store.saved.filter((row) => row.origin === "resample");
+  assert.ok(rows.length >= 2, "the row was written before its chunks");
+  assert.equal(rows[0].chunk_count, null, "it carries no chunk count until every chunk is stored");
+  const last = rows[rows.length - 1];
+  assert.equal(last.frames, WANT, "only the four whole bars between the two presses were kept");
+  assert.equal(last.frames % BAR, 0, "a whole number of bars");
+
+  const chunkPuts = ui.requests.filter(
+    (request) => request.method === "PUT" && request.url.includes(last.take_id + "/chunks/"),
+  );
+  assert.ok(chunkPuts.length > 0, "the resample uploaded its chunks");
+  for (const put of chunkPuts) assert.equal(put.bytes % 6, 0, "each chunk holds whole stereo frames");
+  assert.equal(
+    chunkPuts.reduce((sum, put) => sum + put.bytes, 0),
+    WANT * 6,
+    "the four bars and nothing more",
+  );
+  assert.equal(ui.requests.filter((request) => request.url.endsWith("/finish")).length, 1, "and it finished once");
+});
+
+test("an import is refused up front when the device plays at an odd rate", async () => {
+  const ui = await bootSampler({ rate: 32000 });
+  await ui.openSampler();
+
+  const input = ui.view().querySelector("[data-act=sample-import]");
+  Object.defineProperty(input, "files", { value: [fileStub("kick.wav", IMPORT_FILE_BYTES)], configurable: true });
+  input.dispatchEvent(ui.event("change", { target: input }));
+  await ui.settle(24);
+
+  const toast = ui.document.querySelector("[data-role=toast]");
+  assert.equal(
+    String(toast.textContent),
+    "This device plays at 32000 Hz; a sample is kept at 44.1, 48, 88.2 or 96 kHz.",
+    "the page says which rates a sample may have",
+  );
+  assert.equal(ui.store.pendings.size, 0, "nothing was staged");
+  assert.equal(
+    ui.requests.filter((request) => request.url.indexOf("/chunks/") >= 0).length,
+    0,
+    "and no chunk was sent",
+  );
+});
+
+test("a window blur lets every held pad key go", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  ui.document.dispatchEvent(ui.event("keydown", { key: "3" }));
+  await ui.settle(24);
+  assert.equal(ui.engine.livePads.length, 1, "key 3 played a pad");
+
+  // The window lost the focus: the keyup it never sends is not waited for.
+  for (const handler of [...(ui.windowListeners.blur || [])]) handler(ui.event("blur", {}));
+  await ui.settle();
+  assert.deepEqual(
+    ui.engine.releases,
+    [{ track_id: TRACK, bank_id: bankId, index: 2 }],
+    "the held key was let go",
+  );
 });
 
 // ---- the live half: a real Chrome against a real hub ------------------------
