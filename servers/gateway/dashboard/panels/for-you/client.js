@@ -20,7 +20,10 @@
  * Messages come from the page's data-fy-* attributes (server-translated).
  *
  * Emitted inside a template literal: this source must contain NO backticks. It re-runs on every
- * Turbo visit; the page is part of the swapped body, so listeners bind fresh each time.
+ * Turbo visit; the page is part of the swapped body, so listeners bind fresh each time. A widget
+ * page may fetch a cell's markup after the page was drawn (widgets/grid-client.js), so the
+ * per-element listeners live in `bindWidgetMarkup(scope)` and the page leaves it on
+ * `window.crowBindWidgetMarkup` for that fill to call.
  */
 export function forYouClientJs() {
   return `<script>
@@ -365,35 +368,55 @@ export function forYouClientJs() {
     var btn = root.querySelector('[data-fy-play="' + audio.id + '"]');
     if (btn) btn.textContent = root.getAttribute('data-fy-' + which + '-label') || btn.textContent;
   }
-  var audios = root.querySelectorAll('audio[id^="fy-audio-"]');
-  for (var m = 0; m < audios.length; m++) {
-    audios[m].addEventListener('play', function (e) {
-      var el = e.currentTarget;
-      label(el, 'pause');
-      var played = el.getAttribute('data-fy-played');
-      if (played && !el.__fyMarked) {
-        el.__fyMarked = true;
-        post('/api/media/articles/' + encodeURIComponent(played) + '/action', { action: 'mark_read' }, true).catch(function () {});
-      }
-    });
-    audios[m].addEventListener('pause', function (e) { label(e.currentTarget, 'play'); });
-    audios[m].addEventListener('ended', function (e) { label(e.currentTarget, 'play'); });
+  // The per-element listeners, over one scope: a tile's audio labels its Play button, and a sheet's
+  // close returns focus to the story that opened it. A widget page may fetch a cell long after the
+  // page was drawn (widgets/grid-client.js), so this runs again over the fetched body and marks what
+  // it bound: nothing binds twice.
+  function bindWidgetMarkup(scope) {
+    var box = scope || root;
+    if (!box || !box.querySelectorAll) return;
+    var audios = box.querySelectorAll('audio[id^="fy-audio-"]');
+    for (var m = 0; m < audios.length; m++) {
+      if (audios[m].getAttribute('data-fy-bound') === 'audio') continue;
+      audios[m].setAttribute('data-fy-bound', 'audio');
+      audios[m].addEventListener('play', function (e) {
+        var el = e.currentTarget;
+        label(el, 'pause');
+        var played = el.getAttribute('data-fy-played');
+        if (played && !el.__fyMarked) {
+          el.__fyMarked = true;
+          post('/api/media/articles/' + encodeURIComponent(played) + '/action', { action: 'mark_read' }, true).catch(function () {});
+        }
+      });
+      audios[m].addEventListener('pause', function (e) { label(e.currentTarget, 'play'); });
+      audios[m].addEventListener('ended', function (e) { label(e.currentTarget, 'play'); });
+    }
+    var sheets = box.querySelectorAll('dialog.fy-sheet');
+    for (var i = 0; i < sheets.length; i++) {
+      if (sheets[i].getAttribute('data-fy-bound') === 'sheet') continue;
+      sheets[i].setAttribute('data-fy-bound', 'sheet');
+      sheets[i].addEventListener('close', function (e) {
+        var o = e.currentTarget.__fyOpener;
+        e.currentTarget.__fyOpener = null;
+        if (o && document.contains(o) && typeof o.focus === 'function') o.focus();
+      });
+    }
   }
+  // The page as the server drew it, and the hook a lazy cell's fill calls for markup it fetched.
+  bindWidgetMarkup(root);
+  // Assigned on every visit: Turbo keeps the window, and this visit's root is the one to bind against.
+  window.crowBindWidgetMarkup = bindWidgetMarkup;
 
-  // Focus returns to the story that opened the sheet; open sheets close before Turbo caches the page.
-  var sheets = root.querySelectorAll('dialog.fy-sheet');
-  for (var i = 0; i < sheets.length; i++) {
-    sheets[i].addEventListener('close', function (e) {
-      var o = e.currentTarget.__fyOpener;
-      e.currentTarget.__fyOpener = null;
-      if (o && document.contains(o) && typeof o.focus === 'function') o.focus();
-    });
-  }
+  // Open sheets close before Turbo caches the page. The snapshot keeps attributes, not listeners, so
+  // the binding markers come off too: a restored page binds its sheets and audio again.
   if (!window.__crowForYouCacheBound) {
     window.__crowForYouCacheBound = true;
     document.addEventListener('turbo:before-cache', function () {
       var open = document.querySelectorAll('dialog.fy-sheet[open]');
       for (var j = 0; j < open.length; j++) closeSheet(open[j]);
+      // The document, not this visit's root: the listener is bound once, on the first visit.
+      var marked = document.querySelectorAll('[data-fy-bound]');
+      for (var k = 0; k < marked.length; k++) marked[k].removeAttribute('data-fy-bound');
     });
   }
 })();

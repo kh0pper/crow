@@ -7,6 +7,9 @@
  *   POST /dashboard/widgets-api/needs-me/act   { key, action, nonce } → { ok: true, summary }
  *   POST /dashboard/widgets-api/push           { on: boolean } → { ok: true, on }
  *   GET  /dashboard/widgets-api/bird           "your bird" (widgets phase 3): { mood, steps, steps_goal, walked, svg }
+ *   GET  /dashboard/widgets-api/cell           one widget's cell body for a grid cell the page did
+ *                                              NOT load with it: { id, html } (widgets/grid-client.js
+ *                                              fetches it the moment the device shows the cell)
  *
  * YOUR BIRD: the phone has no SVG decoder, so the gateway hands it the drawing itself — the SAME
  * string the profile picture is made of (servers/sharing/profile-avatar.js renderBirdSvg, over
@@ -60,6 +63,12 @@ import { resolveCrowHome } from "../../shared/crow-home.js";
 import { SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
 import { findNeedsMeItem, loadNeedsMe } from "../widgets/needs-me.js";
+import { loadWidgets, widgetsForPage } from "../widgets/registry.js";
+import { cellBodyHtml } from "../widgets/grid-html.js";
+import { forYouContext } from "../dashboard/panels/for-you.js";
+import { forYouEnabled } from "../for-you/flag.js";
+import { readForYouSettings } from "../for-you/settings.js";
+import { instanceZone } from "../../shared/schedule-store.js";
 import { decideOption } from "../board/decision-service.js";
 import { decideResult } from "../board/result-service.js";
 import { isEnabledBot } from "../board/bot-lookup.js";
@@ -70,6 +79,13 @@ const SUMMARY = `${P}/needs-me`;
 const ACT = `${P}/needs-me/act`;
 const PUSH = `${P}/push`;
 const BIRD = `${P}/bird`;
+const CELL = `${P}/cell`;
+
+/**
+ * The two pages that draw the widget grid, and so the two a cell may be fetched for. Both are For
+ * You's own surface: they share its enable flag and its owner gate.
+ */
+const CELL_PAGES = new Set(["for-you", "widgets"]);
 
 /** The local-scope setting the Not-now snoozes live in, and how long one lasts. */
 export const WIDGETS_SNOOZED_KEY = "widgets_snoozed";
@@ -388,6 +404,41 @@ export function widgetsRouter(dashboardAuth, { core = getHandoffCore(), openDb =
     } catch (err) {
       console.warn(`[widgets] bird: ${err && err.message}`);
       return jsonError(res, 500, "The bird could not be drawn");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // One widget's cell body, for a device that has just shown a cell the page did not load with it:
+  // the grid's lazy fill (widgets/grid-client.js). The page the cell belongs to decides the offer —
+  // its own enable flag (forYouEnabled, the gate panels/for-you.js and panels/widgets.js apply) and
+  // its own widget list (widgetsForPage: the For You switches, the installed add-ons and their
+  // availability all apply there, and nothing is ever looked up any other way). The body is rendered
+  // by the same function the page draws a cell with, so a fetched cell and a drawn one cannot
+  // disagree; a loader that threw is that widget's own error line, never a 500.
+  router.get(CELL, async (req, res) => {
+    const db = openDb();
+    try {
+      if (!(await isLocalPasswordSessionOn(db, req))) return jsonError(res, 404, "Not found");
+      const page = typeof req.query.page === "string" ? req.query.page : "";
+      if (!CELL_PAGES.has(page)) return jsonError(res, 404, "Not found");
+      if (!forYouEnabled()) return jsonError(res, 404, "Not found");
+      const id = typeof req.query.id === "string" ? req.query.id : "";
+      const settings = await readForYouSettings(db);
+      const crowHome = resolveCrowHome();
+      const widget = widgetsForPage(page, { settings, crowHome }).find((w) => w.id === id);
+      if (!widget) return jsonError(res, 404, "Not found", { code: "no_widget" });
+      const at = Number(now());
+      let tz;
+      try { tz = await instanceZone(db); } catch { tz = undefined; }
+      const lang = langOf(req);
+      const context = forYouContext(db, { settings, crowHome, now: at, tz, lang });
+      const [entry] = await loadWidgets([widget], context);
+      // "" means the widget has nothing to show: the device draws the grid's own nothing line.
+      return res.json({ id: widget.id, html: cellBodyHtml(entry, lang, at) });
+    } catch (err) {
+      console.warn(`[widgets] cell: ${err && err.message}`);
+      return jsonError(res, 500, "The widget could not be drawn");
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }

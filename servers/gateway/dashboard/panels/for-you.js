@@ -30,6 +30,7 @@ import { geocodeCity, weatherFor } from "../../for-you/weather.js";
 import { loadNews } from "../../for-you/news.js";
 import { loadNeedsMe } from "../../widgets/needs-me.js";
 import { loadWidgets, widgetsForPage, WIDGET_TIMEOUT_MS } from "../../widgets/registry.js";
+import { splitForPage } from "../../widgets/grid-html.js";
 import { widgetsGridCss } from "../../widgets/grid-css.js";
 import { widgetsMoreCss } from "../../widgets/more-html.js";
 import { gridClientJs } from "../../widgets/grid-client.js";
@@ -210,7 +211,13 @@ export default {
     ]).finally(() => clearTimeout(wxTimer));
     // Each widget degrades alone: a failed read is its own one-line error cell, never the page's.
     // `crowHome` is where the installed add-ons' own widgets come from (widgets/addons.js).
-    const cells = await loadWidgets(widgetsForPage("for-you", { settings, crowHome }), context);
+    // Only the widgets this page's default layout holds are loaded with the page; the rest are drawn
+    // as lazy cells and fetched by the device when it shows one (widgets/grid-html.js, grid-client.js).
+    const offered = widgetsForPage("for-you", { settings, crowHome });
+    const { eager, lazy } = splitForPage(offered, "for-you");
+    const loaded = await loadWidgets(eager, context);
+    const isLazy = new Set(lazy);
+    const cells = offered.map((widget) => (isLazy.has(widget) ? { widget, lazy: true } : loaded.shift()));
     return layout({
       title: t("forYou.title", lang),
       content: forYouCss() + widgetsGridCss() + widgetsMoreCss()

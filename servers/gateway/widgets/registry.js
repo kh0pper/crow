@@ -15,11 +15,12 @@
  *               may add any widget from "+ Add widget"; this list says where it is OFFERED at all;
  *   defaultOn   false = offered, but not part of any page's default layout (the weather, whose chip
  *               already lives in For You's header). The server draws the cell hidden and the device
- *               may add it with "+ Add widget";
+ *               may add it with "+ Add widget" — which is also the moment its `load` runs:
  *   defaultPages an optional per-page override of `defaultOn`: the pages whose DEFAULT layout holds
- *               this widget. Everywhere else it is offered but drawn hidden, so the same widget can
- *               be the generic page's default while For You leaves it out (Today + Ramble), or For
- *               You's default while the generic page leaves it out (Your morning and the rest);
+ *               this widget. Everywhere else it is offered, drawn hidden and NOT loaded with the page,
+ *               so the same widget can be the generic page's default while For You leaves it out
+ *               (Today + Ramble), or For You's default while the generic page leaves it out (Your
+ *               morning and the rest);
  *   pageSizes   an optional per-page default size ({ page: [w, h] }), for a widget that fills For
  *               You's row but is half of the generic page's first screenful (What needs me). It must
  *               be one of `sizes`; widgets/grid-html.js ignores anything else;
@@ -30,7 +31,10 @@
  *   load(ctx)   reads the data, or returns null when nothing came back (the grid draws the widget's
  *               own one-line error instead). A throw is the same as null;
  *   render      draws the widget from that data; "" means "nothing to show": no cell at all (the
- *               Move card without Ramble, Listen with nothing in it), exactly as For You v1 did.
+ *               Move card without Ramble, Listen with nothing in it), exactly as For You v1 did. A
+ *               lazy cell is the exception — the page never ran that widget's loader, so the cell is
+ *               drawn anyway and the device shows the grid's "nothing to show" line when the
+ *               fetched answer is empty.
  *
  * The loaders and renderers are For You's own (for-you/*.js, panels/for-you/html.js) — no logic
  * moves here, the registry only names them. `render` may take a third `{ now }` argument; every
@@ -40,6 +44,11 @@
  * `widgetsForPage` is the page's ordered offer: the page's entries, minus the widgets whose For You
  * customize switch is off (off now means "not offered", per the phase 2 plan; per-device removal is
  * the grid's job and never touches the server setting).
+ *
+ * A page does NOT load its whole offer: `splitForPage` (widgets/grid-html.js) cuts it at
+ * `defaultOnFor` — the widgets the page's own default layout holds are loaded with the page, and every
+ * other one is a lazy cell the device fetches from GET /dashboard/widgets-api/cell when it shows it.
+ * That is why `load` may be called for a widget long after the page it belongs to was drawn.
  *
  * Where each one starts out: For You's default layout is needs-me, morning, moves, listen, news (the
  * weather offered, drawn hidden); the generic page's is needs-me and today (everything else offered

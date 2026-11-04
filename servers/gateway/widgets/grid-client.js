@@ -11,6 +11,16 @@
  *   - on load: applies the stored order, size and removals. Anything odd — no value, broken JSON, a
  *     wrong version, an id no widget carries any more — falls back to the server's default, never to
  *     a blank page;
+ *   - fills a LAZY cell the first moment this device shows it: a widget the page offers but its own
+ *     default layout does not hold is drawn by the server as a hidden cell with one loading line
+ *     (`data-wg-lazy="1"`), and its body is fetched from GET /dashboard/widgets-api/cell on this
+ *     page. An empty answer is the grid's "nothing to show" line, a failed one its error line (and
+ *     the cell is marked lazy again, so a later show tries once more). A fetched body is markup the
+ *     page's own client never saw, so it is handed to `window.crowBindWidgetMarkup` when that client
+ *     offers one (For You's does), which binds the sheet and audio listeners inside it;
+ *   - puts a fill that is still out back to its loading line before Turbo caches the page, and fills
+ *     a shown lazy cell again when Turbo restores an already-wired grid: a snapshot is never allowed
+ *     to leave a cell stuck on "Loading...";
  *   - Edit: shows Remove on each cell and a Size button that steps through the sizes that widget is
  *     allowed (`data-sizes`) and nothing else. Pointer events move a cell: the mouse drags at once,
  *     a touch starts after a long press, so a scroll or the shell's swipe is never mistaken for a
@@ -40,8 +50,92 @@ export function gridClientJs() {
   function hide(el) { if (el) el.setAttribute('hidden', ''); }
   function hiddenOf(el) { return !!(el && el.hasAttribute && el.hasAttribute('hidden')); }
 
+  // ---- a lazy cell's body ----
+
+  // The grid carries the three lines the client may have to draw itself: the server's "nothing to
+  // show", its "couldn't load" and its loading line. All three are page text, so they go in as text,
+  // never as markup.
+  function bodyOf(cell) { return cell.querySelector('.wg-cell-body'); }
+  function setNote(cell, text) {
+    var body = bodyOf(cell);
+    if (!body) return;
+    body.textContent = '';
+    var p = document.createElement('p');
+    p.className = 'fy-note';
+    p.textContent = text;
+    body.appendChild(p);
+  }
+  function fillLazy(grid, cell) {
+    if (!grid || !cell || !grid.contains(cell)) return;
+    // '1' is "not fetched yet"; 'loading' is "a fetch is on its way" (so a second show cannot
+    // start a second one). A fetched cell carries no attribute at all.
+    if (cell.getAttribute('data-wg-lazy') !== '1') return;
+    if (hiddenOf(cell)) return;
+    var id = cell.getAttribute('data-widget');
+    if (!id) return;
+    var page = grid.getAttribute('data-wg-page') || '';
+    cell.setAttribute('data-wg-lazy', 'loading');
+    function failed() {
+      setNote(cell, grid.getAttribute('data-wg-error') || '');
+      cell.setAttribute('data-wg-lazy', '1');
+    }
+    if (typeof window.fetch !== 'function') { failed(); return; }
+    var url = '/dashboard/widgets-api/cell?page=' + encodeURIComponent(page) + '&id=' + encodeURIComponent(id);
+    var request;
+    try {
+      request = window.fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+    } catch (err) { failed(); return; }
+    Promise.resolve(request).then(function (res) {
+      if (!res || !res.ok) throw new Error('cell request refused');
+      return res.json();
+    }).then(function (data) {
+      if (!data || typeof data.html !== 'string') throw new Error('cell request answered oddly');
+      var body = bodyOf(cell);
+      if (!body) throw new Error('cell has no body');
+      if (data.html) {
+        body.innerHTML = data.html;
+        // Fetched markup is the widget's own (a story's sheet, a tile's audio): the page's client
+        // binds what it drew, so it is handed this body for the same per-element listeners.
+        if (typeof window.crowBindWidgetMarkup === 'function') window.crowBindWidgetMarkup(body);
+      } else {
+        setNote(cell, grid.getAttribute('data-wg-nothing') || '');
+      }
+      cell.removeAttribute('data-wg-lazy');
+    }).catch(function () { failed(); });
+  }
+  function fillShownLazy(grid) {
+    if (!grid || !grid.querySelectorAll) return;
+    var list = grid.querySelectorAll('[data-widget]');
+    for (var i = 0; i < list.length; i++) if (!hiddenOf(list[i])) fillLazy(grid, list[i]);
+  }
+
+  /**
+   * Back to the loading line for a cell whose fill never landed: a snapshot taken mid-fetch would
+   * otherwise come back marked ready with a cell stuck on "Loading..." and no fetch coming.
+   */
+  function resetLazyLines(grid) {
+    var loading = grid.getAttribute('data-wg-loading') || '';
+    var error = grid.getAttribute('data-wg-error') || '';
+    var list = grid.querySelectorAll('[data-widget]');
+    for (var i = 0; i < list.length; i++) {
+      var state = list[i].getAttribute('data-wg-lazy');
+      if (state !== 'loading' && state !== '1') continue;
+      var body = bodyOf(list[i]);
+      var text = body ? String(body.textContent || '').trim() : '';
+      // '1' is either untouched (still loading) or the error line a failed fill drew.
+      if (state === '1' && (!error || text !== error)) continue;
+      list[i].setAttribute('data-wg-lazy', '1');
+      if (loading) setNote(list[i], loading);
+    }
+  }
+
   function bind(grid) {
-    if (!grid || grid.getAttribute('data-wg-ready') === '1') return;
+    if (!grid || grid.getAttribute('data-wg-ready') === '1') {
+      // A grid Turbo restored from its snapshot: copied markup with no listeners. Only the lazy fill
+      // is run again here (it needs the elements, not the grid's handlers).
+      fillShownLazy(grid);
+      return;
+    }
     grid.setAttribute('data-wg-ready', '1');
 
     var key = STORE + (grid.getAttribute('data-wg-page') || '');
@@ -338,6 +432,7 @@ export function gridClientJs() {
         putSize(cell, size[0], size[1]);
         show(cell);
         grid.appendChild(cell);
+        fillLazy(grid, cell);
       }
       closePicker();
     }
@@ -378,8 +473,10 @@ export function gridClientJs() {
     }, { passive: true });
 
     // Turbo caches the page as it is. A snapshot taken mid-edit would come back with a stuck Edit
-    // mode and changes nobody confirmed, so the grid is put back before the snapshot is taken. The
-    // visit's grid must be one more entry, not one more listener.
+    // mode and changes nobody confirmed, so the grid is put back before the snapshot is taken. A
+    // cell a fetch was on its way to is put back to its loading line too: the snapshot's copy would
+    // come back already wired, and no fetch would ever finish it. The visit's grid must be one more
+    // entry, not one more listener.
     var tidies = window.__crowWidgetsGridTidies || (window.__crowWidgetsGridTidies = []);
     tidies.push(function () {
       if (grid.isConnected === false) return false;
@@ -389,6 +486,7 @@ export function gridClientJs() {
         try { if (typeof picker.close === 'function') picker.close(); } catch (err) { /* already closed */ }
       }
       reset();
+      resetLazyLines(grid);
       return true;
     });
     if (!window.__crowWidgetsGridCacheBound) {
@@ -402,6 +500,7 @@ export function gridClientJs() {
     }
 
     applyLayout(readLayout());
+    fillShownLazy(grid);
   }
 
   function boot() {

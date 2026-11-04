@@ -5,7 +5,9 @@
  *   - CROW_FOR_YOU off: /dashboard/widgets is a 404 for the owner too; on: the owner's own local
  *     password session gets it, a plain-scope or SSO session gets 404, and the page has no POST;
  *   - its default screenful is What needs me and Today + Ramble, at 2×2, with every other widget
- *     drawn hidden so "+ Add widget" can put it there on this device;
+ *     offered by "+ Add widget": those are drawn as hidden LAZY cells (one loading line each) and
+ *     are not loaded with the page — the device fetches a cell from /dashboard/widgets-api/cell when
+ *     it shows it (widgets/grid-client.js);
  *   - the layout key is the grid client's own (crow.widgets.layout.widgets) and the page carries
  *     the grid client, untouched from PR 1;
  *   - Today + Ramble's lines are each optional: no Workspace (or a CalDAV that throws) leaves the
@@ -116,16 +118,18 @@ async function withFlag(fn) {
   try { return await fn(); } finally { delete process.env.CROW_FOR_YOU; }
 }
 
-/** The grid's cells, in the order the server drew them, with the size and visibility it gave each. */
+/** The grid's cells, in the order the server drew them, with the size, visibility and body it gave each. */
 function cells(body) {
   const { document } = parseHTML(`<!doctype html><html><body>${body}</body></html>`);
   return [...document.querySelectorAll('.wg-grid[data-wg-page="widgets"] [data-widget]')].map((el) => ({
     id: el.getAttribute("data-widget"),
     hidden: el.hasAttribute("hidden"),
+    lazy: el.getAttribute("data-wg-lazy"),
     w: Number(el.getAttribute("data-w")),
     h: Number(el.getAttribute("data-h")),
     sizes: JSON.parse(el.getAttribute("data-sizes") || "[]"),
     text: String(el.textContent || "").replace(/\s+/g, " ").trim(),
+    body: String((el.querySelector(".wg-cell-body") || {}).textContent || "").replace(/\s+/g, " ").trim(),
   }));
 }
 
@@ -155,7 +159,7 @@ test("flag on: the owner's own local password session gets it; a plain or an SSO
   });
 });
 
-test("its default screenful is What needs me and Today + Ramble at 2×2; the rest are offered and drawn hidden", async () => {
+test("its default screenful is What needs me and Today + Ramble at 2×2; the rest are lazy cells", async () => {
   await withFlag(async () => {
     const r = await get("/dashboard/widgets");
     assert.equal(r.status, 200);
@@ -166,17 +170,23 @@ test("its default screenful is What needs me and Today + Ramble at 2×2; the res
     assert.deepEqual(today.sizes, [[2, 1], [2, 2], [4, 1]], "and the only sizes it may step through");
     const needs = drawn.find((c) => c.id === "needs-me");
     assert.deepEqual([needs.w, needs.h], [2, 2]);
-    // Every registered widget is offered on the page: the hidden ones are "+ Add widget" entries.
-    // Widgets phase 3, PR 2's in-Crow widgets are all offered and all hidden (the camera is absent:
-    // Frigate is not installed on this scratch home).
-    assert.deepEqual(drawn.map((c) => c.id), ["needs-me", "morning", "listen", "news", "today", "messages", "apps", "projects", "bots"], "the cells the loads drew");
-    for (const id of ["morning", "listen", "news", "messages", "apps", "projects", "bots"]) {
-      assert.equal(drawn.find((c) => c.id === id).hidden, true, `${id} is offered, not part of the default`);
-    }
-    // Move and the weather drew no cell at all: Ramble is not installed, and there is no city.
-    assert.ok(!drawn.some((c) => c.id === "moves"), "no Ramble: no Move cell");
-    assert.ok(!drawn.some((c) => c.id === "weather"), "no city: no weather cell");
+    assert.equal(needs.lazy, null, "a default-layout widget is loaded with the page");
+    assert.equal(today.lazy, null);
     assert.equal(needs.text.includes("What needs me"), true);
+    // Every registered widget is offered on the page, in registry order. The ones the default layout
+    // does not hold are drawn hidden as LAZY cells: one loading line each, never loaded with the page,
+    // and listed by the picker so "+ Add widget" can put them up (widgets/grid-client.js fills it).
+    assert.deepEqual(drawn.map((c) => c.id), [
+      "needs-me", "morning", "moves", "listen", "news", "today", "weather",
+      "messages", "apps", "projects", "bots",
+    ], "the cells the page draws");
+    for (const id of ["morning", "moves", "listen", "news", "weather", "messages", "apps", "projects", "bots"]) {
+      const lazy = drawn.find((c) => c.id === id);
+      assert.equal(lazy.hidden, true, `${id} is offered, not part of the default`);
+      assert.equal(lazy.lazy, "1", `${id} is a lazy cell`);
+      assert.equal(lazy.body, "Loading…", `${id} draws the loading line, and nothing else`);
+      assert.match(r.body, new RegExp(`data-wg-add="${id}"`), `${id} is offered by the picker`);
+    }
   });
 });
 

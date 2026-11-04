@@ -11,10 +11,15 @@
  *
  * Rules this file owns:
  *   - a widget whose `render` returns "" draws NO cell (the Move card without Ramble, Listen with
- *     nothing in it: For You v1 left those sections out, and so does the grid);
+ *     nothing in it: For You v1 left those sections out, and so does the grid). A LAZY cell is drawn
+ *     regardless: the page never asked that widget's loader, so it cannot know — the device fetches
+ *     the body and shows the grid's own "nothing to show" line when the answer is empty;
  *   - a widget that is offered but not part of THIS page's default layout is drawn with `hidden`
  *     (`defaultOnFor`): the weather on For You, Your morning on the generic page. It is the "+ Add
- *     widget" entry until this device adds it;
+ *     widget" entry until this device adds it, and it is NOT loaded with the page: `splitForPage`
+ *     keeps those cells out of the page's loads, `gridCellHtml` draws their body as one
+ *     `widgets.grid.loading` line and marks them `data-wg-lazy="1"`, and `widgets/grid-client.js`
+ *     fetches the body from `GET /dashboard/widgets-api/cell` the moment the device shows it;
  *   - a widget whose load failed draws its own one-line error instead of its content — its own card
  *     where it has one (`errorHtml`), so "What needs me" keeps its title and its way into the full
  *     list — and every other cell still renders;
@@ -72,8 +77,28 @@ export function defaultSizeOf(widget, pageId = "") {
   return Array.isArray(list[0]) ? [Number(list[0][0]), Number(list[0][1])] : [2, 1];
 }
 
-/** The cell's body: the widget's markup, or its own error line when the load failed. */
-function bodyHtml(entry, lang, now) {
+/**
+ * The page's offer, split by whether the page's OWN default layout holds each widget: `eager` are
+ * loaded with the page, `lazy` are not loaded at all — the server draws their cells hidden with a
+ * loading line, and the device fetches one from the cell route when it shows it. This is the ONE
+ * place that split is made, so both pages agree on it.
+ */
+export function splitForPage(widgets, pageId = "") {
+  const eager = [];
+  const lazy = [];
+  for (const widget of Array.isArray(widgets) ? widgets : []) {
+    if (defaultOnFor(widget, pageId)) eager.push(widget);
+    else lazy.push(widget);
+  }
+  return { eager, lazy };
+}
+
+/**
+ * The cell's body: the widget's markup, or its own error line when the load failed. The lazy fill
+ * route (routes/widgets.js) renders exactly this, so a fetched body and a page-drawn one can never
+ * disagree.
+ */
+export function cellBodyHtml(entry, lang, now) {
   const widget = entry.widget;
   if (entry.failed) {
     if (typeof widget.errorHtml === "function") return widget.errorHtml(lang);
@@ -89,17 +114,25 @@ function bodyHtml(entry, lang, now) {
   }
 }
 
-/** One cell, or "" when the widget has nothing to show. */
+/**
+ * One cell, or "" when the widget has nothing to show (a lazy entry always draws one: the page has
+ * not asked its loader, so it cannot know).
+ */
 export function gridCellHtml(entry, lang = "en", now, pageId = "") {
   const widget = entry && entry.widget;
   if (!widget || !widget.id) return "";
-  const body = bodyHtml(entry, lang, now);
+  // A lazy entry is not loaded at all: its body is the loading line until the device shows it and
+  // the client fills it from the cell route.
+  const body = entry.lazy
+    ? `<p class="fy-note">${e(t("widgets.grid.loading", lang))}</p>`
+    : cellBodyHtml(entry, lang, now);
   if (!body) return "";
   const title = widgetTitle(widget, lang);
   const size = defaultSizeOf(widget, pageId);
   const sizes = JSON.stringify(Array.isArray(widget.sizes) ? widget.sizes : []);
   const off = defaultOnFor(widget, pageId) ? "" : " hidden";
-  return `<section class="wg-cell" data-widget="${e(widget.id)}" data-w="${size[0]}" data-h="${size[1]}" data-sizes="${e(sizes)}" data-def="${size[0]},${size[1]}"${off}>
+  const lazyAttr = entry.lazy ? ' data-wg-lazy="1"' : "";
+  return `<section class="wg-cell" data-widget="${e(widget.id)}" data-w="${size[0]}" data-h="${size[1]}" data-sizes="${e(sizes)}" data-def="${size[0]},${size[1]}"${off}${lazyAttr}>
       <div class="wg-cell-body">${body}</div>
       <button type="button" class="fy-btn wg-remove" data-wg-remove aria-label="${e(fill(t("widgets.grid.removeNamed", lang), { name: title }))}">${e(t("widgets.grid.remove", lang))}</button>
       <button type="button" class="fy-btn wg-size" data-wg-size aria-label="${e(fill(t("widgets.grid.resizeNamed", lang), { name: title }))}">${e(t("widgets.grid.resize", lang))}</button>
@@ -136,10 +169,15 @@ function pickerHtml(drawn, lang) {
 }
 
 /**
- * The page's grid. `cells` is what `loadWidgets` returned (or a page's own `[{ widget, data }]`);
- * `opts.now` reaches a renderer that wants the request's clock. The grid is one element: the client
- * finds it by its `data-wg-page`, and so does the shell when it must keep a swipe from starting
- * inside it.
+ * The page's grid. `cells` is what `loadWidgets` returned (or a page's own `[{ widget, data }]`, or
+ * `{ widget, lazy: true }` for an offered widget the page did not load); `opts.now` reaches a
+ * renderer that wants the request's clock. The grid is one element: the client finds it by its
+ * `data-wg-page`, and so does the shell when it must keep a swipe from starting inside it.
+ *
+ * When any cell is lazy, the grid also carries the three page lines a lazy fill may have to draw
+ * itself (`data-wg-nothing`, `data-wg-error`, `data-wg-loading`): the client sets one of them as TEXT,
+ * never as markup, and puts the loading line back before a Turbo snapshot if the fill was still out.
+ * A page with nothing lazy has no use for them, so it does not carry them.
  */
 export function gridHtml(pageId, cells, lang = "en", opts = {}) {
   const now = opts.now;
@@ -150,7 +188,11 @@ export function gridHtml(pageId, cells, lang = "en", opts = {}) {
     if (html) drawn.push({ entry, html });
   }
   const body = drawn.map((c) => c.html).join("\n    ");
-  return `<div class="wg-grid" data-wg-page="${e(String(pageId == null ? "" : pageId))}" data-wg-saved="${e(t("widgets.grid.saved", lang))}">
+  const lazyLines = drawn.some((c) => c.entry && c.entry.lazy)
+    ? ` data-wg-nothing="${e(t("widgets.grid.nothing", lang))}" data-wg-error="${e(t("widgets.grid.error", lang))}"`
+      + ` data-wg-loading="${e(t("widgets.grid.loading", lang))}"`
+    : "";
+  return `<div class="wg-grid" data-wg-page="${e(page)}" data-wg-saved="${e(t("widgets.grid.saved", lang))}"${lazyLines}>
     ${toolbarHtml(lang)}
     ${body}
     ${pickerHtml(drawn, lang)}

@@ -28,6 +28,7 @@ import { isLocalPasswordSessionOn } from "../local-session.js";
 import { forYouEnabled } from "../../for-you/flag.js";
 import { readForYouSettings } from "../../for-you/settings.js";
 import { loadWidgets, widgetsForPage } from "../../widgets/registry.js";
+import { splitForPage } from "../../widgets/grid-html.js";
 import { widgetsGridCss } from "../../widgets/grid-css.js";
 import { widgetsMoreCss } from "../../widgets/more-html.js";
 import { gridClientJs } from "../../widgets/grid-client.js";
@@ -66,7 +67,13 @@ export default {
     const context = forYouContext(db, { settings, crowHome, now, tz, lang });
     // Each widget degrades alone: a failed or timed-out read is its own one-line error cell.
     // `crowHome` is where the installed add-ons' own widgets come from (widgets/addons.js).
-    const cells = await loadWidgets(widgetsForPage("widgets", { settings, crowHome }), context);
+    // Only the widgets this page's default layout holds are loaded with the page; the rest are drawn
+    // as lazy cells and fetched by the device when it shows one (widgets/grid-html.js, grid-client.js).
+    const offered = widgetsForPage("widgets", { settings, crowHome });
+    const { eager, lazy } = splitForPage(offered, "widgets");
+    const loaded = await loadWidgets(eager, context);
+    const isLazy = new Set(lazy);
+    const cells = offered.map((widget) => (isLazy.has(widget) ? { widget, lazy: true } : loaded.shift()));
     return layout({
       title: t("widgets.page.title", lang),
       content: forYouCss() + widgetsGridCss() + widgetsMoreCss()
