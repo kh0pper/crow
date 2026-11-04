@@ -279,8 +279,8 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
 
     // W3-3: redirect to onboarding only on first-ever setup AND only when the
     // completion flag has never been set (so existing operators who reset their
-    // password are never nagged). `next` is deliberately dropped here: on first
-    // run there was no password before this POST, so no consent request can be pending.
+    // password are never nagged). `next` is dropped on first run on purpose: an app
+    // sign-in started before the owner existed is restarted from the app after onboarding.
     if (wasFirstSetup) {
       let onboardingDone = false;
       const _loginDb = createDbClient();
