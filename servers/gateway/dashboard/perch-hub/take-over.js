@@ -149,13 +149,32 @@ export function perchTakeOverJs(lang = "en") {
     },ms);
   }
 
+  /* The viewer must name its own websockify: noVNC 1.0.0 defaults the WebSocket
+     path to "websockify" at the origin ROOT, and the gateway upgrades only
+     /proxy/<id>/... , so an unnamed page never connects (see
+     servers/shared/novnc-url.js for the same rule). Plain ES5: this runs in the
+     page, inside a template literal, with no backtick and no dollar-brace. */
+  function toViewerUrl(base){
+    var page=String(base||'/proxy/browser/vnc.html');
+    var at=page.indexOf('?');
+    var href=at<0?page:page.slice(0,at), q=at<0?'':page.slice(at+1);
+    var sock=href;
+    while(sock.charAt(0)==='/') sock=sock.slice(1);
+    var cut=sock.lastIndexOf('/');
+    sock=(cut<0?'':sock.slice(0,cut+1))+'websockify';
+    var pin='path='+encodeURIComponent(sock).replace(/%2F/gi,'/');
+    var named=/(^|&)path=/.test(q);
+    var rest=(q?q+'&':'')+'autoconnect=true&resize=scale&view_only=false';
+    return href+'?'+rest+(named?'':'&'+pin);
+  }
+
   function toViewer(s){
     if(s.frame) return;
     var f=document.createElement('iframe'); f.className='to-vnc';
     f.setAttribute('title',(s.app&&s.app.label)?s.app.label:'VNC');
     /* view_only pinned off: noVNC keeps that setting in its own browser storage, and the
        Browser panel's (and the app tile's) watch-only viewer sets it on the same origin */
-    f.setAttribute('src',(s.app?s.app.base:'/proxy/browser/vnc.html')+'?autoconnect=true&resize=scale&view_only=false');
+    f.setAttribute('src',toViewerUrl(s.app?s.app.base:'/proxy/browser/vnc.html'));
     s.view.appendChild(f); s.frame=f;
   }
 

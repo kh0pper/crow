@@ -383,7 +383,7 @@ async function hub({ newMode = true, sid = "perchlive-aaaaaaaa", links = [{ id: 
   const anchors = links.map((l) => {
     const a = makeEl("a"); a.className = "shell-app";
     a.setAttribute("data-app-id", l.id); a.setAttribute("data-app-kind", l.kind);
-    a.setAttribute("href", l.href || "/proxy/" + l.id + "/vnc.html?autoconnect=true&resize=scale&view_only=false");
+    a.setAttribute("href", l.href || "/proxy/" + l.id + "/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/" + l.id + "/websockify");
     const lb = makeEl("span"); lb.className = "shell-app-label"; lb.textContent = l.label; a.appendChild(lb);
     return a;
   });
@@ -476,7 +476,7 @@ test("the client opens a tile only for a known desktop app in an open new-mode s
   assert.equal(byClass(sheet, "to-host")[0].textContent, "Studio");
   assert.ok(h.calls.some((c) => c.method === "POST" && c.path.endsWith("/apps/studio/take-over")));
   assert.ok(!h.calls.some((c) => c.path.includes("/browser/") || c.path.includes("/keychain/")), "never the browser's routes or its password");
-  assert.equal(byClass(sheet, "to-vnc")[0].getAttribute("src"), "/proxy/studio/vnc.html?autoconnect=true&resize=scale&view_only=false");
+  assert.equal(byClass(sheet, "to-vnc")[0].getAttribute("src"), "/proxy/studio/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/studio/websockify");
   byClass(sheet, "to-back")[0].onclick();
   await tick();
   assert.ok(h.calls.some((c) => c.method === "POST" && c.path.endsWith("/apps/studio/hand-back")));
@@ -527,7 +527,7 @@ test("the Take over sheet refuses an app whose base is not a noVNC page (never t
   assert.deepEqual(h.calls, [], "no take-over request at all");
   h.sandbox.document.dispatchEvent(new CustomEvent("perch:browser-takeover", { detail: { sid: "perchlive-aaaaaaaa", anchor: null, app: { id: "studio", label: "Studio", base: "/proxy/studio/novnc/vnc_lite.html" } } }));
   await tick();
-  assert.equal(byClass(byClass(h.root, "ph-tosheet")[0], "to-vnc")[0].getAttribute("src"), "/proxy/studio/novnc/vnc_lite.html?autoconnect=true&resize=scale&view_only=false");
+  assert.equal(byClass(byClass(h.root, "ph-tosheet")[0], "to-vnc")[0].getAttribute("src"), "/proxy/studio/novnc/vnc_lite.html?autoconnect=true&resize=scale&view_only=false&path=proxy/studio/novnc/websockify");
 });
 
 test("the client code is template-safe in both languages", async () => {
@@ -562,7 +562,7 @@ test("the browser's app tile takes the browser path: /browser/take-over, a view_
   assert.ok(!h.calls.some((c) => c.path.includes("/apps/browser/take-over")), "never the generic app route");
   assert.ok(!h.calls.some((c) => c.path.includes("/keychain/")), "neither the tile nor the sheet asks the keychain");
   assert.equal(byClass(sheet, "to-copy").length, 0, "no Copy password row");
-  assert.equal(byClass(sheet, "to-vnc")[0].getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false");
+  assert.equal(byClass(sheet, "to-vnc")[0].getAttribute("src"), "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/browser/websockify");
   byClass(sheet, "to-back")[0].onclick();
   await tick();
   assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/dashboard/perch-api/browser/hand-back"));
@@ -592,7 +592,7 @@ test("the tile offers Open to the app's page whenever Take over is not offered (
   const open = byClass(t, "at-open")[0];
   assert.equal(open.hidden, false);
   assert.equal(open.textContent, "Open");
-  assert.equal(open.getAttribute("href"), "/proxy/studio/vnc.html?autoconnect=true&resize=scale&view_only=false", "the launcher's own link");
+  assert.equal(open.getAttribute("href"), "/proxy/studio/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/studio/websockify", "the launcher's own link");
   assert.equal(open.getAttribute("data-turbo"), "false");
 
   const offered = await hub();
@@ -648,7 +648,7 @@ test("a 1.3.10-shaped installed browser (no desktop, no mcpServers) is a page li
   assert.equal(app.kind, "page");
   assert.equal(app.desktopPath, null);
   assert.equal(app.label, "Browser Automation", "the manifest's name, not \"VNC Viewer\"");
-  assert.equal(app.href, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false", "its noVNC page is pinned too");
+  assert.equal(app.href, "/proxy/browser/vnc.html?autoconnect=true&resize=scale&view_only=false&path=proxy/browser/websockify", "its noVNC page is pinned too");
   assert.equal(appTileInfo("browser", { crowHome: old }), null, "no tile");
   const c = clientApp(app);
   const h = await hub({ links: [{ id: c.id, label: c.label, kind: c.kind, href: c.href }] });
