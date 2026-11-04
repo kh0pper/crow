@@ -4,8 +4,9 @@
 # Why it exists: at boot tailscale often has no address before the fence's
 # bounded wait ends, so the boot apply installs the port-only rule (stricter, and
 # safe) and the state file carries no address. This unit re-runs the same
-# idempotent, docker-free `apply --boot` until an addressed rule exists for every
-# `publish tailnet` entry, and after that its run changes nothing.
+# idempotent, docker-free `apply --boot` on the timer's cadence (one run a minute
+# for the first 15 minutes after boot, then every 15 minutes), and a run whose
+# transaction is byte-identical to the last applied one restores nothing at all.
 #
 # It declares NO RuntimeDirectory=: /run/crow-engine-fence belongs to
 # crow-engine-fence.service, and a second unit declaring the same directory would

@@ -37,5 +37,9 @@ publish port-only 8030
 # A publish on a LAN address. Source exemptions are allowed here only: one
 # address per consumer, and every process on the consumer host counts as the
 # consumer. A range needs the operator's explicit `confirm-range` token at the
-# end of the line, because it widens who may reach the port.
-publish lan 192.0.2.10 8030 consumer 192.0.2.20
+# end of the line, because it widens who may reach the port; its prefix is a
+# number from 1 to 32/128 and `/0` is refused. Every consumer has to be an
+# address of this publish's own family. A tailnet address (Tailscale's CGNAT
+# range or its ULA prefix) is refused here: that is what `publish tailnet` is
+# for, and a tailnet publish carries no source exemptions.
+publish lan 192.0.2.10 8011 consumer 192.0.2.20

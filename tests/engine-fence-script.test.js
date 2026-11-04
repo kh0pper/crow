@@ -78,7 +78,7 @@ fam=FAMILY
 printf '%s %s\n' "$fam" "$*" >> "$FAKE_LOG"
 model="$FAKE_FIXTURES/model-$fam.txt"
 jump="$FAKE_FIXTURES/jump-$fam"
-if [ "$1" = "--version" ]; then
+if [ $1 = "--version" ]; then
   if [ -f "$FAKE_FIXTURES/no-$fam" ]; then
     echo "$fam: not installed" >&2
     exit 127
@@ -86,8 +86,19 @@ if [ "$1" = "--version" ]; then
   cat "$FAKE_FIXTURES/version-$fam.txt"
   exit 0
 fi
+# A real xtables binary takes the lock for every call that touches a table, and
+# on iptables-legacy a call without -w fails at once when another process holds
+# it. A call without -w here is a failure, not a quiet success.
+case " $* " in
+  *" -w "*) ;;
+  *)
+    echo "fake $fam: called without -w (the xtables lock was not taken): $*" >&2
+    exit 3
+    ;;
+esac
+if [ $1 = "-w" ]; then shift 2; fi
 table=filter
-if [ "$1" = "-t" ]; then
+if [ $1 = "-t" ]; then
   table=$2
   shift 2
 fi
@@ -96,8 +107,15 @@ shift
 case "$table/$cmd" in
   raw/-S)
     if [ "$#" -ge 1 ]; then
-      if [ -f "$model" ]; then grep -F -- "-A $1 " "$model" || true; fi
-      exit 0
+      # A real 'iptables -t raw -S <chain>' prints the chain's own -N line
+      # first, then its rules, and fails when the chain does not exist.
+      if [ -f "$model" ]; then
+        echo "-N $1"
+        grep -F -- "-A $1 " "$model" || true
+        exit 0
+      fi
+      echo "$fam: chain $1 does not exist" >&2
+      exit 1
     fi
     echo "-P PREROUTING ACCEPT"
     if [ -f "$jump" ]; then echo "-A PREROUTING -j CROW-ENGINE-FENCE"; fi
@@ -125,6 +143,21 @@ const FAKE_RESTORE = String.raw`#!/usr/bin/env bash
 set -u
 fam=FAMILY
 printf '%s-restore %s\n' "$fam" "$*" >> "$FAKE_LOG"
+# -w: the xtables lock. --noflush: anything else would replace the whole table.
+case " $* " in
+  *" -w "*) ;;
+  *)
+    echo "fake $fam-restore: called without -w" >&2
+    exit 3
+    ;;
+esac
+case " $* " in
+  *" --noflush "*) ;;
+  *)
+    echo "fake $fam-restore: called without --noflush" >&2
+    exit 1
+    ;;
+esac
 if [ -f "$FAKE_FIXTURES/fail-restore-$fam" ]; then
   echo "fake restore: refused" >&2
   exit 1
@@ -133,9 +166,22 @@ stdin=$(cat)
 printf '%s\n' "$stdin" > "$FAKE_FIXTURES/restore-input-$fam.txt"
 model="$FAKE_FIXTURES/model-$fam.txt"
 : > "$model.new"
+declared=0
 while IFS= read -r line; do
   case "$line" in
-    "-A CROW-ENGINE-FENCE "*)
+    ':CROW-ENGINE-FENCE - [0:0]') declared=1 ;;
+    '-N CROW-ENGINE-FENCE')
+      # What a real 'iptables -t raw -S CROW-ENGINE-FENCE' prints first. Feeding
+      # it back into a transaction that already declares the chain is an error,
+      # exactly as the real restore would report it.
+      echo "fake $fam-restore: chain already exists: $line" >&2
+      exit 1
+      ;;
+    '-A CROW-ENGINE-FENCE '*)
+      if [ "$declared" -ne 1 ]; then
+        echo "fake $fam-restore: rule before the chain declaration" >&2
+        exit 1
+      fi
       line=$(printf '%s' "$line" | sed -E \
         -e 's#([[:space:]]-d[[:space:]]+)([0-9]+\.[0-9.]+)([[:space:]]|$)#\1\2/32\3#' \
         -e 's#([[:space:]]-d[[:space:]]+)([0-9A-Fa-f:]+)([[:space:]]|$)#\1\2/128\3#')
@@ -150,6 +196,10 @@ exit 0
 const FAKE_TAILSCALE = String.raw`#!/usr/bin/env bash
 set -u
 printf 'tailscale %s\n' "$*" >> "$FAKE_LOG"
+if [ -f "$FAKE_FIXTURES/hang-tailscale" ]; then
+  : > "$FAKE_FIXTURES/tailscale-was-called"
+  sleep 30
+fi
 counter="$FAKE_FIXTURES/tailscale-calls-$2"
 n=$(cat "$counter" 2>/dev/null || echo 0)
 n=$((n + 1))
@@ -218,6 +268,10 @@ exit 0
 const FAKE_FLOCK = String.raw`#!/usr/bin/env bash
 set -u
 printf 'flock %s\n' "$*" >> "$FAKE_LOG"
+if [ -f "$FAKE_FIXTURES/fail-flock" ]; then
+  echo "flock: another run holds the lock" >&2
+  exit 1
+fi
 exit 0
 `;
 
@@ -285,9 +339,14 @@ function setup({ conf = BASE_CONF, fixtures = {}, daemonJson = '{"log-driver":"j
     conf: join(root, "etc", "engine-fence.conf"),
     facts: join(root, "etc", "engine-fence.facts.json"),
     state: join(stateDir, "state.json"),
+    appliedHash: join(stateDir, "applied.sha256"),
     daemonJson: join(dir, "daemon.json"),
     unit: join(dir, "docker.service"),
+    // The v6 stack is a file the script probes. A scratch file stands in for
+    // /proc/net/if_inet6 so the tests decide which host they model.
+    v6Stack: join(dir, "if_inet6"),
   };
+  writeFileSync(ctx.v6Stack, "00000000000000000000000000000001 01 80 10 80 lo\n");
   mkdirSync(join(root, "etc"), { recursive: true });
   writeFileSync(ctx.conf, conf);
   writeFileSync(ctx.log, "");
@@ -309,6 +368,9 @@ function envOf(ctx, extra = {}) {
     CROW_ENGINE_FENCE_DOCKER_DROPIN_DIR: ctx.dropin,
     CROW_ENGINE_FENCE_DOCKER_UNIT: ctx.unit,
     CROW_ENGINE_FENCE_TAILSCALE_WAIT: "0",
+    CROW_ENGINE_FENCE_TAILSCALE_TIMEOUT: "1",
+    CROW_ENGINE_FENCE_XT_WAIT: "10",
+    CROW_ENGINE_FENCE_V6_STACK: ctx.v6Stack,
     CROW_ENGINE_FENCE_LOCK_WAIT: "5",
     ...extra,
   };
@@ -324,6 +386,8 @@ const run = (ctx, args = [], extra = {}) =>
 const calls = (ctx) => readFileSync(ctx.log, "utf8").split("\n").filter(Boolean);
 const clearCalls = (ctx) => writeFileSync(ctx.log, "");
 const dockerCalls = (ctx) => calls(ctx).filter((line) => line.startsWith("docker "));
+const ruleCalls = (ctx) =>
+  calls(ctx).filter((line) => /^ip6?tables(-restore)? /.test(line) && !line.includes("--version"));
 
 const restoreInput = (ctx, fam = "iptables") =>
   readFileSync(join(ctx.fixtures, `restore-input-${fam}.txt`), "utf8").trimEnd().split("\n");
@@ -338,10 +402,11 @@ const rulesOf = (ctx, fam = "iptables") => {
 
 /** The live chain, as a real `iptables -t raw -S` would print it. */
 function liveRules(ctx, fam = "iptables") {
-  const r = spawnSync("bash", ["-c", `iptables=${fam === "iptables" ? "iptables" : "ip6tables"}; "$iptables" -t raw -S`], {
-    encoding: "utf8",
-    env: envOf(ctx),
-  });
+  const r = spawnSync(
+    "bash",
+    ["-c", `iptables=${fam === "iptables" ? "iptables" : "ip6tables"}; "$iptables" -w 10 -t raw -S`],
+    { encoding: "utf8", env: envOf(ctx) },
+  );
   assert.equal(r.status, 0, r.stderr);
   return r.stdout.split("\n").filter(Boolean);
 }
@@ -444,6 +509,23 @@ test("the conf is validated before any rule is touched", () => {
     { conf: "interface tailscale0\npublish port-only 8030 consumer 192.0.2.20\n", code: 12, re: /no destination to scope a consumer/ },
     { conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.0/24\n", code: 12, re: /confirm-range/ },
     { conf: "interface tailscale0\npublish lan 127.0.0.1 8011 consumer 192.0.2.20\n", code: 12, re: /loopback/ },
+    // finding: the interface directive is held to bridge_denied and to the
+    // no-leading-dash rule too.
+    { conf: "interface lo\npublish tailnet 8003\n", code: 12, re: /can never be the fence interface/ },
+    { conf: "interface docker0\npublish tailnet 8003\n", code: 12, re: /can never be the fence interface/ },
+    { conf: "interface -oX\npublish tailnet 8003\n", code: 11, re: /may not start with '-'/ },
+    { conf: "interface tailscale0\nbridge -br\npublish tailnet 8003\n", code: 11, re: /bridge name may not start with '-'/ },
+    // finding: a tailnet address on a lan line, so a tailnet publish can never
+    // pick up source exemptions.
+    { conf: "interface tailscale0\npublish lan 100.64.20.7 8011 consumer 100.64.20.9\n", code: 12, re: /is a tailnet address/ },
+    { conf: "interface tailscale0\npublish lan fd7a:115c:a1e0::5 8011 consumer fd7a:115c:a1e1::9\n", code: 12, re: /is a tailnet address/ },
+    // finding: confirm-range needs a numeric, in-range prefix, never /0, and the
+    // consumer has to be the publish's own family.
+    { conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.0/x confirm-range\n", code: 11, re: /numeric prefix/ },
+    { conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.0/0 confirm-range\n", code: 11, re: /numeric prefix/ },
+    { conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.0/33 confirm-range\n", code: 11, re: /numeric prefix/ },
+    { conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer fd7a:115c:a1e1::/64 confirm-range\n", code: 11, re: /numeric prefix/ },
+    { conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer fd7a:115c:a1e1::9\n", code: 11, re: /numeric prefix/ },
   ];
   for (const c of bad) {
     const ctx = setup({ conf: c.conf });
@@ -464,6 +546,29 @@ test("a consumer range is accepted only with the operator's confirm-range token"
   const drop = rulesOf(ctx).find((line) => line.endsWith("-j DROP"));
   assert.match(drop, /-d 192\.0\.2\.10/);
   assert.ok(rulesOf(ctx).some((line) => line.includes("-s 192.0.2.0/24")), "the range is the exemption");
+});
+
+test("an address outside the tailnet ranges is still a LAN publish, and a v6 range is accepted", () => {
+  const cases = [
+    // Just outside the CGNAT /10 (second octet 128).
+    "publish lan 100.128.0.5 8011 consumer 100.128.0.9",
+    // Just outside Tailscale's ULA /48.
+    "publish lan fd7a:115c:a1e1::5 8011 consumer fd7a:115c:a1e1::9",
+    // A v6 publish with a v6 range: same family, prefix in range.
+    "publish lan 2001:db8::10 8011 consumer 2001:db8::/64 confirm-range",
+  ];
+  for (const line of cases) {
+    const ctx = setup({ conf: `interface tailscale0\n${line}\n` });
+    const r = run(ctx, ["apply"]);
+    assert.equal(r.status, 0, `${line}: ${r.stderr}`);
+  }
+});
+
+test("the shipped example conf passes check", () => {
+  const ctx = setup({ conf: readFileSync(CONF_EXAMPLE, "utf8") });
+  const r = run(ctx, ["check"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /the conf is valid/);
 });
 
 // ─── apply: the rule text ───────────────────────────────────────────────────
@@ -518,19 +623,69 @@ test("no rule carries conntrack, a source match or a second protocol", () => {
   }
 });
 
+test("every call that touches a table takes the xtables lock (-w)", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.equal(run(ctx, ["status"]).status, 0);
+  assert.equal(run(ctx, ["swap-check"]).status, 0);
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+  assert.equal(run(ctx, ["apply", "--boot"]).status, 0);
+
+  const all = ruleCalls(ctx);
+  assert.ok(all.length > 5, `rule calls were made (${all.length})`);
+  for (const line of all) {
+    // tailscaled holds /run/xtables.lock at boot, and on iptables-legacy a call
+    // without -w fails at once: the fake refuses such a call outright.
+    assert.match(line, / -w 10( |$)/, `the xtables lock is taken: ${line}`);
+  }
+});
+
+test("a family that loses its last rule restores an empty chain; a chain that never existed is skipped", () => {
+  // A fresh box whose only publish is a v4 `lan` line: the v6 chain never
+  // exists, so no v6 transaction is sent at all.
+  const fresh = setup({ conf: "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.20\n" });
+  assert.equal(run(fresh, ["check"]).status, 0);
+  clearCalls(fresh);
+  assert.equal(run(fresh, ["apply", "--boot"]).status, 0);
+  assert.equal(calls(fresh).filter((line) => line.startsWith("ip6tables-restore")).length, 0);
+  assert.equal(existsSync(join(fresh.fixtures, "restore-input-ip6tables.txt")), false, "nothing to clear, nothing sent");
+
+  // A box whose v6 chain does exist must see it emptied when its last v6 rule
+  // goes away, or the old DROP would linger.
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.ok(
+    liveRules(ctx, "v6").some((line) => line.startsWith("-A CROW-ENGINE-FENCE")),
+    "the v6 chain has rules to start with",
+  );
+  writeFileSync(ctx.conf, "interface tailscale0\npublish lan 192.0.2.10 8011 consumer 192.0.2.20\n");
+  const r = run(ctx, ["apply"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(
+    restoreInput(ctx, "ip6tables"),
+    ["*raw", ":CROW-ENGINE-FENCE - [0:0]", "COMMIT"],
+    "the existing v6 chain is restored empty",
+  );
+  assert.equal(
+    liveRules(ctx, "v6").filter((line) => line.startsWith("-A CROW-ENGINE-FENCE")).length,
+    0,
+    "no stale v6 rule is left behind",
+  );
+});
+
 test("the chain is filled before it is jumped to, once", () => {
   const ctx = setup();
   applyGolden(ctx);
   const log = calls(ctx);
   const restoreAt = log.findIndex((line) => line.startsWith("iptables-restore"));
-  const insertAt = log.findIndex((line) => line === "iptables -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE");
+  const insertAt = log.findIndex((line) => line === "iptables -w 10 -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE");
   assert.ok(restoreAt >= 0, "the chain is loaded");
   assert.ok(insertAt > restoreAt, "the jump comes after the COMMIT");
-  assert.equal(log.filter((line) => line === "iptables -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE").length, 1);
-  assert.equal(log.filter((line) => line === "ip6tables -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE").length, 1);
+  assert.equal(log.filter((line) => line === "iptables -w 10 -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE").length, 1);
+  assert.equal(log.filter((line) => line === "ip6tables -w 10 -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE").length, 1);
   assert.equal(log.filter((line) => line.startsWith("iptables-restore")).length, 1, "one transaction per family");
   assert.equal(log.filter((line) => line.startsWith("ip6tables-restore")).length, 1);
-  assert.ok(log.includes("iptables -t raw -C PREROUTING -j CROW-ENGINE-FENCE"), "the jump is checked first");
+  assert.ok(log.includes("iptables -w 10 -t raw -C PREROUTING -j CROW-ENGINE-FENCE"), "the jump is checked first");
 });
 
 test("apply is idempotent: identical transaction, identical -S, no second insert", () => {
@@ -546,7 +701,7 @@ test("apply is idempotent: identical transaction, identical -S, no second insert
   assert.equal(restoreInput(ctx, "ip6tables").join("\n"), firstV6, "the same v6 transaction");
   assert.deepEqual(liveRules(ctx), liveBefore, "the live chain is unchanged");
   assert.equal(
-    calls(ctx).filter((line) => line === "iptables -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE").length,
+    calls(ctx).filter((line) => line === "iptables -w 10 -t raw -I PREROUTING 1 -j CROW-ENGINE-FENCE").length,
     1,
     "the jump is inserted once",
   );
@@ -608,6 +763,26 @@ test("the state file is 0640 root:<group> inside a 0750 <group> directory (F1)",
   // No process names, no environment, no address beyond the resolved tailnet one.
   const text = readFileSync(ctx.state, "utf8");
   assert.doesNotMatch(text, /PATH|HOME=|env|command/i);
+});
+
+test("the state file's group is validated as a name and passed after --", () => {
+  const script = readFileSync(SCRIPT, "utf8");
+  assert.ok(script.includes('chgrp -- "$FENCE_GROUP"'), "the group is never read as an option");
+  assert.doesNotMatch(script, /chgrp "\$FENCE_GROUP" --/, "no chgrp takes the group first");
+
+  const bad = setup();
+  const r1 = run(bad, ["apply"], { CROW_ENGINE_FENCE_GROUP: "-oops" });
+  assert.equal(r1.status, 22);
+  assert.match(r1.stderr, /invalid group name/);
+  assert.equal(existsSync(bad.state), false);
+  assert.equal(existsSync(join(bad.fixtures, "restore-input-iptables.txt")), false);
+
+  const missing = setup();
+  const r2 = run(missing, ["apply"], { CROW_ENGINE_FENCE_GROUP: "crow-no-such-group-4f2a" });
+  assert.equal(r2.status, 22);
+  assert.match(r2.stderr, /no such group/);
+  assert.equal(existsSync(missing.state), false);
+  assert.equal(existsSync(join(missing.fixtures, "restore-input-iptables.txt")), false);
 });
 
 // ─── The S5a cross-check ────────────────────────────────────────────────────
@@ -822,14 +997,48 @@ test("facts for a bridge are required by boot mode, and a missing Crow label ref
   assert.match(r2.stderr, /knows nothing about the bridge/);
 });
 
-test("without ip6tables no v6 rule is written and the run still succeeds", () => {
-  const ctx = setup({ fixtures: { "no-ip6tables": "" } });
+test("v6 comes from the stack, not the binary: no /proc entry means no ip6tables call at all", () => {
+  const ctx = setup();
+  const absent = join(ctx.root, "no-such-if_inet6");
   assert.equal(run(ctx, ["check"]).status, 0);
-  const r = run(ctx, ["apply", "--boot"]);
+  clearCalls(ctx);
+  const r = run(ctx, ["apply", "--boot"], { CROW_ENGINE_FENCE_V6_STACK: absent });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /ip6tables is not installed/);
+  assert.match(r.stderr, /no IPv6 stack/);
+  assert.deepEqual(
+    calls(ctx).filter((line) => line.startsWith("ip6tables")),
+    [],
+    "no ip6tables call of any kind (the binary is installed)",
+  );
   assert.equal(existsSync(join(ctx.fixtures, "restore-input-ip6tables.txt")), false);
   assert.equal(stateOf(ctx).rules.every((rule) => rule.family === "v4"), true);
+
+  // The same box with the stack present writes them: only the stack decides.
+  clearCalls(ctx);
+  const with6 = run(ctx, ["apply", "--boot"]);
+  assert.equal(with6.status, 0, with6.stderr);
+  assert.ok(calls(ctx).some((line) => line.startsWith("ip6tables-restore")));
+  assert.ok(stateOf(ctx).rules.some((rule) => rule.family === "v6"));
+});
+
+test("a wedged tailscale costs one bounded timeout, then port-only rules", () => {
+  const ctx = setup({
+    conf: "interface tailscale0\nbridge crow-eng-ex\npublish tailnet 8003\npublish port-only 8030\n",
+    fixtures: { "hang-tailscale": "" },
+  });
+  assert.equal(run(ctx, ["check"]).status, 0);
+  clearCalls(ctx);
+  const started = Date.now();
+  const r = run(ctx, ["apply", "--boot"], { CROW_ENGINE_FENCE_TAILSCALE_TIMEOUT: "1" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - started < 20_000, "the apply did not wait on the daemon forever");
+  assert.equal(existsSync(join(ctx.fixtures, "tailscale-was-called")), true, "tailscale was asked");
+  assert.match(r.stderr, /port-only/);
+  for (const fam of ["iptables", "ip6tables"]) {
+    const drops = rulesOf(ctx, fam).filter((line) => line.endsWith("-j DROP"));
+    assert.ok(drops.length > 0, `${fam}: rules were written`);
+    assert.ok(drops.every((line) => !/ -d /.test(line)), `${fam}: every rule is port-only`);
+  }
 });
 
 test("a failing restore leaves the rules as they were and says so", () => {
@@ -839,6 +1048,25 @@ test("a failing restore leaves the rules as they were and says so", () => {
   assert.equal(r.status, 19);
   assert.match(r.stderr, /live rules were left as they were/);
   assert.equal(existsSync(join(ctx.fixtures, "jump-iptables")), false, "no jump was added");
+});
+
+test("every command takes the flock before it does anything", () => {
+  const ctx = setup();
+  assert.equal(run(ctx, ["check"]).status, 0);
+  assert.ok(calls(ctx).some((line) => line.startsWith("flock -w ")), "check takes the lock");
+  for (const args of [["status"], ["apply", "--boot"], ["remove", "tailnet-9999"], ["swap-check"]]) {
+    clearCalls(ctx);
+    run(ctx, args);
+    assert.ok(calls(ctx).some((line) => line.startsWith("flock -w ")), `${args.join(" ")} takes the lock`);
+  }
+});
+
+test("a lock held elsewhere is exit 21 and no rule is touched", () => {
+  const ctx = setup({ fixtures: { "fail-flock": "" } });
+  const r = run(ctx, ["apply"]);
+  assert.equal(r.status, 21);
+  assert.match(r.stderr, /holds the lock/);
+  assert.equal(existsSync(join(ctx.fixtures, "restore-input-iptables.txt")), false);
 });
 
 // ─── status ─────────────────────────────────────────────────────────────────
@@ -872,6 +1100,26 @@ test("status says port-only when there is no tailnet address", () => {
   assert.match(r.stdout, /^tailnet: v4 none$/m);
 });
 
+test("status is read-only: it never writes the state file", () => {
+  const fresh = setup();
+  const r0 = run(fresh, ["status"]);
+  assert.equal(r0.status, 0, r0.stderr);
+  assert.equal(existsSync(fresh.state), false, "status wrote no state file");
+
+  const ctx = setup();
+  applyGolden(ctx);
+  const before = readFileSync(ctx.state, "utf8");
+  const ino = statSync(ctx.state).ino;
+  writeFileSync(ctx.conf, BASE_CONF + "# edited\n");
+  clearCalls(ctx);
+  const r = run(ctx, ["status"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /WARN: the conf changed since the last check/);
+  assert.equal(readFileSync(ctx.state, "utf8"), before, "the state file is untouched");
+  assert.equal(statSync(ctx.state).ino, ino, "the state file was not replaced");
+  assert.doesNotMatch(calls(ctx).join("\n"), /-restore/, "status restores nothing");
+});
+
 // ─── remove ─────────────────────────────────────────────────────────────────
 
 test("remove edits the live rules only: one id, the others stay, the conf is untouched", () => {
@@ -899,6 +1147,52 @@ test("remove refuses an id that is not live", () => {
   assert.equal(r.status, 20);
   assert.match(r.stderr, /no live rule is tagged/);
   assert.equal(run(ctx, ["remove"]).status, 2);
+});
+
+test("a re-apply run skips a byte-identical transaction, and a remove survives it", () => {
+  const ctx = setup();
+  applyGolden(ctx);
+  assert.ok(existsSync(ctx.appliedHash), "the applied hash is recorded");
+
+  clearCalls(ctx);
+  const again = run(ctx, ["apply", "--boot"]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /byte-identical to the last apply/);
+  assert.equal(calls(ctx).filter((line) => line.includes("-restore")).length, 0, "no restore at all");
+  assert.deepEqual(dockerCalls(ctx), [], "and no docker call");
+
+  // remove edits the live rules; the conf's transaction is unchanged, so the
+  // timer's run skips and the removal stands.
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+  clearCalls(ctx);
+  const timer = run(ctx, ["apply", "--boot"]);
+  assert.equal(timer.status, 0, timer.stderr);
+  assert.match(timer.stdout, /byte-identical/);
+  assert.equal(calls(ctx).filter((line) => line.includes("-restore")).length, 0);
+  assert.equal(
+    liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
+    false,
+    "the removal holds through the timer's run",
+  );
+
+  // A real conf change makes the next run restore the full set again.
+  writeFileSync(ctx.conf, BASE_CONF + "# the operator edited the conf\n");
+  assert.equal(run(ctx, ["check"]).status, 0);
+  const afterEdit = run(ctx, ["apply", "--boot"]);
+  assert.equal(afterEdit.status, 0, afterEdit.stderr);
+  assert.ok(
+    liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
+    "the conf edit brought the rule back",
+  );
+
+  // An interactive apply is the documented way to restore without a conf edit.
+  assert.equal(run(ctx, ["remove", "tailnet-8003"]).status, 0);
+  assert.equal(liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")), false);
+  assert.equal(run(ctx, ["apply"]).status, 0);
+  assert.ok(
+    liveRules(ctx).some((line) => line.includes("crow-engine-fence:tailnet-8003:")),
+    "an interactive apply restores it",
+  );
 });
 
 // ─── swap-check ─────────────────────────────────────────────────────────────
@@ -1044,9 +1338,32 @@ test("unit lint: the re-apply unit declares no RuntimeDirectory and restarts not
   const timer = directives(readFileSync(TIMER, "utf8"));
   assert.equal(first(timer, "Unit"), "crow-engine-fence-reapply.service");
   assert.equal(first(timer, "WantedBy"), "timers.target");
-  assert.ok(first(timer, "OnBootSec"), "a fast trigger after boot");
-  assert.ok(first(timer, "OnUnitInactiveSec"), "a repeating trigger");
   for (const line of activeLines(readFileSync(TIMER, "utf8"))) assert.doesNotMatch(line, /systemctl/, line);
+});
+
+test("the re-apply timer is minute-by-minute for the first 15 minutes, then every 15", () => {
+  const timer = directives(readFileSync(TIMER, "utf8"));
+  const boot = timer.OnBootSec ?? [];
+  assert.equal(boot.length, 15, "one trigger per minute of the boot window");
+  boot.forEach((value, i) => assert.equal(value, `${i + 1}min`, `trigger ${i + 1} is at ${i + 1}min`));
+  assert.equal(timer.OnUnitInactiveSec, undefined, "no indefinite minute-by-minute re-arm");
+  assert.deepEqual(timer.OnCalendar, ["*:0/15"], "then every 15 minutes on the calendar");
+  assert.equal(first(timer, "AccuracySec"), "15s");
+});
+
+test("the doc states the cadence, the skip, the read-only status and the fail-closed flag edit", () => {
+  const text = readFileSync(DOC, "utf8");
+  for (const needle of [
+    "once a minute",
+    "every 15 minutes",
+    "byte-identical",
+    "applied.sha256",
+    "read-only",
+    "systemctl disable --now crow-engine-fence-reapply.timer",
+    "makes the next boot fail closed",
+  ]) {
+    assert.ok(text.includes(needle), `the doc says ${needle}`);
+  }
 });
 
 // ─── Hygiene and the doc ────────────────────────────────────────────────────
@@ -1077,6 +1394,12 @@ test("the boot path contains no docker command word", () => {
   for (const line of activeLines(region)) {
     assert.doesNotMatch(line, /(^|[^A-Za-z0-9_.-])docker[ \t]/, line);
     assert.doesNotMatch(line, /docker_call/, line);
+  }
+  // The functions that read the Docker facts have to live in that region: they
+  // read files, and a `docker` call that drifted into any of them would
+  // deadlock boot through docker.socket activation.
+  for (const name of ["boot_backend", "docker_flags_text", "docker_flags_sha", "boot_facts_or_die", "apply_rules_now"]) {
+    assert.ok(region.includes(`${name}(`), `${name} is on the boot path`);
   }
 });
 
@@ -1111,5 +1434,6 @@ test("no temp file is left behind in the state directory", () => {
   const ctx = setup();
   applyGolden(ctx);
   assert.deepEqual(readdirSync(ctx.stateDir).filter((name) => name.startsWith(".state.")), []);
+  assert.deepEqual(readdirSync(ctx.stateDir).filter((name) => name.startsWith(".applied.")), []);
   assert.deepEqual(readdirSync(join(ctx.root, "etc")).filter((name) => name.startsWith(".engine-fence-facts.")), []);
 });

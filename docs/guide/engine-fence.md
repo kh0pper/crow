@@ -31,7 +31,11 @@ When tailscale reports no address for a family — logged out, or the boot race 
    ! -i tailscale0 -m comment --comment "crow-engine-fence:<id>:g<generation>:portonly" -j DROP
 ```
 
-The address is resolved on every apply (`tailscale ip -4` / `-6`) and is never stored in the conf or the script. `publish lan` never falls back: its address is in the conf.
+The address is resolved on every apply (`tailscale ip -4` / `-6`, each call bounded by `timeout 3` — a wedged daemon means the address is unresolvable, not that the unit hangs) and is never stored in the conf or the script. `publish lan` never falls back: its address is in the conf.
+
+IPv6 rules exist only when the kernel runs a v6 stack (`/proc/net/if_inet6` exists). That is decided by the stack and not by whether `ip6tables` is installed: a host with the binary and no v6 module gets no v6 rules and no warning about them. When a family does end up with no rules at all — a publish that moved family, the last LAN publish removed — the chain is restored empty, so a stale DROP never lingers; a family whose chain never existed is left alone, so a v4-only host gains no empty v6 chain.
+
+Every call that touches a table passes `-w 10`: the xtables lock, so a call waits for another holder (tailscaled takes it at boot) instead of failing outright, as iptables-legacy does.
 
 ## The conf
 
@@ -45,11 +49,11 @@ publish port-only 8030
 publish lan 192.0.2.10 8011 consumer 192.0.2.20
 ```
 
-- `interface` — the one inbound interface allowed to reach a published port. Exactly one, required.
+- `interface` — the one inbound interface allowed to reach a published port. Exactly one, required. `lo`, `docker0`, Docker's gateway bridge and the well-known hypervisor/CNI defaults are refused (a fence pinned to a shared interface fences nothing), and so is any name beginning with `-` (it would be read as an option).
 - `bridge` — a bridge Crow itself created for one engine, by its `com.docker.network.bridge.name` (at most 15 characters). `docker0`, Docker's gateway bridge and the well-known hypervisor/CNI defaults are refused: a `RETURN` for a shared interface fences nothing.
 - `publish tailnet <port>` — a publish on this host's tailnet address. A `consumer` clause on this line refuses the conf.
 - `publish port-only <port>` — no destination match. Protects a wildcard or unknown-address publish during a migration. No consumer clause.
-- `publish lan <addr> <port> consumer <addr> …` — a LAN-address publish, the only place source exemptions are allowed. One address per consumer, and every process on the consumer host counts as the consumer. A range needs the operator's explicit `confirm-range` token at the end of the line, because it widens who may reach the port.
+- `publish lan <addr> <port> consumer <addr> …` — a LAN-address publish, the only place source exemptions are allowed. One address per consumer, and every process on the consumer host counts as the consumer. A range needs the operator's explicit `confirm-range` token at the end of the line, because it widens who may reach the port; its prefix must be a number in range (1–32 for v4, 1–128 for v6) and `/0` is refused, since an exemption that matches everything makes the DROP beside it unreachable. Every consumer must be an address of the publish's own family. A tailnet address as the publish destination is refused: that is `publish tailnet`, which carries no source exemptions.
 
 An unknown directive, a port outside 1-65535, a port published twice, a malformed address or a refused combination fails the whole conf, and a failed conf changes no rule. There is no directive for `docker0` and none for a wildcard address.
 
@@ -77,16 +81,19 @@ Then, with docker up:
 ```bash
 crow-engine-fence check      # validates the conf, reads the backend and the bridges, saves the facts
 crow-engine-fence apply      # check + the rules
-crow-engine-fence status     # the live rules, the addresses used, the generation
+crow-engine-fence status     # the live rules, the addresses used, the generation (read-only)
 systemctl enable crow-engine-fence.service crow-engine-fence-reapply.timer
 ```
 
 `check` is the only mode that talks to docker (`iptables --version`, `docker info` for the firewall backend, `docker network inspect` for each `bridge`). `apply --boot` is what the units run and makes **no** docker call at all: it reads the firewall backend from `/etc/docker/daemon.json` (an absent file or key means Docker's default backend; an explicit `nftables` backend or an unreadable file is refused), the iptables flavour from `iptables --version`, and the bridge facts from `/etc/crow/engine-fence.facts.json`.
 
-That facts file is written by `check` and by an interactive `apply`. `apply --boot` refuses when it is missing, when the conf changed since it was written, or when `/etc/docker/daemon.json` or a `docker.service` drop-in changed: re-run `check` after any of those edits. `status` warns about the same mismatches.
+That facts file is written by `check` and by an interactive `apply`. `apply --boot` refuses when it is missing, when the conf changed since it was written, or when `/etc/docker/daemon.json` or a `docker.service` drop-in changed: re-run `check` after any of those edits. `status` warns about the same mismatches. **Any edit to `daemon.json`, to a file in `/etc/systemd/system/docker.service.d/`, or to the unit's `ExecStart` makes the next boot fail closed — docker will not start — until `crow-engine-fence check` is re-run.** The facts file stores the hash of exactly that text, and the boot path compares it before it touches a rule.
+
+`status` is read-only: it prints the live rules, the addresses and the generation, and it never writes the state file. The state file is written by `apply` and by `remove`, so what it holds is what was last applied, not what a look at the host would like it to say.
 
 - `/etc/crow/engine-fence.facts.json` — root, 0640: the backend, the per-bridge facts, the conf hash, the Docker-flags hash, `saved_at`.
 - `/run/crow-engine-fence/state.json` — root, 0640, group `<group>`, inside the unit's `0750` RuntimeDirectory: the generation, `applied_at`, the backend, the resolved tailnet addresses, and one entry per rule (`id`, family, address, `addressed`/`port-only`, port, interface, exemptions). Nothing else — no process names, no environment.
+- `/run/crow-engine-fence/applied.sha256` — root, 0640, group `<group>`: the hash of the transaction text that was last really restored. A re-apply run that would restore the same bytes restores nothing (see the timer below). It lives on `/run`, so a reboot starts without it and the boot apply always writes its rules.
 
 ### RequiredBy or WantedBy
 
@@ -103,7 +110,14 @@ Install exactly one of the two under `/etc/systemd/system/crow-engine-fence.serv
 
 ### The re-apply timer
 
-`crow-engine-fence-reapply.timer` re-runs `crow-engine-fence apply --boot` (idempotent, no docker) until an addressed rule exists for every `publish tailnet` entry, and after that its run does nothing at all: identical rules and an untouched state file. It declares **no** `RuntimeDirectory=` — `/run/crow-engine-fence` belongs to the fence unit — and it never restarts or stops the fence unit or docker.
+`crow-engine-fence-reapply.timer` re-runs `crow-engine-fence apply --boot` (idempotent, no docker) and has two phases:
+
+- the first 15 minutes after boot, **once a minute** — one `OnBootSec=` trigger per minute, because that is the window in which tailscaled may still have no address and the boot apply installed the stricter port-only rule;
+- from then on, **every 15 minutes** on the calendar (`OnCalendar=*:0/15`).
+
+Either phase does nothing at all when the transaction it would restore is byte-identical to the last applied one: no `iptables-restore`, no `ip6tables-restore`, no state rewrite. The applied hash is `/run/crow-engine-fence/applied.sha256`. That is what makes the minute-by-minute window cheap, and it is also why `remove <id>` survives the timer: the conf's transaction is unchanged, so the run skips. A conf edit changes the transaction (a new generation) and the next run restores the full set — the removed rule included, if the conf still lists it — and so does an interactive `crow-engine-fence apply`, which never skips.
+
+The unit declares **no** `RuntimeDirectory=` — `/run/crow-engine-fence` belongs to the fence unit — and it never restarts or stops the fence unit or docker.
 
 ### Sandbox and the strict variant
 
@@ -130,11 +144,12 @@ then `systemd-tmpfiles --create` and `systemctl daemon-reload`. The `ReadWritePa
 **Break-glass, when a bad conf or an unreadable backend keeps docker down:**
 
 ```bash
+systemctl disable --now crow-engine-fence-reapply.timer
 systemctl disable crow-engine-fence
 systemctl start docker
 ```
 
-`disable` removes the `docker.service.requires` link, so docker starts without the fence. Fix the conf, run `crow-engine-fence check` and `crow-engine-fence apply`, then `systemctl enable crow-engine-fence` again. The break-glass is never `mask`: masking `crow-engine-fence` keeps docker down (docker requires the unit), which is the outage the break-glass exists to end. A late, dead or logged-out `tailscaled` does **not** block docker — that is what the port-only rule and the timer are for. Only a conf that fails validation, an unknown backend or a missing/stale facts file blocks it.
+Both lines matter: `disable` removes the `docker.service.requires` link, so docker starts without the fence, and disabling the re-apply timer stops a later run from restoring the fence's rules behind you while you are working around a broken conf. Fix the conf, run `crow-engine-fence check` and `crow-engine-fence apply`, then `systemctl enable crow-engine-fence` and `systemctl enable --now crow-engine-fence-reapply.timer` again. The break-glass is never `mask`: masking `crow-engine-fence` keeps docker down (docker requires the unit), which is the outage the break-glass exists to end. A late, dead or logged-out `tailscaled` does **not** block docker — that is what the port-only rule and the timer are for. Only a conf that fails validation, an unknown backend or a missing/stale facts file blocks it.
 
 ## Acceptance probes (once per install, in a window)
 
@@ -157,7 +172,7 @@ crow-engine-fence remove <id>        # one publish's rules, live only; the conf 
 crow-engine-fence status             # warns about a conf entry with no live rule
 ```
 
-`remove <id>` edits the live rules only, never the conf: the conf is the operator's file, and the next apply puts the rule back. To retire a publish for good, edit the conf too; to stop using the fence entirely:
+`remove <id>` edits the live rules only, never the conf: the conf is the operator's file. It also leaves the applied hash alone, so the re-apply timer's run keeps skipping and the removal stands; an interactive `crow-engine-fence apply` or any edit to the conf restores the rule. To retire a publish for good, edit the conf too; to stop using the fence entirely:
 
 ```bash
 systemctl disable --now crow-engine-fence-reapply.timer
