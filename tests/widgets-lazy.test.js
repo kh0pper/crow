@@ -52,6 +52,20 @@ const REPO = new URL("..", import.meta.url).pathname;
 const NATIVE_FETCH = globalThis.fetch;
 afterEach(() => { if (globalThis.fetch !== NATIVE_FETCH) globalThis.fetch = NATIVE_FETCH; });
 
+/**
+ * A rig's window over linkedom's. linkedom's window is a Proxy of the real global whose set trap
+ * writes to globalThis, and Object.create alone still reaches that trap; every property a rig or a
+ * client writes is therefore made an OWN property first, so it stays on this window.
+ */
+const OWN_KEYS = ["fetch", "localStorage", "__crowWidgetsGridCacheBound", "__crowWidgetsGridTidies", "__crowForYouCacheBound", "crowBindWidgetMarkup"];
+function rigWindow(parsedWindow, values = {}) {
+  const w = Object.create(parsedWindow);
+  for (const name of OWN_KEYS) {
+    Object.defineProperty(w, name, { value: values[name], writable: true, configurable: true, enumerable: true });
+  }
+  return w;
+}
+
 // ─── the probe add-on ────────────────────────────────────────────────────────
 // One installed bundle, two widgets: one that says how often it was loaded, one that throws. Its
 // widgets are on neither page's default layout, so both are lazy cells on both pages.
@@ -546,9 +560,8 @@ function rig({ layout, respond }) {
   const cells = [{ widget: live, data: {} }, { widget: lazyWidget, lazy: true }];
   const parsed = parseHTML(`<!doctype html><html><body>${gridHtml("for-you", cells, "en")}</body></html>`);
   const document = parsed.document;
-  // linkedom's window falls through to the real global: a fetch stub set on it directly would
-  // replace this process's own fetch (and every later test's, the live Chrome one included).
-  const window = Object.create(parsed.window);
+  // Own properties only: see rigWindow (a stub on linkedom's window itself lands on globalThis).
+  const window = rigWindow(parsed.window);
   const store = new Map();
   if (layout !== undefined) store.set(KEY, JSON.stringify(layout));
   const calls = [];
@@ -672,11 +685,9 @@ function pageRig({ respond }) {
   // linkedom hands every parse the same window object, and the clients keep their own flags on it (a
   // cache listener bound once, the binding hook). Each case here needs its own page, so each gets a
   // window of its own over the shared one, with none of those flags inherited.
-  const window = Object.create(parsed.window);
-  window.__crowWidgetsGridCacheBound = false;
-  window.__crowWidgetsGridTidies = [];
-  window.__crowForYouCacheBound = false;
-  window.crowBindWidgetMarkup = undefined;
+  const window = rigWindow(parsed.window, {
+    __crowWidgetsGridCacheBound: false, __crowWidgetsGridTidies: [], __crowForYouCacheBound: false, crowBindWidgetMarkup: undefined,
+  });
   Object.defineProperty(document, "cookie", { value: "crow_csrf=tok", configurable: true });
   const store = new Map();
   store.set(KEY, JSON.stringify({ v: 1, cells: [{ id: "lazy", w: 2, h: 1 }] }));
@@ -789,6 +800,16 @@ test("a cell showing the fill's error line is put back to the loading line at th
   r.document.dispatchEvent(new r.window.Event("turbo:before-cache"));
   assert.equal(cell.getAttribute("data-wg-lazy"), "1");
   assert.equal(cell.querySelector(".wg-cell-body").textContent, t("widgets.grid.loading", "en"), "a restored page shows the loading line, not a stale error");
+});
+
+test("the vm rigs leave the process's own global alone", async () => {
+  const before = { fetch: globalThis.fetch, ls: globalThis.localStorage, fy: globalThis.__crowForYouCacheBound, hook: globalThis.crowBindWidgetMarkup };
+  pageRig({ respond: () => ({ ok: true, json: async () => ({ id: "lazy", html: "" }) }) });
+  await settle();
+  assert.equal(globalThis.fetch, before.fetch, "fetch is still the process's own");
+  assert.equal(globalThis.localStorage, before.ls);
+  assert.equal(globalThis.__crowForYouCacheBound, before.fy);
+  assert.equal(globalThis.crowBindWidgetMarkup, before.hook);
 });
 
 // ─── the page, in a real browser ────────────────────────────────────────────
