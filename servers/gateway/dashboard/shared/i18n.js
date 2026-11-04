@@ -4924,7 +4924,7 @@ export const translations = {
   // Z2 of the final-review fix wave: the owner sees when an invite or a frame never
   // got through (owner.js `listLiveMembers`'s `problem`). `{reason}` is a closed
   // refusal code from outbox.js's TERMINAL_REFUSALS.
-  "projects.c2c.problem.unreachable": { en: "Couldn't reach their Crow. Ask them to update Crow, or try again later.", es: "No se pudo contactar con su Crow. Pídeles que actualicen Crow o inténtalo de nuevo más tarde." },
+  "projects.c2c.problem.unreachable": { en: "Couldn't reach their Crow yet. Crow keeps trying; if this stays, ask them to update Crow.", es: "Todavía no se pudo contactar con su Crow. Crow sigue intentándolo; si esto continúa, pídeles que actualicen Crow." },
   "projects.c2c.problem.refused": { en: "Their Crow refused this ({reason}).", es: "Su Crow rechazó esto ({reason})." },
   "projects.c2c.updateRole": { en: "Update role", es: "Actualizar rol" },
   "projects.c2c.unshare": { en: "Stop sharing", es: "Dejar de compartir" },

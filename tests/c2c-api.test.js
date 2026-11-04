@@ -557,11 +557,11 @@ test("Z2: the owner is shown a refusal's reason and an unreachable invitation, e
     .querySelector(`[data-c2c-member="${BOUND}"] [data-c2c-problem]`);
   assert.equal(unreachableEn.getAttribute("data-c2c-problem"), "unreachable");
   assert.equal(unreachableEn.textContent,
-    "Couldn't reach their Crow. Ask them to update Crow, or try again later.");
+    "Couldn't reach their Crow yet. Crow keeps trying; if this stays, ask them to update Crow.");
   const unreachableEs = parseHTML(`<html><body>${await renderPanel({ view: String(p.id) }, "es")}</body></html>`).document
     .querySelector(`[data-c2c-member="${BOUND}"] [data-c2c-problem]`);
   assert.equal(unreachableEs.textContent,
-    "No se pudo contactar con su Crow. Pídeles que actualicen Crow o inténtalo de nuevo más tarde.");
+    "Todavía no se pudo contactar con su Crow. Crow sigue intentándolo; si esto continúa, pídeles que actualicen Crow.");
 
   // The reason is a closed refusal code in practice, but the line is escaped like
   // everything else on the page: a hostile value in the row is never markup.
