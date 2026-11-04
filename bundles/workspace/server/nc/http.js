@@ -9,21 +9,36 @@ const RESENDABLE = new Set(["GET", "HEAD", "OPTIONS", "PROPFIND", "REPORT", "SEA
 const STALE_SOCKET = new Set(["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"]);
 const staleSocket = (e) => e?.name !== "TimeoutError" && STALE_SOCKET.has(e?.cause?.code);
 
-export async function ncFetch(cfg, method, url, { headers = {}, body, timeoutMs = 30000 } = {}) {
+/** The one unreachable error, with the reason it says. A cancel is the caller's own doing, not an outage. */
+const unreachable = (why) => new NcError("workspace_unreachable", why === "cancelled"
+  ? "Crow Workspace request was cancelled."
+  : `Crow Workspace did not answer (${why}). Is it running?`);
+const whyOf = (e, signal) => (e?.name === "TimeoutError" ? "timed out" : signal?.aborted ? "cancelled" : "connection failed");
+
+/**
+ * `signal` is the caller's own cancel (the Today card's calendar budget): it rides ALONGSIDE the request's
+ * timeout, so whichever goes first stops the request. Without one the request gets exactly the timeout it
+ * always had.
+ */
+export async function ncFetch(cfg, method, url, { headers = {}, body, timeoutMs = 30000, signal } = {}) {
+  if (signal?.aborted) throw unreachable("cancelled"); // nothing to wait for: never put it on the wire
   const send = () => fetch(url, {
-    method, body, redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
+    method, body, redirect: "manual",
+    signal: signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs),
     headers: { Authorization: `Basic ${Buffer.from(`${cfg.user}:${cfg.appPassword}`).toString("base64")}`, "OCS-APIRequest": "true", ...headers },
   });
   try {
     try { return await send(); }
     catch (e) {
+      // The caller cancelled: its request is over, so it is never sent a second time.
+      if (signal?.aborted) throw e;
       // one resend, on a fresh connection, for a method that may be sent twice (a conditional PUT that did land
       // the first time answers 412 → changed_concurrently, never a silent double write)
       if (!staleSocket(e) || !RESENDABLE.has(method)) throw e;
       return await send();
     }
   } catch (e) {
-    throw new NcError("workspace_unreachable", `Crow Workspace did not answer (${e?.name === "TimeoutError" ? "timed out" : "connection failed"}). Is it running?`);
+    throw unreachable(whyOf(e, signal));
   }
 }
 

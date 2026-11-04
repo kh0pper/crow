@@ -13,8 +13,8 @@ import { HOME_PROPFIND, ADDRESS_SET_PROPFIND, calendarQuery, uidQueryCal, uidQue
 
 // ---------- collections ----------
 /** `component` picks which calendars count: VEVENT (default, the calendars) or VTODO (task lists). No declared component set counts for both, as CalDAV says. */
-export async function listCollections(cfg, kind, { component = "VEVENT" } = {}) {
-  const r = await ncFetch(cfg, "PROPFIND", pimHomeUrl(cfg, kind), { headers: { Depth: "1", "Content-Type": "application/xml" }, body: HOME_PROPFIND });
+export async function listCollections(cfg, kind, { component = "VEVENT", signal } = {}) {
+  const r = await ncFetch(cfg, "PROPFIND", pimHomeUrl(cfg, kind), { headers: { Depth: "1", "Content-Type": "application/xml" }, body: HOME_PROPFIND, signal });
   if (r.status !== 207) throw httpFail(r, kind === "card" ? "list address books" : "list calendars");
   const out = [];
   for (const x of parseMultistatus(await r.text())) {
@@ -32,10 +32,10 @@ export async function listCollections(cfg, kind, { component = "VEVENT" } = {}) 
     const ownerUid = (propText(x.props, NS.oc, "owner-principal") || "").replace(/\/$/, "").split("/").pop();
     out.push({ kind, id, href: pimHref(cfg, kind, [id]), name: propText(x.props, NS.d, "displayname") || id, writable, owner_uid: ownerUid || null, color: propText(x.props, "http://apple.com/ns/ical/", "calendar-color") || null });
   }
-  for (const c of out) c.owner = c.owner_uid ? (await displayName(cfg, c.owner_uid).catch(() => null)) ?? c.owner_uid : null;
+  for (const c of out) c.owner = c.owner_uid ? (await displayName(cfg, c.owner_uid, { signal }).catch((e) => { if (signal?.aborted) throw e; return null; })) ?? c.owner_uid : null;
   return out;
 }
-export const listCalendars = (cfg) => listCollections(cfg, "cal");
+export const listCalendars = (cfg, { signal } = {}) => listCollections(cfg, "cal", { signal });
 export const listTaskLists = (cfg) => listCollections(cfg, "cal", { component: "VTODO" });
 /**
  * A collection by name or id, in this order: exact display name (case-insensitive), collection id, then — for a
@@ -64,8 +64,8 @@ export async function resolveCollection(cfg, kind, nameOrId, opts) {
 export const resolveCalendar = (cfg, n) => resolveCollection(cfg, "cal", n);
 
 // ---------- objects ----------
-async function report(cfg, coll, body) {
-  const r = await ncFetch(cfg, "REPORT", pimCollectionUrl(cfg, coll.kind, coll.href), { headers: { Depth: "1", "Content-Type": "application/xml; charset=utf-8" }, body });
+async function report(cfg, coll, body, { signal } = {}) {
+  const r = await ncFetch(cfg, "REPORT", pimCollectionUrl(cfg, coll.kind, coll.href), { headers: { Depth: "1", "Content-Type": "application/xml; charset=utf-8" }, body, signal });
   if (r.status !== 207) throw httpFail(r, "search the collection");
   const out = [];
   for (const x of parseMultistatus(await r.text())) {
@@ -76,7 +76,7 @@ async function report(cfg, coll, body) {
   }
   return out;
 }
-export const queryEvents = (cfg, cal, start, end) => report(cfg, cal, calendarQuery(start, end));
+export const queryEvents = (cfg, cal, start, end, { signal } = {}) => report(cfg, cal, calendarQuery(start, end), { signal });
 export async function findByUid(cfg, coll, uid, kind = coll.kind) {
   const hits = await report(cfg, coll, kind === "card" ? uidQueryCard(uid) : uidQueryCal(uid));
   const re = new RegExp(`^UID(;[^:]*)?:${uid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\r?$`, "m");

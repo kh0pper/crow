@@ -45,7 +45,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 let calendarSeam = null;
 let rambleSeam = null;
 
-/** Test seam: `{ calendar: async ({ now, tz }) => event|null, ramble: async ({ db, now }) => state|null }`. */
+/** Test seam: `{ calendar: async ({ now, tz, signal }) => event|null, ramble: async ({ db, now }) => state|null }` — a
+ *  calendar seam that is still working when the budget fires sees its `signal` aborted. */
 export function _setTodaySeamsForTest({ calendar, ramble } = {}) {
   calendarSeam = calendar || null;
   rambleSeam = ramble || null;
@@ -64,14 +65,17 @@ async function bundleModule(crowHome, bundle, rel) {
   return import(pathToFileURL(file).href);
 }
 
-/** The value, or null once `ms` has passed (a read that hangs costs its line, never the page). */
+/** The value, or null once `ms` has passed (a read that hangs costs its line, never the page). The read is
+ *  handed an AbortController's signal and CANCELLED when the budget fires: what it started (Workspace's CalDAV
+ *  requests, which have their own 30 s timeout) stops there instead of running on behind an abandoned card. */
 function within(work, ms) {
+  const controller = new AbortController();
   let timer = null;
   const budget = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(null), ms);
+    timer = setTimeout(() => { controller.abort(); resolve(null); }, ms);
     try { timer?.unref?.(); } catch { /* a test's timer need not support unref */ }
   });
-  return Promise.race([Promise.resolve().then(work), budget]).finally(() => { if (timer) clearTimeout(timer); });
+  return Promise.race([Promise.resolve().then(() => work(controller.signal)), budget]).finally(() => { if (timer) clearTimeout(timer); });
 }
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -80,19 +84,19 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
  * The next event in the first calendar Crow bot can see, as
  * `{ summary, start, all_day }`, or null. Throws on anything unexpected (the caller omits the line).
  */
-async function readNextEvent(crowHome, { now }) {
+async function readNextEvent(crowHome, { now, signal }) {
   const [caldav, config] = await Promise.all([
     bundleModule(crowHome, "workspace", "pim/caldav.js"),
     bundleModule(crowHome, "workspace", "config.js"),
   ]);
   if (!caldav || !config || typeof caldav.queryEvents !== "function" || typeof caldav.expandEvents !== "function") return null;
   const cfg = config.getConfig(); // throws not_ready until Workspace's setup has finished
-  const calendars = await caldav.listCalendars(cfg);
+  const calendars = await caldav.listCalendars(cfg, { signal });
   if (!Array.isArray(calendars) || !calendars.length) return null;
   const calendar = calendars[0];
   const from = new Date(now - 60 * 1000);
   const to = new Date(now + DAY_MS);
-  const objects = await caldav.queryEvents(cfg, calendar, from, to);
+  const objects = await caldav.queryEvents(cfg, calendar, from, to, { signal });
   const events = [];
   for (const object of Array.isArray(objects) ? objects : []) {
     try {
@@ -120,7 +124,9 @@ async function readNextEvent(crowHome, { now }) {
 async function calendarToday(crowHome, { now, tz, lang }) {
   try {
     if (!calendarSeam && !workspaceInstalled(crowHome)) return null;
-    const read = calendarSeam ? () => calendarSeam({ now, tz }) : () => readNextEvent(crowHome, { now });
+    const read = calendarSeam
+      ? (signal) => calendarSeam({ now, tz, signal })
+      : (signal) => readNextEvent(crowHome, { now, signal });
     return shapeEvent(await within(read, CALENDAR_TIMEOUT_MS), { now, tz, lang });
   } catch (err) {
     console.warn(`[today] calendar line omitted: ${err && err.message}`);
