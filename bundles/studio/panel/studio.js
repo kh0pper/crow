@@ -241,6 +241,18 @@ const STYLES = `
     flex: 1 1 100%; font-size: 12px; line-height: 1.45; color: var(--st-human);
   }
   .studio .st-recordings { display: flex; flex-direction: column; gap: 6px; }
+  /* A performance the timeline refused: the server's sentence and the two
+     buttons that settle it, above the lanes and never hidden by a render. */
+  .studio .st-perf-notice {
+    flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    border: 1px solid var(--st-edge); border-radius: 8px; background: var(--st-head);
+    padding: 8px 10px;
+  }
+  .studio .st-perf-notice[hidden] { display: none; }
+  .studio .st-perf-notice .st-perf-text {
+    margin: 0; flex: 1 1 260px; font-size: 12px; line-height: 1.45; color: var(--st-human);
+  }
+  .studio .st-perf-notice .st-th-btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .studio .st-pending {
     border: 1px solid var(--st-line); border-radius: 8px; background: var(--st-head); padding: 8px 10px;
   }
@@ -415,6 +427,110 @@ const STYLES = `
   }
   .studio .st-take-acts { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
   .studio .st-takes-foot { display: flex; flex-wrap: wrap; gap: 8px; }
+  .studio .st-modes { display: flex; border: 1px solid var(--st-edge); border-radius: 8px; overflow: hidden; }
+  .studio .st-mode {
+    min-height: 44px; padding: 0 14px; border: none; background: #24282D; color: var(--st-text);
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .studio .st-mode + .st-mode { border-left: 1px solid var(--st-edge); }
+  .studio .st-mode[aria-pressed=true] { background: #2E3A2F; }
+  .studio .st-tl-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .studio .st-tl-rec { display: flex; align-items: center; gap: 8px; }
+  .studio .st-tl-rec[aria-pressed=true] { background: #3A1F1C; border-color: var(--st-danger); }
+  .studio .st-tl-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--st-danger); flex: 0 0 auto; }
+  .studio .st-legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
+  .studio .st-tl-notice {
+    flex: 1 1 100%; margin: 0; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid #5A2A26; background: #2A1A18; font-size: 13px; line-height: 1.45; color: #F2C9C3;
+  }
+  .studio .st-timeline {
+    overflow-x: auto; border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+  }
+  .studio .st-tl { min-width: 1180px; position: relative; }
+  .studio .st-tl-row { display: grid; grid-template-columns: 180px minmax(0, 1fr); border-bottom: 1px solid var(--st-line-soft); }
+  .studio .st-tl-side {
+    padding: 8px 10px; background: var(--st-head); border-right: 1px solid var(--st-line);
+    font-size: 11px; line-height: 1.5; color: var(--st-muted);
+  }
+  .studio .st-tl-ruler .st-tl-side { border-bottom: 1px solid var(--st-line); }
+  .studio .st-tl-ruler-body { position: relative; height: 64px; background: var(--st-head); border-bottom: 1px solid var(--st-line); }
+  .studio .st-tl-sections { position: absolute; top: 6px; left: 0; right: 0; height: 22px; cursor: crosshair; touch-action: none; }
+  .studio .st-tl-section {
+    position: absolute; top: 0; height: 22px; box-sizing: border-box; padding: 0 8px;
+    border-radius: 5px; border: 1px solid var(--st-edge); background: #2C3136; color: var(--st-text);
+    font-size: 12px; font-weight: 600; display: flex; align-items: center;
+    white-space: nowrap; overflow: hidden;
+  }
+  .studio .st-tl-section-new { opacity: 0.6; pointer-events: none; }
+  /* A marker's and a section's name is a button (so the keyboard can reach it),
+     and the small one beside it removes it after a yes. */
+  .studio .st-tl-tag-btn {
+    min-height: 22px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent;
+    color: inherit; font: inherit; font-weight: inherit; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;
+  }
+  .studio .st-tl-tag-btn:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }
+  .studio .st-tl-tag-x {
+    min-height: 22px; min-width: 22px; padding: 0 4px; border: 0; border-radius: 4px;
+    background: transparent; color: var(--st-danger); font: inherit; cursor: pointer;
+  }
+  .studio .st-tl-tag-x:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 1px; }
+  .studio .st-tl-markers { position: absolute; top: 32px; left: 0; right: 0; height: 18px; cursor: copy; }
+  .studio .st-tl-marker {
+    position: absolute; top: 0; display: flex; align-items: center; gap: 4px;
+    font-size: 11px; color: #E8C07A; white-space: nowrap; padding: 0 2px;
+    border-left: 2px solid #E8C07A;
+  }
+  .studio .st-tl-bars {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 18px; display: grid; cursor: pointer;
+  }
+  .studio .st-tl-bar-n {
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; color: #7E7A72;
+    border-left: 1px solid var(--st-line); padding-left: 3px; overflow: hidden; white-space: nowrap;
+  }
+  .studio .st-tl-playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px; background: #FFFFFF; pointer-events: none;
+  }
+  .studio .st-tl-lane-head { display: flex; align-items: center; gap: 8px; }
+  .studio .st-tl-color { width: 8px; align-self: stretch; min-height: 30px; border-radius: 3px; flex: 0 0 auto; }
+  .studio .st-tl-lane-name { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+  .studio .st-tl-lane-title {
+    font-size: 13px; font-weight: 600; color: var(--st-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-tl-lane-kind { font-size: 11px; color: var(--st-muted); }
+  .studio .st-tl-lane-body { position: relative; height: 54px; touch-action: none; }
+  .studio .st-tl-block {
+    position: absolute; top: 7px; height: 40px; box-sizing: border-box; padding: 0 8px;
+    border-radius: 6px; border: 2px solid var(--st-human); background: #24282D; color: #121417;
+    font: inherit; text-align: left; overflow: hidden; cursor: grab; touch-action: none;
+  }
+  .studio .st-tl-block-sel { box-shadow: inset 0 0 0 2px #FFFFFF; }
+  .studio .st-tl-block-name {
+    position: relative; display: block; font-size: 11px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-tl-block-by { position: relative; display: block; font-size: 10px; opacity: 0.8; white-space: nowrap; }
+  .studio .st-tl-wave { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .studio .st-tl-fade { position: absolute; top: 0; bottom: 0; background: #121417; opacity: 0.3; pointer-events: none; }
+  .studio .st-tl-fade-in { left: 0; }
+  .studio .st-tl-fade-out { right: 0; }
+  .studio .st-tl-corner { position: absolute; top: 0; width: 12px; height: 12px; background: #121417; opacity: 0.35; cursor: ew-resize; }
+  .studio .st-tl-corner-in { left: 0; border-bottom-right-radius: 6px; }
+  .studio .st-tl-corner-out { right: 0; border-bottom-left-radius: 6px; }
+  .studio .st-tl-takes { background: #141619; }
+  .studio .st-tl-takes-note { margin: 0; }
+  .studio .st-tl-takes-body { padding: 8px 10px; min-width: 0; }
+  .studio .st-tl-placement {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    padding: 14px 16px; background: var(--st-panel);
+  }
+  .studio .st-tl-placement-title { margin: 0; font-size: 14px; font-weight: 600; }
+  .studio .st-tl-placement-info { font-size: 12px; color: var(--st-muted); }
+  .studio .st-tl-placement-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+  .studio .st-tl-placement-help {
+    flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.5; color: var(--st-muted);
+  }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
@@ -509,6 +625,10 @@ function studioPage({ songId, render, res }) {
       <header class="st-bar">
         <a class="st-back" href="/dashboard/studio">← Songs</a>
         <span class="st-title" data-role="title">Song</span>
+        <div class="st-modes" role="group" aria-label="View">
+          <button class="st-mode" type="button" data-act="mode-session" aria-pressed="true" title="Play the scene grid">Session</button>
+          <button class="st-mode" type="button" data-act="mode-arrangement" aria-pressed="false" title="Play the song on the timeline">Arrangement</button>
+        </div>
         <div class="st-transport">
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
           <button class="st-btn st-transport-btn" type="button" data-act="stop" title="Stop" aria-label="Stop">■</button>
@@ -520,10 +640,21 @@ function studioPage({ songId, render, res }) {
           <span class="st-pos" data-role="position">001.1.1</span>
         </div>
         <span class="st-rec-notice" data-role="rec-notice" hidden></span>
+        <div class="st-tl-tools">
+          <button class="st-btn st-tl-rec" type="button" data-act="rec-timeline" aria-pressed="false" title="Collect the scene launches you play into the timeline">
+            <span class="st-tl-rec-dot" aria-hidden="true"></span>Record to timeline
+          </button>
+          <button class="st-btn" type="button" data-act="split" title="Split the selected placement, or the one under the playhead, at the playhead">Split at playhead</button>
+          <span class="st-legend"><span class="st-dot" aria-hidden="true"></span>You</span>
+          <span class="st-legend"><span class="st-dot st-dot-agent" aria-hidden="true"></span>Crow agent</span>
+        </div>
+        <span class="st-tl-notice" data-role="timeline-notice" hidden></span>
+        <div class="st-perf-notice" data-role="performance-notice" hidden></div>
         <div class="st-presence" data-role="presence"></div>
       </header>
       <div class="st-body">
         <main class="st-main">
+          <section class="st-timeline" data-role="timeline" hidden></section>
           <div class="st-grid-wrap" data-role="grid-wrap">
             <div class="st-grid" data-role="grid"></div>
           </div>

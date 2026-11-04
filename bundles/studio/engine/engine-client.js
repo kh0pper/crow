@@ -87,6 +87,11 @@
  * - `nextBarFrame()` asks for the next bar boundary on the same clock and
  *   resolves `{frame, bar}` (0-based bar; while the transport is stopped, the
  *   frame bar 0 would start at).
+ * - `setMode("session" | "arrangement")` and `seek(bar)` choose what the
+ *   transport plays: the session grid, where launches arm clips, or the song's
+ *   arrangement, where its placements sound on their bars. Switching mode
+ *   closes every sounding note and voice; `seek()` moves the arrangement
+ *   playhead, and the next block plays from that bar.
  * - `flush()` resolves once every message posted before it has been applied.
  * - `loadAudio(take_id, channels, rate)` hands the processor one take's PCM,
  *   resampled here to the context's rate when the take was recorded at another
@@ -583,6 +588,8 @@
    *                    stopAll: function(): void,
    *                    play: function(): void,
    *                    stop: function(): void,
+   *                    setMode: function(string): void,
+   *                    seek: function(number): void,
    *                    flush: function(): Promise<void>,
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
@@ -1206,6 +1213,30 @@
       /** @returns {void} */
       stop() {
         post({ type: "stop" });
+      },
+
+      /**
+       * Choose what the transport plays: the session grid (`"session"`, the
+       * default, where `launchScene`/`launchClip` arm clips) or the song's
+       * arrangement (`"arrangement"`, where its placements sound on their
+       * bars and launches are ignored). Switching closes every sounding note
+       * and voice and resets what each track plays.
+       * @param {"session"|"arrangement"} mode anything else means `"session"`
+       * @returns {void}
+       */
+      setMode(mode) {
+        post({ type: "setMode", mode: mode === "arrangement" ? "arrangement" : "session" });
+      },
+
+      /**
+       * Move the arrangement playhead to a bar. The next block plays from that
+       * bar — the takes the timeline holds there start at that very frame —
+       * and the notes and voices that were sounding are closed first.
+       * @param {number} bar the 0-based bar; anything below 0 is bar 0
+       * @returns {void}
+       */
+      seek(bar) {
+        post({ type: "seek", bar: Number(bar) });
       },
 
       /**

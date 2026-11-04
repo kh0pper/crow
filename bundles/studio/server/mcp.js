@@ -57,6 +57,8 @@ import { listCommands } from "./commands/registry.js";
 import "./commands/core.js";
 // The 1b take commands, registered the same way.
 import "./commands/takes.js";
+// The 1b timeline commands — placements, markers and sections — likewise.
+import "./commands/arrangement.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
@@ -602,12 +604,14 @@ export function createStudioServer({
     {
       title: "Render the song to audio",
       description:
-        "Render the song — or one scene, or one clip — offline through the same engine the operator hears, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB). The operator's render length limit applies; listen before and after a change and report the numbers.",
+        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB). The operator's render length limit applies; listen before and after a change and report the numbers.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to render"),
         scene_id: z.string().min(1).optional().describe("render this scene (every clip it holds)"),
         clip_id: z.string().min(1).optional().describe("render just this clip"),
         seconds: z.number().positive().describe("how many seconds to render"),
+        mode: z.enum(["session", "arrangement"]).optional().describe("session (default: a scene or clip) or arrangement (the timeline)"),
+        from_bar: z.number().int().min(0).max(998).optional().describe("arrangement only: the bar to start from (0 = the first bar)"),
       },
     },
     async (args, extra) => {
@@ -627,6 +631,8 @@ export function createStudioServer({
           scene_id: args.scene_id ?? null,
           clip_id: args.clip_id ?? null,
           seconds: args.seconds,
+          mode: args.mode ?? "session",
+          from_bar: args.from_bar ?? 0,
           author,
         });
         return textResult({

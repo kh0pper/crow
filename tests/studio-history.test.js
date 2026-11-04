@@ -18,6 +18,7 @@ import { encodeDocState } from "../bundles/studio/server/doc.js";
 import { newSongDoc, snapshot } from "../bundles/studio/server/doc.js";
 import { StudioError, runCommand } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
+import "../bundles/studio/server/commands/arrangement.js";
 import {
   OBJECT_GONE,
   REDO_COMMAND,
@@ -849,4 +850,67 @@ test("redo of an already-redone undo is refused", (t) => {
   const { plan } = s.undo(redone.entry);
   assert.deepEqual(plan.conflicts, []);
   assert.equal(snapshot(s.doc).meta.bpm, 120);
+});
+
+/** A one-track, one-scene, two-bar clip song with an eight-bar placement on it. */
+function splitScene(t) {
+  const s = studio(t);
+  s.run("track.add", { id: "bass", name: "Bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "riff",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Riff",
+    length_bars: 2,
+    notes: [note(0, 1, 36, 100)],
+  });
+  s.run("arrangement.place", { id: "p-a", track_id: "bass", clip_id: "riff", start_bar: 0, bars: 8 });
+  return s;
+}
+
+test("undo of a split after moving one half is refused as a whole", (t) => {
+  const s = splitScene(t);
+  const split = s.run("arrangement.split", { id: "p-a", at_bar: 3, new_id: "p-b" });
+  s.run("arrangement.move", { id: "p-b", start_bar: 20 });
+
+  // The two halves are one edit, so the step as a whole can no longer go back:
+  // putting the first half back while the second half has moved would leave a
+  // song that never existed.
+  const before = docBytes(s.doc);
+  const plan = planUndo(s.doc, split.entry);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.conflicts.length, 1);
+  assert.equal(plan.conflicts[0].ref, "placement:p-b");
+  assert.deepEqual(plan.blocked, [
+    "Part of that split was changed since; undo the later edits first, or move the pieces by hand.",
+  ]);
+
+  // A refused undo writes nothing at all.
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.equal(docBytes(s.doc), before);
+  assert.equal(snapshot(s.doc).arrangement.placements["p-a"].bars, 3);
+  assert.equal(snapshot(s.doc).arrangement.placements["p-b"].start_bar, 20);
+});
+
+test("undo of a split with no later edits restores the placement", (t) => {
+  const s = splitScene(t);
+  s.run("arrangement.set_fades", { id: "p-a", fade_in_beats: 1, fade_out_beats: 2 });
+  const split = s.run("arrangement.split", { id: "p-a", at_bar: 3, new_id: "p-b" });
+  assert.deepEqual(Object.keys(snapshot(s.doc).arrangement.placements).sort(), ["p-a", "p-b"]);
+
+  const { plan } = s.undo(split.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual(Object.keys(snapshot(s.doc).arrangement.placements), ["p-a"]);
+  assert.deepEqual(snapshot(s.doc).arrangement.placements["p-a"], {
+    id: "p-a",
+    track_id: "bass",
+    clip_id: "riff",
+    start_bar: 0,
+    bars: 8,
+    offset_beats: 0,
+    fade_in_beats: 1,
+    fade_out_beats: 2,
+  });
 });

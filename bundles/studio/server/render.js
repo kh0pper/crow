@@ -39,12 +39,21 @@
  * An audio clip plays recorded takes (see `server/commands/takes.js`), and
  * those are WAV files in storage, not part of the song document. A render
  * therefore has to load them before it starts: `renderSong()` works out which
- * takes the launch can hear — every take in the comp of the audio clips the
+ * takes the render can hear — every take in the comp of the audio clips the
  * scene (or the clip) plays, discarded ones aside — and asks `options.takeAudio`
  * for each one's decoded PCM. `createRenderer()` builds that function from the
  * storage client, refusing any take whose key is not exactly under the song's
  * own `studio/<song_id>/takes/` prefix: a render may read nothing of a song but
  * that song's own recordings.
+ *
+ * ## The arrangement
+ *
+ * `{ mode: "arrangement", from_bar, seconds }` renders the song's timeline
+ * instead of a scene: the engine is put in arrangement mode, seeked to
+ * `from_bar` and played. The takes it loads are the ones the comps of the audio
+ * clips placed inside the rendered window use — the window in bars is
+ * `seconds` at the song's own tempo, four beats to the bar — so a render of the
+ * third verse does not read the first verse's recordings.
  *
  * ## Renders are serialized, and there is no timeout
  *
@@ -83,6 +92,12 @@ const studioEngine = require(join(ENGINE_DIR, "engine-client.js"));
 /** Every render is 48 kHz stereo: the rate the engine and the meters assume. */
 const SAMPLE_RATE = 48000;
 
+/** Beats in a bar, phase 1b (the sequencer's own constant). */
+const BEATS_PER_BAR = 4;
+
+/** The tempo a song without a usable `meta.bpm` is measured at, in bpm. */
+const DEFAULT_BPM = 120;
+
 /** How long a render's presigned download URL lives, in seconds (one hour). */
 const URL_EXPIRY_SECONDS = 3600;
 
@@ -118,6 +133,9 @@ const MAX_NAME_LENGTH = 60;
  */
 const MAX_TAKE_SAMPLES = 115200000;
 
+/** The longest arrangement a song may have, in bars (bar 999 is its last). */
+const MAX_FROM_BAR = 998;
+
 /** The largest a take's WAV file can be: its 44-byte header plus 3 bytes a sample. */
 const MAX_TAKE_BYTES = 44 + MAX_TAKE_SAMPLES * 3;
 
@@ -136,7 +154,13 @@ let cachedReleaseSymbol;
  * dashboard's first scene button does — and a song with no clips at all renders
  * the requested length of silence rather than throwing.
  *
- * Before the render starts, the takes the launch can hear are loaded into the
+ * `{ mode: "arrangement", from_bar }` renders the song's timeline instead: the
+ * engine plays the song's placements from that bar, and the scene and clip ids
+ * are not used. A mode that is neither `"session"` nor `"arrangement"`, or a
+ * `from_bar` that is not a whole bar between 0 and 998, is refused by name
+ * rather than quietly rendered as something else.
+ *
+ * Before the render starts, the takes the render can hear are loaded into the
  * engine through `options.takeAudio`, so a song with recorded audio renders as
  * it sounds rather than as silence. A take that cannot be read stops the render
  * with its id in the sentence (`Take <id> could not be loaded for this
@@ -144,16 +168,18 @@ let cachedReleaseSymbol;
  *
  * @param {object} snapshot the song as the hub's `snapshot()` returns it
  * @param {{scene_id?: string|null, clip_id?: string|null, seconds?: number,
- *          sampleRate?: number,
+ *          sampleRate?: number, mode?: "session"|"arrangement", from_bar?: number,
  *          takeAudio?: (take: object) => Promise<{rate: number,
  *            channels: Float32Array[]}|null>}} [options]
  *   `takeAudio` reads and decodes one take's WAV; it is only called for takes
- *   the render can hear, and only when the song has any
+ *   the render can hear, and only when the song has any; `mode` and `from_bar`
+ *   render the arrangement (see above)
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number,
  *                    seconds: number}>} the rendered stereo channels
  */
 export async function renderSong(snapshot, options = {}) {
   const { scene_id = null, clip_id = null, seconds = 1, sampleRate = SAMPLE_RATE } = options;
+  const mode = renderMode(options.mode);
   if (scene_id != null && clip_id != null) {
     throw new Error("A render takes a scene_id or a clip_id, not both.");
   }
@@ -161,6 +187,7 @@ export async function renderSong(snapshot, options = {}) {
   if (!Number.isFinite(rate) || rate <= 0) throw new Error("A render needs a positive sample rate.");
   const span = Number(seconds);
   if (!Number.isFinite(span) || span <= 0) throw new Error("A render needs a positive number of seconds.");
+  const fromBar = mode === "arrangement" ? renderFromBar(options.from_bar) : 0;
 
   const length = Math.max(1, Math.round(span * rate));
   const context = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: rate });
@@ -169,10 +196,18 @@ export async function renderSong(snapshot, options = {}) {
   try {
     engine = await studioEngine.create(context, { assetBytes: engineAssets() });
     engine.setSong(snapshot);
-    const launch = pickLaunch(snapshot, scene_id, clip_id);
-    if (launch.scene) engine.launchScene(launch.scene);
-    if (launch.clip) engine.launchClip(launch.clip);
-    await loadTakes(engine, snapshot, launch, options.takeAudio);
+    let takes;
+    if (mode === "arrangement") {
+      engine.setMode("arrangement");
+      engine.seek(fromBar);
+      takes = takesInWindow(snapshot, fromBar, fromBar + barsOf(span, snapshot));
+    } else {
+      const launch = pickLaunch(snapshot, scene_id, clip_id);
+      if (launch.scene) engine.launchScene(launch.scene);
+      if (launch.clip) engine.launchClip(launch.clip);
+      takes = takesToLoad(snapshot, launch);
+    }
+    await loadTakes(engine, takes, options.takeAudio);
     engine.play();
     engine.node.connect(context.destination);
     // Without this the render can begin before the song reaches the processor.
@@ -282,6 +317,10 @@ export function createRenderer({
    * @param {string|null} [request.scene_id] render this scene
    * @param {string|null} [request.clip_id] render this clip
    * @param {number} request.seconds how much to render
+   * @param {"session"|"arrangement"} [request.mode] render the session grid
+   *   (the default) or the song's timeline
+   * @param {number} [request.from_bar] the bar an arrangement render starts at
+   *   (a whole bar from 0 to 998; ignored for a session render)
    * @param {{kind?: string, id?: string, label?: string}|null} [request.author]
    *   who asked; a human author is audited as `local`, anything else as `bot`
    * @returns {Promise<{storage_key: string, url: string, seconds: number,
@@ -297,6 +336,10 @@ export function createRenderer({
     // storage prefix both need it, so a render without one is refused clearly.
     if (project_id == null) throw new Error("A render needs the song's project.");
     const span = checkSeconds(seconds, longest);
+    // Which view, and where in the timeline: refused here, before a slot is
+    // taken, so a bad request never holds the render queue.
+    const mode = renderMode(request.mode);
+    const fromBar = renderFromBar(request.from_bar);
 
     await acl.assertLocalCapability(db, project_id, "write_files");
     await acquire();
@@ -305,7 +348,14 @@ export function createRenderer({
       // read once, before anything is rendered.
       const prefix = await storagePrefixFor(db, project_id);
       const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
-      const audio = await renderAudio(snapshot, { scene_id, clip_id, seconds: span, takeAudio });
+      const audio = await renderAudio(snapshot, {
+        scene_id,
+        clip_id,
+        seconds: span,
+        mode,
+        from_bar: fromBar,
+        takeAudio,
+      });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
       const renderedSeconds = audio.seconds;
       const lufs = integratedLufs(audio.left, audio.right, rate);
@@ -393,7 +443,7 @@ function checkSeconds(seconds, longest) {
 }
 
 /**
- * Hand the engine every take the launched scene (or clip) can hear.
+ * Hand the engine every take the render can hear.
  *
  * The engine plays a comp's segments by take id, so a take that was never
  * loaded is silence; loading them all before `flush()` is what makes an audio
@@ -403,13 +453,13 @@ function checkSeconds(seconds, longest) {
  * on unchanged, because they name what the operator has to fix.
  *
  * @param {object} engine the engine `studioEngine.create()` returned
- * @param {object} snapshot the song
- * @param {{scene?: string, clip?: string}} launch what the render launches
+ * @param {object[]} takes the takes this render hears (see `takesToLoad` and
+ *   `takesInWindow`)
  * @param {Function|undefined} takeAudio the caller's reader
  * @returns {Promise<void>}
  */
-async function loadTakes(engine, snapshot, launch, takeAudio) {
-  for (const take of takesToLoad(snapshot, launch)) {
+async function loadTakes(engine, takes, takeAudio) {
+  for (const take of takes) {
     if (typeof takeAudio !== "function") {
       throw new Error(takeLoadFailure(take.id, "this render has no way to read takes"));
     }
@@ -422,8 +472,8 @@ async function loadTakes(engine, snapshot, launch, takeAudio) {
 }
 
 /**
- * The takes a render can hear: every take named by the comp of an audio clip
- * the launch plays, without the discarded ones, each once.
+ * The takes a session render can hear: every take named by the comp of an audio
+ * clip the launch plays, without the discarded ones, each once.
  *
  * A scene launch plays that scene's clips, a clip launch just that clip, and a
  * render that launches neither (silence) hears no takes at all.
@@ -434,8 +484,6 @@ async function loadTakes(engine, snapshot, launch, takeAudio) {
  */
 function takesToLoad(snapshot, launch) {
   const clips = snapshot && snapshot.clips && typeof snapshot.clips === "object" ? snapshot.clips : {};
-  const takes = snapshot && snapshot.takes && typeof snapshot.takes === "object" ? snapshot.takes : {};
-
   const playing = [];
   if (launch.clip) {
     const clip = clips[launch.clip];
@@ -445,10 +493,46 @@ function takesToLoad(snapshot, launch) {
       if (clip && clip.scene_id === launch.scene) playing.push(clip);
     }
   }
+  return takesOfClips(snapshot, playing);
+}
 
+/**
+ * The takes an arrangement render can hear: every take named by the comp of an
+ * audio clip that has a placement intersecting the rendered window of bars.
+ *
+ * @param {object} snapshot the song
+ * @param {number} fromBar the first bar the render plays
+ * @param {number} toBar the bar it stops at (exclusive)
+ * @returns {object[]} the takes, as the snapshot holds them
+ */
+function takesInWindow(snapshot, fromBar, toBar) {
+  const clips = snapshot && snapshot.clips && typeof snapshot.clips === "object" ? snapshot.clips : {};
+  const placements = placementsOf(snapshot);
+  const playing = [];
+  for (const placement of placements) {
+    const start = Number(placement.start_bar);
+    const bars = Number(placement.bars);
+    if (!Number.isFinite(start) || !Number.isFinite(bars)) continue;
+    // Half-open on both sides: a placement that ends where the window starts is
+    // behind it, and one that starts where it ends is past it.
+    if (!(start < toBar && fromBar < start + bars)) continue;
+    const clip = clips[placement.clip_id];
+    if (clip) playing.push(clip);
+  }
+  return takesOfClips(snapshot, playing);
+}
+
+/**
+ * The takes the comps of some clips name, without the discarded ones, each once.
+ * @param {object} snapshot the song
+ * @param {object[]} clips the clips being played
+ * @returns {object[]}
+ */
+function takesOfClips(snapshot, clips) {
+  const takes = snapshot && snapshot.takes && typeof snapshot.takes === "object" ? snapshot.takes : {};
   const wanted = [];
   const seen = new Set();
-  for (const clip of playing) {
+  for (const clip of clips) {
     if (!clip || clip.kind !== "audio" || !Array.isArray(clip.comp)) continue;
     for (const segment of clip.comp) {
       const id = segment && typeof segment.take_id === "string" ? segment.take_id : "";
@@ -463,6 +547,60 @@ function takesToLoad(snapshot, launch) {
     }
   }
   return wanted;
+}
+
+/**
+ * The song's placements, in the order the snapshot holds them (an empty list
+ * for a song with no arrangement).
+ * @param {object} snapshot
+ * @returns {object[]}
+ */
+function placementsOf(snapshot) {
+  const arrangement = snapshot && snapshot.arrangement;
+  const placements = arrangement && arrangement.placements;
+  return placements && typeof placements === "object" ? Object.values(placements) : [];
+}
+
+/**
+ * How many bars a render of this many seconds covers, at the song's own tempo
+ * and four beats to the bar.
+ * @param {number} seconds
+ * @param {object} snapshot
+ * @returns {number}
+ */
+function barsOf(seconds, snapshot) {
+  const meta = snapshot && snapshot.meta && typeof snapshot.meta === "object" ? snapshot.meta : {};
+  const bpm = Number(meta.bpm);
+  const tempo = Number.isFinite(bpm) && bpm > 0 ? bpm : DEFAULT_BPM;
+  return (Number(seconds) * tempo) / (60 * BEATS_PER_BAR);
+}
+
+/**
+ * A `from_bar` option as a whole bar. A bar the engine cannot have is refused
+ * here, before any audio is rendered: bar 0 is the first one and 999 bars is
+ * the longest arrangement a song may have.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function renderFromBar(value) {
+  if (value === undefined || value === null) return 0;
+  const bar = Number(value);
+  if (!Number.isInteger(bar) || bar < 0 || bar > MAX_FROM_BAR) {
+    throw new Error(`A render can start at a whole bar from 0 to ${MAX_FROM_BAR}.`);
+  }
+  return bar;
+}
+
+/**
+ * The view a render plays: the session grid or the song's timeline. A mode the
+ * engine does not have is refused rather than rendered as the session.
+ * @param {unknown} value
+ * @returns {"session"|"arrangement"}
+ */
+function renderMode(value) {
+  if (value === undefined || value === null) return "session";
+  if (value === "session" || value === "arrangement") return value;
+  throw new Error('A render plays "session" or "arrangement".');
 }
 
 /**

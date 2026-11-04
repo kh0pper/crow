@@ -3,7 +3,7 @@
  *
  * These tests drive the real MCP server over an in-memory transport with a fake
  * hub client, a fake renderer, a stub catalogue and the app's real actor
- * helpers. They pin the four things the plan names for this task:
+ * helpers. They pin the five things the plan names for this task:
  *
  *   1. the tool list is the registry's own list (no more, no less, and nothing
  *      for a people-only command);
@@ -11,19 +11,38 @@
  *      env says the caller is the owner;
  *   3. a hub refusal reaches the agent as a tool error in the hub's own words,
  *      with its code;
- *   4. a render passes its arguments through and reports a limit refusal.
+ *   4. a render passes its arguments through and reports a limit refusal;
+ *   5. the timeline's commands are tools like any other, so an agent lays a
+ *      song out on the bars through the same registry commands the panel uses,
+ *      and an arrangement render starts where the agent asked.
+ *
+ * The timeline tests run against the REAL session hub on a scratch database:
+ * a placement, a split, a marker and a section only mean something once a
+ * command has actually gone through the hub and into the song document.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createClient } from "@libsql/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { listCommands } from "../bundles/studio/server/commands/registry.js";
+import { createHub } from "../bundles/studio/server/hub.js";
+import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { actorFromEnv, resolveCallActor } from "../servers/research/actor.js";
 
 /** The render url the fake renderer answers with (a placeholder host). */
 const RENDER_URL = "https://storage.example/studio/song-1/render.wav";
+
+/** The one project the scratch database's ACL knows about. */
+const PROJECT = 21;
+
+/** The author the person's own edits carry, for the songs a test creates. */
+const HUMAN = Object.freeze({ kind: "human", id: "local", label: "You" });
 
 /** A stub catalogue: the real one loads the WASM engine, which is a parity test. */
 const STUB_CATALOGUE = async () => ({
@@ -160,6 +179,99 @@ function textOf(result) {
     .filter((block) => block.type === "text")
     .map((block) => block.text)
     .join("\n");
+}
+
+/**
+ * A scratch libsql client for one test, closed when the test ends.
+ * @param {import("node:test").TestContext} t
+ */
+function scratchDb(t) {
+  const db = createClient({ url: "file:" + join(mkdtempSync(join(tmpdir(), "studio-")), "crow.db") });
+  t.after(() => db.close());
+  return db;
+}
+
+/**
+ * A project ACL that knows one project and grants every capability in it.
+ * The hub only needs these three calls; the renderer is a stub here, so the
+ * capability question is never asked of it.
+ */
+function fakeAcl() {
+  return {
+    async assertProjectExists(db, projectId) {
+      const id = Number(projectId);
+      if (id !== PROJECT) throw new Error(`Project #${projectId} not found`);
+      return { id };
+    },
+    async assertCapability(db, projectId, contactId, capability) {
+      await this.assertProjectExists(db, projectId);
+      return { role: "owner", capabilities: { [capability]: true } };
+    },
+    async appendAudit() {},
+  };
+}
+
+/**
+ * The real session hub, behind the client shape the MCP server takes.
+ *
+ * The gateway's agent client answers the same seven calls over HTTP, scoping
+ * each one by the caller's author; here the author is passed straight to
+ * `hub.runCommand()`, so a test can see what the agent's step really wrote.
+ *
+ * @param {object} hub - the hub `createHub()` returned
+ * @param {object} db - the scratch database, for the song's project
+ * @returns {object} the hub client `createStudioServer()` wants
+ */
+function hubClientOf(hub, db) {
+  return {
+    async listSongs(filter = {}, author = null) {
+      const projectId = Number(filter.project_id);
+      return hub.listSongs(Number.isInteger(projectId) ? { project_ids: [projectId] } : {});
+    },
+    async createSong(request = {}) {
+      return hub.createSong(request);
+    },
+    async snapshot(songId, author = null) {
+      const opened = await hub.openSong(songId);
+      const { rows } = await db.execute({
+        sql: "SELECT project_id FROM studio_songs WHERE id = ?",
+        args: [songId],
+      });
+      return {
+        song_id: songId,
+        project_id: rows[0] ? Number(rows[0].project_id) : null,
+        snapshot: opened.snapshot,
+        snapshot_version: opened.snapshot_version,
+        state: "",
+      };
+    },
+    async history(songId, options = {}, author = null) {
+      return hub.history(songId, options);
+    },
+    async command(songId, request = {}) {
+      return hub.runCommand({ song_id: songId, ...request });
+    },
+    async undo(songId, request = {}) {
+      return hub.undo({ song_id: songId, ...request });
+    },
+    async redo(songId, request = {}) {
+      return hub.redo({ song_id: songId, ...request });
+    },
+  };
+}
+
+/**
+ * A real hub on a scratch database, with one empty song created in it.
+ * @param {import("node:test").TestContext} t
+ * @returns {Promise<{db: object, hub: object, songId: string}>}
+ */
+async function realSong(t) {
+  const db = scratchDb(t);
+  await initStudioTables(db);
+  const hub = createHub({ db, acl: fakeAcl() });
+  const created = await hub.createSong({ project_id: PROJECT, title: "Timeline song", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  return { db, hub, songId: created.song_id };
 }
 
 test("every public non-humanOnly command has exactly one tool and the rest have none", async () => {
@@ -566,6 +678,144 @@ test("agent can keep and comp but not add or discard takes", async () => {
       [TAKE_B],
       "clip_id narrows the listing",
     );
+  } finally {
+    await client.close();
+  }
+});
+
+// ---- the timeline over MCP -------------------------------------------------
+
+test("agent places clips, splits one and adds sections", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+  try {
+    /** Run one tool that must succeed, and hand back the sentence it answered with. */
+    const run = async (name, args) => {
+      const result = await client.callTool({ name, arguments: { song_id: songId, ...args } });
+      assert.notEqual(result.isError, true, `${name} was refused: ${textOf(result)}`);
+      return textOf(result);
+    };
+
+    // A song with two clips in one scene, built through the same tools.
+    await run("studio_track_add", { id: "guitar", name: "Guitar" });
+    await run("studio_scene_add", { id: "verse", name: "Verse" });
+    for (const [clipId, name] of [["riff-a", "Riff A"], ["riff-b", "Riff B"]]) {
+      const summary = await run("studio_clip_write", {
+        clip_id: clipId,
+        track_id: "guitar",
+        scene_id: "verse",
+        name,
+        length_bars: 2,
+        notes: [{ t: 0, d: 1, p: 40, v: 100 }],
+      });
+      assert.match(summary, new RegExp(`Wrote "${name}"`), "the tool answers with the step's own summary");
+    }
+
+    // Two clips on the timeline, the first of them split in half, then the map
+    // of the song: a section over bars 0-4 and a marker where the second clip
+    // starts.
+    assert.match(
+      await run("studio_arrangement_place", { id: "p-a", track_id: "guitar", clip_id: "riff-a", start_bar: 0 }),
+      /Placed clip "Riff A" at bar 0/,
+    );
+    assert.match(
+      await run("studio_arrangement_place", { id: "p-b", track_id: "guitar", clip_id: "riff-b", start_bar: 4 }),
+      /Placed clip "Riff B" at bar 4/,
+    );
+    assert.match(
+      await run("studio_arrangement_split", { id: "p-a", at_bar: 1, new_id: "p-a2" }),
+      /Split the placement/,
+    );
+    assert.match(
+      await run("studio_section_add", { id: "s-verse", start_bar: 0, end_bar: 4, name: "Verse" }),
+      /Added section "Verse"/,
+    );
+    assert.match(
+      await run("studio_marker_add", { id: "m-chorus", bar: 4, name: "Chorus" }),
+      /Added marker "Chorus" at bar 4/,
+    );
+
+    const opened = await hub.openSong(songId);
+    const arrangement = opened.snapshot.arrangement;
+    assert.deepEqual(
+      Object.keys(arrangement.placements).sort(),
+      ["p-a", "p-a2", "p-b"],
+      "the split left two halves of the first clip beside the second one",
+    );
+    assert.equal(arrangement.placements["p-a"].clip_id, "riff-a");
+    assert.equal(arrangement.placements["p-a"].start_bar, 0);
+    assert.equal(arrangement.placements["p-a"].bars, 1, "the first half stops at the split");
+    assert.equal(arrangement.placements["p-a"].offset_beats, 0);
+    assert.equal(arrangement.placements["p-a2"].clip_id, "riff-a");
+    assert.equal(arrangement.placements["p-a2"].start_bar, 1, "the second half starts at the split");
+    assert.equal(arrangement.placements["p-a2"].bars, 1);
+    assert.equal(arrangement.placements["p-a2"].offset_beats, 4, "it continues where the first half stopped");
+    assert.equal(arrangement.placements["p-b"].clip_id, "riff-b");
+    assert.equal(arrangement.placements["p-b"].start_bar, 4);
+    assert.equal(arrangement.placements["p-b"].bars, 2, "a placement is as long as its clip by default");
+
+    assert.deepEqual(Object.keys(arrangement.markers), ["m-chorus"]);
+    assert.equal(arrangement.markers["m-chorus"].bar, 4);
+    assert.equal(arrangement.markers["m-chorus"].name, "Chorus");
+    assert.deepEqual(Object.keys(arrangement.sections), ["s-verse"]);
+    assert.equal(arrangement.sections["s-verse"].start_bar, 0);
+    assert.equal(arrangement.sections["s-verse"].end_bar, 4);
+    assert.equal(arrangement.sections["s-verse"].name, "Verse");
+
+    // Every one of those is a history step of its own, filed under the agent.
+    const entries = await hub.history(songId, { limit: 50 });
+    for (const command of ["arrangement.place", "arrangement.split", "section.add", "marker.add"]) {
+      const entry = entries.find((row) => row.command === command);
+      assert.ok(entry, `${command} should be in the shared history`);
+      assert.equal(entry.author.kind, "agent", `${command} is the agent's step, never the person's`);
+      assert.equal(entry.author.id, "mcp");
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test("agent renders the arrangement from bar 9", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  const { renderer, calls } = makeRenderer();
+  const client = await connect({ hub: hubClientOf(hub, db), renderer });
+  try {
+    // from_bar is 0-based, so bar 9 is 8.
+    const result = await client.callTool({
+      name: "studio_render",
+      arguments: { song_id: songId, seconds: 8, mode: "arrangement", from_bar: 8 },
+    });
+    assert.notEqual(result.isError, true, textOf(result));
+    assert.equal(JSON.parse(textOf(result)).url, RENDER_URL);
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].mode, "arrangement", "the renderer is asked for the timeline, not a scene");
+    assert.equal(calls[0].from_bar, 8, "the render starts on the ninth bar");
+    assert.equal(calls[0].scene_id, null, "an arrangement render launches no scene");
+    assert.equal(calls[0].clip_id, null);
+    assert.equal(calls[0].seconds, 8);
+    assert.equal(calls[0].project_id, PROJECT, "the render is filed under the song's project");
+
+    // The schema is the tool's own gate: a view the engine does not have is
+    // refused before any renderer, hub or storage is touched.
+    const badMode = await client.callTool({
+      name: "studio_render",
+      arguments: { song_id: songId, seconds: 2, mode: "timeline" },
+    });
+    assert.equal(badMode.isError, true, "an unknown mode is not a render");
+    assert.match(textOf(badMode), /Invalid arguments/i);
+    assert.match(textOf(badMode), /mode/);
+
+    // Bar 999 is past the last bar an arrangement can have, so it too is
+    // refused by the schema rather than rendered as some other bar.
+    const badBar = await client.callTool({
+      name: "studio_render",
+      arguments: { song_id: songId, seconds: 2, mode: "arrangement", from_bar: 999 },
+    });
+    assert.equal(badBar.isError, true, "a bar the arrangement cannot have is refused");
+    assert.match(textOf(badBar), /from_bar/);
+
+    assert.equal(calls.length, 1, "neither refused call reached the renderer");
   } finally {
     await client.close();
   }

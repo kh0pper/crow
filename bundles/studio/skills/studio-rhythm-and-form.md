@@ -114,7 +114,7 @@ Either way: hits 0.1–0.25 beat, nothing crossing the loop point, and a report 
 
 ## Forms in scenes
 
-Every section needs its own scene, with its own copies of the clips, so an edit to the first chorus never reaches the second. Prefix names with their order — "01 Intro", "02 Verse 1" — because there is no timeline to read.
+Every section needs its own scene, with its own copies of the clips, so an edit to the first chorus never reaches the second. Prefix names with their order — "01 Intro", "02 Verse 1" — so the grid reads in order. On the timeline, the same clip placed twice is one clip: an edit to it changes both places, so give a section its own copy when it has to differ. Mark each section with `studio_section_add` so the operator sees the form on the ruler.
 
 | Form | Scene order | Bars per section |
 |---|---|---|

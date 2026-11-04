@@ -72,11 +72,13 @@ function take(id, overrides = {}) {
 /**
  * One audio song: a single audio track, one scene, one audio clip holding the
  * comp, and the takes the comp names.
- * @param {{comp: object[], takes?: object[], lengthBars?: number, track?: object}} options
+ * @param {{comp: object[], takes?: object[], lengthBars?: number, track?: object,
+ *          arrangement?: object}} options `arrangement` puts the song on the
+ *   timeline instead of in a scene
  * @returns {object} a snapshot in the shape `server/doc.js` writes
  */
-function audioSong({ comp, takes = [], lengthBars = 1, track = {} }) {
-  return {
+function audioSong({ comp, takes = [], lengthBars = 1, track = {}, arrangement = null }) {
+  const song = {
     meta: { title: "Audio", bpm: 120, meter: [4, 4], key: "C major" },
     tracks: [
       {
@@ -106,6 +108,32 @@ function audioSong({ comp, takes = [], lengthBars = 1, track = {} }) {
       },
     },
     takes: Object.fromEntries(takes.map((item) => [item.id, item])),
+  };
+  if (arrangement) song.arrangement = arrangement;
+  return song;
+}
+
+/** A placement in the snapshot's shape, with 0 fades unless a test sets them. */
+function placement(id, trackId, clipId, startBar, bars, over = {}) {
+  return {
+    id,
+    track_id: trackId,
+    clip_id: clipId,
+    start_bar: startBar,
+    bars,
+    offset_beats: 0,
+    fade_in_beats: 0,
+    fade_out_beats: 0,
+    ...over,
+  };
+}
+
+/** A whole arrangement, keyed by placement id the way `doc.js` writes it. */
+function arrangementOf(items) {
+  return {
+    placements: Object.fromEntries(items.map((item) => [item.id, item])),
+    markers: {},
+    sections: {},
   };
 }
 
@@ -185,11 +213,16 @@ async function waitFor(predicate, ms = 2000) {
  * then the song, launch the scene, play, render.
  * @param {object} song
  * @param {{seconds?: number, sampleRate?: number, audio?: object[],
+ *          mode?: "session"|"arrangement", fromBar?: number,
  *          onError?: (text: string) => void}} [options] `audio` is one
- *   `{id, channels, rate}` per take to load
+ *   `{id, channels, rate}` per take to load; `mode: "arrangement"` plays the
+ *   song's timeline from `fromBar` instead of launching its scene
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
-async function renderAudioSong(song, { seconds = 1, sampleRate = SAMPLE_RATE, audio = [], onError } = {}) {
+async function renderAudioSong(
+  song,
+  { seconds = 1, sampleRate = SAMPLE_RATE, audio = [], mode = "session", fromBar = 0, onError } = {},
+) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
     length: Math.round(seconds * sampleRate),
@@ -206,7 +239,12 @@ async function renderAudioSong(song, { seconds = 1, sampleRate = SAMPLE_RATE, au
       await engine.loadAudio(item.id, channels, item.rate);
     }
     engine.setSong(song);
-    engine.launchScene("scene-1");
+    if (mode === "arrangement") {
+      engine.setMode("arrangement");
+      engine.seek(fromBar);
+    } else {
+      engine.launchScene("scene-1");
+    }
     engine.play();
     engine.node.connect(context.destination);
     await engine.flush();
@@ -471,4 +509,200 @@ test("resampler is identity at equal rates and preserves a 1 kHz sine's frequenc
       `${from} → ${to}: expected 1000 Hz within 0.1%, measured ${measured.toFixed(2)} Hz (${(error * 100).toFixed(3)}% off)`,
     );
   }
+});
+
+// --- the arrangement --------------------------------------------------------
+
+test("fade in ramps linearly from silence", async () => {
+  const frames = 2 * 4 * FRAMES_PER_BEAT; // two bars of take, so the ramp is inside it
+  const song = audioSong({
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+    takes: [take("take-1", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([
+      placement("p1", "track-1", "clip-1", 0, 2, { fade_in_beats: 1 }),
+    ]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 0.6,
+    mode: "arrangement",
+    audio: [{ id: "take-1", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE }],
+  });
+
+  // A fade in of one beat is FRAMES_PER_BEAT frames of linear gain, from 0 at
+  // the placement's first frame to 1 at the frame one beat later.
+  const ramp = FRAMES_PER_BEAT;
+  assert.equal(left[0], 0, "a fade in starts from silence");
+  for (const at of [1, 100, 3000, ramp / 2, ramp - 1]) {
+    const want = 0.5 * (at / ramp) * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-6,
+      `fade in frame ${at}: expected ${want}, got ${left[at]} (linear from silence to the take's own level)`,
+    );
+  }
+  for (const at of [ramp, ramp + 1, 28000, 28799]) {
+    const want = 0.5 * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-6,
+      `frame ${at} is past the fade and has to be the take at full level, got ${left[at]}`,
+    );
+  }
+});
+
+test("a comp boundary inside a fade out keeps fading", async () => {
+  // One two-bar placement that fades out over its last four beats, with the
+  // comp switching takes half way through that fade: the ramp has to carry on
+  // on the voice the comp boundary starts, not restart at full gain and not
+  // drop out with the voice that stops.
+  const frames = 2 * 4 * FRAMES_PER_BEAT;
+  const song = audioSong({
+    comp: [
+      { take_id: "first", from_beat: 0, to_beat: 6 },
+      { take_id: "second", from_beat: 6, to_beat: 8 },
+    ],
+    takes: [take("first", { frames }), take("second", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([placement("p1", "track-1", "clip-1", 0, 2, { fade_out_beats: 4 })]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 3.6,
+    mode: "arrangement",
+    audio: [
+      { id: "first", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE },
+      { id: "second", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE },
+    ],
+  });
+
+  // The fade out runs over the placement's last four beats (frames 96000 to
+  // 192000), and clip beat 6 — the comp boundary — is frame 144000 of it.
+  const fadeStart = 4 * FRAMES_PER_BEAT;
+  const boundary = 6 * FRAMES_PER_BEAT;
+  const fadeFrames = 4 * FRAMES_PER_BEAT;
+  for (const at of [fadeStart + 1000, boundary - 100, boundary + 64, boundary + 1000, boundary + 20000]) {
+    const gain = 1 - (at - fadeStart) / fadeFrames;
+    const want = 0.5 * gain * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-3,
+      `frame ${at}: expected ${want} (the fade is at ${gain}), got ${left[at]} — the ramp has to continue on the take the comp switched to`,
+    );
+  }
+
+  // The level cannot have jumped back to full gain at the boundary either.
+  assert.ok(left[boundary - 100] < 0.5 * CENTRE, "the fade out is still ramping down before the comp boundary");
+});
+
+test("seek into a fade in starts at the faded gain", async () => {
+  // A two-bar clip under a four-bar placement that fades in over eight beats:
+  // seeking to bar 1 lands on the half-way point of that ramp, so the first
+  // frame of the render has to be the take at half level, not at full. The
+  // take is three bars long, so nothing runs out under the ramp.
+  const frames = 3 * 4 * FRAMES_PER_BEAT;
+  const song = audioSong({
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+    takes: [take("take-1", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([placement("p1", "track-1", "clip-1", 0, 4, { fade_in_beats: 8 })]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 2.1,
+    mode: "arrangement",
+    fromBar: 1,
+    audio: [{ id: "take-1", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE }],
+  });
+
+  // Four of the eight beats of the fade are behind the seek: the gain there is
+  // 0.5, and the four beats that are left ramp it back to 1.
+  const remaining = 4 * FRAMES_PER_BEAT;
+  assert.ok(Math.abs(left[0] - 0.5 * 0.5 * CENTRE) < 1e-6, `frame 0 should be at half the gain, got ${left[0]}`);
+  for (const at of [1, 100, 5000, remaining - 1]) {
+    const want = 0.5 * (0.5 + 0.5 * (at / remaining)) * CENTRE;
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-6,
+      `frame ${at}: expected ${want}, got ${left[at]} (the ramp continues from where the seek landed)`,
+    );
+  }
+  const past = 0.5 * CENTRE;
+  assert.ok(
+    Math.abs(left[remaining + 100] - past) < 1e-6,
+    `past the fade the take is at full level, got ${left[remaining + 100]}`,
+  );
+});
+
+test("a split half with a fade out does not silence the next half", async () => {
+  // A split where the first half fades out over its own bar: the second half
+  // continues the clip exactly, so joining the two would put the whole take on
+  // one voice whose gain has reached 0 at the seam — and the second half would
+  // play silence. A fade at the seam has to keep the two halves on two voices.
+  const frames = 2 * 4 * FRAMES_PER_BEAT;
+  const song = audioSong({
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+    takes: [take("take-1", { frames })],
+    lengthBars: 2,
+    arrangement: arrangementOf([
+      placement("p1", "track-1", "clip-1", 0, 1, { fade_out_beats: 4 }),
+      placement("p2", "track-1", "clip-1", 1, 1, { offset_beats: 4 }),
+    ]),
+  });
+
+  const { left } = await renderAudioSong(song, {
+    seconds: 4.1,
+    mode: "arrangement",
+    audio: [{ id: "take-1", channels: [constant(frames, 0.5)], rate: SAMPLE_RATE }],
+  });
+
+  const seam = 4 * FRAMES_PER_BEAT;
+  const want = 0.5 * CENTRE;
+  for (const at of [seam + 100, seam + 1000, seam + 30000, seam + 90000]) {
+    assert.ok(
+      Math.abs(left[at] - want) < 1e-3,
+      `frame ${at} is the second half of the split and has to sound at full level ${want}, got ${left[at]}`,
+    );
+  }
+});
+
+test("split audio placements play without a click", async () => {
+  // Two bars of audio in a two-bar clip, so the second half of a split starts
+  // four beats into the take — exactly where the first half stopped.
+  const frames = 2 * 4 * FRAMES_PER_BEAT;
+  const samples = new Float32Array(frames);
+  for (let at = 0; at < frames; at += 1) samples[at] = Math.sin(at / 100) * 0.5;
+
+  const songWith = (placements) =>
+    audioSong({
+      comp: [{ take_id: "take-1", from_beat: 0, to_beat: 8 }],
+      takes: [take("take-1", { frames })],
+      lengthBars: 2,
+      arrangement: arrangementOf(placements),
+    });
+  const audio = () => [{ id: "take-1", channels: [Float32Array.from(samples)], rate: SAMPLE_RATE }];
+
+  const whole = await renderAudioSong(songWith([placement("p1", "track-1", "clip-1", 0, 2)]), {
+    seconds: 2.5,
+    mode: "arrangement",
+    audio: audio(),
+  });
+  const halves = await renderAudioSong(
+    songWith([
+      placement("p1", "track-1", "clip-1", 0, 1),
+      placement("p2", "track-1", "clip-1", 1, 1, { offset_beats: 4 }),
+    ]),
+    { seconds: 2.5, mode: "arrangement", audio: audio() },
+  );
+
+  assert.ok(peakOf(whole.left) > 0.01, "the unsplit render has to be audible to compare anything");
+  let differing = -1;
+  for (let at = 0; at < whole.left.length; at += 1) {
+    if (whole.left[at] !== halves.left[at] || whole.right[at] !== halves.right[at]) {
+      differing = at;
+      break;
+    }
+  }
+  assert.equal(
+    differing,
+    -1,
+    `half ${differing} of the split render differs from the unsplit one (a restart or a crossfade at the split)`,
+  );
 });

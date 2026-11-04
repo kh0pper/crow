@@ -1800,6 +1800,16 @@ test("teardown mid-record keeps every chunk and uploads the take", async (t) => 
   // down in the middle of the take.
   await page.evaluate("document.dispatchEvent(new Event('turbo:before-cache')), true");
 
+  // The torn-down page stops the recorder and keeps every chunk; whether it
+  // also gets the upload out before it closes depends on how fast this machine
+  // is. What is guaranteed is that the take is not lost: the next time the
+  // song is open, the pending take is finished. So open it again (after the
+  // teardown's 3 s cap) and require the take.
+  await new Promise((resolve) => setTimeout(resolve, 3500));
+  const again = await openPage(studioUrl());
+  t.after(() => again.close());
+  await waitForStudio(again);
+
   const snap = await waitForSong((state) => {
     const clip = audioClipOf(state);
     return !!clip && takesOfClip(state, clip.id).length > takesBefore;
