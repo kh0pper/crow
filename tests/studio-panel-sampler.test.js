@@ -2439,6 +2439,7 @@ async function openPage(url) {
 
   return {
     evaluate,
+    send,
     close: async () => {
       try {
         socket.close();
@@ -2582,4 +2583,209 @@ test("a file imported in Chrome lands on its pad through the real upload", async
   const assigns = entries.filter((entry) => /^pad\.assign/.test(String(entry.command)));
   assert.equal(assigns.length, 1, `exactly one pad assignment (got ${assigns.map((e) => e.command).join(", ")})`);
   assert.equal(assigns[0].args.sample_id, sample.id, "and it is for the imported sample");
+});
+
+// ---- real input events, through the DevTools protocol -----------------------
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The centre of the first node `selector` matches, in page pixels. */
+async function centreOf(page, selector) {
+  const box = await page.evaluate(`(function () {
+    var node = document.querySelector(${JSON.stringify(selector)});
+    if (!node) return null;
+    node.scrollIntoView({ block: 'center', inline: 'center' });
+    var r = node.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, width: r.width };
+  })()`);
+  assert.ok(box, `nothing matches ${selector}`);
+  return box;
+}
+
+const mouse = (page, type, x, y, extra = {}) =>
+  page.send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1, ...extra });
+
+/** A real press-and-release on the node, held for `holdMs`. */
+async function mousePress(page, selector, holdMs = 0) {
+  const { x, y } = await centreOf(page, selector);
+  await mouse(page, "mouseMoved", x, y, { button: "none", clickCount: 0 });
+  await mouse(page, "mousePressed", x, y, { buttons: 1 });
+  if (holdMs) await pause(holdMs);
+  await mouse(page, "mouseReleased", x, y, { buttons: 0 });
+}
+
+/** A real drag of a range's thumb from its centre to `toFraction` of its width. */
+async function dragRange(page, selector, toFraction) {
+  const box = await centreOf(page, selector);
+  const toX = box.left + box.width * toFraction;
+  await mouse(page, "mouseMoved", box.x, box.y, { button: "none", clickCount: 0 });
+  await mouse(page, "mousePressed", box.x, box.y, { buttons: 1 });
+  for (let i = 1; i <= 8; i += 1) {
+    await mouse(page, "mouseMoved", box.x + ((toX - box.x) * i) / 8, box.y, { buttons: 1, clickCount: 0 });
+    await pause(15);
+  }
+  await mouse(page, "mouseReleased", toX, box.y, { buttons: 0 });
+}
+
+/**
+ * A fresh song with a sampler track, a pattern clip, a sample on pad A01 and
+ * (optionally) step 1 on, opened in the pad view on pad A01.
+ */
+async function openSamplerPage(t, { stepOn = false } = {}) {
+  const created = await hub.createSong({ project_id: PROJECT, title: "Live sampler", author: LIVE_HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const id = created.song_id;
+  const run = async (command, args, internal = false) => {
+    const result = await hub.runCommand({ song_id: id, cmd_id: null, command, args, author: LIVE_HUMAN, internal });
+    assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
+  };
+  await run("track.add", { id: TRACK, name: "Beat box", kind: "sampler" });
+  await run("scene.add", { id: SCENE, name: "Verse" });
+  await run("clip.add_pattern", { clip_id: CLIP, track_id: TRACK, scene_id: SCENE, name: "Beat", length_steps: 16 });
+  const snap0 = (await hub.openSong(id)).snapshot;
+  const bank = Object.values(snap0.banks || {})[0];
+  const sampleId = "7a1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f71";
+  await run(
+    "sample.add",
+    {
+      sample: {
+        id: sampleId,
+        storage_key: `${PREFIX}studio/live/samples/${sampleId}.wav`,
+        rate: RATE,
+        channels: 2,
+        frames: FRAMES,
+        name: "porch-knocks",
+        origin: "import",
+        author_label: "You",
+      },
+    },
+    true,
+  );
+  await run("pad.assign", { track_id: TRACK, bank_id: bank.id, index: 0, sample_id: sampleId });
+  if (stepOn) await run("step.toggle", stepArgs(bank.id, 0));
+
+  const page = await openPage(`${base}/dashboard/studio?song=${encodeURIComponent(id)}`);
+  t.after(() => page.close());
+  assert.ok(await waitFor(page, `!!document.querySelector('[data-clip-id=${CLIP}]')`, 20000), "the clip is on the grid");
+  assert.equal(await page.evaluate(`(function () {
+    var open = document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]');
+    if (!open) return false; open.click(); return true;
+  })()`), true, "the clip offers its open button");
+  assert.ok(
+    await waitFor(page, "!!document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index=\"0\"]')", 10000),
+    "the pad view opened",
+  );
+  await page.evaluate("document.querySelector('[data-role=sampler] [data-act=pad][data-pad-index=\"0\"]').click(), true");
+  assert.ok(await waitFor(page, "!!document.querySelector('[data-act=step][data-at=\"0\"]')", 10000), "the steps drew");
+  const snapOf = async () => (await hub.openSong(id)).snapshot;
+  const waitSnap = async (check, timeoutMs = 10000) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+      last = await snapOf();
+      try {
+        if (check(last)) return last;
+      } catch {
+        // Mid-update; look again.
+      }
+      await pause(50);
+    }
+    return last;
+  };
+  return { page, id, bank, snapOf, waitSnap };
+}
+
+const CUTOFF = "[data-role=sampler] input[data-pad-field=\"filter.cutoff_hz\"][data-pad-index=\"0\"]";
+
+/** The step at position `at` of pad A01 in pattern a, or undefined when it is off. */
+function stepOf(snap, at) {
+  return Object.values(snap.steps || {}).find(
+    (step) => step.clip_id === CLIP && step.pattern_id === "a" && step.at === at && step.index === 0,
+  );
+}
+
+test("in Chrome, a long press then a slider drag locks the step, not the pad", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { page, bank, snapOf, waitSnap } = await openSamplerPage(t, { stepOn: true });
+  const padCutoff = (snap) => {
+    const pad = Object.values(snap.pads || {}).find((p) => p.bank_id === bank.id && p.index === 0);
+    return pad?.filter?.cutoff_hz;
+  };
+  const startCutoff = padCutoff(await snapOf());
+
+  // Press and hold step 1 for 400 ms, then let go.
+  await mousePress(page, "[data-act=step][data-at=\"0\"]", 400);
+  assert.ok(
+    await waitFor(page, "!!document.querySelector('[data-role=step-lock]')", 5000),
+    "holding the step opened the lock strip",
+  );
+
+  // Drag the pad's Cutoff slider with a real mouse.
+  await dragRange(page, CUTOFF, 0.25);
+  const locked = await waitSnap((snap) => "cutoff_hz" in (stepOf(snap, 0)?.locks || {}));
+  assert.ok(
+    "cutoff_hz" in (stepOf(locked, 0)?.locks || {}),
+    "the step's locks hold cutoff_hz (the hub never received a step.set carrying it)",
+  );
+  assert.equal(padCutoff(locked), startCutoff, "the pad's own cutoff did not move");
+  assert.ok(stepOf(locked, 0), "a long press does not toggle the step off in the hub");
+  assert.ok(
+    await waitFor(page, "document.querySelector('[data-act=step][data-at=\"0\"]').getAttribute('data-step-on') === 'true'"),
+    "a long press does not toggle the step off",
+  );
+
+  // Done leaves lock mode; the same drag now moves the pad.
+  await mousePress(page, "[data-act=step-lock-done]");
+  assert.ok(await waitFor(page, "!document.querySelector('[data-role=step-lock]')", 5000), "Done closed the lock strip");
+  await dragRange(page, CUTOFF, 0.75);
+  const moved = await waitSnap((snap) => padCutoff(snap) !== startCutoff);
+  assert.notEqual(padCutoff(moved), startCutoff, "out of lock mode the drag changed the pad's cutoff");
+});
+
+test("in Chrome, Rename renames the selected pattern", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { page, id, waitSnap } = await openSamplerPage(t);
+  await mousePress(page, "[data-act=rename-pattern]");
+  assert.ok(await waitFor(page, "document.activeElement && document.activeElement.className === 'st-inline'", 5000), "the name field has focus");
+
+  await page.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", modifiers: 2, commands: ["selectAll"] });
+  await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 2 });
+  await page.send("Input.insertText", { text: "Verse beat" });
+  await page.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+
+  const named = await waitSnap((snap) => JSON.stringify(snap).includes('"name":"Verse beat"'));
+  assert.ok(JSON.stringify(named).includes('"name":"Verse beat"'), "the pattern is named Verse beat in the snapshot");
+  const entries = await hub.history(id, { limit: 100 });
+  const renames = entries.filter((entry) => entry.command === "pattern.rename");
+  assert.equal(renames.length, 1, `exactly one pattern.rename (got ${renames.length})`);
+});
+
+test("in Chrome, Escape cancels a rename and nothing is saved", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { page, id } = await openSamplerPage(t);
+  await mousePress(page, "[data-act=rename-pattern]");
+  assert.ok(await waitFor(page, "document.activeElement && document.activeElement.className === 'st-inline'", 5000), "the name field has focus");
+  await page.send("Input.insertText", { text: " changed" });
+  await page.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  assert.ok(await waitFor(page, "!document.querySelector('.st-inline')", 5000), "the name field closed");
+  await pause(500);
+  const entries = await hub.history(id, { limit: 100 });
+  assert.equal(entries.filter((entry) => entry.command === "pattern.rename").length, 0, "Escape saved nothing");
+});
+
+test("at phone width the 16 steps fit without scrolling", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { page } = await openSamplerPage(t);
+  await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  await pause(200);
+  const fit = await page.evaluate(`(function () {
+    var strip = document.querySelector('.st-step-strip');
+    var one = document.querySelector('[data-act=step][data-at="0"]');
+    var nine = document.querySelector('[data-act=step][data-at="8"]');
+    return { scroll: strip.scrollWidth, client: strip.clientWidth, one: one.offsetTop, nine: nine.offsetTop };
+  })()`);
+  assert.ok(fit.scroll <= fit.client, `the strip scrolls sideways (${fit.scroll} > ${fit.client})`);
+  assert.ok(fit.nine > fit.one, `step 9 wraps to a second row (${fit.nine} vs ${fit.one})`);
 });

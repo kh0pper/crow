@@ -666,6 +666,7 @@ const STYLES = `
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
+    .studio .st-step-strip { grid-template-columns: repeat(8, minmax(0, 1fr)); overflow-x: hidden; }
   }
 `;
 
