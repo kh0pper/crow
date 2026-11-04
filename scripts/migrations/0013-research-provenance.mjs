@@ -46,7 +46,7 @@ export function run({ dbPath, log = () => {} }) {
     const deferral = researchTablesDeferral(db);
     if (deferral) {
       log(`  ${deferral}`);
-      return { deferred: true };
+      return { deferred: true, reason: deferral };
     }
 
     const results = [];

@@ -141,7 +141,7 @@ export async function run({ dbPath, tasksDbPath, log = () => {} }) {
     const outcome = await rebuildStore(tdb, tasksDbPath, log);
     if (outcome === "absent") {
       log("  tasks_items: absent — deferred (board_defs created)");
-      return { deferred: true };
+      return { deferred: true, reason: "tasks_items absent" };
     }
     log(`  tasks_items: ${outcome === "rebuilt" ? "rebuilt (CHECK dropped, stage dropped, data_json added)" : "already converged — no rebuild"}`);
 

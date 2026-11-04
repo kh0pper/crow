@@ -289,7 +289,7 @@ export async function runPostListenSetup(server, app, deps) {
     // instance short-circuits its ticks on bootSha === HEAD. Idempotent by
     // construction: applied ids are skipped by record.
     try {
-      const { runMigrations } = await import("../../../scripts/migrations/runner.mjs");
+      const { runMigrations, readDeferrals } = await import("../../../scripts/migrations/runner.mjs");
       const r2 = await runMigrations({
         migrationsDir: join(appRoot, "scripts", "migrations"),
         dbPath: inst.dbPath,
@@ -297,8 +297,19 @@ export async function runPostListenSetup(server, app, deps) {
         log: (m) => console.log(`[migrations:post-settle] ${m}`),
       });
       if (r2.applied.length) console.log(`[migrations:post-settle] applied: ${r2.applied.join(", ")}`);
-      if (r2.deferred.length) {
-        console.warn(`[migrations:post-settle] still deferred: ${r2.deferred.join(", ")} — the owning bundle may not be installed`);
+      // Only NEW deferrals are loud. Both passes run in ONE boot and the boot
+      // pass already wrote this instance's deferral rows, so a deferral repeated
+      // here is KNOWN unless its reason changed (a different table went absent).
+      if (r2.newlyDeferred.length) {
+        console.warn(`[migrations:post-settle] still deferred: ${r2.newlyDeferred.join(", ")} — the owning bundle may not be installed`);
+      }
+      const known = r2.deferred.filter((id) => !r2.newlyDeferred.includes(id));
+      if (known.length) {
+        // ONE quiet line per boot, so a long-standing wait stays visible without
+        // drowning a new deferral in a line per migration.
+        const rows = readDeferrals(inst.dbPath).filter((r) => known.includes(r.id));
+        const since = rows.map((r) => r.first_deferred_at).sort()[0];
+        console.log(`[migrations:post-settle] waiting on absent tables: ${known.join(", ")}${since ? ` (known since ${since})` : ""}`);
       }
     } catch (err) {
       console.warn("[migrations:post-settle] skipped:", err.message);

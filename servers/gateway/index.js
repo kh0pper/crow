@@ -221,8 +221,10 @@ try {
     log: (m) => console.log(`[migrations] ${m}`),
   });
   if (_resReg.applied.length) console.log(`[migrations] applied: ${_resReg.applied.join(", ")}`);
-  if (_resReg.deferred.length) {
-    console.log(`[migrations] deferred (will retry): ${_resReg.deferred.join(", ")}`);
+  // Only NEW deferrals: a migration whose targets never appear defers on every
+  // boot, and repeating that here is what hid a genuinely new one.
+  if (_resReg.newlyDeferred.length) {
+    console.log(`[migrations] deferred (will retry): ${_resReg.newlyDeferred.join(", ")}`);
   }
 } catch (e) {
   // Fail closed on a genuine failure — serving on a half-migrated store is how
