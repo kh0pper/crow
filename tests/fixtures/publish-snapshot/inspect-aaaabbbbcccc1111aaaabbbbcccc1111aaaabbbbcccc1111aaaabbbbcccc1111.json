@@ -1,0 +1,46 @@
+{
+  "Id": "aaaabbbbcccc1111aaaabbbbcccc1111aaaabbbbcccc1111aaaabbbbcccc1111",
+  "Name": "/crow-engine-35b",
+  "Config": {
+    "Hostname": "0f0e0d0c0b0a",
+    "Env": [
+      "PATH=/usr/local/bin:/usr/bin",
+      "OPENAI_API_KEY=FAKE-ENV-SECRET-4a7d2c",
+      "HF_TOKEN=FAKE-ENV-TOKEN-18ce40"
+    ],
+    "Cmd": ["serve", "--api-key", "FAKE-CMD-SECRET-91be35"],
+    "Entrypoint": ["/entrypoint.sh", "--token", "FAKE-ENTRYPOINT-SECRET-77cc10"],
+    "Labels": {
+      "crow.runtime": "docker",
+      "crow.bundle": "example-model",
+      "com.docker.compose.project": "example-model",
+      "com.docker.compose.project.working_dir": "/home/crow/.crow/bundles/example-model",
+      "org.opencontainers.image.vendor": "example-vendor",
+      "org.opencontainers.image.revision": "0000000000000000000000000000000000000000"
+    }
+  },
+  "HostConfig": {
+    "NetworkMode": "default",
+    "PortBindings": {
+      "8003/tcp": [{ "HostIp": "100.64.20.5", "HostPort": "8003" }]
+    },
+    "Binds": ["/home/crow/.crow/FAKE-MOUNT-SECRET-2f9a88:/data"]
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/home/crow/.crow/FAKE-MOUNT-SECRET-2f9a88",
+      "Destination": "/data",
+      "Mode": "",
+      "RW": true
+    }
+  ],
+  "NetworkSettings": {
+    "Networks": {
+      "crow-eng-example": {
+        "NetworkID": "1111111111111111111111111111111111111111111111111111111111111111",
+        "IPAddress": "172.20.0.2"
+      }
+    }
+  }
+}
