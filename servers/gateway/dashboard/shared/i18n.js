@@ -1858,6 +1858,13 @@ export const translations = {
   "botbuilder.sfConfirmOtherLabel": { en: "Other tool names, one per line", es: "Otros nombres de herramientas, uno por línea" },
   "botbuilder.sfConfirmOtherHint": { en: "Names that don't match one of this bot's tools. Kept as written.", es: "Nombres que no coinciden con ninguna herramienta de este bot. Se conservan tal cual." },
   "botbuilder.sfSave": { en: "Save safety", es: "Guardar seguridad" },
+  // Satellite-hosted bundles (SAT-7 part B): the per-bot Q2 opt-in and its warning (the warning
+  // copy is the ruling's own wording, in both languages).
+  "botbuilder.sfSatTitle": { en: "Tools on a paired server", es: "Herramientas en un servidor emparejado" },
+  "botbuilder.sfSatLead": { en: "This bot is granted tools from a bundle on a paired server. By default they work only on your own turns.", es: "Este bot tiene herramientas de un paquete en un servidor emparejado. Por defecto solo funcionan en tus propios turnos." },
+  "botbuilder.sfSatAnyTurn": { en: "Also on other people's turns", es: "También en turnos de otras personas" },
+  "botbuilder.sfSatAnyTurnWarn": { en: "{bundles} tools will also run on turns started by other people (email, Discord). They can ask this bot to change your repositories.", es: "Las herramientas de {bundles} también funcionarán en turnos iniciados por otras personas (correo, Discord). Podrán pedir a este bot que cambie tus repositorios." },
+  "botbuilder.sfSatAnyTurnFailed": { en: "Couldn't save that switch: {error}", es: "No se pudo guardar ese interruptor: {error}" },
   "botbuilder.acReadyTitle": { en: "Ready to run?", es: "¿Listo para funcionar?" },
   "botbuilder.acSessionsTitle": { en: "Recent conversations", es: "Conversaciones recientes" },
   "botbuilder.acProposalsWaiting": { en: "{n} skill(s) this bot wrote are waiting for your review.", es: "{n} habilidad(es) escrita(s) por este bot esperan tu revisión." },

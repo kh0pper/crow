@@ -411,6 +411,18 @@ export async function mountMcpServers(app, deps) {
   } catch (err) {
     console.warn(`[gateway] services-tools mount skipped: ${err.message}`);
   }
+  // Satellite tools (SAT-7 part B): /satellite-tools/<satellite_id>/<bundle>/mcp, the bots' door to
+  // a satellite-hosted bundle (satellites/tools-mount.js), on the same shared loopback mount. It
+  // mounts with ownerTurnOnly:false because it applies Kevin's Q2 rule itself (the owner's turn OR
+  // the per-bot opt-in), and asks the same SYNC Perch accessor for that check. Independent of the
+  // services mount above: one failing never un-mounts the other.
+  try {
+    const { perchEngineAccessor } = await import("../services/mount.js");
+    const { mountSatelliteTools } = await import("../satellites/tools-mount.js");
+    mountSatelliteTools(app, { sessionManager, createDbClient, perchEngine: await perchEngineAccessor() });
+  } catch (err) {
+    console.warn(`[gateway] satellite-tools mount skipped: ${err.message}`);
+  }
   // Credential card (spec §10.2): the bot-only /secrets mount, core like /board. Its token
   // (SECRETS_TOKEN) rotates with the families above; crow_request_secret also needs a signed
   // Perch actor whose session is resident and awake in this process (never woken by a check).

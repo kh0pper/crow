@@ -278,9 +278,11 @@ test("mount-time validation: required options, family shape, kind, exactly one o
   const app = express();
   assert.doesNotThrow(() => mountLoopbackMcp(app, mountOpts({ family: "example-two" })));
   assert.doesNotThrow(() => mountLoopbackMcp(app, mountOpts({ family: "example-three", token: undefined, validateToken: async () => false })));
+  assert.doesNotThrow(() => mountLoopbackMcp(app, mountOpts({ family: "example-three", actorKind: "satellite-tools" })),
+    "SAT-7 part B appends satellite-tools to the scope kinds");
   const bad = [
     { family: "Bad" }, { family: "x" }, { family: "a/b" }, { params: "" }, { params: undefined },
-    { actorKind: "bot" }, { actorKind: "satellite-tools" }, { actorKind: undefined },
+    { actorKind: "bot" }, { actorKind: "satellite" }, { actorKind: undefined },
     { token: undefined }, { validateToken: async () => true }, { token: {} },
     { authorize: undefined }, { upstream: {} }, { upstream: { listTools() {} } }, { toolFilter: undefined },
     { resultCap: undefined }, { resultCap: { maxBytes: 0, contentTypes: ["text"] } }, { resultCap: { maxBytes: 10 } },

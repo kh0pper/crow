@@ -36,7 +36,9 @@ const text = (t) => ({ content: [{ type: "text", text: t }] });
 const refusal = (t) => ({ ...text(t), isError: true });
 
 export const notAvailableFor = (tool) => refusal(`${tool || "This tool"} is not available here.`);
-export const toolsChangedResult = () => refusal("These tools changed; approve them on the Servers page.");
+/** The pin refusal, with the loopback mount's own code (helper spec §5's `tools_changed`), so a bot
+ *  reading it through `/satellite-tools/.../mcp` gets that fixed sentence and its audit event. */
+export const toolsChangedResult = () => ({ ...refusal("These tools changed; approve them on the Servers page."), code: "tools_changed" });
 export const failedFor = (tool) => refusal(`${tool || "That tool"} failed.`);
 
 /** A satellite entry may carry this bundle id (never `artifacts`; a real bundle id only). */

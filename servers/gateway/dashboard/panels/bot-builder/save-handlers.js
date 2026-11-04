@@ -344,9 +344,17 @@ async function applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, c
 
 // ---------------------------------------------------------------- safety
 
-export function saveSafety(def, b, { lang, changed }) {
+export async function saveSafety(def, b, { lang, changed, db = null, botId = null }) {
   def.permission_policy = def.permission_policy || {};
   const pp = def.permission_policy;
+  const out = { warn: [] };
+  // Satellite tools on other people's turns (SAT-7 part B): the per-bot opt-in is its own table
+  // (`satellite_bot_optins`, migration 0021), not the def, because the mount reads it per request.
+  // Only the tab render that showed the control decides (sat_any_turn_rendered), so a page
+  // rendered before a satellite bundle was installed can never switch it off again. The value is
+  // only WANTED here: the POST handler writes it (applySatelliteOptin) after the def update lands,
+  // so a save this function refuses never turns the opt-in on.
+  if (b.sat_any_turn_rendered && db && botId) out.satOptin = b.sat_any_turn === "on" || b.sat_any_turn === "true";
   if (b.email_mode && b.email_mode !== b.email_mode__was) {
     if (b.email_mode !== "draft_only" && b.email_mode !== "allow") return { error: t("botbuilder.abInvalidChoice", lang) };
     pp.external_send = b.email_mode;
@@ -371,7 +379,24 @@ export function saveSafety(def, b, { lang, changed }) {
     const next = applyConfirm(prev, tools, { checked: arr(b.confirm_tool), otherText: b.confirm_other });
     if (!same(next, prev)) pp.confirm = next;
   }
-  return {};
+  return out;
+}
+
+/**
+ * Write the per-bot satellite opt-in saveSafety wanted, once the definition update has succeeded
+ * (F3). Written on change only; a storage failure is a soft warning, never a failed save.
+ * @returns {Promise<{warn: string[]}>}
+ */
+export async function applySatelliteOptin({ db, botId, want, lang }) {
+  const out = { warn: [] };
+  if (typeof want !== "boolean" || !db || !botId) return out;
+  try {
+    const { getBotOptin, setBotOptin } = await import("../../../satellites/store.js");
+    if (want !== (await getBotOptin(db, botId))) await setBotOptin(db, botId, want);
+  } catch (err) {
+    out.warn.push(fill(t("botbuilder.sfSatAnyTurnFailed", lang), { error: String((err && err.message) || err).slice(0, 80) }));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- advanced

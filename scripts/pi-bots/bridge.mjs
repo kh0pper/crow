@@ -70,8 +70,9 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // bot-world.mjs so P2's interactive engine can build the SAME world without
 // this module's per-turn channel semantics. bot-world imports back LAZILY —
 // see its CYCLE NOTE.
-import { buildBotWorld, prepareSpawn, bindWorldSession, withServiceBlocks } from "./bot-world.mjs";
+import { buildBotWorld, prepareSpawn, bindWorldSession, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
 import { expandServiceEntry, turnScopeFor } from "./service-blocks.mjs";
+import { expandSatelliteEntry } from "./satellite-blocks.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath, botsProjectsRoot } from "./instance-paths.mjs";
 import { botWorkspaceEnv, BOT_WORKSPACE_KEYS, BOT_ID_RE } from "./bot-workspace-env.mjs";
@@ -306,14 +307,20 @@ export function filterSpawnEnv(def) { return filterSpawnEnvWithReport(def).spawn
 
 export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
-export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null, serviceSkippedTools = [] } = {}) {
+export function toolAllowlist(def, { remoteEnabled = false, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null } = {}) {
   const builtin = (def.tools && def.tools.pi_builtin) || [];
   // Project services (Task 18): an entry naming a connected service that got labelled blocks for
   // this turn (service-blocks.mjs) becomes one name per block (`github/get_me` ->
   // `mcp__github-work__get_me`, `mcp__github-personal__get_me`), minus the over-long ones. With no
   // blocks (every channel turn, every non-owner turn) the spelling is today's, byte for byte.
+  // Satellite-hosted bundles (SAT-7 part B) are spelled from their own block the same way
+  // (satellite-blocks.mjs expandSatelliteEntry): pi-lab registers one `mcp__<block>__<tool>` per
+  // tool of a {url} block, and the block is what carries the grant. With no block (a revoked
+  // satellite, file-mode delivery, an ungranted bundle) the entry keeps today's spelling.
   const mcp = ((def.tools && def.tools.crow_mcp) || []).flatMap((s) =>
-    expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools }) || ["mcp__" + s.replace("/", "__")]);
+    expandServiceEntry(s, { serviceBlocks, skippedTools: serviceSkippedTools })
+    || expandSatelliteEntry(s, { satelliteBlocks })
+    || ["mcp__" + s.replace("/", "__")]);
   const out = [...builtin, ...mcp];
   if (remoteEnabled) {
     // Server-level allow per remote capability (= all that capability's tools;
@@ -357,7 +364,7 @@ export function canonicalToolOrder(csv) {
  * which feed PI_BOT_PERMISSION_POLICY.
  * @returns {{csv: string, maOptIn: boolean, maCapable: boolean}}
  */
-export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [] } = {}) {
+export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactive = false, narrowedTools = null, serviceBlocks = null, serviceSkippedTools = [], satelliteBlocks = null } = {}) {
   const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
   const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
   // Belt (R7 — pi `--tools` provably filters extension-registered tools
@@ -365,7 +372,7 @@ export function buildToolsCsv(def, { resolved, remoteEnabled = false, interactiv
   // custom tools"). Only expose `subagent` to the model when capable+
   // opted-in; otherwise pi never offers it. The gate is the backstop if a
   // hand DB-edit bypasses this.
-  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled, serviceBlocks, serviceSkippedTools }));
+  let tools = canonicalToolOrder(toolAllowlist(def, { remoteEnabled, serviceBlocks, serviceSkippedTools, satelliteBlocks }));
   if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
   // PL-3 completion, same belt as subagent above. pi-lab's ask-user
   // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1
@@ -536,6 +543,7 @@ export class PiRpc {
       narrowedTools: opts.narrowedTools,
       serviceBlocks: opts.serviceBlocks || null,
       serviceSkippedTools: opts.serviceSkippedTools || [],
+      satelliteBlocks: opts.satelliteBlocks || null,
     });
     // Wave 2: the FINAL csv, exposed so the interactive engine's Session-tab
     // facts can report the tool count the child was actually pinned with
@@ -1540,6 +1548,14 @@ export async function handleInbound(opts) {
       principal: jobRow ? jobRow.principal : null, workerPid: jobRow ? jobRow.worker_pid : null,
     });
     await withServiceBlocks(world, spawnPrep, { scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn, notClaimer: !!turn.notClaimer, log });
+    // Satellite tools (SAT-7 part B): a granted satellite bundle's block, on the owner's own turn
+    // or on any turn when the owner opted this bot in (Q2). The mount re-checks both; here it only
+    // decides what to offer. A channel turn on a key-less host gets no signature and so no block
+    // (the signing relay signs a scope kind for an owner job only), which the seam logs.
+    await withSatelliteBlocks(world, spawnPrep, {
+      scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn, notClaimer: !!turn.notClaimer, log,
+      actor: { botId: bot_id, threadId: gateway_thread_id, gatewayType: gateway_type, jobId: opts.job_id || null },
+    });
   }
 
   // Strand 2: a model that cannot take this bot's tool surface fails every
@@ -1555,6 +1571,7 @@ export async function handleInbound(opts) {
       narrowedTools: po.narrowedTools,
       serviceBlocks: po.serviceBlocks || null,
       serviceSkippedTools: po.serviceSkippedTools || [],
+      satelliteBlocks: po.satelliteBlocks || null,
     });
     const budget = checkToolBudget(csv, capFor(resolved));
     if (!budget.ok) {
