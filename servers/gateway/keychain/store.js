@@ -91,7 +91,14 @@ export async function ensureWriteKey(db, { crowHome, onNewKey } = {}) {
   return key;
 }
 
-export async function saveExtensionSecret(db, key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now }) {
+/** Keychain "bundle ids" that belong to Crow itself, never to an add-on: the off-site backup key
+ *  (servers/shared/crow-vault.js OFFSITE_KEY). An add-on installed under such an id must not be able
+ *  to overwrite the entry or be handed it, so every add-on path skips or refuses these ids. */
+export const SYSTEM_BUNDLE_IDS = Object.freeze(new Set(["offsite-backup"]));
+export const isSystemBundleId = (id) => SYSTEM_BUNDLE_IDS.has(String(id));
+
+export async function saveExtensionSecret(db, key, { bundleId, envKey, label, username = null, url = null, secret, origin, firstView = false, now, systemOwner = false }) {
+  if (isSystemBundleId(bundleId) && systemOwner !== true) throw new Error("keychain: that id is reserved for Crow itself");
   await ensureKeychainTable(db);
   requireKey(key);
   if (!bundleId || !envKey || typeof secret !== "string" || secret === "") throw new Error("keychain: bundleId, envKey and a secret are required");
@@ -378,7 +385,9 @@ export async function importEntries(db, key, entries) {
       if (!e.bundle_id || !e.env_key) { skipped++; continue; }
       if (current.some((c) => c.kind === "extension" && c.bundle_id === e.bundle_id && c.env_key === e.env_key && c.readable)) { skipped++; continue; }
       const origin = e.origin === "generated" ? "generated" : "typed";
-      const { id } = await saveExtensionSecret(db, key, { bundleId: e.bundle_id, envKey: e.env_key, label: e.label, username: e.username, url: e.url, secret: e.secret, origin });
+      // The owner's re-authenticated import of their own export is the recovery path, so it may
+      // bring back a Crow-owned entry (the off-site key); add-on paths never may.
+      const { id } = await saveExtensionSecret(db, key, { bundleId: e.bundle_id, envKey: e.env_key, label: e.label, username: e.username, url: e.url, secret: e.secret, origin, systemOwner: isSystemBundleId(e.bundle_id) });
       if (e.status === "extension_removed") await db.execute({ sql: "UPDATE crow_keychain SET status = 'extension_removed' WHERE id = ?", args: [id] });
       ids.push(id);
       imported++;

@@ -18,8 +18,8 @@ const v = (a, scope) => ({ kind: a.kind, botId: a.botId, scope, threadId: a.thre
 
 beforeEach(() => { _resetActorKeyForTest(); _resetPresignedForTest(); });
 
-test("the scope kinds are exactly ['service'], frozen", () => {
-  assert.deepEqual([...SCOPE_ACTOR_KINDS], ["service"]);
+test("the scope kinds are exactly ['service', 'satellite-tools'], frozen", () => {
+  assert.deepEqual([...SCOPE_ACTOR_KINDS], ["service", "satellite-tools"]);
   assert.ok(Object.isFrozen(SCOPE_ACTOR_KINDS));
 });
 

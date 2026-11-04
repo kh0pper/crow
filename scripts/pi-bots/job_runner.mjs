@@ -42,7 +42,7 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { hasActorKey, presignActors } from "./actor-sig.mjs";
-import { withSkillTools, botGrantsServer, withServiceBlocks } from "./bot-world.mjs";
+import { withSkillTools, botGrantsServer, withServiceBlocks, withSatelliteBlocks } from "./bot-world.mjs";
 import { crowDefaultsBlock, readWritingRules } from "./crow-defaults.mjs";
 import { turnScopeFor } from "./service-blocks.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
@@ -407,11 +407,18 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
     const svcPrep = { piRpcOpts: { def, mcpConfig, mcpDelivery } };
     {
       const turn = turnScopeFor({ gatewayType: "job", jobId: job.job_id, principal: job.principal ?? null, workerPid: job.worker_pid ?? null });
+      const jobWorld = { def, crowHome, projectId: bot.project_id == null ? null : Number(bot.project_id), bot, gatewayType: "job", mcpDelivery, mcpConfig };
       await withServiceBlocks(
-        { def, crowHome, projectId: bot.project_id == null ? null : Number(bot.project_id), bot, gatewayType: "job", mcpDelivery, mcpConfig },
+        jobWorld,
         svcPrep,
         { scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn, notClaimer: !!turn.notClaimer, log, actor: { ...jobActor(job), jobId: job.job_id } },
       );
+      // Satellite tools (SAT-7 part B): a granted satellite bundle's block, for an owner job
+      // (or for any job of a bot the owner opted in, Q2). The relay signs this kind only for an
+      // owner job this process claimed (helper spec §4.4), so a cron job gets no block at all and
+      // the seam logs why.
+      await withSatelliteBlocks(jobWorld, svcPrep,
+        { scopeRef: turn.scopeRef, ownerTurn: turn.ownerTurn, notClaimer: !!turn.notClaimer, log, actor: { ...jobActor(job), jobId: job.job_id } });
       mcpConfig = svcPrep.piRpcOpts.mcpConfig;
     }
     // S6-CROW: a project bot's background job reads its project workspace,
@@ -444,6 +451,7 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
       projectWorkspaceDir, mcpDelivery, mcpConfig, botId: job.bot_id,
       serviceBlocks: svcPrep.piRpcOpts.serviceBlocks || null,
       serviceSkippedTools: svcPrep.piRpcOpts.serviceSkippedTools || [],
+      satelliteBlocks: svcPrep.piRpcOpts.satelliteBlocks || null,
     });
     try {
       const st0 = await pi.getState().catch(() => null);

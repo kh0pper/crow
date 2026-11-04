@@ -18,6 +18,8 @@ import { createBlogServer } from "../../blog/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { sortedServers, sortedByName } from "../../shared/stable-order.js";
 import { connectedServers } from "../proxy.js";
+import { callerContext } from "../caller-context.js";
+import { localFirst, satelliteVisible } from "../satellites/tool-entry.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
 import { isVoiceBotId } from "../../shared/voice-bot.js";
@@ -234,6 +236,18 @@ export function createToolExecutor(opts = {}) {
   // the owner's dashboard chat. Every other executor (voice, one-shot, a bound bot) leaves it NULL.
   const jobPrincipal = opts.principal === "owner" ? "owner" : null;
   const remote = opts.remote || null; // cross-instance voice routing (null = off)
+  // The owner's own session is the ONLY executor that may reach a satellite's tools (spec §9.2):
+  // every other caller (voice, one-shot, a bound bot, a peer-relayed task) runs with NO caller
+  // store, and the satellite wrapper refuses it before any network work. Passing null (rather
+  // than not running at all) also stops an ambient store from being inherited.
+  // `ownerSession` (the dashboard chat on a local password session) selects the store WITHOUT
+  // touching jobPrincipal: whether a delegated job counts as the owner's turn stays the services
+  // rule above. A peer-relayed task gets an explicit peer store, so every listing hides satellites.
+  const callerStore = (opts.principal === "owner" || opts.ownerSession === true)
+    ? { caller: "owner-local", peer: false, crossHost: false, botId: null }
+    : opts.peerActor === true
+      ? { caller: null, peer: true, crossHost: false, botId: null }
+      : null;
   // Who is calling: taken ONLY from the bound bot (never from tool arguments or model output).
   // Unbound executors (the operator's own chat) send no _meta at all.
   // A paired instance's task (bot relay, one-shot) runs as that peer: every tool call says so,
@@ -274,6 +288,10 @@ export function createToolExecutor(opts = {}) {
    * Returns { result: string, isError: boolean }.
    */
   async function executeTool(name, args) {
+    return callerContext.run(callerStore, () => executeToolInner(name, args));
+  }
+
+  async function executeToolInner(name, args) {
     try {
       // Project services first: an mcp__<block>__<tool> name belongs to the conversation's
       // pinned project's connections and to nothing else. A route without a caller is a
@@ -359,8 +377,9 @@ export function createToolExecutor(opts = {}) {
 
       // Direct addon tool call (e.g., "crow_tax_prepare_from_documents")
       if (connectedServers) {
-        for (const [integrationId, entry] of connectedServers) {
+        for (const [integrationId, entry] of localFirst(connectedServers)) {
           if (entry.status !== "connected" || !entry.client) continue;
+          if (!satelliteVisible(entry)) continue; // a peer never reaches a satellite's tools
           const hasTool = entry.tools?.some((t) => t.name === name);
           if (hasTool) {
             try {
@@ -567,6 +586,7 @@ export function createToolExecutor(opts = {}) {
       // Include addon servers as discoverable categories
       if (connectedServers) {
         for (const [id, entry] of connectedServers) {
+          if (!satelliteVisible(entry)) continue;
           if (entry.status === "connected" && entry.tools?.length) {
             lines.push(`  tools/${id} (${entry.tools.length} tools): Installed extension`);
           }
@@ -583,6 +603,7 @@ export function createToolExecutor(opts = {}) {
         // Get schema for a specific addon tool
         for (const [id, entry] of connectedServers) {
           if (entry.status !== "connected" || !entry.client) continue;
+          if (!satelliteVisible(entry)) continue;
           const tool = entry.tools?.find((t) => t.name === action);
           if (tool) {
             return {
@@ -598,6 +619,7 @@ export function createToolExecutor(opts = {}) {
       const lines = [];
       for (const [id, entry] of connectedServers) {
         if (entry.status !== "connected") continue;
+        if (!satelliteVisible(entry)) continue;
         if (addonId && id !== addonId) continue;
         lines.push(`[${id}] (${entry.tools?.length || 0} tools):`);
         for (const t of entry.tools || []) {
@@ -655,8 +677,9 @@ export function createToolExecutor(opts = {}) {
     // Normalize params from the formats weaker models produce (shared with the voice confirm gate).
     const { params } = normalizeExternalParams(args);
 
-    for (const [integrationId, entry] of connectedServers) {
+    for (const [integrationId, entry] of localFirst(connectedServers)) {
       if (entry.status !== "connected" || !entry.client) continue;
+      if (!satelliteVisible(entry)) continue; // a peer never reaches a satellite's tools
       const hasTool = entry.tools.some((t) => t.name === action);
       if (hasTool) {
         try {
@@ -668,7 +691,7 @@ export function createToolExecutor(opts = {}) {
       }
     }
 
-    return { result: `Tool "${action}" not found in any connected extension. Available: ${[...connectedServers.entries()].filter(([,e]) => e.status === "connected").map(([id, e]) => `${id}(${e.tools?.length || 0})`).join(", ")}`, isError: true };
+    return { result: `Tool "${action}" not found in any connected extension. Available: ${[...connectedServers.entries()].filter(([,e]) => e.status === "connected" && satelliteVisible(e)).map(([id, e]) => `${id}(${e.tools?.length || 0})`).join(", ")}`, isError: true };
   }
 
   /**
@@ -825,9 +848,12 @@ function walkSchemaNode(node) {
  *
  * @param {object} [opts]
  * @param {object} [opts.botDef] - bound bot definition (pi_bot_defs.definition)
+ * @param {boolean} [opts.peer] - this turn is a paired peer's, so satellite-hosted tools are
+ *                                never advertised (spec §9.2)
  */
 export function getChatTools(opts = {}) {
   const scope = botVoiceScope(opts.botDef);   // null ⇒ unbound, no scoping
+  const peerTurn = opts.peer === true;
   const tools = [];
 
   for (const [category, manifest] of Object.entries(TOOL_MANIFESTS)) {
@@ -990,6 +1016,7 @@ export function getChatTools(opts = {}) {
     // to the same bytes on every boot.
     for (const [id, entry] of sortedServers(connectedServers)) {
       if (entry.status !== "connected" || !entry.tools?.length) continue;
+      if (peerTurn && entry.isSatellite) continue; // a peer never sees a satellite's tools
       const toolNames = [];
 
       for (const tool of sortedByName(entry.tools)) {

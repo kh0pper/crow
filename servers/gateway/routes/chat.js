@@ -684,7 +684,15 @@ export default function chatRouter(dashboardAuth) {
       // mid-thread cannot move the tools; a legacy row with NULL project_id gets none.
       const serviceScope = await chatServiceScope(db, req, conversation, { lang, crowHome });
       serviceTools = serviceScope.tools;
-      const execOpts = chatExecutorOptions(serviceScope);
+      // The satellite owner paths (spec §9.2): this route is the owner's own dashboard chat, so
+      // its tool calls say "owner-local" — but only for a local password session (a peer-SSO
+      // session or a request from this machine itself is not the owner's turn). Anything else
+      // keeps no caller store, and the satellite wrapper refuses those tools before any network
+      // work.
+      let ownerTurn = false;
+      try { ownerTurn = (await isLocalPasswordSessionOn(db, req)) === true; } catch { ownerTurn = false; }
+      // ownerSession sets only the caller store; the job principal stays chatExecutorOptions' rule.
+      const execOpts = { ...chatExecutorOptions(serviceScope), ...(ownerTurn ? { ownerSession: true } : {}) };
       toolExecutor = createToolExecutor(execOpts.serviceRoute
         ? {
             ...execOpts,
@@ -692,7 +700,7 @@ export default function chatRouter(dashboardAuth) {
               crowHome, lang, signal: abortController.signal,
             }),
           }
-        : {});
+        : execOpts);
 
       // Save user message
       const { content, attachments, model: bodyModel, provider: bodyProvider } = req.body || {};

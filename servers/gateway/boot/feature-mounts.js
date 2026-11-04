@@ -370,6 +370,22 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[roles-api] Failed to mount:", err.message);
   }
 
+  // --- Mount Satellites API (Satellite Crow SAT-1) ---
+  // Owner only on every route (JSON session gate + local password session; never a signed
+  // peer, an instance-authenticated request or a peer-SSO session), CSRF on every POST.
+  // Never Funnel-public.
+  try {
+    const { default: satellitesRouter } = await import("../routes/satellites.js");
+    app.use(satellitesRouter());
+    console.log("Satellites API mounted at /api/satellites");
+    // SAT-5: status poller (60 s) and daily cert renewal, in-process and unref'd; each tick is
+    // one SELECT when nothing is paired. CROW_SATELLITE_TIMERS=0 turns them off.
+    const { startSatelliteTimers } = await import("../satellites/runtime.js");
+    startSatelliteTimers();
+  } catch (err) {
+    console.warn("[satellites] Failed to mount:", err.message);
+  }
+
   // --- Mount Turbo Streams (server-pushed HTML fragments) ---
   // Private routes under /dashboard/streams/*; the Funnel-reject
   // middleware above blocks public access. See routes/streams.js for the

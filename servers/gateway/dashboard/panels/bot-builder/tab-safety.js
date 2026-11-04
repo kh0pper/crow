@@ -5,9 +5,12 @@ import { escapeHtml, actionBar } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { segGroup, card } from "./ui.js";
 import { confirmView } from "./def-adapter.js";
-import { selectedWriteTools, loadSources, sourceDisplay } from "./sources.js";
+import { selectedWriteTools, loadSources, sourceDisplay, satelliteReadMarks, satelliteMarksFrom } from "./sources.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
+import { getManifest } from "../../../bundles-config.js";
 import { sourceLabel } from "./tool-access.js";
+import { installPaths, satelliteInstalls } from "../../../satellites/installs.js";
+import { getBotOptin } from "../../../satellites/store.js";
 
 export async function renderSafety(ctx) {
   const { db, def, lang, hidden } = ctx;
@@ -42,6 +45,10 @@ export async function renderSafety(ctx) {
     `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>`);
 
   const crowHome = ctx.crowHome || resolveCrowHome();
+  // Satellite-hosted bundles (SAT-7 part B): the per-bot "also on other people's turns" opt-in,
+  // shown only when a satellite bundle is installed. Grants themselves live on Abilities (one row
+  // per source) and are never auto-granted; this switch only widens WHEN a granted tool may run.
+  const satCard = await satelliteOptinCard({ db, botId: ctx.botId, lang, crowHome });
   // One probe for this page: the same sources the tool names and their labels come from.
   let sources = null;
   try { sources = (await loadSources({ db, projectId: def.project_id ?? null, crowHome })).sources; } catch { sources = null; }
@@ -50,7 +57,13 @@ export async function renderSafety(ctx) {
     catalog = {};
     for (const src of sources) if (src.ok) catalog[src.server] = src.catalog;
   }
-  const tools = selectedWriteTools(def, catalog);
+  // A satellite-hosted bundle's tools are write-class whatever their names say (SAT-7 §9.1), so a
+  // granted one stays on this list even when its source did not load at all.
+  let satMarks = null;
+  try {
+    satMarks = sources ? satelliteMarksFrom(sources, crowHome) : await satelliteReadMarks(db, crowHome);
+  } catch { satMarks = satelliteMarksFrom([], crowHome); }
+  const tools = selectedWriteTools(def, catalog, satMarks);
   const srcLabel = new Map((sources || []).map((src) => [src.server, src]));
   const view = confirmView(pp.confirm, tools);
   const checked = new Set(view.checked);
@@ -71,7 +84,50 @@ export async function renderSafety(ctx) {
     t("botbuilder.sfConfirmLead", lang));
 
   return `<form method="POST" class="btb-form" id="btb-safety-form">${hidden("safety")}` +
-    email + folders + ask +
+    email + folders + satCard + ask +
     `<p class="btb-hint">${t("botbuilder.hintPermEnforced", lang)}</p>` +
     actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.sfSave", lang))}</button>`) + `</form>`;
+}
+
+/**
+ * The satellite opt-in card, or "" when this Crow hosts no satellite bundle. The warning is
+ * rendered hidden and revealed by a tiny inline script when the box is on (and on load when it
+ * starts checked): client code never builds text, it only un-hides the paragraph rendered here.
+ * Its wording names the INSTALLED bundles (their manifest display name, falling back to the id),
+ * never a fixed one. Nothing here is appended after the card except the script, so the copy is
+ * rendered server-side only.
+ */
+async function satelliteOptinCard({ db, botId, lang, crowHome }) {
+  let installed = [];
+  try { installed = satelliteInstalls(installPaths(crowHome)); } catch { installed = []; }
+  if (!installed.length) return "";
+  let on = false;
+  try { on = await getBotOptin(db, botId); } catch { on = false; }
+  const warnId = "sf-sat-warn";
+  const warning = fill(t("botbuilder.sfSatAnyTurnWarn", lang), { bundles: bundleNamesList(installed.map((r) => bundleDisplayName(r.id)), lang) });
+  const body = `<div class="btb-check-list"><label class="btb-check-row">` +
+      `<input type="checkbox" name="sat_any_turn" value="on" id="sf-sat-any" data-warn="${warnId}"${on ? " checked" : ""}> ` +
+      `<span>${escapeHtml(t("botbuilder.sfSatAnyTurn", lang))}</span></label></div>` +
+    `<p class="btb-hint btb-warn" id="${warnId}"${on ? "" : " hidden"}>${escapeHtml(warning)}</p>` +
+    `<input type="hidden" name="sat_any_turn_rendered" value="1">`;
+  const script = `<script>(function(){var b=document.getElementById('sf-sat-any');if(!b)return;function u(){` +
+    `var w=document.getElementById(b.getAttribute('data-warn'));if(w)w.hidden=!b.checked;}b.addEventListener('change',u);u();})();</script>`;
+  return card(t("botbuilder.sfSatTitle", lang), body, t("botbuilder.sfSatLead", lang)) + script;
+}
+
+/** A satellite bundle's display name: its manifest's `name` (the app checkout's copy), else the id. */
+function bundleDisplayName(id) {
+  try {
+    const m = getManifest(id);
+    if (m && typeof m.name === "string" && m.name.trim()) return m.name.trim();
+  } catch { /* not in this checkout: the id is still true */ }
+  return String(id);
+}
+
+/** "A", "A and B", "A, B and C" (Spanish: "y") — the reader's own list, never a comma-only join. */
+function bundleNamesList(names, lang) {
+  const list = names.filter((n) => typeof n === "string" && n);
+  if (!list.length) return "";
+  if (list.length === 1) return list[0];
+  return list.slice(0, -1).join(", ") + (lang === "es" ? " y " : " and ") + list[list.length - 1];
 }

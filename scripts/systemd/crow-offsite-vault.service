@@ -1,0 +1,32 @@
+# TEMPLATE — not installed and not enabled by this repository. Deploy enables it after the owner
+# has a keychain export that holds the off-site backup key (spec §12.1, §12.3). See
+# docs/guide/satellites.md. Drop it in ~/.config/systemd/user/ as a user unit together with
+# crow-offsite-vault.timer; %h is the operator's home, so no path has to be filled in.
+[Unit]
+Description=Crow off-site backup upload (encrypted crow.db → satellite vault)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/crow
+Environment=CROW_HOME=%h/.crow
+ExecStart=/usr/bin/env node %h/crow/scripts/offsite-run.mjs upload
+# The nightly backup is written at 02:30 and may be over 100 MB to encrypt and send.
+TimeoutStartSec=3600
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+# Files this job creates are private (the encrypted copy in the temp dir, the keychain entry it may
+# generate), the temp dir is its own (so the scratch copy of the database is never visible to
+# another user), and the tree is read-only except the two places the job must write: the Crow home
+# (crow.db's settings rows, secrets/, the generated off-site key) and the nightly backup directory
+# it reads. PrivateTmp gives the scratch directory a private, writable /tmp; nothing else on disk is
+# writable, so a bug in the job cannot rewrite the code it runs from.
+UMask=0077
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.crow
+ReadOnlyPaths=-%h/backups/crow

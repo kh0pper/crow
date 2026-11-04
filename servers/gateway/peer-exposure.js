@@ -65,6 +65,9 @@ function resolveProxyTool(toolName, connectedServers) {
   let found = null;
   for (const [id, entry] of connectedServers) {
     if (!entry || entry.isRemote) continue;
+    // A satellite-hosted bundle is NEVER remotable (spec §9.2): not resolvable, so it can never
+    // be in remote_exposed_tools effectively, whatever the setting says.
+    if (entry.isSatellite) continue;
     if (Array.isArray(entry.tools) && entry.tools.some((t) => t && t.name === toolName)) {
       if (found !== null) return null; // ambiguous
       found = id; // addon entries are keyed by their canonical id (proxy.js)

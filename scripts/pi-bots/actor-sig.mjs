@@ -63,7 +63,8 @@
  *    this.
  *  - a child replaying its OWN headers (that is its own identity).
  *
- * The second key: scope-bound (v3) kinds (SCOPE_ACTOR_KINDS, "service"),
+ * The second key: scope-bound (v3) kinds (SCOPE_ACTOR_KINDS, "service" and
+ * "satellite-tools"),
  * the loopback MCP mount helper, below. initGatewayActorKey also mints a
  * separate per-boot `scopeKey`, which it never returns: the stdin hand-off
  * carries only the v1/v2 key, and setActorKey installs only that one. So the
@@ -254,8 +255,11 @@ export function verifySessionActorSig({ sig, ...actor } = {}) {
 // carries (X-Crow-Actor-Scope) and resolves it itself (signed-session.js
 // resolveSignedScope): the job still running, the session still live.
 
-/** The kinds signed over the scope-bound (v3) tuple. Closed set, like v2. */
-export const SCOPE_ACTOR_KINDS = Object.freeze(["service"]);
+/** The kinds signed over the scope-bound (v3) tuple. Closed set, like v2.
+ *  "service" = a bot reaching the owner's connected accounts (/services-tools).
+ *  "satellite-tools" = a bot reaching a satellite-hosted bundle (/satellite-tools/<sat>/<bundle>;
+ *  SAT-7). Named apart from a future satellite-originated kind so the two can never be confused. */
+export const SCOPE_ACTOR_KINDS = Object.freeze(["service", "satellite-tools"]);
 
 // bot_jobs.job_id as the generators mint it ("job-<base36>-<base36>"), with
 // room for other safe ids; bounded so the scope header stays small. A job id

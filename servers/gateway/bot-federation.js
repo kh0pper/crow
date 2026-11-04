@@ -9,6 +9,7 @@
  *   (incl. every gateway credential) throws. Enforced regardless of what the
  *   remote UI sends.
  */
+import { keepSatelliteGrants } from "./satellites/grants.js";
 import { guardPolicyForPeer } from "./dashboard/panels/bot-builder/policy-guard.js";
 import { isValidReadPath, parseReadPathsInput } from "../../scripts/pi-bots/bot-read-paths.mjs";
 
@@ -115,6 +116,9 @@ export function applyPeerPatch(currentDef, patch) {
     }
     setByPath(out, path, value);
   }
+  // A signed peer never changes a bot's satellite-bundle grants or their "ask first" entries
+  // (spec §9.2: peers never reach satellite tools); those parts stay as the owner left them.
+  keepSatelliteGrants(out, currentDef || {});
   // S6-CROW: read folders get the same validation as the Bot Builder save —
   // checked on the MERGED result, so a deeper key (permission_policy.read_paths.0)
   // cannot slip an unvalidated element in.

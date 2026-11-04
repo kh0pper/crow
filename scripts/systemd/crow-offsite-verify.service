@@ -1,0 +1,28 @@
+# TEMPLATE — not installed and not enabled by this repository. Deploy enables it after the
+# off-site upload has run at least once. See docs/guide/satellites.md.
+[Unit]
+Description=Crow off-site backup check (download, decrypt, integrity_check, memory count)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/crow
+Environment=CROW_HOME=%h/.crow
+ExecStart=/usr/bin/env node %h/crow/scripts/offsite-run.mjs verify
+# Downloading and decrypting one 100 MB vault file.
+TimeoutStartSec=3600
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+# This job decrypts the backup, so its scratch dir holds a plaintext crow.db: private temp dir,
+# umask 0077, and a read-only tree except the two places it must write — the Crow home (the status
+# rows and the settings it records) and the nightly backup directory it reads. A killed run's
+# scratch is swept by the next one (satellites/offsite.js), and SIGTERM removes its own.
+UMask=0077
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.crow
+ReadOnlyPaths=-%h/backups/crow

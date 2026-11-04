@@ -73,11 +73,22 @@ function tokens(name) {
  * The rule with its reason kept: "write" when a rule says the tool changes
  * things, "read" when only lookup words match, "unknown" when nothing
  * matches (classifyTool counts that as write).
+ *
+ * `opts.isSatellite` (SAT-7, spec §9.1): a satellite-hosted bundle chooses its own tool names, so
+ * the name rule can say nothing about it. Every such tool is WRITE unless the owner marked that
+ * exact tool read against the pinned list (satellite_tool_pins.read_marks_json).
  * @param {{name?:string, readOnlyHint?:boolean, destructiveHint?:boolean}} tool
+ * @param {{isSatellite?:boolean, readMarks?:Iterable<string>}} [opts]
  * @returns {"read"|"write"|"unknown"}
  */
-export function classifyToolDetail(tool) {
+export function classifyToolDetail(tool, opts = {}) {
   const t = tool || {};
+  if (opts && opts.isSatellite === true) {
+    const name = String(t.name || "");
+    if (!name) return "write";
+    const marks = opts.readMarks instanceof Set ? opts.readMarks : new Set(Array.isArray(opts.readMarks) ? opts.readMarks : []);
+    return marks.has(name) ? "read" : "write";
+  }
   // MCP annotations are untrusted hints from the server: they may only
   // NARROW. A server can mark a tool as changing things; it can never turn a
   // tool the name rule calls "changes things" (or does not recognise) into a
@@ -93,8 +104,10 @@ export function classifyToolDetail(tool) {
 
 /**
  * @param {{name?:string, readOnlyHint?:boolean, destructiveHint?:boolean}} tool
+ * @param {{isSatellite?:boolean, readMarks?:Iterable<string>}} [opts] - a satellite source is
+ *   write for every tool unless the owner marked that tool read (see classifyToolDetail)
  * @returns {"read"|"write"} a name the rule does not recognise is "write"
  */
-export function classifyTool(tool) {
-  return classifyToolDetail(tool) === "read" ? "read" : "write";
+export function classifyTool(tool, opts) {
+  return classifyToolDetail(tool, opts) === "read" ? "read" : "write";
 }

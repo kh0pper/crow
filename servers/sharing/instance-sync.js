@@ -149,10 +149,12 @@ export const SYNCED_TABLES = [
 // the voice hand-off log, which holds the operator's verbatim speech and stays on the instance
 // that heard it; service_connections: a project's connected accounts, whose secrets live in the
 // local-only keychain; staged_sends: a draft staged for the operator's yes, which holds the
-// recipients and the body). The keychain has its own key file, but its rows are still never
+// recipients and the body; satellites and their revocations, tool pins and bot opt-ins: this
+// instance's own paired boxes). The keychain has its own key file, but its rows are still never
 // replicated. Checked at load.
 export const LOCAL_ONLY_TABLES = Object.freeze([
   "crow_keychain", "voice_handoffs", "service_connections", "staged_sends",
+  "satellites", "satellite_revocations", "satellite_tool_pins", "satellite_bot_optins",
 ]);
 export function assertLocalOnlyDisjoint(synced, localOnly) {
   for (const t of localOnly) {

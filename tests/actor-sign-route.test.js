@@ -356,8 +356,7 @@ test("service: the two job 403 messages stay distinct", async () => {
 });
 
 // Adversarial review M3: a job/board-gateway session is signed only with a job this host claimed.
-test("a board-gateway session is signed only for a job this host claimed", async () => {
-  const CARD = { botId: "hank", sessionId: SESS.card, threadId: "board-card-5", gatewayType: "board" };
+test("a board-gateway session is signed only for a job this host claimed", async () => {  const CARD = { botId: "hank", sessionId: SESS.card, threadId: "board-card-5", gatewayType: "board" };
   let r = await ask({ ...CARD, kinds: ["peer-relay"] });
   assert.equal(r.status, 403, "no job: " + r.text);
   r = await ask({ ...CARD, jobId: "job-elsewhere-1", kinds: ["peer-relay"] });
@@ -365,6 +364,25 @@ test("a board-gateway session is signed only for a job this host claimed", async
   r = await ask({ ...CARD, jobId: "job-run-1", kinds: ["peer-relay", "board"] });
   assert.equal(r.status, 200, "its own claimed job: " + r.text);
   assert.equal(verifyPeerRelayActorSig({ ...CARD, sig: r.json.sigs["peer-relay"] }), true);
+});
+
+// SAT-7 part B: 'satellite-tools' is a second scope kind, and the relay treats it exactly as
+// 'service' (helper spec §4.4: only an owner job this host claimed; never an s: scope).
+test("satellite-tools: an owner job this host claimed gets a v3 sig; a NULL-principal job and a session turn do not", async () => {
+  let r = await ask({ ...OWNJOB, kinds: ["satellite-tools"] });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(Object.keys(r.json.sigs), ["satellite-tools"]);
+  assert.equal(verifyScopeActorSig({ kind: "satellite-tools", botId: "hank", scope: `j:job-own-1@${process.pid}`, threadId: OWNJOB.threadId, gatewayType: "job", sig: r.json.sigs["satellite-tools"] }), true);
+  // A cron job (principal NULL) is not the owner's: 403, and no partial signatures.
+  const cron = { botId: "hank", threadId: "job-job-run-1", gatewayType: "job", jobId: "job-run-1" };
+  r = await ask({ ...cron, kinds: ["bot", "satellite-tools"] });
+  assert.equal(r.status, 403, r.text);
+  assert.equal(r.json?.sigs, undefined);
+  assert.equal((await ask({ ...cron, kinds: ["bot"] })).status, 200, "control: the cron job still gets its v1 kinds");
+  // A session turn (Gmail, Discord, any s:) never gets a scope kind through the relay.
+  r = await ask({ ...LIVE(), kinds: ["satellite-tools"] });
+  assert.equal(r.status, 403, r.text);
+  assert.equal(r.json?.sigs, undefined);
 });
 
 // Step 7 for a scope kind: a process that holds only the v1/v2 key (setActorKey,

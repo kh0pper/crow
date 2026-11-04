@@ -27,7 +27,7 @@ import { worldRootFor, planCarryOver, applyCarryOver, undoCarryOver } from "../.
 import { rowRev } from "./def-adapter.js";
 import { changeTracker } from "./ui.js";
 import { applyTrackerChoice, applyShowCards, trackerIsCustom } from "./tracker-choice.js";
-import { saveBasics, saveAbilities, saveSafety, saveAdvanced } from "./save-handlers.js";
+import { saveBasics, saveAbilities, saveSafety, saveAdvanced, applySatelliteOptin } from "./save-handlers.js";
 import { guardPolicyForSave } from "./policy-guard.js";
 import { isVoiceBotId } from "../../../../shared/voice-bot.js";
 import { handleVoiceBotSave, handleVoiceBotPreset } from "./voice-bot-editor.js";
@@ -65,6 +65,10 @@ function reqLang(req) {
 // consumes it without an import cycle); imported for local use AND re-exported
 // for existing importers (a bare `export ... from` creates no local binding).
 import { buildCrowMessagesGatewayConfig } from "./gateway-fields.js";
+import { isLocalPasswordSessionOn } from "../../local-session.js";
+import { keepSatelliteGrants } from "../../../satellites/grants.js";
+export { keepSatelliteGrants };
+
 export { buildCrowMessagesGatewayConfig };
 
 // applyTrackerChoice lives in the leaf ./tracker-choice.js so wizard.js and
@@ -365,10 +369,19 @@ export async function handleBotBuilderPost(req, res, { db }) {
     let columnProjectIdUpdate;  // set (number or null) when the project is saved
     let columnNameUpdate = null;       // set when Basics renames the bot
     let afterWrite = null, afterLabel = ""; // device effects, run only once the write succeeded
+    // F3: the satellite opt-in the Safety save WANTED. It is written only after the definition
+    // update lands (below), so a save refused by the policy guard, a stale-form CAS or a
+    // validation error never switches it on.
+    let satOptin;
     let channelChanged = tab === "gateways";
     // Extra query suffix carried into the post-save redirect (e.g. a soft
     // validation warning for the AI tab). Never blocks the save.
     let extraQ = "";
+    const writeSatOptin = async () => {
+      if (typeof satOptin !== "boolean") return;
+      const r = await applySatelliteOptin({ db, botId, want: satOptin, lang });
+      for (const w of r.warn || []) extraQ += "&warn=" + encodeURIComponent(w);
+    };
 
     if (isNew) {
       // project_id is column-owned; it rides in def only for readers above.
@@ -379,7 +392,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
       let r;
       if (tab === "basics") r = await saveBasics(def, b, sctx);
       else if (tab === "abilities") r = await saveAbilities(def, b, sctx);
-      else if (tab === "safety") r = saveSafety(def, b, sctx);
+      else if (tab === "safety") r = await saveSafety(def, b, sctx);
       else r = await saveAdvanced(def, b, sctx);
       if (r.error) {
         return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` + encodeURIComponent(r.error));
@@ -392,6 +405,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
       for (const w of r.warn || []) extraQ += "&warn=" + encodeURIComponent(w);
       if (r.column && r.column.display_name) columnNameUpdate = r.column.display_name;
       if (r.column && Object.prototype.hasOwnProperty.call(r.column, "project_id")) columnProjectIdUpdate = r.column.project_id;
+      if (Object.prototype.hasOwnProperty.call(r, "satOptin")) satOptin = r.satOptin;
       channelChanged = !!r.channelChanged;
       afterWrite = r.after || null;
       afterLabel = r.afterLabel || "";
@@ -591,6 +605,21 @@ export async function handleBotBuilderPost(req, res, { db }) {
       }
     }
 
+    // Spec §8: no peer-SSO session drives a satellite. EVERY tab save (new and legacy) passes
+    // here: only the owner's own local password session may change a bot's satellite grants or
+    // its "other people's turns" opt-in; any other session's save keeps those parts as they were.
+    {
+      let ownerLocal = false;
+      try { ownerLocal = (await isLocalPasswordSessionOn(db, req)) === true; } catch { ownerLocal = false; }
+      if (!ownerLocal) {
+        let stored = {};
+        try { stored = JSON.parse(row.definition || "{}") || {}; } catch { stored = {}; }
+        const changedGrants = keepSatelliteGrants(def, stored);
+        if (typeof satOptin === "boolean" || changedGrants) extraQ += "&warn=" + encodeURIComponent(t("botbuilder.satOwnerOnly", lang));
+        satOptin = undefined;
+      }
+    }
+
     // One guard for every dashboard write of permission_policy (see policy-guard.js).
     {
       let storedPolicy;
@@ -614,6 +643,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
       };
       if (!defChanged && columnNameUpdate === null && columnProjectIdUpdate === undefined) {
         // the definition did not change (a device voice profile may have)
+        await writeSatOptin();
         await runAfter();
         return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&saved=1${extraQ}`);
       }
@@ -634,6 +664,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` +
           encodeURIComponent(t("botbuilder.staleForm", lang)));
       }
+      await writeSatOptin();
       await runAfter();
     } catch (e) {
       return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${backTab}&error=` + encodeURIComponent(String(e.message || e)));

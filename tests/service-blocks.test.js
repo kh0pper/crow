@@ -179,7 +179,8 @@ const jobActorOf = (jobId) => ({ botId: "hank", jobId, threadId: "job-" + jobId,
 // ---------------------------------------------------------------------------
 
 test("Task 15 pieces this task consumes exist: v3 service kind, scope signing, owner-job-only relay, services token", async () => {
-  assert.deepEqual([...AS.SCOPE_ACTOR_KINDS], ["service"]);
+  // SAT-7 part B appends its own kind; the relay rule is the same one 'service' has.
+  assert.deepEqual([...AS.SCOPE_ACTOR_KINDS], ["service", "satellite-tools"]);
   for (const f of ["signScopeActor", "verifyScopeActorSig", "scopeRefFor", "presignActors"]) assert.equal(typeof AS[f], "function", f);
   const { ACTOR_SIGN_KINDS } = await import("../servers/gateway/routes/actor-sign.js");
   assert.ok(ACTOR_SIGN_KINDS.includes("service"));

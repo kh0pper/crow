@@ -54,11 +54,14 @@ import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { mcpConfigDelivery } from "./mcp-delivery.mjs";
 import { applyServiceBlocks, withServiceBlocks, offerableConnections } from "./service-blocks.mjs";
+import { applySatelliteBlocks, withSatelliteBlocks } from "./satellite-blocks.mjs";
 import { worldRootFor, carriedReadRoots, brokenWorldLink } from "./world-root.mjs";
 import { installedKitDir, readKitThemes, readHouseStyleSync, houseStyleLinks } from "../../servers/shared/design-kit.js";
 
 /** Project services (Task 18): THE seam every rail calls (service-blocks.mjs). */
 export { withServiceBlocks, offerableConnections };
+/** Satellite-hosted bundles on a bot's turns (SAT-7 part B): the same seam shape (satellite-blocks.mjs). */
+export { withSatelliteBlocks };
 
 /** Lazy bridge handle — see the CYCLE NOTE above. */
 function loadBridge() { return import("./bridge.mjs"); }
@@ -260,6 +263,14 @@ async function writeWorldMcp(a, sessionId) {
     const sb = a.serviceBlocks;
     if (mcpConfig && sb && sb.blocks && ((a.jobId != null && sb.scopeRef === scopeRefFor({ jobId: a.jobId })) || (sid != null && sb.scopeRef === "s:" + sid))) {
       mcpConfig = applyServiceBlocks(mcpConfig, sb);
+    }
+    // Satellite tools (SAT-7 part B): the same rebuild rule for the same reason — withSatelliteBlocks
+    // stored this turn's blocks here before the preflight, and a child pinned with tools its config
+    // no longer carries has no satellite tool at all. Only a blocks result whose scope still names
+    // this turn.
+    const satb = a.satelliteBlocks;
+    if (mcpConfig && satb && satb.blocks && ((a.jobId != null && satb.scopeRef === scopeRefFor({ jobId: a.jobId })) || (sid != null && satb.scopeRef === "s:" + sid))) {
+      mcpConfig = applySatelliteBlocks(mcpConfig, satb);
     }
     if (w.warnings.length) a.log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.remoteWarnings && w.remoteWarnings.length) {

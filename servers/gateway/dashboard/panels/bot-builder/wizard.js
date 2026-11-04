@@ -39,6 +39,7 @@ import { engineRequiredFor } from "./engine-gate.js";
 import { applyTrackerChoice } from "./tracker-choice.js";
 import { worldRootFor } from "../../../../../scripts/pi-bots/world-root.mjs";
 import { canManageProject } from "../../../apps/extra-tiles.js";
+import { installPaths, satelliteBundleIds } from "../../../satellites/installs.js";
 
 export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "review"];
 
@@ -443,14 +444,17 @@ export async function handleWizardCreate(req, res, { db, lang }) {
   // probe when the template actually adds tools: probing spawns every MCP
   // server (12s timeout each on a cold cache), and most templates add none.
   let availableMcp = new Set();
+  let satelliteBundles = null;
   if (((tpl.tools || {}).crow_mcp || []).length) {
     try { availableMcp = availableMcpSet(await probeAll()); } catch { availableMcp = new Set(); }
+    // SAT-7 §9.4: a satellite bundle's tools are never auto-granted — the owner ticks them.
+    try { satelliteBundles = satelliteBundleIds(installPaths(resolveCrowHome())); } catch { satelliteBundles = null; }
   }
   let availableSkills = [];
   if ((tpl.skills || []).length) {
     try { availableSkills = loadSkills(resolveCrowHome()); } catch { availableSkills = []; }
   }
-  applyTemplate(def, tpl, { availableMcp, availableSkills });
+  applyTemplate(def, tpl, { availableMcp, availableSkills, satelliteBundles });
 
   if (simpleGateways) {
     def.gateways = simpleGateways;

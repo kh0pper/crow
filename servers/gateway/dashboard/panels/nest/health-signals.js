@@ -1289,6 +1289,7 @@ export async function collectHealthSignals(db, opts = {}) {
     // instead of escaping the array literal (review M8).
     Promise.resolve().then(() => reservationSignal(lang, nowFn)),
     artifactNodeSignal(lang),
+    import("../../../satellites/nest-signals.js").then((m) => m.satellitesSignal(db, lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,

@@ -12,7 +12,7 @@
 import { createDbClient, auditLog } from "../../db.js";
 import { keychainGeneratedKeys, keychainEligibleKeys, expandKeychainTemplate, isReplacedValue } from "../bundle-env-secrets.js";
 import { createNotification } from "../../shared/notifications.js";
-import { saveExtensionSecret, reactivateBundleEntries, hasExtensionEntry, markBundleRemoved, ensureWriteKey, listEntries, openEntrySecret } from "./store.js";
+import { saveExtensionSecret, reactivateBundleEntries, hasExtensionEntry, markBundleRemoved, ensureWriteKey, listEntries, openEntrySecret, isSystemBundleId } from "./store.js";
 import { loadKeychainKey } from "./key.js";
 import { unexportedCount } from "./reminder.js";
 import { readSetting, writeSetting } from "../dashboard/settings/registry.js";
@@ -66,6 +66,8 @@ function templateEnv(manifest, env) {
 export async function recordKeychainForInstall({ bundleId, manifest, env, minted, reusedPlain = {}, keychainReq, log = () => {} }) {
   const d = deps();
   const out = { saved: 0, firstView: [], vault: null, mintedSaved: true };
+  // An add-on under a Crow-owned id (the off-site key's) never reads or writes that entry.
+  if (isSystemBundleId(bundleId)) { log("[keychain] skipped: that bundle id is reserved for Crow itself"); return out; }
   const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
   const eligible = new Set(keychainEligibleKeys(manifest));
   const tEnv = templateEnv(manifest, env);
@@ -181,6 +183,7 @@ export async function recordKeychainForInstall({ bundleId, manifest, env, minted
 export async function keychainRestoreValues(bundleId, manifest) {
   const keys = keychainGeneratedKeys(manifest);
   const out = { values: {}, unreadable: [], failed: false };
+  if (isSystemBundleId(bundleId)) return out; // never hand Crow's own key to an add-on
   if (keys.length === 0) return out;
   let db;
   try {
@@ -219,6 +222,7 @@ export async function keychainRestoreValues(bundleId, manifest) {
 export const BACKFILL_SETTING = "keychain_backfilled_keys";
 
 export async function backfillKeychainEntries(bundleId, manifest, values, { log = () => {} } = {}) {
+  if (isSystemBundleId(bundleId)) return 0;
   const specs = new Map((manifest?.env_vars || []).map((v) => [v.name, v]));
   // Never a publicly known value (replace_values_sha256): the next install replaces it.
   const todo = keychainGeneratedKeys(manifest).filter((k) => !specs.get(k)?.store_as && values?.[k]?.plain && !isReplacedValue(specs.get(k), values[k].plain));
@@ -292,6 +296,7 @@ export async function restoreServicesAfterInstall(bundleId, { log = () => {} } =
  * keychain mark).
  */
 export async function markBundleKeychainRemoved(bundleId, { onPaused = () => {} } = {}) {
+  if (isSystemBundleId(bundleId)) return; // an add-on's removal never pauses Crow's own entry
   let db;
   try {
     db = deps().openDb();

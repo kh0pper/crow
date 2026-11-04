@@ -351,6 +351,12 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   // caller's environment (the child inherits it), as in the gateway's proxy.
   const addonEnv = { ...repoEnv, ...process.env };
   for (const [id, addon] of Object.entries(readAddons(crowHome))) {
+    // Satellite-hosted bundles have no local MCP server to spawn: crow reaches them through its
+    // own satellite tool entry (spec §8, §9.1), so they are never catalog blocks here.
+    if (addon?.transport === "satellite") {
+      unconfigured[id] = "satellite: its tools come from the paired server";
+      continue;
+    }
     if (!isLegacyConfiguredAddon(id, addon, undefined, addonEnv)) {
       unconfigured[id] = "service: its account fields are not set";
       continue;

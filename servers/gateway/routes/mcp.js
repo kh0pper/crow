@@ -16,6 +16,29 @@ import { applyLocalTokenAuth } from "../local-token.js";
 import { verifyRemoteActor, noteRemoteActorResult } from "../../shared/remote-actor.js";
 import { defaultPairKey } from "../../shared/sync-pair-binding.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
+import { callerContext } from "../caller-context.js";
+
+/**
+ * The caller context every handler on this mount runs inside (spec §9.2). Read back by
+ * satellite tool calls (satellites/tool-entry.js) and by the peer-omission checks in
+ * proxy/router/tool-executor:
+ *   - a paired instance (`req.instanceAuth`) is a peer: `caller: null`, refused;
+ *   - an authenticated mount (OAuth or the local MCP token) with no instanceAuth is the owner
+ *     remotely: `owner-remote`;
+ *   - a `--no-auth` mount (authMiddleware absent) is nobody: `caller: null`, refused.
+ * `crossHostAuth` is never set on an MCP mount today; it is recorded so a refusal is automatic if
+ * that ever changes.
+ */
+export function callerFor(req, authMiddleware) {
+  const peer = !!req?.instanceAuth;
+  const crossHost = !!req?.crossHostAuth;
+  return {
+    caller: peer || crossHost || !authMiddleware ? null : "owner-remote",
+    peer,
+    crossHost,
+    botId: null,
+  };
+}
 
 /**
  * Simple in-memory EventStore for StreamableHTTPServerTransport resumability.
@@ -234,6 +257,9 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
   const mcpPath = `${prefix}/mcp`;
   const ssePath = `${prefix}/sse`;
   const messagesPath = `${prefix}/messages`;
+  // Every handler of this mount runs inside the caller context (see callerFor). ALS propagates
+  // through the SDK's own dispatch, so a tool handler sees the store its request set.
+  const withCaller = (handler) => (req, res, next) => callerContext.run(callerFor(req, authMiddleware), () => handler(req, res, next));
 
   // Tool call tracking middleware for Streamable HTTP
   const toolTrackMiddleware = (req, res, next) => {
@@ -300,16 +326,16 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
       if (applyLocalTokenAuth(req)) return next();
       return authMiddleware(req, res, next);
     };
-    router.post(mcpPath, skipAuthForInstance, toolTrackMiddleware, handlers.postHandler);
-    router.get(mcpPath, skipAuthForInstance, handlers.getHandler);
-    router.delete(mcpPath, skipAuthForInstance, handlers.deleteHandler);
-    router.get(ssePath, skipAuthForInstance, sseHandlers.sseHandler);
-    router.post(messagesPath, skipAuthForInstance, sseHandlers.messagesHandler);
+    router.post(mcpPath, skipAuthForInstance, toolTrackMiddleware, withCaller(handlers.postHandler));
+    router.get(mcpPath, skipAuthForInstance, withCaller(handlers.getHandler));
+    router.delete(mcpPath, skipAuthForInstance, withCaller(handlers.deleteHandler));
+    router.get(ssePath, skipAuthForInstance, withCaller(sseHandlers.sseHandler));
+    router.post(messagesPath, skipAuthForInstance, withCaller(sseHandlers.messagesHandler));
   } else {
-    router.post(mcpPath, toolTrackMiddleware, handlers.postHandler);
-    router.get(mcpPath, handlers.getHandler);
-    router.delete(mcpPath, handlers.deleteHandler);
-    router.get(ssePath, sseHandlers.sseHandler);
-    router.post(messagesPath, sseHandlers.messagesHandler);
+    router.post(mcpPath, toolTrackMiddleware, withCaller(handlers.postHandler));
+    router.get(mcpPath, withCaller(handlers.getHandler));
+    router.delete(mcpPath, withCaller(handlers.deleteHandler));
+    router.get(ssePath, withCaller(sseHandlers.sseHandler));
+    router.post(messagesPath, withCaller(sseHandlers.messagesHandler));
   }
 }

@@ -19,7 +19,7 @@ import { parseReadPathsInput } from "../../../../../scripts/pi-bots/bot-read-pat
 import { t, fill } from "../../shared/i18n.js";
 import { applyFilesMode, applySourceModes, applyLearningMode, applyConfirm } from "./def-adapter.js";
 import { applyCommandsMode } from "./bash-mode.js";
-import { selectedWriteTools, toolsFromKeys } from "./sources.js";
+import { selectedWriteTools, toolsFromKeys, satelliteReadMarks, satelliteMarksFrom } from "./sources.js";
 import { normText } from "./ui.js";
 import { applyShowCards, trackerIsCustom } from "./tracker-choice.js";
 import { oneLine } from "../../shared/bot-display.js";
@@ -344,9 +344,29 @@ async function applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, c
 
 // ---------------------------------------------------------------- safety
 
-export function saveSafety(def, b, { lang, changed }) {
+/**
+ * The satellite read marks the Safety save classifies a granted tool with, when the page posted no
+ * tool offer (an older page): a satellite tool is write unless the owner marked it read (SAT-7
+ * §9.1). Any failure is no marks — the save still happens.
+ */
+async function satelliteMarksForSave(db) {
+  // Never null: with no db or a failed read, every satellite-installed bundle still has no marks,
+  // so its tools stay write-class (fail closed to the ask list).
+  if (!db) return satelliteMarksFrom([]);
+  try { return await satelliteReadMarks(db); } catch { return satelliteMarksFrom([]); }
+}
+
+export async function saveSafety(def, b, { lang, changed, db = null, botId = null }) {
   def.permission_policy = def.permission_policy || {};
   const pp = def.permission_policy;
+  const out = { warn: [] };
+  // Satellite tools on other people's turns (SAT-7 part B): the per-bot opt-in is its own table
+  // (`satellite_bot_optins`, migration 0021), not the def, because the mount reads it per request.
+  // Only the tab render that showed the control decides (sat_any_turn_rendered), so a page
+  // rendered before a satellite bundle was installed can never switch it off again. The value is
+  // only WANTED here: the POST handler writes it (applySatelliteOptin) after the def update lands,
+  // so a save this function refuses never turns the opt-in on.
+  if (b.sat_any_turn_rendered && db && botId) out.satOptin = b.sat_any_turn === "on" || b.sat_any_turn === "true";
   if (b.email_mode && b.email_mode !== b.email_mode__was) {
     if (b.email_mode !== "draft_only" && b.email_mode !== "allow") return { error: t("botbuilder.abInvalidChoice", lang) };
     pp.external_send = b.email_mode;
@@ -366,12 +386,29 @@ export function saveSafety(def, b, { lang, changed }) {
     // the tools the page offered (same classification the page used)
     let offered = null;
     try { offered = typeof b.confirm_offered === "string" ? JSON.parse(b.confirm_offered) : null; } catch { offered = null; }
-    const tools = offered ? toolsFromKeys(offered, def) : selectedWriteTools(def);
+    const tools = offered ? toolsFromKeys(offered, def) : selectedWriteTools(def, null, await satelliteMarksForSave(db));
     const prev = Array.isArray(pp.confirm) ? pp.confirm : [];
     const next = applyConfirm(prev, tools, { checked: arr(b.confirm_tool), otherText: b.confirm_other });
     if (!same(next, prev)) pp.confirm = next;
   }
-  return {};
+  return out;
+}
+
+/**
+ * Write the per-bot satellite opt-in saveSafety wanted, once the definition update has succeeded
+ * (F3). Written on change only; a storage failure is a soft warning, never a failed save.
+ * @returns {Promise<{warn: string[]}>}
+ */
+export async function applySatelliteOptin({ db, botId, want, lang }) {
+  const out = { warn: [] };
+  if (typeof want !== "boolean" || !db || !botId) return out;
+  try {
+    const { getBotOptin, setBotOptin } = await import("../../../satellites/store.js");
+    if (want !== (await getBotOptin(db, botId))) await setBotOptin(db, botId, want);
+  } catch (err) {
+    out.warn.push(fill(t("botbuilder.sfSatAnyTurnFailed", lang), { error: String((err && err.message) || err).slice(0, 80) }));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------- advanced
