@@ -50,11 +50,16 @@
  *     trust: "official-lock",                     // the only accepted value
  *   }
  *
- * §2's cmake command line is part of the record, not of the toolchain: the
- * defines must select the official lock exactly once
- * (`-DGUFO_EXTENSIONS_FROM_LOCK=ON`), must name exactly the recorded commit
- * (`-DGUFO_REVISION=<source.commit>`), and must never hand gufo an extension
- * list of its own (`-DGUFO_EXTENSIONS=`, `-DGUFO_EXTENSION_DIRS=`).
+ * §2's cmake command line is part of the record, not of the toolchain, and it is
+ * judged by an allowlist grammar rather than by string equality: every entry of
+ * `cmake.defines` must be one `-D<NAME>[:<TYPE>]=<value>` token, so an alternate
+ * spelling of a define cannot slip past a check. Keyed on the parsed variable
+ * name (a `:TYPE` suffix is accepted and ignored), the defines must select the
+ * official lock exactly once (`GUFO_EXTENSIONS_FROM_LOCK=ON`), must name exactly
+ * the recorded commit (`GUFO_REVISION=<source.commit>`), and must never hand gufo
+ * an extension list of its own (`GUFO_EXTENSIONS`, `GUFO_EXTENSION_DIRS`, typed
+ * or not). A bare `-D`, a split `"-D", "NAME=value"` pair, `-U`, `-C <file>`,
+ * a lowercase name or a padded token is refused as malformed.
  *
  * Out of v1 on purpose (they were considered and dropped): a
  * `nix-build-derivation` recipe, `nix.substituters` and
@@ -74,8 +79,8 @@ import { createHash } from "node:crypto";
 
 /**
  * One code per refusal. A caller switches on these; a boolean is never enough.
- * `PROVIDER_KEY_COLLISION` and `PROVIDER_KEYS_MISSING` from `collisionCheck`
- * carry the artifact key / provider id after a ":".
+ * `PROVIDER_KEY_COLLISION` and `PROVIDER_KEYS_MISSING` / `PROVIDER_KEYS_INVALID`
+ * from `collisionCheck` carry the artifact key / provider id after a ":".
  */
 export const REASONS = Object.freeze({
   RECORD_NOT_OBJECT: "record_not_object",
@@ -86,6 +91,7 @@ export const REASONS = Object.freeze({
   SOURCE_COMMIT_INVALID: "source_commit_invalid",
   SOURCE_DIRTY: "source_dirty",
   SOURCE_UNTRACKED: "source_untracked",
+  DEFINES_MALFORMED: "defines_malformed",
   DEFINES_LOCK_MISSING: "defines_lock_missing",
   DEFINES_REVISION_MISMATCH: "defines_revision_mismatch",
   DEFINES_FORBIDDEN: "defines_forbidden",
@@ -131,19 +137,29 @@ export const OFFICIAL_LOCK_MODE = "lock";
  */
 export const BUILD_ID_RE = /^gufo-[0-9][0-9A-Za-z._+-]*-[0-9a-f]{7}-(?:lock|discovery|explicit)-[0-9a-f]{8}$/;
 
-/** §2: the only way the official lock is selected, and the revision pin. */
-const LOCK_DEFINE = "-DGUFO_EXTENSIONS_FROM_LOCK=ON";
-const REVISION_DEFINE_PREFIX = "-DGUFO_REVISION=";
-/** §2: a record that hands gufo its own extension list is refused. */
-const FORBIDDEN_DEFINE_PREFIXES = Object.freeze(["-DGUFO_EXTENSIONS=", "-DGUFO_EXTENSION_DIRS="]);
+/**
+ * §2: the one spelling a cmake define may have — `-D` then an upper-case name,
+ * an optional `:TYPE`, `=` and the value. The name is the only thing the checks
+ * key on, so `-DGUFO_REVISION=...` and `-DGUFO_REVISION:STRING=...` are the same
+ * variable and neither can be used to hide a second, different value.
+ */
+const DEFINE_RE = /^-D([A-Z0-9_]+)(?::[A-Z]+)?=(.*)$/;
+/** §2: the official lock, exactly once, and the revision pin. */
+const LOCK_VARIABLE = "GUFO_EXTENSIONS_FROM_LOCK";
+const REVISION_VARIABLE = "GUFO_REVISION";
+/** §2: a record that hands gufo its own extension list is refused, typed or not. */
+const FORBIDDEN_VARIABLES = Object.freeze(["GUFO_EXTENSIONS", "GUFO_EXTENSION_DIRS"]);
 
 const HEX40_RE = /^[0-9a-f]{40}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const IMAGE_DIGEST_RE = /@sha256:[0-9a-f]{64}$/;
 /** A built extension's source is the official tree's own directory for it. */
 const EXTENSION_SOURCE_RE = /^src\/models\/([A-Za-z0-9_.-]+)$/;
-/** A build id that is safe to print verbatim (no path, no host, no user). */
-const DISPLAY_ID_RE = /^[A-Za-z0-9._+-]{1,64}$/;
+/**
+ * A build id that is safe to print verbatim (no path, no host, no user, and no
+ * dot — a dot is how a host name or a file name would arrive).
+ */
+const DISPLAY_ID_RE = /^[A-Za-z0-9_+-]{1,64}$/;
 /** The trust levels a displayed record may name; anything else is "unrecorded". */
 const DISPLAY_TRUSTS = Object.freeze([OFFICIAL_TRUST, "unrecorded"]);
 
@@ -161,6 +177,7 @@ const ID_INPUT_REASONS = Object.freeze([
   REASONS.LOCK_HASH_INVALID,
   REASONS.IMAGE_FLOATING_TAG,
   REASONS.IMAGE_NOT_DIGEST_PINNED,
+  REASONS.DEFINES_MALFORMED,
   REASONS.DEFINES_LOCK_MISSING,
   REASONS.DEFINES_REVISION_MISMATCH,
   REASONS.DEFINES_FORBIDDEN,
@@ -320,9 +337,11 @@ export function selectionModeCheck(diagnose) {
  * no key list are all refusals, because a collision can then not be judged at
  * all. An UNAVAILABLE provider still counts: the key is still claimed, and the
  * probe order is still what the caller cannot see. A missing key list is
- * reported as `provider_keys_missing:<id>`; colliding keys are reported in
- * sorted order as `provider_key_collision:<key>`. The value shape of a present
- * key list (strings, non-empty) is the record validator's business.
+ * reported as `provider_keys_missing:<id>`; a present key list that is empty or
+ * not all non-empty strings is `provider_keys_invalid:<id>` — the list is judged
+ * here, not left to the caller, because an unknown key set can never be cleared;
+ * colliding keys are reported in sorted order as
+ * `provider_key_collision:<key>`.
  *
  * @param {Array<{id: string, available?: boolean}>} providers diagnose provider list
  * @param {Record<string, string[]>} providerKeys provider id -> artifact keys
@@ -350,14 +369,27 @@ export function collisionCheck(providers, providerKeys) {
 
   if (keys) {
     for (const id of ids) {
-      if (!Array.isArray(keys[id])) add(`${REASONS.PROVIDER_KEYS_MISSING}:${id}`);
+      const own = Object.prototype.hasOwnProperty.call(keys, id) ? keys[id] : undefined;
+      // No key list recorded for a provider diagnose lists: the collision
+      // cannot be judged at all, so the provider is refused by name.
+      if (!Array.isArray(own)) {
+        add(`${REASONS.PROVIDER_KEYS_MISSING}:${id}`);
+        continue;
+      }
+      // An empty list, or a list that is not all non-empty strings, is refused
+      // here rather than left to the caller: a provider whose keys are unknown
+      // can never be cleared of a collision.
+      if (own.length === 0 || own.some((k) => typeof k !== "string" || k === "")) {
+        add(`${REASONS.PROVIDER_KEYS_INVALID}:${id}`);
+      }
     }
   }
 
   const ownersByKey = new Map();
   for (const id of ids) {
-    const own = keys && Array.isArray(keys[id]) ? keys[id] : [];
-    for (const key of new Set(own.filter((k) => typeof k === "string" && k !== ""))) {
+    const own = keys && Object.prototype.hasOwnProperty.call(keys, id) ? keys[id] : undefined;
+    if (!Array.isArray(own)) continue;
+    for (const key of new Set(own)) {
       if (!ownersByKey.has(key)) ownersByKey.set(key, []);
       const owners = ownersByKey.get(key);
       if (!owners.includes(id)) owners.push(id);
@@ -413,24 +445,52 @@ export function validateBuildRecord(record) {
 
   // --- §2 defines: official lock, own revision, no extension list ----------
   const cmake = isPlainObject(record.cmake) ? record.cmake : {};
-  const defines = Array.isArray(cmake.defines) && cmake.defines.every((d) => typeof d === "string")
-    ? cmake.defines
-    : null;
-  if (!defines) {
+  const rawDefines = Array.isArray(cmake.defines) ? cmake.defines : null;
+  if (!rawDefines) {
     // No usable command line at all: the lock define is what is missing.
     add(REASONS.DEFINES_LOCK_MISSING);
   } else {
-    if (defines.filter((d) => d === LOCK_DEFINE).length !== 1) add(REASONS.DEFINES_LOCK_MISSING);
-    if (commit) {
-      // Only judged against a valid commit: the mismatch would repeat
-      // SOURCE_COMMIT_INVALID and say nothing new.
-      const revisions = defines.filter((d) => d.startsWith(REVISION_DEFINE_PREFIX));
-      if (revisions.length !== 1 || revisions[0] !== `${REVISION_DEFINE_PREFIX}${commit}`) {
-        add(REASONS.DEFINES_REVISION_MISMATCH);
+    // Every entry must be one allowlisted `-D<NAME>[:<TYPE>]=<value>` token. The
+    // checks below key on the parsed NAME, so a typed or otherwise respelled
+    // define is judged on the variable it sets and not on its text.
+    const parsed = [];
+    let malformed = false;
+    for (const entry of rawDefines) {
+      const m = typeof entry === "string" ? DEFINE_RE.exec(entry) : null;
+      // A padded token is not the token: whitespace inside a define is never
+      // part of the value the build used.
+      if (!m || m[2] !== m[2].trim()) {
+        malformed = true;
+        continue;
       }
+      parsed.push({ name: m[1], value: m[2] });
     }
-    if (defines.some((d) => FORBIDDEN_DEFINE_PREFIXES.some((prefix) => d.startsWith(prefix)))) {
-      add(REASONS.DEFINES_FORBIDDEN);
+
+    if (malformed) {
+      // A command line the grammar cannot read is not judged key by key: the
+      // keys it seems to set are an artefact of a spelling gufo never got.
+      add(REASONS.DEFINES_MALFORMED);
+    } else {
+      const named = (name) => parsed.filter((d) => d.name === name);
+
+      // §2: the official lock, exactly once and switched on — an `=OFF` after an
+      // `=ON` and a typed `:BOOL=OFF` are the same refusal.
+      const lock = named(LOCK_VARIABLE);
+      if (lock.length !== 1 || lock[0].value !== "ON") add(REASONS.DEFINES_LOCK_MISSING);
+
+      if (commit) {
+        // Only judged against a valid commit: the mismatch would repeat
+        // SOURCE_COMMIT_INVALID and say nothing new. A second revision define,
+        // typed or not, is a second value and therefore a mismatch.
+        const revisions = named(REVISION_VARIABLE);
+        if (revisions.length !== 1 || revisions[0].value !== commit) {
+          add(REASONS.DEFINES_REVISION_MISMATCH);
+        }
+      }
+
+      // §2: any form of an extension list is refused, typed or not, whichever
+      // value it carries.
+      if (FORBIDDEN_VARIABLES.some((name) => named(name).length > 0)) add(REASONS.DEFINES_FORBIDDEN);
     }
   }
 
@@ -608,10 +668,11 @@ export function validateBuildRecord(record) {
  *
  * It carries no path, no host label, no user and no hash past 12 hex: the build
  * id, the trust level, the commit prefix, the extension count and the binary
- * digest prefix only. The build id is printed only when it is a plain id and
- * never a path or a label; the trust level is mapped onto the two known values,
- * so a new or a garbage trust string is shown as "unrecorded". Tolerates a
- * partial or garbage record (a legacy directory has almost nothing) and never
+ * digest prefix only. The build id is printed only when it is the full build id
+ * (which may carry dots in its version) or a plain dot-free id, and never a
+ * path, a host name or a label; the trust level is mapped onto the two known
+ * values, so a new or a garbage trust string is shown as "unrecorded". Tolerates
+ * a partial or garbage record (a legacy directory has almost nothing) and never
  * throws.
  *
  * @param {unknown} record
@@ -620,7 +681,10 @@ export function validateBuildRecord(record) {
 export function displayBuildRecord(record) {
   const r = isPlainObject(record) ? record : {};
   const rawId = typeof r.build_id === "string" ? r.build_id : "";
-  const id = DISPLAY_ID_RE.test(rawId) ? rawId : "build unknown";
+  // A dot is not printed on the strength of the plain-id pattern alone: only a
+  // full build id may carry one (its version part does), so `host.example` or a
+  // file name is shown as "build unknown" rather than echoed.
+  const id = BUILD_ID_RE.test(rawId) || DISPLAY_ID_RE.test(rawId) ? rawId : "build unknown";
   const trust = typeof r.trust === "string" && DISPLAY_TRUSTS.includes(r.trust) ? r.trust : "unrecorded";
   const commit = typeof r.source?.commit === "string" && HEX40_RE.test(r.source.commit)
     ? r.source.commit.slice(0, 7)

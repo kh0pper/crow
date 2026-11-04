@@ -130,6 +130,45 @@ const ONE_FIELD_REFUSALS = [
     r.cmake.defines.push("-DGUFO_EXTENSION_DIRS=src/models");
   }, REASONS.DEFINES_FORBIDDEN],
 
+  // §2 defines, read by grammar instead of by exact string: the checks key on
+  // the variable name, so a typed or respelled define is judged by what it sets
+  ["a lock define switched off after it was switched on", (r) => {
+    r.cmake.defines.push("-DGUFO_EXTENSIONS_FROM_LOCK=OFF");
+  }, REASONS.DEFINES_LOCK_MISSING],
+  ["a typed lock define set to OFF", (r) => {
+    r.cmake.defines[0] = "-DGUFO_EXTENSIONS_FROM_LOCK:BOOL=OFF";
+  }, REASONS.DEFINES_LOCK_MISSING],
+  ["a typed extension list on the cmake command line", (r) => {
+    r.cmake.defines.push("-DGUFO_EXTENSIONS:STRING=qwen");
+  }, REASONS.DEFINES_FORBIDDEN],
+  ["a typed extension directory list on the cmake command line", (r) => {
+    r.cmake.defines.push("-DGUFO_EXTENSION_DIRS:PATH=/x");
+  }, REASONS.DEFINES_FORBIDDEN],
+  ["a typed revision define naming another commit", (r) => {
+    r.cmake.defines.push(`-DGUFO_REVISION:STRING=${"0".repeat(40)}`);
+  }, REASONS.DEFINES_REVISION_MISMATCH],
+
+  // §2 defines, against the allowlist grammar
+  ["a bare -D on the cmake command line", (r) => { r.cmake.defines.push("-D"); }, REASONS.DEFINES_MALFORMED],
+  ["a define split across two arguments", (r) => {
+    r.cmake.defines.push("-D", "GUFO_EXTENSIONS=qwen");
+  }, REASONS.DEFINES_MALFORMED],
+  ["an -U on the cmake command line", (r) => {
+    r.cmake.defines.push("-UGUFO_EXTENSIONS_FROM_LOCK");
+  }, REASONS.DEFINES_MALFORMED],
+  ["a -C cache initialisation on the cmake command line", (r) => {
+    r.cmake.defines.push("-C", "cache.cmake");
+  }, REASONS.DEFINES_MALFORMED],
+  ["a lowercase define", (r) => {
+    r.cmake.defines.push("-Dgufo_extensions_from_lock=ON");
+  }, REASONS.DEFINES_MALFORMED],
+  ["a define with leading whitespace", (r) => {
+    r.cmake.defines.push(" -DGUFO_EXTENSIONS_FROM_LOCK=ON");
+  }, REASONS.DEFINES_MALFORMED],
+  ["a define with trailing whitespace in its value", (r) => {
+    r.cmake.defines[0] = "-DGUFO_EXTENSIONS_FROM_LOCK=ON ";
+  }, REASONS.DEFINES_MALFORMED],
+
   ["a failed check_install", (r) => { r.check_install.status = "FAIL"; }, REASONS.CHECK_INSTALL_NOT_PASS],
   ["check_install run in another mode", (r) => { r.check_install.mode = "discovery"; }, REASONS.CHECK_INSTALL_NOT_LOCK],
   ["a check_install report digest of the wrong shape", (r) => { r.check_install.report_sha256 = "not-a-digest"; }, REASONS.REPORT_HASH_INVALID],
@@ -230,12 +269,38 @@ for (const [name, mutate, code] of ONE_FIELD_REFUSALS) {
   });
 }
 
-test("refuses cmake defines that are not an array of strings", () => {
-  for (const bad of [LOCK_DEFINE, [LOCK_DEFINE, 7], null, {}]) {
+test("refuses cmake defines that are not a usable command line", () => {
+  for (const bad of [LOCK_DEFINE, null, {}]) {
     const record = golden();
     record.cmake.defines = bad;
     assert.deepEqual(reasonsOf(record), [REASONS.DEFINES_LOCK_MISSING], JSON.stringify(bad));
   }
+  // an entry that is not a string cannot match the define grammar, so the list
+  // is malformed rather than merely missing its lock define
+  const nonString = golden();
+  nonString.cmake.defines = [LOCK_DEFINE, 7];
+  assert.deepEqual(reasonsOf(nonString), [REASONS.DEFINES_MALFORMED]);
+});
+
+test("a typed define is a valid spelling, and the keyed checks still apply", () => {
+  const commit = golden().source.commit;
+  for (const defines of [
+    ["-DGUFO_EXTENSIONS_FROM_LOCK:BOOL=ON", `-DGUFO_REVISION=${commit}`],
+    [`-DGUFO_EXTENSIONS_FROM_LOCK=ON`, `-DGUFO_REVISION:STRING=${commit}`],
+    ["-DGUFO_EXTENSIONS_FROM_LOCK:BOOL=ON", `-DGUFO_REVISION:STRING=${commit}`],
+  ]) {
+    const record = golden();
+    record.cmake.defines = defines;
+    // the id hashes the define list, so it is recomputed for this spelling
+    record.build_id = computeBuildId({ ...goldenBuildIdInputs(), defines });
+    assert.deepEqual(validateBuildRecord(record), { ok: true, reasons: [] }, JSON.stringify(defines));
+  }
+
+  // the typed OFF spelling as the whole command line: no lock selected, no
+  // revision pinned — one refusal per field, not a malformed-define complaint
+  const offOnly = golden();
+  offOnly.cmake.defines = ["-DGUFO_EXTENSIONS_FROM_LOCK:BOOL=OFF"];
+  assert.deepEqual(reasonsOf(offOnly), [REASONS.DEFINES_LOCK_MISSING, REASONS.DEFINES_REVISION_MISMATCH]);
 });
 
 test("refuses a provider_keys block that is not a plain object", () => {
@@ -379,7 +444,24 @@ test("collision: a repeated key inside one provider is not a collision", () => {
     collisionCheck([provider("qwen27-q4")], { "qwen27-q4": ["gguf:qwen27", "gguf:qwen27"] }),
     { ok: true, reasons: [] },
   );
-  assert.deepEqual(collisionCheck([provider("a"), provider("b")], { a: [], b: [] }), { ok: true, reasons: [] });
+});
+
+test("collision: an empty or non-string key list is refused, naming the provider", () => {
+  // the list is judged here, not left to the caller: an unknown key set can
+  // never be cleared of a collision
+  assert.deepEqual(collisionCheck([provider("a"), provider("b")], { a: [], b: [] }), {
+    ok: false,
+    reasons: [`${REASONS.PROVIDER_KEYS_INVALID}:a`, `${REASONS.PROVIDER_KEYS_INVALID}:b`],
+  });
+  assert.deepEqual(collisionCheck([provider("a")], { a: [] }).reasons, [
+    `${REASONS.PROVIDER_KEYS_INVALID}:a`,
+  ]);
+  assert.deepEqual(collisionCheck([provider("a")], { a: ["gguf:a", 7] }).reasons, [
+    `${REASONS.PROVIDER_KEYS_INVALID}:a`,
+  ]);
+  assert.deepEqual(collisionCheck([provider("a")], { a: ["gguf:a", ""] }).reasons, [
+    `${REASONS.PROVIDER_KEYS_INVALID}:a`,
+  ]);
 });
 
 test("collision fails CLOSED on a shape it cannot judge", () => {
@@ -590,6 +672,21 @@ test("displayBuildRecord prints a build id only when it is a plain id", () => {
   // a plain legacy id is printed as it is
   assert.ok(displayBuildRecord({ build_id: "legacy-example" }).includes("legacy-example"));
   assert.ok(displayBuildRecord({ build_id: "gufo-0.29.0-0123456-lock-01234567" }).includes("gufo-0.29.0-0123456-lock-01234567"));
+});
+
+test("displayBuildRecord prints a dotted id only when it is a full build id", () => {
+  // a dotted id is a host name or a file name, not a build: shown as unknown
+  const line = displayBuildRecord({ build_id: "crow.example.ts.net", trust: "unrecorded" });
+  assert.ok(line.includes("build unknown"), line);
+  assert.equal(line.includes("crow.example.ts.net"), false, line);
+  assert.equal(line.includes("example"), false, line);
+  assert.ok(displayBuildRecord({ build_id: "legacy.example" }).includes("build unknown"));
+
+  // the full build id shape is the only one allowed to carry a dot
+  const full = "gufo-0.29.0-rc.1-0123456-lock-01234567";
+  assert.match(full, BUILD_ID_RE);
+  assert.ok(displayBuildRecord({ build_id: full }).includes(full));
+  assert.ok(displayBuildRecord({ build_id: "legacy-example" }).includes("legacy-example"));
 });
 
 test("displayBuildRecord maps trust onto the known set", () => {
