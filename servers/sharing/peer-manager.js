@@ -215,7 +215,7 @@ export class PeerManager {
     // connections never reach onPeerData.)
     this.onPeerData = null;
     this.onPeerDisconnected = null; // callback(crowId)
-    this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null) — instance-to-instance connections
+    this.onInstanceConnected = null; // callback(crowId, conn, remoteInstanceId|null, { peerMuxEarly }) — instance-to-instance connections
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — a proven sibling advertised its outgoing Hypercore feed key
     this.onInstanceAdmitting = null; // sync (conn) => muxer|null — a sibling is being admitted: put the replication muxer on the stream before our `authenticated`
     this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
@@ -541,6 +541,7 @@ export class PeerManager {
         // admission side effects wait for both halves.
         state.peerAuthed = true;
         state.peerLineMax = parsePeerLineMax(msg.line_max);
+        state.peerMuxEarly = msg.mux === 1;
         if (state.authenticated && !state.mutual) await this._completeAdmit(conn, state);
         break;
       default:
@@ -828,7 +829,11 @@ export class PeerManager {
     }
     try {
       // line_max: the longest line we accept; the peer's send() keeps under it.
-      conn.write(JSON.stringify({ type: "authenticated", line_max: this.postAdmitLineMax }) + "\n");
+      // mux: 1 tells the peer our muxer was already on the stream, so it may
+      // replicate at once. Without it (a sibling from before this change,
+      // whose muxer goes on only inside its replicate()) the peer's first
+      // frames would be lost, so instance-connect waits for its first one.
+      conn.write(JSON.stringify({ type: "authenticated", line_max: this.postAdmitLineMax, ...(mux ? { mux: 1 } : {}) }) + "\n");
 
       await this._sendDeferredReply(conn, state);
 
@@ -878,7 +883,7 @@ export class PeerManager {
       if (state.proof === "sig" && state.remoteInstanceId && msg.feed_key_hex && this.onInstanceKeyReceived) {
         fire(() => this.onInstanceKeyReceived(state.remoteInstanceId, msg.feed_key_hex));
       }
-      if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId));
+      if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId, { peerMuxEarly: state.peerMuxEarly === true }));
     } else if (this.onPeerConnected) {
       fire(() => this.onPeerConnected(crowId, conn));
     }
