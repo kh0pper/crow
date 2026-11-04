@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { resolveCrowHome } from "./crow-home.js";
+import { secretsAncestorsReport } from "./secrets-ancestors.js";
 
 export const SECRET_VALUES_FILENAME = "pi-bot-secret-values";
 /** The display set, beside the card set (pi-lab's reader takes one plain value
@@ -64,6 +65,7 @@ export function cardHashesPath(env = process.env) {
 // (dev, ino) the first time this process uses it, and a dir at the path that
 // is not the anchored one is never trusted.
 const anchors = new Map();   // path -> { dev, ino, path, fd }
+let ancestorsReported = false;   // the ancestors are judged once per process, not once per caller
 
 /**
  * Create (700) and anchor this instance's secrets dir; returns the anchor.
@@ -71,11 +73,39 @@ const anchors = new Map();   // path -> { dev, ino, path, fd }
  * read and write in it goes through /proc/self/fd/<fd> (anchoredPath), so a
  * dir renamed away is followed to where it really is, and a dir planted at
  * the old path is never used.
+ *
+ * Before the first anchor the dir's ANCESTORS are judged
+ * (secrets-ancestors.js). Phase 1 (CROW_BOT_UID unset) only warns: the boot
+ * line counts the findings and the Bot Runtime status lists them. With a bot
+ * uid configured (Phase 3's launcher sets it) any finding REFUSES the anchor —
+ * null, so callers that already fail closed on no anchor do not use a dir
+ * another principal could have swapped in. The dir is CREATED first and the
+ * ancestors judged after: every ancestor then exists, so `cannot stat` means a
+ * path that went away (never "first boot, no dir yet"). `opts` carries the
+ * check's seams (stat, groupMembers, ownerName, ownerUid) and `log`.
  */
-export function anchorSecretsDir(env = process.env) {
+export function anchorSecretsDir(env = process.env, opts = {}) {
   const dir = secretsDir(env);
   if (anchors.has(dir)) return anchors.get(dir);
+  // Create it BEFORE the check: the ancestors of a path that exists are the
+  // ones that matter, and a missing component is not "nothing there to swap".
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const ancestors = secretsAncestorsReport({ env, secretsDir: dir, stat: opts.stat, groupMembers: opts.groupMembers, ownerName: opts.ownerName, ownerUid: opts.ownerUid });
+  const log = typeof opts.log === "function" ? opts.log : (line) => console.warn(line);
+  if (ancestors.refused) {
+    if (!ancestorsReported) {
+      ancestorsReported = true;
+      log("[secrets] refused: CROW_BOT_UID is set and the secrets dir ancestors are not safe: " +
+        ancestors.findings.map((f) => f.path + " (" + f.why + ")").join(", "));
+    }
+    return null;
+  }
+  if (!ancestors.ok && !ancestorsReported) {
+    ancestorsReported = true;
+    log("[secrets] WARNING: the secrets dir ancestors can be replaced by another principal (" +
+      ancestors.findings.map((f) => f.path + ": " + f.why).join(", ") +
+      "); a same-uid bot with a shell could plant a dir there before a restart");
+  }
   let fd;
   try { fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW); } catch { return null; }
   const st = fstatSync(fd);

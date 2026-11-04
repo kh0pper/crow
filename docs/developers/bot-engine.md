@@ -421,6 +421,38 @@ Nothing above changes what an **uncontained** bot can do: it never comes through
 
 `crow.db`/`tasks.db` are bound read-write (so provider keys, OAuth tokens and bot definitions are readable, and a bot can widen its own next spawn's policy); credentialed add-on MCP servers in the bot's config run inside the sandbox with their secrets; the door routes accept whatever headers the bot sends (trust rests on the signed actor and per-route tokens); an in-session model switch to a provider the spawn was not built for fails, because the agent dir carries only the spawn's providers. Uncontained bots (not opted in, or refused) are exactly as they are without the contain tier.
 
+### The status is honest: `partly contained`, never `contained`
+
+The spawn log gets one line per pi spawn:
+
+```
+[containment] helper partly contained: 2 open (crow.db and tasks.db are readable and writable (…); the browser is unreachable (no browser door yet))
+```
+
+and Settings → **Bot Runtime** shows the same facts as a status block (`scripts/pi-bots/containment-status.mjs`). The three words are exact: `contained`, `partly contained`, `not contained`.
+
+- **`not contained`** — a pi spawn that is not opted in to the contain tier, or one that was refused (a provider row with no door: `provider <id> has no door`; a refusal raised while the plan was built: its own reason), or every bot on a host without bubblewrap (`this host has no bwrap`), or a bot this process never observed (`spawns outside this process are not observed here, so this bot counts as not contained`). A spawn that ran uncontained has the one line `runs with the operator's files, network and keys`.
+- **`partly contained`** — a contain spawn. Phase 1 can never report `contained`, because the instance data dir is bound read-write. The open list always starts with `crow.db and tasks.db are readable and writable (provider keys, OAuth tokens, settings, bot definitions)`, then one line per MCP server that is not one of Crow's own (`<server> runs inside the sandbox with its own credentials`), and `the browser is unreachable (no browser door yet)` when a browser MCP or browser tool is configured.
+
+The instance status is its weakest bot's. Open lines are the union, de-duplicated, each prefixed with the bot that carries it; any `not contained` bot adds `an uncontained bot could replace the hidden secrets dir before a restart (peer tokens, service bindings)`. Nothing is stored: the defs are read at render and the last spawn's tier/level/open list is kept in the gateway process (no DB column, so no migration). The status is never more optimistic than what the process observed: a bot that has not spawned here — or any bot while `PIBOT_SUPERVISOR=external`, whose units run with an env the gateway never sees, and a bot whose channel turns run in the supervised Discord child — is `not contained` with the unobserved line. The tier is never inferred from the gateway's own env.
+
+### The secrets dir's ancestors
+
+`<CROW_HOME>/secrets` is anchored by `(dev, ino)` at first use (`servers/shared/secret-values.js`), which only protects against a dir planted at the path **after** that first use — whatever dir sits there at the first use is anchored. So `servers/shared/secrets-ancestors.js` walks the dir's ancestors up to `/` and reports every one another principal could rename:
+
+| finding | meaning |
+|---|---|
+| `world-writable without sticky` | anyone can rename what is inside |
+| `writable by the bot uid` | Phase 3's bot owns the ancestor and can chmod it |
+| `owned by another user` | a non-root owner other than this user can chmod it (the bot-uid rule above is more specific and wins) |
+| `group-writable by the bot's group` | the bot uid writes with that group |
+| `group-writable by a group with other members` | another member of this user's own group can write it |
+| `cannot stat` | the ancestor cannot be judged at all |
+
+A sticky ancestor is not a finding for the world or group rules: Linux refuses to rename an entry the writer does not own, which is why the usual `/tmp` path is fine. The dir is created **before** the ancestors are judged (`anchorSecretsDir` makes it, then checks), so every ancestor exists and `cannot stat` means a path that went away — never "first boot, no dir yet".
+
+The gateway prints one boot line (`[isolation] secrets dir ancestors: ok`, `<n> findings`, or `refused (<n> findings)`), Settings → Bot Runtime lists each finding, and Phase 1 only **warns**: behaviour is unchanged while `CROW_BOT_UID` is unset. With `CROW_BOT_UID` set (Phase 3's launcher) any finding makes `anchorSecretsDir` return `null`, so every caller that already fails closed on no anchor refuses to use the secrets dir at all. `CROW_BOT_GIDS` (comma-separated) is read alongside it when the launcher knows the bot's groups.
+
 ## See also
 
 - [Self-Hosted Bundles](./bundles) — the general bundle contract this bundle follows.

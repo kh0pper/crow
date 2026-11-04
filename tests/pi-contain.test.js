@@ -182,6 +182,32 @@ test("integration: bypass mode cannot be contained: the spawn throws and leaves 
   assert.deepEqual(after_, [], "the agent shadow was removed");
 });
 
+// ---- fix wave (F5): a refusal inside the plan says ITS reason in the line ----
+
+test("integration F5: a ContainRefused before the plan is built logs `not contained` with the refusal reason", { skip, timeout: 30000 }, async (t) => {
+  const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+  process.env.CROW_PI_CONTAIN_BOTS = "contain-refused-line-bot";
+  const session = join(scratch, "session-refused-line"); mkdirSync(join(session, "sessions"), { recursive: true });
+  const logged = [];
+  const realError = console.error;
+  t.after(() => { console.error = realError; });
+  console.error = (...a) => { logged.push(a.join(" ")); };
+  try {
+    assert.throws(() => new PiRpc({
+      def: { bot_id: "contain-refused-line-bot", permission_policy: { bash: "deny", write_paths: [] } },
+      sessionDir: session, resolved: { provider: "p", model: "m", key: "p/m" }, nodeBin: process.execPath,
+      cliPath: join(scratch, "nope.mjs"), permissionMode: "bypass",
+    }), /cannot run in the contain tier/);
+  } finally {
+    console.error = realError;
+  }
+  const line = logged.find((l) => l.startsWith("[containment]"));
+  assert.ok(line, "the one [containment] line is logged: " + logged.join("\n"));
+  assert.match(line, /\[containment\] contain-refused-line-bot not contained: 1 open \(/);
+  assert.match(line, /cannot run in the contain tier/, "the refusal reason, not the uncontained sentence");
+  assert.doesNotMatch(line, /runs with the operator's files/, "the turn never ran, so that sentence is wrong for it");
+});
+
 // ---- fix round 1 (F2): the no-door refusal, end to end through the bridge ----
 
 test("integration: a provider row with no door fails the contain spawn with the exact reason", { skip, timeout: 30000 }, async () => {

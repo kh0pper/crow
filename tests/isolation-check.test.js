@@ -8,7 +8,8 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { canOpen, probeForeignProc, processFacts, secretEnvNames, formatIsolationLine } from "../servers/shared/isolation-check.js";
+import { canOpen, probeForeignProc, processFacts, secretEnvNames, formatIsolationLine, formatSecretsAncestorsLine } from "../servers/shared/isolation-check.js";
+import { checkSecretsAncestors } from "../servers/shared/secrets-ancestors.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "crow-iso-")));
 const kids = [];
@@ -68,4 +69,22 @@ test("formatIsolationLine never includes a path's contents, only counts and bool
   assert.match(line, /foreign \/proc root openable: no/);
   assert.match(line, /user namespace: private/);
   assert.match(line, /root-equivalent groups: docker/);
+});
+
+test("the secrets dir ancestors boot line: ok, a finding count, and refused once a bot uid is configured", () => {
+  assert.equal(formatSecretsAncestorsLine({ ok: true, findings: [], refused: false }), "[isolation] secrets dir ancestors: ok");
+  const finding = [{ path: "/home/x/.crow", why: "world-writable without sticky" }];
+  assert.equal(formatSecretsAncestorsLine({ ok: false, findings: finding, refused: false }),
+    "[isolation] secrets dir ancestors: 1 findings");
+  assert.equal(formatSecretsAncestorsLine({ ok: false, findings: [...finding, ...finding], refused: true }),
+    "[isolation] secrets dir ancestors: refused (2 findings)");
+  assert.equal(formatSecretsAncestorsLine(null), "[isolation] secrets dir ancestors: ok", "never throws on no report");
+});
+
+test("a scratch tree this process owns reads ok on a real host (/tmp's sticky bit is why)", () => {
+  const secrets = join(scratch, "a", "b", "secrets");
+  mkdirSync(secrets, { recursive: true });
+  const r = checkSecretsAncestors({ secretsDir: secrets });
+  assert.deepEqual(r.findings, []);
+  assert.equal(r.ok, true);
 });
