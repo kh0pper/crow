@@ -120,6 +120,14 @@ const TAKE_STORE_SCRIPT = await loadPanelScript("take-store.js", "TAKE_STORE_SCR
 const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
 
 /**
+ * The routing rule, loaded once: the SAME text `server/commands/midi.js`
+ * evaluates in Node, so the hub and the page can never answer a message
+ * differently. It comes before the client, which routes through
+ * `window.StudioMidiRoute.routeFor`.
+ */
+const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
+
+/**
  * Escape a value for use in HTML text or a double-quoted attribute.
  * @param {unknown} value
  * @returns {string}
@@ -789,6 +797,7 @@ async function libraryPage({ db, render, res }) {
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
       <script>${TAKE_STORE_SCRIPT}
+${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
     </div>`;
@@ -871,6 +880,7 @@ function studioPage({ songId, render, res }) {
            client converts a take recorded at another rate with it, and so does
            its worker. -->
       <script>${TAKE_STORE_SCRIPT}
+${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>

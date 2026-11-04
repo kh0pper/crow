@@ -32,8 +32,11 @@
  *     the same controller are refused, so the router never has to choose.
  *
  * `routeFor()` is the pure half of this module: given a song snapshot and an
- * incoming message, it answers which live mapping runs and what it runs. The
- * page does the playing; nothing here touches the audio or the browser.
+ * incoming message, it answers which live mapping runs and what it runs. It is a
+ * thin call into `panel/midi-route.js`, the ONE copy of the routing rule, which
+ * the page inlines and runs too — so the hub and the page can never answer a
+ * message differently. The page does the playing; nothing here touches the
+ * audio or the browser.
  *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (an unknown action, a missing scene, a full table) leaves the document
@@ -41,6 +44,7 @@
  */
 
 import { z } from "zod";
+import { routeFor as routeInMidiRoute } from "../../panel/midi-route.js";
 import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   LIMITS,
@@ -121,6 +125,11 @@ export const FX_HOLD_NAMES = Object.freeze([
  * command that edits the song (or a people-only or Studio-only command) has no
  * way in. The panel draws its picker from it, the MCP tool text names it, and
  * `midi.map` refuses an unknown kind by listing it.
+ *
+ * `panel/midi-route.js` holds the plain-JS twin the router gates on (it cannot
+ * import zod: the page inlines it). The two must accept exactly the same
+ * arguments, and a test rides them against each other kind by kind — change one
+ * and change the other.
  *
  * @type {Readonly<Object<string, import("zod").ZodTypeAny>>}
  */
@@ -911,67 +920,18 @@ defineCommand({
 /**
  * Which live mapping an incoming MIDI message runs, and what it runs.
  *
- * Only a mapping that is live answers: `proposed` must be false AND its `action`
- * must still deep-equal its `accepted_action`, so a mapping proposed by an agent
- * never runs, and one whose action was changed after the operator accepted it
- * stops running until it is accepted again.
- *
- * Every mapping is matched on its own message, except `keys.play`: a keys
- * mapping claims EVERY note on its channel (that is what lets one row drive a
- * keyboard), so it answers the notes no mapping names — and a `pad.play`
- * mapping for that note always wins, which is how the MPK Mini's pads still play
- * the pads their notes name while the keys play the rest.
+ * The rule itself — the allow-list with each kind's arguments, the live-only
+ * check (`proposed` false AND `action` still equal to `accepted_action`), the
+ * `keys.play` channel claim and its precedence under `pad.play` — lives in
+ * `panel/midi-route.js`, because the page runs the very same text. This is the
+ * server's way in.
  * @param {object} snap - a song snapshot
  * @param {{device_name: string, type: string, channel: number, number: number}} message
  * @returns {{id: string, action: object}|null} the mapping and a copy of its
  *   action, or null when nothing live answers
  */
 export function routeFor(snap, message) {
-  const wanted = normalizeIncoming(message);
-  if (!wanted) return null;
-
-  let other = null;
-  let keys = null;
-  for (const mapping of Object.values(snap?.midi_maps ?? {})) {
-    if (!mapping || mapping.proposed !== false) continue;
-    if (!isDeepEqual(mapping.action, mapping.accepted_action)) continue;
-    // The router is the last gate before an action runs: whatever a document
-    // holds (an old or hand-synced one), only an allow-listed action with valid
-    // arguments is ever routed.
-    if (actionRefusal(mapping.action) !== null) continue;
-    if (mapping.device_name !== wanted.device_name) continue;
-    const stored = mapping.message;
-    if (!stored) continue;
-    if (stored.type !== wanted.type) continue;
-    if (Number(stored.channel) !== wanted.channel) continue;
-
-    const kind = mapping.action?.kind;
-    const answer = { id: mapping.id, action: cloneJson(mapping.action) };
-    if (kind === "keys.play") {
-      // One row, the whole channel: the notes no pad mapping takes — and only
-      // notes, whatever a document holds.
-      if (stored.type === "note" && keys === null) keys = answer;
-      continue;
-    }
-    if (Number(stored.number) !== wanted.number) continue;
-    if (kind === "pad.play") return answer;
-    if (other === null) other = answer;
-  }
-  return other ?? keys;
-}
-
-/** @returns {object|null} an incoming message as this module compares them, or null. */
-function normalizeIncoming(message) {
-  if (!message || typeof message !== "object") return null;
-  const deviceName = message.device_name;
-  const type = message.type;
-  const channel = Number(message.channel);
-  const number = Number(message.number);
-  if (typeof deviceName !== "string" || deviceName === "") return null;
-  if (type !== "note" && type !== "cc" && type !== "pc") return null;
-  if (!Number.isInteger(channel) || channel < 1 || channel > 16) return null;
-  if (!Number.isInteger(number) || number < 0 || number > 127) return null;
-  return { device_name: deviceName, type, channel, number };
+  return routeInMidiRoute(snap, message);
 }
 
 /** @returns {boolean} whether two JSON values are the same value. */

@@ -1,20 +1,26 @@
 /**
  * Studio panel — MIDI devices, Learn and the router.
  *
- * The emitted scripts (the controllers module `panel/midi.js` and the client
- * `panel/client.js`, in that order, exactly as the handler emits them) run
- * against a linkedom document built from the page the handler renders, a real
- * Yjs song whose `midi_maps` a real `midi.map` command wrote, a fake
- * `navigator.requestMIDIAccess` with fake ports, a fake Web Locks API shared by
- * the "tabs" of a test, and a fake engine that records what it was asked to do.
+ * The emitted scripts (the routing rule `panel/midi-route.js`, the controllers
+ * module `panel/midi.js` and the client `panel/client.js`, in that order, exactly
+ * as the handler emits them) run against a linkedom document built from the page
+ * the handler renders, a real Yjs song whose `midi_maps` a real `midi.map`
+ * command wrote, a fake `navigator.requestMIDIAccess` with fake ports, a fake
+ * Web Locks API shared by the "tabs" of a test, and a fake engine that records
+ * what it was asked to do.
  *
- * What they prove: Web MIDI is never asked for without a click (and is asked
- * for again on a later load only while the permission is still granted), Learn
- * turns the next program change into one `midi.map` for the control the
- * operator picked, an unplugged controller that comes back by name keeps its
+ * What they prove: the page and the server route every case the same (one rule,
+ * one module, `panel/midi-route.js`), that rule's plain-JS gate accepts exactly
+ * what the zod table accepts, Web MIDI is never asked for without a click (and
+ * is asked for again on a later load only while the permission is still
+ * granted), Learn turns the next program change into one `midi.map` for the
+ * control the operator picked, a proposal on the same message is left standing,
+ * the rest of the gesture Learn mapped is not also played, a knob waits for a
+ * control change, an unplugged controller that comes back by name keeps its
  * mapping, the table says who set each row, a routed pedal runs its action
  * locally and writes no history step, a proposed mapping routes nothing, and a
- * second tab holds no routing lock and so routes nothing at all.
+ * second tab holds no routing lock and so routes nothing at all — asking again
+ * on its beat, and letting go of a grant that arrives after the page closed.
  *
  * No browser is needed: nothing here touches audio or Web MIDI for real.
  */
@@ -299,6 +305,7 @@ async function bootMidi(options = {}) {
   const { encodeDocState } = await import("../bundles/studio/server/doc.js");
   const { CLIENT_SCRIPT } = await import("../bundles/studio/panel/client.js");
   const { MIDI_SCRIPT } = await import("../bundles/studio/panel/midi.js");
+  const { MIDI_ROUTE_SCRIPT } = await import("../bundles/studio/panel/midi-route.js");
 
   const doc = options.doc || (await midiDoc());
   const res = {
@@ -315,12 +322,18 @@ async function bootMidi(options = {}) {
   assert.ok(res.html.includes('data-act="midi-connect"'), "the header carries Connect controllers");
   assert.ok(res.html.includes('data-act="midi-learn"'), "and the Learn toggle");
   assert.ok(res.html.includes('data-role="midi"'), "the page carries the MIDI section");
-  // The scripts travel in the handler's order: the controllers module first, so
-  // window.StudioMidi is there when the client boots.
+  // The scripts travel in the handler's order: the routing rule and then the
+  // controllers module first, so window.StudioMidiRoute and window.StudioMidi
+  // are there when the client boots.
+  assert.ok(
+    res.html.indexOf("window.StudioMidiRoute") < res.html.indexOf("window.StudioMidi "),
+    "the routing rule is emitted before the controllers module",
+  );
   assert.ok(
     res.html.indexOf("window.StudioMidi") < res.html.indexOf("var COMMANDS = ["),
-    "the MIDI script is emitted before the client",
+    "the MIDI scripts are emitted before the client",
   );
+  assert.ok(res.html.includes(MIDI_ROUTE_SCRIPT), "the page carries the routing script verbatim");
   const { document, window: domWindow } = parseHTML(res.html);
 
   const midi = options.midi || fakeMidiAccess();
@@ -394,7 +407,7 @@ async function bootMidi(options = {}) {
   assert.notEqual(clientText, CLIENT_SCRIPT, "the test replaces the Yjs asset URL with the file on disk");
 
   const timers = [];
-  // One scope, two scripts, in the order the page emits them.
+  // One scope, four scripts, in the order the page emits them.
   const run = new Function(
     "document",
     "window",
@@ -408,7 +421,7 @@ async function bootMidi(options = {}) {
     "clearTimeout",
     "setInterval",
     "clearInterval",
-    `${MIDI_SCRIPT}\n${clientText}`,
+    `${MIDI_ROUTE_SCRIPT}\n${MIDI_SCRIPT}\n${clientText}`,
   );
   run(
     document,
@@ -504,6 +517,32 @@ async function bootMidi(options = {}) {
       assert.ok(node, "the header carries the lock state");
       return String(node.textContent || "");
     },
+    /** What the page's toast says right now. */
+    toastText() {
+      const node = document.querySelector("[data-role=toast]");
+      assert.ok(node, "the page carries a toast");
+      return String(node.textContent || "");
+    },
+    /** Take this page down the way Turbo does before a visit. */
+    teardown() {
+      document.dispatchEvent(new domWindow.Event("turbo:before-cache"));
+    },
+    /**
+     * Run every timer the page has scheduled so far (its idle windows, its
+     * retry beat, its debounces). The harness keeps them instead of running
+     * them, so a test decides when time passes.
+     */
+    runTimers() {
+      const pending = timers.splice(0);
+      for (const fn of pending) {
+        try {
+          fn();
+        } catch (err) {
+          // A timer that throws is the test's to see, not the next one's.
+          assert.fail(`a page timer threw: ${err && err.message}`);
+        }
+      }
+    },
   };
   return ui;
 }
@@ -516,6 +555,45 @@ function commands(ui, id) {
 /** @returns {object[]} every frame the page sent that would become a history step. */
 function historyFrames(ui) {
   return ui.sent.filter((message) => message.type === "command" || message.type === "undo" || message.type === "redo");
+}
+
+/**
+ * A Web Locks API whose grants arrive when the test says so: a request is
+ * recorded, and `grant()` runs its callback the way a browser does — holding the
+ * name only until that callback's promise settles.
+ */
+function gatedLocks() {
+  const asked = [];
+  const heldNames = new Set();
+  return {
+    asked,
+    heldNames,
+    request(name, options, run) {
+      const entry = {
+        name,
+        options,
+        /** Grant it now, the way a browser does: hold the name until settled. */
+        grant() {
+          const callback = typeof options === "function" ? options : run;
+          const settings = typeof options === "function" ? {} : options || {};
+          if (heldNames.has(name) && settings.ifAvailable) {
+            callback(null);
+            return;
+          }
+          heldNames.add(name);
+          const settle = () => {
+            heldNames.delete(name);
+          };
+          Promise.resolve(callback({ name })).then(settle, settle);
+        },
+      };
+      asked.push(entry);
+      return Promise.resolve(undefined);
+    },
+    async query() {
+      return { held: [...heldNames].map((name) => ({ name })), pending: [] };
+    },
+  };
 }
 
 // ---- the tests -------------------------------------------------------------
@@ -640,11 +718,32 @@ test("the mapping table shows who set each row", async () => {
   assert.ok(theirs, "so is the bot's");
 
   assert.equal(String(mine.querySelector(".st-midi-by").textContent), "you", "the operator's row is yours");
-  assert.equal(String(theirs.querySelector(".st-midi-by").textContent), "the bot (proposed)",
-    "the bot's row says it is a proposal");
+  assert.equal(String(theirs.querySelector(".st-midi-by").textContent), "proposed (by the bot)",
+    "the bot's row says it is a proposal, and who proposed it");
   assert.match(String(mine.textContent), /program change 2/, "the row names the message");
   assert.match(String(mine.querySelector(".st-midi-does").textContent), /Launch scene Verse/,
     "and what the message does");
+
+  // A profile run by the operator proposes rows too: those are proposals of
+  // YOURS, and only the operator's own yes makes one live.
+  await ui.apply("midi.propose_profile", { device: "fcb1010", device_name: DEVICE }, { kind: "human" });
+  const proposed = ui.mappingRow("fcb1010-pedal-1");
+  assert.ok(proposed, "the operator's own proposal is listed");
+  assert.equal(String(proposed.querySelector(".st-midi-by").textContent), "proposed (by you)",
+    "a proposal of the operator's says so, in the first person");
+
+  // A bot's row that the operator accepted is live, and says who set it: the
+  // bot proposed, the operator said yes (midi.accept is the operator's alone).
+  await ui.apply("midi.accept", {
+    id: "m-theirs",
+    expect: {
+      device_name: DEVICE,
+      message: { type: "pc", channel: 1, number: 4 },
+      action: { kind: "scene.launch", scene_id: CHORUS },
+    },
+  }, { kind: "human" });
+  assert.equal(String(ui.mappingRow("m-theirs").querySelector(".st-midi-by").textContent),
+    "the bot (accepted)", "an accepted bot row says it was accepted");
 });
 
 test("a routed pedal launches its scene and makes no history step", async () => {
@@ -714,4 +813,588 @@ test("a second tab routes nothing", async () => {
   first.pedal(DEVICE, [0xc0, 3]);
   await first.settle();
   assert.deepEqual(first.engine.launches, [CHORUS], "the tab with the lock is the one that plays");
+});
+
+// ---- the one routing rule --------------------------------------------------
+
+/**
+ * A live mapping as a snapshot holds one: the shape server/commands/midi.js
+ * writes, with `accepted_action` copied from the action unless a case moves it
+ * on the way a hand-written document can.
+ */
+function liveMapping(id, action, message, extra = {}) {
+  return {
+    id,
+    device_name: "D",
+    message,
+    action,
+    set_by: "operator",
+    proposed: false,
+    accepted_action: action === null ? null : JSON.parse(JSON.stringify(action)),
+    ...extra,
+  };
+}
+
+/** The message most cases arrive on: program change 3 on channel 1 of "D". */
+const PC3 = { type: "pc", channel: 1, number: 3 };
+const NOTE3 = { type: "note", channel: 1, number: 3 };
+const NOTE0 = { type: "note", channel: 1, number: 0 };
+const CC3 = { type: "cc", channel: 1, number: 3 };
+
+/** @returns {object} an incoming message, program change 3 unless told otherwise. */
+function incoming(over = {}) {
+  return { device_name: "D", type: "pc", channel: 1, number: 3, ...over };
+}
+
+/**
+ * Every routing case the review's parity probe ran, plus the ones it named: a
+ * malformed scene id, an extra argument, an inherited effect name, a pad field
+ * no control sweeps, a range upside down, a pad index past the end, a macro
+ * index past the end, a numeric device name, channel 0, an empty device name and
+ * a map key that is not the mapping's own id.
+ */
+const ROUTE_CASES = [
+  {
+    name: "a live mapping",
+    maps: { a: liveMapping("a", { kind: "scene.launch", scene_id: "s1" }, PC3) },
+    routed: true,
+  },
+  {
+    name: "a proposal",
+    maps: { a: liveMapping("a", { kind: "scene.launch", scene_id: "s1" }, PC3, { proposed: true }) },
+    routed: false,
+  },
+  {
+    name: "a missing proposed flag",
+    maps: { a: liveMapping("a", { kind: "scene.launch", scene_id: "s1" }, PC3, { proposed: undefined }) },
+    routed: false,
+  },
+  {
+    name: "an action changed after accept",
+    maps: { a: liveMapping("a", { kind: "scene.launch", scene_id: "s1" }, PC3, { accepted_action: { kind: "scene.launch", scene_id: "s2" } }) },
+    routed: false,
+  },
+  {
+    name: "a malformed scene id",
+    maps: { a: liveMapping("a", { kind: "scene.launch", scene_id: "../x y" }, PC3) },
+    routed: false,
+  },
+  {
+    name: "an extra argument",
+    maps: { a: liveMapping("a", { kind: "scene.launch", scene_id: "s1", evil: 1 }, PC3) },
+    routed: false,
+  },
+  {
+    name: "an inherited effect name",
+    maps: { a: liveMapping("a", { kind: "fx.hold", name: "constructor" }, CC3) },
+    message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "a pad field no control sweeps",
+    maps: { a: liveMapping("a", { kind: "pad.param", track_id: "t", param: "sample_id", min: 0, max: 5 }, CC3) },
+    message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "a range upside down",
+    maps: { a: liveMapping("a", { kind: "pad.param", track_id: "t", param: "pitch", min: 5, max: 0 }, CC3) },
+    message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "a pad index past the end",
+    maps: { a: liveMapping("a", { kind: "pad.play", track_id: "t", bank_id: "b", index: 99 }, NOTE3) },
+    message: incoming({ type: "note" }),
+    routed: false,
+  },
+  {
+    name: "a macro index past the end",
+    maps: { a: liveMapping("a", { kind: "macro.set", index: 99 }, CC3) },
+    message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "a pad mapping over the keys mapping",
+    maps: {
+      k: liveMapping("k", { kind: "keys.play" }, NOTE0),
+      p: liveMapping("p", { kind: "pad.play", track_id: "t", bank_id: "b", index: 1 }, NOTE3),
+    },
+    message: incoming({ type: "note" }),
+    routed: true,
+  },
+  {
+    name: "a keys row stored as a control change",
+    maps: { k: liveMapping("k", { kind: "keys.play" }, { type: "cc", channel: 1, number: 0 }) },
+    message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "a keys row on a note it does not name",
+    maps: { k: liveMapping("k", { kind: "keys.play" }, NOTE0) },
+    message: incoming({ type: "note", number: 70 }),
+    routed: true,
+  },
+  {
+    name: "a named mapping over the keys mapping",
+    maps: {
+      k: liveMapping("k", { kind: "keys.play" }, NOTE0),
+      o: liveMapping("o", { kind: "transport.play" }, NOTE3),
+    },
+    message: incoming({ type: "note" }),
+    routed: true,
+  },
+  {
+    name: "a numeric device name",
+    maps: { a: liveMapping("a", { kind: "stop_all" }, PC3, { device_name: 5 }) },
+    message: incoming({ device_name: "5" }),
+    routed: false,
+  },
+  {
+    name: "numbers stored as strings",
+    maps: { a: liveMapping("a", { kind: "stop_all" }, { type: "pc", channel: "1", number: "3" }) },
+    routed: true,
+  },
+  {
+    name: "a map key that is not the mapping's id",
+    maps: { key1: liveMapping("other-id", { kind: "stop_all" }, PC3) },
+    routed: true,
+  },
+  {
+    name: "a null action",
+    maps: { a: liveMapping("a", null, PC3, { accepted_action: null }) },
+    routed: false,
+  },
+  {
+    name: "an inherited action kind",
+    maps: { a: liveMapping("a", { kind: "toString" }, PC3) },
+    routed: false,
+  },
+  {
+    name: "channel 0",
+    maps: { a: liveMapping("a", { kind: "stop_all" }, { type: "pc", channel: 0, number: 3 }) },
+    message: incoming({ channel: 0 }),
+    routed: false,
+  },
+  {
+    name: "an empty device name",
+    maps: { a: liveMapping("a", { kind: "stop_all" }, PC3, { device_name: "" }) },
+    message: incoming({ device_name: "" }),
+    routed: false,
+  },
+  {
+    name: "two live mappings on one message",
+    maps: {
+      a: liveMapping("a", { kind: "stop_all" }, PC3),
+      b: liveMapping("b", { kind: "transport.play" }, PC3),
+    },
+    routed: true,
+  },
+  {
+    name: "a mapping with no message",
+    maps: { a: liveMapping("a", { kind: "stop_all" }, null) },
+    routed: false,
+  },
+  {
+    name: "a midi_maps that is an array",
+    maps: [liveMapping("a", { kind: "stop_all" }, PC3)],
+    routed: true,
+  },
+  { name: "no midi_maps at all", maps: null, message: incoming(), routed: false },
+  { name: "no message at all", maps: { a: liveMapping("a", { kind: "stop_all" }, PC3) }, message: null, routed: false },
+];
+
+/**
+ * The plain-JS gate against the zod table, argument for argument: every kind,
+ * a good one and the ways a stored document can spoil it.
+ */
+const ACTION_CANDIDATES = [
+  ["scene.launch", { scene_id: "s1" }],
+  ["scene.launch", { scene_id: "" }],
+  ["scene.launch", { scene_id: "a b" }],
+  ["scene.launch", { scene_id: "x".repeat(40) }],
+  ["scene.launch", { scene_id: "x".repeat(41) }],
+  ["scene.launch", { scene_id: "s1", extra: 1 }],
+  ["scene.launch", {}],
+  ["clip.launch", { clip_id: "c1" }],
+  ["clip.launch", { clip_id: 5 }],
+  ["transport.play", {}],
+  ["transport.play", { on: true }],
+  ["transport.stop", {}],
+  ["record.toggle", {}],
+  ["stop_all", {}],
+  ["pad.play", { track_id: "t", bank_id: "b", index: 0 }],
+  ["pad.play", { track_id: "t", bank_id: "b", index: 15 }],
+  ["pad.play", { track_id: "t", bank_id: "b", index: 16 }],
+  ["pad.play", { track_id: "t", bank_id: "b", index: -1 }],
+  ["pad.play", { track_id: "t", bank_id: "b", index: 1.5 }],
+  ["pad.play", { track_id: "t", bank_id: "b", index: "1" }],
+  ["pad.play", { track_id: "t", index: 1 }],
+  ["pad.param", { track_id: "t", param: "pitch", min: 0, max: 5 }],
+  ["pad.param", { track_id: "t", param: "pitch", min: 0, max: 0 }],
+  ["pad.param", { track_id: "t", param: "pitch", min: 5, max: 0 }],
+  ["pad.param", { track_id: "t", param: "sample_id", min: 0, max: 5 }],
+  ["pad.param", { track_id: "t", param: "pitch", min: "0", max: 5 }],
+  ["pad.param", { track_id: "t", param: "pitch", min: 0, max: Infinity }],
+  ["pad.param", { track_id: "t", param: "pitch", min: 0, max: NaN }],
+  ["pad.param", { track_id: "t", param: "pitch" }],
+  ["track.macro", { track_id: "t", index: 7 }],
+  ["track.macro", { track_id: "t", index: 8 }],
+  ["track.macro", { track_id: "t", index: 0.5 }],
+  ["fx.hold", { name: "stutter" }],
+  ["fx.hold", { name: "reverb_throw" }],
+  ["fx.hold", { name: "constructor" }],
+  ["fx.hold", { name: "__proto__" }],
+  ["fx.hold", { name: 1 }],
+  ["looper.cycle", {}],
+  ["looper.to_pad", { track_id: "t", bank_id: "b", index: 15 }],
+  ["looper.to_pad", { track_id: "t", bank_id: "b", index: 99 }],
+  ["mix.gain", { track_id: "t" }],
+  ["mix.gain", { track_id: "" }],
+  ["keys.play", {}],
+  ["keys.play", { channel: 1 }],
+  ["macro.set", { index: 0 }],
+  ["macro.set", { index: 7 }],
+  ["macro.set", { index: 8 }],
+  ["macro.set", {}],
+];
+
+test("the page and the server route every case the same", async () => {
+  const { MIDI_ACTION_KINDS, MIDI_ACTIONS, routeFor } = await import("../bundles/studio/server/commands/midi.js");
+  const { MIDI_ROUTE_SCRIPT, validRoutedAction } = await import("../bundles/studio/panel/midi-route.js");
+
+  // The page's copy: the very text the handler inlines, evaluated the way the
+  // page's own script tag runs it.
+  const page = new Function("window", `${MIDI_ROUTE_SCRIPT}\nreturn window.StudioMidiRoute;`)({});
+  assert.equal(typeof page.routeFor, "function", "the inlined script defines the router");
+
+  // The inline-script rules, on the text the page really carries.
+  assert.equal(MIDI_ROUTE_SCRIPT.includes("\u0060"), false, "no backtick: the panel rule");
+  assert.equal(MIDI_ROUTE_SCRIPT.includes("$" + "{"), false, "no template interpolation");
+  assert.equal(MIDI_ROUTE_SCRIPT.includes('"'), false, "no double quote");
+  assert.equal(MIDI_ROUTE_SCRIPT.includes("\\"), false, "no backslash either");
+  assert.equal(MIDI_ROUTE_SCRIPT.includes("</script"), false, "and it cannot close its own tag");
+
+  for (const one of ROUTE_CASES) {
+    const snap = { midi_maps: one.maps };
+    const message = one.message === undefined ? incoming() : one.message;
+    const server = routeFor(snap, message);
+    const client = page.routeFor(snap, message);
+    assert.deepEqual(client, server, `${one.name}: the page answers what the server answers`);
+    assert.equal(server === null, !one.routed, `${one.name}: ${one.routed ? "routes" : "routes nothing"}`);
+  }
+
+  // The case the review called out by name: the answer is the mapping's own id,
+  // not the key it is filed under.
+  const keyed = routeFor({ midi_maps: { key1: liveMapping("other-id", { kind: "stop_all" }, PC3) } }, incoming());
+  assert.equal(keyed.id, "other-id", "the answer names the mapping's own id");
+
+  // The plain-JS gate accepts exactly what the zod table accepts, argument for
+  // argument: an action the hub would refuse is never routed, and one the hub
+  // accepts is never silently dropped.
+  const seen = new Set();
+  for (const [kind, args] of ACTION_CANDIDATES) {
+    seen.add(kind);
+    const zod = MIDI_ACTIONS[kind].safeParse(args).success;
+    assert.equal(
+      validRoutedAction({ kind, ...args }),
+      zod,
+      `${kind} ${JSON.stringify(args)}: the plain-JS gate and the schema agree`,
+    );
+  }
+  assert.deepEqual([...seen].sort(), [...MIDI_ACTION_KINDS].sort(),
+    "every allow-listed kind is ridden against its own schema");
+
+  // And the router is the thing that runs that gate: a live mapping holding an
+  // action the schema refuses routes nothing.
+  for (const kind of MIDI_ACTION_KINDS) {
+    const action = { kind, extra: 1 };
+    const answered = routeFor(
+      { midi_maps: { m: liveMapping("m", action, CC3) } },
+      incoming({ type: "cc" }),
+    );
+    assert.equal(answered, null, `${kind} with an argument its schema refuses is not routed`);
+  }
+});
+
+/** One mapping written by the real command, as the operator or as the bot. */
+async function writeMapping(doc, args, agent = false) {
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "midi.map", args, { author: { kind: agent ? "agent" : "human" } });
+  return args;
+}
+
+test("learning over a message a bot also proposed keeps the proposal and learns", async () => {
+  const doc = await midiDoc();
+  const message = { type: "pc", channel: 1, number: 3 };
+  await writeMapping(doc, {
+    id: "m-live",
+    device_name: DEVICE,
+    message,
+    action: { kind: "scene.launch", scene_id: SCENE },
+  });
+  await writeMapping(doc, {
+    id: "m-proposal",
+    device_name: DEVICE,
+    message,
+    action: { kind: "transport.play" },
+  }, true);
+
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  // Learn on the Chorus launch button, then the pedal the bot also proposed on.
+  ui.click("[data-act=midi-learn]");
+  ui.click(`[data-act=launch-scene][data-scene-id=${CHORUS}]`);
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+
+  const removed = commands(ui, "midi.remove");
+  assert.equal(removed.length, 1, "the LIVE mapping on that message goes");
+  assert.equal(removed[0].args.id, "m-live");
+  const first = commands(ui, "midi.map");
+  assert.equal(first.length, 1, "and one live mapping is written");
+  assert.deepEqual(first[0].args.action, { kind: "scene.launch", scene_id: CHORUS });
+  assert.notEqual(first[0].args.id, "m-proposal", "Learn never writes the proposal's id");
+
+  await ui.apply("midi.remove", removed[0].args, { kind: "human" });
+  await ui.apply("midi.map", first[0].args, { kind: "human" });
+  let stored = await mappingsOf(ui.doc);
+  assert.equal(stored["m-proposal"].proposed, true, "the bot's proposal is untouched");
+  assert.deepEqual(stored["m-proposal"].action, { kind: "transport.play" });
+  assert.equal(stored[first[0].args.id].proposed, false, "Learn's mapping is the operator's, so live");
+
+  // Now the operator learns a control whose action IS the proposal's action:
+  // still nothing is accepted silently — a live mapping of their own is written,
+  // and the proposal is left for the MIDI page.
+  ui.click("[data-act=midi-learn]");
+  ui.click("[data-act=play]");
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+
+  const removedAgain = commands(ui, "midi.remove");
+  const second = commands(ui, "midi.map");
+  assert.equal(removedAgain.length, 2, "the live Chorus mapping goes too");
+  assert.equal(removedAgain[1].args.id, first[0].args.id);
+  assert.equal(second.length, 2);
+  assert.deepEqual(second[1].args.action, { kind: "transport.play" },
+    "the answer the operator picked is the one learned");
+  assert.notEqual(second[1].args.id, "m-proposal", "and it is not the proposal's row");
+
+  await ui.apply("midi.remove", removedAgain[1].args, { kind: "human" });
+  await ui.apply("midi.map", second[1].args, { kind: "human" });
+  stored = await mappingsOf(ui.doc);
+  assert.equal(stored["m-proposal"].proposed, true, "the proposal is still a proposal");
+  assert.equal(stored[second[1].args.id].proposed, false, "and the operator's own row is live");
+});
+
+test("the rest of the gesture Learn mapped is not played", async () => {
+  const doc = await midiDoc();
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  // Learn a scene launch from one pedal press.
+  ui.click("[data-act=midi-learn]");
+  ui.click(`[data-act=launch-scene][data-scene-id=${CHORUS}]`);
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the press taught one mapping");
+
+  // The press that taught it is not also played, and neither is another one on
+  // the same control until the mapping is in the snapshot.
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [], "the gesture that taught the mapping launched nothing");
+
+  // The mapping arrives; from then on the pedal is the scene's.
+  await ui.apply("midi.map", maps[0].args, { kind: "human" });
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [CHORUS], "once the mapping is in the song the pedal drives it");
+
+  // A note-on teaches a pad, and the note-off that follows it has no note-on of
+  // its own: it is swallowed too.
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+  ui.click("[data-role=sampler] [data-act=pad][data-pad-index=0]");
+  await ui.settle();
+  ui.pedal(DEVICE, [0x90, 36, 100]);
+  await ui.settle();
+  const afterNote = commands(ui, "midi.map");
+  assert.equal(afterNote.length, 2, "the note taught a pad mapping");
+  assert.equal(afterNote[1].args.action.kind, "pad.play");
+
+  ui.pedal(DEVICE, [0x80, 36, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.pads, [], "the learned note-on played nothing");
+  assert.deepEqual(ui.engine.releases, [], "and its note-off reached nothing");
+});
+
+test("a knob's Learn waits for a control change", async () => {
+  const doc = await midiDoc();
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+  const gain = ui.document.querySelector("[data-pad-field=gain_db]");
+  assert.ok(gain, "the pad's gain is a control Learn can hold");
+  ui.click("[data-pad-field=gain_db]");
+  await ui.settle();
+
+  // A pedal's press is not a knob turn: nothing is mapped, and the page names
+  // what the control needs instead of mapping the wrong message.
+  ui.pedal(DEVICE, [0xc0, 6]);
+  await ui.settle();
+  assert.equal(commands(ui, "midi.map").length, 0, "a pedal is not a knob");
+  assert.match(ui.toastText(), /control change/, "the page names what the control needs");
+  assert.equal(ui.document.querySelector("[data-act=midi-learn]").getAttribute("aria-pressed"), "true",
+    "Learn is still waiting");
+
+  // The control change it was waiting for maps it, as a pad.param.
+  ui.pedal(DEVICE, [0xb0, 6, 64]);
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the knob maps the control");
+  assert.equal(maps[0].args.action.kind, "pad.param");
+  assert.equal(maps[0].args.action.param, "gain_db");
+});
+
+test("the MIDI lock is let go when the page closes before it is granted", async () => {
+  const locks = gatedLocks();
+  const doc = await midiDoc();
+  await mapPedal(doc, { id: "m-pedal-3", number: 3, sceneId: CHORUS });
+
+  const gone = await bootMidi({ doc, locks });
+  gone.click("[data-act=midi-connect]");
+  await gone.settle();
+  assert.equal(locks.asked.length, 1, "the page asked for the song's routing lock");
+  assert.equal(locks.heldNames.has("studio-midi-song-1"), false, "the browser has not answered yet");
+
+  // The page goes (a Turbo visit) before the grant arrives.
+  gone.teardown();
+  await gone.settle();
+  locks.asked[0].grant();
+  await gone.settle();
+  assert.equal(locks.heldNames.has("studio-midi-song-1"), false,
+    "a grant that arrives after the page closed is let go at once");
+
+  // The page that stays keeps its lock, and gives it back on its own teardown.
+  const kept = gatedLocks();
+  const alive = await bootMidi({ doc, locks: kept });
+  alive.click("[data-act=midi-connect]");
+  await alive.settle();
+  kept.asked[0].grant();
+  await alive.settle();
+  assert.equal(kept.heldNames.has("studio-midi-song-1"), true, "a live page keeps the lock it was granted");
+  alive.teardown();
+  await alive.settle();
+  assert.equal(kept.heldNames.has("studio-midi-song-1"), false, "and lets go of it on teardown");
+});
+
+test("a refused tab asks again for the lock and routes nothing meanwhile", async () => {
+  const locks = fakeLocks();
+  const doc = await midiDoc();
+  await mapPedal(doc, { id: "m-pedal-3", number: 3, sceneId: CHORUS });
+
+  const first = await bootMidi({ doc, locks });
+  first.click("[data-act=midi-connect]");
+  await first.settle();
+
+  const second = await bootMidi({ doc, locks });
+  second.click("[data-act=midi-connect]");
+  await second.settle();
+  assert.equal(second.lockState(), "Another tab is listening to MIDI for this song.");
+
+  // The tab that had the lock goes; the refused tab asks again on its beat.
+  first.teardown();
+  await first.settle();
+  assert.equal(locks.held.has("studio-midi-song-1"), false, "the first tab gave the lock back");
+  second.runTimers();
+  await second.settle();
+  assert.equal(locks.held.has("studio-midi-song-1"), true, "the refused tab has it now");
+  assert.equal(second.lockState(), "", "and stops saying another tab is listening");
+
+  second.pedal(DEVICE, [0xc0, 3]);
+  await second.settle();
+  assert.deepEqual(second.engine.launches, [CHORUS], "so the pedal plays again");
+});
+
+test("a knob's last value is sent when the page goes", async () => {
+  const doc = await midiDoc();
+  await writeMapping(doc, {
+    id: "m-gain",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 7 },
+    action: { kind: "mix.gain", track_id: TRACK },
+  });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  ui.pedal(DEVICE, [0xb0, 7, 100]);
+  await ui.settle();
+  assert.equal(commands(ui, "track.set_mix").length, 0, "the 300 ms window is still open");
+
+  ui.teardown();
+  const sent = commands(ui, "track.set_mix");
+  assert.equal(sent.length, 1, "the last value is sent, not dropped");
+  assert.equal(sent[0].args.track_id, TRACK);
+  assert.equal(sent[0].args.gain_db, -3.3, "the value the knob was sitting at");
+});
+
+test("a routed action is held to what the page can really do", async () => {
+  const doc = await midiDoc();
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  // The routing rule is the gate, but the page is the last word on what it will
+  // touch: an action that reaches it from elsewhere still cannot write a field
+  // Studio never offered, spell an effect the engine does not know, or launch a
+  // scene the song no longer has.
+  const real = ui.window.StudioMidiRoute;
+  const handMade = (action) => {
+    ui.window.StudioMidiRoute = { routeFor: () => ({ id: "hand-made", action }) };
+  };
+
+  handMade({ kind: "pad.param", track_id: TRACK, param: "sample_id", min: 0, max: 16 });
+  ui.pedal(DEVICE, [0xb0, 20, 100]);
+  await ui.settle();
+  ui.runTimers();
+  await ui.settle();
+  assert.equal(commands(ui, "pad.set").length, 0, "a field outside the lock list is not written");
+
+  handMade({ kind: "fx.hold", name: "nonsense" });
+  ui.pedal(DEVICE, [0xb0, 21, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [], "only the five known effects reach the engine");
+
+  handMade({ kind: "fx.hold", name: "stutter" });
+  ui.pedal(DEVICE, [0xb0, 22, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [{ name: "stutter", amount: 1, on: true }], "a known one still holds");
+
+  await ui.apply("scene.remove", { scene_id: CHORUS }, { kind: "human" });
+  handMade({ kind: "scene.launch", scene_id: CHORUS });
+  ui.pedal(DEVICE, [0xc0, 7]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [], "there is nothing left to launch");
+  assert.equal(ui.engine.plays, 0, "and no transport starts");
+  assert.equal(ui.toastText(), "That pedal’s scene is gone.");
+
+  ui.document.querySelector("[data-role=toast]").textContent = "";
+  ui.pedal(DEVICE, [0xc0, 7]);
+  await ui.settle();
+  assert.equal(ui.toastText(), "", "and it is said once");
+
+  ui.window.StudioMidiRoute = real;
 });

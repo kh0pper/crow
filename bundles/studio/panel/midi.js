@@ -37,9 +37,11 @@
  *   name — and because a mapping is stored against the controller's NAME, a
  *   mapping made before the unplug keeps working after it.
  *
- * Nothing here routes anything: the page's router (client.js, with the song's
- * own `midi_maps`) decides what a message runs, and only the one page holding
- * the song's routing Web Lock ever gets as far as running it.
+ * Nothing here routes anything: the page draws its rule from
+ * `window.StudioMidiRoute` (panel/midi-route.js, the routing rule this repo keeps
+ * in one copy for the hub and the page alike), decides what a message runs from
+ * the song's own `midi_maps`, and only the one page holding the song's routing
+ * Web Lock ever gets as far as running it.
  *
  * `close()` lets go of every port again (used by a teardown, so a Turbo visit
  * does not leave a second listener behind).
