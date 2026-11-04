@@ -23,10 +23,10 @@ export const NAME_CACHE_TTL_MS = 3600 * 1000;
  * callers that only show the name fall back to the uid themselves (`?? uid`), and the comment loop fails closed on
  * null. `fresh` skips the cache (the answer still refreshes it).
  */
-export async function displayName(cfg, uid, { fresh = false } = {}) {
+export async function displayName(cfg, uid, { fresh = false, signal } = {}) {
   const c = nameCache.get(uid);
   if (!fresh && c && Date.now() - c.at < NAME_CACHE_TTL_MS) return c.name;
-  const r = await ncFetch(cfg, "PROPFIND", principalUrl(cfg, uid), { headers: { Depth: "0", "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>` });
+  const r = await ncFetch(cfg, "PROPFIND", principalUrl(cfg, uid), { headers: { Depth: "0", "Content-Type": "application/xml" }, body: `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:displayname/></d:prop></d:propfind>`, signal });
   if (r.status !== 207) { r.body?.cancel?.(); return null; }
   const name = propText(parseMultistatus(await r.text())[0]?.props || new Map(), NS.d, "displayname") || null;
   if (name !== null) nameCache.set(uid, { name, at: Date.now() });
