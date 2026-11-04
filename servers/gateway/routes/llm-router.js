@@ -65,7 +65,9 @@ import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/m
 import { resolveTenantId } from "../../shared/tenancy.js";
 import { loadProviders } from "../../shared/providers.js";
 import { validateLocalToken, validateModelsToken } from "../local-token.js";
-import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, isDoorUrl, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { resolveDoorTarget, listDoorModels, isTrustedDoorRequest, isTrustedDoorSource, isDoorUrl, forwardedAddrs, DOOR_PROVIDER_HEADER, DOOR_HOP_HEADER } from "../models/door-resolve.js";
+import { normalizeAddr } from "../../shared/peer-class.js";
+import { classifyIp } from "../../shared/ip-classify.js";
 import { isForeignInstanceHost } from "../../shared/provider-host.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { providerDoorUrl } from "../models/door.js";
@@ -196,12 +198,101 @@ async function defaultDoorAuth(token) {
   try { return (await validateLocalToken(db(), token)) || (await validateModelsToken(db(), token)); } catch { return false; }
 }
 
+// ---- the door's shadow census (private engineering notes, the AR3 work) ----
+// The source rule is about to be narrowed to loopback and the tailnet with no
+// bearer exception, so this line is the live confirmation that nothing is
+// admitted by a credential today: it fires ONLY when the source check FAILED
+// and a bearer then VALIDATED, and it names the FIRST source the rule refused —
+// the socket, then each forwarded entry in header order — so a loopback socket
+// relaying a LAN client logs the LAN address, never 127.0.0.1.
+//
+// Rails, all load-bearing:
+//  - an entry that is not an address logs the class `invalid` ONLY: the value
+//    can be an obfuscated token or carry control characters, and is never echoed;
+//  - the token, `req.ip` and every other header value are never logged; the
+//    route and the optional `x-crow-client` tag are bounded and printable-only;
+//  - at most one line per (class, address) per DOOR_CENSUS_WINDOW_MS, whatever
+//    the route, in a map capped at DOOR_CENSUS_MAX_KEYS with the oldest evicted,
+//    so a spray of spoofed addresses cannot grow memory;
+//  - no DB write, no setting, no counter file.
+export const DOOR_CENSUS_WINDOW_MS = 60 * 60 * 1000; // one line per key per hour
+export const DOOR_CENSUS_MAX_KEYS = 256;
+const doorCensusSeen = new Map(); // "<class> <address>" -> last logged at, ms
+
+/** The capped map's size, and a reset. Test seams; nothing else reads them. */
+export function doorCensusSize() { return doorCensusSeen.size; }
+export function resetDoorCensus() { doorCensusSeen.clear(); }
+
+/** Census bucket for one source address the door refused: `loopback`, `tailnet`,
+ * `lan`, `bridge`, `public` or `invalid`. Only reached for a source the trust
+ * check already rejected, so loopback/tailnet here mean an exotic spelling.
+ * `bridge` is Docker's 172.16/12; the documentation/lab ranges land in `lan`
+ * because an address there is not reachable from the internet either. */
+function censusClass(addr) {
+  if (addr === null || addr === undefined || String(addr).trim() === "") return "invalid";
+  const { cls, v4, via } = classifyIp(addr);
+  if (cls === "invalid") return "invalid";
+  // An IPv4 reached through a translator or tunnel is not a local source.
+  if (via !== null && via !== "mapped") return "public";
+  if (cls === "loopback") return "loopback";
+  if (isTrustedDoorSource(addr)) return "tailnet";
+  // classifyIp leaves v4 null for a plain IPv4 literal, so test the address itself too.
+  if (cls === "private") return /^172\.(1[6-9]|2\d|3[01])\./.test(v4 ?? normalizeAddr(addr) ?? "") ? "bridge" : "lan";
+  if (cls === "public") return "public";
+  return "lan";
+}
+
+/** The first source the rule refused: the socket, then each forwarded address in
+ * header order. `undefined` when every source was trusted (never happens on the
+ * census path), `null` for a forwarded value that is not an address. */
+function firstUntrustedDoorSource(socketAddr, headers) {
+  if (!isTrustedDoorSource(socketAddr)) return socketAddr ?? null;
+  for (const a of forwardedAddrs(headers || {})) {
+    if (a === null || !isTrustedDoorSource(a)) return a;
+  }
+  return undefined;
+}
+
+/** Printable, bounded copy of an untrusted string (control characters -> "?"). */
+function printable(s, max) {
+  return String(s ?? "").replace(/[^\x20-\x7e]/g, "?").slice(0, max);
+}
+
+/** The census line (see the block above). Never throws: a logger that throws
+ * must not change whether the door admitted the request. */
+function logBearerAdmission(req, deps, socketAddr) {
+  try {
+    const addr = firstUntrustedDoorSource(socketAddr, req.headers);
+    if (addr === undefined) return;
+    const cls = censusClass(addr);
+    // An IPv6 zone id (`fe80::1%anything`) is caller-chosen text: never logged.
+    // Anything that is not a plain address after that is logged as its class only.
+    const bare = String(normalizeAddr(addr) ?? "").replace(/%.*$/, "");
+    const plain = cls !== "invalid" && /^[0-9a-f:.]+$/i.test(bare);
+    const where = plain ? `${cls} ${bare.slice(0, 64)}` : cls;
+    const now = deps.nowFn();
+    const last = doorCensusSeen.get(where);
+    if (last !== undefined && now - last < DOOR_CENSUS_WINDOW_MS) return;
+    doorCensusSeen.delete(where);
+    doorCensusSeen.set(where, now);
+    while (doorCensusSeen.size > DOOR_CENSUS_MAX_KEYS) doorCensusSeen.delete(doorCensusSeen.keys().next().value);
+    const route = printable(`${req.method || "-"} ${(req.baseUrl || "") + (req.path || "")}`.trim(), 120) || "-";
+    const raw = req.headers["x-crow-client"];
+    const client = printable(Array.isArray(raw) ? raw[0] : raw, 80).trim() || "-";
+    deps.logFn(`[llm-router] bearer admitted from a non-tailnet source (would be refused after AR3): ${where} route=${route} client=${client}`);
+  } catch { /* the census never changes the door's answer */ }
+}
+
 /** Non-companion door addressing: loopback/tailnet source, or a valid bearer. */
 async function doorCallerAllowed(req, deps) {
+  const socketAddr = deps.remoteAddressFn(req);
   // Socket AND every forwarded address must be loopback/tailnet (final review I1).
-  if (isTrustedDoorRequest(deps.remoteAddressFn(req), req.headers)) return true;
+  if (isTrustedDoorRequest(socketAddr, req.headers)) return true;
   const h = req.headers.authorization || "";
-  return h.startsWith("Bearer ") ? !!(await deps.doorAuthFn(h.slice(7))) : false;
+  if (!h.startsWith("Bearer ") || !(await deps.doorAuthFn(h.slice(7)))) return false;
+  // Admitted by the credential alone: exactly the case the census exists for.
+  logBearerAdmission(req, deps, socketAddr);
+  return true;
 }
 
 function incomingHop(req) {
@@ -790,6 +881,8 @@ export default function llmRouterRouter(opts = {}) {
     remoteAddressFn: (req) => req.socket?.remoteAddress || "",
     doorAuthFn: defaultDoorAuth,
     nowFn: Date.now,
+    // The census line's sink (tests inject their own; the gateway keeps stdout).
+    logFn: (line) => console.log(line),
     recordUsageFn: (event) => recordUsageEvent(db(), event),
     // The voice keys per request (m6): a seam, so router tests never need the db() singleton.
     resolveVoiceKeysFn: (dbc) => resolveVoiceKeys(dbc),
