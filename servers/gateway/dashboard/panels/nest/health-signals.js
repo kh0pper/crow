@@ -65,6 +65,11 @@ import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drai
 import { createSidecarHealthReader } from "../../../artifact-origin/sidecar-health.js";
 import { unexportedCount } from "../../../keychain/reminder.js";
 import { loadKeychainKey } from "../../../keychain/key.js";
+import {
+  expirableWhere,
+  expiryColumns,
+  readExpireDays,
+} from "../../../../sharing/sync-conflict-expiry.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -559,10 +564,20 @@ async function updatesSignal(db) {
 async function syncConflictsSignal(db) {
   let count = 0;
   try {
-    const { rows } = await db.execute({
-      sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0",
-      args: [],
-    });
+    // Only UNEXPIRED conflicts are still owed a look: a row the 6-hourly sweep
+    // would clear on its own must not keep a warning card alive (363-month-old
+    // rows being the reason this signal exists). A store that predates the
+    // expiry columns counts every unresolved row, its old behaviour.
+    const cols = await expiryColumns(db);
+    let query = { sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0", args: [] };
+    if (cols.has("opened_at")) {
+      const { sql: where, args } = expirableWhere(await readExpireDays(db));
+      query = {
+        sql: `SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0 AND NOT (${where})`,
+        args,
+      };
+    }
+    const { rows } = await db.execute(query);
     count = Number(rows[0]?.n ?? 0);
   } catch {
     // sync_conflicts table may not exist yet on older installs; treat as 0.

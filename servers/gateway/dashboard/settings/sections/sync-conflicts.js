@@ -10,6 +10,10 @@
  *   restore_other — recover the losing data as a new local edit via
  *                   restoreConflict() in sync-conflict-resolve.js.
  *   resolve_all   — bulk mark-all-resolved.
+ *   resolve_older — resolve every unresolved row older than N days (1–365),
+ *                   opened rows and newer-losers included; winner kept.
+ *   opened        — page script: a person expanded a row's data, so the expiry
+ *                   sweep must leave it alone (sync-conflict-expiry.js).
  *
  * POST dispatch follows the settings-section handleAction pattern (auth+CSRF
  * for free via /dashboard/settings), exactly as paired-instances.js does.
@@ -27,6 +31,15 @@ import {
   NATURAL_KEY_RESTORE_TABLES,
 } from "../../../../sharing/sync-conflict-resolve.js";
 import { getInstanceSyncManager } from "../../../../sharing/server.js";
+import {
+  EXPIRE_DAYS_DEFAULT,
+  EXPIRE_DAYS_MAX,
+  EXPIRE_DAYS_MIN,
+  expiryColumns,
+  markOpened,
+  markResolvedVia,
+  resolveOlderConflicts,
+} from "../../../../sharing/sync-conflict-expiry.js";
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -62,6 +75,47 @@ function prettyJson(raw) {
   } catch {
     return String(raw);
   }
+}
+
+/** JSON safe inside a <script> and a template literal (models/client.js idiom). */
+function scriptJson(v) {
+  return JSON.stringify(v)
+    .replace(/</g, "\\u003c")
+    .replace(/`/g, "\\u0060")
+    .replace(/\$/g, "\\u0024");
+}
+
+/**
+ * "A person opened this conflict" tracker: one POST per row per page load, so
+ * the expiry sweep leaves a row somebody actually looked at alone. Turbo swaps
+ * the section content on navigation, which re-runs this script. Pages carry
+ * `script-src 'unsafe-inline'`, so a plain inline script is the house pattern
+ * here (see theme.js / shared-storage.js) — no nonce.
+ */
+function openedTrackerJS(csrfToken) {
+  return `
+(function () {
+  var token = ${scriptJson(String(csrfToken || ""))};
+  var rows = document.querySelectorAll('details.sc-details[data-conflict-id]');
+  for (var i = 0; i < rows.length; i++) {
+    (function (el) {
+      el.addEventListener('toggle', function () {
+        if (!el.open || el.dataset.openedSent) return;
+        el.dataset.openedSent = '1';
+        var body = new URLSearchParams();
+        body.set('action', 'sync_conflicts_opened');
+        body.set('conflict_id', el.dataset.conflictId);
+        body.set('_csrf', token);
+        fetch('/dashboard/settings', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+        }).catch(function () {});
+      });
+    })(rows[i]);
+  }
+})();`;
 }
 
 // ── Conflict table row renderer ───────────────────────────────────────────────
@@ -143,7 +197,7 @@ function renderConflictRow(r, lang, csrfToken) {
       <td style="padding:8px;font-size:0.78rem;color:var(--crow-text-muted)">${escapeHtml(when)}</td>
       <td style="padding:8px">${opBadge(r.op)}</td>
       <td style="padding:8px">
-        <details>
+        <details class="sc-details" data-conflict-id="${escapeHtml(String(r.id))}">
           <summary style="cursor:pointer;font-size:0.78rem;color:var(--crow-accent)">
             ${escapeHtml(t("syncConflicts.showData", lang))}
             <span style="font-size:0.7rem;color:var(--crow-text-muted)">
@@ -308,6 +362,33 @@ export default {
          </form>`
       : "";
 
+    // The escape hatch for a backlog: resolves EVERY unresolved row past the
+    // cutoff (opened ones and newer-losers included) because a person asked.
+    const resolveOlderForm = unresolvedRows.length > 0
+      ? `<form method="POST" action="/dashboard/settings"
+              style="margin-top:0.5rem;display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap"
+              onsubmit="return confirm(${escapeHtml(JSON.stringify(t("syncConflicts.resolveOlderConfirm", lang)))})">
+           <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}" />
+           <input type="hidden" name="action" value="sync_conflicts_resolve_older" />
+           <label for="sc-days" style="font-size:0.82rem;color:var(--crow-text-muted)">
+             ${escapeHtml(t("syncConflicts.resolveOlder", lang))}
+           </label>
+           <input id="sc-days" name="days" type="number" min="${EXPIRE_DAYS_MIN}" max="${EXPIRE_DAYS_MAX}"
+                  step="1" value="${EXPIRE_DAYS_DEFAULT}" required style="width:5rem" />
+           <span style="font-size:0.82rem;color:var(--crow-text-muted)">
+             ${escapeHtml(t("syncConflicts.days", lang))}
+           </span>
+           <button type="submit" class="btn btn-secondary" style="font-size:0.82rem">
+             ${escapeHtml(t("syncConflicts.resolveOlderButton", lang))}
+           </button>
+         </form>`
+      : "";
+
+    // Only rows that render an expandable pane need the opened tracker.
+    const openedScript = unresolvedRows.length > 0
+      ? `<script>${openedTrackerJS(csrfToken)}</script>`
+      : "";
+
     return `<style>
       .sc-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
       .sc-table th { text-align:left; padding:8px; background:var(--crow-bg-deep); color:var(--crow-text-muted); font-weight:500; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.03em; }
@@ -337,6 +418,7 @@ export default {
     </div>
 
     ${bulkResolveBtn}
+    ${resolveOlderForm}
 
     <details style="margin-top:1.5rem">
       <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-text-muted);padding:0.4rem 0">
@@ -350,7 +432,9 @@ export default {
           <tbody>${resolvedTbody}</tbody>
         </table>
       </div>
-    </details>`;
+    </details>
+
+    ${openedScript}`;
   },
 
   async handleAction({ req, res, db, action }) {
@@ -358,20 +442,30 @@ export default {
 
     const conflictId = req.body?.conflict_id;
     const instanceSync = getInstanceSyncManager();
+    const conflictPage = "/dashboard/settings?section=sync-conflicts";
+
+    // Page-script ping: a person expanded this row's data. Replies 204 — there
+    // is nothing to show and the page must not navigate.
+    if (action === "sync_conflicts_opened") {
+      if (conflictId) await markOpened(db, String(conflictId));
+      res.status(204).end();
+      return true;
+    }
 
     if (action === "sync_conflicts_keep_current") {
       if (!conflictId) {
-        res.redirectAfterPost("/dashboard/settings?section=sync-conflicts");
+        res.redirectAfterPost(conflictPage);
         return true;
       }
       await resolveConflict(db, String(conflictId));
-      res.redirectAfterPost("/dashboard/settings?section=sync-conflicts");
+      await markResolvedVia(db, conflictId, "operator");
+      res.redirectAfterPost(conflictPage);
       return true;
     }
 
     if (action === "sync_conflicts_restore_other") {
       if (!conflictId) {
-        res.redirectAfterPost("/dashboard/settings?section=sync-conflicts");
+        res.redirectAfterPost(conflictPage);
         return true;
       }
       const outcome = await restoreConflict(db, String(conflictId), { instanceSync });
@@ -384,11 +478,27 @@ export default {
     }
 
     if (action === "sync_conflicts_resolve_all") {
+      const cols = await expiryColumns(db);
+      const via = cols.has("resolved_via") ? `, resolved_via = 'operator'` : "";
       await db.execute({
-        sql: `UPDATE sync_conflicts SET resolved = 1, resolved_at = datetime('now') WHERE resolved = 0`,
+        sql: `UPDATE sync_conflicts SET resolved = 1, resolved_at = datetime('now')${via} WHERE resolved = 0`,
         args: [],
       });
-      res.redirectAfterPost("/dashboard/settings?section=sync-conflicts");
+      res.redirectAfterPost(conflictPage);
+      return true;
+    }
+
+    // Resolve everything past a cutoff a person typed in. Strictly validated:
+    // an out-of-range hand-crafted POST must not resolve anything.
+    if (action === "sync_conflicts_resolve_older") {
+      const raw = String(req.body?.days ?? "").trim();
+      const days = /^\d{1,3}$/.test(raw) ? Number(raw) : NaN;
+      if (!Number.isInteger(days) || days < EXPIRE_DAYS_MIN || days > EXPIRE_DAYS_MAX) {
+        res.redirectAfterPost(conflictPage);
+        return true;
+      }
+      await resolveOlderConflicts(db, { days });
+      res.redirectAfterPost(conflictPage);
       return true;
     }
 
