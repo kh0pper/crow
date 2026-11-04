@@ -563,6 +563,48 @@ test("S3: an ack names one stream — a resent '*' seq 1 never acks V seq 1", as
   });
 });
 
+test("cancelEpoch keepStreams: the named stream of an old epoch survives (X1)", async () => {
+  await withDb(async ({ db }) => {
+    // The old membership has a role frame on the old origin instance's stream (the
+    // stream V6's unshare will ride) and an invite on its "*" stream.
+    await enq(db, { body: { role: "viewer" } });                 // old epoch, stream PEER
+    await enq(db, { ...invite(), epoch: EPOCH });                 // old epoch, stream "*"
+    await enq(db, { ...invite(), epoch: NEW_EPOCH });             // the new membership's invite
+
+    const n = await cancelEpoch(db, {
+      contactId: CONTACT,
+      projectUuid: P1,
+      keepEpoch: NEW_EPOCH,
+      keepStreams: [{ epoch: EPOCH, stream: PEER }],
+    });
+    assert.equal(n, 1, "only the old '*' stream frame is cancelled");
+    const rows = await rowsOf(db);
+    const kept = rows.find((r) => r.epoch === EPOCH && streamOf(r.to_instance_id) === PEER);
+    assert.equal(kept.acked_at, null, "the kept stream is still queued");
+    assert.equal(kept.last_refusal, null, "and not marked cancelled");
+    const cancelled = rows.find((r) => r.epoch === EPOCH && streamOf(r.to_instance_id) === WILDCARD);
+    assert.notEqual(cancelled.acked_at, null, "the old '*' stream frame is cancelled as before");
+    assert.equal(cancelled.last_refusal, "cancelled");
+    // The keep list is per (epoch, stream): the NEW epoch's frames are never touched.
+    assert.equal(rows.find((r) => r.epoch === NEW_EPOCH).acked_at, null);
+
+    // A kept stream on ANOTHER epoch is not protected by an entry for this one.
+    assert.equal(await cancelEpoch(db, {
+      contactId: CONTACT, projectUuid: P1, keepEpoch: NEW_EPOCH,
+      keepStreams: [{ epoch: NEW_EPOCH, stream: PEER }],
+    }), 1);
+
+    // Malformed entries are refused loudly, before anything is cancelled.
+    for (const bad of [{ epoch: EPOCH }, { stream: PEER }, { epoch: "", stream: PEER }, null]) {
+      await assert.rejects(
+        () => cancelEpoch(db, { contactId: CONTACT, projectUuid: P1, keepEpoch: NEW_EPOCH, keepStreams: [bad] }),
+        (err) => err.code === "bad_argument",
+        JSON.stringify(bad),
+      );
+    }
+  });
+});
+
 test("S3: ack and refuse require the epoch and the stream", async () => {
   await withDb(async ({ db }) => {
     const seq = await enq(db);

@@ -4893,6 +4893,11 @@ export const translations = {
   // carried. Both are sanitized before they get here.
   "c2c.notify.invited": { en: "{contact} invited you to {project}", es: "{contact} te invitó a {project}" },
   "c2c.notify.unshared": { en: "{contact} stopped sharing {project}", es: "{contact} dejó de compartir {project}" },
+  // X2 of the Task 7A fix wave: OUR accept/decline/leave was refused `forbidden` or
+  // `stale_epoch`, so the membership is gone and the visit ends without an unshare
+  // frame ever arriving. Different wording from `c2c.notify.unshared` on purpose: no
+  // frame said "stopped sharing", the owner's answer did.
+  "c2c.notify.noLongerSharing": { en: "{contact} is no longer sharing {project}", es: "{contact} ya no comparte {project}" },
   // Fallbacks when a stored name cannot be shown (sanitizeDisplayName refuses it).
   "c2c.notify.someone": { en: "A contact", es: "Un contacto" },
   "c2c.notify.aProject": { en: "a project", es: "un proyecto" },

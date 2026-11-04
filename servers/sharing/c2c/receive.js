@@ -326,7 +326,12 @@ async function handleEnvelopeOnly(ctx, crowId, contactId, envelope, reason, kind
  *   `send(crowId, frame)` is the transport. `contactByCrowId(crowId)` resolves the
  *   admitted contact row (or null). `handlers` maps onInvite/onAccept/onDecline/
  *   onRole/onUnshare (Tasks 6/7) plus an optional onRefusal; a kind whose handler
- *   is not loaded is refused `busy` (F1). A handler may RETURN
+ *   is not loaded is refused `busy` (F1). `onRefusal` is not a frame handler: it is
+ *   called at the ack/refusal step, OUTSIDE any transaction, with ONE argument,
+ *   `{ db, contactId, crowId, frame, reason, terminal }` — the handle is in there
+ *   because the refusal may end one of OUR frames' effects (the visitor's accept, X2
+ *   of the Task 7A fix wave, reads our outbox and ends the visit). Its return value
+ *   is ignored. A handler may RETURN
  *   `{ afterCommit: async () => … }` — network I/O belongs there, never in the
  *   transaction (S7/W1; the hook runs after COMMIT, the ack and the flush). `beforeTransaction` is a TEST SEAM (F2):
  *   it runs once, just before the frame's transaction opens, so a test can commit
@@ -407,7 +412,9 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
         reason: body.reason,
       });
       try {
-        await handlers.onRefusal?.({ contactId, crowId, frame, reason: body.reason, terminal });
+        // The handle rides along (X2): a refusal can end one of OUR frames' effects,
+        // and that handler runs here, outside any transaction, so it may fan out.
+        await handlers.onRefusal?.({ db, contactId, crowId, frame, reason: body.reason, terminal });
       } catch (err) {
         console.warn(`[c2c] onRefusal failed: ${err?.message || err}`);
       }

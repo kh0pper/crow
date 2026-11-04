@@ -301,10 +301,18 @@ test("the invite cancels the old membership's queued frames and carries an incre
 
     const second = await invite(s);
 
+    // X1 (Task 7A fix wave): the old membership's frames on the OLD ORIGIN INSTANCE's
+    // stream are KEPT, because V6's re-invite queues the old membership's unshare on
+    // exactly that stream — a cancelled frame ahead of it would leave a hole the
+    // visitor holds as `gap` forever. The role frame therefore stays queued, and so
+    // does the unshare behind it.
     const roleAfter = (await outbox(s, "project.role"))[0];
-    assert.notEqual(roleAfter.acked_at, null, "S6: the old membership's queued frame is cancelled");
-    assert.equal(roleAfter.last_refusal, "cancelled");
+    assert.equal(roleAfter.acked_at, null, "the old origin's stream is not cancelled");
+    assert.equal(roleAfter.last_refusal, null);
     assert.equal(roleAfter.epoch, first.memberUuid, "it was the old epoch's frame");
+    const unshare = (await outbox(s, "project.unshare"))[0];
+    assert.equal(unshare.acked_at, null, "and the unshare behind it is still queued");
+    assert.equal(Number(unshare.seq), Number(roleAfter.seq) + 1, "the unshare is the next seq of that stream");
 
     const invites = await outbox(s, "project.invite");
     assert.equal(invites.length, 2);
@@ -313,8 +321,9 @@ test("the invite cancels the old membership's queued frames and carries an incre
     assert.ok(gen2 > gen1, `S2: a re-invite carries a greater generation (${gen1} → ${gen2})`);
     assert.equal(invites[1].epoch, second.memberUuid);
     assert.equal(invites[1].to_instance_id, null, "an invite rides the '*' stream (S1)");
-    // The old invite is cancelled by the same S6 pass; the new one is live.
-    assert.notEqual(invites[0].acked_at, null);
+    // The old "*" stream is still cancelled by the same S6 pass; the new one is live.
+    assert.notEqual(invites[0].acked_at, null, "the old '*' stream frame is still cancelled");
+    assert.equal(invites[0].last_refusal, "cancelled");
     assert.equal(invites[1].acked_at, null);
   });
 });

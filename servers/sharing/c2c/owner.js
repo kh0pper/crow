@@ -32,7 +32,7 @@ import { sanitizeDisplayName } from "../display-name.js";
 import { isCbPinnedStrict, lookupPinnedContactKey } from "../contact-binding.js";
 import { CONTACT_CAPS_JSON, memberRole } from "./authz.js";
 import {
-  cancelEpoch, enqueue, flush, nextInviteGeneration, withTransaction,
+  cancelEpoch, enqueue, flush, nextInviteGeneration, streamOf, withTransaction,
 } from "./outbox.js";
 import { ROLES as C2C_ROLES, buildFrame, parseFrame } from "./frames.js";
 
@@ -240,14 +240,21 @@ async function writeInviteRow(db, { projectId, contactId, epoch, dbRole }) {
  *
  * V6: when the row being converted was ACCEPTED, its visit lives on one specific
  * INSTANCE (`origin_instance_id`), and the new invite rides the `"*"` stream — which
- * only reaches the instance it lands on. So, after `cancelEpoch(keep = the new
- * epoch)` and BEFORE the new invite is queued, the old membership is unshared
- * directly: a `project.unshare` carrying the OLD epoch and aimed at the old
+ * only reaches the instance it lands on. So the old membership is unshared directly
+ * as well: a `project.unshare` carrying the OLD epoch and aimed at the old
  * `origin_instance_id`. That instance hears the old membership end (its visit goes
  * `unshared`, its local copies go) even if it is not the instance the new invite
- * reaches. The unshare is enqueued AFTER `cancelEpoch` so it is not cancelled with
- * the rest of the old epoch; it rides the old epoch's own stream (S1), so it cannot
- * collide with the new invite's frames.
+ * reaches.
+ *
+ * The unshare is enqueued after the S6 pass and is NOT cancelled by it
+ * (`keepStreams`, X1 of the Task 7A fix wave): `cancelEpoch` keeps the OLD epoch's
+ * frames on the OLD origin instance's stream, which is exactly the stream the
+ * unshare rides. Cancelling them would leave a seq hole there, and the visitor
+ * refuses every seq after a hole `gap` forever — so the unshare would never land.
+ * The kept frames are the old membership's role frames; the visitor applies them
+ * (and acks them) harmlessly before the unshare, which is then next in that stream.
+ * The unshare rides the old epoch's own stream (S1), so it cannot collide with the
+ * new invite's frames.
  *
  * The contact must be bound on BOTH counts (O4): a pinned Ed25519 key
  * (`lookupPinnedContactKey`) and this instance's PT-3 pin (`contact_hs_cb:<crow_id>`
@@ -304,11 +311,22 @@ export async function inviteContact(db, {
 
     await writeInviteRow(db, { projectId, contactId, epoch, dbRole });
     // S6: the previous membership's still-queued frames are dead weight for the
-    // peer; correctness never depends on this (S1/R4 refuse them anyway).
-    await cancelEpoch(db, { contactId, projectUuid, keepEpoch: epoch });
+    // peer; correctness never depends on this (S1/R4 refuse them anyway). X1: the
+    // OLD origin instance's stream is kept, because the unshare below rides it — a
+    // cancelled frame ahead of it would leave a hole and the visitor would hold the
+    // unshare as `gap` forever.
+    await cancelEpoch(db, {
+      contactId,
+      projectUuid,
+      keepEpoch: epoch,
+      keepStreams: previousEpoch && previousInstanceId
+        ? [{ epoch: previousEpoch, stream: streamOf(previousInstanceId) }]
+        : [],
+    });
     if (previousEpoch && previousInstanceId) {
       // V6: the accepted membership's instance hears it directly, on the old epoch's
-      // own stream. Queued after cancelEpoch, so it survives that pass.
+      // own stream. Queued after cancelEpoch, and that stream was kept, so nothing
+      // of the old membership's queue is skipped ahead of it.
       await enqueue(db, {
         contactId,
         projectUuid,

@@ -38,11 +38,17 @@
 import { createNotification, deliverNotification } from "../../shared/notifications.js";
 import { fill, t } from "../../gateway/dashboard/shared/i18n.js";
 import { sanitizeDisplayName } from "../display-name.js";
-import { enqueue, flush, withTransaction } from "./outbox.js";
+import { WILDCARD_STREAM, enqueue, flush, inTransaction, withTransaction } from "./outbox.js";
 import { ROLES, buildFrame, parseFrame } from "./frames.js";
 
 /** The `c2c_visits.state` values the actions accept as their starting point. */
 const START = Object.freeze({ accept: "invited", decline: "invited", leave: "active" });
+
+/** The two refusals that mean the membership a frame named is gone (X2). */
+const ENDING_REFUSALS = new Set(["forbidden", "stale_epoch"]);
+
+/** The answers a visit sends: a refusal of either one of OURS ends the visit (X2). */
+const ANSWER_KINDS = new Set(["project.accept", "project.decline"]);
 
 /**
  * A refused visit operation: a state a visit is not in, an unusable instance id, a
@@ -125,13 +131,19 @@ async function flushAfterCommit(db, { contactId, send, flushAfter }) {
 }
 
 /**
- * Plan 2 fills this in (spec §9 "Cleanup"): on unshare the visitor deletes that
- * project's drafts, its proposal states and the read-only snapshots it holds.
+ * Plan 2 fills this in (spec §9 "Cleanup"): the visitor deletes that project's
+ * drafts, its proposal states and the read-only snapshots it holds.
  *
  * A no-op in plan 1 — nothing is shared yet, so a visit has nothing to delete — and
- * exported so plan 2 can put the work here. It is called INSIDE the frame's
- * transaction, so the real version must do DB work only (no file or network I/O
- * while the handle's write lock is held, R7).
+ * exported so plan 2 can put the work here. The plan-2 version purges on all four
+ * ways a visit ends or is replaced: LEAVE (`leaveVisit`), UNSHARE (`onUnshare`),
+ * SUPERSEDE (a newer invite replacing an active visit, `onInvite`) and REFUSAL (our
+ * accept/decline was refused `forbidden`/`stale_epoch`, `onRefusal`). Every call site
+ * wraps it in try/catch: the state change is the effect that must land, and a
+ * cleanup that threw would roll it back and lose it.
+ *
+ * It is called INSIDE the frame's transaction, so the real version must do DB work
+ * only (no file or network I/O while the handle's write lock is held, R7).
  * @param {object} _visit the `c2c_visits` row being ended
  */
 export async function deleteLocalCopies(_visit) {
@@ -212,8 +224,11 @@ async function safeNotify(db, { title, source }, deliver = null) {
 /**
  * Build the visitor's handler map for the receive pipeline's `ctx.handlers`
  * (boot.js's `createC2cHandlerLoader` merges the module's exports with
- * `Object.assign`, so the module also exports `onInvite` / `onRole` / `onUnshare`
- * directly — that is the whole shape it expects, no change to boot.js).
+ * `Object.assign`, so the module also exports `onInvite` / `onRole` / `onUnshare` /
+ * `onRefusal` directly — that is the whole shape it expects, no change to boot.js).
+ * `onRefusal` is not a frame handler: the pipeline calls it at its ack/refusal step
+ * (outside any transaction) whenever a terminal refusal arrived for one of our
+ * frames, with ONE argument, `{ db, contactId, crowId, frame, reason, terminal }`.
  *
  * These run INSIDE the pipeline's transaction (S7) and must do DB work only: no
  * send, no flush, no notification fan-out. A handler that notifies writes the ROW
@@ -227,7 +242,8 @@ async function safeNotify(db, { title, source }, deliver = null) {
  * notification helper, `deliverNotification` and the exported `deleteLocalCopies`.
  *
  * @param {{notify?: Function, deliver?: Function, deleteCopies?: Function}} [opts]
- * @returns {{onInvite: Function, onRole: Function, onUnshare: Function}}
+ * @returns {{onInvite: Function, onRole: Function, onUnshare: Function,
+ *   onRefusal: Function}}
  */
 export function createVisitorHandlers({ notify = null, deliver = null, deleteCopies = null } = {}) {
   const notifier = notify ?? ((db, opts) => safeNotify(db, opts, deliver));
@@ -287,7 +303,14 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
       // stream is independent) and then reads as stale, so the copies of the visit
       // being replaced are deleted HERE, exactly as onUnshare would have.
       console.log(`[c2c] a newer invite supersedes an active visit (${projectUuid})`);
-      await (deleteCopies ?? deleteLocalCopies)(visit);
+      // X3: wrapped like every other cleanup call. Ending the old visit is not this
+      // handler's effect — the new invite is — so a throwing plan-2 purge must not
+      // roll the invite back and lose it.
+      try {
+        await (deleteCopies ?? deleteLocalCopies)(visit);
+      } catch (err) {
+        console.warn(`[c2c] deleting a superseded visit's local copies failed: ${err?.message || err}`);
+      }
     }
 
     await db.execute({
@@ -348,7 +371,10 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
    *
    * The cleanup runs even when the row was already `unshared` — an unshare must
    * leave nothing behind, however often it arrives — but only a real transition
-   * announces itself, so a repeated frame cannot notify twice.
+   * announces itself, so a repeated frame cannot notify twice. X4: a real transition
+   * is one from `invited` or `active`; an unshare reaching a `left`/`declined` visit
+   * (already over, ended by the operator) ends it quietly instead of announcing an
+   * end the operator made themselves.
    *
    * The cleanup is wrapped: ending the visit is the effect that must land, and a
    * failing hook that threw here would roll the unshare back and get the frame
@@ -369,6 +395,8 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
       console.warn(`[c2c] deleting a visit's local copies failed: ${err?.message || err}`);
     }
     if (!ended) return; // already unshared: no second notification
+    // X4: the transition we announce is from a LIVE state only.
+    if (visit.state !== "invited" && visit.state !== "active") return;
     const names = await namesOfVisit(db, visit);
     return afterCommitOf(await notifier(db, {
       title: fill(t("c2c.notify.unshared"), names),
@@ -376,7 +404,100 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
     }));
   }
 
-  return { onInvite, onRole, onUnshare };
+  /**
+   * `project.refuse` (X2): the owner refused one of OUR answers, and the refusal is
+   * terminal (`forbidden` / `stale_epoch`) — the membership that answer belonged to
+   * is gone. Until now the visitor would sit on a visit the owner already ended.
+   *
+   * The refused frame is identified from the outbox row `onRefuse` just closed, by
+   * (contact, project, epoch, stream, seq): only a refused `project.accept` or
+   * `project.decline` is an ANSWER whose refusal says something about the visit. A
+   * refused invite/role/unshare frame is left to the pipeline. When the visit still
+   * stands at that epoch it ends: `unshared` with an end time, the plan-2 cleanup
+   * (guarded, X3 — a throwing purge must not cost us the state change), and one
+   * notification. A visit already superseded by a newer invite (a different epoch)
+   * is not ours to end, so it is left alone.
+   *
+   * Delivery: receive.js calls this OUTSIDE any transaction, passing the handle with
+   * the rest (`{ db, contactId, crowId, frame, reason, terminal }`), so the row is
+   * written with `deliver: false` and its fan-out runs right here, after the write.
+   * If a future caller does run it inside a transaction, nothing is delivered there
+   * (R7): the hook is returned as `{ afterCommit }` instead.
+   *
+   * Never throws: a refusal we could not read is worth a log line, not a broken
+   * reply path.
+   */
+  async function onRefusal({ db = null, contactId, frame = null, reason = null, terminal = false } = {}) {
+    if (!db) return;
+    if (!terminal || !ENDING_REFUSALS.has(reason)) return;
+    const body = frame?.body ?? {};
+    const projectUuid = frame?.project_uuid;
+    const epoch = body.epoch;
+    if (!Number.isSafeInteger(contactId)) return;
+    if (typeof projectUuid !== "string" || !projectUuid) return;
+    if (typeof epoch !== "string" || !epoch) return;
+    if (!Number.isSafeInteger(body.seq) || body.seq <= 0) return;
+    const stream = typeof body.stream === "string" && body.stream ? body.stream : WILDCARD_STREAM;
+
+    // Which of our frames did it answer? The row is already closed by `onRefuse`
+    // (terminal refusals ack it), so this only reads it.
+    let kind = null;
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT kind FROM c2c_outbox
+               WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND seq = ?
+                 AND COALESCE(to_instance_id, '*') = ?
+               LIMIT 1`,
+        args: [contactId, projectUuid, epoch, body.seq, stream],
+      });
+      kind = rows[0]?.kind ?? null;
+    } catch (err) {
+      console.warn(`[c2c] could not read a refused frame's kind: ${err?.message || err}`);
+      return;
+    }
+    if (!ANSWER_KINDS.has(kind)) return;
+
+    let visit = null;
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT * FROM c2c_visits
+               WHERE owner_contact_id = ? AND project_uuid = ?
+               ORDER BY id DESC LIMIT 1`,
+        args: [contactId, projectUuid],
+      });
+      visit = rows[0] ?? null;
+    } catch (err) {
+      console.warn(`[c2c] could not read the visit of a refused answer: ${err?.message || err}`);
+      return;
+    }
+    // A visit superseded by a newer invite is at a newer epoch: this refusal is
+    // about a membership nobody holds any more, so it changes nothing.
+    if (!visit || visit.epoch !== epoch) return;
+
+    const r = await db.execute({
+      sql: `UPDATE c2c_visits
+               SET state = 'unshared', ended_at = COALESCE(ended_at, datetime('now'))
+             WHERE id = ? AND state <> 'unshared'`,
+      args: [visit.id],
+    });
+    const ended = Number(r.rowsAffected ?? 0) > 0;
+    try {
+      await (deleteCopies ?? deleteLocalCopies)(visit);
+    } catch (err) {
+      console.warn(`[c2c] deleting a refused visit's local copies failed: ${err?.message || err}`);
+    }
+    if (!ended) return; // already ended: no second notification
+    const names = await namesOfVisit(db, visit);
+    const hook = await notifier(db, {
+      title: fill(t("c2c.notify.noLongerSharing"), names),
+      source: "sharing:c2c_refused",
+    });
+    if (typeof hook !== "function") return;
+    if (inTransaction(db)) return { afterCommit: hook };
+    await hook();
+  }
+
+  return { onInvite, onRole, onUnshare, onRefusal };
 }
 
 const defaultHandlers = createVisitorHandlers();
@@ -387,6 +508,8 @@ export const onInvite = defaultHandlers.onInvite;
 export const onRole = defaultHandlers.onRole;
 /** The receive pipeline's handler for `project.unshare`. */
 export const onUnshare = defaultHandlers.onUnshare;
+/** The receive pipeline's handler for a terminal refusal of one of our answers (X2). */
+export const onRefusal = defaultHandlers.onRefusal;
 
 /* ------------------------------------------------------------------ actions */
 
@@ -406,6 +529,7 @@ export const onUnshare = defaultHandlers.onUnshare;
  */
 async function answerVisit(db, {
   visitId, kind, from, state, reason, action, localInstanceId, send = null, flushAfter = null,
+  deleteCopies = null,
 }) {
   if (!Number.isSafeInteger(visitId) || visitId <= 0) {
     throw new VisitError("a visit id is required", "bad_argument");
@@ -457,6 +581,18 @@ async function answerVisit(db, {
         : { reason },
       localInstanceId,
     });
+
+    // X4: a leave ends the membership locally, so the visit's copies go with it —
+    // the fourth way a visit ends (the others are unshare, supersede and refusal).
+    // Guarded like the rest: the state change is the effect that must land, and the
+    // purge is plan 2's work.
+    if (state === "left") {
+      try {
+        await (deleteCopies ?? deleteLocalCopies)(visit);
+      } catch (err) {
+        console.warn(`[c2c] deleting a left visit's local copies failed: ${err?.message || err}`);
+      }
+    }
     return Number(visit.owner_contact_id);
   });
 
@@ -518,14 +654,20 @@ export async function declineVisit(db, { visitId, localInstanceId, send = null, 
 /**
  * Leave a shared project: `active` → `left`, and one `project.decline` with
  * `reason: "left"` (the owner's Crow tells the operator once, owner.js `onDecline`).
+ * The visit's local copies are purged in the same transaction (guarded, X4: the
+ * plan-2 hook purges on leave, unshare, supersede and refusal).
  *
  * @param {object} db
  * @param {{visitId:number, localInstanceId:string, send?:Function,
- *   flushAfter?:Function}} opts
+ *   flushAfter?:Function, deleteCopies?:Function}} opts
+ *   `deleteCopies` is the plan-2 cleanup seam (as on `createVisitorHandlers`); the
+ *   default is the exported `deleteLocalCopies`.
  * @returns {Promise<void>}
  * @throws {VisitError} `not_found`, `bad_state` (not `active`), `bad_instance_id`
  */
-export async function leaveVisit(db, { visitId, localInstanceId, send = null, flushAfter = null } = {}) {
+export async function leaveVisit(db, {
+  visitId, localInstanceId, send = null, flushAfter = null, deleteCopies = null,
+} = {}) {
   return answerVisit(db, {
     visitId,
     kind: "project.decline",
@@ -536,6 +678,7 @@ export async function leaveVisit(db, { visitId, localInstanceId, send = null, fl
     localInstanceId,
     send,
     flushAfter,
+    deleteCopies,
   });
 }
 

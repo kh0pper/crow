@@ -14,7 +14,7 @@ import { createDbClient } from "../servers/db.js";
 import { C2C_TABLES_SQL } from "../scripts/migrations/0016-crow-to-crow.mjs";
 import { buildFrame } from "../servers/sharing/c2c/frames.js";
 import { handleC2cFrame } from "../servers/sharing/c2c/receive.js";
-import { inviteContact } from "../servers/sharing/c2c/owner.js";
+import { inviteContact, setRole } from "../servers/sharing/c2c/owner.js";
 import {
   acceptVisit, createVisitorHandlers, declineVisit, deleteLocalCopies, leaveVisit,
   listVisits, onInvite, onRole, onUnshare, VisitError,
@@ -191,6 +191,16 @@ const unshareFrame = ({
 } = {}) => buildFrame({
   kind: "project.unshare", projectUuid, epoch, seq,
   fromInstanceId, toInstanceId, body: {},
+});
+
+/** A refusal of one of OUR answers, as the owner's pipeline sends it (S3). */
+const refusalFrame = ({
+  epoch = E1, stream = OWNER_INST, seq = 1, reason = "forbidden",
+  toInstanceId = LOCAL, fromInstanceId = OWNER_INST, projectUuid = P1,
+} = {}) => buildFrame({
+  kind: "project.refuse", projectUuid,
+  fromInstanceId, toInstanceId,
+  body: { epoch, stream, seq, reason },
 });
 
 async function visitRows(db) {
@@ -763,6 +773,248 @@ test("V6: a re-invite of a member that never accepted queues no unshare", async 
   });
 });
 
+/* ------------------------------ X1 of the Task 7A fix wave: no hole before the
+ * re-invite's unshare */
+
+test("X1: a re-invite keeps the old instance's stream, so the role frame lands before the unshare", async () => {
+  await withDb(async (s) => {
+    const { db } = s;
+    await pin(db, FRIEND_CROW);
+    const first = await inviteContact(db, {
+      projectId: s.projectId, contactId: FRIEND_CONTACT, role: "viewer",
+      localInstanceId: OWNER_INST, now: 1000,
+    });
+    // The friend's Crow accepted from `LOCAL`, so the old membership lives there and
+    // that is the stream V6's unshare will ride.
+    await db.execute({
+      sql: `UPDATE project_members SET accepted_at = datetime('now'), origin_instance_id = ?
+             WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+      args: [LOCAL, s.projectId, FRIEND_CONTACT],
+    });
+    const gen1 = JSON.parse((await outbox(db, "project.invite"))[0].frame_json).body.gen;
+    // The visitor's own row: an ACTIVE visit at the old epoch, on this instance.
+    await db.execute({
+      sql: `INSERT INTO c2c_visits
+              (owner_contact_id, project_uuid, name, role, epoch, gen, owner_instance_id,
+               state, accepted_at)
+            VALUES (?, ?, 'Labs', 'viewer', ?, ?, ?, 'active', datetime('now'))`,
+      args: [FRIEND_CONTACT, P1, first.memberUuid, gen1, OWNER_INST],
+    });
+
+    // A role change the instance never acked: it is still queued on the OLD epoch's
+    // `LOCAL` stream when the re-invite happens.
+    await setRole(db, {
+      projectId: s.projectId, contactId: FRIEND_CONTACT, role: "editor",
+      localInstanceId: OWNER_INST, flushAfter: false,
+    });
+    await inviteContact(db, {
+      projectId: s.projectId, contactId: FRIEND_CONTACT, role: "commenter",
+      localInstanceId: OWNER_INST, now: 2000,
+    });
+
+    const rows = await outbox(db);
+    assert.deepEqual(rows.map((r) => r.kind),
+      ["project.invite", "project.role", "project.unshare", "project.invite"],
+      "the old invite, the unacked role change, the unshare, the new invite");
+    const [oldInvite, role, unshare, newInvite] = rows;
+
+    // The old instance's stream is KEPT (keepStreams): the role frame stays queued,
+    // ahead of the unshare, so the visitor never sees a hole there.
+    assert.equal(role.acked_at, null, "the old instance's stream is not cancelled");
+    assert.equal(role.last_refusal, null);
+    assert.equal(unshare.acked_at, null);
+    assert.equal(unshare.seq, Number(role.seq) + 1, "the unshare is the next seq of that stream");
+    assert.equal(unshare.to_instance_id, LOCAL, "the unshare rides the OLD instance's stream");
+    // The old "*" stream is still cancelled: only the old ORIGIN's stream is kept.
+    assert.notEqual(oldInvite.acked_at, null, "the old '*' stream frame is still cancelled");
+    assert.equal(oldInvite.last_refusal, "cancelled");
+    assert.equal(newInvite.acked_at, null, "the new membership's invite is untouched");
+
+    // Now deliver that stream in order, as the flush would: the role frame, then the
+    // unshare. Both are acked, and neither is refused `gap`.
+    const sentRole = await deliver(JSON.parse(role.frame_json), {
+      db, crowId: FRIEND_CROW, peerInstanceId: OWNER_INST,
+    });
+    assert.equal(acks(sentRole).length, 1, "the role frame is applied and acked");
+    assert.equal(refusals(sentRole).length, 0);
+    let visit = await visitRow(db, FRIEND_CONTACT);
+    assert.equal(visit.role, "editor");
+    assert.equal(visit.epoch, first.memberUuid, "a role change keeps the epoch");
+
+    const sentUnshare = await deliver(JSON.parse(unshare.frame_json), {
+      db, crowId: FRIEND_CROW, peerInstanceId: OWNER_INST,
+    });
+    assert.equal(refusals(sentUnshare).length, 0, "the unshare is not held as `gap`");
+    assert.equal(acks(sentUnshare).length, 1, "it lands");
+    visit = await visitRow(db, FRIEND_CONTACT);
+    assert.equal(visit.state, "unshared", "the old membership ends");
+    assert.notEqual(visit.ended_at, null);
+  });
+});
+
+/* ---------------------------------- X2: a refused answer ends the visit (quietly
+ * or not, but it is not left looking active) */
+
+test("X2: an accept refused `forbidden` leaves the visit unshared, with one notification", async () => {
+  await withDb(async ({ db }) => {
+    await deliver(inviteFrame(), { db });
+    const visitId = Number((await visitRow(db)).id);
+    await acceptVisit(db, { visitId, localInstanceId: LOCAL });
+    assert.equal((await visitRow(db)).state, "active");
+
+    const delivered = [];
+    const handlers = createVisitorHandlers({
+      deliver: async (_db, payload) => { delivered.push(payload.title); },
+    });
+    const sent = await deliver(refusalFrame({ reason: "forbidden" }), { db, handlers });
+    assert.equal(refusals(sent).length, 0, "a refusal is never answered with a refusal");
+
+    const visit = await visitRow(db);
+    assert.equal(visit.state, "unshared", "the refused accept ends the visit");
+    assert.notEqual(visit.ended_at, null);
+    assert.deepEqual(delivered, ["alex is no longer sharing Labs"], "one notification");
+    assert.deepEqual(await titles(db), [
+      "alex invited you to Labs",
+      "alex is no longer sharing Labs",
+    ], "the row was written and fanned out once");
+
+    // Our accept frame is closed by the refusal (R4's terminal path), not left queued.
+    const [accept] = await outbox(db, "project.accept");
+    assert.equal(accept.last_refusal, "forbidden");
+    assert.notEqual(accept.acked_at, null);
+
+    // A second copy of the same refusal changes nothing and notifies nothing.
+    await deliver(refusalFrame({ reason: "forbidden" }), { db, handlers });
+    assert.equal((await visitRow(db)).state, "unshared");
+    assert.equal(await count(db, "notifications"), 2, "one row per visit moment, never two");
+  });
+});
+
+test("X2: only OUR accept/decline answers react, and only at the visit's own epoch", async () => {
+  await withDb(async ({ db }) => {
+    await deliver(inviteFrame(), { db });
+    const visitId = Number((await visitRow(db)).id);
+    await acceptVisit(db, { visitId, localInstanceId: LOCAL });
+
+    const delivered = [];
+    const handlers = createVisitorHandlers({
+      deliver: async (_db, payload) => { delivered.push(payload.title); },
+    });
+
+    // A refusal of a frame we never queued (seq 9 of that stream): nothing to read.
+    await deliver(refusalFrame({ seq: 9, reason: "forbidden" }), { db, handlers });
+    // A HOLDING refusal never ends anything (R5).
+    await deliver(refusalFrame({ reason: "busy" }), { db, handlers });
+    // A terminal refusal of a frame at ANOTHER epoch is about a membership the visit
+    // has left behind (a newer invite superseded it).
+    await deliver(refusalFrame({ epoch: E0, stream: OWNER_INST, reason: "stale_epoch" }), { db, handlers });
+    assert.equal((await visitRow(db)).state, "active", "none of those ended the visit");
+    assert.deepEqual(delivered, [], "and none of them notified");
+
+    // A `stale_epoch` refusal of the REAL accept does end it.
+    await deliver(refusalFrame({ reason: "stale_epoch" }), { db, handlers });
+    assert.equal((await visitRow(db)).state, "unshared");
+    assert.deepEqual(delivered, ["alex is no longer sharing Labs"]);
+  });
+});
+
+/* ---------------------------- X3: a throwing plan-2 purge never loses the effect */
+
+test("X3: a throwing deleteCopies cannot lose a superseding invite", async () => {
+  await withDb(async ({ db }) => {
+    await deliver(inviteFrame(), { db });
+    const visitId = Number((await visitRow(db)).id);
+    await acceptVisit(db, { visitId, localInstanceId: LOCAL });
+
+    const handlers = createVisitorHandlers({
+      deleteCopies: async () => { throw new Error("plan 2 purge exploded"); },
+    });
+    const sent = await deliver(inviteFrame({ epoch: E2, gen: 2, role: "editor", seq: 1 }), { db, handlers });
+    assert.equal(refusals(sent).length, 0, "the invite is not refused");
+    assert.equal(acks(sent).length, 1, "and it is acked: the effect landed");
+    const visit = await visitRow(db);
+    assert.equal(visit.epoch, E2, "the new membership is recorded");
+    assert.equal(visit.state, "invited");
+    assert.equal(visit.gen, 2);
+  });
+});
+
+/* ------------------------------------ X4: quiet endings, and leave's own cleanup */
+
+test("X4: an unshare reaching a declined visit ends it quietly", async () => {
+  await withDb(async ({ db }) => {
+    await deliver(inviteFrame(), { db });
+    const visitId = Number((await visitRow(db)).id);
+    await declineVisit(db, { visitId, localInstanceId: LOCAL });
+    assert.equal((await visitRow(db)).state, "declined");
+
+    const sent = await deliver(unshareFrame(), { db });
+    assert.equal(acks(sent).length, 1);
+    assert.equal(refusals(sent).length, 0);
+    let visit = await visitRow(db);
+    assert.equal(visit.state, "unshared", "the owner's unshare still ends the row");
+    assert.deepEqual(await titles(db), ["alex invited you to Labs"],
+      "but it does not announce an end the operator made themselves");
+
+    // And a repeated unshare never notifies twice (the transition already happened).
+    await deliver(unshareFrame({ seq: 2 }), { db });
+    visit = await visitRow(db);
+    assert.equal(visit.state, "unshared");
+    assert.equal(await count(db, "notifications"), 1);
+  });
+});
+
+test("X4: an unshare reaching a left visit ends it quietly too", async () => {
+  await withDb(async ({ db }) => {
+    const P2 = "2".repeat(32);
+    await deliver(inviteFrame({ projectUuid: P2 }), { db });
+    const visitId = Number((await visitRow(db)).id);
+    await acceptVisit(db, { visitId, localInstanceId: LOCAL });
+    await leaveVisit(db, { visitId, localInstanceId: LOCAL });
+    const left = await visitRow(db);
+    assert.equal(left.state, "left");
+    const endedAt = left.ended_at;
+
+    const sent = await deliver(unshareFrame({ projectUuid: P2 }), { db });
+    assert.equal(acks(sent).length, 1);
+    assert.equal(refusals(sent).length, 0);
+    const after = await visitRow(db);
+    assert.equal(after.state, "unshared", "the owner's unshare still ends the row");
+    assert.equal(after.ended_at, endedAt, "it keeps the leave's end time");
+    assert.deepEqual(await titles(db), ["alex invited you to Labs"],
+      "an operator-ended visit is not announced as the owner's doing");
+  });
+});
+
+test("X4: leave purges the visit's copies, and a throwing purge does not stop it", async () => {
+  await withDb(async ({ db }) => {
+    await deliver(inviteFrame(), { db });
+    const visitId = Number((await visitRow(db)).id);
+    await acceptVisit(db, { visitId, localInstanceId: LOCAL });
+
+    const cleaned = [];
+    await leaveVisit(db, {
+      visitId, localInstanceId: LOCAL,
+      deleteCopies: async (v) => { cleaned.push(Number(v.id)); },
+    });
+    assert.deepEqual(cleaned, [visitId], "the plan-2 purge ran for the left visit");
+    assert.equal((await visitRow(db)).state, "left");
+
+    // A second visited project, whose purge throws: the leave still lands.
+    await deliver(inviteFrame({ epoch: E2, gen: 2, projectUuid: "2".repeat(32), seq: 1 }), { db });
+    const second = (await visitRows(db)).find((v) => v.project_uuid === "2".repeat(32));
+    await acceptVisit(db, { visitId: Number(second.id), localInstanceId: LOCAL });
+    await leaveVisit(db, {
+      visitId: Number(second.id), localInstanceId: LOCAL,
+      deleteCopies: async () => { throw new Error("plan 2 purge exploded"); },
+    });
+    const left = (await visitRows(db)).find((v) => Number(v.id) === Number(second.id));
+    assert.equal(left.state, "left", "the state change is not rolled back by the purge");
+    assert.notEqual(left.ended_at, null);
+    assert.equal((await outbox(db, "project.decline")).length, 2, "and the leave frame is queued");
+  });
+});
+
 /* ------------------------------------------------------- the i18n surface */
 
 test("the visitor's notification strings exist in en and es", async () => {
@@ -771,4 +1023,6 @@ test("the visitor's notification strings exist in en and es", async () => {
   assert.equal(fill(t("c2c.notify.invited", "es"), names), "alex te invitó a Labs");
   assert.equal(fill(t("c2c.notify.unshared"), names), "alex stopped sharing Labs");
   assert.equal(fill(t("c2c.notify.unshared", "es"), names), "alex dejó de compartir Labs");
+  assert.equal(fill(t("c2c.notify.noLongerSharing"), names), "alex is no longer sharing Labs");
+  assert.equal(fill(t("c2c.notify.noLongerSharing", "es"), names), "alex ya no comparte Labs");
 });

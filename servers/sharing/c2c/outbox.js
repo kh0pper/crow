@@ -197,7 +197,14 @@
  *
  * S6. `cancelEpoch` is an optimisation, not a correctness rule (S1, S2 do not need
  *     it): it ends the still-queued frames of an earlier membership so fewer dead
- *     frames are sent.
+ *     frames are sent. `keepStreams` names the streams it must NOT cancel
+ *     (`[{ epoch, stream }]`). The owner's re-invite passes the OLD epoch together
+ *     with the OLD origin instance's stream, because the `project.unshare` it queues
+ *     for that instance rides exactly that stream (owner.js V6): cancelling the
+ *     frames ahead of it would leave a hole there, and the visitor would hold every
+ *     later seq of that stream as `gap` forever — an unshare that never lands. The
+ *     kept frames are the old membership's role frames, which the visitor applies and
+ *     acks (or refuses `stale_epoch`) harmlessly before the unshare.
  *
  * R9 (follow-up). Inbound marks are never pruned: `c2c_inbound_seq` keeps one row
  *     per (contact, sender instance, project, epoch, stream) for good, and a new
@@ -552,14 +559,35 @@ export async function onRefuse(db, { contactId, projectUuid, epoch, stream, seq,
  * membership is enqueued, so the peer is not sent frames of a membership it is
  * about to leave. Correctness does not depend on it: each epoch is its own stream
  * (S1) and authorization refuses an old membership with `stale_epoch`.
+ *
+ * `keepStreams` is the stream-level exception (`[{ epoch, stream }]`, S6): the
+ * frames of exactly those streams stay queued. The owner's V6 re-invite passes the
+ * old epoch and the old origin instance's stream, so the old membership's frames
+ * there are still delivered — in order, ahead of the `project.unshare` the re-invite
+ * queues on that same stream. Cancelling them would leave a hole the visitor holds
+ * as `gap`, and the unshare would never arrive.
+ *
+ * @param {{keepStreams?: Array<{epoch:string, stream:string}>}} [opts]
  * @returns {Promise<number>} frames cancelled
  */
-export async function cancelEpoch(db, { contactId, projectUuid, keepEpoch }) {
+export async function cancelEpoch(db, { contactId, projectUuid, keepEpoch, keepStreams = [] }) {
   if (typeof keepEpoch !== "string" || !keepEpoch) throw c2cError("c2c outbox: keepEpoch is required", "bad_argument");
+  const keep = Array.isArray(keepStreams) ? keepStreams : [];
+  for (const s of keep) {
+    // A stream is (epoch, stream), never the instance id alone (S1): the epoch is
+    // part of the key an entry protects.
+    if (!s || typeof s.epoch !== "string" || !s.epoch) {
+      throw c2cError("c2c outbox: keepStreams entries need an epoch", "bad_argument");
+    }
+    if (typeof s.stream !== "string" || !s.stream) {
+      throw c2cError("c2c outbox: keepStreams entries need a stream", "bad_argument");
+    }
+  }
+  const kept = keep.map(() => " AND NOT (epoch = ? AND COALESCE(to_instance_id, '*') = ?)").join("");
   const res = await write(db,
     `UPDATE c2c_outbox SET acked_at = datetime('now'), last_refusal = 'cancelled'
-      WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL AND epoch <> ?`,
-    [contactId, projectUuid, keepEpoch]);
+      WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL AND epoch <> ?${kept}`,
+    [contactId, projectUuid, keepEpoch, ...keep.flatMap((s) => [s.epoch, s.stream])]);
   const n = res.rowsAffected ?? 0;
   if (n) console.log(`[c2c] cancelled ${n} queued frame(s) of an earlier membership`);
   return n;
@@ -619,6 +647,18 @@ export async function nextInviteGeneration(db, projectUuid, opts = {}) {
     });
     return gen;
   });
+}
+
+/**
+ * Is this async context already inside one of this module's live transactions on
+ * `db`? Exported for a handler that must know whether it may do network I/O right
+ * now: visitor.js's `onRefusal` delivers its notification inline unless it is inside
+ * a transaction, where no push may happen (R7/W1) and it returns `{ afterCommit }`
+ * instead.
+ * @returns {boolean}
+ */
+export function inTransaction(db) {
+  return inLiveTransaction(db);
 }
 
 /**
