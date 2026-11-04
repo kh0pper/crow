@@ -87,7 +87,7 @@ export async function run({ dbPath, tasksDbPath, log = () => {} }) {
   const tdb = open(tasksDbPath);
   try {
     const hasTasks = tdb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks_items'").get();
-    if (!hasTasks) return { deferred: true }; // bundle not started yet — retry next boot
+    if (!hasTasks) return { deferred: true, reason: "tasks_items absent" }; // bundle not started yet — retry next boot
 
     // ---- converged columns + indexes (always, even with nothing to move) ----
     const cols = tdb.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);

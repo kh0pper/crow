@@ -289,6 +289,15 @@ stores are created by their bundle, which starts *after* the gateway boots;
 recording a deferral as applied would let the table be created later without the
 new columns and never retry.
 
+A deferral may carry a short stable `reason` (`"tasks_items absent"`). It is
+remembered in `schema_migrations_deferred` (also created lazily by the runner,
+never in `init-db.js`) so a wait that repeats on every boot is logged once: the
+first deferral — and any change of reason — is loud, a repeat with the same
+reason only refreshes `last_checked_at`. A migration that applies deletes its
+deferral row in the same transaction as its `schema_migrations` record, and a
+missing row (a restored DB) just costs one extra log line. The row never syncs
+(instance-sync replicates only `SYNCED_TABLES`).
+
 The registry runs **twice per boot**: once before serving (covers `crow.db`) and
 again after the addons settle (covers bundle-owned stores). Bookkeeping lives in
 `schema_migrations`, created lazily by the runner — deliberately **not** in

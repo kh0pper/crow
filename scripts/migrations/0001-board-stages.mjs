@@ -29,14 +29,16 @@ function open(p) {
 }
 
 export function run({ dbPath, tasksDbPath, log = () => {} }) {
-  const results = [];
+  // Which targets were missing — named in the deferral reason so a CHANGED
+  // missing table reads as a new deferral rather than repeating noise.
+  const absent = new Set();
 
   const tdb = open(tasksDbPath);
   try {
     for (const [col, ddl] of [["stage", "TEXT"], ["assigned_bot", "TEXT"], ["plan_ref", "TEXT"]]) {
       const r = addColumnIfMissing(tdb, "tasks_items", col, ddl);
       log(`  tasks_items.${col}: ${r}`);
-      results.push(r);
+      if (r === "absent") absent.add("tasks_items");
     }
   } finally {
     tdb.close();
@@ -50,7 +52,7 @@ export function run({ dbPath, tasksDbPath, log = () => {} }) {
     ]) {
       const r = addColumnIfMissing(cdb, tbl, col, ddl);
       log(`  ${tbl}.${col}: ${r}`);
-      results.push(r);
+      if (r === "absent") absent.add(tbl);
     }
   } finally {
     cdb.close();
@@ -67,5 +69,5 @@ export function run({ dbPath, tasksDbPath, log = () => {} }) {
   // boots. An `all` rule would therefore never fire on a real instance — one
   // present table would mark the whole migration applied and the tasks_items
   // columns would never land. That is the original bug, reintroduced.
-  if (results.includes("absent")) return { deferred: true };
+  if (absent.size) return { deferred: true, reason: `${[...absent].join(", ")} absent` };
 }

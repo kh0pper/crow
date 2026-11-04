@@ -145,7 +145,7 @@ export async function run({ dbPath, tasksDbPath, log = () => {} }) {
     const hasTasksItems = tdb.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks_items'"
     ).get();
-    if (!hasTasksItems) return { deferred: true };
+    if (!hasTasksItems) return { deferred: true, reason: "tasks_items absent" };
 
     tdb.exec(BOARD_PLANS_DDL);
     tdb.exec(BOARD_RESULTS_DDL);

@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { runMigrations, discoverMigrations } from "../scripts/migrations/runner.mjs";
+import { runMigrations, discoverMigrations, readDeferrals } from "../scripts/migrations/runner.mjs";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "migreg-"));
@@ -24,6 +24,23 @@ function fixture() {
   new Database(tasksDbPath).close();
   return { root, dir, dbPath, tasksDbPath };
 }
+
+/** A second migrations dir over the SAME stores. ESM caches modules by URL, so
+ *  changing a migration's behaviour between boots means a new file path. */
+function altDir(f, name) {
+  const d = join(f.root, name);
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+const deferring = (id, reason) =>
+  `export const id = ${JSON.stringify(id)};
+   export function run() { return ${reason === undefined
+     ? "{ deferred: true }"
+     : `{ deferred: true, reason: ${JSON.stringify(reason)} }`}; }`;
+
+/** The runner's own deferral line — `<id> deferred — <reason>, will retry`. */
+const isRunnerDeferralLine = (line) => /^\d{4}-[a-z0-9-]+ deferred — .*will retry/.test(line);
 
 const wm = (dir, name, body) => writeFileSync(join(dir, name), body);
 
@@ -249,6 +266,190 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
   } finally { rmSync(g.root, { recursive: true, force: true }); }
 });
 
+test("a repeated deferral is logged once, not on every boot", async () => {
+  const f = fixture();
+  try {
+    wm(f.dir, "0001-defer.mjs", deferring("0001-defer", "tasks_items absent"));
+    const boot = (nowIso) => {
+      const lines = [];
+      return { lines, run: () => runMigrations({
+        migrationsDir: f.dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+        log: (m) => lines.push(m), now: () => nowIso,
+      }) };
+    };
+
+    const first = boot("2026-01-01T00:00:00.000Z");
+    const a = await first.run();
+    assert.deepEqual(a.newlyDeferred, ["0001-defer"], "a first deferral is NEW");
+    assert.deepEqual(a.deferred, ["0001-defer"]);
+    assert.ok(first.lines.some((m) => m.includes("0001-defer deferred — tasks_items absent")),
+      `the new deferral must be logged: ${first.lines.join(" | ")}`);
+
+    const second = boot("2026-01-02T00:00:00.000Z");
+    const b = await second.run();
+    assert.deepEqual(b.deferred, ["0001-defer"], "still deferred, so still retried every boot");
+    assert.deepEqual(b.newlyDeferred, [], "same reason → KNOWN, not new");
+    assert.ok(!second.lines.some(isRunnerDeferralLine),
+      `a known deferral must not log: ${second.lines.join(" | ")}`);
+
+    // first_deferred_at is the start of the wait; only last_checked_at moves.
+    assert.deepEqual(readDeferrals(f.dbPath), [{
+      id: "0001-defer", reason: "tasks_items absent",
+      first_deferred_at: "2026-01-01T00:00:00.000Z", last_checked_at: "2026-01-02T00:00:00.000Z",
+    }]);
+
+    const db = new Database(f.dbPath);
+    const appliedRows = db.prepare("SELECT id FROM schema_migrations").all();
+    db.close();
+    assert.deepEqual(appliedRows, [], "a deferral is never recorded as applied");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a changed deferral reason makes it new again", async () => {
+  const f = fixture();
+  try {
+    wm(f.dir, "0001-defer.mjs", deferring("0001-defer", "tasks_items absent"));
+    await runMigrations({ migrationsDir: f.dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+
+    // A different target is missing now — that is a new wait, not the old one.
+    const d2 = altDir(f, "migrations-2");
+    wm(d2, "0001-defer.mjs", deferring("0001-defer", "tracker_items absent"));
+    const lines = [];
+    const r = await runMigrations({
+      migrationsDir: d2, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath,
+      log: (m) => lines.push(m), now: () => "2026-02-01T00:00:00.000Z",
+    });
+    assert.deepEqual(r.newlyDeferred, ["0001-defer"]);
+    assert.ok(lines.some((m) => m.includes("tracker_items absent")), lines.join(" | "));
+    const row = readDeferrals(f.dbPath)[0];
+    assert.equal(row.reason, "tracker_items absent");
+    assert.equal(row.first_deferred_at, "2026-02-01T00:00:00.000Z", "the old wait is over — the new one starts now");
+
+    // Same reason again → known once more.
+    const again = await runMigrations({ migrationsDir: d2, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+    assert.deepEqual(again.newlyDeferred, []);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a deferral with no reason books as \"target tables absent\"", async () => {
+  const f = fixture();
+  try {
+    wm(f.dir, "0001-bare.mjs", deferring("0001-bare"));
+    await runMigrations({ migrationsDir: f.dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+    assert.equal(readDeferrals(f.dbPath)[0].reason, "target tables absent");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a missing deferral row (restored DB) makes the next deferral new again", async () => {
+  const f = fixture();
+  try {
+    wm(f.dir, "0001-defer.mjs", deferring("0001-defer", "tasks_items absent"));
+    await runMigrations({ migrationsDir: f.dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+
+    const db = new Database(f.dbPath);
+    db.prepare("DELETE FROM schema_migrations_deferred").run();
+    db.close();
+
+    const lines = [];
+    const r = await runMigrations({
+      migrationsDir: f.dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath, log: (m) => lines.push(m),
+    });
+    assert.deepEqual(r.newlyDeferred, ["0001-defer"], "bookkeeping is an optimization — losing it costs one log line, never a retry");
+    assert.ok(lines.some(isRunnerDeferralLine));
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("when a deferred migration later applies, it is recorded and its deferral row is gone", async () => {
+  const f = fixture();
+  try {
+    wm(f.dir, "0001-defer.mjs", deferring("0001-defer", "tasks_items absent"));
+    const a = await runMigrations({ migrationsDir: f.dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+    assert.deepEqual(a.newlyDeferred, ["0001-defer"]);
+
+    // The bundle finally created the table: same id, no deferral this time.
+    const d2 = altDir(f, "migrations-2");
+    wm(d2, "0001-defer.mjs", `export const id = "0001-defer"; export function run() {}`);
+    const b = await runMigrations({ migrationsDir: d2, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+    assert.deepEqual(b.applied, ["0001-defer"]);
+    assert.deepEqual(b.deferred, []);
+    assert.deepEqual(b.newlyDeferred, []);
+
+    const db = new Database(f.dbPath);
+    const recorded = db.prepare("SELECT id FROM schema_migrations").all().map((r) => r.id);
+    db.close();
+    assert.deepEqual(recorded, ["0001-defer"]);
+    assert.deepEqual(readDeferrals(f.dbPath), [], "the deferral row is deleted in the same step as the record");
+
+    // And a second boot skips it — nothing left to defer.
+    const c = await runMigrations({ migrationsDir: d2, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
+    assert.deepEqual(c.skipped, ["0001-defer"]);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("0001-0004 name the absent table in their deferral reason", async () => {
+  const dir = join(import.meta.dirname, "..", "scripts", "migrations");
+  const f = fixture();
+  try {
+    // The production shape for a paired instance with no board: crow.db is
+    // initialized, tasks.db exists and holds only board_defs — never tasks_items.
+    const t = new Database(f.tasksDbPath);
+    t.exec("CREATE TABLE board_defs (id INTEGER PRIMARY KEY, slug TEXT UNIQUE)");
+    t.close();
+    const c = new Database(f.dbPath);
+    c.exec("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY); CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)");
+    c.close();
+
+    const lines = [];
+    const r = await runMigrations({
+      migrationsDir: dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath, log: (m) => lines.push(m),
+    });
+
+    const byId = Object.fromEntries(readDeferrals(f.dbPath).map((x) => [x.id, x.reason]));
+    for (const id of ["0001-board-stages", "0002-board-defs", "0003-tracker-convergence", "0004-track1-card-model"]) {
+      assert.ok(r.deferred.includes(id), `${id} must defer without tasks_items`);
+      assert.equal(byId[id], "tasks_items absent", `${id} must name the table it found absent`);
+    }
+    assert.ok(lines.some((m) => m.includes("0001-board-stages deferred — tasks_items absent")), lines.join(" | "));
+
+    // Second boot, same stores: every one of them is KNOWN and quiet.
+    const quiet = [];
+    const r2 = await runMigrations({
+      migrationsDir: dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath, log: (m) => quiet.push(m),
+    });
+    assert.deepEqual(r2.newlyDeferred, []);
+    for (const id of ["0001-board-stages", "0002-board-defs", "0003-tracker-convergence", "0004-track1-card-model"]) {
+      assert.ok(r2.deferred.includes(id), `${id} still defers (and is still retried)`);
+    }
+    // The runner's own deferral line is what must stay quiet. A migration body
+    // may still log its own progress (0002 says board_defs was created).
+    assert.ok(!quiet.some(isRunnerDeferralLine), `no repeated deferral lines: ${quiet.join(" | ")}`);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("the deferral bookkeeping can never sync to a paired instance", async () => {
+  // instance-sync emits and applies only SYNCED_TABLES (an allowlist), and this
+  // table is not in it — same position as schema_migrations itself.
+  const { SYNCED_TABLES } = await import("../servers/sharing/instance-sync.js");
+  assert.ok(!SYNCED_TABLES.includes("schema_migrations_deferred"));
+  assert.ok(!SYNCED_TABLES.includes("schema_migrations"));
+});
+
+test("WIRING: both boot passes report only NEW deferrals, and the known ones get one quiet line", () => {
+  // Without this anchor the callers could keep printing every known deferral
+  // while the runner's bookkeeping looks perfectly correct.
+  const index = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "index.js"), "utf8");
+  assert.match(index, /if \(_resReg\.newlyDeferred\.length\)/,
+    "the boot pass prints its 'deferred (will retry)' line only for new deferrals");
+  assert.doesNotMatch(index, /if \(_resReg\.deferred\.length\)/);
+
+  const postListen = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "boot", "post-listen.js"), "utf8");
+  assert.match(postListen, /if \(r2\.newlyDeferred\.length\)/);
+  assert.match(postListen, /console\.log\(`\[migrations:post-settle\] waiting on absent tables:/,
+    "known deferrals still get ONE quiet line per boot, at console.log");
+  assert.doesNotMatch(postListen, /console\.warn\(`\[migrations:post-settle\] waiting on absent tables/,
+    "a known deferral is not a warning");
+});
+
 test("ORDER INVARIANT: registry runs after the schema guard, before the first createDbClient", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "index.js"), "utf8");
 
@@ -267,4 +468,35 @@ test("ORDER INVARIANT: registry runs after the schema guard, before the first cr
     "registry must run BEFORE the first createDbClient — createDbClient registers a " +
     "never-closed per-path WAL keeper, and a later migration-guard restore would " +
     "swap the DB file under a pinned inode (split-brain)");
+});
+
+test("item 48: a KNOWN deferral prints none of the migration's own lines; a failure prints them all", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join: j } = await import("node:path");
+  const { runMigrations } = await import("../scripts/migrations/runner.mjs");
+  const dir = mkdtempSync(j(tmpdir(), "mig48-"));
+  try {
+    const migDir = j(dir, "m");
+    (await import("node:fs")).mkdirSync(migDir);
+    writeFileSync(j(migDir, "0001-quiet.mjs"),
+      'export const id = "0001-quiet";\nexport function run({ log }) { log("  t.c: absent"); return { deferred: true, reason: "t absent" }; }\n');
+    const args = { migrationsDir: migDir, dbPath: j(dir, "crow.db"), tasksDbPath: j(dir, "tasks.db") };
+    const first = [];
+    await runMigrations({ ...args, log: (m) => first.push(m) });
+    assert.ok(first.includes("  t.c: absent"), "a new deferral prints the migration's lines");
+    const second = [];
+    const r = await runMigrations({ ...args, log: (m) => second.push(m) });
+    assert.deepEqual(r.deferred, ["0001-quiet"]);
+    assert.deepEqual(second, [], "a known deferral prints nothing at all, not even 'applying'");
+
+    writeFileSync(j(migDir, "0002-boom.mjs"),
+      'export const id = "0002-boom";\nexport function run({ log }) { log("  before the failure"); throw new Error("boom"); }\n');
+    const third = [];
+    await assert.rejects(runMigrations({ ...args, log: (m) => third.push(m) }), /boom/);
+    assert.ok(third.includes("applying 0002-boom") && third.includes("  before the failure"),
+      "a throwing migration still prints what it logged");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
