@@ -233,11 +233,12 @@ async function releaseWorklet(context) {
 /**
  * Render one sampler song offline: build the engine, hand it the samples, then
  * the song, launch its scene, play, render. `tap` turns a tap on before the
- * transport starts, and `onTap` sees every `{target, channels}` block it posts.
+ * transport starts, and `onTap` sees every `{target, frame, channels}` block it
+ * posts.
  * @param {object} song
  * @param {{seconds?: number, samples?: object[], onError?: (text: string) => void,
  *          onSampleNeeded?: (sampleId: string) => void, tap?: string|null,
- *          onTap?: (tap: {target: string, channels: Float32Array[]}) => void}} [options]
+ *          onTap?: (tap: {target: string, frame: number, channels: Float32Array[]}) => void}} [options]
  *   `samples` is one `{id, channels}` per sample to load, each at the context's rate
  * @returns {Promise<{left: Float32Array, right: Float32Array, taps: object[]}>}
  */
@@ -997,6 +998,7 @@ test("a tap delivers the track's blocks to the client", async () => {
   assert.ok(taps.length >= 2, `a tap posts one block at a time, got ${taps.length}`);
   for (const tap of taps) {
     assert.equal(tap.target, "track-1", "every block names the tapped track");
+    assert.equal(typeof tap.frame, "number", "every block names the frame it starts on");
     assert.ok(Array.isArray(tap.channels), "a tap delivers the block's channels");
     assert.equal(tap.channels.length, 2, "a tap delivers the stereo pair");
   }
@@ -1014,6 +1016,36 @@ test("a tap delivers the track's blocks to the client", async () => {
   for (let at = 0; at < left.length; at += 1) {
     assert.equal(delivered[at], left[at], `tap frame ${at} has to be that frame of the track's own output`);
   }
+});
+
+test("a tap block carries the frame it starts on", async () => {
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1")],
+    pads: [pad("track-1", 0)],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 48000) },
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+  });
+
+  const { taps } = await renderSamplerSong(song, {
+    seconds: 0.3,
+    samples: [{ id: SAMPLE_ID, channels: [constant(48000, 0.4)] }],
+    tap: "master",
+  });
+
+  assert.ok(taps.length >= 2, `a tap posts one block at a time, got ${taps.length}`);
+  // The frames are contiguous from the render's first frame, and each block
+  // names its own first frame: a resample can cut on them instead of counting.
+  let expected = 0;
+  for (const tap of taps) {
+    assert.equal(
+      tap.frame,
+      expected,
+      `the block starting at frame ${expected} has to say so, got ${tap.frame}`,
+    );
+    expected += tap.channels[0].length;
+  }
+  assert.ok(expected >= Math.round(0.3 * SAMPLE_RATE), `the blocks cover the render, got ${expected} frames`);
 });
 
 test("tap on and tap off render the same master", async () => {

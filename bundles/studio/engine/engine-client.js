@@ -108,10 +108,12 @@
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
- *   own output (`track_id`) on, per block, as `{type:"tap_block", target,
- *   channels}`: what record-into-pad and resampling listen to. Off by default.
- *   `onTap(listener)` follows those blocks; it resolves to an unsubscribe.
- *   A tap never changes the mix it copies.
+ *   own output (`track_id`) on, per block, as `{type:"tap_block", target, frame,
+ *   channels}`: `frame` is the context frame the block's first sample sits on,
+ *   the same clock `launched` and `nextBarFrame` report in. What record-into-pad
+ *   and resampling listen to. Off by default. `onTap(listener)` follows those
+ *   blocks as `{target, frame, channels}`; it resolves to an unsubscribe. A tap
+ *   never changes the mix it copies.
  */
 (function () {
   "use strict";
@@ -1194,9 +1196,13 @@
         return;
       }
       if (message.type === "tap_block") {
-        // A tap's copy of one block, for record-into-pad and resampling.
+        // A tap's copy of one block, for record-into-pad and resampling. The
+        // frame is the context frame of the block's first sample: a resample
+        // cuts what it keeps on that frame, never by counting blocks.
+        const frame = Number(message.frame);
         const tap = {
           target: String(message.target),
+          frame: Number.isFinite(frame) ? Math.trunc(frame) : 0,
           channels: Array.isArray(message.channels) ? message.channels : [],
         };
         for (const listener of tapListeners) {
@@ -1546,7 +1552,7 @@
       /**
        * Turn a tap on or off: `"master"` for the mix, or a track's id for that
        * track's own output. While a tap is on the processor posts one
-       * `{type:"tap_block", target, channels}` per block, which is what
+       * `{type:"tap_block", target, frame, channels}` per block, which is what
        * record-into-pad and resampling record. Off by default, and off costs
        * nothing.
        * @param {string} target "master" or a track id
@@ -1558,10 +1564,11 @@
       },
 
       /**
-       * Follow a tap: one `{target, channels}` per block while one is on,
-       * `target` being "master" or the tapped track's id and `channels` the
-       * block's own copies (the tap never shares its mix's buffers).
-       * @param {(tap: {target: string, channels: Float32Array[]}) => void} listener
+       * Follow a tap: one `{target, frame, channels}` per block while one is on,
+       * `target` being "master" or the tapped track's id, `frame` the context
+       * frame of the block's first sample, and `channels` the block's own copies
+       * (the tap never shares its mix's buffers).
+       * @param {(tap: {target: string, frame: number, channels: Float32Array[]}) => void} listener
        * @returns {() => void} unsubscribe
        */
       onTap(listener) {

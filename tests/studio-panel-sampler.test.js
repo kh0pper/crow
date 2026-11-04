@@ -330,8 +330,8 @@ function fakeEngine() {
   return engine;
 }
 
-/** The navigator stand-in: one raw stereo input, and no Web Locks. */
-function fakeNavigator() {
+/** The navigator stand-in: one raw stereo input, no Web Locks unless given one. */
+function fakeNavigator(options = {}) {
   const track = {
     label: "Test input",
     getSettings: () => ({ deviceId: "in-1" }),
@@ -340,10 +340,10 @@ function fakeNavigator() {
     },
   };
   const stream = { getAudioTracks: () => [track], getTracks: () => [track] };
-  return {
+  const stub = {
     track,
     stream,
-    locks: null,
+    locks: options.locks || null,
     mediaDevices: {
       async enumerateDevices() {
         return [{ kind: "audioinput", deviceId: "in-1", label: "Test input" }];
@@ -353,6 +353,45 @@ function fakeNavigator() {
       },
     },
   };
+  // A permission prompt that is still up: the answer is only given when the
+  // test hands it over.
+  if (options.holdInput) {
+    stub.releaseInput = () => {};
+    stub.mediaDevices.getUserMedia = () => new Promise((resolve) => {
+      stub.releaseInput = () => resolve(stream);
+    });
+  }
+  return stub;
+}
+
+/**
+ * The Web Locks API, in memory, shared by the "tabs" of one test: a name is
+ * either held or free, an `ifAvailable` request whose name is held gets null,
+ * and `query()` reports what some page holds right now.
+ * @returns {{request: Function, query: Function, held: Set<string>}}
+ */
+function fakeLocks() {
+  const held = new Set();
+  return {
+    held,
+    async request(name, options, run) {
+      const callback = typeof options === "function" ? options : run;
+      const settings = typeof options === "function" ? {} : options || {};
+      if (held.has(name)) {
+        if (settings.ifAvailable && typeof callback === "function") return callback(null);
+        return undefined;
+      }
+      held.add(name);
+      try {
+        return typeof callback === "function" ? await callback({ name }) : undefined;
+      } finally {
+        held.delete(name);
+      }
+    },
+    async query() {
+      return { held: [...held].map((name) => ({ name })), pending: [] };
+    },
+  };
 }
 
 /**
@@ -360,6 +399,7 @@ function fakeNavigator() {
  * fake browser around it, and hand back what it drew, what it sent and what the
  * engine was asked to do.
  * @param {{doc?: object, holdChunks?: boolean, holdRecorder?: boolean, rate?: number,
+ *          holdInput?: boolean, store?: object, locks?: object,
  *          putChunkProblem?: (takeId: string, index: number) => boolean}} [options]
  */
 async function bootSampler(options = {}) {
@@ -383,9 +423,9 @@ async function bootSampler(options = {}) {
   assert.ok(res.html.includes('data-role="sampler"'), "the page carries the sampler host");
   const { document, window: domWindow } = parseHTML(res.html);
 
-  const store = fakeTakeStore(options);
+  const store = options.store || fakeTakeStore(options);
   const engine = fakeEngine();
-  const navigatorStub = fakeNavigator();
+  const navigatorStub = fakeNavigator({ locks: options.locks, holdInput: options.holdInput === true });
   let releaseRecorder = () => {};
   if (options.holdRecorder) {
     engine.holdRecorder = new Promise((resolve) => {
@@ -585,14 +625,18 @@ async function bootSampler(options = {}) {
       engine.holdRecorder = null;
       releaseRecorder();
     },
-    /** Push one tap block of whole frames to whatever is listening to the tap. */
-    tapBlock(frames) {
-      const channels = [new Float32Array(frames), new Float32Array(frames)];
-      for (const listener of [...engine.tapListeners]) listener({ target: "master", channels });
+    /** Answer a permission prompt that is still up. */
+    releaseInput() {
+      if (typeof navigatorStub.releaseInput === "function") navigatorStub.releaseInput();
     },
-    /** Push `count` tap blocks of `frames` frames each. */
-    tapBlocks(count, frames) {
-      for (let at = 0; at < count; at += 1) ui.tapBlock(frames);
+    /** Push one tap block of whole frames, starting at `frame`. */
+    tapBlock(frames, frame = 0) {
+      const channels = [new Float32Array(frames), new Float32Array(frames)];
+      for (const listener of [...engine.tapListeners]) listener({ target: "master", frame, channels });
+    },
+    /** Push `count` tap blocks of `frames` frames each, from `fromFrame` on. */
+    tapBlocks(count, frames, fromFrame = 0) {
+      for (let at = 0; at < count; at += 1) ui.tapBlock(frames, fromFrame + at * frames);
     },
     /** Open a pattern clip: the pad-and-steps view is its editor. */
     async openSampler() {
@@ -948,6 +992,18 @@ test("an import longer than one chunk uploads in whole-frame chunks", async () =
     FRAMES_LONG * 6,
     "the whole file, in whole frames",
   );
+  // The row was written only after every chunk was on this device, and every
+  // version of it carried its count: another tab never sees a half import.
+  const importRows = ui.store.saved.filter((row) => row.origin === "import");
+  assert.ok(importRows.length >= 1, "the import's row was written");
+  for (const row of importRows) {
+    assert.equal(row.chunk_count, chunkPuts.length, "every write of it carried the chunk count");
+  }
+  assert.equal(
+    ui.store.saved.filter((row) => row.chunk_count === null).length,
+    0,
+    "no uncounted row was ever left for another tab to recover",
+  );
   assert.equal(
     ui.requests.filter((request) => request.url.endsWith("/finish")).length,
     1,
@@ -1056,14 +1112,15 @@ test("resample with Snap to bar keeps whole bars", async () => {
   await ui.settle(24);
   assert.equal(ui.engine.taps.at(-1).on, true, "the tap is on");
 
-  // One and a half bars arrive before the second press.
-  ui.tapBlocks((BAR * 3) / 2 / 128, 128);
+  // One and a half bars arrive before the second press, from the bar line the
+  // tap started on.
+  ui.tapBlocks((BAR * 3) / 2 / 128, 128, 0);
   await ui.settle();
 
   // The second press asks for the next bar line; the blocks keep coming.
   button().dispatchEvent(ui.event("click", { bubbles: true }));
   await ui.settle();
-  ui.tapBlocks(2000, 128);
+  ui.tapBlocks(2000, 128, (BAR * 3) / 2);
   await ui.settle(60);
 
   assert.equal(ui.engine.taps.at(-1).on, false, "the tap went off on the stop bar line");
@@ -1086,6 +1143,198 @@ test("resample with Snap to bar keeps whole bars", async () => {
     "the four bars and nothing more",
   );
   assert.equal(ui.requests.filter((request) => request.url.endsWith("/finish")).length, 1, "and it finished once");
+});
+
+test("resample with Snap to bar starts on the bar line, not after it", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  // The transport runs, so Snap to bar (on by default) quantizes the resample.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  const BAR = RATE * 2; // 120 BPM in 4/4
+  // The first press resolves to the bar line at BAR, but the tap's first block
+  // is delivered half a bar BEFORE it: the blocks around the press are late.
+  ui.engine.barFrames = [{ frame: BAR, bar: 1 }, { frame: BAR * 2, bar: 2 }];
+
+  const button = () => {
+    const node = ui.view().querySelector("[data-act=pad-resample]");
+    assert.ok(node, "the pad offers Resample output");
+    return node;
+  };
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(24);
+  assert.equal(ui.engine.taps.at(-1).on, true, "the tap is on");
+
+  // Blocks from half a bar before the bar line through the bar after it: two
+  // bars of them, and the sample may keep only the middle one.
+  ui.tapBlocks(((BAR * 3) / 2) / 128, 128, BAR / 2);
+  await ui.settle();
+
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(60);
+
+  assert.equal(ui.engine.taps.at(-1).on, false, "the tap went off on the stop bar line");
+  const rows = ui.store.saved.filter((row) => row.origin === "resample");
+  const last = rows[rows.length - 1] || {};
+  assert.equal(last.frames, BAR, "exactly one bar, from the bar line the press resolved to");
+
+  const chunkPuts = ui.requests.filter(
+    (request) => request.method === "PUT" && request.url.includes(last.take_id + "/chunks/"),
+  );
+  assert.ok(chunkPuts.length > 0, "the resample uploaded its chunks");
+  assert.equal(
+    chunkPuts.reduce((sum, put) => sum + put.bytes, 0),
+    BAR * 6,
+    "not one frame from before the bar line or from the bar that followed it",
+  );
+});
+
+test("a stop bar reached before the press resolves is not overrun", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  const BAR = RATE * 2;
+  // The first press resolves to bar 0, and bar 0 is long gone by the time the
+  // first block arrives: the sample starts on the NEXT bar line after it.
+  ui.engine.barFrames = [{ frame: 0, bar: 0 }, { frame: BAR * 3, bar: 3 }];
+  const button = () => {
+    const node = ui.view().querySelector("[data-act=pad-resample]");
+    assert.ok(node, "the pad offers Resample output");
+    return node;
+  };
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(24);
+
+  // Blocks from bar 1 through the middle of bar 3: the stop bar (bar 3) has
+  // already gone past by the time the second press resolves to it.
+  ui.tapBlocks(((BAR * 5) / 2) / 128, 128, BAR);
+  await ui.settle();
+
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(60);
+
+  assert.equal(ui.engine.taps.at(-1).on, false, "the tap went off at once");
+  const rows = ui.store.saved.filter((row) => row.origin === "resample");
+  const last = rows[rows.length - 1] || {};
+  assert.equal(last.frames, BAR, "exactly one bar, from the next bar line after the first block");
+  const chunkPuts = ui.requests.filter(
+    (request) => request.method === "PUT" && request.url.includes(last.take_id + "/chunks/"),
+  );
+  assert.equal(
+    chunkPuts.reduce((sum, put) => sum + put.bytes, 0),
+    BAR * 6,
+    "not one frame past the stop bar",
+  );
+});
+
+test("stopResample ends on the press's block when the transport stopped mid-resample", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  const BAR = RATE * 2;
+  ui.engine.barFrames = [{ frame: BAR, bar: 1 }];
+  const button = () => {
+    const node = ui.view().querySelector("[data-act=pad-resample]");
+    assert.ok(node, "the pad offers Resample output");
+    return node;
+  };
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(24);
+  assert.equal(ui.engine.taps.at(-1).on, true, "the tap is on");
+
+  // Half a bar is recorded, then the transport stops under the resample.
+  ui.tapBlocks((BAR / 2) / 128, 128, BAR);
+  await ui.settle();
+  ui.click("[data-act=stop]");
+  await ui.settle(24);
+
+  // The press resolves on the block it lands in, not on a bar line that a
+  // stopped transport will never reach.
+  ui.ctx().currentTime = (BAR + BAR / 2) / RATE;
+  button().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle(60);
+
+  assert.equal(ui.engine.taps.at(-1).on, false, "the tap went off on the press's block");
+  assert.equal(ui.engine.barFrames.length, 0, "no further bar line was asked for");
+  const rows = ui.store.saved.filter((row) => row.origin === "resample");
+  const last = rows[rows.length - 1] || {};
+  assert.equal(last.frames, BAR / 2, "the half bar the tap had already gathered");
+});
+
+test("cancelling record into pad during the permission prompt closes the input", async () => {
+  const ui = await bootSampler({ holdInput: true });
+  await ui.openSampler();
+
+  const record = () => {
+    const node = ui.view().querySelector("[data-act=pad-record]");
+    assert.ok(node, "the pad offers Record into pad");
+    return node;
+  };
+  record().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.notEqual(ui.navigator.track.stopped, true, "the input has not arrived yet");
+  assert.equal(String(record().textContent), "Stop recording", "the page says it is recording");
+
+  // A second press cancels it while the permission prompt is still up.
+  record().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  ui.releaseInput();
+  await ui.settle(24);
+
+  assert.equal(ui.navigator.track.stopped, true, "the input the page opened was closed when it arrived");
+  assert.equal(ui.engine.recorders.length, 0, "no recorder was built for a cancelled recording");
+  assert.equal(ui.store.pendings.size, 0, "no pending row was left behind");
+  assert.equal(String(record().textContent), "Record into pad", "and the page offers one again");
+});
+
+test("another tab does not recover a sample still being recorded", async () => {
+  // Two tabs of one device share the take store and the Web Locks of the
+  // origin. The page recording a sample has a row with no chunk count yet and
+  // holds that take's lock; the other tab must leave the row to it.
+  const store = fakeTakeStore();
+  const locks = fakeLocks();
+
+  const first = await bootSampler({ store, locks });
+  await first.openSampler();
+  first.view().querySelector("[data-act=pad-record]").dispatchEvent(first.event("click", { bubbles: true }));
+  await first.settle(24);
+
+  const recorder = first.engine.recorders[0];
+  assert.ok(recorder, "the first tab is recording into the pad");
+  recorder.chunk(new Uint8Array(12), 0);
+  await first.settle(24);
+
+  const rows = store.saved.filter((row) => row.chunk_count === null);
+  assert.equal(rows.length, 1, "the recording page wrote its uncounted row");
+  const takeId = rows[0].take_id;
+  assert.equal(locks.held.has("studio-take-" + takeId), true, "and it holds the take's lock");
+
+  // The other tab loads its own page against the same device.
+  const second = await bootSampler({ store, locks });
+  await second.settle(40);
+
+  assert.equal(locks.held.has("studio-take-" + takeId), true, "the recording page still holds its lock");
+  assert.equal(
+    store.saved.filter((row) => row.chunk_count === null).length,
+    1,
+    "the other tab never counted the row it found",
+  );
+  assert.equal(
+    store.saved.filter((row) => row.recovered === true).length,
+    0,
+    "and recovered nothing from a sample that is still being recorded",
+  );
+  assert.equal(
+    second.requests.filter((request) => request.url.endsWith("/finish")).length,
+    0,
+    "no upload of half a sample was started",
+  );
 });
 
 test("an import is refused up front when the device plays at an odd rate", async () => {

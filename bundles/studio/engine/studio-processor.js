@@ -139,8 +139,10 @@
  *
  * `{type:"tap", target, on}` turns on a copy of the master ("master") or of
  * one track's own output (that track's id) per block, posted as
- * `{type:"tap_block", target, channels}`. Record-into-pad and resampling use it.
- * A tap is off by default, and off costs nothing at all.
+ * `{type:"tap_block", target, frame, channels}`, `frame` being the context's
+ * frame the block's first sample sits on (the same clock `launched` and
+ * `nextBarFrame` report). Record-into-pad and resampling use it. A tap is off by
+ * default, and off costs nothing at all.
  *
  * ## Block splitting
  *
@@ -179,8 +181,8 @@
  * (one ack per `audio` message, so the client knows the PCM is in),
  * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
  * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
- * loaded, once per sample id), `{type:"tap_block", target, channels}` (while a
- * tap is on, one per block)
+ * loaded, once per sample id), `{type:"tap_block", target, frame, channels}`
+ * (while a tap is on, one per block)
  *
  * ## Frames the client can count on
  *
@@ -188,7 +190,10 @@
  * frames, not this processor's: `currentFrame`, the AudioWorkletGlobalScope
  * global every processor on one AudioContext shares, so a recorder built as a
  * second worklet on the same context arms on the very frame the engine's
- * launch took effect. `bar` is 0-based. The translation from the sequencer's
+ * launch took effect. A `tap_block` carries its own `frame` in the same clock —
+ * the context frame of its first sample — so a resample can cut what it keeps
+ * exactly on a bar line instead of counting blocks. `bar` is 0-based. The
+ * translation from the sequencer's
  * own frames is measured once, at the first block (see `contextOffset()`).
  *
  * Two message types exist only when `processorOptions.testHooks === true`, and
@@ -1524,10 +1529,12 @@
 
       const left = output[0];
       const right = output.length > 1 ? output[1] : null;
+      // The block's first frame, taken before `block()` advances the counter.
+      const firstFrame = this.frame;
       try {
         this.prepareTap(count);
         this.block(left, right, count);
-        this.postTap(left, right, count);
+        this.postTap(left, right, count, firstFrame);
       } catch (error) {
         this.fail(error);
         left.fill(0);
@@ -1561,20 +1568,28 @@
     /**
      * Post a tap's copy of this block: the master (already mixed and clipped)
      * or the tapped track's own output. Nothing is posted while no tap is on.
+     *
+     * Every block names the CONTEXT frame its first sample sits on, so the
+     * caller can cut what it keeps on the frame itself instead of counting.
      * @param {Float32Array} left the master's left channel
      * @param {Float32Array|null} right the master's right channel
      * @param {number} count the frames this block holds
+     * @param {number} firstFrame this block's first frame, in the processor's own frames
      * @returns {void}
      */
-    postTap(left, right, count) {
+    postTap(left, right, count, firstFrame) {
+      // The block's first frame in the CONTEXT's clock, the same one `launched`
+      // and `nextBarFrame` report in.
+      const frame = this.contextOffset() + firstFrame;
       if (this.tapMaster) {
         const channels = right ? [left.slice(0, count), right.slice(0, count)] : [left.slice(0, count)];
-        this.port.postMessage({ type: "tap_block", target: "master", channels: channels });
+        this.port.postMessage({ type: "tap_block", target: "master", frame: frame, channels: channels });
       }
       if (this.tapIndex >= 0 && this.tapLeft) {
         this.port.postMessage({
           type: "tap_block",
           target: this.tapTrackId,
+          frame: frame,
           channels: [this.tapLeft.slice(0, count), this.tapRight.slice(0, count)],
         });
       }
