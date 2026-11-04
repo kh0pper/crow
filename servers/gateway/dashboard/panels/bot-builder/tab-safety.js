@@ -5,7 +5,7 @@ import { escapeHtml, actionBar } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import { segGroup, card } from "./ui.js";
 import { confirmView } from "./def-adapter.js";
-import { selectedWriteTools, loadSources, sourceDisplay } from "./sources.js";
+import { selectedWriteTools, loadSources, sourceDisplay, satelliteReadMarks, satelliteMarksFrom } from "./sources.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { getManifest } from "../../../bundles-config.js";
 import { sourceLabel } from "./tool-access.js";
@@ -57,7 +57,13 @@ export async function renderSafety(ctx) {
     catalog = {};
     for (const src of sources) if (src.ok) catalog[src.server] = src.catalog;
   }
-  const tools = selectedWriteTools(def, catalog);
+  // A satellite-hosted bundle's tools are write-class whatever their names say (SAT-7 §9.1), so a
+  // granted one stays on this list even when its source did not load at all.
+  let satMarks = null;
+  try {
+    satMarks = sources ? satelliteMarksFrom(sources, crowHome) : await satelliteReadMarks(db, crowHome);
+  } catch { satMarks = satelliteMarksFrom([], crowHome); }
+  const tools = selectedWriteTools(def, catalog, satMarks);
   const srcLabel = new Map((sources || []).map((src) => [src.server, src]));
   const view = confirmView(pp.confirm, tools);
   const checked = new Set(view.checked);

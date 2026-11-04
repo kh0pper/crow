@@ -35,6 +35,7 @@ import { offSkills } from "../../servers/shared/skill-state.js";
 import { resolveCrowHome } from "../../servers/shared/crow-home.js";
 import { isVoiceBotDef } from "../../servers/shared/voice-bot.js";
 import { classifyTool, classifyToolDetail, LEGACY_READ } from "../../servers/shared/tool-classify.js";
+import { installPaths, satelliteBundleIds } from "../../servers/gateway/satellites/installs.js";
 
 /** An exact `server/tool` entry (the only spelling that grants). */
 export const SKILL_TOOL_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9_]+$/;
@@ -43,12 +44,42 @@ export const SKILL_TOOL_RE = /^[a-z0-9][a-z0-9-]*\/[A-Za-z0-9_]+$/;
  * The only servers a skill can grant tools from (review fix round 1: a bot
  * whose write paths cover the checkout could edit a repo skill's `tools:`
  * and give itself any tool on its next turn). Entries for any other server
- * stay informational.
+ * stay informational — a satellite-hosted bundle included: its grants are the
+ * owner's own ticks in Bot Builder (SAT-7 §9.4).
  */
 export const GRANTABLE_SERVERS = Object.freeze(["crow-projects"]);
 
 /** The one read/write rule, shared with Bot Builder's Read-only mode (servers/shared/tool-classify.js). */
-export const isReadTool = (tool) => classifyTool({ name: tool }) === "read";
+export const isReadTool = (tool, opts) => classifyTool({ name: tool }, opts) === "read";
+
+// ── satellite-hosted bundles (SAT-7 §9.4) ───────────────────────────────────────────────────────
+// A satellite picks its own tool names, so the name rule says nothing about its tools: every one
+// of them is WRITE unless the owner marked it read against the pinned list. The bundle ids come
+// from installed.json (local, no network, no DB); the read marks come from whoever holds the pins
+// (Bot Builder — satelliteReadMarks), so a caller without them fails CLOSED (write).
+
+/** The satellite-hosted bundle ids, read once per call chain (installed.json only). */
+export function satelliteBundleIdSet({ crowHome } = {}) {
+  try { return satelliteBundleIds(installPaths(crowHome || resolveCrowHome())); } catch { return new Set(); }
+}
+
+/**
+ * The classifyTool options for one server: {isSatellite, readMarks} when the server is a
+ * satellite-hosted bundle (named in `satelliteMarks`, or installed.json places it on a satellite),
+ * undefined for everything else.
+ * @param {string} server
+ * @param {{crowHome?:string, satelliteMarks?:Map<string,string[]>, ids?:Set<string>}} [opts]
+ * @returns {{isSatellite:true, readMarks:string[]}|undefined}
+ */
+export function satelliteClassifyOpts(server, opts = {}) {
+  const s = String(server || "");
+  const marks = opts.satelliteMarks instanceof Map ? opts.satelliteMarks.get(s) : undefined;
+  if (marks === undefined) {
+    const ids = opts.ids instanceof Set ? opts.ids : satelliteBundleIdSet(opts);
+    if (!ids.has(s)) return undefined;
+  }
+  return { isSatellite: true, readMarks: Array.isArray(marks) ? marks : [] };
+}
 
 /** Split a crow_mcp entry ("server/tool" or "server__tool") into [server, tool]; null for a bare server.
  *  Exported for the services mount (servers/gateway/services/mount.js), so the spellings that
@@ -72,10 +103,11 @@ export function splitEntry(e) {
  * only tools the classifier calls read (an unrecognised one counts as write
  * there, so it is never added).
  */
-export function serverInReadMode(list, server) {
+export function serverInReadMode(list, server, opts = {}) {
   if (!Array.isArray(list) || list.includes(server)) return false;
+  const sat = satelliteClassifyOpts(server, opts);
   const mine = list.map(splitEntry).filter((x) => x && x[0] === server).map((x) => x[1]);
-  return mine.length > 0 && mine.every((tool) => LEGACY_READ.has(tool) || classifyToolDetail({ name: tool }) !== "write");
+  return mine.length > 0 && mine.every((tool) => LEGACY_READ.has(tool) || classifyToolDetail({ name: tool }, sat) !== "write");
 }
 
 /**
@@ -83,11 +115,11 @@ export function serverInReadMode(list, server) {
  * Read-only (serverInReadMode), so a Read-only bot never keeps a tool that
  * writes. Entries of a server with a real write pick are kept. PURE.
  */
-export function dropLegacyRead(list) {
+export function dropLegacyRead(list, opts = {}) {
   if (!Array.isArray(list)) return [];
   const ro = new Map();
   const readMode = (server) => {
-    if (!ro.has(server)) ro.set(server, serverInReadMode(list, server));
+    if (!ro.has(server)) ro.set(server, serverInReadMode(list, server, opts));
     return ro.get(server);
   };
   return list.filter((e) => {
@@ -153,19 +185,21 @@ export function grantsTool(list, entry) {
  * PURE union of crowMcp with the required tools of `skills`.
  * @returns {{ list: string[], added: string[] }}
  */
-export function withSkillRequiredTools(crowMcp, skills, { crowHome, declined = [], repoSkillsDir } = {}) {
-  // a Read-only server's legacy entries (crow_fetch_source) are dropped
-  const list = dropLegacyRead(crowMcp);
+export function withSkillRequiredTools(crowMcp, skills, { crowHome, declined = [], repoSkillsDir, satelliteMarks } = {}) {
+  // A Read-only server's legacy entries (crow_fetch_source) are dropped
+  // (the satellite ids are read once here, not once per tool)
+  const satOpts = { crowHome, satelliteMarks, ids: satelliteBundleIdSet({ crowHome }) };
+  const list = dropLegacyRead(crowMcp, satOpts);
   const skip = new Set(Array.isArray(declined) ? declined : []);
   const added = [];
   // a server in Read-only mode (judged on the list as given) gets read tools only
-  const readOnly = (server) => serverInReadMode(crowMcp, server);
+  const readOnly = (server) => serverInReadMode(crowMcp, server, satOpts);
   for (const s of Array.isArray(skills) ? skills : []) {
     if (typeof s !== "string") continue;
     for (const entry of skillRequiredTools(s, { crowHome, repoSkillsDir })) {
       if (skip.has(entry) || grantsTool(list, entry)) continue;
       const [server, tool] = entry.split("/");
-      if (readOnly(server) && !isReadTool(tool)) continue;
+      if (readOnly(server) && !isReadTool(tool, satelliteClassifyOpts(server, satOpts))) continue;
       list.push(entry);
       added.push(entry);
     }
@@ -180,8 +214,8 @@ const declinedOf = (def) => {
 const crowMcpOf = (def) => (def && def.tools && Array.isArray(def.tools.crow_mcp) ? def.tools.crow_mcp : []);
 
 /** What the bot actually gets from crow_mcp: the stored list plus its repo skills' tools, minus declines. */
-export function effectiveCrowMcp(def, { crowHome, repoSkillsDir } = {}) {
-  return withSkillRequiredTools(crowMcpOf(def), def && def.skills, { crowHome, repoSkillsDir, declined: declinedOf(def) }).list;
+export function effectiveCrowMcp(def, { crowHome, repoSkillsDir, satelliteMarks } = {}) {
+  return withSkillRequiredTools(crowMcpOf(def), def && def.skills, { crowHome, repoSkillsDir, satelliteMarks, declined: declinedOf(def) }).list;
 }
 
 /**
@@ -192,13 +226,13 @@ export function effectiveCrowMcp(def, { crowHome, repoSkillsDir } = {}) {
  *   candidate passes the model's tool cap (`wanted` names them; the legacy
  *   entries are still dropped).
  */
-export async function addSkillToolsGuarded(def, { crowHome, budget = null, repoSkillsDir } = {}) {
+export async function addSkillToolsGuarded(def, { crowHome, budget = null, repoSkillsDir, satelliteMarks } = {}) {
   if (!def || typeof def !== "object" || isVoiceBotDef(def)) return { def, added: [], refused: false, wanted: [] };
   const stored = crowMcpOf(def);
-  const { list, added } = withSkillRequiredTools(stored, def.skills, { crowHome, repoSkillsDir, declined: declinedOf(def) });
+  const { list, added } = withSkillRequiredTools(stored, def.skills, { crowHome, repoSkillsDir, satelliteMarks, declined: declinedOf(def) });
   // the stored list minus a Read-only server's legacy entries: what the bot
   // runs with when nothing is added (or the union is refused)
-  const base = dropLegacyRead(stored);
+  const base = dropLegacyRead(stored, { crowHome, satelliteMarks });
   const baseDef = base.length === stored.length ? def : { ...def, tools: { ...(def.tools || {}), crow_mcp: base } };
   if (!added.length) return { def: baseDef, added: [], refused: false, wanted: [] };
   const candidate = { ...def, tools: { ...(def.tools || {}), crow_mcp: list } };
@@ -234,8 +268,8 @@ export function skillDeclaredRepoTools(name, opts = {}) {
 }
 
 /** Would the union grant `entry` on top of `list` (Read-only mode respected; declines not considered)? */
-export function unionMayGrant(list, entry) {
+export function unionMayGrant(list, entry, opts = {}) {
   const [server, tool] = entry.split("/");
   if (!GRANTABLE_SERVERS.includes(server)) return false;
-  return !(serverInReadMode(list, server) && !isReadTool(tool));
+  return !(serverInReadMode(list, server, opts) && !isReadTool(tool, satelliteClassifyOpts(server, opts)));
 }

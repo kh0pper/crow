@@ -19,7 +19,7 @@ import { parseReadPathsInput } from "../../../../../scripts/pi-bots/bot-read-pat
 import { t, fill } from "../../shared/i18n.js";
 import { applyFilesMode, applySourceModes, applyLearningMode, applyConfirm } from "./def-adapter.js";
 import { applyCommandsMode } from "./bash-mode.js";
-import { selectedWriteTools, toolsFromKeys } from "./sources.js";
+import { selectedWriteTools, toolsFromKeys, satelliteReadMarks, satelliteMarksFrom } from "./sources.js";
 import { normText } from "./ui.js";
 import { applyShowCards, trackerIsCustom } from "./tracker-choice.js";
 import { oneLine } from "../../shared/bot-display.js";
@@ -344,6 +344,18 @@ async function applySkillTools(def, { prevMcp, prevHadMcp, prevSkills, posted, c
 
 // ---------------------------------------------------------------- safety
 
+/**
+ * The satellite read marks the Safety save classifies a granted tool with, when the page posted no
+ * tool offer (an older page): a satellite tool is write unless the owner marked it read (SAT-7
+ * §9.1). Any failure is no marks — the save still happens.
+ */
+async function satelliteMarksForSave(db) {
+  // Never null: with no db or a failed read, every satellite-installed bundle still has no marks,
+  // so its tools stay write-class (fail closed to the ask list).
+  if (!db) return satelliteMarksFrom([]);
+  try { return await satelliteReadMarks(db); } catch { return satelliteMarksFrom([]); }
+}
+
 export async function saveSafety(def, b, { lang, changed, db = null, botId = null }) {
   def.permission_policy = def.permission_policy || {};
   const pp = def.permission_policy;
@@ -374,7 +386,7 @@ export async function saveSafety(def, b, { lang, changed, db = null, botId = nul
     // the tools the page offered (same classification the page used)
     let offered = null;
     try { offered = typeof b.confirm_offered === "string" ? JSON.parse(b.confirm_offered) : null; } catch { offered = null; }
-    const tools = offered ? toolsFromKeys(offered, def) : selectedWriteTools(def);
+    const tools = offered ? toolsFromKeys(offered, def) : selectedWriteTools(def, null, await satelliteMarksForSave(db));
     const prev = Array.isArray(pp.confirm) ? pp.confirm : [];
     const next = applyConfirm(prev, tools, { checked: arr(b.confirm_tool), otherText: b.confirm_other });
     if (!same(next, prev)) pp.confirm = next;

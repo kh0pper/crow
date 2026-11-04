@@ -111,13 +111,17 @@ export function availableMcpSet(probe) {
  * Overlay a template onto a freshly-built defaultDefinition() object.
  * Mutates and returns def. Filtering rules per spec §D2.
  *
+ * `satelliteBundles` names the bundle ids installed on a paired server (SAT-7 §9.4): a satellite
+ * tool is only ever granted by the owner ticking it in Bot Builder, never by a template.
+ *
  * @param {object} def - defaultDefinition() output
  * @param {object} tpl - a BOT_TEMPLATES entry
- * @param {{availableMcp: Set<string>, availableSkills: string[]}} ctx
+ * @param {{availableMcp: Set<string>, availableSkills: string[], satelliteBundles?: Set<string>}} ctx
  */
-export function applyTemplate(def, tpl, { availableMcp, availableSkills }) {
+export function applyTemplate(def, tpl, { availableMcp, availableSkills, satelliteBundles = null } = {}) {
   if (!tpl) return def;
-  const addMcp = ((tpl.tools && tpl.tools.crow_mcp) || []).filter((k) => availableMcp.has(k));
+  const onSatellite = (k) => satelliteBundles instanceof Set && satelliteBundles.has(String(k).split("/")[0]);
+  const addMcp = ((tpl.tools && tpl.tools.crow_mcp) || []).filter((k) => availableMcp.has(k) && !onSatellite(k));
   if (addMcp.length) {
     def.tools.crow_mcp = [...new Set([...(def.tools.crow_mcp || []), ...addMcp])];
   }

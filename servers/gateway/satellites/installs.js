@@ -62,6 +62,15 @@ export function satelliteInstalls(paths = installPaths(), satelliteId = null) {
   return readInstalled(paths.installed).filter((r) => isSatelliteEntry(r) && (!satelliteId || r.host === satelliteId));
 }
 
+/**
+ * The ids of the satellite-hosted bundles: what a classifier needs to treat a bundle's tools as
+ * write (SAT-7 §9.4 — a satellite picks its own tool names, so the name rule says nothing about
+ * them). Crow's own install records only: no network, no DB.
+ */
+export function satelliteBundleIds(paths = installPaths()) {
+  return new Set(satelliteInstalls(paths).map((r) => String(r.id)));
+}
+
 function readManifest(appBundles, id) {
   try { return JSON.parse(readFileSync(join(appBundles, id, "manifest.json"), "utf8")); } catch { return null; }
 }

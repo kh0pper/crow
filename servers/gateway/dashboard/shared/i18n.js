@@ -1819,6 +1819,9 @@ export const translations = {
   "botbuilder.abCustom": { en: "Custom…", es: "Personalizado…" },
   "botbuilder.abCount": { en: "{on} of {total} tools on · {reads} only read", es: "{on} de {total} herramientas activas · {reads} solo leen" },
   "botbuilder.abSourceFailed": { en: "Couldn't load this service's tools right now. Its current selection ({n} tools) is kept.", es: "No se pudieron cargar las herramientas de este servicio ahora. Se conserva su selección actual ({n} herramientas)." },
+  // SAT-7 part C: a satellite-hosted bundle's source row says which paired server its tools run on
+  // (two hosts can install the same bundle id).
+  "botbuilder.srcSatelliteOn": { en: "{name} (on {host})", es: "{name} (en {host})" },
   "botbuilder.abChooseTools": { en: "Choose tools ({n})", es: "Elegir herramientas ({n})" },
   "botbuilder.abFilterLabel": { en: "Filter {source} tools", es: "Filtrar herramientas de {source}" },
   "botbuilder.abFilterPlaceholder": { en: "Filter tools", es: "Filtrar herramientas" },
