@@ -288,7 +288,7 @@ function requireStep(doc, args) {
   const step = getStep(doc, args.clip_id, args.pattern_id, args.at, args.bank_id, args.index);
   if (!step) {
     refuseInvalid(
-      `There is no step at position ${args.at} of pattern "${args.pattern_id}" for pad ${args.index + 1} of bank "${args.bank_id}"; add it with step.toggle first.`,
+      `Pattern "${args.pattern_id}" has no step ${args.at + 1} (at: ${args.at}) for pad ${args.index + 1} of bank "${args.bank_id}"; add it with step.toggle first.`,
     );
   }
   return step;
@@ -1189,7 +1189,7 @@ defineCommand({
     const has = Boolean(
       snap.steps?.[stepKey(args.clip_id, args.pattern_id, args.at, args.bank_id, args.index)],
     );
-    return `${has ? "Took the step off" : "Put a step on"} pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}" at position ${args.at}`;
+    return `${has ? "Took the step off" : "Put a step on"} pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}" at step ${args.at + 1}`;
   },
   touches(args) {
     return [
@@ -1251,8 +1251,11 @@ defineCommand({
   summary(args, snap) {
     const parts = [];
     if (args.v !== undefined) parts.push(`velocity ${args.v}`);
-    if (args.locks !== undefined) parts.push(`${Object.keys(args.locks).length} lock(s)`);
-    return `Set ${parts.join(" and ")} on position ${args.at} of pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}"`;
+    if (args.locks !== undefined) {
+      const names = Object.keys(args.locks);
+      parts.push(names.length === 1 ? `a ${names[0]} lock` : `${names.length} locks (${names.join(", ")})`);
+    }
+    return `Set ${parts.join(" and ")} on step ${args.at + 1} of pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}"`;
   },
   touches(args) {
     return [
@@ -1320,7 +1323,7 @@ defineCommand({
     })
     .strict(),
   summary(args, snap) {
-    return `Cleared the locks on position ${args.at} of pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}"`;
+    return `Cleared the locks on step ${args.at + 1} of pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}"`;
   },
   touches(args) {
     return [
@@ -1371,7 +1374,9 @@ defineCommand({
     const count = args.chain.length;
     return count === 0
       ? `Cleared the chain of clip "${labelOfClip(snap, args.clip_id)}"`
-      : `Chained ${count} pattern(s) on clip "${labelOfClip(snap, args.clip_id)}"`;
+      : `Set the chain of clip "${labelOfClip(snap, args.clip_id)}" to ${args.chain
+          .map((id) => labelOfPattern(snap, args.clip_id, id))
+          .join(" → ")}`;
   },
   touches(args) {
     const refs = [clipRef(args.clip_id)];

@@ -946,7 +946,7 @@ test("agent writes a pattern and chains it", async (t) => {
           index: 0,
           v: at === 0 ? 120 : 100,
         }),
-        /Put a step on pattern "A" at position/,
+        /Put a step on pattern "A" at step/,
       );
     }
     assert.match(
@@ -958,11 +958,11 @@ test("agent writes a pattern and chains it", async (t) => {
         index: 0,
         locks: { cutoff_hz: 900 },
       }),
-      /Set 1 lock\(s\) on position 12 of pattern "A"/,
+      /Set a cutoff_hz lock on step 13 of pattern "A"/,
     );
     assert.match(
       await run("studio_chain_set", { clip_id: "beat", chain: ["a", "b", "a"] }),
-      /Chained 3 pattern\(s\) on clip "Drums A"/,
+      /Set the chain of clip "Drums A" to A → Fill → A/,
     );
 
     // The snapshot — the document the operator and the engine both see — holds
