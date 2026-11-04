@@ -345,6 +345,9 @@ for pkg_cmd in git:git curl:curl; do
   command -v "${pkg_cmd#*:}" >/dev/null 2>&1 || missing+=("${pkg_cmd%%:*}")
 done
 [ -e /etc/ssl/certs/ca-certificates.crt ] || missing+=(ca-certificates)
+# A library, not a command: rocksdb-native's prebuilt addon links libatomic.so.1
+# and minimal server images lack it.
+ldconfig -p 2>/dev/null | grep -q 'libatomic\.so\.1' || missing+=(libatomic1)
 if [ "${#missing[@]}" -gt 0 ]; then
   say "installing ${missing[*]}"
   sudo apt-get update -qq

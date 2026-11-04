@@ -171,6 +171,17 @@ Visita `http://localhost:3001/setup` para ver el estado de las integraciones y l
 Las instancias en Docker pueden encadenarse con otras instalaciones de Crow — VMs en la nube, escritorios o Raspberry Pis. Las memorias se sincronizan automáticamente vía P2P. Consulta el [Inicio Rápido Multi-Dispositivo](./multi-device).
 :::
 
+## Solución de Problemas
+
+**El gateway se reinicia sin parar y el registro dice `Cannot find module '/prebuilds/linux-x64/rocksdb-native.node'`.** El addon nativo precompilado enlaza con `libatomic.so.1`, que las imágenes de servidor y de nube mínimas no incluyen. Instálalo y reinicia el gateway:
+
+```bash
+sudo apt install libatomic1
+docker compose restart gateway
+```
+
+(Si el instalador configuró el gateway como servicio, usa `sudo systemctl restart crow-gateway` en su lugar.)
+
 ## Próximos Pasos
 
 - [Guía de almacenamiento](/es/guide/storage) — Aprende a subir y gestionar archivos
