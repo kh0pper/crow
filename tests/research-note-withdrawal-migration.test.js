@@ -93,12 +93,16 @@ test("init-db adds the columns to a pre-0013 database too", () => {
 test("it defers when the research tables are absent, or on an old-FK-shape database", () => {
   const absent = join(tmp("wd-absent-"), "crow.db");
   new Database(absent).close();
-  assert.deepEqual(run({ dbPath: absent, log: () => {} }), { deferred: true });
+  const ra = run({ dbPath: absent, log: () => {} });
+  assert.equal(ra.deferred, true);
+  assert.match(ra.reason, /absent/);
   const a = new Database(absent, { readonly: true });
   try { assert.equal(typeof researchTablesDeferral(a), "string"); } finally { a.close(); }
 
   const old = makeOldFkDb(join(tmp("wd-oldfk-"), "crow.db"));
-  assert.deepEqual(run({ dbPath: old, log: () => {} }), { deferred: true });
+  const ro = run({ dbPath: old, log: () => {} });
+  assert.equal(ro.deferred, true);
+  assert.match(ro.reason, /FK still targets research_projects/);
   assert.deepEqual(noteCols(old), {}, "nothing added");
 
   const ok = new Database(make0013Db("wd-nodefer-"), { readonly: true });

@@ -161,7 +161,9 @@ test("init-db upgrades an old-FK-shape database (FK → research_projects) witho
 
 test("0013 defers on an old-FK-shape database", () => {
   const dbPath = makeOldFkDb(join(tmp("prov-defer-"), "crow.db"));
-  assert.deepEqual(run({ dbPath, log: () => {} }), { deferred: true });
+  const r = run({ dbPath, log: () => {} });
+  assert.equal(r.deferred, true);
+  assert.match(r.reason, /FK still targets research_projects/, "the deferral names its cause");
   assert.equal(hasColumn(dbPath, "research_sources", "fetch_status"), false);
   assert.equal(hasColumn(dbPath, "research_notes", "provenance"), false);
 });
@@ -169,7 +171,9 @@ test("0013 defers on an old-FK-shape database", () => {
 test("0013 defers when the research tables are absent", () => {
   const dbPath = join(tmp("prov-absent-"), "crow.db");
   new Database(dbPath).close();
-  assert.deepEqual(run({ dbPath, log: () => {} }), { deferred: true });
+  const r = run({ dbPath, log: () => {} });
+  assert.equal(r.deferred, true);
+  assert.match(r.reason, /absent/, "the deferral names its cause");
 });
 
 test("CHECK constraints reject unknown values", () => {
