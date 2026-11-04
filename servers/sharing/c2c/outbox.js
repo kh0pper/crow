@@ -152,9 +152,11 @@
  *     (R2-1, which is why an unchanged queue is simply walked over). Every other
  *     rule is the first walk's, re-read from the rows — a busy hold is re-checked
  *     and the S11 stream holds start empty, because the new send may reach a target
- *     the last one could not. At most 8 re-walks run per call; past that the request
- *     is left for the next flush of that contact (whose own send is later, so it
- *     wins) and `[c2c] flush re-walk limit reached for contact <id>` is logged once.
+ *     the last one could not; a busy hold applies even to a row this call already
+ *     sent. At most 8 re-walks run per call; past that the request is dropped and
+ *     `[c2c] flush re-walk limit reached for contact <id>` is logged (once per
+ *     limit hit): the next flush of that contact, its connect or the 60 s tick,
+ *     walks the queue anyway.
  *     A walk that stopped on a send error still re-walks: a new request usually
  *     means a new connection, which is exactly what that error was about. The
  *     return value is every frame the first walk and all its re-walks sent; the
@@ -594,10 +596,6 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
     return 0;
   }
   walking.add(contactId);
-  // This call's own send is later than anything a previous call left behind, so a
-  // request left by the re-walk limit below is taken up by the walk here: replaying
-  // it would send with an older transport and could hit the limit a second time.
-  takeRewalk(db, contactId);
   try {
     const sentIds = new Set(); // S4/R2-1: the rows this CALL sent, across every walk
     let current = { send, now };
@@ -610,9 +608,9 @@ export async function flush(db, send, { contactId, now = Date.now() } = {}) {
       const next = takeRewalk(db, contactId);
       if (!next) break;
       if (rewalks >= FLUSH_REWALK_LIMIT) {
-        // A burst of connects is absorbed here; past the limit the next flush for
-        // this contact does it. Keep the request, so its news is not lost.
-        requestRewalk(db, contactId, next);
+        // A burst of connects is absorbed here; past the limit the request is
+        // dropped (keeping it would only pin its send closure): the next flush of
+        // this contact — its connect or the 60 s tick — walks the queue anyway.
         console.warn(`[c2c] flush re-walk limit reached for contact ${contactId}`);
         break;
       }
@@ -650,14 +648,16 @@ async function walkQueue(db, send, now, contactId, sentIds) {
   const heldStreams = new Set();
   let sent = 0;
   for (const row of rows) {
-    if (sentIds.has(row.id)) continue; // R2-1: this call sent it on an earlier walk
     if (held.has(row.project_uuid)) continue;
     const stream = fullStreamOf(row);
     if (heldStreams.has(stream)) continue;
+    // The busy hold comes BEFORE the R2-1 skip: a row this call already sent may
+    // have been refused `busy` since, and its project must wait like on any walk.
     if (row.last_refusal === "busy" && now - sqlTimeToMs(row.last_attempt_at) < BUSY_HOLD_MS) {
       held.add(row.project_uuid);
       continue;
     }
+    if (sentIds.has(row.id)) continue; // R2-1: this call sent it on an earlier walk
     let frame;
     try {
       frame = JSON.parse(row.frame_json);

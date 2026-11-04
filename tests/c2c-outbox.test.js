@@ -628,6 +628,34 @@ test("S4 re-walk picks up a row enqueued during the walk", async () => {
   });
 });
 
+test("S4 re-walk: a busy hold applies to a row this call already sent", async () => {
+  await withDb(async ({ db }) => {
+    await enq(db); // P1 seq 1
+
+    const via2 = [];
+    let once = false;
+    const send2 = (f) => { via2.push(f.seq); return undefined; };
+    const send1 = async (f) => {
+      if (!once) {
+        once = true;
+        // While seq 1 is out, the peer answers it `busy` (its handler is not loaded),
+        // P1 queues seq 2, and a connect asks for a re-walk.
+        await db.execute({
+          sql: "UPDATE c2c_outbox SET last_refusal = 'busy' WHERE project_uuid = ? AND seq = 1",
+          args: [P1],
+        });
+        assert.equal(await enq(db), 2);
+        flush(db, send2, { contactId: CONTACT });
+      }
+      return undefined;
+    };
+
+    assert.equal(await flush(db, send1, { contactId: CONTACT }), 1, "only seq 1 went");
+    assert.deepEqual(via2, [], "the re-walk held P1: seq 2 waits out the busy hold");
+    assert.deepEqual((await rowsOf(db)).map((r) => r.attempts), [1, 0]);
+  });
+});
+
 test(`S4 re-walk limit: ${FLUSH_REWALK_LIMIT} re-walks, one line, guard released`, async () => {
   await withDb(async ({ db }) => {
     await enq(db);
@@ -652,10 +680,9 @@ test(`S4 re-walk limit: ${FLUSH_REWALK_LIMIT} re-walks, one line, guard released
     assert.equal(n, 0, "nothing was ever really sent");
     assert.equal(calls, 1 + FLUSH_REWALK_LIMIT, "the first walk and exactly the limit of re-walks");
     assert.deepEqual(lines, [`[c2c] flush re-walk limit reached for contact ${CONTACT}`],
-      "one line, and the pending request is left for the next flush");
+      "one line; the request past the limit is dropped");
 
-    // The guard is released: a later flush walks the queue normally (the request the
-    // limit left behind is taken up by this call's own, later, send).
+    // The guard is released: a later flush walks the queue normally.
     const sent = [];
     assert.equal(await flush(db, (f) => { sent.push(f.seq); }, { contactId: CONTACT }), 1);
     assert.deepEqual(sent, [1]);
