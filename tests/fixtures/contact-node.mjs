@@ -9,10 +9,15 @@
  * - REPO, PT3_BASE_SHA
  * - startTestnet() → { bootstrap, destroy() }          createTestnet(3) on 127.0.0.1
  * - startContactNode({ name, repo, bootstrap, relayUrl, seedFrom, home, extraEnv, bindingAdvertDelayMs })
- *     → node: { name, repo, home, dataDir, crowId, ed25519Pubkey, secp256k1Pubkey,
- *               tool(name, args), sql(sql, args), exec(sql, args), identity(), seedHex(),
- *               isConnected(crowId), log, logLines(re), guardViolations(),
- *               stop({ keepHome }), restart({ repo }) }
+ *     → node: { name, repo, home, dataDir, crowId, instanceId, ed25519Pubkey,
+ *               secp256k1Pubkey, tool(name, args), sql(sql, args), exec(sql, args),
+ *               c2c(fn, args), identity(), seedHex(), isConnected(crowId), log,
+ *               logLines(re), guardViolations(), stop({ keepHome }), restart({ repo }) }
+ *     `exec` seeds a memory, or a project with its local owner row; `c2c(fn, args)`
+ *     calls one allowlisted servers/sharing/c2c function on the node's real db
+ *     (owner.js: inviteContact, setRole, unshareContact, listLiveMembers;
+ *     visitor.js: acceptVisit, declineVisit, leaveVisit, listVisits). Both are
+ *     test-only seams of the Crow-to-Crow two-node gate.
  * - stopAllContactNodes()                               kills every child, removes every home
  * - inviteAndAccept(inviter, acceptor)
  * - waitConnected(a, b), shareMemory(from, toCrowId, text), hasMemory(node, text),
@@ -156,6 +161,7 @@ export async function startContactNode({ name, repo = REPO, bootstrap, relayUrl,
     tool: (toolName, args = {}) => call("tool", { name: toolName, args }),
     sql: (sql, args = []) => call("sql", { sql, args }),
     exec: (sql, args = []) => call("exec", { sql, args }),
+    c2c: (fn, args = {}) => call("c2c", { fn, args }),
     identity: () => call("identity"),
     seedHex: () => call("seedHex"),
     isConnected: (crowId) => call("isConnected", { crowId }),

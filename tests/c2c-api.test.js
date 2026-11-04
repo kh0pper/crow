@@ -47,6 +47,8 @@ const HOSTILE = 3; // a display name that is markup
 const HOSTILE_NAME = "<script>alert(1)</script>";
 const OWNER_SESSION = "owner-session-token";
 const SSO_SESSION = "sso-session-token";
+/** A session minted by a login ON this machine (dashboard/auth.js scopes 'dashboard onhost'). */
+const ONHOST_SESSION = "onhost-session-token";
 const SSH = (s) => createHash("sha256").update(s).digest("hex");
 
 let seq = 0;
@@ -131,12 +133,14 @@ before(async () => {
     });
   }
   // The dashboard's sessions: one minted by this instance's own password login, one by
-  // a peer's SSO (scopes are what isLocalPasswordSessionOn compares).
+  // a peer's SSO, one by a login FROM this machine (scopes are what
+  // isLocalPasswordSessionOn compares).
   await db.execute({
     sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES
             (?, 'access', 'dashboard', 'dashboard', datetime('now', '+1 day')),
-            (?, 'access', 'dashboard', 'dashboard sso src:peer-1', datetime('now', '+1 day'))`,
-    args: [SSH(OWNER_SESSION), SSH(SSO_SESSION)],
+            (?, 'access', 'dashboard', 'dashboard sso src:peer-1', datetime('now', '+1 day')),
+            (?, 'access', 'dashboard', 'dashboard onhost', datetime('now', '+1 day'))`,
+    args: [SSH(OWNER_SESSION), SSH(SSO_SESSION), SSH(ONHOST_SESSION)],
   });
 
   const { c2cApiRouter } = await import("../servers/gateway/routes/c2c-api.js");
@@ -145,11 +149,16 @@ before(async () => {
   const { default: express } = await import("express");
   // The dashboard's own gate, stubbed: a cookie signs the request in, and the client is
   // "the owner's laptop" so the origin rule inside isLocalPasswordSessionOn can pass.
+  // `x-test-gate` is how a case asks for a caller that is NOT the owner's laptop:
+  //   crosshost   → a peer-signed request (req.crossHostAuth)
+  //   self-origin → a request from this machine itself (no classifier memo planted)
   const gate = (req, res, next) => {
     const cookies = parseCookies(req);
     if (!cookies.crow_session) return res.redirect("/dashboard/login");
     req.dashboardSession = cookies.crow_session;
-    markFromLaptop(req);
+    const kind = String(req.headers["x-test-gate"] || "owner");
+    if (kind === "crosshost") req.crossHostAuth = true;
+    if (kind !== "self-origin") markFromLaptop(req);
     next();
   };
   const app = express();
@@ -212,6 +221,43 @@ test("a peer-SSO session is not the owner: 403 not_owner, nothing read or writte
     args: [p.id],
   });
   assert.equal(Number(rows[0].n), 0, "an SSO caller changed nothing");
+});
+
+test("a dashboard on-host login, a peer-signed request and a self-origin request are each 403 not_owner, writing nothing", async () => {
+  const CASES = [
+    ["a dashboard onhost session token row", { cookie: `crow_session=${ONHOST_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok", "x-test-gate": "owner" }],
+    ["a gate that sets req.crossHostAuth", { cookie: `crow_session=${OWNER_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok", "x-test-gate": "crosshost" }],
+    ["a request from this machine itself (self-origin)", { cookie: `crow_session=${OWNER_SESSION}; crow_csrf=tok`, "x-crow-csrf": "tok", "x-test-gate": "self-origin" }],
+  ];
+  for (const [label, headers] of CASES) {
+    const p = await newProject();
+    const invite = await post(`/projects/${p.id}/invite`, { contact_id: BOUND, role: "viewer" }, headers);
+    assert.equal(invite.status, 403, label);
+    assert.deepEqual(invite.body, { error: "not_owner", code: "not_owner" }, label);
+
+    const unshare = await post(`/projects/${p.id}/members/${BOUND}/unshare`, {}, headers);
+    assert.equal(unshare.status, 403, label);
+    assert.deepEqual(unshare.body, { error: "not_owner", code: "not_owner" }, label);
+
+    // A visit answer is the owner's too: the visit must not move and no frame may be queued.
+    const visit = await newVisit({ state: "invited" });
+    const accept = await post(`/visits/${visit.id}/accept`, {}, headers);
+    assert.equal(accept.status, 403, label);
+    assert.deepEqual(accept.body, { error: "not_owner", code: "not_owner" }, label);
+
+    const members = await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM project_members WHERE project_id = ? AND contact_id IS NOT NULL",
+      args: [p.id],
+    });
+    assert.equal(Number(members.rows[0].n), 0, `${label}: nothing was written for the project`);
+    const projectUuid = await uuidOf(p.id);
+    const frames = await db.execute({ sql: "SELECT COUNT(*) AS n FROM c2c_outbox WHERE project_uuid = ?", args: [projectUuid] });
+    assert.equal(Number(frames.rows[0].n), 0, `${label}: no frame was queued`);
+    const visitState = await db.execute({ sql: "SELECT state FROM c2c_visits WHERE id = ?", args: [visit.id] });
+    assert.equal(visitState.rows[0].state, "invited", `${label}: the visit did not move`);
+    const visitFrames = await db.execute({ sql: "SELECT COUNT(*) AS n FROM c2c_outbox WHERE project_uuid = ?", args: [visit.projectUuid] });
+    assert.equal(Number(visitFrames.rows[0].n), 0, `${label}: no answer was queued for the visit`);
+  }
 });
 
 /* ------------------------------------------------------------------ the statuses */
