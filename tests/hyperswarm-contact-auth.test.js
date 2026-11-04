@@ -722,7 +722,25 @@ test("H-C10b an old sibling gets the deferred bare reply, with the piggyback, on
 // ================================================================ H-C11
 const SIDE_EFFECTS = [
   // _completeAdmit is _admit's second half (mutual admission), reached only from _admit or the peer's `authenticated` after ours.
-  { what: "connections.set(", re: /\.connections\s*\.\s*set\s*\(/g, allowed: ["_completeAdmit"] },
+  // _promote is the ONE other writer: it only re-points `connections` at an entry
+  // that was already admitted (the newest live survivor of a close), and only
+  // _dropConnection calls it.
+  { what: "connections.set", re: /\bconnections\s*(\?\.|\.)\s*set\b/g, allowed: ["_completeAdmit", "_promote"] },
+  { what: "_promote(", re: /\._promote\s*\(/g, allowed: ["_dropConnection"] },
+  // Aliasing either map hands out its mutation path: a local copy can call
+  // set()/delete() behind the APIs' back. Only the constructor may hold one.
+  // A member access after the name (`= this.connections.get(…)`) is a read, not
+  // an alias, so it is not matched; so is a comparison (`=== this.connections`).
+  { what: "alias this.connections", re: /(?<![=!<>])\s*=\s*this\s*\.\s*connections\b(?!\s*(?:\?\.|\.|\[))/g, allowed: ["constructor"] },
+  { what: "alias this.peerConns", re: /(?<![=!<>])\s*=\s*this\s*\.\s*peerConns\b(?!\s*(?:\?\.|\.|\[))/g, allowed: ["constructor"] },
+  // The per-instance bucket (crowId -> entry[]) is private to the index: these
+  // are the only methods that may touch it — by name, or destructured from
+  // `this`. Everything else goes through the APIs above, so no other code can
+  // pick a connection behind sendTo()'s back.
+  { what: "peerConns", re: /\bpeerConns\b/g, allowed: [
+    "constructor", "_completeAdmit", "_dropConnection", "_promote",
+    "sendTo", "isConnected", "connectedInstances", "lineMaxFor", "leaveContact", "destroy",
+  ] },
   { what: "onPeerConnected(", re: /\.onPeerConnected\s*\(/g, allowed: ["_completeAdmit"] },
   { what: "onInstanceConnected(", re: /\.onInstanceConnected\s*\(/g, allowed: ["_completeAdmit"] },
   { what: "onInstanceKeyReceived(", re: /\.onInstanceKeyReceived\s*\(/g, allowed: ["_completeAdmit", "_dispatchAdmitted"] },
@@ -747,15 +765,22 @@ function stripComments(src) {
 function methodSpans(src) {
   const cls = src.indexOf("export class PeerManager");
   const spans = [];
+  // A method body closes at a `}` alone on a 2-space line.
+  const endOf = (from) => {
+    const endRe = /^ {2}\}[;,]?[ \t]*$/gm;
+    endRe.lastIndex = from;
+    const e = endRe.exec(src);
+    return e ? e.index : src.length;
+  };
   const re = /^ {2}(?:async\s+)?(?:static\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/gm;
   re.lastIndex = cls;
   let m;
-  while ((m = re.exec(src))) {
-    const endRe = /^ {2}\}/gm;
-    endRe.lastIndex = m.index + m[0].length;
-    const e = endRe.exec(src);
-    spans.push({ name: m[1], start: m.index, end: e ? e.index : src.length });
-  }
+  while ((m = re.exec(src))) spans.push({ name: m[1], start: m.index, end: endOf(m.index + m[0].length) });
+  // The constructor's parameter list spans lines (and its `  } = {}) {` is not a
+  // body close), so it is matched on its own; peerConns is allowed in it by name.
+  const ctor = /^ {2}constructor\s*\(/gm;
+  ctor.lastIndex = cls;
+  while ((m = ctor.exec(src))) spans.push({ name: "constructor", start: m.index, end: endOf(m.index + m[0].length) });
   return spans;
 }
 
@@ -795,27 +820,45 @@ test("H-C11 positive control: a planted side effect in a temp copy fails the sca
   const dir = mkdtempSync(join(tmpdir(), "pt3-scan-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const src = readFileSync(PEER_MANAGER_PATH, "utf8");
-  const anchor = src.indexOf("  _handleConnection(conn, info) {");
-  assert.ok(anchor > 0);
-  const insertAt = src.indexOf("\n", anchor) + 1;
+  /** The source with `line` inserted right after the line that opens `anchor`. */
+  const at = (anchor, line) => {
+    const i = src.indexOf(anchor);
+    assert.ok(i > 0, `anchor ${anchor}`);
+    const j = src.indexOf("\n", i) + 1;
+    return src.slice(0, j) + line + src.slice(j);
+  };
+  const HC = "  _handleConnection(conn, info) {";
+  const DROP = "  _dropConnection(crowId, conn) {";
   const plants = [
-    ["connections.set(", '    this.connections.set("x", { conn, authenticated: true });\n'],
-    ["bare sign(", "    const s = sign(msg.challenge, this.identity.ed25519Priv);\n"],
-    ['{ type: "authenticated" }', '    conn.write(JSON.stringify({ type: "authenticated" }) + "\\n");\n'],
-    ['{ type: "authenticated" }', '    conn.write(JSON.stringify({ type: "authenticated", line_max: 1 }) + "\\n");\n'],
-    ["onPeerConnected(", "    this.onPeerConnected(remoteCrowId, conn);\n"],
-    ["_completeAdmit(", "    this._completeAdmit(conn, state);\n"],
-    ["verify(... msg.pubkey", "    verify(nonce, msg.signature, msg.pubkey);\n"],
+    ["connections.set in _handleConnection", at(HC, '    this.connections.set("x", { conn, authenticated: true });\n')],
+    // Optional chaining is the same mutation path, not a read.
+    ["connections.set in _handleConnection", at(HC, '    this.connections?.set("x", { conn, authenticated: true });\n')],
+    ["bare sign(", at(HC, "    const s = sign(msg.challenge, this.identity.ed25519Priv);\n")],
+    ['{ type: "authenticated" }', at(HC, '    conn.write(JSON.stringify({ type: "authenticated" }) + "\\n");\n')],
+    ['{ type: "authenticated" }', at(HC, '    conn.write(JSON.stringify({ type: "authenticated", line_max: 1 }) + "\\n");\n')],
+    ["onPeerConnected(", at(HC, "    this.onPeerConnected(remoteCrowId, conn);\n")],
+    ["_completeAdmit(", at(HC, "    this._completeAdmit(conn, state);\n")],
+    ["verify(... msg.pubkey", at(HC, "    verify(nonce, msg.signature, msg.pubkey);\n")],
+    // The per-instance bucket is reachable only from the named methods: by
+    // name, or destructured out of `this` (which hands the Map itself over).
+    ["peerConns in _handleConnection", at(HC, "    this.peerConns.get(x).push(entry);\n")],
+    ["peerConns in _handleConnection", at(HC, "    const { peerConns } = this;\n")],
+    // An alias is the same handout: set()/delete() through a local copy.
+    ["alias this.connections in _handleConnection", at(HC, "    const conns = this.connections;\n")],
+    ["alias this.peerConns in _handleConnection", at(HC, "    const buckets = this.peerConns;\n")],
+    // Promotion is the only other `connections.set`, and only inside _dropConnection.
+    ["connections.set in _dropConnection", at(DROP, "    this.connections.set(crowId, bucket[0]);\n")],
+    ["_promote( in _handleConnection", at(HC, "    this._promote(crowId, bucket);\n")],
   ];
-  for (const [what, line] of plants) {
+  for (const [what, text] of plants) {
     const f = join(dir, "peer-manager.js");
-    writeFileSync(f, src.slice(0, insertAt) + line + src.slice(insertAt));
+    writeFileSync(f, text);
     const v = scanSideEffects(f);
     assert.ok(v.some((x) => x.startsWith(what)), `planted ${what} is caught: ${JSON.stringify(v)}`);
   }
   // And a plant inside a comment is not code: not caught.
   const f = join(dir, "peer-manager.js");
-  writeFileSync(f, src.slice(0, insertAt) + "    // this.connections.set(x)\n" + src.slice(insertAt));
+  writeFileSync(f, at(HC, "    // this.connections.set(x) this.connections?.set(x) const a = this.connections; this.peerConns.get(x).push(entry)\n"));
   assert.deepEqual(scanSideEffects(f), []);
 });
 
