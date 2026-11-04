@@ -492,9 +492,11 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
 
         // The guarded purge (X3), still inside the transaction: ending the visit is
         // the effect that must land, so a throwing plan-2 hook is logged and stepped
-        // over. It runs BEFORE the UPDATE so a write that lands while this transaction
-        // is open (a seam reentering with a newer invite) makes the epoch guard below
-        // take no row, instead of this refusal ending that newer visit.
+        // over. Running it before the UPDATE is safe: this transaction holds the
+        // handle's turn and every write to c2c_visits goes through withTransaction, so
+        // nothing changes the visit between the read above and the UPDATE below; the
+        // only no-row case is a visit already unshared at this epoch, where a repeat
+        // purge is harmless (as in onUnshare).
         try {
           await (deleteCopies ?? deleteLocalCopies)(visit);
         } catch (err) {
