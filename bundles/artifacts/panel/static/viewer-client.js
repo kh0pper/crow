@@ -91,7 +91,7 @@
     root.appendChild(el("nav", { class: "cv-nav", "aria-label": T.nav }, [
       backLink || el("a", { class: "cv-nav-back", href: "/dashboard/artifacts", text: "\u2190 " + T.library }),
       el("span", { class: "cv-nav-title", text: T.library_title }),
-      el("a", { class: "cv-nav-nest", href: "/dashboard/nest", text: T.nest }),
+      el("a", { class: "cv-nav-nest", href: "/dashboard/nest?open=1", text: T.nest }),
     ]));
   }
   if (cardRow) head.insertBefore(cardRow, headTools);

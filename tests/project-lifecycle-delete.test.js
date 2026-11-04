@@ -550,3 +550,249 @@ test("the refusals run again right before the disconnects; a late refusal report
   assert.deepEqual(r2.detail, { bots: ["Late"], disconnected: 1 });
   assert.equal((await proj(id2)).archived_at, null);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Finishing a delete that stopped partway: the post-commit steps re-run from what the audit says
+// is left, against the tombstone (whose slug, uuid and original slug come from that audit).
+// ---------------------------------------------------------------------------------------------
+
+/** A storageDelete that throws on its first call only, then behaves. */
+const flakyStorage = () => {
+  let boom = true;
+  return async (row) => {
+    if (boom) { boom = false; throw new Error("storage down"); }
+    await db.execute({ sql: "DELETE FROM storage_files WHERE id = ?", args: [row.id] });
+  };
+};
+
+test("a partial delete can be finished", async () => {
+  const id = await mk("Finish");
+  const p = await seed(id);
+  seedCards(id, 1);
+  const r = await del(id, "Finish", { storageDelete: flakyStorage() });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.partial, ["files"]);
+  assert.equal(await n("SELECT COUNT(*) AS n FROM storage_files WHERE project_id = ?", [id]), 1);
+  assert.ok((await proj(id)).archived_at, "the tombstone stands");
+
+  const res = await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(res.partial, [], "nothing left");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM storage_files WHERE project_id = ?", [id]), 0);
+  assert.equal(existsSync(p.workspace_dir), false, "the workspace was already moved");
+  // The tombstone is untouched: same row, same slug, still deleted.
+  const tomb = await proj(id);
+  assert.ok(tomb.archived_at);
+  assert.equal(tomb.slug, `${p.slug}-deleted-${id}`);
+
+  const a = await one("SELECT actor_type, payload FROM project_audit_log WHERE project_id = ? AND action = 'project.delete.resume'", [id]);
+  assert.equal(a.actor_type, "local");
+  assert.deepEqual(JSON.parse(a.payload), { remaining_partial: [] });
+  const g = await one("SELECT details FROM audit_log WHERE event_type = 'project.delete.resume' AND details LIKE ?", [`%"project_id":${id},%`]);
+  assert.deepEqual(JSON.parse(g.details).remaining_partial, []);
+  assert.equal(JSON.parse(g.details).slug, p.slug, "the original slug, not the tombstone's");
+});
+
+test("finishing a partial workspace move moves it under deleted-projects", async () => {
+  const id = await mk("Ws Finish");
+  const p = await seed(id);
+  // A data dir that is not this instance's: the workspace is not <dataDir>/projects/<slug>/workspace,
+  // so the delete leaves it in place and says so.
+  const r = await del(id, "Ws Finish", { dataDir: join(DATA, "not-this-instance") });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.partial, ["workspace"]);
+  assert.equal(readFileSync(join(p.workspace_dir, "readme.txt"), "utf8"), "hello", "left in place");
+
+  const res = await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(res.partial, []);
+  assert.equal(existsSync(p.workspace_dir), false);
+  const moved = readdirSync(join(DATA, "deleted-projects")).filter((d) => d.startsWith(p.uuid));
+  assert.equal(moved.length, 1, "one folder under deleted-projects");
+  assert.match(moved[0], new RegExp(`^${p.uuid}-\\d{8}$`));
+  assert.equal(readFileSync(join(DATA, "deleted-projects", moved[0], "readme.txt"), "utf8"), "hello");
+});
+
+test("finishing a delete that was not partial is refused", async () => {
+  const id = await mk("Nothing Owed");
+  await seed(id);
+  const r = await del(id, "Nothing Owed");
+  assert.equal(r.ok, true);
+  assert.equal(r.partial, undefined, "every step finished");
+  assert.deepEqual(await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete }), { ok: false, code: "not_partial" });
+  assert.equal(await n("SELECT COUNT(*) AS n FROM project_audit_log WHERE project_id = ? AND action = 'project.delete.resume'", [id]), 0, "no resume audit for a refusal");
+
+  // A live project is never a candidate either, and neither is one that was never deleted.
+  const live = await mk("Still Live");
+  assert.deepEqual(await L.resumeProjectDelete(db, live, {}), { ok: false, code: "not_partial" });
+  assert.equal((await proj(live)).archived_at, null);
+});
+
+/** `db` with its `execute` wrapped (every other method forwarded, bound to the real client). */
+const withExecute = (db, wrap) => new Proxy(db, {
+  get(target, prop) {
+    if (prop === "execute") return (q) => wrap(target, q);
+    const v = Reflect.get(target, prop, target);
+    return typeof v === "function" ? v.bind(target) : v;
+  },
+});
+
+/**
+ * A project whose delete purged its cards but could not cancel their queued job: the tombstone
+ * stands with `jobs` owed, and no card row is left for the job to be tied to.
+ */
+async function joblessProject(name) {
+  const id = await mk(name);
+  await seed(id);
+  const [card] = seedCards(id, 1);
+  await db.execute({ sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, card_id, source) VALUES (?, 'b', 'g', 'queued', ?, 'card')", args: [`j-${id}`, card] });
+  // The cancel write fails once; the tombstone is already committed and the cards are gone.
+  let boom = true;
+  const flakyJobs = withExecute(db, (real, q) => {
+    const sql = typeof q === "string" ? q : String(q.sql || "");
+    if (boom && /UPDATE bot_jobs SET status = 'failed'/.test(sql)) { boom = false; throw new Error("database is locked"); }
+    return real.execute(q);
+  });
+  const r = await L.deleteProject(flakyJobs, id, { confirmName: name, storageDelete: recorder().storageDelete, disconnectBackend: () => true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.partial, ["jobs"]);
+  assert.equal(tn("SELECT COUNT(*) AS n FROM tasks_items WHERE project_id = ?", [id]), 0, "the cards are gone");
+  return { id, job: `j-${id}` };
+}
+
+/** The same db, but the tombstone row it hands back carries no uuid (an older row shape). */
+const withoutTombUuid = (inner) => withExecute(inner, (real, q) => {
+  const sql = typeof q === "string" ? q : String(q.sql || "");
+  const r = real.execute(q);
+  if (!/archived_at\s+FROM project_spaces/.test(sql)) return r;
+  return r.then((res) => ({ ...res, rows: res.rows.map((row) => ({ ...row, uuid: null })) }));
+});
+
+/** Rewrite the uuid the original project.delete audit entry records (it is plain text). */
+const forgeAuditUuid = (pid, uuid) => db.execute({
+  sql: "UPDATE audit_log SET details = json_set(details, '$.uuid', ?) WHERE event_type = 'project.delete' AND details LIKE ?",
+  args: [uuid, `%"project_id":${pid},%`],
+});
+
+test("jobs that can no longer be traced are reported, not hidden", async () => {
+  const { id } = await joblessProject("Lost Jobs");
+
+  const res = await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(res.partial, [], "not reported as a step that failed again");
+  assert.deepEqual(res.untraceable, ["jobs"], "said out loud, not hidden");
+  const a = await one("SELECT payload FROM project_audit_log WHERE project_id = ? AND action = 'project.delete.resume'", [id]);
+  assert.deepEqual(JSON.parse(a.payload), { remaining_partial: [], untraceable: ["jobs"] });
+  const g = await one("SELECT details FROM audit_log WHERE event_type = 'project.delete.resume' AND details LIKE ?", [`%"project_id":${id},%`]);
+  assert.deepEqual(JSON.parse(g.details).untraceable, ["jobs"]);
+  assert.equal((await one("SELECT status FROM bot_jobs WHERE job_id = ?", [`j-${id}`])).status, "queued", "a job is never invented");
+
+  // Not owed again: a later finish finds nothing left.
+  assert.deepEqual(await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete }), { ok: false, code: "not_partial" });
+
+  // The projects list banner after a real finish says it, in both languages.
+  const ui = await import("../servers/gateway/dashboard/shared/project-lifecycle-ui.js");
+  const other = await joblessProject("Lost Jobs Two");
+  const redirects = [];
+  const out = await ui.handleLifecyclePost(
+    { body: { action: "resume_project_delete", id: String(other.id) }, method: "POST" },
+    { redirectAfterPost: (u) => redirects.push(u) },
+    { db, lang: "en", layout: () => "", projectId: other.id, urls: { post: "/dashboard/projects", confirm: (x) => `/dashboard/projects?delete=${other.id}&${x}` }, forbiddenHtml: "" },
+  );
+  assert.deepEqual(out, {});
+  const query = Object.fromEntries(new URL(redirects[0], "http://x").searchParams);
+  assert.equal(query.untraceable, "jobs");
+  assert.match(ui.resultBannerHtml(query, "en"), /Finished\. Queued bot jobs of this project could no longer be found to cancel; any still queued will stop when they run\./);
+  assert.match(ui.resultBannerHtml(query, "es"), /Terminado\. Ya no se pudieron encontrar los trabajos de bot en cola de este proyecto para cancelarlos; los que sigan en cola se detendrán al ejecutarse\./);
+  assert.equal((await one("SELECT status FROM bot_jobs WHERE job_id = ?", [other.job])).status, "queued");
+});
+
+test("a finish with nothing left says so", async () => {
+  const ui = await import("../servers/gateway/dashboard/shared/project-lifecycle-ui.js");
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  const id = await mk("Nothing Left");
+  await seed(id);
+  assert.equal((await del(id, "Nothing Left")).ok, true);
+
+  // A real finish of an already finished delete: refused with not_partial, and the projects
+  // list page says why instead of showing nothing.
+  const redirects = [];
+  const out = await ui.handleLifecyclePost(
+    { body: { action: "resume_project_delete", id: String(id) }, method: "POST" },
+    { redirectAfterPost: (u) => redirects.push(u) },
+    { db, lang: "en", layout: () => "", projectId: id, urls: { post: "/dashboard/projects", confirm: (x) => `/dashboard/projects?delete=${id}&${x}` }, forbiddenHtml: "" },
+  );
+  assert.deepEqual(out, {});
+  const query = Object.fromEntries(new URL(redirects[0], "http://x").searchParams);
+  assert.equal(query.error, "not_partial");
+  const banner = ui.resultBannerHtml(query, "en");
+  assert.match(banner, /There is nothing left to finish for that project\./);
+  assert.match(banner, /role="alert"/);
+  assert.match(ui.resultBannerHtml(query, "es"), /No queda nada por terminar en ese proyecto\./);
+
+  // The other codes: the owner refusal, and the generic failure text for anything else.
+  assert.match(ui.resultBannerHtml({ error: "not_owner", resume: "1" }, "en"), /Only the project's owner can finish deleting it\./);
+  assert.match(ui.resultBannerHtml({ error: "not_owner", resume: "1" }, "es"), /Solo el propietario del proyecto puede terminar de eliminarlo\./);
+  assert.ok(ui.resultBannerHtml({ error: "bad_actor", resume: "1" }, "en").includes(t("projLife.failed", "en")));
+  assert.match(ui.resultBannerHtml({ error: "bad_actor", resume: "1" }, "es"), /Algo salió mal, así que no se eliminó el proyecto\./);
+  // The panel's own ?error= codes are untouched: no misleading delete banner.
+  assert.equal(ui.resultBannerHtml({ error: "name_required" }, "en"), "");
+});
+
+test("a hostile audit uuid cannot move the workspace outside deleted-projects", async () => {
+  const id = await mk("Hostile");
+  const p = await seed(id);
+  // A delete whose workspace step failed: a data dir that is not this instance's leaves it in place.
+  const r = await del(id, "Hostile", { dataDir: join(DATA, "not-this-instance") });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.partial, ["workspace"]);
+
+  // The audit entry is text a caller could have written: it never names the destination folder.
+  await forgeAuditUuid(id, "../../escape");
+  const res = await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(res.partial, []);
+  assert.deepEqual(readdirSync(dir).filter((d) => d.startsWith("escape")), [], "nothing was created outside deleted-projects");
+  const moved = readdirSync(join(DATA, "deleted-projects")).filter((d) => d.startsWith(p.uuid));
+  assert.equal(moved.length, 1, "named from the row's uuid");
+  assert.equal(readFileSync(join(DATA, "deleted-projects", moved[0], "readme.txt"), "utf8"), "hello");
+
+  // A row with no uuid of its own falls back to the audit's only when that is uuid-shaped.
+  const id2 = await mk("Hostile Two");
+  const p2 = await seed(id2);
+  assert.deepEqual((await del(id2, "Hostile Two", { dataDir: join(DATA, "not-this-instance") })).partial, ["workspace"]);
+  await forgeAuditUuid(id2, "../../escape-two");
+  assert.deepEqual(await L.resumeProjectDelete(withoutTombUuid(db), id2, { storageDelete: recorder().storageDelete }), { ok: false, code: "not_partial" });
+  assert.deepEqual(readdirSync(dir).filter((d) => d.startsWith("escape")), []);
+  assert.equal(readFileSync(join(p2.workspace_dir, "readme.txt"), "utf8"), "hello", "left in place");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM audit_log WHERE event_type = 'project.delete.resume' AND details LIKE ?", [`%"project_id":${id2},%`]), 0, "a refusal writes nothing");
+
+  // A uuid-shaped audit uuid is used when the row has none.
+  const good = "01234567-89ab-cdef-0123-456789abcdef";
+  await forgeAuditUuid(id2, good);
+  const res2 = await L.resumeProjectDelete(withoutTombUuid(db), id2, { storageDelete: recorder().storageDelete });
+  assert.equal(res2.ok, true, JSON.stringify(res2));
+  assert.equal(readdirSync(join(DATA, "deleted-projects")).filter((d) => d.startsWith(good)).length, 1, "named from the audit uuid it had to fall back to");
+  assert.equal(existsSync(p2.workspace_dir), false);
+});
+
+test("finishing twice does nothing the second time", async () => {
+  const id = await mk("Twice");
+  await seed(id);
+  const r = await del(id, "Twice", { storageDelete: flakyStorage() });
+  assert.deepEqual(r.partial, ["files"]);
+  const first = await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.deepEqual(first.partial, []);
+
+  const snap = async () => ({
+    ps: { ...(await proj(id)) },
+    files: await n("SELECT COUNT(*) AS n FROM storage_files WHERE project_id = ?", [id]),
+    resumésCount: await n("SELECT COUNT(*) AS n FROM project_audit_log WHERE project_id = ? AND action = 'project.delete.resume'", [id]),
+    auditRows: await n("SELECT COUNT(*) AS n FROM audit_log WHERE event_type = 'project.delete.resume' AND details LIKE ?", [`%"project_id":${id},%`]),
+  });
+  const before = await snap();
+  assert.equal(before.resumésCount, 1);
+  assert.deepEqual(await L.resumeProjectDelete(db, id, { storageDelete: recorder().storageDelete }), { ok: false, code: "not_partial" });
+  assert.deepEqual(await snap(), before, "nothing changed");
+});

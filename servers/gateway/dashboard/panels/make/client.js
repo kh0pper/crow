@@ -10,7 +10,8 @@
  * Flow: "+ Start something" opens the sheet. A type row opens the composer (type pill, project chip,
  * Perch-attached bot picker, field pre-filled with the type's starter text). Submit POSTs
  * /dashboard/perch-api/bots/:id/interactive {project_id}, then .../interactive/:sid/message {message},
- * then goes to /dashboard/perch#<threadId>. Blank (document, spreadsheet, deck) takes a title and POSTs
+ * then goes to /dashboard/perch?project=<id>#<threadId> (bare for Unassigned: a link without the
+ * project would open whatever scope the operator last had). Blank (document, spreadsheet, deck) takes a title and POSTs
  * /dashboard/make-api/blank (with card_id in This card mode, so the file lands on the card). The
  * interactive API takes no card, so a chat started on This card is filed under the card's project
  * (the sheet's data-project) but not linked to the card. Both send the CSRF token as X-Crow-Csrf.
@@ -207,7 +208,10 @@ export function makeClientJs(lang) {
         if (!sid) return fail();
         return post('/dashboard/perch-api/interactive/' + encodeURIComponent(sid) + '/message', { message: text }).then(function (r) {
           if (!r.ok) return fail();
-          location.href = '/dashboard/perch#' + sid;
+          /* The new chat opens in the project it was filed under (a bare
+             /dashboard/perch opens whatever scope the operator last had);
+             Unassigned, and no project at all, stay bare. */
+          location.href = '/dashboard/perch' + (projectId && projectId !== 'unassigned' ? '?project=' + encodeURIComponent(projectId) : '') + '#' + sid;
         });
       }).catch(fail);
   }

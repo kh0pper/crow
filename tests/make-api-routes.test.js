@@ -316,7 +316,9 @@ test("submitting starts a chat in the project, sends the text, then goes to the 
   assert.equal(posts[0].headers["X-Crow-Csrf"], "tok123");
   assert.equal(posts[1].url, "/dashboard/perch-api/interactive/perchlive-t9/message");
   assert.deepEqual(posts[1].body, { message: "Write a document about bees" });
-  assert.equal(c.loc.href, "/dashboard/perch#perchlive-t9");
+  // The thread opens in the project the chat was started in, not whichever
+  // project the scope cookie last held.
+  assert.equal(c.loc.href, "/dashboard/perch?project=" + P1 + "#perchlive-t9");
 });
 
 test("Blank posts the title and project to make-api", async () => {

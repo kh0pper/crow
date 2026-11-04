@@ -19,18 +19,31 @@ const ACTORS = ["local", "contact", "bot", "system"];
  * status='archived' is allowed. archived_at set and learner_profile rows are always false.
  */
 export async function canOwnProject(db, projectId) {
+  return ownsProject(db, projectId, { allowDeleted: false });
+}
+
+/**
+ * The SAME owner rule with the tombstone allowed (archived_at NOT NULL). Only finishing a delete
+ * that stopped partway uses it: the row it addresses is by definition already deleted, so the
+ * ordinary rule could never pass. Everything else keeps using canOwnProject.
+ */
+export async function canOwnDeletedProject(db, projectId) {
+  return ownsProject(db, projectId, { allowDeleted: true });
+}
+
+async function ownsProject(db, projectId, { allowDeleted }) {
   if (projectId == null || !Number.isFinite(Number(projectId))) return false;
   try {
     const { rows } = await db.execute({
       sql: `SELECT m.role FROM project_spaces ps
               JOIN project_members m ON m.project_id = ps.id AND m.contact_id IS NULL AND m.revoked_at IS NULL
-             WHERE ps.id = ? AND ps.archived_at IS NULL AND (ps.type IS NULL OR ps.type != 'learner_profile')
+             WHERE ps.id = ?${allowDeleted ? "" : " AND ps.archived_at IS NULL"} AND (ps.type IS NULL OR ps.type != 'learner_profile')
              LIMIT 1`,
       args: [Number(projectId)],
     });
     return !!rows[0] && rows[0].role === "owner";
   } catch (err) {
-    console.warn("[project-lifecycle] canOwnProject lookup failed:", err.message);
+    console.warn("[project-lifecycle] owner lookup failed:", err.message);
     return false;
   }
 }
@@ -511,4 +524,143 @@ export async function deleteProject(db, projectId, {
 /** Where deleted workspaces are moved to: <dataDir>/deleted-projects (for showing the new path). */
 export function deletedProjectsDir(dataDir) {
   return join(projectsDataDir(dataDir), "deleted-projects");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finishing a delete that stopped partway.
+//
+// Everything after the tombstone commit is best effort, and the tombstone makes the project
+// undeletable again (canOwnProject needs a live row), so a step that failed there could never be
+// finished. The `project.delete` audit entry in audit_log keeps the ORIGINAL slug and uuid (the
+// row's slug is the tombstone's now) and the list of steps that failed. This re-runs exactly
+// those steps — each one keys on project_id and is idempotent, and the workspace move is skipped
+// when its source is gone — then records what is still left. The tombstone itself is never
+// touched, and nothing runs this automatically: the operator asks for it.
+// ---------------------------------------------------------------------------------------------
+
+/** The steps a partial delete can list (the ones deleteProject runs after its commit). */
+const RESUME_STEPS = Object.freeze(["cards", "board_defs", "jobs", "files", "workspace"]);
+
+/** What a uuid has to look like to name a folder under deleted-projects (hex digits and dashes). */
+const AUDIT_UUID_RE = /^[0-9a-f-]{36}$/i;
+
+/** The newest audit_log row for `id` among `events`, or null. Read-only. */
+async function latestAuditOf(db, id, events) {
+  const { rows } = await db.execute({
+    sql: `SELECT id, event_type, details FROM audit_log
+           WHERE event_type IN (${events.map(() => "?").join(",")})
+             AND json_extract(CASE WHEN json_valid(details) THEN details ELSE '{}' END, '$.project_id') = ?
+           ORDER BY id DESC LIMIT 1`,
+    args: [...events, id],
+  });
+  const row = rows[0];
+  if (!row) return null;
+  let details = null;
+  try { details = JSON.parse(String(row.details)); } catch { details = null; }
+  if (!details || typeof details !== "object") return null;
+  return { id: Number(row.id), event: String(row.event_type), details };
+}
+
+/** The row as it stands, tombstone included. */
+async function loadAnyProject(db, projectId) {
+  const { rows } = await db.execute({
+    sql: "SELECT id, uuid, slug, name, workspace_dir, tasks_db_uri, archived_at FROM project_spaces WHERE id = ?",
+    args: [Number(projectId)],
+  });
+  return rows[0] || null;
+}
+
+/** The project's card ids still in its store (read-only), in the shape cancelCardJobs takes. */
+async function cardsLeft(project, { tasksDbPath } = {}) {
+  const store = resolveCardsStore(project, { tasksDbPath });
+  const tdb = openExisting(store.path);
+  if (!tdb) return { ids: [], global: store.global };
+  try {
+    if (!(await tableExists(tdb, "tasks_items"))) return { ids: [], global: store.global };
+    const ids = (await tdb.execute({ sql: "SELECT id FROM tasks_items WHERE project_id = ?", args: [Number(project.id)] }))
+      .rows.map((r) => Number(r.id));
+    return { ids, global: store.global };
+  } catch (err) {
+    console.warn(`[project-lifecycle] resume ${project.id}: reading card ids failed:`, err?.message || err);
+    return { ids: [], global: store.global };
+  } finally { tdb.close(); }
+}
+
+/**
+ * Finish a delete that stopped partway: re-run the steps its `project.delete` audit lists as
+ * failed, and record what is still left.
+ *
+ * A candidate is a tombstoned project (`archived_at` set, slug `<slug>-deleted-<id>`, or one of
+ * its `-2`, `-3` clash variants) whose newest delete/resume audit entry still names steps. Any
+ * other row is refused with `not_partial`. The original slug and uuid come from the
+ * `project.delete` audit entry, because the row's own slug is the tombstone's.
+ * @param {object} opts
+ * @param {string} [opts.actor='local']  local|contact|bot|system
+ * @param {(fileRow:object)=>Promise<void>} [opts.storageDelete]  per-file delete (object + row)
+ * @param {string} [opts.dataDir]  defaults to project-spaces.js's anchor
+ * @param {string} [opts.tasksDbPath]  the instance-global tasks.db (instance-paths.mjs by default)
+ * @param {() => Date} [opts.now]  the date used in the deleted-projects folder name
+ * @returns {Promise<{ ok: true, partial: string[], untraceable?: string[] } |
+ *   { ok: false, code: 'bad_actor'|'not_owner'|'not_partial' }>}
+ *   `partial` lists what failed again this time (empty when the delete is now complete).
+ *   `untraceable` lists owed steps that could not be repeated at all (a queued job whose card
+ *   rows are gone): they are reported, never silently counted as done, and never owed again.
+ */
+export async function resumeProjectDelete(db, projectId, {
+  actor = "local", storageDelete, dataDir, tasksDbPath, now = () => new Date(),
+} = {}) {
+  if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
+  const id = Number(projectId);
+  if (!Number.isInteger(id)) return { ok: false, code: "not_partial" };
+  if (!(await canOwnDeletedProject(db, id))) return { ok: false, code: "not_owner" };
+
+  const tomb = await loadAnyProject(db, id);
+  if (!tomb || !tomb.archived_at) return { ok: false, code: "not_partial" };
+  // tombstoneSlug: <slug>-deleted-<id>, or -2/-3/... when that slug was taken.
+  if (!new RegExp(`-deleted-${id}(-[0-9]+)?$`).test(String(tomb.slug || ""))) return { ok: false, code: "not_partial" };
+
+  const del = await latestAuditOf(db, id, ["project.delete"]);
+  if (!del || !del.details.slug) return { ok: false, code: "not_partial" };
+  // The newest entry decides what is left: the original delete, or a resume that failed again
+  // (which carries the steps it could not finish). None left means the delete is already complete.
+  const latest = await latestAuditOf(db, id, ["project.delete", "project.delete.resume"]);
+  const listed = latest && latest.event === "project.delete.resume" ? latest.details.remaining_partial : del.details.partial;
+  const wanted = new Set((Array.isArray(listed) ? listed : []).filter((s) => RESUME_STEPS.includes(s)));
+  if (!wanted.size) return { ok: false, code: "not_partial" };
+
+  // The destination folder is named from the ROW's uuid: the audit entry is text a caller could
+  // have written, so it never names a path. Only a row with no uuid falls back to the audit's, and
+  // only when that is uuid-shaped; anything else refuses rather than steer the move out of
+  // deleted-projects.
+  let uuid = tomb.uuid;
+  if (!uuid) {
+    if (!AUDIT_UUID_RE.test(String(del.details.uuid || ""))) return { ok: false, code: "not_partial" };
+    uuid = String(del.details.uuid);
+  }
+  const project = { ...tomb, id, slug: String(del.details.slug), uuid };
+  const partial = [];
+  const untraceable = [];
+  // The ids first: purgeCards removes the rows they name. A card id is per store, so a store with
+  // no rows for the project has no queued job that can be tied to it any more (nothing to cancel).
+  const cards = wanted.has("jobs") ? await cardsLeft(project, { tasksDbPath }) : null;
+  if (wanted.has("cards") || wanted.has("board_defs")) await purgeCards(project, { tasksDbPath }, partial);
+  if (cards) {
+    // No card rows left: no queued job can be tied to the project, so the step cannot run. Report
+    // it instead of counting it as done — and leave it out of remaining_partial, which is what a
+    // later resume reads, so it is never owed again.
+    if (!cards.ids.length) untraceable.push("jobs");
+    else await cancelCardJobs(db, id, cards, partial);
+  }
+  if (wanted.has("files")) await purgeFiles(db, id, storageDelete || defaultStorageDeleteFor(db), partial);
+  if (wanted.has("workspace")) moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
+
+  const extra = untraceable.length ? { untraceable } : {};
+  await appendAudit(db, {
+    project_id: id, actor_type: actor, action: "project.delete.resume", payload: { remaining_partial: partial, ...extra },
+  });
+  await auditLog(db, "project.delete.resume", {
+    actor,
+    details: { project_id: id, uuid: project.uuid, slug: project.slug, name: tomb.name ?? null, remaining_partial: partial, ...extra },
+  });
+  return { ok: true, partial, ...extra };
 }

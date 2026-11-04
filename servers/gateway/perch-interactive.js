@@ -1897,6 +1897,28 @@ export function createInteractiveEngine({
     return /"status"\s*:\s*"waiting_for_user"/.test(text);
   }
 
+  /** The slug of the live project this session is filed in, or null. The world
+   *  builder already read the project space at spawn/wake (bridge
+   *  loadProjectSpace: null when there is no project, or it is archived), so
+   *  this costs no read of its own. */
+  function sessionProjectSlug(s) {
+    const space = s.projectSpace;
+    return space && space.slug ? String(space.slug) : null;
+  }
+
+  /** The one Perch chat link shape (shared/session-cards.js sessionCardModel:
+   *  /dashboard/perch?project=<slug>#<sid>, else #<sid>), plus what a
+   *  needs-you item adds: the Take over sheet. The project rides in front so
+   *  the chat opens in its own project's scope, never in whatever scope the
+   *  operator last had; a session with no live project keeps the bare link. */
+  function takeOverLink(sessionId, projectSlug) {
+    const sid = encodeURIComponent(String(sessionId == null ? "" : sessionId));
+    const slug = projectSlug == null ? "" : String(projectSlug);
+    return "/dashboard/perch"
+      + (slug ? "?project=" + encodeURIComponent(slug) + "&take-over=1" : "?take-over=1")
+      + "#" + sid;
+  }
+
   /** A bot parked on crow_browser_wait_for_user: one "needs you" per turn that
    *  opens the Take over sheet in that chat. No URL or host rides it. */
   function attentionForBrowser(s, turn) {
@@ -1909,7 +1931,7 @@ export function createInteractiveEngine({
       priority: "high",
       title: s.botId + " needs you",
       body: "Take over the browser in the chat.",
-      action_url: "/dashboard/perch?take-over=1#" + s.sessionId,
+      action_url: takeOverLink(s.sessionId, sessionProjectSlug(s)),
     });
   }
 

@@ -1072,7 +1072,9 @@ function federationAuditSignal(lang) {
     value: t("signals.federationAudit.degraded", lang),
     issueLabel: t("signals.federationAudit.issue", lang),
     actionLabel: t("signals.federationAudit.action", lang),
-    actionHref: "/dashboard/nest",
+    // ?open=1 is the classic Nest's explicit form: a bare /dashboard/nest
+    // would send a new-mode device back to Chat instead of showing it.
+    actionHref: "/dashboard/nest?open=1",
   };
 }
 
