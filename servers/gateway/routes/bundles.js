@@ -72,7 +72,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
-import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation } from "../bundle-env-secrets.js";
+import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation, mintMissingFlaggedKeys } from "../bundle-env-secrets.js";
 import {
   jobs, createJob, appendLog, finishJob, setJobChangedHook,
   readInstalled, writeInstalled,
@@ -1124,6 +1124,16 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
       }
 
       // D1: version-keyed refresh phase, BEFORE the missing-only repair below.
+      //
+      // Mint-then-refresh (browser CDP gate): a key the manifest flags `mint_if_missing` is
+      // ADDED first, so an install made before the key existed has it before any code that
+      // reads it is copied in. A failed mint leaves the installed version stale and skips the
+      // refresh, so the next boot retries the whole thing instead of shipping half of it.
+      const repoManifest = readJsonSafe(join(appSrc, "manifest.json"), null);
+      if (mintMissingFlaggedKeys(id, repoManifest, { destDir, crowHome: CROW_HOME, log }) === null) {
+        errors.push({ id, error: "could not generate a missing key — refresh skipped, retried on the next boot" });
+        continue;
+      }
       const refreshed = await refreshVersionedBundle({ id, appSrc, destDir, runner });
       if (refreshed) {
         repaired.push(`${id}: refreshed ${refreshed.oldVersion} -> ${refreshed.newVersion} (${refreshed.touched.join(", ") || "no files changed"})`);

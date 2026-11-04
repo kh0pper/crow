@@ -25,6 +25,12 @@
  *                                     hash of it instead (Vaultwarden ADMIN_TOKEN)
  *   env_vars[].generatable: true     → a HUMAN password field: the forms offer Generate and
  *                                     "Save to Crow keychain" (keychainEligibleKeys)
+ *   env_vars[].mint_if_missing: true → the ONE key this module may ADD outside an install
+ *                                     (mintMissingFlaggedKeys, a boot repair): a key a later
+ *                                     manifest introduced to an install made without it. It
+ *                                     is minted only when ABSENT from both the installed
+ *                                     .env and the retained copy — never replaced, never
+ *                                     regenerated, no value logged.
  *
  * NEVER regenerated on reinstall: bundles bind-mount their data and the kept DB still
  * expects the old password. Order: installed .env → retained copy at
@@ -35,7 +41,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, rmSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { randomBytes, createHash, createECDH } from "node:crypto";
-import { parseEnvText, formatEnvLines } from "./bundle-env-codec.js";
+import { parseEnvText, formatEnvLines, updateEnvText } from "./bundle-env-codec.js";
 export { parseEnvText };
 import { argon2idPhc } from "./keychain/argon2-phc.js";
 
@@ -177,6 +183,76 @@ function withLegacyMarker(env, add) {
 
 export function retainedEnvPath(crowHome, bundleId) {
   return join(crowHome, "secrets", "bundle-env", `${bundleId}.env`);
+}
+
+/** Keys a manifest flags `mint_if_missing`: added on repair when both stores lack them. */
+export function mintableKeys(manifest) {
+  return (manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.mint_if_missing === true && GENERATE_KINDS.has(v.generate))
+    .filter((v) => v.generate !== "vapid_public_key" && !v.store_as) // a public half follows its pair; a hash needs the plaintext elsewhere
+    .map((v) => v.name);
+}
+
+/**
+ * Mint the manifest's `mint_if_missing` keys that are ABSENT from both the installed bundle
+ * .env and the retained copy — the only regenerate-free way a generated key appears outside
+ * an install (planGeneratedEnv already mints every generate key at install time). A key found
+ * in EITHER file is left exactly as it is: a repair must never replace a secret the container
+ * or the kept data already expects, and never mint a new one over it.
+ *
+ * Writes the installed .env and the retained copy atomically at mode 600, line-preserving
+ * (updateEnvText), and logs the KEY name only — never a value. Returns the minted key names,
+ * or null when it could not write (the caller then leaves the bundle un-refreshed so the next
+ * boot retries). Never throws.
+ */
+export function mintMissingFlaggedKeys(bundleId, manifest, { destDir, crowHome, log = () => {} } = {}) {
+  const keys = mintableKeys(manifest);
+  if (keys.length === 0) return [];
+  try {
+    if (typeof bundleId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(bundleId) || bundleId.length > 64) return [];
+    if (typeof destDir !== "string" || typeof crowHome !== "string") return [];
+    const installedPath = join(destDir, ".env");
+    // No installed .env: this is not an install to repair. The install writes one, and with it
+    // every generate key — minting here would invent a secret for a directory nobody set up.
+    if (!existsSync(installedPath)) return [];
+    const installedText = readFileSync(installedPath, "utf8");
+    const retainedPath = retainedEnvPath(crowHome, bundleId);
+    const retainedText = existsSync(retainedPath) ? readFileSync(retainedPath, "utf8") : "";
+    const installed = parseEnvText(installedText);
+    const retained = parseEnvText(retainedText);
+    const byName = new Map((manifest.env_vars || []).map((v) => [v && v.name, v]));
+    const add = {};
+    const restore = {};
+    for (const k of keys) {
+      if (installed[k]) continue; // present in the installed .env: never touched
+      // The same order as install (installed .env → retained copy → new value): a value the
+      // retained copy kept is restored, never replaced by a new one.
+      if (retained[k]) { restore[k] = retained[k]; continue; }
+      add[k] = newSecretValue(byName.get(k).generate);
+    }
+    const minted = Object.keys(add);
+    if (minted.length === 0 && Object.keys(restore).length === 0) return [];
+    writePrivateFile(installedPath, updateEnvText(installedText, { ...restore, ...add }));
+    for (const k of Object.keys(restore)) log(`[bundles] restored ${k} for ${bundleId} from the retained copy`);
+    if (minted.length === 0) return [];
+    const dir = dirname(retainedPath);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    writePrivateFile(
+      retainedPath,
+      retainedText.trim() !== ""
+        ? updateEnvText(retainedText, add)
+        : `# Crow-generated secrets for bundle '${bundleId}'. Kept across uninstall so a\n` +
+          `# reinstall reuses them (the bundle's data still expects them). Do not edit.\n` +
+          formatEnvLines(add),
+    );
+    for (const k of minted) log(`[bundles] minted ${k} for ${bundleId}`);
+    return minted;
+  } catch (err) {
+    // Never throw out of a boot repair, and never log a value: the code says what failed.
+    log(`[bundles] could not mint the flagged key(s) for ${bundleId} (${err && err.code ? err.code : "error"}) — retried on the next boot`);
+    return null;
+  }
 }
 
 export function keychainGeneratedKeys(manifest) {

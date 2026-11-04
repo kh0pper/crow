@@ -17,7 +17,7 @@ import { readFileSync, mkdirSync, existsSync, readdirSync, statSync, realpathSyn
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { stateDir, stateRoot, containerName, cdpPort } from "./instance.js";
+import { stateDir, stateRoot, containerName, cdpPort, cdpToken } from "./instance.js";
 import { articleTurndown } from "./article-markdown.js";
 import { fileInDir, writeFileNoFollow, readFileNoFollow, MAX_FILE_NAME } from "./safe-file.js";
 import { installLeaseGuard } from "./lease-guard.js";
@@ -37,6 +37,19 @@ import { BLOCKED_URL_PATTERNS, isBlockedUrl, blockedResult } from "./blocked-hos
 export function canonicalCrowHome(env = process.env) {
   if (!env.CROW_HOME) return {};
   try { return { CROW_HOME: realpathSync(env.CROW_HOME) }; } catch { return { CROW_HOME: resolvePath(env.CROW_HOME) }; }
+}
+
+/**
+ * Poll `<cdpUrl>/json/version` until it answers (or the attempts run out). The bearer, when
+ * this instance has a token, rides in `headers`; exported so the header contract is testable
+ * without docker and without a browser.
+ */
+export async function waitForCdp(cdpUrl, { headers = {}, attempts = 30, delayMs = 1000 } = {}) {
+  for (let i = 0; i < attempts; i++) {
+    try { const r = await fetch(`${cdpUrl}/json/version`, { headers }); if (r.ok) return true; } catch { /* not up yet */ }
+    if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return false;
 }
 
 /**
@@ -60,6 +73,24 @@ export function novncUrl(page) {
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
     `http://127.0.0.1:${cdpPort()}`;
+
+  /**
+   * The CDP bearer headers for this instance, or {} when it has no token yet.
+   *
+   * Read per request, never cached: the gateway mints the token into the bundle .env on a
+   * boot repair, and this long-running MCP server must start using it without a restart.
+   * The token goes in a header only — never a URL, an argv or a log line.
+   */
+  const cdpHeaders = () => {
+    const token = cdpToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+  /** connectOverCDP options: the header when there is a token, undefined otherwise. */
+  const cdpConnectOptions = () => {
+    const headers = cdpHeaders();
+    return headers.Authorization ? { headers } : undefined;
+  };
+
   const sessionDir = options.sessionDir || stateDir("browser-sessions");
   // The viewer's address on the Crow dashboard (same origin, signed in). The
   // container's own noVNC port listens on 127.0.0.1 only, so a raw
@@ -107,7 +138,7 @@ export function createBrowserServer(options = {}) {
    */
   async function ensureConnected() {
     if (browser && browser.isConnected()) return;
-    browser = await chromium.connectOverCDP(cdpUrl);
+    browser = await chromium.connectOverCDP(cdpUrl, cdpConnectOptions());
     const contexts = browser.contexts();
     context = contexts[0] || await browser.newContext(getContextOptions());
     const pages = context.pages();
@@ -189,11 +220,8 @@ export function createBrowserServer(options = {}) {
           } catch (e) {
             return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${e.message}` }], isError: true };
           }
-          // Poll CDP readiness
-          for (let i = 0; i < 30; i++) {
-            try { const r = await fetch(`${cdpUrl}/json/version`); if (r.ok) break; } catch {}
-            await new Promise((r) => setTimeout(r, 1000));
-          }
+          // Poll CDP readiness (the request carries this instance's bearer, if any).
+          await waitForCdp(cdpUrl, { headers: cdpHeaders() });
         } else if (restart) {
           if (browser) {
             await browser.close().catch(() => {});

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { stateRoot, stateDir, containerName, cdpPort, vncPort } from "../bundles/browser/server/instance.js";
+import { stateRoot, stateDir, containerName, cdpPort, vncPort, cdpToken } from "../bundles/browser/server/instance.js";
 
 const SERVER_JS = new URL("../bundles/browser/server/server.js", import.meta.url);
 
@@ -228,6 +228,66 @@ test("stateRoot ignores a CROW_HOME written inside the bundle .env — it must c
   ], (dir) => {
     withEnv({ CROW_HOME: dir }, () => {
       assert.equal(stateRoot(), dir);
+    });
+  });
+});
+
+// ---- the CDP token: read uncached, from the bundle .env only -----------------
+
+const GOOD_TOKEN = "a1b2c3d4".repeat(8); // 64 chars: the shape hex32 mints
+
+/** A scratch instance home whose bundle .env can be rewritten mid-test. */
+function withTokenHome(fn) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-browser-token-"));
+  mkdirSync(join(dir, "bundles", "browser"), { recursive: true });
+  const envPath = join(dir, "bundles", "browser", ".env");
+  try {
+    withEnv({ CROW_HOME: dir, CROW_BROWSER_CDP_TOKEN: null }, () => fn(dir, envPath));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("cdpToken is null when the .env is missing, lacks the key, or has it empty", () => {
+  withTokenHome((dir, envPath) => {
+    assert.equal(cdpToken(), null, "no .env at all");
+    writeFileSync(envPath, "CROW_BROWSER_CDP_PORT=9222\n");
+    assert.equal(cdpToken(), null, "no token line");
+    writeFileSync(envPath, "CROW_BROWSER_CDP_TOKEN=\n");
+    assert.equal(cdpToken(), null, "an empty value is no token");
+  });
+});
+
+test("cdpToken re-reads when the file changes (the gateway mints it after boot)", () => {
+  withTokenHome((dir, envPath) => {
+    writeFileSync(envPath, "CROW_BROWSER_CDP_TOKEN=" + GOOD_TOKEN + "\n");
+    assert.equal(cdpToken(), GOOD_TOKEN);
+    const second = "B".repeat(43);
+    // Same path, different content: only a cache keyed on the file itself may be reused.
+    writeFileSync(envPath, "CROW_BROWSER_CDP_TOKEN=" + second + "\n");
+    assert.equal(cdpToken(), second);
+    // A key removed/emptied after having been read goes back to null, not to the old value.
+    writeFileSync(envPath, "CROW_BROWSER_CDP_TOKEN=\nCROW_BROWSER_CDP_PORT=9222\n");
+    assert.equal(cdpToken(), null);
+  });
+});
+
+test("cdpToken rejects malformed values instead of sending them", () => {
+  withTokenHome((dir, envPath) => {
+    const bad = ["x".repeat(31), "x".repeat(257), "not a token at all but long enough to pass the length rule", "$(id)" + "x".repeat(40)];
+    for (const v of bad) {
+      writeFileSync(envPath, "CROW_BROWSER_CDP_TOKEN=" + v + "\n");
+      assert.equal(cdpToken(), null, v.length + " chars");
+    }
+  });
+});
+
+test("cdpToken never comes from process.env: the manifest keeps it out of every child's environment", () => {
+  withTokenHome((dir, envPath) => {
+    withEnv({ CROW_BROWSER_CDP_TOKEN: GOOD_TOKEN }, () => {
+      assert.equal(cdpToken(), null, "process.env is not the token's home");
+      writeFileSync(envPath, "CROW_BROWSER_CDP_TOKEN=" + GOOD_TOKEN + "\n");
+      assert.equal(cdpToken(), GOOD_TOKEN);
     });
   });
 });

@@ -8,7 +8,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { appImport } from "./app-root.js";
 const { parseEnvText } = await appImport("servers/gateway/bundle-env-codec.js");
 
@@ -71,4 +71,32 @@ export function cdpPort() {
 /** This instance's noVNC port. */
 export function vncPort() {
   return setting("CROW_BROWSER_VNC_PORT", "6080");
+}
+
+/** A CDP token: url-safe base64 or hex, long enough to be unguessable, short enough to cap. */
+const CDP_TOKEN_RE = /^[A-Za-z0-9_-]{32,256}$/;
+/** The last token read: { path, mtimeMs, size, value } — see cdpToken() for why it is not bundleEnv(). */
+let tokenCache = null;
+
+/**
+ * This instance's CDP token, or null when there is none (or it is malformed).
+ *
+ * Deliberately NOT bundleEnv()'s process-lifetime cache and NOT process.env: the token is a
+ * secret the gateway mints into the bundle .env after the fact (mint_if_missing on repair), a
+ * long-running process must pick that up without a restart, and the manifest keeps it out of
+ * process.env (propagate: false) so MCP children and the gateway .env never carry it. A file
+ * whose mtime and size are unchanged is not re-parsed; every other call re-reads it.
+ */
+export function cdpToken() {
+  const path = join(stateRoot(), "bundles", "browser", ".env");
+  let st;
+  try { st = statSync(path); } catch { tokenCache = null; return null; }
+  if (tokenCache && tokenCache.path === path && tokenCache.mtimeMs === st.mtimeMs && tokenCache.size === st.size) return tokenCache.value;
+  let value = null;
+  try {
+    const raw = parseEnvText(readFileSync(path, "utf8")).CROW_BROWSER_CDP_TOKEN;
+    if (typeof raw === "string" && CDP_TOKEN_RE.test(raw.trim())) value = raw.trim();
+  } catch { value = null; }
+  tokenCache = { path, mtimeMs: st.mtimeMs, size: st.size, value };
+  return value;
 }

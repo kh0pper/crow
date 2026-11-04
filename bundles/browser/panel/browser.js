@@ -81,15 +81,16 @@ export default {
     // relative import of instance.js can't be correct in both the repo and the
     // deployed layout — resolve it by absolute path from CROW_HOME instead.
     //
-    // Fail soft like the docker/curl calls below: if the bundle isn't installed
+    // Fail soft like the docker and probe calls below: if the bundle isn't installed
     // (instance.js missing), leave everything at its "unknown/empty" default —
     // never silently fall back to primary-flavoured constants, which is the
     // defect this resolves.
-    let stateDir = null, containerName = null, cdpPort = null;
+    let stateDir = null, containerName = null, cdpPort = null, cdpToken = null, probeCdp = null;
     try {
       const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
-      const instanceUrl = pathToFileURL(join(crowHome, "bundles", "browser", "server", "instance.js")).href;
-      ({ stateDir, containerName, cdpPort } = await import(instanceUrl));
+      const bundleServer = (file) => pathToFileURL(join(crowHome, "bundles", "browser", "server", file)).href;
+      ({ stateDir, containerName, cdpPort, cdpToken } = await import(bundleServer("instance.js")));
+      ({ probeCdp } = await import(bundleServer("cdp-probe.js")));
     } catch {}
 
     // --- Container status ---
@@ -102,10 +103,11 @@ export default {
       startedAt = parts[1];
     } catch {}
 
-    let cdpConnected = false;
+    // CDP reachability: a Node fetch, not curl, so the request can carry this
+    // instance's CDP bearer without putting it on a command line.
+    let cdp = { connected: false, rejected: false, ungated: false };
     try {
-      execFileSync("curl", ["-s", "-m", "2", `http://127.0.0.1:${cdpPort()}/json/version`], { encoding: "utf-8", timeout: 5000 });
-      cdpConnected = true;
+      if (probeCdp && cdpPort) cdp = await probeCdp({ base: `http://127.0.0.1:${cdpPort()}`, token: cdpToken ? cdpToken() : null });
     } catch {}
 
     // --- Saved sessions ---
@@ -167,12 +169,16 @@ export default {
     } catch {}
     let botUsingText = "A bot is using the browser", takeOverText = "Take over";
     let youHaveText = "You have the browser", handBackText = "Hand back";
+    let cdpRejectedText = "Not connected (CDP token rejected)";
+    let cdpUngatedText = "The browser's debugging port is not gated yet; the next browser update closes it.";
     try {
       const { t } = await import(pathToFileURL(join(appRoot, "servers/gateway/dashboard/shared/i18n.js")).href);
       botUsingText = t("browser.botUsing", lang);
       takeOverText = t("perch.takeOver", lang);
       youHaveText = t("perch.youHaveBrowser", lang);
       handBackText = t("perch.handBack", lang);
+      cdpRejectedText = t("browser.cdpTokenRejected", lang);
+      cdpUngatedText = t("browser.cdpUngated", lang);
     } catch {}
     const botNotice = botUsing ? `
       <div class="browser-bot-using" role="status" style="display:flex; flex-wrap:wrap; align-items:center; gap:0.75rem; padding:1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:1rem;">
@@ -199,9 +205,14 @@ export default {
         </div>
         <div style="padding:1rem; border:1px solid var(--border); border-radius:8px;">
           <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:0.25rem;">CDP (Chrome DevTools)</div>
-          <div>${cdpConnected ? badge("Connected", "success") : badge("Disconnected", "warning")}</div>
+          <div>${cdp.connected ? badge("Connected", "success") : badge(cdp.rejected ? cdpRejectedText : "Disconnected", "warning")}</div>
         </div>
       </div>
+
+      ${cdp.ungated ? `
+        <div class="browser-cdp-ungated" role="status" style="padding:0.75rem 1rem; border:1px solid var(--border); border-radius:8px; margin-bottom:1rem;">
+          ${escapeHtml(cdpUngatedText)}
+        </div>` : ""}
 
       <div style="display:flex; gap:0.5rem; margin-bottom:1.5rem;">
         <form method="POST" action="/api/browser/control" style="display:inline">
