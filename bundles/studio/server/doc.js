@@ -35,6 +35,32 @@
  * a placement's `offset_beats` says how far into its clip it starts, and its
  * fades are in beats (linear, and only meaningful on an audio placement).
  *
+ * A sampler track (device `{engine: "sampler"}`) plays a kit, and its clips
+ * are patterns. The kit and the patterns are their own top-level containers,
+ * keyed by stable ids, so one pad or one step is one small object to edit:
+ *
+ *   samples   Y.Map of sample id → Y.Map {id, storage_key, rate, channels,
+ *                     frames, name, origin, author_label}
+ *   slices    Y.Map of "<sample_id>/<slice_id>" → Y.Map {id, sample_id,
+ *                     start_frame, end_frame}
+ *   banks     Y.Map of "<track_id>/<bank_id>" → Y.Map {id, track_id, name, order}
+ *   pads      Y.Map of "<track_id>/<bank_id>/<index>" → Y.Map {track_id,
+ *                     bank_id, index, sample_id, slice_id, name, mode, pitch,
+ *                     gain_db, pan, attack_ms, decay_ms, sustain, release_ms,
+ *                     filter {type, cutoff_hz, resonance}, choke, reverse}
+ *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order}
+ *   steps     Y.Map of "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" → Y.Map
+ *                     {clip_id, pattern_id, at, bank_id, index, v, locks}
+ *
+ * A sampler track's device says only `{engine: "sampler"}`: the kit lives in
+ * `banks` and `pads`, never inside the device, so editing one pad never
+ * rewrites the track. A pattern clip is a clip with `kind: "pattern"`: it
+ * holds `notes: []`, its `length_steps` and `step_beats` (its loop is
+ * `length_steps × step_beats` beats), its `swing` and its `chain` of pattern
+ * ids. Its `length_bars` is derived from those (see `lengthBarsForSteps`) and
+ * kept in the clip, so scenes and placements measure a pattern clip exactly
+ * as they measure any other clip.
+ *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
  * JSON, so `snapshot()` is a round trip away from the wire, storage or a
@@ -55,11 +81,15 @@ import * as Y from "yjs";
 
 /**
  * What one song may hold (spec §1, phase 1a), plus the per-device controller
- * cap and the per-clip take cap of 1b. Commands refuse past these with a
- * plain-English message naming the limit.
+ * cap and the per-clip take cap of 1b and the sampler's caps of 1c. Commands
+ * refuse past these with a plain-English message naming the limit.
  * @type {{tracks: number, notesPerClip: number, scenes: number, clipBars: number,
  *         params: number, takesPerClip: number, placements: number,
- *         arrangementBars: number, markers: number, sections: number}}
+ *         arrangementBars: number, markers: number, sections: number,
+ *         banksPerKit: number, padsPerBank: number, samplesPerSong: number,
+ *         sampleSamples: number, slicesPerSample: number,
+ *         stepPositions: number, stepEntriesPerPattern: number,
+ *         patternsPerClip: number, chainLength: number, locksPerStep: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -82,6 +112,18 @@ export const LIMITS = Object.freeze({
   arrangementBars: 999,
   markers: 256,
   sections: 128,
+  // The sampler (plan 1c, Limits): a kit of banks of pads, samples with their
+  // slices, pattern clips of steps, and the chains that loop them.
+  banksPerKit: 8,
+  padsPerBank: 16,
+  samplesPerSong: 512,
+  sampleSamples: 5760000,
+  slicesPerSample: 64,
+  stepPositions: 64,
+  stepEntriesPerPattern: 1024,
+  patternsPerClip: 16,
+  chainLength: 64,
+  locksPerStep: 8,
 });
 
 /**
@@ -96,6 +138,32 @@ export const OFFSET_STEP_BEATS = 1 / 16;
  * @type {Readonly<{engine: "audio"}>}
  */
 export const AUDIO_DEVICE = Object.freeze({ engine: "audio" });
+
+/**
+ * The device of a sampler track: the one track kind that plays a kit of pads
+ * instead of a SunVox module. It carries no module and no controllers; its
+ * banks and pads live in the song's own `banks` and `pads` containers.
+ * @type {Readonly<{engine: "sampler"}>}
+ */
+export const SAMPLER_DEVICE = Object.freeze({ engine: "sampler" });
+
+/** The step lengths a pattern may use, in beats (16ths, 8ths, 32nds, quarters). */
+export const STEP_BEATS_VALUES = Object.freeze([0.125, 0.25, 0.5, 1]);
+
+/** A new pattern's step length: a sixteenth note. */
+export const DEFAULT_STEP_BEATS = 0.25;
+
+/** The sample rates a sample may hold (the rates an import may land at). */
+export const SAMPLE_RATES = Object.freeze([44100, 48000, 88200, 96000]);
+
+/** How a sample came to be in the song. */
+export const SAMPLE_ORIGINS = Object.freeze(["import", "record", "resample"]);
+
+/** The filter kinds one pad may use; "off" is a pad that filters nothing. */
+export const PAD_FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
+
+/** The two ways a pad's voice ends: it runs out, or its step releases it. */
+export const PAD_MODES = Object.freeze(["oneshot", "gate"]);
 
 /** 1a is four beats to the bar, in every scene. */
 export const BEATS_PER_BAR = 4;
@@ -132,6 +200,13 @@ const FIELD_SEPARATOR = "|";
  * controller.
  */
 const PARAM_FIELD_PREFIX = "device.params.";
+
+/**
+ * Prefix of a field path that reaches one lock inside a step's `locks`, e.g.
+ * `"locks.cutoff_hz"`. The lock name is everything after the prefix, taken
+ * verbatim, so each lock is its own field and stays undoable on its own.
+ */
+const LOCK_FIELD_PREFIX = "locks.";
 
 /**
  * The key a command's `apply` hangs its history *guards* on.
@@ -648,6 +723,405 @@ export function clipsForScene(doc, sceneId) {
   return clipEntries(doc).filter(({ clip }) => clip.get("scene_id") === sceneId);
 }
 
+// --- The sampler's containers -----------------------------------------------
+
+/**
+ * The samples map, keyed by sample id. Writers use this; a song written before
+ * the sampler existed gets the container the first time it is written to.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function sampleMap(doc) {
+  return ensureContainer(doc, "samples", () => new Y.Map());
+}
+
+/**
+ * The slices map, keyed by "<sample_id>/<slice_id>".
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function sliceMap(doc) {
+  return ensureContainer(doc, "slices", () => new Y.Map());
+}
+
+/**
+ * The banks map, keyed by "<track_id>/<bank_id>".
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function bankMap(doc) {
+  return ensureContainer(doc, "banks", () => new Y.Map());
+}
+
+/**
+ * The pads map, keyed by "<track_id>/<bank_id>/<index>".
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function padMap(doc) {
+  return ensureContainer(doc, "pads", () => new Y.Map());
+}
+
+/**
+ * The patterns map, keyed by "<clip_id>/<pattern_id>".
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function patternMap(doc) {
+  return ensureContainer(doc, "patterns", () => new Y.Map());
+}
+
+/**
+ * The steps map, keyed by "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>".
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function stepMap(doc) {
+  return ensureContainer(doc, "steps", () => new Y.Map());
+}
+
+/**
+ * The key one sample's slice lives under in the song's `slices` map.
+ * @param {string} sampleId
+ * @param {string} sliceId
+ * @returns {string}
+ */
+export function sliceKey(sampleId, sliceId) {
+  return `${sampleId}/${sliceId}`;
+}
+
+/**
+ * The key one bank lives under in the song's `banks` map.
+ * @param {string} trackId
+ * @param {string} bankId
+ * @returns {string}
+ */
+export function bankKey(trackId, bankId) {
+  return `${trackId}/${bankId}`;
+}
+
+/**
+ * The key one pad lives under in the song's `pads` map.
+ * @param {string} trackId
+ * @param {string} bankId
+ * @param {number} index
+ * @returns {string}
+ */
+export function padKey(trackId, bankId, index) {
+  return `${trackId}/${bankId}/${index}`;
+}
+
+/**
+ * The key one pattern lives under in the song's `patterns` map.
+ * @param {string} clipId
+ * @param {string} patternId
+ * @returns {string}
+ */
+export function patternKey(clipId, patternId) {
+  return `${clipId}/${patternId}`;
+}
+
+/**
+ * The key one step lives under in the song's `steps` map. A step is one pad at
+ * one position of one pattern, so the key names all three and nothing here is
+ * an array index.
+ * @param {string} clipId
+ * @param {string} patternId
+ * @param {number} at
+ * @param {string} bankId
+ * @param {number} index
+ * @returns {string}
+ */
+export function stepKey(clipId, patternId, at, bankId, index) {
+  return `${clipId}/${patternId}/${at}/${bankId}.${index}`;
+}
+
+/**
+ * Every sample in the song, in the order the map holds them. A song without a
+ * samples container has none.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, sample: Y.Map<any>}>}
+ */
+export function sampleEntries(doc) {
+  return objectEntries(readContainer(doc, "samples"), "sample");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live sample, or null
+ */
+export function getSample(doc, id) {
+  return liveObject(readContainer(doc, "samples"), id);
+}
+
+/**
+ * Every slice in the song, keyed "<sample_id>/<slice_id>".
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, slice: Y.Map<any>}>}
+ */
+export function sliceEntries(doc) {
+  return objectEntries(readContainer(doc, "slices"), "slice");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} sampleId
+ * @param {string} sliceId
+ * @returns {Y.Map<any>|null} the live slice, or null
+ */
+export function getSlice(doc, sampleId, sliceId) {
+  return liveObject(readContainer(doc, "slices"), sliceKey(sampleId, sliceId));
+}
+
+/**
+ * Every slice of one sample.
+ * @param {Y.Doc} doc
+ * @param {string} sampleId
+ * @returns {Array<{id: string, slice: Y.Map<any>}>}
+ */
+export function slicesForSample(doc, sampleId) {
+  return sliceEntries(doc).filter(({ slice }) => slice.get("sample_id") === sampleId);
+}
+
+/**
+ * Every bank in the song, keyed "<track_id>/<bank_id>".
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, bank: Y.Map<any>}>}
+ */
+export function bankEntries(doc) {
+  return objectEntries(readContainer(doc, "banks"), "bank");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @param {string} bankId
+ * @returns {Y.Map<any>|null} the live bank, or null
+ */
+export function getBank(doc, trackId, bankId) {
+  return liveObject(readContainer(doc, "banks"), bankKey(trackId, bankId));
+}
+
+/**
+ * Every bank of one track's kit.
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @returns {Array<{id: string, bank: Y.Map<any>}>}
+ */
+export function banksForTrack(doc, trackId) {
+  return bankEntries(doc).filter(({ bank }) => bank.get("track_id") === trackId);
+}
+
+/**
+ * Every pad in the song, keyed "<track_id>/<bank_id>/<index>".
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, pad: Y.Map<any>}>}
+ */
+export function padEntries(doc) {
+  return objectEntries(readContainer(doc, "pads"), "pad");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @param {string} bankId
+ * @param {number} index
+ * @returns {Y.Map<any>|null} the live pad, or null
+ */
+export function getPad(doc, trackId, bankId, index) {
+  return liveObject(readContainer(doc, "pads"), padKey(trackId, bankId, index));
+}
+
+/**
+ * Every pad of one bank, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @param {string} bankId
+ * @returns {Array<{id: string, pad: Y.Map<any>}>}
+ */
+export function padsForBank(doc, trackId, bankId) {
+  return padEntries(doc).filter(
+    ({ pad }) => pad.get("track_id") === trackId && pad.get("bank_id") === bankId,
+  );
+}
+
+/**
+ * Every pattern in the song, keyed "<clip_id>/<pattern_id>".
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, pattern: Y.Map<any>}>}
+ */
+export function patternEntries(doc) {
+  return objectEntries(readContainer(doc, "patterns"), "pattern");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @param {string} patternId
+ * @returns {Y.Map<any>|null} the live pattern, or null
+ */
+export function getPattern(doc, clipId, patternId) {
+  return liveObject(readContainer(doc, "patterns"), patternKey(clipId, patternId));
+}
+
+/**
+ * Every pattern of one pattern clip.
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @returns {Array<{id: string, pattern: Y.Map<any>}>}
+ */
+export function patternsForClip(doc, clipId) {
+  return patternEntries(doc).filter(({ pattern }) => pattern.get("clip_id") === clipId);
+}
+
+/**
+ * Every step in the song, keyed
+ * "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>".
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, step: Y.Map<any>}>}
+ */
+export function stepEntries(doc) {
+  return objectEntries(readContainer(doc, "steps"), "step");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @param {string} patternId
+ * @param {number} at
+ * @param {string} bankId
+ * @param {number} index
+ * @returns {Y.Map<any>|null} the live step, or null
+ */
+export function getStep(doc, clipId, patternId, at, bankId, index) {
+  return liveObject(readContainer(doc, "steps"), stepKey(clipId, patternId, at, bankId, index));
+}
+
+/**
+ * Every step of one pattern.
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @param {string} patternId
+ * @returns {Array<{id: string, step: Y.Map<any>}>}
+ */
+export function stepsForPattern(doc, clipId, patternId) {
+  return stepEntries(doc).filter(
+    ({ step }) => step.get("clip_id") === clipId && step.get("pattern_id") === patternId,
+  );
+}
+
+/**
+ * Every step of every pattern of one clip.
+ * @param {Y.Doc} doc
+ * @param {string} clipId
+ * @returns {Array<{id: string, step: Y.Map<any>}>}
+ */
+export function stepsForClip(doc, clipId) {
+  return stepEntries(doc).filter(({ step }) => step.get("clip_id") === clipId);
+}
+
+/**
+ * A pad with nothing on it: the shape every pad carries and the engine reads.
+ * @param {string} trackId
+ * @param {string} bankId
+ * @param {number} index - 0-15
+ * @returns {{track_id: string, bank_id: string, index: number, sample_id: null,
+ *            slice_id: null, name: string, mode: string, pitch: number,
+ *            gain_db: number, pan: number, attack_ms: number, decay_ms: number,
+ *            sustain: number, release_ms: number,
+ *            filter: {type: string, cutoff_hz: number, resonance: number},
+ *            choke: number, reverse: boolean}}
+ */
+export function defaultPad(trackId, bankId, index) {
+  return {
+    track_id: trackId,
+    bank_id: bankId,
+    index,
+    sample_id: ABSENT,
+    slice_id: ABSENT,
+    name: "",
+    mode: "oneshot",
+    pitch: 0,
+    gain_db: 0,
+    pan: 0,
+    attack_ms: 0,
+    decay_ms: 0,
+    sustain: 1,
+    release_ms: 0,
+    filter: { type: "off", cutoff_hz: 20000, resonance: 0 },
+    choke: 0,
+    reverse: false,
+  };
+}
+
+/**
+ * A new bank and its sixteen empty pads, in the order they are written: a bank
+ * always holds all sixteen pads, so a pad is an object from the start.
+ * @param {string} trackId
+ * @param {string} bankId
+ * @param {string} name
+ * @param {number} order - its place in the kit, from 0
+ * @returns {{bank: object, pads: object[]}}
+ */
+export function newSamplerBank(trackId, bankId, name, order) {
+  const bank = { id: bankId, track_id: trackId, name, order };
+  const pads = [];
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    pads.push(defaultPad(trackId, bankId, index));
+  }
+  return { bank, pads };
+}
+
+/**
+ * The bars a pattern clip's loop fills: `length_steps × step_beats` beats,
+ * rounded up to whole bars, and at least one.
+ * @param {number} lengthSteps
+ * @param {number} stepBeats
+ * @returns {number}
+ */
+export function lengthBarsForSteps(lengthSteps, stepBeats) {
+  const steps = numberOr(lengthSteps, LIMITS.stepPositions / 4);
+  const beats = numberOr(stepBeats, DEFAULT_STEP_BEATS);
+  return Math.max(1, Math.ceil((steps * beats) / BEATS_PER_BAR));
+}
+
+/**
+ * Whether a track plays a kit of pads rather than a SunVox module.
+ * @param {Y.Map<any>|null|undefined} track
+ * @returns {boolean}
+ */
+export function isSamplerTrack(track) {
+  return deviceEngine(track) === SAMPLER_DEVICE.engine;
+}
+
+/**
+ * Whether a clip holds steps and patterns (a pattern clip) rather than notes.
+ * @param {Y.Map<any>|null|undefined} clip
+ * @returns {boolean}
+ */
+export function isPatternClip(clip) {
+  return clip?.get?.("kind") === "pattern";
+}
+
+/**
+ * The tracks whose pads play one sample — the write a sample edit is, judged on
+ * its effect: re-chopping or renaming a sample touches every track that plays
+ * it, so a lock check has to see those tracks.
+ * @param {object} snap - a snapshot
+ * @param {string} sampleId
+ * @returns {string[]} the track ids, sorted, each once
+ */
+export function sampleUsers(snap, sampleId) {
+  if (typeof sampleId !== "string" || sampleId === "") return [];
+  const ids = new Set();
+  for (const pad of Object.values(snap?.pads ?? {})) {
+    if (pad?.sample_id !== sampleId) continue;
+    if (typeof pad.track_id === "string" && pad.track_id !== "") ids.add(pad.track_id);
+  }
+  return [...ids].sort();
+}
+
 /**
  * The whole song as plain JSON — the shape clients, the sequencer and a render
  * read, and the value two hubs compare after a restart.
@@ -659,9 +1133,19 @@ export function clipsForScene(doc, sceneId) {
  * @returns {{meta: {title: string, bpm: number, meter: number[], key: string},
  *            tracks: object[], scenes: object[], clips: Object<string, object>,
  *            takes: Object<string, object>,
+ *            samples: Object<string, object>, slices: Object<string, object>,
+ *            banks: Object<string, object>, pads: Object<string, object>,
+ *            patterns: Object<string, object>, steps: Object<string, object>,
  *            arrangement: {placements: Object<string, object>,
  *                          markers: Object<string, object>,
  *                          sections: Object<string, object>}}}
+ *   The sampler's six containers are plain objects keyed by each object's own
+ *   ref id — a sample by its id, a slice by "<sample_id>/<slice_id>", a bank by
+ *   "<track_id>/<bank_id>", a pad by "<track_id>/<bank_id>/<index>", a pattern
+ *   by "<clip_id>/<pattern_id>" and a step by
+ *   "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" — so the engine can read a
+ *   pad or a step without walking the track or the clip. A song written before
+ *   the sampler existed reads all six as empty objects.
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -700,8 +1184,33 @@ export function snapshot(doc) {
     // stays an ordinary key instead of touching the object's prototype.
     clips: Object.fromEntries(clips),
     takes: Object.fromEntries(takes),
+    samples: snapshotContainer(doc, "samples", normalizeSample),
+    slices: snapshotContainer(doc, "slices", normalizeSlice),
+    banks: snapshotContainer(doc, "banks", normalizeBank),
+    pads: snapshotContainer(doc, "pads", normalizePad),
+    patterns: snapshotContainer(doc, "patterns", normalizePattern),
+    steps: snapshotContainer(doc, "steps", normalizeStep),
     arrangement: snapshotArrangement(doc),
   };
+}
+
+/**
+ * One of the sampler's containers as a snapshot carries it: a plain object
+ * keyed by the map's own key (each of those is the object's ref id).
+ * @param {Y.Doc} doc
+ * @param {string} key - the container's name in the song map
+ * @param {(id: string, value: any) => object} normalize
+ * @returns {Object<string, object>} empty when the song has no such container
+ */
+function snapshotContainer(doc, key, normalize) {
+  const entries = [];
+  const value = readContainer(doc, key);
+  if (value instanceof Y.Map) {
+    for (const [id, object] of value.entries()) entries.push([id, normalize(id, object)]);
+  }
+  // Object.fromEntries defines own properties, so a key like "__proto__" stays
+  // an ordinary key (see the clips above).
+  return Object.fromEntries(entries);
 }
 
 /**
@@ -754,6 +1263,14 @@ function snapshotArrangement(doc) {
  *   - an audio clip's comp is in beat order, inside the clip, and every one of
  *     its segments names a take of that clip that is not discarded — the rule
  *     `clip.set_comp` enforces on its own edits;
+ *   - the sampler's objects hang together: a bank sits on a sampler track, a
+ *     pad's sample is in the song and the slice it names is a slice of that
+ *     sample, every chain entry is a pattern of its own clip, every step names
+ *     a pad of its clip's track inside its clip's step positions, and the
+ *     counts stay inside their limits (banks per kit, pads per bank, samples
+ *     per song, slices per sample, patterns per clip, chain length, step
+ *     entries per pattern, locks per step) — the rules the sampler commands
+ *     enforce on their own edits;
  *   - the arrangement holds at most `LIMITS.placements` placements,
  *     `LIMITS.markers` markers and `LIMITS.sections` sections, ends at bar
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
@@ -831,6 +1348,7 @@ export function checkInvariants(doc) {
   }
 
   reasons.push(...arrangementReasons(song));
+  reasons.push(...samplerReasons(song));
 
   return reasons;
 }
@@ -946,6 +1464,223 @@ function arrangementReasons(song) {
 }
 
 /**
+ * What is wrong with a song's sampler objects, in plain English.
+ *
+ * The rules one sampler edit can look after on its own, checked over the whole
+ * song at once: every bank sits on a sampler track, every pad's sample is in
+ * the song and the slice it names belongs to that sample, every chain entry is
+ * a pattern of its own clip, every step names a pad of its clip's track inside
+ * the clip's step positions, a slice stays inside its sample's frames, and no
+ * count outgrows its limit (banks per kit, pads per bank, samples per song,
+ * slices per sample, patterns per clip, chain length, step entries per pattern,
+ * locks per step).
+ *
+ * The history dry-runs an undo's plan on a clone and calls this, so a plan that
+ * would leave, say, a pad pointing at a slice a newer edit removed is refused
+ * whole instead of half-landing.
+ * @param {object} song - a snapshot
+ * @returns {string[]}
+ */
+function samplerReasons(song) {
+  const reasons = [];
+  const samples = Object.values(song.samples ?? {});
+  const slices = Object.values(song.slices ?? {});
+  const banks = Object.values(song.banks ?? {});
+  const pads = Object.values(song.pads ?? {});
+  const patterns = Object.values(song.patterns ?? {});
+  const steps = Object.values(song.steps ?? {});
+
+  if (samples.length + slices.length + banks.length + pads.length + patterns.length + steps.length === 0) {
+    return reasons;
+  }
+
+  // Samples: the rate an import may land at, and the 60-second cap.
+  if (samples.length > LIMITS.samplesPerSong) {
+    reasons.push(
+      `The song would hold ${samples.length} samples; a song can hold at most ${LIMITS.samplesPerSong} samples.`,
+    );
+  }
+  const samplesById = new Map();
+  for (const sample of samples) {
+    samplesById.set(sample.id, sample);
+    const which = `The sample "${nameOrId(sample.name, sample.id)}"`;
+    if (!SAMPLE_RATES.includes(sample.rate)) {
+      reasons.push(`${which} would have a rate of ${sample.rate} Hz; a sample's rate is one of ${SAMPLE_RATES.join(", ")}.`);
+    }
+    if (!(sample.frames > 0)) reasons.push(`${which} would hold no frames.`);
+    if (sample.frames * sample.channels > LIMITS.sampleSamples) {
+      reasons.push(
+        `${which} would hold ${sample.frames * sample.channels} samples; a sample can hold at most ${LIMITS.sampleSamples} (frames × channels).`,
+      );
+    }
+  }
+
+  // Slices: each one is inside its sample's frames, and there are few enough.
+  const slicesByKey = new Map();
+  const slicesPerSample = new Map();
+  for (const slice of slices) {
+    const which = `The slice "${slice.id}" of sample "${slice.sample_id}"`;
+    slicesByKey.set(sliceKey(slice.sample_id, slice.id), slice);
+    slicesPerSample.set(slice.sample_id, (slicesPerSample.get(slice.sample_id) ?? 0) + 1);
+    const sample = samplesById.get(slice.sample_id);
+    if (!sample) {
+      reasons.push(`${which} would be left without its sample: there is no sample "${slice.sample_id}" in the song.`);
+      continue;
+    }
+    if (!(slice.start_frame >= 0 && slice.start_frame < slice.end_frame && slice.end_frame <= sample.frames)) {
+      reasons.push(
+        `${which} would run from frame ${slice.start_frame} to frame ${slice.end_frame}, outside the ${sample.frames} frames of that sample.`,
+      );
+    }
+  }
+  for (const [sampleId, count] of slicesPerSample) {
+    if (count <= LIMITS.slicesPerSample) continue;
+    const label = nameOrId(samplesById.get(sampleId)?.name, sampleId);
+    reasons.push(
+      `The sample "${label}" would have ${count} slices; a sample can have at most ${LIMITS.slicesPerSample} slices.`,
+    );
+  }
+
+  // Banks: on a sampler track, and no more than a kit holds.
+  const tracksById = new Map(song.tracks.map((track) => [track.id, track]));
+  const bankKeys = new Set();
+  const banksPerTrack = new Map();
+  for (const bank of banks) {
+    bankKeys.add(bankKey(bank.track_id, bank.id));
+    banksPerTrack.set(bank.track_id, (banksPerTrack.get(bank.track_id) ?? 0) + 1);
+    const which = `The bank "${nameOrId(bank.name, bank.id)}"`;
+    const track = tracksById.get(bank.track_id);
+    if (!track) {
+      reasons.push(`${which} would be left without its track: there is no track "${bank.track_id}" in the song.`);
+    } else if (track.device?.engine !== SAMPLER_DEVICE.engine) {
+      reasons.push(`${which} would sit on track "${nameOrId(track.name, track.id)}", which is not a sampler track.`);
+    }
+  }
+  for (const [trackId, count] of banksPerTrack) {
+    if (count <= LIMITS.banksPerKit) continue;
+    const label = nameOrId(tracksById.get(trackId)?.name, trackId);
+    reasons.push(`The kit of track "${label}" would have ${count} banks; a kit can have at most ${LIMITS.banksPerKit} banks.`);
+  }
+
+  // Pads: a bank's own pad, playing a sample of the song and a slice of it.
+  const padKeys = new Set();
+  for (const pad of pads) {
+    padKeys.add(padKey(pad.track_id, pad.bank_id, pad.index));
+    const which = `The pad ${Number(pad.index) + 1} of bank "${pad.bank_id}"`;
+    if (!bankKeys.has(bankKey(pad.track_id, pad.bank_id))) {
+      reasons.push(`${which} would be left without its bank: track "${pad.track_id}" has no bank "${pad.bank_id}".`);
+      continue;
+    }
+    if (!(Number.isInteger(pad.index) && pad.index >= 0 && pad.index < LIMITS.padsPerBank)) {
+      reasons.push(
+        `${which} would sit at index ${pad.index}; a bank holds ${LIMITS.padsPerBank} pads, numbered 0 to ${LIMITS.padsPerBank - 1}.`,
+      );
+    }
+    if (pad.sample_id === ABSENT) {
+      if (pad.slice_id !== ABSENT) reasons.push(`${which} would play a slice without a sample.`);
+      continue;
+    }
+    if (!samplesById.has(pad.sample_id)) {
+      reasons.push(`${which} would play sample "${pad.sample_id}", which is not in the song.`);
+      continue;
+    }
+    if (pad.slice_id === ABSENT) continue;
+    if (!slicesByKey.has(sliceKey(pad.sample_id, pad.slice_id))) {
+      reasons.push(
+        `${which} would play slice "${pad.slice_id}", which is not a slice of sample "${pad.sample_id}".`,
+      );
+    }
+  }
+
+  // Patterns, their clips and their chains.
+  const patternKeys = new Set();
+  const patternsPerClip = new Map();
+  for (const pattern of patterns) {
+    patternKeys.add(patternKey(pattern.clip_id, pattern.id));
+    patternsPerClip.set(pattern.clip_id, (patternsPerClip.get(pattern.clip_id) ?? 0) + 1);
+    const clip = song.clips[pattern.clip_id];
+    const which = `The pattern "${nameOrId(pattern.name, pattern.id)}"`;
+    if (!clip) {
+      reasons.push(`${which} would be left without its clip: there is no clip "${pattern.clip_id}" in the song.`);
+    } else if (clip.kind !== "pattern") {
+      reasons.push(`${which} would sit on clip "${nameOrId(clip.name, clip.id)}", which holds notes rather than patterns.`);
+    }
+  }
+  for (const [clipId, count] of patternsPerClip) {
+    if (count <= LIMITS.patternsPerClip) continue;
+    const clip = song.clips[clipId];
+    const label = nameOrId(clip?.name, clipId);
+    reasons.push(`The clip "${label}" would hold ${count} patterns; a pattern clip can hold at most ${LIMITS.patternsPerClip} patterns.`);
+  }
+  for (const clip of Object.values(song.clips)) {
+    if (clip.kind !== "pattern") continue;
+    const which = `The clip "${nameOrId(clip.name, clip.id)}"`;
+    const chain = Array.isArray(clip.chain) ? clip.chain : [];
+    if (chain.length > LIMITS.chainLength) {
+      reasons.push(`${which} would chain ${chain.length} patterns; a chain is at most ${LIMITS.chainLength} long.`);
+    }
+    for (const entry of chain) {
+      if (patternKeys.has(patternKey(clip.id, entry))) continue;
+      reasons.push(`${which} would chain "${entry}", which is not a pattern of that clip.`);
+    }
+    if (!(clip.length_steps >= 1 && clip.length_steps <= LIMITS.stepPositions)) {
+      reasons.push(
+        `${which} would have ${clip.length_steps} step positions; a pattern holds 1 to ${LIMITS.stepPositions}.`,
+      );
+    }
+    if (!STEP_BEATS_VALUES.includes(clip.step_beats)) {
+      reasons.push(`${which} would use a step of ${clip.step_beats} beats; a step is one of ${STEP_BEATS_VALUES.join(", ")}.`);
+    }
+    if (!(clip.swing >= 0 && clip.swing <= 0.75)) {
+      reasons.push(`${which} would swing ${clip.swing}; swing is between 0 and 0.75.`);
+    }
+  }
+
+  // Steps: on a pattern of their clip, on a pad of their track, inside the loop.
+  const stepsPerPattern = new Map();
+  for (const step of steps) {
+    const key = patternKey(step.clip_id, step.pattern_id);
+    const which = `The step at position ${step.at} of pattern "${step.pattern_id}"`;
+    stepsPerPattern.set(key, (stepsPerPattern.get(key) ?? 0) + 1);
+    if (!patternKeys.has(key)) {
+      reasons.push(
+        `${which} would be left without its pattern: clip "${step.clip_id}" has no pattern "${step.pattern_id}".`,
+      );
+      continue;
+    }
+    const clip = song.clips[step.clip_id];
+    const positions = Number(clip?.length_steps) || 0;
+    if (!(Number.isInteger(step.at) && step.at >= 0 && step.at < positions)) {
+      reasons.push(
+        `${which} would sit outside the ${positions} step positions of clip "${nameOrId(clip?.name, step.clip_id)}".`,
+      );
+    }
+    if (!padKeys.has(padKey(clip?.track_id ?? "", step.bank_id, step.index))) {
+      reasons.push(
+        `${which} would name a pad that is not on the clip's track: there is no pad ${Number(step.index) + 1} in bank "${step.bank_id}".`,
+      );
+    }
+    const lockCount = Object.keys(step.locks ?? {}).length;
+    if (lockCount > LIMITS.locksPerStep) {
+      reasons.push(`${which} would carry ${lockCount} locks; a step carries at most ${LIMITS.locksPerStep} locks.`);
+    }
+  }
+  for (const [key, count] of stepsPerPattern) {
+    if (count <= LIMITS.stepEntriesPerPattern) continue;
+    reasons.push(
+      `A pattern would hold ${count} steps; a pattern can hold at most ${LIMITS.stepEntriesPerPattern} steps.`,
+    );
+  }
+
+  return reasons;
+}
+
+/** @returns {string} a name for a message, or the id when it has none. */
+function nameOrId(name, id) {
+  return typeof name === "string" && name !== "" ? name : id;
+}
+
+/**
  * What is wrong with one audio clip's comp, in plain English.
  * @param {object} clip - the clip from a snapshot (it carries `kind: "audio"`)
  * @param {string} label - what the messages call the clip
@@ -1035,6 +1770,12 @@ function barsText(bars) {
  *     `null` deletes it;
  *   - `"take:abc|*"` does the same for a take, and `"take:abc|offset_frames"`
  *     writes one field of it;
+ *   - `"sample:abc|*"`, `"slice:<sample>/<slice>|*"`, `"bank:<track>/<bank>|*"`,
+ *     `"pad:<track>/<bank>/<index>|*"`, `"pattern:<clip>/<pattern>|*"` and
+ *     `"step:<clip>/<pattern>/<at>/<bank>.<index>|*"` do the same for a sampler
+ *     object, and a plain field name (or `"locks.<name>"`) writes one field of
+ *     one of them — which is how one pad, one step or one lock undoes without
+ *     touching its neighbours;
  *   - `"placement:abc|*"`, `"marker:abc|*"` and `"section:abc|*"` do the same
  *     for the three arrangement objects, and `"placement:abc|bars"` (and its
  *     siblings) writes one field of one of them;
@@ -1082,6 +1823,14 @@ export function applyBeforeAfter(doc, plan) {
         break;
       case "take":
         writeTake(doc, target.id, split.field, value);
+        break;
+      case "sample":
+      case "slice":
+      case "bank":
+      case "pad":
+      case "pattern":
+      case "step":
+        writeSamplerObject(doc, target.kind, target.id, split.field, value);
         break;
       case "placement":
       case "marker":
@@ -1135,6 +1884,13 @@ export function readField(doc, ref, field = "*") {
     return readPath(take, fieldPath(field));
   }
 
+  if (SAMPLER_MAP_OF[target.kind]) {
+    const object = samplerObject(doc, target.kind, target.id);
+    if (!object) return ABSENT;
+    if (field === "*") return toPlain(object);
+    return readPath(object, fieldPath(field));
+  }
+
   if (target.kind === "placement" || target.kind === "marker" || target.kind === "section") {
     const object = arrangementObject(doc, target.kind, target.id);
     if (!object) return ABSENT;
@@ -1176,6 +1932,11 @@ export function readField(doc, ref, field = "*") {
 function fieldPath(field) {
   if (field.startsWith(PARAM_FIELD_PREFIX) && field.length > PARAM_FIELD_PREFIX.length) {
     return ["device", "params", field.slice(PARAM_FIELD_PREFIX.length)];
+  }
+  // One lock inside a step's `locks`: two edits to different locks of one step
+  // then undo independently (a step carries at most eight of them).
+  if (field.startsWith(LOCK_FIELD_PREFIX) && field.length > LOCK_FIELD_PREFIX.length) {
+    return ["locks", field.slice(LOCK_FIELD_PREFIX.length)];
   }
   // The device-type guard a set_param entry carries (read-only, never restored).
   if (field === "device.type") return ["device", "type"];
@@ -1350,6 +2111,51 @@ function writeTake(doc, id, field, value) {
   writeField(take, field, value);
 }
 
+/** Which song container each sampler object kind lives in. */
+const SAMPLER_MAP_OF = Object.freeze({
+  sample: "samples",
+  slice: "slices",
+  bank: "banks",
+  pad: "pads",
+  pattern: "patterns",
+  step: "steps",
+});
+
+/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern or step, or null. */
+function samplerObject(doc, kind, id) {
+  const key = SAMPLER_MAP_OF[kind];
+  if (!key) return null;
+  return liveObject(readContainer(doc, key), id);
+}
+
+/**
+ * Write one field of a sampler object, or (re)create/delete it whole.
+ *
+ * A pad and a step carry no `id` of their own: their container key is their
+ * identity (`<track>/<bank>/<index>` and `<clip>/<pattern>/<at>/<bank>.<index>`),
+ * so nothing here invents one. A sample, slice, bank and pattern do carry one,
+ * and it is the same value their key holds.
+ */
+function writeSamplerObject(doc, kind, id, field, value) {
+  const key = SAMPLER_MAP_OF[kind];
+  if (field === "*" && value === ABSENT) {
+    const existing = readContainer(doc, key);
+    if (existing instanceof Y.Map) existing.delete(id);
+    return;
+  }
+  const map = ensureContainer(doc, key, () => new Y.Map());
+  if (field === "*") {
+    const object = cloneJson(value) ?? {};
+    delete object._index;
+    const hasOwnId = kind !== "pad" && kind !== "step";
+    map.set(id, objectMap(hasOwnId ? { ...object, id: object.id ?? id } : object));
+    return;
+  }
+  const object = map.get(id);
+  if (!(object instanceof Y.Map)) throw new Error(`Studio: there is no ${kind} "${id}" to write to`);
+  writeField(object, field, value);
+}
+
 /** Which sub-map of the arrangement each arrangement object kind lives in. */
 const ARRANGEMENT_MAP_OF = Object.freeze({
   placement: "placements",
@@ -1412,10 +2218,11 @@ function normalizeTrack(value) {
     id: typeof plain.id === "string" ? plain.id : "",
     name: typeof plain.name === "string" ? plain.name : "",
     color: typeof plain.color === "string" ? plain.color : TRACK_COLORS[0],
-    // An audio track has no module and no controllers: its device is exactly
-    // {engine: "audio"}, never an empty set of SunVox fields.
-    device: engine === AUDIO_DEVICE.engine
-      ? { engine: AUDIO_DEVICE.engine }
+    // A track that plays no SunVox module carries exactly {engine}: an audio
+    // track plays takes, and a sampler track plays the kit that lives in the
+    // song's own banks and pads (never inside this device).
+    device: engine === AUDIO_DEVICE.engine || engine === SAMPLER_DEVICE.engine
+      ? { engine }
       : {
           engine,
           type: typeof device.type === "string" ? device.type : "",
@@ -1442,8 +2249,11 @@ function normalizeScene(value) {
  * A clip as a snapshot carries it, with its notes as plain {t, d, p, v}.
  *
  * A SunVox clip carries no `kind` (an absent kind is "notes"); an audio clip
- * adds `kind: "audio"` and its comp, so a reader can tell the two apart
- * without a second lookup.
+ * adds `kind: "audio"` and its comp, and a pattern clip adds `kind: "pattern"`
+ * with its step length, swing and chain, so a reader can tell the three apart
+ * without a second lookup. A pattern clip's `length_bars` is derived from its
+ * loop (`length_steps × step_beats`) rather than read from the document, so it
+ * always measures what the pattern plays.
  */
 function normalizeClip(id, value) {
   const plain = stripHints(value);
@@ -1464,6 +2274,21 @@ function normalizeClip(id, value) {
       };
     }),
   };
+  if (plain.kind === "pattern") {
+    const lengthSteps = integerOr(plain.length_steps, 16);
+    const stepBeats = STEP_BEATS_VALUES.includes(plain.step_beats) ? plain.step_beats : DEFAULT_STEP_BEATS;
+    const swing = Math.min(0.75, Math.max(0, numberOr(plain.swing, 0)));
+    return {
+      ...clip,
+      notes: [],
+      kind: "pattern",
+      length_steps: lengthSteps,
+      step_beats: stepBeats,
+      swing,
+      chain: Array.isArray(plain.chain) ? plain.chain.filter((entry) => typeof entry === "string") : [],
+      length_bars: lengthBarsForSteps(lengthSteps, stepBeats),
+    };
+  }
   if (plain.kind !== "audio") return clip;
   return { ...clip, kind: "audio", comp: normalizeSegments(plain.comp) };
 }
@@ -1479,6 +2304,103 @@ function normalizeSegments(value) {
       to_beat: numberOr(item.to_beat, 0),
     };
   });
+}
+
+/**
+ * A sample as a snapshot carries it: every field present, nothing extra. The
+ * audio itself is not in the document — `storage_key` says where it lives.
+ */
+function normalizeSample(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    storage_key: typeof plain.storage_key === "string" ? plain.storage_key : "",
+    rate: integerOr(plain.rate, 48000),
+    channels: integerOr(plain.channels, 1),
+    frames: integerOr(plain.frames, 0),
+    name: typeof plain.name === "string" ? plain.name : "",
+    origin: SAMPLE_ORIGINS.includes(plain.origin) ? plain.origin : SAMPLE_ORIGINS[0],
+    author_label: typeof plain.author_label === "string" ? plain.author_label : "",
+  };
+}
+
+/** A slice as a snapshot carries it: every field present, nothing extra. */
+function normalizeSlice(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id.split("/").pop() ?? id,
+    sample_id: typeof plain.sample_id === "string" ? plain.sample_id : "",
+    start_frame: integerOr(plain.start_frame, 0),
+    end_frame: integerOr(plain.end_frame, 0),
+  };
+}
+
+/** A bank as a snapshot carries it: every field present, nothing extra. */
+function normalizeBank(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id.split("/").pop() ?? id,
+    track_id: typeof plain.track_id === "string" ? plain.track_id : "",
+    name: typeof plain.name === "string" ? plain.name : "",
+    order: integerOr(plain.order, 0),
+  };
+}
+
+/**
+ * A pad as a snapshot carries it: every field present, nothing extra. An empty
+ * pad carries `sample_id: null`, which is how "no sound on this pad" is spelled.
+ */
+function normalizePad(id, value) {
+  const plain = stripHints(value);
+  const filter = plain.filter && typeof plain.filter === "object" ? plain.filter : {};
+  return {
+    track_id: typeof plain.track_id === "string" ? plain.track_id : "",
+    bank_id: typeof plain.bank_id === "string" ? plain.bank_id : "",
+    index: integerOr(plain.index, 0),
+    sample_id: typeof plain.sample_id === "string" ? plain.sample_id : ABSENT,
+    slice_id: typeof plain.slice_id === "string" ? plain.slice_id : ABSENT,
+    name: typeof plain.name === "string" ? plain.name : "",
+    mode: PAD_MODES.includes(plain.mode) ? plain.mode : PAD_MODES[0],
+    pitch: numberOr(plain.pitch, 0),
+    gain_db: numberOr(plain.gain_db, 0),
+    pan: numberOr(plain.pan, 0),
+    attack_ms: numberOr(plain.attack_ms, 0),
+    decay_ms: numberOr(plain.decay_ms, 0),
+    sustain: numberOr(plain.sustain, 1),
+    release_ms: numberOr(plain.release_ms, 0),
+    filter: {
+      type: PAD_FILTER_TYPES.includes(filter.type) ? filter.type : PAD_FILTER_TYPES[0],
+      cutoff_hz: numberOr(filter.cutoff_hz, 20000),
+      resonance: numberOr(filter.resonance, 0),
+    },
+    choke: integerOr(plain.choke, 0),
+    reverse: plain.reverse === true,
+  };
+}
+
+/** A pattern as a snapshot carries it: every field present, nothing extra. */
+function normalizePattern(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id.split("/").pop() ?? id,
+    clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
+    name: typeof plain.name === "string" ? plain.name : "",
+    order: integerOr(plain.order, 0),
+  };
+}
+
+/** A step as a snapshot carries it: every field present, nothing extra. */
+function normalizeStep(id, value) {
+  const plain = stripHints(value);
+  return {
+    clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
+    pattern_id: typeof plain.pattern_id === "string" ? plain.pattern_id : "",
+    at: integerOr(plain.at, 0),
+    bank_id: typeof plain.bank_id === "string" ? plain.bank_id : "",
+    index: integerOr(plain.index, 0),
+    v: integerOr(plain.v, 100),
+    locks: plain.locks && typeof plain.locks === "object" ? cloneJson(plain.locks) : {},
+  };
 }
 
 /** A take as a snapshot carries it: every field present, nothing extra. */

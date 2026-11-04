@@ -59,6 +59,8 @@ import "./commands/core.js";
 import "./commands/takes.js";
 // The 1b timeline commands — placements, markers and sections — likewise.
 import "./commands/arrangement.js";
+// The 1c sampler commands — kits, pads, samples, patterns and steps.
+import "./commands/sampler.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */

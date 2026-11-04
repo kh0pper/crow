@@ -66,6 +66,8 @@ import "./commands/core.js";
 import "./commands/takes.js";
 // The 1b timeline commands — placements, markers and sections — likewise.
 import "./commands/arrangement.js";
+// The 1c sampler commands — kits, pads, samples, patterns and steps.
+import "./commands/sampler.js";
 import {
   REDO_COMMAND,
   UNDO_COMMAND,

@@ -168,6 +168,12 @@
  *
  * The timeline commands close the list: `arrangement.*` lays clips out on the
  * bars, and `marker.*` and `section.*` name bars and ranges of them.
+ *
+ * The sampler commands follow: a kit's `bank.*` and `pad.*`, the song's
+ * `sample.*` and `slice.*`, a pattern clip's `pattern.*`, `step.*` and
+ * `chain.*`, and `clip.add_pattern` that makes one. `sample.add` is not here
+ * for the same reason `take.add` is not: only the gateway's sample upload
+ * finish route adds a sample, as Studio's own step.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -207,6 +213,23 @@ export const COMMANDS = Object.freeze([
   "section.add",
   "section.set",
   "section.remove",
+  "bank.add",
+  "bank.rename",
+  "pad.set",
+  "pad.assign",
+  "sample.rename",
+  "slice.set",
+  "pattern.add",
+  "pattern.rename",
+  "pattern.remove",
+  "pattern.set_length",
+  "pattern.set_steps_beat",
+  "pattern.set_swing",
+  "step.toggle",
+  "step.set",
+  "step.clear_locks",
+  "chain.set",
+  "clip.add_pattern",
 ]);
 
 /** The `var COMMANDS = [...]` declaration, built from the one list above. */

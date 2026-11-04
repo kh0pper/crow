@@ -27,12 +27,27 @@ import {
 import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/takes.js";
 import "../bundles/studio/server/commands/arrangement.js";
+import "../bundles/studio/server/commands/sampler.js";
 
 /** A take id, the way the recording client generates one. */
 const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
 
 /** A second take id, for the comp cases. */
 const OTHER_TAKE_ID = "1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d";
+
+/** A sample id, the way the recording or import client generates one. */
+const SAMPLE_ID = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
+
+/** The sample object `sample.add` accepts, as the gateway builds it. */
+const SAMPLE_ARGS = {
+  storage_key: `studio/song-1/samples/${SAMPLE_ID}.wav`,
+  rate: 48000,
+  channels: 2,
+  frames: 48000,
+  name: "Drum loop",
+  origin: "import",
+  author_label: "the operator",
+};
 
 /** The take object `take.add` accepts, as the gateway builds it. */
 const TAKE_ARGS = {
@@ -57,7 +72,11 @@ const COMMAND_IDS = [
   "arrangement.resize",
   "arrangement.set_fades",
   "arrangement.split",
+  "bank.add",
+  "bank.rename",
+  "chain.set",
   "clip.add_audio",
+  "clip.add_pattern",
   "clip.edit_notes",
   "clip.remove",
   "clip.rename",
@@ -67,13 +86,27 @@ const COMMAND_IDS = [
   "marker.add",
   "marker.remove",
   "marker.rename",
+  "pad.assign",
+  "pad.set",
+  "pattern.add",
+  "pattern.remove",
+  "pattern.rename",
+  "pattern.set_length",
+  "pattern.set_steps_beat",
+  "pattern.set_swing",
+  "sample.add",
+  "sample.rename",
   "scene.add",
   "scene.remove",
   "scene.rename",
   "section.add",
   "section.remove",
   "section.set",
+  "slice.set",
   "song.set_meta",
+  "step.clear_locks",
+  "step.set",
+  "step.toggle",
   "take.add",
   "take.discard",
   "take.keep",
@@ -130,6 +163,24 @@ const MINIMAL_ARGS = {
   "section.add": { start_bar: 0, end_bar: 8, name: "Verse" },
   "section.set": { id: "s1", name: "Intro" },
   "section.remove": { id: "s1" },
+  "bank.add": { track_id: "t1" },
+  "bank.rename": { track_id: "t1", bank_id: "b1", name: "A" },
+  "pad.set": { track_id: "t1", bank_id: "b1", index: 0, fields: { gain_db: 0 } },
+  "pad.assign": { track_id: "t1", bank_id: "b1", index: 0, sample_id: SAMPLE_ID },
+  "sample.add": { sample: { id: SAMPLE_ID, ...SAMPLE_ARGS } },
+  "sample.rename": { sample_id: SAMPLE_ID, name: "Loop A" },
+  "slice.set": { sample_id: SAMPLE_ID, slices: [{ start_frame: 0, end_frame: 100 }] },
+  "pattern.add": { clip_id: "c1" },
+  "pattern.rename": { clip_id: "c1", pattern_id: "p1", name: "A" },
+  "pattern.remove": { clip_id: "c1", pattern_id: "p1" },
+  "pattern.set_length": { clip_id: "c1", length_steps: 16 },
+  "pattern.set_steps_beat": { clip_id: "c1", step_beats: 0.25 },
+  "pattern.set_swing": { clip_id: "c1", swing: 0 },
+  "step.toggle": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0 },
+  "step.set": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0, v: 100 },
+  "step.clear_locks": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0 },
+  "chain.set": { clip_id: "c1", chain: [] },
+  "clip.add_pattern": { track_id: "t1", scene_id: "s1" },
 };
 
 /** A song document that is destroyed when the test ends. */
@@ -211,10 +262,12 @@ test("the registry lists every command", () => {
   assert.equal(getCommand("take.discard").humanOnly, true);
   // A take only ever arrives through the gateway's upload finish route.
   assert.equal(getCommand("take.add").internal, true);
+  // And a sample only ever arrives through the same finish route.
+  assert.equal(getCommand("sample.add").internal, true);
   assert.equal(getCommand("clip.write").internal, false);
   assert.deepEqual(
     listCommands({ public: true }).map((command) => command.id),
-    COMMAND_IDS.filter((id) => id !== "take.add"),
+    COMMAND_IDS.filter((id) => id !== "take.add" && id !== "sample.add"),
   );
   assert.equal(refuses(() => getCommand("clip.explode"), "not_found").code, "not_found");
 });
@@ -367,6 +420,16 @@ test("apply returns before/after for every touched field", (t) => {
   const audioTrack = addTrack(doc, "Guitar", { kind: "audio" });
   const au = "clip:gtr-verse";
 
+  // A sampler track, its kit and a pattern clip, for the 1c sampler commands
+  // below. The kit's bank is found from the snapshot, because the track makes
+  // it; the pads it holds are then known by index.
+  const kitTrack = addTrack(doc, "Kit", { kind: "sampler" });
+  const kitBank = Object.values(snapshot(doc).banks).find((bank) => bank.track_id === kitTrack).id;
+  const padOf = (bankId, index) => `pad:${kitTrack}/${bankId}/${index}`;
+  const bankOf = (bankId) => `bank:${kitTrack}/${bankId}`;
+  const kitPads = (bankId) =>
+    Array.from({ length: 16 }, (_, index) => `${padOf(bankId, index)}|*`);
+
   // Every command, in the order they can run, with the exact key set its
   // before and after maps must carry.
   const cases = [
@@ -503,6 +566,114 @@ test("apply returns before/after for every touched field", (t) => {
     },
     { id: "section.set", args: { id: "sec-verse", name: "Intro" }, keys: ["section:sec-verse|name"] },
     { id: "section.remove", args: { id: "sec-verse" }, keys: ["section:sec-verse|*"] },
+    // The sampler commands: a second bank, a sample chopped into two slices and
+    // put on a pad, a pattern clip with two patterns, a step with a lock, and
+    // the chain that loops them.
+    {
+      id: "bank.add",
+      args: { id: "kit-b", track_id: kitTrack, name: "Beats" },
+      keys: [`${bankOf("kit-b")}|*`, ...kitPads("kit-b")],
+    },
+    {
+      id: "bank.rename",
+      args: { track_id: kitTrack, bank_id: "kit-b", name: "Hits" },
+      keys: [`${bankOf("kit-b")}|name`],
+    },
+    {
+      id: "sample.add",
+      args: { sample: { id: SAMPLE_ID, ...SAMPLE_ARGS } },
+      keys: [`sample:${SAMPLE_ID}|*`],
+    },
+    {
+      id: "sample.rename",
+      args: { sample_id: SAMPLE_ID, name: "Loop A" },
+      keys: [`sample:${SAMPLE_ID}|name`],
+    },
+    {
+      id: "slice.set",
+      args: {
+        sample_id: SAMPLE_ID,
+        slices: [
+          { id: "s1", start_frame: 0, end_frame: 12000 },
+          { id: "s2", start_frame: 12000, end_frame: 24000 },
+        ],
+      },
+      keys: [`slice:${SAMPLE_ID}/s1|*`, `slice:${SAMPLE_ID}/s2|*`],
+    },
+    {
+      id: "pad.assign",
+      args: { track_id: kitTrack, bank_id: "kit-b", index: 0, sample_id: SAMPLE_ID, slice_id: "s1" },
+      keys: [`${padOf("kit-b", 0)}|sample_id`, `${padOf("kit-b", 0)}|slice_id`],
+    },
+    {
+      id: "pad.set",
+      args: {
+        track_id: kitTrack,
+        bank_id: "kit-b",
+        index: 0,
+        fields: { gain_db: -6, filter: { type: "lp", cutoff_hz: 4000, resonance: 0.2 } },
+      },
+      keys: [`${padOf("kit-b", 0)}|gain_db`, `${padOf("kit-b", 0)}|filter`],
+    },
+    {
+      id: "clip.add_pattern",
+      args: { clip_id: "kit-clip", track_id: kitTrack, scene_id: scene, length_steps: 16, name: "Kit loop" },
+      keys: ["clip:kit-clip|*", "pattern:kit-clip/a|*"],
+    },
+    { id: "pattern.add", args: { clip_id: "kit-clip", id: "pb", name: "B" }, keys: ["pattern:kit-clip/pb|*"] },
+    {
+      id: "pattern.rename",
+      args: { clip_id: "kit-clip", pattern_id: "pb", name: "Fill" },
+      keys: ["pattern:kit-clip/pb|name"],
+    },
+    {
+      id: "pattern.set_steps_beat",
+      args: { clip_id: "kit-clip", step_beats: 0.5 },
+      keys: ["clip:kit-clip|step_beats", "clip:kit-clip|length_bars"],
+    },
+    { id: "pattern.set_swing", args: { clip_id: "kit-clip", swing: 0.5 }, keys: ["clip:kit-clip|swing"] },
+    {
+      id: "pattern.set_length",
+      args: { clip_id: "kit-clip", length_steps: 8 },
+      keys: ["clip:kit-clip|length_steps", "clip:kit-clip|length_bars"],
+    },
+    {
+      id: "step.toggle",
+      args: { clip_id: "kit-clip", pattern_id: "a", at: 0, bank_id: "kit-b", index: 0, v: 110 },
+      keys: ["step:kit-clip/a/0/kit-b.0|*"],
+    },
+    {
+      id: "step.set",
+      args: {
+        clip_id: "kit-clip",
+        pattern_id: "a",
+        at: 0,
+        bank_id: "kit-b",
+        index: 0,
+        locks: { cutoff_hz: 900 },
+      },
+      keys: ["step:kit-clip/a/0/kit-b.0|locks.cutoff_hz"],
+    },
+    {
+      id: "step.clear_locks",
+      args: { clip_id: "kit-clip", pattern_id: "a", at: 0, bank_id: "kit-b", index: 0 },
+      keys: ["step:kit-clip/a/0/kit-b.0|locks.cutoff_hz"],
+    },
+    {
+      id: "chain.set",
+      args: { clip_id: "kit-clip", chain: ["a", "pb"] },
+      keys: ["clip:kit-clip|chain"],
+    },
+    {
+      id: "pattern.remove",
+      args: { clip_id: "kit-clip", pattern_id: "pb" },
+      keys: ["pattern:kit-clip/pb|*", "clip:kit-clip|chain"],
+    },
+    {
+      id: "clip.remove",
+      args: { clip_id: "kit-clip" },
+      keys: ["clip:kit-clip|*", "pattern:kit-clip/a|*", "step:kit-clip/a/0/kit-b.0|*"],
+    },
     { id: "clip.remove", args: { clip_id: clipId }, keys: [`${cl}|*`] },
     { id: "scene.remove", args: { scene_id: chorus }, keys: [`scene:${chorus}|*`] },
     { id: "track.remove", args: { track_id: "drums" }, keys: ["track:drums|*"] },

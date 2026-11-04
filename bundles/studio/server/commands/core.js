@@ -19,6 +19,7 @@
  * document exactly as it was.
  */
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
@@ -26,8 +27,12 @@ import {
   BEATS_PER_BAR,
   INSTRUMENT_TYPES,
   LIMITS,
+  SAMPLER_DEVICE,
   STEP_GUARDS,
   TRACK_COLORS,
+  bankEntries,
+  bankMap,
+  bankKey,
   cloneJson,
   clipMap,
   clipEntries,
@@ -39,11 +44,23 @@ import {
   getTrack,
   isAudioClip,
   isAudioTrack,
+  isPatternClip,
+  isSamplerTrack,
+  newSamplerBank,
   objectMap,
   objectRef,
+  padEntries,
+  padKey,
+  padMap,
+  patternEntries,
+  patternKey,
+  patternMap,
   placementEntries,
   placementMap,
   songMap,
+  stepEntries,
+  stepKey,
+  stepMap,
   takeEntries,
   takeMap,
   toPlain,
@@ -151,6 +168,26 @@ function placementRef(id) {
   return objectRef("placement", id);
 }
 
+/** @returns {string} the ref of a kit bank. */
+function bankRef(trackId, bankId) {
+  return objectRef("bank", bankKey(trackId, bankId));
+}
+
+/** @returns {string} the ref of one pad of one bank. */
+function padRef(trackId, bankId, index) {
+  return objectRef("pad", padKey(trackId, bankId, index));
+}
+
+/** @returns {string} the ref of one pattern of one clip. */
+function patternRef(clipId, patternId) {
+  return objectRef("pattern", patternKey(clipId, patternId));
+}
+
+/** @returns {string} the ref of one step of one pattern. */
+function stepRef(clipId, patternId, at, bankId, index) {
+  return objectRef("step", stepKey(clipId, patternId, at, bankId, index));
+}
+
 /** @returns {number} "1 bar" vs "8 bars" without the plural bug. */
 function barsText(bars) {
   return bars === 1 ? "1 bar" : `${bars} bars`;
@@ -200,6 +237,31 @@ function clipsText(count) {
 function refuseOnAudioTrack(track, what) {
   if (!isAudioTrack(track)) return;
   refuseInvalid(`Track "${track.get("name")}" is an audio track; it has no ${what}.`);
+}
+
+/**
+ * Refuse an edit that only makes sense on a SunVox track, naming the track.
+ * A sampler track's device is its kit's engine, not a module to swap: the kit
+ * lives beside the device, so a device write would be a different sound.
+ * @param {Y.Map<any>} track
+ * @param {string} what - what a sampler track does not have
+ * @returns {void}
+ */
+function refuseOnSamplerTrack(track, what) {
+  if (!isSamplerTrack(track)) return;
+  refuseInvalid(`Track "${track.get("name")}" is a sampler track; it has no ${what}.`);
+}
+
+/**
+ * Refuse a notes edit on a pattern clip, naming the clip.
+ * @param {Y.Map<any>} clip
+ * @returns {void}
+ */
+function refuseOnPatternClip(clip) {
+  if (!isPatternClip(clip)) return;
+  refuseInvalid(
+    `Clip "${clip.get("name")}" holds steps and patterns rather than notes; there are no notes to write there.`,
+  );
 }
 
 /**
@@ -302,6 +364,119 @@ function removePlacements(doc, { clipIds, trackIds = new Set() }, before, after)
     after[fieldKey(placementRef(id), "*")] = ABSENT;
     placements.delete(id);
   }
+}
+
+/**
+ * Record and delete one kind of sampler object a removal takes with it: every
+ * entry in `doomed` is captured under its own `"<ref>|*"` key and deleted, so
+ * one undo puts all of them back in the same step.
+ * @param {Y.Doc} doc
+ * @param {"bank"|"pad"|"pattern"|"step"} kind
+ * @param {Array<{id: string, [key: string]: Y.Map<any>}>} doomed
+ * @param {(doc: Y.Doc) => Y.Map<any>} mapOf - the container's writing accessor
+ * @param {Object<string, any>} before - the removal's before map, filled in
+ * @param {Object<string, any>} after - the removal's after map, filled in
+ * @returns {void}
+ */
+function removeSamplerKind(doc, kind, doomed, mapOf, before, after) {
+  if (doomed.length === 0) return;
+  const map = mapOf(doc);
+  for (const entry of doomed) {
+    const ref = objectRef(kind, entry.id);
+    before[fieldKey(ref, "*")] = cloneJson(toPlain(entry[kind]));
+    after[fieldKey(ref, "*")] = ABSENT;
+    map.delete(entry.id);
+  }
+}
+
+/**
+ * Delete the sampler objects a clip removal (or a track removal, through its
+ * clips) takes with it: the patterns of those clips and their steps, and —
+ * when a track goes — its banks and all their pads. Each one is captured for
+ * the same undo step, so one undo brings the kit and its patterns back.
+ *
+ * A sample stays: it belongs to the song, not to the track that plays it.
+ * @param {Y.Doc} doc
+ * @param {{clipIds?: Set<string>, trackIds?: Set<string>}} doomed - the clips
+ *   and tracks being removed
+ * @param {Object<string, any>} before - the removal's before map, filled in
+ * @param {Object<string, any>} after - the removal's after map, filled in
+ * @returns {void}
+ */
+function removeSamplerObjects(doc, { clipIds = new Set(), trackIds = new Set() }, before, after) {
+  removeSamplerKind(
+    doc,
+    "step",
+    stepEntries(doc).filter(({ step }) => clipIds.has(step.get("clip_id"))),
+    stepMap,
+    before,
+    after,
+  );
+  removeSamplerKind(
+    doc,
+    "pattern",
+    patternEntries(doc).filter(({ pattern }) => clipIds.has(pattern.get("clip_id"))),
+    patternMap,
+    before,
+    after,
+  );
+  removeSamplerKind(
+    doc,
+    "pad",
+    padEntries(doc).filter(({ pad }) => trackIds.has(pad.get("track_id"))),
+    padMap,
+    before,
+    after,
+  );
+  removeSamplerKind(
+    doc,
+    "bank",
+    bankEntries(doc).filter(({ bank }) => trackIds.has(bank.get("track_id"))),
+    bankMap,
+    before,
+    after,
+  );
+}
+
+/**
+ * The patterns and steps of a clip, as refs a lock/focus check has to see with
+ * it.
+ * @param {object} snap
+ * @param {string} clipId
+ * @returns {string[]}
+ */
+function samplerRefsOfClip(snap, clipId) {
+  const refs = [];
+  for (const pattern of Object.values(snap.patterns ?? {})) {
+    if (pattern.clip_id !== clipId) continue;
+    refs.push(patternRef(clipId, pattern.id));
+  }
+  for (const step of Object.values(snap.steps ?? {})) {
+    if (step.clip_id !== clipId) continue;
+    refs.push(stepRef(step.clip_id, step.pattern_id, step.at, step.bank_id, step.index));
+  }
+  return refs;
+}
+
+/**
+ * A sampler track's kit and its clips' patterns, as refs a lock/focus check
+ * has to see with the track.
+ * @param {object} snap
+ * @param {string} trackId
+ * @returns {string[]}
+ */
+function samplerRefsOfTrack(snap, trackId) {
+  const refs = [];
+  for (const bank of Object.values(snap.banks ?? {})) {
+    if (bank.track_id === trackId) refs.push(bankRef(trackId, bank.id));
+  }
+  for (const pad of Object.values(snap.pads ?? {})) {
+    if (pad.track_id === trackId) refs.push(padRef(trackId, pad.bank_id, pad.index));
+  }
+  for (const clip of Object.values(snap.clips)) {
+    if (clip.track_id === trackId) refs.push(...samplerRefsOfClip(snap, clip.id));
+  }
+  return refs;
 }
 
 /**
@@ -505,18 +680,26 @@ defineCommand({
       mute: z.boolean().optional(),
       solo: z.boolean().optional(),
       kind: z
-        .enum(["sunvox", "audio"])
+        .enum(["sunvox", "audio", "sampler"])
         .optional()
-        .describe('what the track plays: "sunvox" (the default) or "audio" for recorded takes'),
+        .describe(
+          'what the track plays: "sunvox" (the default), "audio" for recorded takes, or "sampler" for a kit of pads',
+        ),
     })
     .strict(),
   summary(args) {
     if (args.kind === "audio") return `Added audio track "${args.name}"`;
+    if (args.kind === "sampler") return `Added sampler track "${args.name}"`;
     return `Added track "${args.name}" (${args.device?.type ?? DEFAULT_DEVICE_TYPE})`;
   },
   touches(args) {
     return [trackRef(args.id)];
   },
+  /**
+   * A sampler track arrives with its kit: bank "A" and its sixteen empty pads,
+   * created in the same step as the track, so one undo takes the whole thing
+   * back and no track is ever left with a kit it does not have.
+   */
   apply(doc, args) {
     const tracks = trackList(doc);
     if (tracks.length >= LIMITS.tracks) {
@@ -526,8 +709,13 @@ defineCommand({
       refuseInvalid(`A track with id "${args.id}" already exists in this song.`);
     }
     const audio = args.kind === "audio";
-    if (audio && args.device !== undefined) {
-      refuseInvalid(`An audio track has no instrument; leave the device out when adding one.`);
+    const sampler = args.kind === "sampler";
+    if ((audio || sampler) && args.device !== undefined) {
+      refuseInvalid(
+        audio
+          ? `An audio track has no instrument; leave the device out when adding one.`
+          : `A sampler track has no SunVox module; leave the device out when adding one.`,
+      );
     }
     const index = tracks.length;
     const track = {
@@ -536,11 +724,13 @@ defineCommand({
       color: args.color ?? nextTrackColor(doc),
       device: audio
         ? { ...AUDIO_DEVICE }
-        : {
-            engine: "sunvox",
-            type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
-            params: { ...(args.device?.params ?? {}) },
-          },
+        : sampler
+          ? { ...SAMPLER_DEVICE }
+          : {
+              engine: "sunvox",
+              type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
+              params: { ...(args.device?.params ?? {}) },
+            },
       mute: args.mute ?? false,
       solo: args.solo ?? false,
       gain_db: args.gain_db ?? 0,
@@ -549,16 +739,33 @@ defineCommand({
     };
     const previous = index > 0 ? tracks.get(index - 1) : null;
     tracks.push([objectMap(track)]);
-    return {
-      before: { [fieldKey(trackRef(track.id), "*")]: ABSENT },
-      after: {
-        [fieldKey(trackRef(track.id), "*")]: {
-          ...cloneJson(track),
-          _index: index,
-          _after: siblingBefore(previous),
-        },
+    const before = { [fieldKey(trackRef(track.id), "*")]: ABSENT };
+    const after = {
+      [fieldKey(trackRef(track.id), "*")]: {
+        ...cloneJson(track),
+        _index: index,
+        _after: siblingBefore(previous),
       },
     };
+
+    if (sampler) {
+      const bankId = randomUUID();
+      const { bank, pads } = newSamplerBank(track.id, bankId, "A", 0);
+      bankMap(doc).set(bankKey(track.id, bankId), objectMap(bank));
+      const bankField = fieldKey(bankRef(track.id, bankId), "*");
+      before[bankField] = ABSENT;
+      after[bankField] = cloneJson(bank);
+      const padsMap = padMap(doc);
+      for (const pad of pads) {
+        const key = padKey(track.id, bankId, pad.index);
+        padsMap.set(key, objectMap(pad));
+        const field = fieldKey(padRef(track.id, bankId, pad.index), "*");
+        before[field] = ABSENT;
+        after[field] = cloneJson(pad);
+      }
+    }
+
+    return { before, after };
   },
 });
 
@@ -585,6 +792,8 @@ defineCommand({
     for (const ref of placementRefsOfTrack(snap, args.track_id)) {
       if (!refs.includes(ref)) refs.push(ref);
     }
+    // A sampler track's kit and its clips' patterns go with it.
+    refs.push(...samplerRefsOfTrack(snap, args.track_id));
     return refs;
   },
   apply(doc, args) {
@@ -611,10 +820,12 @@ defineCommand({
     }
     // A recorded take belongs to its clip, so it goes with it and comes back
     // with it, in the same step. So does every placement that put the clip on
-    // the timeline, and every placement sitting on the track itself.
+    // the timeline, every placement sitting on the track itself, and — on a
+    // sampler track — the kit and the patterns of the clips that go.
     const removedClips = new Set(clips.map(({ id }) => id));
     removeTakes(doc, removedClips, before, after);
     removePlacements(doc, { clipIds: removedClips, trackIds: new Set([args.track_id]) }, before, after);
+    removeSamplerObjects(doc, { clipIds: removedClips, trackIds: new Set([args.track_id]) }, before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
@@ -661,6 +872,7 @@ defineCommand({
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
     refuseOnAudioTrack(track, "SunVox module to swap");
+    refuseOnSamplerTrack(track, "SunVox module to swap");
     const ref = trackRef(args.track_id);
     const before = fieldValue(track, "device");
     const device = { engine: "sunvox", type: args.type, params: { ...paramsDefaults(args.params) } };
@@ -697,6 +909,7 @@ defineCommand({
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);
     refuseOnAudioTrack(track, "SunVox controller to set");
+    refuseOnSamplerTrack(track, "SunVox controller to set");
     const ref = trackRef(args.track_id);
     const device = toPlain(track.get("device")) ?? {
       engine: "sunvox",
@@ -879,6 +1092,7 @@ defineCommand({
       refs.push(trackRef(clip.track_id));
       refs.push(...takeRefsOfClip(snap, clip.id));
       refs.push(...placementRefsOfClip(snap, clip.id));
+      refs.push(...samplerRefsOfClip(snap, clip.id));
     }
     return refs;
   },
@@ -904,11 +1118,12 @@ defineCommand({
       before[fieldKey(clipRef(id), "*")] = cloneJson(toPlain(clip));
       after[fieldKey(clipRef(id), "*")] = ABSENT;
     }
-    // The clips' takes and the placements that put those clips on the
-    // timeline go with them, captured for the same undo step.
+    // The clips' takes, their patterns and steps, and the placements that put
+    // those clips on the timeline go with them, captured for the same undo step.
     const removedClips = new Set(clips.map(({ id }) => id));
     removeTakes(doc, removedClips, before, after);
     removePlacements(doc, { clipIds: removedClips }, before, after);
+    removeSamplerObjects(doc, { clipIds: removedClips }, before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
@@ -944,9 +1159,17 @@ defineCommand({
     const track = requireTrack(doc, args.track_id);
     requireScene(doc, args.scene_id);
     const existingAudio = getClip(doc, args.clip_id);
-    if (existingAudio) refuseOnAudioClip(existingAudio);
+    if (existingAudio) {
+      refuseOnAudioClip(existingAudio);
+      refuseOnPatternClip(existingAudio);
+    }
     if (isAudioTrack(track)) {
       refuseInvalid(`Track "${track.get("name")}" is an audio track; use clip.add_audio to make a clip on it.`);
+    }
+    if (isSamplerTrack(track)) {
+      refuseInvalid(
+        `Track "${track.get("name")}" is a sampler track; use clip.add_pattern to make a pattern clip on it.`,
+      );
     }
 
     if (args.notes.length > LIMITS.notesPerClip) {
@@ -1047,6 +1270,7 @@ defineCommand({
   apply(doc, args) {
     const clip = requireClip(doc, args.clip_id);
     refuseOnAudioClip(clip);
+    refuseOnPatternClip(clip);
     const name = clip.get("name") ?? args.clip_id;
     const lengthBars = clip.get("length_bars") ?? 1;
     const limit = lengthBars * BEATS;
@@ -1110,6 +1334,11 @@ defineCommand({
   },
   apply(doc, args) {
     const clip = requireClip(doc, args.clip_id);
+    if (isPatternClip(clip)) {
+      refuseInvalid(
+        `Clip "${clip.get("name")}" is a pattern clip; its length comes from its steps, so set them with pattern.set_length.`,
+      );
+    }
     if (args.length_bars > LIMITS.clipBars) {
       refuseLimit(`A clip can be at most ${LIMITS.clipBars} bars long.`);
     }
@@ -1188,7 +1417,12 @@ defineCommand({
   },
   touches(args, snap) {
     const clip = snap.clips[args.clip_id];
-    const refs = [clipRef(args.clip_id), ...takeRefsOfClip(snap, args.clip_id), ...placementRefsOfClip(snap, args.clip_id)];
+    const refs = [
+      clipRef(args.clip_id),
+      ...takeRefsOfClip(snap, args.clip_id),
+      ...placementRefsOfClip(snap, args.clip_id),
+      ...samplerRefsOfClip(snap, args.clip_id),
+    ];
     if (clip) refs.push(trackRef(clip.track_id));
     return refs;
   },
@@ -1198,9 +1432,11 @@ defineCommand({
     const before = { [fieldKey(ref, "*")]: cloneJson(toPlain(clip)) };
     const after = { [fieldKey(ref, "*")]: ABSENT };
     // Its recorded takes go with it, captured for the same undo step, and so
-    // does every placement that put it on the timeline.
+    // do its patterns and steps and every placement that put it on the
+    // timeline.
     removeTakes(doc, new Set([args.clip_id]), before, after);
     removePlacements(doc, { clipIds: new Set([args.clip_id]) }, before, after);
+    removeSamplerObjects(doc, { clipIds: new Set([args.clip_id]) }, before, after);
     clipMap(doc).delete(args.clip_id);
     return { before, after };
   },
