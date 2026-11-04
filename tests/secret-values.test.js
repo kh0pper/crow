@@ -395,6 +395,68 @@ test("a secrets dir renamed away and replaced after it was anchored is not trust
   SV.invalidateSecretValues();
 });
 
+test("a planted dir owned by another uid is never anchored (Task 9: the first use is the dangerous one)", async (t) => {
+  const I = scratchInstance();
+  mkdirSync(join(I.home, "secrets"), { recursive: true, mode: 0o700 });
+  const realUid = typeof process.getuid === "function" ? process.getuid() : 0;
+  // A fresh module instance: this process's anchor map must not answer for it.
+  const fresh = await import("../servers/shared/secret-values.js?planted-uid");
+  t.mock.method(process, "getuid", () => realUid + 1);
+  assert.equal(fresh.anchorSecretsDir(I.env), null, "the dir at the path is not this uid's");
+  assert.equal(fresh.anchoredPath(I.env, "card-secret-hashes"), null);
+  assert.equal(fresh.secretsDirCurrentPath(I.env), null);
+  assert.equal(fresh.secretsDirTrusted(I.env), false);
+});
+
+test("F4: first boot — anchorSecretsDir creates the dir BEFORE the ancestors are judged, so a fresh HOME anchors cleanly", () => {
+  const I = scratchInstance();                 // <CROW_HOME> exists (its data dir does), secrets does not
+  assert.equal(existsSync(join(I.home, "secrets")), false);
+  const logs = [];
+  // CROW_BOT_UID set turns any finding into a refusal: with the check running
+  // before the mkdir, the not-yet-made home would be `cannot stat` and the
+  // anchor would be refused.
+  const anchor = SV.anchorSecretsDir({ ...I.env, CROW_BOT_UID: "54321" }, {
+    log: (l) => logs.push(l),
+    groupMembers: () => [],                    // the suite's umask may leave 0775 dirs
+  });
+  assert.ok(anchor && typeof anchor.fd === "number", "the first boot anchors: " + logs.join());
+  assert.equal(existsSync(join(I.home, "secrets")), true, "the dir was made before the check");
+  assert.equal(logs.some((l) => /refused/.test(l)), false, "no refusal on a fresh home");
+  assert.equal(SV.secretsDirTrusted(I.env), true);
+  rmSync(I.root, { recursive: true, force: true });
+});
+
+test("CROW_BOT_UID + an unsafe ancestor refuses the anchor; without it the anchor is made and the warning logs once", async () => {
+  const mode777 = 0o040777;
+  const worldWritable = (home) => (p) => (p === home ? { uid: process.getuid(), gid: process.getgid(), mode: mode777 } : lstatSync(p));
+
+  // Phase 3: a finding refuses the anchor, so every caller fails closed.
+  const guarded = await import("../servers/shared/secret-values.js?bot-uid-gate");
+  const G = scratchInstance();
+  mkdirSync(join(G.home, "secrets"), { recursive: true, mode: 0o700 });
+  const guardedLog = [];
+  const gEnv = { ...G.env, CROW_BOT_UID: "54321" };
+  assert.equal(guarded.anchorSecretsDir(gEnv, { stat: worldWritable(G.home), log: (l) => guardedLog.push(l) }), null);
+  assert.equal(guardedLog.length, 1);
+  assert.match(guardedLog[0], /refused/);
+  assert.match(guardedLog[0], new RegExp(G.home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.ok(!guardedLog[0].includes("54321"), "the log never needs the uid");
+
+  // Phase 1: the same tree only warns, once per process even across homes.
+  const warned = await import("../servers/shared/secret-values.js?phase1-warn");
+  const W = scratchInstance();
+  mkdirSync(join(W.home, "secrets"), { recursive: true, mode: 0o700 });
+  const warnedLog = [];
+  const anchor = warned.anchorSecretsDir(W.env, { stat: worldWritable(W.home), log: (l) => warnedLog.push(l) });
+  assert.ok(anchor && typeof anchor.fd === "number", "behaviour is unchanged: the dir is anchored");
+  assert.equal(warnedLog.length, 1);
+  assert.match(warnedLog[0], /WARNING/);
+  const W2 = scratchInstance();
+  mkdirSync(join(W2.home, "secrets"), { recursive: true, mode: 0o700 });
+  assert.ok(warned.anchorSecretsDir(W2.env, { stat: worldWritable(W2.home), log: (l) => warnedLog.push(l) }));
+  assert.equal(warnedLog.length, 1, "logged once per process");
+});
+
 test("the confirm CLI reads the operator's typed password on stdin (never argv), records only an exact manual match, never prints a value", async () => {
   const I = scratchInstance();
   const seed = randomBytes(32);

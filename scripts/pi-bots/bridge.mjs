@@ -50,8 +50,9 @@ import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { wrapPiSpawn, piSandboxMode } from "./pi_sandbox.mjs";
 import { ENTRY_MARK } from "./pi_netns_entry.mjs";
-import { containSelected, prepareAgentShadow, sweepStaleContainDirs } from "./pi_contain.mjs";
+import { containSelected, prepareAgentShadow, sweepStaleContainDirs, ContainRefused } from "./pi_contain.mjs";
 import { containedClassifierBlock, containedCloudTokenPath } from "./pi_contain_agent.mjs";
+import { botContainment, defToolNames, recordContainment, formatContainmentLine } from "./containment-status.mjs";
 import { gatewayListenPort } from "../../servers/gateway/listen-port.js";
 import { providerRowToObject } from "../../servers/shared/provider-row.js";
 import { CLOUD_CONSENT_KEY, CLOUD_CONSENT_SALT_KEY } from "../../servers/shared/cloud-consent.js";
@@ -793,6 +794,27 @@ export class PiRpc {
     // over-mounted (a bound path really contains it) or absent from the empty
     // root (no bind covers it), and the `hidden` check below reads that report.
     let contain = null;
+    // Honest containment status (bot containment Phase 1, Task 8): the bot's own
+    // closed-world servers and tools are what the status is about. ONE
+    // `[containment]` line per spawn, and the same facts are remembered in this
+    // process for the Bot Runtime settings section (no DB column, no migration).
+    const statusServers = Object.entries((opts.mcpConfig && opts.mcpConfig.mcpServers) || {})
+      .filter(([, block]) => block && typeof block === "object" && !block.disabled)
+      .map(([name]) => name);
+    const statusTools = def ? defToolNames(def) : [];
+    const reportContainment = (tier, refusal = null) => {
+      const status = botContainment({
+        tier, mcpServers: statusServers,
+        providerIds: (containModels && containModels.providerIds) || [],
+        missing: [
+          ...((contain && Array.isArray(contain.missing)) ? contain.missing : []),
+          ...(refusal ? [{ reason: refusal }] : []),
+        ],
+        tools: statusTools,
+      });
+      try { recordContainment(sandboxBotId, { ...status, tier }); } catch { /* status only */ }
+      console.error(formatContainmentLine(sandboxBotId, status));
+    };
     // Per-spawn contain resources (agent shadow, ...), removed exactly once:
     // on any failure before pi runs, or once pi's whole process group is gone
     // (the outer bwrap can exit while pi still drains inside its namespace).
@@ -823,9 +845,21 @@ export class PiRpc {
       launch = wrapPiSpawn(nodeBin, args, { env, infoFd: 3, botId: sandboxBotId, contain,
         hideDirs: [secretsHere, ...others], seccompFd: contain ? SECCOMP_FD : null, passFds });
     } catch (e) {
+      // A contain spawn that was REFUSED still gets its one line, naming the
+      // provider with no door (or the refusal the caller sees). When the
+      // refusal came before/while the plan was built (a bypass policy, a data
+      // folder that is the Crow home, an unscannable bind) there is no
+      // `missing` list to carry it, so the reason itself becomes the line:
+      // the turn did NOT run, and `runs with the operator's files` would be
+      // wrong for it.
+      const missing = (contain && Array.isArray(contain.missing)) ? contain.missing : [];
+      if (containedSpawn && (e instanceof ContainRefused || missing.length > 0)) {
+        reportContainment(null, e instanceof ContainRefused && missing.length === 0 ? e.message : null);
+      }
       this._runContainCleanup();
       throw e;
     }
+    reportContainment(launch.tier);
     // Under bwrap every found dir must really be masked (wrapPiSpawn drops a
     // dir it cannot stat): otherwise refuse, never run with one visible. In the
     // contain tier a dir is unreachable either way: over-mounted read-only when

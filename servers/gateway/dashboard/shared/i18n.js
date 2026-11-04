@@ -2832,6 +2832,60 @@ export const translations = {
       "<strong>Local a esta instancia, nunca sincronizado.</strong>",
   },
   "settings.ports.description": { en: "Host ports used by installed bundles and core services, with live status. Read-only.", es: "Puertos del host usados por los paquetes instalados y los servicios principales, con estado en vivo. Solo lectura." },
+  // Bot Runtime → honest containment status (bot containment Phase 1, Task 8).
+  // The open lines are the policy's exact English sentences; the level words are
+  // the policy's exact words (contained / partly contained / not contained).
+  "settings.containment.title": { en: "Containment", es: "Contención" },
+  "settings.botRuntimeContainmentLevel": { en: "Bots: {level}", es: "Contención de los bots: {level}" },
+  "settings.containment.levelContained": { en: "contained", es: "contenido" },
+  "settings.containment.levelPartly": { en: "partly contained", es: "parcialmente contenido" },
+  "settings.containment.levelNot": { en: "not contained", es: "sin contención" },
+  "settings.containment.noBots": { en: "No bots are enabled on this instance.", es: "No hay bots activados en esta instancia." },
+  "settings.containment.openHeading": { en: "Still open:", es: "Sigue abierto:" },
+  "settings.containment.note": {
+    en: "Computed from each bot's last spawn in this process; a bot this process has not spawned counts as " +
+      "not contained. Phase 1 cannot make a bot fully contained: the instance database is bound read-write.",
+    es: "Se calcula a partir del último arranque de cada bot en este proceso; un bot que este proceso no ha " +
+      "arrancado cuenta como sin contención. La fase 1 no puede contener un bot por completo: la base de " +
+      "datos de la instancia está montada como lectura y escritura.",
+  },
+  "settings.containment.openDataDbs": {
+    en: "crow.db and tasks.db are readable and writable (provider keys, OAuth tokens, settings, bot definitions)",
+    es: "crow.db y tasks.db son legibles y escribibles (claves de proveedores, tokens OAuth, ajustes, definiciones de bots)",
+  },
+  "settings.containment.openAddOnServer": {
+    en: "{server} runs inside the sandbox with its own credentials",
+    es: "{server} se ejecuta dentro del entorno aislado con sus propias credenciales",
+  },
+  "settings.containment.openBrowser": {
+    en: "the browser is unreachable (no browser door yet)",
+    es: "el navegador no es accesible (aún no hay puerta para el navegador)",
+  },
+  "settings.containment.openSecretsSwap": {
+    en: "an uncontained bot could replace the hidden secrets dir before a restart (peer tokens, service bindings)",
+    es: "un bot sin contención podría reemplazar el directorio de secretos oculto antes de un reinicio (tokens de pares, vinculaciones de servicios)",
+  },
+  "settings.containment.openUncontained": {
+    en: "runs with the operator's files, network and keys",
+    es: "se ejecuta con los archivos, la red y las claves del operador",
+  },
+  "settings.containment.openNoDoor": { en: "provider {id} has no door", es: "el proveedor {id} no tiene puerta" },
+  "settings.containment.openNoBwrap": { en: "this host has no bwrap", es: "este equipo no tiene bwrap" },
+  "settings.containment.openUnobserved": {
+    en: "spawns outside this process are not observed here, so this bot counts as not contained",
+    es: "los arranques fuera de este proceso no se observan aquí, así que este bot cuenta como sin contención",
+  },
+  "settings.containment.ancestorFinding": { en: "{path}: {why}", es: "{path} — {why}" },
+  "settings.containment.ancestorRefused": {
+    en: "the secrets dir anchor is refused while these are open (CROW_BOT_UID is set)",
+    es: "el anclaje del directorio de secretos se rechaza mientras esto siga abierto (CROW_BOT_UID está definido)",
+  },
+  "settings.containment.whyWorldWritable": { en: "world-writable without sticky", es: "escribible por cualquiera y sin sticky" },
+  "settings.containment.whyBotUid": { en: "writable by the bot uid", es: "escribible por el uid del bot" },
+  "settings.containment.whyBotGroup": { en: "group-writable by the bot's group", es: "escribible por el grupo del bot" },
+  "settings.containment.whySharedGroup": { en: "group-writable by a group with other members", es: "escribible por un grupo con otros miembros" },
+  "settings.containment.whyOtherOwner": { en: "owned by another user", es: "propiedad de otro usuario" },
+  "settings.containment.whyCannotStat": { en: "cannot stat", es: "no se puede consultar" },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.models": { en: "Models", es: "Modelos" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },

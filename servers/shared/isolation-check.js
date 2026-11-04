@@ -123,6 +123,21 @@ export function formatIsolationLine(r) {
   ].join("; ");
 }
 
+/**
+ * One [isolation] line for the hidden secrets dir's ancestors (bot containment
+ * Phase 1, Task 9; the check itself is secrets-ancestors.js). `ok` when no
+ * ancestor another principal could rename was found; otherwise the count, and
+ * `refused` once a bot uid is configured (that finding then refuses the anchor
+ * in secret-values.js). Paths and modes never appear here: the Bot Runtime
+ * status lists them for the operator.
+ */
+export function formatSecretsAncestorsLine(r) {
+  const n = Array.isArray(r && r.findings) ? r.findings.length : 0;
+  if (r && r.refused) return "[isolation] secrets dir ancestors: refused (" + n + " findings)";
+  if (n) return "[isolation] secrets dir ancestors: " + n + " findings";
+  return "[isolation] secrets dir ancestors: ok";
+}
+
 function looksLikeInstanceHome(p) {
   try { if (!statSync(p).isDirectory()) return false; } catch { return false; }
   for (const marker of ["installed.json", "mcp-addons.json", "data"]) {
