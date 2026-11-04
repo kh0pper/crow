@@ -301,7 +301,7 @@ function checkClipOnTrack(clip, trackId) {
  *          fade_in_beats: number, fade_out_beats: number}} placement
  * @returns {void}
  */
-function checkPlacementFit(clip, placement) {
+function checkPlacementFit(clip, placement, { existing = false } = {}) {
   const end = placement.start_bar + placement.bars;
   if (end > LIMITS.arrangementBars) {
     refuseLimit(
@@ -309,12 +309,17 @@ function checkPlacementFit(clip, placement) {
     );
   }
   const length = clipLengthBeats(clip);
-  if (!(placement.offset_beats >= 0) || placement.offset_beats >= length) {
+  // A placement that is already on the timeline keeps playing when its clip's
+  // cycle shrinks under its offset (a chain made shorter, or the undo of one
+  // made longer): the sequencer wraps the offset over the cycle, so an edit to
+  // that placement checks the offset it really plays from.
+  const offset = existing && placement.offset_beats >= 0 ? modulo(placement.offset_beats, length) : placement.offset_beats;
+  if (!(offset >= 0) || offset >= length) {
     refuseInvalid(
       `A placement starts inside its clip, so its offset is under the ${beatText(length)} beats of its whole cycle in "${clip.get("name")}"; ${beatText(placement.offset_beats)} beats is not.`,
     );
   }
-  if (!onOffsetGrid(placement.offset_beats)) {
+  if (!onOffsetGrid(offset)) {
     refuseInvalid(
       `A placement's offset is on the sixteenth-of-a-beat grid; ${beatText(placement.offset_beats)} beats is not.`,
     );
@@ -487,7 +492,7 @@ defineCommand({
       fade_in_beats: Number(placement.get("fade_in_beats")) || 0,
       fade_out_beats: Number(placement.get("fade_out_beats")) || 0,
     };
-    checkPlacementFit(clip, next);
+    checkPlacementFit(clip, next, { existing: true });
     checkFreeLane(doc, next);
 
     const ref = placementRef(args.id);
@@ -528,7 +533,7 @@ defineCommand({
       fade_in_beats: Number(placement.get("fade_in_beats")) || 0,
       fade_out_beats: Number(placement.get("fade_out_beats")) || 0,
     };
-    checkPlacementFit(clip, next);
+    checkPlacementFit(clip, next, { existing: true });
     checkFreeLane(doc, next);
     placement.set("bars", args.bars);
     const ref = placementRef(args.id);
@@ -627,8 +632,8 @@ defineCommand({
       fade_in_beats: 0,
       fade_out_beats: secondFadeOut,
     };
-    checkPlacementFit(clip, first);
-    checkPlacementFit(clip, second);
+    checkPlacementFit(clip, first, { existing: true });
+    checkPlacementFit(clip, second, { existing: true });
 
     // The two halves exactly fill the space the one placement had, so the only
     // lane that can matter is the first half's own: it was checked when the
@@ -688,7 +693,7 @@ defineCommand({
       fade_in_beats: args.fade_in_beats,
       fade_out_beats: args.fade_out_beats,
     };
-    checkPlacementFit(clip, next);
+    checkPlacementFit(clip, next, { existing: true });
 
     const ref = placementRef(args.id);
     const beforeIn = Number(placement.get("fade_in_beats")) || 0;

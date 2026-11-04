@@ -53,7 +53,8 @@
  * (`engine.loadSample`). A sample a render cannot read is not fatal — a pad
  * whose sample is missing plays silence (the spec's Review Focus 1), and one
  * dangling pad must not turn into a failed render of the whole song — but it is
- * never silently dropped either: the render's answer carries * `missing_samples: [{id, reason}]`, the renderer repeats it in its result and
+ * never silently dropped either: the render's answer carries
+ * `missing_samples: [{id, reason}]`, the renderer repeats it in its result and
  * in the `studio.render` audit line, and `studio_render` hands it to the agent.
  * A pad that names a sample the song does not hold at all is reported the same
  * way. The key rule still holds — such an object is never read.

@@ -506,16 +506,21 @@ test("splitting a chained pattern clip keeps playing the same pattern", (t) => {
   assert.equal(placementOf(s.doc, "p-c").offset_beats, 4);
   assert.match(midCycle.result.summary, /at bar 8/);
 
-  // An offset at the cycle's end is not inside it. Shortening the chain under
-  // the placement (A now, four beats) leaves that offset past the cycle, and
-  // the next edit of it is refused by name.
+  // Shortening the chain under the placement (A now, four beats) leaves its
+  // stored offset at the cycle's end. The sequencer wraps it and keeps playing,
+  // so the placement can still be moved, resized, faded and split; only a NEW
+  // placement must start inside the cycle.
   s.run("chain.set", { clip_id: clip, chain: ["a"] });
-  const past = refuses(() => s.run("arrangement.move", { id: "p-b", start_bar: 7 }), "invalid");
-  assert.match(past.message, /under the 4 beats of its whole cycle/);
-  refuses(
-    () => s.run("arrangement.place", { id: "p-d", track_id: track, clip_id: clip, start_bar: 9, bars: 1, offset_beats: 4 }),
+  s.run("arrangement.move", { id: "p-b", start_bar: 10 });
+  s.run("arrangement.resize", { id: "p-b", bars: 2 });
+  s.run("arrangement.set_fades", { id: "p-b", fade_in_beats: 0, fade_out_beats: 1 });
+  s.run("arrangement.split", { id: "p-b", at_bar: 11, new_id: "p-e" });
+  assert.equal(placementOf(s.doc, "p-b").start_bar, 10, "the stranded half was moved");
+  const past = refuses(
+    () => s.run("arrangement.place", { id: "p-d", track_id: track, clip_id: clip, start_bar: 14, bars: 1, offset_beats: 4 }),
     "invalid",
   );
+  assert.match(past.message, /under the 4 beats of its whole cycle/);
 
   // A loop that is not whole bars wraps on its own beats: twelve sixteenths are
   // three beats, so a split one bar into it lands one beat into the cycle.
@@ -531,10 +536,11 @@ test("splitting a chained pattern clip keeps playing the same pattern", (t) => {
   // One beat into a three-beat cycle is inside it, so the block is editable...
   s.run("arrangement.move", { id: "p-t", start_bar: 3 });
   assert.equal(placementOf(s.doc, "p-t").offset_beats, 1);
-  // ...while a one-beat loop's own end is not: shortening the pattern under the
-  // placement leaves that offset at the cycle's end.
+  // ...and it stays editable when the pattern is shortened under it to a
+  // one-beat loop: the offset wraps to where the sequencer plays it from.
   s.run("pattern.set_length", { clip_id: short.clip, length_steps: 4 });
-  refuses(() => s.run("arrangement.resize", { id: "p-t", bars: 2 }), "invalid");
+  s.run("arrangement.resize", { id: "p-t", bars: 2 });
+  assert.equal(placementOf(s.doc, "p-t").bars, 2);
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
