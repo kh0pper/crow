@@ -287,6 +287,8 @@ await addColumnIfMissing("project_members", "accepted_at", "TEXT");
 
 // Crow-to-Crow foundation tables. Same DDL as scripts/migrations/0016-crow-to-crow.mjs (one shape,
 // two rails). Additive, no SCHEMA_GENERATION bump. project_shared_items is created now, used in plan 2.
+// c2c_outbox_seq is the sender's stream counter, c2c_inbound_seq the receiver's mark per stream
+// (the sequencing contract is documented at the top of servers/sharing/c2c/outbox.js).
 await initTable("crow-to-crow tables", `
   CREATE TABLE IF NOT EXISTS project_shared_items (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,16 +314,34 @@ await initTable("crow-to-crow tables", `
     attempts        INTEGER NOT NULL DEFAULT 0,
     last_attempt_at TEXT,
     last_refusal    TEXT,
-    acked_at        TEXT,
-    UNIQUE (contact_id, project_uuid, seq)
+    acked_at        TEXT
   );
 
+  -- A seq is unique per stream (R1): the same number names different frames on
+  -- different targets, so the old (contact, project, seq) key would collide.
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_c2c_outbox_stream_seq
+    ON c2c_outbox(contact_id, project_uuid, COALESCE(to_instance_id, '*'), seq);
+
+  -- The sender's stream counter: one row per (contact, project, stream), never derived from
+  -- MAX(seq) over c2c_outbox, so pruning never re-issues a seq (outbox.js R2).
+  CREATE TABLE IF NOT EXISTS c2c_outbox_seq (
+    contact_id   INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    project_uuid TEXT NOT NULL,
+    stream       TEXT NOT NULL,
+    next_seq     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (contact_id, project_uuid, stream)
+  );
+
+  -- One high-water mark per stream: the frame's to_instance_id, or '*' when it has none
+  -- (outbox.js R1). The epoch column orders streams: a newer-epoch invite resets one (R3).
   CREATE TABLE IF NOT EXISTS c2c_inbound_seq (
     contact_id         INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
     sender_instance_id TEXT NOT NULL,
     project_uuid       TEXT NOT NULL,
+    stream             TEXT NOT NULL DEFAULT '*',
     high_water         INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (contact_id, sender_instance_id, project_uuid)
+    epoch              TEXT,
+    PRIMARY KEY (contact_id, sender_instance_id, project_uuid, stream)
   );
 
   CREATE TABLE IF NOT EXISTS c2c_visits (

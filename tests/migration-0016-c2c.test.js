@@ -1,4 +1,4 @@
-// 0016-crow-to-crow: project_members.accepted_at + the four c2c tables; init-db carries the same DDL.
+// 0016-crow-to-crow: project_members.accepted_at + the c2c tables; init-db carries the same DDL.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -10,7 +10,7 @@ import { run, id } from "../scripts/migrations/0016-crow-to-crow.mjs";
 import { LOCAL_ONLY_TABLES, SYNCED_TABLES, assertLocalOnlyDisjoint } from "../servers/sharing/instance-sync.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
-const TABLES = ["project_shared_items", "c2c_outbox", "c2c_inbound_seq", "c2c_visits"];
+const TABLES = ["project_shared_items", "c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits"];
 
 /** The pre-0016 shape of the three tables the migration depends on. */
 function legacyDb({ rows = false } = {}) {
@@ -37,8 +37,13 @@ const schemaOf = (dbPath) => {
   const sql = Object.fromEntries(TABLES.map((t) => [t, d.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(t)?.sql]));
   const idx = d.prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='project_shared_items' AND sql IS NOT NULL ORDER BY name").all();
   const pm = d.prepare("PRAGMA table_info(project_members)").all().map((c) => c.name).sort();
+  // The stream mark's own columns: R1's stream key and R3's epoch must match on both rails.
+  const inbound = d.prepare("PRAGMA table_info(c2c_inbound_seq)").all()
+    .map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt: c.dflt_value, pk: c.pk }));
+  const outboxSeq = d.prepare("PRAGMA table_info(c2c_outbox_seq)").all()
+    .map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, dflt: c.dflt_value, pk: c.pk }));
   d.close();
-  return { sql, idx, pm };
+  return { sql, idx, pm, inbound, outboxSeq };
 };
 
 test("0016 creates every table and column on a fresh DB", () => {
@@ -51,6 +56,15 @@ test("0016 creates every table and column on a fresh DB", () => {
     assert.ok(s.pm.includes("accepted_at"));
     assert.equal(s.idx.length, 1);
     assert.match(s.idx[0].sql, /WHERE removed_at IS NULL/);
+    // R2: the sender's per-stream counter; R1/R3: the mark's stream key and epoch.
+    assert.deepEqual(s.outboxSeq.map((c) => c.name), ["contact_id", "project_uuid", "stream", "next_seq"]);
+    assert.deepEqual(s.outboxSeq.filter((c) => c.pk).map((c) => c.name).sort(), ["contact_id", "project_uuid", "stream"]);
+    for (const col of ["stream", "epoch", "high_water"]) assert.ok(s.inbound.some((c) => c.name === col), col);
+    assert.deepEqual(
+      s.inbound.filter((c) => c.pk).map((c) => c.name).sort(),
+      ["contact_id", "project_uuid", "sender_instance_id", "stream"],
+      "the mark is per (sender instance, project, stream)",
+    );
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -98,6 +112,8 @@ test("init-db and 0016 produce identical schemas", () => {
       const mig = schemaOf(dbPath);
       assert.deepEqual(mig.sql, initSchema.sql);
       assert.deepEqual(mig.idx, initSchema.idx);
+      assert.deepEqual(mig.inbound, initSchema.inbound, "c2c_inbound_seq columns match");
+      assert.deepEqual(mig.outboxSeq, initSchema.outboxSeq, "c2c_outbox_seq columns match");
       assert.ok(initSchema.pm.includes("accepted_at") && mig.pm.includes("accepted_at"));
       // the column definition itself must match too
       const colOf = (p) => { const x = new Database(p); const c = x.prepare("PRAGMA table_info(project_members)").all().find((c) => c.name === "accepted_at"); x.close(); return { type: c.type, notnull: c.notnull, dflt: c.dflt_value }; };
@@ -107,7 +123,7 @@ test("init-db and 0016 produce identical schemas", () => {
 });
 
 test("c2c tables are local-only", () => {
-  for (const t of ["c2c_outbox", "c2c_inbound_seq", "c2c_visits"]) assert.ok(LOCAL_ONLY_TABLES.includes(t), t);
+  for (const t of ["c2c_outbox", "c2c_outbox_seq", "c2c_inbound_seq", "c2c_visits"]) assert.ok(LOCAL_ONLY_TABLES.includes(t), t);
   assertLocalOnlyDisjoint(SYNCED_TABLES, LOCAL_ONLY_TABLES);
 });
 
