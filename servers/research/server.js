@@ -577,18 +577,28 @@ export function createProjectServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "No updates provided." }] };
       }
 
-      // An archived project is hidden, so a status change is the owner's alone (delete's rule).
-      // The status read is here, before the write, so the audit row can say what changed.
+      // `learner_profile` is maker-lab's own type: every project list drops it and the owner
+      // rule excludes it, so retyping a project to it would hide it beyond anyone's reach.
+      if (type === "learner_profile") {
+        return {
+          content: [{ type: "text", text: "A project cannot be given the learner_profile type here." }],
+          isError: true,
+        };
+      }
+      // An archived project is hidden, and its type decides where it is listed, so a status or
+      // type change is the owner's alone (delete's rule). Read before the write, for the audit row.
       let statusFrom = null;
-      if (status !== undefined) {
+      let typeFrom = null;
+      if (status !== undefined || type !== undefined) {
         try {
           await assertCanChangeStatus(db, id);
         } catch (err) {
           if (err instanceof AclError) return aclErrorToToolResult(err);
           throw err;
         }
-        const cur = await db.execute({ sql: "SELECT status FROM project_spaces WHERE id = ?", args: [Number(id)] });
+        const cur = await db.execute({ sql: "SELECT status, type FROM project_spaces WHERE id = ?", args: [Number(id)] });
         statusFrom = cur.rows[0] ? cur.rows[0].status : null;
+        typeFrom = cur.rows[0] ? cur.rows[0].type : null;
       }
 
       let rowsAffected;
@@ -603,6 +613,11 @@ export function createProjectServer(dbPath, options = {}) {
       if (status !== undefined) {
         await appendAudit(db, {
           project_id: Number(id), ...auditActor(actor), action: "status_changed", payload: { from: statusFrom, to: status },
+        });
+      }
+      if (type !== undefined) {
+        await appendAudit(db, {
+          project_id: Number(id), ...auditActor(actor), action: "type_changed", payload: { from: typeFrom, to: type },
         });
       }
       return { content: [{ type: "text", text: `Project #${id} updated.` }] };

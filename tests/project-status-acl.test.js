@@ -157,6 +157,41 @@ test("crow_update_project: a visited project's status is refused and nothing is 
   } finally { await client.close(); s.close(); }
 });
 
+test("crow_update_project: a visited project's type change is refused (a type can hide a project)", async () => {
+  const s = fresh();
+  const client = await researchClient(s.dbPath);
+  try {
+    const id = await newProject(s, { role: "editor" });
+    const r = await updateProject(client, { id, type: "research" });
+    assert.equal(r.isError, true, "the tool refuses");
+    assert.match(textOf(r), REFUSAL);
+    const { rows } = await s.db.execute({ sql: "SELECT type FROM project_spaces WHERE id = ?", args: [id] });
+    assert.equal(rows[0].type, "general", "the type is unchanged");
+    assert.deepEqual(await auditsOf(s, id), []);
+  } finally { await client.close(); s.close(); }
+});
+
+test("crow_update_project: learner_profile is refused even for the owner; an owner's other type change is audited", async () => {
+  const s = fresh();
+  const client = await researchClient(s.dbPath);
+  try {
+    const id = await newProject(s, { role: "owner" });
+    const bad = await updateProject(client, { id, type: "learner_profile" });
+    assert.equal(bad.isError, true);
+    let { rows } = await s.db.execute({ sql: "SELECT type FROM project_spaces WHERE id = ?", args: [id] });
+    assert.equal(rows[0].type, "general", "never hidden through this tool");
+
+    const ok = await updateProject(client, { id, type: "research" });
+    assert.notEqual(ok.isError, true);
+    ({ rows } = await s.db.execute({ sql: "SELECT type FROM project_spaces WHERE id = ?", args: [id] }));
+    assert.equal(rows[0].type, "research");
+    const audits = await auditsOf(s, id);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].action, "type_changed");
+    assert.deepEqual(JSON.parse(audits[0].payload), { from: "general", to: "research" });
+  } finally { await client.close(); s.close(); }
+});
+
 test("crow_update_project: a missing project's status change is refused", async () => {
   const s = fresh();
   const client = await researchClient(s.dbPath);
@@ -384,7 +419,7 @@ function scanSource(text, name = "source") {
     const call = h.text.indexOf("updateProjectSpaceMeta(");
     if (call === -1) continue;
     const before = h.text.slice(0, call);
-    if (!/\bstatus\b/.test(before)) continue;
+    if (!/\b(?:status|type)\b/.test(before)) continue;
     if (before.includes("assertCanChangeStatus(")) guarded.push(`${name}: ${h.label}`);
     else violations.push(`${name}: ${h.label} can write a status with no assertCanChangeStatus before it`);
   }

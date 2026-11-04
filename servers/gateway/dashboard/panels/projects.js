@@ -165,7 +165,7 @@ export default {
             await assertCanChangeStatus(db, projectId);
           } catch (err) {
             if (err instanceof AclError && err.code === "not_owner") {
-              return res.redirectAfterPost(`/dashboard/projects?view=${id}&error=not_owner`);
+              return res.redirectAfterPost(`/dashboard/projects?view=${projectId}&error=not_owner`);
             }
             throw err;
           }
