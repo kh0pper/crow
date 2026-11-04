@@ -55,7 +55,17 @@ Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.
 The first time you visit `/dashboard`, you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my Crow's Nest password."
 
 ::: tip First-run setup link
-Until a password exists, the first-run pages ask for a one-time setup token, so someone else on your network cannot set the password first. The installer prints the setup URL with `?token=…` already in it; the same token is saved in `~/.crow/setup-token` (readable only by your account) if you need it again. Opening the page on the machine itself — `http://localhost:3001/setup` — needs no token. The token stops working once the password is set.
+Until a password exists, the first-run pages ask for a one-time setup token, so someone else on your network cannot set the password first.
+
+Under Docker the page is served from inside the `crow-gateway` container, so a request you make from the host reaches it from the Docker bridge network rather than from the machine itself: the token is required, even when you browse from the host.
+
+The token lives inside the container, in Crow's home directory there — read it with:
+
+```bash
+docker compose exec crow-gateway cat /root/.crow/setup-token
+```
+
+Then open `http://localhost:3001/setup?token=<that value>`. The compose file publishes the gateway on `127.0.0.1` only, so that address is the host's own port mapping, not a port open to your network. The token stops working once the password is set.
 :::
 
 ## Connect Your AI

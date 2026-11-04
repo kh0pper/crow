@@ -11,7 +11,7 @@
  */
 
 import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
-import { allowFirstRun, setupTokenPath } from "./dashboard/setup-token.js";
+import { allowFirstRun } from "./dashboard/setup-token.js";
 import { CROW_HERO_SVG } from "./dashboard/shared/crow-hero.js";
 
 /** Escape a string for safe interpolation into HTML attributes. */
@@ -24,7 +24,7 @@ const translations = {
     subtitle: "Set up your Crow instance",
     step1Password: "Set Crow\u2019s Nest Password",
     useInviteLink: "Use the link you were sent.",
-    setupTokenRequired: "The setup link is printed by the installer, and saved in {path} on this machine. If you are on the machine itself, open /setup from it directly — no link is needed.",
+    setupTokenRequired: "The setup link is printed by the installer, and the same token is saved as setup-token in Crow's home directory — on this machine, or inside the Crow container. If you are on the machine itself and it is not behind Docker, open /setup from it directly — no link is needed.",
     protectPassword: "Protect your Crow\u2019s Nest with a password. This is required before you can access the control panel.",
     choosePassword: "Choose a password (12+ characters)",
     confirmPassword: "Confirm password",
@@ -35,7 +35,7 @@ const translations = {
     subtitle: "Configura tu instancia Crow",
     step1Password: "Establecer Contraseña del Nido",
     useInviteLink: "Usa el enlace que te enviaron.",
-    setupTokenRequired: "El enlace de configuración lo imprime el instalador y se guarda en {path} en esta máquina. Si estás en la máquina misma, abre /setup desde ella directamente — no hace falta ningún enlace.",
+    setupTokenRequired: "El enlace de configuración lo imprime el instalador, y ese mismo token se guarda como setup-token en el directorio home de Crow — en esta máquina o dentro del contenedor de Crow. Si estás en la máquina misma y no está detrás de Docker, abre /setup desde ella directamente — no hace falta ningún enlace.",
     protectPassword: "Protege tu Nido de Crow con una contraseña. Esto es necesario antes de poder acceder al panel de control.",
     choosePassword: "Elige una contraseña (12+ caracteres)",
     confirmPassword: "Confirmar contraseña",
@@ -78,7 +78,6 @@ export async function setupPageHandler(req, res) {
   const gate = allowFirstRun(req, { from: "query" });
   const { token: setupToken, allowed: tokenAllowed } = gate;
   const tokenBlocked = !tokenAllowed;
-  const tokenPath = setupTokenPath();
 
   const html = `<!DOCTYPE html>
 <html lang="${lang}">
@@ -128,7 +127,7 @@ export async function setupPageHandler(req, res) {
     ${tokenBlocked ? `
     <div class="instructions">
       <p style="margin-bottom:12px;color:#ff3b30"><strong>${t.useInviteLink}</strong></p>
-      <p style="color:#86868b">${t.setupTokenRequired.split("{path}").join(escapeAttr(tokenPath))}</p>
+      <p style="color:#86868b">${t.setupTokenRequired}</p>
     </div>` : `
     <div class="instructions">
       <p style="margin-bottom:12px">${t.protectPassword}</p>

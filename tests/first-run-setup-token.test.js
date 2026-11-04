@@ -12,11 +12,15 @@
 // simulated over the loopback test connection.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, statSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { rmScratch } from "./helpers/safe-rm.js";
+
+const execFileP = promisify(execFile);
 
 const REPO = join(import.meta.dirname, "..");
 const dir = mkdtempSync(join(tmpdir(), "first-run-setup-token-"));
@@ -37,7 +41,9 @@ const {
   tokenMatches,
   clearSetupToken,
   isDirectLoopback,
+  allowFirstRun,
   announceSetupToken,
+  bootSetupToken,
   setupTokenPath,
 } = await import("../servers/gateway/dashboard/setup-token.js");
 
@@ -103,6 +109,9 @@ const hasPasswordForm = (html) => /name="password"/.test(html);
 const GATED_TEXT = "The setup link is printed by the installer";
 const isGated = (html) => html.includes(GATED_TEXT);
 const isServedWithToken = (html) => hasPasswordForm(html) && !html.includes(GATED_TEXT) && /name="setup_token"/.test(html);
+// The gate names the token FILE, not a host path: under Docker it is inside the
+// container, so a host path in the message would point at nothing there.
+const WHERE_TO_LOOK = "on this machine, or inside the Crow container";
 
 test("the token file is 0600 and a second read returns the same token", () => {
   const first = getSetupToken({ crowHome: HOME });
@@ -173,7 +182,8 @@ test("GET /dashboard/login: a LAN peer without a token gets the gated message; w
   const html = await gated.text();
   assert.equal(gated.status, 200);
   assert.ok(isGated(html), "gated without the token");
-  assert.ok(html.includes(TOKEN_FILE), "the gated message says where the token is saved");
+  assert.ok(html.includes(WHERE_TO_LOOK), "the gated message says where to look (this machine, or the container)");
+  assert.equal(html.includes(TOKEN_FILE), false, "and names no host path for the token file");
   assert.equal(/name="setup_token"/.test(html), false, "no token is echoed to a peer that did not present one");
 
   const wrong = await (await get("/dashboard/login?token=not-the-token")).text();
@@ -189,7 +199,8 @@ test("/setup: a LAN peer without a token is blocked, with the token it is served
   const blocked = await (await get("/setup")).text();
   assert.ok(/Use the link you were sent/.test(blocked), "blocked message");
   assert.equal(hasPasswordForm(blocked), false);
-  assert.ok(blocked.includes(TOKEN_FILE));
+  assert.ok(blocked.includes(WHERE_TO_LOOK), "the blocked page says where to look");
+  assert.equal(blocked.includes(TOKEN_FILE), false, "no host path");
 
   const served = await (await get(`/setup?token=${encodeURIComponent(token)}`)).text();
   assert.ok(hasPasswordForm(served), "served with the token");
@@ -246,4 +257,124 @@ test("POST /dashboard/login: a Serve-shaped loopback request needs the token, a 
   assert.equal(local.status, 303, await local.text().then((t) => t.slice(0, 200)));
   assert.equal(await isPasswordSet(), true, "loopback may set the first password");
   assert.equal(existsSync(TOKEN_FILE), false, "and the token file is cleared");
+});
+
+// --- B1: a first-run validation error must not throw the token away ----------
+test("B1: a first-run POST that fails validation re-renders WITH the token, and the retry succeeds", async () => {
+  const token = await resetFirstRun();
+
+  // Passwords don't match: the page comes back carrying the validated token, so
+  // a non-loopback peer can simply correct the form.
+  const mismatch = await post("/dashboard/login", { password: PW, confirm: `${PW}!`, setup_token: token });
+  assert.equal(mismatch.status, 200);
+  const mismatchHtml = await mismatch.text();
+  assert.equal(isGated(mismatchHtml), false, "the token was accepted");
+  const echoed = /name="setup_token" value="([^"]+)"/.exec(mismatchHtml)?.[1];
+  assert.equal(echoed, token, "the token is carried back into the form");
+  assert.equal(await isPasswordSet(), false, "nothing was set yet");
+
+  // Too short a password is the other first-run error render: same carry-over.
+  const weak = await post("/dashboard/login", { password: "short", confirm: "short", setup_token: token });
+  assert.equal(weak.status, 200);
+  assert.equal(/name="setup_token" value="([^"]+)"/.exec(await weak.text())?.[1], token, "the short-password retry keeps the token");
+  assert.equal(await isPasswordSet(), false);
+
+  // The retry with the token the page handed back sets the password.
+  const ok = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: echoed });
+  assert.equal(ok.status, 303, (await ok.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true);
+  assert.equal(existsSync(TOKEN_FILE), false, "the one-time file is gone");
+});
+
+// --- MINOR 1: the env token has no loopback exemption -------------------------
+test("MINOR 1: with CROW_SETUP_TOKEN set, a bare loopback POST still needs the token", async () => {
+  process.env.CROW_SETUP_TOKEN = "env-token-with-no-exemption";
+  try {
+    await resetFirstRun(); // no password, no file — the env token is the only token
+
+    const local = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null });
+    assert.equal(local.status, 200, "not signed in");
+    assert.ok(isGated(await local.text()), "the machine itself is refused too");
+    assert.equal(await isPasswordSet(), false);
+
+    const wrong = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: "not-the-env-token" }, { peer: null });
+    assert.ok(isGated(await wrong.text()), "a wrong token stays refused");
+    assert.equal(await isPasswordSet(), false);
+
+    const ok = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: "env-token-with-no-exemption" }, { peer: null });
+    assert.equal(ok.status, 303, (await ok.text()).slice(0, 200));
+    assert.equal(await isPasswordSet(), true);
+  } finally {
+    delete process.env.CROW_SETUP_TOKEN;
+  }
+});
+
+// --- MINOR 4: no token is minted for an instance that already has a password --
+test("MINOR 4: getSetupToken does not recreate the file once a password exists", async () => {
+  await resetFirstRun();
+  assert.ok(existsSync(TOKEN_FILE), "a token file to remove");
+  await db.execute("INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('password_hash', 'not-a-real-hash', datetime('now'))");
+  clearSetupToken({ crowHome: HOME });
+  try {
+    assert.equal(await isPasswordSet(), true);
+    const t = getSetupToken({ crowHome: HOME, hasPassword: await isPasswordSet() });
+    assert.equal(t.token, "", "no token is handed out");
+    assert.equal(existsSync(TOKEN_FILE), false, "and no file is written back");
+  } finally {
+    await db.execute("DELETE FROM dashboard_settings WHERE key = 'password_hash'");
+  }
+});
+
+// --- MINOR 5: the boot seam, and a declared loopback proxy -------------------
+test("MINOR 5: the gateway's boot seam creates the token file and logs its path, never the token", async () => {
+  const bootHome = mkdtempSync(join(dir, "boot-seam-home-"));
+  const lines = [];
+  const line = await bootSetupToken({ crowHome: bootHome, isPasswordSet: () => false, log: (l) => lines.push(l) });
+  const file = setupTokenPath({ crowHome: bootHome });
+  assert.equal(lines.length, 1, "exactly one line");
+  assert.ok(line.includes(file), "the line carries the file path");
+  assert.equal(existsSync(file), true, "the boot hook created the file");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  const { token } = getSetupToken({ crowHome: bootHome });
+  assert.equal(line.includes(token), false, "the line never carries the token");
+
+  const quietHome = mkdtempSync(join(dir, "boot-seam-quiet-"));
+  const quiet = [];
+  assert.equal(await bootSetupToken({ crowHome: quietHome, isPasswordSet: async () => true, log: (l) => quiet.push(l) }), null);
+  assert.equal(quiet.length, 0, "silent once a password exists");
+  assert.equal(existsSync(setupTokenPath({ crowHome: quietHome })), false, "and no file is created");
+});
+
+test("MINOR 5b: a loopback socket listed in CROW_TRUSTED_PROXIES is NOT exempt, headers or not", async () => {
+  const previous = process.env.CROW_TRUSTED_PROXIES;
+  const req = (remoteAddress, headers = {}) => ({ socket: { remoteAddress }, headers, query: {} });
+  process.env.CROW_TRUSTED_PROXIES = "loopback";
+  try {
+    assert.equal(isDirectLoopback(req("127.0.0.1")), false, "a same-box proxy is not the machine's own user");
+    assert.equal(isDirectLoopback(req("::1")), false, "v6 loopback too");
+
+    await resetFirstRun();
+    const gate = allowFirstRun(req("127.0.0.1"), { crowHome: HOME, from: "query" });
+    assert.equal(gate.allowed, false, "no exemption through a declared proxy");
+    assert.equal(gate.token, null);
+  } finally {
+    if (previous === undefined) delete process.env.CROW_TRUSTED_PROXIES;
+    else process.env.CROW_TRUSTED_PROXIES = previous;
+  }
+});
+
+// --- MINOR 3: two processes racing to mint the token agree --------------------
+test("MINOR 3: two concurrent getSetupToken calls return the same value (first writer wins)", async () => {
+  const raceHome = mkdtempSync(join(dir, "race-home-"));
+  const mod = pathToFileURL(join(REPO, "servers/gateway/dashboard/setup-token.js")).href;
+  const script = `import(${JSON.stringify(mod)}).then((m) => process.stdout.write(m.getSetupToken({ crowHome: process.env.RACE_HOME }).token));`;
+  const run = () => execFileP(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, CROW_SETUP_TOKEN: "", RACE_HOME: raceHome },
+    encoding: "utf8",
+  });
+  const [a, b] = await Promise.all([run(), run()]);
+  const onDisk = readFileSync(join(raceHome, "setup-token"), "utf8").trim();
+  assert.match(onDisk, /^[A-Za-z0-9_-]{40,}$/, "one token on disk");
+  assert.equal(a.stdout.trim(), onDisk, "the first caller reports what is on disk");
+  assert.equal(b.stdout.trim(), onDisk, "so does the racing caller");
 });

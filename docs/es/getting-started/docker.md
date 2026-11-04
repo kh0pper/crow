@@ -55,7 +55,17 @@ Visita `http://localhost:3001/setup` para ver el estado de las integraciones y l
 La primera vez que visites `/dashboard`, se te pedirá establecer una contraseña. También puedes establecerla desde la página `/setup` o pidiéndoselo a tu IA: "Establece mi contraseña del Crow's Nest."
 
 ::: tip Enlace de configuración inicial
-Mientras no exista una contraseña, las páginas de configuración inicial piden un token de un solo uso, para que nadie más en tu red pueda establecer la contraseña primero. El instalador imprime la URL de configuración con `?token=…` ya incluido; ese mismo token se guarda en `~/.crow/setup-token` (solo tu cuenta puede leerlo) por si lo necesitas de nuevo. Abrir la página en la máquina misma — `http://localhost:3001/setup` — no requiere token. El token deja de funcionar en cuanto estableces la contraseña.
+Mientras no exista una contraseña, las páginas de configuración inicial piden un token de un solo uso, para que nadie más en tu red pueda establecer la contraseña primero.
+
+Con Docker la página se sirve desde dentro del contenedor `crow-gateway`, así que una petición que hagas desde el host llega desde la red bridge de Docker y no desde la máquina misma: el token es obligatorio, incluso cuando abres la página desde el host.
+
+El token está dentro del contenedor, en el directorio home de Crow allí — léelo con:
+
+```bash
+docker compose exec crow-gateway cat /root/.crow/setup-token
+```
+
+Luego abre `http://localhost:3001/setup?token=<ese valor>`. El archivo compose publica el gateway solo en `127.0.0.1`, así que esa dirección es el mapeo de puerto del propio host, no un puerto abierto a tu red. El token deja de funcionar en cuanto estableces la contraseña.
 :::
 
 ## Conectar Tu IA

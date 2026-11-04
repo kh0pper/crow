@@ -538,28 +538,49 @@ if [ -n "$SETUP_TOKEN" ]; then
   SETUP_QS="?token=${SETUP_TOKEN}"
 fi
 
+# Has this Crow already been set up? Two signals together: no token file (it is
+# deleted with the first password) AND the gateway redirecting /setup to the
+# login page, which setup-page.js does only once a password exists. Status 302
+# from /setup is the simplest reliable one; a missing 302 (gated page, or no
+# answer) leaves the first-run message in place.
+SETUP_DONE=false
+if [ ! -r "$SETUP_TOKEN_FILE" ]; then
+  SETUP_STATUS="$(curl -sS -m 3 -o /dev/null -w '%{http_code}' http://localhost:3001/setup 2>/dev/null || true)"
+  if [ "$SETUP_STATUS" = "302" ]; then
+    SETUP_DONE=true
+  fi
+fi
+
 if [ "$IS_CLOUD_HOST" = true ] && [ -z "${GATEWAY_HTTPS_URL:-}" ]; then
   echo "  This is a cloud server: ${MDNS_HOST} is not reachable from your browser."
   echo "  Open an SSH tunnel from your own computer, then browse to http://localhost:3001/setup${SETUP_QS} :"
   echo "    ssh -L 3001:localhost:3001 ${USER}@<this-server's-public-IP>"
   echo "  (Or re-run this installer and accept Tailscale Serve for a permanent URL.)"
+  SIGNIN_URL="http://localhost:3001/dashboard/login   (through the SSH tunnel)"
 else
   echo "  Open in your browser:"
   echo "    https://${MDNS_HOST}/setup${SETUP_QS}"
+  SIGNIN_URL="https://${MDNS_HOST}/dashboard/login"
   if [ -n "${GATEWAY_HTTPS_URL:-}" ]; then
     echo "    ${GATEWAY_HTTPS_URL}/setup${SETUP_QS}   (any device on your tailnet)"
+    SIGNIN_URL="${GATEWAY_HTTPS_URL}/dashboard/login"
   fi
 fi
 echo ""
-if [ -n "$SETUP_TOKEN" ]; then
-  echo "  That link works once, and anyone who has it can claim this Crow — don't share it."
+if [ "$SETUP_DONE" = true ]; then
+  echo "  Setup is already done; sign in at:"
+  echo "    ${SIGNIN_URL}"
 else
-  echo "  The one-time setup token is not written yet. The gateway saves it to:"
-  echo "    ${SETUP_TOKEN_FILE}"
-  echo "  Read it on this machine and add it to the URL as ?token=<that value>."
+  if [ -n "$SETUP_TOKEN" ]; then
+    echo "  That link works once, and anyone who has it can claim this Crow — don't share it."
+  else
+    echo "  The one-time setup token is not written yet. The gateway saves it to:"
+    echo "    ${SETUP_TOKEN_FILE}"
+    echo "  Read it on this machine and add it to the URL as ?token=<that value>."
+  fi
+  echo "  Opening the setup page on this machine itself (http://localhost:3001/setup)"
+  echo "  needs no token."
 fi
-echo "  Opening the setup page on this machine itself (http://localhost:3001/setup)"
-echo "  needs no token."
 echo ""
 echo "  Everything else happens there — the setup wizard walks you through"
 echo "  passwords, your AI model, and connecting devices."

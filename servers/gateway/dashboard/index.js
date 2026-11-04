@@ -45,8 +45,8 @@ import { signTicket, verifyTicket, isSafeDestPath } from "../../shared/sso-ticke
 import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
 import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
-import { SUPPORTED_LANGS, t, fill } from "./shared/i18n.js";
-import { allowFirstRun, announceSetupToken, clearSetupToken, setupTokenPath } from "./setup-token.js";
+import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
+import { allowFirstRun, clearSetupToken } from "./setup-token.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -114,9 +114,10 @@ import { isLocalPasswordSessionOn } from "./local-session.js";
 import { withForYouOwner } from "./shell/chrome.js";
 import { forYouEnabled } from "../for-you/flag.js";
 
-/** A first-run gate message, with the path where the setup token is saved. */
+/** A first-run gate message: where the token lives is described (this machine or
+ * the container), never as a host path the browser could be told to read. */
 function setupTokenMessage(key, lang) {
-  return fill(t(key, lang), { path: setupTokenPath() });
+  return t(key, lang);
 }
 
 /** A retried 2FA step's pending token keeps the SSO context and the on-host flag (auth.js). */
@@ -204,16 +205,20 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       // First-time setup. The setup token comes first: while no password exists,
       // only direct loopback (the owner on this machine or through an SSH
       // tunnel) may set it, or a request carrying the matching one-time token.
+      // CROW_SETUP_TOKEN (hosted) has no loopback exemption (setup-token.js).
       const gate = allowFirstRun(req, { from: "body" });
       if (!gate.allowed) {
         return res.type("html").send(renderLogin({ isSetup: true, error: setupTokenMessage("login.setupTokenInvalid", lang), lang }));
       }
+      // Every error render below carries the validated token back into the form:
+      // without it the retry would be refused, since the peer is not loopback.
+      const retryToken = gate.token || undefined;
       const strength = validatePasswordStrength(password);
       if (!strength.valid) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: strength.message, lang }));
+        return res.type("html").send(renderLogin({ isSetup: true, setupToken: retryToken, error: strength.message, lang }));
       }
       if (password !== confirm) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: "Passwords don't match.", lang }));
+        return res.type("html").send(renderLogin({ isSetup: true, setupToken: retryToken, error: "Passwords don't match.", lang }));
       }
       await setPassword(password);
       // The first password exists: the one-time token has done its job.

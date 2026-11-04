@@ -706,9 +706,8 @@ try {
   // (the journal is broader than the owner). Silent once a password exists
   // (servers/gateway/dashboard/setup-token.js).
   try {
-    const { announceSetupToken } = await import("./dashboard/setup-token.js");
-    const { isPasswordSet } = await import("./dashboard/auth.js");
-    announceSetupToken({ passwordSet: await isPasswordSet().catch(() => false) });
+    const { bootSetupToken } = await import("./dashboard/setup-token.js");
+    await bootSetupToken();
   } catch (err) {
     console.warn("[setup] could not prepare the first-run setup token:", err.message);
   }
