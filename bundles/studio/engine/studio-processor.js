@@ -115,7 +115,12 @@
  * - **Voice stealing:** 16 voices per track, 64 for the whole song. The 17th
  *   voice on a track steals that track's oldest, and a start that would take
  *   the song past 64 steals the song's oldest — a voice that is already fading
- *   out (choked, or already releasing) goes before one that is still held.
+ *   out (choked, or already releasing) goes before one that is still held. A
+ *   track's own steal fades: the stolen voice is moved into one of the track's
+ *   two fade tails and rung out over 64 frames while the new voice takes its
+ *   slot (with both tails in use it is cut instead — the pool stays 16). The
+ *   song-wide steal cuts, so a song past its 64-voice cap really is 64 voices.
+ *   Nothing is stolen until the new voice's own range is known to be playable.
  * - **Choke groups:** a start in choke group *n* fades every other sounding
  *   voice of group *n* on that track out over 64 frames.
  * - **Modes:** a `oneshot` pad plays to the end of its range and stops there
@@ -123,7 +128,12 @@
  *   `gate_frames`, the step's own length.
  * - **Live pads:** `{type:"live", track_id, bank_id, index, v, on}` starts or
  *   releases a pad from the panel (on-screen audition, MIDI later). A live
- *   start never goes through history and is never quantized.
+ *   start never goes through history and is never quantized. A release only
+ *   releases `gate` voices: a `oneshot` pad that was pressed plays to its end.
+ * - **Locks:** every one of a pad's own fields can be locked per step —
+ *   `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `pitch`, `gain_db`,
+ *   `pan`, `reverse`, `cutoff_hz`, `resonance` and the filter's kind under
+ *   `filter_type` — and all of them go through the same `field()` lookup.
  *
  * ## Taps
  *
@@ -265,6 +275,14 @@
   /** How many voices one sampler track holds, and how many the song may sound. */
   const SAMPLER_VOICES_PER_TRACK = 16;
   const SAMPLER_VOICES_SONG_WIDE = 64;
+
+  /**
+   * How many stolen voices one track can ring out at once. The 16 voice slots
+   * are all in use when a steal happens, so the stolen voice fades in one of
+   * these tails instead of holding the slot it is losing; two cover a steal
+   * chain, and past them a stolen voice is simply cut.
+   */
+  const STOLEN_TAILS_PER_TRACK = 2;
 
   /**
    * How many bytes of decoded samples may be loaded at once. Past this the
@@ -1254,6 +1272,8 @@
         left: 0,
         right: 0,
         voices: voices,
+        /** Stolen voices ringing out their 64-frame fade; empty until one is needed. */
+        tails: [],
       };
     }
 
@@ -1362,7 +1382,14 @@
           voice.sounding = false;
           voice.channels = null;
         }
-      }      const own = engine || record.engine;
+      }
+      if (record.tails) {
+        for (const tail of record.tails) {
+          tail.sounding = false;
+          tail.channels = null;
+        }
+      }
+      const own = engine || record.engine;
       if (!own) return;
       try {
         if (record.module >= 0) {
@@ -1614,14 +1641,17 @@
       for (let index = 0; index < slots.length; index += 1) {
         const record = slots[index];
         if (!record) continue;
-        // A tapped track is rendered into its own scratch buffers first and
-        // then added to the mix, so the tap carries that track alone. Nothing
-        // is copied while no track is tapped.
+        // A tapped track is rendered into its own scratch buffers first, at this
+        // sub-run's own offset (a block is rendered in several runs, one per
+        // event), and then added from there: the tap carries that track alone
+        // and the master is the same sum with the tap on or off. Nothing is
+        // copied while no track is tapped.
         if (index === tapped && this.tapLeft) {
-          this.renderRecord(record, frames, this.tapLeft, this.tapRight, 0);
+          this.renderRecord(record, frames, this.tapLeft, this.tapRight, offset);
           for (let at = 0; at < frames; at += 1) {
-            left[offset + at] += this.tapLeft[at];
-            if (right) right[offset + at] += this.tapRight[at];
+            const position = offset + at;
+            left[position] += this.tapLeft[position];
+            if (right) right[position] += this.tapRight[position];
           }
           continue;
         }
@@ -1685,9 +1715,29 @@
      * @returns {void}
      */
     renderSampler(record, frames, left, right, offset) {
-      const voices = record.voices;
       const gainLeft = record.left;
       const gainRight = record.right;
+      this.renderVoiceList(record.voices, frames, left, right, offset, gainLeft, gainRight);
+      // A stolen voice rings out in a fade tail for 64 frames after its slot was
+      // taken (see `retireVoice`), through the very same mix.
+      if (record.tails && record.tails.length > 0) {
+        this.renderVoiceList(record.tails, frames, left, right, offset, gainLeft, gainRight);
+      }
+    }
+
+    /**
+     * Mix one list of sampler voices over a run of frames, with the track's own
+     * gain and pan.
+     * @param {object[]} voices
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array|null} right
+     * @param {number} offset
+     * @param {number} gainLeft
+     * @param {number} gainRight
+     * @returns {void}
+     */
+    renderVoiceList(voices, frames, left, right, offset, gainLeft, gainRight) {
       for (let at = 0; at < voices.length; at += 1) {
         const voice = voices[at];
         if (!voice.sounding) continue;
@@ -1791,6 +1841,12 @@
      * A step gives a `gate` pad its `gate_frames` to release at. A live press has
      * no step, so it holds until `liveRelease` for a `gate` pad and plays to the
      * end of its range for a `oneshot` one.
+     *
+     * Every one of the pad's own fields can be locked for this one voice, and
+     * they all go through the same `field()` lookup: `attack_ms`, `decay_ms`,
+     * `sustain`, `release_ms`, `pitch`, `gain_db`, `pan`, `reverse`,
+     * `cutoff_hz`, `resonance`, and the filter's kind under `filter_type` (the
+     * document spells the pad's own one `filter.type`).
      * @param {{track_id: string, bank_id: string, index: number, v: number,
      *          locks?: object, gate_frames?: number}} event
      * @param {boolean} live whether this is a live press rather than a step
@@ -1811,15 +1867,21 @@
         this.reportMissingSample(sampleId);
         return;
       }
-      stored.lastUsed = this.sampleClock += 1;
 
       const locks = event.locks && typeof event.locks === "object" ? event.locks : null;
       const field = (name, fallback) => (locks && locks[name] !== undefined ? locks[name] : fallback);
 
       const range = this.padRange(pad, stored);
+      // An empty range plays nothing, so it must not take (and so steal) a
+      // voice: the check is made here, before a slot is chosen, so a start that
+      // cannot succeed leaves every sounding voice alone.
+      if (!(range.end > range.start)) return;
+
+      stored.lastUsed = this.sampleClock += 1;
       const mode = typeof pad.mode === "string" ? pad.mode : "oneshot";
       const gateFrames = mode === "gate" && !live ? Number(event.gate_frames) : NaN;
       const filter = pad.filter && typeof pad.filter === "object" ? pad.filter : {};
+      const filterType = field("filter_type", filter.type);
 
       const voice = this.takeVoice(record);
       const started = StudioSamplerVoice.start(voice, {
@@ -1832,15 +1894,16 @@
         gainDb: field("gain_db", pad.gain_db),
         velocity: event.v,
         pan: field("pan", pad.pan),
-        attackMs: pad.attack_ms,
+        attackMs: field("attack_ms", pad.attack_ms),
         decayMs: field("decay_ms", pad.decay_ms),
-        sustain: pad.sustain,
+        sustain: field("sustain", pad.sustain),
         releaseMs: field("release_ms", pad.release_ms),
-        filterType: typeof filter.type === "string" ? filter.type : "off",
+        filterType: typeof filterType === "string" ? filterType : "off",
         cutoffHz: field("cutoff_hz", filter.cutoff_hz),
         resonance: field("resonance", filter.resonance),
         gateFrames: Number.isFinite(gateFrames) ? gateFrames : -1,
         choke: pad.choke,
+        mode: mode,
         trackId: asId(event.track_id),
         bankId: bankId,
         index: index,
@@ -1889,6 +1952,10 @@
     /**
      * Pick the voice a new trigger uses: a free one, else this track's oldest —
      * a voice that is already fading out (choked or releasing) goes first.
+     *
+     * The caller starts the new voice, and has already checked that its range
+     * holds frames, so a steal never costs a sounding voice to a start that
+     * could not happen.
      * @param {object} record
      * @returns {object} the voice record to overwrite
      */
@@ -1899,8 +1966,47 @@
         if (!voice.sounding) return voice;
         if (this.stealRank(voice) < this.stealRank(oldest)) oldest = voice;
       }
-      oldest.sounding = false;
+      this.retireVoice(record, oldest);
       return oldest;
+    }
+
+    /**
+     * Move a stolen voice into a fade tail so it rings out over 64 frames
+     * instead of clicking off, or cut it when both tails already ring.
+     *
+     * The choice, documented: the 16 slots belong to the 16 sounding voices and
+     * the new voice needs this one on its very frame, so a stolen voice cannot
+     * keep its slot. It keeps sounding in a fade tail when one is free (the
+     * 64-frame ring-out) and is cut when both are in use.
+     * @param {object} record
+     * @param {object} voice the slot the new voice is about to take
+     * @returns {void}
+     */
+    retireVoice(record, voice) {
+      if (!voice.sounding) return;
+      const tail = this.tailFor(record);
+      if (!tail) return;
+      Object.assign(tail, voice);
+      // It holds its last sample and fades out: there is nothing left to read.
+      tail.ending = true;
+      tail.gateRemaining = -1;
+      tail.fadeRemaining = StudioSamplerVoice.FADE_FRAMES;
+      tail.sounding = true;
+    }
+
+    /**
+     * @param {object} record
+     * @returns {object|null} a tail voice that is free, or a new one while the
+     *   track holds fewer than `STOLEN_TAILS_PER_TRACK`; null when none is
+     */
+    tailFor(record) {
+      const tails = record.tails;
+      if (!tails) return null;
+      for (const tail of tails) if (!tail.sounding) return tail;
+      if (tails.length >= STOLEN_TAILS_PER_TRACK) return null;
+      const tail = StudioSamplerVoice.create();
+      tails.push(tail);
+      return tail;
     }
 
     /**
@@ -1918,7 +2024,9 @@
     /**
      * Keep the whole song inside its 64-voice cap: while too many voices sound,
      * the song's best steal candidate goes — across tracks, choked and releasing
-     * ones first, then the oldest anywhere.
+     * ones first, then the oldest anywhere. A cross-track steal cuts rather than
+     * fading: the cap is the song's DSP budget, so the frame that trips it plays
+     * exactly the surviving voices and nothing else.
      * @param {object} newest the voice this trigger just started (never stolen)
      * @returns {void}
      */
@@ -1946,7 +2054,9 @@
 
     /**
      * A live pad message: a press starts the pad's voice (never through
-     * history, never quantized), a release lets the voices that pad started go.
+     * history, never quantized), a release lets the `gate` voices that pad
+     * started go. A `oneshot` pad keeps playing to the end of its range: letting
+     * go of the key does not cut a one-shot sound short.
      * @param {{track_id: string, bank_id: string, index: number, v: number, on: boolean}} event
      * @returns {void}
      */
@@ -1961,6 +2071,7 @@
       const index = Math.trunc(Number(event.index) || 0);
       for (const voice of record.voices) {
         if (!voice.sounding) continue;
+        if (voice.mode !== "gate") continue;
         if (voice.bankId !== bankId || voice.index !== index) continue;
         StudioSamplerVoice.release(voice);
       }

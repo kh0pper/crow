@@ -26,7 +26,14 @@
  * plain double position with linear interpolation: at ratio 1 the voice is
  * sample-exact, at ratio 2 every other sample is read (an octave up, half the
  * length), and a fractional ratio blends the two neighbours. Reversed playback
- * runs the same position backwards from the end of the range.
+ * runs the same position backwards from the end of the range. The blended
+ * neighbour is held inside the range (end − 1 forwards, start backwards), so a
+ * voice never reads into the slice next door.
+ *
+ * A voice ends in exactly two ways: its envelope reaches DONE (a release
+ * finished, or a decay bottomed out at sustain 0) or its read range runs out.
+ * A start therefore sounds from its own first frame, even while an attack is
+ * still climbing from 0.
  *
  * ## Why it is bit-identical in Chromium and Node
  *
@@ -186,6 +193,8 @@
       y2b: 0,
       /** Frames left before a gate-mode voice releases; -1 means "no gate". */
       gateRemaining: -1,
+      /** "oneshot" plays to its range end; "gate" releases on a live release. */
+      mode: "oneshot",
       /** Frames left in a choke (or end-of-range) fade; 0 means "not fading". */
       fadeRemaining: 0,
       /** Whether the read position has left the range (the fade then holds). */
@@ -271,6 +280,24 @@
   }
 
   /**
+   * Take the envelope to its sustain stage, or end the voice when the sustain
+   * level is 0: a decay all the way down leaves nothing to hear, so the voice
+   * is DONE and its slot is free again.
+   * @param {object} voice
+   * @returns {void}
+   */
+  function settleAtSustain(voice) {
+    if (voice.sustain > 0) {
+      voice.stage = STAGE_SUSTAIN;
+      voice.level = voice.sustain;
+      return;
+    }
+    voice.level = 0;
+    voice.stage = STAGE_DONE;
+    voice.sounding = false;
+  }
+
+  /**
    * Start (or restart) a voice on one pad trigger.
    *
    * Everything the voice needs is worked out here, once, so the render loop is
@@ -283,7 +310,7 @@
    *          attackMs?: number, decayMs?: number, sustain?: number,
    *          releaseMs?: number, filterType?: string, cutoffHz?: number,
    *          resonance?: number, gateFrames?: number, choke?: number,
-   *          trackId?: string, bankId?: string, index?: number,
+   *          mode?: string, trackId?: string, bankId?: string, index?: number,
    *          serial?: number, sampleRate: number}} config
    * @returns {boolean} whether the voice started
    */
@@ -323,14 +350,17 @@
     voice.sustain = clamp(finiteOr(settings.sustain, 1), 0, 1);
 
     // Attack 0 starts at full level; a decay of 0 jumps straight to sustain.
+    // A started voice sounds from its very first frame, even at level 0 while
+    // an attack climbs: only DONE or the end of its range ends it, or an
+    // attacked pad would be dropped on the frame it was triggered.
     voice.stage = STAGE_ATTACK;
     voice.level = 0;
     voice.increment = voice.attackFrames > 0 ? 1 / voice.attackFrames : 0;
+    voice.sounding = true;
     if (voice.attackFrames === 0) {
       voice.level = 1;
       if (voice.decayFrames === 0) {
-        voice.level = voice.sustain;
-        voice.stage = STAGE_SUSTAIN;
+        settleAtSustain(voice);
       } else {
         voice.stage = STAGE_DECAY;
         voice.increment = (1 - voice.sustain) / voice.decayFrames;
@@ -346,6 +376,7 @@
     );
 
     const gateFrames = Number(settings.gateFrames);
+    voice.mode = settings.mode === "gate" ? "gate" : "oneshot";
     voice.gateRemaining = Number.isFinite(gateFrames) && gateFrames > 0 ? Math.round(gateFrames) : -1;
     voice.fadeRemaining = 0;
     voice.ending = false;
@@ -356,7 +387,6 @@
     voice.bankId = typeof settings.bankId === "string" ? settings.bankId : "";
     voice.index = Math.trunc(finiteOr(settings.index, 0));
     voice.serial = Math.trunc(finiteOr(settings.serial, 0));
-    voice.sounding = voice.level > 0;
     return true;
   }
 
@@ -402,8 +432,7 @@
       if (voice.level >= 1) {
         voice.level = 1;
         if (voice.decayFrames === 0) {
-          voice.level = voice.sustain;
-          voice.stage = STAGE_SUSTAIN;
+          settleAtSustain(voice);
         } else {
           voice.stage = STAGE_DECAY;
           voice.increment = (1 - voice.sustain) / voice.decayFrames;
@@ -413,10 +442,7 @@
     }
     if (voice.stage === STAGE_DECAY) {
       voice.level -= voice.increment;
-      if (voice.level <= voice.sustain) {
-        voice.level = voice.sustain;
-        voice.stage = STAGE_SUSTAIN;
-      }
+      if (voice.level <= voice.sustain) settleAtSustain(voice);
       return;
     }
     if (voice.stage === STAGE_RELEASE) {
@@ -505,7 +531,12 @@
         } else {
           const base = Math.floor(position);
           const fraction = position - base;
-          const next = base + 1 < length ? base + 1 : base;
+          // The neighbour never leaves the voice's own range: a forward read
+          // stops at end − 1, a reversed one at start, so the last frame of a
+          // slice cannot bleed the next slice's audio into it. A shorter second
+          // channel caps it too (both channels are read at one position).
+          const limit = Math.min(voice.reverse ? voice.start : voice.end - 1, length - 1);
+          const next = base + 1 > limit ? (limit > base ? limit : base) : base + 1;
 
           const a = channel0[base];
           const raw =

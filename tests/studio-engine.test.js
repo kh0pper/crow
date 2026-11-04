@@ -1498,6 +1498,31 @@ test("sampler pattern bit-identical in Chromium and Node", async (t) => {
   assert.ok(nodePeak > 0.01, `the Node sampler render has to be audible, peak was ${nodePeak}`);
   const nodeHash = hashChannels(node.left, node.right);
 
+  // Every pad in the song has to contribute: a silent voice path, or a pad
+  // whose step never starts a voice, would hide inside the hash. Each pad is
+  // rendered alone (its track's clip, one step at position 0) and has to sound.
+  for (const key of Object.keys(song.pads)) {
+    const [trackId, bankId, index] = key.split("/");
+    const clipId = trackId === "track-1" ? "clip-1" : "clip-2";
+    const alone = {
+      ...song,
+      steps: {
+        [`${clipId}/a/0/${bankId}.${index}`]: {
+          clip_id: clipId,
+          pattern_id: "a",
+          at: 0,
+          bank_id: bankId,
+          index: Number(index),
+          v: 127,
+          locks: {},
+        },
+      },
+    };
+    const one = await renderSong(alone, { seconds: 0.6, sampleRate: SAMPLE_RATE, samples });
+    const padPeak = Math.max(peakOf(one.left), peakOf(one.right));
+    assert.ok(padPeak > 0.001, `pad ${key} has to contribute sound of its own, peak was ${padPeak}`);
+  }
+
   const tab = await openTab();
   try {
     await tab.navigate(origin + "/");

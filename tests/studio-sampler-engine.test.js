@@ -232,14 +232,19 @@ async function releaseWorklet(context) {
 
 /**
  * Render one sampler song offline: build the engine, hand it the samples, then
- * the song, launch its scene, play, render.
+ * the song, launch its scene, play, render. `tap` turns a tap on before the
+ * transport starts, and `onTap` sees every `{target, channels}` block it posts.
  * @param {object} song
  * @param {{seconds?: number, samples?: object[], onError?: (text: string) => void,
- *          onSampleNeeded?: (sampleId: string) => void}} [options] `samples` is
- *   one `{id, channels}` per sample to load, each at the context's rate
- * @returns {Promise<{left: Float32Array, right: Float32Array}>}
+ *          onSampleNeeded?: (sampleId: string) => void, tap?: string|null,
+ *          onTap?: (tap: {target: string, channels: Float32Array[]}) => void}} [options]
+ *   `samples` is one `{id, channels}` per sample to load, each at the context's rate
+ * @returns {Promise<{left: Float32Array, right: Float32Array, taps: object[]}>}
  */
-async function renderSamplerSong(song, { seconds = 1, samples = [], onError, onSampleNeeded } = {}) {
+async function renderSamplerSong(
+  song,
+  { seconds = 1, samples = [], onError, onSampleNeeded, tap = null, onTap = null } = {},
+) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
     length: Math.round(seconds * SAMPLE_RATE),
@@ -247,10 +252,19 @@ async function renderSamplerSong(song, { seconds = 1, samples = [], onError, onS
   });
   let engine = null;
   let rendered = false;
+  const taps = [];
   try {
     engine = await studioEngine.create(context, { assetBytes: ASSETS });
     if (typeof onError === "function") engine.onError(onError);
     if (typeof onSampleNeeded === "function") engine.onSampleNeeded(onSampleNeeded);
+    if (typeof onTap === "function") {
+      engine.onTap((block) => {
+        taps.push(block);
+        onTap(block);
+      });
+    } else {
+      engine.onTap((block) => taps.push(block));
+    }
     for (const item of samples) {
       // A fresh copy per render: loadSample transfers the buffers to the worklet.
       await engine.loadSample(
@@ -260,6 +274,7 @@ async function renderSamplerSong(song, { seconds = 1, samples = [], onError, onS
       );
     }
     engine.setSong(song);
+    if (tap) engine.tap(tap, true);
     engine.launchScene("scene-1");
     engine.play();
     engine.node.connect(context.destination);
@@ -271,7 +286,7 @@ async function renderSamplerSong(song, { seconds = 1, samples = [], onError, onS
     const right = new Float32Array(buffer.length);
     buffer.copyFromChannel(left, 0);
     buffer.copyFromChannel(right, 1);
-    return { left, right };
+    return { left, right, taps };
   } finally {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
@@ -284,6 +299,52 @@ function assertLevel(actual, expected, what, tolerance = 1e-6) {
     Math.abs(actual - expected) < tolerance,
     `${what}: expected ${expected}, got ${actual}`,
   );
+}
+
+/**
+ * Press and release one pad through the engine's live messages, before the
+ * render starts: a live note goes straight to a voice and is never quantized.
+ * @param {object} song
+ * @param {{seconds?: number, samples?: object[], index?: number}} [options]
+ * @returns {Promise<{left: Float32Array, right: Float32Array}>}
+ */
+async function renderLivePad(song, { seconds = 0.4, samples = [], index = 0 } = {}) {
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(seconds * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    for (const item of samples) {
+      await engine.loadSample(
+        item.id,
+        item.channels.map((channel) => Float32Array.from(channel)),
+        SAMPLE_RATE,
+      );
+    }
+    engine.setSong(song);
+    engine.play();
+    engine.node.connect(context.destination);
+    // The track's slot is built by the song; the press waits for it.
+    await engine.flush();
+    engine.livePad("track-1", BANK, index, 127);
+    await engine.flush();
+    engine.liveRelease("track-1", BANK, index);
+    await engine.flush();
+    const buffer = await context.startRendering();
+    rendered = true;
+    const left = new Float32Array(buffer.length);
+    const right = new Float32Array(buffer.length);
+    buffer.copyFromChannel(left, 0);
+    buffer.copyFromChannel(right, 1);
+    return { left, right };
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
 }
 
 // --- the tests --------------------------------------------------------------
@@ -537,6 +598,250 @@ test("a lock changes only its step's voice", async () => {
   }
 });
 
+test("an attacked pad ramps up linearly over its attack", async () => {
+  // 5 ms of attack at 48 kHz is exactly 240 frames.
+  const ATTACK = 240;
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1")],
+    pads: [pad("track-1", 0, { attack_ms: 5 })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 4800) },
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 0.2,
+    samples: [{ id: SAMPLE_ID, channels: [constant(4800, 0.5)] }],
+  });
+
+  const full = 0.5 * CENTRE;
+  // The attack starts at silence and climbs one frame at a time: a voice that
+  // starts at level 0 is still a voice that started.
+  assertLevel(left[0], 0, "the attack's own frame is silence", 1e-9);
+  for (const at of [1, 60, 120, 239]) {
+    assertLevel(left[at], (full * at) / ATTACK, `frame ${at} is that far up the attack`, 1e-7);
+  }
+  for (const at of [ATTACK, 1000, 4799]) {
+    assertLevel(left[at], full, `frame ${at} is past the attack and at full level`, 1e-7);
+  }
+  for (const at of [4900, 5000]) {
+    assert.equal(left[at], 0, `frame ${at} is past the sample and has to be silent`);
+  }
+});
+
+test("attack, sustain and filter type locks apply to their step", async () => {
+  // Four 16ths on one pad, each 4000 frames long: no voice overlaps the next.
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1")],
+    pads: [pad("track-1", 0)],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 4000) },
+    steps: [
+      step("clip-1", 0, 0, { v: 127 }),
+      step("clip-1", 4, 0, { v: 127, locks: { attack_ms: 5 } }),
+      step("clip-1", 8, 0, { v: 127, locks: { sustain: 0.5 } }),
+      step("clip-1", 12, 0, { v: 127, locks: { filter_type: "hp", cutoff_hz: 1000 } }),
+    ],
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 1.7,
+    samples: [{ id: SAMPLE_ID, channels: [constant(4000, 0.5)] }],
+  });
+
+  const full = 0.5 * CENTRE;
+  // The pad itself: no attack, no filter.
+  for (const at of [0, 1, 1000, 3999]) {
+    assertLevel(left[at], full, `frame ${at} is the unlocked step's voice`, 1e-7);
+  }
+
+  // An `attack_ms` lock climbs over 240 frames instead of starting at full.
+  const attacked = 4 * FRAMES_PER_SIXTEENTH;
+  assertLevel(left[attacked], 0, "the locked attack's frame is silence", 1e-9);
+  assertLevel(left[attacked + 120], full * 0.5, "the locked attack is half way up at 120 frames", 1e-7);
+  assertLevel(left[attacked + 239], (full * 239) / 240, "the locked attack is not over at 239 frames", 1e-7);
+  assertLevel(left[attacked + 240], full, "the locked attack is over at 240 frames", 1e-7);
+
+  // A `sustain` lock settles the whole voice at half level (a decay of 0 jumps
+  // straight there).
+  const sustained = 8 * FRAMES_PER_SIXTEENTH;
+  for (const at of [sustained, sustained + 1, sustained + 2000, sustained + 3999]) {
+    assertLevel(left[at], full * 0.5, `frame ${at} is the sustain lock's half level`, 1e-7);
+  }
+
+  // A `filter_type` lock gives this voice a high pass, which a constant sample
+  // cannot get through, where the same pad without the lock passes it whole.
+  const filtered = 12 * FRAMES_PER_SIXTEENTH;
+  for (const at of [filtered + 1000, filtered + 2000, filtered + 3999]) {
+    assert.ok(
+      Math.abs(left[at]) < 1e-6,
+      `frame ${at} is behind the locked high pass and has to be silent, got ${left[at]}`,
+    );
+  }
+});
+
+test("a decayed-out voice frees its slot", async () => {
+  // A sample long enough to outlast the pattern, so only an envelope can end a
+  // voice.
+  const sampleFrames = 200000;
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    pads: [
+      // This decay bottoms out at sustain 0: 480 frames and the voice is over.
+      pad("track-1", 0, { decay_ms: 10, sustain: 0 }),
+      pad("track-1", 1),
+    ],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, sampleFrames) },
+    steps: [
+      // 15 held voices fill 15 slots... (velocity 20 keeps 16 of them inside
+      // the master's ±1 clip, so the level still counts voices)
+      ...Array.from({ length: 15 }, (unused, at) => step("clip-1", at, 1, { v: 20 })),
+      // ...and the 16th goes to a voice that decays away to nothing.
+      step("clip-1", 15, 0, { v: 20 }),
+      // One 16th after it has gone, a new held voice has to find its slot free
+      // rather than steal one of the 15 that still sound.
+      step("clip-1", 16, 1, { v: 20 }),
+    ],
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 2.2,
+    samples: [{ id: SAMPLE_ID, channels: [constant(sampleFrames, 0.5)] }],
+  });
+
+  const full = 0.5 * CENTRE * Math.pow(20 / 127, 2);
+  assertLevel(
+    left[15 * FRAMES_PER_SIXTEENTH + 480 + 1000],
+    15 * full,
+    "the decayed voice contributes nothing after its decay",
+    1e-6,
+  );
+  assertLevel(
+    left[16 * FRAMES_PER_SIXTEENTH + 1000],
+    16 * full,
+    "the 16th voice takes the freed slot instead of stealing a sounding one",
+    1e-6,
+  );
+});
+
+test("a steal fades the stolen voice out over 64 frames", async () => {
+  // The oldest voice is loud and the rest are at velocity 1, so the level says
+  // whether the stolen one is still ringing or gone at once.
+  const samples = constant(144000, 0.5);
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    pads: [pad("track-1", 0)],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 144000) },
+    steps: [
+      step("clip-1", 0, 0, { v: 100 }),
+      ...Array.from({ length: 15 }, (unused, at) => step("clip-1", at + 1, 0, { v: 1 })),
+      // The 17th voice steals the loud one; a new voice needs the slot now.
+      step("clip-1", 16, 0, { v: 1 }),
+    ],
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 2.1,
+    samples: [{ id: SAMPLE_ID, channels: [samples] }],
+  });
+
+  const gain = (velocity) => (velocity / 127) * (velocity / 127);
+  const base = 0.5 * CENTRE;
+  const trigger = 16 * FRAMES_PER_SIXTEENTH;
+  // On its own frame the stolen voice still sounds at full level (the fade has
+  // not started yet) beside the new one.
+  assertLevel(
+    left[trigger],
+    base * (gain(100) + 16 * gain(1)),
+    "the stolen voice is still there on the trigger frame",
+    1e-6,
+  );
+  // 64 frames later it is gone, without a click: it faded instead of being cut.
+  assertLevel(
+    left[trigger + 64],
+    base * 16 * gain(1),
+    "the stolen voice is gone 64 frames later",
+    1e-6,
+  );
+});
+
+test("an empty range never steals a voice", async () => {
+  // A slice whose end is its start has nothing to play: its trigger must leave
+  // the 16 sounding voices exactly as they were.
+  const samples = constant(144000, 0.5);
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    pads: [pad("track-1", 0), pad("track-1", 1, { slice_id: "empty" })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 144000) },
+    slices: { [`${SAMPLE_ID}/empty`]: sliceDoc(SAMPLE_ID, "empty", 1000, 1000) },
+    steps: [
+      ...Array.from({ length: 16 }, (unused, at) => step("clip-1", at, 0, { v: at + 1 })),
+      step("clip-1", 16, 1, { v: 127 }),
+    ],
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 2.1,
+    samples: [{ id: SAMPLE_ID, channels: [samples] }],
+  });
+
+  const gain = (velocity) => (velocity / 127) * (velocity / 127);
+  let everything = 0;
+  for (let velocity = 1; velocity <= 16; velocity += 1) everything += gain(velocity);
+  assertLevel(
+    left[16 * FRAMES_PER_SIXTEENTH + 500],
+    0.5 * CENTRE * everything,
+    "a trigger with nothing to play leaves every sounding voice alone",
+    1e-6,
+  );
+});
+
+test("the last frame of a slice does not read the next slice", async () => {  // The frame just past the slice is loud: reading one frame too far would
+  // blend 0.9 into the slice's own 0.1.
+  const frames = 1200;
+  const pcm = constant(frames, 0.9);
+  pcm.fill(0.1, 0, 1000);
+  const pitch = 7;
+  const ratio = Math.pow(2, pitch / 12);
+
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1")],
+    pads: [pad("track-1", 0, { slice_id: "s1", pitch })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, frames) },
+    slices: { [`${SAMPLE_ID}/s1`]: sliceDoc(SAMPLE_ID, "s1", 0, 1000) },
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 0.05,
+    samples: [{ id: SAMPLE_ID, channels: [pcm] }],
+  });
+
+  // The pitch is fractional, so frame reads land between sample frames: the
+  // last frame inside the slice lands on sample 999 with a fraction left over,
+  // which is exactly the read that used to reach past the slice.
+  let lastInside = -1;
+  let sawFraction = false;
+  for (let at = 0; at < 700; at += 1) {
+    const position = at * ratio;
+    if (position >= 1000) break;
+    const base = Math.floor(position);
+    lastInside = at;
+    if (base === 999 && position - base > 0.05) sawFraction = true;
+  }
+  assert.ok(sawFraction, "the test needs a frame that lands on the slice's last sample with a fraction left");
+  assert.equal(Math.floor(lastInside * ratio), 999, "the last frame inside the slice reads its last sample");
+
+  const full = 0.1 * CENTRE;
+  for (let at = 0; at <= lastInside; at += 1) {
+    assertLevel(left[at], full, `frame ${at} reads only the slice's own 0.1`, 1e-7);
+  }
+});
+
 test("a pad whose sample is missing is silent and reported once", async () => {
   const errors = [];
   const needed = [];
@@ -563,21 +868,22 @@ test("a pad whose sample is missing is silent and reported once", async () => {
 });
 
 test("a dense sampler song renders faster than real time in Node", async () => {
-  const SECONDS = 30;
+  const SECONDS = 8;
 
-  // Eight short pads, four sampler tracks playing 16ths across them with a
-  // filter and an envelope on every voice, and four SunVox tracks playing a
-  // note per beat: a song that has to keep up with the clock.
+  // Two-second samples, so every voice of a track's pool is still sounding
+  // when the next 16th lands: four full pools (the song's whole 64-voice cap),
+  // each voice through a filter and an envelope, plus four SunVox tracks
+  // playing a note per beat. A song that has to keep up with the clock.
+  const sampleFrames = 2 * SAMPLE_RATE;
   const samples = [];
   const sampleDocs = {};
-  for (let index = 0; index < 8; index += 1) {
-    const frames = 9600;
-    const pcm = new Float32Array(frames);
-    for (let at = 0; at < frames; at += 1) {
-      pcm[at] = Math.sin((2 * Math.PI * (180 + index * 40) * at) / SAMPLE_RATE) * 0.4 * (1 - at / frames);
+  for (let index = 0; index < 16; index += 1) {
+    const pcm = new Float32Array(sampleFrames);
+    for (let at = 0; at < sampleFrames; at += 1) {
+      pcm[at] = Math.sin((2 * Math.PI * (180 + index * 40) * at) / SAMPLE_RATE) * 0.4 * (1 - at / sampleFrames);
     }
     samples.push({ id: `sample-${index + 1}`, channels: [pcm] });
-    sampleDocs[`sample-${index + 1}`] = sampleDoc(`sample-${index + 1}`, frames);
+    sampleDocs[`sample-${index + 1}`] = sampleDoc(`sample-${index + 1}`, sampleFrames);
   }
 
   const tracks = [];
@@ -589,7 +895,7 @@ test("a dense sampler song renders faster than real time in Node", async () => {
     const clipId = `pattern-${index + 1}`;
     tracks.push(track(trackId, { pan: index * 0.4 - 0.6 }));
     clips.push(patternClip(clipId, trackId));
-    for (let padIndex = 0; padIndex < 8; padIndex += 1) {
+    for (let padIndex = 0; padIndex < 16; padIndex += 1) {
       pads.push(
         pad(trackId, padIndex, {
           sample_id: `sample-${padIndex + 1}`,
@@ -599,9 +905,8 @@ test("a dense sampler song renders faster than real time in Node", async () => {
           filter: { type: "lp", cutoff_hz: 3000, resonance: 0.5 },
         }),
       );
-    }
-    for (let at = 0; at < 16; at += 1) {
-      steps.push(step(clipId, at, at % 8, { v: 70 + ((at * 7) % 50) }));
+      // One 16th per pad: the pool fills, and then stays full.
+      steps.push(step(clipId, padIndex, padIndex, { v: 70 + ((padIndex * 7) % 50) }));
     }
   }
   for (let index = 0; index < 4; index += 1) {
@@ -629,14 +934,144 @@ test("a dense sampler song renders faster than real time in Node", async () => {
 
   const song = samplerSong({ tracks, clips, pads, steps, samples: sampleDocs });
 
-  const started = Date.now();
-  const { left, right } = await renderSamplerSong(song, { seconds: SECONDS, samples });
-  const elapsed = Date.now() - started;
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(SECONDS * SAMPLE_RATE),
+    sampleRate: SAMPLE_RATE,
+  });
+  let engine = null;
+  let rendered = false;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    for (const item of samples) {
+      await engine.loadSample(
+        item.id,
+        item.channels.map((channel) => Float32Array.from(channel)),
+        SAMPLE_RATE,
+      );
+    }
+    engine.setSong(song);
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
 
-  assert.ok(peakOf(left) > 0.01, `the dense song has to be audible, peak was ${peakOf(left)}`);
-  assert.ok(peakOf(right) > 0.01, `the dense song has to be audible on the right too, peak was ${peakOf(right)}`);
+    // Only the render is timed: building the song and loading its PCM is the
+    // page's work, not the DSP's.
+    const started = performance.now();
+    const buffer = await context.startRendering();
+    const elapsed = performance.now() - started;
+    rendered = true;
+
+    const left = new Float32Array(buffer.length);
+    const right = new Float32Array(buffer.length);
+    buffer.copyFromChannel(left, 0);
+    buffer.copyFromChannel(right, 1);
+    assert.ok(peakOf(left) > 0.01, `the dense song has to be audible, peak was ${peakOf(left)}`);
+    assert.ok(peakOf(right) > 0.01, `the dense song has to be audible on the right too, peak was ${peakOf(right)}`);
+    assert.ok(
+      elapsed < SECONDS * 1000,
+      `a ${SECONDS} s dense sampler song has to render faster than real time, took ${Math.round(elapsed)} ms`,
+    );
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
+test("a tap delivers the track's blocks to the client", async () => {
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1")],
+    pads: [pad("track-1", 0)],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 48000) },
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+  });
+
+  const { left, taps } = await renderSamplerSong(song, {
+    seconds: 0.3,
+    samples: [{ id: SAMPLE_ID, channels: [constant(48000, 0.4)] }],
+    tap: "track-1",
+  });
+
+  assert.ok(taps.length >= 2, `a tap posts one block at a time, got ${taps.length}`);
+  for (const tap of taps) {
+    assert.equal(tap.target, "track-1", "every block names the tapped track");
+    assert.ok(Array.isArray(tap.channels), "a tap delivers the block's channels");
+    assert.equal(tap.channels.length, 2, "a tap delivers the stereo pair");
+  }
+
+  // One track, no clipping: what the tap delivers is that track's output, and
+  // so is the master.
+  const delivered = [];
+  for (const tap of taps) {
+    for (let at = 0; at < tap.channels[0].length; at += 1) delivered.push(tap.channels[0][at]);
+  }
   assert.ok(
-    elapsed < SECONDS * 1000,
-    `a ${SECONDS} s dense sampler song has to render faster than real time, took ${elapsed} ms`,
+    delivered.length >= left.length,
+    `the tap has to cover the whole render, got ${delivered.length} of ${left.length} frames`,
   );
+  for (let at = 0; at < left.length; at += 1) {
+    assert.equal(delivered[at], left[at], `tap frame ${at} has to be that frame of the track's own output`);
+  }
+});
+
+test("tap on and tap off render the same master", async () => {
+  const samples = [{ id: SAMPLE_ID, channels: [constant(48000, 0.1)] }];
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1")],
+    pads: [pad("track-1", 0), pad("track-1", 1)],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, 48000) },
+    // Two 16ths: 6000 frames is not a whole number of 128-frame blocks, so the
+    // second event lands in the middle of one and splits it in two.
+    steps: [step("clip-1", 0, 0, { v: 127 }), step("clip-1", 1, 1, { v: 127 })],
+  });
+
+  const off = await renderSamplerSong(song, { seconds: 0.5, samples });
+  const on = await renderSamplerSong(song, { seconds: 0.5, samples, tap: "track-1" });
+
+  assert.ok(peakOf(off.left) > 0.01, `the song has to be audible, peak was ${peakOf(off.left)}`);
+  let worst = 0;
+  let firstDifference = -1;
+  for (let at = 0; at < off.left.length; at += 1) {
+    const difference = Math.abs(off.left[at] - on.left[at]);
+    if (difference > worst) worst = difference;
+    if (difference !== 0 && firstDifference < 0) firstDifference = at;
+  }
+  assert.equal(
+    worst,
+    0,
+    `a tap must not change the mix it copies, first difference at frame ${firstDifference}`,
+  );
+  assert.deepEqual(off.right, on.right, "the right channel is the same with the tap on or off");
+});
+
+test("releasing a live oneshot pad lets it finish", async () => {
+  // 12000 frames (0.25 s): the release lands long before the sound is over.
+  const frames = 12000;
+  const samples = [{ id: SAMPLE_ID, channels: [constant(frames, 0.5)] }];
+  const songFor = (mode) =>
+    samplerSong({
+      tracks: [track("track-1")],
+      clips: [],
+      pads: [pad("track-1", 0, { mode })],
+      samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, frames) },
+      steps: [],
+    });
+
+  const oneshot = await renderLivePad(songFor("oneshot"), { seconds: 0.35, samples });
+  const full = 0.5 * CENTRE;
+  for (const at of [0, 1, 6000, frames - 1]) {
+    assertLevel(oneshot.left[at], full, `frame ${at}: a oneshot pad plays to its end after the release`, 1e-6);
+  }
+  for (const at of [frames + 100, frames + 1000]) {
+    assert.equal(oneshot.left[at], 0, `frame ${at} is past the sample and has to be silent`);
+  }
+
+  // A gate pad, released before its end, stops on the release frame instead.
+  const gate = await renderLivePad(songFor("gate"), { seconds: 0.35, samples });
+  for (const at of [0, 1, 100, 1000]) {
+    assert.equal(gate.left[at], 0, `frame ${at}: a live gate pad is released by liveRelease`);
+  }
 });

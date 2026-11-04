@@ -110,6 +110,8 @@
  * - `tap(target, on)` turns a copy of the master (`"master"`) or of one track's
  *   own output (`track_id`) on, per block, as `{type:"tap_block", target,
  *   channels}`: what record-into-pad and resampling listen to. Off by default.
+ *   `onTap(listener)` follows those blocks; it resolves to an unsubscribe.
+ *   A tap never changes the mix it copies.
  */
 (function () {
   "use strict";
@@ -1073,6 +1075,7 @@
     const launchListeners = new Set();
     const errorListeners = new Set();
     const sampleNeededListeners = new Set();
+    const tapListeners = new Set();
     /**
      * Hand one failure to the error listeners and the console: a fault after
      * start-up has no caller to throw to.
@@ -1187,6 +1190,21 @@
           const resolveSample = waiting.shift();
           if (waiting.length === 0) pendingSamples.delete(message.sample_id);
           resolveSample();
+        }
+        return;
+      }
+      if (message.type === "tap_block") {
+        // A tap's copy of one block, for record-into-pad and resampling.
+        const tap = {
+          target: String(message.target),
+          channels: Array.isArray(message.channels) ? message.channels : [],
+        };
+        for (const listener of tapListeners) {
+          try {
+            listener(tap);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
         }
         return;
       }
@@ -1506,7 +1524,9 @@
       },
 
       /**
-       * Release the voices one pad's live presses started.
+       * Release the `gate` voices one pad's live presses started. A `oneshot`
+       * voice is left alone: a one-shot pad plays to the end of its range, as
+       * `livePad` says.
        * @param {string} trackId
        * @param {string} bankId
        * @param {number} index the pad, 0-15
@@ -1535,6 +1555,21 @@
        */
       tap(target, on) {
         post({ type: "tap", target: String(target), on: on === true });
+      },
+
+      /**
+       * Follow a tap: one `{target, channels}` per block while one is on,
+       * `target` being "master" or the tapped track's id and `channels` the
+       * block's own copies (the tap never shares its mix's buffers).
+       * @param {(tap: {target: string, channels: Float32Array[]}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onTap(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        tapListeners.add(listener);
+        return function unsubscribe() {
+          tapListeners.delete(listener);
+        };
       },
 
       /**
@@ -1607,6 +1642,7 @@
         launchListeners.clear();
         errorListeners.clear();
         sampleNeededListeners.clear();
+        tapListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
         node.port.onmessage = null;
