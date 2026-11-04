@@ -110,8 +110,9 @@ export default {
     if (req.method === "POST") {
       const { action } = req.body;
 
-      // Archive, Restore, Delete (§15): owner-only, re-checked on the server, named options only.
-      if (["archive_project", "restore_project", "delete_project"].includes(action)) {
+      // Archive, Restore, Delete, and finishing a partial delete (§15): owner-only, re-checked on
+      // the server, named options only.
+      if (["archive_project", "restore_project", "delete_project", "resume_project_delete"].includes(action)) {
         const pid = Number(req.body.id);
         const handled = await handleLifecyclePost(req, res, {
           db, lang, layout, projectId: pid, forbiddenHtml: `<p role="alert">${escapeHtml(t("projectHome.forbidden", lang))}</p>`,
@@ -451,7 +452,7 @@ async function renderListView(db, query, layout, lang, req) {
     { delay: 25 },
   );
 
-  const content = `${css}<style>${lifecycleRules()}</style>${resultBannerHtml(query, lang)}${visitsSection}${createForm}${filterBar}${projectsHtml}${paginationHtml}${c2cClientJs(lang)}`;
+  const content = `${css}<style>${lifecycleRules()}</style>${resultBannerHtml(query, lang, req)}${visitsSection}${createForm}${filterBar}${projectsHtml}${paginationHtml}${c2cClientJs(lang)}`;
   return layout({ title: `Projects (${totalCount})`, content });
 }
 

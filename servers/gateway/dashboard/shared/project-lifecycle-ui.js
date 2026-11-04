@@ -15,10 +15,19 @@ import { escapeHtml } from "./components.js";
 import { t } from "./i18n.js";
 import { csrfInput } from "./csrf.js";
 import {
-  canOwnProject, archiveProject, restoreProject, deleteSummary, deleteProject, deletedProjectsDir,
+  canOwnProject, canOwnDeletedProject, archiveProject, restoreProject, deleteSummary, deleteProject,
+  resumeProjectDelete, deletedProjectsDir,
 } from "../../../shared/project-lifecycle.js";
 
 const fill = (key, lang, vals) => Object.entries(vals).reduce((out, [k, v]) => out.split("{" + k + "}").join(String(v ?? "")), t(key, lang));
+
+// Finishing a delete that stopped partway. The wording lives here, next to the button, rather than
+// in the shared i18n table (which this change does not touch).
+const RESUME_TEXT = Object.freeze({
+  button: { en: "Finish deleting", es: "Terminar de eliminar" },
+  done: { en: "The rest of the delete finished.", es: "El resto de la eliminación terminó." },
+});
+const local = (entry, lang) => entry[lang] || entry.en;
 
 const STEP_KEY = Object.freeze({ cards: "projLife.stepCards", board_defs: "projLife.stepBoard", files: "projLife.stepFiles", workspace: "projLife.stepWorkspace", jobs: "projLife.stepJobs" });
 const COUNT_ROWS = Object.freeze([
@@ -49,6 +58,7 @@ export function lifecycleRules() {
   .pl-link--quiet { border-color: transparent; background: none; color: var(--crow-accent); }
   .pl-btn:focus-visible, .pl-link:focus-visible, .pl-form input:focus-visible, .pl-manage summary:focus-visible { outline: 2px solid var(--crow-accent); outline-offset: 2px; }
   .pl-banner { padding: 10px 12px; border: 1px solid var(--crow-border); border-radius: var(--crow-radius-card, 12px); background: var(--crow-bg-surface); overflow-wrap: anywhere; }
+  .pl-banner .pl-form { margin-top: 8px; }
   .pl-banner--err { border-color: var(--crow-error); }
   .pl-manage { margin-top: 8px; }
   .pl-manage summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; color: var(--crow-accent); font-weight: 600; }
@@ -142,12 +152,15 @@ export async function deleteConfirmHtml(db, req, project, lang, { urls, error = 
     </form></div>` };
 }
 
-/** The banner on /dashboard/projects after an archive or delete (query: archived, deleted, ws, partial). */
-export function resultBannerHtml(query, lang) {
+/**
+ * The banner on /dashboard/projects after an archive, a delete, or finishing one (query: archived,
+ * deleted, ws, partial, id, resumed). `req` is only read for the CSRF token of the finish button.
+ */
+export function resultBannerHtml(query, lang, req = {}) {
   const q = query || {};
   const one = (v) => (typeof v === "string" ? v : "");
   if (one(q.deleted) === "1") {
-    const lines = [t("projLife.deleted", lang)];
+    const lines = [one(q.resumed) === "done" ? local(RESUME_TEXT.done, lang) : t("projLife.deleted", lang)];
     const ws = one(q.ws);
     // The folder name is rebuilt under the server's own deleted-projects directory; only a plain name is accepted.
     const folder = /^[A-Za-z0-9][A-Za-z0-9-]{5,100}$/.test(ws) && ws !== "none";
@@ -158,7 +171,15 @@ export function resultBannerHtml(query, lang) {
     if (steps.length) lines.push(fill("projLife.partial", lang, { steps: steps.join(", ") }));
     // Only the redirect a real delete builds shows the banner: a valid ws, or a partial list. A bare ?deleted=1 shows nothing.
     if (!folder && ws !== "left" && ws !== "none" && !steps.length) return "";
-    return `<p class="pl-banner" role="status" data-pl-deleted>${lines.map(escapeHtml).join(" ")}</p>`;
+    const text = lines.map(escapeHtml).join(" ");
+    // A partial leaves a way to finish it: the operator asks for it, the POST re-checks ownership
+    // against the tombstone and which steps are really still owed.
+    const id = Number(one(q.id));
+    if (steps.length && Number.isInteger(id) && id > 0) {
+      const form = post(req, "resume_project_delete", "/dashboard/projects", local(RESUME_TEXT.button, lang), { id });
+      return `<div class="pl-banner" role="status" data-pl-deleted>${text}${form}</div>`;
+    }
+    return `<p class="pl-banner" role="status" data-pl-deleted>${text}</p>`;
   }
   if (one(q.archived)) return `<p class="pl-banner" role="status" data-pl-archived>${escapeHtml(t("projLife.archived", lang))}</p>`;
   return "";
@@ -170,16 +191,21 @@ async function slugOf(db, id) {
 }
 
 /**
- * Handle archive_project, restore_project and delete_project. Returns false when the action is not
- * one of ours, else { page? }: a refusal page for the caller to return, or {} after a redirect. Ownership is re-checked here with canOwnProject; the lifecycle
- * functions check it again. `urls.confirm(extraQuery)` is the confirm page to return to on a refusal.
+ * Handle archive_project, restore_project, delete_project and resume_project_delete. Returns false
+ * when the action is not one of ours, else { page? }: a refusal page for the caller to return, or
+ * {} after a redirect. Ownership is re-checked here with canOwnProject (resume: the same rule
+ * allowing the tombstone, canOwnDeletedProject); the lifecycle functions check it again.
+ * `urls.confirm(extraQuery)` is the confirm page to return to on a refusal.
  */
 export async function handleLifecyclePost(req, res, { db, lang, layout, projectId, urls, forbiddenHtml }) {
   const body = req.body || {};
   const action = String(body.action || "");
-  if (!["archive_project", "restore_project", "delete_project"].includes(action)) return false;
+  if (!["archive_project", "restore_project", "delete_project", "resume_project_delete"].includes(action)) return false;
   const id = Number(projectId);
-  if (!Number.isInteger(id) || !(await canOwnProject(db, id))) {
+  const allowed = Number.isInteger(id) && (action === "resume_project_delete"
+    ? await canOwnDeletedProject(db, id)
+    : await canOwnProject(db, id));
+  if (!allowed) {
     res.status(403);
     return { page: layout({ title: t("projectHome.forbidden", lang), content: `<style>${lifecycleRules()}</style>${forbiddenHtml}` }) };
   }
@@ -194,6 +220,16 @@ export async function handleLifecyclePost(req, res, { db, lang, layout, projectI
     res.redirectAfterPost(slug ? `/dashboard/project/${encodeURIComponent(slug)}` : "/dashboard/projects");
     return {};
   }
+  if (action === "resume_project_delete") {
+    const r = await resumeProjectDelete(db, id, { actor: "local" });
+    if (!r.ok) {
+      res.redirectAfterPost(`/dashboard/projects?error=${encodeURIComponent(r.code)}`);
+      return {};
+    }
+    const partial = (r.partial || []).filter((s) => STEP_KEY[s]).join(",");
+    res.redirectAfterPost(`/dashboard/projects?deleted=1&ws=none&id=${id}&resumed=${partial ? "partial" : "done"}${partial ? `&partial=${encodeURIComponent(partial)}` : ""}`);
+    return {};
+  }
   const r = await deleteProject(db, id, { confirmName: typeof body.confirm_name === "string" ? body.confirm_name : "", actor: "local" });
   if (!r.ok) {
     const n = Number(r.detail?.disconnected || 0);
@@ -202,6 +238,7 @@ export async function handleLifecyclePost(req, res, { db, lang, layout, projectI
   }
   const ws = r.movedTo ? basename(r.movedTo) : (r.counts.workspace ? "left" : "none");
   const partial = (r.partial || []).filter((s) => STEP_KEY[s]).join(",");
-  res.redirectAfterPost(`/dashboard/projects?deleted=1&ws=${encodeURIComponent(ws)}${partial ? `&partial=${encodeURIComponent(partial)}` : ""}`);
+  // A partial delete carries its id so the banner can offer to finish it.
+  res.redirectAfterPost(`/dashboard/projects?deleted=1&ws=${encodeURIComponent(ws)}${partial ? `&partial=${encodeURIComponent(partial)}&id=${id}` : ""}`);
   return {};
 }
