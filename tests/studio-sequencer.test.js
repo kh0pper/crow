@@ -1329,8 +1329,8 @@ test("a placement of a pattern clip plays its chain on the timeline", () => {
       clips: [patternClip("c1", "t1", "s1", { chain: ["a", "b"] })],
       patterns: [pattern("c1", "a", 0), pattern("c1", "b", 1)],
       steps: [step("c1", "a", 0, 0), step("c1", "b", 0, 1)],
-      // Sixteen beats into its clip: the placement starts on the chain's second
-      // pattern, four beats into the cycle.
+      // Four beats into its clip: the placement starts on the chain's second
+      // pattern, one bar into the two-bar cycle.
       arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 2, { offset_beats: 4 })]),
     }),
   );
@@ -1402,5 +1402,199 @@ test("seeking into a chain lands on the right pattern", () => {
   seq.seek(3);
   assert.deepEqual(padRows(collectFrom(seq, FRAMES_PER_BAR * 4, FRAMES_PER_BAR, 128)), [
     [FRAMES_PER_BAR * 4, 1],
+  ]);
+});
+
+/**
+ * A chain clip on one sampler track, with the placements given: one pattern is
+ * one bar, and the pads tell the patterns apart — "a" plays pad 0, "b" 1 and
+ * "c" 2.
+ */
+function chainedArrangementSong(chain, placements) {
+  return song({
+    tracks: [samplerTrack("t1")],
+    scenes: [scene("s1")],
+    clips: [patternClip("c1", "t1", "s1", { chain })],
+    patterns: [pattern("c1", "a", 0), pattern("c1", "b", 1), pattern("c1", "c", 2)],
+    steps: [step("c1", "a", 0, 0), step("c1", "b", 0, 1), step("c1", "c", 0, 2)],
+    arrangement: arrangementOf(placements),
+  });
+}
+
+/** Play a song's arrangement from bar 0 and read the pads it played. */
+function arrangementPads(snapshot, bars) {
+  const seq = sequencer(snapshot);
+  seq.setMode("arrangement");
+  seq.play();
+  return padRows(collect(seq, FRAMES_PER_BAR * bars, 128));
+}
+
+test("adjacent placements of a chained clip each start where their offset says", () => {
+  // The cycle two placements are joined on is the chain's own: two bars here,
+  // not the clip's one. A second placement at offset 0 therefore starts that
+  // cycle over — "a" again — instead of carrying on into the "b" that follows
+  // the first bar, even though the two placements are adjacent.
+  assert.deepEqual(
+    arrangementPads(
+      chainedArrangementSong(
+        ["a", "b"],
+        [placement("p1", "t1", "c1", 0, 1), placement("p2", "t1", "c1", 1, 1)],
+      ),
+      2,
+    ),
+    [
+      [0, 0],
+      [FRAMES_PER_BAR, 0],
+    ],
+  );
+
+  // An offset that does continue the cycle — four beats into the two-bar cycle
+  // — is still joined to the placement before it, and plays "b" there.
+  assert.deepEqual(
+    arrangementPads(
+      chainedArrangementSong(
+        ["a", "b"],
+        [
+          placement("p1", "t1", "c1", 0, 1),
+          placement("p2", "t1", "c1", 1, 1, { offset_beats: 4 }),
+        ],
+      ),
+      2,
+    ),
+    [
+      [0, 0],
+      [FRAMES_PER_BAR, 1],
+    ],
+  );
+
+  // A placement that is not adjacent at all starts its own cycle: a gap is
+  // silence, and the second placement is "a" again a bar later.
+  assert.deepEqual(
+    arrangementPads(
+      chainedArrangementSong(
+        ["a", "b"],
+        [placement("p1", "t1", "c1", 0, 1), placement("p2", "t1", "c1", 2, 1)],
+      ),
+      3,
+    ),
+    [
+      [0, 0],
+      [FRAMES_PER_BAR * 2, 0],
+    ],
+  );
+});
+
+test("a chain entry naming a missing pattern is a silent slot", () => {
+  // "x" names no pattern of this clip. It is not compacted out of the chain:
+  // its bar plays nothing and the cycle still runs a, silence, b — one bar each.
+  assert.deepEqual(
+    arrangementPads(
+      chainedArrangementSong(["a", "x", "b"], [placement("p1", "t1", "c1", 0, 4)]),
+      4,
+    ),
+    [
+      [0, 0],
+      [FRAMES_PER_BAR * 2, 1],
+      [FRAMES_PER_BAR * 3, 0],
+    ],
+  );
+
+  // Scene mode reads the very same chain out of the document.
+  const seq = sequencer(chainSong(["a", "x", "b"]));
+  seq.launchClip("c1");
+  seq.play();
+  assert.deepEqual(padRows(collect(seq, FRAMES_PER_BAR * 4, 128)), [
+    [0, 0],
+    [FRAMES_PER_BAR * 2, 1],
+    [FRAMES_PER_BAR * 3, 0],
+  ]);
+
+  // A chain with nothing left to play at all is no chain: every slot is the
+  // clip's first pattern, rather than a song that plays nothing.
+  assert.deepEqual(
+    arrangementPads(chainedArrangementSong(["x", "y"], [placement("p1", "t1", "c1", 0, 2)]), 2),
+    [
+      [0, 0],
+      [FRAMES_PER_BAR, 0],
+    ],
+  );
+});
+
+test("an offset inside a pattern lands mid-pattern", () => {
+  // Offset 2 is inside the clip's four-beat pattern: the steps that sit at the
+  // pattern's start are behind the playhead, so the placement opens on "b"
+  // half a bar in, and each pattern still lays its own steps from there.
+  assert.deepEqual(
+    arrangementPads(
+      chainedArrangementSong(["a", "b"], [placement("p1", "t1", "c1", 0, 3, { offset_beats: 2 })]),
+      3,
+    ),
+    [
+      [FRAMES_PER_BAR / 2, 1],
+      [(FRAMES_PER_BAR * 3) / 2, 0],
+      [(FRAMES_PER_BAR * 5) / 2, 1],
+    ],
+  );
+});
+
+test("a chain renders the same events at any block size", () => {
+  // Swing pushes the odd steps close to block boundaries, where a rounding
+  // rule that leaked the block position would show. A 128-frame block and a
+  // 97-frame one must yield the very same events at the very same frames.
+  const snapshot = () =>
+    song({
+      tracks: [samplerTrack("t1")],
+      scenes: [scene("s1")],
+      clips: [patternClip("c1", "t1", "s1", { chain: ["a", "x", "b"], swing: 0.75 })],
+      patterns: [pattern("c1", "a", 0), pattern("c1", "b", 1)],
+      steps: [
+        step("c1", "a", 0, 0),
+        step("c1", "a", 3, 3),
+        step("c1", "a", 15, 4),
+        step("c1", "b", 7, 5),
+        step("c1", "b", 14, 6),
+      ],
+      arrangement: arrangementOf([
+        placement("p1", "t1", "c1", 0, 3),
+        placement("p2", "t1", "c1", 3, 2, { offset_beats: 1 }),
+      ]),
+    });
+
+  const play = (size) => {
+    const seq = sequencer(snapshot());
+    seq.setMode("arrangement");
+    seq.play();
+    return collect(seq, FRAMES_PER_BAR * 5, size);
+  };
+  const wide = play(128);
+  const narrow = play(97);
+  assert.ok(wide.length > 4, "the song really plays something");
+  assert.deepEqual(narrow, wide);
+});
+
+test("a swung last step stays inside its pattern", () => {
+  // Swing 0.75 on the last step of a sixteen-step pattern: 3.75 beats plus 0.75
+  // of a 16th is 3.9375 — still short of the 4-beat pattern end, so the pad
+  // never slides past its pattern and no slot plays two of them.
+  const seq = sequencer(
+    song({
+      tracks: [samplerTrack("t1")],
+      scenes: [scene("s1")],
+      clips: [patternClip("c1", "t1", "s1", { swing: 0.75 })],
+      patterns: [pattern("c1", "a", 0)],
+      steps: [step("c1", "a", 0, 0), step("c1", "a", 15, 15)],
+      arrangement: arrangementOf([placement("p1", "t1", "c1", 0, 2)]),
+    }),
+  );
+  seq.setMode("arrangement");
+  seq.play();
+
+  // The swung onset: 94,500 frames into its bar, 1,500 short of the next one.
+  const swung = FRAMES_PER_BEAT * 3.9375;
+  assert.deepEqual(padRows(collect(seq, FRAMES_PER_BAR * 2, 128)), [
+    [0, 0],
+    [swung, 15],
+    [FRAMES_PER_BAR, 0],
+    [FRAMES_PER_BAR + swung, 15],
   ]);
 });
