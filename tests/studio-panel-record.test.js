@@ -1619,7 +1619,7 @@ test("the upload counter never exceeds the chunk count on resume", async () => {
             body: {
               begun: true,
               frames: 6,
-              received: [
+              "received": [
                 { index: 0, sha256: "0".repeat(64) },
                 { index: 1, sha256: "1".repeat(64) },
                 { index: 2, sha256: "2".repeat(64) },
