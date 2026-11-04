@@ -58,6 +58,7 @@ const ASSETS = {
   "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
   "resample.js": readFileSync(join(ENGINE_DIR, "resample.js"), "utf8"),
   "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
+  "perf-fx.js": readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
@@ -253,14 +254,26 @@ function hashChannels(left, right) {
  * instead of launching its first scene.
  * @param {object} song
  * @param {{seconds?: number, sampleRate?: number, audio?: object[],
- *          mode?: "session"|"arrangement", fromBar?: number}} [options]
+ *          mode?: "session"|"arrangement", fromBar?: number,
+ *          hold?: object[], release?: string[]}} [options]
  *   `audio` is one `{id, channels, rate}` per take to load, and `samples` one
- *   `{id, channels, rate}` per sampled pad's PCM
+ *   `{id, channels, rate}` per sampled pad's PCM; `hold` is one
+ *   `{name, amount}` per performance effect held before the transport starts,
+ *   and `release` one effect name per effect let go of (also before it starts)
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
 async function renderSong(
   song,
-  { seconds = 2, sampleRate = SAMPLE_RATE, audio = [], samples = [], mode = "session", fromBar = 0 } = {},
+  {
+    seconds = 2,
+    sampleRate = SAMPLE_RATE,
+    audio = [],
+    samples = [],
+    mode = "session",
+    fromBar = 0,
+    hold = [],
+    release = [],
+  } = {},
 ) {
   const context = new OfflineAudioContext({
     numberOfChannels: 2,
@@ -288,6 +301,10 @@ async function renderSong(
       );
     }
     engine.setSong(song);
+    // The performance effects are live state: held (or let go of) before the
+    // transport starts, they take effect at the first block's first frame.
+    for (const item of hold) engine.fxHold(item.name, item.amount);
+    for (const name of release) engine.fxRelease(name);
     if (mode === "arrangement") {
       engine.setMode("arrangement");
       engine.seek(fromBar);
@@ -722,6 +739,29 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderEffects = async function (song, hold, release, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  "  engine.setSong(song);",
+  "  for (var h = 0; h < hold.length; h++) engine.fxHold(hold[h].name, hold[h].amount);",
+  "  for (var r = 0; r < release.length; r++) engine.fxRelease(release[r]);",
+  "  engine.launchScene(song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -732,6 +772,7 @@ const SERVED = {
   "/assets/sequencer.js": ["text/javascript; charset=utf-8", () => ASSETS["sequencer.js"]],
   "/assets/resample.js": ["text/javascript; charset=utf-8", () => ASSETS["resample.js"]],
   "/assets/sampler-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["sampler-voice.js"]],
+  "/assets/perf-fx.js": ["text/javascript; charset=utf-8", () => ASSETS["perf-fx.js"]],
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
@@ -1538,6 +1579,133 @@ test("sampler pattern bit-identical in Chromium and Node", async (t) => {
       nodeHash,
       `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a sampler render`,
     );
+  } finally {
+    tab.close();
+  }
+});
+
+test("effects bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // Two tracks of overlapping notes, so the effects run on a mix that would
+  // show a wrong sample, a wrong frame or a wrong pan.
+  const song = {
+    meta: { title: "Effects parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "track-1",
+        name: "Low",
+        color: "#E8C07A",
+        device: { engine: "sunvox", type: "Analog generator", params: {} },
+        mute: false,
+        solo: false,
+        gain_db: -6,
+        pan: -0.3,
+        locked: false,
+      },
+      {
+        id: "track-2",
+        name: "High",
+        color: "#8FC1E8",
+        device: { engine: "sunvox", type: "Analog generator", params: {} },
+        mute: false,
+        solo: false,
+        gain_db: -3,
+        pan: 0.4,
+        locked: false,
+      },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Low",
+        length_bars: 1,
+        notes: [
+          { t: 0, d: 1, p: 48, v: 110 },
+          { t: 1.5, d: 0.75, p: 55, v: 80 },
+          { t: 2.5, d: 1.5, p: 52, v: 120 },
+        ],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "High",
+        length_bars: 1,
+        notes: [
+          { t: 0.5, d: 1, p: 72, v: 90 },
+          { t: 2, d: 0.5, p: 67, v: 100 },
+          { t: 3, d: 1, p: 70, v: 70 },
+        ],
+      },
+    },
+  };
+
+  /**
+   * One case: which effects are held for the whole render, and which are let go
+   * of on the very first frame (so their 64-frame crossfade and the state drop
+   * are part of the hash too).
+   */
+  const cases = [
+    { label: "held", hold: [
+      { name: "stutter", amount: 0.5 },
+      { name: "lofi", amount: 1 },
+      { name: "reverb_throw", amount: 0.5 },
+    ], release: [] },
+    { label: "released", hold: [
+      { name: "stutter", amount: 0.5 },
+      { name: "tape_stop", amount: 0.7 },
+      { name: "filter_sweep", amount: 0.8 },
+      { name: "lofi", amount: 1 },
+      { name: "reverb_throw", amount: 0.5 },
+    ], release: ["stutter", "tape_stop", "filter_sweep", "lofi", "reverb_throw"] },
+  ];
+
+  const seconds = 3;
+  const dry = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE });
+  const dryHash = hashChannels(dry.left, dry.right);
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderEffects"), "function", "the engine page did not load");
+    for (const item of cases) {
+      const node = await renderSong(song, {
+        seconds: seconds,
+        sampleRate: SAMPLE_RATE,
+        hold: item.hold,
+        release: item.release,
+      });
+      const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+      assert.ok(nodePeak > 0.01, `the Node ${item.label} render has to be audible, peak was ${nodePeak}`);
+      const nodeHash = hashChannels(node.left, node.right);
+      assert.notEqual(
+        nodeHash,
+        dryHash,
+        `the ${item.label} effects have to change the master, or the hash compares nothing`,
+      );
+
+      const browser = await tab.evaluate(
+        `window.studioRenderEffects(${JSON.stringify(song)}, ${JSON.stringify(item.hold)}, ${JSON.stringify(item.release)}, ${seconds}, ${SAMPLE_RATE})`,
+      );
+      assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+      assert.equal(browser.sampleRate, SAMPLE_RATE);
+      assert.ok(
+        browser.peak > 0.01,
+        `the Chromium ${item.label} render has to be audible too, peak was ${browser.peak}`,
+      );
+      assert.equal(
+        browser.hash,
+        nodeHash,
+        `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an effects render (${item.label})`,
+      );
+    }
   } finally {
     tab.close();
   }

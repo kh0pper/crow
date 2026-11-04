@@ -1,16 +1,19 @@
 /**
  * Studio engine worklet processor — the SunVox host.
  *
- * `engine-client.js` concatenates four files into ONE module and loads it with
+ * `engine-client.js` concatenates six files into ONE module and loads it with
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sunvox.js + studio-processor.js
+ *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
+ *       + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
- * declares the `SunVoxLib` factory) and with the pure sequencer
- * (`StudioSequencer` on `globalThis`). Nothing here is imported: the same
- * source runs in a browser's `AudioWorkletGlobalScope` and in
- * node-web-audio-api's worklet thread.
+ * declares the `SunVoxLib` factory), with the pure sequencer
+ * (`StudioSequencer` on `globalThis`), with the sampler's voice DSP
+ * (`StudioSamplerVoice`) and with the performance-effects bus
+ * (`StudioPerfFx`). Nothing here is imported: the same source runs in a
+ * browser's `AudioWorkletGlobalScope` and in node-web-audio-api's worklet
+ * thread.
  *
  * ## One SunVox engine per track, mixed in JavaScript
  *
@@ -144,6 +147,37 @@
  * `nextBarFrame` report). Record-into-pad and resampling use it. A tap is off by
  * default, and off costs nothing at all.
  *
+ * A master tap copies the master AFTER the performance bus and the clip, so
+ * what it records is what the room hears.
+ *
+ * ## The performance bus and the looper
+ *
+ * `perf-fx.js` (`StudioPerfFx`) sits on the master bus, and the order it is
+ * called in is the signal path:
+ *
+ *     tracks → master mix → looper → performance bus → clip/limit → tap/output
+ *
+ * The looper therefore taps the mix BEFORE any effect and mixes its take back
+ * in, so a held stutter or reverb is never baked into a loop; the clip and the
+ * master tap both come after the effects. Both calls return at once when
+ * nothing is held and the looper is empty.
+ *
+ * The effects are live performance state: `{type:"fx", name, amount, on}`
+ * holds or releases one, and nothing else in this file touches them. A scene
+ * launch, a stop or a pattern change does NOT release an effect — only a
+ * release does (a held stutter keeps repeating its captured slice through a
+ * transport stop, and a held tape stop stays at silence). The looper answers
+ * `{type:"looper", action}` with `record`, `overdub`, `play`, `stop` or
+ * `clear`, all quantized to the bar, and `{type:"looper_take"}` with
+ * `{type:"looper_buffer", id, channels, rate, bars}` — whole bars of the
+ * master, which the page turns into a pad's sample.
+ *
+ * Both take a `transport` the processor keeps for the block:
+ * `{frame, playing, bpm, beatsPerBar, barFrame, offset}`, where `frame` is the
+ * block's first frame, `barFrame` the frame of the bar line the playhead is
+ * inside (`null` while the transport is stopped: there is no grid to quantize
+ * to), and `offset` the run's first index inside the output buffers.
+ *
  * ## Block splitting
  *
  * `process()` is handed 128 frames. The sequencer's events for the block are
@@ -172,7 +206,8 @@
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
  * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
  * `{type:"sample_unload", sample_id}`, `{type:"live", track_id, bank_id,
- * index, v, on}`, `{type:"tap", target, on}`
+ * index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name, amount, on}`,
+ * `{type:"looper", action}`, `{type:"looper_take", id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth}` (at most every 50 ms of
  * audio), `{type:"launched", track_id, clip_id, scene_id, bar, frame}` (one
@@ -182,7 +217,8 @@
  * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
  * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
  * loaded, once per sample id), `{type:"tap_block", target, frame, channels}`
- * (while a tap is on, one per block)
+ * (while a tap is on, one per block), `{type:"looper_buffer", id, channels,
+ * rate, bars}` (one answer per `looper_take`)
  *
  * ## Frames the client can count on
  *
@@ -311,6 +347,35 @@
 
   /** How long a comp-boundary crossfade runs, in frames. */
   const VOICE_FADE_FRAMES = 64;
+
+  /** Four beats to the bar, everywhere in Studio. */
+  const BEATS_PER_BAR = 4;
+
+  /** The tempo a song without a usable `meta.bpm` counts the performance bus at. */
+  const DEFAULT_BPM = 120;
+
+  /**
+   * How many frames one beat lasts at a tempo. It is NOT rounded: a bar line and
+   * a stutter's divisions are measured off it in doubles and rounded once, the
+   * way the sequencer does its own beats.
+   * @param {number} bpm
+   * @returns {number}
+   */
+  function framesPerBeatAt(bpm) {
+    const tempo = Number(bpm);
+    return (sampleRate * 60) / (Number.isFinite(tempo) && tempo > 0 ? tempo : DEFAULT_BPM);
+  }
+
+  /**
+   * A song's tempo, from its own `meta.bpm`; a missing or unusable one is 120.
+   * @param {object} snapshot
+   * @returns {number}
+   */
+  function bpmOf(snapshot) {
+    const meta = snapshot && typeof snapshot.meta === "object" && snapshot.meta ? snapshot.meta : {};
+    const value = Number(meta.bpm);
+    return Number.isFinite(value) && value > 0 ? value : DEFAULT_BPM;
+  }
 
   /** @returns {number} the value held between two bounds. */
   function clamp(value, low, high) {
@@ -830,6 +895,29 @@
       /** Whether the master is tapped (record-into-pad / resampling). */
       this.tapMaster = false;
 
+      /**
+       * The performance-effects bus and the looper (`perf-fx.js`): live state
+       * that never reaches the song, applied after the mix and before the clip.
+       */
+      this.perf = StudioPerfFx.create(sampleRate);
+
+      /** The song's tempo, for the bus's beat and bar grid. */
+      this.bpm = DEFAULT_BPM;
+
+      /**
+       * The transport the bus reads each block, kept as one object so the audio
+       * thread allocates nothing: its first frame, whether the playhead runs,
+       * the tempo, and the frame of the bar line it is inside.
+       */
+      this.transport = {
+        frame: 0,
+        offset: 0,
+        playing: false,
+        bpm: DEFAULT_BPM,
+        beatsPerBar: BEATS_PER_BAR,
+        barFrame: null,
+      };
+
       /** The track whose own output is tapped, or null. */
       this.tapTrackId = null;
 
@@ -968,6 +1056,18 @@
           break;
         case "tap":
           this.setTap(message.target, message.on === true);
+          break;
+        case "fx":
+          // A performance effect is live state: the change takes effect at the
+          // next block's first frame and never touches the song or its history.
+          if (message.on === false) this.perf.release(message.name);
+          else this.perf.hold(message.name, message.amount);
+          break;
+        case "looper":
+          this.perf.looper(message.action);
+          break;
+        case "looper_take":
+          this.postLooperTake(message);
           break;
         case "flush":
           // Messages are handled in arrival order and slot work is queued, so
@@ -1126,6 +1226,25 @@
     }
 
     /**
+     * Answer one `looper_take` with the looper's whole bars of the master, as
+     * `{type:"looper_buffer", id, channels, rate, bars}`: what the page turns
+     * into a pad's sample (Task 12). The channels are copies, so the looper keeps
+     * its own take.
+     * @param {{id?: number}} message
+     * @returns {void}
+     */
+    postLooperTake(message) {
+      const take = this.perf.take();
+      this.port.postMessage({
+        type: "looper_buffer",
+        id: message.id,
+        channels: take.channels,
+        rate: take.rate,
+        bars: take.bars,
+      });
+    }
+
+    /**
      * Take a new song: the sequencer reads it at once (so the transport calls
      * that follow are ordered against it), then the tracks' engines follow it.
      * @param {object} snapshot the song as `server/doc.js`'s `snapshot()` returns it
@@ -1138,6 +1257,7 @@
         throw new Error(`A song can have at most ${MAX_TRACKS} tracks.`);
       }
       this.readKit(snapshot);
+      this.bpm = bpmOf(snapshot);
       this.sequencer.setSong(snapshot);
       this.enqueue(() => this.syncSlots(tracks));
     }
@@ -1624,6 +1744,10 @@
       left.fill(0);
       if (right) right.fill(0);
 
+      // The performance bus's transport is read BEFORE the sequencer moves its
+      // own clock to the end of the block.
+      this.updateTransport();
+
       // The sequencer must see every block, ready or not: its events are
       // measured from contiguous frame starts.
       const events = this.sequencer.block(this.frame, count);
@@ -1652,9 +1776,40 @@
     }
 
     /**
-     * Render `frames` of every track, mix them with their gain and pan, and hard
-     * clip at ±1.0 — 1a's whole master stage. An audio track contributes its
-     * PCM voices here instead of a SunVox engine, through the very same mix.
+     * Work out the transport the performance bus reads for this block: its first
+     * frame, whether the playhead runs, the song's tempo, and the frame of the
+     * bar line the playhead is inside.
+     *
+     * The bar line comes from the sequencer's own `nextBarFrame()` — the one
+     * place the bar-boundary rounding lives — one bar back from the boundary it
+     * answers, or the boundary itself when the playhead sits exactly on it. A
+     * stopped transport has no grid at all, which is why `barFrame` is null
+     * there: the looper's commands then take effect at once instead of waiting
+     * for a bar that never comes.
+     * @returns {void}
+     */
+    updateTransport() {
+      const transport = this.transport;
+      transport.frame = this.frame;
+      transport.offset = 0;
+      transport.playing = this.sequencer.isPlaying();
+      transport.bpm = this.bpm;
+      transport.beatsPerBar = BEATS_PER_BAR;
+      if (!transport.playing) {
+        transport.barFrame = null;
+        return;
+      }
+      const boundary = this.sequencer.nextBarFrame();
+      const barFrames = BEATS_PER_BAR * framesPerBeatAt(this.bpm);
+      transport.barFrame =
+        boundary.frame === this.frame ? this.frame : Math.max(0, Math.round(boundary.frame - barFrames));
+    }
+
+    /**
+     * Render `frames` of every track, mix them with their gain and pan, run the
+     * master bus (looper, then performance effects), and hard clip at ±1.0 —
+     * 1a's whole master stage. An audio track contributes its PCM voices here
+     * instead of a SunVox engine, through the very same mix.
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
@@ -1683,6 +1838,14 @@
         }
         this.renderRecord(record, frames, left, right, offset);
       }
+
+      // The master bus, in the order the signal path fixes: the looper first (it
+      // taps the mix BEFORE any effect and mixes its own take back in), then the
+      // performance-effects chain. Both return at once when nothing is held and
+      // the looper is empty, so an idle bus costs one call per run.
+      this.transport.offset = offset;
+      this.perf.loop(left, right, frames, this.transport);
+      this.perf.process(left, right, frames, this.transport);
 
       for (let at = 0; at < frames; at += 1) {
         const position = offset + at;

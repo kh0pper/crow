@@ -3,15 +3,17 @@
  *
  * The engine is one AudioWorklet node whose processor hosts SunVox and the
  * sequencer (`studio-processor.js`). A worklet cannot `import`, so this file
- * glues four sources into ONE module and hands it to
+ * glues six sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sampler-voice.js + sunvox.js + studio-processor.js
+ *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
+ *       + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
  * the client side of the port, before the PCM is handed over. `sampler-voice.js`
- * is the sampler's voice DSP, which the processor uses in that same scope.
+ * is the sampler's voice DSP, and `perf-fx.js` the performance-effects bus and
+ * its looper, which the processor uses in that same scope.
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -115,7 +117,16 @@
  *   the same clock `launched` and `nextBarFrame` report in. What record-into-pad
  *   and resampling listen to. Off by default. `onTap(listener)` follows those
  *   blocks as `{target, frame, channels}`; it resolves to an unsubscribe. A tap
- *   never changes the mix it copies.
+ *   never changes the mix it copies, and a MASTER tap copies it after the
+ *   performance bus, so what it records is what the room hears.
+ * - `fxHold(name, amount)` and `fxRelease(name)` hold or let go one performance
+ *   effect (`filter_sweep`, `lofi`, `stutter`, `tape_stop`, `reverb_throw`).
+ *   They are live state, never a command or a history step, and they take effect
+ *   at the next block's first frame. Nothing else releases them.
+ * - `looper(action)` drives the master looper: `record`, `overdub`, `play`,
+ *   `stop` or `clear`, all quantized to the bar. `looperTake()` resolves with
+ *   `{channels, rate, bars}` — whole bars of the master the looper recorded,
+ *   which record-into-pad turns into a pad's sample.
  */
 (function () {
   "use strict";
@@ -125,6 +136,7 @@
     "sequencer.js",
     "resample.js",
     "sampler-voice.js",
+    "perf-fx.js",
     "sunvox.js",
     "studio-processor.js",
   ];
@@ -621,6 +633,12 @@
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
+   *                    onTap: function(function): function,
+   *                    fxHold: function(string, number): void,
+   *                    fxRelease: function(string): void,
+   *                    looper: function(string): void,
+   *                    looperTake: function(): Promise<{channels: Float32Array[],
+   *                      rate: number, bars: number}>,
    *                    onError: function(function): function,
    *                    calibrate: function(object): Promise<object>,
    *                    createRecorder: function(object): Promise<object>,
@@ -1113,6 +1131,9 @@
     const pendingAudio = new Map();
     /** sample id → resolvers waiting for the processor's `sample_loaded`. */
     const pendingSamples = new Map();
+    /** request id → the resolver waiting for the processor's `looper_buffer`. */
+    const pendingLooper = new Map();
+    let looperSeq = 0;
     const post = (message, transfer) => {
       if (transfer && transfer.length > 0) {
         try {
@@ -1201,6 +1222,21 @@
           const resolveSample = waiting.shift();
           if (waiting.length === 0) pendingSamples.delete(message.sample_id);
           resolveSample();
+        }
+        return;
+      }
+      if (message.type === "looper_buffer") {
+        // The looper's whole bars of the master, for a take this client asked
+        // for. Answered with copies (the looper keeps its own take), so the page
+        // owns what it receives.
+        const waiting = pendingLooper.get(message.id);
+        if (waiting) {
+          pendingLooper.delete(message.id);
+          waiting({
+            channels: Array.isArray(message.channels) ? message.channels : [],
+            rate: Number(message.rate),
+            bars: Number(message.bars),
+          });
         }
         return;
       }
@@ -1573,6 +1609,63 @@
       },
 
       /**
+       * Hold one performance effect on the master bus. The effect is live state:
+       * it never enters the song, never becomes a history step, and nothing but
+       * `fxRelease` (a scene launch, a transport stop, a pattern change) ends it.
+       *
+       * `amount` is 0..1 and means what the effect makes of it; a `fxHold` on an
+       * effect that is already held follows the amount, which is how a knob
+       * sweeps the filter.
+       * @param {"filter_sweep"|"lofi"|"stutter"|"tape_stop"|"reverb_throw"} name
+       * @param {number} amount 0..1
+       * @returns {void}
+       */
+      fxHold(name, amount) {
+        const value = Number(amount);
+        post({ type: "fx", name: String(name), amount: Number.isFinite(value) ? value : 0, on: true });
+      },
+
+      /**
+       * Let one performance effect go: it crossfades back to the dry master over
+       * 64 frames (the reverb throw closes its send and rings out).
+       * @param {string} name
+       * @returns {void}
+       */
+      fxRelease(name) {
+        post({ type: "fx", name: String(name), amount: 0, on: false });
+      },
+
+      /**
+       * One looper command on the master bus, quantized to the bar: `record`
+       * starts on the next bar line, the next `play`/`overdub`/`record` ends the
+       * take on the bar line after it, `play` loops it into the master, `overdub`
+       * adds the live master into it, `clear` empties it.
+       * @param {"record"|"overdub"|"play"|"stop"|"clear"} action
+       * @returns {void}
+       */
+      looper(action) {
+        post({ type: "looper", action: String(action) });
+      },
+
+      /**
+       * The looper's take: whole bars of the master it recorded, in two channels
+       * at the context's rate. Record-into-pad turns it into a sample.
+       *
+       * Resolves when the processor answers, with a snapshot of the take at the
+       * moment it read the request: a take that is still recording answers the
+       * whole bars it has captured so far, and a looper that has recorded nothing
+       * answers no bars.
+       * @returns {Promise<{channels: Float32Array[], rate: number, bars: number}>}
+       */
+      looperTake() {
+        const id = ++looperSeq;
+        return new Promise((resolve) => {
+          pendingLooper.set(id, resolve);
+          post({ type: "looper_take", id: id });
+        });
+      },
+
+      /**
        * Follow a tap: one `{target, frame, channels}` per block while one is on,
        * `target` being "master" or the tapped track's id, `frame` the context
        * frame of the block's first sample, and `channels` the block's own copies
@@ -1661,6 +1754,7 @@
         tapListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
+        pendingLooper.clear();
         node.port.onmessage = null;
       },
     };
