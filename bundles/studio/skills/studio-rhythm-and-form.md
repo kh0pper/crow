@@ -110,7 +110,32 @@ Either way: hits 0.1–0.25 beat, nothing crossing the loop point, and a report 
 - A clip is a pattern. One bar is 16 steps; two to four bars when the last bar carries a fill.
 - Pattern variations are scenes: A, A with one element changed, B, fill. Name them by section ("V1 drums A") and give the operator the launch order.
 - Motion must be written, not automated: a longer clip (8 or 16 bars) whose later steps climb, or thin out, is the only movement inside a clip. `studio_track_set_param` changes a track for the whole song, not one scene; say so.
-- Studio cannot yet import, chop, slice, time-stretch or repitch a sample, hold choke groups, fire conditional or probability trigs, lock parameters per step, record knob motion or chain patterns into a song. Retrigs are just repeated 32nds, and `studio_render` is the only bounce.
+- Studio cannot yet time-stretch or repitch a sample to tempo, fire conditional or probability trigs, record knob motion, or play samples through the performance-effects bus. Retrigs are just repeated 32nds, and `studio_render` is the only bounce.
+
+## Sampler practice
+
+On a sampler track the ten grooves above are 16 steps of pads, one bar: step 1 is `t` 0 and step 5 is beat 2. The pad names are the kit's own — `kick`, `snare`, `clap`, `rim`, `hat`, `open hat`, `ride`, `crash`, `tom`, `tambourine` — plus whatever else the kit holds, a `sub`, a `cajón` or a chord stab, which only the operator assigns. A style's row lists the steps each pad fires; every other pad is silent on that step. `step.toggle` puts a hit on one step (`v` is its velocity) and `step.set` gives that one step its locks.
+
+The swing column is `pattern.set_swing`'s own value, not a percentage: for both 16ths and 8ths, `swing = (p − 50) ÷ 50` where *p* is the percentage in the Swing section above, so 58 % is `0.16` and 66.7 % is `0.33`.
+
+| Style | bpm | Pads → steps | Swing | Which steps carry a lock |
+|---|---|---|---|---|
+| Rock | 100–140 | kick 1, 9 · snare 5, 13 · hat 1, 3, 5, 7, 9, 11, 13, 15 · crash 1 on a section start | 0 | hat `gain_db` +2 on step 1 (the accent) |
+| Pop | 90–130 | kick 1, 9 · snare + clap 5, 13 · hat 1, 3, 5, 7, 9, 11, 13, 15, all 16 in the chorus | 0 | snare `gain_db` +2 on 5 and 13 |
+| Funk | 90–120 | kick 1, 4, 7, 11 · snare 5, 13 · snare ghosts 3, 10, 15 at v 30 · hat all 16 with accents on 1, 3, 5, 7, 9, 11, 13, 15 | 0 | hat `decay_ms` 60 on 15 (the hat before the bar line) |
+| Boom bap | 80–100 | kick 1, 8, 11 · snare 5, 13 · hat 1, 3, 5, 7, 9, 11, 13, 15 | 0.16–0.20 | hat `decay_ms` 60 on 3, 7, 11 and 15 |
+| Trap | 130–170 (felt 65–85) | kick 1, 7, 11 · clap 9 · hat all 16 · sub 1, 7, 11 | 0 | hat `decay_ms` 40 on 15 and 16 (the roll); set `step_beats` 0.125 and use 32 positions for 32nd rolls |
+| House | 118–130 | kick 1, 5, 9, 13 · clap 5, 13 · open hat 3, 7, 11, 15 | 0.08–0.16 | open hat `gain_db` +2 on 3, 7, 11 and 15 |
+| Techno | 120–140 | kick 1, 5, 9, 13 · rim 9 or 13 · hat all 16 | 0 | hat `cutoff_hz` 4000 on step 1, `decay_ms` 200 on step 9 |
+| Drum & bass | 160–180 | kick 1, 11 · snare 5, 13 with a ghost at 7 at v 30 · hat 1, 3, 5, 7, 9, 11, 13, 15 | 0 | kick `decay_ms` 120 on 11 |
+| Reggae | 60–90 | kick 9 · rim 9 · hat 1, 3, 5, 7, 9, 11, 13, 15 · chord stab 3, 7, 11, 15 | 0.16–0.33 | rim `gain_db` +2 on 9 |
+| Folk | 60–140 | cajón low 1, 9 · cajón slap 5, 13 · tambourine 5, 13 | 0 | tambourine `gain_db` −3 on 5 |
+
+- A step carries up to 8 locks, one value per pad field: a step that wants a shorter hat and a lower one is one `step.set` with two locks. Velocity is not a lock — write it with `step.toggle`'s `v` or `step.set`'s `v`.
+- Set a choke group on the pads, not per step: put the closed and the open hat in group 1 so an open hat stops when the next closed one fires, and let a `gate` pad release at its step end.
+- Where the archetype says a voice is late (boom bap's snare 5–20 ms), a lock cannot move a step in time: write the pattern one step later, or set `pattern.set_swing` and say what the grid became.
+- Two bars are two patterns of the same clip, and the chain loops them: `chain.set` `["a", "b"]` plays bar 1 then the variation. The fill goes in the second pattern's last four steps, not in a third pattern.
+- Write the hits with `v`, not with `gain_db` locks: 100–120 accent, 70–90 body, 20–45 ghost. A lock is for one hit that differs in colour — a filter, a pitch, a decay — not for the level of a whole lane.
 
 ## Forms in scenes
 

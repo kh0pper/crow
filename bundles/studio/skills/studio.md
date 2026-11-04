@@ -1,6 +1,6 @@
 ---
 name: studio
-description: Use when the operator asks for anything in Crow Studio — writing, editing or mixing parts; adding, renaming or removing tracks, scenes and clips; changing an instrument; setting level, pan, mute or solo; rendering a song, scene or clip to hear it and read its loudness; or undoing a Studio edit.
+description: Use when the operator asks for anything in Crow Studio — writing, editing or mixing parts; adding, renaming or removing tracks, scenes and clips; changing an instrument; setting level, pan, mute or solo; programming a sampler pattern, a step lock or a chain of patterns; rendering a song, scene or clip to hear it and read its loudness; or undoing a Studio edit.
 triggers:
   - studio
   - edit the song
@@ -13,6 +13,11 @@ triggers:
   - render the song
   - undo that
   - mix the tracks
+  - sampler
+  - drum pattern
+  - step lock
+  - chain the patterns
+  - chop the sample
   - hacer una canción
   - añade un bajo
   - sube el volumen
@@ -31,6 +36,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 
 - `studio_session_summary` — always your first call: tracks with device and lock state, scenes, clips with a note count each. It pages 50 clips at a time; ask for `page: 2`, `3`, … while it says there is more.
 - `studio_get_clip` — read a clip's notes before you change it.
+- `studio_samples` — on a sampler track, read the song's samples first: id, name, seconds, origin, the pads that play each one and its slices in order. Ids come from there.
 - `studio_module_types` — the real controller names, ranges and defaults. A track device must be a generator: Analog generator, DrumSynth, Generator or SpectraVoice.
 - Load `studio-preferences` at the start of every session — it reads and stores preferences through `crow-memory` — and store one whenever the operator teaches you one.
 
@@ -82,6 +88,34 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | "record a guitar part" | You cannot record. Say what to do instead: arm the audio track, press Record, launch the scene; each loop pass becomes its own take |
 
 Refusals are information: a locked track (`locked`) or the clip the operator has open (`focused`) is off-limits. Say which one, and offer an alternative — another track, a new clip, or waiting for them to unlock it. Never reach around it.
+
+## Sampler
+
+A sampler track (`studio_track_add` with `kind: "sampler"`) plays a **kit**: banks of 16 pads, each pad a sample or one slice of one. A sampler track's clip is a **pattern clip** (`kind: "pattern"`): a loop of `length_steps` positions, each `step_beats` beats long (16 steps of a quarter beat is one bar), a `swing`, a list of **patterns** and a **chain** that loops them. A step fires one pad with a velocity and up to 8 **locks**, which override one of the pad's fields for that step's voice only. Read the sounds with `studio_samples` and the pattern clips with `studio_get_clip` before you write them.
+
+You may write patterns, steps, locks, chains, slices and pad settings, but only the operator brings a sound into the song — importing a file, recording into a pad or resampling — and no step of yours may drop or replace the sound a pad plays.
+
+| Tool | What it does |
+|---|---|
+| `studio_clip_add_pattern` | Add a pattern clip to a sampler track in a scene; it arrives with its first pattern, A, and 16 step positions unless you ask for another length. One clip per track per scene. |
+| `studio_pattern_add` | Add a pattern to a pattern clip (at most 16); name it for what it does ("Fill", "Chorus"). |
+| `studio_pattern_rename` | Rename a pattern. |
+| `studio_pattern_remove` | Remove a pattern, its steps and its place in the chain in one step; the clip's last pattern stays. |
+| `studio_pattern_set_length` | The loop's step positions, 1–64: 16 per bar of 16ths, four pages of 16 on screen. A shorter loop drops the steps past its new end. |
+| `studio_pattern_set_steps_beat` | The step length in beats: 0.25 (16ths, the default), 0.125 (32nds, for rolls), 0.5 (8ths). The clip's bar length follows. |
+| `studio_pattern_set_swing` | Swing 0–0.75: the second step of every pair — the 2nd, 4th, 6th… on the page — is delayed by `swing × step_beats` beats, so 0.16 on 16ths is the usual boom-bap lilt and 0.5 pushes it to a 1/32. |
+| `studio_step_toggle` | Put a step on one position for one pad, or take it off. `v` is its velocity 1–127 (100 when omitted). |
+| `studio_step_set` | A step's velocity, or the locks that override the pad's fields for that one voice: `pitch`, `gain_db`, `cutoff_hz`, `resonance`, `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `pan`, `reverse`, `filter_type`. Locks merge into the step's own; at most 8. |
+| `studio_step_clear_locks` | Clear every lock on one step. |
+| `studio_chain_set` | The pattern ids a clip's chain plays in order, then loops (`["a", "b", "a"]`); empty loops the first pattern. At most 64 entries, all of that clip's patterns. |
+| `studio_bank_add` | Add a bank of 16 empty pads to a kit (at most 8 banks per kit). |
+| `studio_bank_rename` | Rename a bank. |
+| `studio_pad_assign` | Put a sample, or one of its slices (`slice_id`), on a pad. An empty pad is yours to fill; a pad that already plays a sound is the operator's, and repointing it is refused. |
+| `studio_pad_set` | One pad's own fields: `name`, `mode` (`oneshot` plays to the end, `gate` releases at the step end), `pitch` ±24 semitones, `gain_db`, `pan`, `attack_ms`/`decay_ms`/`sustain`/`release_ms`, `filter {type, cutoff_hz, resonance}`, `choke` group 1–8 (a hit cuts the other voices in its group) and `reverse`. |
+| `studio_slice_set` | Replace a sample's slices — `{id?, start_frame, end_frame}` in order, at most 64. A kept slice id keeps its pads playing it; removing a slice a pad plays is refused. |
+| `studio_sample_rename` | Rename a sample. |
+
+A pad whose sample you do not name plays the whole sample; `slice_id` narrows it to one slice. Pitches are resampling: `pitch` +12 plays an octave up in half the time, so a repitched hit changes length with its pitch.
 
 ## Editing etiquette
 

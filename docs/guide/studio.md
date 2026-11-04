@@ -69,6 +69,26 @@ Hear yourself through your interface's **direct-monitor knob**: it has no delay.
 
 **What the bot can do with takes.** It can list them, keep one, comp them, restore a discarded one and correct a take's timing, and it hears them in its renders. It can never record, add or discard a take, or remove a clip, track or scene that holds takes: those need you.
 
+## The sampler
+
+A **sampler track** plays a **kit**: banks of 16 pads, each pad holding one sample or one slice of a sample. Its clips are **patterns** rather than notes: 16 step buttons per page, up to four pages, and each step fires one pad at a velocity. A sample belongs to the song, not to the track, so two pads or two tracks can play the same sound.
+
+**Making a sampler track.** **+ Sampler** adds a track with one bank of pads, A. Press a pad to hear it, or use keys 1–8 and Q–I for the first sixteen; a pad whose sample is still uploading says **Uploading…** and plays nothing. Select a pad to see its settings — mode (one-shot plays to the end, gate releases at the step's end), pitch, level, pan, envelope, filter, choke group and reverse — and each change is one undoable step.
+
+**Bringing sounds in.** There are three ways, and all of them are yours:
+
+1. **Import** a WAV, FLAC, MP3 or OGG file. Studio decodes it in your browser and re-encodes it as a 24-bit WAV at your browser's sample rate before uploading it to the project's storage, so what plays back is what was stored; an MP3 brings its encoder delay with it. A sample can be up to 60 s.
+2. **Record into pad** arms the recorder on that pad: press Record, play, press Stop, and the recording becomes the pad's sample. It starts where you started it, with no latency compensation.
+3. **Resample** records the master output, or one track's output, through the same recorder, so a sound you made in Studio becomes a pad. **Snap to bar** is on by default, which turns a resample into a loop you can chain.
+
+**Chopping.** The chop editor draws the waveform with its slice markers. **Auto-chop by hits** finds the transients (the sensitivity slider decides how many), the **Grid** pick cuts it into 2, 4, 8 or 16 equal pieces, and dragging a marker moves a cut by hand. Each chop is one undoable step, and a slice keeps its id, so a pad that plays a slice carries on playing it after a re-chop; removing a slice a pad still plays is refused. **Assign slices to pads** fills pads 1, 2, 3… in order.
+
+**Steps and locks.** Click a step to put a hit on it, click it again to take it off; its height is its velocity. Hold a step and change a pad control to **lock** it: that pitch, level, filter, envelope or pan applies to that step's own voice, up to 8 locks on a step. The clip has a length in steps, a step length (16ths by default, 32nds for rolls) and a **swing** amount that delays the second step of every pair. Choke groups make a hit cut the other voices in its group, which is what keeps an open hat from ringing through the next closed one.
+
+**Patterns and chains.** A pattern clip holds up to 16 patterns and a **chain**: an ordered list of them that loops (`A, B, A`), so one clip is a bar or a phrase and the chain is the part. Pattern tabs, the chain editor and the length and swing controls sit above the steps.
+
+**What the bot can do with the sampler.** It writes patterns, steps, locks, chains, slices and pad settings, and every one of those is a step you can undo. It cannot bring a sound in — it can import nothing, record nothing and resample nothing — and no step of its, undo included, can drop or replace the sound a pad plays, remove a bank or a sampler track whose pads hold sounds, swap a sampler track's device, or take back a sample's arrival. A track you lock keeps it off that kit, and re-chopping a sound a locked track plays is refused too. It cannot hover over a pad in your browser, so it cannot hear what you hear: ask it for a render and say what you think.
+
 ## The timeline
 
 Switch from **Session** to **Arrangement** to lay the song out on bars. Each track gets a lane, and each block on a lane is a **placement** of one of that track's clips, outlined in the colour of whoever placed it (you, or the bot).
@@ -98,6 +118,17 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Placements on the timeline | 2048 | — |
 | Timeline length | 999 bars | — |
 | Markers / sections | 256 / 128 | — |
+| Banks per kit | 8 | — |
+| Pads per bank | 16 | — |
+| Samples per song | 512 | — |
+| Sample length | 60 s of 48 kHz stereo (5,760,000 samples) | — |
+| Slices per sample | 64 | — |
+| Step positions per pattern | 64 (16 per page) | — |
+| Steps per pattern | 1024 | — |
+| Patterns per clip | 16 | — |
+| Chain length | 64 | — |
+| Locks per step | 8 | — |
+| Decoded samples held in memory | 256 MB | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
 
