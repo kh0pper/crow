@@ -469,6 +469,7 @@ export default {
         return true;
       }
       const outcome = await restoreConflict(db, String(conflictId), { instanceSync });
+      if (outcome.status === "applied") await markResolvedVia(db, conflictId, "operator");
       // Pass only the status enum; render() maps it to an i18n'd flash.
       const status = ["applied", "stale", "refused"].includes(outcome.status)
         ? outcome.status

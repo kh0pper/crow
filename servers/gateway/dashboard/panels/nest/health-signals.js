@@ -577,7 +577,16 @@ async function syncConflictsSignal(db) {
         args,
       };
     }
-    const { rows } = await db.execute(query);
+    let rows;
+    try {
+      ({ rows } = await db.execute(query));
+    } catch (err) {
+      // The expiry predicate failed (e.g. a malformed snapshot): count every
+      // unresolved row rather than report "none" — a broken query must not
+      // hide conflicts. A missing table still throws here and lands below.
+      if (query.args.length === 0) throw err;
+      ({ rows } = await db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0", args: [] }));
+    }
     count = Number(rows[0]?.n ?? 0);
   } catch {
     // sync_conflicts table may not exist yet on older installs; treat as 0.

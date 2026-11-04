@@ -692,3 +692,15 @@ test("sync_conflicts stays OUT of SYNCED_TABLES (local bookkeeping, never replic
     "sync_conflicts is per-instance bookkeeping — adding it to the allowlist would replicate conflict rows",
   );
 });
+test("a row with an unparseable created_at never expires and is still counted", async () => {
+  const { expirableWhere } = await import("../servers/sharing/sync-conflict-expiry.js");
+  const Database = (await import("better-sqlite3")).default;
+  const d = new Database(":memory:");
+  d.exec("CREATE TABLE sync_conflicts (id INTEGER PRIMARY KEY, resolved INTEGER, created_at TEXT, opened_at TEXT, winning_data TEXT, losing_data TEXT)");
+  d.prepare("INSERT INTO sync_conflicts VALUES (1, 0, 'not a date', NULL, '{}', '{}')").run();
+  d.prepare("INSERT INTO sync_conflicts VALUES (2, 0, NULL, NULL, '{}', '{}')").run();
+  const w = expirableWhere(7);
+  assert.equal(d.prepare(`SELECT count(*) n FROM sync_conflicts WHERE ${w.sql}`).get(...w.args).n, 0, "never expirable");
+  assert.equal(d.prepare(`SELECT count(*) n FROM sync_conflicts WHERE resolved = 0 AND NOT (${w.sql})`).get(...w.args).n, 2, "still counted");
+  d.close();
+});

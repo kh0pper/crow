@@ -101,12 +101,12 @@ export function olderThanWhere(days, { now = null } = {}) {
   const d = normalizeDays(days);
   const offset = `-${d} days`;
   const base = sqlNow(now);
-  // The IS NOT NULL guard keeps a malformed row (no created_at) from turning
-  // the comparison into NULL: such a row is never "older than N days", so it
-  // stays visible instead of silently vanishing from the health count.
+  // COALESCE keeps a row whose created_at is NULL or unparseable from turning
+  // the whole predicate into NULL: such a row is never "older than N days", so
+  // it never expires and stays visible in the health count.
   const sql = base
-    ? "(created_at IS NOT NULL AND datetime(created_at) < datetime(?, ?))"
-    : "(created_at IS NOT NULL AND datetime(created_at) < datetime('now', ?))";
+    ? "COALESCE(datetime(created_at) < datetime(?, ?), 0)"
+    : "COALESCE(datetime(created_at) < datetime('now', ?), 0)";
   return { sql, args: base ? [base, offset] : [offset] };
 }
 
