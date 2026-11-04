@@ -157,6 +157,13 @@ test("the internal-secret patterns do not swallow human credentials", () => {
   }
 });
 
+// Generated keys a bundle's own code reads from its .env (never via envKeys, so the value never
+// reaches an MCP config). Each entry names the file that reads it; the test checks that file.
+const DIRECT_ENV_READERS = {
+  browser: { CROW_BROWSER_CDP_TOKEN: "bundles/browser/server/instance.js" },
+};
+const REPO_ROOT_FOR_READERS = new URL("..", import.meta.url).pathname;
+
 test("every generated key is consumed: by its compose file, or by its MCP server (server.envKeys)", () => {
   for (const { dir, m } of MANIFESTS) {
     const keys = S.generatedEnvKeys(m);
@@ -169,7 +176,17 @@ test("every generated key is consumed: by its compose file, or by its MCP server
     // installer puts those into this instance's MCP entry). Explicit interpolation only:
     // an env_file .env would make `consumed.all` pass vacuously.
     const mcpKeys = new Set(m.server?.envKeys || []);
-    for (const k of keys) assert.ok(consumed.keys.has(k) || mcpKeys.has(k), `${dir}: ${k} is generated but neither its compose nor its MCP server reads it`);
+    const direct = DIRECT_ENV_READERS[dir] || {};
+    for (const k of keys) {
+      if (direct[k]) {
+        // Read straight from the bundle .env by the bundle's own code (kept OUT of envKeys on
+        // purpose, so it never lands in an MCP config); the exemption is proven, not assumed.
+        const reader = readFileSync(join(REPO_ROOT_FOR_READERS, direct[k]), "utf8");
+        assert.ok(reader.includes(k), `${dir}: ${k} is exempted as read by ${direct[k]}, which does not mention it`);
+        continue;
+      }
+      assert.ok(consumed.keys.has(k) || mcpKeys.has(k), `${dir}: ${k} is generated but neither its compose nor its MCP server reads it`);
+    }
   }
 });
 
