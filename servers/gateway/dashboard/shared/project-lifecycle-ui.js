@@ -21,8 +21,8 @@ import {
 
 const fill = (key, lang, vals) => Object.entries(vals).reduce((out, [k, v]) => out.split("{" + k + "}").join(String(v ?? "")), t(key, lang));
 
-// Finishing a delete that stopped partway. The wording lives here, next to the button, rather than
-// in the shared i18n table (which this change does not touch).
+// Finishing a delete that stopped partway. The button and the plain "done" line live here, next to
+// the button; the step names and the refusal wording are projLife.* keys in the shared i18n table.
 const RESUME_TEXT = Object.freeze({
   button: { en: "Finish deleting", es: "Terminar de eliminar" },
   done: { en: "The rest of the delete finished.", es: "El resto de la eliminación terminó." },
@@ -30,6 +30,9 @@ const RESUME_TEXT = Object.freeze({
 const local = (entry, lang) => entry[lang] || entry.en;
 
 const STEP_KEY = Object.freeze({ cards: "projLife.stepCards", board_defs: "projLife.stepBoard", files: "projLife.stepFiles", workspace: "projLife.stepWorkspace", jobs: "projLife.stepJobs" });
+// Owed steps a resume could not repeat at all (resumeProjectDelete's `untraceable`): said out
+// loud, because reporting them as done would be a lie.
+const UNTRACEABLE_KEY = Object.freeze({ jobs: "projLife.jobsUntraceable" });
 const COUNT_ROWS = Object.freeze([
   ["cards", "projLife.cCards"], ["files", "projLife.cFiles"], ["notes", "projLife.cNotes"], ["sources", "projLife.cSources"],
   ["sessions", "projLife.cSessions"], ["connections", "projLife.cConnections"], ["backends", "projLife.cBackends"],
@@ -107,7 +110,25 @@ const whoText = (detail, lang) => {
   return parts.join(", ");
 };
 
-const ERROR_KEY = Object.freeze({ name_mismatch: "projLife.nameMismatch", failed: "projLife.failed" });
+const ERROR_KEY = Object.freeze({
+  name_mismatch: "projLife.nameMismatch",
+  failed: "projLife.failed",
+  // Finishing a partial delete (resumeProjectDelete's own refusals).
+  not_partial: "projLife.nothingToFinish",
+  not_owner: "projLife.notOwnerFinish",
+});
+
+/**
+ * A refusal line for a closed code. `anyCode` is for the finish-a-delete redirect, which carries
+ * nothing but resumeProjectDelete's codes: an unknown one falls back to the generic failure text.
+ * Without it an unmapped code renders nothing (the projects panel uses ?error= for its own codes).
+ */
+function errorBannerHtml(code, lang, { anyCode = false } = {}) {
+  const c = typeof code === "string" ? code : "";
+  const key = Object.hasOwn(ERROR_KEY, c) ? ERROR_KEY[c] : (anyCode ? ERROR_KEY.failed : null);
+  if (!key) return "";
+  return `<p class="pl-banner pl-banner--err" role="alert" data-pl-error="${escapeHtml(c)}">${escapeHtml(t(key, lang))}</p>`;
+}
 
 /**
  * The delete confirm page body. `urls`: { post, cancel }.
@@ -117,7 +138,7 @@ export async function deleteConfirmHtml(db, req, project, lang, { urls, error = 
   const sum = await deleteSummary(db, project.id, {});
   if (sum.blocked && sum.blocked.code === "not_owner") return { forbidden: true };
   const title = `<h2 class="pl-title">${escapeHtml(fill("projLife.confirmTitle", lang, { name: project.name }))}</h2>`;
-  const err = (ERROR_KEY[error] ? `<p class="pl-banner pl-banner--err" role="alert" data-pl-error="${escapeHtml(error)}">${escapeHtml(t(ERROR_KEY[error], lang))}</p>` : "")
+  const err = errorBannerHtml(error, lang)
     // A refusal found after the disconnects ran (deleteProject's detail.disconnected).
     + (/^[1-9][0-9]{0,5}$/.test(String(disconnected)) ? `<p class="pl-banner pl-banner--err" role="alert" data-pl-disconnected>${escapeHtml(t("projLife.disconnected", lang))}</p>` : "");
   const cancel = `<a class="pl-link pl-link--quiet" href="${escapeHtml(urls.cancel)}">${escapeHtml(t("common.cancel", lang))}</a>`;
@@ -154,19 +175,30 @@ export async function deleteConfirmHtml(db, req, project, lang, { urls, error = 
 
 /**
  * The banner on /dashboard/projects after an archive, a delete, or finishing one (query: archived,
- * deleted, ws, partial, id, resumed). `req` is only read for the CSRF token of the finish button.
+ * deleted, ws, partial, untraceable, id, resumed; or error + resume=1 for a refused finish). `req`
+ * is only read for the CSRF token of the finish button.
  */
 export function resultBannerHtml(query, lang, req = {}) {
   const q = query || {};
   const one = (v) => (typeof v === "string" ? v : "");
+  // Finishing a delete that was refused lands here with the refusal code and resume=1: the same
+  // banner the confirm page uses, on the projects list page.
+  if (one(q.resume) === "1") {
+    const refusal = errorBannerHtml(one(q.error), lang, { anyCode: true });
+    if (refusal) return refusal;
+  }
   if (one(q.deleted) === "1") {
-    const lines = [one(q.resumed) === "done" ? local(RESUME_TEXT.done, lang) : t("projLife.deleted", lang)];
+    // A step the finish could not repeat at all is said out loud, never silently left out as done;
+    // when it is the only thing left it carries the "Finished." wording itself.
+    const untraceable = one(q.untraceable).split(",").filter((s) => Object.hasOwn(UNTRACEABLE_KEY, s)).map((s) => t(UNTRACEABLE_KEY[s], lang));
+    const lines = [one(q.resumed) === "done" && !untraceable.length ? local(RESUME_TEXT.done, lang) : t("projLife.deleted", lang)];
     const ws = one(q.ws);
     // The folder name is rebuilt under the server's own deleted-projects directory; only a plain name is accepted.
     const folder = /^[A-Za-z0-9][A-Za-z0-9-]{5,100}$/.test(ws) && ws !== "none";
     if (folder) {
       lines.push(fill("projLife.movedTo", lang, { path: join(deletedProjectsDir(), ws) }), t("projLife.removeLater", lang));
     } else if (ws === "left") lines.push(t("projLife.notMoved", lang));
+    lines.push(...untraceable);
     const steps = one(q.partial).split(",").filter((s) => STEP_KEY[s] && !(ws === "left" && s === "workspace")).map((s) => t(STEP_KEY[s], lang));
     if (steps.length) lines.push(fill("projLife.partial", lang, { steps: steps.join(", ") }));
     // Only the redirect a real delete builds shows the banner: a valid ws, or a partial list. A bare ?deleted=1 shows nothing.
@@ -223,11 +255,13 @@ export async function handleLifecyclePost(req, res, { db, lang, layout, projectI
   if (action === "resume_project_delete") {
     const r = await resumeProjectDelete(db, id, { actor: "local" });
     if (!r.ok) {
-      res.redirectAfterPost(`/dashboard/projects?error=${encodeURIComponent(r.code)}`);
+      // resume=1 marks these as the finish's own refusal codes (the list banner maps them).
+      res.redirectAfterPost(`/dashboard/projects?error=${encodeURIComponent(r.code)}&resume=1`);
       return {};
     }
     const partial = (r.partial || []).filter((s) => STEP_KEY[s]).join(",");
-    res.redirectAfterPost(`/dashboard/projects?deleted=1&ws=none&id=${id}&resumed=${partial ? "partial" : "done"}${partial ? `&partial=${encodeURIComponent(partial)}` : ""}`);
+    const untraceable = (r.untraceable || []).filter((s) => Object.hasOwn(UNTRACEABLE_KEY, s)).join(",");
+    res.redirectAfterPost(`/dashboard/projects?deleted=1&ws=none&id=${id}&resumed=${partial ? "partial" : "done"}${partial ? `&partial=${encodeURIComponent(partial)}` : ""}${untraceable ? `&untraceable=${encodeURIComponent(untraceable)}` : ""}`);
     return {};
   }
   const r = await deleteProject(db, id, { confirmName: typeof body.confirm_name === "string" ? body.confirm_name : "", actor: "local" });

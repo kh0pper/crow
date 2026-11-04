@@ -541,6 +541,9 @@ export function deletedProjectsDir(dataDir) {
 /** The steps a partial delete can list (the ones deleteProject runs after its commit). */
 const RESUME_STEPS = Object.freeze(["cards", "board_defs", "jobs", "files", "workspace"]);
 
+/** What a uuid has to look like to name a folder under deleted-projects (hex digits and dashes). */
+const AUDIT_UUID_RE = /^[0-9a-f-]{36}$/i;
+
 /** The newest audit_log row for `id` among `events`, or null. Read-only. */
 async function latestAuditOf(db, id, events) {
   const { rows } = await db.execute({
@@ -597,8 +600,11 @@ async function cardsLeft(project, { tasksDbPath } = {}) {
  * @param {string} [opts.dataDir]  defaults to project-spaces.js's anchor
  * @param {string} [opts.tasksDbPath]  the instance-global tasks.db (instance-paths.mjs by default)
  * @param {() => Date} [opts.now]  the date used in the deleted-projects folder name
- * @returns {Promise<{ ok: true, partial: string[] } | { ok: false, code: 'bad_actor'|'not_owner'|'not_partial' }>}
+ * @returns {Promise<{ ok: true, partial: string[], untraceable?: string[] } |
+ *   { ok: false, code: 'bad_actor'|'not_owner'|'not_partial' }>}
  *   `partial` lists what failed again this time (empty when the delete is now complete).
+ *   `untraceable` lists owed steps that could not be repeated at all (a queued job whose card
+ *   rows are gone): they are reported, never silently counted as done, and never owed again.
  */
 export async function resumeProjectDelete(db, projectId, {
   actor = "local", storageDelete, dataDir, tasksDbPath, now = () => new Date(),
@@ -622,20 +628,39 @@ export async function resumeProjectDelete(db, projectId, {
   const wanted = new Set((Array.isArray(listed) ? listed : []).filter((s) => RESUME_STEPS.includes(s)));
   if (!wanted.size) return { ok: false, code: "not_partial" };
 
-  const project = { ...tomb, id, slug: String(del.details.slug), uuid: del.details.uuid || tomb.uuid };
+  // The destination folder is named from the ROW's uuid: the audit entry is text a caller could
+  // have written, so it never names a path. Only a row with no uuid falls back to the audit's, and
+  // only when that is uuid-shaped; anything else refuses rather than steer the move out of
+  // deleted-projects.
+  let uuid = tomb.uuid;
+  if (!uuid) {
+    if (!AUDIT_UUID_RE.test(String(del.details.uuid || ""))) return { ok: false, code: "not_partial" };
+    uuid = String(del.details.uuid);
+  }
+  const project = { ...tomb, id, slug: String(del.details.slug), uuid };
   const partial = [];
+  const untraceable = [];
   // The ids first: purgeCards removes the rows they name. A card id is per store, so a store with
   // no rows for the project has no queued job that can be tied to it any more (nothing to cancel).
   const cards = wanted.has("jobs") ? await cardsLeft(project, { tasksDbPath }) : null;
   if (wanted.has("cards") || wanted.has("board_defs")) await purgeCards(project, { tasksDbPath }, partial);
-  if (cards) await cancelCardJobs(db, id, cards, partial);
+  if (cards) {
+    // No card rows left: no queued job can be tied to the project, so the step cannot run. Report
+    // it instead of counting it as done — and leave it out of remaining_partial, which is what a
+    // later resume reads, so it is never owed again.
+    if (!cards.ids.length) untraceable.push("jobs");
+    else await cancelCardJobs(db, id, cards, partial);
+  }
   if (wanted.has("files")) await purgeFiles(db, id, storageDelete || defaultStorageDeleteFor(db), partial);
   if (wanted.has("workspace")) moveWorkspace(project, projectsDataDir(dataDir), now(), partial);
 
-  await appendAudit(db, { project_id: id, actor_type: actor, action: "project.delete.resume", payload: { remaining_partial: partial } });
+  const extra = untraceable.length ? { untraceable } : {};
+  await appendAudit(db, {
+    project_id: id, actor_type: actor, action: "project.delete.resume", payload: { remaining_partial: partial, ...extra },
+  });
   await auditLog(db, "project.delete.resume", {
     actor,
-    details: { project_id: id, uuid: project.uuid, slug: project.slug, name: tomb.name ?? null, remaining_partial: partial },
+    details: { project_id: id, uuid: project.uuid, slug: project.slug, name: tomb.name ?? null, remaining_partial: partial, ...extra },
   });
-  return { ok: true, partial };
+  return { ok: true, partial, ...extra };
 }
