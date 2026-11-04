@@ -1525,6 +1525,43 @@ test("two uploaders for one take: only one runs", async () => {
   assert.equal(store.pendings.size, 0, "the finished take left nothing on this device");
 });
 
+test("a take held by another view is retried and finished once that view lets go", async () => {
+  // A Turbo visit tears a view down mid-upload while the tab lives on: its lock
+  // can outlast it for a moment, and the next view of the song must not give
+  // the take up when it finds the lock taken.
+  const takeId = "0a1b2c3d-0000-4000-8000-0000000000dd";
+  const row = {
+    take_id: takeId,
+    song_id: "song-1",
+    clip_id: "c-held",
+    rate: 48000,
+    channels: 2,
+    offset_frames: 0,
+    compensated: false,
+    bpm: 240,
+    chunk_count: 1,
+    begun: false,
+    finished: false,
+    created_at: new Date(0).toISOString(),
+  };
+  const store = fakeTakeStore({ log: [] });
+  store.pendings.set(takeId, row);
+  store.chunks.set(takeId + ":0", new Uint8Array(12).buffer);
+  const locks = fakeLocks();
+  locks.held.add("studio-take-" + takeId);
+
+  const ui = await bootPanel({ store, locks, pending: [row] });
+  await ui.settle(24);
+  assert.equal(finishCount(ui), 0, "the take is not sent while another view holds it");
+  assert.ok(ui.timers.length > 0, "but a retry is scheduled");
+
+  locks.held.delete("studio-take-" + takeId);
+  for (const fn of ui.timers.splice(0)) fn();
+  await ui.settle(24);
+  assert.equal(finishCount(ui), 1, "once the lock is free the take is finished");
+  assert.equal(store.pendings.size, 0, "and nothing is left on this device");
+});
+
 test("a vanished pending row ends the upload quietly", async () => {
   // Another view finished the take and deleted the row: the chunks are gone
   // with it, and this view must not report a missing piece or retry.
