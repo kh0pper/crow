@@ -275,6 +275,8 @@
    *            seek: function(number): void,
    *            block: function(number, number): Array<object>,
    *            nextBarFrame: function(): {bar: number, beat: number, frame: number},
+   *            barLines: function(object): {barFrame: number|null,
+   *              nextBarFrame: number|null, bar: number|null},
    *            position: function(): {bar: number, beat: number, sixteenth: number},
    *            isPlaying: function(): boolean}}
    */
@@ -310,6 +312,12 @@
     let originFrame = null; // absolute frame of beat 0 for this transport run
     let currentFrame = null; // absolute frame just past the last processed block
     let lastFrame = null; // absolute frame of the last processed frame
+
+    /**
+     * The object `barLines()` reads the next boundary into, so that answering the
+     * performance bus's bar question every block allocates nothing at all.
+     */
+    const barScratch = { bar: 0, beat: 0, frame: 0 };
 
     /** track id → [{track_id, clipId, startBeat, endBeat}] in beat order. */
     const segments = new Map();
@@ -1614,6 +1622,45 @@
       return { bar: Math.round(beat / BEATS_PER_BAR), beat: beat, frame: frameNow() };
     }
 
+    /**
+     * Fill a caller's own object with the bar lines around the playhead, in this
+     * sequencer's own frames, WITHOUT allocating one: a host that reads them on
+     * every block (the performance bus's looper quantizes to them) must not make
+     * garbage on the audio thread.
+     *
+     * `barFrame` is the line the playhead is inside and `nextBarFrame` the next
+     * line at or after the next block's first frame, both from the very same
+     * rounding `nextBarFrom` applies. The previous line is therefore never a
+     * rounded difference — `round(origin + bar * barFrames) - barFrames` is a
+     * frame away from `round(origin + (bar - 1) * barFrames)` at a fractional
+     * frames-per-beat, which would start a quantized command off the grid.
+     *
+     * A stopped transport (or one that has not run yet) has no grid at all, so
+     * both answers are null: there is no bar for a command to wait for.
+     * @param {{barFrame: number|null, nextBarFrame: number|null, bar: number|null}} target
+     * @returns {object} the same object, filled in
+     */
+    function barLines(target) {
+      const out = target && typeof target === "object" ? target : {};
+      if (!playing || originFrame === null) {
+        out.barFrame = null;
+        out.nextBarFrame = null;
+        out.bar = null;
+        return out;
+      }
+      const barFrames = BEATS_PER_BAR * framesPerBeat;
+      const frame = frameNow();
+      const next = nextBarInto(barScratch, frame, originFrame, framesPerBeat);
+      out.bar = next.bar;
+      out.nextBarFrame = next.frame;
+      if (next.frame <= frame || next.bar < 1) {
+        out.barFrame = Math.round(originFrame + next.bar * barFrames);
+      } else {
+        out.barFrame = Math.round(originFrame + (next.bar - 1) * barFrames);
+      }
+      return out;
+    }
+
     // --- block -----------------------------------------------------------
 
     /**
@@ -2336,6 +2383,7 @@
       seek: seek,
       block: block,
       nextBarFrame: nextBarFrame,
+      barLines: barLines,
       position: position,
       isPlaying: function isPlaying() {
         return playing;
@@ -2365,6 +2413,21 @@
    *   0-based `bar`, the boundary in `beat`s and its rounded `frame`
    */
   function nextBarFrom(frame, originFrame, framesPerBeat) {
+    return nextBarInto({ bar: 0, beat: 0, frame: 0 }, frame, originFrame, framesPerBeat);
+  }
+
+  /**
+   * The same answer as `nextBarFrom`, written into the caller's own object: the
+   * performance bus asks for the bar lines on every block, and a block must not
+   * make garbage on the audio thread.
+   * @param {{bar: number, beat: number, frame: number}} target
+   * @param {number} frame
+   * @param {number} originFrame
+   * @param {number} framesPerBeat
+   * @returns {object} the same object, filled in
+   */
+  function nextBarInto(target, frame, originFrame, framesPerBeat) {
+    const out = target && typeof target === "object" ? target : {};
     const barFrames = BEATS_PER_BAR * framesPerBeat;
     let bar = Math.max(0, Math.ceil((frame - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
     let boundary = Math.round(originFrame + bar * barFrames);
@@ -2373,7 +2436,10 @@
       bar += 1;
       boundary = Math.round(originFrame + bar * barFrames);
     }
-    return { bar: bar, beat: bar * BEATS_PER_BAR, frame: boundary };
+    out.bar = bar;
+    out.beat = bar * BEATS_PER_BAR;
+    out.frame = boundary;
+    return out;
   }
 
   /** @returns {number} launch reports in the order of their block frames. */

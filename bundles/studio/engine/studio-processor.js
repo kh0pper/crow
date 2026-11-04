@@ -165,18 +165,29 @@
  * The effects are live performance state: `{type:"fx", name, amount, on}`
  * holds or releases one, and nothing else in this file touches them. A scene
  * launch, a stop or a pattern change does NOT release an effect — only a
- * release does (a held stutter keeps repeating its captured slice through a
- * transport stop, and a held tape stop stays at silence). The looper answers
+ * release does (a held stutter keeps repeating its slice through a transport
+ * stop, and a held tape stop stays at silence). The looper answers
  * `{type:"looper", action}` with `record`, `overdub`, `play`, `stop` or
- * `clear`, all quantized to the bar, and `{type:"looper_take"}` with
- * `{type:"looper_buffer", id, channels, rate, bars}` — whole bars of the
- * master, which the page turns into a pad's sample.
+ * `clear`, all quantized to the sequencer's own next bar line, and
+ * `{type:"looper_take"}` with `{type:"looper_buffer", id, left, right, frames,
+ * rate, bars}` — whole bars of the master in the looper's own buffers, which the
+ * page turns into a pad's sample.
+ *
+ * **The looper's buffers belong to the page.** `{type:"looper_buffers", left,
+ * right}` hands the processor a pair (transferred) sized for eight bars at the
+ * song's current tempo; a `looper_take` transfers that same pair back, and the
+ * page returns it with another `looper_buffers`. Nothing in this file allocates
+ * a looper buffer, and a recording that would pass the end of them ends at the
+ * last whole bar that fits.
  *
  * Both take a `transport` the processor keeps for the block:
- * `{frame, playing, bpm, beatsPerBar, barFrame, offset}`, where `frame` is the
- * block's first frame, `barFrame` the frame of the bar line the playhead is
- * inside (`null` while the transport is stopped: there is no grid to quantize
- * to), and `offset` the run's first index inside the output buffers.
+ * `{frame, playing, bpm, beatsPerBar, barFrame, nextBarFrame, offset}`, where
+ * `frame` is the block's first frame, `barFrame` the frame of the bar line the
+ * playhead is inside and `nextBarFrame` the sequencer's own next bar line (both
+ * `null` while the transport is stopped: there is no grid to quantize to, so a
+ * command acts at once), and `offset` the run's first index inside the output
+ * buffers. Both are read from the sequencer's `barLines()`, which fills a reused
+ * object: a block allocates nothing.
  *
  * ## Block splitting
  *
@@ -207,7 +218,8 @@
  * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
  * `{type:"sample_unload", sample_id}`, `{type:"live", track_id, bank_id,
  * index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name, amount, on}`,
- * `{type:"looper", action}`, `{type:"looper_take", id}`
+ * `{type:"looper", action}`, `{type:"looper_buffers", left, right}`,
+ * `{type:"looper_take", id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth}` (at most every 50 ms of
  * audio), `{type:"launched", track_id, clip_id, scene_id, bar, frame}` (one
@@ -217,8 +229,9 @@
  * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
  * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
  * loaded, once per sample id), `{type:"tap_block", target, frame, channels}`
- * (while a tap is on, one per block), `{type:"looper_buffer", id, channels,
- * rate, bars}` (one answer per `looper_take`)
+ * (while a tap is on, one per block), `{type:"looper_buffer", id, left, right,
+ * frames, rate, bars}` (one answer per `looper_take`; the `left`/`right` buffers
+ * are transferred, and the page hands them back with `looper_buffers`)
  *
  * ## Frames the client can count on
  *
@@ -353,18 +366,6 @@
 
   /** The tempo a song without a usable `meta.bpm` counts the performance bus at. */
   const DEFAULT_BPM = 120;
-
-  /**
-   * How many frames one beat lasts at a tempo. It is NOT rounded: a bar line and
-   * a stutter's divisions are measured off it in doubles and rounded once, the
-   * way the sequencer does its own beats.
-   * @param {number} bpm
-   * @returns {number}
-   */
-  function framesPerBeatAt(bpm) {
-    const tempo = Number(bpm);
-    return (sampleRate * 60) / (Number.isFinite(tempo) && tempo > 0 ? tempo : DEFAULT_BPM);
-  }
 
   /**
    * A song's tempo, from its own `meta.bpm`; a missing or unusable one is 120.
@@ -906,8 +907,9 @@
 
       /**
        * The transport the bus reads each block, kept as one object so the audio
-       * thread allocates nothing: its first frame, whether the playhead runs,
-       * the tempo, and the frame of the bar line it is inside.
+       * thread allocates nothing: its first frame, whether the playhead runs, the
+       * tempo, the frame of the bar line it is inside and the sequencer's own next
+       * bar line.
        */
       this.transport = {
         frame: 0,
@@ -916,7 +918,14 @@
         bpm: DEFAULT_BPM,
         beatsPerBar: BEATS_PER_BAR,
         barFrame: null,
+        nextBarFrame: null,
       };
+
+      /**
+       * The sequencer's bar lines, filled in place every block (`updateTransport`)
+       * so reading them costs no allocation on the audio thread.
+       */
+      this.barLineScratch = { barFrame: null, nextBarFrame: null, bar: null };
 
       /** The track whose own output is tapped, or null. */
       this.tapTrackId = null;
@@ -1065,6 +1074,12 @@
           break;
         case "looper":
           this.perf.looper(message.action);
+          break;
+        case "looper_buffers":
+          // The page owns the looper's buffers: the audio thread allocates none, so
+          // they arrive (transferred) before the first record and come back after a
+          // take. Adopting them is the message path's work, never a block's.
+          this.perf.setLooperBuffers(message.left, message.right);
           break;
         case "looper_take":
           this.postLooperTake(message);
@@ -1227,21 +1242,36 @@
 
     /**
      * Answer one `looper_take` with the looper's whole bars of the master, as
-     * `{type:"looper_buffer", id, channels, rate, bars}`: what the page turns
-     * into a pad's sample (Task 12). The channels are copies, so the looper keeps
-     * its own take.
+     * `{type:"looper_buffer", id, left, right, frames, rate, bars}` — the looper's
+     * own buffers, TRANSFERRED rather than copied, which the page copies the
+     * loop's frames out of (clipped to [−1, 1]: the looper taps the mix before the
+     * clip) and hands straight back as `looper_buffers`. The looper keeps its
+     * position while they are away, so it plays on from where it was; a looper
+     * that has nothing (or whose buffers are already out on a take) answers no
+     * bars.
      * @param {{id?: number}} message
      * @returns {void}
      */
     postLooperTake(message) {
-      const take = this.perf.take();
-      this.port.postMessage({
+      const take = this.perf.takeLooperBuffers();
+      const answer = {
         type: "looper_buffer",
         id: message.id,
-        channels: take.channels,
-        rate: take.rate,
-        bars: take.bars,
-      });
+        rate: sampleRate,
+        bars: take ? take.bars : 0,
+        frames: take ? take.frames : 0,
+        left: take ? take.left : null,
+        right: take ? take.right : null,
+      };
+      if (take && take.left && take.right) {
+        try {
+          this.port.postMessage(answer, [take.left.buffer, take.right.buffer]);
+          return;
+        } catch {
+          // A host whose port will not take a transfer list still gets a copy.
+        }
+      }
+      this.port.postMessage(answer);
     }
 
     /**
@@ -1777,15 +1807,17 @@
 
     /**
      * Work out the transport the performance bus reads for this block: its first
-     * frame, whether the playhead runs, the song's tempo, and the frame of the
-     * bar line the playhead is inside.
+     * frame, whether the playhead runs, the song's tempo, and the two bar lines
+     * around the playhead.
      *
-     * The bar line comes from the sequencer's own `nextBarFrame()` — the one
-     * place the bar-boundary rounding lives — one bar back from the boundary it
-     * answers, or the boundary itself when the playhead sits exactly on it. A
-     * stopped transport has no grid at all, which is why `barFrame` is null
-     * there: the looper's commands then take effect at once instead of waiting
-     * for a bar that never comes.
+     * Both come from the sequencer's own `barLines()` — the one place the
+     * bar-boundary rounding lives — so the looper quantizes to the very line the
+     * sequencer plays on, even after a tempo change moved the grid (it is never
+     * `barFrame + barFrames` at the current tempo, which a dropped tempo would put
+     * a whole bar — or, at a fractional bar, a frame — away from it). A stopped
+     * transport has no grid at all, which is why both are null there: the looper's
+     * commands then take effect at once instead of waiting for a bar that never
+     * comes. The read fills a reused object: nothing is allocated per block.
      * @returns {void}
      */
     updateTransport() {
@@ -1795,14 +1827,9 @@
       transport.playing = this.sequencer.isPlaying();
       transport.bpm = this.bpm;
       transport.beatsPerBar = BEATS_PER_BAR;
-      if (!transport.playing) {
-        transport.barFrame = null;
-        return;
-      }
-      const boundary = this.sequencer.nextBarFrame();
-      const barFrames = BEATS_PER_BAR * framesPerBeatAt(this.bpm);
-      transport.barFrame =
-        boundary.frame === this.frame ? this.frame : Math.max(0, Math.round(boundary.frame - barFrames));
+      const lines = this.sequencer.barLines(this.barLineScratch);
+      transport.barFrame = lines.barFrame;
+      transport.nextBarFrame = lines.nextBarFrame;
     }
 
     /**

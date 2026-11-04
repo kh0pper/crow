@@ -35,12 +35,17 @@
  * - **lofi** — bit depth 16 → 4 bits, a sample-and-hold whose factor runs 1 → 8
  *   frames, and a −60 dBFS × amount noise floor from an xorshift32 PRNG seeded
  *   0x9E3779B9 afresh on every hold.
- * - **stutter** — captures one division of a beat (1/4, 1/8 or 1/16 by the
- *   amount) and loops it. The slice it repeats begins at the hold frame: the
- *   bus has not been buffering audio while nothing was held (that is what makes
- *   an idle bus free), so the slice is captured as it plays and loops from the
- *   frame after it. The division is the effect's period, so the repetition is
- *   in time however late in the slice the button went down.
+ * - **stutter** — repeats one division of a beat (1/4, 1/8 or 1/16 by the
+ *   amount) ON the beat grid. The slice is the division the hold frame sits
+ *   inside, `[boundary, boundary + division)`, and it repeats from `boundary +
+ *   division` on, so every repeat begins exactly on a division line however
+ *   late inside the division the button went down. The bus keeps a trailing
+ *   ring of one quarter of a beat at the slowest tempo a song may run at (20
+ *   bpm) — allocated once in `create()`, never on a hold, and written one frame
+ *   per frame — so the part of the slice that has already played is repeated
+ *   out of the ring and only the rest is captured live, the live signal passing
+ *   through until `boundary + division`. With no bar line (a stopped transport)
+ *   the hold frame is the boundary.
  * - **tape_stop** — the read head slows linearly from speed 1 to speed 0 over
  *   exactly one beat from the hold frame, reading a ring buffer with linear
  *   interpolation, and the output is silence from the frame the speed reaches
@@ -58,13 +63,25 @@
  * exactly 64 frames from the frame after the release, and is then dropped with
  * its state: from 64 frames after the release the bus writes nothing at all,
  * so the output equals its input bit for bit. The reverb's send closes on
- * release and its tail rings out; once the return's peak over a 128-frame block
- * falls below −120 dBFS the state is cleared and the bus is bit-exact dry
- * again. Nothing is ever summed into the signal as `x + 0`, so a −0 sample
- * stays a −0 sample.
+ * release and its tail rings out. Its delay lines are the tail: once the peak
+ * of what they hold (and of the return) over a 128-frame block falls below
+ * −120 dBFS, AND the longest comb plus the longest allpass have had time to
+ * empty since the send closed — the very first quiet block of a ring still full
+ * of a loud signal is not a finished tail — the state is cleared and the bus is
+ * bit-exact dry again. Nothing is ever summed into the signal as `x + 0`, so a
+ * −0 sample stays a −0 sample.
  *
- * The whole bus is one `if` when nothing is held and the looper is empty: no
- * state, no buffer and no arithmetic.
+ * A **re-hold** while an effect is still applied continues from the state it is
+ * in: a hold on an effect that is already held follows the amount (a knob
+ * sweep), a hold during the crossfade reverses the crossfade at the same rate —
+ * from the wet level it had reached, so there is no click — and a hold on a
+ * reverb that is ringing its tail reopens the send without clearing it. A
+ * release during such a ramp back up carries on down from where the mix is.
+ *
+ * The bus costs one store per channel per frame while the playhead runs (the
+ * stutter's trailing ring, above) and nothing else when no effect is held and
+ * the looper is empty: no other state is read or written and the master is
+ * bit-exact.
  *
  * ## The looper
  *
@@ -72,26 +89,39 @@
  * quantized to the bar. `record` starts on the next bar line and ends on the
  * bar line AFTER the next `play`/`overdub`/`record` (whole bars, at most 8);
  * `play` loops the take mixed into the master; `overdub` adds the live master
- * into the take while it plays; `clear` empties it at once. The take taps the
- * master BEFORE the effects, so a held stutter or reverb is not baked into the
- * loop.
+ * into the take while it plays; `stop` during a recording keeps the whole bars
+ * it captured (and discards it if it captured none) and leaves it for a later
+ * `play`/`overdub`; `clear` empties it at once. The take taps the master BEFORE
+ * the effects, so a held stutter or reverb is not baked into the loop.
  *
- * The buffer is readable: `take()` answers `{channels, rate, bars}` — whole bars
- * of what has been recorded, which the processor hands to the page through its
- * `looper_take` message.
+ * **The audio thread allocates nothing for the looper.** The buffers are the
+ * main thread's: `setLooperBuffers(left, right)` adopts a pair sized for eight
+ * bars at the song's current tempo, and a recording that would pass the end of
+ * them ends at the last whole bar that fits. `takeLooperBuffers()` hands those
+ * buffers back — whole bars of the master as `{left, right, frames, bars,
+ * rate}` — with the looper detached from them; while they are away the looper
+ * contributes silence (the dry master still passes through) and keeps its
+ * position, so it carries on from where it was when the same buffers come back
+ * through `setLooperBuffers`. The take is rare and short, which is why the
+ * handover is a transfer and not a copy; the page makes its own copy (clipped
+ * to [−1, 1], because the looper taps the mix before the clip).
  *
  * ## Transport
  *
  * `process(left, right, frames, transport)` and `loop(...)` take
  *
- *     transport = {frame, playing, bpm, beatsPerBar, barFrame, offset?}
+ *     transport = {frame, playing, bpm, beatsPerBar, barFrame, nextBarFrame, offset?}
  *
  * where `frame` is the absolute frame of `left[0]`, `barFrame` is the frame of
- * the bar line the playhead is inside (or `null` when there is no grid: the
- * transport is stopped), and the optional `offset` is the index in `left` this
- * run starts at (the processor renders one block in several runs, one per
- * sequencer event). Everything is worked out from `frame`, so a run split any
- * way at all produces the same frames.
+ * the bar line the playhead is inside, `nextBarFrame` the NEXT real bar line on
+ * the sequencer's own grid (a tempo change moves it: it is never assumed to be
+ * `barFrame + barFrames` at the current tempo), and the optional `offset` is the
+ * index in `left` this run starts at (the processor renders one block in
+ * several runs, one per sequencer event). Both bar fields are `null` when there
+ * is no grid (the transport is stopped) and are read as null when missing;
+ * `Number(null)` is never allowed to turn a stopped transport into bar 0.
+ * Everything is worked out from `frame`, so a run split any way at all produces
+ * the same frames.
  *
  * ## Why it is bit-identical in Chromium and Node
  *
@@ -170,6 +200,13 @@
   /** The longest take the looper records, in bars. */
   const MAX_LOOP_BARS = 8;
 
+  /**
+   * The slowest tempo a song may run at, in bpm. The stutter's trailing ring is
+   * sized for one quarter of a beat at this tempo, which is the longest slice a
+   * stutter can ask for.
+   */
+  const SLOWEST_BPM = 20;
+
   /** A transport a caller that passes none is read as: stopped, at 120 bpm. */
   const DEFAULT_TRANSPORT = Object.freeze({
     frame: 0,
@@ -178,6 +215,7 @@
     bpm: DEFAULT_BPM,
     beatsPerBar: BEATS_PER_BAR,
     barFrame: null,
+    nextBarFrame: null,
   });
 
   /** @returns {number} the value when it is a finite number, else the fallback. */
@@ -203,6 +241,22 @@
   /** @returns {number} the value, or 0 when it is below the denormal floor. */
   function flush(value) {
     return value > -DENORMAL_FLOOR && value < DENORMAL_FLOOR ? 0 : value;
+  }
+
+  /**
+   * A transport frame as a whole number, or null when the transport has none.
+   *
+   * A stopped transport reports `barFrame`/`nextBarFrame` as null, and a caller
+   * that omits one means the same thing. `Number(null)` is 0, so a null must be
+   * caught here: reading it as bar 0 would quantize a stopped looper to a bar
+   * line that does not exist.
+   * @param {unknown} value
+   * @returns {number|null}
+   */
+  function frameOrNull(value) {
+    if (value === null || value === undefined) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.trunc(number) : null;
   }
 
   /**
@@ -353,8 +407,13 @@
     const buffer = comb.buffer;
     const out = buffer[comb.index];
     comb.damp = flush(out * (1 - REVERB_DAMPING) + comb.damp * REVERB_DAMPING);
-    buffer[comb.index] = flush(input + comb.damp * REVERB_FEEDBACK);
+    const written = flush(input + comb.damp * REVERB_FEEDBACK);
+    buffer[comb.index] = written;
     comb.index = comb.index + 1 >= buffer.length ? 0 : comb.index + 1;
+    // What the line holds this frame, for the tail measurement: a line full of
+    // signal is a tail that has not finished, whatever the return happens to
+    // cancel to.
+    comb.level = Math.max(Math.abs(out), Math.abs(written));
     return out;
   }
 
@@ -362,8 +421,10 @@
   function allpassFrame(allpass, input) {
     const buffer = allpass.buffer;
     const out = buffer[allpass.index];
-    buffer[allpass.index] = flush(input + out * REVERB_ALLPASS_GAIN);
+    const written = flush(input + out * REVERB_ALLPASS_GAIN);
+    buffer[allpass.index] = written;
     allpass.index = allpass.index + 1 >= buffer.length ? 0 : allpass.index + 1;
+    allpass.level = Math.max(Math.abs(out), Math.abs(written));
     return out - input;
   }
 
@@ -401,10 +462,37 @@
     /** Effect changes waiting for the next block's first frame. */
     const pending = [];
 
+    // --- the stutter's trailing ring --------------------------------------
+    //
+    // One quarter of a beat at the slowest tempo a song may run at: the longest
+    // slice a stutter can ask for, already behind the hold frame when the button
+    // goes down. Allocated here, once, so a hold never allocates on the audio
+    // thread; the slice itself is copied into its own fixed buffer out of it.
+    const ringFrames = Math.max(1, Math.ceil((sampleRate * 60) / SLOWEST_BPM / 4));
+    const ringLeft = new Float32Array(ringFrames);
+    const ringRight = new Float32Array(ringFrames);
+
+    /** Where the next frame of the master goes in the ring. */
+    let ringIndex = 0;
+
+    /**
+     * How many frames the ring holds without a gap, ending at the frame the next
+     * write goes to. It restarts at 0 whenever the ring is not written (a stopped
+     * transport), so a slice never begins with audio from before a gap.
+     */
+    let ringFilled = 0;
+
+    /** The stutter's slice, copied out of the ring and the live signal. */
+    const stutterLeft = new Float32Array(ringFrames);
+    const stutterRight = new Float32Array(ringFrames);
+
     // --- the looper's state ------------------------------------------------
 
-    /** The finished take: `{left, right, frames, bars}` or null. */
-    let take = null;
+    /**
+     * The main thread's buffers, `{left, right}`, or null while they are away on
+     * a take (or before the page has sent any). The looper allocates none.
+     */
+    let buffers = null;
 
     /** `idle`, `recording`, `playing` or `overdub`. */
     let mode = "idle";
@@ -412,12 +500,18 @@
     /** The action waiting for a bar line (`record`, `finish`, `play`, ...). */
     let pendingAction = null;
 
-    /** The recording in progress: its buffer, how much of it is written, its bar. */
-    let recLeft = null;
-    let recRight = null;
+    /** How many frames of the recording in progress have been written. */
     let recFrames = 0;
+
+    /** How many frames one bar was when the recording started. */
     let recBarFrames = 1;
+
+    /** How many frames a recording may fill: whole bars, at most eight. */
     let recCapacity = 0;
+
+    /** The take's length in whole bars and in frames; 0 when there is none. */
+    let takeBars = 0;
+    let takeFrames = 0;
 
     /** Where the take is reading, in frames from its own first one. */
     let position = 0;
@@ -468,11 +562,8 @@
         state.a2 = 0;
         state.a3 = 0;
       } else if (name === "stutter") {
-        state.sliceLeft = new Float32Array(0);
-        state.sliceRight = new Float32Array(0);
         state.sliceFrames = 0;
         state.captured = 0;
-        state.capturing = false;
         state.division = STUTTER_EIGHTH;
         state.position = 0;
       } else if (name === "tape_stop") {
@@ -496,8 +587,21 @@
           state.allpassesLeft.push(createAllpass(scaledDelay(REVERB_ALLPASS_FRAMES[at], sampleRate)));
           state.allpassesRight.push(createAllpass(scaledDelay(REVERB_ALLPASS_FRAMES[at], sampleRate)));
         }
+        // A tail cannot be finished before its longest comb plus its longest
+        // allpass has had time to empty: the lines hold the loudest part of the
+        // return, and a block of quiet output over a full line is not a tail's end.
+        let longest = 0;
+        for (let at = 0; at < REVERB_COMB_FRAMES.length; at += 1) {
+          longest = Math.max(longest, scaledDelay(REVERB_COMB_FRAMES[at], sampleRate));
+        }
+        let allpassLongest = 0;
+        for (let at = 0; at < REVERB_ALLPASS_FRAMES.length; at += 1) {
+          allpassLongest = Math.max(allpassLongest, scaledDelay(REVERB_ALLPASS_FRAMES[at], sampleRate));
+        }
+        state.settleFrames = longest + allpassLongest;
         state.tailPeak = 0;
         state.tailFrames = 0;
+        state.tailSince = 0;
       }
       states.push(state);
       states.sort(byChainOrder);
@@ -527,6 +631,7 @@
       for (const allpass of state.allpassesRight) allpass.index = 0;
       state.tailPeak = 0;
       state.tailFrames = 0;
+      state.tailSince = 0;
     }
 
     /**
@@ -551,18 +656,38 @@
       if (state.name === "stutter") {
         const division = stutterDivisionOf(amount);
         const beatFrames = beatFramesAt(transport.bpm, sampleRate);
-        const frames = Math.max(1, Math.round(beatFrames * division));
-        if (state.sliceLeft.length < frames) {
-          state.sliceLeft = new Float32Array(frames);
-          state.sliceRight = new Float32Array(frames);
-        } else {
-          state.sliceLeft.fill(0, 0, frames);
-          state.sliceRight.fill(0, 0, frames);
+        const wanted = Math.max(1, Math.round(beatFrames * division));
+        // The slice is never longer than the ring: at any tempo a song may run at
+        // (20 bpm up) the ring is exactly one quarter-beat long, so this only
+        // bites below the slowest tempo the song rules allow.
+        const frames = Math.min(wanted, ringFrames);
+        const barFrame = frameOrNull(transport.barFrame);
+        // The division boundary the hold frame sits in. With no bar line there is
+        // no grid to land on, so the hold frame IS the boundary.
+        let boundary = frame;
+        if (barFrame !== null && frame > barFrame) {
+          boundary = barFrame + Math.floor((frame - barFrame) / frames) * frames;
+        }
+        // How much of the slice has already played: the part that is in the ring.
+        const wantedReady = Math.max(0, Math.min(frames, frame - boundary));
+        let ready = Math.min(wantedReady, ringFilled);
+        if (ready < wantedReady) {
+          // The playhead has not run that long: align on the oldest frame the ring
+          // really holds, so a repeat never starts with audio from before a gap.
+          boundary = frame - ready;
+          if (ready < 0) ready = 0;
+        }
+        let slot = ringIndex - ready;
+        while (slot < 0) slot += ringFrames;
+        for (let at = 0; at < ready; at += 1) {
+          let from = slot + at;
+          while (from >= ringFrames) from -= ringFrames;
+          stutterLeft[at] = ringLeft[from];
+          stutterRight[at] = ringRight[from];
         }
         state.division = division;
         state.sliceFrames = frames;
-        state.captured = 0;
-        state.capturing = true;
+        state.captured = ready;
         state.position = 0;
         return;
       }
@@ -678,10 +803,19 @@
         const state = stateFor(item.name);
         if (!state) continue;
         if (item.on) {
-          // A hold on an effect that is already applied follows the amount (a
-          // knob sweep); anything else starts it here, state and all.
-          if (state.active && state.held) setAmount(state, item.amount);
-          else activate(state, frame, item.amount, transport);
+          // A hold on an effect that is still applied — held, crossfading back to
+          // dry, or (the reverb) ringing its tail — continues from the state it is
+          // in: a knob sweep follows the amount, a re-hold picks the wet signal up
+          // where it is instead of restarting it with a click, and a reverb send
+          // reopens without clearing the tail it is still ringing. Only an effect
+          // that has been dropped is started again, state and all.
+          if (state.active) {
+            state.held = true;
+            if (state.name === "reverb_throw") state.tailSince = 0;
+            setAmount(state, item.amount);
+          } else {
+            activate(state, frame, item.amount, transport);
+          }
           continue;
         }
         if (!state.active) continue;
@@ -690,8 +824,10 @@
         if (!state.held) continue;
         state.held = false;
         // The reverb throw is a send: closing it leaves the tail to ring. Every
-        // other effect hands the dry signal back over the crossfade instead.
-        if (state.name !== "reverb_throw") state.releasing = 0;
+        // other effect hands the dry signal back over the crossfade instead —
+        // continuing a fade it was already in the middle of, so releasing during a
+        // re-hold's ramp back up never jumps either.
+        if (state.name !== "reverb_throw" && state.releasing < 0) state.releasing = 0;
       }
       pending.length = 0;
     }
@@ -708,21 +844,19 @@
      */
     function stepEffect(state, inLeft, inRight, frame) {
       if (state.name === "stutter") {
-        if (state.capturing) {
-          state.sliceLeft[state.captured] = inLeft;
-          state.sliceRight[state.captured] = inRight;
+        if (state.captured < state.sliceFrames) {
+          // The slice is still filling: the live signal passes through, and the
+          // frame it fills from now on is the one this very frame plays.
+          stutterLeft[state.captured] = inLeft;
+          stutterRight[state.captured] = inRight;
           state.captured += 1;
-          if (state.captured >= state.sliceFrames) {
-            state.capturing = false;
-            state.position = 0;
-          }
           state.outLeft = inLeft;
           state.outRight = inRight;
           return;
         }
         const at = state.position;
-        state.outLeft = state.sliceLeft[at];
-        state.outRight = state.sliceRight[at];
+        state.outLeft = stutterLeft[at];
+        state.outRight = stutterRight[at];
         state.position = at + 1 >= state.sliceFrames ? 0 : at + 1;
         return;
       }
@@ -777,15 +911,27 @@
       const wetInputRight = inRight * send;
       let sumLeft = 0;
       let sumRight = 0;
+      // The loudest sample any of the delay lines holds this frame. The tail lives
+      // in the lines, not in the return: an allpass can cancel the return to
+      // nothing while the lines are still full, so the level is measured on both.
+      let linePeak = 0;
       for (let at = 0; at < state.combsLeft.length; at += 1) {
-        sumLeft += combFrame(state.combsLeft[at], wetInputLeft);
-        sumRight += combFrame(state.combsRight[at], wetInputRight);
+        const combLeft = state.combsLeft[at];
+        const combRight = state.combsRight[at];
+        sumLeft += combFrame(combLeft, wetInputLeft);
+        sumRight += combFrame(combRight, wetInputRight);
+        if (combLeft.level > linePeak) linePeak = combLeft.level;
+        if (combRight.level > linePeak) linePeak = combRight.level;
       }
       let wetLeft = sumLeft / state.combsLeft.length;
       let wetRight = sumRight / state.combsRight.length;
       for (let at = 0; at < state.allpassesLeft.length; at += 1) {
-        wetLeft = allpassFrame(state.allpassesLeft[at], wetLeft);
-        wetRight = allpassFrame(state.allpassesRight[at], wetRight);
+        const allpassLeft = state.allpassesLeft[at];
+        const allpassRight = state.allpassesRight[at];
+        wetLeft = allpassFrame(allpassLeft, wetLeft);
+        wetRight = allpassFrame(allpassRight, wetRight);
+        if (allpassLeft.level > linePeak) linePeak = allpassLeft.level;
+        if (allpassRight.level > linePeak) linePeak = allpassRight.level;
       }
       wetLeft *= REVERB_WET_GAIN;
       wetRight *= REVERB_WET_GAIN;
@@ -794,14 +940,20 @@
       state.outLeft = wetLeft === 0 ? inLeft : inLeft + wetLeft;
       state.outRight = wetRight === 0 ? inRight : inRight + wetRight;
 
-      // The tail's level is measured over 128-frame blocks: once the send has
-      // closed and a whole block is below −120 dBFS, the reverb is dropped and
-      // the bus is bit-exact dry from there on.
-      const peak = Math.max(Math.abs(wetLeft), Math.abs(wetRight));
+      // The tail's level is measured over 128-frame blocks, on the return AND on
+      // the delay lines. Once the send has closed, a whole block is below
+      // −120 dBFS, and the longest comb plus the longest allpass have had time to
+      // empty since it closed, the reverb is dropped and the bus is bit-exact dry
+      // from there on. The settle time is what keeps a short throw's tail: the
+      // first quiet block of a line that is still full of a loud signal is not the
+      // end of the tail.
+      const peak = Math.max(Math.abs(wetLeft), Math.abs(wetRight), linePeak);
       if (peak > state.tailPeak) state.tailPeak = peak;
       state.tailFrames += 1;
+      if (state.held) state.tailSince = 0;
+      else state.tailSince += 1;
       if (state.tailFrames >= TAIL_BLOCK_FRAMES) {
-        if (!state.held && state.tailPeak < TAIL_FLOOR) drop(state);
+        if (!state.held && state.tailSince >= state.settleFrames && state.tailPeak < TAIL_FLOOR) drop(state);
         state.tailPeak = 0;
         state.tailFrames = 0;
       }
@@ -811,50 +963,151 @@
 
     /** @returns {void} forget the take and everything the looper was doing. */
     function clearTake() {
-      take = null;
       pendingAction = null;
       position = 0;
       mode = "idle";
       recFrames = 0;
+      takeBars = 0;
+      takeFrames = 0;
     }
 
     /**
-     * Arm a recording starting here.
+     * Adopt the main thread's buffers: the pair the looper records into and plays
+     * out of. The page sends them (transferred) before the first record, again
+     * when the song slows down enough that eight bars no longer fit, and back
+     * again after a take; the audio thread never allocates one.
+     *
+     * A larger pair that arrives while the looper holds a take (or is part way
+     * through a recording) keeps what it holds: the frames are copied over once,
+     * here, on the message path. The pair that comes back from a take is the pair
+     * that went out, so there is nothing to copy then.
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @returns {void}
+     */
+    function setLooperBuffers(left, right) {
+      if (!left || !right) return;
+      if (typeof left.length !== "number" || typeof right.length !== "number") return;
+      if (left.length !== right.length) return;
+      const previous = buffers;
+      buffers = { left: left, right: right };
+      if (previous && previous.left !== left) {
+        const keep = Math.max(takeFrames, mode === "recording" ? recFrames : 0);
+        if (keep > 0) {
+          const count = Math.min(keep, left.length, previous.left.length);
+          for (let at = 0; at < count; at += 1) {
+            left[at] = previous.left[at];
+            right[at] = previous.right[at];
+          }
+        }
+      }
+      const barFrames = Math.max(1, recBarFrames);
+      const fits = Math.floor(left.length / barFrames);
+      if (takeFrames === 0) takeBars = 0;
+      if (takeBars > fits) {
+        takeBars = Math.max(0, fits);
+        takeFrames = takeBars * barFrames;
+      }
+      if (recCapacity > left.length) recCapacity = Math.floor(left.length / barFrames) * barFrames;
+    }
+
+    /**
+     * Hand the looper's buffers to the main thread: whole bars of the master as
+     * `{left, right, frames, bars, rate}`, with the looper detached from them.
+     * The page copies what it needs and hands the same pair straight back through
+     * `setLooperBuffers`. While they are away the looper contributes silence (the
+     * dry master still passes through) and keeps its position, so it carries on
+     * from where it was when they come back. A looper that already handed them
+     * out has nothing to give.
+     * @returns {{left: Float32Array, right: Float32Array, frames: number,
+     *            bars: number, rate: number}|null}
+     */
+    function takeLooperBuffers() {
+      if (!buffers) return null;
+      const barFrames = Math.max(1, recBarFrames);
+      let bars = takeBars;
+      let frames = takeFrames;
+      if (mode === "recording") {
+        // A recording answers the whole bars it has captured so far.
+        bars = clamp(Math.floor(recFrames / barFrames), 0, MAX_LOOP_BARS);
+        frames = bars * barFrames;
+      }
+      if (frames > buffers.left.length) {
+        bars = 0;
+        frames = 0;
+      }
+      const handed = { left: buffers.left, right: buffers.right, frames: frames, bars: bars, rate: sampleRate };
+      buffers = null;
+      return handed;
+    }
+
+    /**
+     * Arm a recording starting here. The buffer is the main thread's: a recording
+     * that would pass its end closes at the last whole bar that fits (and never
+     * starts at all when not even one bar fits).
      * @param {number} barFrames how long one bar is at the tempo it starts on
      * @returns {void}
      */
     function startRecording(barFrames) {
+      if (!buffers) return;
+      const length = buffers.left.length;
       recBarFrames = Math.max(1, Math.round(barFrames));
-      recCapacity = MAX_LOOP_BARS * recBarFrames;
-      if (!recLeft || recLeft.length < recCapacity) {
-        recLeft = new Float32Array(recCapacity);
-        recRight = new Float32Array(recCapacity);
-      }
+      const fits = Math.floor(length / recBarFrames);
+      if (fits < 1) return;
+      recCapacity = Math.min(fits, MAX_LOOP_BARS) * recBarFrames;
       recFrames = 0;
+      takeBars = 0;
+      takeFrames = 0;
       position = 0;
       mode = "recording";
     }
 
     /**
      * Close the recording: whole bars, at least one and at most eight, then
-     * either idle or playing/overdubbing from the top.
+     * either idle or playing/overdubbing from the top. Nothing is copied: the take
+     * is a length over the buffers it was recorded into, and the frames past what
+     * was recorded are silenced so a shorter take never plays an older one.
      * @param {string} nextMode `idle`, `playing` or `overdub`
+     * @param {number} [wholeBars] the bars to keep (the last whole ones); the
+     *   rounded count is used when the caller names none
      * @returns {void}
      */
-    function finishRecording(nextMode) {
+    function finishRecording(nextMode, wholeBars) {
       const barFrames = Math.max(1, recBarFrames);
-      const bars = clamp(Math.round(recFrames / barFrames), 1, MAX_LOOP_BARS);
-      const frames = bars * barFrames;
-      const left = new Float32Array(frames);
-      const right = new Float32Array(frames);
-      const held = Math.min(frames, recFrames);
-      if (held > 0 && recLeft && recRight) {
-        left.set(recLeft.subarray(0, held));
-        right.set(recRight.subarray(0, held));
+      const bars =
+        wholeBars === undefined
+          ? clamp(Math.round(recFrames / barFrames), 1, MAX_LOOP_BARS)
+          : clamp(wholeBars, 1, MAX_LOOP_BARS);
+      const frames = Math.min(bars * barFrames, buffers ? buffers.left.length : 0);
+      if (frames > 0 && buffers) {
+        const held = Math.min(frames, recFrames);
+        for (let at = held; at < frames; at += 1) {
+          buffers.left[at] = 0;
+          buffers.right[at] = 0;
+        }
       }
-      take = { left: left, right: right, frames: frames, bars: bars };
+      takeBars = frames > 0 ? bars : 0;
+      takeFrames = frames;
+      recFrames = 0;
       position = 0;
-      mode = nextMode;
+      mode = frames > 0 ? nextMode : "idle";
+    }
+
+    /**
+     * Stop during a recording: keep the whole bars it captured — at least one, so
+     * the take is playable — or discard it when it never finished one.
+     * @returns {void}
+     */
+    function stopRecording() {
+      const barFrames = Math.max(1, recBarFrames);
+      const bars = Math.floor(recFrames / barFrames);
+      if (bars < 1) {
+        takeBars = 0;
+        takeFrames = 0;
+        recFrames = 0;
+        return;
+      }
+      finishRecording("idle", Math.min(bars, MAX_LOOP_BARS));
     }
 
     /**
@@ -876,33 +1129,31 @@
       }
       if (action === "play") {
         position = 0;
-        mode = take ? "playing" : "idle";
+        mode = takeFrames > 0 ? "playing" : "idle";
         return;
       }
       if (action === "overdub") {
         position = 0;
-        mode = take ? "overdub" : "idle";
+        mode = takeFrames > 0 ? "overdub" : "idle";
         return;
       }
       // "stop"
+      if (mode === "recording") stopRecording();
       mode = "idle";
     }
 
     /**
      * One looper command, quantized to the bar. `record` starts on the next bar
      * line; the next `play`, `overdub` or `record` ends the take on the bar line
-     * after it. `clear` empties the take at once, because there is nothing to
-     * keep in time.
+     * after it. `stop` during a recording keeps the whole bars it captured and
+     * leaves them for a later `play`/`overdub`. `clear` empties the take at once,
+     * because there is nothing to keep in time.
      * @param {string} action "record", "overdub", "play", "stop" or "clear"
      * @returns {void}
      */
     function looper(action) {
       const what = typeof action === "string" ? action : "";
       if (what === "clear") {
-        if (recLeft) {
-          recLeft.fill(0);
-          recRight.fill(0);
-        }
         clearTake();
         return;
       }
@@ -913,12 +1164,12 @@
       }
       if (what === "play") {
         if (mode === "recording") pendingAction = "finishplay";
-        else if (take) pendingAction = "play";
+        else if (takeFrames > 0) pendingAction = "play";
         return;
       }
       if (what === "overdub") {
         if (mode === "recording") pendingAction = "finishoverdub";
-        else pendingAction = take ? "overdub" : "record";
+        else pendingAction = takeFrames > 0 ? "overdub" : "record";
         return;
       }
       if (what === "stop") {
@@ -929,36 +1180,15 @@
     }
 
     /**
-     * The take as the page reads it: whole bars of the master, in two channels
-     * at this bus's rate. A take that is still recording answers what it has
-     * captured so far; a looper that has recorded nothing answers no bars.
-     * @returns {{channels: Float32Array[], rate: number, bars: number}}
-     */
-    function takeSnapshot() {
-      if (take) {
-        return {
-          channels: [Float32Array.from(take.left), Float32Array.from(take.right)],
-          rate: sampleRate,
-          bars: take.bars,
-        };
-      }
-      const barFrames = recBarFrames;
-      const bars =
-        mode === "recording" && recFrames > 0 ? clamp(Math.floor(recFrames / barFrames), 0, MAX_LOOP_BARS) : 0;
-      const frames = bars * barFrames;
-      const left = new Float32Array(frames);
-      const right = new Float32Array(frames);
-      if (frames > 0 && recLeft && recRight) {
-        left.set(recLeft.subarray(0, frames));
-        right.set(recRight.subarray(0, frames));
-      }
-      return { channels: [left, right], rate: sampleRate, bars: bars };
-    }
-
-    /**
      * One run of frames through the looper: the take plays into the master, and
      * a recording (or an overdub) takes the master as it was BEFORE the take was
      * mixed in — so a loop never records itself.
+     *
+     * A command is quantized to the sequencer's OWN next bar line, the one the
+     * transport reports: never `barFrame + barFrames` at the current tempo, which
+     * a tempo change (or a fractional bar) would put a frame or a whole bar away
+     * from the grid the rest of the song plays on. With no bar line the transport
+     * has no grid and the command takes effect at once, on this run's first frame.
      * @param {Float32Array} left
      * @param {Float32Array|null} right
      * @param {number} frames how many frames this run holds
@@ -974,25 +1204,37 @@
       const offset = Math.max(0, Math.trunc(finiteOr(t.offset, 0)));
       const base = Math.trunc(finiteOr(t.frame, 0));
       const barFrames = Math.max(1, Math.round(barFramesAt(t.bpm, sampleRate, t.beatsPerBar)));
-      const barFrame = Number.isFinite(Number(t.barFrame)) ? Math.trunc(Number(t.barFrame)) : null;
+      const barFrame = frameOrNull(t.barFrame);
+      const nextBarLine = frameOrNull(t.nextBarFrame);
 
-      // Where the next bar line is. A command that lands exactly on one takes
-      // effect there; with no grid (the transport is stopped) it takes effect at
-      // once, because there is no bar to wait for.
-      let nextLine = null;
+      // Where the next bar line is: the sequencer's own, when the transport names
+      // one; otherwise the one bar after the line the playhead is inside. A
+      // command that lands exactly on a line takes effect there; with no grid (the
+      // transport is stopped) it takes effect at once, because there is no bar to
+      // wait for.
+      let nextLine = -1;
       if (pendingAction !== null) {
         if (barFrame === null) {
           applyPendingAction(barFrames);
         } else {
-          nextLine = barFrame + barFrames;
-          if (base + offset === barFrame) applyPendingAction(barFrames);
+          let line = nextBarLine !== null && nextBarLine >= barFrame ? nextBarLine : barFrame + barFrames;
+          // A run can start past the line the transport named (the block is
+          // rendered in several runs): the command then waits for the next one,
+          // it never takes effect in the past.
+          while (line < base + offset) line += barFrames;
+          if (line === base + offset) {
+            applyPendingAction(barFrames);
+            nextLine = line + barFrames;
+          } else {
+            nextLine = line;
+          }
         }
       }
 
       const end = Math.min(left.length, offset + count);
       for (let index = offset; index < end; index += 1) {
         const frame = base + index;
-        if (nextLine !== null && frame >= nextLine) {
+        if (nextLine >= 0 && frame >= nextLine) {
           applyPendingAction(barFrames);
           nextLine += barFrames;
         }
@@ -1000,31 +1242,49 @@
         const dryRight = right ? right[index] : dryLeft;
 
         if (mode === "playing" || mode === "overdub") {
-          if (take) {
-            const at = position < take.frames ? position : 0;
-            left[index] = dryLeft + take.left[at];
-            if (right) right[index] = dryRight + take.right[at];
-            position = at + 1 >= take.frames ? 0 : at + 1;
+          if (buffers && takeFrames > 0) {
+            const at = position < takeFrames ? position : 0;
+            left[index] = dryLeft + buffers.left[at];
+            if (right) right[index] = dryRight + buffers.right[at];
+            position = at + 1 >= takeFrames ? 0 : at + 1;
             if (mode === "overdub") {
-              take.left[at] += dryLeft;
-              take.right[at] += dryRight;
+              buffers.left[at] += dryLeft;
+              buffers.right[at] += dryRight;
             }
             continue;
           }
         }
 
-        if (mode === "recording" && recLeft && recRight) {
-          recLeft[recFrames] = dryLeft;
-          recRight[recFrames] = dryRight;
+        if (mode === "recording" && buffers) {
+          buffers.left[recFrames] = dryLeft;
+          buffers.right[recFrames] = dryRight;
           recFrames += 1;
-          // Eight bars is the whole take: it closes itself there.
+          // The buffers are the whole take: it closes itself at their last whole bar.
           if (recFrames >= recCapacity) finishRecording("idle");
         }
       }
     }
 
     /**
+     * One frame of the master into the stutter's trailing ring.
+     * @param {number} left
+     * @param {number} right
+     * @returns {void}
+     */
+    function writeRing(left, right) {
+      ringLeft[ringIndex] = left;
+      ringRight[ringIndex] = right;
+      ringIndex = ringIndex + 1 >= ringFrames ? 0 : ringIndex + 1;
+      if (ringFilled < ringFrames) ringFilled += 1;
+    }
+
+    /**
      * One run of frames through the performance-effects chain, in place.
+     *
+     * The stutter's trailing ring is written on every frame the playhead runs —
+     * the only work an idle bus does, so a hold part way through a division can
+     * repeat the part that has already played. The effects themselves, the
+     * pending holds and releases, cost nothing while nothing is held.
      * @param {Float32Array} left
      * @param {Float32Array|null} right
      * @param {number} frames how many frames this run holds
@@ -1040,14 +1300,27 @@
       const base = Math.trunc(finiteOr(t.frame, 0));
 
       applyPending(base + offset, t);
-      if (activeCount === 0) return;
-
       const end = Math.min(left.length, offset + count);
+      // A stopped transport has no grid to repeat on, so nothing needs the ring;
+      // dropping what it holds keeps a later slice from starting on stale audio.
+      const ringRuns = t.playing === true;
+      if (!ringRuns) ringFilled = 0;
+
+      if (activeCount === 0) {
+        if (!ringRuns) return;
+        for (let index = offset; index < end; index += 1) {
+          const inLeft = left[index];
+          writeRing(inLeft, right ? right[index] : inLeft);
+        }
+        return;
+      }
+
       for (let index = offset; index < end; index += 1) {
-        if (activeCount === 0) return;
         const frame = base + index;
         let outLeft = left[index];
         let outRight = right ? right[index] : outLeft;
+        if (ringRuns) writeRing(outLeft, outRight);
+        if (activeCount === 0) continue;
 
         for (let at = 0; at < states.length; at += 1) {
           const state = states[at];
@@ -1060,11 +1333,17 @@
           if (state.releasing >= 0) {
             // The crossfade: full wet on the release frame, and dry again by
             // the 64th — where the effect is dropped and the frame is untouched.
+            // A re-hold reverses it at the very same rate, so picking an effect
+            // back up mid-fade never jumps.
             const mix = (RELEASE_FRAMES - state.releasing) / RELEASE_FRAMES;
             wetLeft = inLeft + (wetLeft - inLeft) * mix;
             wetRight = inRight + (wetRight - inRight) * mix;
-            state.releasing += 1;
-            if (state.releasing >= RELEASE_FRAMES) drop(state);
+            if (state.held) {
+              state.releasing = state.releasing > 0 ? state.releasing - 1 : -1;
+            } else {
+              state.releasing += 1;
+              if (state.releasing >= RELEASE_FRAMES) drop(state);
+            }
           }
           outLeft = wetLeft;
           outRight = wetRight;
@@ -1076,8 +1355,8 @@
     }
 
     /**
-     * How many effects are live right now. Zero means `process()` returns
-     * without touching a single frame.
+     * How many effects are live right now. Zero means `process()` has nothing to
+     * do but the stutter's trailing ring.
      * @returns {number}
      */
     function liveCount() {
@@ -1101,7 +1380,8 @@
       process: process,
       loop: loop,
       looper: looper,
-      take: takeSnapshot,
+      setLooperBuffers: setLooperBuffers,
+      takeLooperBuffers: takeLooperBuffers,
       activeCount: liveCount,
       heldNames: heldNames,
     };
@@ -1112,6 +1392,7 @@
     CHAIN: CHAIN,
     RELEASE_FRAMES: RELEASE_FRAMES,
     MAX_LOOP_BARS: MAX_LOOP_BARS,
+    SLOWEST_BPM: SLOWEST_BPM,
     TAIL_FLOOR: TAIL_FLOOR,
     TAIL_BLOCK_FRAMES: TAIL_BLOCK_FRAMES,
     DENORMAL_FLOOR: DENORMAL_FLOOR,
