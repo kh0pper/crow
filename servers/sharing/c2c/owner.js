@@ -16,16 +16,20 @@
  * Transactions (S4, R7). Each action writes its membership row, its frame and its
  * audit row in ONE `withTransaction`, and flushes AFTER COMMIT, never inside. The
  * handlers, by contrast, are called by the pipeline INSIDE its transaction, so they
- * do DB work only: no send, no flush.
+ * do DB work only: no send, no flush, and no notification fan-out either (W1). They
+ * write the notification ROW with `deliver: false` and RETURN
+ * `{ afterCommit }`, which the pipeline runs once the transaction has committed.
  *
  * Logs say `[c2c]` and never carry a frame body; audit rows carry refs only.
  */
 import { randomBytes } from "node:crypto";
-import { createNotification } from "../../shared/notifications.js";
-import { AclError, appendAudit, assertProjectExists } from "../../shared/project-acl.js";
+import { createNotification, deliverNotification } from "../../shared/notifications.js";
+import {
+  AclError, appendAudit, assertLocalCapability, assertProjectExists,
+} from "../../shared/project-acl.js";
 import { fill, t } from "../../gateway/dashboard/shared/i18n.js";
 import { sanitizeDisplayName } from "../display-name.js";
-import { isCbPinned, lookupPinnedContactKey } from "../contact-binding.js";
+import { isCbPinnedStrict, lookupPinnedContactKey } from "../contact-binding.js";
 import { CONTACT_CAPS_JSON, memberRole } from "./authz.js";
 import {
   cancelEpoch, enqueue, flush, nextInviteGeneration, withTransaction,
@@ -49,7 +53,8 @@ const INVITE_NAME_MAX = 200;
 /** A fixed, valid envelope for the frames.js probe below. */
 const PROBE_UUID = "0".repeat(32);
 
-const CTRL = /[\u0000-\u001f\u007f]/;
+/** Every control character, wherever it sits (global: one pass removes them all). */
+const CTRL = /[\u0000-\u001f\u007f]/g;
 
 /**
  * Is `value` a usable instance id? frames.js owns the cap (its `ID_RE`) and does
@@ -89,17 +94,24 @@ function actorOf(actor) {
 
 /**
  * The project name as an invite body may carry it: well-formed, no control
- * characters, single-spaced, at most `INVITE_NAME_MAX` code points. `enqueue`
+ * characters, single-spaced, at most `INVITE_NAME_MAX` UTF-16 units. `enqueue`
  * refuses a frame `parseFrame` cannot read back, so a name that violates the wire
  * rule is normalised here rather than turning into a failed invite.
+ *
+ * The cap counts UTF-16 units, exactly as frames.js's `isText` does (`x.length`), and
+ * whole code points are added while they still fit, so the cut can never split a
+ * surrogate pair (a lone half would fail `isWellFormed` on the wire).
  */
 function inviteNameOf(project) {
   const s = String(project?.name ?? "").toWellFormed()
     .replace(CTRL, "")
     .replace(/\s+/g, " ")
     .trim();
-  const points = Array.from(s);
-  const name = points.length > INVITE_NAME_MAX ? points.slice(0, INVITE_NAME_MAX).join("") : s;
+  let name = "";
+  for (const cp of s) {
+    if (name.length + cp.length > INVITE_NAME_MAX) break;
+    name += cp;
+  }
   if (!name) throw new AclError(`Project #${project?.id} has no name to send`, "bad_state");
   return name;
 }
@@ -229,6 +241,11 @@ async function writeInviteRow(db, { projectId, contactId, epoch, dbRole }) {
  * (`lookupPinnedContactKey`) and this instance's PT-3 pin (`contact_hs_cb:<crow_id>`
  * ≥ 1), else nothing is written and `contact_not_bound` is thrown.
  *
+ * W3: the local caller must be allowed to manage members
+ * (`assertLocalCapability(db, projectId, "manage_members")`), exactly like every
+ * other member mutation. W5: the pin is read with the STRICT variant, so a failed
+ * read refuses (`contact_not_bound`) instead of admitting the invite.
+ *
  * @param {object} db
  * @param {{projectId:number, contactId:number, role:"viewer"|"commenter"|"editor",
  *   localInstanceId:string, actor?:string|{type:string,id?:any}, now?:number,
@@ -237,11 +254,12 @@ async function writeInviteRow(db, { projectId, contactId, epoch, dbRole }) {
  *   clock seam.
  * @returns {Promise<{memberUuid:string}>} the new membership epoch
  * @throws {AclError} `contact_not_found`, `contact_not_bound`, `bad_role`,
- *   `not_found`/`archived` for the project
+ *   `missing_capability`/`not_member`, `not_found`/`archived` for the project
  */
 export async function inviteContact(db, {
   projectId, contactId, role, localInstanceId, actor = "local", now, send = null, flushAfter = null,
 } = {}) {
+  await assertLocalCapability(db, projectId, "manage_members");
   const dbRole = requireRole(role);
   if (!isValidInstanceId(localInstanceId)) {
     throw new AclError("inviteContact needs this instance's own id", "bad_instance_id");
@@ -253,11 +271,12 @@ export async function inviteContact(db, {
   if (!contact) throw new AclError("contact_not_found", "not_found");
   // O4: a Crow-to-Crow invite goes only to a Crow that has proved the bound key on
   // this instance. The key alone is not enough: the PT-3 pin is what says the
-  // contact's CURRENT Crow can complete a bound handshake.
+  // contact's CURRENT Crow can complete a bound handshake. W5: the pin is read with
+  // the strict variant, which is false on a read error (isCbPinned fails closed the
+  // other way — it admits on an unreadable pin — which would be fail OPEN here).
   const pinnedKey = await lookupPinnedContactKey(db, contact.crow_id);
-  if (!pinnedKey || !(await isCbPinned(db, localInstanceId, contact.crow_id))) {
-    throw new AclError("contact_not_bound", "contact_not_bound");
-  }
+  const pinned = pinnedKey ? await isCbPinnedStrict(db, localInstanceId, contact.crow_id) : false;
+  if (!pinned) throw new AclError("contact_not_bound", "contact_not_bound");
 
   const name = inviteNameOf(project);
   const epoch = randomBytes(16).toString("hex");
@@ -309,11 +328,12 @@ export async function inviteContact(db, {
  *   localInstanceId:string, actor?:string|{type:string,id?:any},
  *   send?:Function, flushAfter?:Function}} opts
  * @returns {Promise<{memberUuid:string, seq:number}>}
- * @throws {AclError} `not_member`, `not_accepted`, `bad_role`
+ * @throws {AclError} `not_member`, `not_accepted`, `bad_role`, `missing_capability`
  */
 export async function setRole(db, {
   projectId, contactId, role, localInstanceId, actor = "local", send = null, flushAfter = null,
 } = {}) {
+  await assertLocalCapability(db, projectId, "manage_members"); // W3: same gate as the panel
   const dbRole = requireRole(role);
   if (!isValidInstanceId(localInstanceId)) {
     throw new AclError("setRole needs this instance's own id", "bad_instance_id");
@@ -370,11 +390,12 @@ export async function setRole(db, {
  * @param {{projectId:number, contactId:number, localInstanceId:string,
  *   actor?:string|{type:string,id?:any}, send?:Function, flushAfter?:Function}} opts
  * @returns {Promise<{memberUuid:string, seq:number}>}
- * @throws {AclError} `not_member`
+ * @throws {AclError} `not_member`, `missing_capability`
  */
 export async function unshareContact(db, {
   projectId, contactId, localInstanceId, actor = "local", send = null, flushAfter = null,
 } = {}) {
+  await assertLocalCapability(db, projectId, "manage_members"); // W3: same gate as the panel
   if (!isValidInstanceId(localInstanceId)) {
     throw new AclError("unshareContact needs this instance's own id", "bad_instance_id");
   }
@@ -501,32 +522,41 @@ async function namesOf(db, member) {
 }
 
 /**
- * One notification, through the shared helper (the plan's O3). Never throws: a
- * notification is not the effect, and the handler's transaction must not fail
- * because a push channel is missing.
+ * One notification ROW, written inside the caller's transaction (the plan's O3,
+ * W1/R7): the shared helper is asked for `deliver: false`, so no push, ntfy call or
+ * email happens while the frame's transaction holds the handle's write lock.
+ *
+ * Returns the `afterCommit` hook the receive pipeline runs once COMMIT succeeded
+ * (after the ack, and after the flush when there is one). The hook hands the exact
+ * payload the helper would have fanned out (`note.delivery`) to
+ * `deliverNotification`. `deliver` is the fan-out seam tests inject; the default is
+ * the real one.
+ *
+ * Never throws: a notification is not the effect, and the handler's transaction
+ * must not fail because a push channel or the settings table is missing. A row the
+ * type gate drops (null) means there is nothing to deliver.
  *
  * The title comes from i18n (en + es, `c2c.notify.*`) with the two names
  * interpolated; like every server-side notification it is stored in English (the
  * dashboard translates its own UI, a stored row has no language). Nothing else of
  * the frame is used — never a body beyond those two names.
- *
- * The helper writes the row AND fans it out to the optional channels (web push,
- * ntfy, email). The row belongs to the handler's transaction, so a rolled-back
- * accept leaves no notification behind; the fan-out is best-effort by the helper's
- * own design. This is the plan's instruction ("use the existing notification
- * helper"); the alternative — a post-commit hook in receive.js — is not Task 6's
- * to add.
+ * @returns {Promise<Function|null>} the afterCommit hook, or null
  */
-async function safeNotify(db, { title, source }) {
+async function safeNotify(db, { title, source }, deliver = null) {
   try {
-    await createNotification(db, {
+    const note = await createNotification(db, {
       title,
       type: "peer",
       source,
       action_url: "/dashboard/projects",
+      deliver: false, // W1/R7: the row here, the fan-out after COMMIT
     });
+    if (!note) return null; // the notification type is switched off: nothing to deliver
+    const fanOut = typeof deliver === "function" ? deliver : deliverNotification;
+    return async () => { await fanOut(db, note.delivery); };
   } catch (err) {
     console.warn(`[c2c] notification failed: ${err?.message || err}`);
+    return null;
   }
 }
 
@@ -536,14 +566,26 @@ async function safeNotify(db, { title, source }) {
  * also exports `onAccept` / `onDecline` directly).
  *
  * These run INSIDE the pipeline's transaction (S7) and must do DB work only: no
- * send, no flush. `notify` is the delivery seam (tests inject a spy); the default
- * is the shared notification helper.
+ * send, no flush, no notification fan-out. A handler that notifies writes the ROW
+ * here (with `deliver: false`) and RETURNS `{ afterCommit }`, which the pipeline
+ * runs after COMMIT (S7/W1) — so a rolled-back accept leaves no notification
+ * behind and nothing is pushed while the write lock is held.
  *
- * @param {{notify?: Function}} [opts]
+ * `notify` is the row-writing seam (tests inject a spy that records the title and
+ * returns nothing); `deliver` is the fan-out seam the returned hook uses. The
+ * default is the shared notification helper and `deliverNotification`.
+ *
+ * @param {{notify?: Function, deliver?: Function}} [opts]
  * @returns {{onAccept: Function, onDecline: Function}}
  */
-export function createOwnerHandlers({ notify = null } = {}) {
-  const notifier = notify ?? ((db, opts) => safeNotify(db, opts));
+export function createOwnerHandlers({ notify = null, deliver = null } = {}) {
+  const notifier = notify ?? ((db, opts) => safeNotify(db, opts, deliver));
+
+  /**
+   * The handler's return: only a real hook becomes one, so a stub notifier (or a
+   * notification the type gate dropped) simply has nothing to run.
+   */
+  const afterCommitOf = (hook) => (typeof hook === "function" ? { afterCommit: hook } : undefined);
 
   /**
    * `project.accept`: the member's Crow said yes from `visitor_instance_id`, which
@@ -552,6 +594,8 @@ export function createOwnerHandlers({ notify = null } = {}) {
    *
    * A throw is the pipeline's failure path (S5): the accept rolls back with the
    * seq's mark, the seq is consumed and the frame is refused `unsupported`.
+   * Otherwise it RETURNS `{ afterCommit }` (S7/W1): the notification row is already
+   * written, and that hook is what announces the acceptance once COMMIT lands.
    */
   async function onAccept(db, { member, frame } = {}) {
     if (!member) throw new AclError("accept without a membership", "forbidden");
@@ -567,17 +611,19 @@ export function createOwnerHandlers({ notify = null } = {}) {
     });
     if (Number(r.rowsAffected ?? 0) === 0) return; // already announced: no second notification
     const names = await namesOf(db, member);
-    await notifier(db, {
+    return afterCommitOf(await notifier(db, {
       title: fill(t("c2c.notify.joined"), names),
       source: "sharing:c2c_accept",
-    });
+    }));
   }
 
   /**
    * `project.decline`: `{reason:"declined"}` (or no reason) ends the pending
    * invitation quietly; `{reason:"left"}` ends an accepted membership and says so
    * once. Both revoke the row, which is what takes the member's rights away (no
-   * live row → every later frame is `forbidden`).
+   * live row → every later frame is `forbidden`). A `left` RETURNS
+   * `{ afterCommit }` for its one notification (S7/W1); a plain decline announces
+   * nothing and returns nothing.
    */
   async function onDecline(db, { member, frame } = {}) {
     if (!member) throw new AclError("decline without a membership", "forbidden");
@@ -589,10 +635,10 @@ export function createOwnerHandlers({ notify = null } = {}) {
     });
     if (!left || Number(r.rowsAffected ?? 0) === 0) return;
     const names = await namesOf(db, member);
-    await notifier(db, {
+    return afterCommitOf(await notifier(db, {
       title: fill(t("c2c.notify.left"), names),
       source: "sharing:c2c_left",
-    });
+    }));
   }
 
   return { onAccept, onDecline };

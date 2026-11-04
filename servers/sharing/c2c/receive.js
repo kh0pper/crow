@@ -29,7 +29,17 @@
  *      it (F2) — a refusal consumes the seq in that same transaction and the
  *      refusal is sent after COMMIT; otherwise it commits the mark FIRST (S5) and
  *      runs the handler with the in-transaction `member`/`visit`. After COMMIT:
- *      ack, then flush (never inside, S4).
+ *      ack, then flush (never inside, S4), then the handler's `afterCommit` hook
+ *      (S7/W1) — no network I/O happens inside the transaction, and a hook is run
+ *      only for an effect that really committed.
+ *
+ * A handler may RETURN `{ afterCommit: async () => … }`: the transaction is not the
+ * place for a push, an ntfy call or an email (R7 holds the write lock, and the
+ * transaction may still roll back). The pipeline captures the hook INSIDE the
+ * transaction and runs it only when COMMIT succeeded — after the ack, and after the
+ * flush when there is one. A dup, a refusal, the mark cap, a throwing handler or a
+ * failed COMMIT drops it. It is wrapped in try/catch and logs
+ * `[c2c] <kind> after-commit failed` without ever carrying the body.
  *
  * A throwing handler follows the outbox contract's failure path (S5/R4): the
  * transaction rolls back with the mark, a new transaction consumes the seq, then
@@ -316,7 +326,9 @@ async function handleEnvelopeOnly(ctx, crowId, contactId, envelope, reason, kind
  *   `send(crowId, frame)` is the transport. `contactByCrowId(crowId)` resolves the
  *   admitted contact row (or null). `handlers` maps onInvite/onAccept/onDecline/
  *   onRole/onUnshare (Tasks 6/7) plus an optional onRefusal; a kind whose handler
- *   is not loaded is refused `busy` (F1). `beforeTransaction` is a TEST SEAM (F2):
+ *   is not loaded is refused `busy` (F1). A handler may RETURN
+ *   `{ afterCommit: async () => … }` — network I/O belongs there, never in the
+ *   transaction (S7/W1; the hook runs after COMMIT, the ack and the flush). `beforeTransaction` is a TEST SEAM (F2):
  *   it runs once, just before the frame's transaction opens, so a test can commit
  *   a write (a re-invite) that the in-transaction authorization must see.
  * @param {string} crowId the ADMITTED contact's crow id
@@ -441,6 +453,9 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
   let consumed = false;
   let refusal = null;
   let capped = false;
+  // The handler's in-transaction return value; its `afterCommit` hook (S7/W1) runs
+  // only after this transaction has committed.
+  let handlerResult;
   // F2's test seam: a write committed just before BEGIN (a re-invite) must be seen
   // by the authorization INSIDE the transaction below.
   if (typeof ctx.beforeTransaction === "function") await ctx.beforeTransaction();
@@ -464,7 +479,7 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
       }
 
       if (!(await commitInbound(db, key))) return; // another delivery took the seq: a dup
-      await handler(db, {
+      handlerResult = await handler(db, {
         frame,
         member: auth.member ?? null,
         visit: auth.visit ?? null,
@@ -500,5 +515,18 @@ export async function handleC2cFrame(ctx, crowId, payload, meta = {}) {
     await flush(db, (outbound) => ctx.send(crowId, outbound), { contactId });
   } catch (err) {
     console.warn(`[c2c] flush after ${frame.kind} failed: ${err?.message || err}`);
+  }
+
+  // W1/S7: the handler's post-commit hook, if it returned one. Every path that did
+  // not really commit (a dup, a refusal, the cap, a throw, a failed COMMIT) has
+  // already returned above, so an effect that did not happen is never announced.
+  const afterCommit = handlerResult?.afterCommit;
+  if (typeof afterCommit === "function") {
+    try {
+      await afterCommit();
+    } catch (err) {
+      // Never the body: it is the contact's own words.
+      console.warn(`[c2c] ${frame.kind} after-commit failed: ${err?.message || err}`);
+    }
   }
 }

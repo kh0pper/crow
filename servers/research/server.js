@@ -34,6 +34,14 @@ import { matchQuote } from "./quote-match.js";
 import { braveSearch } from "../shared/brave-search.js";
 import { PROVENANCE_COLUMNS } from "./provenance-schema.js";
 
+/**
+ * W4: a contact whose membership is Crow-to-Crow (`project_members.mode='live'`) is
+ * managed by the sharing controls, not by the old member tools. Those tools must
+ * never write role/capabilities/mode or revoke a live row — the c2c controls own
+ * them (and the visitor's Crow).
+ */
+const LIVE_MEMBER_REFUSED = "This contact is a live member: change it in the Crow-to-Crow sharing controls.";
+
 // publication_date is free-form TEXT ("1993", "2005-07", "2023-05-14",
 // occasionally prose like "May 14, 2023"). new Date() parses the ISO
 // date-only forms as UTC midnight, and getFullYear()/toLocaleDateString()
@@ -2047,10 +2055,16 @@ export function createProjectServer(dbPath, options = {}) {
         // Upsert: look for an existing active row (matching the partial UNIQUE indexes).
         const existing = (await db.execute({
           sql: contact_id == null
-            ? `SELECT id FROM project_members WHERE project_id = ? AND contact_id IS NULL AND revoked_at IS NULL`
-            : `SELECT id FROM project_members WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+            ? `SELECT id, mode FROM project_members WHERE project_id = ? AND contact_id IS NULL AND revoked_at IS NULL`
+            : `SELECT id, mode FROM project_members WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
           args: contact_id == null ? [project_id] : [project_id, contact_id],
         })).rows[0];
+
+        // W4: a Crow-to-Crow membership (`mode='live'`) is managed by the sharing
+        // controls. This tool must never rewrite its role/capabilities/mode.
+        if (existing?.mode === "live") {
+          return { content: [{ type: "text", text: LIVE_MEMBER_REFUSED }], isError: true };
+        }
 
         let memberId;
         let action;
@@ -2096,6 +2110,15 @@ export function createProjectServer(dbPath, options = {}) {
       try {
         await assertProjectExists(db, project_id);
         await assertLocalCapability(db, project_id, "manage_members");
+
+        // W4: never revoke a live (Crow-to-Crow) membership from here; it belongs to
+        // the sharing controls, which also tell the visitor's Crow.
+        const live = (await db.execute({
+          sql: `SELECT 1 AS present FROM project_members
+                 WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL AND mode = 'live' LIMIT 1`,
+          args: [project_id, contact_id],
+        })).rows[0];
+        if (live) return { content: [{ type: "text", text: LIVE_MEMBER_REFUSED }], isError: true };
 
         const r = await db.execute({
           sql: `UPDATE project_members

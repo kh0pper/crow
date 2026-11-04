@@ -5,7 +5,7 @@
 // `handleC2cFrame` for the accept/decline/left cases.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
@@ -36,9 +36,30 @@ const UNBOUND_CONTACT = 2;
 const KEYED_CONTACT = 3;
 
 /**
+ * init-db's OWN `project_members` block, read straight out of the script (W5): the
+ * real table with its real role CHECK, so "a commenter is stored as guest" is tested
+ * against the constraint the database actually enforces, not a weaker copy.
+ * `accepted_at` is added the way init-db adds it (addColumnIfMissing, on the line
+ * right after the block) — the same shape both rails converge on.
+ */
+function initDbTable(label) {
+  const src = readFileSync(new URL("../scripts/init-db.js", import.meta.url), "utf8");
+  const marker = `initTable("${label}", \``;
+  const at = src.indexOf(marker);
+  assert.notEqual(at, -1, `init-db has no "${label}" block`);
+  const from = at + marker.length;
+  const to = src.indexOf("`);", from);
+  assert.notEqual(to, -1, `init-db's "${label}" block is unterminated`);
+  return src.slice(from, to);
+}
+
+/**
  * A scratch crow.db with the real 0016 c2c DDL and the tables the owner side and
- * the receive pipeline touch. Three contacts: 1 is bound (pinned key + cb pin), 2
- * has no key at all, 3 has the key but no pin.
+ * the receive pipeline touch. `project_members` is init-db's own DDL (above) and the
+ * project has its local OWNER row: every owner action is gated on
+ * `manage_members` (W3), exactly like the panel and the MCP tools.
+ * Three contacts: 1 is bound (pinned key + cb pin), 2 has no key at all, 3 has the
+ * key but no pin.
  */
 async function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "c2c-owner-"));
@@ -51,15 +72,10 @@ async function fresh() {
     CREATE TABLE project_spaces (
       id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
       slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, archived_at TEXT);
-    CREATE TABLE project_members (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL UNIQUE,
-      project_id INTEGER NOT NULL REFERENCES project_spaces(id) ON DELETE CASCADE,
-      contact_id INTEGER, role TEXT NOT NULL, capabilities TEXT, mode TEXT,
-      granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-      granted_by_contact_id INTEGER, revoked_at TEXT, origin_instance_id TEXT,
-      accepted_at TEXT);
-    CREATE UNIQUE INDEX idx_project_members_remote
-      ON project_members(project_id, contact_id) WHERE contact_id IS NOT NULL AND revoked_at IS NULL;
+  `);
+  await db.executeMultiple(initDbTable("project_members table"));
+  await db.execute("ALTER TABLE project_members ADD COLUMN accepted_at TEXT");
+  await db.executeMultiple(`
     CREATE TABLE notifications (
       id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, source TEXT, title TEXT, body TEXT,
       priority TEXT DEFAULT 'normal', action_url TEXT, metadata TEXT, schedule_id INTEGER,
@@ -87,6 +103,12 @@ async function fresh() {
     args: [P1],
   });
   const projectId = Number(project.lastInsertRowid);
+  // The caller is the project's local owner: W3 gates every owner action on
+  // manage_members, which the owner role carries by default.
+  await db.execute({
+    sql: "INSERT INTO project_members (project_id, contact_id, role) VALUES (?, NULL, 'owner')",
+    args: [projectId],
+  });
   await pin(db, CROW); // contact 1 is fully bound
 
   return {
@@ -131,10 +153,19 @@ async function acceptDirect(s, { instanceId = VISITOR } = {}) {
 
 async function memberRow(s) {
   const { rows } = await s.db.execute({
-    sql: "SELECT * FROM project_members WHERE project_id = ? ORDER BY id DESC LIMIT 1",
+    sql: "SELECT * FROM project_members WHERE project_id = ? AND contact_id IS NOT NULL ORDER BY id DESC LIMIT 1",
     args: [s.projectId],
   });
   return rows[0] ?? null;
+}
+
+/** The project's CONTACT member rows (the local owner row is not a share). */
+async function contactMembers(s) {
+  const { rows } = await s.db.execute({
+    sql: "SELECT * FROM project_members WHERE project_id = ? AND contact_id IS NOT NULL ORDER BY id",
+    args: [s.projectId],
+  });
+  return rows;
 }
 
 async function outbox(s, kind = null) {
@@ -195,7 +226,7 @@ test("invite converts a clone row; no rights before accept", async () => {
     const row = await memberRow(s);
 
     assert.equal(row.mode, "live", "the clone row converts in place (no second row)");
-    assert.equal(await count(s, "project_members"), 1);
+    assert.equal((await contactMembers(s)).length, 1);
     assert.notEqual(row.uuid, CLONE_EPOCH, "the conversion mints a fresh epoch");
     assert.equal(row.uuid, memberUuid);
     assert.equal(row.role, "guest", "a commenter is stored as guest (the column's CHECK)");
@@ -236,7 +267,7 @@ test("invite refuses an unbound contact", async () => {
       isNotBound,
       "a pinned key without this instance's cb pin",
     );
-    assert.equal(await count(s, "project_members"), 0, "nothing was written");
+    assert.equal((await contactMembers(s)).length, 0, "nothing was written");
     assert.equal(await count(s, "c2c_outbox"), 0, "and nothing was queued");
     assert.equal(await count(s, "project_audit_log"), 0);
   });
@@ -254,7 +285,7 @@ test("invite rotates the epoch on re-invite", async () => {
     assert.equal(row.revoked_at, null, "the converted row is still active");
     assert.equal(row.accepted_at, null, "the new membership starts unaccepted again");
     assert.equal(row.origin_instance_id, null, "and without a target instance");
-    assert.equal(await count(s, "project_members"), 1, "the same row is reused in place");
+    assert.equal((await contactMembers(s)).length, 1, "the same row is reused in place");
   });
 });
 
@@ -568,13 +599,208 @@ test("listLiveMembers reports invited, active, the update flag, and skips revoke
 
 /* --------------------------------------------------------------- guards */
 
+// W5: the fixture is init-db's OWN project_members DDL, so this CHECK is the one
+// production enforces — which is why a commenter must be stored as `guest`.
+test("the fixture really carries init-db's role CHECK (no 'commenter' row is possible)", async () => {
+  await withDb(async (s) => {
+    await assert.rejects(
+      () => s.db.execute({
+        sql: `INSERT INTO project_members (project_id, contact_id, role, mode)
+              VALUES (?, ?, 'commenter', 'live')`,
+        args: [s.projectId, CONTACT],
+      }),
+      /CHECK constraint failed/i,
+    );
+  });
+});
+
 test("an unknown role is refused before anything is written", async () => {
   await withDb(async (s) => {
     await assert.rejects(
       () => invite(s, { role: "owner" }),
       (err) => err instanceof AclError && err.code === "bad_role",
     );
-    assert.equal(await count(s, "project_members"), 0);
+    assert.equal((await contactMembers(s)).length, 0);
     assert.equal(await count(s, "c2c_outbox"), 0);
+  });
+});
+
+/* --------------------- W1: no network I/O inside the frame's transaction (R7) */
+
+/**
+ * The real pipeline, with the owner handlers' fan-out swapped for a spy. The spy
+ * reads `accepted_at` through a SECOND connection: an uncommitted row is invisible
+ * there, so a non-null read proves the hook ran after COMMIT.
+ */
+test("W1: an accept's notification is delivered after COMMIT, the ack and the flush", async () => {
+  await withDb(async (s) => {
+    const { memberUuid } = await invite(s);
+    const observer = createDbClient(s.dbPath);
+    const events = [];
+    const deliverSpy = async (_db, payload) => {
+      const { rows } = await observer.execute({
+        sql: "SELECT accepted_at FROM project_members WHERE project_id = ? AND contact_id = ?",
+        args: [s.projectId, CONTACT],
+      });
+      events.push({ at: "deliver", title: payload.title, acceptedAt: rows[0]?.accepted_at ?? null });
+    };
+    try {
+      await handleC2cFrame({
+        db: s.db,
+        send: (_crowId, frame) => { events.push({ at: frame.kind }); },
+        localInstanceId: LOCAL,
+        contactByCrowId,
+        handlers: createOwnerHandlers({ deliver: deliverSpy }),
+      }, CROW, acceptFrame(memberUuid), { proof: "cb", instanceId: VISITOR });
+    } finally {
+      observer.close();
+    }
+
+    const delivered = events.filter((e) => e.at === "deliver");
+    assert.equal(delivered.length, 1, "the accept delivers exactly once");
+    assert.equal(delivered[0].title, "alex joined Labs");
+    assert.notEqual(delivered[0].acceptedAt, null,
+      "another connection sees the committed acceptance: the fan-out ran after COMMIT");
+    assert.equal(await count(s, "notifications"), 1, "the row itself was written in the transaction");
+
+    const order = events.map((e) => e.at);
+    assert.ok(order.includes("project.ack") && order.includes("project.invite"), order.join(","));
+    assert.ok(order.indexOf("project.ack") < order.indexOf("deliver"), "after the ack");
+    assert.ok(order.indexOf("project.invite") < order.indexOf("deliver"),
+      "and after the flush of the queued invite");
+  });
+});
+
+test("W1: a dup accept re-acks and never runs the after-commit hook", async () => {
+  await withDb(async (s) => {
+    const { memberUuid } = await invite(s);
+    const delivered = [];
+    const handlers = createOwnerHandlers({
+      deliver: async (_db, payload) => { delivered.push(payload.title); },
+    });
+    const accept = acceptFrame(memberUuid);
+
+    const first = await deliver(s, accept, handlers);
+    assert.equal(acks(first).length, 1);
+    assert.deepEqual(delivered, ["alex joined Labs"]);
+
+    const second = await deliver(s, accept, handlers);
+    assert.equal(delivered.length, 1, "a dup announces nothing (the hook was dropped)");
+    assert.equal(acks(second).length, 1, "it is re-acked instead");
+    assert.equal(await count(s, "notifications"), 1, "and writes no second row");
+  });
+});
+
+/* --------------------------- W2: the invite name matches the wire rule exactly */
+
+test("W2: every control character is removed, not just the first", async () => {
+  await withDb(async (s) => {
+    await s.db.execute({
+      sql: "UPDATE project_spaces SET name = ? WHERE id = ?",
+      args: ["\u0001a\u0002", s.projectId],
+    });
+    await invite(s);
+    const [row] = await outbox(s, "project.invite");
+    assert.equal(JSON.parse(row.frame_json).body.name, "a");
+  });
+});
+
+test("W2: an over-long emoji name is cut on a code point at 200 units, and enqueue accepts it", async () => {
+  await withDb(async (s) => {
+    await s.db.execute({
+      sql: "UPDATE project_spaces SET name = ? WHERE id = ?",
+      args: ["\u{1F600}".repeat(150), s.projectId], // 150 code points, 300 UTF-16 units
+    });
+    // enqueue re-parses the frame, so an unusable name would throw here.
+    await invite(s);
+    const [row] = await outbox(s, "project.invite");
+    const name = JSON.parse(row.frame_json).body.name;
+    assert.equal(name.length, 200, "the cap counts UTF-16 units, as frames.js does");
+    assert.equal(name, "\u{1F600}".repeat(100), "whole code points only");
+    assert.ok(name.isWellFormed(), "no split surrogate pair on the wire");
+  });
+});
+
+/* ------------------------------- W3: the caller must be allowed to manage members */
+
+/** Set the LOCAL user's role on the project (the caller `assertLocalCapability` reads). */
+async function localRole(s, role) {
+  await s.db.execute({
+    sql: "UPDATE project_members SET role = ? WHERE project_id = ? AND contact_id IS NULL",
+    args: [role, s.projectId],
+  });
+}
+
+test("W3: invite, role change and unshare are refused without manage_members", async () => {
+  await withDb(async (s) => {
+    const denied = (err) => err instanceof AclError && err.code === "missing_capability";
+    const { memberUuid } = await invite(s);
+    await acceptDirect(s);
+
+    await localRole(s, "viewer");
+    await assert.rejects(
+      () => invite(s),
+      denied,
+      "a viewer may not invite",
+    );
+    await assert.rejects(
+      () => setRole(s.db, {
+        projectId: s.projectId, contactId: CONTACT, role: "editor", localInstanceId: LOCAL,
+      }),
+      denied,
+      "a viewer may not change a role",
+    );
+    await assert.rejects(
+      () => unshareContact(s.db, {
+        projectId: s.projectId, contactId: CONTACT, localInstanceId: LOCAL,
+      }),
+      denied,
+      "a viewer may not unshare",
+    );
+
+    const row = await memberRow(s);
+    assert.equal(row.uuid, memberUuid, "no re-invite happened");
+    assert.equal(row.role, "viewer", "no role was written");
+    assert.equal(row.revoked_at, null, "nothing was revoked");
+    assert.equal((await outbox(s, "project.role")).length, 0);
+    assert.equal((await outbox(s, "project.unshare")).length, 0);
+
+    // The owner may do all three.
+    await localRole(s, "owner");
+    const second = await invite(s);
+    assert.notEqual(second.memberUuid, memberUuid);
+    await acceptDirect(s);
+    await setRole(s.db, {
+      projectId: s.projectId, contactId: CONTACT, role: "editor", localInstanceId: LOCAL,
+    });
+    await unshareContact(s.db, {
+      projectId: s.projectId, contactId: CONTACT, localInstanceId: LOCAL,
+    });
+    assert.equal((await outbox(s, "project.role")).length, 1);
+    assert.notEqual((await memberRow(s)).revoked_at, null, "the owner's unshare revoked it");
+  });
+});
+
+/* ------------------------------------- W5: the bound check fails CLOSED */
+
+test("W5: an unreadable cb pin refuses the invite instead of admitting it", async () => {
+  await withDb(async (s) => {
+    // A throwing seam: only the pin read fails, everything else works.
+    const throwing = {
+      execute: (arg) => {
+        const sql = typeof arg === "string" ? arg : arg.sql;
+        if (/dashboard_settings_overrides/.test(sql)) throw new Error("simulated pin read failure");
+        return s.db.execute(arg);
+      },
+    };
+    await assert.rejects(
+      () => inviteContact(throwing, {
+        projectId: s.projectId, contactId: CONTACT, role: "viewer", localInstanceId: LOCAL, now: 1000,
+      }),
+      (err) => err instanceof AclError && err.code === "contact_not_bound",
+      "an unreadable pin must never read as bound",
+    );
+    assert.equal((await contactMembers(s)).length, 0, "nothing was written");
+    assert.equal(await count(s, "c2c_outbox"), 0, "and nothing was queued");
   });
 });

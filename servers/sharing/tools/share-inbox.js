@@ -12,6 +12,14 @@ import { ROLES, AclError, assertLocalCapability, appendAudit } from "../../share
 import { withoutProvenance } from "../../research/provenance-schema.js";
 import { isPeerLineOverCap } from "../peer-manager.js";
 
+/**
+ * W4: a contact whose membership is Crow-to-Crow (`project_members.mode='live'`) is
+ * managed by the sharing controls. This clone-share path records a `mode='clone'`
+ * row, so a live row must refuse the share outright instead of being rewritten
+ * (or colliding with the one-active-row-per-contact index).
+ */
+const LIVE_MEMBER_REFUSED = "This contact is a live member: change it in the Crow-to-Crow sharing controls.";
+
 export function registerShareInboxTools(server, ctx) {
   const { db, identity, peerManager, buildProjectCloneBundle } = ctx;
 
@@ -80,6 +88,16 @@ export function registerShareInboxTools(server, ctx) {
         if (capabilities) {
           try { JSON.parse(capabilities); }
           catch { return { content: [{ type: "text", text: "Error: capabilities must be valid JSON" }], isError: true }; }
+        }
+
+        // W4: never record a clone row over a live Crow-to-Crow membership.
+        const liveMember = (await db.execute({
+          sql: `SELECT 1 AS present FROM project_members
+                 WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL AND mode = 'live' LIMIT 1`,
+          args: [item_id, contactRow.id],
+        })).rows[0];
+        if (liveMember) {
+          return { content: [{ type: "text", text: `Error: ${LIVE_MEMBER_REFUSED}` }], isError: true };
         }
 
         // Confirmation gate — preview shows what the bundle will contain

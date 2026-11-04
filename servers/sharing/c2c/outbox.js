@@ -108,7 +108,9 @@
  *     the AsyncLocalStorage token `{ db, live: true }` that `withTransaction`
  *     created, and `live` is set false once COMMIT or ROLLBACK has run — so work
  *     that outlives the transaction can never join it. `fn` must do DB work only:
- *     no network awaits inside, or it would hold the handle's write lock.
+ *     no network awaits inside, or it would hold the handle's write lock. THE ONE
+ *     SANCTIONED EXCEPTION to "DB work only" is a handler's returned
+ *     `afterCommit` hook (S7): it is not run inside `fn` at all, only after COMMIT.
  *     `commitInbound` / `consumeInbound` never open a transaction of their own:
  *     they write on the handle they are given, so they ride the caller's
  *     `withTransaction` and commit or roll back with its effect.
@@ -155,6 +157,24 @@
  *     commits between a frame's arrival and its transaction is seen: the frame is
  *     `stale_epoch`/`forbidden` and its effect never runs. The refusal that
  *     decision produced is SENT only after COMMIT.
+ *
+ *     The ROLE is not part of the epoch: a role change keeps the membership (and so
+ *     its epoch) and only rewrites `role` (task 6's `setRole`), so an epoch match
+ *     says nothing about what the role is now. Nothing may cache the role it saw in
+ *     an invite or a `project.role`: the visitor (and plan 2's item frames) MUST
+ *     check the CURRENT role on EVERY frame through `c2cCan(role, action)`
+ *     (authz.js), read inside that frame's own transaction.
+ *
+ *     AFTER-COMMIT (W1). A handler may not do network I/O inside that transaction:
+ *     it holds the handle's write lock (R7) and the transaction may still roll back.
+ *     A handler that must notify writes its ROW there (the shared notification
+ *     helper with `deliver: false`, so nothing is pushed or mailed while the lock
+ *     is held) and RETURNS `{ afterCommit: async () => … }`. Task 5 captures that
+ *     hook inside the transaction and runs it only when COMMIT succeeded — after
+ *     the ack, and after the flush when there is one — wrapped in try/catch that
+ *     logs `[c2c] <kind> after-commit failed` and never carries the body. A dup, a
+ *     refusal, the mark cap, a thrown handler and a failed COMMIT all DROP it: a
+ *     hook is only ever run for an effect that really happened.
  *
  * S8. A missing handler holds the frame. Task 5 looks the kind's handler up
  *     BEFORE the transaction; when the module that owns the kind has not loaded

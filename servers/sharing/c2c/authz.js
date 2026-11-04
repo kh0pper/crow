@@ -9,7 +9,12 @@
  *     by the outbox contract's invite generation (S2), never by a state list.
  *
  * Membership is never cached on the session: every frame re-reads the row, so an
- * unshare or a role change takes effect on a live connection. Logs never carry
+ * unshare or a role change takes effect on a live connection. A ROLE CHANGE KEEPS
+ * THE MEMBERSHIP, and therefore keeps its epoch (task 6's `setRole` rewrites `role`
+ * only): an epoch match says nothing about the role. The visitor — and plan 2's
+ * item frames — MUST check the CURRENT role on every frame through
+ * `c2cCan(role, action)`, read inside that frame's own transaction, never a role
+ * remembered from the invite or from an earlier `project.role`. Logs never carry
  * frame bodies (contact text).
  */
 import { CAPABILITY_KEYS } from "../../shared/project-acl.js";
@@ -30,6 +35,12 @@ const ACTIONS_BY_ROLE = Object.freeze({
 /**
  * Can `role` do `action`? Actions are read|comment|propose|add: a viewer reads,
  * a commenter reads and comments, an editor does all four.
+ *
+ * This is the ONLY source of Crow-to-Crow rights, and it must be asked per frame
+ * with the role read in THAT frame's transaction: a role change keeps the epoch
+ * (outbox contract S7), so nothing earlier — an invite body, a `project.role`, a
+ * connection's first authorization — may be reused as the current role. Plan 2's
+ * shared-item frames ask the same way.
  * @returns {boolean}
  */
 export function c2cCan(role, action) {
@@ -40,6 +51,10 @@ export function c2cCan(role, action) {
  * Map a `project_members.role` to a Crow-to-Crow role: viewer→viewer,
  * guest→commenter, editor→editor. Anything else (owner, unknown) has no
  * Crow-to-Crow role and gets null.
+ *
+ * The role of an ACCEPTED member is re-read on every frame (never cached), and a
+ * role change keeps the epoch, so this mapping — not the epoch — is what says what
+ * the visitor may do right now.
  * @returns {"viewer"|"commenter"|"editor"|null}
  */
 export function memberRole(row) {
@@ -78,10 +93,16 @@ export async function liveMember(db, { projectUuid, contactId }) {
  *
  *   - no live row → `forbidden`;
  *   - `frame.epoch !== member.uuid` → `stale_epoch` (a frame queued before an
- *     unshare/re-invite or a role change keeps the old epoch, spec §9.1);
+ *     unshare/re-invite keeps the old epoch, spec §9.1);
  *   - accept/decline need `accepted_at IS NULL`; decline `{reason:"left"}` is the
  *     exception (it ends an accepted membership);
  *   - every other kind needs `accepted_at` set.
+ *
+ * The epoch identifies the MEMBERSHIP, never its role: a role change KEEPS the epoch
+ * (task 6's `setRole` rewrites `role` only), so an epoch match does not mean the role
+ * is still what it was. The returned `member` is the row as read in this transaction,
+ * and `memberRole(member)` is the only role a caller may act on — re-checked on every
+ * frame through `c2cCan` (contract S7).
  *
  * @returns {Promise<{ok:true, member:object}|{ok:false, reason:"forbidden"|"stale_epoch"}>}
  */

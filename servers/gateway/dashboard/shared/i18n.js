@@ -2331,6 +2331,12 @@ export const translations = {
 
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
+  // A live (Crow-to-Crow) membership is owned by the sharing controls; the old
+  // member editor refuses it rather than rewriting role/capabilities or revoking it.
+  "projects.members.liveRefused": {
+    en: "This contact is a live member: change it in the Crow-to-Crow sharing controls.",
+    es: "Este contacto es un miembro en vivo: cámbialo en los controles de compartición de Crow a Crow.",
+  },
 
   // ─── Projects Panel: fetch status per source (lane D, research fetch-before-cite) ───
   "projects.fetch.fetched": { en: "fetched", es: "obtenida" },

@@ -174,6 +174,9 @@ export default {
 
       // M2c: project members — add/update + remove. Both gated by ACL via the
       // project-acl helper so the panel can't bypass capability checks.
+      // W4: a Crow-to-Crow membership (`mode='live'`) belongs to the c2c controls.
+      // This editor must never write role/capabilities (or revoke) a live row, or
+      // the owner would silently fight the sharing controls.
       if (action === "add_member") {
         const id = parseInt(req.body.id, 10);
         const contactId = req.body.contact_id ? parseInt(req.body.contact_id, 10) : null;
@@ -186,9 +189,12 @@ export default {
           await assertLocalCapability(db, id, "manage_members");
           if (capabilities) JSON.parse(capabilities);
           const existing = (await db.execute({
-            sql: `SELECT id FROM project_members WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+            sql: `SELECT id, mode FROM project_members WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
             args: [id, contactId],
           })).rows[0];
+          if (existing?.mode === "live") {
+            return res.redirectAfterPost(`/dashboard/projects?view=${id}&error=live_member`);
+          }
           if (existing) {
             await db.execute({
               sql: `UPDATE project_members SET role = ?, capabilities = ? WHERE id = ?`,
@@ -217,6 +223,14 @@ export default {
         }
         try {
           await assertLocalCapability(db, id, "manage_members");
+          // W4: the c2c controls own a live row; refusing here keeps this path from
+          // revoking a Crow-to-Crow membership behind their back.
+          const live = (await db.execute({
+            sql: `SELECT 1 AS present FROM project_members
+                   WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL AND mode = 'live' LIMIT 1`,
+            args: [id, contactId],
+          })).rows[0];
+          if (live) return res.redirectAfterPost(`/dashboard/projects?view=${id}&error=live_member`);
           await db.execute({
             sql: `UPDATE project_members SET revoked_at = datetime('now')
                   WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
@@ -560,6 +574,12 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
     backendsHtml = section(`Data Backends (${backends.length})`, dataTable(["Name", "Type", "Status", "Runs"], rows, { stack: true }), { delay: 300 });
   }
 
+  // W4: the member editor refused a live row; the redirect says why, translated
+  // (the query string carries the code, never the message).
+  const memberNotice = req.query?.error === "live_member"
+    ? `<div class="alert alert-error" role="alert">${escapeHtml(t("projects.members.liveRefused", lang))}</div>`
+    : "";
+
   // M2c: Members section. Shows active members with role + resolved capabilities,
   // plus a small "Add member" form (contacts dropdown + role select).
   // Per-member capability override JSON is rendered as a textarea — M5 will
@@ -675,6 +695,7 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
   }
 
   const content = `
+    ${memberNotice}
     ${section("Overview", overviewHtml + workspaceInfo)}
     ${section(`Members (${members.length})`, membersHtml + addMemberForm, { delay: 50 })}
     ${section(`Sources (${sourceTotal})`, sourcesHtml, { delay: 100 })}
