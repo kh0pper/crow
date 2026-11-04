@@ -22,6 +22,10 @@
  * /downloads mount is this instance's browser-downloads dir. A containerized
  * gateway never watches. CDP is loopback only.
  *
+ * The bundle .env's CROW_BROWSER_CDP_TOKEN rides along as a bearer header on the
+ * /json/version request and the WebSocket upgrade (readCdpToken, read per connect).
+ * It is never in a URL, and this module never logs it.
+ *
  * Read-only: every CDP message goes through cdp-allowlist.js's cdpSend gate,
  * and attachToTarget is only ever sent for the lease's own targetId.
  *
@@ -89,6 +93,25 @@ export function isLoopbackHost(host) {
 
 function readBundleEnv(crowHome) {
   try { return parseEnvText(readFileSync(join(crowHome, "bundles", "browser", ".env"), "utf8")) || {}; } catch { return {}; }
+}
+
+/** A CDP token: url-safe base64 or hex (the bundle's instance.js applies the same shape). */
+const CDP_TOKEN_RE = /^[A-Za-z0-9_-]{32,256}$/;
+
+/**
+ * This instance's CDP token from its bundle .env, or null when there is none.
+ *
+ * Read the same way the port is (readBundleEnv, uncached): the token is minted into the file
+ * after the container was installed, so a watcher that cached it at boot would keep sending
+ * nothing. A malformed value is treated as no token — the request is then simply unauthenticated,
+ * exactly as before the token existed, rather than sending a wrong header.
+ */
+export function readCdpToken(crowHome) {
+  if (!crowHome) return null;
+  const raw = readBundleEnv(crowHome).CROW_BROWSER_CDP_TOKEN;
+  if (typeof raw !== "string") return null;
+  const s = raw.trim();
+  return CDP_TOKEN_RE.test(s) ? s : null;
 }
 
 function parsePort(raw) {
@@ -163,14 +186,19 @@ export async function resolveCdpUrl({ crowHome, inspect = dockerInspect, contain
 /**
  * Connect to a loopback DevTools endpoint: /json/version → its browser
  * WebSocket, which must be loopback on the same port. → a cdp-allowlist client.
+ *
+ * `token` (readCdpToken) becomes an `Authorization: Bearer` header on BOTH the
+ * version request and the WebSocket upgrade. It is never put in a URL or a log
+ * line; with no token the requests are exactly what they were before.
  */
-export async function connectCdp(base, { timeoutMs = 2000, maxPayload = 24 * 1024 * 1024 } = {}) {
+export async function connectCdp(base, { timeoutMs = 2000, maxPayload = 24 * 1024 * 1024, token = null } = {}) {
   let u;
   try { u = new URL(base); } catch { throw codeError("ECDPHOST", "bad CDP endpoint"); }
   if (u.protocol !== "http:" || !isLoopbackHost(u.hostname) || !u.port) throw codeError("ECDPHOST", "CDP endpoint is not loopback");
+  const headers = typeof token === "string" && token !== "" ? { Authorization: `Bearer ${token}` } : {};
   let j;
   try {
-    const r = await fetch(new URL("/json/version", u), { signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
+    const r = await fetch(new URL("/json/version", u), { signal: AbortSignal.timeout(timeoutMs), redirect: "error", headers });
     const text = r.ok ? await r.text() : "";
     if (!text || text.length > 65536) throw new Error("bad version");
     j = JSON.parse(text);
@@ -180,7 +208,7 @@ export async function connectCdp(base, { timeoutMs = 2000, maxPayload = 24 * 102
   let ws;
   try { ws = new URL(j && j.webSocketDebuggerUrl); } catch { throw codeError("ECDPHOST", "bad CDP socket"); }
   if (ws.protocol !== "ws:" || !isLoopbackHost(ws.hostname) || ws.port !== u.port) throw codeError("ECDPHOST", "CDP socket is not this loopback endpoint");
-  const socket = new WebSocket(ws.href, { maxPayload, handshakeTimeout: timeoutMs, followRedirects: false, perMessageDeflate: false });
+  const socket = new WebSocket(ws.href, { headers, maxPayload, handshakeTimeout: timeoutMs, followRedirects: false, perMessageDeflate: false });
   await new Promise((resolve, reject) => {
     const fail = () => { try { socket.terminate(); } catch { /* gone */ } reject(codeError("ECDPCONNECT", "CDP connect failed")); };
     socket.once("open", resolve);
@@ -376,7 +404,7 @@ export function createWatcher({
       try {
         const u = new URL(base);
         if (!isLoopbackHost(u.hostname)) throw codeError("ECDPHOST", "not loopback");
-        const c = await connectFn(base);
+        const c = await connectFn(base, { token: readCdpToken(crowHome) });
         if (closed) { c.close(); return null; }
         conn = c;
         reachable = true;

@@ -12,6 +12,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import http from "node:http";
+import { WebSocketServer } from "ws";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,7 +92,7 @@ class FakeSocket extends EventEmitter {
 function makeFakeBrowser({ targets = [{ targetId: "T1", type: "page", url: "https://shop.example.test/cart?item=42" }] } = {}) {
   let ack = 0;
   const b = {
-    targets, sent: [], sockets: [], connects: [],
+    targets, sent: [], sockets: [], connects: [], connectOptions: [],
     shot: { w: 800, h: 600 }, dpr: 1, autoFrames: false, captureDelayMs: 0, shotFrames: true,
     methods: () => b.sent.map((m) => m.method),
     calls: (method) => b.sent.filter((m) => m.method === method),
@@ -139,8 +140,9 @@ function makeFakeBrowser({ targets = [{ targetId: "T1", type: "page", url: "http
           return reply({});
       }
     },
-    connect: async (base) => {
+    connect: async (base, opts) => {
       b.connects.push(base);
+      b.connectOptions.push(opts || null);
       const s = new FakeSocket(b);
       b.sockets.push(s);
       return A.createCdpClient(s);
@@ -334,6 +336,70 @@ test("connectCdp refuses non-loopback endpoints", async () => {
   assert.equal(W.isLoopbackHost("localhost"), true);
   assert.equal(W.isLoopbackHost("127.0.0.1.example.test"), false);
   assert.equal(W.isLoopbackHost("0.0.0.0"), false);
+});
+
+// ---------------------------------------------------------------------------
+// the CDP token (browser CDP gate, PR 1): a bearer on the version request and the
+// upgrade, read from this instance's bundle .env and never put in a URL
+// ---------------------------------------------------------------------------
+
+const CDP_TOKEN = "d15c0de".repeat(8); // 56 chars, url-safe: the shape hex32/base64url mints
+
+test("readCdpToken reads this instance's bundle .env and rejects anything malformed", () => {
+  assert.equal(W.readCdpToken(makeHome({ env: "" })), null, "no token line");
+  assert.equal(W.readCdpToken(makeHome({ env: `CROW_BROWSER_CDP_TOKEN=${CDP_TOKEN}\n` })), CDP_TOKEN);
+  for (const bad of ["x".repeat(31), "x".repeat(257), "not a token but long enough to pass the length rule", ""]) {
+    assert.equal(W.readCdpToken(makeHome({ env: `CROW_BROWSER_CDP_TOKEN=${bad}\n` })), null, bad.length + " chars");
+  }
+  assert.equal(W.readCdpToken(null), null, "no home, no token");
+});
+
+test("connectCdp: the bearer rides the /json/version request AND the WebSocket upgrade", async () => {
+  const seen = { version: [], upgrade: [] };
+  const wss = new WebSocketServer({ noServer: true });
+  wss.on("connection", (ws) => ws.on("error", () => {}));
+  const srv = http.createServer((req, res) => {
+    seen.version.push(req.headers.authorization || null);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${srv.address().port}/devtools/browser/x` }));
+  });
+  srv.on("upgrade", (req, socket, head) => {
+    seen.upgrade.push(req.headers.authorization || null);
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = "http://127.0.0.1:" + srv.address().port;
+  try {
+    const withToken = await W.connectCdp(base, { token: CDP_TOKEN });
+    withToken.close();
+    const without = await W.connectCdp(base);
+    without.close();
+  } finally {
+    for (const c of wss.clients) c.terminate();
+    wss.close();
+    try { srv.closeAllConnections(); } catch { /* nothing open */ }
+    await new Promise((r) => srv.close(r));
+  }
+  assert.deepEqual(seen.version, [`Bearer ${CDP_TOKEN}`, null], "the poll carries it; with no token the request is what it always was");
+  assert.deepEqual(seen.upgrade, [`Bearer ${CDP_TOKEN}`, null], "the upgrade carries it too");
+});
+
+test("the watcher passes this instance's token to every connect, re-read from the bundle .env", async () => {
+  const home = makeHome({ env: "CROW_BROWSER_CDP_PORT=9333\n" });
+  const b = makeFakeBrowser();
+  const h = makeWatcher({ home, browser: b });
+  try {
+    assert.equal(await h.w.available(), true);
+    assert.deepEqual(b.connectOptions.at(-1), { token: null }, "no token minted yet: the watcher sends nothing extra");
+    // The gateway mints the token later; the next connect must use it without a restart.
+    writeFileSync(join(home, "bundles", "browser", ".env"), `CROW_BROWSER_CDP_PORT=9333\nCROW_BROWSER_CDP_TOKEN=${CDP_TOKEN}\n`);
+    b.sockets.at(-1).close();
+    await flush();
+    await h.clock.advance(2000, 100);
+    assert.equal(await h.w.available(), true, "reconnected");
+    assert.deepEqual(b.connectOptions.at(-1), { token: CDP_TOKEN });
+    assert.equal(b.connects.length, 2, "one connect for each reachability check");
+  } finally { h.w.close(); }
 });
 
 // ---------------------------------------------------------------------------

@@ -64,9 +64,13 @@ export default function browserRouter(authMiddleware) {
   // GET /api/browser/status — container and CDP health check
   router.get("/api/browser/status", authMiddleware, async (req, res) => {
     let containerRunning = false;
-    let cdpConnected = false;
+    // CDP: a Node fetch (cdp-probe.js), not curl — the token belongs in a header,
+    // never on a command line where /proc would show it to every process.
+    let cdp = { connected: false, rejected: false, ungated: false };
     try {
-      const { containerName, cdpPort } = await loadInstance();
+      const { containerName, cdpPort, cdpToken } = await loadInstance();
+      const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+      const { probeCdp } = await import(pathToFileURL(join(crowHome, "bundles", "browser", "server", "cdp-probe.js")).href);
 
       try {
         const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", containerName()], { encoding: "utf-8", timeout: 5000 }).trim();
@@ -74,14 +78,13 @@ export default function browserRouter(authMiddleware) {
       } catch {}
 
       try {
-        execFileSync("curl", ["-s", "-m", "2", `http://127.0.0.1:${cdpPort()}/json/version`], { encoding: "utf-8", timeout: 5000 });
-        cdpConnected = true;
+        cdp = await probeCdp({ base: `http://127.0.0.1:${cdpPort()}`, token: cdpToken() });
       } catch {}
     } catch {
       // instance.js not resolvable (bundle not installed) — report both as down
     }
 
-    res.json({ containerRunning, cdpConnected });
+    res.json({ containerRunning, cdpConnected: cdp.connected, cdpTokenRejected: cdp.rejected, cdpUngated: cdp.ungated });
   });
 
   return router;

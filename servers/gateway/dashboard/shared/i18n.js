@@ -4511,6 +4511,8 @@ export const translations = {
   "perch.browserNotWaiting": { en: "The bot is no longer waiting for you.", es: "El bot ya no te está esperando." },
   "perch.youHaveBrowser": { en: "You have the browser", es: "Tienes tú el navegador" },
   "browser.botUsing": { en: "A bot is using the browser", es: "Un bot está usando el navegador" },
+  "browser.cdpTokenRejected": { en: "Not connected (CDP token rejected)", es: "Sin conexión (token de CDP rechazado)" },
+  "browser.cdpUngated": { en: "The browser's debugging port is not gated yet; the next browser update closes it.", es: "El puerto de depuración del navegador aún no tiene control de acceso; la próxima actualización del navegador lo cierra." },
   "perch.browserFloatLabel": { en: "Browser preview", es: "Vista previa del navegador" },
   "perch.browserFloatExpand": { en: "Full screen", es: "Pantalla completa" },
   "perch.browserFloatClose": { en: "Close preview", es: "Cerrar vista previa" },

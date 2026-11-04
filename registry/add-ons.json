@@ -479,7 +479,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.4.1",
+      "version": "1.4.2",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -543,6 +543,15 @@
           "secret": true,
           "generate": "hex32",
           "propagate": false
+        },
+        {
+          "name": "CROW_BROWSER_CDP_TOKEN",
+          "description": "The control key for Chrome DevTools. Crow generates it and keeps it in this bundle's settings file; Crow's own browser clients send it. The browser container will require it after the next browser update. You never type or copy it.",
+          "required": false,
+          "secret": true,
+          "generate": "hex32",
+          "propagate": false,
+          "mint_if_missing": true
         },
         {
           "name": "CROW_BROWSER_CDP_PORT",

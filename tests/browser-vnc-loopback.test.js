@@ -166,7 +166,7 @@ test("compose passes the token (required), no VNC password, and its downloads mo
 });
 
 test("the manifest declares no VNC password and says the viewer is loopback-only behind sign-in", () => {
-  assert.equal(MANIFEST.version, "1.4.1");
+  assert.equal(MANIFEST.version, "1.4.2");
   assert.doesNotMatch(JSON.stringify(MANIFEST), /VNC_PASSWORD/);
   assert.deepEqual(MANIFEST.requires.env, ["CROW_BROWSER_VNC_TOKEN"]);
   const tok = MANIFEST.env_vars.find((v) => v.name === "CROW_BROWSER_VNC_TOKEN");
@@ -186,7 +186,7 @@ test("the manifest declares no VNC password and says the viewer is loopback-only
   const reg = JSON.parse(read("registry/add-ons.json"));
   const entry = (reg["add-ons"] || reg.addons || reg).find?.((a) => a.id === "browser");
   assert.ok(entry, "the registry lists the browser");
-  assert.equal(entry.version, "1.4.1");
+  assert.equal(entry.version, "1.4.2");
   assert.doesNotMatch(JSON.stringify(entry), /VNC_PASSWORD/);
   assert.doesNotMatch(read("bundles/browser/.env.example"), /VNC_PASSWORD/);
 });

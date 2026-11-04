@@ -249,3 +249,171 @@ test("gatewayGeneratedEnv: propagate_as renames a generated key on its way to th
   assert.deepEqual(out, { S3_ACCESS_KEY: "GK0123", S3_SECRET_KEY: "ab", G_PLAIN: "p" });
   assert.deepEqual(S.gatewayEnvNames(m).sort(), ["G_MASTER", "G_PLAIN", "S3_ACCESS_KEY", "S3_SECRET_KEY"].sort(), "uninstall re-comments the names the gateway .env really holds");
 });
+
+// ── mint_if_missing: the one regenerate-free "mint on repair" path (browser CDP gate) ──
+
+const FLAGGED = {
+  id: "mintdemo",
+  env_vars: [
+    { name: "MINT_NEW_KEY", generate: "hex32", secret: true, propagate: false, mint_if_missing: true },
+    { name: "MINT_PLAIN", default: "kept-as-is" },
+  ],
+};
+const hex = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+
+/** An installed bundle dir + a retained copy, both writable by the test. */
+function mintFixture({ id = "mintdemo", installed = "KEEP_KEY=keep\n", retained = null } = {}) {
+  const crowHome = scratch("mint-home-");
+  const destDir = scratch("mint-dest-");
+  const installedPath = join(destDir, ".env");
+  writeFileSync(installedPath, installed, { mode: 0o644 });
+  chmodSync(installedPath, 0o644);
+  const retainedPath = S.retainedEnvPath(crowHome, id);
+  if (retained !== null) {
+    mkdirSync(join(crowHome, "secrets", "bundle-env"), { recursive: true });
+    writeFileSync(retainedPath, retained);
+  }
+  return { crowHome, destDir, installedPath, retainedPath };
+}
+
+const readEnv = (p) => S.parseEnvText(readFileSync(p, "utf8"));
+
+test("mint_if_missing: a key absent from BOTH files is minted into both, at mode 600, other lines kept", () => {
+  const f = mintFixture();
+  const lines = [];
+  const minted = S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { ...f, log: (m) => lines.push(m) });
+  assert.deepEqual(minted, ["MINT_NEW_KEY"]);
+  const installed = readEnv(f.installedPath);
+  assert.ok(hex(installed.MINT_NEW_KEY), "hex32 shape");
+  assert.equal(installed.KEEP_KEY, "keep", "the rest of the .env is untouched");
+  assert.equal(mode(f.installedPath), 0o600, "the token does not widen the .env's mode");
+  assert.deepEqual(readEnv(f.retainedPath), { MINT_NEW_KEY: installed.MINT_NEW_KEY }, "the retained copy is updated too");
+  assert.equal(mode(f.retainedPath), 0o600);
+  assert.equal(mode(join(f.crowHome, "secrets", "bundle-env")), 0o700);
+  assert.deepEqual(lines, ["[bundles] minted MINT_NEW_KEY for mintdemo"], "the key name is logged, and only it");
+  assert.ok(!lines.join("\n").includes(installed.MINT_NEW_KEY), "the value is never logged");
+});
+
+test("mint_if_missing: a key already in the installed .env is never touched or regenerated", () => {
+  const f = mintFixture({ installed: "MINT_NEW_KEY=" + "a".repeat(64) + "\nKEEP_KEY=keep\n" });
+  const lines = [];
+  assert.deepEqual(S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { ...f, log: (m) => lines.push(m) }), []);
+  assert.equal(readEnv(f.installedPath).MINT_NEW_KEY, "a".repeat(64));
+  assert.equal(existsSync(f.retainedPath), false, "nothing to retain: the key already existed");
+  assert.deepEqual(lines, []);
+});
+
+test("mint_if_missing: a key only in the retained copy is restored into the .env, never regenerated", () => {
+  const kept = "b".repeat(64);
+  const f = mintFixture({ retained: "MINT_NEW_KEY=" + kept + "\n" });
+  const lines = [];
+  assert.deepEqual(S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { ...f, log: (m) => lines.push(m) }), [], "nothing new was minted");
+  assert.equal(readEnv(f.installedPath).MINT_NEW_KEY, kept, "the retained value is restored (install's own order)");
+  assert.equal(readEnv(f.installedPath).KEEP_KEY, "keep", "other lines kept");
+  assert.equal(mode(f.installedPath), 0o600);
+  assert.equal(readEnv(f.retainedPath).MINT_NEW_KEY, kept);
+  assert.ok(lines.length === 1 && !lines[0].includes(kept), "one line, never the value");
+});
+
+test("mint_if_missing: never regenerates — a second pass mints nothing", () => {
+  const f = mintFixture();
+  const first = S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { ...f, log: () => {} });
+  assert.deepEqual(first, ["MINT_NEW_KEY"]);
+  const value = readEnv(f.installedPath).MINT_NEW_KEY;
+  const again = S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { ...f, log: () => {} });
+  assert.deepEqual(again, []);
+  assert.equal(readEnv(f.installedPath).MINT_NEW_KEY, value);
+  assert.equal(readEnv(f.retainedPath).MINT_NEW_KEY, value);
+});
+
+test("mint_if_missing: only flagged keys are minted, and another bundle's keys are left alone", () => {
+  const f = mintFixture();
+  const otherId = "mintother";
+  const otherDest = scratch("mint-other-");
+  writeFileSync(join(otherDest, ".env"), "MINT_NEW_KEY=" + "c".repeat(64) + "\n");
+  const otherRetained = S.retainedEnvPath(f.crowHome, otherId);
+  mkdirSync(join(f.crowHome, "secrets", "bundle-env"), { recursive: true });
+  writeFileSync(otherRetained, "OTHER_KEY=other\n");
+  const otherBefore = readFileSync(join(otherDest, ".env"), "utf8");
+  const otherRetainedBefore = readFileSync(otherRetained, "utf8");
+
+  const minted = S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { ...f, log: () => {} });
+  assert.deepEqual(minted, ["MINT_NEW_KEY"], "MINT_PLAIN is not a generate key and is not listed for minting");
+  assert.equal(readFileSync(join(otherDest, ".env"), "utf8"), otherBefore, "the other install's .env is untouched");
+  assert.equal(readFileSync(otherRetained, "utf8"), otherRetainedBefore, "the other install's retained copy is untouched");
+  assert.deepEqual(S.mintableKeys(FLAGGED), ["MINT_NEW_KEY"]);
+  assert.deepEqual(S.mintableKeys({ env_vars: [{ name: "X", generate: "hex32" }] }), [], "no flag, no mint");
+});
+
+test("mint_if_missing: nothing is minted for a directory with no .env (not an install to repair)", () => {
+  const home = scratch("mint-empty-home-");
+  const dest = scratch("mint-empty-dest-");
+  const lines = [];
+  assert.deepEqual(S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { destDir: dest, crowHome: home, log: (m) => lines.push(m) }), []);
+  assert.equal(existsSync(join(dest, ".env")), false);
+  assert.deepEqual(lines, []);
+});
+
+test("mint_if_missing: a failure returns null, logs no value, and never throws", () => {
+  // An .env that exists but cannot be read as a file: the read itself fails, before anything is written.
+  const crowHome = scratch("mint-fail-home-");
+  const destDir = scratch("mint-fail-dest-");
+  mkdirSync(join(destDir, ".env"));
+  const lines = [];
+  const out = S.mintMissingFlaggedKeys("mintdemo", FLAGGED, { destDir, crowHome, log: (m) => lines.push(m) });
+  assert.equal(out, null, "null is what tells the boot repair to retry instead of advancing the version");
+  assert.match(lines.join("\n"), /could not mint the flagged key\(s\) for mintdemo/);
+  assert.doesNotMatch(lines.join("\n"), /[0-9a-f]{64}/, "no log line carries a value");
+  assert.equal(existsSync(S.retainedEnvPath(crowHome, "mintdemo")), false, "nothing was half-written");
+});
+
+test("install already mints the browser's CDP token: planGeneratedEnv generates every `generate` key", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../bundles/browser/manifest.json", import.meta.url), "utf8"));
+  const plan = S.planGeneratedEnv("browser", manifest, { destDir: scratch("d-"), crowHome: scratch("h-") });
+  assert.match(plan.env.CROW_BROWSER_CDP_TOKEN, /^[0-9a-f]{64}$/, "hex32, minted at install next to the VNC token — no change to the install path");
+  assert.ok(S.generatedEnvKeys(manifest).includes("CROW_BROWSER_CDP_TOKEN"));
+  assert.ok(S.gatewayExcludedKeys(manifest).has("CROW_BROWSER_CDP_TOKEN"), "propagate:false keeps it out of the gateway .env");
+  assert.deepEqual(S.mintableKeys(manifest), ["CROW_BROWSER_CDP_TOKEN"], "and it is the only key a boot repair may add later");
+});
+
+// ── the same path through the boot repair (mint BEFORE the version refresh) ──
+
+test("boot repair mints the flagged key for an installed bundle, logging the key only", async () => {
+  const id = "mint-repair";
+  mkdirSync(join(FIXTURES, id), { recursive: true });
+  // No version on either side: no refresh, so this is the mint-on-repair path alone.
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify({ id, name: id, type: "bundle", env_vars: FLAGGED.env_vars }));
+  const dest = seedInstalled(id, { env_vars: FLAGGED.env_vars }, "KEEP_KEY=keep\n");
+  writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([{ id, type: "bundle" }]));
+  const lines = [];
+  const out = await B.repairInstalledBundleAssets({ appBundles: FIXTURES, run: async () => ({ stdout: "", stderr: "" }), skillMode: "off", log: (m) => lines.push(m) });
+  assert.deepEqual(out.errors, []);
+  const env = readEnv(join(dest, ".env"));
+  assert.ok(hex(env.MINT_NEW_KEY), "the installed .env got the key");
+  assert.equal(env.KEEP_KEY, "keep");
+  assert.ok(hex(readEnv(S.retainedEnvPath(CROW_HOME, id)).MINT_NEW_KEY), "and so did the retained copy");
+  assert.ok(lines.includes(`[bundles] minted MINT_NEW_KEY for ${id}`), lines.join(" | "));
+  assert.ok(!lines.join("\n").includes(env.MINT_NEW_KEY), "no log line carries the value");
+  // A second boot is a no-op: never regenerated.
+  const lines2 = [];
+  await B.repairInstalledBundleAssets({ appBundles: FIXTURES, run: async () => ({ stdout: "", stderr: "" }), skillMode: "off", log: (m) => lines2.push(m) });
+  assert.ok(!lines2.join("\n").includes("minted"), "nothing was minted on the second pass");
+  assert.equal(readEnv(join(dest, ".env")).MINT_NEW_KEY, env.MINT_NEW_KEY);
+});
+
+test("a failed mint skips the version refresh, so the next boot retries both", async () => {
+  const id = "mint-block-refresh";
+  mkdirSync(join(FIXTURES, id), { recursive: true });
+  writeFileSync(join(FIXTURES, id, "manifest.json"), JSON.stringify({ id, name: id, type: "bundle", version: "2.0.0", env_vars: FLAGGED.env_vars }));
+  const dest = join(CROW_HOME, "bundles", id);
+  mkdirSync(dest, { recursive: true });
+  writeFileSync(join(dest, "manifest.json"), JSON.stringify({ id, name: id, type: "bundle", version: "1.0.0", env_vars: FLAGGED.env_vars }));
+  // An .env that exists but cannot be read as a file: the mint must fail rather than guess.
+  mkdirSync(join(dest, ".env"));
+  writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([{ id, type: "bundle", version: "1.0.0" }]));
+  const lines = [];
+  const out = await B.repairInstalledBundleAssets({ appBundles: FIXTURES, run: async () => ({ stdout: "", stderr: "" }), skillMode: "off", log: (m) => lines.push(m) });
+  assert.ok(out.errors.some((e) => e.id === id && /could not generate a missing key/.test(e.error)), JSON.stringify(out.errors));
+  assert.ok(!out.repaired.some((r) => r.startsWith(id + ": refreshed")), "no copy happened without the key");
+  assert.equal(JSON.parse(readFileSync(join(dest, "manifest.json"), "utf8")).version, "1.0.0", "the commit marker stays old, so the next boot retries");
+});
