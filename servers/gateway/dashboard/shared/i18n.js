@@ -4883,11 +4883,16 @@ export const translations = {
   "widgets.addon.empty": { en: "Nothing to show yet.", es: "Nada que mostrar todavía." },
   "widgets.addon.open": { en: "Open", es: "Abrir" },
   "widgets.addon.refresh": { en: "Reload {name}", es: "Recargar {name}" },
-  // Crow-to-Crow owner notifications (servers/sharing/c2c/owner.js). The two
-  // values are the contact's display name and the project's name — never a frame
-  // body — so the placeholders are the whole message surface.
+  // Crow-to-Crow membership notifications (servers/sharing/c2c/owner.js and
+  // visitor.js). The two values are a contact's display name and a project's name —
+  // never a frame body — so the placeholders are the whole message surface.
   "c2c.notify.joined": { en: "{contact} joined {project}", es: "{contact} se unió a {project}" },
   "c2c.notify.left": { en: "{contact} left {project}", es: "{contact} salió de {project}" },
+  // The visitor's side of the same two moments (servers/sharing/c2c/visitor.js):
+  // `{contact}` is the owner's contact name and `{project}` the name their invite
+  // carried. Both are sanitized before they get here.
+  "c2c.notify.invited": { en: "{contact} invited you to {project}", es: "{contact} te invitó a {project}" },
+  "c2c.notify.unshared": { en: "{contact} stopped sharing {project}", es: "{contact} dejó de compartir {project}" },
   // Fallbacks when a stored name cannot be shown (sanitizeDisplayName refuses it).
   "c2c.notify.someone": { en: "A contact", es: "Un contacto" },
   "c2c.notify.aProject": { en: "a project", es: "un proyecto" },

@@ -197,8 +197,10 @@ test("F7: a type:'c2c' payload reaches handleC2cFrame and never the share branch
     assert.equal(sent.length, 1, "the receive pipeline answered");
     assert.equal(sent[0].crowId, CROW);
     assert.equal(sent[0].frame.kind, "project.refuse");
-    assert.equal(sent[0].frame.body.reason, "busy",
-      "F1: no handler module in this host yet, so the frame is HELD with busy");
+    // owner.js and visitor.js both load now (Tasks 6 and 7), so this is a real
+    // authorization answer, not F1's "no handler yet" hold: the contact has no
+    // `c2c_visits` row for this project, so the visitor rule refuses it.
+    assert.equal(sent[0].frame.body.reason, "forbidden");
     assert.equal(await memoryCount(), 0, "the share branches never ran for a c2c payload");
 
     // Control: the same handler DOES import a real share, so the assertion above

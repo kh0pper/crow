@@ -233,9 +233,21 @@ async function writeInviteRow(db, { projectId, contactId, epoch, dbRole }) {
  *
  * One transaction does all of it (S4): the membership row with a fresh epoch, the
  * cancellation of the previous membership's queued frames (S6, an optimisation
- * only), the next invite generation (S2), the `project.invite` frame on the `"*"`
- * stream (the visitor's instance is not known yet, S1) and the audit row. The
- * flush runs after COMMIT.
+ * only), the direct unshare of an ACCEPTED member's old membership (V6), the next
+ * invite generation (S2), the `project.invite` frame on the `"*"` stream (the
+ * visitor's instance is not known yet, S1) and the audit row. The flush runs after
+ * COMMIT.
+ *
+ * V6: when the row being converted was ACCEPTED, its visit lives on one specific
+ * INSTANCE (`origin_instance_id`), and the new invite rides the `"*"` stream — which
+ * only reaches the instance it lands on. So, after `cancelEpoch(keep = the new
+ * epoch)` and BEFORE the new invite is queued, the old membership is unshared
+ * directly: a `project.unshare` carrying the OLD epoch and aimed at the old
+ * `origin_instance_id`. That instance hears the old membership end (its visit goes
+ * `unshared`, its local copies go) even if it is not the instance the new invite
+ * reaches. The unshare is enqueued AFTER `cancelEpoch` so it is not cancelled with
+ * the rest of the old epoch; it rides the old epoch's own stream (S1), so it cannot
+ * collide with the new invite's frames.
  *
  * The contact must be bound on BOTH counts (O4): a pinned Ed25519 key
  * (`lookupPinnedContactKey`) and this instance's PT-3 pin (`contact_hs_cb:<crow_id>`
@@ -282,10 +294,31 @@ export async function inviteContact(db, {
   const epoch = randomBytes(16).toString("hex");
 
   const memberUuid = await withTransaction(db, async () => {
+    // V6: capture the OLD membership before the invite overwrites the row in place —
+    // an accepted member's visit lives on `origin_instance_id`, and that instance has
+    // to be told the old membership ended (see the docblock).
+    const previous = await activeRowOf(db, { projectId, contactId });
+    const previousEpoch = typeof previous?.uuid === "string" && previous.uuid ? previous.uuid : null;
+    const previousInstanceId = typeof previous?.origin_instance_id === "string"
+      && previous.origin_instance_id ? previous.origin_instance_id : null;
+
     await writeInviteRow(db, { projectId, contactId, epoch, dbRole });
     // S6: the previous membership's still-queued frames are dead weight for the
     // peer; correctness never depends on this (S1/R4 refuse them anyway).
     await cancelEpoch(db, { contactId, projectUuid, keepEpoch: epoch });
+    if (previousEpoch && previousInstanceId) {
+      // V6: the accepted membership's instance hears it directly, on the old epoch's
+      // own stream. Queued after cancelEpoch, so it survives that pass.
+      await enqueue(db, {
+        contactId,
+        projectUuid,
+        kind: "project.unshare",
+        epoch: previousEpoch,
+        toInstanceId: previousInstanceId,
+        body: {},
+        localInstanceId,
+      });
+    }
     const gen = await nextInviteGeneration(db, projectUuid, now === undefined ? {} : { now });
     await enqueue(db, {
       contactId,
