@@ -271,12 +271,20 @@ test("an untagged DROP, or one without an interface pin, does not count as a fen
   assert.equal(audit.publishes[0].code, "unfenced");
 });
 
-test("rule parser: a non-negated -i, a -s, another match module or an unknown option is not a fence rule", () => {
+test("rule parser: ANY plain -i rejects the line, even beside a negated pin", () => {
   const base = addressedRule("100.64.20.5/32", 8003);
 
-  // The interface pin must be negated, and `!` must sit immediately before it.
+  // The interface pin must be negated.
   const plainIface = base.replace("! -i tailscale0", "-i tailscale0");
-  assert.equal(parseFenceRule(plainIface).iface, null, "a non-negated pin is not kept");
+  assert.equal(parseFenceRule(plainIface), null, "a non-negated pin rejects the line");
+
+  // …and a plain `-i` beside the negated one is not a spelling the fence writes
+  // either: the whole line is rejected rather than read as one pin.
+  const bothIfaces = base.replace("-m tcp", "-m tcp -i eth0");
+  assert.equal(parseFenceRule(bothIfaces), null, "a plain -i alongside ! -i rejects the line");
+  const afterPin = `${base} -i eth0`;
+  assert.equal(parseFenceRule(afterPin), null, "a trailing plain -i rejects the line");
+
   const unfenced = auditOf(snapshotWith(
     { "8003/tcp": [{ HostIp: "100.64.20.5", HostPort: "8003" }] },
     { rawRules: { v4: [JUMP, plainIface], v6: [] } },
@@ -297,6 +305,36 @@ test("rule parser: a non-negated -i, a -s, another match module or an unknown op
 
   // The fence's own spelling still parses.
   assert.equal(parseFenceRule(base).iface, "tailscale0");
+});
+
+test("only the exact PREROUTING jump makes the chain reachable", () => {
+  const binding = { "8003/tcp": [{ HostIp: "100.64.20.5", HostPort: "8003" }] };
+  const rule = addressedRule("100.64.20.5/32", 8003);
+  const withJump = (jump) => auditOf(snapshotWith(binding, { rawRules: { v4: [jump, rule], v6: [] } }));
+
+  assert.equal(withJump(JUMP).publishes[0].code, "fenced", "the plain jump");
+  assert.equal(
+    withJump('-A PREROUTING -m comment --comment "crow-engine-fence:e1" -j CROW-ENGINE-FENCE').publishes[0].code,
+    "fenced",
+    "the optional comment is allowed",
+  );
+
+  // A jump carrying any match of its own is not the jump: the rules in the
+  // chain are never reached for this traffic, so nothing counts as fenced.
+  for (const jump of [
+    "-A PREROUTING -s 192.0.2.1/32 -j CROW-ENGINE-FENCE",
+    "-A PREROUTING -i lo -j CROW-ENGINE-FENCE",
+    "-A PREROUTING -d 100.64.20.5/32 -j CROW-ENGINE-FENCE",
+    "-A PREROUTING -p tcp -j CROW-ENGINE-FENCE",
+    "-A PREROUTING -m tcp -j CROW-ENGINE-FENCE",
+    "-A PREROUTING -j CROW-ENGINE-FENCE -j ACCEPT",
+    "-A OUTPUT -j CROW-ENGINE-FENCE",
+    "-A PREROUTING -j CROW-ENGINE-FENCE stray",
+  ]) {
+    const audit = withJump(jump);
+    assert.equal(audit.publishes[0].code, "unfenced", jump);
+    assert.equal(audit.publishes[0].severity, "warn", jump);
+  }
 });
 
 test("a rule counts only inside CROW-ENGINE-FENCE and only with the PREROUTING jump", () => {
@@ -480,6 +518,42 @@ test("a port_bindings that is not a plain object is flagged unknown-host, never 
   assert.equal(warn.severity, "warn");
 });
 
+test("a missing or non-object host_config, and an unparseable port key, are flagged unknown-host", () => {
+  const containerSnapshot = (container) => ({
+    docker: { version: "28.0.1", userland_proxy: true },
+    tailscale: { v4: "100.64.20.5" },
+    containers: [{ id: "dd44ee55ff66", name: "crow-engine-y", labels: { "crow.runtime": "docker" }, networks: ["bridge"], ...container }],
+    raw_rules: { v4: [], v6: [] },
+  });
+
+  // Missing, null, a string, an array, a number: every one is a shape this
+  // module cannot read, so it takes the unreadable path instead of a skip.
+  for (const hostConfig of [undefined, null, "network_mode: default", [{ network_mode: "default" }], 8005]) {
+    const audit = auditOf(containerSnapshot(hostConfig === undefined ? {} : { host_config: hostConfig }));
+    assert.equal(audit.publishes.length, 1, `flagged, not skipped (${JSON.stringify(hostConfig)})`);
+    assert.equal(audit.publishes[0].id, "published-ports:dd44ee55ff66:unknown-host");
+    assert.equal(audit.publishes[0].code, "unknown-host");
+    assert.equal(audit.publishes[0].severity, "warn");
+  }
+
+  // A port key that does not spell a container port lands on the same path.
+  for (const key of ["http/tcp", "tcp", "8005/tcp/extra", "99999/tcp", "0/tcp", ""]) {
+    const audit = auditOf(containerSnapshot({
+      host_config: { network_mode: "default", port_bindings: { [key]: [{ HostIp: "0.0.0.0", HostPort: "8005" }] } },
+    }));
+    assert.equal(audit.publishes.length, 1, `flagged, not skipped (key ${JSON.stringify(key)})`);
+    assert.equal(audit.publishes[0].id, "published-ports:dd44ee55ff66:unknown-host");
+    assert.equal(audit.publishes[0].code, "unknown-host");
+    assert.equal(audit.publishes[0].severity, "warn");
+  }
+
+  // A readable shape is untouched: the loopback binding stays silent.
+  const clean = auditOf(containerSnapshot({
+    host_config: { network_mode: "default", port_bindings: { "8005/tcp": [{ HostIp: "127.0.0.1", HostPort: "8005" }] } },
+  }));
+  assert.equal(clean.publishes.length, 0);
+});
+
 test("long syntax and lowercase inspect keys are read the same way", () => {
   const audit = auditOf(snapshotWith({
     "8007/tcp": [{ host_ip: "198.51.100.7", host_port: "8007" }],
@@ -507,21 +581,38 @@ test("host-network containers: Crow-labelled warns, another one is listed as inf
   assert.equal(other.severity, "info");
 });
 
-test("isCrowLabelled keys on crow.runtime, not on crow.bundle or crow.component", () => {
+test("isCrowLabelled fails toward warn: any Crow label makes a container Crow-managed", async () => {
+  // Not every Crow launcher sets crow.runtime yet, so every marker counts.
   assert.equal(isCrowLabelled({ "crow.runtime": "docker" }), true);
-  assert.equal(isCrowLabelled({ "crow.bundle": "caddy" }), false);
-  assert.equal(isCrowLabelled({ "crow.component": "gateway" }), false);
+  assert.equal(isCrowLabelled({ "crow.bundle": "caddy" }), true);
+  assert.equal(isCrowLabelled({ "crow.component": "gateway" }), true);
+  assert.equal(isCrowLabelled({ "crow.runtime": "" }), true, "an empty label value is still a label");
   assert.equal(isCrowLabelled({}), false);
   assert.equal(isCrowLabelled(null), false);
 
-  // A host-network container that only carries a bundle label is listed as
-  // info — it is not this instance's own engine.
+  // A host-network container that carries ONLY crow.bundle still warns: a label
+  // never makes something LESS flagged.
   const audit = auditOf(snapshotWith({}, {
     networkMode: "host",
     labels: { "crow.bundle": "caddy", "com.docker.compose.project": "caddy" },
   }));
-  assert.equal(audit.publishes[0].code, "host-network");
-  assert.equal(audit.publishes[0].severity, "info");
+  assert.equal(audit.publishes[0].code, "host-network-engine");
+  assert.equal(audit.publishes[0].severity, "warn");
+
+  // …and only crow.component, with no runtime label at all, is the same answer.
+  const component = auditOf(snapshotWith({}, {
+    networkMode: "host",
+    labels: { "crow.component": "gateway" },
+  }));
+  assert.equal(component.publishes[0].severity, "warn");
+
+  // It reaches the signal as a warn too.
+  const { card, issues } = await signalOf(writeSnapshot(snapshotWith({}, {
+    networkMode: "host",
+    labels: { "crow.bundle": "caddy" },
+  })));
+  assert.equal(card.state, "warn");
+  assert.equal(issues.find((i) => i.id === "published-ports:001122334455:host-network").severity, "warn");
 });
 
 test("docker below the floor warns; an unreadable version is info", () => {
@@ -583,6 +674,33 @@ test("an allowlisted publish is info, listed, never hidden", async () => {
   assert.ok(card, "the card still renders");
   // The LAN publish is not allowlisted and stays a warn.
   assert.equal(issues.find((i) => i.id === "published-ports:c3d4e5f6a7b8:8080").severity, "warn");
+});
+
+test("the fenced count is fences only: an allowlisted publish and a missing Docker version never say 'fenced'", async () => {
+  // An allowlisted wildcard publish is info, but no rule fences it: it gets a
+  // count of its own instead of joining the fenced count.
+  const allowlisted = await signalOf(writeSnapshot(fixture("wildcard-engine.json")), { allowlistRaw: '["8011"]' });
+  assert.doesNotMatch(allowlisted.card.value, /fenced/);
+  assert.match(allowlisted.card.value, /1 allowlisted/);
+  assert.match(allowlisted.card.value, /1 to review/);
+
+  // No Docker version in the snapshot: the docker-version note is info, and it
+  // is not a fence either.
+  const noVersion = await signalOf(writeSnapshot(snapshotWith({}, { docker: {} })));
+  assert.ok(noVersion.issues.find((i) => i.id === "published-ports:docker-version"));
+  assert.doesNotMatch(noVersion.card.value, /\d+ fenced/);
+
+  // Both notes at once: still nothing fenced.
+  const both = await signalOf(writeSnapshot(snapshotWith(
+    { "8011/tcp": [{ HostIp: "0.0.0.0", HostPort: "8011" }] },
+    { docker: {} },
+  )), { allowlistRaw: '["8011"]' });
+  assert.doesNotMatch(both.card.value, /\d+ fenced/);
+  assert.match(both.card.value, /1 allowlisted/);
+
+  // A publish that does carry the fence rule is still counted.
+  const fenced = await signalOf(writeSnapshot(fixture("fenced-tailnet.json")));
+  assert.match(fenced.card.value, /1 fenced/);
 });
 
 test("a first-party, version-pinned bundle can allowlist its own ports", () => {

@@ -324,14 +324,12 @@ export function parseFenceRule(line) {
         break;
       }
       case "-i":
-      case "--in-interface": {
-        // A plain `-i <iface>` is read but never kept: without the negation it
-        // is not the fence (it would drop tailnet traffic too).
-        const v = valueAt(i);
-        if (v == null) return null;
-        i++;
-        break;
-      }
+      case "--in-interface":
+        // A plain (non-negated) `-i <iface>` is NOT a spelling the fence writes:
+        // without the negation it would drop tailnet traffic too. Return null on
+        // ANY such token — including a line that also carries `! -i <iface>` —
+        // so two interface matches can never be folded into one pinned rule.
+        return null;
       case "-s":
       case "--source":
       case "-o":
@@ -399,18 +397,71 @@ export function parseFenceRules(rawRules) {
   return { v4: parsedV4.rules, v6: parsedV6.rules, jumps: { v4: parsedV4.jump, v6: parsedV6.jump } };
 }
 
-/** `-A PREROUTING ... -j CROW-ENGINE-FENCE`: the jump that makes the chain reachable. */
+/**
+ * The jump that makes the chain reachable — and ONLY its exact spelling:
+ *
+ *   -A PREROUTING -j CROW-ENGINE-FENCE
+ *   -A PREROUTING -m comment --comment "…" -j CROW-ENGINE-FENCE   (comment optional)
+ *
+ * Anything else on the line (`-s`, `-i lo`, a second `-j`, an unknown token)
+ * means the chain is not traversed for the traffic we care about, so this is
+ * not a jump. Same strict tokenizer as parseFenceRule: an unrecognised spelling
+ * can only ever leave a publish LESS fenced, never more.
+ */
 function isFenceJump(line) {
   const tokens = tokenize(line);
-  const valueOf = (...flags) => {
-    for (let i = 0; i < tokens.length; i++) {
-      if (!flags.includes(tokens[i])) continue;
-      const v = tokens[i + 1];
-      return v && v !== "!" && !v.startsWith("-") ? v : null;
-    }
-    return null;
+  let append = null;
+  let jump = null;
+  let matchComment = false;
+  let commentText = null;
+
+  const valueAt = (i) => {
+    const v = tokens[i + 1];
+    return v === undefined || v === "!" || v.startsWith("-") ? null : v;
   };
-  return valueOf("-A", "--append") === "PREROUTING" && valueOf("-j", "--jump") === FENCE_CHAIN;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    switch (token) {
+      case "-A":
+      case "--append": {
+        const v = valueAt(i);
+        if (v == null || append != null) return false;
+        append = v;
+        i++;
+        break;
+      }
+      case "-j":
+      case "--jump": {
+        const v = valueAt(i);
+        if (v == null || jump != null) return false;
+        jump = v;
+        i++;
+        break;
+      }
+      case "-m":
+      case "--match": {
+        const v = valueAt(i);
+        if (v == null || matchComment || v.toLowerCase() !== "comment") return false;
+        matchComment = true;
+        i++;
+        break;
+      }
+      case "--comment": {
+        const v = valueAt(i);
+        if (v == null || !matchComment || commentText != null) return false;
+        commentText = v;
+        i++;
+        break;
+      }
+      default:
+        // A jump line carries no match of its own: `-s`, `-i`, `-o`, a second
+        // `-A`, a stray word — all reject the line.
+        return false;
+    }
+  }
+
+  return append === "PREROUTING" && jump === FENCE_CHAIN;
 }
 
 /**
@@ -524,18 +575,36 @@ function normNetworks(networks) {
   return [];
 }
 
+const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** The only key spelling Docker's PortBindings uses: `<container port>/<proto>`. */
+const BINDING_KEY_RE = /^(\d{1,5})(?:\/([A-Za-z0-9]+))?$/;
+
 /**
  * Docker's PortBindings shape, tolerantly: `{ "8005/tcp": [ { HostIp, HostPort } ] }`
  * (inspect's spelling), lowercase host_ip/host_port, or a bare port string.
+ *
+ * Returns `{ bindings, unreadable }`. `unreadable` is true when the bindings
+ * value itself is not a plain object (a string, a number, an array) AND when ANY
+ * key does not spell a container port — so the caller flags the container (see
+ * inspectPublishedPorts) instead of letting a shape it cannot read read as
+ * "nothing published". `null` is Docker's own spelling for "no bindings" and is
+ * not unreadable.
  */
 function normPortBindings(bindings) {
-  if (!bindings || typeof bindings !== "object") return [];
+  if (!isPlainObject(bindings)) return { bindings: [], unreadable: bindings != null };
   const out = [];
+  let unreadable = false;
   for (const [key, value] of Object.entries(bindings)) {
-    const [portRaw, protoRaw] = String(key).split("/");
-    const port = Number(portRaw);
-    if (!Number.isInteger(port) || port <= 0) continue;
-    const proto = protoRaw ? String(protoRaw).toLowerCase() : "tcp";
+    const m = BINDING_KEY_RE.exec(String(key).trim());
+    const port = m ? Number(m[1]) : NaN;
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      // An unparseable port key is a shape this module cannot read: flag it,
+      // never skip the key silently.
+      unreadable = true;
+      continue;
+    }
+    const proto = m[2] ? m[2].toLowerCase() : "tcp";
     const list = Array.isArray(value) ? value : value == null ? [] : [value];
     if (list.length === 0) {
       // A binding with no host entry at all: nothing is published, nothing to report.
@@ -543,28 +612,35 @@ function normPortBindings(bindings) {
     }
     for (const entry of list) {
       const hostIp = pick(entry?.HostIp, entry?.host_ip, entry?.hostIp);
-      const hostPort = pick(entry?.HostPort, entry?.host_port, entry?.hostPort, portRaw);
+      const hostPort = pick(entry?.HostPort, entry?.host_port, entry?.hostPort, m[1]);
       out.push({ port: Number(hostPort) || port, containerPort: port, proto, hostIp: hostIp === undefined ? "" : String(hostIp) });
     }
   }
-  return out;
+  return { bindings: out, unreadable };
 }
 
 function normContainer(c) {
-  const hostConfig = c?.host_config || c?.HostConfig || {};
+  const rawHostConfig = pick(c?.host_config, c?.HostConfig);
+  // A missing or non-object host_config is not "no ports": nothing about this
+  // container's publish shape could be read, so it takes the SAME unreadable
+  // path as a malformed port_bindings (see inspectPublishedPorts) — flagged,
+  // never a silent skip.
+  const hostConfigReadable = isPlainObject(rawHostConfig);
+  const hostConfig = hostConfigReadable ? rawHostConfig : {};
   const labels = normLabels(pick(c?.labels, c?.Labels));
   const rawBindings = pick(hostConfig.port_bindings, hostConfig.PortBindings, c?.port_bindings);
+  const bindings = normPortBindings(rawBindings);
   return {
     id: String(pick(c?.id, c?.short_id, c?.Id, "") || ""),
     name: String(pick(c?.name, c?.Name, "") || ""),
     labels,
     networkMode: String(pick(hostConfig.network_mode, hostConfig.NetworkMode, c?.network_mode, "") || ""),
-    portBindings: normPortBindings(rawBindings),
-    // A present-but-unreadable port_bindings (an array, a string, a number) is
-    // a shape this module cannot read. It is flagged, never treated as
-    // "nothing published" — see inspectPublishedPorts. `null` is Docker's own
-    // spelling for "no bindings" and stays absent.
-    portBindingsUnreadable: rawBindings != null && (typeof rawBindings !== "object" || Array.isArray(rawBindings)),
+    portBindings: bindings.bindings,
+    // An unreadable host_config, or a port_bindings this module cannot read
+    // (an array, a string, a number, an unparseable port key), is a shape it
+    // cannot classify. It is flagged, never treated as "nothing published" —
+    // see inspectPublishedPorts.
+    portBindingsUnreadable: !hostConfigReadable || bindings.unreadable,
     networks: normNetworks(pick(c?.networks, c?.NetworkSettings?.Networks)),
   };
 }
@@ -734,13 +810,23 @@ function shortId(id, name) {
   return String(name || "container").slice(0, 12);
 }
 
-/** Crow marks its OWN containers with `crow.runtime`; that is the marker that
- * says "this container is part of this Crow instance". `crow.bundle` and
- * `crow.component` are descriptive labels a container can carry for other
- * reasons, so they never make a container Crow-managed by themselves. */
-export function isCrowLabelled(labels) {
+/** Any of these labels is enough to treat a container as Crow-managed. */
+const CROW_MANAGED_LABELS = Object.freeze(["crow.runtime", "crow.bundle", "crow.component"]);
+
+/**
+ * Whether a container counts as Crow-managed for the warns that treat Crow's
+ * own workloads differently (the host-network entry).
+ *
+ * FAIL TOWARD WARN. Not every Crow launcher sets `crow.runtime` yet, so a
+ * container is treated as Crow-managed when it carries ANY of `crow.runtime`,
+ * `crow.bundle` or `crow.component`, or when bundleIdOf can tie its bundle label
+ * to an installed bundle. Labels only ever ADD flagging: nothing here can make a
+ * publish look safer, and a label never makes something LESS flagged.
+ */
+export function isCrowLabelled(labels, { installedDir = installedBundlesDir() } = {}) {
   if (!labels || typeof labels !== "object") return false;
-  return Boolean(labels["crow.runtime"]);
+  if (CROW_MANAGED_LABELS.some((key) => Object.hasOwn(labels, key))) return true;
+  return bundleIdOf(labels, { installedDir }) != null;
 }
 
 /** The bundle id a container CLAIMS. Only Crow's own label counts: a compose
@@ -759,10 +845,20 @@ function claimedBundleId(labels) {
  *                                                     <installedDir>/<id>
  *                                                     (or a path inside it)
  *
- * A container cannot earn the allowlist by labelling itself: the compose
- * working dir is what ties it to the installed bundle directory. A missing
- * working-dir label does not qualify, and `com.docker.compose.project` alone is
- * never accepted.
+ * Labelling itself is not enough: the compose working dir is what ties a
+ * container to the installed bundle directory. A missing working-dir label does
+ * not qualify, and `com.docker.compose.project` alone is never accepted.
+ *
+ * BE PLAIN ABOUT WHAT THIS PROVES: the label check RAISES THE BAR, it does not
+ * prove identity. A container can still set its own labels, including a
+ * `crow.bundle` id and a compose working dir that points at an installed bundle
+ * — so a hostile container on this Docker socket can claim a first-party
+ * bundle's identity. That must never be rewarded with operator trust, which is
+ * why the two labels never widen the OPERATOR allowlist (a `bundle:` selector
+ * only matches this verified id) and why the manifest half needs a first-party,
+ * version-pinned bundle: the residual — at most the ports that bundle's own
+ * installed, first-party manifest declares — is bounded by the repo's manifest,
+ * not by what the container asks for.
  */
 export function bundleIdOf(labels, { installedDir = installedBundlesDir() } = {}) {
   const id = claimedBundleId(labels);
@@ -905,7 +1001,7 @@ export function inspectPublishedPorts({
       // A host-network container publishes nothing; its own listeners sit on
       // every address of the host. Crow's own engine on host networking is a
       // warn of its own; anything else is listed as info (visible, not silent).
-      const crowLabelled = isCrowLabelled(c.labels);
+      const crowLabelled = isCrowLabelled(c.labels, { installedDir });
       publishes.push({
         id: `published-ports:${shortId(c.id, c.name)}:host-network`,
         containerId: c.id,

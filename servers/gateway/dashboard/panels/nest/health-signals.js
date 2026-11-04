@@ -1347,7 +1347,11 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
 
   const issues = [];
   let warnCount = 0;
-  let infoCount = 0;
+  // Three separate counts: a publish that carries a real fence rule, one the
+  // operator (or a first-party manifest) allowlisted, and everything else.
+  // Only the first is ever called "fenced".
+  let fencedCount = 0;
+  let allowlistedCount = 0;
 
   // One issue per (container, port) — the id the plan names — so a v4 and a v6
   // binding on the same port cannot produce two issues under one id. A warn
@@ -1381,11 +1385,18 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
       // publishes no port, so it has no rule to describe and must never be
       // rendered as fenced.
       let key;
-      if (p.code === "allowlisted") key = "signals.publishedPorts.infoAllowlisted";
-      else if (p.code === "host-network" || p.code === "host-network-engine") key = "signals.publishedPorts.hostNetwork";
-      else key = "signals.publishedPorts.infoFenced";
-      // …and it is not "fenced" for the count either.
-      if (p.code !== "host-network" && p.code !== "host-network-engine") infoCount++;
+      if (p.code === "allowlisted") {
+        key = "signals.publishedPorts.infoAllowlisted";
+        allowlistedCount++;
+      } else if (p.code === "host-network" || p.code === "host-network-engine") {
+        key = "signals.publishedPorts.hostNetwork";
+      } else {
+        key = "signals.publishedPorts.infoFenced";
+      }
+      // …and only an entry that actually carries a fence rule joins the
+      // "fenced" count: an allowlisted publish, a host-network entry and the
+      // docker-version note are not fenced.
+      if (p.code === "fenced" || p.code === "fenced-port-only") fencedCount++;
       issues.push({
         id: p.id, severity: "info", state: "info", issueOnly: true, label,
         issueLabel: fill(t(key, lang), vars), ...action,
@@ -1403,7 +1414,8 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
       }), ...action,
     });
   } else if (audit.docker.belowFloor === null) {
-    infoCount++;
+    // Not "fenced" and not a review item: an unreadable Docker version is
+    // listed on its own, and never joins either count.
     issues.push({
       id: "published-ports:docker-version", severity: "info", state: "info", issueOnly: true, label,
       issueLabel: t("signals.publishedPorts.dockerUnknown", lang), ...action,
@@ -1431,7 +1443,10 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
       : fill(t("signals.publishedPorts.staleValue", lang), { age: formatAge(audit.ageMs) }));
   }
   if (warnCount > 0) parts.push(fill(t("signals.publishedPorts.review", lang), { n: warnCount }));
-  if (infoCount > 0) parts.push(fill(t("signals.publishedPorts.fenced", lang), { n: infoCount }));
+  // An allowlisted publish got there by the operator's decision or a
+  // first-party manifest — not by a fence rule — so it gets its own count.
+  if (allowlistedCount > 0) parts.push(fill(t("signals.publishedPorts.allowlistedCount", lang), { n: allowlistedCount }));
+  if (fencedCount > 0) parts.push(fill(t("signals.publishedPorts.fenced", lang), { n: fencedCount }));
   const value = withBlind(parts.length
     ? parts.join(" · ")
     : t(issues.length ? "signals.publishedPorts.listed" : "signals.publishedPorts.ok", lang));

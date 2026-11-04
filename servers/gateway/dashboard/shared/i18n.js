@@ -305,6 +305,7 @@ export const translations = {
   "signals.publishedPorts.listed": { en: "listed below, none fenced", es: "se listan abajo, ninguno protegido" },
   "signals.publishedPorts.review": { en: "{n} to review", es: "{n} por revisar" },
   "signals.publishedPorts.fenced": { en: "{n} fenced", es: "{n} protegidos" },
+  "signals.publishedPorts.allowlistedCount": { en: "{n} allowlisted", es: "{n} en la lista de permitidos" },
   "signals.publishedPorts.blind": { en: "not inspected: {list}", es: "sin inspeccionar: {list}" },
   "signals.publishedPorts.blindHostNetwork": { en: "host networking", es: "red del host" },
   "signals.publishedPorts.blindUserlandProxy": { en: "userland-proxy=false", es: "userland-proxy=false (proxy en espacio de usuario)" },
