@@ -230,6 +230,13 @@ async function safeNotify(db, { title, source }, deliver = null) {
  * (outside any transaction) whenever a terminal refusal arrived for one of our
  * frames, with ONE argument, `{ db, contactId, crowId, frame, reason, terminal }`.
  *
+ * MERGE ORDER (boot.js `createC2cHandlerLoader`): owner.js is merged FIRST, then
+ * this module, both with a plain `Object.assign` — so a key exported by both is
+ * silently OVERWRITTEN by whichever module loads last (visitor.js). The two maps
+ * share no key today; if owner.js ever grows an `onRefusal` (or this module an
+ * `onAccept`/`onDecline`), the two must be combined deliberately — the later
+ * `Object.assign` wins, and the earlier handler is dropped with no warning.
+ *
  * These run INSIDE the pipeline's transaction (S7) and must do DB work only: no
  * send, no flush, no notification fan-out. A handler that notifies writes the ROW
  * here (with `deliver: false`) and RETURNS `{ afterCommit }`, which the pipeline
@@ -418,11 +425,24 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
    * notification. A visit already superseded by a newer invite (a different epoch)
    * is not ours to end, so it is left alone.
    *
+   * Y1 of the fix wave 2: the outbox read, the visit read, the guarded purge, the
+   * UPDATE and the notification ROW are ONE `withTransaction`. Written as raw
+   * `db.execute` calls they took no turn on the handle, so a concurrent `onInvite`
+   * for a NEWER epoch could be flipped back to `unshared` by a stale read — and the
+   * refusal's statements could join (and roll back with) somebody else's open
+   * transaction. The UPDATE also names the epoch for the same reason: even a read
+   * that turns out to be stale now takes no row. The purge runs BEFORE the UPDATE so
+   * that a write which lands while this transaction is open (a seam reentering with a
+   * newer invite) leaves the epoch guard's UPDATE a no-op instead of ending the newer
+   * visit. Only a visit that was `invited` or `active` before the UPDATE is
+   * announced (X4): a refused decline or leave ends quietly.
+   *
    * Delivery: receive.js calls this OUTSIDE any transaction, passing the handle with
    * the rest (`{ db, contactId, crowId, frame, reason, terminal }`), so the row is
-   * written with `deliver: false` and its fan-out runs right here, after the write.
-   * If a future caller does run it inside a transaction, nothing is delivered there
-   * (R7): the hook is returned as `{ afterCommit }` instead.
+   * written with `deliver: false` INSIDE the transaction above and its fan-out runs
+   * right here, after that transaction resolved. If a future caller does run it
+   * inside a transaction, nothing is delivered there (R7): the hook is returned as
+   * `{ afterCommit }` instead.
    *
    * Never throws: a refusal we could not read is worth a log line, not a broken
    * reply path.
@@ -439,59 +459,74 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
     if (!Number.isSafeInteger(body.seq) || body.seq <= 0) return;
     const stream = typeof body.stream === "string" && body.stream ? body.stream : WILDCARD_STREAM;
 
-    // Which of our frames did it answer? The row is already closed by `onRefuse`
-    // (terminal refusals ack it), so this only reads it.
-    let kind = null;
+    // Y1: everything below is ONE transaction — the two reads, the purge, the state
+    // change and the notification ROW. Nothing of it may be observed half-done, and a
+    // concurrent invite's transaction must never take these statements with it.
+    let hook = null;
     try {
-      const { rows } = await db.execute({
-        sql: `SELECT kind FROM c2c_outbox
-               WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND seq = ?
-                 AND COALESCE(to_instance_id, '*') = ?
-               LIMIT 1`,
-        args: [contactId, projectUuid, epoch, body.seq, stream],
+      hook = await withTransaction(db, async () => {
+        // Which of our frames did it answer? The row is already closed by `onRefuse`
+        // (terminal refusals ack it), so this only reads it.
+        const { rows: answered } = await db.execute({
+          sql: `SELECT kind FROM c2c_outbox
+                 WHERE contact_id = ? AND project_uuid = ? AND epoch = ? AND seq = ?
+                   AND COALESCE(to_instance_id, '*') = ?
+                 LIMIT 1`,
+          args: [contactId, projectUuid, epoch, body.seq, stream],
+        });
+        if (!ANSWER_KINDS.has(answered[0]?.kind ?? null)) return null;
+
+        const { rows } = await db.execute({
+          sql: `SELECT * FROM c2c_visits
+                 WHERE owner_contact_id = ? AND project_uuid = ?
+                 ORDER BY id DESC LIMIT 1`,
+          args: [contactId, projectUuid],
+        });
+        const visit = rows[0] ?? null;
+        // A visit superseded by a newer invite is at a newer epoch: this refusal is
+        // about a membership nobody holds any more, so it changes nothing.
+        if (!visit || visit.epoch !== epoch) return null;
+        // X4: only a LIVE visit announces its own end; a declined or left visit was
+        // already ended by the operator, so a refused answer to it ends quietly.
+        const wasLive = visit.state === "invited" || visit.state === "active";
+
+        // The guarded purge (X3), still inside the transaction: ending the visit is
+        // the effect that must land, so a throwing plan-2 hook is logged and stepped
+        // over. It runs BEFORE the UPDATE so a write that lands while this transaction
+        // is open (a seam reentering with a newer invite) makes the epoch guard below
+        // take no row, instead of this refusal ending that newer visit.
+        try {
+          await (deleteCopies ?? deleteLocalCopies)(visit);
+        } catch (err) {
+          console.warn(`[c2c] deleting a refused visit's local copies failed: ${err?.message || err}`);
+        }
+
+        // Y1: the row AND the epoch. A visit that moved on to a newer membership is
+        // not this refusal's to end, whatever the read above saw.
+        const r = await db.execute({
+          sql: `UPDATE c2c_visits
+                   SET state = 'unshared', ended_at = COALESCE(ended_at, datetime('now'))
+                 WHERE id = ? AND epoch = ? AND state <> 'unshared'`,
+          args: [visit.id, epoch],
+        });
+        const ended = Number(r.rowsAffected ?? 0) > 0;
+        if (!ended) return null; // already ended, or no longer at this epoch: silent
+        if (!wasLive) return null; // a declined/left visit ends quietly (X4)
+
+        const names = await namesOfVisit(db, visit);
+        const written = await notifier(db, {
+          title: fill(t("c2c.notify.noLongerSharing"), names),
+          source: "sharing:c2c_refused",
+        });
+        return typeof written === "function" ? written : null;
       });
-      kind = rows[0]?.kind ?? null;
     } catch (err) {
-      console.warn(`[c2c] could not read a refused frame's kind: ${err?.message || err}`);
+      console.warn(`[c2c] a refused answer's visit could not be ended: ${err?.message || err}`);
       return;
     }
-    if (!ANSWER_KINDS.has(kind)) return;
 
-    let visit = null;
-    try {
-      const { rows } = await db.execute({
-        sql: `SELECT * FROM c2c_visits
-               WHERE owner_contact_id = ? AND project_uuid = ?
-               ORDER BY id DESC LIMIT 1`,
-        args: [contactId, projectUuid],
-      });
-      visit = rows[0] ?? null;
-    } catch (err) {
-      console.warn(`[c2c] could not read the visit of a refused answer: ${err?.message || err}`);
-      return;
-    }
-    // A visit superseded by a newer invite is at a newer epoch: this refusal is
-    // about a membership nobody holds any more, so it changes nothing.
-    if (!visit || visit.epoch !== epoch) return;
-
-    const r = await db.execute({
-      sql: `UPDATE c2c_visits
-               SET state = 'unshared', ended_at = COALESCE(ended_at, datetime('now'))
-             WHERE id = ? AND state <> 'unshared'`,
-      args: [visit.id],
-    });
-    const ended = Number(r.rowsAffected ?? 0) > 0;
-    try {
-      await (deleteCopies ?? deleteLocalCopies)(visit);
-    } catch (err) {
-      console.warn(`[c2c] deleting a refused visit's local copies failed: ${err?.message || err}`);
-    }
-    if (!ended) return; // already ended: no second notification
-    const names = await namesOfVisit(db, visit);
-    const hook = await notifier(db, {
-      title: fill(t("c2c.notify.noLongerSharing"), names),
-      source: "sharing:c2c_refused",
-    });
+    // The fan-out runs only after the transaction above has resolved: inside it the
+    // write lock is held and the write could still roll back (R7/W1).
     if (typeof hook !== "function") return;
     if (inTransaction(db)) return { afterCommit: hook };
     await hook();
@@ -501,6 +536,12 @@ export function createVisitorHandlers({ notify = null, deliver = null, deleteCop
 }
 
 const defaultHandlers = createVisitorHandlers();
+
+/* These four are the export shape boot.js's `createC2cHandlerLoader` merges into the
+ * pipeline's handler map — owner.js FIRST, then this module, each with a plain
+ * `Object.assign`. A key both modules export is therefore taken from visitor.js with
+ * no warning; the maps share none today, and if owner.js ever gains an `onRefusal`
+ * the two must be combined deliberately rather than left to the merge order. */
 
 /** The receive pipeline's handler for `project.invite` (real notification helper). */
 export const onInvite = defaultHandlers.onInvite;

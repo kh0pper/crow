@@ -205,6 +205,12 @@
  *     later seq of that stream as `gap` forever — an unshare that never lands. The
  *     kept frames are the old membership's role frames, which the visitor applies and
  *     acks (or refuses `stale_epoch`) harmlessly before the unshare.
+ *     Y2 of the fix wave 2: the membership row only names the membership being
+ *     replaced NOW, so a re-invite ALSO keeps every stream that still has an unacked
+ *     `project.unshare` for that contact and project (`unackedUnshareStreams`) — an
+ *     unshare an EARLIER re-invite queued for an older instance. Without it a second
+ *     re-invite cancels that unshare (and the frames before it) and the older visit
+ *     never ends.
  *
  * R9 (follow-up). Inbound marks are never pruned: `c2c_inbound_seq` keeps one row
  *     per (contact, sender instance, project, epoch, stream) for good, and a new
@@ -594,6 +600,41 @@ export async function cancelEpoch(db, { contactId, projectUuid, keepEpoch, keepS
 }
 
 /**
+ * Y2 of the Task 7A fix wave 2: every stream that still carries an UNACKED
+ * `project.unshare` for (contact, project), as `[{ epoch, stream }]` — the extra
+ * `keepStreams` entries a re-invite must hand to `cancelEpoch`.
+ *
+ * The membership row can only speak for the membership being replaced NOW: a
+ * re-invite converts it in place (new epoch, `origin_instance_id` cleared), so an
+ * unshare queued by an EARLIER re-invite for an even older membership's instance is
+ * on no row any more. Cancelling its stream would leave a hole there, and the
+ * visitor holds every later seq of a holed stream as `gap` forever (S6) — the older
+ * visit would never end. Reads on the caller's handle: `inviteContact` runs it inside
+ * its transaction, so the streams it keeps are the ones that were still queued when
+ * the cancel pass ran.
+ *
+ * @param {{contactId:number, projectUuid:string}} opts
+ * @returns {Promise<Array<{epoch:string, stream:string}>>}
+ */
+export async function unackedUnshareStreams(db, { contactId, projectUuid } = {}) {
+  if (!Number.isSafeInteger(contactId) || contactId <= 0) {
+    throw c2cError("c2c outbox: contactId is required", "bad_argument");
+  }
+  if (typeof projectUuid !== "string" || !projectUuid) {
+    throw c2cError("c2c outbox: projectUuid is required", "bad_argument");
+  }
+  // S1's stream spelling: a null target is `*`, exactly as the flush and the markers
+  // key it — the entry has to name the stream `cancelEpoch` protects.
+  const { rows } = await write(db,
+    `SELECT DISTINCT epoch, COALESCE(to_instance_id, '*') AS stream
+       FROM c2c_outbox
+      WHERE contact_id = ? AND project_uuid = ? AND acked_at IS NULL
+        AND kind = 'project.unshare'`,
+    [contactId, projectUuid]);
+  return rows.map((row) => ({ epoch: String(row.epoch), stream: String(row.stream) }));
+}
+
+/**
  * Drop acked rows older than `olderThanDays` (30 by default).
  * R2: the stream counters in `c2c_outbox_seq` are untouched, so a pruned row's
  * seq is never handed out again.
@@ -652,9 +693,10 @@ export async function nextInviteGeneration(db, projectUuid, opts = {}) {
 /**
  * Is this async context already inside one of this module's live transactions on
  * `db`? Exported for a handler that must know whether it may do network I/O right
- * now: visitor.js's `onRefusal` delivers its notification inline unless it is inside
- * a transaction, where no push may happen (R7/W1) and it returns `{ afterCommit }`
- * instead.
+ * now: visitor.js's `onRefusal` writes its notification row inside its OWN
+ * `withTransaction` (fix wave 2, Y1) and fans it out only once that resolved — unless
+ * it was already inside a caller's transaction, where no push may happen (R7/W1) and
+ * it returns `{ afterCommit }` instead.
  * @returns {boolean}
  */
 export function inTransaction(db) {
