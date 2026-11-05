@@ -137,6 +137,19 @@ function logSafe(v) {
 }
 
 /**
+ * Is this chunk the start of something that is NOT a JSON control line? A
+ * sibling's control phase ends there: every handshake line starts with `{`
+ * (0x7b) and every Protomux message starts with a varint channel id (0 for a
+ * channel open) — the very test instance-connect.js's firstMuxFrame uses.
+ * (A member of the control phase is always its own Noise message, so its own
+ * `data` chunk: the sender writes each line with its own conn.write.)
+ */
+function isNonJsonChunk(data) {
+  if (typeof data === "string") return data.length > 0 && data.charCodeAt(0) !== 0x7b;
+  return !!data?.length && data[0] !== 0x7b;
+}
+
+/**
  * Create a deterministic topic for a contact pair.
  * topic = sha256(sorted(myPubkey, theirPubkey))
  */
@@ -160,7 +173,44 @@ export const PEER_LINE_MAX_MAX = SECRET_STREAM_MAX_ATOMIC_WRITE - 64 * 1024; // 
 export const PEER_LINE_MAX_DEFAULT = PEER_LINE_MAX_MAX;
 export const PEER_LINE_MAX_MIN = 1024 * 1024;
 
+// ---------------------------------------------------------------- frame-chain caps
+// The frame chain in _handleConnection is a promise chain: a frame's handler
+// runs only after every earlier one, so a peer that writes faster than a
+// handler makes the chain (and the memory it pins) grow. Two independent
+// limits, both counted per QUEUED line:
+//
+//  - Contacts get BACKPRESSURE first (streamx pause/resume). A legitimate
+//    burst is real: flushC2cOutbox and the pending-share delivery can hand a
+//    contact more queued frames than any fixed cap, and killing that link
+//    would only livelock reconnects. So pause at the soft caps, resume once
+//    the chain drains.
+//  - Every kind gets a HARD kill. Pausing cannot save a chunk that arrived
+//    packed with lines: it was split (and queued) before any pause took
+//    effect, and a flood is a flood whatever its shape.
+//
+// All four are constructor options (the preAuthMaxLines pattern), never env
+// vars: a test drives the exact cap without patching process.env.
+export const CHAIN_SOFT_FRAMES = 256;
+export const CHAIN_SOFT_BYTES = 16 * 1024 * 1024;
+/** Resume a paused contact once the chain is back under these (a quarter of the soft caps). */
+export const CHAIN_RESUME_FRAMES = 64;
+export const CHAIN_RESUME_BYTES = 4 * 1024 * 1024;
+export const CHAIN_MAX_FRAMES = 4096;
+/** The hard byte cap: two of the longest lines a peer may send us, plus 1 MiB. */
+export const chainMaxBytesFor = (postAdmitLineMax) => 2 * postAdmitLineMax + 1024 * 1024;
+
+// A sibling's control phase: from admission until its first Protomux frame,
+// every line is JSON, and everything a legitimate sibling says there fits in a
+// handful of tiny frames (its `authenticated`, maybe `pair-binding`, its
+// `instance-key`, a deferred challenge-response). So the size AND the count are
+// capped; either breach kills (size and count only in the log, never content).
+export const SIBLING_CONTROL_LINE_MAX = 64 * 1024;
+export const SIBLING_CONTROL_MAX_LINES = 16;
+
 const clampLineMax = (n) => Math.min(PEER_LINE_MAX_MAX, Math.max(PEER_LINE_MAX_MIN, n));
+
+/** A cap option: a positive finite number, else the default (never "off"). */
+const positiveOr = (v, fallback) => (Number.isFinite(v) && v > 0 ? v : fallback);
 
 const _lineMaxWarned = new Set();
 const warnLineMaxOnce = (raw, msg) => {
@@ -238,6 +288,14 @@ export class PeerManager {
    *   always clamped to [1 MiB, 16,711,679])
    * @param {number} [opts.maxConnsPerCrow] live connections one Crow id may hold
    *   (MAX_CONNS_PER_CROW); at the cap the oldest is destroyed
+   * @param {number} [opts.chainSoftFrames] queued frames at which a CONTACT
+   *   connection is paused (CHAIN_SOFT_FRAMES)
+   * @param {number} [opts.chainSoftBytes] queued bytes at which a CONTACT
+   *   connection is paused (CHAIN_SOFT_BYTES)
+   * @param {number} [opts.chainMaxFrames] queued frames over which ANY admitted
+   *   connection is killed (CHAIN_MAX_FRAMES)
+   * @param {number} [opts.chainMaxBytes] queued bytes over which ANY admitted
+   *   connection is killed (chainMaxBytesFor(postAdmitLineMax))
    */
   constructor(identity, {
     env = process.env,
@@ -248,6 +306,10 @@ export class PeerManager {
     pairBindingWaitMs = 10_000,
     postAdmitLineMax = postAdmitLineMaxFromEnv(env),
     maxConnsPerCrow = MAX_CONNS_PER_CROW,
+    chainSoftFrames = CHAIN_SOFT_FRAMES,
+    chainSoftBytes = CHAIN_SOFT_BYTES,
+    chainMaxFrames = CHAIN_MAX_FRAMES,
+    chainMaxBytes = null,
   } = {}) {
     this.identity = identity;
     this.instanceSyncEnabled = hyperswarmInstanceSyncEnabled(env);
@@ -260,6 +322,19 @@ export class PeerManager {
     // newline) is held to this cap. Sibling connections are exempt (see
     // lineCapped in _handleConnection).
     this.postAdmitLineMax = Number.isFinite(postAdmitLineMax) ? clampLineMax(postAdmitLineMax) : PEER_LINE_MAX_DEFAULT;
+    // How much of an admitted connection's frame chain (frames and bytes) may
+    // be queued before we push back (contacts) or kill (any kind). See the
+    // constants above for why it is backpressure first.
+    this.chainSoftFrames = positiveOr(chainSoftFrames, CHAIN_SOFT_FRAMES);
+    this.chainMaxFrames = positiveOr(chainMaxFrames, CHAIN_MAX_FRAMES);
+    // Derived from OUR line cap: the kill cap must be able to hold two maximal
+    // lines, or a peer sending back-to-back legal lines would be cut.
+    this.chainMaxBytes = positiveOr(chainMaxBytes, chainMaxBytesFor(this.postAdmitLineMax));
+    // The soft cap must sit at least one maximal line under the kill cap, or a
+    // lowered line cap (CROW_PEER_LINE_MAX_BYTES) would kill a legitimate burst
+    // before it was ever paused. The resume mark follows it down.
+    this.chainSoftBytes = Math.max(1, Math.min(positiveOr(chainSoftBytes, CHAIN_SOFT_BYTES), this.chainMaxBytes - this.postAdmitLineMax - 1));
+    this.chainResumeBytes = Math.min(CHAIN_RESUME_BYTES, Math.floor(this.chainSoftBytes / 4));
     // PT-2a: how long a sibling that offered pair binding may take to send
     // its `pair-binding` frame once we have proven ourselves to it.
     this.pairBindingWaitMs = pairBindingWaitMs;
@@ -488,6 +563,11 @@ export class PeerManager {
       preBytes: 0,
       preLines: 0,
       lastGone: false, // onPeerDisconnected already fired for this connection
+      chainFrames: 0,     // lines queued on the frame chain right now…
+      chainBytes: 0,      // …and their bytes (both fall in the link's finally)
+      paused: false,      // we paused this connection (a contact, soft caps)
+      controlLines: 0,    // post-admission sibling JSON lines seen
+      controlDone: false, // the sibling's control phase is over: replication started
     };
 
     // On instance-sync connections the instance_id lets the peer find OUR row
@@ -538,6 +618,9 @@ export class PeerManager {
     // replicate(id, conn)), whose JSON blocks have no raw newline, so a line
     // cap there would cut a sibling replicating one large entry.
     const lineCapped = () => !capped() && state.kind === "contact";
+    // A sibling's control phase: post-admission JSON lines, until its first
+    // Protomux frame (see isNonJsonChunk).
+    const controlPhase = () => !capped() && state.kind === "instance" && !state.controlDone;
     // `buffer` is the leftover partial line; `bufferBytes` its UTF-8 length,
     // kept as a running count so a line trickled in many chunks is never
     // re-measured (or re-split) from the start.
@@ -555,8 +638,84 @@ export class PeerManager {
       }
       kill();
     };
+    // A backlog over the hard caps: logged by size and count only (never a
+    // line, a frame body can carry a peer's own words), once per peer per
+    // minute, then killed.
+    const overBacklog = () => {
+      const who = state.remoteCrowId || "?";
+      if (this._refusalLog.shouldLog(`chain_over_cap:${who}`)) {
+        console.warn(`[peer-manager] frame backlog over cap ${logSafe(who)} frames=${state.chainFrames} bytes=${state.chainBytes}`);
+      }
+      kill();
+    };
+    // A sibling control-phase breach (one line too big, or too many lines):
+    // size and count only, rate-limited per peer.
+    const overControl = (why, bytes) => {
+      const who = state.remoteCrowId || "?";
+      if (this._refusalLog.shouldLog(`sibling_control:${who}`)) {
+        console.warn(`[peer-manager] sibling control over cap ${logSafe(who)} why=${why} bytes=${bytes} lines=${state.controlLines}`);
+      }
+      kill();
+    };
+    // Backpressure, contacts only: called after a frame is queued. A paused
+    // stream emits no further `data`, so the chain drains and nothing new is
+    // queued until releaseBackpressure() resumes it.
+    const applyBackpressure = () => {
+      if (state.paused || state.kind !== "contact") return;
+      if (state.chainFrames < this.chainSoftFrames && state.chainBytes < this.chainSoftBytes) return;
+      state.paused = true;
+      try { conn.pause(); } catch { /* already gone */ }
+    };
+    // Called after a handler settles: resume once the chain is back under the
+    // resume marks (a quarter of the soft caps), never on one frame.
+    const releaseBackpressure = () => {
+      if (!state.paused) return;
+      if (state.chainFrames > CHAIN_RESUME_FRAMES || state.chainBytes > this.chainResumeBytes) return;
+      state.paused = false;
+      try { conn.resume(); } catch { /* already gone */ }
+    };
+    /**
+     * Queue one frame on the connection chain, counting it while it waits.
+     * The counters fall in `finally`, once the handler has returned, so they
+     * are the frames (and bytes) actually QUEUED — which is what the caps and
+     * the backpressure are about. Returns false when the frame killed the
+     * connection (the caller must stop reading this chunk).
+     */
+    const enqueue = (msg, bytes) => {
+      state.chainFrames += 1;
+      state.chainBytes += bytes;
+      // Hard kill for every kind. (Unreachable before admission: the pre-auth
+      // caps keep the chain at 64 lines / 64 KiB there.)
+      if (state.chainFrames > this.chainMaxFrames || state.chainBytes > this.chainMaxBytes) {
+        overBacklog();
+        return false;
+      }
+      applyBackpressure();
+      chain = chain
+        .then(() => this._handleMessage(conn, msg, challenge, state))
+        .catch(() => {})
+        .finally(() => {
+          state.chainFrames -= 1;
+          state.chainBytes -= bytes;
+          releaseBackpressure();
+        });
+      return true;
+    };
     conn.on("data", (data) => {
-      if (state.refused || state.closed) return;
+      if (state.refused || state.closed || state.controlDone) return;
+      // A sibling's control phase is over at its first non-JSON chunk: from
+      // here the stream is Hypercore replication, and this handler has nothing
+      // left to parse (Protomux has its own listener, added by
+      // onInstanceAdmitting). Returning at once keeps replication bytes out of
+      // split()/JSON.parse and out of `buffer` — no buffer growth on them at
+      // all — while a pre-admission binary chunk still hits the pre-auth caps
+      // below, as before.
+      if (state.kind === "instance" && state.authenticated && isNonJsonChunk(data)) {
+        state.controlDone = true;
+        buffer = "";
+        bufferBytes = 0;
+        return;
+      }
       const chunk = typeof data === "string" ? data : decoder.write(data);
       let lines = [];
       if (chunk.includes("\n")) {
@@ -578,6 +737,12 @@ export class PeerManager {
           if (state.preBytes > this.preAuthMaxBytes
               || (line.trim() && ++state.preLines > this.preAuthMaxLines)) { kill(); return; }
         }
+        if (controlPhase()) {
+          const bytes = Buffer.byteLength(line);
+          state.controlLines += 1;
+          if (bytes > SIBLING_CONTROL_LINE_MAX) { overControl("bytes", bytes); return; }
+          if (state.controlLines > SIBLING_CONTROL_MAX_LINES) { overControl("lines", bytes); return; }
+        }
         if (!line.trim()) continue;
         let msg;
         try { msg = JSON.parse(line); } catch { continue; } // Ignore parse errors
@@ -585,12 +750,15 @@ export class PeerManager {
         // A sibling's pair-binding frame is read OUTSIDE the frame chain: our
         // admission may be waiting on it inside the chain (see _admit).
         if (msg?.type === "pair-binding") { this._onPairBindingFrame(msg, state); continue; }
-        chain = chain.then(() => this._handleMessage(conn, msg, challenge, state)).catch(() => {});
+        if (!enqueue(msg, Buffer.byteLength(line) + 1)) return;
       }
       if (capped()) {
         if (state.preBytes + bufferBytes > this.preAuthMaxBytes) kill();
       } else if (lineCapped() && bufferBytes > this.postAdmitLineMax) {
         overCap(bufferBytes);
+      } else if (controlPhase() && bufferBytes > SIBLING_CONTROL_LINE_MAX) {
+        // A sibling dribbling one oversized control line with no newline yet.
+        overControl("bytes", bufferBytes);
       }
     });
 
