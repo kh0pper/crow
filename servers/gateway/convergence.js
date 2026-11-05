@@ -415,6 +415,7 @@ export async function verifyPendingConvergence({
     try {
       const { fireMigrationAlert } = await import("../shared/migration-guard.js");
       await fireMigrationAlert({
+        code: "convergence-failed",
         title: "Crow update quarantined: convergence failed",
         body:
           `This instance converged to ${String(sha).slice(0, 9)} and ${why}. That sha is ` +

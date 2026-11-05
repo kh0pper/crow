@@ -305,6 +305,27 @@ export async function runPostListenSetup(server, app, deps) {
     });
   }
 
+  // Alert spool (audit N1c-2): a path that must not write crow.db (the
+  // migration guard, a migration failure during auto-update) leaves one small
+  // JSON file per alert under <CROW_HOME>/alerts/pending. Deliver them to the
+  // operator's bell now that the DB is up. Skipped under --no-auth, like the
+  // fix-it cards and the health monitor: that gateway is nobody's dashboard.
+  if (!noAuth) {
+    setImmediate(async () => {
+      let db;
+      try {
+        const { drainAlertSpool } = await import("../../shared/alert-spool.js");
+        const { createNotification } = await import("../../shared/notifications.js");
+        db = createDbClient();
+        await drainAlertSpool(db, { createNotification });
+      } catch (err) {
+        console.warn("[alerts] spool delivery skipped:", err?.message);
+      } finally {
+        try { db?.close?.(); } catch {}
+      }
+    });
+  }
+
   // Start auto-update checker
   startAutoUpdate(createDbClient(), { noAuth }).catch((err) => {
     console.error("[auto-update] Failed to start:", err.message);

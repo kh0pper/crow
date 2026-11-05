@@ -180,10 +180,113 @@ export function _setDbForTest(database) {
 const RESULT_KEY = "auto_update_last_result";
 const RESULT_SINCE_KEY = "auto_update_result_since";
 
+/**
+ * Auto-update failure bell (audit N1c-2): the ntfy/email sends below are
+ * unconfigured by default, so "updates have stopped" only ever reached the
+ * Settings → Updates card. These two keys are the 24 h cooldown, stored the
+ * way every other auto-update key is (dashboard_settings).
+ */
+export const UPDATE_NOTIFIED_CODE_KEY = "auto_update_notified_code";
+export const UPDATE_NOTIFIED_AT_KEY = "auto_update_notified_at";
+export const UPDATE_NOTIFY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Cause + action per classification code, keyed by exactly the codes
+ * classifyUpdateResult() yields, so a result prefix can never become a silent
+ * failure (`other` is the floor). The recorded result is quoted on top of this
+ * only for the codes in RESULT_TEXT_IS_SAFE below — those are our own fixed
+ * sentences — because `Pull failed: …` and `Update error: …` embed git/npm
+ * stderr, which can hold paths and secrets, and a bell is pushed off-device.
+ * The full result text always stays in Settings → Updates and the log.
+ */
+const UPDATE_FAILURE_TEXT = Object.freeze({
+  "not-on-main": ["Crow updates stopped: not on the main branch", "The checkout is on another branch, so updates are skipped. Switch it back to main, then run Check for updates now."],
+  "branch-unknown": ["Crow updates stopped: branch could not be read", "The checkout could not report its branch (a broken or shallow git checkout). Repair the checkout, then run Check for updates now."],
+  "ci-red": ["Crow updates stopped: CI is red", "Updates are held back because the latest build failed its required tests. Retries continue on their own; once main is green again the next check deploys it."],
+  "migration-quarantined": ["Crow updates paused: migration quarantined", "A migration damaged data and was rolled back, so that commit is quarantined. Updates resume by themselves when a fix lands on main; after 3 attempts the quarantine marker files have to be deleted."],
+  "fetch-failed": ["Crow updates stopped: fetch failed", "The updater could not reach the git remote. Check network access and the remote URL, then run Check for updates now."],
+  "pull-failed": ["Crow updates stopped: pull failed", "The update could not be applied, usually because local changes overlap it. Resolve them, then run Check for updates now."],
+  "update-error": ["Crow updates stopped: update error", "The updater hit an unexpected error. See Settings → Updates and the gateway log for the exact result, then run Check for updates now."],
+  "migration-failed": ["Crow updates stopped: migration failed", "The database migration after the pull failed, so the restart was withheld and the previous code is still running. Read the log, then run node scripts/guarded-init-db.mjs."],
+  "init-db-failed": ["Crow updates stopped: init-db failed", "Database setup after the pull failed, so the restart was withheld and the previous code is still running. Read the log, then run node scripts/guarded-init-db.mjs."],
+  other: ["Crow updates stopped: unrecognised result", "The updater recorded a result it cannot classify. See Settings → Updates for the exact text and the gateway log for the cause."],
+});
+
+/**
+ * Codes whose recorded result is OUR fixed sentence, with no captured command
+ * output, so it can be quoted in the bell verbatim — the same words Settings
+ * shows. Everything else (fetch/pull/update-error, and any future code that
+ * lands on `other`) gets the table text only: those strings embed git/npm
+ * stderr, which can hold paths and secrets (audit N1c-2).
+ */
+const RESULT_TEXT_IS_SAFE = new Set([
+  "not-on-main", "ci-red", "migration-quarantined", "migration-failed", "init-db-failed",
+]);
+
+/**
+ * Ring the in-app bell for a FAILURE result, at most once per code per 24 h.
+ * ok / transient / skip-by-design results never ring. Never throws: this runs
+ * inside every result write and must not cost the updater its bookkeeping.
+ *
+ * @param {string} value the `auto_update_last_result` value being recorded
+ * @param {number} [nowMs] clock seam
+ * @returns {Promise<object|null>} the notification row, or null when silent
+ */
+async function notifyUpdateFailure(value, nowMs = Date.now()) {
+  try {
+    if (!db) return null;
+    const klass = classifyUpdateResult(value);
+    if (!klass || klass.kind !== "failure") return null;
+
+    let lastCode = null;
+    let lastAt = null;
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT key, value FROM dashboard_settings WHERE key IN (?, ?)",
+        args: [UPDATE_NOTIFIED_CODE_KEY, UPDATE_NOTIFIED_AT_KEY],
+      });
+      lastCode = rows?.find((r) => r.key === UPDATE_NOTIFIED_CODE_KEY)?.value ?? null;
+      lastAt = rows?.find((r) => r.key === UPDATE_NOTIFIED_AT_KEY)?.value ?? null;
+    } catch { /* unreadable cooldown: notify rather than stay silent */ }
+    const lastAtMs = Date.parse(lastAt || "");
+    if (lastCode === klass.code && Number.isFinite(lastAtMs) && nowMs - lastAtMs < UPDATE_NOTIFY_COOLDOWN_MS) {
+      return null; // same condition, already rung within the window
+    }
+
+    const [title, action] = UPDATE_FAILURE_TEXT[klass.code] || UPDATE_FAILURE_TEXT.other;
+    const recorded = typeof value === "string" ? value.trim().slice(0, 300) : "";
+    const body = RESULT_TEXT_IS_SAFE.has(klass.code) && recorded ? `${recorded}\n\n${action}` : action;
+    const { createNotification } = await import("../shared/notifications.js");
+    const row = await createNotification(db, {
+      type: "system",
+      priority: "high",
+      source: "auto-update",
+      title,
+      body,
+      action_url: "/dashboard/settings?section=updates",
+      metadata: { code: klass.code },
+    });
+    // Stamped even when the type is switched off: the operator's preference is
+    // a choice, and re-attempting every tick would not deliver it either.
+    await saveSetting(UPDATE_NOTIFIED_CODE_KEY, klass.code);
+    await saveSetting(UPDATE_NOTIFIED_AT_KEY, new Date(nowMs).toISOString());
+    return row;
+  } catch (err) {
+    console.warn(`[auto-update] failure notification skipped: ${err?.message}`);
+    return null;
+  }
+}
+
 async function saveSetting(key, value) {
   if (!db) return;
   try {
-    if (key === RESULT_KEY) await stampResultSince(value);
+    if (key === RESULT_KEY) {
+      await stampResultSince(value);
+      // Every result write funnels through here, so the failure bell covers
+      // each branch (including the migration-guard ones) without a per-branch
+      // call to forget (audit N1c-2).
+      await notifyUpdateFailure(value);
+    }
     await db.execute({
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
       args: [key, value, value],
@@ -569,6 +672,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
         _quarantineAlertAt = Date.now();
         const { fireMigrationAlert } = await import("../shared/migration-guard.js");
         await fireMigrationAlert({
+          code: "migration-quarantined",
           title: "Crow updates paused: migration quarantined",
           body: `Auto-update is paused because a migration (schema gen ${q.marker.fromGeneration}->${q.marker.toGeneration}) damaged data and was rolled back. Updates resume automatically when a fix lands on main (attempt ${q.marker.attempts}/3).`,
         });
@@ -709,6 +813,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       const msg = `Migration failed (init-db exit ${res.initDbExit}) — restart withheld, running code unchanged`;
       log(msg);
       await guard.fireMigrationAlert({
+        code: "migration-failed",
         title: "Crow migration failed during auto-update",
         body: `init-db exited ${res.initDbExit} after pulling an update. The gateway keeps running the previous code; the next restart will retry via the boot gate. Check logs, then run \`node scripts/guarded-init-db.mjs\`.`,
       });
@@ -730,6 +835,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       const msg = `init-db failed (exit ${initRes.code}) — restart withheld, running code unchanged`;
       log(msg);
       await guard.fireMigrationAlert({
+        code: "init-db-failed",
         title: "Crow init-db failed during auto-update",
         body: `init-db exited ${initRes.code} after pulling an update (no migration expected). The gateway keeps running the previous code. Check logs, then run \`node scripts/guarded-init-db.mjs\`.`,
       });
