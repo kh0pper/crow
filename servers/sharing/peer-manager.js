@@ -1108,8 +1108,10 @@ export class PeerManager {
       await this._sendDeferredReply(conn, state);
 
       if (kind === "instance") {
-        // A new sibling (cb proof) gets our feed key in its own frame; an old
-        // one got it on the deferred challenge-response above.
+        // A new sibling (cb proof) gets our feed key in its own frame. An older
+        // (bare-signature) sibling gets none: the pre-PT-3 piggyback on the
+        // deferred challenge-response is gone in both directions (PT-2b), and
+        // such a sibling is never pair-bound, so `require` refuses it anyway.
         if (state.proof === "cb" && this.localInstanceId && remoteInstanceId && this.getFeedKeyForInstance) {
           let feedKeyHex = null;
           try { feedKeyHex = await this.getFeedKeyForInstance(remoteInstanceId); } catch {}

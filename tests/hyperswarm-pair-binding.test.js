@@ -28,7 +28,9 @@
  *
  *   U-H1  new↔new binds and pins both ways; feed keys only in instance-key; markers flow.
  *   U-H2  a seed holder without the pair key claiming B.
- *   U-H3  mixed versions (PT-3 and pre-PT-3 trees), both Noise role orders, mutual.
+ *   U-H3  mixed versions (PT-3, PT-2a and pre-PT-3 trees), both Noise role orders, mutual.
+ *         pre-PT-3 in `auto` is admitted with NO feed key either way (PT-2b deleted
+ *         the piggyback in both directions, plan §2.2); PT-2a binds and syncs.
  *   U-H4  a relay between two new siblings (regression: PT-3's cb_sig).
  *   U-H5  the guard runs inside the frame chain: an early instance-key waits for it.
  *   U-H6  a sibling without an instance id: unpinned rows only (auto), refused (require).
@@ -65,6 +67,7 @@ import { _dbKeepers, _walTripwires } from "../servers/db.js";
 
 const PRE_PT3_SHA = "8afbabaf5cacc1b1c590451218d46eff43692072"; // PT-2.0: bare signature
 const PT3_SHA = "d733b582bbbc977a377c60bf95893cf2d5902635";     // PT-3: channel-bound, pre-PT-2a
+const PT2A_SHA = "b3d9de16e8e3db826f3d6685c5dcf0b44243a49d";     // PT-2a: pair-bound, pre-PT-2b
 const T = { timeout: 180_000 };
 
 // ---------------------------------------------------------------- logs
@@ -173,18 +176,27 @@ function removeSideDir(side) {
 
 // ---------------------------------------------------------------- old trees
 const trees = {};
+/** Import an old tree's module, or null when that sha predates it. */
+async function optionalModule(tree, path) {
+  try { return await tree.importModule(path); } catch { return null; }
+}
 before(async () => {
   console.log = capture; console.warn = capture; console.error = capture;
-  for (const [name, sha] of [["pre", PRE_PT3_SHA], ["pt3", PT3_SHA]]) {
+  for (const [name, sha] of [["pre", PRE_PT3_SHA], ["pt3", PT3_SHA], ["pt2a", PT2A_SHA]]) {
     const tree = await oldTree(sha);
+    const ic = await tree.importModule("servers/sharing/instance-connect.js");
     trees[name] = {
       tree,
       PeerManager: (await tree.importModule("servers/sharing/peer-manager.js")).PeerManager,
       InstanceSyncManager: (await tree.importModule("servers/sharing/instance-sync.js")).InstanceSyncManager,
-      handleInstanceConnection: (await tree.importModule("servers/sharing/instance-connect.js")).handleInstanceConnection,
+      handleInstanceConnection: ic.handleInstanceConnection,
+      // PT-2a already ships wireInstanceSync (it introduced the pair-binding
+      // guard), so its node is wired with its OWN code. PT-3 and before wired
+      // the same closures from boot.js; the verbatim copies below reproduce them.
+      wireInstanceSync: name === "pt2a" ? ic.wireInstanceSync : null,
       TRUSTED_PEER_SQL: (await tree.importModule("servers/shared/peer-trust.js")).TRUSTED_PEER_SQL,
-      wireContactBinding: name === "pt3" ? (await tree.importModule("servers/sharing/contact-binding.js")).wireContactBinding : null,
-      wireClosures: name === "pt3" ? wireBootClosuresPT3 : wireBootClosuresPrePT3,
+      wireContactBinding: name === "pre" ? null : ((await optionalModule(tree, "servers/sharing/contact-binding.js"))?.wireContactBinding ?? null),
+      wireClosures: name === "pt2a" ? null : (name === "pt3" ? wireBootClosuresPT3 : wireBootClosuresPrePT3),
     };
   }
 }, { timeout: 900_000 });
@@ -432,7 +444,10 @@ function newNode(side, { mode = "auto", pairKeyLookup = side.pairKeyLookup, db =
   pm.p2pDisabled = true; // links are loopback socket pairs
   pm.localInstanceId = side.id;
   wireContactBinding(pm, { db: side.db, localInstanceId: () => side.id });
-  if (wire) IC.wireInstanceSync(pm, { db, instanceSyncManager: side.mgr, pairKeyLookup, mode, pairBindingWaitMs });
+  // `mode: "default"` omits the option entirely, so wireInstanceSync applies its
+  // own default (pairBindingMode(): `auto` on main, `require` on PT-2b) — the
+  // only honest way to test "the default mode".
+  if (wire) IC.wireInstanceSync(pm, { db, instanceSyncManager: side.mgr, pairKeyLookup, ...(mode === "default" ? {} : { mode }), pairBindingWaitMs });
   return spy(pm, side, "new");
 }
 
@@ -441,11 +456,24 @@ function oldNode(side, which) {
   const tr = trees[which];
   const pm = new tr.PeerManager(side.identity, { env: {} });
   pm.p2pDisabled = true;
-  tr.wireClosures({
-    peerManager: pm, db: side.db, instanceSyncManager: side.mgr,
-    handleInstanceConnection: tr.handleInstanceConnection, TRUSTED_PEER_SQL: tr.TRUSTED_PEER_SQL,
-    wireContactBinding: tr.wireContactBinding,
-  });
+  if (which === "pt2a") {
+    // PT-2a's own wiring: its wireInstanceSync (the pair-binding guard, the
+    // Hyperswarm transport, the test's side-local pair keys) and its contact
+    // binding, with boot.js's localInstanceId line. Its default mode is `auto`,
+    // exactly as PT-2a shipped.
+    if (typeof tr.wireInstanceSync !== "function") {
+      throw new Error("the PT-2a tree has no wireInstanceSync: its mixed legs cannot be wired from its own code");
+    }
+    pm.localInstanceId = side.id;
+    if (tr.wireContactBinding) tr.wireContactBinding(pm, { db: side.db, localInstanceId: () => side.id });
+    tr.wireInstanceSync(pm, { db: side.db, instanceSyncManager: side.mgr, pairKeyLookup: side.pairKeyLookup });
+  } else {
+    tr.wireClosures({
+      peerManager: pm, db: side.db, instanceSyncManager: side.mgr,
+      handleInstanceConnection: tr.handleInstanceConnection, TRUSTED_PEER_SQL: tr.TRUSTED_PEER_SQL,
+      wireContactBinding: tr.wireContactBinding,
+    });
+  }
   return spy(pm, side, which);
 }
 
@@ -500,6 +528,7 @@ async function link(t, X, Y, { xInitiator = true } = {}) {
  */
 async function rawSibling(t, N, identity, {
   challengeId, responseId = undefined, pb = true, pbKeyHex = null, pbMacOverride = undefined, pbFrame = true, after = [], pmInitiator = true, proof = "cb",
+  cb = true, piggyback = null,
 } = {}) {
   const [p, r] = await streams(t, pmInitiator);
   const pmFrames = tapWrites(p);
@@ -514,7 +543,7 @@ async function rawSibling(t, N, identity, {
     for (const l of ls) if (l.trim()) { try { got.push(JSON.parse(l)); } catch {} }
   });
   N.pm._handleConnection(p, {});
-  const ask = { type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, pubkey: identity.ed25519Pubkey, crowId: identity.crowId };
+  const ask = { type: "challenge", challenge: randomBytes(32).toString("hex"), ...(cb ? { cb: 1 } : {}), pubkey: identity.ed25519Pubkey, crowId: identity.crowId };
   if (pb) ask.pb = 1;
   if (challengeId !== undefined) ask.instance_id = challengeId;
   r.write(JSON.stringify(ask) + "\n");
@@ -524,6 +553,8 @@ async function rawSibling(t, N, identity, {
   const hh = Buffer.from(r.handshakeHash).toString("hex");
   const resp = { type: "challenge-response", crowId: identity.crowId, pubkey: identity.ed25519Pubkey };
   if (responseId !== undefined) resp.instance_id = responseId;
+  // A pre-PT-3 sibling piggybacks its feed key on this reply (PT-2b: never applied).
+  if (piggyback) resp.feed_key_hex = piggyback;
   if (proof === "sig") resp.signature = sign(theirs.challenge, identity.ed25519Priv);
   else resp.cb_sig = sign(contactCbMessage({ role: r.isInitiator ? "init" : "resp", signerCrowId: identity.crowId, challengeHex: theirs.challenge, handshakeHashHex: hh }), identity.ed25519Priv);
   const out = [resp];
@@ -701,12 +732,14 @@ test("U-H2 a seed holder without B's pair key, claiming B: refused guard:pb_requ
 
 // ================================================================ U-H3
 /**
- * One mixed-version leg. `which`: "pt3" | "pre". `newInit`: the new node is
- * the Noise initiator. `setup`: "auto" | "pinned" (the new side has the pair
- * pin) | "cbPinned" (the new side has PT-3's instance_hs_cb: pin) | "require".
- * `expect`: "admit" or the new side's refusal reason. `oldMuxDelayMs`: the
- * old node's replicate() (where old code puts its muxer on the stream) starts
- * that much later, as on a loaded box (a slow DB read or feed open).
+ * One mixed-version leg. `which`: "pt3" | "pt2a" | "pre". `newInit`: the new
+ * node is the Noise initiator. `setup`: "auto" | "pinned" (the new side has the
+ * pair pin) | "cbPinned" (the new side has PT-3's instance_hs_cb: pin) |
+ * "require". `expect`: "admit" | "admit-no-key" (admitted, but no feed key
+ * flows: a bare-signature sibling is never pair-bound) | the new side's refusal
+ * reason. `oldMuxDelayMs`: the old node's replicate() (where pre-PT-3/PT-3 code
+ * puts its muxer on the stream) starts that much later, as on a loaded box (a
+ * slow DB read or feed open).
  */
 async function mixedLeg(t, { which, newInit, setup, expect, oldMuxDelayMs = 0 }) {
   const label = `U-H3 ${which} ${newInit ? "new-init" : "old-init"} ${setup}${oldMuxDelayMs ? ` old mux +${oldMuxDelayMs}ms` : ""}`;
@@ -717,12 +750,16 @@ async function mixedLeg(t, { which, newInit, setup, expect, oldMuxDelayMs = 0 })
   const O = oldNode(o, which);
 
   // Fidelity control: the old node really is the old code.
-  if (which === "pt3") {
-    assert.equal(O.pm.admitGuards?.instance, null, `${label}: PT-3 has an empty instance guard slot`);
-  } else {
+  if (which === "pre") {
     assert.equal(O.pm.admitGuards, undefined, `${label}: pre-PT-3 has no admitGuards`);
+    assert.equal(O.pm.instanceBinding, undefined, `${label}: pre-PT-3 has no instanceBinding`);
+  } else if (which === "pt3") {
+    assert.equal(O.pm.admitGuards?.instance, null, `${label}: PT-3 has an empty instance guard slot`);
+    assert.equal(O.pm.instanceBinding, undefined, `${label}: PT-3 has no instanceBinding`);
+  } else {
+    assert.equal(typeof O.pm.admitGuards?.instance, "function", `${label}: PT-2a wires the pair-binding guard`);
+    assert.equal(typeof O.pm.instanceBinding?.macFor, "function", `${label}: PT-2a answers a pb offer with a MAC`);
   }
-  assert.equal(O.pm.instanceBinding, undefined, `${label}: the old node has no instanceBinding`);
   assert.equal(typeof N.pm.admitGuards.instance, "function", `${label}: the new node is wired`);
 
   if (oldMuxDelayMs) {
@@ -738,16 +775,50 @@ async function mixedLeg(t, { which, newInit, setup, expect, oldMuxDelayMs = 0 })
     assert.ok(await until(() => N.spies.instanceConnected.length === 1 && O.spies.instanceConnected.length === 1, W(8000)), `${label}: admitted both ways`);
     assert.ok(await until(() => N.spies.keyReceived.length === 1 && O.spies.keyReceived.length === 1, W(5000)), `${label}: feed keys both ways`);
     const viaNew = feedKeyVia(L.wx), viaOld = feedKeyVia(L.wy);
-    assert.equal(viaNew, which === "pt3" ? "instance-key" : "piggyback", `${label}: new→old feed key`);
-    assert.equal(viaOld, which === "pt3" ? "instance-key" : "piggyback", `${label}: old→new feed key`);
+    // A bare-signature (pre-PT-3) sibling is the only one that ever needed the
+    // pre-auth piggyback; PT-3 and PT-2a both deliver the key in `instance-key`.
+    const keyVia = which === "pre" ? "piggyback" : "instance-key";
+    assert.equal(viaNew, keyVia, `${label}: new→old feed key`);
+    assert.equal(viaOld, keyVia, `${label}: old→new feed key`);
     assert.deepEqual(N.spies.keyReceived, [[o.id, outKeyHex(o, n.id)]]);
     assert.deepEqual(O.spies.keyReceived, [[n.id, outKeyHex(n, o.id)]]);
-    assert.equal(framesOf(L.wx, "challenge-response")[0]?.pb_mac, undefined, `${label}: no pb_mac in the cb reply`);
-    assert.deepEqual(framesOf(L.wx, "pair-binding"), [], `${label}: the old node asked without pb, so no pair-binding frame`);
+    if (which === "pt2a") {
+      // PT-2a speaks pair binding: the old node asks with `pb: 1`, the new side
+      // answers with a MAC after the old side proves itself, and both bind.
+      assert.equal(framesOf(L.wy, "challenge")[0]?.pb, 1, `${label}: the old node offers pb`);
+      assert.match(framesOf(L.wx, "pair-binding")[0]?.pb_mac ?? "", /^[0-9a-f]{64}$/, `${label}: the new side answers with a pair-binding MAC`);
+      assert.equal(await pairPin(n, o.id), "1", `${label}: bound, so pinned`);
+      assert.equal(getPeerTrustHealth().unboundPeers[o.id], undefined, `${label}: no "without pair binding" item`);
+    } else {
+      assert.equal(framesOf(L.wx, "challenge-response")[0]?.pb_mac, undefined, `${label}: no pb_mac in the cb reply`);
+      assert.deepEqual(framesOf(L.wx, "pair-binding"), [], `${label}: the old node asked without pb, so no pair-binding frame`);
+      assert.match(getPeerTrustHealth().unboundPeers[o.id]?.message || "", /without pair binding/, `${label}: the new side raises "without pair binding"`);
+      assert.equal(await pairPin(n, o.id), null, `${label}: no pair pin for a legacy peer`);
+    }
     const m = await markers(n, o, { label, link: L });
+    Object.assign(row, { newSide: which === "pt2a" ? "admitted (bound)" : "admitted (legacy)", oldSide: "admitted", keyNewToOld: viaNew, keyOldToNew: viaOld, markerNewToOld: m.xy, markerOldToNew: m.yx });
+  } else if (expect === "admit-no-key") {
+    // PT-2b deleted the pre-PT-3 piggyback in BOTH directions (plan §2.2). A
+    // bare-signature sibling is still admitted in `auto` (unpinned, no G pin),
+    // but NO feed key flows either way — the old side still writes its
+    // piggybacked key (it is old code), and nothing here applies it, so neither
+    // side opens the other's feed and no entry replicates.
+    assert.ok(await until(() => N.spies.instanceConnected.length === 1 && O.spies.instanceConnected.length === 1, W(8000)), `${label}: admitted both ways`);
+    await sleep(1000);
+    assert.deepEqual(N.spies.keyReceived, [], `${label}: no feed key reaches the new side`);
+    assert.deepEqual(O.spies.keyReceived, [], `${label}: no feed key reaches the old side`);
+    assert.equal(feedKeyVia(L.wx), null, `${label}: the new side sends no feed key`);
+    assert.deepEqual(framesOf(L.wx, "instance-key"), [], `${label}: and no instance-key either`);
+    const m = await markers(n, o, { expect: false, label });
     assert.match(getPeerTrustHealth().unboundPeers[o.id]?.message || "", /without pair binding/, `${label}: the new side raises "without pair binding"`);
-    assert.equal(await pairPin(n, o.id), null, `${label}: no pair pin for a legacy peer`);
-    Object.assign(row, { newSide: "admitted (legacy)", oldSide: "admitted", keyNewToOld: viaNew, keyOldToNew: viaOld, markerNewToOld: m.xy, markerOldToNew: m.yx });
+    assert.equal(await pairPin(n, o.id), null, `${label}: no pair pin for a bare-signature sibling`);
+    Object.assign(row, {
+      newSide: "admitted (legacy, no feed key)",
+      oldSide: "admitted",
+      keyNewToOld: "none",
+      keyOldToNew: feedKeyVia(L.wy) ? `${feedKeyVia(L.wy)} written by old, not applied` : "none",
+      markerNewToOld: m.xy, markerOldToNew: m.yx,
+    });
   } else {
     assert.ok(await until(() => L.st.xClosed, W(8000)), `${label}: the new side destroys the connection`);
     await sleep(300);
@@ -775,18 +846,27 @@ for (const newInit of [true, false]) {
     await mixedLeg(t, { which: "pt3", newInit, setup: "pinned", expect: "guard:pb_required_pinned" });
     await mixedLeg(t, { which: "pt3", newInit, setup: "require", expect: "guard:pb_required" });
   });
-  test(`U-H3 pre-PT-3 ↔ new (${newInit ? "new" : "old"} is the Noise initiator): admitted while instance_hs_cb: is unset (deferred piggyback both ways, markers); pin set → refused (PT-3 behaviour, m7); require → refused`, T, async (t) => {
-    await mixedLeg(t, { which: "pre", newInit, setup: "auto", expect: "admit" });
+  test(`U-H3 pre-PT-3 ↔ new (${newInit ? "new" : "old"} is the Noise initiator): auto + unpinned → ADMITTED with NO feed key either way (the piggyback is gone both ways) and no markers; pin set → refused (PT-3 behaviour, m7); require → refused`, T, async (t) => {
+    await mixedLeg(t, { which: "pre", newInit, setup: "auto", expect: "admit-no-key" });
     await mixedLeg(t, { which: "pre", newInit, setup: "cbPinned", expect: "cb_required_pinned" });
     await mixedLeg(t, { which: "pre", newInit, setup: "require", expect: "guard:pb_required" });
   });
+  // PT-2a ↔ PT-2b (plan §2.2): safe and it syncs — a PT-2a sibling answers the
+  // pb offer with a genuine pair MAC, so the pair is BOUND, including in the
+  // default mode (nothing here is legacy).
+  test(`U-H3 PT-2a ↔ new (${newInit ? "new" : "old"} is the Noise initiator): bound both ways in auto AND in the default require — pair-binding MAC answered, pins written, instance-key both ways, markers flow`, T, async (t) => {
+    await mixedLeg(t, { which: "pt2a", newInit, setup: "auto", expect: "admit" });
+    await mixedLeg(t, { which: "pt2a", newInit, setup: "require", expect: "admit" });
+  });
 }
 
-// U-H3s: an old sibling puts its muxer on the stream only inside its own
+// U-H3s: a pre-PT-2a sibling puts its muxer on the stream only inside its own
 // replicate(), so the new side must not open its channels before the old
 // side's first Protomux frame (the old side lost them: no replication, or
 // "Invalid open message"). The CI flake, made deterministic by a late attach.
-for (const which of ["pt3", "pre"]) {
+// PT-3 exercises that wait path; PT-2a attaches before admission (`mux: 1`) and
+// is here as the up-to-date mixed pair, which does replicate.
+for (const which of ["pt3", "pt2a"]) {
   test(`U-H3s ${which} ↔ new, the old side's muxer attached 300 ms late (both Noise role orders): markers still flow both ways`, T, async (t) => {
     for (const newInit of [false, true]) {
       await mixedLeg(t, { which, newInit, setup: "auto", expect: "admit", oldMuxDelayMs: 300 });
@@ -1234,19 +1314,20 @@ test("U-H13 (regression, expected-green on main) a seed-holding Noise relay betw
   assert.equal(await pairPin(b, a.id), null);
 });
 
-test("U-H14 (red on main) the same relay also strips pb: 1: the default mode refuses guard:pb_required on both sides and the rewritten key is never applied; documenting control: explicit auto with no pins admits it as legacy and the swap lands", T, async (t) => {
+test("U-H14 (red on main) the same relay also strips pb: 1: the DEFAULT mode (no mode option — require on this branch, auto on main) refuses guard:pb_required on both sides and the rewritten key is never applied; documenting control: explicit auto with no pins admits it as legacy and the swap lands", T, async (t) => {
   const { identity, a, b, pairKey } = await makePair(t);
   const REWRITTEN = randomBytes(32).toString("hex");
   {
+    // `mode: "default"` omits the option: wireInstanceSync uses pairBindingMode().
     logs.length = 0;
-    const A = newNode(a, { mode: "require" }), B = newNode(b, { mode: "require" });
+    const A = newNode(a, { mode: "default" }), B = newNode(b, { mode: "default" });
     const la = await seedRelayLeg(t, A, identity, { claimsId: b.id, pairKey, pbFrame: false, feedKeyHex: REWRITTEN });
     const lb = await seedRelayLeg(t, B, identity, { claimsId: a.id, pairKey, pbFrame: false, feedKeyHex: REWRITTEN });
     assert.ok(await until(() => A.spies.kills.length > 0 && B.spies.kills.length > 0, W(8000)), pmLogs());
     await sleep(200);
     assert.ok(refusedFor("guard:pb_required"), pmLogs());
-    assertInert(A, "U-H14 require A", { frames: la.frames });
-    assertInert(B, "U-H14 require B", { frames: lb.frames });
+    assertInert(A, "U-H14 default-mode A", { frames: la.frames });
+    assertInert(B, "U-H14 default-mode B", { frames: lb.frames });
     assert.equal(await pairPin(a, b.id), null);
   }
   {
@@ -1331,17 +1412,28 @@ test("U-H16 (red on main) no challenge-response ever carries a feed key, and a b
     assert.equal(feedKeyVia(L.wx), "instance-key");
     assert.equal(feedKeyVia(L.wy), "instance-key");
   }
-  // (b) A bare-signature sibling that DOES send a feed key in its response is
-  // never credited with it (pre-PT-3 old siblings simply stop learning keys).
+  // (b) A bare-signature sibling that DOES piggyback a feed key on its
+  // challenge-response is never credited with it (pre-PT-3 old siblings simply
+  // stop learning keys), and OUR bare reply still exists — pre-PT-3 contacts
+  // need it — with no feed key in it.
+  //
+  // The ask omits `cb: 1` on purpose: that is what makes the reply the DEFERRED
+  // bare-signature one (a `cb: 1` asker is answered immediately with cb_sig, as
+  // in U-H1, and never gets the deferred reply at all). `mode: "auto"` is
+  // explicit because a bare-sig sibling is by definition never pair-bound: the
+  // default `require` refuses it before any reply could be sent.
   {
     const { identity, a, b } = await makePair(t);
     const FEED = randomBytes(32).toString("hex");
     const A = newNode(a, { mode: "auto" });
-    const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, proof: "sig", pb: false });
+    const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, proof: "sig", pb: false, cb: false, piggyback: FEED });
     assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(8000)), pmLogs());
     await sleep(200);
     assert.deepEqual(A.spies.keyReceived, [], "a piggybacked feed key is never applied");
+    assert.deepEqual(A.spies.feedKeyAsked, [], "no feed key is even looked up for a bare-sig sibling");
     assert.equal(feedKeyVia(R.pmFrames), null, "the deferred reply carries no feed key either");
-    assert.equal(typeof framesOf(R.pmFrames, "challenge-response")[0]?.signature, "string", "the bare reply itself still exists (pre-PT-3 contacts need it)");
+    const reply = framesOf(R.pmFrames, "challenge-response")[0];
+    assert.equal(reply?.feed_key_hex, undefined, "no feed_key_hex in the bare reply");
+    assert.equal(typeof reply?.signature, "string", "the bare reply itself still exists (pre-PT-3 contacts need it)");
   }
 });

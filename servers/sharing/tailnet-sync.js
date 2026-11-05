@@ -887,6 +887,14 @@ async function handleAcceptedConnection(ws, peerHandshake, c1Raw, frameReader, c
       if (!d.ok) { ws.close(1008, PAIR_BINDING_CLOSE_REASON); return; }
       pairBound = bound;
     }
+    // Session mode is negotiated AND bound on each side (rev 2): an `auto`,
+    // unpinned peer that proved no pair key leaves the pair decision "legacy",
+    // and a negotiated session must never run over an unbound pair. Refused
+    // BEFORE any side effect below (CR pin, address backfill, feed).
+    if (negotiateSm && !pairBound) {
+      refuseSession("proof", proof?.sm_ctr ?? null, "sm_invalid");
+      return;
+    }
     // Session check AFTER the pair decision and BEFORE any side effect: the
     // proof frame's MAC covers cr_proof and pb_proof, so a rewritten or
     // replayed proof never reaches the CR pin, the address backfill or a feed.
@@ -1225,6 +1233,10 @@ export class PeerDialer {
     let linked = false;
     let closedByUs = false;
     let peerCloseCode = 0; // set when the PEER closed (refusal codes arrive before any frame)
+    // The peer's close reason, when it closed on us: a refusal that lands while
+    // we are still mid-handshake (the server refusing C3 closes with the session
+    // reason) must be classified as closed-by-peer, not as our own failure.
+    let peerCloseReason = "";
 
     const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
@@ -1432,6 +1444,12 @@ export class PeerDialer {
         });
         const noiseStream = noise.noiseStream;
         if (!noise.ok) {
+          // The peer refused our feed frame and closed with the session reason
+          // while we were awaiting Noise. The close handler already recorded
+          // that as closed-by-peer; a noise_timeout line here would blame our
+          // own Noise step for the peer's refusal and plant a second, false
+          // "failed the session check" Nest item.
+          if (peerCloseCode === 1008 && peerCloseReason === SESSION_BINDING_CLOSE_REASON) return;
           recordDialFailure(peerId, `${wsUrl}: ${noise.reason}`);
           noteSessionRefusal(this.ctx, remoteInstanceId, { side: "client", kind: "noise", reason: noise.reason, now: this.ctx.now });
           closedByUs = true;
@@ -1469,7 +1487,7 @@ export class PeerDialer {
     ws.on("close", (code, reason) => {
       if (this.ws === ws) this.ws = null;
       const why = reason?.length ? String(reason) : "";
-      if (!closedByUs) peerCloseCode = code || -1;
+      if (!closedByUs) { peerCloseCode = code || -1; peerCloseReason = why; }
       if (linked) this.passiveSince = Date.now();
       if (closedByUs && !linked) return this.scheduleRetry(); // our refusal; failure already recorded
       // Peer already linked to us — nothing failed, nothing to retry.

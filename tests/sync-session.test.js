@@ -203,6 +203,15 @@ test("S-5 decideSession: the negotiation table, bound AND negotiated", () => {
   assert.deepEqual(d({ peerOffered: true, mode: "auto" }), { ok: false, legacySession: false, reason: "sm_invalid" });
   // Not bound: decidePairBinding already decided; no keys are derived here.
   assert.deepEqual(d({ bound: false, mode: "require" }), { ok: true, legacySession: true, reason: null });
+  // A NEGOTIATED session over an UNBOUND pair is a contradiction (fix wave):
+  // an `auto`, unpinned peer that proved no pair key leaves the pair decision
+  // legacy, yet a session was negotiated — refused as sm_invalid, never run.
+  for (const mode of ["auto", "require"]) {
+    assert.deepEqual(d({ bound: false, negotiated: true, peerOffered: true, macResult: { ok: true }, mode }), { ok: false, legacySession: false, reason: "sm_invalid" }, mode);
+  }
+  // A peer that merely OFFERS sm while neither side can bind stays on the pair
+  // decision's legacy path (the store-unreadable escape in `auto`).
+  assert.deepEqual(d({ bound: false, peerOffered: true, mode: "auto" }), { ok: true, legacySession: true, reason: null });
   assert.equal(SM_VERSION, 1);
 });
 

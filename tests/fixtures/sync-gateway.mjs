@@ -124,8 +124,14 @@ export async function startBlackholeRelay(targetPort) {
  * Every negative test that uses this relay first runs it in pass-through mode
  * as a positive control: the relay must be transparent, so the refusal can only
  * come from the MAC.
+ *
+ * `closeClientWith: { code, reason }` closes OUR client's leg politely (a real
+ * close frame, code + reason) once it has sent its third text frame (C3) — the
+ * hop a server that refused C3 is: the peer must be able to read the refusal's
+ * close code and reason. (Without it the relay hard-terminates both legs, which
+ * reaches the peer as 1006.)
  */
-export async function startWsRelay(targetPort, { onText = null, mitmNoise = false, dropBinary = false } = {}) {
+export async function startWsRelay(targetPort, { onText = null, mitmNoise = false, dropBinary = false, closeClientWith = null } = {}) {
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((r) => wss.once("listening", r));
   const conns = new Set();
@@ -181,6 +187,12 @@ export async function startWsRelay(targetPort, { onText = null, mitmNoise = fals
       }
       if (out === null) return;
       if (dir === "c2s") sendUp(out); else sendDown(out);
+      // A server that refuses C3 closes this leg politely, right after reading
+      // it: same code, same reason.
+      if (closeClientWith && dir === "c2s" && conn.counts.c2s >= 3 && client.readyState === WebSocket.OPEN) {
+        try { client.close(closeClientWith.code, closeClientWith.reason); } catch { /* gone */ }
+        return;
+      }
       // The JSON phase is a fixed shape: the client sends C1, C2, C3 and the
       // server S1, S2. Once both are complete, everything is replication.
       if (!conn.mitm && conn.counts.c2s >= 3 && conn.counts.s2c >= 2) {

@@ -17,6 +17,8 @@
  *   U-S2  relay swaps the feed key s→c: bad_mac, no backfill, no initInstance,
  *         no replicate, no marker.
  *   U-S3  relay swaps the feed key c→s: refused before sync_url/last_seen.
+ *   U-S3b the server's C3 refusal reaches the client as closed-by-peer only
+ *         (no client-side noise_timeout, no second session item).
  *   U-S4  address swap in C1 (server refuses at C2) and in S1 (server refuses,
  *         the client never backfills because S2 never arrives).
  *   U-S5  replay/reorder: C2 in C3's slot, session 1's C3 into session 2, and
@@ -26,13 +28,16 @@
  *   U-S9  one log line per peer/reason/hour; no 64-hex value in any log line.
  *   U-S10 Noise binding: a Noise MITM is refused on both sides; an unbound
  *         pair in auto is still MITM-able (the documenting control).
+ *   U-S12 a negotiated session over an UNBOUND pair (an auto, unpinned peer
+ *         whose proof carries no pair key) is refused sm_invalid before any
+ *         side effect — session mode is negotiated AND bound on each side.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { makeFleet, until, sleep, hasMemory, writeAndEmit } from "./fixtures/sync-fleet.mjs";
 import { startGateway, startWsRelay } from "./fixtures/sync-gateway.mjs";
-import { _setAllowLoopbackAddressesForTest, _resetSessionRefusalLogForTest, _resetLegacySessionLogForTest } from "../servers/sharing/tailnet-sync.js";
+import { _setAllowLoopbackAddressesForTest, _resetSessionRefusalLogForTest, _resetLegacySessionLogForTest, SESSION_BINDING_CLOSE_REASON } from "../servers/sharing/tailnet-sync.js";
 import { sign } from "../servers/sharing/identity.js";
 import { getPeerDialHealth, _resetPeerDialHealth } from "../servers/shared/peer-dial-health.js";
 import { getPeerTrustHealth, _resetPeerTrustHealth } from "../servers/shared/peer-trust-health.js";
@@ -90,6 +95,8 @@ async function override(side, key) {
   const { rows } = await side.db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?", args: [key, side.id] });
   return rows[0]?.value ?? null;
 }
+/** This side's PT-2a pin for `peerId` ("1" when bound before), or null. */
+const pairPin = (side, peerId) => override(side, `sync_pair_bound:${peerId}`);
 async function peerRow(side, peerId) {
   const { rows } = await side.db.execute({ sql: "SELECT gateway_url, tailscale_ip, sync_url, last_seen_at FROM crow_instances WHERE id = ?", args: [peerId] });
   return { ...rows[0] };
@@ -256,9 +263,10 @@ test("U-S3 relay swaps the feed key in C3: the server refuses before sync_url, l
     _resetPeerDialHealth();
     logs = [];
     await A.startClients();
-    // The server refuses C3; the client is already in the Noise phase when the
-    // socket dies, so its own dial error is a local one (noise_timeout) — the
-    // refusal is the SERVER's, and it must land before any server side effect.
+    // The server refuses C3 and closes with the session reason. The client is
+    // in the Noise wait and classifies that close as closed-by-peer (no
+    // noise_timeout of its own — U-S3b asserts that half). The refusal itself
+    // is the SERVER's, and it must land before any server side effect.
     assert.ok(await until(() => /session binding failed for/.test(logs.join("\n")) && /server side/.test(logs.join("\n")), 8000), logs.join("\n"));
     await sleep(300);
     A.stopClients();
@@ -269,6 +277,60 @@ test("U-S3 relay swaps the feed key in C3: the server refuses before sync_url, l
   } finally {
     release();
     await relay.close();
+    A.stopClients(); B.stopClients();
+    await A.close();
+    await B.close();
+    await fleet.cleanup();
+  }
+});
+
+/* -------------------------------------------------------------- U-S3b */
+
+test("U-S3b when the server refuses C3 the client classifies the close as closed-by-peer only: no noise_timeout of its own and no client-side session item; control: the same relay pass-through logs the session-bound link", async () => {
+  reset();
+  const fleet = await makeFleet();
+  const { a, b } = fleet;
+  const A = await startGateway(fleet, a, { log: LOG });
+  const B = await startGateway(fleet, b, { log: LOG });
+  // A relay that, once the client's C3 has gone through, closes the client's
+  // leg exactly the way a refusing server does: 1008 + the session reason. (A
+  // hard terminate would reach the client as 1006 and it could not classify
+  // anything; the direct two-process legs see the real server do this.)
+  const refusing = await startWsRelay(B.port, { closeClientWith: { code: 1008, reason: SESSION_BINDING_CLOSE_REASON } });
+  const passRelay = await startWsRelay(B.port, {});
+  try {
+    capture();
+    // Positive control: a transparent relay, and the client logs its own
+    // session-bound link — so the absence asserted below is the close's doing.
+    await pointAt(a, b, passRelay.port);
+    await flowBoth({ side: a, startClients: A.startClients, stopClients: A.stopClients }, { side: b, startClients: B.startClients, stopClients: B.stopClients }, "u-s3b control");
+    assert.ok(logs.some((l) => /session-bound link/.test(l) && /client side/.test(l)), logs.join("\n"));
+
+    logs = [];
+    _resetPeerDialHealth();
+    _resetSessionRefusalLogForTest();
+    await pointAt(a, b, refusing.port);
+    await A.startClients();
+    // The refusal reaches the client as the close reason; nothing the client did
+    // failed, so its dial health says closed-by-peer, not noise_timeout.
+    assert.ok(await until(() => /closed by peer \(1008 session binding failed\)/.test(dialErr(b.id)), 8000), dialErr(b.id));
+    await sleep(500);
+    A.stopClients();
+    // The client's half of the record: none. noteSessionRefusal writes the log
+    // line and the Nest item together, so no client-side line means no second,
+    // false "failed the session check" item for a refusal the server owns.
+    // (The server may still log its OWN noise_timeout: the relay cut the leg it
+    // was replicating on. That is the server's line, not the client's.)
+    const clientLines = logs.filter((l) => /\(client side/.test(l));
+    assert.ok(!clientLines.some((l) => /session binding failed/.test(l)), `no client-side session refusal: ${logs.join("\n")}`);
+    assert.ok(!clientLines.some((l) => /noise_timeout/.test(l)), `no client-side noise_timeout: ${logs.join("\n")}`);
+    assert.ok(!/noise_timeout/.test(dialErr(b.id)), dialErr(b.id));
+    assert.ok(!logs.some((l) => /session-bound link/.test(l)), "no session-bound link");
+    assert.equal(a.mgr.hasDedicatedStream(b.id), false, "no link");
+  } finally {
+    release();
+    await refusing.close();
+    await passRelay.close();
     A.stopClients(); B.stopClients();
     await A.close();
     await B.close();
@@ -613,6 +675,63 @@ test("U-S9 logs: one line per peer/frame/reason per hour (injected clock), and n
     // Nothing secret rides a log line: no 64-hex value at all (MAC, key, hash, nonce).
     const leaks = logs.filter((l) => /[0-9a-f]{64}/.test(l));
     assert.deepEqual(leaks, [], "logs carry no 64-hex values");
+  } finally {
+    release();
+    await relay.close();
+    A.stopClients(); B.stopClients();
+    await A.close();
+    await B.close();
+    await fleet.cleanup();
+  }
+});
+
+test("U-S12 a negotiated session over an UNBOUND pair (auto, unpinned, no pb_proof) is refused sm_invalid before any side effect; control: the same relay pass-through links session-bound", async () => {
+  reset();
+  const fleet = await makeFleet();
+  const { a, b } = fleet;
+  const A = await startGateway(fleet, a, { log: LOG });
+  const B = await startGateway(fleet, b, { log: LOG });
+  let strip = false;
+  const relay = await startWsRelay(B.port, {
+    onText: (dir, idx, text) => (strip && dir === "c2s" && idx === 2 ? mutate(text, (m) => { delete m.pb_proof; }) : undefined),
+  });
+  try {
+    capture();
+    await pointAt(a, b, relay.port);
+    // Both sides are in auto so an unbound pair decision is LEGACY (not a
+    // refusal), which is the only way a negotiated session can meet one.
+    A.ctx.pairBindingMode = "auto";
+    B.ctx.pairBindingMode = "auto";
+    // Positive control: pass-through — the pair binds, so the session runs.
+    await flowBoth({ side: a, startClients: A.startClients, stopClients: A.stopClients }, { side: b, startClients: B.startClients, stopClients: B.stopClients }, "u-s12 control");
+    assert.ok(logs.some((l) => /session-bound link/.test(l)), logs.join("\n"));
+    assert.equal(await pairPin(a, b.id), "1", "control: the pair bound, so A pinned B");
+
+    // Drop the pins and the other handshake leftovers (CR pin, port memo):
+    // the pair decision must be LEGACY for this leg, or the pair-binding
+    // refusal would fire first and hide the session decision.
+    for (const x of [a, b]) {
+      await x.db.execute({ sql: "DELETE FROM dashboard_settings_overrides WHERE instance_id = ?", args: [x.id] });
+    }
+    assert.equal(await pairPin(a, b.id), null);
+    logs = [];
+    _resetPeerDialHealth();
+    _resetSessionRefusalLogForTest();
+    strip = true;
+    await A.startClients();
+    // The server negotiated `sm` (the client offered it) but the client's proof
+    // carries no pair key, so the pair decision is not bound: refused before the
+    // CR pin, the address backfill or a feed.
+    assert.ok(await until(() => logs.some((l) => /session binding failed for/.test(l) && /server side, proof frame/.test(l) && l.endsWith(": sm_invalid")), 8000), `${dialErr(b.id)}\n${logs.join("\n")}`);
+    await sleep(300);
+    A.stopClients();
+    assert.equal(a.mgr.hasDedicatedStream(b.id), false, "no client stream");
+    assert.equal(b.mgr.hasDedicatedStream(a.id), false, "no server stream");
+    assert.equal(await override(b, `tailnet_sync_cr:${a.id}`), null, "no CR pin on the refusing server");
+    assert.ok(!logs.some((l) => /session-bound link/.test(l)), "never a session-bound link");
+    const { m1 } = await markers(a, b, "u-s12 after");
+    await sleep(500);
+    assert.equal(await hasMemory(b.db, m1), false, "nothing crosses");
   } finally {
     release();
     await relay.close();

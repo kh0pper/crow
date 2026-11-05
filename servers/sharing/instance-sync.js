@@ -1319,6 +1319,13 @@ export class InstanceSyncManager {
    */
   constructor(identity, db, localInstanceId, { now = Date.now } = {}) {
     this._now = now; // injectable clock (origin-mismatch log rate limit)
+    // Resolve the entry-origin policy ONCE at startup: this is the call that
+    // makes docs/guide/instances.md's "a warning in the log at every start"
+    // true for an unknown CROW_SYNC_ENTRY_ORIGIN. entryOriginMode()'s other
+    // caller is the mismatch path, which only runs once a mismatching entry
+    // arrives — on a healthy fleet that is never, so the warning would never
+    // print. The manager is built on every gateway start (managers.js).
+    this.entryOriginMode = entryOriginMode();
     this.originMismatches = new Map(); // peer id -> entries whose instance_id != peer
     this._originLogAt = new Map();     // peer id -> last log time (ms)
     this.identity = identity;
@@ -2812,8 +2819,10 @@ export class InstanceSyncManager {
         console.warn(`[instance-sync] entry origin mismatch from ${remoteInstanceId}: claims ${instance_id}`);
       }
       // Skipped under the default (enforce); the caller's checkpoint still
-      // advances past it, so a skipped entry is CONSUMED, not retried.
-      if (entryOriginMode() === "enforce") return;
+      // advances past it, so a skipped entry is CONSUMED, not retried. The mode
+      // was resolved at construction (one boot, one policy); the fallback keeps
+      // a partial `this` (a test seam that calls this method directly) working.
+      if ((this.entryOriginMode ?? entryOriginMode()) === "enforce") return;
     }
 
     // Verified: from here on every handler sees the row minus its local-only columns.

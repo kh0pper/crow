@@ -221,5 +221,12 @@ export function decideSession({ bound, negotiated, peerOffered, macResult, mode 
   }
   // Not bound: decidePairBinding already decided (legacy in auto, refused
   // otherwise), and a side with no bound pair never derives session keys.
+  // A NEGOTIATED session over an unbound pair is a contradiction — keys were
+  // derived from a pair key, yet the pair decision says legacy (an auto,
+  // unpinned peer that proved no pair key) — so it is refused, never run.
+  // `negotiated` is the caller's "we both offered it AND the pair is bound"
+  // (tailnet-sync settleSession): a peer that merely OFFERS `sm` while neither
+  // side can bind stays on the pair decision's legacy path.
+  if (negotiated) return { ok: false, legacySession: false, reason: "sm_invalid" };
   return { ok: true, legacySession: true, reason: null };
 }

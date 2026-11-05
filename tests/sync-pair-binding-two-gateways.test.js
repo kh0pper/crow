@@ -61,6 +61,8 @@ const legacySession = (peerId, side) => new RegExp(`\\[tailnet-sync\\] ${esc(pee
 const refused = (peerId, side, reason) => new RegExp(`\\[tailnet-sync\\] pair binding failed for ${esc(peerId)} \\(${side} side\\): ${reason}`);
 const sessionRefused = (peerId, side, reason) => new RegExp(`\\[tailnet-sync\\] session binding failed for ${esc(peerId.slice(0, 12))}[^\\n]* \\(${side} side[^\\n]*\\): ${reason}`);
 const legacy = (peerId, side) => new RegExp(`\\[tailnet-sync\\] ${esc(peerId)} syncs without pair binding \\(${side} side`);
+/** The server never received a proof: the dialer refused itself client side and closed. */
+const proofMissing = (peerId) => new RegExp(`\\[tailnet-sync\\] challenge proof missing from ${esc(peerId)}`);
 const anyRefusal = /\[tailnet-sync\] pair binding failed/;
 const anyLegacy = /syncs without pair binding/;
 const sinceLog = (inst, from) => inst.log.slice(from);
@@ -239,7 +241,7 @@ describe("new↔new pair (T1, T6, then T5, T8, T7 on the same link)", () => {
     assert.ok(await logShows(A, bound(B.id, "client"), from), "bound again");
   });
 
-  test("T8 one-sided rollback: old B refused; clearing A's pin restores sync as legacy; B on new code re-pins", T, async () => {
+  test("T8 one-sided rollback: old B refused; the pin clear PLUS CROW_SYNC_PAIR_BINDING=auto on A restores sync as legacy; B back on new code re-pins and the default is session-bound again", T, async () => {
     const { A, B } = P;
     await flows(B, A, "t8 control"); // positive control before the rollback
     assert.equal(pairPinned(A, B.id), true);
@@ -248,22 +250,35 @@ describe("new↔new pair (T1, T6, then T5, T8, T7 on the same link)", () => {
     assert.ok(await logShows(A, refused(B.id, "client", "pb_required_pinned"), from), "A refuses old B");
     const stuck = await blocked(B, A, "t8 old");
 
-    // The documented escape, with A running: the owner clears A's pin.
+    // The documented one-sided rollback is TWO steps (plan §4.4): clear A's pin
+    // (a pre-PT-2a peer) AND run the PT-2b host with
+    // CROW_SYNC_PAIR_BINDING=auto. Under the default `require`, clearing the pin
+    // alone does NOT restore legacy sync — an unbound pair is refused.
     const cl = await pinCli(A, ["--clear", B.id]);
     assert.equal(cl.code, 0, cl.out);
     assert.equal(pairPinned(A, B.id), false);
-    assert.ok(await until(() => hasMarker(A, stuck), FLOW_MS, 500), "the held marker flows after the clear (A's next handshake, normal backoff)");
+    await A.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
+    assert.ok(await until(() => hasMarker(A, stuck), FLOW_MS, 500), "the held marker flows after the clear + auto (A's next handshake, normal backoff)");
     await flowsBoth(A, B, "t8 cleared");
-    assert.ok(await logShows(A, legacy(B.id, "client"), from), "A raises the 'syncs without pair binding' item");
+    assert.ok(await logShows(A, legacy(B.id, "client"), 0), "A raises the 'syncs without pair binding' item");
 
     const from2 = A.log.length;
     await B.boot({ repo: REPO });
     assert.ok(await logShows(A, bound(B.id, "client"), from2), "bound again");
     assert.ok(await until(() => pairPinned(A, B.id), 15_000), "re-pinned");
+
+    // Back on the default mode: the pair keeps syncing, now session-bound.
+    await A.boot();
+    assert.ok(await logShows(A, sessionBound(B.id, "client"), 0), `session-bound again on the default\n${syncLines(A.log)}`);
+    await flowsBoth(A, B, "t8 default again");
   });
 
   test("T7 store mode 0644 on A: refused with 'no pair key', no crash; chmod 600 recovers without a restart", T, async () => {
     const { A, B } = P;
+    // A runs the default mode and is pinned for B (the legs above), so a
+    // key-less handshake is refused on A's own client side with
+    // pb_required_pinned. The recovery needs no restart: defaultPairKey re-reads
+    // the store on every call (and loadPeerCreds reads as empty at 0644).
     await flows(B, A, "t7 control");
     const pid = A.child.pid;
     chmodSync(A.tokensPath, 0o644);
@@ -317,10 +332,12 @@ describe("T2 a seed holder without a pairing", () => {
     await B.stop();
 
     imp = await makeImpostor(A, B.id);
+    const impLogs = [];
     const ctx = {
       identity: imp.identity, instanceSyncManager: imp.mgr, db: imp.db, gatewayPort: A.port,
       standardPorts: [], lookupTailnetIp: async () => null, selfAddress: async () => null, idleRecheckMs: 200,
-      pairKeyLookup: imp.side.pairKeyLookup, log: { warn: () => {}, log: () => {} },
+      pairKeyLookup: imp.side.pairKeyLookup,
+      log: { warn: (m) => impLogs.push(String(m)), log: (m) => impLogs.push(String(m)) },
     };
     const peerRow = { id: A.id, name: "a", gateway_url: `http://127.0.0.1:${A.port}`, tailscale_ip: null, sync_url: null, status: "active" };
     const held = await imp.marker("t2 no-key");
@@ -328,10 +345,17 @@ describe("T2 a seed holder without a pairing", () => {
     const d1 = new PeerDialer(peerRow, ctx);
     dialers.push(d1);
     d1.start();
-    assert.ok(await logShows(A, refused(B.id, "server", "pb_required_pinned"), from, 60_000), `A refuses the key-less dialer\n${syncLines(sinceLog(A, from))}`);
+    // Under the default `require` the key-less dialer refuses ITSELF, on its own
+    // client side (`pb_required`: an unbound pair), BEFORE it sends its proof —
+    // so A never reaches its pair decision and only sees the socket die during
+    // the handshake. Both halves are asserted: the client's own refusal, and A
+    // never accepting it (no proof, no acceptance line, no marker).
+    assert.ok(await until(() => impLogs.some((l) => /pair binding failed for .* \(client side\): pb_required/.test(l)), 60_000),
+      `the key-less dialer refuses itself client side\n${impLogs.join("\n")}`);
+    assert.ok(await logShows(A, proofMissing(B.id), from, 60_000), `A never received a proof\n${syncLines(sinceLog(A, from))}`);
     await new Promise((r) => setTimeout(r, QUIET_MS));
     assert.equal(hasMarker(A, held), false, "the impostor's marker never reaches A");
-    assert.doesNotMatch(sinceLog(A, from), /replicating with peer/, "no replication was set up");
+    assert.doesNotMatch(sinceLog(A, from), /pair-bound handshake|replicating with peer/, "A never accepted it");
     d1.stop();
 
     // The same dialer and manager, given B's real key from B's store: accepted.
