@@ -1449,7 +1449,10 @@ export class PeerDialer {
           // that as closed-by-peer; a noise_timeout line here would blame our
           // own Noise step for the peer's refusal and plant a second, false
           // "failed the session check" Nest item.
-          if (peerCloseCode === 1008 && peerCloseReason === SESSION_BINDING_CLOSE_REASON) return;
+          // Only a TIMEOUT is attributed to the peer's close: a close reason is
+          // the other end's word, so a key mismatch (a Noise MITM) is always
+          // recorded here, whatever the close said.
+          if (noise.reason === "noise_timeout" && peerCloseCode === 1008 && peerCloseReason === SESSION_BINDING_CLOSE_REASON) return;
           recordDialFailure(peerId, `${wsUrl}: ${noise.reason}`);
           noteSessionRefusal(this.ctx, remoteInstanceId, { side: "client", kind: "noise", reason: noise.reason, now: this.ctx.now });
           closedByUs = true;

@@ -337,6 +337,10 @@ describe("T2 a seed holder without a pairing", () => {
       identity: imp.identity, instanceSyncManager: imp.mgr, db: imp.db, gatewayPort: A.port,
       standardPorts: [], lookupTailnetIp: async () => null, selfAddress: async () => null, idleRecheckMs: 200,
       pairKeyLookup: imp.side.pairKeyLookup,
+      // A real attacker does not refuse itself: run the impostor in `auto`, so
+      // it sends its proof with no pair binding and A's OWN server-side
+      // refusal is what is tested end to end.
+      pairBindingMode: "auto",
       log: { warn: (m) => impLogs.push(String(m)), log: (m) => impLogs.push(String(m)) },
     };
     const peerRow = { id: A.id, name: "a", gateway_url: `http://127.0.0.1:${A.port}`, tailscale_ip: null, sync_url: null, status: "active" };
@@ -345,14 +349,11 @@ describe("T2 a seed holder without a pairing", () => {
     const d1 = new PeerDialer(peerRow, ctx);
     dialers.push(d1);
     d1.start();
-    // Under the default `require` the key-less dialer refuses ITSELF, on its own
-    // client side (`pb_required`: an unbound pair), BEFORE it sends its proof —
-    // so A never reaches its pair decision and only sees the socket die during
-    // the handshake. Both halves are asserted: the client's own refusal, and A
-    // never accepting it (no proof, no acceptance line, no marker).
-    assert.ok(await until(() => impLogs.some((l) => /pair binding failed for .* \(client side\): pb_required/.test(l)), 60_000),
-      `the key-less dialer refuses itself client side\n${impLogs.join("\n")}`);
-    assert.ok(await logShows(A, proofMissing(B.id), from, 60_000), `A never received a proof\n${syncLines(sinceLog(A, from))}`);
+    // The key-less impostor (auto, so it does not refuse itself) sends its proof
+    // without a pair proof; A holds the key and has B pinned, so A refuses it
+    // on A's own server side.
+    assert.ok(await logShows(A, refused(B.id, "server", "pb_required_pinned"), from, 60_000),
+      `A refuses the key-less dialer\n${syncLines(sinceLog(A, from))}`);
     await new Promise((r) => setTimeout(r, QUIET_MS));
     assert.equal(hasMarker(A, held), false, "the impostor's marker never reaches A");
     assert.doesNotMatch(sinceLog(A, from), /pair-bound handshake|replicating with peer/, "A never accepted it");
