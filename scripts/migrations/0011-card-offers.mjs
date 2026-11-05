@@ -13,6 +13,9 @@ import Database from "better-sqlite3";
 
 export const id = "0011-card-offers";
 
+// rollbackSafe: a new table and index only; older code never reads them.
+export const rollbackSafe = true;
+
 // Byte-for-byte the block in scripts/init-db.js ("card_offers table").
 export const CARD_OFFERS_DDL = `
   CREATE TABLE IF NOT EXISTS card_offers (

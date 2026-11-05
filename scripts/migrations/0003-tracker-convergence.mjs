@@ -16,6 +16,10 @@ import Database from "better-sqlite3";
 
 export const id = "0003-tracker-convergence";
 
+// rollbackSafe: NO — it rewrites pm_sync_state ids, deletes tracker rows and
+// DROPs tracker_items/tracker_defs.
+export const rollbackSafe = false;
+
 // F3: the gateway's migration carve-out (servers/gateway/index.js ~233-236)
 // tolerates an error whose message matches this regex by deferring the whole
 // migration registry run to next boot — meant for a transient SQLITE_BUSY on

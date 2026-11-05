@@ -9,6 +9,9 @@ import { SATELLITE_DDL } from "../../servers/shared/satellite-schema.js";
 
 export const id = "0021-satellites";
 
+// rollbackSafe: new satellite tables only; older code never reads them.
+export const rollbackSafe = true;
+
 export function run({ dbPath, log = () => {} }) {
   const db = new Database(dbPath);
   db.pragma("busy_timeout = 10000");

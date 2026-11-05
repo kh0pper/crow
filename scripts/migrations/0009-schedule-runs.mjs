@@ -21,6 +21,10 @@ import { scheduleKind, cadenceMinutes, REMINDER_PREFIX, ONCE } from "../../serve
 
 export const id = "0009-schedule-runs";
 
+// rollbackSafe: NO — besides the new table it rewrites schedules (enabled = 0)
+// and inserts schedule_runs rows, which older code would misread as its own.
+export const rollbackSafe = false;
+
 // Byte-for-byte the block in scripts/init-db.js ("schedule_runs table").
 export const SCHEDULE_RUNS_DDL = `
   CREATE TABLE IF NOT EXISTS schedule_runs (

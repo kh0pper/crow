@@ -13,6 +13,10 @@ import Database from "better-sqlite3";
 
 export const id = "0022-archived-name-cleanup";
 
+// rollbackSafe: NO — it rewrites project_spaces names in place, and older code
+// would show the renamed rows as if a person had renamed them.
+export const rollbackSafe = false;
+
 export const ARCHIVED_NAME_SUFFIX = " — archived";
 
 // The suffix is 11 characters (SQLite LENGTH/SUBSTR count characters, not bytes). The length guard

@@ -17,6 +17,9 @@ import Database from "better-sqlite3";
 
 export const id = "0007-perch-session-files";
 
+// rollbackSafe: a new table and index only; older code never reads them.
+export const rollbackSafe = true;
+
 const DDL = [
   `CREATE TABLE IF NOT EXISTS perch_session_files (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

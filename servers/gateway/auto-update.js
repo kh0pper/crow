@@ -4,7 +4,7 @@
  * Enabled by default. Users can toggle via Settings panel or CROW_AUTO_UPDATE env var.
  * Stores state in dashboard_settings DB table.
  *
- * On update: git pull → npm install → init-db → restart (if supervised)
+ * On update: git pull → npm install → import check → init-db → restart (if supervised)
  */
 
 import { execFile } from "node:child_process";
@@ -14,6 +14,10 @@ import { fileURLToPath } from "node:url";
 import { isSupervised } from "../shared/supervisor.js";
 import { isInstallSetRunning } from "./install-lock.js";
 import { classifyCheckRuns } from "../shared/ci-check-runs.js";
+import { checkTreeImport, IMPORT_CHECK_ENV } from "./boot/import-check.js";
+import {
+  evaluateUpdateQuarantine, writeUpdateQuarantine,
+} from "../shared/update-quarantine.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let APP_ROOT = dirname(dirname(__dirname));
@@ -76,6 +80,9 @@ export const UPDATE_RESULT_PREFIXES = Object.freeze([
   { prefix: "Skipped: cannot determine branch", kind: "failure", code: "branch-unknown" },
   { prefix: "Skipped: CI is RED", kind: "failure", code: "ci-red" },
   { prefix: "Skipped: migration quarantined", kind: "failure", code: "migration-quarantined" },
+  { prefix: "Skipped: update quarantined", kind: "failure", code: "update-quarantined" },
+  { prefix: "Update rollback blocked", kind: "failure", code: "update-rollback-blocked" },
+  { prefix: "Rolled back: ", kind: "failure", code: "update-rolled-back" },
   { prefix: "Fetch failed", kind: "failure", code: "fetch-failed" },
   { prefix: "Pull failed", kind: "failure", code: "pull-failed" },
   { prefix: "Update error", kind: "failure", code: "update-error" },
@@ -209,6 +216,9 @@ const UPDATE_FAILURE_TEXT = Object.freeze({
   "update-error": ["Crow updates stopped: update error", "The updater hit an unexpected error. See Settings → Updates and the gateway log for the exact result, then run Check for updates now."],
   "migration-failed": ["Crow updates stopped: migration failed", "The database migration after the pull failed, so the restart was withheld and the previous code is still running. Read the log, then run node scripts/guarded-init-db.mjs."],
   "init-db-failed": ["Crow updates stopped: init-db failed", "Database setup after the pull failed, so the restart was withheld and the previous code is still running. Read the log, then run node scripts/guarded-init-db.mjs."],
+  "update-rolled-back": ["Crow rolled back an update that would not start", "The pulled commit was rolled back automatically because its code fails to load, so the previous version is still running. The bad commit is quarantined: updates resume by themselves when main moves past it."],
+  "update-quarantined": ["Crow updates paused: a commit is quarantined", "The newest commit on main was rolled back because it would not start, so it is skipped. Fix forward on main and the next check deploys it; a rollback taken for a machine-side reason retries after a few hours."],
+  "update-rollback-blocked": ["Crow updates paused: rollback blocked", "The pulled commit fails to load and could not be rolled back because local changes overlap it, so the restart is withheld. Commit or revert those changes in the checkout, then run Check for updates now."],
   other: ["Crow updates stopped: unrecognised result", "The updater recorded a result it cannot classify. See Settings → Updates for the exact text and the gateway log for the cause."],
 });
 
@@ -221,6 +231,7 @@ const UPDATE_FAILURE_TEXT = Object.freeze({
  */
 const RESULT_TEXT_IS_SAFE = new Set([
   "not-on-main", "ci-red", "migration-quarantined", "migration-failed", "init-db-failed",
+  "update-rolled-back", "update-quarantined", "update-rollback-blocked",
 ]);
 
 /**
@@ -356,9 +367,21 @@ const LOCK_STALE_MS = 30 * 60 * 1000;
 const OBSERVED_SUFFIX = "#observed";
 
 async function lockPath(cwd) {
+  const dir = await gitDirFor(cwd);
+  if (!dir) return null; // not a git checkout → no lock possible
+  return join(dir, "crow-auto-update.lock");
+}
+
+/**
+ * The checkout's ABSOLUTE git dir, or null.
+ *
+ * `--absolute-git-dir`, never `--git-common-dir`: the checkout lock and the
+ * update quarantine marker are per-checkout state and must sit together in the
+ * one directory both co-hosted instances resolve identically.
+ */
+export async function gitDirFor(cwd = null) {
   const r = await run("git", ["rev-parse", "--absolute-git-dir"], cwd ? { cwd } : {});
-  if (r.code !== 0 || !r.stdout) return null; // not a git checkout → no lock possible
-  return join(r.stdout, "crow-auto-update.lock");
+  return r.code === 0 && r.stdout ? r.stdout : null;
 }
 
 function readLock(path) {
@@ -632,6 +655,104 @@ async function resolveCiVerdict(remoteUrl, sha) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Layer 0 rollback (audit N1c-3): a pulled sha that does not load, or whose
+// init-db failed without advancing the schema, is rolled back HERE, inside the
+// old healthy process, before anything restarts into it.
+// ---------------------------------------------------------------------------
+
+let _importCheckImpl = null;
+/** Test-only: force the import-check verdict (the timeout branch is produced by
+ *  runImportCheck, which is exercised directly). */
+export function _setImportCheckForTest(fn) { _importCheckImpl = fn; }
+
+async function pulledTreeImportCheck() {
+  if (_importCheckImpl) return _importCheckImpl();
+  return checkTreeImport({ appRoot: APP_ROOT });
+}
+
+/**
+ * `reset --keep`, never `--hard`: an overlapping tracked change makes git
+ * REFUSE instead of destroying it, and the refusal is reported to the operator
+ * as `update-rollback-blocked`. There is deliberately no blanket tracked-WIP
+ * guard on this path (B3) — `--keep` is the guard.
+ *
+ * Hooks are disabled: live installs point core.hooksPath INTO the tree, so the
+ * pulled sha's own hooks would otherwise run as the updater's user (S10).
+ */
+function resetKeep(previous) {
+  return run("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "reset", "--keep", previous]);
+}
+
+/**
+ * Write the update quarantine, move the checkout back, put the deps back.
+ *
+ * The marker is written FIRST: a crash between the two must still leave the
+ * record that stops every co-hosted instance from re-pulling the same sha.
+ *
+ * @returns {Promise<{ok:boolean, marker:object|null, detail:string}>}
+ */
+async function quarantineAndRollBack({ gitDir, sha, previous, reason, depsChanged, log = () => {} }) {
+  const marker = writeUpdateQuarantine({ gitDir, sha, previous, reason });
+  if (!marker) log(`could not write the update quarantine marker for ${String(sha).slice(0, 9)}`);
+  const reset = await resetKeep(previous);
+  if (reset.code !== 0) {
+    return { ok: false, marker, detail: reset.stderr || `git reset --keep exited ${reset.code}` };
+  }
+  if (depsChanged) {
+    // node_modules now hold the pulled sha's tree; the running code needs its own.
+    const npmResult = await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
+    if (npmResult.code !== 0) log(`npm install warning after rollback: ${npmResult.stderr}`);
+  }
+  return { ok: true, marker, detail: "" };
+}
+
+/**
+ * L0.5: init-db failed. Quarantine the sha and roll the code back — but ONLY
+ * when the schema generation did not advance. A generation crossing means new
+ * code already wrote the store, and the old code was never written for that
+ * shape, so the tree is left where it is (today's behaviour) and the existing
+ * alert stands. The result text is unchanged either way; the marker is what
+ * makes the NEXT tick say "update quarantined" instead of "Up to date".
+ */
+async function rollBackAfterInitDbFailure({ gitDir, sha, previous, depsChanged, advanced, log = () => {} }) {
+  if (advanced) {
+    log(`init-db advanced the schema generation — leaving the tree at ${String(sha).slice(0, 9)} (the old code was not written for the new shape)`);
+    return { ok: false, advanced: true };
+  }
+  const rolled = await quarantineAndRollBack({ gitDir, sha, previous, reason: "init-db-failed", depsChanged, log });
+  if (!rolled.ok) {
+    await fireUpdateAlert({
+      code: "update-rollback-blocked",
+      title: "Crow updates paused: rollback blocked",
+      body: `init-db failed after the update to ${String(sha).slice(0, 9)} and the checkout could not be reset to ${String(previous).slice(0, 9)} because local changes overlap it (${String(rolled.detail).slice(0, 200)}). It is quarantined; commit, stash or revert those changes, then restart the gateway.`,
+    });
+    return { ok: false, advanced: false };
+  }
+  log(`Rolled the checkout back to ${String(previous).slice(0, 9)} and quarantined ${String(sha).slice(0, 9)} (init-db failed, schema unchanged).`);
+  return { ok: true, advanced: false };
+}
+
+/** Did init-db move the schema generation forward? If it did, the old code may
+ *  not understand the store, so the tree is left where it is (L0.5). */
+function schemaVersionAdvanced(pre, post) {
+  return Number(post?.userVersion ?? 0) > Number(pre?.userVersion ?? 0);
+}
+
+/**
+ * A loud, DB-free alert through the SAME rails the migration guard uses: the
+ * instance's alert spool (drained into the in-app bell once the DB is up) plus
+ * ntfy/email. Never throws.
+ */
+async function fireUpdateAlert(payload) {
+  try {
+    const { fireMigrationAlert } = await import("../shared/migration-guard.js");
+    await fireMigrationAlert(payload);
+  } catch (err) {
+    console.warn(`[auto-update] alert failed: ${err?.message}`);
+  }
+}
+
 /** The mutating sequence; exported ONLY as the test seam for the under-lock
  *  branch re-check (spec D3b — the outer guard would abort a branch fixture
  *  before the lock). */
@@ -639,6 +760,10 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // Get current version
   const currentRef = await run("git", ["rev-parse", "--short", "HEAD"]);
   const currentVersion = currentRef.stdout;
+  // Full sha alongside the short one: the quarantine marker and `reset --keep`
+  // both need 40 hex (a prefix would name a different commit).
+  const currentFullSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+  const gitDir = await gitDirFor();
 
   // Fetch latest from remote
   log("Checking for updates...");
@@ -684,6 +809,27 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     if (q.cleared) log(`Quarantine cleared — main moved past ${q.marker.sha.slice(0, 9)}; retrying the migration under guard`);
   } catch (err) {
     log(`quarantine check error (proceeding): ${err?.message}`);
+  }
+
+  // L0.3 update quarantine — same under-lock spot, same fresh origin head, so
+  // the 6 h tick and the manual Check-now button both consult it. A sha this
+  // host already rolled back is never re-pulled; the marker clears itself when
+  // main moves past it (or expires, for a machine-side reason).
+  let originHeadSha = "";
+  try {
+    originHeadSha = (await run("git", ["rev-parse", "origin/main"])).stdout;
+    const uq = evaluateUpdateQuarantine({ gitDir, originHeadSha });
+    if (uq.blocked) {
+      const msg = `Skipped: update quarantined (${uq.marker.sha.slice(0, 9)}, ${uq.marker.reason}); waiting for a newer commit on main`;
+      log(msg);
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, skipped: "update-quarantined", message: msg };
+    }
+    if (uq.cleared) log(`Update quarantine cleared — main moved past ${uq.marker.sha.slice(0, 9)}`);
+    if (uq.expired) log(`Update quarantine for ${uq.marker.sha.slice(0, 9)} expired — retrying`);
+  } catch (err) {
+    log(`update quarantine check error (proceeding): ${err?.message}`);
   }
 
   // Check if there are new commits
@@ -747,12 +893,59 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
 
   // Install deps (only if package-lock changed)
   const changedFiles = await run("git", ["diff", "--name-only", `${currentVersion}..HEAD`]);
-  if (changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json")) {
+  const depsChanged =
+    changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json");
+  if (depsChanged) {
     log("Dependencies changed — running npm install...");
     const npmResult = await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
     if (npmResult.code !== 0) {
       log(`npm install warning: ${npmResult.stderr}`);
     }
+  }
+
+  // L0.2 import check — AFTER npm, BEFORE init-db. Both halves matter: init-db
+  // must not run its new-schema pass for a sha that will never boot, and the
+  // rollback must happen while the deps still match the tree it resets to.
+  const pulledSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+  const importCheck = await pulledTreeImportCheck();
+  if (importCheck.skipped === "no-seam") {
+    // S2: a sha from before the seam existed cannot answer the check, and
+    // running its gateway here would START a full server. Skip; Layer 1
+    // (the boot guard) is the backstop for it.
+    log(`import check unavailable in ${pulledSha.slice(0, 9)} (no ${IMPORT_CHECK_ENV} seam) — relying on the boot guard`);
+  } else if (importCheck.ok !== true) {
+    const reason = importCheck.reason || "import-check";
+    const rolled = await quarantineAndRollBack({
+      gitDir, sha: pulledSha, previous: currentFullSha, reason, depsChanged, log,
+    });
+    if (!rolled.ok) {
+      // `reset --keep` refused: local changes overlap the rollback. The marker
+      // stays (the sha is bad whatever the checkout does), the restart is
+      // withheld, and the operator is told what to clean up (B3).
+      const msg = `Update rollback blocked: ${pulledSha.slice(0, 9)} fails to load (${reason}) and the checkout could not be reset to ${currentFullSha.slice(0, 9)} — local changes overlap it; restart withheld`;
+      log(msg);
+      await fireUpdateAlert({
+        code: "update-rollback-blocked",
+        title: "Crow updates paused: rollback blocked",
+        body: `The update to ${pulledSha.slice(0, 9)} fails to load (${reason}) and the checkout could not be reset to ${currentFullSha.slice(0, 9)} because local changes overlap it (${String(rolled.detail).slice(0, 200)}). It is quarantined, so it is not pulled again. Commit, stash or revert those changes, then run Check for updates now.`,
+      });
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, error: msg, converge: false, blocked: true, sha: pulledSha };
+    }
+    // The previous code is back on disk and in node_modules. init-db NEVER ran,
+    // so the schema question does not arise; the marker stops a re-pull.
+    const expires = rolled.marker?.expires_at ? "; the quarantine also expires in 6h" : "";
+    const msg = `Rolled back: ${pulledSha.slice(0, 9)} fails to load (${reason}); running ${currentFullSha.slice(0, 9)}; updates resume when main moves past it${expires}`;
+    log(msg);
+    await fireUpdateAlert({
+      code: "update-rolled-back",
+      title: "Crow rolled back an update that would not start",
+      body: `The update to ${pulledSha.slice(0, 9)} was rolled back before it was ever restarted into: its gateway code fails to load (${reason}). ${currentFullSha.slice(0, 9)} is still running, and ${pulledSha.slice(0, 9)} is quarantined — updates resume by themselves when main moves past it.`,
+    });
+    await saveSetting("auto_update_last_check", new Date().toISOString());
+    await saveSetting("auto_update_last_result", msg);
+    return { updated: false, error: msg, converge: false, rolledBack: true, sha: pulledSha };
   }
 
   // Run init-db for any schema changes — guarded (A3) when the run carries
@@ -794,7 +987,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       const trackedWip = porcelain.stdout.split("\n").filter((l) => l && !l.startsWith("??"));
       if (trackedWip.length === 0) {
         await run("git", ["reset", "--hard", currentVersion]);
-        if (changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json")) {
+        if (depsChanged) {
           await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
         }
         log(`Rolled code back to ${currentVersion} to match the restored database.`);
@@ -817,6 +1010,14 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
         title: "Crow migration failed during auto-update",
         body: `init-db exited ${res.initDbExit} after pulling an update. The gateway keeps running the previous code; the next restart will retry via the boot gate. Check logs, then run \`node scripts/guarded-init-db.mjs\`.`,
       });
+      // L0.5 — leave the tree at the new sha ONLY when the schema moved forward.
+      // Otherwise nothing about the new code has landed in the DB, so the next
+      // restart for any reason (reboot, a bundle install) would boot it and
+      // crash-loop on the same failure. `--keep` refuses on overlapping WIP.
+      await rollBackAfterInitDbFailure({
+        gitDir, sha: pulledSha, previous: currentFullSha, depsChanged, log,
+        advanced: schemaVersionAdvanced(preState, guard.readSchemaState(dbPath)),
+      });
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
       // converge:false — this branch exists to WITHHOLD the restart. Without
@@ -838,6 +1039,11 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
         code: "init-db-failed",
         title: "Crow init-db failed during auto-update",
         body: `init-db exited ${initRes.code} after pulling an update (no migration expected). The gateway keeps running the previous code. Check logs, then run \`node scripts/guarded-init-db.mjs\`.`,
+      });
+      // L0.5, same rule as the guarded branch above.
+      await rollBackAfterInitDbFailure({
+        gitDir, sha: pulledSha, previous: currentFullSha, depsChanged, log,
+        advanced: schemaVersionAdvanced(preState, guard.readSchemaState(dbPath)),
       });
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);

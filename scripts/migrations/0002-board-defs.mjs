@@ -32,6 +32,10 @@ import { resolveSqlitePath } from "../pi-bots/instance-paths.mjs";
 
 export const id = "0002-board-defs";
 
+// rollbackSafe: NO — it DROPs tasks_items and renames a rebuilt table into its
+// place, so older code meets a shape it was never written for.
+export const rollbackSafe = false;
+
 export const BOARD_DEFS_DDL = `CREATE TABLE IF NOT EXISTS board_defs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   slug TEXT UNIQUE,

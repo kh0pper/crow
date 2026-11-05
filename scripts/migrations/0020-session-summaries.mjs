@@ -36,6 +36,10 @@ import { addColumnIfMissing } from "./0006-bot-sessions-archived.mjs";
 
 export const id = "0020-session-summaries";
 
+// rollbackSafe: additive bot_sessions/memories columns plus two indexes; older
+// code ignores them and never reads summary sources.
+export const rollbackSafe = true;
+
 export const COLUMNS = Object.freeze([
   ["bot_sessions", "summary", "TEXT"],
   ["bot_sessions", "summary_at", "TEXT"],

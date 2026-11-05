@@ -46,6 +46,10 @@ import Database from "better-sqlite3";
 
 export const id = "0000-tasks-base";
 
+// rollbackSafe: CREATE TABLE/INDEX IF NOT EXISTS only, so older code (which
+// never selects from these tables) keeps working on the wider shape.
+export const rollbackSafe = true;
+
 /** The three base tables this migration is responsible for. */
 export const TASKS_BASE_TABLES = ["tasks_recurrence", "tasks_items", "tasks_briefings"];
 

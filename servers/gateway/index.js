@@ -34,6 +34,20 @@
 // before every other module in this graph. Keep it the first import.
 import "./boot/run-instance-paths-gate.js";
 
+import { writeSync } from "node:fs";
+
+// L0.1 import-check seam — the FIRST body statement (imports above are hoisted
+// and all evaluated before this line, so reaching it proves the whole static
+// graph loaded). An updater spawns this file with CROW_GATEWAY_IMPORT_CHECK=1
+// before init-db and before any restart into the pulled sha; nothing below may
+// move above it, and nothing here touches the DB. writeSync, not console.log:
+// process.exit() straight after an async stdout write truncates the token on a
+// pipe and turns a healthy tree into a false rollback.
+if (process.env.CROW_GATEWAY_IMPORT_CHECK === "1") {
+  writeSync(1, "crow-gateway-import-ok\n");
+  process.exit(0);
+}
+
 import { resolve as resolvePath, dirname as dirnamePath } from "node:path";
 import { fileURLToPath } from "node:url";
 

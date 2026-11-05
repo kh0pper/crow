@@ -18,6 +18,9 @@ import { addColumnIfMissing } from "./0001-board-stages.mjs";
 
 export const id = "0023-sync-conflict-expiry";
 
+// rollbackSafe: two additive sync_conflicts columns; older code ignores them.
+export const rollbackSafe = true;
+
 export const COLUMNS = [
   ["opened_at", "TEXT"],
   ["resolved_via", "TEXT"],

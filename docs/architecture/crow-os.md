@@ -127,8 +127,9 @@ Bundle files are stored in `~/.crow/bundles/<id>/`. Each bundle has its own `doc
 3. `npm install` for new dependencies
 4. `npm run init-db` for schema migrations
 5. Restart `crow-gateway.service`
-6. If gateway fails to start: automatic rollback to previous ref
-7. Log results to `~/.crow/update.log`
+6. Success means the gateway ANSWERS: HTTP 200 on `/health` within 90 s and the unit's `NRestarts` unchanged
+7. If it does not: `git reset --keep` back to the previous ref (never `git checkout`, which would detach HEAD and silently stop every future update), then restart and verify again
+8. Log results to `~/.crow/update.log`
 
 ## HTTPS Options
 
