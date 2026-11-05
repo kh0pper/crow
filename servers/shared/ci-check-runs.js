@@ -71,6 +71,27 @@ export function parseGithubRemote(url) {
   return { owner, repo };
 }
 
+/** The runs in this payload that carry one of the three required contexts. */
+export function ciGateRuns(payload) {
+  return (payload?.check_runs || []).filter((r) => CI_GATE_CONTEXTS.includes(r?.name));
+}
+
+/**
+ * The required contexts this payload has NO run for.
+ *
+ * classifyCheckRuns answers "pending" for two very different shapes: a context
+ * that has not reported YET (its run is queued or in progress) and a context
+ * that will NEVER report on this origin (a fork carrying only some of our
+ * workflows). The gateway needs the difference to word its skip, and to stop
+ * calling a partial-CI fork "still running" forever (review round 2). The
+ * classifier's own return values are untouched — this is a second read of the
+ * same payload, not a sixth verdict.
+ */
+export function missingCiContexts(payload) {
+  const present = new Set(ciGateRuns(payload).map((r) => r.name));
+  return CI_GATE_CONTEXTS.filter((name) => !present.has(name));
+}
+
 /**
  * Pure classification of a GitHub check-runs payload for the target sha.
  * "unknown" (no named runs — a fork without our CI, or a push that raced the
@@ -83,9 +104,13 @@ export function parseGithubRemote(url) {
  * deployed before `suite` and `static-checks` ever ran. A present-and-finished
  * subset is "pending" (the rest has not reported yet), a red run is "red" even
  * when another context is still missing, and no run at all is "unknown".
+ *
+ * A finished subset with a context missing is "pending" HERE — the gateway
+ * turns that shape into "no-ci" when nothing is still running (review round 2,
+ * see missingCiContexts); the satellite keeps treating it as a refusal.
  */
 export function classifyCheckRuns(payload) {
-  const runs = (payload?.check_runs || []).filter((r) => CI_GATE_CONTEXTS.includes(r?.name));
+  const runs = ciGateRuns(payload);
   if (runs.length === 0) return "unknown";
   if (runs.some((r) => r.status !== "completed")) return "pending";
   const ok = ["success", "neutral", "skipped"];

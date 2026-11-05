@@ -587,8 +587,10 @@ const UPDATE_CAUSE_KEYS = {
   "branch-unknown": "signals.updates.causeBranchUnknown",
   "ci-red": "signals.updates.causeCiRed",
   "ci-pending": "signals.updates.causeCiPending",
-  // Review S2: GitHub answered, but with none of our three checks — a fork
-  // without this repo's CI. Never "CI is still running" for days.
+  // Review S2: GitHub answered, but without our three checks — a fork without
+  // this repo's CI. Never "CI is still running" for days. Round 2: also the
+  // partial fork (some checks present, nothing running), so the wording is
+  // "didn't all run".
   "no-ci": "signals.updates.causeNoCi",
   // N1c-5: GitHub could not be asked. Two codes, so an outage that clears reads
   // differently from one that has paused updates for good.
@@ -665,7 +667,9 @@ async function updatesSignal(db, nowFn, opts = {}) {
   );
   // N1c-5: an origin that is not GitHub has no CI to ask, so the CI gate can
   // never apply there. The card keeps its reading and gains ONE info line, so
-  // "updates are not gated here" is stated instead of being guessed at.
+  // "updates are not gated here" is stated instead of being guessed at. The
+  // reading is re-recorded by an up-to-date tick as well (auto-update.js), so
+  // the line does not vanish between pulls (review round 2).
   const withCiGate = (card) => settings.auto_update_ci_gate === "not-applicable"
     ? [card, {
       id: "updates:ci-gate", severity: "info", state: "info", issueOnly: true, label,

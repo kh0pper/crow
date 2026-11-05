@@ -15,7 +15,7 @@ import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSupervised } from "../shared/supervisor.js";
 import { isInstallSetRunning } from "./install-lock.js";
-import { classifyCheckRuns, parseGithubRemote } from "../shared/ci-check-runs.js";
+import { classifyCheckRuns, parseGithubRemote, ciGateRuns, missingCiContexts, CI_GATE_CONTEXTS } from "../shared/ci-check-runs.js";
 import { checkTreeImport, IMPORT_CHECK_ENV } from "./boot/import-check.js";
 import {
   activeUpdateQuarantine, evaluateUpdateQuarantine, writeUpdateQuarantine, FULL_SHA_RE,
@@ -77,11 +77,18 @@ export const UPDATE_RESULT_PREFIXES = Object.freeze([
   { prefix: "Tree pull skipped: the checkout is read-only", kind: "ok", code: "tree-external" },
   { prefix: "Tree pull skipped: another instance holds the checkout lock", kind: "ok", code: "tree-locked" },
   { prefix: "Skipped: CI still running", kind: "transient", code: "ci-pending" },
-  // N1c-5 follow-up (review S2): GitHub answered, but with none of our three
+  // N1c-5 follow-up (review S2): GitHub answered, but without our three
   // required checks — a fork without this repo's CI. Its own verdict, so the
   // card names the fork case and the escape hatch instead of claiming a build
-  // is still running for days.
-  { prefix: "Skipped: origin/main (", kind: "transient", code: "no-ci" },
+  // is still running for days. Review round 2 split it in two: a fork that
+  // carries SOME of the checks (nothing still running) is the same unverified
+  // case as one that carries none, and it used to read "still running" forever.
+  // Both prefixes name the distinguishing sentence, so neither can swallow
+  // another `Skipped: origin/main …` message (the old prefix was the bare
+  // `Skipped: origin/main (`) and the sha — an interpolation, and therefore
+  // invisible to the coverage test — cannot hide the words.
+  { prefix: "Skipped: origin/main has none of the required CI checks", kind: "transient", code: "no-ci" },
+  { prefix: "Skipped: origin/main has only some of the required CI checks", kind: "transient", code: "no-ci" },
   // N1c-5: GitHub could not be asked at all. The first two ticks of an outage
   // are transient (it usually clears itself); the third is a failure, so the
   // operator hears about an updater that is paused indefinitely.
@@ -225,7 +232,7 @@ const UPDATE_FAILURE_TEXT = Object.freeze({
   // Transient in practice (it never rings: notifyUpdateFailure only reads the
   // failure codes' rows), but keep the map keyed by every code so a future kind
   // change cannot land on the `other` text.
-  "no-ci": ["Crow updates held back: main has none of the required CI checks", "GitHub answered for the newest commit on main but reported none of the required checks (suite, static-checks, audit) — usually a fork that does not carry this repo's CI, or a push whose workflow has not started yet. The commit stays undeployed while that is the case; set CROW_UPDATE_CI_GATE=0 in the environment and restart Crow to update without the gate."],
+  "no-ci": ["Crow updates held back: main is missing required CI checks", "GitHub answered for the newest commit on main but reported only some or none of the required checks (suite, static-checks, audit) and nothing still running — usually a fork that does not carry this repo's CI, or a push whose workflow has not started yet. The commit stays undeployed while that is the case; set CROW_UPDATE_CI_GATE=0 in the environment and restart Crow to update without the gate."],
   "ci-gate-unavailable": ["Crow updates paused: the CI result could not be read", "GitHub could not be asked whether the newest commit on main passed its required tests, so that commit stays undeployed for as long as the answers keep failing — Crow keeps retrying on every check. If this machine can never read GitHub's API, set CROW_UPDATE_CI_GATE=0 in the environment and restart Crow."],
   "migration-quarantined": ["Crow updates paused: migration quarantined", "A migration damaged data and was rolled back, so that commit is quarantined. Updates resume by themselves when a fix lands on main; after 3 attempts the quarantine marker files have to be deleted."],
   "fetch-failed": ["Crow updates stopped: fetch failed", "The updater could not reach the git remote. Check network access and the remote URL, then run Check for updates now."],
@@ -761,7 +768,9 @@ export const CI_GATE_SETTING_KEY = "auto_update_ci_gate";
  *   "no-ci"                — GitHub answered and carries none of our three
  *                             required checks (review S2). Never green, and its
  *                             own sentence: a fork without this repo's CI is not
- *                             a build that is still running.
+ *                             a build that is still running. Review round 2:
+ *                             the same for a fork carrying only SOME of them
+ *                             once nothing is still running.
  *
  * The origin is parsed by the shared parseGithubRemote (review S1): the old
  * substring regex read a local path containing `github.com/o/r` as GitHub and
@@ -778,10 +787,10 @@ export const CI_GATE_SETTING_KEY = "auto_update_ci_gate";
  * `?per_page=100` (review S3): the default page of 30 could truncate a commit
  * with more runs, and a missing context now reads as pending forever.
  */
-async function resolveCiVerdict(remoteUrl, sha) {
-  if (_ciVerdictOverride) return _ciVerdictOverride;
+async function resolveCiGate(remoteUrl, sha) {
+  if (_ciVerdictOverride) return { verdict: _ciVerdictOverride, missing: [] };
   const remote = parseGithubRemote(remoteUrl);
-  if (!remote) return "not-applicable";
+  if (!remote) return { verdict: "not-applicable", missing: [] };
   const doFetch = _ciFetch || ((...a) => fetch(...a));
   try {
     const resp = await doFetch(
@@ -791,14 +800,35 @@ async function resolveCiVerdict(remoteUrl, sha) {
         signal: AbortSignal.timeout(15000),
       },
     );
-    if (!resp.ok) return "unavailable";
+    if (!resp.ok) return { verdict: "unavailable", missing: [] };
     // json() throwing (a rate-limit HTML page, a truncated body) lands in the
     // catch below, which is exactly where an unreadable answer belongs.
-    const verdict = classifyCheckRuns(await resp.json());
-    return verdict === "unknown" ? "no-ci" : verdict;
+    const payload = await resp.json();
+    const verdict = classifyCheckRuns(payload);
+    const missing = missingCiContexts(payload);
+    // Review round 2: "pending" has two shapes. Something still running means
+    // the next tick may really see it finish — keep waiting. Nothing running
+    // and a required context with NO run at all means nothing more is coming on
+    // this origin (a fork that carries only some of our workflows), which is the
+    // same unverifiable case as a payload with none of them: no-ci, with its own
+    // "only some" sentence. The satellite stays green-only either way.
+    const settledPartial = verdict === "pending" && missing.length > 0
+      && ciGateRuns(payload).every((r) => r.status === "completed");
+    if (verdict === "unknown" || settledPartial) return { verdict: "no-ci", missing };
+    return { verdict, missing: [] };
   } catch {
-    return "unavailable";
+    return { verdict: "unavailable", missing: [] };
   }
+}
+
+/**
+ * The verdict alone — the shape the tick (and its tests) speak. The detail that
+ * only the no-ci sentence needs comes from resolveCiGate.
+ *
+ * @returns {Promise<string>}
+ */
+async function resolveCiVerdict(remoteUrl, sha) {
+  return (await resolveCiGate(remoteUrl, sha)).verdict;
 }
 
 /** Test-only: the real resolver, so the failure mapping can be exercised
@@ -1248,14 +1278,21 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     await saveSetting("auto_update_last_check", new Date().toISOString());
     await saveSetting("auto_update_last_result", "Up to date");
     await saveSetting("auto_update_latest_version", currentVersion);
-    // N1 (review round 1): nothing is pending, so neither a leftover outage
-    // streak nor a stale CI-gate reading may survive. Without this, two
-    // unreadable ticks followed by a manual pull left the count at 2, and the
-    // next single GitHub blip (days later) rang the "paused" bell at once —
-    // and a not-applicable line outlived an origin change (its info line would
-    // keep claiming updates are not CI-gated).
+    // N1 (review round 1): nothing is pending, so a leftover outage streak must
+    // not survive. Without this, two unreadable ticks followed by a manual pull
+    // left the count at 2, and the next single GitHub blip (days later) rang the
+    // "paused" bell at once.
+    //
+    // The CI-gate reading is refreshed here, not blanked (review round 2):
+    // "Up to date" is what a self-hosted origin records on nearly every tick, so
+    // writing "" hid the not-applicable info line except between a pull and the
+    // next tick. Re-reading the origin is a local git call — no network, no
+    // GitHub request — and it is the same parse the gate uses, so a non-GitHub
+    // origin keeps "not-applicable" while a GitHub origin (or a changed origin)
+    // clears a stale reading.
+    const originRemote = _ciRemoteUrl ?? (await git(["remote", "get-url", "origin"])).stdout;
     await saveSetting(CI_UNAVAILABLE_COUNT_KEY, "0");
-    await saveSetting(CI_GATE_SETTING_KEY, "");
+    await saveSetting(CI_GATE_SETTING_KEY, parseGithubRemote(originRemote) ? "" : "not-applicable");
     return { updated: false };
   }
 
@@ -1272,17 +1309,19 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     // bare repo, and a local path containing `github.com/o/r` is not GitHub.
     const remote = _ciRemoteUrl ?? (await git(["remote", "get-url", "origin"])).stdout;
     const targetSha = (await git(["rev-parse", "origin/main"])).stdout;
-    const ci = await resolveCiVerdict(remote, targetSha);
+    // `missing` is only populated for no-ci: the required contexts GitHub has no
+    // run for, which is what the sentence must say (none or only some).
+    const ci = await resolveCiGate(remote, targetSha);
     // Recorded for the Nest's Updates card; reset on every verdict that is not
     // "unavailable", so the 3-in-a-row pause needs three CONSECUTIVE ones.
-    await saveSetting(CI_GATE_SETTING_KEY, ci);
-    if (ci !== "unavailable") await saveSetting(CI_UNAVAILABLE_COUNT_KEY, "0");
+    await saveSetting(CI_GATE_SETTING_KEY, ci.verdict);
+    if (ci.verdict !== "unavailable") await saveSetting(CI_UNAVAILABLE_COUNT_KEY, "0");
 
-    if (ci === "not-applicable") {
+    if (ci.verdict === "not-applicable") {
       // Self-hosted origins (a bare repo on disk, another host) have no GitHub
       // check-runs at all — the gate cannot apply and they must keep updating.
       log("CI gate not applicable (origin is not GitHub)");
-    } else if (ci === "unavailable") {
+    } else if (ci.verdict === "unavailable") {
       // GitHub could not be asked: 403/429 rate limits, an outage, a timeout.
       // Skipping is the whole fix — one bad answer used to deploy the sha.
       // Same shape as the pending branch below and for the same reason, so NO
@@ -1301,22 +1340,28 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       return { updated: false, skipped: "ci-unavailable", message: msg, ciUnavailableCount: n };
     }
 
-    if (ci === "no-ci") {
-      // GitHub answered with none of the three required checks (review S2): a
+    if (ci.verdict === "no-ci") {
+      // GitHub answered without the full set of required checks (review S2): a
       // fork that does not carry this repo's CI, or a push whose workflow has
-      // not registered yet. Unverified is never green, so this tick is skipped
-      // — and, like pending, WITHOUT converge:false (the refusal is about the
-      // NEXT commit on main, not the tree already checked out). Its own
-      // sentence, so nothing keeps claiming a build is still running for days.
-      const msg = `Skipped: origin/main (${targetSha.slice(0, 9)}) has none of the required CI checks (a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate`;
+      // not registered yet. Review round 2 adds the partial fork: one or two of
+      // the three present and nothing still running means the rest will never
+      // report here either, which is the same unverified case. Unverified is
+      // never green, so this tick is skipped — and, like pending, WITHOUT
+      // converge:false (the refusal is about the NEXT commit on main, not the
+      // tree already checked out). Its own sentence, so nothing keeps claiming a
+      // build is still running for days.
+      const shaShort = targetSha.slice(0, 9);
+      const msg = ci.missing.length > 0 && ci.missing.length < CI_GATE_CONTEXTS.length
+        ? `Skipped: origin/main has only some of the required CI checks (${shaShort}; missing ${ci.missing.join(", ")} — a fork without this repo's full CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate`
+        : `Skipped: origin/main has none of the required CI checks (${shaShort}; a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, skipped: "no-ci", message: msg };
+      return { updated: false, skipped: "no-ci", message: msg, missingCi: ci.missing };
     }
 
-    if (ci === "red" || ci === "pending") {
-      const msg = ci === "red"
+    if (ci.verdict === "red" || ci.verdict === "pending") {
+      const msg = ci.verdict === "red"
         ? `Skipped: CI is RED on origin/main (${targetSha.slice(0, 9)}) — not deploying a failing build; will retry next tick`
         : `Skipped: CI still running on origin/main (${targetSha.slice(0, 9)}) — will retry next tick`;
       log(msg);
@@ -1328,13 +1373,15 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       // what the shared checkout holds, or the whole host stays skewed for as long
       // as main's CI is red. The refusals that DO withhold the restart are the
       // ones about code on disk (quarantines, a blocked rollback, not-on-main).
-      return { updated: false, skipped: ci === "red" ? "ci-red" : "ci-pending", message: msg };
+      return { updated: false, skipped: ci.verdict === "red" ? "ci-red" : "ci-pending", message: msg };
     }
   } else {
     // N1 (review round 1): the gate is off, so no CI verdict was consulted.
     // Clear both keys — a count left over from before the switch would ring on
-    // the first blip after it is turned back on, and a not-applicable line
-    // would keep the card's info notice alive for an origin nobody asked about.
+    // the first blip after it is turned back on, and a stale verdict would keep
+    // the card's notice alive for a check this tick never ran. (The up-to-date
+    // branch still records not-applicable on a non-GitHub origin: that reading
+    // is about the ORIGIN, not about whether this tick consulted the gate.)
     await saveSetting(CI_UNAVAILABLE_COUNT_KEY, "0");
     await saveSetting(CI_GATE_SETTING_KEY, "");
   }

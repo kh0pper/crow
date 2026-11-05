@@ -66,21 +66,22 @@ Cuando GitHub responde, la respuesta decide:
 | los tres en verde | la actualización continúa |
 | alguno en rojo | se pospone y se reintenta en la próxima comprobación |
 | alguno aún en ejecución | se pospone y se reintenta en la próxima comprobación |
-| falta uno de los tres (los demás ya informaron) | se pospone hasta que informe: **verde exige los tres**, así que un sha en el que solo `audit` ha terminado nunca se despliega |
-| ningún check-run de nuestros tres | se pospone como **sin CI** (ver abajo): un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
+| falta alguno de los tres y nada sigue en ejecución | se pospone como **sin CI** (ver abajo): los checks que faltan nunca informarán en este origen — **verde exige los tres**, así que un sha en el que solo `audit` ha terminado nunca se despliega ni se queda como "en ejecución" |
+| ningún check-run de nuestros tres | se pospone como **sin CI**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
 
-**Sin CI.** GitHub respondió, pero sin ninguno de los tres checks requeridos —
+**Sin CI.** GitHub respondió, pero sin los tres checks requeridos —
 típicamente un fork que no lleva la CI de este repositorio, o un push cuyos
 workflows aún no se han registrado. El commit queda sin verificar, así que esta
-comprobación se pospone con su propio mensaje:
+comprobación se pospone con su propio mensaje, que nombra los checks que faltan:
 
 ```
-Skipped: origin/main (1a2b3c4d5) has none of the required CI checks (a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate
+Skipped: origin/main has none of the required CI checks (1a2b3c4d5; a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate
+Skipped: origin/main has only some of the required CI checks (1a2b3c4d5; missing audit — a fork without this repo's full CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate
 ```
 
 Se registra como resultado transitorio, así que nunca hace sonar la campana; si
 se repite más de dos intervalos de comprobación, la tarjeta de Actualizaciones
-del Nest avisa de que los checks requeridos nunca se ejecutaron en main.
+del Nest avisa de que los checks requeridos no se ejecutaron todos en main.
 `CROW_UPDATE_CI_GATE=0` es la salida.
 
 Dos resultados *no* son un resultado de CI:
@@ -94,7 +95,11 @@ actualización continúa exactamente como siempre, el registro dice
 ```
 
 y la tarjeta de Actualizaciones del Nest muestra una línea informativa diciendo
-que las actualizaciones no pasan por la puerta de CI en este origen.
+que las actualizaciones no pasan por la puerta de CI en este origen. Esa línea
+sigue visible entre comprobaciones: una comprobación con el repositorio al día
+vuelve a leer el origen en local y registra otra vez "no aplicable" (solo un
+origen de GitHub la borra), así que el aviso no depende de acertar con la única
+comprobación que descargó algo.
 
 **No disponible.** El origen *sí* es GitHub y no se pudo leer ninguna respuesta:
 un fallo de red, un tiempo de espera agotado, un límite de peticiones `403`/`429`,

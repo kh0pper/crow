@@ -331,8 +331,10 @@ export const translations = {
   "signals.updates.causeCiRed": { en: "CI is red on main", es: "la CI está en rojo en main" },
   "signals.updates.causeCiPending": { en: "CI is still running on main", es: "la CI aún se está ejecutando en main" },
   // Review S2: a GitHub origin whose payload carries none of our checks is not
-  // "still running" — it is a fork without this repo's CI.
-  "signals.updates.causeNoCi": { en: "the required CI checks never ran on main", es: "los checks de CI requeridos nunca se ejecutaron en main" },
+  // "still running" — it is a fork without this repo's CI. Review round 2: the
+  // same wording covers a fork that carries only SOME of them, so it says "not
+  // all" rather than "never".
+  "signals.updates.causeNoCi": { en: "the required CI checks didn't all run on main", es: "los checks de CI requeridos no se ejecutaron todos en main" },
   // N1c-5: the CI gate could not read GitHub, and the 3-in-a-row pause.
   "signals.updates.causeCiUnavailable": { en: "Crow can't read the CI result for main", es: "Crow no puede leer el resultado de CI de main" },
   "signals.updates.causeCiUnavailablePaused": { en: "Crow can't read the CI result for main, so updates are paused", es: "Crow no puede leer el resultado de CI de main, así que las actualizaciones están en pausa" },

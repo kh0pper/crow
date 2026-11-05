@@ -51,6 +51,10 @@ function stubDb(initial = {}) {
       if (/SELECT key, value FROM dashboard_settings WHERE key IN \(\?, \?\)/.test(sql || "")) {
         return { rows: args.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) })) };
       }
+      if (/SELECT key, value FROM dashboard_settings WHERE key LIKE 'auto_update_%'/.test(sql || "")) {
+        return { rows: [...settings].filter(([k]) => k.startsWith("auto_update_"))
+          .map(([key, value]) => ({ key, value })) };
+      }
       if (/INSERT INTO dashboard_settings/.test(sql || "")) {
         settings.set(args[0], args[1]);
         return { rows: [], lastInsertRowid: 0 };
@@ -134,9 +138,20 @@ test("resolveCiVerdict: every failure to read GitHub is 'unavailable', never 'un
     // and no longer "CI still running").
     _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ check_runs: [] }) }));
     assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "no-ci");
-    // A payload where only SOME of the three reported is pending (S3), not green.
+    // A payload where only SOME of the three reported is never green (S3). With
+    // everything present finished, review round 2 makes it no-ci: `suite` and
+    // `static-checks` will never report on this origin, so waiting is forever.
     _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => ({
       check_runs: [{ name: "audit", status: "completed", conclusion: "success" }],
+    }) }));
+    assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "no-ci");
+    // …but a present run that is still going keeps it pending: the next tick may
+    // really see it finish, so that shape must keep waiting.
+    _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => ({
+      check_runs: [
+        { name: "audit", status: "in_progress", conclusion: null },
+        { name: "suite", status: "completed", conclusion: "success" },
+      ],
     }) }));
     assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "pending");
     // The documented SSH-over-443 form is GitHub too — it used to read as
@@ -242,7 +257,7 @@ test("a GitHub origin with none of our checks is 'no-ci' (review S2): skipped, t
     assert.equal(res.skipped, "no-ci");
     assert.equal(
       res.message,
-      `Skipped: origin/main (${g(fx.work, "rev-parse", "origin/main").slice(0, 9)}) has none of the required CI checks (a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate`,
+      `Skipped: origin/main has none of the required CI checks (${g(fx.work, "rev-parse", "origin/main").slice(0, 9)}; a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate`,
     );
     assert.equal(res.converge, undefined, "no converge:false — this refuses the NEXT commit, not the tree on disk");
     assert.equal(g(fx.work, "rev-parse", "HEAD"), before, "an unverified sha must not pull");
@@ -309,13 +324,17 @@ test("Check for updates now goes through the same gate: an unreadable answer ski
   }
 });
 
-test("N1: an up-to-date checkout resets the outage streak and clears the recorded gate", async () => {
+test("N1: an up-to-date checkout resets the outage streak and keeps not-applicable on a self-hosted origin", async () => {
   // Two unreadable ticks, then the operator pulls by hand: without the reset the
   // count stays at 2, so the NEXT single GitHub blip (days later) rings the
-  // "updates are paused" bell. The stale gate reading is cleared too, or a
-  // not-applicable info line outlived an origin change.
+  // "updates are paused" bell.
+  //
+  // Review round 2: "Up to date" is what a self-hosted origin records on nearly
+  // every tick, so the old unconditional `""` here hid the not-applicable info
+  // line except between a pull and the next tick. The origin is re-read locally
+  // (no GitHub request) and a non-GitHub origin keeps the reading.
   const fx = fixture();
-  const db = stubDb({ [CI_UNAVAILABLE_COUNT_KEY]: "2", [CI_GATE_SETTING_KEY]: "not-applicable" });
+  const db = stubDb({ [CI_UNAVAILABLE_COUNT_KEY]: "2" });
   try {
     _setAppRootForTest(fx.work);
     _setDbForTest(db);
@@ -326,8 +345,53 @@ test("N1: an up-to-date checkout resets the outage streak and clears the recorde
     assert.equal(res.skipped, undefined, "plain up-to-date, not a CI skip");
     assert.equal(db.settings.get("auto_update_last_result"), "Up to date");
     assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "0", "the streak must not survive an up-to-date tick");
-    assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "", "the stale gate reading is cleared");
+    assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "not-applicable",
+      "a self-hosted origin keeps the not-applicable reading between checks");
+
+    // …and the card keeps showing the line, which is the whole point of keeping
+    // the key: the same db the tick just wrote.
+    const { collectHealthSignals, invalidateHealthCache } = await import("../servers/gateway/dashboard/panels/nest/health-signals.js");
+    const saved = process.env.CROW_AUTO_UPDATE;
+    delete process.env.CROW_AUTO_UPDATE;
+    try {
+      invalidateHealthCache();
+      const health = await collectHealthSignals(db, { now: () => Date.now(), lang: "en", uptimeMs: 60_000 });
+      const card = health.details.find((d) => d.id === "updates");
+      assert.equal(card.state, "ok", "an up-to-date tick is still an ok card");
+      const line = health.issues.find((i) => i.id === "updates:ci-gate");
+      assert.ok(line, `the not CI-gated info line survives the up-to-date tick: ${JSON.stringify(health.issues)}`);
+      assert.equal(line.severity, "info");
+    } finally {
+      invalidateHealthCache();
+      if (saved !== undefined) process.env.CROW_AUTO_UPDATE = saved;
+    }
   } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REAL_APP_ROOT);
+    fx.cleanup();
+  }
+});
+
+test("N1: an up-to-date tick on a GitHub origin clears a stale not-applicable reading, without asking GitHub", async () => {
+  const fx = fixture();
+  const db = stubDb({ [CI_UNAVAILABLE_COUNT_KEY]: "2", [CI_GATE_SETTING_KEY]: "not-applicable" });
+  try {
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+    // The fixture origin is a local bare repo; the seam makes the tick read it as
+    // GitHub (an origin change, seen from the updater's point of view).
+    _setCiRemoteUrlForTest(GH_URL);
+    // No network call on an up-to-date tick: the verdict is never resolved, so
+    // the fetch seam must not be reached.
+    _setCiFetchForTest(() => { throw new Error("an up-to-date tick must not ask GitHub"); });
+    g(fx.work, "pull", "--ff-only", "origin", "main");
+    const res = await runLockedUpdate(() => {});
+    assert.equal(res.updated, false, JSON.stringify(res));
+    assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "0");
+    assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "", "a GitHub origin drops the stale not-applicable line");
+  } finally {
+    _setCiFetchForTest(null);
+    _setCiRemoteUrlForTest(null);
     _setDbForTest(null);
     _setAppRootForTest(REAL_APP_ROOT);
     fx.cleanup();
