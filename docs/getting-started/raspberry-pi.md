@@ -181,11 +181,16 @@ Once Tailscale is installed, you can use [Tailscale Funnel](https://tailscale.co
 # Enable Funnel in your Tailscale admin console first:
 # https://login.tailscale.com/admin/dns → Enable Funnel
 
-# Expose your gateway publicly
-tailscale funnel --bg --https=443 http://localhost:3001
+# Expose only the public blog paths
+tailscale funnel --bg --set-path=/blog http://localhost:3001/blog
+tailscale funnel --bg --set-path=/robots.txt http://localhost:3001/robots.txt
+tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
+tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-Your blog is now at `https://<hostname>.your-tailnet.ts.net/blog`. The Crow's Nest remains private — public IPs get a 403 response, so only the blog is effectively visible.
+Funnel publishes to the whole internet, so only these blog paths go on it — mapping `/` would put the Crow's Nest login page in front of the public. The Crow's Nest stays on `tailscale serve` (tailnet only); see the [Tailscale Setup Guide](/getting-started/tailscale-setup).
+
+Your blog is now at `https://<hostname>.your-tailnet.ts.net/blog`. The Crow's Nest remains private — a funneled request to any other path gets a 403.
 
 To set the public URL for correct RSS/social preview links:
 

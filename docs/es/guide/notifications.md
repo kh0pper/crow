@@ -109,7 +109,7 @@ crow bundle install ntfy
 ### Configuración del teléfono
 
 1. Instala la app de ntfy en tu teléfono
-2. En la app, agrega un servidor: `http://<your-tailscale-ip>:2586`
+2. En la app, agrega un servidor: la dirección HTTPS por la que tu teléfono alcanza el servidor — por ejemplo un puerto de Tailscale Serve como `https://<hostname>.<tu-tailnet>.ts.net:8445`. `http://<tailnet-ip>:2586` no sirve: el servidor ntfy escucha solo en `localhost`, y las direcciones `http://` de la tailnet no están abiertas
 3. Suscríbete a tu topic (predeterminado: `crow`)
 4. Todas las notificaciones de Crow ahora llegan al instante a tu teléfono
 

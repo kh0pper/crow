@@ -32,7 +32,7 @@ The table above covers MCP clients (AI assistants that connect to Crow's tools).
 
 ## MCP Endpoints
 
-Every path is relative to your gateway URL (e.g. `http://crow:3001`). Each server is available over Streamable HTTP at `<prefix>/mcp` and over legacy SSE at `<prefix>/sse` + `<prefix>/messages`:
+Every path is relative to your gateway URL — `https://<hostname>.<tailnet>.ts.net:8444` for a client on another device (that is the port from the `tailscale serve` step in the [Tailscale Setup guide](../getting-started/tailscale-setup)), or `http://localhost:3001` for a client on the gateway's own machine. Each server is available over Streamable HTTP at `<prefix>/mcp` and over legacy SSE at `<prefix>/sse` + `<prefix>/messages`:
 
 | Prefix | Server | Notes |
 |---|---|---|

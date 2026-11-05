@@ -160,15 +160,25 @@ curl http://localhost:3001/health
 
 ## Step 8: Connect Your AI Platform
 
-Your Crow server is now running and accessible via Tailscale. Connect it from any AI platform:
+Your Crow server is now running. Recommended: put it behind Tailscale Serve on the VM so other devices reach it over HTTPS (the gateway itself listens on plain HTTP at `127.0.0.1:3001`):
 
-- [Claude Web & Mobile](../platforms/claude) — `http://<tailscale-ip>:3001/memory/mcp`
-- [ChatGPT](../platforms/chatgpt) — `http://<tailscale-ip>:3001/memory/sse`
-- [Gemini](../platforms/gemini) — `http://<tailscale-ip>:3001/memory/mcp`
-- [Claude Code](../platforms/claude-code) — `http://<tailscale-ip>:3001/memory/mcp`
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+Connect it from any AI platform, using the hostname `tailscale status` shows for this VM:
+
+- [Claude Web & Mobile](../platforms/claude) — `https://<hostname>.<tailnet>.ts.net:8444/memory/mcp`
+- [ChatGPT](../platforms/chatgpt) — `https://<hostname>.<tailnet>.ts.net:8444/memory/sse`
+- [Gemini](../platforms/gemini) — `https://<hostname>.<tailnet>.ts.net:8444/memory/mcp`
+- [Claude Code](../platforms/claude-code) — `https://<hostname>.<tailnet>.ts.net:8444/memory/mcp`
 - [All platforms](../platforms/)
 
-Visit `http://<tailscale-ip>:3001/setup` from a device on your Tailscale network to see integration status and endpoint URLs.
+Visit `https://<hostname>.<tailnet>.ts.net:8444/setup` from a device on your Tailscale network to see integration status and endpoint URLs.
+
+::: info Plain http over the tailnet
+Step 6's `sudo ufw allow from 100.64.0.0/10 to any port 3001` also leaves `http://<tailscale-ip>:3001/...` reachable from your tailnet, which is enough for MCP clients that send a token. Use the Serve HTTPS address for anything browser-based: it is the only form that can set the production `Secure` session cookie, and it is what hosted AI clients expect.
+:::
 
 ::: tip Try it out
 After connecting your AI platform, say:

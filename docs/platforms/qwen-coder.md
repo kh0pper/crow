@@ -113,13 +113,13 @@ Connect to a deployed Crow gateway for remote access — useful for Tailscale se
    }
    ```
 
-   For a Tailscale-accessible gateway, use the Tailscale address — and consider the [router endpoint](/guide/context-performance) for a much smaller tool surface:
+   For a Tailscale-accessible gateway, use the Tailscale Serve address — `https://<hostname>.<tailnet>.ts.net:8444/router/mcp`, the `:8444` port set up by `tailscale serve --bg --https=8444 http://localhost:3001` on the server (`http://100.x.x.x:3001` is not reachable from another device) — and consider the [router endpoint](/guide/context-performance) for a much smaller tool surface:
    ```json
    {
      "mcpServers": {
        "crow": {
          "type": "url",
-         "url": "http://100.x.x.x:3001/router/mcp"
+         "url": "https://<hostname>.<tailnet>.ts.net:8444/router/mcp"
        }
      }
    }

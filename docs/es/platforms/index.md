@@ -28,7 +28,7 @@ La tabla anterior cubre los clientes MCP (asistentes de IA que se conectan a las
 
 ## Endpoints MCP
 
-Cada ruta es relativa a la URL de tu gateway (por ejemplo, `http://crow:3001`). Cada servidor está disponible vía Streamable HTTP en `<prefix>/mcp` y vía SSE legado en `<prefix>/sse` + `<prefix>/messages`:
+Cada ruta es relativa a la URL de tu gateway — `https://<hostname>.<tu-tailnet>.ts.net:8444` para un cliente en otro dispositivo (ese es el puerto del paso de `tailscale serve` en la [guía de Configuración de Tailscale](/es/getting-started/tailscale-setup)), o `http://localhost:3001` para un cliente en la propia máquina del gateway. Cada servidor está disponible vía Streamable HTTP en `<prefix>/mcp` y vía SSE legado en `<prefix>/sse` + `<prefix>/messages`:
 
 | Prefijo | Servidor | Notas |
 |---|---|---|

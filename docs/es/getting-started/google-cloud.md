@@ -160,15 +160,25 @@ curl http://localhost:3001/health
 
 ## Paso 8: Conecta Tu Plataforma de IA
 
-Tu servidor de Crow ya está funcionando y es accesible vía Tailscale. Conéctalo desde cualquier plataforma de IA:
+Tu servidor de Crow ya está funcionando. Recomendado: ponlo detrás de Tailscale Serve en la VM para que otros dispositivos lo alcancen por HTTPS (el gateway mismo escucha en HTTP plano en `127.0.0.1:3001`):
 
-- [Claude Web y Móvil](/es/platforms/claude) — `http://<tailscale-ip>:3001/memory/mcp`
-- [ChatGPT](/es/platforms/chatgpt) — `http://<tailscale-ip>:3001/memory/sse`
-- [Gemini](/es/platforms/gemini) — `http://<tailscale-ip>:3001/memory/mcp`
-- [Claude Code](/es/platforms/claude-code) — `http://<tailscale-ip>:3001/memory/mcp`
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+Conéctalo desde cualquier plataforma de IA, usando el nombre de host que `tailscale status` muestra para esta VM:
+
+- [Claude Web y Móvil](/es/platforms/claude) — `https://<hostname>.<tu-tailnet>.ts.net:8444/memory/mcp`
+- [ChatGPT](/es/platforms/chatgpt) — `https://<hostname>.<tu-tailnet>.ts.net:8444/memory/sse`
+- [Gemini](/es/platforms/gemini) — `https://<hostname>.<tu-tailnet>.ts.net:8444/memory/mcp`
+- [Claude Code](/es/platforms/claude-code) — `https://<hostname>.<tu-tailnet>.ts.net:8444/memory/mcp`
 - [Todas las plataformas](/es/platforms/)
 
-Visita `http://<tailscale-ip>:3001/setup` desde un dispositivo en tu red de Tailscale para ver el estado de las integraciones y las URLs de los endpoints.
+Visita `https://<hostname>.<tu-tailnet>.ts.net:8444/setup` desde un dispositivo en tu red de Tailscale para ver el estado de las integraciones y las URLs de los endpoints.
+
+::: info HTTP plano por la tailnet
+La regla `sudo ufw allow from 100.64.0.0/10 to any port 3001` del Paso 6 también deja alcanzable `http://<tailscale-ip>:3001/...` desde tu tailnet, lo que basta para clientes MCP que envían un token. Usa la dirección HTTPS de Serve para cualquier cosa basada en navegador: es la única forma que puede establecer la cookie de sesión `Secure` de producción, y es lo que esperan los clientes de IA alojados.
+:::
 
 ::: tip Pruébalo
 Después de conectar tu plataforma de IA, di:

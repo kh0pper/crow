@@ -94,7 +94,7 @@ Cuando estés satisfecho con un borrador:
 
 > "Publica mi entrada sobre software local-first"
 
-La entrada se vuelve accesible públicamente en `http://tu-servidor:3001/blog/notes-on-local-first-software`.
+La entrada se vuelve accesible públicamente en `https://<hostname>.tu-tailnet.ts.net/blog/notes-on-local-first-software` una vez que tu blog es alcanzable desde internet (consulta [Hacer tu blog público](#hacer-tu-blog-publico) más abajo). Mientras tanto solo se sirve en la propia máquina, en `http://localhost:3001/blog/notes-on-local-first-software`.
 
 Para despublicar:
 
@@ -133,10 +133,10 @@ El tema controla:
 
 Los feeds se generan automáticamente:
 
-- **RSS 2.0**: `http://tu-servidor:3001/blog/feed.xml`
-- **Atom**: `http://tu-servidor:3001/blog/feed.atom`
+- **RSS 2.0**: `https://<hostname>.tu-tailnet.ts.net/blog/feed.xml`
+- **Atom**: `https://<hostname>.tu-tailnet.ts.net/blog/feed.atom`
 
-Los feeds incluyen las 20 entradas publicadas más recientes con contenido completo.
+Los feeds incluyen las 20 entradas publicadas más recientes con contenido completo. En la propia máquina los mismos feeds están en `http://localhost:3001/blog/feed.xml` y `http://localhost:3001/blog/feed.atom`.
 
 ## Exportar
 
@@ -175,7 +175,7 @@ Tu blog no tiene presencia web sin el gateway en ejecución. Cómo se vuelve acc
 | Despliegue | ¿Blog accesible? | Cómo |
 |---|---|---|
 | **Escritorio (stdio)** | No | El gateway no está en ejecución — no hay blog web |
-| **Autoalojado (Pi/servidor)** | Solo en LAN por defecto | Disponible en `http://<ip-del-servidor>:3001/blog` en tu red local |
+| **Autoalojado (Pi/servidor)** | Solo en LAN por defecto | Disponible en `http://<ip-del-servidor>:3001/blog` en tu red local si el puerto 3001 es alcanzable; el Caddy del instalador también sirve `https://<hostname>.local/blog` |
 | **Nube (Render/Oracle)** | Sí — internet público | Blog en `https://tu-servidor-crow/blog` |
 | **Hosting gestionado** | Sí — internet público | Blog en `usuario.crow.maestro.press/blog` |
 
@@ -189,13 +189,18 @@ Para configuraciones autoalojadas, consulta las secciones de abajo para hacer tu
 # Primero habilita Funnel en tu consola de administración de Tailscale:
 # https://login.tailscale.com/admin/dns → Enable Funnel
 
-# Luego expón tu gateway
-tailscale funnel --bg --https=443 http://localhost:3001
+# Luego expón solo las rutas públicas del blog
+tailscale funnel --bg --set-path=/blog http://localhost:3001/blog
+tailscale funnel --bg --set-path=/robots.txt http://localhost:3001/robots.txt
+tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
+tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
+
+Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` pondría el dashboard, el MCP y el chat de IA frente al público. El Crow's Nest se queda en `tailscale serve` (solo tailnet); consulta la [Guía de Configuración de Tailscale](/es/getting-started/tailscale-setup).
 
 Tu blog ahora es accesible públicamente en `https://<hostname>.tu-tailnet.ts.net/blog`.
 
-El Crow's Nest permanece privado — las solicitudes desde IPs públicas reciben una respuesta 403 porque no están dentro de los rangos de red permitidos. Solo el blog (y otras rutas sin autenticación como `/health` y `/setup`) son efectivamente visibles para el público.
+El Crow's Nest permanece privado — el gateway responde 403 a cualquier solicitud que llegue por Funnel fuera de su lista pública (`/blog`, `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, `/manifest.json`), así que el dashboard, el MCP y el chat de IA nunca son alcanzables por Funnel aunque esté mal mapeado.
 
 ### Dominio personalizado con Caddy
 

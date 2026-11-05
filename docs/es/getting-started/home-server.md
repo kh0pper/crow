@@ -52,7 +52,15 @@ curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 ```
 
-Configura un nombre memorable en tu [consola de administración de Tailscale](https://login.tailscale.com/admin/machines) — renombra la máquina a `crow`. Con MagicDNS activado, tu servidor es accesible en `http://crow:3001` desde cualquier dispositivo en tu red Tailscale.
+Configura un nombre memorable en tu [consola de administración de Tailscale](https://login.tailscale.com/admin/machines) — renombra la máquina a `crow`. Con MagicDNS activado, los dispositivos de tu tailnet alcanzan la máquina como `crow`; para llegar al dashboard por HTTPS, pon el gateway detrás de Tailscale Serve.
+
+El script de instalación se ofrece a hacerlo y muestra la dirección resultante — configura Serve en `443`, así que el Crow's Nest queda en `https://crow.<tu-tailnet>.ts.net/dashboard`. Para configurarlo a mano (o dejararlo fuera del `443`, lejos de las rutas públicas de Funnel), usa un puerto propio de Serve:
+
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+Desde cualquier dispositivo en tu red Tailscale, el Crow's Nest queda en `https://crow.<tu-tailnet>.ts.net:8444/dashboard`. `http://crow:3001` no funciona desde otro dispositivo: el firewall deja el 3001 cerrado a la tailnet y una cookie de sesión de producción necesita HTTPS.
 
 ## Conectar Tu Plataforma de IA
 
@@ -63,7 +71,7 @@ Una vez que Crow esté funcionando, conéctalo desde cualquier plataforma de IA:
 - [Claude Code](/es/platforms/claude-code)
 - [Todas las plataformas](/es/platforms/)
 
-Visita `https://crow.local/setup` (red local) o `http://crow:3001/setup` (Tailscale) para ver el estado de las integraciones.
+Visita `https://crow.local/setup` (red local) o la dirección de Serve de arriba — `https://crow.<tu-tailnet>.ts.net/dashboard` o `https://crow.<tu-tailnet>.ts.net:8444` (Tailscale) — para ver el estado de las integraciones.
 
 ## Gestionar Tu Crow
 

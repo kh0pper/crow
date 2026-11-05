@@ -157,7 +157,13 @@ Sigue el enlace que aparece en tu terminal para autorizar el dispositivo en tu c
 2. Haz clic en tu instancia de Oracle → Edit → Renombra a `crow`
 3. Activa **MagicDNS** si aún no está activado (en configuración de DNS)
 
-Tu servidor ahora es accesible en `http://crow:3001` desde cualquier dispositivo en tu red Tailscale.
+Luego pon el gateway detrás de Tailscale Serve, que le da un certificado HTTPS real en tu tailnet. El gateway escucha en HTTP plano en `127.0.0.1:3001`, y las reglas de firewall de arriba nunca abren ese puerto, así que otro dispositivo no puede alcanzarlo directamente:
+
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+Tu servidor ahora es accesible en `https://crow.tu-tailnet.ts.net:8444` desde cualquier dispositivo en tu red Tailscale (tu nombre de host y el de tu tailnet son los que muestra `tailscale status`). Usa URLs `http://` solo en la propia máquina.
 
 ## Paso 8: Crear un Servicio systemd
 
@@ -197,13 +203,13 @@ curl http://localhost:3001/health
 
 Tu servidor Crow ahora está funcionando y accesible vía Tailscale. Conéctalo desde cualquier plataforma de IA:
 
-- [Claude Web y Móvil](/es/platforms/claude) — `http://crow:3001/memory/mcp`
-- [ChatGPT](/es/platforms/chatgpt) — `http://crow:3001/memory/sse`
-- [Gemini](/es/platforms/gemini) — `http://crow:3001/memory/mcp`
-- [Claude Code](/es/platforms/claude-code) — `http://crow:3001/memory/mcp`
+- [Claude Web y Móvil](/es/platforms/claude) — `https://crow.tu-tailnet.ts.net:8444/memory/mcp`
+- [ChatGPT](/es/platforms/chatgpt) — `https://crow.tu-tailnet.ts.net:8444/memory/sse`
+- [Gemini](/es/platforms/gemini) — `https://crow.tu-tailnet.ts.net:8444/memory/mcp`
+- [Claude Code](/es/platforms/claude-code) — `https://crow.tu-tailnet.ts.net:8444/memory/mcp`
 - [Todas las plataformas](/es/platforms/)
 
-Visita `http://crow:3001/setup` desde un dispositivo en tu red Tailscale para ver el estado de las integraciones.
+Visita `https://crow.tu-tailnet.ts.net:8444/setup` desde un dispositivo en tu red Tailscale para ver el estado de las integraciones (el paso de `tailscale serve` del Paso 7 es lo que hace funcionar esa dirección HTTPS).
 
 ::: tip Pruébalo
 Después de conectar tu plataforma de IA, di:
@@ -222,10 +228,16 @@ Por defecto, todo es privado detrás de Tailscale. Si quieres que tu blog sea ac
 # Primero activa Funnel en tu consola de administración de Tailscale:
 # https://login.tailscale.com/admin/dns → Enable Funnel
 
-tailscale funnel --bg --https=443 http://localhost:3001
+# Exponer solo las rutas públicas del blog
+tailscale funnel --bg --set-path=/blog http://localhost:3001/blog
+tailscale funnel --bg --set-path=/robots.txt http://localhost:3001/robots.txt
+tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
+tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-Tu blog estará en `https://crow.tu-tailnet.ts.net/blog`.
+Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` expondría el inicio de sesión del dashboard del Crow's Nest. El dashboard se queda en `tailscale serve` (solo tailnet, Paso 7).
+
+Tu blog estará en `https://crow.tu-tailnet.ts.net/blog`. El Crow's Nest permanece privado — una solicitud que llegue por Funnel a cualquier otra ruta recibe un 403.
 
 ### Opción B: Caddy + Dominio personalizado
 

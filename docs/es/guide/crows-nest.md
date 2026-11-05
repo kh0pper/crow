@@ -110,20 +110,21 @@ Una vez que el gateway esté en ejecución:
 | Desde | URL |
 |---|---|
 | La misma máquina | `http://localhost:3001/dashboard` |
-| LAN (otro dispositivo en tu red) | `http://<server-ip>:3001/dashboard` |
-| Remoto vía Tailscale | `http://<tailscale-ip>:3001/dashboard` |
-| Remoto vía `tailscale serve` | `https://<hostname>.tail1234.ts.net/dashboard` |
+| LAN (otro dispositivo en tu red) | `https://<hostname>.local/dashboard` vía el Caddy del instalador; `http://<server-ip>:3001/dashboard` solo si abriste el puerto 3001 tú mismo |
+| Remoto vía Tailscale | `https://<hostname>.<tu-tailnet>.ts.net:8444/dashboard` — necesita el paso de `tailscale serve` de abajo |
 
 ### Acceso remoto con `tailscale serve`
 
-Si quieres HTTPS y un hostname apropiado sin exponer el Crow's Nest a internet:
+Si quieres HTTPS y un hostname apropiado sin exponer el Crow's Nest a internet, pon el gateway detrás de Tailscale Serve en el servidor:
 
 ```bash
 # Servir el gateway por Tailscale con un certificado HTTPS válido
-tailscale serve --bg --https=443 http://localhost:3001
+tailscale serve --bg --https=8444 http://localhost:3001
 ```
 
-Esto hace que el Crow's Nest esté disponible en `https://<hostname>.your-tailnet.ts.net/dashboard` desde cualquier dispositivo en tu red Tailscale. Solo los dispositivos conectados a Tailscale pueden alcanzarlo.
+Esto hace que el Crow's Nest esté disponible en `https://<hostname>.<tu-tailnet>.ts.net:8444/dashboard` desde cualquier dispositivo en tu red Tailscale. Solo los dispositivos conectados a Tailscale pueden alcanzarlo. Si Serve se configuró en `443` (lo que ofrece hacer el paso de Tailscale del instalador), la dirección no lleva puerto: `https://<hostname>.<tu-tailnet>.ts.net/dashboard`.
+
+El gateway escucha en HTTP plano en `127.0.0.1:3001` y el firewall del instalador nunca abre ese puerto a tu tailnet, así que `http://crow:3001` funciona solo en el servidor mismo. El puerto HTTPS de Serve además da a las instalaciones de producción la cookie de sesión `Secure` que necesitan.
 
 ## Primer inicio de sesión
 
