@@ -31,7 +31,7 @@ permissions:
 jobs:
   suite:
     runs-on: ubuntu-latest
-    # 30, not 15: on 2026-10-26 the runner's apt mirror and the playwright CDN
+    # 45 (was 30; PT-2b added ~10 min of two-gateway sync tests), not 15: on 2026-10-26 the runner's apt mirror and the playwright CDN
     # were slow enough (~9.5 min browser + deps, ~5.5 min apt-get update) that
     # setup alone used the whole 15 minutes and every suite was cancelled
     # before a test ran. The cache below takes the browser download off the
