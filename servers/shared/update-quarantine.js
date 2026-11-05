@@ -19,7 +19,18 @@
  * does not load has no TTL: it waits for the next commit on main. Neither does
  * a sha a BLOCKED rollback left checked out, whatever its reason (`persist`) —
  * a checkout still sitting on the refused commit must never time out into
- * "Up to date".
+ * "Up to date". That last exemption lasts only while the commit really is
+ * checked out: once local HEAD is no longer the marker's sha (the operator
+ * moved main back), a transient reason gets its TTL back, counted from `at`
+ * (see `markerDeadline`).
+ *
+ * The mirror-image rule: while local HEAD IS the marker's sha, the marker is
+ * never deleted and never ignored, whatever its expiry and wherever main has
+ * moved to. The refused commit is still checked out, so the next restart, reboot
+ * or bundle install boots it, and a co-hosted peer's convergence would migrate
+ * and restart into it. Only `blocked`, `heldAtHead` and an always-active marker
+ * are possible in that state (see `namesLocalHead`); expiry and "main moved"
+ * apply once the checkout is off the sha.
  *
  * Nothing here throws: this runs inside a tick that must still record a result.
  */
@@ -40,7 +51,10 @@ export const UPDATE_QUARANTINE_MAX_BYTES = 64 * 1024;
  *  pulled sha never got as far as its import check or its init-db. That says
  *  nothing about the commit (a registry outage is not a bad sha), so a rollback
  *  that moved the checkout back expires and main is retried with no new commit.
- *  A BLOCKED rollback for the same reason is written with `persist` instead. */
+ *  A BLOCKED rollback for the same reason is written with `persist` instead, and
+ *  regains this TTL once HEAD is no longer its sha — otherwise a registry
+ *  outage the operator already reset by hand would pause updates until main
+ *  moved. */
 export const TRANSIENT_QUARANTINE_MS = Object.freeze({
   "import-timeout": 6 * 60 * 60 * 1000,
   "init-db-failed": 6 * 60 * 60 * 1000,
@@ -144,16 +158,63 @@ export function clearUpdateQuarantine({ gitDir } = {}) {
   try { unlinkSync(quarantinePath(gitDir)); return true; } catch { return false; }
 }
 
-export function quarantineExpired(marker, now = Date.now()) {
-  if (!marker?.expires_at) return false;
-  return Date.parse(marker.expires_at) <= now;
+/**
+ * The moment a marker stops holding, or `null` when it waits for main instead.
+ *
+ * An `expires_at` the writer recorded always wins. A marker a BLOCKED rollback
+ * persisted WITHOUT one is permanent only while the checkout still holds the
+ * sha it names: once local HEAD has moved off it (the operator put main back by
+ * hand), a transient reason gets its TTL back, counted from the marker's `at`,
+ * so a machine-side failure — a registry outage is not a bad commit — is
+ * retried even though main never moves. A reason that is not transient keeps
+ * waiting for main. An unreadable local HEAD means "assume still checked out":
+ * never time a marker out on a guess.
+ */
+function markerDeadline(marker, localHeadSha = "") {
+  if (marker?.expires_at) return Date.parse(marker.expires_at);
+  if (!Object.hasOwn(TRANSIENT_QUARANTINE_MS, marker?.reason)) return null;
+  const head = String(localHeadSha || "").trim();
+  if (!FULL_SHA_RE.test(head) || head === marker.sha) return null;
+  return Date.parse(marker.at) + TRANSIENT_QUARANTINE_MS[marker.reason];
 }
 
-/** The marker only while it still holds; an expired one is ignored (not
- *  deleted here — the updater's evaluate() owns cleanup). */
-export function activeUpdateQuarantine({ gitDir, now = Date.now() } = {}) {
+/** `localHeadSha` decides only the persisted-marker case above: without it an
+ *  expiry-less marker is treated as still checked out and never expires. */
+export function quarantineExpired(marker, now = Date.now(), localHeadSha = "") {
+  const deadline = markerDeadline(marker, localHeadSha);
+  return deadline !== null && deadline <= now;
+}
+
+/**
+ * Is the marker naming the commit the checkout HOLDS?
+ *
+ * An unreadable local HEAD counts as "may still be checked out": deleting the
+ * record, or timing it out, on a guess would let the refused sha be pulled again
+ * (or booted by a peer) with nothing left to refuse it.
+ */
+function namesLocalHead(marker, localHeadSha) {
+  const head = String(localHeadSha || "").trim();
+  if (!FULL_SHA_RE.test(head)) return true;
+  return head === marker?.sha;
+}
+
+/** The marker naming exactly the commit the checkout holds, whatever its expiry
+ *  — the refusal a convergence gate honors: that commit must not be migrated
+ *  into or restarted into by anybody. */
+export function updateQuarantineHeldAtHead({ gitDir, localHeadSha = "" } = {}) {
   const marker = readUpdateQuarantine({ gitDir });
-  if (!marker || quarantineExpired(marker, now)) return null;
+  if (!marker || !namesLocalHead(marker, localHeadSha)) return null;
+  return marker;
+}
+
+/** The marker while it still holds. One naming the commit the checkout HOLDS is
+ *  active whatever its expiry; an expired one for any other sha is ignored (not
+ *  deleted here — the updater's evaluate() owns cleanup). */
+export function activeUpdateQuarantine({ gitDir, localHeadSha = "", now = Date.now() } = {}) {
+  const marker = readUpdateQuarantine({ gitDir });
+  if (!marker) return null;
+  if (namesLocalHead(marker, localHeadSha)) return marker;
+  if (quarantineExpired(marker, now, localHeadSha)) return null;
   return marker;
 }
 
@@ -162,25 +223,38 @@ export function activeUpdateQuarantine({ gitDir, now = Date.now() } = {}) {
  *
  * Blocks ONLY when the full origin head equals the marker's sha (a prefix is
  * never enough) and the marker has not expired. When main has moved past it the
- * record is spent and is deleted, so the same bad sha can be re-pulled later
- * only by a commit that names it again on main.
+ * record is spent and is deleted — UNLESS local HEAD still IS the marker's sha: a
+ * refusal that is still checked out stays refused, so the marker survives and the
+ * caller is told the commit is still there (`heldAtHead`). The same holds for an
+ * expired marker. So the same bad sha can be re-pulled later only by a commit
+ * that names it again on main, and only once the checkout is off it.
  *
- * @returns {{blocked:boolean, marker?:object, cleared?:boolean, expired?:boolean}}
+ * @returns {{blocked:boolean, marker?:object, heldAtHead?:true, cleared?:boolean,
+ *   expired?:boolean}} `heldAtHead` marks a marker naming the commit the checkout
+ *   still holds (an unreadable local HEAD counts as held).
  */
-export function evaluateUpdateQuarantine({ gitDir, originHeadSha = "", now = Date.now() } = {}) {
+export function evaluateUpdateQuarantine({
+  gitDir, originHeadSha = "", localHeadSha = "", now = Date.now(),
+} = {}) {
   const marker = readUpdateQuarantine({ gitDir });
   if (!marker) return { blocked: false };
-  if (quarantineExpired(marker, now)) {
+  // Never deleted while the refused commit is still checked out — see the header.
+  const heldAtHead = namesLocalHead(marker, localHeadSha);
+  if (quarantineExpired(marker, now, localHeadSha)) {
+    if (heldAtHead) return { blocked: false, heldAtHead: true, expired: true, marker };
     clearUpdateQuarantine({ gitDir });
     return { blocked: false, expired: true, marker };
   }
   const head = String(originHeadSha || "").trim();
-  if (FULL_SHA_RE.test(head) && head === marker.sha) return { blocked: true, marker };
+  if (FULL_SHA_RE.test(head) && head === marker.sha) {
+    return heldAtHead ? { blocked: true, heldAtHead: true, marker } : { blocked: true, marker };
+  }
   if (FULL_SHA_RE.test(head)) {
+    if (heldAtHead) return { blocked: false, heldAtHead: true, marker };
     clearUpdateQuarantine({ gitDir });
     return { blocked: false, cleared: true, marker };
   }
   // origin/main unreadable: neither block nor clear — a fetch failure reports
   // its own result, and deleting the record on a guess would re-pull a bad sha.
-  return { blocked: false, marker };
+  return heldAtHead ? { blocked: false, heldAtHead: true, marker } : { blocked: false, marker };
 }

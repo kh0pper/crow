@@ -18,7 +18,7 @@ import { isInstallSetRunning } from "./install-lock.js";
 import { classifyCheckRuns } from "../shared/ci-check-runs.js";
 import { checkTreeImport, IMPORT_CHECK_ENV } from "./boot/import-check.js";
 import {
-  evaluateUpdateQuarantine, writeUpdateQuarantine, FULL_SHA_RE,
+  activeUpdateQuarantine, evaluateUpdateQuarantine, writeUpdateQuarantine, FULL_SHA_RE,
 } from "../shared/update-quarantine.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -614,13 +614,16 @@ export async function checkForUpdates({ instance = null } = {}) {
     }
 
     // A process must honor its OWN refusal. runLockedUpdate returns
-    // converge:false on the branches whose whole purpose is to withhold a
-    // restart; a peer may still converge (it refused nothing, and the
-    // quarantine markers guard the genuinely-bad shas), but this process
-    // must not restart into code it just declined.
+    // converge:false on every branch whose whole purpose is to withhold the
+    // restart (a quarantined sha or migration, a blocked rollback, a CI gate, a
+    // branch that changed mid-update); a peer may still converge (it refused
+    // nothing, and the quarantine markers guard the genuinely-bad shas), but this
+    // process must not restart into code it just declined. Its own skip code is
+    // kept (`update-rollback-blocked`, `ci-red`, …) — Settings and the bell
+    // classification key off it.
     if (treeResult?.converge === false) {
       log("instance half skipped — this process's own update refused a restart");
-      return { ...treeResult, pulled, converged: false, skipped: "refused" };
+      return { ...treeResult, pulled, converged: false, skipped: treeResult.skipped ?? "refused" };
     }
 
     // The INSTANCE half — for every gateway, lock or no lock. APP_ROOT is
@@ -728,7 +731,9 @@ function resetKeep(previous) {
  *
  * A blocked rollback (nothing was reset) re-writes the marker WITHOUT an expiry:
  * the checkout is still on the bad sha, so a TTL there would let the next tick
- * time out into "Up to date" with the commit still checked out.
+ * time out into "Up to date" with the commit still checked out. That exemption
+ * ends with the checkout: once HEAD is no longer the marker's sha (the operator
+ * moved main back), the evaluator gives a transient reason its TTL back.
  *
  * @returns {Promise<{ok:boolean, marker:object|null, detail:string,
  *   depsRestored:boolean|null, blockedBy?:"reset-refused"|"no-previous"}>}
@@ -1024,7 +1029,13 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       }
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, skipped: "quarantined", message: msg };
+      // converge:false — a quarantined migration is a refusal to run the code on
+      // disk, so this process must not migrate its own store and restart into it
+      // (the tree still holds that sha whenever the rollback was withheld or
+      // failed). Restarting there re-runs the boot schema guard and init-db
+      // against the store the migration just damaged, on a unit whose restart
+      // policy cannot trip its own start limit.
+      return { updated: false, skipped: "quarantined", message: msg, converge: false };
     }
     if (q.cleared) log(`Quarantine cleared — main moved past ${q.marker.sha.slice(0, 9)}; retrying the migration under guard`);
   } catch (err) {
@@ -1034,34 +1045,46 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // L0.3 update quarantine — same under-lock spot, same fresh origin head, so
   // the 6 h tick and the manual Check-now button both consult it. A sha this
   // host already rolled back is never re-pulled; the marker clears itself when
-  // main moves past it (or expires, for a machine-side reason).
+  // main moves past it (or expires, for a machine-side reason — and a marker a
+  // BLOCKED rollback persisted without an expiry gets that TTL back once HEAD is
+  // no longer its sha, i.e. once the operator has moved main back by hand).
+  // NEITHER cleanup runs while local HEAD still is the marker's sha: the refused
+  // commit is checked out, so the marker stays and the tick refuses.
   let originHeadSha = "";
-  // Kept out of the try block: the up-to-date branch below needs the marker it
-  // saw, even once evaluateUpdateQuarantine() has expired and cleared it (S2).
-  let quarantine = null;
   try {
     originHeadSha = (await run("git", ["rev-parse", "origin/main"])).stdout;
-    const uq = evaluateUpdateQuarantine({ gitDir, originHeadSha });
-    quarantine = uq;
-    if (uq.blocked) {
+    // Local HEAD is what tells the evaluator whether a persisted (expiry-less)
+    // marker is still sitting on the refused commit or may time out.
+    const localHeadSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+    const uq = evaluateUpdateQuarantine({ gitDir, originHeadSha, localHeadSha });
+    // A marker naming the commit the checkout HOLDS is a refusal whatever
+    // origin/main says: the refused sha is still checked out, so this tick
+    // neither deletes the marker nor pulls a newer commit, and it withholds the
+    // restart. `heldAtHead` comes from the evaluator — which never deletes a
+    // marker in that state — so the result cannot quote a marker that is already
+    // gone. (The marker becomes ordinary again once HEAD is off its sha: the
+    // operator's `git reset --keep` is what unfreezes updates.)
+    if (uq.blocked || uq.heldAtHead) {
+      const heldAtHead = uq.heldAtHead === true;
       // S5: a blocked rollback left the bad sha CHECKED OUT. Say so — the old
       // text ("waiting for a newer commit") hid that the next restart, reboot or
       // bundle install boots the sha this host already refused, and the bell
       // must not claim it "was rolled back".
-      const localHead = (await run("git", ["rev-parse", "HEAD"])).stdout;
-      const blocked = localHead === uq.marker.sha;
-      const msg = blocked
+      const msg = heldAtHead
         ? `Update rollback blocked: ${uq.marker.sha.slice(0, 9)} is still checked out; the next restart will boot it`
         : `Skipped: update quarantined (${uq.marker.sha.slice(0, 9)}, ${uq.marker.reason}); waiting for a newer commit on main`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
+      // converge:false on both shapes: this tick refused to run the code on
+      // disk, so this process must not migrate and restart into it.
       return {
         updated: false,
-        skipped: blocked ? "update-rollback-blocked" : "update-quarantined",
-        blocked,
+        skipped: heldAtHead ? "update-rollback-blocked" : "update-quarantined",
+        blocked: heldAtHead,
         sha: uq.marker.sha,
         message: msg,
+        converge: false,
       };
     }
     if (uq.cleared) log(`Update quarantine cleared — main moved past ${uq.marker.sha.slice(0, 9)}`);
@@ -1077,19 +1100,23 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   await saveSetting("auto_update_current_version", currentVersion);
 
   if (behindCount === 0) {
-    // S2 defence: the marker may have EXPIRED (or could not be matched against
-    // an unreadable origin head) while the checkout still sits on the commit it
-    // names. "Up to date" there is the silent re-arm — nothing is pulled, so npm
-    // never runs again and the next restart boots the commit this host refused.
-    const stale = quarantine && !quarantine.cleared ? quarantine.marker : null;
+    // S2 defence: the marker may still hold while the checkout sits on the commit
+    // it names — "Up to date" there is the silent re-arm, because nothing is
+    // pulled and npm never runs again. Read the marker as it stands AFTER
+    // evaluateUpdateQuarantine() ran in THIS tick: a marker the evaluator expired
+    // and deleted (HEAD off its sha) must not come back out of a pre-evaluation
+    // copy as a one-tick false "blocked" (and a false bell).
+    const stale = activeUpdateQuarantine({ gitDir, localHeadSha: currentFullSha });
     if (stale && stale.sha === currentFullSha) {
       const msg = `Update rollback blocked: ${stale.sha.slice(0, 9)} is still checked out; the next restart will boot it`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
+      // converge:false — the commit this process just refused is still the one
+      // checked out; migrating and restarting here would boot it.
       return {
         updated: false, skipped: "update-rollback-blocked",
-        blocked: true, sha: stale.sha, message: msg,
+        blocked: true, sha: stale.sha, message: msg, converge: false,
       };
     }
     log("Already up to date.");
@@ -1115,7 +1142,9 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, skipped: ci === "red" ? "ci-red" : "ci-pending", message: msg };
+      // converge:false — a red/pending build was declined this tick, so this
+      // process must not restart on the strength of a tick it refused.
+      return { updated: false, skipped: ci === "red" ? "ci-red" : "ci-pending", message: msg, converge: false };
     }
   }
 
@@ -1129,7 +1158,9 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     log(msg);
     await saveSetting("auto_update_last_check", new Date().toISOString());
     await saveSetting("auto_update_last_result", msg);
-    return { updated: false, skipped: "not-on-main", branch: recheck.stdout, message: msg };
+    // converge:false — the tree now holds another branch's code; a restart here
+    // would run code this tick refused to update to.
+    return { updated: false, skipped: "not-on-main", branch: recheck.stdout, message: msg, converge: false };
   }
 
   // D2: pull directly — NO stash. `git pull --ff-only` refuses only when the
@@ -1239,16 +1270,30 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       // code-newer-than-schema case).
       const porcelain = await run("git", ["status", "--porcelain"]);
       const trackedWip = porcelain.stdout.split("\n").filter((l) => l && !l.startsWith("??"));
+      // Same three values as quarantineAndRollBack: `null` when the reinstall
+      // never ran (no dependency change, or the tree was left at the new sha).
+      let depsRestored = null;
       if (trackedWip.length === 0) {
         await run("git", ["reset", "--hard", currentVersion]);
         if (depsChanged) {
-          await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
+          // The tree is back on the old commit, so its own node_modules are the
+          // ones the next restart needs. A failure here is REPORTED, not
+          // swallowed: the restart happens straight after, onto a possibly
+          // half-written tree (S1, same clause as the other rollbacks).
+          const npmResult = await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
+          if (npmResult.code !== 0) {
+            log(`npm install failed after the data-loss rollback (exit ${npmResult.code}): ${String(npmResult.stderr || "").slice(-400)}`);
+            depsRestored = false;
+          } else {
+            depsRestored = true;
+          }
         }
         log(`Rolled code back to ${currentVersion} to match the restored database.`);
       } else {
         log("Local WIP present — code left at the new sha; next boot is quarantined (old schema, data intact).");
       }
-      const msg = `Migration quarantined: data loss detected and rolled back (${(res.report?.losses || []).join("; ")})`;
+      const msg = `Migration quarantined: data loss detected and rolled back (${(res.report?.losses || []).join("; ")})` +
+        depsRestoredClause(depsRestored);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
       // The live process's DB handles still pin the pre-restore inode —

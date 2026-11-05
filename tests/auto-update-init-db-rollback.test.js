@@ -66,6 +66,15 @@ writeFileSync(process.env.CROW_DB_PATH, "this is not a sqlite database\\n");
 process.exit(1);
 `;
 
+/** init-db that DROPS a core table: the migration guard classifies that as
+ *  data loss, restores the backup, and the auto-update data-loss path runs. */
+const DESTRUCTIVE_INIT_DB = `import Database from ${JSON.stringify(BS3)};
+const db = new Database(process.env.CROW_DB_PATH);
+db.prepare("DROP TABLE memories").run();
+db.close();
+process.exit(0);
+`;
+
 const OK_INIT_DB = `process.exit(0);\n`;
 
 /**
@@ -358,4 +367,48 @@ test("the next tick says update quarantined, never Up to date", async () => {
     assert.notEqual(db.settings.get("auto_update_last_result"), "Up to date");
     assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev);
   } finally { uninstall(saved); }
+});
+
+test("the data-loss rollback's own failed npm install is reported on the result", async () => {
+  // The data-loss path does `reset --hard` and then reinstalls the previous
+  // commit's deps. That install's exit code used to be ignored: the result said
+  // the rollback was clean while node_modules held a half-written tree — and
+  // this path restarts the gateway immediately afterwards to reopen the restored
+  // DB file, so the next boot runs the last healthy commit on the wrong deps.
+  const f = fixture({ mode: "guarded", initDbBody: DESTRUCTIVE_INIT_DB, changePkg: true });
+  const db = stubDb();
+  const saved = process.env.CROW_DB_PATH;
+  const shimDir = join(f.root, "bin");
+  const callsLog = join(f.root, "npm-calls.log");
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db, saved);
+    mkdirSync(shimDir, { recursive: true });
+    // The install for the PULLED sha succeeds; the data-loss rollback's fails.
+    writeFileSync(join(shimDir, "npm"), `#!/bin/sh
+echo call >> '${callsLog}'
+if [ "$(wc -l < '${callsLog}')" -gt 1 ]; then exit 1; fi
+exit 0
+`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.quarantined, true, JSON.stringify(r));
+    assert.equal(r.converge, false);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev, "the code is back on the previous commit");
+    assert.equal(readFileSync(callsLog, "utf8").trim().split("\n").length, 2,
+      "npm ran once for the pull and once for the rollback");
+
+    const result = db.settings.get("auto_update_last_result");
+    assert.match(result, /^Migration quarantined: data loss detected and rolled back/);
+    assert.match(result, /table memories disappeared/, "the guard really did report the loss");
+    assert.match(result,
+      /its dependencies could not be reinstalled — run npm install --omit=dev in the checkout before the next restart/i,
+      `the result must say the deps are not back: ${result}`);
+  } finally {
+    process.env.PATH = prevPath;
+    uninstall(saved);
+  }
 });

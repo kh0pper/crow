@@ -100,14 +100,19 @@ actualizador:
 Nada se reinicia dentro del commit malo. Un commit cuyo código no carga queda en
 cuarentena hasta que `main` avance más allá; una reversión tomada por una razón
 de la máquina (un timeout, un `npm install` fallido, un `init-db` fallido que no
-cambió nada) caduca además a las 6 horas. Si `git reset --keep` se niega porque
+cambió nada) caduca además a las 6 horas. Ninguna de las dos cosas aplica
+mientras el checkout siga conteniendo el commit rechazado: ese marcador no se
+borra nunca ni caduca nunca, así que el avance de `main` tampoco lo desbloquea —
+el próximo reinicio o rearranque arrancaría exactamente ese commit. Si `git reset --keep` se niega porque
 hay cambios locales que se solapan, el reinicio se retiene, el resultado dice
 `Update rollback blocked`, y el marcador se reescribe SIN caducidad — el checkout
 todavía contiene el commit malo, así que una comprobación posterior lo reporta en
-vez de decir `Up to date`, y el próximo reinicio o rearranque lo arrancaría.
-Después de mover el checkout a mano, borra `<git-dir>/crow-update-quarantine.json`
-si la negativa fue por una razón de la máquina (las dependencias nunca se
-instalaron) y quieres reintentar ese mismo commit.
+vez de decir `Up to date`, y el próximo reinicio o rearranque lo arrancaría. En
+cuanto el checkout deja de contener ese commit (por ejemplo, moviendo `main`
+back a mano), el marcador vuelve a ser uno normal: una razón de la máquina (las
+dependencias nunca se instalaron) caduca 6 horas después de escribirse y ese
+mismo commit se reintenta, y uno cuyo código no carga espera a `main` como
+siempre. No hay que borrar nada a mano.
 
 Un `init-db` fallido tras un pull solo se revierte cuando nada del código nuevo
 puede haber llegado a la base de datos: el pull no debe cruzar una generación de
@@ -116,8 +121,9 @@ base de datos debe seguir siendo legible y `user_version` no debe haber avanzado
 En caso contrario el árbol se deja como está y el aviso lo dice.
 
 Toda instancia co-alojada que comparte el checkout respeta el mismo marcador:
-ninguna migra ni se reinicia dentro de un commit en cuarentena, y cada una
-verifica por separado que *su propio* entorno puede cargar el árbol antes de migrar.
+ninguna migra ni se reinicia dentro de un commit en cuarentena — ni siquiera una
+vez pasadas sus 6 horas, mientras el checkout siga conteniendo ese commit — y cada
+una verifica por separado que *su propio* entorno puede cargar el árbol antes de migrar.
 
 ### Capa 1: el guardián de arranque {#boot-guard}
 

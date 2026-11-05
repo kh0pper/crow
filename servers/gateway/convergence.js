@@ -40,7 +40,7 @@ export function compareHealth(before, after) {
 import { readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { checkTreeImport } from "./boot/import-check.js";
-import { activeUpdateQuarantine } from "../shared/update-quarantine.js";
+import { updateQuarantineHeldAtHead } from "../shared/update-quarantine.js";
 
 /** How long a convergence has to boot and verify before we call it failed.
  *  Must exceed the worst realistic boot: a guarded SCHEMA_GENERATION migration
@@ -338,8 +338,13 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
   // anybody, including the peer that never pulled it. Without this a co-hosted
   // instance whose own env loads the sha fine still converges into it.
   const gitDir = await au.gitDirFor(root);
-  const uq = activeUpdateQuarantine({ gitDir });
-  if (uq && uq.sha === headNow) {
+  // `localHeadSha` is the sha the checkout actually holds under the lock, and a
+  // marker naming it refuses UNCONDITIONALLY — expired or not. Only once HEAD is
+  // off that sha does a marker's expiry apply again (the updater's own rule), so
+  // a peer can never migrate and restart into a commit that is still checked out
+  // as a refused one.
+  const uq = updateQuarantineHeldAtHead({ gitDir, localHeadSha: headNow });
+  if (uq) {
     au.releaseCheckoutLock(lock);
     log(`refusing to converge: ${headNow.slice(0, 9)} is update-quarantined (${uq.reason})`);
     return { pulled, converged: false, skipped: "update-quarantined", sha: headNow, applied: [] };

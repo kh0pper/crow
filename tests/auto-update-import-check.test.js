@@ -614,7 +614,9 @@ test("a blocked deps-failed rollback never times out into 'Up to date'", async (
   // expired HEAD still equalled origin/main, so the tick recorded "Up to date"
   // with the refused commit still checked out — and npm never ran again because
   // no pull happened. Two guards: a blocked rollback writes its marker WITHOUT
-  // an expiry, and the up-to-date branch reports a marker that names HEAD.
+  // an expiry (so the TTL cannot apply while the commit is still checked out),
+  // and the up-to-date branch reports a marker that names HEAD — as long as the
+  // marker is still there after this tick's evaluation.
   const f = fixture({ bIndex: PASSING_SEAM, changePkg: true, changeA: true });
   const db = stubDb();
   const shimDir = join(f.root, "bin");
@@ -665,15 +667,20 @@ exec ${realGit} "$@"
     assert.match(db.settings.get("auto_update_last_result"),
       new RegExp(`${f.bad.slice(0, 9)} is still checked out`));
 
-    // (c) The defence: a marker written by a release that still carried the TTL,
-    // now expired, naming the commit that is still checked out.
+    // (c) A marker written by a release that still carried the TTL, now expired,
+    // naming the commit that is still checked out. Round 3: it is NOT deleted and
+    // the tick does NOT carry on — an expired marker stops blocking only once the
+    // checkout no longer holds the sha it names. A refused commit that is still
+    // checked out stays refused, for this instance AND its peers.
     age7h({ expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() });
     const third = await checkForUpdates();
-    assert.notEqual(db.settings.get("auto_update_last_result"), "Up to date",
-      "an expired marker for the checked-out sha is not \"Up to date\"");
+    assert.equal(third.blocked, true, JSON.stringify(third));
+    assert.equal(third.converge, false, "no restart into a refused commit, expired marker or not");
     assert.match(db.settings.get("auto_update_last_result"),
       new RegExp(`${f.bad.slice(0, 9)} is still checked out`));
-    assert.equal(third.blocked, true, JSON.stringify(third));
+    assert.ok(existsSync(quarantinePath(f.gitDir)),
+      "an expired marker naming the checked-out sha is never deleted");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).sha, f.bad);
   } finally {
     process.env.PATH = prevPath;
     _setAppRootForTest(REAL_APP_ROOT);

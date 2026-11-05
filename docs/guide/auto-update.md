@@ -96,13 +96,18 @@ a missing token, the updater:
 Nothing restarts into the bad commit. A commit whose code does not load stays
 quarantined until `main` moves past it; a rollback taken for a machine-side
 reason (a timeout, a failed `npm install`, a failed `init-db` that changed
-nothing) also expires after 6 hours. If `git reset --keep` refuses because local
+nothing) also expires after 6 hours. Neither applies while the checkout still
+holds the refused commit: that marker is never deleted and never times out, so
+`main` moving on does not unfreeze it either — the next restart or reboot would
+boot exactly that commit. If `git reset --keep` refuses because local
 changes overlap, the restart is withheld, the result says `Update rollback
 blocked`, and the marker is re-written WITHOUT an expiry — the checkout is still
 holding the bad commit, so a later check reports it instead of `Up to date`, and
-the next restart or reboot would boot it. After moving the checkout back by hand,
-delete `<git-dir>/crow-update-quarantine.json` if the refusal was a machine-side
-one (the dependencies never installed) and you want that same commit retried.
+the next restart or reboot would boot it. As soon as the checkout no longer holds
+that commit (move `main` back by hand, for example) the marker is back to an
+ordinary one: a machine-side reason (the dependencies never installed) expires 6
+hours after it was written and that same commit is retried, and one whose code
+does not load waits for `main` as usual. Nothing has to be deleted by hand.
 
 `init-db` failing after a pull is only rolled back when nothing about the new
 code can have reached the database: the pull must not cross a schema generation,
@@ -111,8 +116,9 @@ still be readable, and `user_version` must not have advanced. Otherwise the
 tree is left where it is and the alert says so.
 
 Every co-hosted instance sharing the checkout honors the same marker: none of
-them migrates or restarts into a quarantined commit, and each one separately
-verifies that *its own* environment can load the tree before migrating.
+them migrates or restarts into a quarantined commit — not even once its 6 hours
+have passed, as long as the checkout still holds that commit — and each one
+separately verifies that *its own* environment can load the tree before migrating.
 
 ### Layer 1: the boot guard {#boot-guard}
 
