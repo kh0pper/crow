@@ -21,26 +21,28 @@
 ##   .env         — crow-gateway (and tunnel): Crow's own settings, including the
 ##                  S3_ENDPOINT / S3_ACCESS_KEY / S3_SECRET_KEY the gateway reaches
 ##                  object storage with. Copy it from .env.example.
-##   .env.garage  — the garage service ONLY: its five GARAGE_* secrets, read through
-##                  that service's own env_file. Copy it from .env.garage.example.
+##   .env.garage  — the garage service and its one-shot garage-preflight check: its
+##                  five GARAGE_* secrets, read through that service's own env_file.
+##                  Copy it from .env.garage.example.
 ##
 ## Garage's admin token, RPC secret and metrics token must never reach the gateway. The
 ## gateway only ever talks to Garage over S3, with the one key pair in S3_* (the same
 ## rule the File Storage (Garage) extension follows — see tests/garage-bundle.test.js),
-## so no GARAGE_* reference appears in any service other than garage.
+## so no GARAGE_* reference appears in any service other than garage / garage-preflight.
 ##
 ## Required keys — only for the profile you actually start. Compose interpolates EVERY
 ## service in this file, including the ones whose profile is off, so a required variable
 ## reference (a `:?` with an error message) would make an unrelated profile fail before
-## any container starts. Hence the empty-default `:-` form below for the one value that
-## is still interpolated: the value is still required, but a blank one stops the
-## container that needs it (MinIO without a root password), not the whole
-## `docker compose config`. Garage reads its secrets from .env.garage instead, where a
-## blank one stops the container (it refuses to start without an RPC secret).
+## any container starts. Hence no `:?` anywhere below, and a start-time check inside the
+## container for every required value:
 ##   storage        — .env.garage: GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN,
 ##                    GARAGE_METRICS_TOKEN, GARAGE_DEFAULT_ACCESS_KEY,
-##                    GARAGE_DEFAULT_SECRET_KEY
-##   minio-legacy   — MINIO_ROOT_PASSWORD in .env
+##                    GARAGE_DEFAULT_SECRET_KEY. The one-shot garage-preflight service
+##                    checks all five and exits 78; garage waits for it, so a blank or
+##                    malformed value stops the storage profile before Garage starts.
+##   minio-legacy   — MINIO_ROOT_PASSWORD in .env. The service's own entrypoint refuses
+##                    a blank, default (`minioadmin`) or too-short password (exit 78),
+##                    so MinIO never falls back to its published default credentials.
 
 services:
   crow-gateway:
@@ -78,9 +80,14 @@ services:
     # makes a missing .env.garage a plain error instead of a Garage that starts with
     # no secrets. Nothing else is passed in: the non-secret settings live in the
     # mounted garage.toml, so this service needs no `environment:` block at all.
+    # A BLANK value in that file is caught by garage-preflight, below: Garage has no
+    # shell, so the check cannot run in this image.
     env_file:
       - path: .env.garage
         required: true
+    depends_on:
+      garage-preflight:
+        condition: service_completed_successfully
     volumes:
       # The extension's own rendered config, mounted read-only rather than copied:
       # one file keeps the bundle install and this profile from drifting apart.
@@ -102,6 +109,60 @@ services:
       start_period: 20s
     profiles: [storage]
 
+  garage-preflight:
+    # One-shot gate for `--profile storage`, started by the same env file as garage.
+    # Garage's image has no shell, so the check runs beside it in busybox: every one
+    # of the five GARAGE_* values must be present and in the format the manifest's
+    # generators produce (bundles/garage/manifest.json → the generate rules in
+    # servers/gateway/bundle-env-secrets.js):
+    #   hex32          → 64 hex characters (GARAGE_RPC_SECRET, GARAGE_DEFAULT_SECRET_KEY)
+    #   garage_key_id  → "GK" + 24 hex characters (GARAGE_DEFAULT_ACCESS_KEY)
+    #   secret         → 43 base64url characters (GARAGE_ADMIN_TOKEN, GARAGE_METRICS_TOKEN)
+    # Garage accepts any string as a token, so for those two a long random string is
+    # enough (the documented `openssl rand -hex 32` gives 64 hex, which also passes).
+    # Anything blank or not in format stops the profile here — exit 78 (EX_CONFIG) and
+    # one line on stderr naming the variable — and `garage` never starts, because it
+    # depends on this service completing successfully.
+    # Every `$` in the script is written `$$`: Compose turns that into a literal `$` and
+    # leaves the shell to expand it.
+    image: busybox:1.38.0
+    env_file:
+      - path: .env.garage
+        required: true
+    command:
+      - /bin/sh
+      - -c
+      - |
+        fail() {
+          echo "garage-preflight: $$1 is empty or malformed - fix it in .env.garage (formats in .env.garage.example)" >&2
+          exit 78
+        }
+        hex32() {  # name value: 64 hex characters
+          v=$$2
+          [ -n "$$v" ] || fail "$$1"
+          [ "$${#v}" -eq 64 ] || fail "$$1"
+          case "$$v" in *[!0-9a-fA-F]*) fail "$$1" ;; esac
+        }
+        key_id() {  # name value: GK + 24 hex characters
+          v=$$2
+          [ -n "$$v" ] || fail "$$1"
+          [ "$${#v}" -eq 26 ] || fail "$$1"
+          case "$$v" in GK*) ;; *) fail "$$1" ;; esac
+          case "$${v#GK}" in *[!0-9a-fA-F]*) fail "$$1" ;; esac
+        }
+        long_token() {  # name value: a long random string
+          v=$$2
+          [ "$${#v}" -ge 32 ] || fail "$$1"
+        }
+        hex32 GARAGE_RPC_SECRET "$$GARAGE_RPC_SECRET"
+        hex32 GARAGE_DEFAULT_SECRET_KEY "$$GARAGE_DEFAULT_SECRET_KEY"
+        key_id GARAGE_DEFAULT_ACCESS_KEY "$$GARAGE_DEFAULT_ACCESS_KEY"
+        long_token GARAGE_ADMIN_TOKEN "$$GARAGE_ADMIN_TOKEN"
+        long_token GARAGE_METRICS_TOKEN "$$GARAGE_METRICS_TOKEN"
+        echo "garage-preflight: .env.garage holds all five GARAGE_* values"
+    restart: "no"
+    profiles: [storage]
+
   minio:
     # LEGACY — for existing deployments only. MinIO's public images are no longer published
     # (Docker Hub and Quay refuse anonymous pulls as of 2026-11-05), so a fresh
@@ -110,14 +171,33 @@ services:
     # settings in .env; the same minio-data volume and image pin are kept, so an
     # existing volume is read as-is with no data change.
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # The pinned image's entrypoint is /usr/bin/docker-entrypoint.sh and its cmd is
+    # `minio`; this service's `command:` overrides the cmd. A blank password would make
+    # MinIO fall back to its published minioadmin:minioadmin credentials, so the
+    # entrypoint is replaced with a /bin/sh guard that refuses a blank password, the
+    # default one, or anything shorter than 8 characters (exit 78, one line on stderr)
+    # and otherwise execs the real entrypoint with `"$@"` — the command below. Every
+    # `$` is written `$$` (Compose turns it into a literal `$`), and `--` is the
+    # placeholder that becomes $0, so `$@` holds exactly the command arguments.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -z "$$MINIO_ROOT_PASSWORD" ] || [ "$$MINIO_ROOT_PASSWORD" = minioadmin ] || [ "$${#MINIO_ROOT_PASSWORD}" -lt 8 ]; then
+          echo "minio: MINIO_ROOT_PASSWORD is blank, the default minioadmin, or shorter than 8 characters - set a real one in .env (legacy MinIO section of .env.example)" >&2
+          exit 78
+        fi
+        exec /usr/bin/docker-entrypoint.sh "$$@"
+      - --
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crowadmin}
       # Required — set it in .env; see .env.example (legacy MinIO section). The
       # empty-default `:-` form for the same reason as garage: an off profile is still
       # interpolated, and a required `:?` reference would also demand it from a
-      # `--profile cloud --profile storage` run. Blank stops the MinIO container at
-      # start (it needs a root password), which is the only profile that reads it.
+      # `--profile cloud --profile storage` run. A blank value stops the MinIO
+      # container at start through the entrypoint guard above — this is the only
+      # profile that reads it.
       MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-}"
     volumes:
       - minio-data:/data

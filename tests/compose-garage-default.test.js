@@ -15,6 +15,13 @@
  *    token and RPC secret are cluster credentials: the same rule the File Storage
  *    (Garage) extension follows ("the gateway gets S3_* only", tests/garage-bundle.test.js).
  *    No service interpolates `${GARAGE_…}`, so no Garage secret can arrive through `.env`;
+ *    the only other reader is the one-shot `garage-preflight` container, which validates
+ *    `.env.garage` and exits (it holds no S3 credentials and runs nothing);
+ *  - **a blank required secret stops the container that needs it.** Garage's image has
+ *    no shell, so `garage-preflight` (busybox, same env file) checks all five GARAGE_*
+ *    values and exits 78, and `garage` waits for it (service_completed_successfully).
+ *    MinIO's entrypoint is replaced with a /bin/sh guard that refuses a blank, default
+ *    (`minioadmin`) or too-short root password before exec'ing the real entrypoint;
  *  - the compose hardcodes no credentials (never a value, never a `${VAR:?}` that an
  *    unrelated profile would have to satisfy) and Garage's own key pair is the same pair
  *    the gateway gets as S3_ACCESS_KEY / S3_SECRET_KEY;
@@ -26,8 +33,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { rmScratch } from "./helpers/safe-rm.js";
 import { scanCompose } from "../scripts/check-port-allocation.js";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -98,6 +108,53 @@ const profilesOf = (block) => {
   return m[1].split(",").map((s) => s.trim()).filter(Boolean);
 };
 
+/**
+ * The items of a block-sequence field (`entrypoint:` / `command:`) in a service body,
+ * exactly as the compose file writes them: a `- item` line is that string, a `- |`
+ * block scalar is its content (dedented, trailing newline kept).
+ */
+function sequenceField(block, key) {
+  const lines = block.split("\n");
+  const start = lines.findIndex((l) => new RegExp(`^(\\s*)${key}:\\s*$`).test(l));
+  assert.notEqual(start, -1, key + " is written as a block sequence");
+  const keyIndent = lines[start].length - lines[start].trimStart().length;
+  const items = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= keyIndent) break; // the sequence ended
+    const item = /^\s*-\s+(.*)$/.exec(line);
+    assert.ok(item, `${key}: expected a sequence item, got: ${line}`);
+    const itemIndent = indent;
+    if (!/^[|>]/.test(item[1])) { items.push(item[1].trim()); continue; }
+    const body = [];
+    let contentIndent = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const bodyLine = lines[j];
+      if (bodyLine.trim() === "") { body.push(""); continue; }
+      const bodyIndent = bodyLine.length - bodyLine.trimStart().length;
+      if (bodyIndent <= itemIndent) { i = j - 1; break; }
+      if (contentIndent < 0) contentIndent = bodyIndent;
+      body.push(bodyLine.slice(contentIndent));
+      i = j;
+    }
+    items.push(body.join("\n"));
+  }
+  return items;
+}
+
+/** Compose `$$` → `$`: what the container's shell actually receives. */
+const unescapeDollars = (text) => text.replace(/\$\$/g, "$");
+
+/** A script field run through /bin/sh, with `args` as `$@` (the `sh -c script -- args` form). */
+function runScript(script, args, env) {
+  return spawnSync("/bin/sh", ["-c", script, "--", ...args], {
+    env: { PATH: process.env.PATH || "/usr/bin:/bin", ...env },
+    encoding: "utf8",
+  });
+}
+
 /** The env file paths a service's `env_file:` declares — long form (`- path: x`) or short. */
 function envFilePaths(block) {
   const paths = [];
@@ -132,13 +189,16 @@ const GARAGE_SECRETS = [
 
 // ── profiles ──
 
-test("`--profile storage` starts Garage, and only Garage", () => {
+test("`--profile storage` starts Garage (and its one-shot preflight), and nothing else", () => {
   assert.deepEqual(profilesOf(garage()), ["storage"]);
+  const preflight = SERVICES.get("garage-preflight");
+  assert.ok(preflight, "garage-preflight is the only other storage-profile service");
+  assert.deepEqual(profilesOf(preflight), ["storage"]);
   assert.equal(/^\s*minio:\s*$/m.test(COMPOSE) && profilesOf(minio()).includes("storage"), false,
     "minio must not be under the storage profile any more");
-  // Garage is the ONLY service the storage profile starts.
+  // Garage and its preflight are the ONLY services the storage profile starts.
   for (const [name, block] of SERVICES) {
-    if (name === "garage") continue;
+    if (name === "garage" || name === "garage-preflight") continue;
     assert.ok(!profilesOf(block).includes("storage"), `${name} must not join the storage profile`);
   }
 });
@@ -156,6 +216,121 @@ test("the minio service says why it is legacy-only and points new installs at Ga
   assert.match(block, /existing deployments only/i);
   assert.match(block, /no longer published/i, "the reason the image cannot be pulled");
   assert.match(block, /--profile storage/, "says what new deployments use instead");
+});
+
+// ── a blank secret stops the service that needs it ──
+
+test("minio's entrypoint refuses a blank, default or too-short root password before the real one runs", () => {
+  const entrypoint = sequenceField(minio(), "entrypoint");
+  assert.deepEqual(entrypoint.slice(0, 2), ["/bin/sh", "-c"], "the guard is a /bin/sh -c script");
+  const raw = entrypoint[2];
+  // Every `$` is doubled: a lone `$` would be interpolated by Compose (from .env), not by
+  // the shell, and the guard would then check a value compose already substituted.
+  assert.doesNotMatch(raw, /(?<!\$)\$(?!\$)/, "every $ in the entrypoint script is written $$ ");
+  const script = unescapeDollars(raw).trimEnd();
+  assert.match(script, /if \[ -z "\$MINIO_ROOT_PASSWORD" \]/,
+    "blank is refused (MinIO would otherwise fall back to its default credentials)");
+  assert.match(script, /"\$MINIO_ROOT_PASSWORD" = minioadmin/, "the published minioadmin default is refused");
+  assert.match(script, /"\$\{#MINIO_ROOT_PASSWORD\}" -lt 8/, "anything shorter than 8 characters is refused");
+  assert.match(script, /exit 78/);
+  assert.match(script, /exec \/usr\/bin\/docker-entrypoint\.sh "\$@"\s*$/,
+    "otherwise the real entrypoint runs, with the command as its arguments");
+  assert.equal(entrypoint[3], "--", "the `--` placeholder: $0, so $@ holds the command args");
+  assert.match(minio(), /command:\s*server \/data --console-address ":9001"/,
+    "the command is unchanged, so it arrives as $@");
+
+  // The guard actually refuses, and a usable password reaches the entrypoint with the args.
+  const dir = mkdtempSync(join(tmpdir(), "crow-minio-entrypoint-"));
+  try {
+    const recorder = join(dir, "docker-entrypoint.sh");
+    writeFileSync(recorder, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    chmodSync(recorder, 0o755);
+    const args = ["server", "/data", "--console-address", ":9001"];
+    // The real target (/usr/bin/docker-entrypoint.sh) exists only inside the image: the
+    // copy that runs points at a recorder, everything else is the shipped script.
+    const runnable = script.replace("/usr/bin/docker-entrypoint.sh", recorder);
+    const runWith = (env) => runScript(runnable, args, env);
+    for (const [why, env] of [
+      ["blank", { MINIO_ROOT_PASSWORD: "" }],
+      ["unset", {}],
+      ["the minioadmin default", { MINIO_ROOT_PASSWORD: "minioadmin" }],
+      ["7 characters", { MINIO_ROOT_PASSWORD: "short12" }],
+    ]) {
+      const r = runWith(env);
+      assert.equal(r.status, 78, `${why}: exit 78 (EX_CONFIG)`);
+      assert.equal(r.stdout, "", `${why}: nothing on stdout`);
+      assert.equal(r.stderr.trimEnd().split("\n").length, 1, `${why}: exactly one line on stderr`);
+      assert.match(r.stderr, /MINIO_ROOT_PASSWORD/, `${why}: the line names the variable, never a value`);
+      assert.doesNotMatch(r.stderr, /minioadmin:/, `${why}: no credentials in the message`);
+    }
+    const ok = runWith({ MINIO_ROOT_PASSWORD: "correct-horse" });
+    assert.equal(ok.status, 0, "8+ characters, not the default: the guard gets out of the way");
+    assert.deepEqual(ok.stdout.trimEnd().split("\n"), args, "the command arrives as $@");
+  } finally {
+    rmScratch(dir);
+  }
+});
+
+test("garage-preflight: a one-shot busybox that validates .env.garage and names every GARAGE_* value", () => {
+  assert.ok(SERVICES.has("garage-preflight"), "the root compose has the preflight service");
+  const block = SERVICES.get("garage-preflight");
+  assert.equal(/^\s*image:\s*busybox:1\.38\.0\s*$/m.test(block), true, "busybox, pinned: the Garage image has no shell");
+  assert.deepEqual(envFilePaths(block), [".env.garage"], "the same env file as garage, nothing else");
+  assert.match(block, /^\s*env_file:\s*\n\s*-\s*path:\s*\.env\.garage\s*\n\s*required:\s*true\s*$/m,
+    "declared required: a missing .env.garage is an error");
+  assert.match(block, /^\s*restart:\s*"no"\s*$/m, "one shot: never restarted, so a failure stops the profile");
+
+  const command = sequenceField(block, "command");
+  assert.deepEqual(command.slice(0, 2), ["/bin/sh", "-c"]);
+  assert.doesNotMatch(command[2], /(?<!\$)\$(?!\$)/, "every $ in the script is written $$ ");
+  const script = unescapeDollars(command[2]).trimEnd();
+  for (const name of GARAGE_SECRETS) {
+    assert.match(script, new RegExp(`\\b${name}\\b`), `${name} is checked by name, so a failure names it`);
+  }
+  assert.match(script, /exit 78/);
+
+  // The formats the manifest's generate rules produce (servers/gateway/bundle-env-secrets.js):
+  // hex32 = 64 hex (RPC secret, S3 secret), garage_key_id = "GK" + 24 hex (S3 key ID),
+  // secret = 43 base64url (admin/metrics token — Garage takes any long random string, so
+  // the documented `openssl rand -hex 32` passes too). A blank one fails, naming it.
+  const good = {
+    GARAGE_RPC_SECRET: "a".repeat(64),
+    GARAGE_DEFAULT_SECRET_KEY: "b".repeat(64),
+    GARAGE_DEFAULT_ACCESS_KEY: `GK${"c".repeat(24)}`,
+    GARAGE_ADMIN_TOKEN: "d".repeat(43),
+    GARAGE_METRICS_TOKEN: "e".repeat(43),
+  };
+  const runWith = (env) => runScript(script, [], env);
+  const refused = (why, env, named) => {
+    const r = runWith(env);
+    assert.equal(r.status, 78, `${why}: exit 78 (EX_CONFIG)`);
+    assert.equal(r.stderr.trimEnd().split("\n").length, 1, `${why}: exactly one line on stderr`);
+    assert.match(r.stderr, new RegExp(`\\b${named}\\b`), `${why}: the line names ${named}`);
+    assert.ok(!r.stderr.includes(env[named] || "\u0000"), `${why}: never the value`);
+  };
+  const pass = runWith(good);
+  assert.equal(pass.status, 0, pass.stderr);
+  assert.equal(pass.stderr, "", "nothing on stderr when the file is complete");
+  for (const name of GARAGE_SECRETS) {
+    refused(`${name} blank`, { ...good, [name]: "" }, name);
+    refused(`${name} absent`, Object.fromEntries(Object.entries(good).filter(([k]) => k !== name)), name);
+  }
+  refused("RPC secret 63 hex", { ...good, GARAGE_RPC_SECRET: "a".repeat(63) }, "GARAGE_RPC_SECRET");
+  refused("RPC secret not hex", { ...good, GARAGE_RPC_SECRET: "z".repeat(64) }, "GARAGE_RPC_SECRET");
+  refused("S3 secret 63 hex", { ...good, GARAGE_DEFAULT_SECRET_KEY: "b".repeat(63) }, "GARAGE_DEFAULT_SECRET_KEY");
+  refused("key ID 23 hex", { ...good, GARAGE_DEFAULT_ACCESS_KEY: `GK${"c".repeat(23)}` }, "GARAGE_DEFAULT_ACCESS_KEY");
+  refused("key ID without GK", { ...good, GARAGE_DEFAULT_ACCESS_KEY: `XX${"c".repeat(24)}` }, "GARAGE_DEFAULT_ACCESS_KEY");
+  refused("key ID not hex", { ...good, GARAGE_DEFAULT_ACCESS_KEY: `GK${"z".repeat(24)}` }, "GARAGE_DEFAULT_ACCESS_KEY");
+  refused("too short a token", { ...good, GARAGE_ADMIN_TOKEN: "short" }, "GARAGE_ADMIN_TOKEN");
+  // The documented generator (openssl rand -hex 32) is a 64-hex token: accepted.
+  const hexToken = runWith({ ...good, GARAGE_ADMIN_TOKEN: "f".repeat(64), GARAGE_METRICS_TOKEN: "0".repeat(64) });
+  assert.equal(hexToken.status, 0, "a long random token of any shape passes");
+});
+
+test("garage waits for the preflight: depends_on service_completed_successfully", () => {
+  assert.match(garage(),
+    /^\s*depends_on:\s*\n\s*garage-preflight:\s*\n\s*condition:\s*service_completed_successfully\s*$/m,
+    "a failed preflight (exit 78) keeps Garage from starting at all");
 });
 
 // ── ports ──
@@ -190,14 +365,22 @@ test("garage reads its five secrets from .env.garage, and interpolates none of t
   }
 });
 
-test("no service except garage sees a GARAGE_* value: the gateway gets an S3 key, never the admin token", () => {
+test("no service except garage and its preflight sees a GARAGE_* value: the gateway gets an S3 key, never the admin token", () => {
   const gw = SERVICES.get("crow-gateway");
   assert.ok(gw, "the gateway service is still there");
   assert.deepEqual(envFilePaths(gw), [".env"], "the gateway loads .env, not Garage's file");
+  // The preflight reads the same file to VALIDATE it and exits; it never runs Garage and
+  // holds no S3 credentials. Every other service must not see a Garage value at all.
+  const garageReaders = new Set(["garage", "garage-preflight"]);
   for (const [name, block] of SERVICES) {
-    if (name === "garage") continue;
+    if (garageReaders.has(name)) continue;
     assert.ok(!envFilePaths(block).includes(".env.garage"), `${name} must not load .env.garage`);
     assert.doesNotMatch(codeLines(block), /GARAGE_/, `${name} must not reference a Garage secret`);
+  }
+  // No GARAGE_* value is interpolated from `.env` anywhere: a lone `$GARAGE_…` would be
+  // Compose interpolation (the value coming from .env); `$$GARAGE_…` is the shell's own.
+  for (const [name, block] of SERVICES) {
+    assert.doesNotMatch(codeLines(block), /(?<!\$)\$\{?GARAGE_/, `${name} must not interpolate a Garage secret`);
   }
 });
 
@@ -236,8 +419,9 @@ test("no service with a profiles list uses ${VAR:?} — Compose interpolates ina
   // profile was OFF: Compose interpolates every service in the file before it filters
   // by profile. So a required `${VAR:?}` on a profiled service demands the values of
   // every other profile as well. These services keep `${VAR:-}` and fail at container
-  // start instead (MinIO without a root password; Garage now reads its own .env.garage
-  // through env_file and refuses to start without an RPC secret).
+  // start instead, through a check that now exists: MinIO's entrypoint guard refuses a
+  // blank/default/short root password, and garage-preflight (which `garage` waits for)
+  // refuses a blank or malformed GARAGE_* value.
   // Comments are stripped first: prose may NAME the rejected form without using it.
   const code = (block) => block.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
   for (const [name, block] of SERVICES) {

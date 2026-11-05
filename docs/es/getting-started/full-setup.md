@@ -57,12 +57,12 @@ S3_REGION=us-east-1            # debe coincidir con s3_region en bundles/garage/
 STORAGE_QUOTA_MB=1024
 ```
 
-`.env.garage` — los secretos propios del contenedor Garage (los cinco son obligatorios). Formatos: el ID de clave es `GK` + 24 caracteres hex, el secreto S3 y el secreto RPC son 64 caracteres hex, y los tokens de administración y métricas son cualquier cadena aleatoria larga (64 hex vale):
+`.env.garage` — los secretos propios del contenedor Garage (los cinco son obligatorios). Formatos: el ID de clave es `GK` + 24 caracteres hex, el secreto S3 y el secreto RPC son 64 caracteres hex, y los tokens de administración y métricas son cualquier cadena aleatoria larga de al menos 32 caracteres (64 hex vale):
 
 ```bash
-GARAGE_RPC_SECRET=             # 64 hex — Garage no arranca sin él
-GARAGE_ADMIN_TOKEN=            # cualquier cadena aleatoria larga — control total
-GARAGE_METRICS_TOKEN=          # cualquier cadena aleatoria larga
+GARAGE_RPC_SECRET=             # 64 hex — el preflight rechaza uno en blanco o no hex
+GARAGE_ADMIN_TOKEN=            # una cadena aleatoria larga (32+ caracteres) — control total
+GARAGE_METRICS_TOKEN=          # una cadena aleatoria larga (32+ caracteres)
 GARAGE_DEFAULT_ACCESS_KEY=     # ID de clave "GK" + 24 hex — cópialo a .env como S3_ACCESS_KEY
 GARAGE_DEFAULT_SECRET_KEY=     # 64 hex — cópialo a .env como S3_SECRET_KEY
 ```
@@ -72,14 +72,14 @@ Genera los cinco valores y pega cada línea en `.env.garage` — Compose no expa
 ```bash
 echo "GARAGE_DEFAULT_ACCESS_KEY=GK$(openssl rand -hex 12)"   # ID de clave: "GK" + 24 hex — cópialo también como S3_ACCESS_KEY
 echo "GARAGE_DEFAULT_SECRET_KEY=$(openssl rand -hex 32)"     # 64 hex — cópialo también como S3_SECRET_KEY
-echo "GARAGE_RPC_SECRET=$(openssl rand -hex 32)"             # 64 hex — Garage no arranca sin él
+echo "GARAGE_RPC_SECRET=$(openssl rand -hex 32)"             # 64 hex — el preflight rechaza uno en blanco o no hex
 echo "GARAGE_ADMIN_TOKEN=$(openssl rand -hex 32)"
 echo "GARAGE_METRICS_TOKEN=$(openssl rand -hex 32)"
 ```
 
-Por qué la separación: el gateway habla con Garage por S3 y no necesita nada más que el par de claves, así que nunca debe guardar el token de administración del clúster ni el secreto RPC — si se filtrara el entorno del gateway, entregaría todo el clúster de almacenamiento. `.env.garage` lo lee únicamente el contenedor de Garage (y está en `.gitignore`, igual que `.env`).
+Por qué la separación: el gateway habla con Garage por S3 y no necesita nada más que el par de claves, así que nunca debe guardar el token de administración del clúster ni el secreto RPC — si se filtrara el entorno del gateway, entregaría todo el clúster de almacenamiento. `.env.garage` lo lee únicamente el contenedor de Garage y su comprobación de un solo uso `garage-preflight` (y está en `.gitignore`, igual que `.env`).
 
-El puerto va dentro de `S3_ENDPOINT` (no existe `S3_PORT`), y `S3_ACCESS_KEY` / `S3_SECRET_KEY` del gateway deben ser el mismo par que `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage crea esa clave en el primer arranque. Si dejas un valor `GARAGE_*` en blanco, el contenedor de Garage se detiene al arrancar (no funciona sin un secreto RPC), mientras que el gateway sí arranca. La configuración del blog se gestiona vía la herramienta MCP `crow_blog_settings` o el Crow's Nest — no se necesitan variables de entorno.
+El puerto va dentro de `S3_ENDPOINT` (no existe `S3_PORT`), y `S3_ACCESS_KEY` / `S3_SECRET_KEY` del gateway deben ser el mismo par que `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage crea esa clave en el primer arranque. Si dejas un valor `GARAGE_*` en blanco (o fuera del formato de arriba), el perfil de almacenamiento se detiene antes de que Garage arranque: el servicio de un solo uso `garage-preflight` revisa los cinco, sale con 78 y una línea que nombra la variable mala, y `garage` espera por él — mientras que el gateway sí arranca. La configuración del blog se gestiona vía la herramienta MCP `crow_blog_settings` o el Crow's Nest — no se necesitan variables de entorno.
 
 ::: warning MinIO ya no es el valor por defecto — y su imagen ya no se publica
 Garage pasó a ser el almacenamiento de objetos por defecto el 2026-11-05. **Las imágenes públicas de MinIO ya no están:** Docker Hub y Quay rechazan las descargas anónimas desde esa fecha, así que una instalación nueva ya no puede descargar MinIO. MinIO quedó detrás del perfil `minio-legacy`.
@@ -90,7 +90,7 @@ Garage pasó a ser el almacenamiento de objetos por defecto el 2026-11-05. **Las
 docker compose --profile cloud --profile minio-legacy up -d
 ```
 
-Conserva tus ajustes `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — los nombres antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*` — y puedes seguir ahí todo el tiempo que quieras.
+Conserva tus ajustes `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — los nombres antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*` — y puedes seguir ahí todo el tiempo que quieras. Un `MINIO_ROOT_PASSWORD` en blanco, el valor por defecto `minioadmin`, o cualquier cosa de menos de 8 caracteres detiene el contenedor de MinIO al arrancar: el entrypoint del servicio lo rechaza (salida 78) en vez de dejar que MinIO caiga en sus credenciales públicas por defecto.
 
 **Mover datos a Garage no está automatizado.** Crow no tiene ningún comando de exportación o importación de MinIO a Garage: una instalación con `--profile storage` arranca con los volúmenes `garage-meta` / `garage-data` vacíos, y los archivos guardados no se trasladan. Por eso las instalaciones existentes pueden seguir usando `--profile minio-legacy` como su almacenamiento; las instalaciones nuevas deben usar `--profile storage` y los ajustes `S3_*` de arriba.
 :::

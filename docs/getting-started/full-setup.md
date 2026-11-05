@@ -57,12 +57,12 @@ S3_REGION=us-east-1            # must match s3_region in bundles/garage/garage.t
 STORAGE_QUOTA_MB=1024
 ```
 
-`.env.garage` — the Garage container's own secrets (all five required). Formats: the key ID is `GK` + 24 hex characters, the S3 secret and the RPC secret are 64 hex characters, the admin/metrics tokens are any long random string (64 hex is fine):
+`.env.garage` — the Garage container's own secrets (all five required). Formats: the key ID is `GK` + 24 hex characters, the S3 secret and the RPC secret are 64 hex characters, the admin/metrics tokens are any long random string of at least 32 characters (64 hex is fine):
 
 ```bash
-GARAGE_RPC_SECRET=             # 64 hex — Garage will not start without it
-GARAGE_ADMIN_TOKEN=            # any long random string — full admin control
-GARAGE_METRICS_TOKEN=          # any long random string
+GARAGE_RPC_SECRET=             # 64 hex — the preflight refuses a blank or non-hex one
+GARAGE_ADMIN_TOKEN=            # a long random string (32+ chars) — full admin control
+GARAGE_METRICS_TOKEN=          # a long random string (32+ chars)
 GARAGE_DEFAULT_ACCESS_KEY=     # key ID "GK" + 24 hex — copy to .env as S3_ACCESS_KEY
 GARAGE_DEFAULT_SECRET_KEY=     # 64 hex — copy to .env as S3_SECRET_KEY
 ```
@@ -72,14 +72,14 @@ Generate the five values and paste each line into `.env.garage` — Compose does
 ```bash
 echo "GARAGE_DEFAULT_ACCESS_KEY=GK$(openssl rand -hex 12)"   # key ID: "GK" + 24 hex — copy as S3_ACCESS_KEY too
 echo "GARAGE_DEFAULT_SECRET_KEY=$(openssl rand -hex 32)"     # 64 hex — copy as S3_SECRET_KEY too
-echo "GARAGE_RPC_SECRET=$(openssl rand -hex 32)"             # 64 hex — Garage will not start without it
+echo "GARAGE_RPC_SECRET=$(openssl rand -hex 32)"             # 64 hex — the preflight refuses a blank or non-hex one
 echo "GARAGE_ADMIN_TOKEN=$(openssl rand -hex 32)"
 echo "GARAGE_METRICS_TOKEN=$(openssl rand -hex 32)"
 ```
 
-Why the split: the gateway talks to Garage over S3 and needs nothing but the key pair, so it must never hold the cluster admin token or the RPC secret — a leaked gateway env would otherwise hand over the whole storage cluster. `.env.garage` is read by the garage container alone (and listed in `.gitignore`, like `.env`).
+Why the split: the gateway talks to Garage over S3 and needs nothing but the key pair, so it must never hold the cluster admin token or the RPC secret — a leaked gateway env would otherwise hand over the whole storage cluster. `.env.garage` is read by the garage container and its one-shot `garage-preflight` check alone (and listed in `.gitignore`, like `.env`).
 
-The port belongs to `S3_ENDPOINT` (there is no `S3_PORT`), and the gateway's `S3_ACCESS_KEY` / `S3_SECRET_KEY` must be the same pair as `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage creates that key on first start. Leave a `GARAGE_*` value blank and the Garage container stops on start (it refuses to run without an RPC secret), while the gateway itself still boots. Blog settings are managed via the `crow_blog_settings` MCP tool or the Crow's Nest — no env vars needed.
+The port belongs to `S3_ENDPOINT` (there is no `S3_PORT`), and the gateway's `S3_ACCESS_KEY` / `S3_SECRET_KEY` must be the same pair as `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage creates that key on first start. Leave a `GARAGE_*` value blank (or not in the format above) and the storage profile stops before Garage starts: the one-shot `garage-preflight` service checks all five, exits 78 with one line naming the bad variable, and `garage` waits for it — while the gateway itself still boots. Blog settings are managed via the `crow_blog_settings` MCP tool or the Crow's Nest — no env vars needed.
 
 ::: warning MinIO is no longer the default — and its image is no longer published
 Garage became the default object storage on 2026-11-05. **MinIO's public images are gone:** Docker Hub and Quay refuse anonymous pulls as of that date, so a new deployment cannot download MinIO any more. MinIO now lives behind the `minio-legacy` compose profile.
@@ -90,7 +90,7 @@ Garage became the default object storage on 2026-11-05. **MinIO's public images 
 docker compose --profile cloud --profile minio-legacy up -d
 ```
 
-Keep your existing `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` settings — the older `MINIO_*` names are still read when no `S3_*` setting is present — and stay there as long as you like.
+Keep your existing `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` settings — the older `MINIO_*` names are still read when no `S3_*` setting is present — and stay there as long as you like. A blank `MINIO_ROOT_PASSWORD`, the default `minioadmin`, or anything shorter than 8 characters stops the MinIO container at start: the service's entrypoint refuses it (exit 78) instead of letting MinIO fall back to its published default credentials.
 
 **Moving data to Garage is not automated.** Crow has no MinIO-to-Garage export or import command: a `--profile storage` deployment starts with empty `garage-meta` / `garage-data` volumes, and stored files are not carried over. Existing deployments can therefore keep running `--profile minio-legacy` as their storage; new deployments should use `--profile storage` and the `S3_*` settings above.
 :::
