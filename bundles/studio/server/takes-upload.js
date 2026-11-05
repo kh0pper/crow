@@ -89,7 +89,7 @@
  *           Task 4). It belongs to the song's library, is filed under
  *           `${prefix}studio/<song_id>/library/<library_id>.<ext>` with the
  *           reference type `studio_library`, and `finish` issues `library.add`
- *           as Studio itself (`cmd_id` `<upload_id>:library`). A bank is not
+ *           as Studio itself (`cmd_id` `<upload_id>:library:<begin nonce>`). A bank is not
  *           PCM: its bytes are the file itself, stored exactly as they arrived
  *           — no WAV header, no rate, channels or frames. The server checks
  *           only its size and its magic bytes (`RIFF`…`sfbk` over the first
@@ -1136,6 +1136,10 @@ export function createTakeUploads({
       meta.file_name = bank.file_name;
       meta.ext = bank.ext;
       meta.bytes = bank.bytes;
+      // One nonce per begin, carried in the bank's `cmd_id`: a retried finish of
+      // this begin replays its own step, but the same upload id begun again
+      // after a remove is a new step, not a replay of the add that was undone.
+      meta.attempt = randomUUID();
     } else {
       meta.rate = sampleRate;
       meta.channels = channelCount;
@@ -1552,6 +1556,17 @@ export function createTakeUploads({
         // cleared or re-filled since keeps what they chose. Only an attempt
         // that stopped between `sample.add` and its own record has none, and it
         // lands the sample now and records that.
+        // A bank whose finish stopped after `library.add` but before it was
+        // recorded settles now, so its staged copy (up to 512 MB) is dropped
+        // instead of waiting for the stale sweep.
+        if (kind === "font" && meta.finished !== true) {
+          return await completeFinish(takeId, meta, held, {
+            kind,
+            frames: 0,
+            key: typeof meta.storage_key === "string" ? meta.storage_key : String(held.storage_key ?? ""),
+            chunks: hashes.length,
+          });
+        }
         if (kind !== "sample") return finishResult(kind, held);
         if (isPadAssignRecorded(meta)) return finishResult(kind, held, meta.pad_assign);
         const record = held;
@@ -1718,12 +1733,12 @@ export function createTakeUploads({
 
       // `internal: true`: only the gateway's own finish route may issue
       // `take.add`/`sample.add`/`library.add`, and no caller gets to name the
-      // storage key. A bank's command carries the entry's own id in its
-      // `cmd_id`, so a finish that follows a remove is a new step rather than a
-      // replay of the add that was undone.
+      // storage key. A bank's command carries its begin's nonce in its
+      // `cmd_id`, so a finish of a re-begun upload (after a remove) is a new
+      // step rather than a replay of the add that was undone.
       const applied = await hub.runCommand({
         song_id: meta.song_id,
-        cmd_id: isBank ? `${takeId}:library` : takeId,
+        cmd_id: isBank ? `${takeId}:library:${String(meta.attempt ?? "")}` : takeId,
         command: isBank ? "library.add" : kind === "sample" ? "sample.add" : "take.add",
         args: isBank
           ? { entry }

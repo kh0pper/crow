@@ -1564,6 +1564,49 @@ test("a bank chunk past the declared size is refused", async () => {
   assert.equal(existsSync(join(staging, id, "000001.pcm")), false);
 });
 
+test("a bank whose chunks fall short of its declared size is refused at finish", async () => {
+  const { uploads, storage, hub } = setup();
+  const id = randomUUID();
+  const file = bankBytes(3000);
+  await uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) }));
+  const hashes = await stageChunks(uploads, id, [file.subarray(0, 2000)]);
+  await assert.rejects(() => uploads.finish(id, { chunk_hashes: hashes }), (error) => {
+    assert.equal(error.status, 409);
+    return true;
+  });
+  assert.equal(storage.uploads.length, 0, "nothing reached storage");
+  assert.equal(hub.commands.length, 0, "no library entry was added");
+});
+
+test("a bank upload is refused for a caller who may not write in the project", async () => {
+  const { uploads, staging } = setup({ acl: { deny: true } });
+  const file = bankBytes(64);
+  await assert.rejects(() => uploads.begin(randomUUID(), bankRequest({ bytes: file.length, head: bankHead(file) })), (error) => {
+    assert.equal(error.status, 403);
+    return true;
+  });
+  assert.deepEqual(readdirSync(staging), []);
+});
+
+test("the same bank upload begun again after a remove is a new step", async () => {
+  const { uploads, hub } = setup();
+  const id = randomUUID();
+  const file = bankBytes(64);
+  await uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) }));
+  let hashes = await stageChunks(uploads, id, [file]);
+  await uploads.finish(id, { chunk_hashes: hashes });
+  const first = hub.commands[0].cmd_id;
+
+  // The operator removes the bank; the page sends the same file under the same id.
+  delete hub.state.library[`lib-${id}`];
+  await uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) }));
+  hashes = await stageChunks(uploads, id, [file]);
+  await uploads.finish(id, { chunk_hashes: hashes });
+  assert.equal(hub.commands.length, 2);
+  assert.notEqual(hub.commands[1].cmd_id, first, "not a replay of the undone add");
+  assert.ok(hub.state.library[`lib-${id}`], "the bank is back in the song");
+});
+
 test("a finished bank upload adds one library entry", async () => {
   const { uploads, storage, db, acl, hub, staging } = setup();
   const id = randomUUID();
@@ -1582,7 +1625,7 @@ test("a finished bank upload adds one library entry", async () => {
   const command = hub.commands[0];
   assert.equal(command.command, "library.add");
   assert.equal(command.internal, true);
-  assert.equal(command.cmd_id, `${id}:library`);
+  assert.match(command.cmd_id, new RegExp(`^${id}:library:[0-9a-f-]{36}$`));
   assert.equal(command.song_id, SONG);
   assert.deepEqual(command.author, AUTHOR);
   assert.deepEqual(command.args.entry, {
