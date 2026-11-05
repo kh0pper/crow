@@ -9,7 +9,7 @@
 
 services:
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.14
     ports:
       - "127.0.0.1:11434:11434"
     volumes:

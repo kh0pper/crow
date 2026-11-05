@@ -72,7 +72,7 @@ Si prefieres una configuración manual de Docker en lugar del instalador de bund
 ```yaml
 services:
   vikunja:
-    image: vikunja/vikunja:latest
+    image: vikunja/vikunja:2.8.0
     container_name: crow-vikunja
     ports:
       - "3456:3456"

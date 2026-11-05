@@ -72,7 +72,7 @@ If you prefer manual Docker setup instead of the bundle installer:
 ```yaml
 services:
   shiori:
-    image: ghcr.io/go-shiori/shiori:latest
+    image: ghcr.io/go-shiori/shiori:v1.8.0
     container_name: crow-shiori
     ports:
       - "8086:8080"

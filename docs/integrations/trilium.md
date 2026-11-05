@@ -97,7 +97,7 @@ If you prefer manual Docker setup:
 ```yaml
 services:
   trilium:
-    image: triliumnext/notes:latest
+    image: triliumnext/trilium:v0.106.0
     container_name: crow-trilium
     ports:
       - "8080:8080"

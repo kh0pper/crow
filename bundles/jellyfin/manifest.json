@@ -1,7 +1,7 @@
 {
   "id": "jellyfin",
   "name": "Jellyfin",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
   "type": "bundle",
   "author": "Crow",

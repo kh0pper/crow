@@ -21,6 +21,7 @@ import { launcherPin } from "../../shared/resolve-command.js";
 import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
+import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
@@ -2732,6 +2733,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           appendLog(job, "Docker images pulled");
         } catch (err) {
           appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
+          // Log-only was invisible to an owner who never opens the job log (audit
+          // N1c-7): one bell per bundle per 24 h, fixed text, never the output.
+          await reportImagePullFailure({ bundleId, bundleName: manifest?.name });
         }
 
         // Start containers (add --build if compose file has build directives)

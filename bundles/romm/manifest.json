@@ -2,7 +2,7 @@
   "id": "romm",
   "name": "RoMM",
   "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "bundle",
   "author": "Crow",
   "category": "gaming",

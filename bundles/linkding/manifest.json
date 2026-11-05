@@ -1,7 +1,7 @@
 {
   "id": "linkding",
   "name": "Linkding",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
   "type": "bundle",
   "author": "Crow",

@@ -82,7 +82,7 @@ Si prefieres una configuración manual de Docker en lugar del instalador de bund
 ```yaml
 services:
   paperless:
-    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.4.2
     container_name: crow-paperless
     ports:
       - "8000:8000"

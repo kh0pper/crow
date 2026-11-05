@@ -1,7 +1,7 @@
 {
   "id": "audiobookshelf",
   "name": "Audiobookshelf",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
   "type": "bundle",
   "author": "Crow",

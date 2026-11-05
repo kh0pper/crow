@@ -90,7 +90,7 @@ Si prefieres una configuración manual de Docker en lugar del instalador de bund
 ```yaml
 services:
   wallabag:
-    image: wallabag/wallabag:latest
+    image: wallabag/wallabag:2.6.15.1
     container_name: crow-wallabag
     ports:
       - "8084:80"

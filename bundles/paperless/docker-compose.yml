@@ -1,6 +1,6 @@
 services:
   paperless:
-    image: paperlessngx/paperless-ngx:latest
+    image: paperlessngx/paperless-ngx:3.4.2
     container_name: crow-paperless
     ports:
       - "127.0.0.1:8000:8000"

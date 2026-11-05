@@ -1,6 +1,6 @@
 services:
   navidrome:
-    image: deluan/navidrome:latest
+    image: deluan/navidrome:0.64.2
     container_name: crow-navidrome
     ports:
       - "127.0.0.1:4533:4533"

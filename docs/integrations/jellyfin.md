@@ -83,7 +83,7 @@ If you prefer manual Docker setup instead of the bundle installer:
 ```yaml
 services:
   jellyfin:
-    image: jellyfin/jellyfin:latest
+    image: jellyfin/jellyfin:12.4.20261026-211555
     container_name: crow-jellyfin
     ports:
       - "8096:8096"

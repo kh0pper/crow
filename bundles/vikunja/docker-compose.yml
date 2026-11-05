@@ -1,6 +1,6 @@
 services:
   vikunja:
-    image: vikunja/vikunja:latest
+    image: vikunja/vikunja:2.8.0
     container_name: crow-vikunja
     ports:
       - "127.0.0.1:3456:3456"

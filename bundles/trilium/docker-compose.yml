@@ -1,6 +1,6 @@
 services:
   trilium:
-    image: triliumnext/notes:latest
+    image: triliumnext/trilium:v0.106.0
     container_name: crow-trilium
     ports:
       - "127.0.0.1:8088:8080"

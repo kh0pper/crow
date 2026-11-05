@@ -1,7 +1,7 @@
 {
   "id": "tailscale",
   "name": "Tailscale",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "privileged": true,
   "install_consent_messages": {
     "en": "The Tailscale container joins this machine to your tailnet. It uses host networking, the NET_ADMIN capability and the /dev/net/tun device, so it creates a network interface and changes this machine's routing and firewall rules. Do not install it on a machine that already runs Tailscale.",

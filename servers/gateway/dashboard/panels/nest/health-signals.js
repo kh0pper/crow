@@ -57,6 +57,15 @@
  *               Docker unreadable → info "unknown". A snapshot that exists but
  *               cannot be read stays "unknown" (info), never ok-looking.
  *               Lists the shapes it could not inspect (M4).
+ *   bundleImages — how old the images the INSTALLED bundles run are (audit
+ *               N1c-7). A bounded `docker ps` maps containers to
+ *               <CROW_HOME>/bundles/<id> (the compose working-dir label), one
+ *               `docker image inspect` reads their created times, and an image
+ *               older than BUNDLE_IMAGE_STALE_DAYS gets ONE info line per bundle
+ *               ("<bundle>: image is N days old") linking to that bundle's page.
+ *               Never a warn — an aged image is information, not a failure.
+ *               Docker unavailable, a timed-out exec or a ragged inspect answer →
+ *               "unknown" (info), never ok. No card when nothing is installed.
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -99,6 +108,13 @@ import {
   PUBLISHED_PORTS_ALLOWLIST_KEY,
   DOCKER_FLOOR,
 } from "./published-ports.js";
+import {
+  BUNDLE_PS_FORMAT,
+  bundleImageAges,
+  parseImageCreated,
+  parseRunningBundleImages,
+  readInstalledBundleIds,
+} from "./bundle-images.js";
 import { unexportedCount } from "../../../keychain/reminder.js";
 import { loadKeychainKey } from "../../../keychain/key.js";
 import {
@@ -1823,6 +1839,101 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
   return issues.length ? [card, ...issues] : card;
 }
 
+// ─── Bundle images (audit N1c-7) ─────────────────────────────────────────────
+// Every bundle now pins its image tag, so an installed bundle keeps the release
+// it installed with until the owner reinstalls — an image can age for years with
+// no card saying so. Two bounded exec calls answer it: a `docker ps` (no root)
+// that maps running containers to installed bundle directories, then ONE
+// `docker image inspect` for the distinct images. Both carry a hard timeout, so
+// a wedged daemon can never hold the nest render.
+//
+// INFO ONLY, on purpose: an old image is a fact for the owner to judge (their
+// NAS image being 100 days old may be exactly what they want). Only a signal
+// that cannot read Docker says "unknown" — and that is info too, never ok.
+const BUNDLE_IMAGES_TIMEOUT_MS = 5000;
+
+const defaultBundleContainersReader = () => execFileSync("docker", ["ps", "--format", BUNDLE_PS_FORMAT], {
+  encoding: "utf-8", timeout: BUNDLE_IMAGES_TIMEOUT_MS,
+});
+
+// One call for every image: an inspect per image would be one timeout each on a
+// host where Docker is hung.
+const defaultBundleImageCreatedReader = (images) => execFileSync("docker", [
+  "image", "inspect", "--format", "{{.Created}}", ...images,
+], { encoding: "utf-8", timeout: BUNDLE_IMAGES_TIMEOUT_MS });
+
+let _bundleContainersReader = defaultBundleContainersReader;
+let _bundleImageCreatedReader = defaultBundleImageCreatedReader;
+let _installedBundleIdsReader = () => readInstalledBundleIds();
+
+/** Test seams: any subset of { containers, created, installed }; omitted ones stay as they are. */
+export function _setBundleImageReaders({ containers, created, installed } = {}) {
+  if (containers !== undefined) _bundleContainersReader = containers || defaultBundleContainersReader;
+  if (created !== undefined) _bundleImageCreatedReader = created || defaultBundleImageCreatedReader;
+  if (installed !== undefined) _installedBundleIdsReader = installed || (() => readInstalledBundleIds());
+}
+
+async function bundleImagesSignal(lang, nowFn) {
+  const label = t("signals.bundleImages.label", lang);
+  const action = {
+    actionLabel: t("signals.bundleImages.action", lang),
+    actionHref: "/dashboard/extensions",
+  };
+  const unknown = (reason) => ({
+    id: "bundleImages", severity: "info", state: "info", label,
+    value: t("signals.bundleImages.unknown", lang),
+    issueLabel: fill(t("signals.bundleImages.unknownWhy", lang), { reason }),
+    ...action,
+  });
+
+  let installedIds = [];
+  try { installedIds = _installedBundleIdsReader() || []; } catch { installedIds = []; }
+  if (installedIds.length === 0) return null; // nothing installed → nothing to age
+
+  let containersOut;
+  try {
+    containersOut = _bundleContainersReader();
+  } catch {
+    return unknown(t("signals.bundleImages.reasonDocker", lang));
+  }
+
+  const images = parseRunningBundleImages(containersOut, { installedIds });
+  if (images.length === 0) {
+    // Installed, but no bundle container is running: nothing is aged by an image.
+    return { id: "bundleImages", severity: null, state: "ok", label, value: t("signals.bundleImages.ok", lang) };
+  }
+
+  const names = [...new Set(images.map((i) => i.image))];
+  let created;
+  try {
+    created = parseImageCreated(_bundleImageCreatedReader(names), names);
+  } catch {
+    return unknown(t("signals.bundleImages.reasonInspect", lang));
+  }
+  // No creation time for ANY image is a failed read, not a young image.
+  if (created.size === 0) return unknown(t("signals.bundleImages.reasonInspect", lang));
+
+  const { old } = bundleImageAges({ images, created, nowMs: nowFn() });
+  if (old.length === 0) {
+    return { id: "bundleImages", severity: null, state: "ok", label, value: t("signals.bundleImages.ok", lang) };
+  }
+
+  // Card for the strip + one issue per bundle, so each line carries its OWN link
+  // to that bundle's page (the Extensions search box) and its own dedupe id.
+  return [
+    {
+      id: "bundleImages", severity: "info", state: "info", cardOnly: true, label,
+      value: fill(t("signals.bundleImages.count", lang), { n: old.length }),
+    },
+    ...old.map((o) => ({
+      id: `bundleImages:${o.bundleId}`, severity: "info", state: "info", issueOnly: true, label,
+      issueLabel: fill(t("signals.bundleImages.old", lang), { name: o.bundleId, days: o.days }),
+      actionLabel: action.actionLabel,
+      actionHref: `/dashboard/extensions?q=${encodeURIComponent(o.bundleId)}`,
+    })),
+  ];
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -1872,6 +1983,7 @@ export async function collectHealthSignals(db, opts = {}) {
     // instead of escaping the array literal (review M8).
     Promise.resolve().then(() => reservationSignal(lang, nowFn)),
     Promise.resolve().then(() => publishedPortsSignal(db, lang, nowFn, opts.publishedPorts || {})),
+    Promise.resolve().then(() => bundleImagesSignal(lang, nowFn)),
     artifactNodeSignal(lang),
     import("../../../satellites/nest-signals.js").then((m) => m.satellitesSignal(db, lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({

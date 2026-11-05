@@ -1,7 +1,7 @@
 {
   "id": "bookstack",
   "name": "BookStack",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
   "type": "bundle",
   "author": "Crow",

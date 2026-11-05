@@ -44,7 +44,7 @@ You can install **both**. They coexist under the same "Cameras" category in the 
 
 Or via **Extensions** in the Crow's Nest → find motionEye under **Cameras**.
 
-Uses the official `ghcr.io/motioneye-project/motioneye:latest` multi-arch image (amd64, arm64, armhf, riscv64), version 0.43.1 as of this writing.
+Uses the official `ghcr.io/motioneye-project/motioneye:0.44.0` multi-arch image (amd64, arm64, armhf, riscv64), version 0.44.0 as of this writing.
 
 Exposes port `:8765` on loopback. The Nest iframe loads motionEye from that loopback address, so there's no public exposure of the camera UI.
 

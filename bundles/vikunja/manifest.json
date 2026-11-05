@@ -1,7 +1,7 @@
 {
   "id": "vikunja",
   "name": "Vikunja",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
   "type": "bundle",
   "author": "Crow",

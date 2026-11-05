@@ -1,6 +1,6 @@
 services:
   kavita:
-    image: jvmilazz0/kavita:latest
+    image: jvmilazz0/kavita:0.9.1
     container_name: crow-kavita
     ports:
       - "127.0.0.1:5000:5000"

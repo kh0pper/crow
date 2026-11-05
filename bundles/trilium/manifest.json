@@ -1,7 +1,7 @@
 {
   "id": "trilium",
   "name": "TriliumNext",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
   "type": "bundle",
   "author": "Crow",

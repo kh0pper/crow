@@ -1,7 +1,7 @@
 {
   "id": "matrix-bridges",
   "name": "Matrix Bridges",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp, custom crow-matrix-bridge). Opt-in per bridge; each has its own consent text and hardware requirements. Installs appservice registrations into Dendrite and restarts the homeserver.",
   "type": "bundle",
   "author": "Crow",

@@ -1,7 +1,7 @@
 {
   "id": "calibre-server",
   "name": "Calibre Server",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
   "type": "bundle",
   "author": "Crow",

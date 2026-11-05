@@ -1,7 +1,7 @@
 {
   "id": "navidrome",
   "name": "Navidrome",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
   "type": "bundle",
   "author": "Crow",

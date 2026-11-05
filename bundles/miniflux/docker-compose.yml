@@ -1,6 +1,6 @@
 services:
   miniflux:
-    image: miniflux/miniflux:latest
+    image: miniflux/miniflux:2.3.5
     container_name: crow-miniflux
     ports:
       - "127.0.0.1:8085:8080"
