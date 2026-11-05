@@ -101,10 +101,13 @@ Nada se reinicia dentro del commit malo. Un commit cuyo código no carga queda e
 cuarentena hasta que `main` avance más allá; una reversión tomada por una razón
 de la máquina (un timeout, un `npm install` fallido, un `init-db` fallido que no
 cambió nada) caduca además a las 6 horas. Si `git reset --keep` se niega porque
-hay cambios locales que se solapan, la cuarentena se mantiene, el reinicio se
-retiene, y el resultado dice `Update rollback blocked` — incluido el caso en que
-el checkout todavía contiene el commit malo, así que el próximo reinicio o
-rearranque lo arrancaría.
+hay cambios locales que se solapan, el reinicio se retiene, el resultado dice
+`Update rollback blocked`, y el marcador se reescribe SIN caducidad — el checkout
+todavía contiene el commit malo, así que una comprobación posterior lo reporta en
+vez de decir `Up to date`, y el próximo reinicio o rearranque lo arrancaría.
+Después de mover el checkout a mano, borra `<git-dir>/crow-update-quarantine.json`
+si la negativa fue por una razón de la máquina (las dependencias nunca se
+instalaron) y quieres reintentar ese mismo commit.
 
 Un `init-db` fallido tras un pull solo se revierte cuando nada del código nuevo
 puede haber llegado a la base de datos: el pull no debe cruzar una generación de
@@ -248,19 +251,19 @@ una instalación con el instalador, o donde hayas clonado el repositorio):
 CROW_APP="${CROW_APP:-$HOME/.crow/app}"
 cd "$CROW_APP"
 git pull --ff-only origin main
-npm install
+npm install --omit=dev
 node scripts/guarded-init-db.mjs   # migración con guarda: copia previa, restauración si hay pérdida
 sudo systemctl restart crow-gateway
 ```
 
-`node scripts/guarded-init-db.mjs` es el punto de entrada de migraciones que usa
-también el actualizador: hace una copia de seguridad antes de migrar, clasifica el
-resultado por si hubo pérdida de datos y restaura la copia si la migración dañó el
-almacén. `npm run init-db` sigue existiendo, pero es la ejecución desnuda, sin
-ninguna guarda y sin copia: úsala solo en una base de datos de pruebas, nunca en
-una que te importe.
+`node scripts/guarded-init-db.mjs` usa la misma guarda que el actualizador: hace
+una copia de seguridad antes de migrar, clasifica el resultado por si hubo
+pérdida de datos y restaura la copia si la migración dañó el almacén.
+`npm run init-db` sigue existiendo, pero es la ejecución desnuda, sin ninguna
+guarda y sin copia: úsala solo en una base de datos de pruebas, nunca en una que
+te importe.
 
-`bash ~/.crow/app/scripts/crow-update.sh` hace la misma secuencia en un solo paso
+`bash "$CROW_APP/scripts/crow-update.sh"` hace la misma secuencia en un solo paso
 y va más allá: comprueba que el código nuevo responde de verdad en `/health` y
 revierte con `git reset --keep` si no lo hace.
 
@@ -321,6 +324,15 @@ Una reversión se lee así:
 ```
 [auto-update] Rolled back: 9d18049 fails to load (import-check); running c29e19c; updates resume when main moves past it
 [auto-update] Rolled back: 9d18049 — npm install failed; running c29e19c; retried after 6 h or when main moves
+```
+
+Si el propio `npm install` de la reversión falla, el resultado (y la
+notificación) llevan una cláusula más — instala antes del próximo reinicio,
+porque `node_modules` puede estar a medio escribir aunque el código viejo siga
+corriendo desde memoria:
+
+```
+; its dependencies could not be reinstalled — run npm install --omit=dev in the checkout before the next restart
 ```
 
 Un `npm install` fallido registra su código de salida y el final de la salida de

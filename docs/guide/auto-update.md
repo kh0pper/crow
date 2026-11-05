@@ -97,9 +97,12 @@ Nothing restarts into the bad commit. A commit whose code does not load stays
 quarantined until `main` moves past it; a rollback taken for a machine-side
 reason (a timeout, a failed `npm install`, a failed `init-db` that changed
 nothing) also expires after 6 hours. If `git reset --keep` refuses because local
-changes overlap, the quarantine stays, the restart is withheld, and the result
-says `Update rollback blocked` — including the case where the checkout is still
-holding the bad commit, so the next restart or reboot would boot it.
+changes overlap, the restart is withheld, the result says `Update rollback
+blocked`, and the marker is re-written WITHOUT an expiry — the checkout is still
+holding the bad commit, so a later check reports it instead of `Up to date`, and
+the next restart or reboot would boot it. After moving the checkout back by hand,
+delete `<git-dir>/crow-update-quarantine.json` if the refusal was a machine-side
+one (the dependencies never installed) and you want that same commit retried.
 
 `init-db` failing after a pull is only rolled back when nothing about the new
 code can have reached the database: the pull must not cross a schema generation,
@@ -239,18 +242,18 @@ an installer setup, or wherever you cloned the repo):
 CROW_APP="${CROW_APP:-$HOME/.crow/app}"
 cd "$CROW_APP"
 git pull --ff-only origin main
-npm install
+npm install --omit=dev
 node scripts/guarded-init-db.mjs   # guarded migration: backup first, restore on data loss
 sudo systemctl restart crow-gateway
 ```
 
-`node scripts/guarded-init-db.mjs` is the migration entry point the updater uses
-too: it takes a pre-migration backup, classifies the result for data loss and
-restores the backup if the migration damaged the store. `npm run init-db` still
+`node scripts/guarded-init-db.mjs` uses the same guard the updater uses: it takes
+a pre-migration backup, classifies the result for data loss and restores the
+backup if the migration damaged the store. `npm run init-db` still
 exists, but it is the bare, unguarded run with no backup — use it only on a
 scratch database, never on one you care about.
 
-`bash ~/.crow/app/scripts/crow-update.sh` does the same sequence in one step and
+`bash "$CROW_APP/scripts/crow-update.sh"` does the same sequence in one step and
 goes further: it verifies the new code actually answers `/health` and rolls back
 with `git reset --keep` if it does not.
 
@@ -309,6 +312,14 @@ A rollback reads:
 ```
 [auto-update] Rolled back: 9d18049 fails to load (import-check); running c29e19c; updates resume when main moves past it
 [auto-update] Rolled back: 9d18049 — npm install failed; running c29e19c; retried after 6 h or when main moves
+```
+
+If the rollback's OWN `npm install` fails, the result (and the notification) carry
+one more clause — install before the next restart, because `node_modules` may be
+half-written even though the old code keeps running from memory:
+
+```
+; its dependencies could not be reinstalled — run npm install --omit=dev in the checkout before the next restart
 ```
 
 A failed `npm install` logs its exit code and the tail of npm's own output (which

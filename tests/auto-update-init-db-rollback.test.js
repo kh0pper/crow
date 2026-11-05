@@ -78,7 +78,7 @@ const OK_INIT_DB = `process.exit(0);\n`;
  *                   imports, so nothing arms and the bare branch runs — the only
  *                   branch where B1 can still allow a rollback.
  */
-function fixture({ mode = "plain", initDbBody = FAILING_INIT_DB, bFiles = {}, dbUserVersion = 1 } = {}) {
+function fixture({ mode = "plain", initDbBody = FAILING_INIT_DB, bFiles = {}, dbUserVersion = 1, changePkg = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "idbr-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
@@ -106,6 +106,8 @@ function fixture({ mode = "plain", initDbBody = FAILING_INIT_DB, bFiles = {}, db
 
   if (mode === "plain") writeFileSync(join(work, "scripts", "init-db-env.mjs"), initDbBody);
   else writeFileSync(join(work, "scripts", "init-db.js"), initDbBody);
+  // A dependency change makes the rollback reinstall node_modules too.
+  if (changePkg) writeFileSync(join(work, "package.json"), '{\n  "name": "fixture",\n  "version": "0.0.2"\n}\n');
   for (const [name, body] of Object.entries(bFiles)) {
     mkdirSync(join(work, name, ".."), { recursive: true });
     writeFileSync(join(work, name), body);
@@ -290,6 +292,54 @@ test("with a generation advance the tree is left exactly as it is", async () => 
     const alert = spooledBodies(f.alerts).find((a) => a.code === "migration-failed");
     assert.match(alert.body, /user_version advanced \(1 -> 99\)/);
   } finally { uninstall(saved); }
+});
+
+test("the init-db rollback's own failed npm install is reported on the result and the alert", async () => {
+  // S1. The rollback reinstalls the previous commit's deps; when THAT npm fails,
+  // node_modules may hold a half-written tree under the last healthy commit, so
+  // the operator has to be told to run the install by hand before restarting.
+  // The old code logged it and reported a clean rollback.
+  const f = fixture({ mode: "plain", initDbBody: FAILING_INIT_DB, changePkg: true });
+  const db = stubDb();
+  const saved = process.env.CROW_DB_PATH;
+  const shimDir = join(f.root, "bin");
+  const callsLog = join(f.root, "npm-calls.log");
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db, saved);
+    mkdirSync(shimDir, { recursive: true });
+    // The install for the PULLED sha succeeds; the rollback's reinstall fails.
+    writeFileSync(join(shimDir, "npm"), `#!/bin/sh
+echo call >> '${callsLog}'
+if [ "$(wc -l < '${callsLog}')" -gt 1 ]; then exit 1; fi
+exit 0
+`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.converge, false, "the restart stays withheld");
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev, "the tree WAS rolled back");
+    assert.equal(readFileSync(callsLog, "utf8").trim().split("\n").length, 2,
+      "npm ran once for the pull and once for the rollback");
+
+    // Case-insensitive: the result joins the clause with `; `, the alert opens a
+    // sentence with it.
+    const clause = /its dependencies could not be reinstalled — run npm install --omit=dev in the checkout before the next restart/i;
+    const result = db.settings.get("auto_update_last_result");
+    assert.match(result, /^init-db failed \(exit 1\)/, "the classification prefix is unchanged");
+    assert.match(result, clause, `the result must say the deps are not back: ${result}`);
+
+    const alert = spooledBodies(f.alerts).find((a) => a.code === "init-db-failed");
+    assert.ok(alert, "the DB-possibly-broken path keeps the spool alert");
+    assert.match(alert.body, clause, `the alert must carry the same clause: ${alert.body}`);
+    assert.ok(!/with its own dependencies reinstalled/i.test(`${alert.body} ${result}`),
+      "nothing may claim the deps were reinstalled");
+  } finally {
+    process.env.PATH = prevPath;
+    uninstall(saved);
+  }
 });
 
 test("the next tick says update quarantined, never Up to date", async () => {

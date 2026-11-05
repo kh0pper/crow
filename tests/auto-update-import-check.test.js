@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { checkForUpdates, _setAppRootForTest, _setDbForTest, _setImportCheckForTest } from "../servers/gateway/auto-update.js";
 import { _setAlertChannelsForTest } from "../servers/shared/migration-guard.js";
 import { _setAlertsRootForTest } from "../servers/shared/alert-spool.js";
-import { readUpdateQuarantine } from "../servers/shared/update-quarantine.js";
+import { readUpdateQuarantine, quarantinePath } from "../servers/shared/update-quarantine.js";
 import {
   IMPORT_CHECK_ENV, IMPORT_CHECK_TOKEN, _setOriginalEnvForTest, hasImportCheckSeam, originalEnv, runImportCheck,
 } from "../servers/gateway/boot/import-check.js";
@@ -536,9 +536,144 @@ exec ${realGit} "$@"
     assert.ok(!existsSync(join(f.work, "scripts", "init-db-ran.sentinel")));
     assert.equal(db.notifications.length, 1, `one bell, saw ${JSON.stringify(db.notifications)}`);
     assert.equal(JSON.parse(db.notifications[0].metadata).code, "update-rollback-blocked");
+    // S3: the operator-facing wording is cause-neutral. A dependency failure is
+    // not a commit that "will not start" and its code does not "fail to load".
+    assert.match(db.notifications[0].title, /a commit that could not be used is still checked out/);
+    assert.ok(!/will not start/i.test(db.notifications[0].title),
+      `a failed install is not "will not start": ${db.notifications[0].title}`);
+    assert.ok(!/fails to load/i.test(db.notifications[0].body),
+      `cause-neutral wording: a dependency failure does not fail to load — ${db.notifications[0].body}`);
     // The reinstall never runs when the reset refused: node_modules still hold
     // the pulled sha's tree, frozen until the operator repairs the checkout.
     assert.equal(readFileSync(npmLog, "utf8").trim().split("\n").length, 1);
+  } finally {
+    process.env.PATH = prevPath;
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+/** A local npm for the PATH shim that fails EVERY call (the registry is still
+ *  down when the rollback tries to put the previous commit's deps back). */
+function npmShimAlwaysFailing(shimDir, npmLog) {
+  mkdirSync(shimDir, { recursive: true });
+  writeFileSync(join(shimDir, "npm"), `#!/bin/sh
+git -C "$PWD" rev-parse HEAD >> '${npmLog}'
+echo 'npm ERR! /home/example/.crow/app/node_modules/broken postinstall failed' >&2
+exit 1
+`, { mode: 0o755 });
+}
+
+test("a rollback's own failed npm install is reported, never claimed as reinstalled", async () => {
+  // S1. The reinstall after the reset can fail too (the registry is still down,
+  // or the 300 s timeout kills npm mid-install). node_modules then hold a
+  // half-written tree — and the previous commit IS the last healthy one, so the
+  // boot guard cannot refuse the next restart. The old code logged it and still
+  // reported the update as rolled back "with its own dependencies reinstalled".
+  const f = fixture({ bIndex: PASSING_SEAM, changePkg: true });
+  const db = stubDb();
+  const shimDir = join(f.root, "bin");
+  const npmLog = join(f.root, "npm-calls.log");
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db);
+    npmShimAlwaysFailing(shimDir, npmLog);
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.rolledBack, true, JSON.stringify(r));
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev, "the checkout is back on the previous commit");
+    const calls = readFileSync(npmLog, "utf8").trim().split("\n");
+    assert.equal(calls.length, 2, `both installs ran: ${JSON.stringify(calls)}`);
+    assert.equal(calls[1], f.prev, "the failing reinstall ran after the reset");
+
+    const clause = "its dependencies could not be reinstalled — run npm install --omit=dev in the checkout before the next restart";
+    const result = db.settings.get("auto_update_last_result");
+    assert.ok(result.includes(clause), `the result must say the deps are not back: ${result}`);
+    assert.match(result, /^Rolled back: /, "the classification prefix is unchanged");
+
+    assert.equal(db.notifications.length, 1, `one bell, saw ${JSON.stringify(db.notifications)}`);
+    const n = db.notifications[0];
+    assert.ok(n.body.includes(clause), `the bell must carry the same clause: ${n.body}`);
+    // The positive claim the old text made is gone.
+    assert.ok(!/with its own dependencies reinstalled/i.test(`${n.title} ${n.body} ${result}`),
+      `nothing may claim the deps were reinstalled: ${n.body}`);
+  } finally {
+    process.env.PATH = prevPath;
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("a blocked deps-failed rollback never times out into 'Up to date'", async () => {
+  // S2. The blocked marker used to carry the `deps-failed` 6 h TTL, and once it
+  // expired HEAD still equalled origin/main, so the tick recorded "Up to date"
+  // with the refused commit still checked out — and npm never ran again because
+  // no pull happened. Two guards: a blocked rollback writes its marker WITHOUT
+  // an expiry, and the up-to-date branch reports a marker that names HEAD.
+  const f = fixture({ bIndex: PASSING_SEAM, changePkg: true, changeA: true });
+  const db = stubDb();
+  const shimDir = join(f.root, "bin");
+  const npmLog = join(f.root, "npm-calls.log");
+  const failMarker = join(f.root, "npm-failed.once");
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { stdio: "pipe" }).toString().trim();
+  const prevPath = process.env.PATH;
+  const SEVEN_H = 7 * 60 * 60 * 1000;
+  try {
+    install(f, db);
+    npmShim(shimDir, npmLog, failMarker);
+    // The git shim dirties a file the pulled commit changed at reset time, so
+    // `--keep` refuses and the checkout stays on the bad sha.
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "reset" ]; then printf 'local edit\\n' > '${join(f.work, "a.txt")}'; fi
+done
+exec ${realGit} "$@"
+`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const first = await checkForUpdates();
+    assert.equal(first.blocked, true, JSON.stringify(first));
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.bad, "the refused commit is still checked out");
+
+    // (a) The marker a blocked rollback leaves behind has no expiry at all.
+    const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.equal(marker.reason, "deps-failed");
+    assert.equal(marker.expires_at, undefined,
+      "a checkout still sitting on the refused commit must never time out");
+
+    /** Rewrite the record as if seven hours had passed. */
+    const age7h = (extra = {}) => writeFileSync(quarantinePath(f.gitDir), JSON.stringify({
+      ...marker,
+      at: new Date(Date.parse(marker.at) - SEVEN_H).toISOString(),
+      ...(marker.expires_at
+        ? { expires_at: new Date(Date.parse(marker.expires_at) - SEVEN_H).toISOString() }
+        : {}),
+      ...extra,
+    }));
+
+    // (b) The clock seven hours on: the same marker still blocks, and the result
+    // says the commit is still checked out instead of "Up to date".
+    age7h();
+    const second = await checkForUpdates();
+    assert.notEqual(db.settings.get("auto_update_last_result"), "Up to date");
+    assert.equal(second.blocked, true, JSON.stringify(second));
+    assert.match(db.settings.get("auto_update_last_result"),
+      new RegExp(`${f.bad.slice(0, 9)} is still checked out`));
+
+    // (c) The defence: a marker written by a release that still carried the TTL,
+    // now expired, naming the commit that is still checked out.
+    age7h({ expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() });
+    const third = await checkForUpdates();
+    assert.notEqual(db.settings.get("auto_update_last_result"), "Up to date",
+      "an expired marker for the checked-out sha is not \"Up to date\"");
+    assert.match(db.settings.get("auto_update_last_result"),
+      new RegExp(`${f.bad.slice(0, 9)} is still checked out`));
+    assert.equal(third.blocked, true, JSON.stringify(third));
   } finally {
     process.env.PATH = prevPath;
     _setAppRootForTest(REAL_APP_ROOT);

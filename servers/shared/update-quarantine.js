@@ -16,7 +16,10 @@
  *
  * A rollback that a machine merely got wrong (a timeout, a busy DB) must not
  * pause updates forever, so those reasons carry a 6 h TTL. A sha whose CODE
- * does not load has no TTL: it waits for the next commit on main.
+ * does not load has no TTL: it waits for the next commit on main. Neither does
+ * a sha a BLOCKED rollback left checked out, whatever its reason (`persist`) —
+ * a checkout still sitting on the refused commit must never time out into
+ * "Up to date".
  *
  * Nothing here throws: this runs inside a tick that must still record a result.
  */
@@ -35,8 +38,9 @@ export const UPDATE_QUARANTINE_MAX_BYTES = 64 * 1024;
  *
  *  `deps-failed`: `npm install` itself exited non-zero during the update, so the
  *  pulled sha never got as far as its import check or its init-db. That says
- *  nothing about the commit (a registry outage is not a bad sha), so it expires
- *  and main is retried with no new commit. */
+ *  nothing about the commit (a registry outage is not a bad sha), so a rollback
+ *  that moved the checkout back expires and main is retried with no new commit.
+ *  A BLOCKED rollback for the same reason is written with `persist` instead. */
 export const TRANSIENT_QUARANTINE_MS = Object.freeze({
   "import-timeout": 6 * 60 * 60 * 1000,
   "init-db-failed": 6 * 60 * 60 * 1000,
@@ -112,13 +116,17 @@ export function readUpdateQuarantine({ gitDir, readFile = readFileSync, lstat = 
 }
 
 /** Written when a rollback starts, so it exists BEFORE the checkout moves. A
- *  crash between the two must still leave the record that stops a re-pull. */
+ *  crash between the two must still leave the record that stops a re-pull.
+ *
+ *  `persist:true` writes the record WITHOUT `expires_at`, whatever the reason:
+ *  the caller could not reset the checkout, so the sha really is still there and
+ *  an expiry would only turn it into a silent "Up to date" later. */
 export function writeUpdateQuarantine({
-  gitDir, sha, previous = null, reason, by = "gateway", now = Date.now(),
+  gitDir, sha, previous = null, reason, by = "gateway", now = Date.now(), persist = false,
 } = {}) {
   if (!gitDir || typeof sha !== "string" || !FULL_SHA_RE.test(sha)) return null;
   if (typeof reason !== "string" || !reason.trim()) return null;
-  const ttl = TRANSIENT_QUARANTINE_MS[reason];
+  const ttl = persist ? 0 : TRANSIENT_QUARANTINE_MS[reason];
   const record = {
     v: UPDATE_QUARANTINE_FORMAT,
     sha,
