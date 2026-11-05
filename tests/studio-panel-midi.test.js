@@ -25,9 +25,22 @@
  * No browser is needed: nothing here touches audio or Web MIDI for real.
  */
 
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createClient } from "@libsql/client";
+import express from "express";
+import { WebSocket, WebSocketServer } from "ws";
+import { AclError } from "../servers/shared/project-acl.js";
+import { createHub } from "../bundles/studio/server/hub.js";
+import { initStudioTables } from "../bundles/studio/server/init-tables.js";
+import { createStudioWeb } from "../bundles/studio/server/web.js";
+import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import studioPanel from "../bundles/studio/panel/studio.js";
 
 /** The fixture song: one sampler track, two scenes and one pattern clip. */
@@ -1556,4 +1569,504 @@ test("accept sends what the row showed", async () => {
   assert.equal(stored.proposed, true, "the mapping is still a proposal");
   assert.deepEqual(stored.action, { kind: "scene.launch", scene_id: SCENE }, "and still the bot's newer one");
   assert.ok(ui.mappingRow("m-proposed").getAttribute("data-proposed") !== "false", "nothing went live on the page either");
+});
+
+// ---- LIVE-HARNESS-BEGIN: a real Chrome against a real hub -------------------
+
+const PROJECT = 62;
+const PREFIX = "projects/62/";
+const LIVE_BUNDLE_DIR = new URL("../bundles/studio", import.meta.url).pathname.replace(/\/$/, "");
+const LIVE_HUMAN = { kind: "human", id: "local", label: "You" };
+const LIVE_AGENT = { kind: "agent", id: "mcp", label: "Agent (MCP)" };
+
+let chrome = null;
+let server = null;
+let upgrades = null;
+let db = null;
+let hub = null;
+let base = "";
+let dir = "";
+const objects = new Map();
+
+function liveAcl() {
+  async function assertProjectExists(_db, projectId) {
+    if (Number(projectId) !== PROJECT) throw new AclError(`Project #${projectId} not found`, "not_found");
+    return { id: PROJECT };
+  }
+  async function assertCapability(database, projectId) {
+    return assertProjectExists(database, projectId);
+  }
+  async function appendAudit() {}
+  return { assertProjectExists, assertCapability, appendAudit };
+}
+
+function cookieOf(header, name) {
+  for (const part of String(header || "").split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+
+function uploadDb() {
+  return {
+    async execute(statement) {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (/storage_prefix/i.test(sql)) return { rows: [{ storage_prefix: PREFIX }] };
+      return { rows: [] };
+    },
+  };
+}
+
+before(async () => {
+  chrome = await startHeadlessChrome({ extraArgs: ["--autoplay-policy=no-user-gesture-required"] });
+  if (!chrome) return;
+
+  dir = mkdtempSync(join(tmpdir(), "studio-panel-midi-"));
+  db = createClient({ url: "file:" + join(dir, "crow.db") });
+  await db.execute(
+    "CREATE TABLE IF NOT EXISTS project_spaces (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, status TEXT, archived_at TEXT, storage_prefix TEXT)",
+  );
+  await db.execute({
+    sql: "INSERT INTO project_spaces (id, name, storage_prefix) VALUES (?, ?, ?)",
+    args: [PROJECT, "Studio project", PREFIX],
+  });
+  await initStudioTables(db);
+
+  const webRef = { web: null };
+  hub = createHub({ db, acl: liveAcl(), onBroadcast: (id, payload) => webRef.web?.broadcast(id, payload) });
+
+  const storage = {
+    async putObjectStream(key, stream) {
+      const pieces = [];
+      for await (const piece of stream) pieces.push(Buffer.from(piece));
+      objects.set(key, Buffer.concat(pieces));
+    },
+    async deleteObject(key) {
+      objects.delete(key);
+    },
+    async getBucketStats() {
+      return { fileCount: objects.size, totalSizeBytes: 0 };
+    },
+    defaultBucket: () => "crow-files",
+  };
+  const takeStorage = {
+    defaultBucket: () => "crow-files",
+    storagePrefixFor: async () => PREFIX,
+    async getObject(key) {
+      throw new Error(`there is no object at ${key}`);
+    },
+  };
+  const takeUploads = createTakeUploads({
+    stagingDir: mkdtempSync(join(dir, "staging-")),
+    storage,
+    db: uploadDb(),
+    acl: liveAcl(),
+    hub,
+    songs: { projectOf: async () => PROJECT },
+    now: () => Date.now(),
+    quotaMb: 5120,
+  });
+
+  const web = createStudioWeb({
+    hub,
+    Router: express.Router,
+    WebSocketServer,
+    auth: {
+      isAllowedNetwork: () => true,
+      sessionFromRequest: (req) => cookieOf(req.headers.cookie, "crow_session"),
+      verifySession: async (token) => token === "good",
+      csrfTokenAccepted: (_req, presented) => presented === "csrf-ok",
+      classifyPeer: () => ({ via: "local" }),
+    },
+    crowHome: join(dir, "home"),
+    bundleDir: LIVE_BUNDLE_DIR,
+    takeUploads,
+    takeStorage,
+    songRowOf: async (id) => (await hub.listSongs({ project_ids: [PROJECT] })).find((row) => row.id === id) ?? null,
+    rawBody: (limit) => express.raw({ type: () => true, limit, inflate: false }),
+  });
+  webRef.web = web;
+
+  const app = express();
+  app.use(express.json({ limit: "1mb" }));
+  app.use((req, res, next) => {
+    if (req.path === "/dashboard/studio" || req.path.startsWith("/dashboard/studio/")) {
+      res.setHeader("Content-Security-Policy", [
+        "default-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src https://fonts.gstatic.com",
+        "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+        "img-src 'self' data: blob:",
+        "media-src 'self' https: blob:",
+        "connect-src 'self'",
+        "frame-src 'self' https:",
+      ].join("; "));
+    }
+    next();
+  });
+  const dashboardAuth = (req, res, next) => {
+    if (!cookieOf(req.headers.cookie, "crow_session")) return res.status(401).json({ error: "unauthorized" });
+    return next();
+  };
+  app.use(web.router(dashboardAuth));
+  app.get("/dashboard/studio", async (req, res, next) => {
+    try {
+      await studioPanel.handler(req, res, { db, layout: minimalLayout });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  server = createServer(app);
+  upgrades = web.attachUpgrade(server);
+  await new Promise((resolve) => server.listen(0, chrome.bindHost ?? "127.0.0.1", resolve));
+  base = `http://${chrome.pageHost ?? "127.0.0.1"}:${server.address().port}`;
+});
+
+after(async () => {
+  if (upgrades) upgrades.close();
+  if (server) {
+    try {
+      server.closeAllConnections?.();
+    } catch {
+      // Nothing left to close.
+    }
+    await new Promise((resolve) => server.close(resolve));
+  }
+  if (chrome) await chrome.close();
+  try {
+    db?.close?.();
+  } catch {
+    // Already gone.
+  }
+  if (dir) rmSync(dir, { recursive: true, force: true });
+});
+
+/**
+ * What runs in the page before any script of its own: a fake Web MIDI with one
+ * input, "FCB1010", that page JS can fire messages from (`__fakeMidi.fire`), and
+ * a wrap of the engine the client builds that records the calls the tests read
+ * (`__engineLog`) and the launch reports the engine sends back.
+ */
+const PAGE_STUBS = `(function () {
+  var log = [];
+  window.__engineLog = log;
+  window.__pageErrors = [];
+  window.addEventListener('error', function (e) { window.__pageErrors.push(String(e.message)); });
+  var port = { id: 'fcb-1', name: 'FCB1010', manufacturer: 'Behringer', type: 'input', state: 'connected', connection: 'open', onmidimessage: null };
+  var access = { inputs: new Map([[port.id, port]]), outputs: new Map(), onstatechange: null, sysexEnabled: false };
+  navigator.requestMIDIAccess = function () { return Promise.resolve(access); };
+  window.__fakeMidi = {
+    fire: function (bytes) { if (port.onmidimessage) port.onmidimessage({ data: new Uint8Array(bytes), target: port }); }
+  };
+  var real;
+  function wrap(lib) {
+    if (!lib || typeof lib.create !== 'function' || lib.__wrapped) return lib;
+    var create = lib.create;
+    lib.create = function () {
+      return create.apply(this, arguments).then(function (engine) {
+        ['fxHold', 'fxRelease', 'launchScene', 'launchClip'].forEach(function (name) {
+          var original = engine[name];
+          engine[name] = function () {
+            log.push({ call: name, args: Array.prototype.slice.call(arguments) });
+            return original.apply(this, arguments);
+          };
+        });
+        var onLaunch = engine.onLaunch;
+        engine.onLaunch = function (callback) {
+          return onLaunch.call(this, function (launch) {
+            log.push({ call: 'launchReport', args: [launch] });
+            return callback(launch);
+          });
+        };
+        return engine;
+      });
+    };
+    lib.__wrapped = true;
+    return lib;
+  }
+  Object.defineProperty(window, 'StudioEngine', {
+    configurable: true,
+    get: function () { return real; },
+    set: function (value) { real = wrap(value); }
+  });
+})();`;
+
+/** Open one page in the private browser with the dashboard's session cookies. */
+async function openPage(url, { viewport = null } = {}) {
+  const tab = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
+  const socket = new WebSocket(tab.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  const consoleErrors = [];
+  socket.on("message", (raw) => {
+    const message = JSON.parse(String(raw));
+    if (message.method === "Runtime.exceptionThrown") {
+      const text = JSON.stringify(
+        message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text,
+      ).slice(0, 500);
+      consoleErrors.push(text);
+      console.error("PAGE exception:", text);
+    }
+    if (message.method === "Runtime.consoleAPICalled" && message.params.type === "error") {
+      const text = message.params.args.map((arg) => arg.value ?? arg.description ?? "").join(" ").slice(0, 500);
+      consoleErrors.push(text);
+      console.error("PAGE console.error:", text);
+    }
+  });
+  let nextId = 0;
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const mine = (nextId += 1);
+      const onMessage = (raw) => {
+        const message = JSON.parse(String(raw));
+        if (message.id !== mine) return;
+        socket.off("message", onMessage);
+        if (message.error) reject(new Error(JSON.stringify(message.error)));
+        else resolve(message.result || {});
+      };
+      socket.on("message", onMessage);
+      socket.send(JSON.stringify({ id: mine, method, params }));
+    });
+  const evaluate = async (expression) => {
+    const outcome = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    if (outcome.exceptionDetails) throw new Error(JSON.stringify(outcome.exceptionDetails));
+    return outcome.result?.value;
+  };
+
+  await send("Page.enable");
+  await send("Network.enable");
+  await send("Runtime.enable");
+  if (viewport) {
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: 1,
+      mobile: viewport.mobile === true,
+    });
+  }
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: PAGE_STUBS });
+  for (const [name, value] of [["crow_session", "good"], ["crow_csrf", "csrf-ok"]]) {
+    await send("Network.setCookie", { name, value, url: `${base}/` });
+  }
+  await send("Page.navigate", { url });
+
+  return {
+    evaluate,
+    send,
+    consoleErrors,
+    close: async () => {
+      try {
+        socket.close();
+      } catch {
+        // Already closed.
+      }
+      try {
+        await fetch(chrome.cdp + "/json/close/" + tab.id);
+      } catch {
+        // The tab is going away either way.
+      }
+    },
+  };
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Poll a page until `expression` is truthy. */
+async function waitFor(page, expression, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = false;
+  while (Date.now() < deadline) {
+    try {
+      last = await page.evaluate(expression);
+    } catch {
+      last = false;
+    }
+    if (last) return last;
+    await pause(25);
+  }
+  return last;
+}
+
+/** Poll the song's document until `check` accepts its snapshot. */
+async function waitSnap(id, check, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = (await hub.openSong(id)).snapshot;
+    try {
+      if (check(last)) return last;
+    } catch {
+      // Mid-update; look again.
+    }
+    await pause(50);
+  }
+  return last;
+}
+
+/** The centre of the first node `selector` matches, in page pixels. */
+async function centreOf(page, selector) {
+  const box = await page.evaluate(`(function () {
+    var node = document.querySelector(${JSON.stringify(selector)});
+    if (!node) return null;
+    node.scrollIntoView({ block: 'center', inline: 'center' });
+    var r = node.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, left: r.left, top: r.top, width: r.width, height: r.height };
+  })()`);
+  assert.ok(box, `nothing matches ${selector}`);
+  return box;
+}
+
+const mouse = (page, type, x, y, extra = {}) =>
+  page.send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1, ...extra });
+
+/** A real press-and-release on the node, held for `holdMs`. */
+async function mousePress(page, selector, holdMs = 0) {
+  const { x, y } = await centreOf(page, selector);
+  await mouse(page, "mouseMoved", x, y, { button: "none", clickCount: 0 });
+  await mouse(page, "mousePressed", x, y, { buttons: 1 });
+  if (holdMs) await pause(holdMs);
+  await mouse(page, "mouseReleased", x, y, { buttons: 0 });
+}
+
+/** A song with the FCB1010 test's scenes and one pattern clip, as the operator. */
+async function liveSong(title, scenes = FCB_SCENES) {
+  const created = await hub.createSong({ project_id: PROJECT, title, author: LIVE_HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const id = created.song_id;
+  const run = async (command, args, author = LIVE_HUMAN) => {
+    const result = await hub.runCommand({ song_id: id, cmd_id: null, command, args, author });
+    assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
+    return result;
+  };
+  await run("track.add", { id: TRACK, name: "Beat box", kind: "sampler" });
+  for (const [sceneId, name] of scenes) await run("scene.add", { id: sceneId, name });
+  await run("clip.add_pattern", { clip_id: CLIP, track_id: TRACK, scene_id: SCENE, name: "Beat", length_steps: 16 });
+  return { id, run };
+}
+
+const engineLog = (page) => page.evaluate("JSON.parse(JSON.stringify(window.__engineLog))");
+
+// ---- LIVE-HARNESS-END -------------------------------------------------------
+
+test("in Chrome, the operator accepts a bot's FCB1010 proposal and pedal 2 launches the verse", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { id, run } = await liveSong("Pedal song");
+
+  // The bot proposes the pedalboard's setup through its own command.
+  await run("midi.propose_profile", { device: "fcb1010", device_name: DEVICE }, LIVE_AGENT);
+  const proposed = await waitSnap(id, (snap) => Object.keys(snap.midi_maps || {}).length === 4);
+  assert.equal(Object.values(proposed.midi_maps).filter((row) => row.proposed === true).length, 4, "four proposals");
+
+  const page = await openPage(`${base}/dashboard/studio?song=${encodeURIComponent(id)}`);
+  t.after(() => page.close());
+  assert.ok(await waitFor(page, "!!document.querySelector('[data-act=midi-connect]')", 20000), "the page offers Connect controllers");
+
+  await mousePress(page, "[data-act=midi-connect]");
+  assert.ok(
+    await waitFor(page, "document.querySelector('[data-act=midi-connect]').getAttribute('aria-pressed') === 'true'", 10000),
+    "Connect controllers took the fake port",
+  );
+  assert.ok(
+    await waitFor(page, "!!document.querySelector('[data-role=midi] .st-midi-proposals [data-act=midi-accept-all]')", 10000),
+    "the page shows the bot's proposals and Accept all",
+  );
+
+  // A proposal is not live: the pedal does nothing yet.
+  await page.evaluate("window.__fakeMidi.fire([0xc0, 1])");
+  await pause(300);
+  assert.equal((await engineLog(page)).filter((entry) => entry.call === "launchScene").length, 0, "a proposal launches nothing");
+
+  const historyBefore = (await hub.history(id, { limit: 500 })).length;
+  await mousePress(page, "[data-act=midi-accept-all]");
+  const live = await waitSnap(id, (snap) => {
+    const rows = Object.values(snap.midi_maps || {});
+    return rows.length === 4 && rows.every((row) => row.proposed === false);
+  });
+  assert.ok(Object.values(live.midi_maps).every((row) => row.proposed === false), "the hub shows every row proposed:false");
+  assert.ok(
+    await waitFor(page, "document.querySelectorAll('[data-role=midi] tr[data-proposed=\"false\"]').length === 4", 10000),
+    "and so does the page",
+  );
+  const historyAccepted = (await hub.history(id, { limit: 500 })).length;
+
+  // Program change 1 on channel 1 is pedal 2, which launches the second scene.
+  await page.evaluate("window.__fakeMidi.fire([0xc0, 1])");
+  const launched = await waitFor(
+    page,
+    "window.__engineLog.some(function (e) { return e.call === 'launchScene' && e.args[0] === 'verse'; })",
+    10000,
+  );
+  assert.ok(launched, "the page asked the engine to launch the Verse");
+  const calls = (await engineLog(page)).filter((entry) => entry.call === "launchScene");
+  assert.deepEqual(calls.map((entry) => entry.args[0]), ["verse"], "and only the Verse");
+  assert.ok(
+    await waitFor(page, "window.__engineLog.some(function (e) { return e.call === 'launchReport' && e.args[0] && e.args[0].scene_id === 'verse'; })", 10000),
+    "the engine reported the Verse launch taking effect",
+  );
+
+  await pause(300);
+  assert.equal((await hub.history(id, { limit: 500 })).length, historyAccepted, "the pedal added no history entry");
+  assert.ok(historyAccepted >= historyBefore, "(the accepts themselves are the operator's steps)");
+  assert.deepEqual(page.consoleErrors, [], "no page errors");
+});
+
+test("in Chrome, an effect button held with the mouse releases when the pointer leaves it", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { id } = await liveSong("Effects song");
+  const page = await openPage(`${base}/dashboard/studio?song=${encodeURIComponent(id)}`);
+  t.after(() => page.close());
+  assert.ok(await waitFor(page, `!!document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]')`, 20000), "the clip is on the grid");
+  await page.evaluate(`document.querySelector('[data-act=open-clip][data-clip-id=${CLIP}]').click()`);
+  const STUTTER = "[data-role=sampler] [data-fx-name=stutter]";
+  assert.ok(await waitFor(page, `!!document.querySelector('${STUTTER}')`, 10000), "the pad view shows the effects row");
+
+  const fxCalls = async () => (await engineLog(page)).filter((entry) => entry.call === "fxHold" || entry.call === "fxRelease");
+
+  // Press, then slide off the button with the mouse still down.
+  const box = await centreOf(page, STUTTER);
+  await mouse(page, "mouseMoved", box.x, box.y, { button: "none", clickCount: 0 });
+  await mouse(page, "mousePressed", box.x, box.y, { buttons: 1 });
+  assert.ok(
+    await waitFor(page, "window.__engineLog.some(function (e) { return e.call === 'fxHold'; })", 10000),
+    "the press holds the effect",
+  );
+  const outsideY = box.top - 60 > 0 ? box.top - 60 : box.top + box.height + 60;
+  for (let step = 1; step <= 4; step += 1) {
+    await mouse(page, "mouseMoved", box.x, box.y + ((outsideY - box.y) * step) / 4, { buttons: 1, clickCount: 0 });
+    await pause(20);
+  }
+  assert.ok(
+    await waitFor(page, "window.__engineLog.some(function (e) { return e.call === 'fxRelease'; })", 10000),
+    "leaving the button releases the effect, mouse still down",
+  );
+  await mouse(page, "mouseReleased", box.x, outsideY, { buttons: 0 });
+  await pause(200);
+  let calls = await fxCalls();
+  assert.equal(calls[0].call, "fxHold");
+  assert.equal(calls[0].args[0], "stutter");
+  assert.equal(typeof calls[0].args[1], "number", "fxHold carries an amount");
+  assert.deepEqual(calls.slice(1).map((entry) => [entry.call, entry.args[0]]), [["fxRelease", "stutter"]]);
+  assert.equal(
+    await page.evaluate(`document.querySelector('${STUTTER}').getAttribute('aria-pressed')`),
+    "false",
+    "the button looks let go",
+  );
+
+  // A plain press and release is one more pair.
+  await mousePress(page, STUTTER, 150);
+  assert.ok(
+    await waitFor(page, "window.__engineLog.filter(function (e) { return e.call === 'fxRelease'; }).length === 2", 10000),
+    "a normal release lets the effect go",
+  );
+  calls = await fxCalls();
+  assert.deepEqual(
+    calls.map((entry) => [entry.call, entry.args[0]]),
+    [["fxHold", "stutter"], ["fxRelease", "stutter"], ["fxHold", "stutter"], ["fxRelease", "stutter"]],
+    "two hold/release pairs in all",
+  );
+  assert.deepEqual(page.consoleErrors, [], "no page errors");
 });

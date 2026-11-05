@@ -324,6 +324,17 @@ const STYLES = `
   .studio .st-midi-row[data-proposed=true] { background: #17222D; }
   .studio .st-midi-acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
   .studio .st-midi-acts .st-btn { min-height: 40px; }
+  /* In the table a row is a table row and its cells are cells: the list row's
+     flex box (above) must not reach them, or the header and the rows part. */
+  .studio tr.st-midi-row {
+    display: table-row; padding: 0; border: 0; border-radius: 0;
+    background: transparent; font-size: 13px;
+  }
+  .studio tr.st-midi-row[data-proposed=true] { background: #17222D; }
+  .studio tr.st-midi-row.st-midi-hit { background: #2A2418; }
+  .studio td.st-midi-does { flex: none; }
+  .studio td.st-midi-acts { display: table-cell; text-align: right; white-space: nowrap; }
+  .studio td.st-midi-acts .st-btn { margin-left: 6px; }
   .studio .st-fx {
     border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
     padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;

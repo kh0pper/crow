@@ -9612,7 +9612,7 @@ export const CLIENT_SCRIPT = [
   "      var select = el('select', 'st-select st-midi-profile');",
   "      select.setAttribute('data-act', 'midi-profile');",
   "      select.setAttribute('aria-label', 'Lay out a controller this song can be played from');",
-  "      var blank = el('option', '', MIDI_SETUP_LABEL);",
+  "      var blank = el('option', '', 'Choose a controller');",
   "      blank.value = '';",
   "      blank.selected = true;",
   "      select.appendChild(blank);",
