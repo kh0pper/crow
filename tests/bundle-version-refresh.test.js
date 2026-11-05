@@ -18,7 +18,7 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, openSync, closeSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, openSync, closeSync, readdirSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -383,6 +383,27 @@ describe("4b — docker-type restriction + declared-root traversal rejection", (
     } finally {
       closeSync(mapped);
     }
+  });
+
+  test("a symlinked destination directory is replaced, never written through", async () => {
+    const id = "widget-linked";
+    const repoRoot = freshRoot("crowrepo-linked-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "L", version: "2.0.0", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/vendor/lib/synth.js`, "new synth\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    const outside = freshRoot("crow-outside-");
+    put(outside, "lib/synth.js", "outside bytes\n");
+    mkdirSync(join(destBundleDir(id), "vendor"), { recursive: true });
+    symlinkSync(join(outside, "lib"), join(destBundleDir(id), "vendor/lib"));
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+
+    assert.equal(readFileSync(join(outside, "lib/synth.js"), "utf8"), "outside bytes\n", "the link's target is untouched");
+    assert.equal(lstatSync(join(destBundleDir(id), "vendor/lib")).isDirectory(), true, "the destination is now a real directory");
+    assert.equal(readAt(destBundleDir(id), "vendor/lib/synth.js"), "new synth\n");
   });
 
   test("a docker bundle's declared widgets/ is code: the version bump ships widgets/x.js", async () => {

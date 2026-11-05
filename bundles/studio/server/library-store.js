@@ -678,6 +678,11 @@ export async function libraryGc({ crowHome, inUse, olderThanDays = GC_AGE_DAYS, 
     if (!isTemporary && used.has(match[1])) continue;
     const age = current - info.mtimeMs;
     if (isTemporary ? age < TEMP_MAX_AGE_MS : age < limitMs) continue;
+    // A download may have refreshed this file between the first look and now
+    // (a re-fetch renames a new file into place): look again just before the
+    // unlink, and keep anything that is no longer old.
+    const again = await stat(path).catch(() => null);
+    if (!again || !again.isFile() || again.mtimeMs !== info.mtimeMs) continue;
     try {
       await unlink(path);
     } catch {

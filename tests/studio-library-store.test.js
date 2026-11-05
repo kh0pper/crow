@@ -725,6 +725,31 @@ test("get this instrument fetches a file this Crow lost", async (t) => {
   assert.deepEqual(readFileSync(join(libraryDir(crowHome), `${sha}.sf3`)), bytes);
 });
 
+test("a song whose catalog entry is out of date is told so, not sent round a download loop", async (t) => {
+  const bytes = fakeBank();
+  const { base, requests } = await stubServer(t, bytes);
+  const stale = {
+    id: "lib-stale",
+    kind: "font",
+    name: "Test Bank",
+    source: "catalog",
+    catalog_id: "test-bank",
+    // The bytes the song was made with; the catalog row now names other bytes.
+    sha256: sha256Of(Buffer.from("RIFFolder-bank-sfbk", "ascii")),
+    bytes: 19,
+    licence: "MIT",
+    credit: "Test Bank by the test suite",
+    author_label: "You",
+  };
+  const { base: gateway, hub } = await boot(t, { catalog: catalogRow(base, bytes), library: { [stale.id]: stale } });
+
+  const answer = await call(gateway, "/api/studio/library/download", { method: "POST", body: { song_id: SONG, catalog_id: "test-bank" } });
+  assert.equal(answer.status, 409, answer.bytes.toString());
+  assert.match(answer.body.error, /out of date/);
+  assert.equal(requests.length, 0, "nothing was fetched");
+  assert.equal(hub.commands.length, 0, "the song is unchanged");
+});
+
 test("the library gc keeps every file a song uses and skips a run it cannot fully see", async (t) => {
   const used = fakeBank();
   const usedSha = sha256Of(used);

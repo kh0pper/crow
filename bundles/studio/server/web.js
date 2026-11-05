@@ -138,6 +138,7 @@ const LIBRARY_UNAVAILABLE_TEXT = "Studio cannot download instruments on this ins
 
 /** What a caller is told when Studio itself could not download. */
 const LIBRARY_FAILED_TEXT = "Studio could not download that instrument.";
+const LIBRARY_OUT_OF_DATE_TEXT = "This song's copy of that instrument is out of date: the catalog now offers a different file. Remove it from the song and add it again to get the new one.";
 
 /** What an agent is told when it asks to download a catalog file. */
 const AGENT_DOWNLOAD_REFUSED_TEXT =
@@ -455,7 +456,7 @@ function sendTakeError(res, err) {
 /**
  * Answer with an error a library route threw.
  *
- * `library-store.js` marks each refusal with `error.status` (400, 404, 413,
+ * `library-store.js` and the download route mark each refusal with `error.status` (400, 404, 409, 413,
  * 502, 503), because a download's failures — an unknown catalog row, a body
  * past its size, a hash that does not match, a network that is down — are
  * exactly the cases a caller needs to read. Anything without a status is a bug:
@@ -1719,6 +1720,16 @@ export function createStudioWeb({
       if (running) return res.json(await running);
       const work = (async () => {
         if (existing) {
+          // The song's entry names the bytes it was made with. When the catalog
+          // row has since moved to a different file, fetching it again would
+          // never match the song's hash, so the ask is answered with a sentence
+          // instead of a download that can only fail (and would repeat).
+          const current = await library.entry(catalogId);
+          if (String(current.sha256 ?? "") !== String(existing.sha256 ?? "")) {
+            const error = new Error(LIBRARY_OUT_OF_DATE_TEXT);
+            error.status = 409;
+            throw error;
+          }
           if (await library.holds(String(existing.sha256 ?? ""))) {
             return { entry: existing, downloaded: false };
           }

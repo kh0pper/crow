@@ -434,7 +434,16 @@ function replaceFileAtomic(src, dst) {
  * @returns {void}
  */
 function replaceTreeAtomic(src, dst) {
-  mkdirSync(dst, { recursive: true });
+  // A destination that is a symlink (or a file) where the source has a
+  // directory is replaced, never followed: writing through it would land the
+  // copy wherever the link points. A directory made here takes the source
+  // directory's own permission bits.
+  const existing = lstatSync(dst, { throwIfNoEntry: false });
+  if (existing && !existing.isDirectory()) rmSync(dst, { force: true });
+  if (!existing || !existing.isDirectory()) {
+    mkdirSync(dirname(dst), { recursive: true });
+    mkdirSync(dst, { mode: statSync(src).mode & 0o777 });
+  }
   for (const entry of readdirSync(src, { withFileTypes: true })) {
     const from = join(src, entry.name);
     const to = join(dst, entry.name);
