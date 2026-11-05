@@ -339,10 +339,12 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
   // instance whose own env loads the sha fine still converges into it.
   const gitDir = await au.gitDirFor(root);
   // `localHeadSha` is the sha the checkout actually holds under the lock, and a
-  // marker naming it refuses UNCONDITIONALLY — expired or not. Only once HEAD is
-  // off that sha does a marker's expiry apply again (the updater's own rule), so
-  // a peer can never migrate and restart into a commit that is still checked out
-  // as a refused one.
+  // HELD marker (the one a blocked rollback writes) naming it refuses
+  // UNCONDITIONALLY — expired or not, so no peer migrates or restarts into a
+  // commit a blocked rollback left checked out. An ordinary (unflagged) marker is
+  // not a refusal here: the operator may have pulled that commit on purpose, and
+  // the updater's own TTL / "main moved" cleanup governs it. Once HEAD is off the
+  // sha, even a held marker's expiry applies again (the updater's own rule).
   const uq = updateQuarantineHeldAtHead({ gitDir, localHeadSha: headNow });
   if (uq) {
     au.releaseCheckoutLock(lock);

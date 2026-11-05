@@ -300,11 +300,12 @@ test("a tree half that REFUSED a restart is not overridden by convergence", asyn
     const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "auto-update.js"), "utf8");
     assert.ok(src.includes("treeResult?.converge === false"),
       "checkForUpdates must honor its own tree half's refusal");
-    assert.equal((src.match(/converge: false/g) || []).length, 11,
-      "all ELEVEN restart-withholding branches must be marked: 2 loss paths, 2 init-db " +
+    assert.equal((src.match(/converge: false/g) || []).length, 10,
+      "all TEN restart-withholding branches must be marked: 2 loss paths, 2 init-db " +
       "failures, the N1c-3 rollback and its blocked variant, the up-to-date blocked " +
-      "defence, the migration quarantine, the update quarantine (both shapes — round 3), " +
-      "the CI gate and a branch that changed mid-update");
+      "defence, the migration quarantine, the update quarantine (both shapes — round 3) " +
+      "and a branch that changed mid-update. The CI gate is deliberately NOT one: " +
+      "red/pending CI refuses the NEXT commit, not the tree already checked out.");
     assert.equal(converged, false);
   } finally {
     conv._setRestartForTest(null);

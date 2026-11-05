@@ -647,6 +647,8 @@ exec ${realGit} "$@"
     assert.equal(marker.reason, "deps-failed");
     assert.equal(marker.expires_at, undefined,
       "a checkout still sitting on the refused commit must never time out");
+    assert.equal(marker.held, true,
+      "a blocked rollback writes a HELD marker — the flag the held-at-HEAD rules key on");
 
     /** Rewrite the record as if seven hours had passed. */
     const age7h = (extra = {}) => writeFileSync(quarantinePath(f.gitDir), JSON.stringify({

@@ -146,7 +146,9 @@ test("a sha the updater rolled back is refused by every peer (B3)", async () => 
   const f = fixture();
   arm();
   setBootSha(f.boot);
-  writeUpdateQuarantine({ gitDir: f.gitDir, sha: f.mid, previous: f.boot, reason: "import-check" });
+  // The sha is still checked out, so the marker that names it is one a BLOCKED
+  // rollback wrote (`persist` ⇒ `held`).
+  writeUpdateQuarantine({ gitDir: f.gitDir, sha: f.mid, previous: f.boot, reason: "import-check", persist: true });
 
   const r = await convergeInstance({ appRoot: f.work, instance: f.instance });
 
@@ -178,16 +180,21 @@ test("an EXPIRED update quarantine does not block a peer once the tree is off it
   assert.equal(restarts.length, 1);
 });
 
-test("a peer refuses an EXPIRED marker whose sha is still checked out (round 3)", async () => {
+test("a peer refuses an EXPIRED HELD marker whose sha is still checked out (round 3)", async () => {
   const f = fixture();
   arm();
   setBootSha(f.boot);
   // HEAD IS the sha the marker names, so the refused commit is still checked
   // out. Its expiry must not let a peer migrate this store and restart into it:
-  // the next boot would run the commit the updater already refused.
-  writeUpdateQuarantine({
-    gitDir: f.gitDir, sha: f.mid, reason: "import-timeout", now: Date.now() - 7 * 60 * 60 * 1000,
-  });
+  // the next boot would run the commit the updater already refused. Only a HELD
+  // marker (a blocked rollback) carries that rule — round 4 keeps ordinary
+  // markers on the TTL, so this fixture writes the flag explicitly.
+  writeFileSync(quarantinePath(f.gitDir), JSON.stringify({
+    v: 1, sha: f.mid, previous: f.boot, reason: "import-timeout",
+    at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(), by: "test",
+    expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    held: true,
+  }));
   assert.ok(Date.parse(readUpdateQuarantine({ gitDir: f.gitDir }).expires_at) <= Date.now(),
     "the fixture marker really is expired");
 

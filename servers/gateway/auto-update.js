@@ -615,12 +615,14 @@ export async function checkForUpdates({ instance = null } = {}) {
 
     // A process must honor its OWN refusal. runLockedUpdate returns
     // converge:false on every branch whose whole purpose is to withhold the
-    // restart (a quarantined sha or migration, a blocked rollback, a CI gate, a
-    // branch that changed mid-update); a peer may still converge (it refused
-    // nothing, and the quarantine markers guard the genuinely-bad shas), but this
-    // process must not restart into code it just declined. Its own skip code is
-    // kept (`update-rollback-blocked`, `ci-red`, …) — Settings and the bell
-    // classification key off it.
+    // restart (a quarantined sha or migration, a blocked rollback, a branch that
+    // changed mid-update); a peer may still converge (it refused nothing, and the
+    // quarantine markers guard the genuinely-bad shas), but this process must not
+    // restart into code it just declined. Its own skip code is kept
+    // (`update-rollback-blocked`, `not-on-main`, …) — Settings and the bell
+    // classification key off it. The CI gate deliberately does NOT set it: red or
+    // pending CI refuses the NEXT commit on main, not the tree already checked
+    // out, so a co-hosted peer must still converge onto that tree.
     if (treeResult?.converge === false) {
       log("instance half skipped — this process's own update refused a restart");
       return { ...treeResult, pulled, converged: false, skipped: treeResult.skipped ?? "refused" };
@@ -729,11 +731,14 @@ function resetKeep(previous) {
  * previous commit but node_modules may hold a half-written tree, so the next
  * restart would boot it on the wrong dependencies), `null` when it never ran.
  *
- * A blocked rollback (nothing was reset) re-writes the marker WITHOUT an expiry:
- * the checkout is still on the bad sha, so a TTL there would let the next tick
- * time out into "Up to date" with the commit still checked out. That exemption
- * ends with the checkout: once HEAD is no longer the marker's sha (the operator
- * moved main back), the evaluator gives a transient reason its TTL back.
+ * A blocked rollback (nothing was reset) re-writes the marker as HELD (`held`,
+ * no expiry): the checkout is still on the bad sha, so a TTL there would let the
+ * next tick time out into "Up to date" with the commit still checked out. That
+ * exemption ends with the checkout: once HEAD is no longer the marker's sha (the
+ * operator moved main back), the evaluator gives a transient reason its TTL back.
+ * A rollback that DID move the tree back writes an ordinary marker, so an
+ * operator who later pulls that same commit by hand (after fixing the registry)
+ * is not frozen out by it.
  *
  * @returns {Promise<{ok:boolean, marker:object|null, detail:string,
  *   depsRestored:boolean|null, blockedBy?:"reset-refused"|"no-previous"}>}
@@ -742,11 +747,11 @@ async function quarantineAndRollBack({ gitDir, sha, previous, reason, depsChange
   const marker = writeUpdateQuarantine({ gitDir, sha, previous, reason });
   if (!marker) log(`could not write the update quarantine marker for ${String(sha).slice(0, 9)}`);
   // Nothing was reset, so the checkout still holds the refused sha: make the
-  // marker permanent whatever its reason was (S2). A machine-side reason keeps
-  // its TTL only for a rollback that actually moved the tree back.
+  // marker HELD and permanent whatever its reason was (S2). A machine-side
+  // reason keeps its TTL only for a rollback that actually moved the tree back.
   const blocked = (blockedBy, detail) => {
     if (!writeUpdateQuarantine({ gitDir, sha, previous, reason, persist: true })) {
-      log(`could not re-write the update quarantine marker for ${String(sha).slice(0, 9)} without an expiry`);
+      log(`could not re-write the update quarantine marker for ${String(sha).slice(0, 9)} as held`);
     }
     return { ok: false, blockedBy, marker, detail, depsRestored: null };
   };
@@ -1045,25 +1050,27 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // L0.3 update quarantine — same under-lock spot, same fresh origin head, so
   // the 6 h tick and the manual Check-now button both consult it. A sha this
   // host already rolled back is never re-pulled; the marker clears itself when
-  // main moves past it (or expires, for a machine-side reason — and a marker a
-  // BLOCKED rollback persisted without an expiry gets that TTL back once HEAD is
-  // no longer its sha, i.e. once the operator has moved main back by hand).
-  // NEITHER cleanup runs while local HEAD still is the marker's sha: the refused
-  // commit is checked out, so the marker stays and the tick refuses.
+  // main moves past it (or expires, for a machine-side reason — and a HELD
+  // marker, which a BLOCKED rollback writes, gets that TTL back once HEAD is no
+  // longer its sha, i.e. once the operator has moved main back by hand).
+  // NEITHER cleanup runs while a HELD marker's sha is local HEAD: the refused
+  // commit is checked out, so the marker stays and the tick refuses. An ordinary
+  // marker that happens to name HEAD is the operator's own choice (a manual
+  // pull), so it clears exactly as it would off HEAD.
   let originHeadSha = "";
   try {
     originHeadSha = (await run("git", ["rev-parse", "origin/main"])).stdout;
-    // Local HEAD is what tells the evaluator whether a persisted (expiry-less)
-    // marker is still sitting on the refused commit or may time out.
+    // Local HEAD is what tells the evaluator whether a HELD (expiry-less) marker
+    // is still sitting on the refused commit or may time out.
     const localHeadSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
     const uq = evaluateUpdateQuarantine({ gitDir, originHeadSha, localHeadSha });
-    // A marker naming the commit the checkout HOLDS is a refusal whatever
+    // A HELD marker naming the commit the checkout HOLDS is a refusal whatever
     // origin/main says: the refused sha is still checked out, so this tick
     // neither deletes the marker nor pulls a newer commit, and it withholds the
     // restart. `heldAtHead` comes from the evaluator — which never deletes a
-    // marker in that state — so the result cannot quote a marker that is already
-    // gone. (The marker becomes ordinary again once HEAD is off its sha: the
-    // operator's `git reset --keep` is what unfreezes updates.)
+    // HELD marker in that state — so the result cannot quote a marker that is
+    // already gone. (The marker becomes ordinary again once HEAD is off its sha:
+    // the operator's `git reset --keep` is what unfreezes updates.)
     if (uq.blocked || uq.heldAtHead) {
       const heldAtHead = uq.heldAtHead === true;
       // S5: a blocked rollback left the bad sha CHECKED OUT. Say so — the old
@@ -1102,12 +1109,14 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   if (behindCount === 0) {
     // S2 defence: the marker may still hold while the checkout sits on the commit
     // it names — "Up to date" there is the silent re-arm, because nothing is
-    // pulled and npm never runs again. Read the marker as it stands AFTER
+    // pulled and npm never runs again. Only a HELD marker (a blocked rollback) is
+    // permanent here; an ordinary one naming HEAD is the operator's own choice and
+    // its TTL/"main moved" cleanup applies. Read the marker as it stands AFTER
     // evaluateUpdateQuarantine() ran in THIS tick: a marker the evaluator expired
     // and deleted (HEAD off its sha) must not come back out of a pre-evaluation
     // copy as a one-tick false "blocked" (and a false bell).
     const stale = activeUpdateQuarantine({ gitDir, localHeadSha: currentFullSha });
-    if (stale && stale.sha === currentFullSha) {
+    if (stale?.held === true && stale.sha === currentFullSha) {
       const msg = `Update rollback blocked: ${stale.sha.slice(0, 9)} is still checked out; the next restart will boot it`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
@@ -1142,9 +1151,13 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      // converge:false — a red/pending build was declined this tick, so this
-      // process must not restart on the strength of a tick it refused.
-      return { updated: false, skipped: ci === "red" ? "ci-red" : "ci-pending", message: msg, converge: false };
+      // Deliberately NO converge:false here (round 4). Red or pending CI refuses
+      // the NEXT commit on main, not the tree already checked out: a co-hosted
+      // peer whose boot sha differs from HEAD must still migrate and restart into
+      // what the shared checkout holds, or the whole host stays skewed for as long
+      // as main's CI is red. The refusals that DO withhold the restart are the
+      // ones about code on disk (quarantines, a blocked rollback, not-on-main).
+      return { updated: false, skipped: ci === "red" ? "ci-red" : "ci-pending", message: msg };
     }
   }
 
