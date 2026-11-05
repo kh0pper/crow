@@ -707,7 +707,11 @@ defineCommand({
         .describe(
           'what the track plays: "sunvox" (the default), "audio" for recorded takes, "sampler" for a kit of pads, or "soundfont" for an instrument from the song\'s library',
         ),
-      font_id: idSchema
+      // Its own schema, not `idSchema` again: the same schema reached twice in
+      // one object is published as a `$ref`, which tool grammars refuse.
+      font_id: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{1,40}$/, "an id is 1-40 letters, digits, dashes or underscores")
         .optional()
         .describe(
           'a soundfont track\'s instrument: a font in the song\'s library; the track plays its first preset until track.set_program chooses another',
