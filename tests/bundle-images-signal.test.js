@@ -8,7 +8,9 @@
  *     and the age, linking to that bundle's page;
  *   - nothing that old → ok, "bundle images are recent";
  *   - Docker failing (or a ragged `image inspect` answer) → "unknown", info,
- *     NEVER ok.
+ *     NEVER ok;
+ *   - no `docker` binary at all (ENOENT) → no card: a host with only MCP-style
+ *     bundles never needs Docker, and a permanent "unknown" would be noise.
  *
  * The two exec calls are stubbed through _setBundleImageReaders, so nothing here
  * depends on the Docker state of the machine running the suite.
@@ -114,9 +116,11 @@ test("nothing old → ok, 'bundle images are recent'", async () => {
 });
 
 test("docker unavailable → 'unknown' at info, never ok", async () => {
+  // Docker is there but unusable (a hung daemon, permissions): worth saying.
+  const hung = Object.assign(new Error("docker: timed out"), { code: "ETIMEDOUT" });
   const { detail, issues, result } = await bundleImages(makeDb(), {
     installed: ["jellyfin"],
-    containers: () => { throw new Error("docker: not found"); },
+    containers: () => { throw hung; },
   });
   assert.equal(detail.state, "info");
   assert.equal(detail.value, t("signals.bundleImages.unknown", "en"));
@@ -124,6 +128,22 @@ test("docker unavailable → 'unknown' at info, never ok", async () => {
   assert.ok(issue, "unknown is surfaced, not silently dropped");
   assert.equal(issue.severity, "info");
   assert.equal(result.ok, true);
+});
+
+test("no docker binary at all (ENOENT) → no card, not 'unknown'", async () => {
+  const missing = () => { throw Object.assign(new Error("spawnSync docker ENOENT"), { code: "ENOENT" }); };
+  const { detail, issues } = await bundleImages(makeDb(), { installed: ["linkding"], containers: missing });
+  assert.equal(detail, undefined, "an MCP-only host gets no permanent card");
+  assert.deepEqual(issues, []);
+
+  // The binary can also vanish between the two calls.
+  const second = await bundleImages(makeDb(), {
+    installed: ["linkding"],
+    containers: () => psRow("linkding", "sissbruecker/linkding:1.47.0"),
+    created: missing,
+  });
+  assert.equal(second.detail, undefined);
+  assert.deepEqual(second.issues, []);
 });
 
 test("a timed-out / ragged image inspect answer → 'unknown', never ok", async () => {

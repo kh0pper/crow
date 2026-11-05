@@ -14,6 +14,8 @@ import {
   pullAlertSettingKey,
   reportImagePullFailure,
   bundlePageUrl,
+  imagePullFailureRings,
+  parseComposeServices,
 } from "../servers/gateway/bundle-pull-alert.js";
 import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 
@@ -122,4 +124,110 @@ test("the bell reads the dashboard language", async () => {
   const { calls, notify } = makeNotify();
   await notifyImagePullFailure({ db, bundleId: "trilium", bundleName: "TriliumNext", nowMs: NOW, notify });
   assert.equal(calls[0].title, "No se pudieron descargar las imágenes de TriliumNext");
+});
+
+// ── build-only images do not ring (a service this repo builds has nothing to
+// pull, so `compose pull` failing on it is expected, not news) ──
+
+/** The real companion compose shapes: `build:` + a local `image:` tag. */
+const COMPANION_COMPOSE = [
+  "services:",
+  "  companion:",
+  "    build:",
+  "      context: .",
+  "      dockerfile: Dockerfile",
+  "    image: crow-companion",
+  "    container_name: crow-companion",
+].join("\n");
+const COMPANION_ALLOWLIST = "bundles/companion/docker-compose.yml  crow-companion  # built locally\n";
+
+/** The real navidrome compose shape: a pulled image, no build. */
+const NAVIDROME_COMPOSE = [
+  "services:",
+  "  navidrome:",
+  "    image: deluan/navidrome:0.64.2",
+  "    container_name: navidrome",
+].join("\n");
+
+const PULL_DENIED = "Error response from daemon: pull access denied for crow-companion, repository does not exist";
+
+test("the compose services are read as written (build flag + image)", () => {
+  assert.deepEqual(parseComposeServices(COMPANION_COMPOSE), [{ name: "companion", image: "crow-companion", hasBuild: true }]);
+  assert.deepEqual(parseComposeServices(NAVIDROME_COMPOSE), [{ name: "navidrome", image: "deluan/navidrome:0.64.2", hasBuild: false }]);
+});
+
+test("a build-only bundle's failed pull rings NO bell", async () => {
+  const { db } = makeDb();
+  const { calls, notify } = makeNotify();
+  const row = await reportImagePullFailure({
+    bundleId: "companion",
+    composeText: COMPANION_COMPOSE,
+    allowlistText: COMPANION_ALLOWLIST,
+    output: PULL_DENIED,
+    dbFactory: () => ({ ...db, close() {} }),
+    notify,
+    nowMs: NOW,
+    log: { warn() {} },
+  });
+  assert.equal(row, null, "nothing to tell the owner: this image is built here");
+  assert.equal(calls.length, 0);
+});
+
+test("a pulled-image bundle's failed pull still rings once", async () => {
+  const { db, rows } = makeDb();
+  const { calls, notify } = makeNotify();
+  const opts = {
+    bundleId: "navidrome",
+    composeText: NAVIDROME_COMPOSE,
+    allowlistText: "",
+    output: "Error response from daemon: Get https://registry-1.docker.io/v2/: net/http: TLS handshake timeout",
+    dbFactory: () => ({ ...db, close() {} }),
+    notify,
+    nowMs: NOW,
+    log: { warn() {} },
+  };
+  await reportImagePullFailure(opts);
+  assert.equal(calls.length, 1, "one bell for an image that really had to download");
+  assert.ok(rows.has(pullAlertSettingKey("navidrome")), "and the cooldown marker is stamped");
+  await reportImagePullFailure(opts);
+  assert.equal(calls.length, 1, "still one inside the 24 h window");
+});
+
+test("the guard needs a compose file: with none it rings (the old behaviour)", () => {
+  assert.equal(imagePullFailureRings({ bundleId: "navidrome" }), true);
+});
+
+test("a built service plus a pulled sidecar: the sidecar's failure still rings", async () => {
+  const mixed = [
+    "services:",
+    "  app:",
+    "    build: .",
+    "    image: crow-someapp:1.0.0",
+    "  db:",
+    "    image: mariadb:10.11",
+  ].join("\n");
+  const allowlist = "bundles/someapp/docker-compose.yml  crow-someapp:1.0.0  # built locally\n";
+  assert.equal(
+    imagePullFailureRings({ bundleId: "someapp", composeText: mixed, allowlistText: allowlist, output: "pull access denied for crow-someapp:1.0.0" }),
+    false,
+    "the failure names only the built image",
+  );
+  assert.equal(
+    imagePullFailureRings({ bundleId: "someapp", composeText: mixed, allowlistText: allowlist, output: "Error response from daemon: manifest for mariadb:10.11 not found" }),
+    true,
+    "the failure names the pulled sidecar",
+  );
+});
+
+test("unattributable output: no bell for an allowlisted bundle that builds, otherwise a bell", () => {
+  // Nothing in the output places the failure on a service.
+  const vsCommand = ["services:", "  app:", "    build: .", "    image: crow-someapp:1.0.0"].join("\n");
+  const allowlist = "bundles/someapp/docker-compose.yml  crow-someapp:1.0.0  # built locally\n";
+  assert.equal(imagePullFailureRings({ bundleId: "someapp", composeText: vsCommand, allowlistText: allowlist, output: "unknown error" }), false);
+  // Same compose, but the bundle is NOT in the allowlist: ring.
+  assert.equal(imagePullFailureRings({ bundleId: "unlisted", composeText: vsCommand, allowlistText: allowlist, output: "unknown error" }), true);
+  // No services parsed at all (flow-style compose): the same fallback applies.
+  assert.equal(imagePullFailureRings({ bundleId: "someapp", composeText: "services: {app: {build: ., image: crow-someapp:1.0.0}}\n", allowlistText: allowlist, output: "" }), false);
+  // A compose that builds nothing still rings.
+  assert.equal(imagePullFailureRings({ bundleId: "navidrome", composeText: NAVIDROME_COMPOSE, allowlistText: "", output: "unknown error" }), true);
 });

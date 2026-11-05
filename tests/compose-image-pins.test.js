@@ -25,12 +25,26 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseImagePinAllowlist } from "../servers/shared/image-pin-allowlist.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ALLOWLIST_PATH = join(ROOT, "scripts", "image-pin-allowlist.txt");
 
-/** Directories never worth walking: dependencies, VCS, and generated scratch. */
-const SKIP_DIRS = new Set(["node_modules", ".git", "data", ".pi-brief"]);
+/** Directories never worth walking: dependencies and VCS. */
+const SKIP_DIRS = new Set(["node_modules", ".git", ".pi-brief"]);
+
+/**
+ * Skipped ONLY at the repo root: `data/` is the checkout's generated scratch
+ * area. A bundle may legitimately keep its own `data/` folder, and a compose
+ * file there is still a compose file this repo ships — skipping it everywhere
+ * would let a bundle hide an unpinned image one directory deep.
+ */
+const ROOT_SKIP_DIRS = new Set(["data"]);
+
+/** Whether a directory of this name is skipped (`isRoot`: it is the walk's start). */
+export function isSkippedDir(name, isRoot = false) {
+  return SKIP_DIRS.has(name) || (isRoot && ROOT_SKIP_DIRS.has(name));
+}
 
 /** docker-compose.yml / docker-compose.tailnet.yml / compose.yml / *.yaml … */
 const COMPOSE_FILE_RE = /^(?:docker-)?compose(?:[.-][A-Za-z0-9_.-]+)?\.ya?ml$/;
@@ -38,25 +52,34 @@ const COMPOSE_FILE_RE = /^(?:docker-)?compose(?:[.-][A-Za-z0-9_.-]+)?\.ya?ml$/;
 /** The image line of a compose service. */
 const IMAGE_LINE_RE = /^\s*(?:-\s*)?image:\s*(.+?)\s*$/;
 
+/**
+ * The same key written inline: flow style (`app: {image: foo:latest}`, the key
+ * after `{`, `,` or whitespace) and JSON style (`"image": "foo:latest"`).
+ * Scanning only lines that START with `image:` lets a whole compose file dodge
+ * the check by switching style, so both are matched wherever they appear.
+ */
+const IMAGE_FLOW_RE = /(?:^|[\s{,])image\s*:\s*("[^"]*"|'[^']*'|[^,}\s]+)/g;
+const IMAGE_JSON_RE = /"image"\s*:\s*"([^"]*)"/g;
+
 /** A resolved reference: `repo[:port]/path[/path]` `:tag` `@sha256:…`. */
 const DIGEST_RE = /@sha256:[0-9a-f]{64}$/;
 
 /** Every compose file under `dir`, as repo-relative POSIX paths, sorted. */
 export function findComposeFiles(dir = ROOT) {
   const out = [];
-  const walk = (abs) => {
+  const walk = (abs, isRoot = false) => {
     let entries;
     try { entries = readdirSync(abs, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
       if (e.isDirectory()) {
-        if (SKIP_DIRS.has(e.name)) continue;
-        walk(join(abs, e.name));
+        if (isSkippedDir(e.name, isRoot)) continue;
+        walk(join(abs, e.name), false);
       } else if (e.isFile() && COMPOSE_FILE_RE.test(e.name)) {
         out.push(relative(dir, join(abs, e.name)).split(sep).join("/"));
       }
     }
   };
-  walk(dir);
+  walk(dir, true);
   return out.sort();
 }
 
@@ -101,20 +124,42 @@ export function checkImagePin(value) {
   return { ok: true };
 }
 
-/** The `image:` values in one compose file, with their line numbers. */
+/** A compose scalar without the quotes compose allows around it. */
+function unquote(raw) {
+  const s = String(raw ?? "").trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1).trim();
+  return s;
+}
+
+/**
+ * The `image:` values in one compose file, with their line numbers and the
+ * style they were written in (`line` block form, `flow`, or `json`).
+ */
 export function findComposeImages(text) {
   const out = [];
   const lines = String(text ?? "").split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const m = IMAGE_LINE_RE.exec(lines[i]);
-    if (!m) continue;
-    // Drop a trailing comment, then the quotes compose allows around a scalar.
-    let raw = m[1].replace(/\s+#.*$/, "").trim();
-    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-      raw = raw.slice(1, -1).trim();
+    const line = lines[i];
+    const m = IMAGE_LINE_RE.exec(line);
+    if (m) {
+      // Drop a trailing comment, then the quotes compose allows around a scalar.
+      const raw = unquote(m[1].replace(/\s+#.*$/, ""));
+      if (raw) out.push({ line: i + 1, raw, style: "line" });
+      continue;
     }
-    if (!raw) continue;
-    out.push({ line: i + 1, raw });
+    // Not the block form — but the same key can still be inline on this line.
+    // A comment cannot declare an image, and spec examples live in comments.
+    if (/^\s*#/.test(line)) continue;
+    const body = line.replace(/\s+#.*$/, "");
+    for (const [re, style] of [[IMAGE_FLOW_RE, "flow"], [IMAGE_JSON_RE, "json"]]) {
+      re.lastIndex = 0;
+      let hit;
+      while ((hit = re.exec(body)) !== null) {
+        const raw = unquote(hit[1]);
+        if (raw) out.push({ line: i + 1, raw, style });
+        if (hit[0] === "") re.lastIndex++; // never loop on an empty match
+      }
+    }
   }
   return out;
 }
@@ -145,17 +190,30 @@ export function checkComposeText(text, { file = "(inline)", allowlist = [] } = {
   return findings;
 }
 
-/** `path image  # reason` lines; blank lines and full-line comments are skipped. */
-export function parseImagePinAllowlist(text) {
-  const out = [];
-  for (const line of String(text ?? "").split("\n")) {
-    const body = line.replace(/(^|\s)#.*$/, "").trim();
-    if (!body) continue;
-    const [path, image] = body.split(/\s+/);
-    if (!path || !image) continue;
-    out.push({ path: path.split(sep).join("/"), image });
+/** `path\timage` — the key that pairs an allowlist entry with a real image. */
+export function composeImageKey(path, image) {
+  return `${path}\t${image}`;
+}
+
+/** Every image in every compose file under `dir`, as `composeImageKey` strings. */
+export function collectComposeImageKeys(dir = ROOT) {
+  const keys = new Set();
+  for (const file of findComposeFiles(dir)) {
+    for (const { raw } of findComposeImages(readFileSync(join(dir, file), "utf8"))) keys.add(composeImageKey(file, raw));
   }
-  return out;
+  return keys;
+}
+
+/**
+ * The allowlist entries that match NO image seen in a compose file. This is the
+ * whole staleness rule, in one place: an entry that no longer names a real
+ * image has rotted into a blanket exemption and must fail the suite.
+ *
+ * @param {Array<{path: string, image: string}>} allowlist
+ * @param {Set<string>} seenImages  `composeImageKey` values
+ */
+export function findStaleAllowlist(allowlist, seenImages) {
+  return (allowlist || []).filter((e) => !seenImages.has(composeImageKey(e.path, e.image)));
 }
 
 const ALLOWLIST = parseImagePinAllowlist(readFileSync(ALLOWLIST_PATH, "utf8"));
@@ -176,12 +234,15 @@ test("every compose image is pinned to a released tag or a digest (or is a local
 });
 
 test("no allowlist entry is stale: each one still matches a real image in a real compose file", () => {
-  const seen = new Set();
-  for (const file of findComposeFiles()) {
-    for (const { raw } of findComposeImages(readFileSync(join(ROOT, file), "utf8"))) seen.add(`${file}\t${raw}`);
-  }
-  const stale = ALLOWLIST.filter((e) => !seen.has(`${e.path}\t${e.image}`)).map((e) => `${e.path} ${e.image}`);
+  const stale = findStaleAllowlist(ALLOWLIST, collectComposeImageKeys()).map((e) => `${e.path} ${e.image}`);
   assert.deepEqual(stale, [], `stale image-pin-allowlist.txt entries:\n  ${stale.join("\n  ")}`);
+});
+
+test("only the repo root's data/ directory is skipped, never a bundle's own", () => {
+  assert.equal(isSkippedDir("data", true), true, "the checkout's generated data/ is scratch");
+  assert.equal(isSkippedDir("data", false), false, "a bundle's data/ folder is still walked");
+  assert.equal(isSkippedDir("node_modules", false), true, "dependencies are skipped at any depth");
+  assert.equal(isSkippedDir(".git", false), true);
 });
 
 // ── the checker's red cases (fixture strings, never a real file) ──
@@ -203,6 +264,28 @@ test("red: an image that is only a variable (no default) is reported, not passed
   const findings = checkComposeText("services:\n  app:\n    image: ${SOME_IMAGE}\n");
   assert.equal(findings.length, 1);
   assert.equal(findings[0].code, "unresolved-variable");
+});
+
+test("red: a flow-style image is caught too (it does not start with `image:`)", () => {
+  const latest = checkComposeText('services:\n  app: {image: nginx:latest, ports: ["80:80"]}\n');
+  assert.deepEqual(latest.map((f) => [f.line, f.code]), [[2, "latest-tag"]], "flow-style :latest");
+
+  const untagged = checkComposeText("services:\n  app: {image: ghcr.io/example/app}\n");
+  assert.deepEqual(untagged.map((f) => [f.line, f.code]), [[2, "no-tag"]], "flow-style with no tag");
+
+  const pinned = checkComposeText("services:\n  app: {image: \"nginx:1.27.3\", ports: [\"80:80\"]}\n");
+  assert.deepEqual(pinned, [], "a pinned flow-style image passes");
+});
+
+test("red: a JSON-style image key is caught too", () => {
+  const latest = checkComposeText('{"services": {"app": {"image": "nginx:latest"}}}\n');
+  assert.deepEqual(latest.map((f) => [f.line, f.code]), [[1, "latest-tag"]], "JSON-style :latest");
+
+  const untagged = checkComposeText('{"services": {"app": {"image": "nginx"}}}\n');
+  assert.deepEqual(untagged.map((f) => [f.line, f.code]), [[1, "no-tag"]], "JSON-style with no tag");
+
+  const pinned = checkComposeText('{"services": {"app": {"image": "nginx:1.27.3"}}}\n');
+  assert.deepEqual(pinned, [], "a pinned JSON-style image passes");
 });
 
 test("green: released tags, registry ports, digests and a variable WITH a default all pass", () => {
@@ -234,10 +317,17 @@ test("green: a locally built image passes once the allowlist names it (and only 
 });
 
 test("red: an allowlist entry that matches nothing is stale", () => {
-  const entry = parseImagePinAllowlist("bundles/gone/docker-compose.yml  crow-gone  # removed bundle\n");
-  assert.deepEqual(entry, [{ path: "bundles/gone/docker-compose.yml", image: "crow-gone" }]);
-  const seen = new Set(
-    findComposeFiles().flatMap((file) => findComposeImages(readFileSync(join(ROOT, file), "utf8")).map((i) => `${file}\t${i.raw}`)),
-  );
-  assert.ok(!seen.has(`${entry[0].path}\t${entry[0].image}`), "a removed file's entry no longer matches");
+  const entries = parseImagePinAllowlist("bundles/gone/docker-compose.yml  crow-gone  # removed bundle\n");
+  assert.deepEqual(entries, [{ path: "bundles/gone/docker-compose.yml", image: "crow-gone" }]);
+  // Through the REAL stale check, not a hand-rolled set lookup.
+  const seen = collectComposeImageKeys();
+  assert.deepEqual(findStaleAllowlist(entries, seen), entries, "the real check flags an entry whose file is gone");
+
+  // …and it clears an entry that does match, so the red case is not a function
+  // that simply says "stale" to everything.
+  assert.deepEqual(findStaleAllowlist(ALLOWLIST, seen), [], "the live allowlist is not stale");
+  const live = ALLOWLIST[0];
+  assert.deepEqual(findStaleAllowlist([live], new Set([composeImageKey(live.path, live.image)])), []);
+  assert.deepEqual(findStaleAllowlist([live], new Set([composeImageKey(live.path, "someone-else:1.0")])), [live],
+    "the pair matters, not just the path");
 });

@@ -1849,7 +1849,9 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
 //
 // INFO ONLY, on purpose: an old image is a fact for the owner to judge (their
 // NAS image being 100 days old may be exactly what they want). Only a signal
-// that cannot read Docker says "unknown" — and that is info too, never ok.
+// that cannot read Docker WHILE DOCKER EXISTS says "unknown" — and that is info
+// too, never ok. No `docker` binary at all is not a failure to report: a host
+// with only MCP-style bundles never needs it (see the ENOENT branches below).
 const BUNDLE_IMAGES_TIMEOUT_MS = 5000;
 
 const defaultBundleContainersReader = () => execFileSync("docker", ["ps", "--format", BUNDLE_PS_FORMAT], {
@@ -1857,9 +1859,10 @@ const defaultBundleContainersReader = () => execFileSync("docker", ["ps", "--for
 });
 
 // One call for every image: an inspect per image would be one timeout each on a
-// host where Docker is hung.
+// host where Docker is hung. `--` ends the option list, so an image name that
+// starts with `-` can never be read as a flag.
 const defaultBundleImageCreatedReader = (images) => execFileSync("docker", [
-  "image", "inspect", "--format", "{{.Created}}", ...images,
+  "image", "inspect", "--format", "{{.Created}}", "--", ...images,
 ], { encoding: "utf-8", timeout: BUNDLE_IMAGES_TIMEOUT_MS });
 
 let _bundleContainersReader = defaultBundleContainersReader;
@@ -1893,7 +1896,10 @@ async function bundleImagesSignal(lang, nowFn) {
   let containersOut;
   try {
     containersOut = _bundleContainersReader();
-  } catch {
+  } catch (err) {
+    // No docker binary → no card at all. Nothing is aged, and an owner who never
+    // installed a container bundle should not be shown a permanent "unknown".
+    if (err?.code === "ENOENT") return null;
     return unknown(t("signals.bundleImages.reasonDocker", lang));
   }
 
@@ -1907,7 +1913,9 @@ async function bundleImagesSignal(lang, nowFn) {
   let created;
   try {
     created = parseImageCreated(_bundleImageCreatedReader(names), names);
-  } catch {
+  } catch (err) {
+    // Same as above: the binary disappearing is not a signal worth a card.
+    if (err?.code === "ENOENT") return null;
     return unknown(t("signals.bundleImages.reasonInspect", lang));
   }
   // No creation time for ANY image is a failed read, not a young image.

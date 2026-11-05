@@ -12,6 +12,10 @@
  *     output, which can carry registry URLs, credentials in a proxy URL, or paths;
  *   - at most once per bundle per 24 h, so a collection install or a retry loop
  *     cannot turn one registry outage into a wall of bells;
+ *   - never for an image this repo BUILDS itself: a `build:` service (or an
+ *     image in scripts/image-pin-allowlist.txt) has nothing to download, so its
+ *     pull failure is expected and stays a job-log line (see
+ *     imagePullFailureRings);
  *   - never throws: the install continues exactly as before.
  *
  * The marker is a local `dashboard_settings` row (one per bundle), written with
@@ -19,9 +23,15 @@
  * setting, it must not sync to a paired instance, and an older install without
  * that table must still install.
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createDbClient } from "../db.js";
 import { createNotification } from "../shared/notifications.js";
+import { parseImagePinAllowlist } from "../shared/image-pin-allowlist.js";
 import { t, fill } from "./dashboard/shared/i18n.js";
+
+/** `scripts/image-pin-allowlist.txt` — the images this repo builds itself. */
+export const IMAGE_PIN_ALLOWLIST_PATH = fileURLToPath(new URL("../../scripts/image-pin-allowlist.txt", import.meta.url));
 
 /** Re-ring window for the same bundle. */
 export const PULL_ALERT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -36,6 +46,106 @@ export const PULL_ALERT_BODY_KEY = "bundles.imagePullFailed.body";
 /** The per-bundle page in Extensions (its search box starts on the id). */
 export function bundlePageUrl(bundleId) {
   return `/dashboard/extensions?q=${encodeURIComponent(bundleId)}`;
+}
+
+export function readImagePinAllowlist(path = IMAGE_PIN_ALLOWLIST_PATH) {
+  try { return parseImagePinAllowlist(readFileSync(path, "utf8")); } catch { return []; }
+}
+
+/** A compose scalar without the quotes compose allows around it. */
+function unquote(raw) {
+  const s = String(raw ?? "").trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1).trim();
+  return s;
+}
+
+/**
+ * The services of one compose text, in file order: `{ name, image, hasBuild }`.
+ *
+ * Deliberately a line reader, not a YAML parser: the install path only needs to
+ * know which services exist, which of them declare `build:`, and what image tag
+ * each names. Flow-style compose files yield no services, and the caller falls
+ * back to "does this file build anything at all" (see imagePullFailureRings).
+ */
+export function parseComposeServices(text) {
+  const services = [];
+  let inServices = false;
+  let current = null;
+  for (const line of String(text ?? "").split("\n")) {
+    if (/^\S/.test(line)) {
+      // A top-level key ends the block: only `services:` opens it.
+      inServices = /^services:\s*(?:#.*)?$/.test(line.trim());
+      current = null;
+      continue;
+    }
+    if (!inServices) continue;
+    const svc = /^ {2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$/.exec(line);
+    if (svc) {
+      current = { name: svc[1], image: null, hasBuild: false };
+      services.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (/^ {3,}build:\s*(?:\S|$)/.test(line)) current.hasBuild = true;
+    const img = /^ {3,}image:\s*(.+?)\s*$/.exec(line.replace(/\s+#.*$/, ""));
+    if (img) current.image = unquote(img[1]);
+  }
+  return services;
+}
+
+/** Does the compose text declare a `build:` for anything, in any style? Comments never count. */
+function composeBuildsAnything(text) {
+  for (const line of String(text ?? "").split("\n")) {
+    if (/^\s*#/.test(line)) continue;
+    if (/(?:^|[\s{,])build\s*:/.test(line.replace(/\s+#.*$/, ""))) return true;
+  }
+  return false;
+}
+
+/**
+ * Should a failed `docker compose pull` ring the owner's bell?
+ *
+ * A compose service with a `build:` section, or one whose image is in
+ * scripts/image-pin-allowlist.txt, has nothing to download: `compose pull`
+ * failing on it is expected (companion, sdxl, scratch-offline) and must stay a
+ * job-log line, or every install of a locally built bundle rings once a day.
+ *
+ * Attribution first: the error output usually names the image it could not
+ * pull, so a bundle with BOTH a built service and a pulled sidecar (a database)
+ * still rings when the sidecar is what failed. When the output names nothing we
+ * can place, the fallback is deliberately blunt: a compose that builds
+ * something, for a bundle the allowlist knows, does not ring.
+ *
+ * @param {object} o
+ * @param {string} o.bundleId
+ * @param {string} [o.composeText]    the installed compose file, as read
+ * @param {string} [o.output]        the command's stderr + message
+ * @param {string} [o.allowlistText] scripts/image-pin-allowlist.txt contents
+ * @param {string} [o.allowlistPath] read from this file when allowlistText is null
+ * @returns {boolean} true when the bell should ring
+ */
+export function imagePullFailureRings({ bundleId, composeText = "", output = "", allowlistText = null, allowlistPath = IMAGE_PIN_ALLOWLIST_PATH } = {}) {
+  // No compose to judge (or no bundle): keep the old behaviour and ring.
+  if (!composeText) return true;
+  const allowlist = allowlistText === null ? readImagePinAllowlist(allowlistPath) : parseImagePinAllowlist(allowlistText);
+  const bundleCompose = `bundles/${bundleId}/docker-compose.yml`;
+  const builtImages = allowlist.filter((e) => e.path === bundleCompose).map((e) => e.image);
+  const allowlistedBundle = builtImages.length > 0;
+  const serviceBuildsItself = (s) => s.hasBuild || (!!s.image && builtImages.includes(s.image));
+
+  const services = parseComposeServices(composeText);
+  if (services.length === 0) {
+    // Nothing parsed to place the failure on: skip only for a bundle the
+    // allowlist calls locally built, whose compose does actually build.
+    return !(allowlistedBundle && composeBuildsAnything(composeText));
+  }
+
+  const out = String(output ?? "");
+  const named = services.filter((s) => s.image && !s.image.includes("${") && out.includes(s.image));
+  if (named.length === 0) {
+    return !(allowlistedBundle && services.some((s) => s.hasBuild));
+  }
+  return !named.every(serviceBuildsItself);
 }
 
 /**
@@ -111,16 +221,21 @@ async function readLanguage(db) {
 
 /**
  * The install path's entry point: owns its database client (the install job has
- * none) and never throws into the caller.
+ * none) and never throws into the caller. Silent (no client opened at all) when
+ * the failed pull can only have been a locally built image.
  *
  * @param {object} [o]
  * @param {string} o.bundleId
  * @param {string} [o.bundleName]
+ * @param {string} [o.composeText]   the installed compose file's text
+ * @param {string} [o.output]       the pull command's stderr + message
+ * @param {string} [o.allowlistText] scripts/image-pin-allowlist.txt contents
  * @param {Function} [o.dbFactory]  test seam
  */
-export async function reportImagePullFailure({ bundleId, bundleName = null, dbFactory = createDbClient, log = console, ...rest } = {}) {
+export async function reportImagePullFailure({ bundleId, bundleName = null, dbFactory = createDbClient, log = console, composeText = "", output = "", allowlistText = null, ...rest } = {}) {
   let db = null;
   try {
+    if (!imagePullFailureRings({ bundleId, composeText, output, allowlistText })) return null;
     db = dbFactory();
     return await notifyImagePullFailure({ db, bundleId, bundleName, log, ...rest });
   } catch (err) {
