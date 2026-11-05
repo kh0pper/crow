@@ -24,8 +24,10 @@ services:
       - ${HOME}/.crow/env/rocm.env
     volumes:
       - ${LLM_CACHE}:/models
+    # CROW_TAILSCALE_IP defaults to 127.0.0.1, so an unset variable can never
+    # publish crow-chat (unauthenticated) on every interface.
     ports:
-      - "${CROW_TAILSCALE_IP}:8003:8000"
+      - "${CROW_TAILSCALE_IP:-127.0.0.1}:8003:8000"
     entrypoint: ["llama-server"]
     command:
       # MTP GGUF + mmproj pre-downloaded to $LLM_CACHE/qwen36-35b-a3b-mtp/

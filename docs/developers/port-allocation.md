@@ -3,12 +3,14 @@
 This document is the **single source of truth** for every host port consumed by Crow itself, by bundles in `bundles/`, and reserved by the MVP roadmap. Any new bundle PR that introduces a port binding must amend this file in the same PR. CI enforces that:
 
 1. Every host port in any `bundles/<id>/docker-compose*.yml` (overlays such as `docker-compose.tailnet.yml` included) is listed here. A host port written as `${VAR:-N}` or `${VAR-N}` counts as `N`, the port a fresh install publishes. A host port that is a variable with no default (`${VAR}`) has no number to check.
-2. No two bundles publish the same host port on overlapping addresses: the same host IP, or either side a wildcard (no IP, `0.0.0.0`, `::`). Two different specific addresses on one port (loopback and the tailnet IP, the 8004 case below) do not clash. A host-IP variable with no default (`${CROW_TAILSCALE_IP}`) is a wildcard, because unset publishes on every address; write it as `${CROW_TAILSCALE_IP:?…}` (required) to make it one specific address. Two services of one bundle are checked against each other too.
+2. No two bundles publish the same host port on overlapping addresses: the same host IP, or either side a wildcard (no IP, `0.0.0.0`, `::`). Two different specific addresses on one port (loopback and the tailnet IP, the 8004 case below) do not clash. A host-IP variable with no default (`${CROW_TAILSCALE_IP}`) is a wildcard, because unset publishes on every address; write it as `${CROW_TAILSCALE_IP:-127.0.0.1}` (unset means loopback) or `${CROW_TAILSCALE_IP:?…}` (required, so Compose refuses to start) to make it one specific address. Two services of one bundle are checked against each other too.
 3. The repo-root `docker-compose.yml` is scanned as well. Its `garage` service (`--profile storage`, the default object storage) is the garage bundle's alternative deployment, and its `minio` service (`--profile minio-legacy`) is the minio bundle's (the two never run together), so their ports count as those bundles'. A ports entry the checker cannot read is printed as a WARNING.
 
 ## Conventions
 
 - All bundle ports bind to `127.0.0.1` unless the bundle is explicitly a reverse proxy (Caddy) or uses `network_mode: host` (browser, companion, coturn, plex, tailscale, crowdsec-firewall-bouncer).
+- A bundle port whose host IP is a variable must carry a non-empty default — `${CROW_TAILSCALE_IP:-127.0.0.1}` — or be a REQUIRED variable (`${CROW_TAILSCALE_IP:?…}`), which Compose refuses to start without. A bare `${CROW_TAILSCALE_IP}`, `$VAR` or `${VAR:-}` publishes on every interface when the variable is unset — which is how an unauthenticated model, STT or TTS server ends up on the LAN. Bundle host-IP variables therefore default to `127.0.0.1`: unset means loopback, never `0.0.0.0`. `tests/compose-port-bind-defaults.test.js` enforces this; the one deliberate exception is the reverse proxy's public 80/443, listed in `scripts/port-bind-allowlist.txt`.
+- The Crow gateway is not one of those loopback-only processes: it listens on `0.0.0.0` (every interface) unless `CROW_GATEWAY_BIND` is set (`servers/gateway/listen-host.js`). The docker install publishes it on `127.0.0.1` only; a bare-metal/native install binds every interface and is protected by the host firewall and Tailscale, not by the bind address.
 - "Existing" rows are bundles already shipped before this registry was introduced — they are recorded here so future bundles avoid them.
 - "Reserved" rows are claimed by upcoming Phase 2 bundles; do not consume them for unrelated work.
 - "MVP" rows are claimed by the bundles in the current MVP plan.
@@ -47,12 +49,12 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 2224 | 127.0.0.1 | forgejo (SSH) | MVP PR 5 |
 | 2586 | 127.0.0.1 | ntfy (`NTFY_PORT`; tailnet reaches it through `tailscale serve 2586`, never Funnel) | existing |
 | 2283 | 127.0.0.1 | immich (existing — verify in compose) | existing |
-| 3001 | 127.0.0.1 | Crow gateway (HTTPS) | core |
-| 3002 | 127.0.0.1 | Crow gateway (alt) | core |
-| 3004 | 127.0.0.1 | Crow gateway (alt) | core |
+| 3001 | every interface (`0.0.0.0`, unless `CROW_GATEWAY_BIND` is set — `servers/gateway/listen-host.js`); the container install publishes the port on `127.0.0.1` only | Crow gateway (HTTPS) | core |
+| 3002 | same as 3001 (the process binds every interface unless `CROW_GATEWAY_BIND` is set) | Crow gateway (alt) | core |
+| 3004 | same as 3001 (the process binds every interface unless `CROW_GATEWAY_BIND` is set) | Crow gateway (alt) | core |
 | 3005 | 127.0.0.1 | sdxl (overridable via `SDXL_PORT`; companion reaches it at localhost over host networking) | existing |
 | 3007 | 127.0.0.1 | uptime-kuma | MVP PR 1 |
-| 3008 | 127.0.0.1 | Crow gateway (alt) | core |
+| 3008 | same as 3001 (the process binds every interface unless `CROW_GATEWAY_BIND` is set) | Crow gateway (alt) | core |
 | 3014 | 127.0.0.1 | Satellite Crow agent (satellite host only, `CROW_SATELLITE_PORT`; tailnet reach through Tailscale Serve, never Funnel) | SAT-3 |
 | 3020 | 127.0.0.1 | adguard-home (admin UI) | MVP PR 3 |
 | 3030 | 127.0.0.1 | homepage | MVP PR 1 |
@@ -88,12 +90,12 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
 | 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to the home server :8002) | external, freed |
-| 8003 | tailscale IP | llamacpp-vulkan-qwen36-35b-a3b (crow-chat) | existing |
+| 8003 | tailscale IP (`CROW_TAILSCALE_IP`; unset → `127.0.0.1`) | llamacpp-vulkan-qwen36-35b-a3b (crow-chat) | existing |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
 | 8004 | tailscale IP | llamacpp-vulkan-qwen3-embed (crow-embed; same port as faster-whisper, different interface) | existing |
-| 8005 | tailscale IP | faster-whisper-server tailnet overlay (`docker-compose.tailnet.yml`, opt-in cross-instance STT; moved off 8004, which crow-embed holds on the tailnet IP) | existing |
+| 8005 | tailscale IP (`CROW_TAILSCALE_IP`; unset → `127.0.0.1`) | faster-whisper-server tailnet overlay (`docker-compose.tailnet.yml`, opt-in cross-instance STT; moved off 8004, which crow-embed holds on the tailnet IP) | existing |
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
-| 8011 | tailscale IP | vllm-rocm-qwen35-4b (crow-voice classifier / fast route) | existing |
+| 8011 | tailscale IP (`CROW_TAILSCALE_IP`; unset → `127.0.0.1`) | vllm-rocm-qwen35-4b (crow-voice classifier / fast route) | existing |
 | 8012 | 127.0.0.1 | llamacpp-vulkan-qwen3-vl-4b (crow-vision: dedicated vision model for vision profiles, Meta Glasses look turns and the vision role; loopback only, no ufw rule) | glasses vision |
 | 8018 | 127.0.0.1 | design-kit (renderer door: Vega-Lite / Mermaid / D2 → SVG; the render container itself sits on an internal-only Docker network with no egress; no ufw rule) | Design kit v1 |
 | 8040 | 127.0.0.1 | lemmy (API for Crow's host-run MCP server and panel, `LEMMY_API_PORT`; the public site goes through Caddy) | item 30 |
@@ -126,14 +128,14 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8554 | 127.0.0.1 | frigate (RTSP restream) | existing |
 | 8555 | 127.0.0.1 | frigate (WebRTC) | existing |
 | 8765 | 127.0.0.1 | motioneye | existing |
-| 8880 | 127.0.0.1 | kokoro-tts (local TTS) | existing |
+| 8880 | 127.0.0.1 (the opt-in tailnet overlay adds the same port on the tailnet IP, `CROW_TAILSCALE_IP`; unset → `127.0.0.1`) | kokoro-tts (local TTS) | existing |
 | 8971 | 127.0.0.1 | frigate (authenticated UI) | existing |
 | 9000 | 127.0.0.1 | minio (S3 API, existing; deprecated, superseded by garage 3900) | existing |
 | 9001 | 127.0.0.1 | minio (console, existing) | existing |
 | 9090 | 127.0.0.1 | linkding (existing) | existing |
-| 9100 | CUDA host tailscale IP | vllm-cuda-embed (`GRACKLE_TAILSCALE_IP`; runs on the CUDA host, not the primary host) | existing |
-| 9101 | CUDA host tailscale IP | vllm-cuda-rerank (`GRACKLE_TAILSCALE_IP`; runs on the CUDA host, not the primary host) | existing |
-| 9102 | CUDA host tailscale IP | vllm-cuda-vision (`GRACKLE_TAILSCALE_IP`; runs on the CUDA host, not the primary host) | existing |
+| 9100 | CUDA host tailscale IP (`GRACKLE_TAILSCALE_IP`; unset → `127.0.0.1`; runs on the CUDA host, not the primary host) | vllm-cuda-embed | existing |
+| 9101 | CUDA host tailscale IP (`GRACKLE_TAILSCALE_IP`; unset → `127.0.0.1`; runs on the CUDA host, not the primary host) | vllm-cuda-rerank | existing |
+| 9102 | CUDA host tailscale IP (`GRACKLE_TAILSCALE_IP`; unset → `127.0.0.1`; runs on the CUDA host, not the primary host) | vllm-cuda-vision | existing |
 | 11434 | 127.0.0.1 | ollama (existing) | existing |
 | 13011 | 127.0.0.1 | (reserved on the satellite host: reverse ssh tunnel to the primary) | reserved (SAT) |
 | 13378 | 127.0.0.1 | audiobookshelf (existing) | existing |

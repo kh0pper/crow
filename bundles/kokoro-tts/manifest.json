@@ -1,5 +1,6 @@
 {
   "id": "kokoro-tts",
+  "version": "1.0.1",
   "type": "bundle",
   "name": "Kokoro TTS (local)",
   "category": "ai",

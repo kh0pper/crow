@@ -11,8 +11,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
     volumes:
       - ${GRACKLE_HF_CACHE}:/models
+    # GRACKLE_TAILSCALE_IP defaults to 127.0.0.1, so an unset variable can
+    # never publish the vision model on every interface.
     ports:
-      - "${GRACKLE_TAILSCALE_IP}:9102:8000"
+      - "${GRACKLE_TAILSCALE_IP:-127.0.0.1}:9102:8000"
     # Qwen3-VL-4B-Instruct-FP8 — fits on 16 GB card alongside embed+rerank.
     # 8B OOMs on the home server's RTX 5060 Ti (weights 10.96 GiB + KV 4.62 GiB > 15.48 GiB).
     command:

@@ -602,7 +602,7 @@
     {
       "id": "caddy",
       "name": "Caddy Reverse Proxy",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Reverse proxy with automatic HTTPS via Let's Encrypt (ACME). Foundation for publicly exposed or federated bundles.",
       "type": "bundle",
       "author": "Crow",
@@ -1397,7 +1397,7 @@
     },
     {
       "id": "faster-whisper-server",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "Faster-Whisper Server (local)",
       "category": "ai",
@@ -2838,6 +2838,7 @@
     },
     {
       "id": "kokoro-tts",
+      "version": "1.0.1",
       "type": "bundle",
       "name": "Kokoro TTS (local)",
       "category": "ai",
@@ -3260,7 +3261,7 @@
     },
     {
       "id": "llamacpp-vulkan-qwen36-35b-a3b",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "type": "bundle",
       "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
       "category": "ai",
@@ -7190,7 +7191,7 @@
     },
     {
       "id": "vllm-cuda-embed",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
       "category": "ai",
@@ -7244,7 +7245,7 @@
     },
     {
       "id": "vllm-cuda-rerank",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "vLLM Reranker — Qwen3-Reranker-0.6B",
       "category": "ai",
@@ -7291,7 +7292,7 @@
     },
     {
       "id": "vllm-cuda-vision",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
       "category": "ai",
@@ -7339,7 +7340,7 @@
     },
     {
       "id": "vllm-rocm-qwen35-4b",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
       "category": "ai",

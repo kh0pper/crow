@@ -17,8 +17,10 @@ services:
       HUGGING_FACE_HUB_TOKEN: ${VLLM_HF_TOKEN:-}
     volumes:
       - ${LLM_CACHE}:/models
+    # CROW_TAILSCALE_IP defaults to 127.0.0.1, so an unset variable can never
+    # publish crow-voice (unauthenticated) on every interface.
     ports:
-      - "${CROW_TAILSCALE_IP}:8011:8000"
+      - "${CROW_TAILSCALE_IP:-127.0.0.1}:8011:8000"
     entrypoint: ["vllm", "serve"]
     command:
       - Qwen/Qwen3.5-4B

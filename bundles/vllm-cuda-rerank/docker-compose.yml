@@ -11,8 +11,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
     volumes:
       - ${GRACKLE_HF_CACHE}:/models
+    # GRACKLE_TAILSCALE_IP defaults to 127.0.0.1, so an unset variable can
+    # never publish the reranker on every interface.
     ports:
-      - "${GRACKLE_TAILSCALE_IP}:9101:8000"
+      - "${GRACKLE_TAILSCALE_IP:-127.0.0.1}:9101:8000"
     command:
       - --model=Qwen/Qwen3-Reranker-0.6B
       - --served-model-name=qwen3-reranker-0.6b

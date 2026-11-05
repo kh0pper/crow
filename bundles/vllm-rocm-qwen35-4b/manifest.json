@@ -1,6 +1,6 @@
 {
   "id": "vllm-rocm-qwen35-4b",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "bundle",
   "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
   "category": "ai",

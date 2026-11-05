@@ -38,6 +38,9 @@ services:
     networks:
       - default
       - crow-federation
+    # PUBLIC BY DESIGN: 80/443 (and HTTP/3 on 443/udp) must answer the internet —
+    # this is the one first-party port published on every interface, and
+    # scripts/port-bind-allowlist.txt names it for that reason.
     ports:
       - "0.0.0.0:80:80"
       - "0.0.0.0:443:443"
