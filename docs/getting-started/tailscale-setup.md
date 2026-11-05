@@ -71,7 +71,7 @@ sudo tailscale set --hostname=crow-home
 
 ## Step 5: Access Crow Remotely
 
-Once both devices are on your tailnet, put the gateway behind Tailscale Serve. Serve terminates TLS with a real certificate for your tailnet hostname, which is what a browser needs: the gateway itself listens on plain HTTP at `127.0.0.1:3001`, and the installer's firewall never opens that port to your tailnet.
+Once both devices are on your tailnet, put the gateway behind Tailscale Serve. Serve terminates TLS with a real certificate for your tailnet hostname, which is what a browser needs: a production install marks its session cookie `Secure`, so a plain `http://` address cannot keep you logged in from another device.
 
 On the server:
 
@@ -88,7 +88,7 @@ https://crow.<your-tailnet>.ts.net:8444/dashboard
 Replace `crow` and `<your-tailnet>` with the hostname and tailnet name `tailscale status` shows for your server.
 
 ::: tip Why not http://crow:3001
-Two things stop it from working off the box: the firewall leaves 3001 closed to the tailnet, and on a production install the session cookie is marked `Secure`, so a browser refuses to set it over plain HTTP. Plain `http://` URLs are for the machine itself (and an SSH tunnel), not for other devices.
+On a production install the session cookie is marked `Secure`, so a browser on another device will not keep a login over plain HTTP: the dashboard is reachable remotely through Serve's HTTPS address only. Plain `http://` URLs are for the machine itself (and an SSH tunnel).
 :::
 
 ## Step 6: Verify the Connection
@@ -127,8 +127,8 @@ sudo tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-
 Verify the Crow's Nest is **not** publicly reachable:
 
 ```bash
-curl -I https://<your-tailnet>.ts.net/dashboard   # expect 404 (no handler)
-curl -I https://<your-tailnet>.ts.net/blog        # expect 200
+curl -I https://<hostname>.<tailnet>.ts.net/dashboard   # anything but 200 means the dashboard is public
+curl -I https://<hostname>.<tailnet>.ts.net/blog        # expect 200
 ```
 
 The gateway also rejects any funneled request to a private path server-side (it sets `Tailscale-Funnel-Request` on Funnel traffic, which `isAllowedNetwork()` uses to fail closed). This is defense in depth — you still must not funnel `/`.
@@ -139,7 +139,7 @@ For tailnet-only access to the full gateway (dashboard, MCP, AI chat), use `tail
 sudo tailscale serve --bg --https=8444 http://localhost:3001
 ```
 
-Then reach the Nest at `https://crow.<your-tailnet>.ts.net:8444/dashboard` from any device on your tailnet. Keep this on its own port (`8444` here) so it is clearly separate from the Funnel paths on `443`, which are public.
+Then reach the Nest at `https://crow.<your-tailnet>.ts.net:8444/dashboard` from any device on your tailnet. Serve and Funnel share port `443` on the same host, so keep the dashboard on its own Serve port (`8444` here) and let Funnel take `443`.
 
 ::: warning Tailscale Funnel Limitations
 Tailscale Funnel is designed for **personal and hobby use**. It has bandwidth limits and is not intended as a production hosting solution. If you plan to monetize your blog or podcast (ads, subscriptions, paid content), use a proper reverse proxy with a custom domain instead (Option B below).

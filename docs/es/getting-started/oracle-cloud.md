@@ -157,7 +157,7 @@ Sigue el enlace que aparece en tu terminal para autorizar el dispositivo en tu c
 2. Haz clic en tu instancia de Oracle → Edit → Renombra a `crow`
 3. Activa **MagicDNS** si aún no está activado (en configuración de DNS)
 
-Luego pon el gateway detrás de Tailscale Serve, que le da un certificado HTTPS real en tu tailnet. El gateway escucha en HTTP plano en `127.0.0.1:3001`, y las reglas de firewall de arriba nunca abren ese puerto, así que otro dispositivo no puede alcanzarlo directamente:
+Luego pon el gateway detrás de Tailscale Serve, que le da un certificado HTTPS real en tu tailnet. Las reglas de firewall de arriba no abren el `3001` a internet, y la unidad systemd de abajo se ejecuta con `NODE_ENV=production`, así que su cookie de sesión `Secure` necesita el puerto HTTPS de Serve:
 
 ```bash
 sudo tailscale serve --bg --https=8444 http://localhost:3001
@@ -235,7 +235,7 @@ tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
 tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` expondría el inicio de sesión del dashboard del Crow's Nest. El dashboard se queda en `tailscale serve` (solo tailnet, Paso 7).
+Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` expondría el inicio de sesión del dashboard del Crow's Nest. El dashboard se queda en `tailscale serve` (solo tailnet, Paso 7): Serve y Funnel comparten el puerto `443` en el mismo host, así que deja el dashboard en el `8444` de Serve y que Funnel se quede con el `443`.
 
 Tu blog estará en `https://crow.tu-tailnet.ts.net/blog`. El Crow's Nest permanece privado — una solicitud que llegue por Funnel a cualquier otra ruta recibe un 403.
 

@@ -188,7 +188,7 @@ tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
 tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-Funnel publishes to the whole internet, so only these blog paths go on it — mapping `/` would put the Crow's Nest login page in front of the public. The Crow's Nest stays on `tailscale serve` (tailnet only); see the [Tailscale Setup Guide](/getting-started/tailscale-setup).
+Funnel publishes to the whole internet, so only these blog paths go on it — mapping `/` would put the Crow's Nest login page in front of the public. The Crow's Nest stays on `tailscale serve` (tailnet only); see the [Tailscale Setup Guide](/getting-started/tailscale-setup). Serve and Funnel share port `443` on the same host, so keep the dashboard on Serve's own port (`8444`) and let Funnel take `443`.
 
 Your blog is now at `https://<hostname>.your-tailnet.ts.net/blog`. The Crow's Nest remains private — a funneled request to any other path gets a 403.
 

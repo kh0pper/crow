@@ -71,7 +71,7 @@ If your Crow gateway runs on a home server or local network, install Tailscale t
 5. Use `https://<hostname>.<tailnet>.ts.net:8444` as the gateway URL
 
 ::: info Why not http://100.x.x.x:3001
-That plain-HTTP address is not open to your tailnet: the installer's firewall only allows Serve's HTTPS port, and a production install marks its session cookie `Secure`, so logging in over plain HTTP fails. Reach Crow through Serve's address instead.
+A production install marks its session cookie `Secure`, so a browser refuses to keep a login over plain HTTP: logging in at `http://100.x.x.x:3001` fails. Reach Crow through Serve's HTTPS address instead.
 :::
 
 ::: tip

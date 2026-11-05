@@ -160,7 +160,7 @@ curl http://localhost:3001/health
 
 ## Step 8: Connect Your AI Platform
 
-Your Crow server is now running. Recommended: put it behind Tailscale Serve on the VM so other devices reach it over HTTPS (the gateway itself listens on plain HTTP at `127.0.0.1:3001`):
+Your Crow server is now running. Recommended: put it behind Tailscale Serve on the VM so other devices reach it over HTTPS (browsers need the production `Secure` session cookie, which Serve's certificate makes possible):
 
 ```bash
 sudo tailscale serve --bg --https=8444 http://localhost:3001

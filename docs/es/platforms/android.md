@@ -71,7 +71,7 @@ Si tu gateway de Crow se ejecuta en un servidor casero o red local, instala Tail
 5. Usa `https://<hostname>.<tu-tailnet>.ts.net:8444` como URL del gateway
 
 ::: info Por qué no http://100.x.x.x:3001
-Esa dirección HTTP plana no está abierta a tu tailnet: el firewall del instalador solo permite el puerto HTTPS de Serve, y una instalación de producción marca su cookie de sesión como `Secure`, así que iniciar sesión por HTTP plano falla. Usa la dirección de Serve.
+Una instalación de producción marca su cookie de sesión como `Secure`, así que el navegador se niega a mantener la sesión sobre HTTP plano: iniciar sesión en `http://100.x.x.x:3001` falla. Usa la dirección HTTPS de Serve.
 :::
 
 ::: tip

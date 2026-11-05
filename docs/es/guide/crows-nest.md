@@ -124,7 +124,7 @@ tailscale serve --bg --https=8444 http://localhost:3001
 
 Esto hace que el Crow's Nest esté disponible en `https://<hostname>.<tu-tailnet>.ts.net:8444/dashboard` desde cualquier dispositivo en tu red Tailscale. Solo los dispositivos conectados a Tailscale pueden alcanzarlo. Si Serve se configuró en `443` (lo que ofrece hacer el paso de Tailscale del instalador), la dirección no lleva puerto: `https://<hostname>.<tu-tailnet>.ts.net/dashboard`.
 
-El gateway escucha en HTTP plano en `127.0.0.1:3001` y el firewall del instalador nunca abre ese puerto a tu tailnet, así que `http://crow:3001` funciona solo en el servidor mismo. El puerto HTTPS de Serve además da a las instalaciones de producción la cookie de sesión `Secure` que necesitan.
+Serve y Funnel comparten el puerto `443` en el mismo host, así que deja el dashboard en su propio puerto de Serve (`8444` aquí) y que Funnel se quede con el `443` para las rutas públicas del blog. Una instalación de producción marca su cookie de sesión como `Secure`, así que el navegador de otro dispositivo necesita la dirección HTTPS de Serve — `http://crow:3001` es para el servidor mismo.
 
 ## Primer inicio de sesión
 

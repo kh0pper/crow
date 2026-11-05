@@ -196,11 +196,11 @@ tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
 tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` pondría el dashboard, el MCP y el chat de IA frente al público. El Crow's Nest se queda en `tailscale serve` (solo tailnet); consulta la [Guía de Configuración de Tailscale](/es/getting-started/tailscale-setup).
+Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` pondría el dashboard, el MCP y el chat de IA frente al público. El Crow's Nest se queda en `tailscale serve` (solo tailnet); consulta la [Guía de Configuración de Tailscale](/es/getting-started/tailscale-setup). Serve y Funnel comparten el puerto `443` en el mismo host, así que deja el dashboard en el puerto propio de Serve (`8444`) y que Funnel se quede con el `443`.
 
 Tu blog ahora es accesible públicamente en `https://<hostname>.tu-tailnet.ts.net/blog`.
 
-El Crow's Nest permanece privado — el gateway responde 403 a cualquier solicitud que llegue por Funnel fuera de su lista pública (`/blog`, `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, `/manifest.json`), así que el dashboard, el MCP y el chat de IA nunca son alcanzables por Funnel aunque esté mal mapeado.
+El Crow's Nest permanece privado — el gateway responde 403 a cualquier solicitud que llegue por Funnel fuera de su lista pública (`/blog`, `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, `/manifest.json`), así que el dashboard, el MCP y el chat de IA no son alcanzables por Funnel por defecto, aunque esté mal mapeado (`CROW_DASHBOARD_PUBLIC=true` o entradas extra en `GATEWAY_FUNNEL_PUBLIC_PREFIXES` amplían la lista).
 
 ### Dominio personalizado con Caddy
 
