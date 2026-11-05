@@ -175,6 +175,10 @@ export function defineCommand(spec) {
     touches,
     apply,
   });
+  // One definition per id: a second one would silently replace the first, and
+  // guards that key on command ids (the sound guard's mix-only skip list, the
+  // people-only undo rules) would then judge a different command.
+  if (COMMANDS.has(id)) throw new Error(`studio command "${id}" is defined twice`);
   COMMANDS.set(id, command);
   return command;
 }
