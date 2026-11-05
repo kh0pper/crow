@@ -11,8 +11,19 @@ import {
   shouldNotify,
   pruneResolved,
   _setTailscaleReader,
+  _setDockerPortsReader,
+  _setFirewallReader,
   classifyFunnelTarget,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
+
+// This file is about the exposure/logins/integrations LOGIC, so the machine's own
+// facts are pinned: a loopback bind (the Privacy card only reports a wide bind
+// when the gateway really has one), a loopback-only Docker (the publishedPorts
+// Docker fallback runs only with no snapshot), and "no ufw.conf". The tests that
+// are about those facts set them explicitly.
+process.env.CROW_GATEWAY_BIND = "127.0.0.1";
+_setDockerPortsReader(() => { throw new Error("no docker"); });
+_setFirewallReader(() => { throw new Error("ENOENT"); });
 
 // A stub db whose execute() answers each signal's query from `data`.
 function makeDb(data = {}) {
@@ -85,12 +96,16 @@ function withEnv(key, val, fn) {
   });
 }
 
-test("exposure: clean env + tailscale CLI absent → ok (no day-1 false warn)", async () => {
+test("exposure: clean env + the tailscale CLI failing → info 'unknown', never ok", async () => {
   invalidateHealthCache();
   _setTailscaleReader(() => { throw new Error("ENOENT"); });
   const r = await collectHealthSignals(makeDb());
-  assert.equal(detail(r, "exposure").state, "ok");
-  assert.equal(find(r, "exposure"), undefined);
+  // Audit N1c-16: a Funnel check that could not run used to read as "private".
+  const card = detail(r, "exposure");
+  assert.notEqual(card.state, "ok", "an unread check is never an ok");
+  assert.equal(card.state, "info");
+  assert.match(card.value, /internet sharing \(Funnel\)/);
+  assert.equal(find(r, "exposure").severity, "info");
 });
 
 test("exposure: serve-only mounts at / with NO AllowFunnel → ok (C1 regression)", async () => {

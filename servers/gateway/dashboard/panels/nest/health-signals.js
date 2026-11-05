@@ -14,7 +14,15 @@
  *               untrusted row holding a bearer/key, an orphan credential (info)
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
  *               else trusted peers unseen >24h (info)
- *   updates   — auto_update_* version comparison (info if update available)
+ *   updates   — auto_update_* state: the last result auto-update wrote,
+ *               classified by auto-update.js (failure → warn, a still-running CI
+ *               only after 2x the interval), a last check older than 2x the
+ *               interval, else the version comparison (info if update
+ *               available); disabled → neutral "off", never an ok "current"
+ *   exposure  — Privacy: the gateway's actual bind (listen-host.js), the host
+ *               firewall from ufw.conf (never root) and Funnel; bound beyond
+ *               loopback + firewall off → warn, any check that could not run →
+ *               at most info naming it, never ok
  *   backup    — newest of THIS instance's files in CROW_BACKUP_DIR (none → info;
  *               >7d → warn; owned by another instance → warn)
  *   keychainExport — extension passwords that are in no keychain Export yet (info; no
@@ -38,8 +46,12 @@
  *               without the interface-pinned raw rule, a rule pinned to a
  *               different address, a Docker below the floor or a fence facts
  *               hash mismatch → warn; a fenced or allowlisted publish → info;
- *               loopback → silent; no readable snapshot → info "unknown", never
- *               ok-looking. Lists the shapes it could not inspect (M4).
+ *               loopback → silent. With NO snapshot (the default install) it
+ *               asks Docker directly (`docker ps`, no root): a port published
+ *               beyond loopback → warn + the engine-fence guide; none → info;
+ *               Docker unreadable → info "unknown". A snapshot that exists but
+ *               cannot be read stays "unknown" (info), never ok-looking.
+ *               Lists the shapes it could not inspect (M4).
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -58,9 +70,12 @@ import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { t, fill } from "../../shared/i18n.js";
+import { docsUrl } from "../../shared/components.js";
 import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
+import { gatewayListenHost } from "../../../listen-host.js";
+import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult } from "../../../auto-update.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
@@ -74,6 +89,8 @@ import { createSidecarHealthReader } from "../../../artifact-origin/sidecar-heal
 import {
   inspectPublishedPorts,
   parseAllowlistSetting,
+  parseDockerPsPorts,
+  classifyHostIp,
   PUBLISHED_PORTS_ALLOWLIST_KEY,
   DOCKER_FLOOR,
 } from "./published-ports.js";
@@ -538,40 +555,133 @@ async function artifactNodeSignal(lang) {
   ];
 }
 
-async function updatesSignal(db) {
-  let current = null, latest = null;
+// Updates (audit N1c-1). The version pair alone cannot tell "up to date" from
+// "every tick has been failing since Tuesday": auto-update's failure branches
+// leave latest_version untouched, so the card read OK while nothing was being
+// checked. The card now reads the result auto-update actually wrote — classified
+// by auto-update.js itself (UPDATE_RESULT_PREFIXES, one source of truth) — plus
+// the age of the last check and the interval the timer runs on.
+const UPDATE_CAUSE_KEYS = {
+  "not-on-main": "signals.updates.causeNotOnMain",
+  "branch-unknown": "signals.updates.causeBranchUnknown",
+  "ci-red": "signals.updates.causeCiRed",
+  "ci-pending": "signals.updates.causeCiPending",
+  "branch-changed": "signals.updates.causeBranchChanged",
+  "fetch-failed": "signals.updates.causeFetchFailed",
+  "pull-failed": "signals.updates.causePullFailed",
+  "update-error": "signals.updates.causeError",
+  "migration-quarantined": "signals.updates.causeQuarantined",
+  "migration-failed": "signals.updates.causeMigrationFailed",
+  "init-db-failed": "signals.updates.causeInitDbFailed",
+  other: "signals.updates.causeOther",
+};
+
+// auto_update_last_check is written as an ISO string (auto-update.js); anything
+// unparseable counts as "no check recorded" rather than as fresh.
+function settingTimeMs(value) {
+  if (!value) return null;
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+async function updatesSignal(db, nowFn, opts = {}) {
+  const lang = opts.lang ?? "en";
+  const label = t("signals.updates.label", lang);
+  const action = {
+    actionLabel: t("signals.updates.action", lang),
+    actionHref: "/dashboard/settings?section=updates",
+  };
+
+  // Same defaults auto-update.js uses for a missing row (a fresh install is
+  // enabled), so a DB read that fails open cannot read as "off".
+  const settings = {
+    auto_update_enabled: "true",
+    auto_update_interval_hours: String(DEFAULT_INTERVAL_HOURS),
+    auto_update_last_check: null,
+    auto_update_last_result: null,
+    auto_update_current_version: null,
+    auto_update_latest_version: null,
+  };
   try {
-    const { rows: curr } = await db.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key='auto_update_current_version'",
+    const { rows } = await db.execute({
+      sql: "SELECT key, value FROM dashboard_settings WHERE key LIKE 'auto_update_%'",
       args: [],
     });
-    const { rows: lat } = await db.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key='auto_update_latest_version'",
-      args: [],
-    });
-    current = curr[0]?.value ?? null;
-    latest = lat[0]?.value ?? null;
+    for (const row of rows || []) if (Object.hasOwn(settings, row.key)) settings[row.key] = row.value;
   } catch {}
 
-  if (!current || !latest || current === latest) {
+  const current = settings.auto_update_current_version || null;
+  const latest = settings.auto_update_latest_version || null;
+
+  // Disabled is its own neutral state: never ok-green, and never a version
+  // claim that reads as "you are current".
+  if (settings.auto_update_enabled !== "true") {
+    return { id: "updates", severity: null, state: "off", label, value: t("signals.updates.off", lang) };
+  }
+
+  const intervalHours = Math.max(
+    MIN_INTERVAL_HOURS,
+    parseInt(settings.auto_update_interval_hours, 10) || DEFAULT_INTERVAL_HOURS,
+  );
+  const stuckMs = 2 * intervalHours * 60 * 60 * 1000;
+  const now = nowFn();
+  const lastCheckMs = settingTimeMs(settings.auto_update_last_check);
+  const result = classifyUpdateResult(settings.auto_update_last_result);
+
+  // A check older than two intervals means the timer itself stopped. Before the
+  // gateway has been up that long, "never checked" is just a boot.
+  const upMs = Number.isFinite(opts.uptimeMs) ? opts.uptimeMs : process.uptime() * 1000;
+  const checkAgeMs = lastCheckMs == null ? null : Math.max(0, now - lastCheckMs);
+  const checkIsStale = checkAgeMs == null ? upMs > stuckMs : checkAgeMs > stuckMs;
+
+  const causeOf = (code) => t(UPDATE_CAUSE_KEYS[code] || UPDATE_CAUSE_KEYS.other, lang);
+  let cause = null;
+  if (result && result.kind === "failure") {
+    cause = causeOf(result.code);
+  } else if (result && result.kind === "transient" && checkIsStale) {
+    // A CI run still going is normal for one tick; the same result after two
+    // whole intervals is not, so the cause line carries how long it has been.
+    cause = fill(t("signals.updates.causeStuckTransient", lang), {
+      cause: causeOf(result.code),
+      age: checkAgeMs == null ? t("signals.updates.ageUnknown", lang) : formatAge(checkAgeMs),
+    });
+  }
+  if (!cause && checkIsStale) {
+    cause = lastCheckMs == null
+      ? t("signals.updates.causeNeverChecked", lang)
+      : fill(t("signals.updates.causeStaleCheck", lang), { age: formatAge(checkAgeMs) });
+  }
+
+  if (cause) {
     return {
       id: "updates",
-      severity: null,
-      state: "ok",
-      label: "Updates",
-      value: current ? `v${current}` : "up to date",
+      severity: "warn",
+      state: "warn",
+      label,
+      value: cause,
+      issueLabel: fill(t("signals.updates.stuckIssue", lang), { cause }),
+      ...action,
+    };
+  }
+
+  if (current && latest && current !== latest) {
+    return {
+      id: "updates",
+      severity: "info",
+      state: "info",
+      label,
+      value: fill(t("signals.updates.availableValue", lang), { version: latest }),
+      issueLabel: t("signals.updates.availableIssue", lang),
+      ...action,
     };
   }
 
   return {
     id: "updates",
-    severity: "info",
-    state: "info",
-    label: "Updates",
-    value: `v${latest} available`,
-    issueLabel: "An update is available",
-    actionLabel: "Check updates",
-    actionHref: "/dashboard/settings?section=updates",
+    severity: null,
+    state: "ok",
+    label,
+    value: current ? fill(t("signals.updates.currentValue", lang), { version: current }) : t("signals.updates.upToDate", lang),
   };
 }
 
@@ -938,6 +1048,34 @@ function isPublicSafeBackendPath(p, prefixes) {
   return isFunnelPublicPath(p, prefixes) || isFunnelPublicPath(sub, prefixes);
 }
 
+// ─── Host firewall (audit N1c-16) ────────────────────────────────────────────
+// UFW's config file is world-readable on Ubuntu/Mint; its RULES are not, so
+// "ENABLED=yes/no" is the only firewall fact this card may state. Never run
+// `ufw` or `sudo` from a health signal. A missing or unreadable file (not UFW,
+// or a distro that keeps its state elsewhere) is "unknown", never "off" and
+// never "on".
+export const UFW_CONF_PATH = "/etc/ufw/ufw.conf";
+const defaultFirewallReader = () => readFileSync(UFW_CONF_PATH, "utf-8");
+let _firewallReader = defaultFirewallReader;
+/** Test seam: replace the ufw.conf reader; null restores the real one. */
+export function _setFirewallReader(fn) { _firewallReader = fn || defaultFirewallReader; }
+
+/** "on" | "off" | "unknown", from ENABLED= in ufw.conf and nothing else. */
+export function readHostFirewall() {
+  let text;
+  try {
+    text = _firewallReader();
+  } catch {
+    return "unknown";
+  }
+  const m = /^\s*ENABLED\s*=\s*["']?(\w+)/m.exec(String(text ?? ""));
+  if (!m) return "unknown";
+  const v = m[1].toLowerCase();
+  if (v === "yes" || v === "true") return "on";
+  if (v === "no" || v === "false") return "off";
+  return "unknown";
+}
+
 // Scope: this check guards THIS Crow's routes (CLAUDE.md "Network exposure
 // invariant"). A Funnel proxy to another port/host belongs to another service
 // (or another Crow on this host, which judges its own paths against its own
@@ -962,7 +1100,8 @@ async function readForeignAcks(db) {
   }
 }
 
-async function exposureSignal(db, lang, nowFn) {
+async function exposureSignal(db, lang, nowFn, opts = {}) {
+  const label = t("signals.exposure.label", lang);
   const problems = [];
   if (process.env.CROW_DASHBOARD_PUBLIC === "true") problems.push(t("signals.exposure.public", lang));
   if (process.argv.includes("--no-auth")) problems.push(t("signals.exposure.noauth", lang));
@@ -989,15 +1128,80 @@ async function exposureSignal(db, lang, nowFn) {
     if (unsafe) problems.push(t("signals.exposure.funnel", lang));
   }
 
+  // Three separate facts, none of which may be skipped (audit N1c-16):
+  //  (a) the bind, taken from the gateway's own listener (listen-host.js) so
+  //      this card can never disagree with what index.js actually binds;
+  //  (b) the host firewall, from ufw.conf only — never root;
+  //  (c) Funnel, above: a failed `tailscale` call is UNKNOWN, never "private".
+  const bindHost = opts.bind ?? gatewayListenHost();
+  const bindKind = classifyHostIp(bindHost).kind;
+  const everyInterface = bindKind === "wildcard" || bindKind === "empty";  // Anything that is not loopback and not this machine's tailnet address is
+  // reachable from the local network — including a bind shape we cannot read,
+  // which must not be reported as private.
+  const onLocalNetwork = !(bindKind === "loopback" || bindKind === "tailnet");
+  const firewall = readHostFirewall();
+
+  // A noun phrase, so the value line and the issue sentence can share it.
+  const where = everyInterface
+    ? t("signals.exposure.everyInterface", lang)
+    : fill(t("signals.exposure.bindAddress", lang), { bind: bindHost });
+  const bindLine = fill(t("signals.exposure.bindValue", lang), { where });
+  const firewallText = firewall === "on"
+    ? t("signals.exposure.firewallOn", lang)
+    : firewall === "off"
+      ? t("signals.exposure.firewallOff", lang)
+      : t("signals.exposure.firewallUnknown", lang);
+
+  const unknowns = [];
+  if (!exposed) unknowns.push(t("signals.exposure.checkFunnel", lang));
+  const unknownSuffix = unknowns.length
+    ? fill(t("signals.exposure.unknownList", lang), { list: unknowns.join(", ") })
+    : "";
+  const withUnknowns = (value) => (unknownSuffix ? `${value} · ${unknownSuffix}` : value);
+  // Bound to every interface with a firewall that is off OR could not be read
+  // is a WARN: nothing confirms the local network is kept out, so the card must
+  // not read as protected. Other unknown checks (Funnel) are at most info.
+  const settingsAction = {
+    actionLabel: t("signals.exposure.action", lang),
+    actionHref: "/dashboard/settings?section=connections",
+  };
+  const bindAction = {
+    actionLabel: t("signals.exposure.bindAction", lang),
+    actionHref: "/dashboard/settings",
+  };
+
   const out = [];
-  if (problems.length === 0) {
-    out.push({ id: "exposure", severity: null, state: "ok", label: t("signals.exposure.label", lang), value: t("signals.exposure.private", lang) });
-  } else {
+  if (problems.length > 0) {
     out.push({
-      id: "exposure", severity: "warn", state: "warn", label: t("signals.exposure.label", lang),
-      value: t("signals.exposure.open", lang), issueLabel: problems[0],
-      actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
+      id: "exposure", severity: "warn", state: "warn", label,
+      value: withUnknowns(t("signals.exposure.open", lang)), issueLabel: problems[0],
+      ...settingsAction,
     });
+  } else if (onLocalNetwork && (firewall === "off" || firewall === "unknown")) {
+    out.push({
+      id: "exposure", severity: "warn", state: "warn", label,
+      value: withUnknowns(`${bindLine}; ${firewallText}`),
+      issueLabel: fill(t("signals.exposure.lanIssue", lang), { where }),
+      ...bindAction,
+    });
+  } else if (onLocalNetwork) {
+    out.push({
+      id: "exposure", severity: "info", state: "info", label,
+      value: withUnknowns(`${bindLine}; ${firewallText}`),
+      issueLabel: fill(t("signals.exposure.lanInfo", lang), { where, firewall: firewallText }),
+      ...bindAction,
+    });
+  } else if (unknowns.length > 0) {
+    // Bound where LAN traffic cannot reach it, but a check could not run:
+    // "at most info", and the value names what is unverified instead of "private".
+    out.push({
+      id: "exposure", severity: "info", state: "info", label,
+      value: fill(t("signals.exposure.unknownValue", lang), { list: unknowns.join(", ") }),
+      issueLabel: fill(t("signals.exposure.unknownIssue", lang), { list: unknowns.join(", ") }),
+      ...settingsAction,
+    });
+  } else {
+    out.push({ id: "exposure", severity: null, state: "ok", label, value: t("signals.exposure.private", lang) });
   }
   if (foreign.size > 0) {
     const acked = await readForeignAcks(db);
@@ -1291,11 +1495,17 @@ async function externalEnginesSignal(lang, nowFn) {
 }
 
 // Published ports (plan PR S5a) — the audit behind the engine fence. Reads ONE
-// JSON file (see published-ports.js): never docker, never iptables, so this
-// signal cannot hang on a wedged daemon and cannot change anything. A
-// tailnet-address publish is INFO only with the interface-pinned raw rule in
-// the snapshot; anything unfenced is a WARN per (container, port); loopback is
-// silent; a snapshot that cannot be read is "unknown" (info), never ok-looking.
+// JSON file (see published-ports.js): never iptables, so this signal cannot hang
+// on a wedged firewall and cannot change anything. A tailnet-address publish is
+// INFO only with the interface-pinned raw rule in the snapshot; anything
+// unfenced is a WARN per (container, port); loopback is silent; a snapshot that
+// cannot be read is "unknown" (info), never ok-looking.
+//
+// With NO snapshot at all — the ordinary default install, where the card used to
+// read "unknown — no fence snapshot" forever (audit N1c-17) — it asks Docker for
+// the published ports it already reports on the nest home screen (bounded
+// `docker ps`, no root, no sudo). Only the missing-file case: a snapshot that
+// EXISTS but cannot be read is the fence's problem, not Docker's.
 const PUBLISHED_PORTS_CODE_KEYS = {
   wildcard: "signals.publishedPorts.wildcard",
   "empty-host": "signals.publishedPorts.emptyHost",
@@ -1316,6 +1526,32 @@ const PUBLISHED_PORTS_BLIND_KEYS = {
   "rootless-or-podman": "signals.publishedPorts.blindRootless",
   "other-netns": "signals.publishedPorts.blindNetns",
 };
+
+// The no-snapshot fallback: the same bounded `docker ps` the nest home screen
+// already runs (data-queries.js) — no root, no sudo, no iptables. Injectable so
+// no test depends on the Docker state of the machine it runs on.
+const DOCKER_PS_TIMEOUT_MS = 5000;
+const defaultDockerPortsReader = () => execFileSync("docker", ["ps", "--format", "{{.Ports}}"], {
+  encoding: "utf-8", timeout: DOCKER_PS_TIMEOUT_MS,
+});
+let _dockerPortsReader = defaultDockerPortsReader;
+/** Test seam: replace the `docker ps` reader (returns its stdout); null restores the real one. */
+export function _setDockerPortsReader(fn) { _dockerPortsReader = fn || defaultDockerPortsReader; }
+
+/**
+ * What Docker publishes, without root: { known, beyond, total }. `known:false`
+ * means the daemon or CLI could not be read (the card then keeps "unknown").
+ */
+function dockerPublishedPorts() {
+  let out;
+  try {
+    out = _dockerPortsReader();
+  } catch {
+    return { known: false, beyond: [], total: 0 };
+  }
+  const all = parseDockerPsPorts(out);
+  return { known: true, beyond: all.filter((p) => p.kind !== "loopback"), total: all.length };
+}
 
 async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
   const label = t("signals.publishedPorts.label", lang);
@@ -1361,8 +1597,35 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
     : value);
 
   if (!audit.hasRows) {
-    // Missing / unreadable / malformed snapshot: the direct docker read is OUT
-    // of this build, so "unknown" is the whole answer — info, never a warn.
+    // No fence snapshot at all = the default install. Ask Docker rather than
+    // report "unknown" on every install forever (audit N1c-17). A snapshot that
+    // exists but cannot be read keeps "unknown" — that is the fence's problem.
+    const probe = audit.status === "missing" ? dockerPublishedPorts() : { known: false, beyond: [], total: 0 };
+    if (probe.known && probe.beyond.length > 0) {
+      const shown = probe.beyond.slice(0, 5).map((p) => `${p.port}/${p.proto}`).join(", ");
+      const rest = probe.beyond.length - Math.min(5, probe.beyond.length);
+      return {
+        id: "publishedPorts", severity: "warn", state: "warn", label,
+        value: withBlind(fill(t("signals.publishedPorts.unfencedDockerValue", lang), {
+          n: probe.beyond.length,
+          list: rest > 0 ? `${shown} +${rest}` : shown,
+        })),
+        issueLabel: t("signals.publishedPorts.unfencedDocker", lang),
+        actionLabel: t("signals.publishedPorts.fenceAction", lang),
+        actionHref: docsUrl("guide/engine-fence"),
+      };
+    }
+    if (probe.known) {
+      return {
+        id: "publishedPorts", severity: "info", state: "info", label,
+        value: withBlind(t("signals.publishedPorts.noDockerPorts", lang)),
+        issueLabel: t("signals.publishedPorts.noDockerPortsWhy", lang),
+        actionLabel: t("signals.publishedPorts.fenceAction", lang),
+        actionHref: docsUrl("guide/engine-fence"),
+      };
+    }
+    // Missing / unreadable / malformed snapshot AND Docker not readable either:
+    // "unknown" is the whole answer — info, never a warn.
     return {
       id: "publishedPorts", severity: "info", state: "info", label,
       value: withBlind(t("signals.publishedPorts.unknown", lang)),
@@ -1499,6 +1762,10 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
  * @param {string} [opts.lang]
  * @param {object} [opts.publishedPorts]  test seams for the publishedPorts signal:
  *   { snapshotPath, readFile, repoBundlesDir, installedBundlesDir, inspect }
+ * @param {string} [opts.bind]  test seam: the gateway's listen host (otherwise
+ *   read from listen-host.js, the same expression index.js binds with)
+ * @param {number} [opts.uptimeMs]  test seam for the Updates card: how long this
+ *   gateway process has been up (otherwise process.uptime())
  * @returns {Promise<{ok: boolean, issues: Array, details: Array}>}
  */
 export async function collectHealthSignals(db, opts = {}) {
@@ -1515,13 +1782,13 @@ export async function collectHealthSignals(db, opts = {}) {
     peersSignal(db, lang, nowFn),
     syncDialSignal(db, lang, nowFn),
     Promise.resolve().then(() => peerTrustSignal(lang, nowFn)),
-    updatesSignal(db),
+    updatesSignal(db, nowFn, { lang, uptimeMs: opts.uptimeMs }),
     backupSignal(db, nowFn, lang),
     keychainExportSignal(db, lang),
     syncConflictsSignal(db),
     outboxSignal(db),
     loginsSignal(db, lang),
-    exposureSignal(db, lang, nowFn),
+    exposureSignal(db, lang, nowFn, { bind: opts.bind }),
     integrationsSignal(db, lang),
     federationAuditSignal(lang),
     messagesSignal(db, lang, nowFn),

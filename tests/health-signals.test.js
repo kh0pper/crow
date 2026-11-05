@@ -7,10 +7,20 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   collectHealthSignals,
   invalidateHealthCache,
+  _setDockerPortsReader,
+  _setFirewallReader,
+  _setTailscaleReader,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
+import { parseDockerPsPorts } from "../servers/gateway/dashboard/panels/nest/published-ports.js";
+import { docsUrl } from "../servers/gateway/dashboard/shared/components.js";
+import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 import { backupLabel, instanceBackupTag, backupFileName } from "../servers/shared/backup-naming.js";
 
 // The signal only counts THIS instance's backup files (per-instance naming).
@@ -20,6 +30,17 @@ const OWN_BACKUP = backupFileName(backupLabel(), instanceBackupTag(), "2026-01-0
 // pass its own `publishedPorts.snapshotPath` must read this scratch path, never
 // the host's real fence snapshot.
 process.env.CROW_PUBLISH_SNAPSHOT = "/tmp/__crow_test_no_publish_snapshot__.json";
+
+// Sibling signals that shell out are neutralized (the same reason
+// external-engines-signal.test.js does it): the host's Docker daemon, ufw.conf
+// and tailscale must not decide what a card says. The bind is pinned to loopback
+// so "the dashboard listens everywhere" is this suite's own choice, not the
+// machine's; the tests below that are about a wide bind set it explicitly.
+process.env.CROW_GATEWAY_BIND = "127.0.0.1";
+_setTailscaleReader(() => { throw new Error("no tailscale"); });
+_setDockerPortsReader(() => { throw new Error("no docker"); });
+const firewallUnreadable = () => { throw new Error("ENOENT"); };
+_setFirewallReader(firewallUnreadable);
 
 // ─── Stub DB factory ──────────────────────────────────────────────────────────
 
@@ -421,3 +442,450 @@ test("publishedPorts: a wildcard publish is a warn issue under its own id", asyn
   assert.equal(issue.severity, "warn");
   assert.equal(result.ok, false, "a published-port warn fails the nest roll-up");
 });
+
+// ─── Updates (audit N1c-1) ────────────────────────────────────────────────────
+// The version pair alone used to read OK while every tick failed: auto-update's
+// failure branches leave latest_version untouched. The card now reads the result
+// auto-update.js wrote, classified by auto-update.js itself.
+
+const NOW = Date.parse("2027-01-10T12:00:00Z");
+const HOUR = 60 * 60 * 1000;
+const iso = (ms) => new Date(ms).toISOString();
+
+/** A db whose dashboard_settings rows are exactly this test's auto-update state. */
+function settingsDb(autoRows = []) {
+  return {
+    async execute({ sql }) {
+      if (sql && sql.includes("auto_update_%")) return { rows: autoRows };
+      if (sql && sql.includes("pi_bot_defs")) return { rows: [{ c: 0 }] };
+      if (sql && sql.includes("crow_instances")) return { rows: [] };
+      return { rows: [] };
+    },
+  };
+}
+
+function autoRows({
+  enabled = "true",
+  intervalHours = "6",
+  lastCheck = iso(NOW - 60_000),
+  result = "Up to date",
+  current = "1.0.0",
+  latest = "1.0.0",
+} = {}) {
+  const rows = [
+    { key: "auto_update_enabled", value: enabled },
+    { key: "auto_update_interval_hours", value: intervalHours },
+  ];
+  if (lastCheck != null) rows.push({ key: "auto_update_last_check", value: lastCheck });
+  if (result != null) rows.push({ key: "auto_update_last_result", value: result });
+  if (current != null) rows.push({ key: "auto_update_current_version", value: current });
+  if (latest != null) rows.push({ key: "auto_update_latest_version", value: latest });
+  return rows;
+}
+
+async function updatesOf(auto, opts = {}) {
+  invalidateHealthCache();
+  const result = await collectHealthSignals(settingsDb(autoRows(auto)), { now: () => NOW, ...opts });
+  return {
+    card: result.details.find((d) => d.id === "updates"),
+    issue: result.issues.find((i) => i.id === "updates"),
+  };
+}
+
+// Every failure result auto-update.js can write, with the cause the card must
+// name. The strings are the module's own, copied verbatim where they are fixed.
+test("updates: every failure result warns and names its cause", async () => {
+  const failures = [
+    ["Skipped: not on main (on 'feature/x')", /isn't on main/],
+    ["Skipped: cannot determine branch (not a git checkout)", /git branch/],
+    ["Skipped: CI is RED on origin/main (abc123456) — not deploying a failing build; will retry next tick", /CI is red on main/],
+    ["Skipped: migration quarantined (gen 3->4, attempt 1) — delete the quarantine marker files to override", /migration was quarantined/],
+    ["Fetch failed: fatal: unable to access", /fetch from origin/],
+    ["Pull failed (local changes may conflict with the update — resolve manually): error: your local changes", /pull failed/],
+    ["Update error: boom", /errored/],
+    ["Migration quarantined: data loss detected and rolled back (memories)", /migration was quarantined/],
+    ["Migration quarantined: data loss detected, automatic restore NOT possible — manual recovery required (x)", /migration was quarantined/],
+    ["Migration failed (init-db exit 1) — restart withheld, running code unchanged", /migration failed/],
+    ["init-db failed (exit 1) — restart withheld, running code unchanged", /database update failed/],
+  ];
+  for (const [result, cause] of failures) {
+    const { card, issue } = await updatesOf({ result, latest: "0.9.0" });
+    assert.equal(card.state, "warn", result);
+    assert.match(card.value, cause, result);
+    assert.equal(issue.severity, "warn", result);
+    assert.match(issue.label, /Automatic updates aren't running: /, result);
+    assert.match(issue.label, cause, result);
+    assert.equal(issue.actionHref, "/dashboard/settings?section=updates", result);
+  }
+});
+
+test("updates: a CI run still in progress is not a warning until it is older than 2x the interval", async () => {
+  const pending = "Skipped: CI still running on origin/main (abc123456) — will retry next tick";
+
+  // 1 h after the result, with a 6 h interval (threshold 12 h): still fine.
+  const fresh = await updatesOf({ result: pending, lastCheck: iso(NOW - HOUR), current: "1.0.0", latest: "1.0.0" });
+  assert.notEqual(fresh.card.state, "warn", "one pending tick is normal");
+  assert.equal(fresh.card.state, "ok");
+  assert.equal(fresh.issue, undefined);
+
+  // 13 h after the same result: now it has outlived two whole intervals.
+  const stuck = await updatesOf({ result: pending, lastCheck: iso(NOW - 13 * HOUR), current: "1.0.0", latest: "1.0.0" });
+  assert.equal(stuck.card.state, "warn");
+  assert.match(stuck.card.value, /CI is still running on main/);
+  assert.match(stuck.card.value, /13h/, "the cause line carries how long it has been");
+});
+
+test("updates: a last check older than 2x the interval warns even when the result reads fine", async () => {
+  const stale = await updatesOf({ result: "Up to date", lastCheck: iso(NOW - 13 * HOUR) });
+  assert.equal(stale.card.state, "warn");
+  assert.match(stale.card.value, /no update check for 13h/);
+  assert.equal(stale.issue.severity, "warn");
+
+  // A missing last_check is only a warning once the gateway has been up longer
+  // than the same threshold — a fresh boot has simply not checked yet.
+  const justBooted = await updatesOf({ result: null, lastCheck: null }, { uptimeMs: 5 * 60_000 });
+  assert.notEqual(justBooted.card.state, "warn", "a fresh boot is not stuck");
+
+  const neverChecked = await updatesOf({ result: null, lastCheck: null }, { uptimeMs: 13 * HOUR });
+  assert.equal(neverChecked.card.state, "warn");
+  assert.match(neverChecked.card.value, /no update check has run since Crow started/);
+});
+
+test("updates: the interval setting decides the threshold, not a hardcoded 6 h", async () => {
+  // A 1 h interval makes 2x = 2 h: a 3 h old check is already stuck.
+  const stuck = await updatesOf({ intervalHours: "1", result: "Up to date", lastCheck: iso(NOW - 3 * HOUR) });
+  assert.equal(stuck.card.state, "warn");
+  const fine = await updatesOf({ intervalHours: "6", result: "Up to date", lastCheck: iso(NOW - 3 * HOUR) });
+  assert.equal(fine.card.state, "ok");
+});
+
+test("updates: disabled is its own neutral state, never an ok 'current' claim", async () => {
+  const { card, issue } = await updatesOf({ enabled: "false", result: "Fetch failed: x", current: "1.0.0", latest: "1.0.0" });
+  assert.equal(card.state, "off");
+  assert.equal(card.value, t("signals.updates.off", "en"));
+  assert.equal(issue, undefined, "disabled is not an issue");
+  assert.doesNotMatch(card.value, /1\.0\.0/, "disabled never claims a version is current");
+});
+
+test("updates: current version with a fresh check is ok; a newer version is info", async () => {
+  const ok = await updatesOf();
+  assert.equal(ok.card.state, "ok");
+  assert.match(ok.card.value, /1\.0\.0/);
+  assert.equal(ok.issue, undefined);
+
+  const available = await updatesOf({ latest: "1.1.0" });
+  assert.equal(available.card.state, "info");
+  assert.match(available.card.value, /1\.1\.0/);
+  assert.equal(available.issue.severity, "info");
+  assert.equal(available.issue.actionHref, "/dashboard/settings?section=updates");
+});
+
+test("updates: the shared classification covers every string auto-update.js writes", async () => {
+  const { classifyUpdateResult, UPDATE_RESULT_PREFIXES } = await import("../servers/gateway/auto-update.js");
+  const src = readFileSync(fileURLToPath(new URL("../servers/gateway/auto-update.js", import.meta.url)), "utf8");
+
+  // Every write must be the `msg` the literals below are assigned to, or a
+  // literal itself — a new expression shape must be reviewed, not guessed at.
+  const args = [...src.matchAll(/saveSetting\("auto_update_last_result",\s*([^;]+?)\);/g)].map((m) => m[1].trim());
+  assert.ok(args.length >= 15, `expected every write, found ${args.length}`);
+  for (const arg of args) {
+    assert.ok(arg === "msg" || /^[`"]/.test(arg), `unreviewed auto_update_last_result expression: ${arg}`);
+  }
+
+  // The literals: the direct arguments, plus every `const msg = ...` value. A
+  // ternary in this file writes its two branches one per line, so a branch is
+  // read from a line that starts with `?` or `:`.
+  const literalHeads = [];
+  const head = (lit) => lit.split("${")[0];
+  for (const arg of args) if (arg !== "msg") literalHeads.push(head(arg.slice(1, -1)));
+
+  const decls = [...src.matchAll(/const msg =\s*([\s\S]*?);\n/g)].map((m) => m[1]);
+  assert.equal(decls.length, args.filter((a) => a === "msg").length, "every recorded msg is a const msg = literal");
+  const literalOf = (text) => {
+    const m = /^[`"]([^`"]*)/.exec(text.trim());
+    return m ? head(m[1]) : null;
+  };
+  for (const body of decls) {
+    const lines = body.split("\n");
+    const found = [];
+    const sameLine = literalOf(lines[0]);
+    if (sameLine != null) found.push(sameLine);
+    for (const line of lines.slice(1)) {
+      if (!/^[?:]/.test(line.trim())) continue;
+      const branch = literalOf(line.trim().replace(/^[?:]\s*/, ""));
+      if (branch != null) found.push(branch);
+    }
+    assert.ok(found.length > 0, `could not read the message in: ${body.slice(0, 60)}`);
+    literalHeads.push(...found);
+  }
+
+  assert.ok(literalHeads.length >= 15, `expected every message literal, found ${literalHeads.length}`);
+  for (const text of literalHeads) {
+    const verdict = classifyUpdateResult(text);
+    assert.ok(verdict, `empty message literal`);
+    assert.notEqual(verdict.code, "other", `\"${text}\" is not covered by UPDATE_RESULT_PREFIXES`);
+    assert.ok(
+      UPDATE_RESULT_PREFIXES.some((e) => text.startsWith(e.prefix)),
+      `\"${text}\" has no explicit prefix entry`,
+    );
+    assert.ok(["ok", "transient", "failure"].includes(verdict.kind), text);
+  }
+
+  // And the classifier's own contract: a result nobody classified is a failure,
+  // never a silent ok, and an empty result is "no result yet".
+  assert.deepEqual(classifyUpdateResult("Something new happened"), { kind: "failure", code: "other" });
+  assert.equal(classifyUpdateResult(""), null);
+  assert.equal(classifyUpdateResult(null), null);
+  assert.deepEqual(classifyUpdateResult("Up to date"), { kind: "ok", code: "up-to-date" });
+  assert.deepEqual(classifyUpdateResult("Skipped: CI still running on origin/main"), { kind: "transient", code: "ci-pending" });
+});
+
+// ─── Privacy: bind + host firewall + Funnel (audit N1c-16) ──────────────────
+
+// A tailscale that answers with no Funnel at all ("private" from Funnel's side).
+const funnelOff = () => _setTailscaleReader(() => "{}");
+const funnelMissing = () => _setTailscaleReader(() => { throw new Error("tailscale: not found"); });
+const ufw = (text) => _setFirewallReader(() => text);
+const ufwUnreadable = () => _setFirewallReader(firewallUnreadable);
+
+async function privacyOf(opts = {}) {
+  invalidateHealthCache();
+  const result = await collectHealthSignals(makeDb(), { now: () => NOW, ...opts });
+  return {
+    card: result.details.find((d) => d.id === "exposure"),
+    issue: result.issues.find((i) => i.id === "exposure"),
+  };
+}
+
+test("privacy: a loopback bind is ok when the Funnel check runs", async () => {
+  try {
+    funnelOff();
+    ufw("ENABLED=yes\n");
+    const { card, issue } = await privacyOf({ bind: "127.0.0.1" });
+    assert.equal(card.state, "ok");
+    assert.equal(card.value, t("signals.exposure.private", "en"));
+    assert.equal(issue, undefined);
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: a tailnet bind is fine too", async () => {
+  try {
+    funnelOff();
+    ufw("ENABLED=no\n");
+    const { card } = await privacyOf({ bind: "100.64.20.5" });
+    assert.equal(card.state, "ok");
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: every interface with the host firewall OFF warns about the local network", async () => {
+  try {
+    funnelOff();
+    ufw("# /etc/ufw/ufw.conf\nENABLED=no\n");
+    const { card, issue } = await privacyOf({ bind: "0.0.0.0" });
+    assert.equal(card.state, "warn");
+    assert.match(card.value, /every interface/);
+    assert.match(card.value, /firewall is off/);
+    assert.equal(issue.severity, "warn");
+    assert.match(issue.label, /local network/);
+    assert.equal(issue.actionHref, "/dashboard/settings");
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: the bind comes from the gateway's own listen host (CROW_GATEWAY_BIND), not a second env parse", async () => {
+  const saved = process.env.CROW_GATEWAY_BIND;
+  try {
+    funnelOff();
+    ufw("ENABLED=no\n");
+    process.env.CROW_GATEWAY_BIND = "0.0.0.0";
+    const wide = await privacyOf();
+    assert.equal(wide.card.state, "warn", "an unset opts.bind reads listen-host.js");
+    process.env.CROW_GATEWAY_BIND = "::";
+    const v6Wildcard = await privacyOf();
+    assert.equal(v6Wildcard.card.state, "warn", ":: is every interface too");
+    process.env.CROW_GATEWAY_BIND = "127.0.0.1";
+    const loop = await privacyOf();
+    assert.equal(loop.card.state, "ok");
+  } finally {
+    if (saved == null) delete process.env.CROW_GATEWAY_BIND; else process.env.CROW_GATEWAY_BIND = saved;
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: every interface with the host firewall ON is info, and says the rules cannot be read", async () => {
+  try {
+    funnelOff();
+    ufw("ENABLED=yes\n");
+    const { card, issue } = await privacyOf({ bind: "0.0.0.0" });
+    assert.equal(card.state, "info");
+    assert.match(card.value, /listens on every interface/);
+    assert.match(card.value, /firewall is on/);
+    assert.equal(issue.severity, "info");
+    assert.match(issue.label, /rules/);
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: every interface with an unreadable firewall file is a warn that names the firewall check as unknown", async () => {
+  try {
+    funnelOff();
+    ufwUnreadable();
+    const { card, issue } = await privacyOf({ bind: "0.0.0.0" });
+    assert.equal(card.state, "warn", "nothing confirms the LAN is kept out, so never info or ok");
+    assert.match(card.value, /firewall could not be read/);
+    assert.equal(issue.severity, "warn");
+  } finally {
+    ufwUnreadable();
+  }
+
+  // A file that exists but says nothing about ENABLED is unknown the same way.
+  try {
+    funnelOff();
+    ufw("# nothing useful here\n");
+    const { card } = await privacyOf({ bind: "0.0.0.0" });
+    assert.equal(card.state, "warn");
+    assert.match(card.value, /firewall could not be read/);
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: a failing tailscale CLI is unknown, never ok", async () => {
+  try {
+    funnelMissing();
+    ufw("ENABLED=yes\n");
+    // Loopback, so the Funnel check is the only thing that could not run.
+    const { card, issue } = await privacyOf({ bind: "127.0.0.1" });
+    assert.notEqual(card.state, "ok", "a check that did not run can never be an ok");
+    assert.equal(card.state, "info");
+    assert.match(card.value, /can't check internet sharing \(Funnel\)/);
+    assert.equal(issue.severity, "info");
+    assert.match(issue.label, /internet sharing \(Funnel\)/);
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+test("privacy: the existing Funnel warning is unchanged (and outranks the bind)", async () => {
+  try {
+    _setTailscaleReader(() => JSON.stringify({
+      AllowFunnel: { "crow.example.ts.net:443": true },
+      Web: { "crow.example.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:3001" } } } },
+    }));
+    ufw("ENABLED=yes\n");
+    const { card, issue } = await privacyOf({ bind: "127.0.0.1" });
+    assert.equal(card.state, "warn");
+    assert.equal(issue.label, t("signals.exposure.funnel", "en"));
+    assert.equal(issue.actionHref, "/dashboard/settings?section=connections");
+  } finally {
+    funnelMissing();
+    ufwUnreadable();
+  }
+});
+
+// ─── Published ports with no fence snapshot (audit N1c-17) ───────────────────
+
+const missingSnapshot = () => join(mkdtempSync(join(tmpdir(), "crow-pp-nosnap-")), "absent.json");
+
+async function portsOf(dockerOut, { snapshotPath = missingSnapshot(), calls = null } = {}) {
+  _setDockerPortsReader(() => { if (calls) calls.n++; if (dockerOut instanceof Error) throw dockerOut; return dockerOut; });
+  invalidateHealthCache();
+  const result = await collectHealthSignals(makeDb(), { now: () => NOW, publishedPorts: { snapshotPath } });
+  return {
+    card: result.details.find((d) => d.id === "publishedPorts"),
+    issue: result.issues.find((i) => i.id === "publishedPorts"),
+    warns: result.issues.filter((i) => i.id.startsWith("published-ports:") && i.severity === "warn"),
+  };
+}
+
+test("publishedPorts: no snapshot + Docker publishing beyond loopback warns with the engine-fence guide", async () => {
+  try {
+    const { card, issue, warns } = await portsOf("0.0.0.0:8080->80/tcp, [::]:8080->80/tcp");
+    assert.equal(card.state, "warn");
+    assert.equal(issue.severity, "warn");
+    assert.match(issue.label, /Docker publishes ports beyond this machine and the engine fence is not installed/);
+    assert.equal(issue.actionHref, docsUrl("guide/engine-fence"));
+    assert.match(card.value, /8080\/tcp/);
+    assert.equal(warns.length, 0, "the card carries the warn; there is no per-port audit to list");
+  } finally {
+    _setDockerPortsReader(() => { throw new Error("no docker"); });
+  }
+});
+
+test("publishedPorts: no snapshot + loopback-only Docker ports is info 'none beyond loopback'", async () => {
+  try {
+    const { card, issue, warns } = await portsOf("127.0.0.1:8080->80/tcp, [::1]:9000->9000/tcp");
+    assert.equal(card.state, "info");
+    assert.match(card.value, /no Docker ports beyond loopback/);
+    assert.equal(issue.severity, "info");
+    assert.equal(issue.actionHref, docsUrl("guide/engine-fence"));
+    assert.equal(warns.length, 0, "no snapshot never invents a per-port warn");
+  } finally {
+    _setDockerPortsReader(() => { throw new Error("no docker"); });
+  }
+});
+
+test("publishedPorts: no snapshot + Docker unavailable stays info 'unknown'", async () => {
+  try {
+    const { card, warns } = await portsOf(new Error("docker: not found"));
+    assert.equal(card.state, "info");
+    assert.match(card.value, /unknown/);
+    assert.equal(warns.length, 0);
+  } finally {
+    _setDockerPortsReader(() => { throw new Error("no docker"); });
+  }
+});
+
+test("publishedPorts: with a snapshot, Docker is never consulted and today's logic stands", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-pp-snap-"));
+  const path = join(dir, "snapshot.json");
+  writeFileSync(path, JSON.stringify({
+    taken_at: new Date(NOW).toISOString(),
+    docker: { version: "28.0.1", userland_proxy: true },
+    tailscale: { v4: "100.64.20.5" },
+    containers: [{
+      id: "0123456789ab",
+      name: "crow-engine",
+      labels: { "crow.runtime": "docker" },
+      host_config: { network_mode: "default", port_bindings: { "8011/tcp": [{ HostIp: "127.0.0.1", HostPort: "8011" }] } },
+    }],
+    raw_rules: { v4: [], v6: [] },
+  }));
+  try {
+    const calls = { n: 0 };
+    const { card } = await portsOf("0.0.0.0:8080->80/tcp", { snapshotPath: path, calls });
+    assert.equal(calls.n, 0, "a readable snapshot is the authority; Docker is not asked");
+    assert.equal(card.state, "ok", "a loopback publish is silent, exactly as before");
+  } finally {
+    _setDockerPortsReader(() => { throw new Error("no docker"); });
+  }
+});
+
+test("publishedPorts: the docker ps ports column parses into publishes, exposed-only ports excluded", () => {
+  const parsed = parseDockerPsPorts(
+    "0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 9000/tcp\n127.0.0.1:5432->5432/tcp\n::1:7000->7000/tcp\n:::7070->7070/tcp",
+  );
+  assert.deepEqual(parsed.map((p) => [p.port, p.proto, p.kind]), [
+    [8080, "tcp", "wildcard"],
+    [8080, "tcp", "wildcard"],
+    [5432, "tcp", "loopback"],
+    [7000, "tcp", "loopback"],
+    [7070, "tcp", "wildcard"],
+  ]);
+  assert.deepEqual(parseDockerPsPorts(""), []);
+  assert.deepEqual(parseDockerPsPorts("80/tcp, 443/tcp"), [], "exposed-only ports publish nothing");
+});
+

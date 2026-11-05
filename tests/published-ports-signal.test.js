@@ -46,6 +46,8 @@ import {
   invalidateHealthCache,
   _setDiskReader,
   _setTailscaleReader,
+  _setDockerPortsReader,
+  _setFirewallReader,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import { t, translations } from "../servers/gateway/dashboard/shared/i18n.js";
 import {
@@ -66,6 +68,12 @@ process.env.CROW_PUBLISH_SNAPSHOT = "/tmp/__crow_test_no_publish_snapshot__.json
 process.env.CROW_BACKUP_DIR = "/tmp/__crow_test_nonexistent_backup_dir__";
 _setTailscaleReader(() => { throw new Error("no tailscale"); });
 _setDiskReader(() => "Avail Size\n500000M 1000000M\n");
+// The no-snapshot Docker fallback and the Privacy card's bind/firewall reads are
+// covered by tests/health-signals.test.js; here they are neutralized so a host
+// with Docker ports published (or ufw off) can never change a card under test.
+_setDockerPortsReader(() => { throw new Error("no docker"); });
+process.env.CROW_GATEWAY_BIND = "127.0.0.1";
+_setFirewallReader(() => { throw new Error("no ufw.conf"); });
 delete process.env.MINIO_ENDPOINT;
 delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;

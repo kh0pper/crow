@@ -22,9 +22,10 @@
  *   missing / unreadable / malformed — nothing to classify; the signal says
  *               "unknown" (info, never ok-looking, and never a warn by itself)
  *
- * The direct-docker fallback is deliberately OUT of this PR: with no snapshot
- * the answer is "unknown", and the detail says which of the M4 blind spots could
- * not be inspected.
+ * The direct-Docker fallback is deliberately narrow: with no snapshot at all
+ * (the ordinary "the fence was never installed" host) the Nest asks Docker
+ * itself through parseDockerPsPorts() — see the publishedPorts signal in
+ * health-signals.js. A snapshot that exists but cannot be read stays "unknown".
  *
  * ## Snapshot shape read here (tolerant; a missing optional field is not fatal)
  *
@@ -192,6 +193,37 @@ export function sameAddress(a, b) {
   const x = unmapIPv4(a);
   const y = unmapIPv4(b);
   return !!x && x === y;
+}
+
+/**
+ * Parse the PUBLISHED half of `docker ps --format '{{.Ports}}'`.
+ *
+ * One container's column looks like
+ *   `0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 9000/tcp`
+ * where the last piece is EXPOSED but not published (nothing on the host) and
+ * is therefore not a publish at all. `->` names the HOST port first.
+ *
+ * Returns [{ port, proto, hostIp, kind }] with `kind` from classifyHostIp, so
+ * the caller can ask "is anything reachable beyond loopback?". Shapes this does
+ * not recognise are dropped — the caller only ever uses this to ADD a warning
+ * on a host with no fence, so an unreadable line can only leave it silent,
+ * exactly as before.
+ */
+export function parseDockerPsPorts(text) {
+  const out = [];
+  for (const chunk of String(text ?? "").split(/[,\n]+/)) {
+    const m = /^\s*(.*):(\d+)->(\d+)\/([a-z]+)\s*$/i.exec(chunk);
+    if (!m) continue;
+    const hostIp = m[1].trim();
+    const cls = classifyHostIp(hostIp);
+    out.push({
+      hostIp: cls.address || hostIp,
+      port: Number(m[2]),
+      proto: String(m[4]).toLowerCase(),
+      kind: cls.kind,
+    });
+  }
+  return out;
 }
 
 // ─── Raw rule parser ─────────────────────────────────────────────────────────

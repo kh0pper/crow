@@ -60,6 +60,7 @@ import { rejectFunneledMiddleware } from "./funnel.js";
 import { refuseRelayedInternal } from "./middleware/internal-guard.js";
 import { gatewayListenPort } from "./listen-port.js";
 import { startActivatedProxySocket, closeProxySocket } from "./proxy-socket.js";
+import { gatewayListenHost } from "./listen-host.js";
 
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
@@ -86,7 +87,7 @@ import { frameAncestorsFor, createPeerFrameHosts } from "./frame-ancestors.js";
 import { getTrustedInstances } from "./dashboard/panels/nest/data-queries.js";
 
 const PORT = gatewayListenPort();
-const BIND = process.env.CROW_GATEWAY_BIND || "0.0.0.0";
+const BIND = gatewayListenHost();
 const noAuth = process.argv.includes("--no-auth");
 
 if (noAuth && process.env.NODE_ENV === "production") {

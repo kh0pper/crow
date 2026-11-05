@@ -45,8 +45,60 @@ export function instanceJitterMs(key) {
   return h % JITTER_WINDOW_MS;
 }
 
-const DEFAULT_INTERVAL_HOURS = 6;
-const MIN_INTERVAL_HOURS = 1;
+export const DEFAULT_INTERVAL_HOURS = 6;
+export const MIN_INTERVAL_HOURS = 1;
+
+/**
+ * Every string this module writes to `auto_update_last_result`, classified ONCE
+ * so the Nest's Updates card reads this table instead of matching the free text
+ * in a second place (audit N1c-1). First matching prefix wins.
+ *
+ *   ok        — the tick did what it should. The two "Tree pull skipped" cases
+ *               are the co-hosted by-design ones: this gateway never pulls the
+ *               shared checkout, and the INSTANCE half still converges.
+ *   transient — the tick retries on its own. The card waits 2x the interval
+ *               before calling it stuck, so a CI run in progress never reads as
+ *               a broken updater.
+ *   failure   — updates stop until someone acts.
+ *
+ * An unrecognised string is a failure (code "other"), never ok: a new message
+ * must be added here rather than silently read as fine. tests/health-signals
+ * checks that every literal this file writes is covered.
+ */
+export const UPDATE_RESULT_PREFIXES = Object.freeze([
+  { prefix: "Updated ", kind: "ok", code: "updated" },
+  { prefix: "Up to date", kind: "ok", code: "up-to-date" },
+  { prefix: "Tree pull skipped: the checkout is read-only", kind: "ok", code: "tree-external" },
+  { prefix: "Tree pull skipped: another instance holds the checkout lock", kind: "ok", code: "tree-locked" },
+  { prefix: "Skipped: CI still running", kind: "transient", code: "ci-pending" },
+  { prefix: "Skipped: branch changed mid-update", kind: "transient", code: "branch-changed" },
+  { prefix: "Skipped: not on main", kind: "failure", code: "not-on-main" },
+  { prefix: "Skipped: cannot determine branch", kind: "failure", code: "branch-unknown" },
+  { prefix: "Skipped: CI is RED", kind: "failure", code: "ci-red" },
+  { prefix: "Skipped: migration quarantined", kind: "failure", code: "migration-quarantined" },
+  { prefix: "Fetch failed", kind: "failure", code: "fetch-failed" },
+  { prefix: "Pull failed", kind: "failure", code: "pull-failed" },
+  { prefix: "Update error", kind: "failure", code: "update-error" },
+  { prefix: "Migration quarantined", kind: "failure", code: "migration-quarantined" },
+  { prefix: "Migration failed", kind: "failure", code: "migration-failed" },
+  { prefix: "init-db failed", kind: "failure", code: "init-db-failed" },
+]);
+
+/**
+ * Classify one `auto_update_last_result` value.
+ *
+ * @param {string|null|undefined} result
+ * @returns {null|{kind: "ok"|"transient"|"failure", code: string}} null when
+ *   nothing has been recorded yet.
+ */
+export function classifyUpdateResult(result) {
+  // Only the leading space is trimmed: "Updated " ends in one, and a real result
+  // is "Updated <a> → <b>".
+  const value = String(result ?? "").trimStart();
+  if (!value.trim()) return null;
+  const hit = UPDATE_RESULT_PREFIXES.find((entry) => value.startsWith(entry.prefix));
+  return hit ? { kind: hit.kind, code: hit.code } : { kind: "failure", code: "other" };
+}
 
 let updateTimer = null;
 let db = null;
