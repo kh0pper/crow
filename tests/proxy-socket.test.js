@@ -29,7 +29,7 @@
  *     activation does) serves requests over it, marked;
  *   - the Access Denied page no longer advises CROW_DASHBOARD_PUBLIC;
  *   - the fix-it detector fires on a loopback Caddyfile with no socket unit,
- *     and resolves its card once the unit exists.
+ *     and resolves its card once the Caddyfile no longer dials loopback.
  *
  * Placeholder addresses only: the LAN client is 192.168.1.20, the public one
  * 8.8.8.8.
@@ -292,7 +292,9 @@ test("pickProxyFd: only a matching LISTEN_PID with fds yields an fd, named for o
     pickProxyFd({ LISTEN_PID: String(pid + 1), LISTEN_FDS: "1" }, pid), null,
     "a foreign LISTEN_PID (an inherited environment) is ignored",
   );
-  assert.equal(pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "1" }, pid), 3, "no names: the first fd");
+  assert.equal(pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "1" }, pid), null, "no names: refused (exact match only)");
+  assert.equal(pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "1", LISTEN_FDNAMES: "crow-gateway.socket" }, pid), null,
+    "a sole fd from another socket unit is never taken for the proxy socket");
   assert.equal(
     pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "1", LISTEN_FDNAMES: PROXY_SOCKET_UNIT }, pid), 3,
   );
@@ -489,8 +491,9 @@ test("detector stays quiet on a fixed Caddyfile, a missing file, another port, a
   assert.equal(caddyProxySocketProblem({ caddyfile: fixture("socket", SOCKET_CADDYFILE), socketUnit: NO_SOCKET_UNIT }), null);
   assert.equal(caddyProxySocketProblem({ caddyfile: join(FIXTURE_DIR, "nope"), socketUnit: NO_SOCKET_UNIT }), null);
   assert.equal(caddyProxySocketProblem({ caddyfile: fixture("other-port", "x {\n\treverse_proxy localhost:3002\n}\n"), socketUnit: NO_SOCKET_UNIT }), null);
-  // systemd owns the socket now: the unit existing is the fix.
-  assert.equal(caddyProxySocketProblem({ caddyfile: loopbackFile, socketUnit: SOCKET_UNIT_FIXTURE }), null);
+  // Decided on the Caddyfile alone (review): a socket unit next to a Caddyfile
+  // that still dials loopback is still a locked-out owner.
+  assert.ok(caddyProxySocketProblem({ caddyfile: loopbackFile, socketUnit: SOCKET_UNIT_FIXTURE }));
 });
 
 test("detector.check upserts one boot card (no one-click remedy: the gateway is not root)", async () => {
@@ -508,7 +511,7 @@ test("detector.check upserts one boot card (no one-click remedy: the gateway is 
   assert.equal(items.length, 0, "nothing is written when the Caddyfile is fine");
 });
 
-test("detector.check RESOLVES its card once the problem is gone (the socket unit exists)", async () => {
+test("detector.check RESOLVES its card once the problem is gone (Caddy dials the socket)", async () => {
   const items = [];
   const resolved = [];
   const store = {
@@ -520,10 +523,11 @@ test("detector.check RESOLVES its card once the problem is gone (the socket unit
   assert.equal(items.length, 1);
   assert.deepEqual(resolved, [], "nothing to resolve while the problem is there");
 
-  await detector.check(store, { caddyfile, socketUnit: SOCKET_UNIT_FIXTURE });
-  assert.equal(items.length, 1, "no card is written when the socket unit exists");
+  const fixed = fixture("socket4", SOCKET_CADDYFILE);
+  await detector.check(store, { caddyfile: fixed, socketUnit: NO_SOCKET_UNIT });
+  assert.equal(items.length, 1, "no card is written once Caddy dials the socket");
   assert.deepEqual(resolved, [["caddy-proxy-socket", DEDUP_KEY]], "the stale card is resolved");
 
   // A store without resolveByKey (or one that throws) must not break boot.
-  await detector.check({ upsertItem: async () => ({ id: 1, notify: false }) }, { caddyfile, socketUnit: SOCKET_UNIT_FIXTURE });
+  await detector.check({ upsertItem: async () => ({ id: 1, notify: false }) }, { caddyfile: fixed, socketUnit: NO_SOCKET_UNIT });
 });

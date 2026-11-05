@@ -62,9 +62,9 @@ export function caddyProxySocketProblem({
   let text;
   try { text = String(readFile(caddyfile, "utf8")); } catch { return null; } // no Caddy, or not readable
   if (!LOOPBACK_PROXY_LINE.test(text)) return null;
-  // systemd owns the socket now: once the unit exists the gateway gets its fd
-  // and Caddy's visitors are a verified `proxy`, so there is nothing to say.
-  try { if (exists(socketUnit)) return null; } catch { /* unreadable: keep the card */ }
+  // Decided on the Caddyfile alone (review): while Caddy still dials loopback the
+  // owner is locked out, whether or not the socket unit file exists.
+  void socketUnit; void exists;
 
   const fixCommand = `sudo bash ${resolve(app, "scripts", "fix-caddy-proxy-socket.sh")}`;
   return {

@@ -327,6 +327,7 @@ sudo tee /etc/systemd/system/crow-gateway-proxy.socket > /dev/null << 'SOCKETEOF
 Description=Crow gateway proxy socket (for the local Caddy only)
 [Socket]
 ListenStream=/run/crow-proxy/gateway.sock
+Service=crow-gateway.service
 SocketUser=root
 SocketGroup=caddy
 SocketMode=0660
@@ -349,11 +350,12 @@ Requires=docker.service
 # by the dashboard's network gate. CROW_TRUSTED_PROXIES=loopback is not the fix
 # (it makes every same-box caller the proxy and breaks the loopback-only doors).
 # systemd owns the socket (root:caddy 0660) and passes this service its
-# listening fd by socket activation — see the socket unit above.
-Sockets=crow-gateway-proxy.socket
+# listening fd by socket activation — see the socket unit above (Sockets= is
+# a [Service] key; Requires=/After= stay here).
 Requires=crow-gateway-proxy.socket
 
 [Service]
+Sockets=crow-gateway-proxy.socket
 Type=simple
 User=$USER
 WorkingDirectory=$CROW_APP
@@ -385,7 +387,9 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now crow-gateway-proxy.socket
-sudo systemctl enable --now crow-gateway
+sudo systemctl enable crow-gateway
+# restart, not enable --now: a re-run must hand a running gateway the socket's fd
+sudo systemctl restart crow-gateway
 sudo systemctl restart caddy
 log "Gateway service enabled and started"
 log "Caddy configured for https://${MDNS_HOST}"

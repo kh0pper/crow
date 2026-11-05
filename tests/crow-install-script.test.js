@@ -336,16 +336,21 @@ test("proxy socket: systemd owns it — root:caddy 0660 on /run/crow-proxy, enab
   assert.match(unit, /^SocketMode=0660$/m);
   assert.match(unit, /^DirectoryMode=0755$/m);
   assert.match(unit, /^WantedBy=sockets\.target$/m);
+  // Without Service= the socket points at a nonexistent crow-gateway-proxy.service and cannot start (review).
+  assert.match(unit, /^Service=crow-gateway\.service$/m);
   // The socket is started before the gateway that consumes its fd.
   const socketIdx = s.indexOf("systemctl enable --now crow-gateway-proxy.socket");
-  const gatewayIdx = s.indexOf("systemctl enable --now crow-gateway\n");
+  const gatewayIdx = s.indexOf("systemctl restart crow-gateway\n");
   assert.ok(socketIdx > -1 && gatewayIdx > -1 && socketIdx < gatewayIdx, "socket first, then the gateway");
 });
 
 test("proxy socket: the gateway unit takes it by activation and owns no runtime dir", () => {
   const s = src();
   const unit = gatewayUnitBlock(s);
-  assert.match(unit, /^Sockets=crow-gateway-proxy\.socket$/m);
+  // Sockets= is a [Service] key; in [Unit] systemd ignores it and passes no fd (review).
+  const svc = unit.slice(unit.indexOf("[Service]"), unit.indexOf("[Install]"));
+  assert.match(svc, /^Sockets=crow-gateway-proxy\.socket$/m);
+  assert.doesNotMatch(unit.slice(0, unit.indexOf("[Service]")), /^Sockets=/m);
   assert.match(unit, /^Requires=crow-gateway-proxy\.socket$/m);
   assert.match(unit, /^After=crow-gateway-proxy\.socket$/m);
   // The old gateway-owned socket setup is gone: no runtime dir, no env path.
@@ -387,7 +392,10 @@ test("fix-caddy-proxy-socket.sh: installs the socket unit + drop-in, restarts Ca
   assert.match(s, /^SocketMode=0660$/m);
   // The three unit lines go in through the drop-in, not a rewritten unit file.
   assert.match(s, /DROP_IN="\$DROP_IN_DIR\/proxy-socket\.conf"/);
-  assert.match(s, /^Sockets=crow-gateway-proxy\.socket$/m);
+  const dropIn = s.slice(s.indexOf('cat > "$DROP_IN"'), s.indexOf("\nEOF\n", s.indexOf('cat > "$DROP_IN"')));
+  assert.match(dropIn.slice(dropIn.indexOf("[Service]")), /^Sockets=crow-gateway-proxy\.socket$/m, "Sockets= under [Service]");
+  assert.doesNotMatch(dropIn.slice(0, dropIn.indexOf("[Service]")), /^Sockets=/m);
+  assert.match(s, /^Service=crow-gateway\.service$/m);
   assert.match(s, /^Requires=crow-gateway-proxy\.socket$/m);
   assert.match(s, /^After=crow-gateway-proxy\.socket$/m);
   // Only the loopback dial line is rewritten (the sed target), and both halves
@@ -416,4 +424,22 @@ test("fix-caddy-proxy-socket.sh: installs the socket unit + drop-in, restarts Ca
   assert.match(s, /getent group "\$CADDY_GROUP"/);
   // No group membership is changed any more.
   assert.doesNotMatch(s, /usermod/);
+});
+
+test("proxy socket units pass systemd-analyze verify when available (skips otherwise)", (t) => {
+  const which = spawnSync("systemd-analyze", ["--version"], { stdio: "ignore" });
+  if (which.error) return t.skip("systemd-analyze not installed");
+  const s = src();
+  const sock = socketUnitBlock(s).replace(/^.*\n/, "");
+  const g = gatewayUnitBlock(s);
+  const svc = g.slice(g.indexOf("[Unit]"), g.indexOf("\nEOF\n"))
+    .replaceAll("$USER", process.env.USER || "nobody").replaceAll("$CROW_APP", "/tmp")
+    .replaceAll("$(which node)", process.execPath).replaceAll("$CROW_DATA", "/tmp")
+    .replace(/^Requires=docker\.service$/m, "").replace(/^After=.*docker.*$/m, "");
+  const dir = mkdtempSync(join(tmpdir(), "crow-units-"));
+  writeFileSync(join(dir, "crow-gateway-proxy.socket"), sock + "\n");
+  writeFileSync(join(dir, "crow-gateway.service"), svc + "\n");
+  const r = spawnSync("systemd-analyze", ["verify", "--man=no", join(dir, "crow-gateway-proxy.socket"), join(dir, "crow-gateway.service")], { encoding: "utf-8" });
+  const out = (r.stdout || "") + (r.stderr || "");
+  assert.doesNotMatch(out, /Unknown key name|cannot be started|not loaded/, out);
 });

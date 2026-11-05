@@ -70,14 +70,16 @@ export function pickProxyFd(env = process.env, pid = process.pid) {
   const count = Number.parseInt(String(env.LISTEN_FDS ?? "").trim(), 10);
   if (!Number.isInteger(count) || count < 1) return null;
   const names = String(env.LISTEN_FDNAMES ?? "").trim();
-  // No names (older systemd, or a unit started by hand): the installer's unit
-  // is the only socket this gateway ever asks for, so fd 3 is ours.
-  if (!names) return FIRST_LISTEN_FD;
+  // No names: refuse. systemd 227+ always names passed fds, so a nameless fd
+  // was not handed over by the installer's unit (review: exact match only).
+  if (!names) return null;
   const list = names.split(":");
   const idx = list.findIndex((n) => n.trim() === PROXY_SOCKET_UNIT);
   if (idx >= 0) return idx < count ? FIRST_LISTEN_FD + idx : null;
-  // Names that do not mention our unit: only unambiguous when it is the sole fd.
-  return count === 1 ? FIRST_LISTEN_FD : null;
+  // Names that do not mention our unit: refuse. Another activated socket (say a
+  // TCP one) must never be taken for the proxy socket, where every connection
+  // is trusted to name its client (review: the operator could add one).
+  return null;
 }
 
 /** An http server serving `app`, marking every accepted connection. */
@@ -131,7 +133,17 @@ export function startActivatedProxySocket(app, mainServer, { env = process.env, 
     return null;
   }
   server.on("error", (err) => log(`[proxy-socket] WARN fd ${fd}: ${err.message}`));
-  server.listen({ fd }, () => log(`[proxy-socket] listening on ${PROXY_SOCKET_UNIT} (${PROXY_SOCKET_PATH})`));
+  server.listen({ fd }, () => {
+    // Only a unix socket may be the proxy socket: on a TCP fd every LAN client
+    // would be trusted to name its own address (review).
+    const addr = server.address();
+    if (addr && typeof addr === "object" && "port" in addr) {
+      log(`[proxy-socket] REFUSED: fd ${fd} is a TCP socket, not the unix proxy socket; closing it`);
+      server.close();
+      return;
+    }
+    log(`[proxy-socket] listening on ${PROXY_SOCKET_UNIT} (${PROXY_SOCKET_PATH})`);
+  });
   return server;
 }
 

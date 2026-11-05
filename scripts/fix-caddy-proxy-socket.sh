@@ -158,12 +158,13 @@ set -e
 
 # 1. The socket unit: systemd, not the gateway, owns the socket. 0660 root:caddy
 #    means exactly the local Caddy can connect; DirectoryMode=0755 gives it the
-#    /run/crow-proxy directory to traverse, owned by the same root:caddy.
+#    /run/crow-proxy directory to traverse, owned by the directory systemd creates root-owned.
 cat > "$SOCKET_UNIT" <<'EOF'
 [Unit]
 Description=Crow gateway proxy socket (for the local Caddy only)
 [Socket]
 ListenStream=/run/crow-proxy/gateway.sock
+Service=crow-gateway.service
 SocketUser=root
 SocketGroup=caddy
 SocketMode=0660
@@ -173,7 +174,7 @@ WantedBy=sockets.target
 EOF
 
 # 2. The gateway's three lines, as a drop-in so the shipped unit keeps its shape.
-#    Sockets= (a [Unit] dependency) is what passes the listening fd to the
+#    Sockets= (a [Service] key) is what passes the listening fd to the
 #    service: the gateway then calls listen({ fd }) and never touches a path.
 mkdir -p "$DROP_IN_DIR"
 cat > "$DROP_IN" <<'EOF'
@@ -181,9 +182,10 @@ cat > "$DROP_IN" <<'EOF'
 # audit's finding) instead of creating one itself, so only the local Caddy can
 # connect and no process running as the gateway's user can forge a proxy peer.
 [Unit]
-Sockets=crow-gateway-proxy.socket
 Requires=crow-gateway-proxy.socket
 After=crow-gateway-proxy.socket
+[Service]
+Sockets=crow-gateway-proxy.socket
 EOF
 
 # 3. Only the loopback dial line is rewritten; everything else stays as it is,
