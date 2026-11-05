@@ -38,7 +38,7 @@ import {
   readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 
@@ -781,43 +781,56 @@ export function depsChangedBetween(root, previous, pending, git = gitText) {
 
 /** Where the migration guard writes its pre-migration backups. Re-derived here
  *  because the installed copy cannot import servers/shared/migration-guard.js
- *  (contract test), and a refusal has to name the real directory, not a guess. */
+ *  (contract test), and a refusal has to name the real directory, not a guess.
+ *  `resolve()` on the DB path exactly as `guardAnchor` does (a relative
+ *  CROW_DB_PATH would otherwise make every other path in the refusal wrong). */
 export function backupDirFor(dbPath) {
   if (typeof dbPath !== "string" || !dbPath) return null;
-  return join(dirname(dbPath), "backups", "migrations");
+  return join(dirname(resolve(dbPath)), "backups", "migrations");
 }
 
-/** Does that directory actually hold a backup? A missing or empty one is not a
- *  backup, and "restore the backup" when there is none wastes the only window
- *  the operator has. */
-function hasBackup(dir) {
-  if (!dir) return false;
-  try { return readdirSync(dir).some((f) => f.endsWith(".db")); } catch { return false; }
+/** The backup the migration guard took for THIS schema-generation crossing, or
+ *  null.
+ *
+ *  `takeBackup` in servers/shared/migration-guard.js names each file
+ *  `crow-pre-g<from>-to-g<to>-<ts>.db`, so the pair of generations identifies the
+ *  backup for this change and nothing else. The directory is shared with every
+ *  earlier migration (retention keeps three), and restoring one of those loses
+ *  every write since it was taken — which is why a refusal names a file only when
+ *  it matches this crossing exactly (S2). */
+export function dbAheadBackupFile(dir, detail = {}) {
+  if (!dir) return null;
+  const from = Number(detail.previousGeneration);
+  const to = Number(detail.userVersion);
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return null;
+  const prefix = `crow-pre-g${from}-to-g${to}-`;
+  try {
+    // The timestamp suffix is ISO-8601 with `:`/`.` replaced by `-`, so a name
+    // sort is chronological and the last entry is the newest for this crossing.
+    const files = readdirSync(dir).filter((f) => f.startsWith(prefix) && f.endsWith(".db")).sort();
+    return files.length ? files[files.length - 1] : null;
+  } catch {
+    return null;
+  }
 }
-
-/** Registry migrations (an id the DB records whose file changed) run through the
- *  convergence pass and take NO backup of their own — only a guarded init-db run
- *  does. The two kinds must not share one recovery sentence (F3). */
-const REGISTRY_REFUSALS = new Set(["migration-not-rollback-safe", "migration-unknown"]);
 
 export function refusalText(reason, { root, detail = {}, failures, pending, previous, dbPath = null }) {
   const b = short(pending);
   const p = short(previous);
   const n = `${failures} times`;
   const dir = backupDirFor(dbPath);
-  const backupExists = hasBackup(dir);
-  // Every refusal names where the backups ARE, or says this kind of change has
-  // none to restore.
-  const backups = backupExists
-    ? (REGISTRY_REFUSALS.has(reason)
-      ? `A registry migration takes no backup of its own; the migration guard's earlier backups are in ${dir}.`
-      : `The migration guard's pre-migration backups are in ${dir}.`)
-    : (REGISTRY_REFUSALS.has(reason)
-      ? "A registry migration takes no automatic backup, so there is nothing to restore."
-      : "No automatic backup exists for this kind of change, so there is nothing to restore.");
-  // Only a backup that exists can be restored, and only for a change that took one.
-  const restoreStep = backupExists && !REGISTRY_REFUSALS.has(reason)
-    ? `restore the newest pre-migration backup from ${dir}, ` : "";
+  // ONLY a schema-generation crossing takes a backup, and only the file matching
+  // THIS pair of generations may be restored (S2). Every other reason took none,
+  // and the directory's older files belong to earlier migrations — naming one
+  // would send the operator to restore a stale database.
+  const backupFile = reason === "db-ahead" ? dbAheadBackupFile(dir, detail) : null;
+  const backups = backupFile
+    ? `The migration guard's pre-migration backup for this change is ${join(dir, backupFile)}.`
+    : (dir
+      ? `No backup was taken for this change. The migration guard's earlier backups, if any, are in ${dir}.`
+      : "No backup was taken for this change, so there is nothing to restore.");
+  // A restore step only when there is a backup of THIS change to restore.
+  const restoreStep = backupFile ? `restore ${join(dir, backupFile)}, ` : "";
   const recover = `To recover: stop the gateway, ${restoreStep}run git -C ${root} log --oneline -5, `
     + `choose a commit known to start, run git -C ${root} reset --keep <that commit>, then start the gateway.`;
   const restore = `To recover: stop the gateway, ${restoreStep}run git -C ${root} reset --keep ${previous}, `
@@ -938,7 +951,16 @@ function reportRefusal({ root, gitDir, state, stateDir, crowHome, now, decision,
   // the moment the operator follows the recovery steps (F2). HELD (`persist`),
   // because the sha really is still checked out: only the checkout moving off it
   // gives the marker its expiry back.
-  if (kind === "refuse") {
+  //
+  // S5: a BLOCKED rollback whose reset did not move the tree (reset-failed,
+  // reset-mismatch) is in the same state — B is still checked out — so the
+  // ordinary marker written before the reset must be re-written HELD too. Left
+  // ordinary, a co-hosted peer's convergence would not refuse B
+  // (`updateQuarantineHeldAtHead` keys off `held`) and the marker would clear as
+  // soon as main moved.
+  const stillCheckedOut = kind === "refuse"
+    || decision.reason === "reset-failed" || decision.reason === "reset-mismatch";
+  if (stillCheckedOut) {
     const quarantined = writeUpdateQuarantineFile(gitDir, buildUpdateQuarantine({
       sha: pending, previous, reason: "startup-crash", by: "boot-guard", now, persist: true,
     }));
@@ -1079,6 +1101,11 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
   // Whether the attempt that just ended was one we asked for. The "wait" log
   // below must not call a planned restart a crash (F8).
   let plannedExit = false;
+  // F8 nit: the count AFTER the block may not have moved — an OOM, a clean exit,
+  // a timeout or an unrecorded exit all count for nothing — and "crashed N of 3"
+  // is only true when it did. Any exit that did not raise the count is logged as
+  // not counted, whatever the reason.
+  const failuresBefore = num(state.failures, 0);
 
   // 2. Count the attempt that just ended, then open this one (S5/R3). The first
   // start after arming has no previous attempt, so it is never counted.
@@ -1186,11 +1213,15 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     saveState(stateDir, state);
     if (decision.action === "defer") {
       log(`${short(pending)} is still failing, but this start deferred (${decision.reason})`);
+    } else if (state.failures > failuresBefore) {
+      log(`${short(pending)} crashed ${state.failures} of ${FAILURE_THRESHOLD} times`);
     } else if (plannedExit) {
       // A restart Crow asked for says nothing about the commit being tried (F8).
       log(`${short(pending)}: planned restart, not counted (${state.failures} of ${FAILURE_THRESHOLD})`);
     } else {
-      log(`${short(pending)} crashed ${state.failures} of ${FAILURE_THRESHOLD} times`);
+      // OOM, a clean exit, a timeout, or no recorded exit: not evidence about
+      // the commit, so it must not read as a crash (F8 nit).
+      log(`${short(pending)}: exit not counted (${state.failures} of ${FAILURE_THRESHOLD})`);
     }
     return decision;
   }

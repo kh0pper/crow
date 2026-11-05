@@ -13,7 +13,7 @@
  * that proves the same sentinels DO fire when the flags are absent.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, after } from "node:test";
@@ -136,4 +136,18 @@ test("control: a bare fetch fires the reference-transaction hook", () => {
   execFileSync("git", ["fetch", "--quiet", "origin", "main"], { cwd: f.work, stdio: "pipe" });
   assert.ok(existsSync(f.sentinels[0]), "the ref update runs the tree's reference-transaction hook");
   assert.equal(existsSync(f.sentinels[1]), false, "no merge happened, so no post-merge");
+});
+
+test("every remaining git call site carries the hooks-off flags (F8 nit)", () => {
+  // rev-parse runs no hooks today, but the rule is "EVERY call": a copy-paste
+  // from one of these files must not reintroduce a bare `git rev-parse HEAD`.
+  for (const file of ["scripts/guarded-init-db.mjs", "servers/gateway/index.js"]) {
+    const lines = readFileSync(join(REAL_APP_ROOT, file), "utf8")
+      .split("\n")
+      .filter((line) => /"git", \[/.test(line));
+    assert.ok(lines.length > 0, `${file}: expected a git call, found none — the assertion would be vacuous`);
+    for (const line of lines) {
+      assert.match(line, /GIT_SAFE/, `${file}: a git call without the hooks-off flags: ${line.trim()}`);
+    }
+  }
 });

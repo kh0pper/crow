@@ -76,11 +76,17 @@ wait_for_health() {
 # running and nothing restarted or logged. A refusal is logged, flagged, and the
 # caller still restarts the service and exits non-zero.
 ROLLBACK_OK=1
+# Whether the RESET itself moved the tree back (S4). The two failures are not the
+# same: a tree back on PREV_REF whose npm install failed still needs the marker,
+# while a reset that never moved the tree must not quarantine the sha (the boot
+# guard owns the held marker for that case).
+RESET_OK=1
 rollback() {
   log "Rolling back to ${PREV_REF:0:8}..."
   if ! git "${GIT_SAFE[@]}" reset --keep "$PREV_REF" 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
     log "ERROR: rollback refused — git reset --keep ${PREV_REF:0:8} failed (local changes overlap it?). The checkout is unchanged at $(git "${GIT_SAFE[@]}" rev-parse --short HEAD 2>/dev/null || echo unknown)."
     ROLLBACK_OK=0
+    RESET_OK=0
   fi
   if ! npm install 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
     log "ERROR: npm install failed during the rollback — the checkout holds ${PREV_REF:0:8} but its dependencies may not match."
@@ -91,7 +97,10 @@ rollback() {
 # Record the commit the rollback moved off, so the next automatic tick does not
 # pull it again and start the same crash loop (F7). NOT held: the checkout is
 # back on PREV_REF, so the marker clears itself when main moves past the sha.
-# Never fatal — a missing marker is worse, not a reason to abandon the run.
+# Never fatal — a missing marker is worse, not a reason to abandon the run. If
+# the commit rolled back to predates scripts/write-update-quarantine.mjs (the
+# first release that ships it), that node call cannot run and only the warning
+# below is logged: the boot guard is the backstop that keeps the sha refused.
 quarantine_rolled_back() {
   if [ -z "${NEW_REF:-}" ] || [ "${NEW_REF:-}" = "${PREV_REF:-}" ]; then
     return 0
@@ -144,7 +153,10 @@ if systemctl is-active --quiet crow-gateway 2>/dev/null; then
   else
     log "ERROR: the gateway did not come up on the new code (health 200 within ${HEALTH_TIMEOUT_SECS}s, NRestarts unchanged: failed). Rolling back..."
     rollback
-    if [ "$ROLLBACK_OK" = "1" ]; then
+    # The marker records the sha this run moved OFF, so it belongs to a reset that
+    # really moved the tree — not to a rollback whose npm install then failed
+    # (S4: the tree IS back on PREV_REF, so the marker is still needed).
+    if [ "$RESET_OK" = "1" ]; then
       quarantine_rolled_back
     fi
     sudo systemctl restart crow-gateway

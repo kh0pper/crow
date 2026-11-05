@@ -364,6 +364,13 @@ test("a rollback whose spool write failed still rings the auto-update bell (F4)"
     assert.equal(db.notifications.length, 1, `the sole channel must ring once: ${JSON.stringify(db.notifications)}`);
     assert.equal(db.notifications[0].source, "auto-update");
     assert.match(db.notifications[0].body, /crashed on startup 3 times/, "the recorded result is quoted verbatim");
+    // S3: this row is the only channel left, and it is a STARTUP CRASH. The
+    // cause-neutral "its code does not load, or its dependencies could not be
+    // installed" is the Layer 0 wording and must not appear here.
+    assert.ok(!/does not load/.test(`${db.notifications[0].title} ${db.notifications[0].body}`),
+      `a startup crash must never be described as code that does not load: ${db.notifications[0].body}`);
+    assert.match(db.notifications[0].body, /crashed on startup, so it was rolled back/,
+      "the action text itself describes a startup crash (S3)");
     assert.match(text, /^Rolled back: /);
   } finally {
     _setDbForTest(null);

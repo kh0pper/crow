@@ -232,6 +232,21 @@ const UPDATE_FAILURE_TEXT = Object.freeze({
 });
 
 /**
+ * The startup-crash variant of `update-rolled-back` (S3).
+ *
+ * Two different events share that code: the Layer 0 paths (a tree whose code does
+ * not load, a failed `npm install`) and a Layer 1 boot-guard rollback, whose
+ * result text starts `Rolled back: <sha> crashed on startup N times`. The code's
+ * cause-neutral text is wrong for the second one — the commit was rolled back
+ * because the SERVICE crashed, not because its code fails to load — and when the
+ * alert-spool write failed this row is the only thing the operator sees.
+ */
+const UPDATE_ROLLED_BACK_CRASH_TEXT = Object.freeze([
+  "Crow rolled back an update that would not start",
+  "The pulled commit crashed on startup, so it was rolled back automatically and the previous version is running again. The commit is quarantined: updates resume by themselves when main moves past it.",
+]);
+
+/**
  * Codes whose recorded result is OUR fixed sentence, with no captured command
  * output, so it can be quoted in the bell verbatim — the same words Settings
  * shows. Everything else (fetch/pull/update-error, and any future code that
@@ -273,7 +288,9 @@ async function notifyUpdateFailure(value, nowMs = Date.now()) {
       return null; // same condition, already rung within the window
     }
 
-    const [title, action] = UPDATE_FAILURE_TEXT[klass.code] || UPDATE_FAILURE_TEXT.other;
+    const [title, action] = (klass.code === "update-rolled-back" && /crashed on startup/i.test(typeof value === "string" ? value : "")
+      ? UPDATE_ROLLED_BACK_CRASH_TEXT
+      : UPDATE_FAILURE_TEXT[klass.code]) || UPDATE_FAILURE_TEXT.other;
     const recorded = typeof value === "string" ? value.trim().slice(0, 300) : "";
     const body = RESULT_TEXT_IS_SAFE.has(klass.code) && recorded ? `${recorded}\n\n${action}` : action;
     const { createNotification } = await import("../shared/notifications.js");

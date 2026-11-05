@@ -187,7 +187,11 @@ not on `main`, a read-only checkout, an `index.lock`) can clear on their own, so
 these are re-checked on the next start. A rollback always compares the failing
 commit with the last commit that ran stably for ten minutes, not with the commit
 just before it, so after a refusal-class change is fixed forward, later crashes
-stay refusable until that fix has itself run stably for ten minutes.
+stay refusable until that fix has itself run stably for ten minutes. A refusal's
+cause may not be the commit itself (a database left ahead by something else), so
+the quarantine is not permanent: once the refused commit has run stably for ten
+minutes, the guard rewrites its marker as an ordinary one, and a newer commit on
+`main` is pulled normally.
 
 **Recovering from a refusal.** The alert and `~/.crow/boot-guard/STATUS` carry
 the exact steps for the case that fired. In general (`CROW_APP` is your checkout:
@@ -197,10 +201,12 @@ the exact steps for the case that fired. In general (`CROW_APP` is your checkout
 # 1. Stop the loop.
 sudo systemctl stop crow-gateway
 
-# 2. If the alert says the database moved (a schema generation, an init-db
-#    change, or a migration that is not rollback-safe), put back the backup the
-#    migration guard took BEFORE touching git — the alert names it, or says that
-#    this kind of change took none. Registry migrations take no backup.
+# 2. Only a schema-generation crossing (user_version above what the previous
+#    commit expects) takes a backup, and the alert names that exact file:
+#    restore it — the migration guard took it BEFORE touching git. Every other
+#    kind of change took none, so the alert names the directory the guard's
+#    earlier backups are in but gives no restore step: those belong to earlier
+#    migrations, not to this one. Registry migrations take no backup.
 ls "$HOME/.crow/data/backups/migrations"
 
 # 3. Move main back to a commit you know starts, keeping unrelated local edits.

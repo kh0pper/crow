@@ -487,6 +487,40 @@ test("after the operator's recovery, the refused sha is not pulled until main mo
   }
 });
 
+/* ---------------------------------------------- a refusal that stops being true */
+
+test("a stable mark demotes the guard's HELD marker, so the next commit on main is pulled (S1)", async () => {
+  // The refusal itself says "the cause may not be B": here the DB was left ahead
+  // by something else, B boots fine, and ten minutes later the gateway marks it
+  // stable. The commit evidently runs, so the HELD marker must stop being held —
+  // otherwise every later tick answers "B is still checked out" and a fix landed
+  // on main is never pulled.
+  const f = refusedFixture();
+  const held = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(held.held, true, "fixture precondition: the refusal wrote a HELD marker");
+  assert.equal(held.sha, f.b);
+
+  const stable = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: f.stateDir, install: false });
+  assert.equal(stable.ok, true, stable.reason);
+  assert.equal(stable.marker.demoted, true, JSON.stringify(stable.marker));
+  const demoted = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(demoted.held, undefined, "a commit that runs stably must not stay refused as held");
+  assert.equal(demoted.sha, f.b, "the record still names the commit the guard refused");
+  assert.equal(demoted.by, "boot-guard", "rewritten through the same writer, same shape");
+
+  const fix = pushToOrigin(f, "c.txt", "three\n");
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  try {
+    const pulled = await checkForUpdates();
+    assert.equal(pulled.updated, true, `the new commit on main must be pulled: ${JSON.stringify(pulled)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), fix);
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+});
+
 /* ------------------------------------------------------------ counting */
 
 test("an OOM kill is never counted and spools one alert instead", () => {
@@ -530,6 +564,64 @@ test("a planned restart does not log 'crashed 0 of 3 times' (F8)", () => {
   assert.match(run.stderr, /planned restart, not counted/);
   assert.ok(!/crashed 0 of/.test(run.stderr), `a planned restart must not read as a crash:\n${run.stderr}`);
   assert.equal(readState(f).failures, 0);
+});
+
+test("an exit that is neither planned nor counted is logged as not counted (F8)", () => {
+  // A clean exit, a timeout, an OOM or an unrecorded exit raise no count, so
+  // "crashed N of 3" is simply untrue for them (the wording nit).
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  runLauncher(f); // arms the trial on B
+  runRecorder(f, { exit: { SERVICE_RESULT: "exit-code", EXIT_CODE: "exited", EXIT_STATUS: "0" } });
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /exit not counted \(0 of 3\)/);
+  assert.ok(!/crashed 0 of/.test(run.stderr), `an uncounted exit must not read as a crash:\n${run.stderr}`);
+  assert.equal(readState(f).failures, 0);
+});
+
+/* -------------------------------------------------------- blocked rollbacks */
+
+test("a reset-failed block leaves a HELD marker, so a co-hosted peer refuses B (S5)", async () => {
+  // `reset --keep` refuses when unrelated local edits overlap B→A: nothing moved,
+  // so B is STILL checked out — the same state a refusal leaves. Its marker must
+  // therefore be held too, or a peer's convergence migrates and restarts into a
+  // commit this host's guard already refused (and the marker clears as soon as
+  // main moves).
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  primeToThreshold(f);
+  writeFileSync(join(f.work, "servers", "gateway", "index.js"), "// local edit overlapping the reset\n");
+
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  const state = readState(f);
+  assert.equal(state.state, "blocked");
+  assert.equal(state.result.reason, "reset-failed");
+  assert.equal(f.git("rev-parse", "HEAD"), f.b, "the refused reset left B checked out");
+
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.ok(marker, "the marker written before the reset must survive");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.held, true, "B is still checked out, so the marker must be HELD");
+
+  // A co-hosted peer (this one booted A) must not converge into B.
+  const { convergeInstance, setBootSha } = await import("../servers/gateway/convergence.js");
+  const dataDir = join(f.root, "peer-data");
+  mkdirSync(dataDir, { recursive: true });
+  setBootSha(f.a);
+  try {
+    const r = await convergeInstance({
+      appRoot: f.work,
+      instance: { dataDir, dbPath: join(dataDir, "crow.db"), tasksDbPath: join(dataDir, "tasks.db") },
+    });
+    assert.equal(r.skipped, "update-quarantined", `the peer converged into a refused commit: ${JSON.stringify(r)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), f.b, "a peer never moves the tree");
+  } finally {
+    setBootSha(null);
+  }
 });
 
 /* ------------------------------------------------------- self-arming */

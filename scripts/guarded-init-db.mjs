@@ -25,6 +25,10 @@ import {
 
 const appRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const dbPath = resolveGuardDbPath(resolveDataDir);
+// Hooks and fsmonitor off, like every other git command on a live checkout: an
+// installed tree points core.hooksPath INTO itself (F1). rev-parse runs no hooks
+// today, but the rule is "every call", so a later one cannot be forgotten here.
+const GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
 const marker = activeMarker(dataMarkerPath(dbPath)) || activeMarker(repoMarkerPath(appRoot));
 if (marker) {
@@ -37,7 +41,7 @@ if (marker) {
 
 let sha = null;
 try {
-  sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: appRoot, timeout: 10000 }).toString().trim();
+  sha = execFileSync("git", [...GIT_SAFE, "rev-parse", "HEAD"], { cwd: appRoot, timeout: 10000 }).toString().trim();
 } catch {}
 
 const res = await runGuardedInitDb({

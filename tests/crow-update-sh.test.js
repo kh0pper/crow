@@ -210,5 +210,12 @@ test("behaviour: a failed npm install mid-rollback is logged and the restart sti
     assert.match(h.log, /npm install failed during the rollback/);
     assert.equal(h.restarts, 2,
       `a failed npm must not exit mid-rollback (saw ${h.restarts} restarts), log:\n${h.log}`);
+    // S4: the RESET moved the tree back, so the marker is still needed even
+    // though the rollback as a whole failed — the next tick would otherwise
+    // re-pull the sha this run just moved off.
+    const marker = readUpdateQuarantine({ gitDir: h.gitDir });
+    assert.ok(marker, `a reset that succeeded must quarantine its sha even when npm then fails, log:\n${h.log}`);
+    assert.equal(marker.sha, h.newRef);
+    assert.equal(marker.by, "crow-update");
   } finally { h.cleanup(); }
 });

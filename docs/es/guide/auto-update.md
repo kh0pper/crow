@@ -195,7 +195,11 @@ así que se revisan otra vez en el siguiente arranque. Una reversión siempre
 compara el commit que falla con el último commit que corrió estable diez minutos,
 no con el commit inmediatamente anterior, así que cuando un cambio de la clase que
 provoca rechazos se corrige hacia adelante, los fallos posteriores siguen siendo
-rechazables hasta que esa corrección haya corrido estable diez minutos.
+rechazables hasta que esa corrección haya corrido estable diez minutos. La causa
+de un rechazo puede no ser el commit mismo (una base de datos que otra cosa dejó
+avanzada), así que la cuarentena no es permanente: cuando el commit rechazado
+corre estable diez minutos, el guardián reescribe su marca como una ordinaria y
+se descarga normalmente un commit más nuevo en `main`.
 
 **Recuperarse de un rechazo.** El aviso y `~/.crow/boot-guard/STATUS` llevan los
 pasos exactos para el caso que se disparó. En general (`CROW_APP` es tu checkout:
@@ -206,11 +210,13 @@ repositorio):
 # 1. Detén el bucle.
 sudo systemctl stop crow-gateway
 
-# 2. Si el aviso dice que la base de datos avanzó (una generación de esquema, un
-#    cambio en init-db, o una migración no reversible), restaura la copia que la
-#    guarda de migraciones hizo ANTES de tocar git — el aviso la nombra, o dice
-#    que este tipo de cambio no dejó ninguna. Las migraciones del registro no
-#    hacen copia.
+# 2. Solo un cruce de generación de esquema (user_version por encima de lo que
+#    espera el commit anterior) deja una copia, y el aviso nombra ese archivo
+#    exacto: restáuralo — la guarda de migraciones la hizo ANTES de tocar git.
+#    Cualquier otro tipo de cambio no dejó ninguna, así que el aviso nombra la
+#    carpeta donde están las copias anteriores de la guarda pero no da un paso
+#    de restauración: son de migraciones anteriores, no de esta. Las migraciones
+#    del registro no hacen copia.
 ls "$HOME/.crow/data/backups/migrations"
 
 # 3. Mueve main atrás a un commit que sepas que arranca, conservando cambios

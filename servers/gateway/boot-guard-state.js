@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import {
   BOOT_GUARD_DIR, FULL_SHA_RE, LAUNCHER_FILE, LAUNCHER_VERSION, freshState, loadState, saveState,
 } from "../../scripts/boot-guard/crow-boot-guard.mjs";
+import { readUpdateQuarantine, writeUpdateQuarantine } from "../shared/update-quarantine.js";
 
 /** Ten minutes up = proven. Matches the drop-in's TimeoutStartSec headroom. */
 export const STABLE_WINDOW_MS = 10 * 60 * 1000;
@@ -139,11 +140,75 @@ export function installLauncherCopy({ appRoot = APP_ROOT, bootSha, stateDir = st
 /* --------------------------------------------------------------- stable */
 
 /**
+ * `<appRoot>`'s absolute git dir, found with the SAME hooks-off flags as every
+ * other git call on the live checkout (a live install points core.hooksPath into
+ * the tree). Null when this is not a readable checkout.
+ */
+function gitDirForAppRoot(appRoot, execFile) {
+  try {
+    const out = execFile("git", [...GIT_HOOKS_OFF, "-C", appRoot, "rev-parse", "--absolute-git-dir"], {
+      encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"],
+    });
+    const dir = String(out || "").trim();
+    return dir || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Demote the boot guard's own HELD refusal marker for a commit that has just
+ * proven it runs (S1).
+ *
+ * A refusal writes `held: true` because the refused sha is still checked out, and
+ * a held marker naming local HEAD is never deleted, never expires and refuses
+ * every convergence — which is right for a sha that keeps crashing and wrong for
+ * one that boots. The refusal text itself says "the cause may not be B", and a
+ * box where B later runs stably would otherwise never pull another update: every
+ * tick would answer "still checked out" even after a fix landed on main.
+ *
+ * A stable mark is the proof that it runs, so the marker is rewritten WITHOUT
+ * `held` through the shared writer (atomic temp+rename, one format, same path
+ * rules as the launcher): the ordinary expiry / "main moved" rules apply again,
+ * and a newer commit on main is pulled normally. Only the guard's own marker
+ * (`by: "boot-guard"`) naming exactly the stable HEAD is touched — a marker for
+ * another sha, or one a blocked rollback in the gateway wrote, says nothing about
+ * this boot.
+ */
+export function demoteHeldMarker({ appRoot = APP_ROOT, bootSha, gitDir = null, execFile = execFileSync } = {}) {
+  try {
+    if (!FULL_SHA_RE.test(String(bootSha || ""))) return { demoted: false, reason: "no-sha" };
+    const dir = gitDir || gitDirForAppRoot(appRoot, execFile);
+    if (!dir) return { demoted: false, reason: "no-git-dir" };
+    const marker = readUpdateQuarantine({ gitDir: dir });
+    if (!marker) return { demoted: false, reason: "no-marker" };
+    if (marker.held !== true) return { demoted: false, reason: "not-held" };
+    if (marker.sha !== bootSha) return { demoted: false, reason: "other-sha" };
+    if (String(marker.by || "") !== "boot-guard") return { demoted: false, reason: "other-writer" };
+    const written = writeUpdateQuarantine({
+      gitDir: dir,
+      sha: marker.sha,
+      previous: marker.previous,
+      reason: marker.reason,
+      by: String(marker.by),
+      // Counted from the original write: an ordinary marker of a transient reason
+      // gets exactly the TTL the rollback's own marker would have had.
+      now: Number.isFinite(Date.parse(marker.at)) ? Date.parse(marker.at) : Date.now(),
+    });
+    return written ? { demoted: true, marker: written } : { demoted: false, reason: "write-failed" };
+  } catch (err) {
+    return { demoted: false, reason: String(err?.message || err) };
+  }
+}
+
+/**
  * The commit has been up for the stable window.
  *
  * No-op while a trial is pending for a DIFFERENT sha: the launcher owns that
  * record and this process never booted it. When the pending sha IS this boot's,
- * this call is what flips it to ok (S4).
+ * this call is what flips it to ok (S4) — and, because ten minutes up is the
+ * proof that the commit runs, it also demotes the guard's HELD refusal marker for
+ * that same sha (S1; see demoteHeldMarker).
  */
 export function markStable(bootSha, {
   appRoot = APP_ROOT, dbPath = null, stateDir = stateDirFor(), now = Date.now(),
@@ -189,7 +254,10 @@ export function markStable(bootSha, {
       launcher_version: copyOk ? LAUNCHER_VERSION : current.launcher_version,
     };
     const saved = saveState(stateDir, next);
-    return { ok: saved, launcher };
+    // Only a committed stable mark is evidence: a failed save leaves the launcher
+    // free to keep refusing the sha.
+    const marker = saved ? demoteHeldMarker({ appRoot, bootSha, execFile }) : { demoted: false, reason: "not-saved" };
+    return { ok: saved, launcher, marker };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err) };
   }

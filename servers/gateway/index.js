@@ -53,6 +53,10 @@ import { fileURLToPath } from "node:url";
 
 const __gatewayDir = dirnamePath(fileURLToPath(import.meta.url));
 const __appRoot = resolvePath(__gatewayDir, "../..");
+// Hooks and fsmonitor off for every git command this process runs: an installed
+// checkout points core.hooksPath INTO the tree, so no git call here may run the
+// tree's own hooks (F1 — "every call", including a read-only rev-parse).
+const GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 // Export the repo root so spawned addon children (bundle MCP servers) can
 // resolve shared servers/ modules without a hardcoded repo-relative path —
 // see bundles/maker-lab/server/app-root.js (BH-4 phase 2).
@@ -177,7 +181,7 @@ try {
       let sha = null;
       try {
         const { execFileSync } = await import("node:child_process");
-        sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: appRoot, timeout: 10000 }).toString().trim();
+        sha = execFileSync("git", [...GIT_SAFE, "rev-parse", "HEAD"], { cwd: appRoot, timeout: 10000 }).toString().trim();
       } catch {}
       const res = await runGuardedInitDb({ dbPath, appRoot, sha, newGeneration: SCHEMA_GENERATION });
       if (res.verdict === "loss") {
@@ -277,7 +281,7 @@ try {
   const { dirname: _dnBoot } = await import("node:path");
   const { fileURLToPath: _fupBoot } = await import("node:url");
   const _rootBoot = _dnBoot(_dnBoot(_dnBoot(_fupBoot(import.meta.url))));
-  setBootSha(_efsBoot("git", ["rev-parse", "HEAD"], { cwd: _rootBoot, timeout: 10000 }).toString().trim());
+  setBootSha(_efsBoot("git", [...GIT_SAFE, "rev-parse", "HEAD"], { cwd: _rootBoot, timeout: 10000 }).toString().trim());
 } catch (e) {
   console.warn(`[convergence] could not record the boot sha (${e.message}) — this instance will not self-converge`);
 }
