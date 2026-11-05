@@ -54,13 +54,22 @@ function chmodQuiet(p, mode) {
   try { fs.chmodSync(p, mode); } catch { /* gone, or not ours to change */ }
 }
 
-/** Create the backup directory 0700 and tighten it when it is ours. */
-function ensurePrivateDir(dir) {
+/** Create the backup directory 0700 the first time; an existing directory is
+ * never clamped (it may be shared with other software, and on a filesystem
+ * without modes a chmod must not fail a backup) — it is warned about instead. */
+function ensurePrivateDir(dir, log = console) {
+  if (fs.existsSync(dir)) {
+    try {
+      const mode = fs.statSync(dir).mode & 0o777;
+      if (mode & 0o077) {
+        log.warn(`[admin-backup] WARNING: ${dir} is mode 0${mode.toString(8)} (group- or world-accessible); ` +
+          `the backups in it may be readable by others. chmod 700 it if only Crow uses it.`);
+      }
+    } catch { /* raced away */ }
+    return;
+  }
   fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-  try {
-    const st = fs.statSync(dir);
-    if (typeof process.getuid !== "function" || st.uid === process.getuid()) chmodQuiet(dir, DIR_MODE);
-  } catch { /* raced away */ }
+  chmodQuiet(dir, DIR_MODE);
 }
 
 /** Real path of a file, falling back to the absolute path when it is gone. */
@@ -219,6 +228,9 @@ async function runBackupInner({ now = new Date() } = {}) {
   const started = Date.now();
   let result;
   try {
+    // 0600 FROM CREATION (never chmod'ed into place afterwards): the copy holds
+    // everything Crow knows, and only the verified file is renamed out of it.
+    fs.closeSync(fs.openSync(tmp, "wx", FILE_MODE));
     result = await performBackup(null, tmp);
   } catch (err) {
     removeBackupFile(tmp);

@@ -10,6 +10,15 @@
  *                so the pre-restore copy is a better-sqlite3 online .backup()
  *                — it reads through the WAL and writes one self-contained
  *                file, 0600. The live database it reads is opened READ-ONLY.
+ *                A copy that cannot be made or fails quick_check exits non-zero
+ *                (restore.sh then stops instead of replacing the database).
+ *   check-source THE SOURCE GATE: refuse a source that is the live database
+ *                itself (or its -wal/-shm), one that is empty, or one that
+ *                fails quick_check read-only — all before anything changes.
+ *   apply        Replace the database: copy (or replay) into a temp file BESIDE
+ *                it, quick_check the temp, then drop the old -wal/-shm and
+ *                rename the temp into place. The restored file keeps the old
+ *                file's owner and mode.
  *   inspect      --dry-run listing of a .db backup: quick_check, the table
  *                list and per-table row counts (read-only).
  *   verify       Post-restore check: quick_check plus the table and memories
@@ -175,6 +184,22 @@ function quickCheck(file, { readonly = false } = {}) {
   }
 }
 
+/** quick_check a file, close the handle and drop any journal our own read left. */
+function checkFile(file, { readonly = false, fold = false } = {}) {
+  const journalsBefore = journalsOf(file);
+  const res = quickCheck(file, { readonly });
+  if (res.handle) {
+    try {
+      // Folding the WAL leaves ONE self-contained file, which is what gets
+      // renamed into place; a filesystem that will not checkpoint is not fatal.
+      if (fold && res.ok) { try { res.handle.pragma("wal_checkpoint(TRUNCATE)"); } catch { /* best-effort */ } }
+      res.handle.close();
+    } catch { /* already closed */ }
+  }
+  dropCreatedJournals(file, journalsBefore);
+  return { ok: res.ok, result: res.result };
+}
+
 /** Remove a -wal/-shm that our own read-only open created (never a pre-existing one). */
 function dropCreatedJournals(file, existedBefore) {
   for (const suffix of ["-wal", "-shm"]) {
@@ -202,33 +227,182 @@ function countRows(handle, table) {
   }
 }
 
+/* ------------------------------------------------------- the source guards */
+
+/** Real path of a file, falling back to the absolute path when it is gone. */
+function realpathOrResolve(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+
+/**
+ * The source must never be the database being replaced, nor one of its
+ * -wal/-shm files: restoring the live file onto itself destroys both copies
+ * (and a -wal replayed as a database is not one).
+ * @returns {string|null} the refusal sentence, or null when the source is safe.
+ */
+function selfRestoreReason(source, dbPath) {
+  const src = realpathOrResolve(source);
+  for (const suffix of ["", "-wal", "-shm"]) {
+    if (src !== realpathOrResolve(dbPath + suffix)) continue;
+    return suffix
+      ? `refusing to restore ${source}: it is ${path.basename(dbPath)}${suffix}, part of the database a restore replaces`
+      : `refusing to restore ${source}: it IS the database being restored (${dbPath}) — nothing has been changed`;
+  }
+  return null;
+}
+
+/**
+ * THE SOURCE GATE, run before anything is touched. Refuses (code 4) a source
+ * that is the target itself, is empty, or fails quick_check read-only; code 1
+ * is an error reading it. The sentence goes to stdout.
+ */
+function checkSource(source, dbPath) {
+  const self = selfRestoreReason(source, dbPath);
+  if (self) return { code: 4, message: self };
+  let st;
+  try { st = fs.statSync(source); } catch (err) {
+    return { code: 1, message: `cannot read ${source}: ${err.message}` };
+  }
+  if (!st.isFile()) return { code: 1, message: `${source} is not a regular file` };
+  if (st.size === 0) return { code: 4, message: `refusing to restore ${source}: the file is empty — nothing has been changed` };
+  if (/\.sql$/i.test(source)) {
+    return { code: 0, message: `  Source check: ${path.basename(source)} is a SQL dump (${st.size} bytes).` };
+  }
+  const check = checkFile(source, { readonly: true });
+  if (!check.ok) {
+    return {
+      code: 4,
+      message: `refusing to restore ${source}: it failed its integrity check (${check.result}) — nothing has been changed`,
+    };
+  }
+  return { code: 0, message: "  Source check: quick_check ok." };
+}
+
+/* ------------------------------------------------------------- the restore */
+
+/** Replay a .sql dump into `dest` with the sqlite3 CLI (the only external tool). */
+function replaySql(source, dest) {
+  if (spawnSync("sqlite3", ["--version"], { stdio: "ignore" }).error) {
+    throw new Error("the sqlite3 command-line tool is not installed, so a .sql dump cannot be replayed");
+  }
+  const inFd = fs.openSync(source, "r");
+  let r;
+  try {
+    r = spawnSync("sqlite3", [dest], { stdio: [inFd, "ignore", "pipe"] });
+  } finally {
+    try { fs.closeSync(inFd); } catch { /* closed */ }
+  }
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    const why = String(r.stderr || "").trim().split("\n")[0] || `sqlite3 exited ${r.status}`;
+    throw new Error(`replaying the SQL dump failed: ${why}`);
+  }
+}
+
+/**
+ * Replace `dbPath` with the backup at `source`.
+ *
+ * The order is what keeps the old database safe: `check-source` has already
+ * verified the source (read-only); the copy lands in a temp file BESIDE the
+ * database and is verified there; only then are the old database's -wal/-shm
+ * removed and the temp renamed into place. `rename` is atomic and the temp is
+ * on the same filesystem, so a failure at any point leaves the old database
+ * and its WAL exactly as they were. A .sql dump is replayed into the temp file
+ * and checked in the same way.
+ *
+ * The restored file keeps the old database's OWNER and MODE when there was one
+ * (a service user's crow.db stays that user's file); as a non-root user chown
+ * cannot give a file away, which is said out loud.
+ */
+function applyRestore(source, dbPath) {
+  const dir = path.dirname(dbPath);
+  const base = path.basename(dbPath);
+  const tmp = path.join(dir, `.${base}.restore-${Date.now()}-${process.pid}.tmp`);
+  const isSql = /\.sql$/i.test(source);
+  let old = null;
+  try { old = fs.statSync(dbPath); } catch { /* no database yet */ }
+
+  try {
+    if (isSql) {
+      replaySql(source, tmp);
+    } else {
+      fs.copyFileSync(source, tmp);
+      // Test seam (tests/backup-script.test.js): a copy that dies half-way,
+      // proving the old database and its -wal survive a failed restore.
+      if (process.env.CROW_RESTORE_TEST_FAIL === "copy") {
+        const fd = fs.openSync(tmp, "r+");
+        try {
+          const size = fs.fstatSync(fd).size;
+          fs.ftruncateSync(fd, Math.max(1, Math.floor(size / 2)));
+        } finally { fs.closeSync(fd); }
+        throw new Error("injected failure: the copy died before the database was replaced");
+      }
+    }
+    chmodQuiet(tmp, FILE_MODE);
+    const check = checkFile(tmp, { fold: true });
+    if (!check.ok) throw new Error(`the restored copy failed its integrity check (${check.result})`);
+    // Verified. Only now may the old database's journals go, and only now is
+    // the file under the real name replaced.
+    for (const suffix of ["-wal", "-shm"]) unlinkQuiet(dbPath + suffix);
+    fs.renameSync(tmp, dbPath);
+  } catch (err) {
+    for (const p of [tmp, tmp + "-wal", tmp + "-shm"]) unlinkQuiet(p);
+    throw err;
+  }
+
+  if (old) {
+    try {
+      fs.chownSync(dbPath, old.uid, old.gid);
+    } catch (err) {
+      const why = err.code === "EPERM"
+        ? "not permitted (only root can give a file to another user)"
+        : err.message;
+      console.log(`  Note: could not keep the old database's owner (${why}); ${base} is owned by the user running the restore.`);
+    }
+    chmodQuiet(dbPath, old.mode & 0o7777);
+  } else {
+    chmodQuiet(dbPath, FILE_MODE);
+  }
+  const size = fs.statSync(dbPath).size;
+  console.log(`  ${isSql ? "SQL dump replayed" : "Binary copy restored"}: ${dbPath} (${size} bytes).`);
+  return 0;
+}
+
 /* ---------------------------------------------------------------- commands */
 
-/** Whole copy of an OFFLINE database into `dest`, 0600. */
+/** Whole copy of an OFFLINE database into `dest`, 0600.
+ *
+ * Returns 1 (and keeps the bad copy as evidence) when the copy cannot be made
+ * or fails quick_check: restore.sh stops there rather than replacing a database
+ * it could not save first. */
 async function safetyCopy(dbPath, dest) {
   if (!fs.existsSync(dbPath)) {
     console.log(`  No database at ${dbPath} — nothing to save.`);
     return 0;
   }
   try { fs.unlinkSync(dest); } catch { /* fresh name */ }
-  // Read-only: this is the live database. better-sqlite3 never writes through
-  // this handle, so a pre-restore copy cannot checkpoint or roll anything back.
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    // better-sqlite3's online backup API is asynchronous and reads through
-    // the WAL, so un-checkpointed rows land in the copy.
-    await db.backup(dest);
-  } finally {
-    try { db.close(); } catch { /* closed */ }
+    // Read-only: this is the live database. better-sqlite3 never writes through
+    // this handle, so a pre-restore copy cannot checkpoint or roll anything back.
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      // better-sqlite3's online backup API is asynchronous and reads through
+      // the WAL, so un-checkpointed rows land in the copy.
+      await db.backup(dest);
+    } finally {
+      try { db.close(); } catch { /* closed */ }
+    }
+  } catch (err) {
+    console.error(`  Error: could not save the current database: ${err.message}`);
+    console.error("  Stopping — the restore will not replace a database it could not back up first.");
+    return 1;
   }
   chmodQuiet(dest, FILE_MODE);
-  const journalsBefore = journalsOf(dest);
-  const check = quickCheck(dest);
-  try { check.handle?.close(); } catch { /* closed */ }
-  dropCreatedJournals(dest, journalsBefore);
+  const check = checkFile(dest);
   if (!check.ok) {
-    console.error(`  Warning: the pre-restore copy failed quick_check (${check.result}). It was kept at ${dest}.`);
-    return 0;
+    console.error(`  Error: the pre-restore copy failed quick_check (${check.result}). It was kept at ${dest}.`);
+    console.error("  Stopping — the restore will not replace a database whose own backup is not sound.");
+    return 1;
   }
   const size = fs.statSync(dest).size;
   console.log(`  Saved a whole copy of the current database (WAL included): ${size} bytes, quick_check ok.`);
@@ -341,6 +515,15 @@ export async function main(argv = process.argv.slice(2)) {
     case "safety-copy":
       if (!a || !b) throw new Error("usage: restore-db.mjs safety-copy <db> <dest>");
       return await safetyCopy(a, b);
+    case "check-source": {
+      if (!a || !b) throw new Error("usage: restore-db.mjs check-source <backup-file> <db>");
+      const r = checkSource(a, b);
+      process.stdout.write(`${r.message}\n`);
+      return r.code;
+    }
+    case "apply":
+      if (!a || !b) throw new Error("usage: restore-db.mjs apply <backup-file> <db>");
+      return applyRestore(a, b);
     case "inspect":
       if (!a) throw new Error("usage: restore-db.mjs inspect <backup.db>");
       return inspect(a);
@@ -351,7 +534,7 @@ export async function main(argv = process.argv.slice(2)) {
       if (!a) throw new Error("usage: restore-db.mjs precheck <db>");
       return await precheck(a);
     default:
-      console.log("usage: node scripts/restore-db.mjs safety-copy <db> <dest> | inspect <backup.db> | verify <db> | precheck <db>");
+      console.log("usage: node scripts/restore-db.mjs safety-copy <db> <dest> | check-source <backup-file> <db> | apply <backup-file> <db> | inspect <backup.db> | verify <db> | precheck <db>");
       return 2;
   }
 }

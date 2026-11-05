@@ -31,6 +31,8 @@ tools: []
 
    Which process has `crow.db` (or its `-wal`/`-shm`) open is what decides, not which port answers: `/proc/<pid>/fd` on Linux, `lsof` elsewhere. If the port answers but not like a gateway (a 5xx, a reset, a timeout), or the database is open and no gateway of ours answers on the port, the backup refuses and says who holds it — set `PORT`/`CROW_GATEWAY_PORT` to that gateway's port, or stop those processes.
 
+   The Crow Artifacts blob store (`<data dir>/artifacts`) is copied too, to `<backup dir>/artifacts` — or, for an instance with its own `CROW_HOME` (a co-hosted second gateway), to `<backup dir>/artifacts-<stem>`. Each instance's `rsync --delete` stays inside its own subdirectory, so two instances never prune each other's blobs.
+
 2. For a preview without writing files:
    ```bash
    bash scripts/backup.sh --dry-run
@@ -38,9 +40,9 @@ tools: []
 
 ### Backup Destinations
 
-- **Local** (always): `~/backups/crow` (`CROW_BACKUP_DIR`) — runs by default, no config needed. The directory is `0700` and everything in it is `0600`.
+- **Local** (always): `~/backups/crow` (`CROW_BACKUP_DIR`) — runs by default, no config needed. A directory the script creates is `0700` and everything in it is `0600`; an existing directory is never re-chmod'ed (it may be shared) — it is warned about instead when group or others can read it.
 - **S3/MinIO**: Set `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` in `.env`. Bucket: `CROW_BACKUP_S3_BUCKET` (default: `crow-backups`)
-- **Git repo**: Set `CROW_BACKUP_GIT_REPO` in `.env` (e.g., a private Gitea repo). Only SQL dumps are committed — never binary `.db` files
+- **Git repo**: Set `CROW_BACKUP_GIT_REPO` in `.env` (e.g., a private Gitea repo). Only SQL dumps are committed — never binary `.db` files. The host-default instance commits `crow-latest.sql` / `crow-<date>.sql`; a co-hosted instance (its own `CROW_HOME`) commits `crow-latest-<stem>.sql` / `crow-<stem>-<date>.sql`.
 
 ### Retention
 
@@ -74,12 +76,14 @@ crontab -e
    systemctl --user start crow-gateway
    ```
 
-The script always saves the current database as `<db>.pre-restore-TIMESTAMP` before overwriting it. That copy is made with better-sqlite3, not `cp`, so data still sitting in `crow.db-wal` is included. Stale `crow.db-wal` / `crow.db-shm` of the database being replaced are removed, and the restored file is verified (integrity check plus table and memory counts) before the script reports success.
+The script always saves the current database as `<db>.pre-restore-TIMESTAMP` before overwriting it. That copy is made with better-sqlite3, not `cp`, so data still sitting in `crow.db-wal` is included; if it cannot be made or does not verify, the restore stops and the database is NOT replaced. Before anything changes, the backup FILE is checked too: one that is the live database itself (or its `-wal`/`-shm`), one that is empty, or one that fails `quick_check` is refused. The copy then lands in a temp file beside the database, is verified there, and only then replaces it — so a failed restore leaves the old database and its WAL exactly as they were. Stale `crow.db-wal` / `crow.db-shm` of the database being replaced are removed at that last step, the restored file keeps the old file's owner and mode, and the result is verified (integrity check plus table and memory counts) before the script reports success.
+
+A database alone is not a full recovery: Artifacts rows point at blobs by sha256 key. This instance's blobs are in `<backup dir>/artifacts` (an instance with its own `CROW_HOME`: `<backup dir>/artifacts-<stem>`) — copy them back to `<data dir>/artifacts/` after the restore. The restore script prints the exact path when it exists.
 
 ### Restore Types
 
 - `.db` files: binary copy — needs no external tool, and is the recommended kind
-- `.sql` files: replayed with the `sqlite3` command-line tool; if it is not installed the script says so and stops rather than leaving a half-restored database
+- `.sql` files: replayed with the `sqlite3` command-line tool into a temp file that is checked before it replaces the database; if the tool is not installed the script says so and stops rather than leaving a half-restored database
 
 ## Safety Confirmations
 

@@ -26,13 +26,14 @@ import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  statSync, symlinkSync, utimesSync, writeFileSync,
+  rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { rmScratch } from "./helpers/safe-rm.js";
+import { artifactStoreName, instanceBackupTag } from "../servers/shared/backup-naming.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const BACKUP_SH = join(ROOT, "scripts", "backup.sh");
@@ -141,15 +142,20 @@ function envFor(ctx, extra = {}) {
   // Default instance (no tag) and no real instance paths leaked from the suite.
   delete env.CROW_HOME;
   delete env.CROW_DATA_DIR;
+  // `extra` wins over those deletes, so a test can describe a co-hosted
+  // instance (its own CROW_HOME) without hand-building a whole env.
+  Object.assign(env, extra);
   return env;
 }
 
 /**
  * Run a script asynchronously: the stub gateway lives in THIS process, so
  * blocking the event loop with spawnSync would make its /health unreachable.
+ * `opts` is merged into the spawn options (e.g. `{ cwd }` for the bare-name
+ * lookup, which falls back to the current directory last).
  */
-const run = (script, args, env) => new Promise((done) => {
-  const child = spawn(BASH, [script, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+const run = (script, args, env, opts = {}) => new Promise((done) => {
+  const child = spawn(BASH, [script, ...args], { env, stdio: ["ignore", "pipe", "pipe"], ...opts });
   let out = "";
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 120_000);
@@ -166,6 +172,7 @@ const which = (tool) => {
 };
 
 const HAS_SQLITE3 = spawnSync("sqlite3", ["--version"], { stdio: "ignore" }).status === 0;
+const HAS_RSYNC = spawnSync("rsync", ["--version"], { stdio: "ignore" }).status === 0;
 
 /**
  * A PATH with node and the shell tools but WITHOUT sqlite3 (nothing from the
@@ -506,11 +513,15 @@ test("restore removes stale wal and shm and keeps a whole safety copy", async ()
   const backupName = `primary-${today()}.db`;
   mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
   copyFileSync(backup, join(ctx.backupDir, backupName));
+  // The restored file keeps the OLD database's owner and mode (extra group
+  // read is unusual and therefore a real assertion).
+  chmodSync(live, 0o640);
 
   const r = await run(RESTORE_SH, [backupName], envFor(ctx));
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, /Quick check: ok/);
   assert.match(r.out, /Memories: 3/);
+  assert.equal(mode(live), 0o640, "the restored database kept the old file's mode");
 
   // Restored content, and the OLD database's WAL/SHM are gone for good.
   assert.deepEqual(memoriesIn(live), ["backup a", "backup b", "backup c"]);
@@ -594,4 +605,168 @@ test("prune removes this instance's old .db and .sql, keeps fresh files, and a d
   assert.equal(existsSync(oldDb), false, "the old copy of this instance is pruned");
   assert.equal(existsSync(oldSql), false, "its dump is pruned with it");
   assert.equal(existsSync(freshDb), true, "a fresh file inside the retention window is kept");
+});
+
+/* ---------------------------------------------------------------------------
+ * Review fixes (round 2): per-instance artifacts copies, and a restore that
+ * never loses the database it replaces.
+ * ------------------------------------------------------------------------- */
+
+// A .sql dump is replayed into a temp file beside the database and checked
+// there, never into the live file: a dump that does not replay leaves the old
+// database exactly as it was.
+test("a .sql dump is replayed into a temp file before it replaces the database", { skip: !HAS_SQLITE3 && "sqlite3 not installed" }, async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["old row"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  const dump = join(ctx.backupDir, `primary-${today()}.sql`);
+  writeFileSync(dump, [
+    "CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT);",
+    "INSERT INTO memories (content) VALUES ('from sql one');",
+    "INSERT INTO memories (content) VALUES ('from sql two');",
+  ].join("\n") + "\n");
+
+  const r = await run(RESTORE_SH, [dump], envFor(ctx));
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /SQL dump replayed/);
+  assert.deepEqual(memoriesIn(live), ["from sql one", "from sql two"]);
+  assert.deepEqual(names(ctx.data).filter((n) => n.startsWith(".crow.db.restore-")), [], "no temp file left behind");
+
+  // A dump that does not replay stops the restore and keeps the database.
+  const bad = join(ctx.backupDir, `primary-bad-${today()}.sql`);
+  writeFileSync(bad, "THIS IS NOT SQL;\n");
+  const failed = await run(RESTORE_SH, [bad], envFor(ctx));
+  assert.notEqual(failed.status, 0, failed.out);
+  assert.match(failed.out, /has NOT been replaced/);
+  assert.deepEqual(memoriesIn(live), ["from sql one", "from sql two"]);
+  assert.deepEqual(names(ctx.data).filter((n) => n.startsWith(".crow.db.restore-")), [], "no temp file left behind");
+});
+
+// Two co-hosted instances share ONE backup directory. Each rsyncs its artifacts
+// store with --delete into its own subdirectory, so one instance's run can never
+// prune the other's blobs (the .db naming rule, applied to the blob store).
+test("two instances' artifacts copies do not delete each other", { skip: !HAS_RSYNC && "rsync not installed" }, async () => {
+  const ctx = await ctxNew();
+  const r4Home = join(ctx.home, ".crow-r4");
+  const aData = ctx.data;
+  const bData = join(ctx.root, "r4data");
+  mkdirSync(bData, { recursive: true });
+  for (const data of [aData, bData]) mkdirSync(join(data, "artifacts", "sha256"), { recursive: true });
+  writeFileSync(join(aData, "artifacts", "sha256", "blob-a"), "blob from the primary");
+  writeFileSync(join(bData, "artifacts", "sha256", "blob-b"), "blob from r4");
+  makeDb(join(aData, "crow.db"), ["primary row"]).close();
+  makeDb(join(bData, "crow.db"), ["r4 row"]).close();
+
+  const envA = envFor(ctx);
+  const envB = envFor(ctx, {
+    CROW_HOME: r4Home,
+    CROW_DATA_DIR: bData,
+    CROW_DB_PATH: join(bData, "crow.db"),
+    PORT: String(await freePort()),
+  });
+  const tag = instanceBackupTag({ CROW_HOME: r4Home });
+  const copyA = join(ctx.backupDir, "artifacts");
+  const copyB = join(ctx.backupDir, artifactStoreName("primary", tag));
+  assert.notEqual(copyA, copyB, "each instance has its own artifacts copy");
+
+  const a1 = await run(BACKUP_SH, [], envA);
+  assert.equal(a1.status, 0, a1.out);
+  const b1 = await run(BACKUP_SH, [], envB);
+  assert.equal(b1.status, 0, b1.out);
+
+  assert.equal(existsSync(join(copyA, "sha256", "blob-a")), true, `the primary's blob is in ${copyA}`);
+  assert.equal(existsSync(join(copyB, "sha256", "blob-b")), true, `r4's blob is in ${copyB}`);
+  assert.equal(existsSync(join(copyA, "sha256", "blob-b")), false, "the two copies are separate");
+  assert.equal(existsSync(join(copyB, "sha256", "blob-a")), false, "the two copies are separate");
+
+  // The primary's store loses a blob; its next run deletes the blob from ITS
+  // copy with --delete, and r4's copy is untouched.
+  rmSync(join(aData, "artifacts", "sha256", "blob-a"));
+  const a2 = await run(BACKUP_SH, [], envA);
+  assert.equal(a2.status, 0, a2.out);
+  assert.equal(existsSync(join(copyA, "sha256", "blob-a")), false, "--delete applied inside the primary's own copy");
+  assert.equal(existsSync(join(copyB, "sha256", "blob-b")), true, "r4's copy survived the primary's run");
+});
+
+// A backup that is not a database passes nothing: quick_check (read-only) of the
+// SOURCE happens before the safety copy, before the -wal/-shm removal and before
+// anything is renamed into place.
+test("a corrupt backup is refused before anything changes", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["keep me", "and me"]).close();
+
+  const corrupt = join(ctx.root, "corrupt.db");
+  writeFileSync(corrupt, "this is not a sqlite database, not even close\n".repeat(40));
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+
+  const r = await run(RESTORE_SH, [corrupt], envFor(ctx));
+  assert.notEqual(r.status, 0, "a corrupt backup must not be restored");
+  assert.match(r.out, /refusing to restore .*corrupt\.db.*(integrity check|not a database)/i, r.out);
+  assert.match(r.out, /Nothing has been changed/);
+
+  // The live database is untouched: same rows, no pre-restore copy, no temp file.
+  assert.deepEqual(memoriesIn(live), ["keep me", "and me"]);
+  assert.deepEqual(names(ctx.data), ["crow.db"], "no safety copy, no temp file");
+});
+
+// The failure lands AFTER the safety copy and while the temp file is being
+// written (before the -wal/-shm removal and before the rename): the old
+// database and its un-checkpointed WAL must both still be there.
+test("a failed restore keeps the old database and its wal", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  await killedWriterDb(live, ["live 1", "live 2", "live 3"]);
+  const wal = join(ctx.data, "crow.db-wal");
+  const shm = join(ctx.data, "crow.db-shm");
+  assert.equal(existsSync(wal), true, "the killed writer left its WAL");
+
+  const backup = join(ctx.backupDir, `primary-${today()}.db`);
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  makeDb(backup, ["from the backup"]).close();
+
+  const r = await run(RESTORE_SH, [backup], envFor(ctx, { CROW_RESTORE_TEST_FAIL: "copy" }));
+  assert.notEqual(r.status, 0, "a failed restore must exit non-zero");
+  assert.match(r.out, /the restore failed, so .*crow\.db has NOT been replaced/, r.out);
+
+  // Old database + WAL intact (checked before anything opens the database).
+  assert.equal(existsSync(wal), true, "the old database's -wal is still there");
+  assert.equal(existsSync(shm), true, "the old database's -shm is still there");
+  assert.deepEqual(names(ctx.data).filter((n) => n.startsWith(".crow.db.restore-")), [], "no half-written temp file left behind");
+  assert.deepEqual(memoriesIn(live), ["live 1", "live 2", "live 3"], "the rows are the old ones");
+  assert.ok(names(ctx.data).some((n) => n.startsWith("crow.db.pre-restore-")), "the safety copy was made first");
+});
+
+// Restoring the live file onto itself destroys both copies, and a -wal is not a
+// database: all three shapes are refused before anything changes.
+test("restoring the live file onto itself is refused", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["only copy"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+
+  // (a) the full path of the live database.
+  const direct = await run(RESTORE_SH, [live], envFor(ctx));
+  assert.notEqual(direct.status, 0, direct.out);
+  assert.match(direct.out, /refusing to restore .*: it IS the database being restored/, direct.out);
+  assert.match(direct.out, /Nothing has been changed/);
+
+  // (b) a bare name that is not in the backup dir or the legacy dir either —
+  // resolved from the current directory.
+  const bare = await run(RESTORE_SH, ["crow.db"], envFor(ctx), { cwd: ctx.data });
+  assert.notEqual(bare.status, 0, bare.out);
+  assert.match(bare.out, /it IS the database being restored/, bare.out);
+
+  // (c) a backup-shaped name that is really the live database's -wal.
+  writeFileSync(join(ctx.data, "crow.db-wal"), "");
+  const link = join(ctx.root, "wal-as-backup.db");
+  symlinkSync(join(ctx.data, "crow.db-wal"), link);
+  const viaLink = await run(RESTORE_SH, [link], envFor(ctx));
+  assert.notEqual(viaLink.status, 0, viaLink.out);
+  assert.match(viaLink.out, /it is crow\.db-wal, part of the database a restore replaces/, viaLink.out);
+
+  // And through all of it the one database was never touched.
+  assert.deepEqual(memoriesIn(live), ["only copy"]);
+  assert.deepEqual(names(ctx.data).filter((n) => n.includes("pre-restore")), []);
 });

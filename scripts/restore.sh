@@ -22,8 +22,23 @@
 # crow-gateway) and run the restore again.
 #
 # Node helpers (scripts/restore-db.mjs) do everything that used to need the
-# sqlite3 CLI: the whole pre-restore safety copy, the .db preview and the
-# verification. Only replaying a .sql dump still needs sqlite3.
+# sqlite3 CLI: the source check, the whole pre-restore safety copy, the copy
+# into place and the verification. Only replaying a .sql dump still needs
+# sqlite3.
+#
+# Nothing is changed before the SOURCE has been checked: a backup that is the
+# live database itself (or its -wal/-shm), one that is empty, or one that fails
+# quick_check is refused with the old database untouched. The copy then lands in
+# a temp file BESIDE the database and is verified there; only after that are the
+# old -wal/-shm removed and the temp renamed into place, so a failed restore
+# always leaves the old database and its WAL intact. The restored file keeps the
+# old database's owner and mode.
+#
+# Artifacts: `npm run backup` also copies the Crow Artifacts blob store to
+# <backup dir>/artifacts (an instance with its own CROW_HOME:
+# <backup dir>/artifacts-<stem>). Rows reference blobs by sha256 key, so a full
+# recovery restores the database AND that directory; this script restores the
+# database only and prints where the blobs are.
 
 set -euo pipefail
 # The safety copy and the restored database are as sensitive as the original.
@@ -131,17 +146,21 @@ if [[ "${2:-}" == "--dry-run" ]]; then
   DRY_RUN=true
 fi
 
-# If given just a filename (not a path), look in the backup dir, then the old one.
-if [[ ! -f "$BACKUP_FILE" && -f "$BACKUP_DIR/$BACKUP_FILE" ]]; then
-  BACKUP_FILE="$BACKUP_DIR/$BACKUP_FILE"
-fi
-if [[ ! -f "$BACKUP_FILE" && -f "$LEGACY_DIR/$BACKUP_FILE" ]]; then
-  BACKUP_FILE="$LEGACY_DIR/$BACKUP_FILE"
+# If given just a filename (not a path), look in the backup dir, then the old
+# one, and only then the current directory.
+if [[ "$BACKUP_FILE" != */* ]]; then
+  if [[ -f "$BACKUP_DIR/$BACKUP_FILE" ]]; then
+    BACKUP_FILE="$BACKUP_DIR/$BACKUP_FILE"
+  elif [[ -f "$LEGACY_DIR/$BACKUP_FILE" ]]; then
+    BACKUP_FILE="$LEGACY_DIR/$BACKUP_FILE"
+  elif [[ -f "$BACKUP_FILE" ]]; then
+    BACKUP_FILE="$(pwd)/$BACKUP_FILE"
+  fi
 fi
 
 if [[ ! -f "$BACKUP_FILE" ]]; then
   echo "Error: Backup file not found: $BACKUP_FILE"
-  echo "Looked in $BACKUP_DIR and $LEGACY_DIR."
+  echo "Looked in $BACKUP_DIR, $LEGACY_DIR and the current directory."
   exit 1
 fi
 
@@ -182,6 +201,28 @@ if [[ "$DRY_RUN" == true ]]; then
   echo ""
   echo "[dry-run] No changes made. Remove --dry-run to restore."
   exit 0
+fi
+
+# --- Refuse a bad source before anything changes ---
+#   exit 0 = the source is a usable backup of something other than the target
+#   exit 4 = refused (the sentence is on stdout); nothing has been touched
+#   other  = the check itself could not run
+set +e
+SOURCE_CHECK="$("$NODE_BIN" "$RESTORE_HELPER" check-source "$BACKUP_FILE" "$DB_PATH" 2>&1)"
+SOURCE_STATUS=$?
+set -e
+if [[ -n "$SOURCE_CHECK" ]]; then
+  echo "$SOURCE_CHECK"
+fi
+if [[ "$SOURCE_STATUS" -eq 4 ]]; then
+  echo ""
+  echo "Nothing has been changed."
+  exit 1
+fi
+if [[ "$SOURCE_STATUS" -ne 0 ]]; then
+  echo "Error: could not check $BACKUP_FILE (node/better-sqlite3 failed)."
+  echo "Refusing to replace $DB_PATH with a file that could not be checked."
+  exit 1
 fi
 
 # --- Refuse while anything holds the database (no --force: this one has no override) ---
@@ -226,32 +267,28 @@ if [[ -f "$DB_PATH" ]]; then
   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
   PRE_RESTORE="$DB_PATH.pre-restore-${TIMESTAMP}"
   echo "Saving the current database (whole, WAL included) to $PRE_RESTORE..."
-  "$NODE_BIN" "$RESTORE_HELPER" safety-copy "$DB_PATH" "$PRE_RESTORE"
+  # A safety copy that cannot be made or does not verify stops the restore:
+  # nothing may replace a database that could not be saved first.
+  if ! "$NODE_BIN" "$RESTORE_HELPER" safety-copy "$DB_PATH" "$PRE_RESTORE"; then
+    echo ""
+    echo "Error: the pre-restore copy failed, so $DB_PATH has NOT been replaced."
+    exit 1
+  fi
 fi
 
 # --- Restore ---
+# Every write happens in restore-db.mjs: a temp copy beside the database (or a
+# .sql replay into one), verified there, then renamed into place. The old -wal
+# and -shm are removed only after the temp file checked out.
 
 echo "Restoring..."
-
-if [[ "$EXT" == "db" ]]; then
-  # Stale WAL/SHM of the DB being replaced must never be replayed onto the
-  # restored file (they belong to the OLD database).
-  rm -f -- "${DB_PATH}-wal" "${DB_PATH}-shm"
-  # Copy beside the DB, then rename: an interrupted copy can never leave a
-  # half-written crow.db under the real name.
-  TMP_RESTORE="${DB_PATH}.restore-${TIMESTAMP:-$(date +%Y%m%d-%H%M%S)}-$$.tmp"
-  trap 'rm -f -- "$TMP_RESTORE"' EXIT
-  cp -- "$BACKUP_FILE" "$TMP_RESTORE"
-  chmod 600 "$TMP_RESTORE"
-  mv -f -- "$TMP_RESTORE" "$DB_PATH"
-  trap - EXIT
-  echo "  Binary copy restored."
-elif [[ "$EXT" == "sql" ]]; then
-  # SQL restore: drop existing, replay dump (creates a fresh database file)
-  rm -f -- "$DB_PATH" "${DB_PATH}-wal" "${DB_PATH}-shm"
-  sqlite3 "$DB_PATH" < "$BACKUP_FILE"
-  chmod 600 "$DB_PATH" 2>/dev/null || true
-  echo "  SQL dump replayed."
+if ! "$NODE_BIN" "$RESTORE_HELPER" apply "$BACKUP_FILE" "$DB_PATH"; then
+  echo ""
+  echo "Error: the restore failed, so $DB_PATH has NOT been replaced."
+  if [[ -n "$PRE_RESTORE" ]]; then
+    echo "The database is as it was; the pre-restore copy is at $PRE_RESTORE."
+  fi
+  exit 1
 fi
 
 # --- Verify (node/better-sqlite3: quick_check + table and memories counts) ---
@@ -265,4 +302,13 @@ echo "Restore complete."
 if [[ -n "$PRE_RESTORE" ]]; then
   echo "Previous database saved at: $PRE_RESTORE"
 fi
+# The blob store is NOT part of the database: rows reference blobs by sha256 key.
+# <backup dir>/artifacts is the host-default instance's copy; an instance with
+# its own CROW_HOME has its own <backup dir>/artifacts-<stem>.
+for artifacts_dir in "$BACKUP_DIR/artifacts" "$BACKUP_DIR"/artifacts-*; do
+  if [[ -d "$artifacts_dir" ]]; then
+    echo "Artifacts blobs for a full recovery: $artifacts_dir"
+    echo "  (copy them back with: rsync -a --delete \"$artifacts_dir/\" \"$(dirname "$DB_PATH")/artifacts/\")"
+  fi
+done
 echo "Start the gateway again when you are ready: systemctl --user start crow-gateway"

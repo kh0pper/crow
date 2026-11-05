@@ -25,7 +25,16 @@
 #
 # Retention: CROW_BACKUP_KEEP_DAYS (default: 7), per instance.
 #
-# Mode bits: everything this script writes is 0600 in a 0700 directory.
+# Artifacts: the Crow Artifacts blob store (<dataDir>/artifacts) is copied to
+# <backup dir>/artifacts — or, for an instance with its own CROW_HOME (a
+# tagged instance), <backup dir>/artifacts-<stem>. Each instance rsyncs
+# `--delete` into its OWN subdirectory only, so two co-hosted instances never
+# prune each other's blobs. A restore needs the database AND that subdirectory.
+#
+# Mode bits: everything this script writes is 0600 in a 0700 directory. A
+# directory this script CREATES is 0700; an existing directory is never clamped
+# (it may be shared) — it is warned about once instead, and a chmod that fails
+# (a filesystem without modes) never aborts a backup.
 
 set -euo pipefail
 # Nothing written by a backup (copy, dump, sidecar, artifacts) may be
@@ -84,6 +93,43 @@ else
   BACKUP_DIR="$("$NODE_BIN" "$BACKUP_HELPER" --backup-dir)"
 fi
 
+# --- This instance's names (stem, tag, artifacts subdirectory) ---
+# <label>[-<tag>]-<date>.db for the copy; the artifacts store is `artifacts`
+# for the host-default instance and `artifacts-<stem>` for a tagged one.
+NAMING="$("$NODE_BIN" "$BACKUP_HELPER" --naming)"
+BACKUP_STEM="$(printf '%s\n' "$NAMING" | sed -n 1p)"
+INSTANCE_TAG="$(printf '%s\n' "$NAMING" | sed -n 2p)"
+ARTIFACTS_NAME="$(printf '%s\n' "$NAMING" | sed -n 3p)"
+if [[ -z "$BACKUP_STEM" || -z "$ARTIFACTS_NAME" ]]; then
+  echo "Error: could not resolve this instance's backup names (node/backup-naming failed)."
+  exit 1
+fi
+
+# Warn once (never chmod) about a directory group or others may read.
+warn_if_shared() {
+  local dir="$1" mode
+  mode="$(stat -c %a -- "$dir" 2>/dev/null || true)"
+  if [[ "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 8#077) != 0 )); then
+    echo "  Warning: $dir is mode $mode (group- or world-accessible); the backups in it may be readable by others. chmod 700 it if only Crow uses it."
+  fi
+}
+
+# Create a private directory when it is missing. An existing directory is never
+# clamped: it may be shared with other software. Nothing here aborts the backup.
+make_private_dir() {
+  local dir="$1"
+  if [[ -d "$dir" ]]; then
+    warn_if_shared "$dir"
+    return 0
+  fi
+  if ! mkdir -p -m 700 -- "$dir"; then
+    echo "  Warning: could not create $dir."
+    return 0
+  fi
+  chmod 700 -- "$dir" 2>/dev/null || echo "  Warning: could not set mode 0700 on $dir."
+  return 0
+}
+
 echo "Crow Backup — $(date)"
 echo "  Database: $DB_PATH"
 echo "  Backup dir: $BACKUP_DIR"
@@ -107,14 +153,14 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "  [dry-run] Would create: $SQL_FILE"
 else
   if [[ ! -d "$BACKUP_DIR" ]]; then
-    mkdir -p -m 700 "$BACKUP_DIR"
-  fi
-  # Tighten a dir that predates this rule — only when it is ours to change.
-  if [[ -O "$BACKUP_DIR" ]]; then
-    chmod 700 "$BACKUP_DIR"
-  fi
-  if [[ "$(stat -c %a "$BACKUP_DIR" 2>/dev/null || echo 700)" != "700" ]]; then
-    echo "  Warning: $BACKUP_DIR is not 0700 and not yours to change; backups in it may be readable by others."
+    mkdir -p -m 700 -- "$BACKUP_DIR" || {
+      echo "Error: cannot create the backup directory $BACKUP_DIR"
+      exit 1
+    }
+    chmod 700 -- "$BACKUP_DIR" 2>/dev/null || echo "  Warning: could not set mode 0700 on $BACKUP_DIR."
+  else
+    # Never clamp an existing directory — it may be shared.
+    warn_if_shared "$BACKUP_DIR"
   fi
   echo "Creating binary copy..."
   "$NODE_BIN" "$BACKUP_HELPER" --report "$REPORT_FILE" --db "$DB_PATH"
@@ -133,20 +179,20 @@ fi
 # into the copy is reclaimed by reconcileBlobs on the restored boot.
 
 ARTIFACTS_DIR="$(dirname "$DB_PATH")/artifacts"
+ARTIFACTS_COPY="$BACKUP_DIR/$ARTIFACTS_NAME"
 if [[ -d "$ARTIFACTS_DIR" ]]; then
   echo "Copying artifacts store..."
   if [[ "$DRY_RUN" == false ]]; then
-    mkdir -p -m 700 "$BACKUP_DIR/artifacts"
+    make_private_dir "$ARTIFACTS_COPY"
     # --no-links: a symlink planted into the store is never followed or copied.
     # --chmod: the copy is ours, so force private dirs/files whatever the
     # source modes are.
-    rsync -a --no-links --delete --chmod=D700,F600 "$ARTIFACTS_DIR/" "$BACKUP_DIR/artifacts/"
-    if [[ -O "$BACKUP_DIR/artifacts" ]]; then
-      chmod 700 "$BACKUP_DIR/artifacts"
-    fi
-    echo "  Artifacts: $BACKUP_DIR/artifacts ($(du -sh "$BACKUP_DIR/artifacts" | cut -f1))"
+    # --delete touches ONLY this instance's own copy (its own subdirectory), so
+    # a co-hosted instance's blobs are never pruned from this run.
+    rsync -a --no-links --delete --chmod=D700,F600 "$ARTIFACTS_DIR/" "$ARTIFACTS_COPY/"
+    echo "  Artifacts: $ARTIFACTS_COPY ($(du -sh "$ARTIFACTS_COPY" | cut -f1))"
   else
-    echo "  [dry-run] Would rsync $ARTIFACTS_DIR/ to $BACKUP_DIR/artifacts/"
+    echo "  [dry-run] Would rsync $ARTIFACTS_DIR/ to $ARTIFACTS_COPY/"
   fi
 fi
 
@@ -200,13 +246,24 @@ if [[ -n "${CROW_BACKUP_GIT_REPO:-}" ]]; then
         git clone "$CROW_BACKUP_GIT_REPO" "$GIT_DIR" 2>/dev/null
       fi
 
-      cp "$SQL_FILE" "$GIT_DIR/crow-latest.sql"
+      # Per instance: the host-default instance keeps the historical names, a
+      # tagged instance commits its own, so two co-hosted instances sharing a
+      # backup repo never overwrite each other's dumps.
+      if [[ -n "$INSTANCE_TAG" ]]; then
+        GIT_LATEST="crow-latest-${BACKUP_STEM}.sql"
+        GIT_DATED="crow-${BACKUP_STEM}-${DATE_ONLY}.sql"
+      else
+        GIT_LATEST="crow-latest.sql"
+        GIT_DATED="crow-${DATE_ONLY}.sql"
+      fi
+
+      cp "$SQL_FILE" "$GIT_DIR/$GIT_LATEST"
       cd "$GIT_DIR"
-      git add crow-latest.sql
+      git add "$GIT_LATEST"
 
       # Also keep dated snapshots (but only SQL — never binary .db)
-      cp "$SQL_FILE" "$GIT_DIR/crow-${DATE_ONLY}.sql"
-      git add "crow-${DATE_ONLY}.sql"
+      cp "$SQL_FILE" "$GIT_DIR/$GIT_DATED"
+      git add "$GIT_DATED"
 
       # Ensure .gitignore blocks binary and sensitive files
       if [[ ! -f .gitignore ]] || ! grep -q '*.db' .gitignore; then
@@ -242,7 +299,7 @@ if [[ "$DRY_RUN" == true ]]; then
 else
   echo "Pruning backups older than $KEEP_DAYS days..."
 fi
-PRUNE_ARGS=(--prune)
+PRUNE_ARGS=(--prune --db "$DB_PATH")
 if [[ "$DRY_RUN" == true ]]; then
   PRUNE_ARGS+=(--dry-run)
 fi

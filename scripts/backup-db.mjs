@@ -40,12 +40,16 @@
  *   --report <file> --db <path>            make the copy (+ dump), report what landed
  *   --names --report <file> --db <path>    dry run: report the names only, write nothing
  *   --backup-dir                           print resolveBackupDir() and exit
- *   --prune [--dry-run]                    per-instance retention for .db and .sql
+ *   --naming                               print stem, tag and artifacts dir name
+ *   --prune [--dry-run] [--db <path>]      per-instance retention for .db and .sql
  *
  * The report file is a shell-sourceable list (DB_FILE=..., SQL_FILE=...,
  * SOURCE=..., copied by backup.sh for its S3/git steps).
  *
- * Mode bits (N1c-12): every file here is 0600 inside a 0700 directory.
+ * Mode bits (N1c-12): every file here is 0600, written that way from creation.
+ * A directory this script CREATES is 0700; an existing backup directory is
+ * never clamped (it may be shared) — it is warned about once instead, because
+ * `chmod` on a filesystem without modes must not abort a backup.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -56,8 +60,8 @@ import Database from "better-sqlite3";
 import { gatewayListenPort } from "../servers/gateway/listen-port.js";
 import { dbHolders, holdersText } from "./restore-db.mjs";
 import {
-  localBackupContext, backupFileName, backupStem, ownerPath, readOwner, isForeignOwner,
-  resolveBackupDir,
+  localBackupContext, backupFileName, backupStem, artifactStoreName, ownerPath, readOwner,
+  isForeignOwner, resolveBackupDir,
 } from "../servers/shared/backup-naming.js";
 
 const FILE_MODE = 0o600;
@@ -81,18 +85,24 @@ function removeWithJournals(p) {
   for (const suffix of ["-wal", "-shm"]) unlinkQuiet(p + suffix);
 }
 
-function isOurPath(p) {
-  try {
-    return typeof process.getuid !== "function" || fs.statSync(p).uid === process.getuid();
-  } catch {
-    return false;
-  }
+/** Create `dir` 0700 when it is missing; never clamp a directory that already
+ * exists (it may be shared with other software) — warn once instead. A
+ * filesystem without modes must never abort a backup. */
+function ensurePrivateDir(dir) {
+  if (fs.existsSync(dir)) { warnIfShared(dir); return; }
+  fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+  chmodQuiet(dir, DIR_MODE);
 }
 
-/** Create `dir` 0700 and tighten it when it already exists with looser bits and is ours. */
-function ensurePrivateDir(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-  if (isOurPath(dir)) chmodQuiet(dir, DIR_MODE);
+/** One warning naming a directory that group/others may read. Never a chmod. */
+function warnIfShared(dir) {
+  let mode = null;
+  try { mode = fs.statSync(dir).mode & 0o777; } catch { return; }
+  if (!mode || !(mode & 0o077)) return;
+  console.warn(
+    `  Warning: ${dir} is mode 0${mode.toString(8)} (group- or world-accessible), so the backups in it may be ` +
+    `readable by others. chmod 700 it if only Crow uses it.`,
+  );
 }
 
 function fmtBytes(n) {
@@ -298,6 +308,9 @@ async function localCopy(dbPath, dir, name, me) {
   const dest = path.join(dir, name);
   const tmp = tmpBeside(dir, name);
   try {
+    // Written 0600 FROM CREATION (not chmod'ed afterwards): a crow.db copy holds
+    // everything Crow knows, and a mode-less filesystem must not abort here.
+    fs.closeSync(fs.openSync(tmp, "wx", FILE_MODE));
     // Nobody holds the DB (dbHolders() said so), so a direct better-sqlite3
     // connection and its online .backup() are safe here — read-only, because
     // the live database is still not ours to write to.
@@ -375,6 +388,9 @@ function dumpSql(copyPath, sqlDest) {
 async function make({ dbPath, reportFile, dryRun }) {
   const ctx = localBackupContext(process.env);
   const dir = ctx.dir;
+  // The owner sidecar names the database this run actually copied: `--db`
+  // wins, so a script pointed at another crow.db does not record the default.
+  const me = { ...ctx.me, db_path: path.resolve(dbPath) };
   const date = utcDate();
   const name = backupFileName(ctx.label, ctx.tag, date);
   const planned = path.join(dir, name);
@@ -442,7 +458,7 @@ async function make({ dbPath, reportFile, dryRun }) {
     } else {
       console.log(`  ${dbName} is not held by any other process — making the copy here with better-sqlite3.`);
     }
-    copy = await localCopy(dbPath, dir, name, ctx.me);
+    copy = await localCopy(dbPath, dir, name, me);
   }
 
   console.log(`  Binary copy: ${copy.file} (${fmtBytes(copy.size)}${copy.pages ? `, ${copy.pages} pages` : ""})`);
@@ -475,13 +491,17 @@ async function make({ dbPath, reportFile, dryRun }) {
  * exactly like an endpoint-pruned one; the .sql half removes this instance's
  * dumps older than CROW_BACKUP_KEEP_DAYS.
  */
-async function prune({ dryRun }) {
+async function prune({ dryRun, dbPath }) {
   const keepDays = parseInt(process.env.CROW_BACKUP_KEEP_DAYS || "7", 10);
   if (!keepDays || keepDays <= 0) {
     console.log("  Retention disabled (CROW_BACKUP_KEEP_DAYS <= 0).");
     return 0;
   }
-  const { dir, label, tag, me } = localBackupContext(process.env);
+  const ctx = localBackupContext(process.env);
+  const { dir, label, tag } = ctx;
+  // Same identity the copy path records, so the foreign-owner guard compares
+  // like with like.
+  const me = dbPath ? { ...ctx.me, db_path: path.resolve(dbPath) } : ctx.me;
   const cutoff = Date.now() - keepDays * 24 * 3600 * 1000;
   const sqlRe = new RegExp(`^${escapeRe(backupStem(label, tag))}-(${DATE_RE})\\.sql$`);
 
@@ -492,6 +512,9 @@ async function prune({ dryRun }) {
     for (const name of names) {
       if (!sqlRe.test(name)) continue;
       const full = path.join(dir, name);
+      // The same guard as the .db half: a dump whose sidecar names another
+      // instance is never ours to delete.
+      if (isForeignOwner(readOwner(full), me)) continue;
       try {
         const st = fs.statSync(full);
         if (st.isFile() && st.mtimeMs < cutoff) out.push(full);
@@ -532,6 +555,7 @@ function parseArgs(argv) {
     else if (a === "--db") { opts.dbPath = argv[++i]; }
     else if (a === "--names") { opts.mode = "names"; }
     else if (a === "--backup-dir") { opts.mode = "backup-dir"; }
+    else if (a === "--naming") { opts.mode = "naming"; }
     else if (a === "--prune") { opts.mode = "prune"; }
     else if (a === "--dry-run") { opts.dryRun = true; }
     else if (a === "-h" || a === "--help") { opts.mode = "help"; }
@@ -543,14 +567,23 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   if (opts.mode === "help") {
-    console.log("usage: node scripts/backup-db.mjs [--report FILE --db PATH] [--names] [--backup-dir] [--prune [--dry-run]]");
+    console.log("usage: node scripts/backup-db.mjs [--report FILE --db PATH] [--names] [--backup-dir] [--naming] [--prune [--dry-run]]");
     return 0;
   }
   if (opts.mode === "backup-dir") {
     process.stdout.write(resolveBackupDir() + "\n");
     return 0;
   }
-  if (opts.mode === "prune") return prune(opts);
+  if (opts.mode === "naming") {
+    // One line each: the stem of this instance's backup names, its tag (empty
+    // for the host-default instance) and its artifacts copy's directory name.
+    // scripts/backup.sh reads these to name the artifacts copy and the git
+    // dumps per instance.
+    const { label, tag } = localBackupContext(process.env);
+    process.stdout.write(`${backupStem(label, tag)}\n${tag || ""}\n${artifactStoreName(label, tag)}\n`);
+    return 0;
+  }
+  if (opts.mode === "prune") return prune({ dryRun: opts.dryRun, dbPath: opts.dbPath || process.env.CROW_DB_PATH || null });
   const dbPath = opts.dbPath || process.env.CROW_DB_PATH;
   if (!dbPath) throw new Error("--db <path> (or CROW_DB_PATH) is required");
   if (!fs.existsSync(dbPath)) throw new Error(`database not found at ${dbPath}`);
