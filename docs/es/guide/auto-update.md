@@ -197,9 +197,11 @@ no con el commit inmediatamente anterior, así que cuando un cambio de la clase 
 provoca rechazos se corrige hacia adelante, los fallos posteriores siguen siendo
 rechazables hasta que esa corrección haya corrido estable diez minutos. La causa
 de un rechazo puede no ser el commit mismo (una base de datos que otra cosa dejó
-avanzada), así que la cuarentena no es permanente: cuando el commit rechazado
-corre estable diez minutos, el guardián reescribe su marca como una ordinaria y
-se descarga normalmente un commit más nuevo en `main`.
+avanzada), así que la cuarentena no es permanente: cuando la instancia que lo
+rechazó ha corrido ese commit estable diez minutos, reescribe su marca como una
+ordinaria y se descarga normalmente un commit más nuevo en `main`. Una instancia
+co-alojada que nunca lo rechazó no puede limpiarla así: un rechazo pertenece a la
+instancia que lo hizo.
 
 **Recuperarse de un rechazo.** El aviso y `~/.crow/boot-guard/STATUS` llevan los
 pasos exactos para el caso que se disparó. En general (`CROW_APP` es tu checkout:

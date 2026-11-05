@@ -189,9 +189,11 @@ commit with the last commit that ran stably for ten minutes, not with the commit
 just before it, so after a refusal-class change is fixed forward, later crashes
 stay refusable until that fix has itself run stably for ten minutes. A refusal's
 cause may not be the commit itself (a database left ahead by something else), so
-the quarantine is not permanent: once the refused commit has run stably for ten
-minutes, the guard rewrites its marker as an ordinary one, and a newer commit on
-`main` is pulled normally.
+the quarantine is not permanent: once the instance that refused it has itself run
+that commit stably for ten minutes, it rewrites the marker as an ordinary one,
+and a newer commit on `main` is pulled normally. A co-hosted instance that never
+refused it cannot clear it that way — a refusal belongs to the instance that
+refused.
 
 **Recovering from a refusal.** The alert and `~/.crow/boot-guard/STATUS` carry
 the exact steps for the case that fired. In general (`CROW_APP` is your checkout:

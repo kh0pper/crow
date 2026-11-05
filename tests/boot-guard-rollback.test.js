@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 
 import { markPlanned, markStable } from "../servers/gateway/boot-guard-state.js";
 import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
-import { readUpdateQuarantine } from "../servers/shared/update-quarantine.js";
+import { readUpdateQuarantine, updateQuarantineHeldAtHead } from "../servers/shared/update-quarantine.js";
 
 const REPO = join(import.meta.dirname, "..");
 const repoFile = (p) => readFileSync(join(REPO, p), "utf8");
@@ -518,6 +518,49 @@ test("a stable mark demotes the guard's HELD marker, so the next commit on main 
   } finally {
     _setDbForTest(null);
     _setAppRootForTest(REPO);
+  }
+});
+
+test("a peer's stable mark leaves this instance's refusal HELD (fix round 2)", async () => {
+  // The marker lives in the shared git dir, but a refusal belongs to the
+  // instance that refused. Instance Y booting B fine says nothing about X's
+  // refusal: demoting on Y's say-so would let Z — still on A — lose its
+  // convergence refusal and restart into B.
+  const f = refusedFixture();
+  const held = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(held.held, true, "fixture precondition: the refusal wrote a HELD marker at B");
+
+  // Y: a second CROW_HOME on the same checkout, no refusal of its own, ten
+  // minutes up on B.
+  const yHome = join(f.root, "crow-home-y");
+  mkdirSync(yHome, { recursive: true });
+  const y = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: join(yHome, "boot-guard"), install: false });
+  assert.equal(y.ok, true, y.reason);
+  assert.equal(y.marker.demoted, false, JSON.stringify(y.marker));
+  assert.equal(y.marker.reason, "no-refusal", "only the instance that refused may demote its own marker");
+
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(marker.held, true, "a peer's stable mark must leave the refusal HELD");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.at, held.at, "the refusal's own record must be untouched");
+
+  // And Z — booted on A — still refuses to converge into B.
+  assert.ok(updateQuarantineHeldAtHead({ gitDir: f.gitDir, localHeadSha: f.b }),
+    "the convergence gate must still see the held marker");
+  const { convergeInstance, setBootSha } = await import("../servers/gateway/convergence.js");
+  const dataDir = join(f.root, "peer-z-data");
+  mkdirSync(dataDir, { recursive: true });
+  setBootSha(f.a);
+  try {
+    const r = await convergeInstance({
+      appRoot: f.work,
+      instance: { dataDir, dbPath: join(dataDir, "crow.db"), tasksDbPath: join(dataDir, "tasks.db") },
+    });
+    assert.equal(r.skipped, "update-quarantined",
+      `a peer converged into a commit another instance refused: ${JSON.stringify(r)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), f.b, "a peer never moves the tree");
+  } finally {
+    setBootSha(null);
   }
 });
 
