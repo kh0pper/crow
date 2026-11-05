@@ -22,9 +22,10 @@
  *   missing / unreadable / malformed — nothing to classify; the signal says
  *               "unknown" (info, never ok-looking, and never a warn by itself)
  *
- * The direct-docker fallback is deliberately OUT of this PR: with no snapshot
- * the answer is "unknown", and the detail says which of the M4 blind spots could
- * not be inspected.
+ * The direct-Docker fallback is deliberately narrow: with no snapshot at all
+ * (the ordinary "the fence was never installed" host) the Nest asks Docker
+ * itself through parseDockerPsPorts() — see the publishedPorts signal in
+ * health-signals.js. A snapshot that exists but cannot be read stays "unknown".
  *
  * ## Snapshot shape read here (tolerant; a missing optional field is not fatal)
  *
@@ -167,6 +168,11 @@ export function isIPv6(addr) {
 
 export function isLoopbackAddress(addr) {
   const a = unmapIPv4(addr);
+  // A HOSTNAME bind is only loopback when it is one of these two names:
+  // `CROW_GATEWAY_BIND=localhost` / `ip6-localhost` resolve to 127.0.0.1 / ::1
+  // for every resolver, so the dashboard cannot be reached from the network.
+  // Any other name stays unknown (fail closed in classifyHostIp).
+  if (a === "localhost" || a === "ip6-localhost") return true;
   // `127.0.0.0/8` only, and only for a real dotted quad: a bare "127." or a
   // lookalike such as "1270.0.0.1" is not loopback.
   return a === "::1" || (isIPv4(a) && a.startsWith("127."));
@@ -192,6 +198,67 @@ export function sameAddress(a, b) {
   const x = unmapIPv4(a);
   const y = unmapIPv4(b);
   return !!x && x === y;
+}
+
+/**
+ * Parse the PUBLISHED half of `docker ps --format '{{.Ports}}'`.
+ *
+ * One container's column looks like
+ *   `0.0.0.0:8080->80/tcp, [::]:8080->80/tcp, 9000/tcp`
+ * where the last piece is EXPOSED but not published (nothing on the host) and
+ * is therefore not a publish at all. `->` names the HOST port first.
+ *
+ * Docker prints a PORT RANGE once per published range — `0.0.0.0:8000-8002->8000-8002/tcp`
+ * — so `(\d+)(?:-(\d+))?` is parsed on BOTH sides and the host range is expanded
+ * to one entry per port: a range is not "one port", and a range that reaches
+ * past loopback must count as published beyond loopback. The container side is
+ * accepted because that is the shape Docker prints, but only the HOST side
+ * decides what is published — this function does not report container ports, so
+ * the range is not carried over for them.
+ *
+ * The same host port published on both families (Docker prints `0.0.0.0:8080`
+ * and `[::]:8080` for one `-p 8080:80`) is ONE publish: entries are de-duplicated
+ * by (port, protocol), keeping the most exposed of the duplicates, so a loopback
+ * duplicate can never hide a wildcard one.
+ *
+ * Returns [{ port, proto, hostIp, kind }] with `kind` from classifyHostIp, so
+ * the caller can ask "is anything reachable beyond loopback?". Shapes this does
+ * not recognise are dropped — the caller only ever uses this to ADD a warning
+ * on a host with no fence, so an unreadable line can only leave it silent,
+ * exactly as before.
+ */
+const DOCKER_PORT_CHUNK_RE = /^\s*(.*):(\d+)(?:-(\d+))?->(\d+)(?:-(\d+))?\/([a-z]+)\s*$/i;
+
+// Higher wins when the same (port, proto) is published more than once: a
+// duplicate on a narrower address must never mask the wider publish.
+const EXPOSURE_RANK = Object.freeze({
+  loopback: 0, tailnet: 1, bridge: 2, lan: 3, empty: 4, wildcard: 5, unknown: 6,
+});
+
+export function parseDockerPsPorts(text) {
+  const byPort = new Map();
+  for (const chunk of String(text ?? "").split(/[,\n]+/)) {
+    const m = DOCKER_PORT_CHUNK_RE.exec(chunk);
+    if (!m) continue;
+    const hostIp = m[1].trim();
+    const cls = classifyHostIp(hostIp);
+    const proto = String(m[6]).toLowerCase();
+    const first = Number(m[2]);
+    if (!Number.isInteger(first) || first <= 0 || first > 65535) continue;
+    const last = m[3] == null ? first : Number(m[3]);
+    // A reversed or absurd range is read as the range's start only: the audit
+    // must never invent ports Docker did not print.
+    const end = Number.isInteger(last) && last >= first && last <= 65535 ? last : first;
+    for (let port = first; port <= end; port++) {
+      const key = `${port}/${proto}`;
+      const entry = { hostIp: cls.address || hostIp, port, proto, kind: cls.kind };
+      const prev = byPort.get(key);
+      if (!prev || (EXPOSURE_RANK[entry.kind] ?? 6) > (EXPOSURE_RANK[prev.kind] ?? 6)) {
+        byPort.set(key, entry);
+      }
+    }
+  }
+  return [...byPort.values()];
 }
 
 // ─── Raw rule parser ─────────────────────────────────────────────────────────

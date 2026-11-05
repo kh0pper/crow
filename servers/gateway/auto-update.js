@@ -45,8 +45,60 @@ export function instanceJitterMs(key) {
   return h % JITTER_WINDOW_MS;
 }
 
-const DEFAULT_INTERVAL_HOURS = 6;
-const MIN_INTERVAL_HOURS = 1;
+export const DEFAULT_INTERVAL_HOURS = 6;
+export const MIN_INTERVAL_HOURS = 1;
+
+/**
+ * Every string this module writes to `auto_update_last_result`, classified ONCE
+ * so the Nest's Updates card reads this table instead of matching the free text
+ * in a second place (audit N1c-1). First matching prefix wins.
+ *
+ *   ok        — the tick did what it should. The two "Tree pull skipped" cases
+ *               are the co-hosted by-design ones: this gateway never pulls the
+ *               shared checkout, and the INSTANCE half still converges.
+ *   transient — the tick retries on its own. The card waits 2x the interval
+ *               before calling it stuck, so a CI run in progress never reads as
+ *               a broken updater.
+ *   failure   — updates stop until someone acts.
+ *
+ * An unrecognised string is a failure (code "other"), never ok: a new message
+ * must be added here rather than silently read as fine. tests/health-signals
+ * checks that every literal this file writes is covered.
+ */
+export const UPDATE_RESULT_PREFIXES = Object.freeze([
+  { prefix: "Updated ", kind: "ok", code: "updated" },
+  { prefix: "Up to date", kind: "ok", code: "up-to-date" },
+  { prefix: "Tree pull skipped: the checkout is read-only", kind: "ok", code: "tree-external" },
+  { prefix: "Tree pull skipped: another instance holds the checkout lock", kind: "ok", code: "tree-locked" },
+  { prefix: "Skipped: CI still running", kind: "transient", code: "ci-pending" },
+  { prefix: "Skipped: branch changed mid-update", kind: "transient", code: "branch-changed" },
+  { prefix: "Skipped: not on main", kind: "failure", code: "not-on-main" },
+  { prefix: "Skipped: cannot determine branch", kind: "failure", code: "branch-unknown" },
+  { prefix: "Skipped: CI is RED", kind: "failure", code: "ci-red" },
+  { prefix: "Skipped: migration quarantined", kind: "failure", code: "migration-quarantined" },
+  { prefix: "Fetch failed", kind: "failure", code: "fetch-failed" },
+  { prefix: "Pull failed", kind: "failure", code: "pull-failed" },
+  { prefix: "Update error", kind: "failure", code: "update-error" },
+  { prefix: "Migration quarantined", kind: "failure", code: "migration-quarantined" },
+  { prefix: "Migration failed", kind: "failure", code: "migration-failed" },
+  { prefix: "init-db failed", kind: "failure", code: "init-db-failed" },
+]);
+
+/**
+ * Classify one `auto_update_last_result` value.
+ *
+ * @param {string|null|undefined} result
+ * @returns {null|{kind: "ok"|"transient"|"failure", code: string}} null when
+ *   nothing has been recorded yet.
+ */
+export function classifyUpdateResult(result) {
+  // Only the leading space is trimmed: "Updated " ends in one, and a real result
+  // is "Updated <a> → <b>".
+  const value = String(result ?? "").trimStart();
+  if (!value.trim()) return null;
+  const hit = UPDATE_RESULT_PREFIXES.find((entry) => value.startsWith(entry.prefix));
+  return hit ? { kind: hit.kind, code: hit.code } : { kind: "failure", code: "other" };
+}
 
 let updateTimer = null;
 let db = null;
@@ -60,6 +112,7 @@ async function getSettings() {
     auto_update_interval_hours: String(DEFAULT_INTERVAL_HOURS),
     auto_update_last_check: null,
     auto_update_last_result: null,
+    auto_update_result_since: null,
     auto_update_current_version: null,
     auto_update_latest_version: null,
   };
@@ -116,16 +169,67 @@ export function _setDbForTest(database) {
 
 /**
  * Save a setting to DB
+ *
+ * `auto_update_last_result` is the one key with a companion: every tick rewrites
+ * `auto_update_last_check`, so the age of THAT value says nothing about how long
+ * the current result has been repeating — a CI run still in progress stays
+ * "fresh" forever (audit N1c-1 follow-up). `auto_update_result_since` records
+ * when the current result's CLASSIFICATION CODE first appeared, and the Nest's
+ * Updates card ages a transient result from it.
  */
+const RESULT_KEY = "auto_update_last_result";
+const RESULT_SINCE_KEY = "auto_update_result_since";
+
 async function saveSetting(key, value) {
   if (!db) return;
   try {
+    if (key === RESULT_KEY) await stampResultSince(value);
     await db.execute({
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
       args: [key, value, value],
     });
   } catch (err) {
     console.warn(`[auto-update] Failed to save ${key}:`, err.message);
+  }
+}
+
+/**
+ * Stamp `auto_update_result_since` ONLY when the result's classification code
+ * changes; the same code repeating keeps the first stamp. A changed message
+ * inside one code (`Skipped: not on main (on 'a')` → `…(on 'b')`, both
+ * not-on-main) is the same condition and must not restart the clock.
+ *
+ * Runs BEFORE the new result is written, so the SELECT still sees the previous
+ * one. When the previous value cannot be read, the code cannot be compared, so
+ * the stamp is reset — an old `since` must never outlive the result it described
+ * and turn into a false warn.
+ */
+async function stampResultSince(nextValue) {
+  if (!db) return;
+  let prev;
+  let hasSince = false;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT key, value FROM dashboard_settings WHERE key IN (?, ?)",
+      args: [RESULT_KEY, RESULT_SINCE_KEY],
+    });
+    prev = rows?.find((r) => r.key === RESULT_KEY)?.value ?? null;
+    hasSince = Boolean(rows?.find((r) => r.key === RESULT_SINCE_KEY)?.value);
+  } catch {
+    prev = undefined; // unreadable: cannot compare, so re-stamp rather than age
+  }
+  const codeOf = (v) => classifyUpdateResult(v)?.code ?? null;
+  // An install already stuck on a result when this shipped has no stamp yet:
+  // stamp it on the next tick, or its wait would never start aging.
+  if (prev !== undefined && hasSince && codeOf(prev) === codeOf(nextValue)) return;
+  const now = new Date().toISOString();
+  try {
+    await db.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+      args: [RESULT_SINCE_KEY, now, now],
+    });
+  } catch (err) {
+    console.warn(`[auto-update] Failed to save ${RESULT_SINCE_KEY}:`, err.message);
   }
 }
 
@@ -765,6 +869,7 @@ export async function getUpdateStatus() {
     intervalHours: parseInt(settings.auto_update_interval_hours, 10) || DEFAULT_INTERVAL_HOURS,
     lastCheck: settings.auto_update_last_check,
     lastResult: settings.auto_update_last_result,
+    resultSince: settings.auto_update_result_since,
     currentVersion: settings.auto_update_current_version,
     latestVersion: settings.auto_update_latest_version,
   };

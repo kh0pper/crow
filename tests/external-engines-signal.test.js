@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   collectHealthSignals, invalidateHealthCache, _setTailscaleReader, _setDiskReader,
+  _setDockerPortsReader, _setFirewallReader, _setContainerReader,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import {
   setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
@@ -23,6 +24,14 @@ import { t } from "../servers/gateway/dashboard/shared/i18n.js";
 // reflects only the externalEngines signal under test, on any host.
 process.env.CROW_BACKUP_DIR = "/tmp/__crow_test_nonexistent_backup_dir__";
 _setTailscaleReader(() => { throw new Error("no tailscale"); });
+// The Privacy card reads the gateway's real bind and the host's ufw.conf, the
+// publishedPorts fallback reads the host's Docker, and a container marker decides
+// whether those two are even warnings: pin all of them so `all.ok` below reflects
+// this file's signals, on any host (CI included).
+process.env.CROW_GATEWAY_BIND = "127.0.0.1";
+_setFirewallReader(() => { throw new Error("no ufw.conf"); });
+_setDockerPortsReader(() => { throw new Error("no docker"); });
+_setContainerReader(() => false);
 // diskSignal ran the real `df /`: on a host whose root fs is >90% full it
 // warns, `all.ok` goes false, and the "nest stays ok" assertion failed
 // locally while passing on CI's roomy runners (B6, 2026-10-02). Feed it a

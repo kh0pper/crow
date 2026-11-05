@@ -46,6 +46,9 @@ import {
   invalidateHealthCache,
   _setDiskReader,
   _setTailscaleReader,
+  _setDockerPortsReader,
+  _setFirewallReader,
+  _setContainerReader,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import { t, translations } from "../servers/gateway/dashboard/shared/i18n.js";
 import {
@@ -66,6 +69,13 @@ process.env.CROW_PUBLISH_SNAPSHOT = "/tmp/__crow_test_no_publish_snapshot__.json
 process.env.CROW_BACKUP_DIR = "/tmp/__crow_test_nonexistent_backup_dir__";
 _setTailscaleReader(() => { throw new Error("no tailscale"); });
 _setDiskReader(() => "Avail Size\n500000M 1000000M\n");
+// The no-snapshot Docker fallback and the Privacy card's bind/firewall reads are
+// covered by tests/health-signals.test.js; here they are neutralized so a host
+// with Docker ports published (or ufw off) can never change a card under test.
+_setDockerPortsReader(() => { throw new Error("no docker"); });
+process.env.CROW_GATEWAY_BIND = "127.0.0.1";
+_setFirewallReader(() => { throw new Error("no ufw.conf"); });
+_setContainerReader(() => false);
 delete process.env.MINIO_ENDPOINT;
 delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;
@@ -385,6 +395,9 @@ test("HostIp spellings classify as the plan's table says", () => {
   assert.equal(classifyHostIp("172.17.0.1").kind, "bridge");
   assert.equal(classifyHostIp("192.0.2.10").kind, "lan");
   assert.equal(classifyHostIp("198.51.100.7").kind, "lan");
+  // A hostname bind: only localhost/ip6-localhost are known to be loopback.
+  assert.equal(classifyHostIp("localhost").kind, "loopback");
+  assert.equal(classifyHostIp("ip6-localhost").kind, "loopback");
   assert.equal(classifyHostIp("some-host-name").kind, "unknown");
 });
 
@@ -400,6 +413,11 @@ test("isLoopbackAddress: 127.0.0.0/8 and ::1 only, and only as a dotted quad", (
   assert.equal(isLoopbackAddress("1270.0.0.1"), false);
   assert.equal(isLoopbackAddress("100.64.20.5"), false);
   assert.equal(isLoopbackAddress(""), false);
+  // `CROW_GATEWAY_BIND=localhost` is a loopback bind, not an unreadable one.
+  assert.equal(isLoopbackAddress("localhost"), true);
+  assert.equal(isLoopbackAddress("LOCALHOST"), true);
+  assert.equal(isLoopbackAddress("ip6-localhost"), true);
+  assert.equal(isLoopbackAddress("localhost.example.ts.net"), false);
   // …and the classifier follows it.
   assert.equal(classifyHostIp("127.0.0.1").kind, "loopback");
   assert.equal(classifyHostIp("127.0.0.1.example").kind, "unknown");
