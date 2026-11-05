@@ -19,9 +19,9 @@ import { checkBotDef, checkToolGrant, checkToolSurface, DriverRefusal, LIFECYCLE
 import { realish, realUserCrowDir, within } from "../scripts/lib/protected-paths.mjs";
 import { loadCases, CASES_DIR, caseSetIdentity } from "../scripts/research-eval/cases.mjs";
 import {
-  abortOnSeamFailure, checkArmEndpoint, completionTokensOf, evalBotDef, EVAL_BOT_ID, LIVE_USAGE, LiveAbort,
-  liveMcpOverrides, liveRunIdentity, existingRunKey, NO_JUDGE_YET, PreflightRefused, preflightModels, proveSampling,
-  readStartMarker, retryableFailure, runLive, runLiveRows, stableStringify, TRANSPORT_FAILURE,
+  abortOnSeamFailure, armModelEntry, checkArmEndpoint, completionTokensOf, evalBotDef, EVAL_BOT_ID, LIVE_USAGE, LiveAbort,
+  liveMcpOverrides, liveRunIdentity, existingRunKey, NO_JUDGE_YET, PreflightRefused, preflightModels, PROBE_PROMPT, PROBE_SEEDS,
+  proveSampling, readStartMarker, retryableFailure, runLive, runLiveRows, stableStringify, TRANSPORT_FAILURE,
 } from "../scripts/research-eval/live.mjs";
 import { startSamplingProxy } from "../scripts/research-eval/sampling-proxy.mjs";
 import { makeTemplate } from "../scripts/research-eval/scratch.mjs";
@@ -41,21 +41,36 @@ test.after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: tru
 const post = (url, body, init = {}) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), ...init });
 const parseSse = (text) => text.split("\n\n").filter(Boolean).map((b) => (b.slice(6) === "[DONE]" ? "[DONE]" : JSON.parse(b.slice(6))));
 
-/** A loopback server whose reply models one aspect of a real sampler (see the probe's doc). */
-async function samplerServer(t, honour) {
+/**
+ * A loopback server that models one aspect of a real sampler, for the probe tests. Everything is
+ * honoured by default; each knob reproduces one way a probe can pass falsely:
+ *   constant      identical text for every request (a greedy / fully field-ignoring server)
+ *   seed: false   ignores the request's seed and varies per call (a fixed SERVER seed)
+ *   topK: false   ignores top_k        minP: false  ignores min_p
+ *   thinking      the text is in reasoning_content and content is empty (a thinking model)
+ *   empty         content and reasoning_content are both empty
+ */
+async function samplerServer(t, { constant = false, seed = true, topK = true, minP = true, thinking = false, empty = false } = {}) {
   let n = 0;
   const bodies = [];
   const server = createServer((req, res) => {
+    // It doubles as a whole arm (preflightModels reads /v1/models).
+    if (req.method === "GET") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ object: "list", data: [{ id: MODEL, status: "loaded" }] }));
+      return;
+    }
     let body = "";
     req.on("data", (c) => { body += c; });
     req.on("end", () => {
       const b = JSON.parse(body || "{}");
       bodies.push(b);
       n += 1;
-      const greedy = (honour.topK !== false && b.top_k === 1) || (honour.minP !== false && b.min_p === 1);
-      const text = greedy ? "greedy" : honour.seed === false ? `n:${n}` : `seed:${b.seed}`;
+      const greedy = (topK && b.top_k === 1) || (minP && b.min_p === 1);
+      const text = empty ? "" : constant ? "ready" : greedy ? "greedy" : seed ? `seed:${b.seed}` : `n:${n}`;
+      const message = thinking ? { role: "assistant", content: "", reasoning_content: text } : { role: "assistant", content: text };
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: text } }] }));
+      res.end(JSON.stringify({ choices: [{ message }] }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -91,7 +106,7 @@ test("the proxy pins temperature 0.7, top_p 0.95, top_k 20, min_p 0 and seed 100
     assert.equal(b.model, MODEL);
   }
   assert.deepEqual(proxy.requests.map((r) => r.overrode_keys), [["temperature", "top_p", "top_k", "min_p", "seed"], ["temperature", "top_p", "top_k", "min_p", "seed"]]);
-  assert.deepEqual(proxy.observedSampling(), { ...SAMPLING, seed: 1002, uniform: true });
+  assert.deepEqual(proxy.pinnedSampling(), { ...SAMPLING, seed: 1002, uniform: true });
   assert.deepEqual(proxy.summary(), { requests: 2, overrode_keys: ["min_p", "seed", "temperature", "top_k", "top_p"], tools_ok: null });
   // A request that already carries the pre-registered values overrides nothing.
   const same = await startSamplingProxy({ upstream: stub.baseUrl, model: MODEL, rep: 2 });
@@ -171,6 +186,72 @@ test("the proxy forwards an abort upstream (a killed turn never leaves the arm g
   assert.deepEqual(closed.sort(), ["request", "response"], "the upstream request and response were torn down");
 });
 
+test("S2: a slow SECOND request is not killed by the connect timer (one upstream socket per request)", async (t) => {
+  // The first reply is immediate, so the upstream socket is pooled; the second reply's first byte
+  // arrives after the connect timeout. On a reused keep-alive socket no "connect" event ever fires
+  // again, so a connect timer armed on it would destroy a healthy request — which is exactly the
+  // shape of a long second tool-call turn.
+  let n = 0;
+  const perSocket = new Map(); // inbound socket -> id, so the test can see whether one was reused
+  const seen = [];
+  const upstream = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      n += 1;
+      const mine = n;
+      if (!perSocket.has(req.socket)) perSocket.set(req.socket, perSocket.size + 1);
+      seen.push(perSocket.get(req.socket));
+      const reply = () => {
+        if (res.writableEnded || res.destroyed) return;
+        res.writeHead(200, { "content-type": "application/json", connection: "keep-alive" });
+        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `reply ${mine}` } }] }));
+      };
+      if (mine === 1) reply(); else setTimeout(reply, 600);
+    });
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => { upstream.closeAllConnections?.(); upstream.close(r); }));
+  const proxy = await startSamplingProxy({
+    upstream: `http://127.0.0.1:${upstream.address().port}/v1`, model: MODEL, rep: 0, connectTimeoutMs: 100, idleTimeoutMs: 10_000,
+  });
+  t.after(() => proxy.close());
+  const first = await post(`${proxy.baseUrl}/chat/completions`, { model: MODEL, messages: [] });
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).choices[0].message.content, "reply 1");
+  const second = await post(`${proxy.baseUrl}/chat/completions`, { model: MODEL, messages: [] }, { signal: AbortSignal.timeout(10_000) });
+  assert.equal(second.status, 200, "the second request survived its own connect wait");
+  assert.equal((await second.json()).choices[0].message.content, "reply 2");
+  // The mechanism: one upstream socket per request, so a connect event always fires.
+  assert.deepEqual(seen, [1, 2], "each request got its own upstream socket, never a reused one");
+});
+
+test("S3: an abort before the upstream headers destroys the in-flight upstream request", async (t) => {
+  // The pre-header window (a long prefill): the proxy has no upstream response to destroy yet, so
+  // it must destroy the request it is awaiting.
+  const closed = [];
+  // The upstream RESPONSE's close is the abort signal (the request's own close fires as soon as its
+  // body has been read, on Node 16+). Nothing here ever writes a response, so a close can only be
+  // a teardown.
+  const upstream = createServer((req, res) => {
+    req.on("data", () => {});
+    res.on("close", () => closed.push("response"));
+  });
+  await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => { upstream.closeAllConnections?.(); upstream.close(r); }));
+  const proxy = await startSamplingProxy({ upstream: `http://127.0.0.1:${upstream.address().port}/v1`, model: MODEL, rep: 0, idleTimeoutMs: 60_000 });
+  t.after(() => proxy.close());
+  const { request } = await import("node:http");
+  const req = request(`${proxy.baseUrl}/chat/completions`, { method: "POST", headers: { "content-type": "application/json" } });
+  req.on("error", () => { /* the abort's own error */ });
+  req.end(JSON.stringify({ model: MODEL, stream: true, messages: [] }));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(closed, [], "the upstream request is still open before the abort");
+  req.destroy();
+  for (let i = 0; i < 100 && !closed.length; i += 1) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(closed, ["response"], "the stub saw its request torn down, so the arm stopped generating");
+});
+
 test("the proxy's idle timeout bounds a silent upstream", async (t) => {
   // Headers, then silence: the proxy's idle bound must cut the wait short (a model that accepts and
   // then says nothing must not hold a turn open).
@@ -225,24 +306,58 @@ test("a gateway port, a gateway path, a foreign host or a lazy loader is not an 
     [{ ...ok, baseUrl: "http://127.0.0.1:8010/v1", gatewayPorts: [8010] }, /gateway port/],
   ];
   for (const [arm, re] of bad) assert.throws(() => checkArmEndpoint(arm), (e) => e instanceof DriverRefusal && re.test(e.message), arm.baseUrl);
-  // An --allow-host entry admits the one named endpoint (the raven arm's shape).
+  // An --allow-host entry admits the one named endpoint (a remote arm's shape).
   assert.doesNotThrow(() => checkArmEndpoint({ ...ok, baseUrl: "http://192.0.2.10:8030/v1", allowHosts: ["192.0.2.10:8030"] }));
 });
 
-test("the sampling probe proves seed, top_k and min_p from three tiny pairs, and refuses an arm that ignores one", async (t) => {
-  const good = await samplerServer(t, { seed: true, topK: true, minP: true });
+test("the sampling probe proves seed, top_k and min_p AFTER a control that the arm can vary at all", async (t) => {
+  const good = await samplerServer(t);
   const proof = await proveSampling({ baseUrl: good.baseUrl, model: MODEL });
-  assert.deepEqual(proof, { seed: true, top_k: true, min_p: true, requests: 6 });
-  // Every probe request is tiny and carries the pinned settings.
+  // Four control requests (four seeds) + one pair per pin.
+  assert.deepEqual(proof, { seed: true, top_k: true, min_p: true, requests: 10 });
   for (const b of good.bodies) {
-    assert.ok(b.max_tokens <= 4, String(b.max_tokens));
-    assert.equal(b.temperature, 0.7);
+    assert.ok(b.max_tokens <= 16, String(b.max_tokens));
+    assert.equal(b.temperature, 1, "temperature 1, so it can never greedy-fy a pair on its own");
+    assert.equal(b.top_p, 1, "top_p 1, so it can never greedy-fy a pair on its own");
     assert.equal(b.stream, false);
+    assert.equal(b.messages[0].content, PROBE_PROMPT);
   }
+  // The control goes first, with the high-entropy prompt and four different seeds.
+  assert.deepEqual(good.bodies.slice(0, 4).map((b) => b.seed), [...PROBE_SEEDS]);
+  for (const b of good.bodies.slice(0, 4)) assert.deepEqual([b.top_k, b.min_p], [0, 0], "nothing is pinned in the control");
+  // The pin pairs change exactly the field they test.
+  assert.deepEqual(good.bodies.slice(4).map((b) => [b.top_k, b.min_p, b.seed]),
+    [[0, 0, PROBE_SEEDS[0]], [0, 0, PROBE_SEEDS[0]], [1, 0, PROBE_SEEDS[0]], [1, 0, PROBE_SEEDS[1]], [0, 1, PROBE_SEEDS[0]], [0, 1, PROBE_SEEDS[1]]]);
+  // A thinking model answers in reasoning_content; reading it is what keeps its proof honest.
+  const thinking = await samplerServer(t, { thinking: true });
+  assert.deepEqual(await proveSampling({ baseUrl: thinking.baseUrl, model: MODEL }), { seed: true, top_k: true, min_p: true, requests: 10 });
   await assert.rejects(proveSampling({ baseUrl: (await samplerServer(t, { seed: false })).baseUrl, model: MODEL }), /seed is not honoured/);
   await assert.rejects(proveSampling({ baseUrl: (await samplerServer(t, { topK: false })).baseUrl, model: MODEL }), /top_k is not honoured/);
   await assert.rejects(proveSampling({ baseUrl: (await samplerServer(t, { minP: false })).baseUrl, model: MODEL }), /min_p is not honoured/);
   await assert.rejects(proveSampling({ baseUrl: "http://127.0.0.1:1/v1", model: MODEL }), (e) => e instanceof PreflightRefused && /sampling probe could not reach/.test(e.message));
+});
+
+test("B1: the probe refuses an arm that is deterministic without the pins", async (t) => {
+  // The three false passes the old three-pair probe gave, in order of how they passed:
+  //  1. a server that ignores every field and is deterministic — every pair was equal;
+  //  2. a server with a fixed seed of its own that ignores the request's seed — the equal pair
+  //     proved nothing, because the pins were never exercised;
+  //  3. a thinking model whose content is empty — every output was "" == "".
+  const deterministic = await samplerServer(t, { constant: true });
+  await assert.rejects(proveSampling({ baseUrl: deterministic.baseUrl, model: MODEL }),
+    (e) => e instanceof PreflightRefused && /cannot prove sampling: the arm is deterministic without the pins/.test(e.message));
+  assert.equal(deterministic.bodies.length, 4, "it stopped at the control: the pin pairs prove nothing on a constant arm");
+  // A fixed server seed: the control varies, so only the seed pair can catch it (and it does).
+  const fixedSeed = await samplerServer(t, { seed: false });
+  await assert.rejects(proveSampling({ baseUrl: fixedSeed.baseUrl, model: MODEL }),
+    (e) => e instanceof PreflightRefused && /seed is not honoured/.test(e.message));
+  const thinkingOnly = await samplerServer(t, { thinking: true, seed: false });
+  await assert.rejects(proveSampling({ baseUrl: thinkingOnly.baseUrl, model: MODEL }),
+    (e) => e instanceof PreflightRefused && /seed is not honoured/.test(e.message));
+  // Every output empty: refused, never read as "equal, therefore seeded".
+  const blank = await samplerServer(t, { empty: true });
+  await assert.rejects(proveSampling({ baseUrl: blank.baseUrl, model: MODEL }),
+    (e) => e instanceof PreflightRefused && /empty completion every time/.test(e.message));
 });
 
 test("evalBotDef grants exactly the skill's crow-projects tools, selects the skill, and passes the driver's guards", async () => {
@@ -304,6 +419,10 @@ test("abortOnSeamFailure aborts on an override receipt, a tool-set or a fixture-
   marker({ pid: 1, case: RR12.id, run_id: "another-run" });
   abort(() => abortOnSeamFailure({ r: okR, summary: okSummary, scratch: { home }, caseDef: RR12, events }), /names run "another-run"/);
   assert.deepEqual(readStartMarker(home), { pid: 1, case: RR12.id, run_id: "another-run" });
+  // N4: no event carrying a run id means the marker cannot be tied to this run at all — an abort,
+  // not a skipped check (the stale "another-run" marker above would otherwise pass).
+  abort(() => abortOnSeamFailure({ r: okR, summary: okSummary, scratch: { home }, caseDef: RR12, events: [{ ev: "spawn" }] }), /no driver event carried a run id/);
+  abort(() => abortOnSeamFailure({ r: okR, summary: okSummary, scratch: { home }, caseDef: RR12, events: [] }), /no driver event carried a run id/);
 });
 
 test("readStartMarker survives a missing or malformed marker", () => {
@@ -317,12 +436,14 @@ test("readStartMarker survives a missing or malformed marker", () => {
 
 test("only transport failures are re-rolled: 5xx, connection errors, survivors and a missing session", () => {
   for (const why of ["model call failed: Connection error", "model call failed: status 500 from the provider", "ECONNRESET while reading",
+    // N2: a 4xx-looking PORT is not a client error — the old /\b4[0-9]{2}\b/ refused to retry this.
+    "model call failed: ECONNRESET at 127.0.0.1:443", "model call failed: socket hang up (:8443)",
     "child exited 0 without a done event; killTree survivors: 41", "run processes survived the thread: 42 killed",
     "cannot find the pi session file for a completed turn; refusing to report it"]) {
     assert.equal(retryableFailure(why), true, why);
   }
   for (const why of ["turn 0 of rr12-r0 exceeded 900000 ms", "model call failed: 400: bad request", "context length exceeded",
-    "model call failed: status 429", "conversation exceeded wallMs", "child exited 4 without a turn-end", "", null]) {
+    "model call failed: status 429", "model call failed: HTTP 403 forbidden", "conversation exceeded wallMs", "child exited 4 without a turn-end", "", null]) {
     assert.equal(retryableFailure(why), false, String(why));
   }
 });
@@ -533,16 +654,16 @@ test("an unreachable arm is exit 4, and no row is written", async () => {
 });
 
 test("the whole CLI runs a unit, then --resume refuses a changed config", async (t) => {
-  const stub = await startStubModel({ script: [] });
-  t.after(() => stub.close());
+  // A seeded arm: the probe needs a server that varies without the pins and honours them.
+  const arm = await samplerServer(t);
   const cases = tmp();
   writeFileSync(join(cases, `${RR12.id}.json`), JSON.stringify(RR12));
   const out = join(tmp(), "rows.jsonl");
-  const arg = liveArg({ "base-url": stub.baseUrl, out, cases, reps: "1" });
+  const arg = liveArg({ "base-url": arm.baseUrl, out, cases, reps: "1" });
   const say = [];
   // The stub pi never asks the model for anything: one honest contaminated row, exit 0.
   assert.equal(await runLive(arg, { log: (m) => say.push(m) }), 0, say.join("\n"));
-  assert.match(say.join("\n"), /sampling proof: seed, top_k and min_p honoured/);
+  assert.match(say.join("\n"), /sampling proof: the arm varies without the pins, and seed, top_k and min_p are honoured/);
   const rows = readFileSync(out, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].contaminated, "no model request passed the sampling proxy");
@@ -578,8 +699,18 @@ test("stableStringify is order-independent and liveRunIdentity keys on every par
   const base = { model: MODEL, baseUrl: "http://127.0.0.1:9/v1", botDefSha: "d", piSha: "p", skillSha: "s", caseSet: caseSet() };
   const a = liveRunIdentity(base);
   for (const over of [{ model: "other" }, { baseUrl: "http://127.0.0.1:10/v1" }, { botDefSha: "d2" }, { piSha: "p2" },
-    { skillSha: "s2" }, { caseSet: { dir: "/elsewhere", sha: "x" } }, { judgeName: "some-judge" }]) {
+    { skillSha: "s2" }, { caseSet: { dir: "/elsewhere", sha: "x" } }, { judgeName: "some-judge" },
+    // N3: the pi model entry is part of the run's identity, so --resume cannot quietly change it.
+    { piModel: { maxTokens: 4096 } }]) {
     assert.notEqual(liveRunIdentity({ ...base, ...over }).key, a.key, JSON.stringify(over));
   }
   assert.equal(liveRunIdentity(base).key, a.key);
+  assert.deepEqual(liveRunIdentity({ ...base, piModel: { maxTokens: 4096 } }).pi_model, { maxTokens: 4096 });
+});
+
+test("N3: the arm's model entry keeps --model as its id, whatever --pi-model carries", () => {
+  assert.deepEqual(armModelEntry(MODEL, null), { id: MODEL });
+  assert.deepEqual(armModelEntry(MODEL, { maxTokens: 4096 }), { maxTokens: 4096, id: MODEL });
+  // A pi-model file naming its own id must not redirect the run (the proxy would refuse it).
+  assert.deepEqual(armModelEntry(MODEL, { id: "another-model" }), { id: MODEL });
 });

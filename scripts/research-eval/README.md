@@ -90,11 +90,17 @@ cap or the window end was reached (rows already written stay; `--resume` continu
 3. **The arm honours `seed`, `top_k` and `min_p`** — the three pinned settings that
    llama-server's OpenAI-compatible `/v1/chat/completions` takes in the request body. No `/props`
    read or doc quote can prove a *request* field is honoured, so this is a minimal deterministic
-   probe, once per run: three pairs of 4-token completions. Two identical seeded requests must
-   return the same text (the seed reaches the sampler); with `top_k=1`, and separately with
-   `min_p=1`, two requests that differ only in the seed must also return the same text, because
-   both settings make the choice greedy. That proves the field is applied at all, not that
-   intermediate values are. An arm that fails is refused, not recorded as unseeded.
+   probe, once per run, on a high-entropy prompt ("write one random word") with temperature 1,
+   top_p 1, top_k 0, min_p 0 and 16 tokens: four *different* seeds must first give at least two
+   different outputs (the control: without it the pins are not what makes this arm deterministic,
+   and an equal pair proves nothing — a server that ignores every field but is greedy, or that
+   keeps a fixed seed of its own, passes every pair on its own); then the same request twice (same
+   seed) must return the same text, and `top_k=1` — and separately `min_p=1` — across two different
+   seeds must return one output, because both settings make the choice greedy. The output read is
+   `message.content` PLUS `message.reasoning_content`, so a thinking model whose content is empty is
+   measured on what it emitted, and a probe that reads nothing at all is refused. That proves the
+   fields are applied at all, not that intermediate values are. An arm that fails any step is
+   refused, not recorded as unseeded.
 4. **The seam ran.** Every turn must report `mcpOverridden == ["crow-projects"]` (the override
    replaced exactly the one block), every model request must offer exactly the granted 13 tools,
    and the fixture server must have written its start marker (pid, case id, run id) into the
@@ -111,10 +117,12 @@ cap or the window end was reached (rows already written stay; `--resume` continu
 enforced. `scripts/research-eval/sampling-proxy.mjs` sits between pi and the arm's endpoint on
 loopback: it forwards only `GET /v1/models` and `POST /v1/chat/completions` for the one model, pins
 temperature 0.7 / top_p 0.95 / top_k 20 / min_p 0 / seed `1000 + rep` on every chat request,
-records what it put on the wire (a row's `sampling` is that observation, not the constant) and the
-tool names pi offered (`sampling_proxy.tools_ok`). When pi's request closes it destroys the upstream
-request, so a killed turn never leaves the arm's model generating; the connect and the idle wait are
-both bounded.
+records what it put on the wire (a row's `sampling` is the sampling **pinned by the proxy** — never
+an observation of what the arm did with it) and the tool names pi offered
+(`sampling_proxy.tools_ok`). It opens one upstream socket per request (`agent: false`), so its
+connect timeout can never fire on a reused keep-alive socket, and it tears the upstream request
+down when pi's response closes — including before the arm has sent any headers, so a killed turn
+during a long prefill stops the model too. The connect and the idle wait are both bounded.
 
 ### Isolation and what it is not
 
@@ -145,7 +153,7 @@ facts):
 - whether the provider id `arm` survives `piProviderIdHere`.
 
 If pi turns out to send `top_k`, `min_p` and `seed` itself, the proxy stays: it is what records the
-sampling the run actually used.
+sampling pinned on the wire.
 
 ## Commands
 
@@ -182,9 +190,12 @@ scratch, then the row is written as contaminated.
 ### report.mjs flags
 
 `report.mjs [--cases=<dir>] <rows>.jsonl [...]`. `--cases` names the expected case set; without
-it the expected set is the union of case ids any arm has. It prints rates (per case, arm,
-criterion, case type, paired arm comparisons) and, for a **live arm on the tracked measurement
-set**, the operator's gate.
+it the expected set is the union of case ids any arm has — except for an arm of the tracked
+measurement set, whose expected cases are always every case in `cases/` as it is on disk (that arm
+is gated over all twelve, whatever `--cases` says: a partial run prints
+`gate: not applied (incomplete: N of 12 cases)` and the CLI exits 6, never a PASS over a subset).
+It prints rates (per case, arm, criterion, case type, paired arm comparisons) and, for a **live
+arm on the tracked measurement set**, the operator's gate.
 
 **The gate** (design §14, set 2026-11-05, frozen in `report.mjs` as `GATES`): an arm may back
 research bots only at **≥80% on (a), ≥80% on (b) and ≥95% on (d)**. Each criterion's statistic is
@@ -192,8 +203,9 @@ the mean over the cases where it applies of that case's criterion pass proportio
 case with fewer applicable reps is not weighted more; the pooled rate is printed alongside, and
 undecided (b) is non-pass. The GATE line names the bars, the set date and how many undecided spans
 counted as non-pass. The gate is printed only when the arm's rows are live rows *and* their case
-set is `cases/` as it is on disk (dir and sha, recorded in each row's `config.case_set`); anything
-else prints "gate: not applied" with the reason. A refusal below blocks every gate line.
+set is `cases/` as it is on disk (dir and sha, recorded in each row's `config.case_set`) *and*
+every case of `cases/` has scored reps; anything else prints "gate: not applied" with the reason. A
+refusal below blocks every gate line.
 
 Verdict refusals: the report prints `NO VERDICT` and the reasons, and exits 6, for: a
 contaminated or malformed row, an unreadable input file, a duplicate (arm, case, rep), a sampling setting other than the
@@ -206,7 +218,7 @@ row's `case_pass`.
 
 - **Sampling**: temperature 0.7, top_p 0.95, top_k 20, min_p 0, seed `1000 + rep`, for every arm.
   Live mode proves the arm honours `seed`, `top_k` and `min_p` at preflight and refuses one that
-  does not; a live row records the sampling the proxy actually put on the wire.
+  does not; a live row records the sampling **pinned by the proxy** on the wire.
 - **Undecided is non-pass.** A sentence that reaches the judge and gets no verdict (or no judge at all) makes (b) `undecided`. It counts as not passing in the headline and the (b) rate, and the undecided rows are listed separately.
 - **Judge interface**: the judge is called as `judge({kind, sentence, snippet})` and nothing else, after every deterministic check has passed, and returns `{verdict: "pass"|"fail"|"undecided", reason}`. `stub-pass` passes everything and is plumbing only: it shows that marked sentences reach the judge and that a pass flows into the case result, and it says nothing about scoring accuracy. Each row records `judge_calls` (real judge invocations, the billed count; the no-judge default counts 0) and `judge_spans` (spans that reached the judge stage, judge or not).
 - **Thresholds** are the operator's, set before the first live run: the 2026-11-05 gate above.

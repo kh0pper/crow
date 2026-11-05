@@ -5,16 +5,16 @@
  * Why it exists: pi (pi-ai/dist/api/openai-completions.js) sends only `temperature`, so an arm's
  * rows would record a sampling setting nobody enforced. The proxy pins the pre-registered
  * sampling (score.mjs SAMPLING plus seed 1000+rep) on every chat request, records what it put on
- * the wire (so a row's `sampling` is an observation, not the constant) and records the tool names
- * pi offered on each request (the runner aborts a unit whose surface is not exactly the granted
- * set).
+ * the wire (so a row's `sampling` is the sampling PINNED BY THE PROXY, not the constant) and
+ * records the tool names pi offered on each request (the runner aborts a unit whose surface is
+ * not exactly the granted set).
  *
  * It is not a sandbox and it starts nothing: it forwards to one already-running base URL that the
  * preflight checked, and only on the two routes below. When pi's request closes (a killed turn)
  * the upstream request is destroyed, so a dead turn never leaves the arm's model generating; and
  * both the connect and the idle wait are bounded.
  *
- * Rows read: `requests` (count), `observedSampling()`, `summary()`.
+ * Rows read: `requests` (count), `pinnedSampling()`, `summary()`.
  */
 import http from "node:http";
 import https from "node:https";
@@ -35,7 +35,7 @@ const readBody = (req) => new Promise((resolve, reject) => {
 });
 
 const sendJson = (res, status, obj) => {
-  if (res.headersSent) { res.destroy(); return; }
+  if (res.destroyed || res.headersSent) { res.destroy(); return; }
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(obj));
 };
@@ -55,7 +55,7 @@ export const samplingFor = (rep) => Object.freeze({ ...SAMPLING, seed: seedFor(r
  *   connectTimeoutMs?: number, idleTimeoutMs?: number}} opts
  *   upstream: the arm's checked base URL, e.g. http://127.0.0.1:<port>/v1
  *   expectedTools: the exact set pi must offer (null = not checked)
- * @returns {Promise<{baseUrl: string, port: number, requests: object[], observedSampling: () => (object|null),
+ * @returns {Promise<{baseUrl: string, port: number, requests: object[], pinnedSampling: () => (object|null),
  *   summary: () => {requests: number, overrode_keys: string[], tools_ok: boolean|null}, close: () => Promise<void>}>}
  */
 export async function startSamplingProxy({
@@ -74,16 +74,28 @@ export async function startSamplingProxy({
   const sockets = new Set();
   const inflight = new Set();
 
-  /** Forwards one request upstream; resolves to {status, headers, stream} or rejects. */
-  const forward = (method, path, headers, body) => new Promise((resolve, reject) => {
+  /**
+   * Forwards one request upstream; resolves to {status, headers, stream} or rejects. `onRequest`
+   * hands the caller the in-flight request so an abort can destroy it before any headers arrive.
+   */
+  const forward = (method, path, headers, body, onRequest = null) => new Promise((resolve, reject) => {
+    let connectTimer = null;
     const req = agentLib.request({
       protocol: up.protocol, hostname: up.hostname, port: up.port, method, path: `${up.pathname.replace(/\/$/, "")}${path}`,
       headers: { ...headers, host: up.host },
-    }, (res) => { resolve({ status: res.statusCode, headers: res.headers, stream: res }); });
+      // One socket per request. The global agent keeps connections alive, and a reused socket never
+      // emits "connect" again — the connect timer below could then never be cleared and would
+      // destroy a healthy request mid-generation (5 s into every later request of a turn).
+      agent: false,
+    }, (res) => {
+      clearTimeout(connectTimer); // headers imply the connect finished, whatever the socket did
+      resolve({ status: res.statusCode, headers: res.headers, stream: res });
+    });
     inflight.add(req);
+    if (onRequest) onRequest(req);
     // A connect that never completes is bounded here (no infinite hang before pi's own timeout).
-    const connectTimer = setTimeout(() => { req.destroy(new Error(`upstream connect timed out after ${connectTimeoutMs} ms`)); }, connectTimeoutMs);
-    req.on("socket", (s) => { s.once("connect", () => clearTimeout(connectTimer)); });
+    connectTimer = setTimeout(() => { req.destroy(new Error(`upstream connect timed out after ${connectTimeoutMs} ms`)); }, connectTimeoutMs);
+    req.on("socket", (s) => { if (!s.connecting) clearTimeout(connectTimer); else s.once("connect", () => clearTimeout(connectTimer)); });
     req.on("error", (err) => { clearTimeout(connectTimer); inflight.delete(req); reject(err); });
     req.on("close", () => { clearTimeout(connectTimer); inflight.delete(req); });
     if (body !== null && body !== undefined) req.end(body); else req.end();
@@ -119,19 +131,30 @@ export async function startSamplingProxy({
     if (body !== null) headers["content-length"] = String(Buffer.byteLength(JSON.stringify(body)));
     else delete headers["content-length"];
 
-    let upstreamRes;
+    // A killed or timed-out turn must stop the model even when the upstream has not sent its
+    // headers yet — a long prefill sits in exactly that window. So the teardown is wired to the
+    // response's "close" BEFORE awaiting upstream headers, and it destroys whatever is in flight.
+    // (The request's own "close" fires as soon as its body is read on Node 16+, so it is useless here.)
+    let idle = null;
+    let upstreamReq = null;
+    let upstreamRes = null;
+    const teardown = () => {
+      clearTimeout(idle);
+      for (const x of [upstreamRes && upstreamRes.stream, upstreamReq]) { try { if (x) x.destroy(); } catch { /* already gone */ } }
+    };
+    res.on("close", teardown);
     try {
-      upstreamRes = await forward(req.method, path.replace(/^\/v1/, ""), headers, body === null ? null : JSON.stringify(body));
+      upstreamRes = await forward(req.method, path.replace(/^\/v1/, ""), headers, body === null ? null : JSON.stringify(body),
+        (r) => { upstreamReq = r; if (res.destroyed) teardown(); });
     } catch (err) {
+      teardown();
       sendJson(res, 502, { error: { message: String(err && err.message) } });
       return;
     }
+    if (res.destroyed) { teardown(); return; }
     // Idle bound: a model that accepts the request and then says nothing is cut off, not waited on.
-    let idle = null;
     const touch = () => { clearTimeout(idle); idle = setTimeout(() => upstreamRes.stream.destroy(new Error("upstream idle timeout")), idleTimeoutMs); };
     touch();
-    // pi's request closing (a killed or timed-out turn) must not leave the model generating.
-    req.on("close", () => { clearTimeout(idle); upstreamRes.stream.destroy(); });
     res.writeHead(upstreamRes.status, (() => {
       const h = { ...upstreamRes.headers };
       delete h["content-length"]; // streamed through, possibly re-chunked
@@ -143,7 +166,6 @@ export async function startSamplingProxy({
     upstreamRes.stream.on("data", (chunk) => { touch(); res.write(chunk); });
     upstreamRes.stream.on("end", () => { clearTimeout(idle); res.end(); });
     upstreamRes.stream.on("error", () => { clearTimeout(idle); res.destroy(); });
-    res.on("close", () => { clearTimeout(idle); upstreamRes.stream.destroy(); });
   });
 
   server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
@@ -153,8 +175,8 @@ export async function startSamplingProxy({
     baseUrl: `http://${host}:${port}/v1`,
     port,
     requests,
-    /** The sampling the proxy actually put on the wire, or null when no chat request went through. */
-    observedSampling() {
+    /** The sampling PINNED BY THE PROXY on the wire, or null when no chat request went through. */
+    pinnedSampling() {
       const seen = requests.filter((r) => r.sampling !== null).map((r) => r.sampling);
       if (!seen.length) return null;
       const last = seen.at(-1);

@@ -1463,7 +1463,9 @@ export async function handleInbound(opts) {
   // the guard is never even loaded. The transform is trusted in-process code: the checks below
   // are a shape fence (eval-guard.mjs), not a sandbox.
   let evalSeam = null;
-  if (typeof opts.evalSpawnTransform === "function") {
+  // Object.hasOwn, not a plain read: an inherited (or __proto__-injected) value is not an option
+  // this caller passed, and the proto chain is not a place an eval seam may hide.
+  if (Object.hasOwn(opts, "evalSpawnTransform") && typeof opts.evalSpawnTransform === "function") {
     const sealedHome = (await import("../lib/eval-guard.mjs")).assertEvalSeam();
     const transform = opts.evalSpawnTransform; // read once
     if (typeof transform !== "function") throw new Error("eval spawn transform refused: not a function");
@@ -1474,7 +1476,10 @@ export async function handleInbound(opts) {
   // no env var names an override and no bot-def field is read — and the same guard as above, so
   // a prod gateway, pibot unit or channel turn fails it. Refused before buildBotWorld below, so a
   // refused call writes no .mcp.json, spawns no pi and stamps no session.
-  const mcpOverridesOpt = opts.mcpOverrides; // read once
+  // Object.hasOwn: an own key only. With a plain read, a payload carrying `__proto__` (JSON.parse
+  // makes it an own key, and the rest spread keeps it) would put mcpOverrides on the prototype and
+  // this line would still take it.
+  const mcpOverridesOpt = Object.hasOwn(opts, "mcpOverrides") ? opts.mcpOverrides : undefined; // read once
   let evalMcp = null;
   if (mcpOverridesOpt !== undefined && mcpOverridesOpt !== null) {
     const guard = await import("../lib/eval-guard.mjs");
@@ -1748,7 +1753,8 @@ export async function handleInbound(opts) {
     world.mcpConfig = config;
     if (world.mcpDelivery === "file") {
       const path = evalMcp.guard.checkOverridePath(world.mcpConfigPath, evalMcp.sealedHome);
-      writeFileSync(path, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+      // Refuses a symlinked target and chmods 600 after the write (mode only applies to a new file).
+      evalMcp.guard.writeOverrideConfig(path, config, evalMcp.sealedHome);
     }
     mcpOverridden = changed;
   }
@@ -1964,10 +1970,21 @@ if (import.meta.url === "file://" + process.argv[1]) {
   const inj = a[a.indexOf("--inject") + 1];
   if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T"); process.exit(2); }
   // A --inject payload is arbitrary JSON from a shell: the eval-only seams are never takable that way.
-  const { mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, ...payload } = JSON.parse(inj);
-  handleInbound(Object.assign({}, payload, {
+  const payload = JSON.parse(inj);
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    console.error("bridge.mjs --inject needs a JSON object"); process.exit(2);
+  }
+  // JSON.parse makes "__proto__" an OWN key, so the rest spread below would carry it and a later
+  // Object.assign would run the prototype setter: such a payload is refused outright rather than
+  // stripped, and so is any other key that only makes sense on the prototype chain.
+  for (const k of ["__proto__", "constructor", "prototype"]) {
+    if (Object.hasOwn(payload, k)) { console.error(`bridge.mjs --inject refuses a payload with a ${k} key`); process.exit(2); }
+  }
+  const { mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, ...rest } = payload;
+  // A spread, not Object.assign: it defines own properties, so no prototype setter can run.
+  handleInbound({ ...rest,
     log: (m) => console.error("[bridge] " + m),
     sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
-  })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
+  }).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
     .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
 }

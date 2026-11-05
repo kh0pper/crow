@@ -89,7 +89,7 @@ test("real pi + stub model: rr12 careful through the fixture server passes a, b 
   assert.equal(row.config.judge, null);
   assert.match(row.config.endpoint_sha, /^[0-9a-f]{64}$/);
   assert.deepEqual(row.config.case_set, CASE_SET);
-  // The pinned sampling is what reached the model (the proxy observed it, the row records it).
+  // The pinned sampling is what reached the model (pinned by the proxy; the row records it).
   assert.deepEqual({ temperature: row.sampling.temperature, top_p: row.sampling.top_p, top_k: row.sampling.top_k, min_p: row.sampling.min_p, seed: row.sampling.seed },
     { ...SAMPLING, seed: seedFor(0) });
   // Exactly the 13 granted tools were offered, on every request.

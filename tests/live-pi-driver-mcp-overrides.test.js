@@ -13,7 +13,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import Database from "better-sqlite3";
 import { childEnv } from "../scripts/lib/live-pi-driver.mjs";
 import { FIXTURE_SERVER } from "../scripts/lib/eval-guard.mjs";
@@ -21,6 +21,7 @@ import { realish } from "../scripts/lib/protected-paths.mjs";
 import { makeScratch, makeTemplate } from "../scripts/research-eval/scratch.mjs";
 
 const REPO = join(import.meta.dirname, "..");
+const BRIDGE = join(REPO, "scripts", "pi-bots", "bridge.mjs");
 const STUB = join(REPO, "tests", "fixtures", "live-pi-driver", "stub-pi.mjs");
 const SEAM_CHILD = join(REPO, "tests", "fixtures", "live-pi-driver", "bridge-seam-child.mjs");
 const BOT = "rr-seam-bot";
@@ -66,6 +67,27 @@ async function seamCall(dir, env, opts) {
   assert.ok(existsSync(out), `the seam child wrote nothing: ${r.stderr}`);
   return JSON.parse(readFileSync(out, "utf8"));
 }
+
+test("S1: --inject refuses a payload with a __proto__ (or constructor/prototype) own key", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "lpd-inject-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = nonEvalEnv(dir, join(dir, "capture.ndjson"));
+  const inject = (raw) => run([BRIDGE, "--inject", raw], env);
+  // JSON.parse makes "__proto__" an OWN key. Before the fix the rest spread kept it and
+  // Object.assign ran the prototype setter, so handleInbound read mcpOverrides off the prototype
+  // and answered "eval-only seam refused" — the strip never applied. The payload never being
+  // handed on at all is what this asserts.
+  const proto = await inject('{"bot_id":"b","gateway_thread_id":"t","user_message":"hi","__proto__":{"mcpOverrides":{"crow-projects":{}}}}');
+  assert.match(proto.stderr, /refuses a payload with a __proto__ key/);
+  assert.doesNotMatch(proto.stderr, /eval-only seam refused/, "the payload never reached the seam's read");
+  assert.equal(proto.err && proto.err.code, 2);
+  for (const key of ["constructor", "prototype"]) {
+    const r = await inject(`{"bot_id":"b","${key}":{"mcpOverrides":{}}}`);
+    assert.match(r.stderr, new RegExp(`refuses a payload with a ${key} key`), key);
+  }
+  // A non-object payload is refused too (JSON.parse can return null, a string or an array).
+  assert.match((await inject("[1,2]")).stderr, /needs a JSON object/);
+});
 
 /** A real env that is NOT an eval scratch, with the stub pi wired. */
 function nonEvalEnv(dir, capture) {
@@ -251,7 +273,8 @@ test("bridge.mjs: the mcpOverrides block opens with the guard, the option is rea
   const src = readFileSync(join(REPO, "scripts", "pi-bots", "bridge.mjs"), "utf8");
   // Read once, into a const, before anything else in the seam.
   assert.equal((src.match(/opts\.mcpOverrides/g) || []).length, 1, "exactly one read of the option");
-  assert.match(src, /const mcpOverridesOpt = opts\.mcpOverrides; \/\/ read once/);
+  // Object.hasOwn: a plain read would also take a __proto__-injected value off the prototype.
+  assert.match(src, /const mcpOverridesOpt = Object\.hasOwn\(opts, "mcpOverrides"\) \? opts\.mcpOverrides : undefined; \/\/ read once/);
   const HEAD = "if (mcpOverridesOpt !== undefined && mcpOverridesOpt !== null) {";
   assert.equal(src.split(HEAD).length - 1, 1, "exactly one seam block");
   const body = src.slice(src.indexOf(HEAD) + HEAD.length).replace(/^\s*/, "");
@@ -266,15 +289,30 @@ test("bridge.mjs: the mcpOverrides block opens with the guard, the option is rea
   assert.doesNotMatch(src, /process\.env\.[A-Z_]*MCP_OVERRIDE|env\[["'][A-Z_]*MCP_OVERRIDE/);
   assert.doesNotMatch(src, /def\.mcpOverrides|definition\.mcpOverrides|bot\.mcpOverrides/);
   assert.match(src, /no env var names an override/, "the reason is written down where the seam is");
-  // The --inject CLI strips both eval-only seams out of a shell-supplied payload.
+  // The --inject CLI refuses a payload with a prototype key, strips both eval-only seams out of
+  // anything else, and builds the opts with a spread (no Object.assign prototype setter).
   const inject = src.slice(src.indexOf('const inj = a[a.indexOf("--inject") + 1];'));
-  assert.match(inject, /const \{ mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, \.\.\.payload \} = JSON\.parse\(inj\);/);
+  assert.match(inject, /for \(const k of \["__proto__", "constructor", "prototype"\]\)/);
+  assert.match(inject, /if \(Object\.hasOwn\(payload, k\)\)/);
+  assert.match(inject, /const \{ mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, \.\.\.rest \} = payload;/);
+  assert.match(inject, /handleInbound\(\{ \.\.\.rest,/);
+  assert.doesNotMatch(inject, /Object\.assign\(/, "no Object.assign: a spread defines own properties");
 });
 
-test("only live-pi-driver-child passes mcpOverrides to handleInbound; no def field is read", () => {
-  const files = readdirSync(join(REPO, "scripts"), { recursive: true, withFileTypes: true })
+test("S5: only live-pi-driver-child passes mcpOverrides to handleInbound; no def field is read, in servers/ and bundles/ too", () => {
+  /** Every .mjs/.js source file under one repo directory (no node_modules, no generated vendor js). */
+  const sourceFiles = (dir) => readdirSync(join(REPO, dir), { recursive: true, withFileTypes: true })
     .filter((d) => d.isFile() && /\.(mjs|js)$/.test(d.name))
-    .map((d) => join(d.parentPath ?? d.path, d.name));
+    .map((d) => join(d.parentPath ?? d.path, d.name))
+    .filter((p) => !p.includes("node_modules") && !p.includes(`${sep}public${sep}vendor${sep}`));
+  // servers/ and bundles/ are live code a future caller could sit in: a gateway route or a bundle
+  // server passing mcpOverrides would be exactly the hole this test exists to catch.
+  const files = [...sourceFiles("scripts"), ...sourceFiles("servers"), ...sourceFiles("bundles")];
+  // The scan really reaches all three trees: without this the servers/ and bundles/ sweep would be
+  // a comment (the old test scanned scripts/ alone and called itself "only caller").
+  assert.deepEqual([...new Set(files.map((f) => f.slice(REPO.length + 1).split(sep)[0]))].sort(), ["bundles", "scripts", "servers"]);
+  assert.ok(files.some((f) => f.endsWith(join("servers", "gateway", "index.js"))), "servers/ is scanned");
+  assert.ok(files.some((f) => f.endsWith(join("bundles", "meta-glasses", "server", "device-store.js"))), "bundles/ is scanned");
   const hits = files.filter((f) => /mcpOverrides/.test(readFileSync(f, "utf8"))).map((f) => f.slice(REPO.length + 1)).sort();
   // The seam, its table, the driver, its child, and live.mjs (which builds the override). Nothing else.
   assert.deepEqual(hits, [

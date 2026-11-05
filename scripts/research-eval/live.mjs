@@ -10,7 +10,7 @@
  *     /proxy/ path, loopback or an --allow-host), and not a lazy loader;
  *   - /models lists exactly the one --model, "loaded" where the server exposes a status
  *     (re-checked before every unit; the sampling proof runs once per run);
- *   - the arm honours seed, top_k and min_p (a minimal deterministic probe, see proveSampling);
+ *   - the arm honours seed, top_k and min_p (a control, then three pairs, see proveSampling);
  *   - the MCP override seam ran (every turn reports mcpOverridden ["crow-projects"]);
  *   - every request to the model offered exactly the granted tool set;
  *   - the fixture server wrote its start marker (pid, case id, run id) into the scratch home.
@@ -41,7 +41,7 @@ import { parseSession } from "./session-log.mjs";
 export const EVAL_BOT_ID = "research-eval";
 /** The one fixed system prompt. Its text is hashed into every row's config (bot_def_sha). */
 export const EVAL_SYSTEM_PROMPT = "You answer research questions and cite the page you opened for every claim.";
-/** Rows carry these beyond the harness shape: the observed sampling, the retries, the proxy's record. */
+/** Rows carry these beyond the harness shape: the sampling pinned by the proxy, the retries, the proxy's record. */
 export const LIVE_ROW_KEYS = Object.freeze([...ROW_KEYS, "sampling_proxy", "attempts", "attempt_reasons"]);
 export const UNIT_CAP_MS = 15 * 60 * 1000;
 export const TRANSPORT_FAILURE = (n) => `transport failure after ${n} attempts`;
@@ -118,20 +118,47 @@ export async function preflightModels({ baseUrl, model, timeoutMs = 5_000, fetch
   return entry;
 }
 
-/** The probe's prompt and token cap: one tiny deterministic completion. */
-export const PROBE_PROMPT = "Reply with the single word: ready";
-export const PROBE_MAX_TOKENS = 4;
+/**
+ * The probe's prompt: high entropy on purpose. A sampler without the pins must be able to vary on
+ * it, which is the control the three pin checks below rest on.
+ */
+export const PROBE_PROMPT = "Write one random English word.";
+export const PROBE_MAX_TOKENS = 16;
+/** Four seeds for the control; the first two are reused by the pin pairs. */
+export const PROBE_SEEDS = Object.freeze([1000, 1001, 1002, 1003]);
+/** The probe's base: everything that could greedy-fy the sampler is disabled, so only the field under test can. */
+const PROBE_BASE = Object.freeze({ temperature: 1, top_p: 1, top_k: 0, min_p: 0 });
+
+/**
+ * The completion text of one probe reply: `message.content` AND `message.reasoning_content`, because
+ * a thinking model puts its first tokens in reasoning_content and leaves content empty. (The legacy
+ * `choice.text` of the completions route is read too.)
+ */
+function probeText(choice) {
+  const m = choice && choice.message && typeof choice.message === "object" ? choice.message : {};
+  const parts = [];
+  if (typeof choice?.text === "string") parts.push(choice.text);
+  if (typeof m.content === "string") parts.push(m.content);
+  if (typeof m.reasoning_content === "string") parts.push(m.reasoning_content);
+  return parts.join("\n");
+}
 
 /**
  * Proves the arm's server honours seed, top_k and min_p — the three pinned settings that
  * llama-server's OpenAI-compatible /v1/chat/completions takes in the request body (its docs list
  * top_k, min_p and seed among the sampler params). No /props read or doc quote can prove that a
- * *request* field is honoured, so this is the minimal deterministic probe: three pairs of tiny
- * completions (max_tokens 4), each pair varying exactly one thing.
- *   seed:  two identical requests, same seed         → same text ⇒ the seed reaches the sampler
- *   top_k: top_k=1, two DIFFERENT seeds              → same text ⇒ top_k is applied (k=1 is greedy)
- *   min_p: top_k=20 with min_p=1, two different seeds → same text ⇒ min_p is applied (min_p=1 keeps
- *          only the most likely token, so the RNG cannot change the pick)
+ * *request* field is honoured, so the probe asks the model itself. Four steps, in this order:
+ *   control: a high-entropy prompt ("write one random word"), temperature 1, top_p 1, top_k 0,
+ *            min_p 0, 16 tokens and FOUR different seeds. At least two of the four must differ.
+ *            Without this an equal pair proves nothing: a server that ignores every field but is
+ *            deterministic (greedy, or a fixed server seed) returns the same text for any two
+ *            requests, and the pin checks below would pass on an arm that pins nothing.
+ *   seed:    the same request twice (same seed)               → same text ⇒ the seed reaches the sampler
+ *   top_k:   top_k=1, two DIFFERENT seeds                     → same text ⇒ top_k is applied (k=1 is greedy)
+ *   min_p:   min_p=1, two different seeds, top_k 0            → same text ⇒ min_p is applied (min_p=1
+ *            keeps only the most likely token, so the RNG cannot change the pick)
+ * Every request carries temperature 1 and top_p 1, so neither can greedy-fy a pair on its own, and
+ * the output is content + reasoning_content (a thinking-only reply is read, not skipped).
  * What it does NOT prove: that intermediate top_k/min_p values are honoured, or anything about
  * top_p. The sampling itself is pre-registered (score.mjs SAMPLING); this is a floor.
  * @returns {Promise<{seed: true, top_k: true, min_p: true, requests: number}>}
@@ -147,7 +174,7 @@ export async function proveSampling({ baseUrl, model, timeoutMs = 60_000, fetchI
       res = await fetchImpl(url, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ model, messages: [{ role: "user", content: PROBE_PROMPT }], max_tokens: PROBE_MAX_TOKENS,
-          temperature: 0.7, top_p: 0.95, stream: false, ...extra }),
+          ...PROBE_BASE, stream: false, ...extra }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
@@ -158,18 +185,23 @@ export async function proveSampling({ baseUrl, model, timeoutMs = 60_000, fetchI
     try { body = await res.json(); } catch { refuse("the sampling probe got a non-JSON reply"); }
     const choice = Array.isArray(body?.choices) ? body.choices[0] : null;
     if (!choice) refuse("the sampling probe got no choices[] back");
-    const text = typeof choice.text === "string" ? choice.text
-      : (choice.message && typeof choice.message.content === "string" ? choice.message.content : null);
-    if (text === null) refuse("the sampling probe got no completion text back");
-    return text;
+    return probeText(choice);
   };
+  // The control FIRST: without the pins the arm must be able to vary at all.
+  const control = [];
+  for (const seed of PROBE_SEEDS) control.push(await ask({ seed }));
+  if (control.every((t) => t === "")) {
+    refuse("the sampling probe read an empty completion every time (content and reasoning_content were both empty)");
+  }
+  if (new Set(control).size < 2) refuse("cannot prove sampling: the arm is deterministic without the pins");
+  // Then the three pins, on the same high-entropy prompt.
   const pair = async (name, a, b) => {
     const [x, y] = [await ask(a), await ask(b)];
     if (x !== y) refuse(`${name} is not honoured: two requests that can only differ by the seed returned different completions`);
   };
-  await pair("seed", { seed: 1000, top_k: 20, min_p: 0 }, { seed: 1000, top_k: 20, min_p: 0 });
-  await pair("top_k", { seed: 1000, top_k: 1, min_p: 0 }, { seed: 1001, top_k: 1, min_p: 0 });
-  await pair("min_p", { seed: 1000, top_k: 20, min_p: 1 }, { seed: 1001, top_k: 20, min_p: 1 });
+  await pair("seed", { seed: PROBE_SEEDS[0] }, { seed: PROBE_SEEDS[0] });
+  await pair("top_k", { top_k: 1, seed: PROBE_SEEDS[0] }, { top_k: 1, seed: PROBE_SEEDS[1] });
+  await pair("min_p", { min_p: 1, seed: PROBE_SEEDS[0] }, { min_p: 1, seed: PROBE_SEEDS[1] });
   return { seed: true, top_k: true, min_p: true, requests };
 }
 
@@ -193,6 +225,15 @@ export function evalBotDef({ provider = "arm", model, crowHome, repoSkillsDir = 
     tools: { pi_builtin: [], crow_mcp: skillRequiredTools(SKILL, { crowHome, repoSkillsDir }) },
     permission_policy: { bash: "deny", write_paths: [], read_paths: [], multi_agent: false, skill_learning: "off" },
   };
+}
+
+/**
+ * One provider's model entry for the driver's models.json: `--pi-model`'s extra fields go UNDER the
+ * id, never over it. A pi-model file that carried its own `id` would otherwise point the run at a
+ * model the proxy refuses (fail-safe, but the wrong way round), so the id is spread last.
+ */
+export function armModelEntry(model, piModel = null) {
+  return { ...(piModel || {}), id: model };
 }
 
 /** The exact tool names pi must offer: `server/tool` → mcp__server__tool. */
@@ -252,9 +293,10 @@ export function completionTokensOf(jsonl) {
 // ---------------------------------------------------------------------------------------------
 
 // Transport only: a connection error, a 5xx, survivors, or a missing session. A turn timeout, a
-// context overflow and a 400 are scored or flagged and never re-rolled.
+// context overflow and a 4xx status are scored or flagged and never re-rolled. The 4xx pattern
+// matches a status phrase only: a bare 443 in "ECONNRESET … :443" is transport, not a client error.
 const TRANSPORT_RE = /connection error|ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|fetch failed|status 5\d\d|HTTP 5\d\d|survivors\b|survived the thread|cannot find the pi session file/i;
-const NEVER_RETRY_RE = /exceeded \d+ ms|context (length|window)|too many tokens|maximum context|status 4\d\d|HTTP 4\d\d|\b4[0-9]{2}\b/i;
+const NEVER_RETRY_RE = /exceeded \d+ ms|context (length|window)|too many tokens|maximum context|status 4\d\d|HTTP 4\d\d/i;
 
 /** True when a run failure is a transport problem the ruling allows re-rolling. */
 export function retryableFailure(reason) {
@@ -292,7 +334,10 @@ function contaminatedRow({ base, tail, why, reason = null, t0, attempts, attempt
 
 /** The deterministic seam checks: any failure aborts the run (exit 2), never retried. */
 export function abortOnSeamFailure({ r, summary, scratch, caseDef, events }) {
-  const runId = events.find((e) => e && e.runId)?.runId ?? null;
+  const runId = (events ?? []).find((e) => e && e.runId)?.runId ?? null;
+  // Without a run id the fixture identity cannot be checked at all: a stale server's marker would
+  // pass. That is a seam failure, not something to shrug at.
+  if (runId === null) throw new LiveAbort("no driver event carried a run id, so the fixture server's start marker cannot be tied to this run");
   for (const th of r.threads) {
     for (const t of th.turns) {
       const got = t.mcpOverridden;
@@ -307,10 +352,10 @@ export function abortOnSeamFailure({ r, summary, scratch, caseDef, events }) {
   const marker = readStartMarker(scratch.home);
   if (marker === null) throw new LiveAbort(`the fixture server wrote no start marker (${FIXTURE_START_MARKER}) in the scratch home`);
   if (marker.case !== caseDef.id) throw new LiveAbort(`the fixture start marker names case ${JSON.stringify(marker.case)}, not ${caseDef.id}`);
-  if (runId !== null && marker.run_id !== runId) throw new LiveAbort(`the fixture start marker names run ${JSON.stringify(marker.run_id)}, not this run (a stale server wrote it)`);
+  if (marker.run_id !== runId) throw new LiveAbort(`the fixture start marker names run ${JSON.stringify(marker.run_id)}, not this run (a stale server wrote it)`);
 }
 
-async function scoredRow({ caseDef, scratch, r, judge, base, tail, config, observed, summary, attempts, attemptReasons, t0 }) {
+async function scoredRow({ caseDef, scratch, r, judge, base, tail, config, pinned, summary, attempts, attemptReasons, t0 }) {
   const sessionPath = r.threads[0]?.sessionPaths?.[0] ?? null;
   if (!sessionPath) throw new LiveAbort("the driver reported no session file for a completed turn");
   const raw = readFileSync(sessionPath, "utf8");
@@ -326,7 +371,7 @@ async function scoredRow({ caseDef, scratch, r, judge, base, tail, config, obser
     criteria: scored.criteria, case_pass: scored.case_pass, evidence: scored.evidence,
     undecided: scored.undecided, no_prose: scored.no_prose, off_set_fetches: scored.off_set_fetches,
     flagged_unconfirmed: scored.flagged_unconfirmed,
-    sampling: observed, judge_reason: scored.judge_reason, judge_calls: scored.judge_calls, judge_spans: scored.judge_spans,
+    sampling: pinned, judge_reason: scored.judge_reason, judge_calls: scored.judge_calls, judge_spans: scored.judge_spans,
     sampling_proxy: { requests: summary.requests, overrode_keys: summary.overrode_keys, tools_ok: summary.tools_ok },
     attempts, attempt_reasons: [...attemptReasons], ...tail,
   };
@@ -370,7 +415,7 @@ export async function runLiveUnit({
         throw new LiveAbort("the bot def's grant and the scratch's skill grant disagree");
       }
       proxy = await startSamplingProxy({ upstream: baseUrl, model, rep, expectedTools: expectedToolNames(botDef.tools.crow_mcp) });
-      const models = { providers: { arm: { baseUrl: proxy.baseUrl, api: "openai-completions", apiKey: "none", models: [{ id: model, ...(piModel || {}) }] } } };
+      const models = { providers: { arm: { baseUrl: proxy.baseUrl, api: "openai-completions", apiKey: "none", models: [armModelEntry(model, piModel)] } } };
       const events = [];
       const r = await runConversation({
         botDef, models, scratchHome: scratch.home,
@@ -381,7 +426,7 @@ export async function runLiveUnit({
         log: (e) => { events.push(e); log(e); },
       });
       const summary = proxy.summary();
-      const observed = proxy.observedSampling();
+      const pinned = proxy.pinnedSampling();
       // A failed run is classified first (a failure is never measured). Only a run that reports
       // success is checked for having measured anything, and for the seam's deterministic facts.
       if (r.ok !== true) {
@@ -397,7 +442,7 @@ export async function runLiveUnit({
         }
         const stop = stopReasonOf(why);
         if (stop === "capacity") throw new LiveAbort(`prod pi capacity: the box has no free pi slot (${clip(why, 160)})`);
-        const row = contaminatedRow({ base, tail, why, reason: r.reason, t0, attempts: attempt, attemptReasons, sampling: observed, samplingProxy: summary });
+        const row = contaminatedRow({ base, tail, why, reason: r.reason, t0, attempts: attempt, attemptReasons, sampling: pinned, samplingProxy: summary });
         if (sessionsDir) copySession(r, sessionsDir, caseDef, rep);
         return { row: orderLiveRow(row), stop };
       }
@@ -408,7 +453,7 @@ export async function runLiveUnit({
       }
       abortOnSeamFailure({ r, summary, scratch, caseDef, events });
       if (sessionsDir) copySession(r, sessionsDir, caseDef, rep);
-      const row = await scoredRow({ caseDef, scratch, r, judge, base, tail, config, observed, summary, attempts: attempt, attemptReasons, t0 });
+      const row = await scoredRow({ caseDef, scratch, r, judge, base, tail, config, pinned, summary, attempts: attempt, attemptReasons, t0 });
       return { row: orderLiveRow(row), stop: null };
     } finally {
       if (proxy) await proxy.close();
@@ -434,13 +479,13 @@ function copySession(r, sessionsDir, caseDef, rep) {
 
 /**
  * The config every row of one invocation carries, and the identity --resume compares. A resume
- * that changes the model, endpoint, bot def, pi, pi-lab, skill, judge, sampling or case set is
- * refused: two configs' rows are not one run.
+ * that changes the model, endpoint, the pi model entry, bot def, pi, pi-lab, skill, judge, sampling
+ * or case set is refused: two configs' rows are not one run.
  */
-export function liveRunIdentity({ model, baseUrl, botDefSha, piSha, piLabSha = null, skillSha, judgeName = null, caseSet }) {
+export function liveRunIdentity({ model, baseUrl, botDefSha, piSha, piLabSha = null, skillSha, judgeName = null, piModel = null, caseSet }) {
   const parts = {
     model, endpoint_sha: sha256(`${baseUrl}\0${model}`), bot_def_sha: botDefSha, pi_sha: piSha, pi_lab_sha: piLabSha,
-    skill_sha: skillSha, judge: judgeName ?? null, sampling: { ...SAMPLING, seed_base: seedFor(0) }, case_set: caseSet,
+    skill_sha: skillSha, judge: judgeName ?? null, pi_model: piModel ?? null, sampling: { ...SAMPLING, seed_base: seedFor(0) }, case_set: caseSet,
   };
   return { ...parts, key: sha256(stableStringify(parts)) };
 }
@@ -581,12 +626,12 @@ export async function runLive(arg, { log = (m) => console.error(m) } = {}) {
     // Built inside a scratch home (never a real instance) so the def's grant is the tracked set.
     const botDefSha = sha256(stableStringify(evalBotDef({ model, crowHome: template.home })));
     const shas = provenanceShas(ROOT);
-    const identity = liveRunIdentity({ model, baseUrl, botDefSha, piSha: sha256(readFileSync(resolve(arg["pi-cli"]))), skillSha: shas.skill_sha, caseSet });
+    const identity = liveRunIdentity({ model, baseUrl, botDefSha, piSha: sha256(readFileSync(resolve(arg["pi-cli"]))), skillSha: shas.skill_sha, piModel, caseSet });
     if (resume) {
       const prev = existingRunKey(arg.out);
       // pi_lab_sha is only known after a conversation runs, so the key compares everything else.
       if (prev && prev.key !== identity.key) {
-        say("--resume refused: this invocation's model, endpoint, bot def, pi, skill, sampling or case set differs from the rows already in the file");
+        say("--resume refused: this invocation's model, endpoint, pi model entry, bot def, pi, skill, sampling or case set differs from the rows already in the file");
         return 2;
       }
     }
@@ -594,7 +639,7 @@ export async function runLive(arg, { log = (m) => console.error(m) } = {}) {
     try {
       await preflightModels({ baseUrl, model });
       const proof = await proveSampling({ baseUrl, model });
-      say(`sampling proof: seed, top_k and min_p honoured (${proof.requests} tiny requests)`);
+      say(`sampling proof: the arm varies without the pins, and seed, top_k and min_p are honoured (${proof.requests} requests)`);
     } catch (err) {
       say(err instanceof PreflightRefused ? err.message : `preflight refused: ${clip(err && err.message, 200)}`);
       return 4;

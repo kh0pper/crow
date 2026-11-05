@@ -1514,7 +1514,7 @@ test("runRows: a unit that throws stops the run; the in-flight unit finishes on 
 });
 
 // ---- Task 9: report.mjs ----
-const { summarize: summarize9, compareArms, wilcoxonSignedRankP, mcnemarP, refusals, render: render9, GATES, gateVerdict, gateStatistic } = await import("../scripts/research-eval/report.mjs");
+const { summarize: summarize9, compareArms, wilcoxonSignedRankP, mcnemarP, refusals, render: render9, GATES, gateVerdict, gateStatistic, measurementCaseIds: measurementCaseIds9 } = await import("../scripts/research-eval/report.mjs");
 const { caseSetIdentity: caseSetIdentity9, CASES_DIR: CASES_DIR9 } = await import("../scripts/research-eval/cases.mjs");
 const { SAMPLING: SAMPLING9, seedFor: seedFor9 } = await import("../scripts/research-eval/score.mjs");
 const REPORT = join(ROOT, "scripts", "research-eval", "report.mjs");
@@ -1704,6 +1704,9 @@ test("fix 4: judge_calls is the exact number of real judge invocations; noJudge 
 
 // ---- Task 9: the gate (design §14, operator ruling G, set 2026-11-05) --------------------------
 const LIVE_SET = () => caseSetIdentity9(CASES_DIR9);
+/** Every tracked case id: an arm of the measurement set is gated over all of them, never a subset. */
+const ALL_CASES = measurementCaseIds9();
+const everyCase = (passes = 3) => Object.fromEntries(ALL_CASES.map((id) => [id, passes]));
 /** A live row: the shape run.mjs/live.mjs writes, including the config a gate needs. */
 const liveRow = (arm, caseId, rep, pass, criteria = {}, extra = {}) => ({
   ...row9(arm, caseId, rep, pass, criteria, extra),
@@ -1751,19 +1754,19 @@ test("the gate statistic is the per-case mean over the cases where the criterion
 });
 
 test("the gate is printed only for a live arm on the measurement set with no refusals", () => {
-  const rows = [...liveArm("L", { rr01: 3, rr02: 3 }), ...liveArm("H", { rr01: 3 }, { mode: "harness", case_set: null })];
+  // The measurement set is every tracked case: a two-case arm is INCOMPLETE, not a PASS.
+  const rows = [...liveArm("L", everyCase()), ...liveArm("H", { rr01: 3 }, { mode: "harness", case_set: null })];
   const text = render9(rows, { refusalsIn: [] }).join("\n");
   assert.match(text, /GATE L: PASS \(a 100% ≥80, b 100% ≥80, d 100% ≥95; bars set 2026-11-05; 0 undecided spans in 0 rows counted as non-pass\)/);
   assert.match(text, /gate: not applied \(harness rows\)/);
   // A live arm whose rows came from another case set never gets a verdict.
   const other = liveArm("P", { rr01: 3 }, { case_set: { dir: "/elsewhere/cases", sha: "x" } });
   assert.match(render9(other, { refusalsIn: [] }).join("\n"), /gate: not applied \(not the measurement set\)/);
-  // One refusal (a single scored rep here) blocks every gate line.
-  const thin = [liveRow("L", "rr01", 0, true)];
-  const blocked = render9(thin, { refusalsIn: refusals(thin) }).join("\n");
+  // One refusal on a COMPLETE arm blocks every gate line.
+  const blocked = render9(liveArm("L", everyCase()), { refusalsIn: ["contaminated: L/rr01/rep 0: ok is false"] }).join("\n");
   assert.match(blocked, /gate: not applied \(a refusal below blocks a verdict\)/);
   assert.doesNotMatch(blocked, /^ {4}GATE /m);
-  // The CLI prints NO VERDICT for the same file and exits 6, with no GATE line.
+  // The CLI prints NO VERDICT for a one-row file and exits 6, with no GATE line.
   const f = join(H, "t9-gate-refused.jsonl");
   write7(f, JSON.stringify({ ...liveRow("L", "rr01", 0, true), sampling: { ...SAMPLING9, seed: 1000 } }) + "\n");
   const res = spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env: { PATH: process.env.PATH } });
@@ -1772,10 +1775,27 @@ test("the gate is printed only for a live arm on the measurement set with no ref
   assert.doesNotMatch(res.stdout, /^ {4}GATE /m);
 });
 
+test("S4: a partial run of the measurement set prints no PASS — the expected cases are cases/ on disk", () => {
+  // Four of the twelve tracked cases, three scored reps each: every figure it has is fine, and the
+  // old report gated exactly those four and printed PASS.
+  const partial = liveArm("L", { rr01: 3, rr02: 3, rr03: 3, rr04: 3 });
+  const text = render9(partial, { refusalsIn: [] }).join("\n");
+  assert.doesNotMatch(text, /GATE L: PASS/);
+  assert.match(text, /gate: not applied \(incomplete: 4 of 12 cases\)/);
+  // The CLI agrees without --cases: the tracked set is the expected set, so it exits 6.
+  const f = join(H, "t9-gate-partial.jsonl");
+  write7(f, partial.map((x) => JSON.stringify(x)).join("\n") + "\n");
+  const res = spawnSync(process.execPath, [REPORT, f], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(res.status, 6, res.stdout + res.stderr);
+  assert.match(res.stdout, /NO VERDICT/);
+  assert.doesNotMatch(res.stdout, /GATE L: PASS/);
+  assert.match(res.stdout, /gate: not applied \(incomplete: 4 of 12 cases\)/);
+});
+
 test("a failing live arm prints GATE FAIL with the undecided spans spelled out", () => {
   const rows = [];
-  for (const id of ["rr01", "rr02"]) for (const rep of [0, 1, 2]) {
-    const undecided = rep === 1 && id === "rr02";
+  for (const id of ALL_CASES) for (const rep of [0, 1, 2]) {
+    const undecided = rep === 1 && id === ALL_CASES[1];
     rows.push({
       ...liveRow("L", id, rep, rep === 0),
       criteria: { a: "pass", b: rep === 0 ? "pass" : undecided ? "undecided" : "fail", c: "n/a", d: "pass" },

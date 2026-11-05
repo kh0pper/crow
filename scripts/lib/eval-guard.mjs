@@ -4,6 +4,7 @@
  * fixture server (fixture-guard.mjs re-exports assertEvalEnv) and the live pi driver both call
  * them first and load the server stack only after one passes.
  */
+import { chmodSync, lstatSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import { isDeepStrictEqual, types } from "node:util";
@@ -103,6 +104,18 @@ const sealedOf = (sealedHome, refuse) => {
 };
 
 /**
+ * One own property's value, read ONCE through its data descriptor. An accessor is refused: a getter
+ * could answer this node on the first read and return "/bin/sh" on the next, so every field the
+ * check reads is read exactly once, from a plain data property.
+ */
+function dataValue(o, key, refuse, where) {
+  const d = Object.getOwnPropertyDescriptor(o, key);
+  if (!d) return undefined;
+  if (!Object.hasOwn(d, "value")) refuse(`${where} ${String(key)} must be a data property, not an accessor`);
+  return d.value;
+}
+
+/**
  * The value rules of EVAL_MCP_OVERRIDES, applied to one env value. `path` needs realish on both
  * sides (a symlinked scratch dir would otherwise pass a string test and point elsewhere).
  */
@@ -136,25 +149,28 @@ export function checkMcpOverrides(overrides, sealedHome) {
   const name = names[0];
   if (typeof name !== "string" || !Object.hasOwn(EVAL_MCP_OVERRIDES, name)) refuse(`server ${String(name)} may not be overridden`);
   const spec = EVAL_MCP_OVERRIDES[name];
-  const entry = overrides[name];
+  const entry = dataValue(overrides, name, refuse, "the overrides");
   if (types.isProxy(entry)) refuse(`override ${name} must not be a Proxy`);
   if (!isPlain(entry)) refuse(`override ${name} must be a plain object`);
   for (const k of Reflect.ownKeys(entry)) if (!MCP_OVERRIDE_KEYS.includes(k)) refuse(`override ${name} has an unknown key ${String(k)}`);
-  if (typeof entry.command !== "string") refuse(`override ${name} command must be a string`);
-  if (entry.command !== process.execPath) refuse(`override ${name} command must be this node (${process.execPath})`);
-  if (types.isProxy(entry.args) || !Array.isArray(entry.args)) refuse(`override ${name} args must be an array`);
-  if (!isDeepStrictEqual([...entry.args], [...spec.args])) refuse(`override ${name} args must be exactly the fixture server`);
-  if (types.isProxy(entry.env) || !isPlain(entry.env)) refuse(`override ${name} env must be a plain object`);
+  const command = dataValue(entry, "command", refuse, `override ${name}`);
+  const args = dataValue(entry, "args", refuse, `override ${name}`);
+  const envIn = dataValue(entry, "env", refuse, `override ${name}`);
+  if (typeof command !== "string") refuse(`override ${name} command must be a string`);
+  if (command !== process.execPath) refuse(`override ${name} command must be this node (${process.execPath})`);
+  if (types.isProxy(args) || !Array.isArray(args)) refuse(`override ${name} args must be an array`);
+  if (!isDeepStrictEqual([...args], [...spec.args])) refuse(`override ${name} args must be exactly the fixture server`);
+  if (types.isProxy(envIn) || !isPlain(envIn)) refuse(`override ${name} env must be a plain object`);
   const env = {};
-  for (const k of Reflect.ownKeys(entry.env)) {
+  for (const k of Reflect.ownKeys(envIn)) {
     if (typeof k !== "string" || !Object.hasOwn(spec.env, k)) refuse(`override ${name} env key ${String(k)} is not allowed`);
-    const v = entry.env[k];
+    const v = dataValue(envIn, k, refuse, `override ${name} env`);
     if (typeof v !== "string") refuse(`override ${name} env ${k} must be a string`);
     env[k] = v;
   }
   for (const k of spec.requiredEnv) if (!Object.hasOwn(env, k)) refuse(`override ${name} env is missing ${k}`);
   for (const [k, rule] of Object.entries(spec.env)) if (Object.hasOwn(env, k)) checkEnvValue(rule, env[k], { home, tmp, name, key: k, refuse });
-  return Object.freeze({ [name]: Object.freeze({ command: entry.command, args: Object.freeze([...spec.args]), env: Object.freeze(env) }) });
+  return Object.freeze({ [name]: Object.freeze({ command, args: Object.freeze([...spec.args]), env: Object.freeze(env) }) });
 }
 
 /**
@@ -202,6 +218,27 @@ export function checkOverridePath(p, sealedHome) {
   if (typeof p !== "string" || !isAbsolute(p) || p !== normalize(p) || p.split(sep).includes("..")) refuse("the config path must be an absolute, normalized path");
   if (!strictlyInside(realish(p), home)) refuse("the config path must be strictly inside CROW_HOME");
   return p;
+}
+
+/**
+ * Writes the overridden config to the one path checkOverridePath approved, and makes sure the file
+ * is private afterwards. Two things a plain writeFileSync does not do:
+ *  - `{ mode: 0o600 }` only applies to a NEW file, so an existing 0644 config keeps its mode:
+ *    chmod after the write;
+ *  - a symlink at the target would be followed, and the real target could be anywhere: lstat first
+ *    and refuse a link (or anything that is not a regular file).
+ * @returns {string} the path written
+ */
+export function writeOverrideConfig(p, config, sealedHome) {
+  const refuse = (rule) => { throw new Error(`eval mcp override refused: ${rule}`); };
+  const path = checkOverridePath(p, sealedHome);
+  let st = null;
+  try { st = lstatSync(path); } catch (err) { if (err && err.code !== "ENOENT") refuse(`the config path cannot be inspected (${err.code})`); }
+  if (st && st.isSymbolicLink()) refuse("the config path is a symlink");
+  if (st && !st.isFile()) refuse("the config path is not a regular file");
+  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
 }
 
 const SPAWN_FILE_KEY = "appendSystemPromptFile";

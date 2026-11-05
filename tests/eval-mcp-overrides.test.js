@@ -6,11 +6,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import {
-  EVAL_MCP_OVERRIDES, FIXTURE_SERVER, FIXTURE_START_MARKER, applyMcpOverrides, checkMcpOverrides, checkOverridePath,
+  EVAL_MCP_OVERRIDES, FIXTURE_SERVER, FIXTURE_START_MARKER, applyMcpOverrides, checkMcpOverrides, checkOverridePath, writeOverrideConfig,
 } from "../scripts/lib/eval-guard.mjs";
 import { realish } from "../scripts/lib/protected-paths.mjs";
 
@@ -186,6 +186,54 @@ test("checkOverridePath: only an absolute, normalized path strictly inside the s
     assert.throws(() => checkOverridePath(p, home), re, p);
   }
   assert.throws(() => checkOverridePath(inside, undefined), /no sealed home/);
+});
+
+test("N1: every override field is read once through a DATA descriptor; an accessor is refused", () => {
+  const home = realish(scratch());
+  const entry = valid(home)["crow-projects"];
+  // An accessor can answer whatever the check wants on one read and something else on the next
+  // (this one always answers this node, and the old code read it three times and accepted it).
+  let reads = 0;
+  const accessorEntry = {};
+  Object.defineProperty(accessorEntry, "command", { enumerable: true, configurable: true, get() { reads += 1; return process.execPath; } });
+  Object.defineProperty(accessorEntry, "args", { enumerable: true, value: [FIXTURE_SERVER] });
+  Object.defineProperty(accessorEntry, "env", { enumerable: true, value: entry.env });
+  assert.throws(() => checkMcpOverrides({ "crow-projects": accessorEntry }, home), /command must be a data property, not an accessor/);
+  assert.equal(reads, 0, "the accessor was never invoked at all");
+  // An env value read through a getter is refused too: the value that is checked must be the value.
+  const env = { ...entry.env };
+  Object.defineProperty(env, "CROW_HOME", { enumerable: true, configurable: true, get() { return home; } });
+  assert.throws(() => checkMcpOverrides({ "crow-projects": { ...entry, env } }, home), /env CROW_HOME must be a data property/);
+  // And the block itself.
+  const top = {};
+  Object.defineProperty(top, "crow-projects", { enumerable: true, get() { return entry; } });
+  assert.throws(() => checkMcpOverrides(top, home), /the overrides crow-projects must be a data property/);
+  // The valid plain object still passes, and the returned copy is frozen data.
+  assert.ok(Object.isFrozen(checkMcpOverrides(valid(home), home)["crow-projects"]));
+});
+
+test("N5: writeOverrideConfig chmods 600 after the write and refuses a symlinked target", () => {
+  const home = realish(scratch());
+  const dir = join(home, "sessions");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, ".mcp.json");
+  // writeFileSync's mode applies only to a NEW file: an existing 0644 config would stay world
+  // readable. The chmod after the write is what makes it private.
+  writeFileSync(path, "old\n");
+  chmodSync(path, 0o644);
+  assert.equal(statSync(path).mode & 0o777, 0o644);
+  const checked = checkMcpOverrides(valid(home), home);
+  const { config: out } = applyMcpOverrides(config(home), checked, home);
+  assert.equal(writeOverrideConfig(path, out, home), path);
+  assert.equal(statSync(path).mode & 0o777, 0o600, "the written config is private");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), out);
+  // A symlink at the target is refused, never followed: its real target could be anywhere.
+  const link = join(dir, "link.json");
+  symlinkSync(path, link);
+  assert.throws(() => writeOverrideConfig(link, out, home), /is a symlink/);
+  // The sealed-home rule still governs the path.
+  assert.throws(() => writeOverrideConfig("/etc/passwd", out, home), /strictly inside/);
+  assert.throws(() => writeOverrideConfig(path, out, undefined), /no sealed home/);
 });
 
 test("the guard module still imports only built-ins and protected-paths (the table adds nothing)", () => {
