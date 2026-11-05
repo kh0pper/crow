@@ -208,11 +208,19 @@
  * voice past the segment, and never leaves one holding a stale value after a
  * stop, a chain turn or a lane that was cleared.
  *
- * The block also says WHICH pattern each sampler track played, in a
- * non-enumerable `patterns` map (track id → pattern id), whether or not that
- * pattern has a curve: the chain slot follows from the beat alone (see
- * `emitPads`), so a host can report what it actually played — a recorder writes
- * a lane into that pattern, never into the one the editor happens to show.
+ * The block also says WHICH pattern each sampler track played, and where in the
+ * transport that pattern's slot sits, in a non-enumerable `patterns` map
+ * (track id → `{pattern_id, slot_start_beat, slot_beats, chain_index}`), whether
+ * or not that pattern has a curve: the chain slot follows from the beat alone
+ * (see `emitPads`), so a host can report what it actually played — a recorder
+ * writes a lane into that pattern, never into the one the editor happens to
+ * show. `slot_start_beat` is the beat the slot began at on the transport's own
+ * clock (the clock a position report is in), `slot_beats` how long the slot
+ * lasts, and `chain_index` the slot's place in the clip's chain — so a recorder
+ * can follow the chain past the end of the reported slot without waiting for
+ * the next report. The entry an object is REUSED across blocks and across
+ * songs: a block allocates nothing here, and a host that keeps one (a report it
+ * posts, say) must copy its fields.
  *
  * ## Launch reports
  *
@@ -440,8 +448,20 @@
      * a non-enumerable `patterns` property, so a host can report what it played
      * (the motion recorder writes into the pattern that sounded, never into the
      * one the editor shows). Reused like `events`: a block allocates nothing.
+     *
+     * Each value is `{pattern_id, slot_start_beat, slot_beats, chain_index}` — the
+     * slot the block ENDS in, in the transport's beat clock — and it is a REUSED
+     * object from `patternSlots` below, never a fresh one, so a host that wants
+     * to keep it has to copy it.
      */
     const patterns = new Map();
+
+    /**
+     * track id → the one report entry that track writes into every block, so
+     * building a block allocates nothing (the entry is created the first time a
+     * track plays a pattern clip and mutated from then on).
+     */
+    const patternSlots = new Map();
     Object.defineProperty(events, "patterns", {
       value: patterns,
       enumerable: false,
@@ -2159,9 +2179,23 @@
         const slotFrame = beatToFrame(slotStart);
         const slotEndFrame = beatToFrame(slotStart + clip.lengthBeats);
         const inBlock = slotEndFrame > frameStart && slotFrame < frameEnd;
-        // What this track played in this block (the last slot it covers wins, so
-        // the chain slot the block ends in is the one reported).
-        if (inBlock) patterns.set(String(seg.track_id), patternId);
+        // What this track played in this block, and where its slot sits (the last
+        // slot it covers wins, so the chain slot the block ENDS in is the one
+        // reported: that is the slot a position report posted after the block is
+        // in). The entry is the track's reused one — a block allocates nothing.
+        if (inBlock) {
+          const trackKey = String(seg.track_id);
+          let entry = patternSlots.get(trackKey);
+          if (entry === undefined) {
+            entry = { pattern_id: "", slot_start_beat: 0, slot_beats: 0, chain_index: 0 };
+            patternSlots.set(trackKey, entry);
+          }
+          entry.pattern_id = patternId;
+          entry.slot_start_beat = slotStart;
+          entry.slot_beats = clip.lengthBeats;
+          entry.chain_index = chainLength > 0 ? slot % chainLength : 0;
+          patterns.set(trackKey, entry);
+        }
         const hasLanes = lanes !== undefined && lanes.length > 0;
         if (inBlock && (hasLanes || slotFrame > frameStart)) {
           standing = hasLanes;

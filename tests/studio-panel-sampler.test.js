@@ -830,8 +830,10 @@ async function bootSampler(options = {}) {
     },
     /**
      * Push one transport position, as the engine's own frames do. `patterns` is
-     * what the engine says it PLAYED on each track at that block (track id →
-     * pattern id); a position without it is a report that carries no such news.
+     * what the engine says it PLAYED on each track at that block: track id →
+     * `{pattern_id, slot_start_beat, slot_beats, chain_index}`, the chain slot the
+     * block ended in and where it sits on the transport's own beat clock. A
+     * position without it is a report that carries no such news.
      */
     playhead(bar, beat, sixteenth = 1, patterns = null) {
       assert.ok(engine.positionListener, "the page follows the engine's position");
@@ -2932,11 +2934,14 @@ test("motion near a chain boundary lands in the pattern the engine played", asyn
   ui.click("[data-act=play]");
   await ui.settle(24);
 
-  // The transport stands a hair before the boundary the page's own estimate of
-  // the chain slot would still call pattern A — and the engine reports that it
-  // already played Fill there (the sequencer turned the slot on its own beat
-  // grid, a block earlier than the position frame says).
-  ui.playhead(1, 3, 4, { [TRACK]: fill.id });
+  // The clip launched off the bar, on beat 6.5, so the engine's own chain turns
+  // over at 6.5, 10.5, … while the page — which only knows the launch's BAR —
+  // has its own estimate a whole slot ahead: at 10.0 beats it would call the
+  // second slot Fill. The engine reports the slot it actually played: A, begun
+  // at 6.5, which is the one the knob's point belongs to.
+  ui.playhead(3, 3, 1, {
+    [TRACK]: { pattern_id: "a", slot_start_beat: 6.5, slot_beats: 4, chain_index: 0 },
+  });
   await ui.settle();
   const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
   assert.ok(cutoff, "the pad's cutoff is a control");
@@ -2945,15 +2950,124 @@ test("motion near a chain boundary lands in the pattern the engine played", asyn
   cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
   await ui.settle();
 
-  // A whole pass of that pattern later the take is written — into Fill, the
-  // pattern the ENGINE played, never the one the page's estimate names.
-  ui.playhead(2, 3, 4, { [TRACK]: fill.id });
+  // Disarming writes the take: one point, into A, three and a half beats into
+  // its slot (14 steps) — never into the Fill the page's estimate named.
+  ui.click("[data-act=motion-arm]");
   await ui.settle();
   const written = commands(ui, "motion.write");
-  assert.equal(written.length, 1, `the pass has to be one motion.write, got ${written.length}`);
-  assert.equal(written[0].args.pattern_id, fill.id, "the lane belongs to the pattern the engine played");
-  assert.notEqual(written[0].args.pattern_id, "a", "and never to the slot the page's estimate still named");
-  assert.deepEqual(written[0].args.points, [{ step_frac: 11, value: 1200 }], "one point, where the knob was turned");
+  assert.equal(written.length, 1, `the take has to be one motion.write, got ${written.length}`);
+  assert.equal(written[0].args.pattern_id, "a", "the lane belongs to the pattern the engine played");
+  assert.notEqual(written[0].args.pattern_id, fill.id, "and never to the slot the page's estimate named");
+  assert.deepEqual(written[0].args.points, [{ step_frac: 14, value: 1200 }], "one point, where the knob was turned");
+});
+
+test("a point turned just after a chain boundary lands at the start of the next pattern", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The clip's chain becomes A → Fill.
+  await ui.apply("pattern.add", { clip_id: CLIP, name: "Fill" });
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const fill = Object.values(snapshot(ui.doc).patterns).find(
+    (pattern) => pattern.clip_id === CLIP && pattern.name === "Fill",
+  );
+  assert.ok(fill, "the second pattern is in the song");
+  await ui.apply("chain.set", { clip_id: CLIP, chain: ["a", fill.id] });
+
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // The last report came from the block before the boundary: it says A, whose
+  // slot began at beat 0 and lasts four beats. The page's own estimate is
+  // already past the end of that slot (4.1 beats), so the point belongs to the
+  // next entry of the chain, a tenth of a beat into Fill — never to A, and never
+  // to the slot the report happened to name.
+  ui.playhead(2, 1, 1.4, {
+    [TRACK]: { pattern_id: "a", slot_start_beat: 0, slot_beats: 4, chain_index: 0 },
+  });
+  await ui.settle();
+  const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  assert.ok(cutoff, "the pad's cutoff is a control");
+  cutoff.value = "900";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  const written = commands(ui, "motion.write");
+  assert.equal(written.length, 1, `the take has to be one motion.write, got ${written.length}`);
+  assert.equal(written[0].args.pattern_id, fill.id, "the point belongs to the pattern the chain turned into");
+  assert.notEqual(written[0].args.pattern_id, "a", "never to the slot that just ended");
+  assert.deepEqual(
+    written[0].args.points,
+    [{ step_frac: 0.5, value: 900 }],
+    "a tenth of a beat in, which the quarter-step grid records as half a step",
+  );
+});
+
+test("a restart does not reuse the last run's pattern", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The clip's chain becomes A → Fill, and the first run plays Fill.
+  await ui.apply("pattern.add", { clip_id: CLIP, name: "Fill" });
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const fill = Object.values(snapshot(ui.doc).patterns).find(
+    (pattern) => pattern.clip_id === CLIP && pattern.name === "Fill",
+  );
+  assert.ok(fill, "the second pattern is in the song");
+  await ui.apply("chain.set", { clip_id: CLIP, chain: ["a", fill.id] });
+
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // Bar 2 is the chain's second slot, and the engine says so.
+  ui.playhead(2, 1, 1, {
+    [TRACK]: { pattern_id: fill.id, slot_start_beat: 4, slot_beats: 4, chain_index: 1 },
+  });
+  await ui.settle();
+  let cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  cutoff.value = "1200";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  // Stop writes that take — into Fill, as it should.
+  ui.click("[data-act=stop]");
+  await ui.settle();
+  let written = commands(ui, "motion.write");
+  assert.equal(written.length, 1, `the stop has to write the take, got ${written.length}`);
+  assert.equal(written[0].args.pattern_id, fill.id, "the first run recorded into Fill");
+
+  // The stopped engine's own last report carries no playing pattern at all, and
+  // a restarted transport begins again at bar 1 — where the chain's FIRST
+  // pattern plays. The report the last run left behind must not be reused: the
+  // new run's point belongs to A, not to the Fill that stopped.
+  ui.playhead(1, 1, 1, {});
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  cutoff.value = "800";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+
+  written = commands(ui, "motion.write");
+  assert.equal(written.length, 2, `the restart has to write its own take, got ${written.length - 1}`);
+  assert.equal(written[1].args.pattern_id, "a", "the new run starts on the first pattern of the chain");
+  assert.notEqual(written[1].args.pattern_id, fill.id, "never on the one the last run stopped in");
+  assert.deepEqual(written[1].args.points, [{ step_frac: 0, value: 800 }], "at the start of the pattern");
 });
 
 test("a MIDI knob in lock mode records no motion", async () => {

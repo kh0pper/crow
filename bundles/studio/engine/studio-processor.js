@@ -287,8 +287,9 @@
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth, patterns}` (at most every
  * 50 ms of audio; `patterns` maps each sampler track that was playing a pattern
- * clip in that block to the id of the pattern it played, which is where the
- * motion recorder puts a lane — see `reportPosition`), `{type:"launched",
+ * clip in that block to `{pattern_id, slot_start_beat, slot_beats, chain_index}`
+ * — the chain slot it played, which is where the motion recorder puts a lane —
+ * see `reportPosition`), `{type:"launched",
  * track_id, clip_id, scene_id, bar, frame}` (one
  * per launch the sequencer applied in that block; see below),
  * `{type:"nextBarFrame", id, frame, bar}`, `{type:"audio_loaded", take_id}`
@@ -3156,14 +3157,23 @@
      * Post the transport position, at most every 50 ms of audio.
      *
      * The report also carries `patterns`: which pattern each sampler track was
-     * playing in this block (`events.patterns`, filled in by the sequencer's own
-     * chain slot). It is the one place a client can learn what the ENGINE played:
-     * a chain slot turns over on the sequencer's own beat grid, so a recorder
-     * that guessed the pattern from the transport position could write a lane
-     * into the slot before the boundary instead of the one that sounded.
+     * playing in this block, and where that pattern's chain slot sits
+     * (`events.patterns`, filled in by the sequencer's own chain slot). It is the
+     * one place a client can learn what the ENGINE played: a chain slot turns
+     * over on the sequencer's own beat grid, so a recorder that guessed the
+     * pattern from the transport position could write a lane into the slot before
+     * the boundary instead of the one that sounded. Each entry is
+     * `{pattern_id, slot_start_beat, slot_beats, chain_index}` — the slot the
+     * block ends in, in the same beat clock the report's own bar/beat/sixteenth
+     * are in — so a client can also follow the chain past the end of that slot
+     * without waiting for the next report.
+     *
+     * The sequencer's entries are reused across blocks, so the report object is
+     * built HERE, once per post, and never per block.
      * @param {number} frames the frames the block held
-     * @param {Map<string, string>|undefined} patterns track id → the pattern id
-     *   the block played (empty when no pattern clip played)
+     * @param {Map<string, {pattern_id: string, slot_start_beat: number,
+     *   slot_beats: number, chain_index: number}>|undefined} patterns track id →
+     *   the slot the block played (empty when no pattern clip played)
      * @returns {void}
      */
     reportPosition(frames, patterns) {
@@ -3173,7 +3183,14 @@
       const position = this.sequencer.position();
       const played = {};
       if (patterns) {
-        for (const entry of patterns) played[entry[0]] = entry[1];
+        for (const [trackId, slot] of patterns) {
+          played[trackId] = {
+            pattern_id: slot.pattern_id,
+            slot_start_beat: slot.slot_start_beat,
+            slot_beats: slot.slot_beats,
+            chain_index: slot.chain_index,
+          };
+        }
       }
       this.port.postMessage({
         type: "position",
