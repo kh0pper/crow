@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSchema, validateDbPath } from "../scripts/boot-guard/crow-boot-guard.mjs";
+import { backupDirFor, evaluateSchema, refusalText, validateDbPath } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const _dirs = [];
 after(() => { for (const d of _dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} } });
@@ -200,6 +200,81 @@ test("a db_path that is not named crow.db is rejected", () => {
 test("a missing db_path refuses instead of guessing", () => {
   const f = fixture();
   assert.equal(check(f, null).reason, "db-unknown");
+});
+
+/* ------------------------------------------------------------ refusal text */
+
+/** Every refusal reason the launcher can print (the switch's cases + default). */
+const REFUSAL_REASONS = [
+  "db-ahead", "init-db-changed", "migration-not-rollback-safe", "migration-unknown",
+  "generation-unreadable", "init-db-unknown", "db-unreadable", "db-path-invalid", "db-unknown",
+  "unproven-previous", "not-on-main", "previous-not-ancestor", "something-new",
+];
+/** Registry migrations run through the convergence pass: they take no backup. */
+const REGISTRY_REASONS = new Set(["migration-not-rollback-safe", "migration-unknown"]);
+
+const textFor = (reason, dbPath) => refusalText(reason, {
+  root: "/checkout",
+  detail: { id: "0009-new", userVersion: 10, previousGeneration: 9 },
+  failures: 3,
+  pending: "b".repeat(40),
+  previous: "a".repeat(40),
+  dbPath,
+});
+
+/** A crow.db whose guard backup directory holds (or does not hold) a backup. */
+function dbWithBackups({ withBackup }) {
+  const dir = mkdtempSync(join(tmpdir(), "bg-texts-"));
+  _dirs.push(dir);
+  const backupDir = join(dir, "backups", "migrations");
+  mkdirSync(backupDir, { recursive: true });
+  if (withBackup) writeFileSync(join(backupDir, "crow-pre-g9-to-g10-2026-01-02.db"), "not really a db\n");
+  return join(dir, "crow.db");
+}
+
+test("the backup directory is the migration guard's own (<db dir>/backups/migrations)", () => {
+  assert.equal(backupDirFor("/home/u/.crow/data/crow.db"), join("/home/u/.crow/data", "backups", "migrations"));
+  assert.equal(backupDirFor(null), null);
+});
+
+test("no backup on disk: every refusal says so instead of promising one (F3)", () => {
+  const dbPath = dbWithBackups({ withBackup: false });
+  for (const reason of REFUSAL_REASONS) {
+    const text = textFor(reason, dbPath);
+    if (REGISTRY_REASONS.has(reason)) {
+      assert.match(text, /A registry migration takes no automatic backup, so there is nothing to restore\./, reason);
+    } else {
+      assert.match(text, /No automatic backup exists for this kind of change/, reason);
+    }
+    assert.ok(!text.includes("backups/migrations"), `${reason} named a directory that does not exist`);
+  }
+});
+
+test("a registry migration refusal never sends the operator to a backup it never took (F3)", () => {
+  // The live report: `migration-not-rollback-safe` told the operator to restore
+  // "the pre-migration backup the migration guard took", and no such backup
+  // existed for that change.
+  for (const withBackup of [false, true]) {
+    const dbPath = dbWithBackups({ withBackup });
+    const text = textFor("migration-not-rollback-safe", dbPath);
+    if (!withBackup) {
+      assert.ok(!/restore the/i.test(text), `the registry refusal must not promise a restore: ${text}`);
+    }
+    assert.ok(!/To recover: stop the gateway, restore/.test(text),
+      "a registry migration leaves nothing of its own to restore");
+    assert.match(text, /reset --keep/, "the git recovery step is still there");
+  }
+});
+
+test("a refusal names the real backup directory when a backup exists (F3)", () => {
+  const dbPath = dbWithBackups({ withBackup: true });
+  const dir = backupDirFor(dbPath);
+  for (const reason of REFUSAL_REASONS) {
+    const text = textFor(reason, dbPath);
+    assert.ok(text.includes(dir), `${reason} must name ${dir}`);
+  }
+  // A generation crossing / init-db change DOES take a backup, so it can be restored.
+  assert.match(textFor("db-ahead", dbPath), /restore the newest pre-migration backup from /);
 });
 
 test("B's migration file is read as text and NEVER imported", () => {

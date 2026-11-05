@@ -26,11 +26,18 @@ CROW_APP="$CROW_HOME/app"
 LOG_FILE="$CROW_HOME/update.log"
 HEALTH_URL="${CROW_HEALTH_URL:-http://127.0.0.1:${PORT:-${CROW_GATEWAY_PORT:-3001}}/health}"
 HEALTH_TIMEOUT_SECS="${CROW_HEALTH_TIMEOUT_SECS:-90}"
+# The helper scripts this script runs live next to it, so they come from the
+# checkout being updated, not from the installed copy.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Hooks and fsmonitor off for every git command here: on an install whose
+# core.hooksPath points INTO the tree, `pull` would run the INCOMING commit's own
+# hooks as this user, before any check has seen the sha.
+GIT_SAFE=(-c core.hooksPath=/dev/null -c core.fsmonitor=false)
 
 # Fall back to repo directory if not installed to ~/.crow/app
 if [ ! -d "$CROW_APP" ]; then
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  CROW_APP="$(dirname "$SCRIPT_DIR")"
+  CROW_APP="$(dirname "$SELF_DIR")"
 fi
 
 log() { echo "$(date -Iseconds) $1" | tee -a "$LOG_FILE"; }
@@ -62,8 +69,7 @@ wait_for_health() {
   return 1
 }
 
-# Hooks disabled: on an install whose core.hooksPath points INTO the tree, the
-# pulled sha's own hooks would otherwise run here.
+# Every git command below runs through GIT_SAFE (hooks and fsmonitor off).
 #
 # Never lets a refusal end the script: under `set -e` an unguarded `git reset`
 # or `npm` here would exit mid-rollback, leaving the crash-looping new commit
@@ -72,8 +78,8 @@ wait_for_health() {
 ROLLBACK_OK=1
 rollback() {
   log "Rolling back to ${PREV_REF:0:8}..."
-  if ! git -c core.hooksPath=/dev/null reset --keep "$PREV_REF" 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
-    log "ERROR: rollback refused — git reset --keep ${PREV_REF:0:8} failed (local changes overlap it?). The checkout is unchanged at $(git rev-parse --short HEAD 2>/dev/null || echo unknown)."
+  if ! git "${GIT_SAFE[@]}" reset --keep "$PREV_REF" 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
+    log "ERROR: rollback refused — git reset --keep ${PREV_REF:0:8} failed (local changes overlap it?). The checkout is unchanged at $(git "${GIT_SAFE[@]}" rev-parse --short HEAD 2>/dev/null || echo unknown)."
     ROLLBACK_OK=0
   fi
   if ! npm install 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
@@ -82,17 +88,32 @@ rollback() {
   fi
 }
 
+# Record the commit the rollback moved off, so the next automatic tick does not
+# pull it again and start the same crash loop (F7). NOT held: the checkout is
+# back on PREV_REF, so the marker clears itself when main moves past the sha.
+# Never fatal — a missing marker is worse, not a reason to abandon the run.
+quarantine_rolled_back() {
+  if [ -z "${NEW_REF:-}" ] || [ "${NEW_REF:-}" = "${PREV_REF:-}" ]; then
+    return 0
+  fi
+  if ! node "$SELF_DIR/write-update-quarantine.mjs" \
+      --sha "$NEW_REF" --previous "$PREV_REF" --reason startup-crash --by crow-update \
+      2>&1 | tail -3 | tee -a "$LOG_FILE"; then
+    log "Warning: could not write the update quarantine marker for ${NEW_REF:0:8}."
+  fi
+}
+
 log "Starting Crow update..."
 
 cd "$CROW_APP"
 
 # Save current ref for rollback
-PREV_REF=$(git rev-parse HEAD)
+PREV_REF=$(git "${GIT_SAFE[@]}" rev-parse HEAD)
 log "Current version: ${PREV_REF:0:8}"
 
 # Pull latest
-if git pull --ff-only 2>&1 | tee -a "$LOG_FILE"; then
-  NEW_REF=$(git rev-parse HEAD)
+if git "${GIT_SAFE[@]}" pull --ff-only 2>&1 | tee -a "$LOG_FILE"; then
+  NEW_REF=$(git "${GIT_SAFE[@]}" rev-parse HEAD)
   log "Updated to: ${NEW_REF:0:8}"
 else
   log "Warning: git pull failed (merge conflicts?). Continuing with current version."
@@ -123,6 +144,9 @@ if systemctl is-active --quiet crow-gateway 2>/dev/null; then
   else
     log "ERROR: the gateway did not come up on the new code (health 200 within ${HEALTH_TIMEOUT_SECS}s, NRestarts unchanged: failed). Rolling back..."
     rollback
+    if [ "$ROLLBACK_OK" = "1" ]; then
+      quarantine_rolled_back
+    fi
     sudo systemctl restart crow-gateway
     if [ "$ROLLBACK_OK" != "1" ]; then
       log "ERROR: the rollback did not complete cleanly (see above); the service was restarted anyway. Fix the checkout by hand, then run the update again."
@@ -143,5 +167,5 @@ fi
 log "Update complete."
 echo ""
 echo "  Previous: ${PREV_REF:0:8}"
-echo "  Current:  $(git rev-parse HEAD | head -c 8)"
+echo "  Current:  $(git "${GIT_SAFE[@]}" rev-parse HEAD | head -c 8)"
 echo "  Log:      ${LOG_FILE}"

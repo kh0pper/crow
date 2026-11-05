@@ -19,7 +19,9 @@ import {
   bootGuardProblem, installLauncherCopy, markPlanned, markStable, recordGuardResult,
   rolledBackResultText, scheduleStableMark,
 } from "../servers/gateway/boot-guard-state.js";
-import { freshState, loadState, saveState } from "../scripts/boot-guard/crow-boot-guard.mjs";
+import { _setDbForTest } from "../servers/gateway/auto-update.js";
+import { _setAlertsRootForTest, drainAlertSpool } from "../servers/shared/alert-spool.js";
+import { freshState, loadState, saveState, writeSpoolAlert } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -32,7 +34,42 @@ function scratch(prefix = "bg-gw-") {
   _dirs.push(dir);
   return dir;
 }
-after(() => { for (const d of _dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} } });
+after(() => {
+  _setAlertsRootForTest(null);
+  _setDbForTest(null);
+  for (const d of _dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
+});
+
+/** dashboard_settings behind a Map plus the notifications INSERT: enough for
+ *  saveSetting, stampResultSince, createNotification and the spool's dedupe. */
+function stubDb() {
+  const settings = new Map();
+  const notifications = [];
+  return {
+    settings,
+    notifications,
+    async execute({ sql, args = [] } = {}) {
+      if (/^\s*SELECT value FROM dashboard_settings WHERE key = \?/.test(sql || "")) {
+        return { rows: settings.has(args[0]) ? [{ value: settings.get(args[0]) }] : [] };
+      }
+      if (/SELECT key, value FROM dashboard_settings WHERE key IN \(\?, \?\)/.test(sql || "")) {
+        return { rows: args.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) })) };
+      }
+      if (/INSERT INTO dashboard_settings/.test(sql || "")) {
+        settings.set(args[0], args[1]);
+        return { rows: [], lastInsertRowid: 0 };
+      }
+      if (/INSERT INTO notifications/.test(sql || "")) {
+        notifications.push({
+          type: args[0], source: args[1], title: args[2], body: args[3],
+          priority: args[4], action_url: args[5], metadata: args[6],
+        });
+        return { rows: [], lastInsertRowid: notifications.length };
+      }
+      return { rows: [] }; // the spool's dedupe SELECT, and anything else
+    },
+  };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -237,6 +274,101 @@ test("markStable carries an unrecorded rollback result instead of clearing it", 
   const text = await recordGuardResult({ stateDir, record: async (v) => { calls.push(v); } });
   assert.equal(calls.length, 1, "the next boot must still be able to write the rollback line");
   assert.match(text, /^Rolled back: /);
+});
+
+/* ------------------------------------------------------------ bell rows (F4) */
+
+/** A state the launcher leaves after a rollback, spool alert and all. */
+function rolledBackState({ alerted }) {
+  return {
+    ...freshState(),
+    state: "rolled-back",
+    last_ok_sha: A,
+    previous_sha: A,
+    pending_sha: B,
+    failures: 3,
+    last_crash: { SERVICE_RESULT: "exit-code", EXIT_CODE: "exited", EXIT_STATUS: "1" },
+    alerted,
+    result: {
+      code: "update-rolled-back", from: B, to: A, failures: 3, reason: "startup-crash",
+      at: "2026-01-02T03:04:05.000Z", recorded: false,
+    },
+  };
+}
+
+const SPOOL_BODY = `Commit ${B.slice(0, 9)} crashed on startup 3 times, so the checkout was moved back to `
+  + `${A.slice(0, 9)} and the previous code is running again. ${B.slice(0, 9)} is quarantined: updates resume `
+  + "by themselves when main moves past it.";
+
+test("one boot-guard rollback gives ONE bell row: the spooled one (F4)", async () => {
+  // The launcher spools `update-rolled-back` and the boot-time drain delivers it;
+  // recordGuardResult then wrote the SAME event's result, whose saveSetting rang
+  // notifyUpdateFailure — two rows for one rollback whenever the 24 h per-code
+  // cooldown did not swallow the second.
+  const crowHome = scratch("bg-bell-");
+  const stateDir = join(crowHome, "boot-guard");
+  mkdirSync(join(crowHome, "alerts"), { recursive: true });
+  _setAlertsRootForTest(join(crowHome, "alerts"));
+  assert.ok(writeSpoolAlert({
+    crowHome,
+    code: "update-rolled-back",
+    title: "Crow rolled back an update that would not start",
+    body: SPOOL_BODY,
+    at: "2026-01-02T03:04:05.000Z",
+  }), "the launcher must have spooled its alert");
+  saveState(stateDir, rolledBackState({ alerted: { "update-rolled-back": B } }));
+
+  const db = stubDb();
+  const created = [];
+  const createNotification = async (_db, n) => { created.push(n); return { id: created.length }; };
+  try {
+    _setDbForTest(db);
+    await drainAlertSpool(db, { createNotification, log: () => {} });
+    const text = await recordGuardResult({ stateDir });
+
+    const rows = [...created, ...db.notifications];
+    assert.equal(rows.length, 1, `one rollback, one row: ${JSON.stringify(rows)}`);
+    assert.equal(created[0].source, "migrations", "the surviving row is the launcher's own alert");
+    assert.match(created[0].body, /crashed on startup 3 times/);
+    assert.ok(!/fails to load/.test(`${created[0].title} ${created[0].body}`),
+      "a startup crash must never be described as code that fails to load");
+    // The Settings → Updates line is still written: only the bell is deduped.
+    assert.match(text, /^Rolled back: /);
+    assert.match(db.settings.get("auto_update_last_result"), /^Rolled back: /);
+    assert.ok(!db.settings.has("auto_update_notified_code"),
+      "the suppressed bell must not claim a notification it never made");
+  } finally {
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("a rollback whose spool write failed still rings the auto-update bell (F4)", async () => {
+  // The suppression is conditional on the spool file really existing: with no
+  // spool, the result write is the only channel left, so it must ring.
+  const crowHome = scratch("bg-bell-nospool-");
+  const stateDir = join(crowHome, "boot-guard");
+  mkdirSync(join(crowHome, "alerts"), { recursive: true });
+  _setAlertsRootForTest(join(crowHome, "alerts"));
+  saveState(stateDir, rolledBackState({ alerted: {} }));
+
+  const db = stubDb();
+  const created = [];
+  const createNotification = async (_db, n) => { created.push(n); return { id: created.length }; };
+  try {
+    _setDbForTest(db);
+    await drainAlertSpool(db, { createNotification, log: () => {} });
+    const text = await recordGuardResult({ stateDir });
+
+    assert.equal(created.length, 0, "no spool file, so the drain delivers nothing");
+    assert.equal(db.notifications.length, 1, `the sole channel must ring once: ${JSON.stringify(db.notifications)}`);
+    assert.equal(db.notifications[0].source, "auto-update");
+    assert.match(db.notifications[0].body, /crashed on startup 3 times/, "the recorded result is quoted verbatim");
+    assert.match(text, /^Rolled back: /);
+  } finally {
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
 });
 
 test("markStable only claims a launcher_version when the copy was installed", () => {

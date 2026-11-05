@@ -23,6 +23,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
 import { markPlanned, markStable } from "../servers/gateway/boot-guard-state.js";
+import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
 import { readUpdateQuarantine } from "../servers/shared/update-quarantine.js";
 
 const REPO = join(import.meta.dirname, "..");
@@ -178,6 +179,23 @@ function installAndStabilize(f) {
 const fastForwardTo = (f, sha) => {
   f.git("reset", "--hard", sha);
 };
+
+/** Land a commit on origin only: the checkout stays exactly where it is. */
+function pushToOrigin(f, name, content) {
+  const pusher = mkdtempSync(join(f.root, "pusher-"));
+  execFileSync("git", ["clone", f.origin, pusher], { stdio: "pipe" });
+  const g = (cwd, ...args) => execFileSync(
+    "git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
+    { cwd, stdio: "pipe" },
+  ).toString().trim();
+  g(pusher, "config", "user.email", "t@t");
+  g(pusher, "config", "user.name", "t");
+  writeFileSync(join(pusher, name), content);
+  g(pusher, "add", name);
+  g(pusher, "commit", "-m", `up ${name}`);
+  g(pusher, "push", "origin", "main");
+  return g(pusher, "rev-parse", "HEAD");
+}
 
 /**
  * One "start": the launcher (ExecStartPre), the fake ExecStopPost, then the
@@ -415,6 +433,60 @@ test("a changed scripts/init-db.js refuses", () => {
   assert.equal(f.git("rev-parse", "HEAD"), f.b);
 });
 
+/* ---------------------------------------------------- quarantine on refusal */
+
+/** Refuse B for the db-ahead reason: the fast path to a refusal-class refusal. */
+function refusedFixture() {
+  const f = makeFixture();
+  const db = new DatabaseSync(f.dbPath);
+  db.exec("PRAGMA user_version = 10"); // one past the running commit's generation
+  db.close();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  const r = cycle(f, { rounds: 6 });
+  assert.equal(r.state.state, "refused");
+  assert.equal(r.state.result.reason, "db-ahead");
+  return f;
+}
+
+test("a refusal writes a HELD update quarantine for the commit it refused (F2)", () => {
+  const f = refusedFixture();
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.ok(marker, "without a marker the next tick re-pulls the sha the guard just refused");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.reason, "startup-crash");
+  assert.equal(marker.by, "boot-guard");
+  assert.equal(marker.held, true, "the refused commit is still checked out: the marker is HELD");
+  assert.equal(marker.expires_at, undefined, "a held marker must never time out into 'Up to date'");
+  assert.equal(f.git("rev-parse", "HEAD"), f.b, "a refusal still changes nothing in the tree");
+});
+
+test("after the operator's recovery, the refused sha is not pulled until main moves (F2)", async () => {
+  const f = refusedFixture();
+  // The operator follows the refusal's steps: nothing was migrated, so there is
+  // no backup to restore; just put main back and start the gateway.
+  f.git("reset", "--keep", f.a);
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  try {
+    const blocked = await checkForUpdates();
+    assert.equal(blocked.skipped, "update-quarantined", JSON.stringify(blocked));
+    assert.match(blocked.message, /waiting for a newer commit on main/);
+    assert.equal(f.git("rev-parse", "HEAD"), f.a, "the refused sha must not be pulled again");
+
+    // Main moves: the marker is spent and the newer commit is taken normally.
+    const fix = pushToOrigin(f, "c.txt", "three\n");
+    assert.notEqual(fix, f.b);
+    const pulled = await checkForUpdates();
+    assert.equal(pulled.updated, true, JSON.stringify(pulled));
+    assert.equal(f.git("rev-parse", "HEAD"), fix);
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "the spent marker is removed");
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+});
+
 /* ------------------------------------------------------------ counting */
 
 test("an OOM kill is never counted and spools one alert instead", () => {
@@ -444,6 +516,20 @@ test("a planned restart (crow:shutdown / SIGTERM) is never counted", () => {
   assert.equal(r.state.state, "pending");
   assert.equal(r.state.failures, 0, "a restart we asked for is not a crash");
   assert.equal(f.git("rev-parse", "HEAD"), f.b);
+});
+
+test("a planned restart does not log 'crashed 0 of 3 times' (F8)", () => {
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  runLauncher(f); // arms the trial on B
+  markPlanned({ stateDir: f.stateDir });
+  runRecorder(f, { exit: CRASH });
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /planned restart, not counted/);
+  assert.ok(!/crashed 0 of/.test(run.stderr), `a planned restart must not read as a crash:\n${run.stderr}`);
+  assert.equal(readState(f).failures, 0);
 });
 
 /* ------------------------------------------------------- self-arming */

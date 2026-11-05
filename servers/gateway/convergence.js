@@ -159,9 +159,16 @@ export function clearConvQuarantine({ appRoot, dataDir }) {
 
 import { execFile } from "node:child_process";
 
+/**
+ * Hooks and fsmonitor off, exactly like auto-update.js and the boot guard: live
+ * installs point `core.hooksPath` INTO the tree, so any git command that writes
+ * a ref would run the tree's own hooks as this user.
+ */
+const GIT_HOOKS_OFF = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+
 function git(cwd, args) {
   return new Promise((resolve) => {
-    execFile("git", args, { cwd, timeout: 120000 }, (err, so, se) =>
+    execFile("git", [...GIT_HOOKS_OFF, ...args], { cwd, timeout: 120000 }, (err, so, se) =>
       resolve({ stdout: (so || "").trim(), stderr: (se || "").trim(), code: err ? err.code || 1 : 0 }));
   });
 }

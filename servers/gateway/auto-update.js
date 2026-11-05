@@ -304,17 +304,22 @@ async function notifyUpdateFailure(value, nowMs = Date.now()) {
  * no tick to travel on. Routing it through saveSetting keeps the classification,
  * the result-since stamp and the failure bell identical to every other path.
  *
+ * `notify:false` is for a result whose event already rang the bell — the boot
+ * guard spools the same rollback into the alert spool, which the drain delivers
+ * as a notification. One event, one row (F4); the caller only passes false when
+ * the spool file really was written, so a failed spool keeps the bell.
+ *
  * @returns {Promise<boolean>} whether it was actually written (false when no db
  *   handle exists, e.g. auto-update disabled on this instance — the caller must
  *   then retry on the next boot rather than mark the record done).
  */
-export async function recordUpdateResult(value) {
+export async function recordUpdateResult(value, { notify = true } = {}) {
   if (!db) return false;
-  await saveSetting(RESULT_KEY, value);
+  await saveSetting(RESULT_KEY, value, { notify });
   return true;
 }
 
-async function saveSetting(key, value) {
+async function saveSetting(key, value, { notify = true } = {}) {
   if (!db) return;
   try {
     if (key === RESULT_KEY) {
@@ -322,7 +327,7 @@ async function saveSetting(key, value) {
       // Every result write funnels through here, so the failure bell covers
       // each branch (including the migration-guard ones) without a per-branch
       // call to forget (audit N1c-2).
-      await notifyUpdateFailure(value);
+      if (notify) await notifyUpdateFailure(value);
     }
     await db.execute({
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
@@ -389,6 +394,18 @@ function run(cmd, args, options = {}) {
 }
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
+/**
+ * Every git command this module runs on the live checkout disables hooks and
+ * fsmonitor. Live installs point `core.hooksPath` INTO the tree, so a `pull`,
+ * `fetch` or `merge` would otherwise run the INCOMING commit's own hooks as the
+ * updater's user — before any of the checks below has seen the sha (S10). One
+ * helper prefixes the flags, so no call site can forget them.
+ */
+const GIT_HOOKS_OFF = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+
+function git(args, options = {}) {
+  return run("git", [...GIT_HOOKS_OFF, ...args], options);
+}
 /** acquireCheckoutLock's return for a read-only tree: observed free, not held. */
 const OBSERVED_SUFFIX = "#observed";
 
@@ -406,7 +423,7 @@ async function lockPath(cwd) {
  * one directory both co-hosted instances resolve identically.
  */
 export async function gitDirFor(cwd = null) {
-  const r = await run("git", ["rev-parse", "--absolute-git-dir"], cwd ? { cwd } : {});
+  const r = await git(["rev-parse", "--absolute-git-dir"], cwd ? { cwd } : {});
   return r.code === 0 && r.stdout ? r.stdout : null;
 }
 
@@ -551,7 +568,7 @@ export const _lockPrimitivesForTest = { acquireLock, releaseLock, lockIsStale };
 export async function checkForUpdates({ instance = null } = {}) {
   const log = (msg) => console.log(`[auto-update] ${msg}`);
   try {
-    const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+    const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
     if (branch.code !== 0 || branch.stdout !== "main") {
       const msg = branch.code !== 0
         ? `Skipped: cannot determine branch (${branch.stderr || "not a git checkout"})`
@@ -577,7 +594,7 @@ export async function checkForUpdates({ instance = null } = {}) {
       await saveSetting("auto_update_last_result", msg);
       treeResult = { updated: false, skipped: "read-only", message: msg };
       try {
-        const om = await run("git", ["rev-parse", "--short", "origin/main"]);
+        const om = await git(["rev-parse", "--short", "origin/main"]);
         if (om.code === 0 && om.stdout) await saveSetting("auto_update_latest_version", om.stdout);
       } catch {}
     } else if (lock && !held) {
@@ -601,7 +618,7 @@ export async function checkForUpdates({ instance = null } = {}) {
       // while last_result read "another updater is running". The holder has
       // just fetched, so origin/main is fresh.
       try {
-        const om = await run("git", ["rev-parse", "--short", "origin/main"]);
+        const om = await git(["rev-parse", "--short", "origin/main"]);
         if (om.code === 0 && om.stdout) await saveSetting("auto_update_latest_version", om.stdout);
       } catch {}
     } else {
@@ -712,7 +729,7 @@ async function pulledTreeImportCheck() {
  * pulled sha's own hooks would otherwise run as the updater's user (S10).
  */
 function resetKeep(previous) {
-  return run("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "reset", "--keep", previous]);
+  return git(["reset", "--keep", previous]);
 }
 
 /**
@@ -866,10 +883,7 @@ async function rollBackUnusableUpdate({
  */
 async function initDbUnchanged({ previous, pulled }) {
   if (!FULL_SHA_RE.test(String(previous || "")) || !FULL_SHA_RE.test(String(pulled || ""))) return false;
-  const blobAt = async (sha) => (await run(
-    "git",
-    ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "rev-parse", `${sha}:scripts/init-db.js`],
-  )).stdout;
+  const blobAt = async (sha) => (await git(["rev-parse", `${sha}:scripts/init-db.js`])).stdout;
   const before = await blobAt(previous);
   if (!before) return false; // unknown is never "unchanged"
   return before === await blobAt(pulled);
@@ -988,16 +1002,16 @@ async function fireUpdateAlert(payload, { spool = true } = {}) {
  *  before the lock). */
 export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${m}`)) {
   // Get current version
-  const currentRef = await run("git", ["rev-parse", "--short", "HEAD"]);
+  const currentRef = await git(["rev-parse", "--short", "HEAD"]);
   const currentVersion = currentRef.stdout;
   // Full sha alongside the short one: the quarantine marker and `reset --keep`
   // both need 40 hex (a prefix would name a different commit).
-  const currentFullSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+  const currentFullSha = (await git(["rev-parse", "HEAD"])).stdout;
   const gitDir = await gitDirFor();
 
   // Fetch latest from remote
   log("Checking for updates...");
-  const fetchResult = await run("git", ["fetch", "--quiet", "origin", "main"]);
+  const fetchResult = await git(["fetch", "--quiet", "origin", "main"]);
   if (fetchResult.code !== 0) {
     const msg = `Fetch failed: ${fetchResult.stderr}`;
     log(msg);
@@ -1012,7 +1026,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // can't race the marker. A quarantined sha is never re-pulled; the marker
   // auto-clears when main moves (attempts-capped).
   try {
-    const originHead = await run("git", ["rev-parse", "origin/main"]);
+    const originHead = await git(["rev-parse", "origin/main"]);
     const { evaluateQuarantine, resolveGuardDbPath } = await import("../shared/migration-guard.js");
     const { resolveDataDir } = await import("../db.js");
     const q = evaluateQuarantine({
@@ -1059,10 +1073,10 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // pull), so it clears exactly as it would off HEAD.
   let originHeadSha = "";
   try {
-    originHeadSha = (await run("git", ["rev-parse", "origin/main"])).stdout;
+    originHeadSha = (await git(["rev-parse", "origin/main"])).stdout;
     // Local HEAD is what tells the evaluator whether a HELD (expiry-less) marker
     // is still sitting on the refused commit or may time out.
-    const localHeadSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+    const localHeadSha = (await git(["rev-parse", "HEAD"])).stdout;
     const uq = evaluateUpdateQuarantine({ gitDir, originHeadSha, localHeadSha });
     // A HELD marker naming the commit the checkout HOLDS is a refusal whatever
     // origin/main says: the refused sha is still checked out, so this tick
@@ -1101,7 +1115,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   }
 
   // Check if there are new commits
-  const behind = await run("git", ["rev-list", "--count", "HEAD..origin/main"]);
+  const behind = await git(["rev-list", "--count", "HEAD..origin/main"]);
   const behindCount = parseInt(behind.stdout, 10) || 0;
 
   await saveSetting("auto_update_current_version", currentVersion);
@@ -1141,8 +1155,8 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // still-running CI skips this tick (self-heals when main is fixed or CI
   // completes); unknown fails open. CROW_UPDATE_CI_GATE=0 disables.
   if (process.env.CROW_UPDATE_CI_GATE !== "0") {
-    const remote = await run("git", ["remote", "get-url", "origin"]);
-    const targetSha = (await run("git", ["rev-parse", "origin/main"])).stdout;
+    const remote = await git(["remote", "get-url", "origin"]);
+    const targetSha = (await git(["rev-parse", "origin/main"])).stdout;
     const ci = await resolveCiVerdict(remote.stdout, targetSha);
     if (ci === "red" || ci === "pending") {
       const msg = ci === "red"
@@ -1165,7 +1179,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // a parallel session's raw `git checkout` races the outer guard across the
   // fetch window, and `pull --ff-only origin main` on an ancestor feature
   // branch FAST-FORWARDS that ref (R1 empirically proved it).
-  const recheck = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const recheck = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
   if (recheck.stdout !== "main") {
     const msg = `Skipped: branch changed mid-update (now '${recheck.stdout}')`;
     log(msg);
@@ -1179,7 +1193,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // D2: pull directly — NO stash. `git pull --ff-only` refuses only when the
   // incoming diff overlaps a locally-modified file; disjoint local WIP
   // survives untouched.
-  const pullResult = await run("git", ["pull", "--ff-only", "origin", "main"]);
+  const pullResult = await git(["pull", "--ff-only", "origin", "main"]);
   if (pullResult.code !== 0) {
     const msg = `Pull failed (local changes may conflict with the update — resolve manually): ${pullResult.stderr}`;
     log(msg);
@@ -1189,7 +1203,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   }
 
   // Install deps (only if package-lock changed)
-  const changedFiles = await run("git", ["diff", "--name-only", `${currentVersion}..HEAD`]);
+  const changedFiles = await git(["diff", "--name-only", `${currentVersion}..HEAD`]);
   const depsChanged =
     changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json");
   // A failed install leaves node_modules half-written and says nothing about the
@@ -1212,7 +1226,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // L0.2 import check — AFTER npm, BEFORE init-db. Both halves matter: init-db
   // must not run its new-schema pass for a sha that will never boot, and the
   // rollback must happen while the deps still match the tree it resets to.
-  const pulledSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+  const pulledSha = (await git(["rev-parse", "HEAD"])).stdout;
   if (npmFailed) {
     // `deps-failed` is a machine-side reason, so a rollback that MOVED the tree
     // back carries the 6 h TTL: main is retried even if it never moves (S4). A
@@ -1260,7 +1274,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     (newGeneration != null && preState.readable && preState.userVersion < newGeneration) ||
     changedFiles.stdout.split("\n").includes("scripts/init-db.js");
   if (armed) {
-    const headSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+    const headSha = (await git(["rev-parse", "HEAD"])).stdout;
     const res = await guard.runGuardedInitDb({
       dbPath, appRoot: APP_ROOT, sha: headSha, newGeneration,
       log: (m) => log(`[migration-guard] ${m}`),
@@ -1281,13 +1295,13 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       // Roll the code back to match the restored schema — but never destroy
       // local WIP on a possibly-false verdict (quarantined boot handles the
       // code-newer-than-schema case).
-      const porcelain = await run("git", ["status", "--porcelain"]);
+      const porcelain = await git(["status", "--porcelain"]);
       const trackedWip = porcelain.stdout.split("\n").filter((l) => l && !l.startsWith("??"));
       // Same three values as quarantineAndRollBack: `null` when the reinstall
       // never ran (no dependency change, or the tree was left at the new sha).
       let depsRestored = null;
       if (trackedWip.length === 0) {
-        await run("git", ["reset", "--hard", currentVersion]);
+        await git(["reset", "--hard", currentVersion]);
         if (depsChanged) {
           // The tree is back on the old commit, so its own node_modules are the
           // ones the next restart needs. A failure here is REPORTED, not
@@ -1378,7 +1392,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     }
   }
 
-  const newRef = await run("git", ["rev-parse", "--short", "HEAD"]);
+  const newRef = await git(["rev-parse", "--short", "HEAD"]);
   const newVersion = newRef.stdout;
 
   await saveSetting("auto_update_last_check", new Date().toISOString());
@@ -1455,7 +1469,7 @@ export async function startAutoUpdate(database, { noAuth = false } = {}) {
   // enabled — while continuing to run whatever the shared checkout moved to.
   // The bookkeeping and the running code disagreed and nothing detected it.
   try {
-    const ref = await run("git", ["rev-parse", "--short", "HEAD"]);
+    const ref = await git(["rev-parse", "--short", "HEAD"]);
     if (ref.code === 0 && ref.stdout) await saveSetting("auto_update_current_version", ref.stdout);
   } catch {}
 

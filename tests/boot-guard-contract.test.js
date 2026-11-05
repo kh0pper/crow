@@ -162,6 +162,24 @@ test("the update quarantine marker is byte-compatible with update-quarantine.js 
   assert.equal(readByLauncher.reason, "import-check");
 });
 
+test("a HELD marker is byte-identical in both writers, and both readers see held (F2)", () => {
+  // The boot guard writes HELD markers from a refusal (the bad commit is still
+  // checked out); auto-update writes them when a rollback could not move the
+  // tree. One format, or one side would silently drop the other's refusal.
+  const now = Date.parse("2026-01-02T03:04:05Z");
+  const launcher = buildUpdateQuarantine({ sha: B, previous: A, reason: "startup-crash", persist: true, now });
+  const dir = scratch();
+  writeUpdateQuarantineFile(dir, launcher);
+  assert.deepEqual(readUpdateQuarantine({ gitDir: dir }), launcher, "the gateway reader must accept it verbatim");
+  assert.equal(launcher.held, true);
+  assert.equal(launcher.expires_at, undefined, "a held marker never times out");
+
+  const other = scratch();
+  const gateway = writeUpdateQuarantine({ gitDir: other, sha: B, previous: A, reason: "startup-crash", by: "boot-guard", persist: true, now });
+  assert.deepEqual(gateway, launcher, "the two writers must produce the same record");
+  assert.equal(readUpdateQuarantineFile(other).held, true, "the launcher's reader must see the gateway's held flag");
+});
+
 test("both implementations use the same transient TTL table", () => {
   assert.deepEqual({ ...LAUNCHER_TRANSIENT }, { ...GATEWAY_TRANSIENT });
   const dir = scratch();

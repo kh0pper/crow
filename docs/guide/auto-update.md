@@ -179,11 +179,15 @@ refuses because the database moved ahead (`user_version`), because
 `scripts/init-db.js` changed, or because an applied migration does not declare
 that the previous code can run on the new shape, nothing you can do in the
 gateway will change the answer: the guard leaves `main` where it is, keeps the
-alert and the `STATUS` file, and does **not** re-arm the same commit on the next
+alert and the `STATUS` file, quarantines the commit so no instance pulls it
+again, and does **not** re-arm the same commit on the next
 start — otherwise it would boot the failing commit three more times per cycle
 for nothing. The other refusals (no proven previous commit, a checkout that is
 not on `main`, a read-only checkout, an `index.lock`) can clear on their own, so
-these are re-checked on the next start.
+these are re-checked on the next start. A rollback always compares the failing
+commit with the last commit that ran stably for ten minutes, not with the commit
+just before it, so after a refusal-class change is fixed forward, later crashes
+stay refusable until that fix has itself run stably for ten minutes.
 
 **Recovering from a refusal.** The alert and `~/.crow/boot-guard/STATUS` carry
 the exact steps for the case that fired. In general (`CROW_APP` is your checkout:
@@ -195,8 +199,9 @@ sudo systemctl stop crow-gateway
 
 # 2. If the alert says the database moved (a schema generation, an init-db
 #    change, or a migration that is not rollback-safe), put back the backup the
-#    migration guard took BEFORE touching git.
-ls ~/backups/crow            # or wherever your backup directory is
+#    migration guard took BEFORE touching git — the alert names it, or says that
+#    this kind of change took none. Registry migrations take no backup.
+ls "$HOME/.crow/data/backups/migrations"
 
 # 3. Move main back to a commit you know starts, keeping unrelated local edits.
 CROW_APP="${CROW_APP:-$HOME/.crow/app}"

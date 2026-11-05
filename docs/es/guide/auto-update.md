@@ -186,11 +186,16 @@ rechaza porque la base de datos avanzó (`user_version`), porque cambió
 `scripts/init-db.js`, o porque una migración aplicada no declara que el código
 anterior puede correr con la forma nueva, nada de lo que hagas en el gateway
 cambiará la respuesta: el guardián deja `main` donde está, mantiene el aviso y el
-archivo `STATUS`, y **no** vuelve a armar el mismo commit en el siguiente
+archivo `STATUS`, pone el commit en cuarentena para que ninguna instancia vuelva
+a descargarlo, y **no** vuelve a armar el mismo commit en el siguiente
 arranque — si no, arrancaría el commit que falla tres veces más por ciclo, para
 nada. Los otros rechazos (sin commit anterior probado, un checkout que no está
 en `main`, un checkout de solo lectura, un `index.lock`) pueden desaparecer solos,
-así que se revisan otra vez en el siguiente arranque.
+así que se revisan otra vez en el siguiente arranque. Una reversión siempre
+compara el commit que falla con el último commit que corrió estable diez minutos,
+no con el commit inmediatamente anterior, así que cuando un cambio de la clase que
+provoca rechazos se corrige hacia adelante, los fallos posteriores siguen siendo
+rechazables hasta que esa corrección haya corrido estable diez minutos.
 
 **Recuperarse de un rechazo.** El aviso y `~/.crow/boot-guard/STATUS` llevan los
 pasos exactos para el caso que se disparó. En general (`CROW_APP` es tu checkout:
@@ -203,8 +208,10 @@ sudo systemctl stop crow-gateway
 
 # 2. Si el aviso dice que la base de datos avanzó (una generación de esquema, un
 #    cambio en init-db, o una migración no reversible), restaura la copia que la
-#    guarda de migraciones hizo ANTES de tocar git.
-ls ~/backups/crow            # o donde esté tu directorio de copias
+#    guarda de migraciones hizo ANTES de tocar git — el aviso la nombra, o dice
+#    que este tipo de cambio no dejó ninguna. Las migraciones del registro no
+#    hacen copia.
+ls "$HOME/.crow/data/backups/migrations"
 
 # 3. Mueve main atrás a un commit que sepas que arranca, conservando cambios
 #    locales no relacionados.

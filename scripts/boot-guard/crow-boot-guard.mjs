@@ -565,13 +565,17 @@ export function acquireLockFileWaiting(path, { waitMs = LOCK_WAIT_MS, pollMs = L
 /**
  * The update quarantine record, byte-compatible with
  * servers/shared/update-quarantine.js (contract test compares both readers).
+ *
+ * `persist` is that module's HELD write: a refusal leaves the bad commit
+ * CHECKED OUT, so its marker must never expire into a silent "Up to date".
  */
 export function buildUpdateQuarantine({
-  sha, previous = null, reason, by = "boot-guard", now = Date.now(),
+  sha, previous = null, reason, by = "boot-guard", now = Date.now(), persist = false,
 } = {}) {
   if (!FULL_SHA_RE.test(String(sha || ""))) return null;
   if (typeof reason !== "string" || !reason.trim()) return null;
-  const ttl = TRANSIENT_QUARANTINE_MS[reason];
+  const held = persist === true;
+  const ttl = held ? 0 : TRANSIENT_QUARANTINE_MS[reason];
   return {
     v: 1,
     sha,
@@ -580,6 +584,7 @@ export function buildUpdateQuarantine({
     at: iso(now),
     by,
     ...(ttl ? { expires_at: iso(now + ttl) } : {}),
+    ...(held ? { held: true } : {}),
   };
 }
 
@@ -774,52 +779,87 @@ export function depsChangedBetween(root, previous, pending, git = gitText) {
 
 /* --------------------------------------------------------------- messages */
 
-function refusalText(reason, { root, detail = {}, failures, pending, previous }) {
+/** Where the migration guard writes its pre-migration backups. Re-derived here
+ *  because the installed copy cannot import servers/shared/migration-guard.js
+ *  (contract test), and a refusal has to name the real directory, not a guess. */
+export function backupDirFor(dbPath) {
+  if (typeof dbPath !== "string" || !dbPath) return null;
+  return join(dirname(dbPath), "backups", "migrations");
+}
+
+/** Does that directory actually hold a backup? A missing or empty one is not a
+ *  backup, and "restore the backup" when there is none wastes the only window
+ *  the operator has. */
+function hasBackup(dir) {
+  if (!dir) return false;
+  try { return readdirSync(dir).some((f) => f.endsWith(".db")); } catch { return false; }
+}
+
+/** Registry migrations (an id the DB records whose file changed) run through the
+ *  convergence pass and take NO backup of their own — only a guarded init-db run
+ *  does. The two kinds must not share one recovery sentence (F3). */
+const REGISTRY_REFUSALS = new Set(["migration-not-rollback-safe", "migration-unknown"]);
+
+export function refusalText(reason, { root, detail = {}, failures, pending, previous, dbPath = null }) {
   const b = short(pending);
   const p = short(previous);
   const n = `${failures} times`;
-  const recover = `To recover: stop the gateway, run git -C ${root} log --oneline -5, choose a commit known to start, `
-    + `run git -C ${root} reset --keep <that commit>, then start the gateway.`;
-  const restore = `To recover: stop the gateway, restore the pre-migration backup the migration guard took, `
-    + `run git -C ${root} reset --keep ${previous}, then start the gateway.`;
+  const dir = backupDirFor(dbPath);
+  const backupExists = hasBackup(dir);
+  // Every refusal names where the backups ARE, or says this kind of change has
+  // none to restore.
+  const backups = backupExists
+    ? (REGISTRY_REFUSALS.has(reason)
+      ? `A registry migration takes no backup of its own; the migration guard's earlier backups are in ${dir}.`
+      : `The migration guard's pre-migration backups are in ${dir}.`)
+    : (REGISTRY_REFUSALS.has(reason)
+      ? "A registry migration takes no automatic backup, so there is nothing to restore."
+      : "No automatic backup exists for this kind of change, so there is nothing to restore.");
+  // Only a backup that exists can be restored, and only for a change that took one.
+  const restoreStep = backupExists && !REGISTRY_REFUSALS.has(reason)
+    ? `restore the newest pre-migration backup from ${dir}, ` : "";
+  const recover = `To recover: stop the gateway, ${restoreStep}run git -C ${root} log --oneline -5, `
+    + `choose a commit known to start, run git -C ${root} reset --keep <that commit>, then start the gateway.`;
+  const restore = `To recover: stop the gateway, ${restoreStep}run git -C ${root} reset --keep ${previous}, `
+    + "then start the gateway.";
   switch (reason) {
     case "db-ahead":
       return `Commit ${b} crashed on startup ${n}. The DB is ahead of ${p}: its schema generation is now `
         + `${detail.userVersion} and ${p} expects ${detail.previousGeneration}, so the previous code may not `
-        + `understand the database, and nothing was changed. The cause may not be ${b}. ${restore}`;
+        + `understand the database, and nothing was changed. The cause may not be ${b}. ${backups} ${restore}`;
     case "init-db-changed":
       return `Commit ${b} crashed on startup ${n} and also changed scripts/init-db.js, which rebuilds tables `
-        + `without bumping the schema generation, so ${p} may not understand the database. Nothing was changed. ${restore}`;
+        + `without bumping the schema generation, so ${p} may not understand the database. Nothing was changed. ${backups} ${restore}`;
     case "migration-not-rollback-safe":
       return `Commit ${b} crashed on startup ${n} and applied database migration ${detail.id}, which does not `
-        + `declare that the previous code can run on the new shape. Nothing was changed. ${restore}`;
+        + `declare that the previous code can run on the new shape. Nothing was changed. ${backups} ${restore}`;
     case "migration-unknown":
       return `Commit ${b} crashed on startup ${n} and the database records migration ${detail.id}, which is not `
-        + `readable in ${b}. Nothing was changed. ${restore}`;
+        + `readable in ${b}. Nothing was changed. ${backups} ${restore}`;
     case "generation-unreadable":
       return `Commit ${b} crashed on startup ${n}, and Crow could not read the schema generation of ${p}, so it `
-        + `cannot tell whether the database is still safe for the previous code. Nothing was changed. ${recover}`;
+        + `cannot tell whether the database is still safe for the previous code. Nothing was changed. ${backups} ${recover}`;
     case "init-db-unknown":
       return `Commit ${b} crashed on startup ${n}, and scripts/init-db.js could not be compared between ${p} and `
-        + `${b}, so the database may have been rebuilt. Nothing was changed. ${recover}`;
+        + `${b}, so the database may have been rebuilt. Nothing was changed. ${backups} ${recover}`;
     case "db-unreadable":
     case "db-path-invalid":
     case "db-unknown":
       return `Commit ${b} crashed on startup ${n}, and Crow could not read this instance's database to check `
-        + `whether the previous code can still use it. Nothing was changed. ${recover}`;
+        + `whether the previous code can still use it. Nothing was changed. ${backups} ${recover}`;
     case "unproven-previous":
       return `Commit ${b} crashed on startup ${n}, and Crow has no record of a commit that booted healthily `
-        + `before it, so it cannot know what to move back to. Nothing was changed. ${recover}`;
+        + `before it, so it cannot know what to move back to. Nothing was changed. ${backups} ${recover}`;
     case "not-on-main":
       return `Commit ${b} crashed on startup ${n}, and the checkout is not on main, so moving it back would `
-        + `detach HEAD and stop updates. Nothing was changed. To recover: put the checkout back on main `
+        + `detach HEAD and stop updates. Nothing was changed. ${backups} To recover: put the checkout back on main `
         + `(git -C ${root} checkout main), then run git -C ${root} reset --keep ${previous}.`;
     case "previous-not-ancestor":
       return `Commit ${b} crashed on startup ${n}, and the recorded previous commit ${p} is not an ancestor of `
-        + `it, so moving back would drop commits. Nothing was changed. ${recover}`;
+        + `it, so moving back would drop commits. Nothing was changed. ${backups} ${recover}`;
     default:
       return `Commit ${b} crashed on startup ${n}, and Crow could not check that moving back to ${p} is safe `
-        + `(${reason}). Nothing was changed. ${recover}`;
+        + `(${reason}). Nothing was changed. ${backups} ${recover}`;
   }
 }
 
@@ -889,8 +929,21 @@ function clearStatusFile(stateDir) {
 function reportRefusal({ root, gitDir, state, stateDir, crowHome, now, decision, pending, previous, kind }) {
   const code = kind === "refuse" ? "update-rollback-refused" : "update-rollback-blocked";
   const text = kind === "refuse"
-    ? refusalText(decision.reason, { root, detail: decision.detail, failures: decision.failures, pending, previous })
+    ? refusalText(decision.reason, {
+      root, detail: decision.detail, failures: decision.failures, pending, previous, dbPath: state.db_path,
+    })
     : blockedText(decision.reason, { root, gitDir, failures: decision.failures, pending, previous });
+  // A refusal leaves the bad commit CHECKED OUT — nothing was changed, so the
+  // next update tick would pull the same sha again and re-enter the crash loop
+  // the moment the operator follows the recovery steps (F2). HELD (`persist`),
+  // because the sha really is still checked out: only the checkout moving off it
+  // gives the marker its expiry back.
+  if (kind === "refuse") {
+    const quarantined = writeUpdateQuarantineFile(gitDir, buildUpdateQuarantine({
+      sha: pending, previous, reason: "startup-crash", by: "boot-guard", now, persist: true,
+    }));
+    if (!quarantined) log(`could not write the update quarantine for ${short(pending)}`);
+  }
   const next = {
     ...state,
     state: kind === "refuse" ? "refused" : "blocked",
@@ -1023,15 +1076,21 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
   }
 
   const attemptId = attemptIdFor(env);
+  // Whether the attempt that just ended was one we asked for. The "wait" log
+  // below must not call a planned restart a crash (F8).
+  let plannedExit = false;
 
   // 2. Count the attempt that just ended, then open this one (S5/R3). The first
   // start after arming has no previous attempt, so it is never counted.
   if (state.state === "pending") {
     const prev = state.attempt;
     if (prev && prev.started_at) {
-      if (exitCountsAsCrash(prev.exit, { planned: Boolean(prev.planned_at) })) {
+      const planned = Boolean(prev.planned_at);
+      if (exitCountsAsCrash(prev.exit, { planned })) {
         state.failures = num(state.failures, 0) + 1;
         if (prev.exit) state.last_crash = { ...prev.exit };
+      } else if (prev.exit && planned) {
+        plannedExit = true;
       } else if (prev.exit && String(prev.exit.service_result || "") === "oom-kill") {
         // OOM is never evidence about the commit (operator ruling 4): one alert.
         if (spoolOnce(state, crowHome, "update-oom-during-trial", {
@@ -1127,6 +1186,9 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     saveState(stateDir, state);
     if (decision.action === "defer") {
       log(`${short(pending)} is still failing, but this start deferred (${decision.reason})`);
+    } else if (plannedExit) {
+      // A restart Crow asked for says nothing about the commit being tried (F8).
+      log(`${short(pending)}: planned restart, not counted (${state.failures} of ${FAILURE_THRESHOLD})`);
     } else {
       log(`${short(pending)} crashed ${state.failures} of ${FAILURE_THRESHOLD} times`);
     }

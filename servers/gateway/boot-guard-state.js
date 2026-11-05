@@ -248,9 +248,15 @@ export async function recordGuardResult({ record = null, stateDir = stateDirFor(
     if (!state.result || state.result.recorded) return null;
     const text = rolledBackResultText(state);
     if (!text) return null;
+    // The launcher spooled this same rollback into the alert spool, and the drain
+    // delivers it as a notification (source "migrations"). Ringing the
+    // auto-update bell as well would put TWO rows on one rollback (F4) — and the
+    // spool row is the one whose wording names the real cause. Only a spool that
+    // was NOT written leaves the bell as the sole channel.
+    const spooled = state.alerted?.[state.result.code] === state.result.from;
     const write = record || (async (value) => {
       const au = await import("./auto-update.js");
-      return au.recordUpdateResult(value);
+      return au.recordUpdateResult(value, { notify: !spooled });
     });
     const written = await write(text);
     // Only mark it recorded when the write really happened: with no db handle
