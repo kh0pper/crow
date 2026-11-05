@@ -9,7 +9,8 @@
  * gateway process avoids that entirely.
  *
  * Destination directory defaults to ~/backups/crow/, configurable via
- * CROW_BACKUP_DIR. File names, ownership sidecars and per-instance retention
+ * CROW_BACKUP_DIR (one backup dir, shared with scripts/backup.sh and
+ * scripts/restore.sh). File names, ownership sidecars and per-instance retention
  * (CROW_BACKUP_KEEP_DAYS, default 7) live in servers/shared/backup-naming.js —
  * read its header for the co-hosted naming scheme and the restore note.
  *
@@ -29,7 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
-import { performBackup, createDbClient } from "../../db.js";
+import { performBackup, createDbClient, resolveDbPath } from "../../db.js";
 import {
   backupLabel, localBackupContext, backupFileName, backupStem, ownBackupRegex,
   listOwnBackups, readOwner, isForeignOwner, ownerPath, newestBackupOwnership,
@@ -40,6 +41,40 @@ import { classifyPeer } from "../../shared/peer-class.js";
 // Kept for existing callers/tests; the logic lives in shared/backup-naming.js.
 export function getInstanceLabel() {
   return backupLabel(process.env);
+}
+
+// N1c-12: a backup is a full copy of everything Crow knows, so the directory is
+// 0700 and every file in it 0600. Enforced here as well as in scripts/backup.sh
+// because the dashboard "Run backup now" action writes through this endpoint with
+// whatever umask the gateway happens to run under.
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
+function chmodQuiet(p, mode) {
+  try { fs.chmodSync(p, mode); } catch { /* gone, or not ours to change */ }
+}
+
+/** Create the backup directory 0700 the first time; an existing directory is
+ * never clamped (it may be shared with other software, and on a filesystem
+ * without modes a chmod must not fail a backup) — it is warned about instead. */
+function ensurePrivateDir(dir, log = console) {
+  if (fs.existsSync(dir)) {
+    try {
+      const mode = fs.statSync(dir).mode & 0o777;
+      if (mode & 0o077) {
+        log.warn(`[admin-backup] WARNING: ${dir} is mode 0${mode.toString(8)} (group- or world-accessible); ` +
+          `the backups in it may be readable by others. chmod 700 it if only Crow uses it.`);
+      }
+    } catch { /* raced away */ }
+    return;
+  }
+  fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+  chmodQuiet(dir, DIR_MODE);
+}
+
+/** Real path of a file, falling back to the absolute path when it is gone. */
+function realpathOrResolve(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
 }
 
 // Verify a freshly-written backup file is a structurally sound SQLite db, and
@@ -149,7 +184,7 @@ function requireToken(req, res, next) {
  * action (POST /dashboard/nest/backup). The localhost route below calls this
  * same function — behavior is identical from both callers.
  *
- * @returns {Promise<{ok: boolean, instance: string, path: string, size_bytes: number,
+ * @returns {Promise<{ok: boolean, instance: string, db_path: string, path: string, size_bytes: number,
  *   duration_ms: number, pages_copied: number|null, pruned_older_than_days: number,
  *   pruned_count: number}>}
  */
@@ -175,7 +210,7 @@ async function runBackupInner({ now = new Date() } = {}) {
   const name = backupFileName(label, tag, date);
   const dest = path.join(dir, name);
 
-  fs.mkdirSync(dir, { recursive: true });
+  ensurePrivateDir(dir);
 
   // Never replace a same-day file another instance owns (co-hosted gateways
   // sharing one backup dir). Checked before the copy and again before rename.
@@ -193,6 +228,9 @@ async function runBackupInner({ now = new Date() } = {}) {
   const started = Date.now();
   let result;
   try {
+    // 0600 FROM CREATION (never chmod'ed into place afterwards): the copy holds
+    // everything Crow knows, and only the verified file is renamed out of it.
+    fs.closeSync(fs.openSync(tmp, "wx", FILE_MODE));
     result = await performBackup(null, tmp);
   } catch (err) {
     removeBackupFile(tmp);
@@ -235,6 +273,7 @@ async function runBackupInner({ now = new Date() } = {}) {
     // replayed onto the new copy.
     for (const suffix of ["-wal", "-shm"]) unlinkQuiet(dest + suffix);
     fs.renameSync(tmp, dest);
+    chmodQuiet(dest, FILE_MODE);
   } catch (err) {
     removeBackupFile(tmp);
     throw err;
@@ -244,8 +283,9 @@ async function runBackupInner({ now = new Date() } = {}) {
     // size + mtime fingerprint: a later in-place rewrite of the file (a
     // co-hosted gateway still on old code) shows up as a "mismatch".
     const st = fs.statSync(dest);
-    fs.writeFileSync(sidecarTmp, JSON.stringify({ ...me, written_at: new Date().toISOString(), size_bytes: st.size, mtime_ms: st.mtimeMs }, null, 2) + "\n");
+    fs.writeFileSync(sidecarTmp, JSON.stringify({ ...me, written_at: new Date().toISOString(), size_bytes: st.size, mtime_ms: st.mtimeMs }, null, 2) + "\n", { mode: FILE_MODE });
     fs.renameSync(sidecarTmp, ownerPath(dest));
+    chmodQuiet(ownerPath(dest), FILE_MODE);
   } catch (err) {
     unlinkQuiet(sidecarTmp);
     console.warn("[admin-backup] could not write owner sidecar:", err.message);
@@ -262,6 +302,11 @@ async function runBackupInner({ now = new Date() } = {}) {
     instance: label,
     instance_tag: tag,
     instance_id: me.instance_id,
+    // WHICH database this copy is of. A host can run several gateways (one per
+    // CROW_HOME) whose /health all answer: scripts/backup-db.mjs only accepts
+    // this copy when this path is its own crow.db, and refuses to fall back to
+    // opening the file while anything holds it.
+    db_path: realpathOrResolve(resolveDbPath()),
     path: dest,
     size_bytes: size,
     verified: true,

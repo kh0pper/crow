@@ -61,6 +61,17 @@ export function backupFileName(label, tag, date) {
   return `${backupStem(label, tag)}-${date}.db`;
 }
 
+/**
+ * Directory name of THIS instance's artifacts blob copy inside the backup dir.
+ * The host-default instance keeps the historical `artifacts`; an instance with
+ * its own CROW_HOME gets `artifacts-<stem>`, so two co-hosted instances rsync
+ * (`--delete`) into separate subdirectories instead of pruning each other's
+ * blobs.
+ */
+export function artifactStoreName(label, tag) {
+  return tag ? `artifacts-${backupStem(label, tag)}` : "artifacts";
+}
+
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

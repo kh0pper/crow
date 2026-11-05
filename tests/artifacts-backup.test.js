@@ -35,7 +35,10 @@ test("backup.sh --dry-run lists the artifacts store rsync next to the DB dump", 
       CROW_BACKUP_GIT_REPO: "",
     },
   });
-  assert.match(out, /\[dry-run\] Would create: .*crow-[\d-]+\.sql/, "the dump is still listed");
+  // N1c-9/N1c-11: the copy is named by servers/shared/backup-naming.js
+  // (<label>[-<tag>]-<date>.db), and the dump is named off it.
+  assert.match(out, /\[dry-run\] Would create: .*\d{4}-\d{2}-\d{2}\.sql/, "the dump is still listed");
+  assert.match(out, /\[dry-run\] Would create: .*\d{4}-\d{2}-\d{2}\.db/, "the binary copy is listed");
   assert.match(out, new RegExp(`\\[dry-run\\] Would rsync ${escRe(join(dataDir, "artifacts"))}/`), "the artifacts store is listed");
 });
 
