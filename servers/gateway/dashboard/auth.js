@@ -13,6 +13,8 @@ import { createDbClient, auditLog } from "../../db.js";
 import { is2faEnabled, verifyDeviceTrust, createPending2faToken } from "./totp.js";
 import { forwardedAddrs, classifyPeer, isOverlayAddr, normalizeAddr } from "../../shared/peer-class.js";
 import { peerTrust } from "../../shared/peer-trust.js";
+import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
+import { escapeHtml } from "./shared/components.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -483,6 +485,9 @@ export function isPrivateOrAllowlistedIp(raw) {
  *   - a declared proxy (CROW_TRUSTED_PROXIES) or a direct peer passes only
  *     when its own address and every address any forwarding header names are
  *     private, tailnet or CROW_ALLOWED_IPS (a header can only take trust away);
+ *   - a connection on the dedicated proxy socket (proxy-socket.js) is a
+ *     declared proxy that vouches for the rightmost X-Forwarded-For hop; with
+ *     no such hop it names nobody and is refused;
  *   - bare loopback, and loopback carrying headers it cannot vouch for, deny.
  */
 export function isAllowedNetwork(req) {
@@ -499,6 +504,10 @@ export function isAllowedNetwork(req) {
       // trust away and the request is denied (pinned in tests/auth-network.test.js).
       return isOverlayAddr(p.client) && p.hops.every((a) => isOverlayAddr(a));
     case "proxy":
+      // `client` is null when nobody vouched for the request (a proxy-socket
+      // connection with no X-Forwarded-For): fail closed, never read the
+      // (empty) socket address as the client.
+      if (!p.client) return false;
       return p.hops.length ? p.hops.every(trustedClient) : trustedClient(p.client);
     case "direct":
       return trustedClient(p.socket) && p.hops.every(trustedClient);
@@ -569,6 +578,9 @@ export function isAllowedEnrollNetwork(req) {
   const headers = req.headers || {};
   if (headers["tailscale-funnel-request"]) return false;
   const sock = String(req.socket?.remoteAddress || req.connection?.remoteAddress || "").replace(/^::ffff:/, "");
+  // No socket address at all (the dedicated proxy socket, proxy-socket.js) is
+  // refused: enrollment is reached over the tailnet directly, never through
+  // this host's Caddy.
   if (!sock) return false;
   const hops = forwardedAddrs(headers);
   if (hops.some((a) => a === null)) return false;
@@ -598,10 +610,14 @@ export function isAllowedEnrollNetwork(req) {
 export function dashboardAuth(req, res, next) {
   // Network check
   if (!isAllowedNetwork(req)) {
-    res.status(403).type("html").send(`<!DOCTYPE html><html><head><title>Access Denied</title></head><body style="font-family:sans-serif;padding:3rem;text-align:center">
-      <h1>Access Denied</h1>
-      <p>Crow's Nest is only accessible from local network or Tailscale.</p>
-      <p>Set up <a href="https://tailscale.com">Tailscale</a> for secure remote access,<br>or set <code>CROW_DASHBOARD_PUBLIC=true</code> in your <code>.env</code> to allow public access.</p>
+    // No env-var escape hatch here: the security audit's finding was that this
+    // page sent the owner to CROW_DASHBOARD_PUBLIC=true, which turns the whole
+    // network gate off. Say how to reach Crow instead.
+    const cookies = parseCookies(req);
+    const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
+    res.status(403).type("html").send(`<!DOCTYPE html><html><head><title>${escapeHtml(t("login.accessDeniedTitle", lang))}</title></head><body style="font-family:sans-serif;padding:3rem;text-align:center">
+      <h1>${escapeHtml(t("login.accessDeniedTitle", lang))}</h1>
+      <p>${escapeHtml(t("login.accessDeniedBody", lang))}</p>
     </body></html>`);
     return;
   }

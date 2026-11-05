@@ -17,7 +17,11 @@
  *                       on this box (loopback, an own address, a bridge) can't
  *                       be told apart from any local process writing the same
  *                       header, so it is "this machine" (no owner's turn behind
- *                       a same-box Caddy/nginx; docs/getting-started/custom-domain.md)
+ *                       a same-box Caddy/nginx; docs/getting-started/custom-domain.md).
+ *                       A connection on the dedicated proxy socket is the one
+ *                       exception: it has no socket address and only its group
+ *                       may open it (proxy-socket.js), so the client the
+ *                       install-time Caddy named decides.
  *   local, unverified,  none: always "this machine" (loopback with no client
  *   funnel              we can trust, or a public Funnel visitor)
  *
@@ -137,8 +141,10 @@ export function effectiveClient(req, opts = {}) {
   if (p.via === "proxy") {
     // A declared proxy on this box can't vouch for anyone: any local process opens the same
     // socket and writes the same X-Forwarded-For (Serve is trusted only because peer-uid.js
-    // checks tailscaled's uid; nothing checks a same-box proxy's).
-    if (isSelfAddress(p.socket, opts)) return null;
+    // checks tailscaled's uid; nothing checks a same-box proxy's). The dedicated proxy socket
+    // (proxy-socket.js) is the exception: no socket address to be "this machine" from, and only
+    // the members of its group may connect, so the client its owner named decides.
+    if (!p.proxySocket && isSelfAddress(p.socket, opts)) return null;
     return p.client || null;
   }
   return null;

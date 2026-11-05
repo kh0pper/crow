@@ -65,6 +65,14 @@ export const translations = {
   // container, so "~/.crow/setup-token" would be the wrong place to look.
   "login.setupTokenGated": { en: "Use the link you were sent to set up your password. The setup link is printed by the installer, and the same token is saved as setup-token in Crow's home directory — on this machine, or inside the Crow container.", es: "Usa el enlace que te enviaron para establecer tu contraseña. El enlace de configuración lo imprime el instalador, y ese mismo token se guarda como setup-token en el directorio home de Crow — en esta máquina o dentro del contenedor de Crow." },
   "login.setupTokenInvalid": { en: "Invalid setup token. Use the link you were sent to set up your password. The setup link is printed by the installer, and the same token is saved as setup-token in Crow's home directory — on this machine, or inside the Crow container.", es: "Token de configuración inválido. Usa el enlace que te enviaron para establecer tu contraseña. El enlace de configuración lo imprime el instalador, y ese mismo token se guarda como setup-token en el directorio home de Crow — en esta máquina o dentro del contenedor de Crow." },
+  // Access Denied page (dashboard/auth.js): the security audit's finding was that
+  // this page offered CROW_DASHBOARD_PUBLIC=true, which turns the network gate
+  // off entirely. Plain guidance instead, and no env-var advice at all.
+  "login.accessDeniedTitle": { en: "Access Denied", es: "Acceso denegado" },
+  "login.accessDeniedBody": {
+    en: "Crow's Nest opens from your home network or your Tailscale network. If you opened it on the server itself (localhost), use the server's network address or its Tailscale name instead. Public access from the internet is off on purpose.",
+    es: "Crow's Nest se abre desde tu red doméstica o tu red de Tailscale. Si lo abriste en el propio servidor (localhost), usa la dirección de red del servidor o su nombre de Tailscale. El acceso público desde internet está desactivado a propósito.",
+  },
   "login.2faTitle": { en: "Two-Factor Authentication", es: "Autenticación de dos factores" },
   "login.2faSubtitle": { en: "Enter the code from your authenticator app", es: "Ingresa el código de tu aplicación autenticadora" },
   "login.2faPlaceholder": { en: "000000", es: "000000" },

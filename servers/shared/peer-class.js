@@ -12,7 +12,10 @@
  *               X-Forwarded-Host present (the shape tailscaled writes)
  *   funnel      loopback socket owned by a Serve uid, Funnel header,        the XFF address
  *               exactly one XFF value that is a PUBLIC address
- *   proxy       socket listed in CROW_TRUSTED_PROXIES                        rightmost undeclared XFF hop
+ *   proxy       socket listed in CROW_TRUSTED_PROXIES, or a connection       rightmost undeclared XFF hop
+ *               accepted on the dedicated proxy socket (PROXY_SOCKET: the
+ *               rightmost XFF hop only; null when it carried none, which
+ *               denies)
  *   direct      any other non-loopback socket                                the socket
  *   unverified  any other loopback request (forged or undeclared-proxy      the socket
  *               headers, a Serve/Funnel shape from the wrong uid, a
@@ -26,6 +29,16 @@
  *
  * The uid check fails closed: an owner that cannot be verified (no
  * /proc/net/tcp, a read error, the row gone) leaves the request unverified.
+ *
+ * PROXY_SOCKET marks a connection accepted on the gateway's dedicated proxy
+ * socket (servers/gateway/proxy-socket.js, the security audit's finding): a
+ * unix socket has no peer address, so it is trusted by construction (systemd
+ * owns it — SocketUser=root, SocketGroup=caddy, mode 0660 — so only the local
+ * Caddy can connect) and the client is EXACTLY the rightmost X-Forwarded-For
+ * hop, never an earlier one. The installer's Caddy dials that socket, so its
+ * visitors are a verified `proxy` instead of an unverifiable loopback peer.
+ * CROW_TRUSTED_PROXIES=loopback is deliberately NOT the fix — see
+ * loopbackProxyWarning below.
  *
  * Residuals (also in docs/architecture/dashboard.md): a process running as
  * tailscaled's uid (root) can forge the Serve shape; so can one running as the
@@ -209,6 +222,11 @@ export function warnLoopbackProxiedDoors({ env = process.env, log = console.warn
 const FORWARDING = ["x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host", "x-forwarded-proto"];
 const MEMO = Symbol.for("crow.peer-class");
 
+/** Set on every connection accepted on the gateway's dedicated proxy socket
+ * (servers/gateway/proxy-socket.js). Symbol.for so a bundle's copy of this
+ * module agrees with the gateway's. */
+export const PROXY_SOCKET = Symbol.for("crow.proxy-socket");
+
 const present = (v) => v != null && String(v).trim() !== "";
 
 function undeclaredHint(addr) {
@@ -216,17 +234,33 @@ function undeclaredHint(addr) {
 }
 
 /** Express proxy-addr semantics: walk X-Forwarded-For from the right while the
- * current address is a declared proxy. */
+ * current address is a declared proxy (CROW_TRUSTED_PROXIES). The first
+ * address that is not a declared proxy is the client. */
 function proxyClient(sock, headers) {
   let client = sock;
   const xff = headerValues(headers["x-forwarded-for"]).map((v) => v.trim()).filter(Boolean);
   for (const v of xff.reverse()) {
-    if (!isTrustedProxy(client)) break;
+    if (client !== null && !isTrustedProxy(client)) break;
     const a = bareForwardedAddr(v);
     if (!a) break;
     client = normalizeAddr(a);
   }
   return client;
+}
+
+/** The client on a connection accepted on the dedicated proxy socket: exactly
+ * the rightmost X-Forwarded-For hop — never walk further left. The socket
+ * itself is the trust anchor (systemd owns it; only the caddy group can open
+ * it), so the address Caddy saw is the client, even when that hop happens to be
+ * another proxy this box also lists in CROW_TRUSTED_PROXIES: the visitor behind
+ * it is still the address Caddy named, and reading an earlier hop would let the
+ * header move the client a proxy deeper. No X-Forwarded-For → nobody to vouch
+ * for (null, which denies). */
+function proxySocketClient(headers) {
+  const xff = headerValues(headers["x-forwarded-for"]).map((v) => v.trim()).filter(Boolean);
+  if (!xff.length) return null;
+  const a = bareForwardedAddr(xff[xff.length - 1]);
+  return a ? normalizeAddr(a) : null;
 }
 
 function loginOf(headers) {
@@ -253,17 +287,27 @@ export function isLocalPeer(remoteAddr, headers = {}) {
   } catch { return false; }
 }
 
-/** → { via, client, hops, socket, tailnetLogin, peerUid }. See the table above. */
+/** → { via, client, hops, socket, tailnetLogin, peerUid, proxySocket }.
+ * See the table above. */
 export function classifyPeer(req) {
   if (req && req[MEMO]) return req[MEMO];
   const socket = req?.socket || req?.connection || null;
   const headers = req?.headers || {};
   const sock = normalizeAddr(socket?.remoteAddress || "");
   const hops = forwardedAddrs(headers).map((a) => (a === null ? null : normalizeAddr(a)));
-  const out = { via: "unverified", client: sock, hops, socket: sock, tailnetLogin: null, peerUid: null };
+  const proxySocket = !!(socket && socket[PROXY_SOCKET] === true);
+  const out = { via: "unverified", client: sock, hops, socket: sock, tailnetLogin: null, peerUid: null, proxySocket };
   const hasFwd = hasForwarding(headers);
 
-  if (!sock) {
+  if (proxySocket) {
+    // A connection accepted on the dedicated proxy socket (proxy-socket.js):
+    // no peer address at all, trusted because only the socket unit's group can
+    // connect. The client is exactly the rightmost hop Caddy named; with no
+    // X-Forwarded-For there is nobody to vouch for, and client stays null
+    // (isAllowedNetwork denies it — fail closed).
+    out.via = "proxy";
+    out.client = proxySocketClient(headers);
+  } else if (!sock) {
     // no peer address: stays unverified
   } else if (isTrustedProxy(sock)) {
     out.via = "proxy";
@@ -306,17 +350,22 @@ function own(req, key, value) {
 }
 
 /**
- * First network middleware: attaches `req.crowPeer`. For Serve and Funnel only,
- * shadows Express's `req.ip` / `req.ips` (and protocol/secure when Serve said
- * https) with the client tailscaled named, so every `req.ip` consumer (rate
- * limits, CrowdSec, the login lockout) sees what it saw before; every other
- * class keeps Express's getters, which honour only CROW_TRUSTED_PROXIES.
+ * First network middleware: attaches `req.crowPeer`. For Serve, Funnel and the
+ * dedicated proxy socket (proxy-socket.js), shadows Express's `req.ip` /
+ * `req.ips` (and protocol/secure when the forwarder said https) with the
+ * client it named, so every `req.ip` consumer (rate limits, CrowdSec, the
+ * login lockout) sees a real address; every other class keeps Express's
+ * getters, which honour only CROW_TRUSTED_PROXIES.
  */
 export function resolveClientMiddleware() {
   return (req, _res, next) => {
     const p = classifyPeer(req);
     req.crowPeer = p;
-    if (p.via === "serve" || p.via === "funnel") {
+    if (p.via === "serve" || p.via === "funnel" || (p.proxySocket && p.client)) {
+      // A proxy-socket request has no socket address, so Express's own ip
+      // getters would yield undefined: every Caddy visitor would share one
+      // rate-limit and login-lockout bucket. The client Caddy named is the
+      // one to key on.
       own(req, "ip", p.client);
       own(req, "ips", [p.client]);
       if (String(req.headers["x-forwarded-proto"] || "").trim().toLowerCase() === "https") {

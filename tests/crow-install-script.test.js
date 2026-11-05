@@ -305,3 +305,141 @@ test("libatomic1 is installed in the Node step, before any npm install/ci (rocks
   // After the whole Node if/else, so both paths (installed / just installed) run it.
   assert.ok(aptIdx > s.indexOf("\nfi\n", step2), "must run on the Node-already-installed path too");
 });
+
+// ─── The dedicated proxy socket (the security audit's finding N1a-3/N1a-4) ───
+
+const FIX_SCRIPT = resolve(import.meta.dirname, "..", "scripts", "fix-caddy-proxy-socket.sh");
+const fixSrc = () => readFileSync(FIX_SCRIPT, "utf-8");
+
+/** The text between the gateway unit's `tee` and the Caddyfile's. */
+function gatewayUnitBlock(s) {
+  return s.slice(
+    s.indexOf("sudo tee /etc/systemd/system/crow-gateway.service"),
+    s.indexOf("# Caddy reverse proxy"),
+  );
+}
+
+/** The text of the socket-unit heredoc the installer writes. */
+function socketUnitBlock(s) {
+  const start = s.indexOf("sudo tee /etc/systemd/system/crow-gateway-proxy.socket");
+  const end = s.indexOf("\nSOCKETEOF\n", start);
+  return start === -1 || end === -1 ? "" : s.slice(start, end);
+}
+
+test("proxy socket: systemd owns it — root:caddy 0660 on /run/crow-proxy, enabled before the gateway", () => {
+  const s = src();
+  const unit = socketUnitBlock(s);
+  assert.ok(unit, "the installer must write /etc/systemd/system/crow-gateway-proxy.socket");
+  assert.match(unit, /^ListenStream=\/run\/crow-proxy\/gateway\.sock$/m);
+  assert.match(unit, /^SocketUser=root$/m);
+  assert.match(unit, /^SocketGroup=caddy$/m);
+  assert.match(unit, /^SocketMode=0660$/m);
+  assert.match(unit, /^DirectoryMode=0755$/m);
+  assert.match(unit, /^WantedBy=sockets\.target$/m);
+  // Without Service= the socket points at a nonexistent crow-gateway-proxy.service and cannot start (review).
+  assert.match(unit, /^Service=crow-gateway\.service$/m);
+  // The socket is started before the gateway that consumes its fd.
+  const socketIdx = s.indexOf("systemctl enable --now crow-gateway-proxy.socket");
+  const gatewayIdx = s.indexOf("systemctl restart crow-gateway\n");
+  assert.ok(socketIdx > -1 && gatewayIdx > -1 && socketIdx < gatewayIdx, "socket first, then the gateway");
+});
+
+test("proxy socket: the gateway unit takes it by activation and owns no runtime dir", () => {
+  const s = src();
+  const unit = gatewayUnitBlock(s);
+  // Sockets= is a [Service] key; in [Unit] systemd ignores it and passes no fd (review).
+  const svc = unit.slice(unit.indexOf("[Service]"), unit.indexOf("[Install]"));
+  assert.match(svc, /^Sockets=crow-gateway-proxy\.socket$/m);
+  assert.doesNotMatch(unit.slice(0, unit.indexOf("[Service]")), /^Sockets=/m);
+  assert.match(unit, /^Requires=crow-gateway-proxy\.socket$/m);
+  assert.match(unit, /^After=crow-gateway-proxy\.socket$/m);
+  // The old gateway-owned socket setup is gone: no runtime dir, no env path.
+  assert.doesNotMatch(s, /^RuntimeDirectory=crow$/m);
+  assert.doesNotMatch(s, /^RuntimeDirectoryMode=0750$/m);
+  assert.doesNotMatch(unit, /RuntimeDirectory=crow/);
+  assert.doesNotMatch(s, /CROW_PROXY_SOCKET/);
+  // ...and the gateway's user is never added to the caddy service user's group.
+  assert.doesNotMatch(s, /usermod -aG "\$USER" caddy/);
+});
+
+test("proxy socket: Caddy dials the unix socket, never loopback with forwarded headers", () => {
+  const s = src();
+  assert.match(s, /reverse_proxy unix\/\/run\/crow-proxy\/gateway\.sock/);
+  assert.doesNotMatch(s, /reverse_proxy (localhost|127\.0\.0\.1):3001/);
+});
+
+test("fix-caddy-proxy-socket.sh: bash -n parses", () => {
+  execFileSync("bash", ["-n", FIX_SCRIPT]);
+});
+
+test("fix-caddy-proxy-socket.sh: shellcheck passes when available (skips otherwise)", (t) => {
+  const which = spawnSync("shellcheck", ["--version"], { stdio: "ignore" });
+  if (which.error) return t.skip("shellcheck not installed");
+  const r = spawnSync("shellcheck", [FIX_SCRIPT], { encoding: "utf-8" });
+  assert.equal(r.status, 0, r.stdout);
+});
+
+test("fix-caddy-proxy-socket.sh: installs the socket unit + drop-in, restarts Caddy, verifies /health", () => {
+  const s = fixSrc();
+  // Idempotent: BOTH facts — the unit file and the gateway's Sockets= — stop it.
+  assert.match(s, /Already set up/);
+  assert.match(s, /systemctl show -p Sockets --value/);
+  // The socket unit itself, with the same ownership the installer writes.
+  assert.match(s, /SOCKET_UNIT="\/etc\/systemd\/system\/\$SOCKET_UNIT_NAME"/);
+  assert.match(s, /^ListenStream=\/run\/crow-proxy\/gateway\.sock$/m);
+  assert.match(s, /^SocketUser=root$/m);
+  assert.match(s, /^SocketGroup=caddy$/m);
+  assert.match(s, /^SocketMode=0660$/m);
+  // The three unit lines go in through the drop-in, not a rewritten unit file.
+  assert.match(s, /DROP_IN="\$DROP_IN_DIR\/proxy-socket\.conf"/);
+  const dropIn = s.slice(s.indexOf('cat > "$DROP_IN"'), s.indexOf("\nEOF\n", s.indexOf('cat > "$DROP_IN"')));
+  assert.match(dropIn.slice(dropIn.indexOf("[Service]")), /^Sockets=crow-gateway-proxy\.socket$/m, "Sockets= under [Service]");
+  assert.doesNotMatch(dropIn.slice(0, dropIn.indexOf("[Service]")), /^Sockets=/m);
+  assert.match(s, /^Service=crow-gateway\.service$/m);
+  assert.match(s, /^Requires=crow-gateway-proxy\.socket$/m);
+  assert.match(s, /^After=crow-gateway-proxy\.socket$/m);
+  // Only the loopback dial line is rewritten (the sed target), and both halves
+  // of the rewrite are asserted before anything is restarted.
+  assert.match(s, /sed -E .*localhost\|127\\\.0\\\.0\\\.1.*unix\/\/run\/crow-proxy\/gateway\.sock/);
+  assert.match(s, /if grep -Eq "\$LOOPBACK_RE" "\$CADDYFILE"/);
+  assert.match(s, /if ! grep -Eq "\$UNIX_RE" "\$CADDYFILE"/);
+  assert.match(s, /caddy validate --config "\$CADDYFILE"/);
+  // Backups before any change, and a restore trap that says so.
+  assert.match(s, /cp -a "\$CADDYFILE" "\$BACKUP_DIR\/Caddyfile"/);
+  assert.match(s, /trap restore ERR/);
+  assert.match(s, /restoring the previous setup/);
+  // Service sequence: daemon-reload, the socket, the gateway, then a FULL Caddy restart.
+  assert.match(s, /systemctl daemon-reload/);
+  assert.match(s, /systemctl enable --now "\$SOCKET_UNIT_NAME"/);
+  assert.match(s, /systemctl restart "\$GATEWAY_UNIT_NAME"/);
+  assert.match(s, /systemctl restart caddy/);
+  assert.doesNotMatch(s, /reload caddy/);
+  // Verification: /health through Caddy for the Caddyfile's own site, 200 or undo.
+  assert.match(s, /--resolve "\$SITE_HOST:\$SITE_PORT:127\.0\.0\.1"/);
+  assert.match(s, /https:\/\/\$SITE_HOST:\$SITE_PORT\/health/);
+  assert.match(s, /if \[ "\$HEALTH_CODE" != "200" \]/);
+  // The gateway user comes from systemd, and the caddy user/group are guarded.
+  assert.match(s, /systemctl show -p User --value "\$GATEWAY_UNIT_NAME"/);
+  assert.match(s, /id "\$CADDY_GROUP"/);
+  assert.match(s, /getent group "\$CADDY_GROUP"/);
+  // No group membership is changed any more.
+  assert.doesNotMatch(s, /usermod/);
+});
+
+test("proxy socket units pass systemd-analyze verify when available (skips otherwise)", (t) => {
+  const which = spawnSync("systemd-analyze", ["--version"], { stdio: "ignore" });
+  if (which.error) return t.skip("systemd-analyze not installed");
+  const s = src();
+  const sock = socketUnitBlock(s).replace(/^.*\n/, "");
+  const g = gatewayUnitBlock(s);
+  const svc = g.slice(g.indexOf("[Unit]"), g.indexOf("\nEOF\n"))
+    .replaceAll("$USER", process.env.USER || "nobody").replaceAll("$CROW_APP", "/tmp")
+    .replaceAll("$(which node)", process.execPath).replaceAll("$CROW_DATA", "/tmp")
+    .replace(/^Requires=docker\.service$/m, "").replace(/^After=.*docker.*$/m, "");
+  const dir = mkdtempSync(join(tmpdir(), "crow-units-"));
+  writeFileSync(join(dir, "crow-gateway-proxy.socket"), sock + "\n");
+  writeFileSync(join(dir, "crow-gateway.service"), svc + "\n");
+  const r = spawnSync("systemd-analyze", ["verify", "--man=no", join(dir, "crow-gateway-proxy.socket"), join(dir, "crow-gateway.service")], { encoding: "utf-8" });
+  const out = (r.stdout || "") + (r.stderr || "");
+  assert.doesNotMatch(out, /Unknown key name|cannot be started|not loaded/, out);
+});

@@ -59,6 +59,7 @@ import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
 import { refuseRelayedInternal } from "./middleware/internal-guard.js";
 import { gatewayListenPort } from "./listen-port.js";
+import { startActivatedProxySocket, closeProxySocket } from "./proxy-socket.js";
 
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
@@ -790,6 +791,8 @@ const { setupCallsSignaling: _setupCallsSignaling, setupCompanionProxy: _setupCo
 const { bodyErrorHandler } = await import("./body-error-handler.js");
 app.use(bodyErrorHandler);
 
+let proxyServer = null;
+
 const server = app.listen(PORT, BIND, (error) => {
   if (error) {
     console.error("Failed to start gateway:", error);
@@ -805,14 +808,34 @@ const server = app.listen(PORT, BIND, (error) => {
     BIND,
     noAuth,
   });
+
+  // The dedicated proxy socket (the security audit's finding): SYSTEMD owns the
+  // socket (`crow-gateway-proxy.socket`: root:caddy 0660 on
+  // /run/crow-proxy/gateway.sock) and hands this process the listening fd via
+  // socket activation, so the installer's Caddy dials a unix socket whose mode
+  // only Caddy can open — a bot running as the gateway's own user cannot forge
+  // an X-Forwarded-For through it. Every connection accepted here is marked and
+  // classified `proxy` with the client Caddy named
+  // (servers/gateway/proxy-socket.js). Started after the post-listen setup so
+  // the sync WS handlers exist; any handler wired later is still seen, because
+  // upgrades look them up per request. Skipped under --no-auth (no gate to
+  // serve) and when there is no activation fd (a plain `node
+  // servers/gateway/index.js` run). Never throws: a socket that cannot start
+  // only costs the proxy path.
+  if (!noAuth) proxyServer = startActivatedProxySocket(app, server);
 });
+
+// A supervised restart closes the TCP listener in post-listen; close the proxy
+// listener alongside it, so no connection is left accepted on a dying process.
+process.on("crow:shutdown", () => closeProxySocket(proxyServer));
 
 // --- Graceful Shutdown ---
 //
 // 7-step sequence (per W4-2 spec, total bound ≤ ~15s):
 //   1. shuttingDown = true (blocks new requests in middleware that checks it)
 //   2. server.close() + closeIdleConnections() — stop accepting; release idle keep-alives
-//   3. Drain up to CROW_SHUTDOWN_DRAIN_MS (default 3000) for in-flight requests to finish.
+//   3. Drain up to CROW_SHUTDOWN_DRAIN_MS (default 3000) for in-flight requests to finish
+//      on BOTH listeners (the TCP server and the systemd-activated proxy socket).
 //      NOTE: /health is served by this same listener — a new monitor poll gets
 //      ECONNREFUSED during the drain window.  That is the correct restart-window
 //      behaviour; up to ~drain-window of monitor-visible refusals is expected.
@@ -827,6 +850,19 @@ const CROW_SHUTDOWN_DRAIN_MS = parseInt(process.env.CROW_SHUTDOWN_DRAIN_MS || "3
 
 let shuttingDown = false;
 
+/** Resolves when a listener has emitted `close`. The listener is registered
+ * BEFORE close(), because a second `close(cb)` on an already-closing server
+ * would wait for an event that has already fired. Never rejects. */
+function closeAndWait(listener) {
+  if (!listener) return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      listener.once("close", () => resolve());
+      listener.close();
+    } catch { resolve(); }
+  });
+}
+
 async function gracefulShutdown() {
   if (shuttingDown) return;
   shuttingDown = true;                                           // step 1
@@ -839,18 +875,22 @@ async function gracefulShutdown() {
     stopScheduler();
   } catch {}
 
-  // Step 2 — stop accepting new connections; release idle keep-alive sockets
-  server.close();
+  // Step 2 — stop accepting new connections on BOTH listeners; release idle
+  // keep-alives. The close promises are collected here so step 3 can wait for
+  // both servers to finish, not just the TCP one.
+  const tcpClosed = closeAndWait(server);
   server.closeIdleConnections();
+  const proxyClosed = closeProxySocket(proxyServer);
 
-  // Step 3 — wait for in-flight requests (drain window)
+  // Step 3 — wait for in-flight requests (drain window) on either listener
   await Promise.race([
-    new Promise((resolve) => server.close(resolve)),            // fires when all connections end
+    Promise.all([tcpClosed, proxyClosed]),                     // fires when both are closed
     new Promise((resolve) => setTimeout(resolve, CROW_SHUTDOWN_DRAIN_MS)),
   ]);
 
-  // Step 4 — sever any remaining sockets (SSE/Turbo-Stream etc.)
+  // Step 4 — sever any remaining sockets (SSE/Turbo-Stream etc.) on either listener
   server.closeAllConnections();
+  closeProxySocket(proxyServer, { force: true });
 
   // Step 5 — session + proxy shutdown, same semantics as before
   const { shutdownAll } = await import("./proxy.js");
