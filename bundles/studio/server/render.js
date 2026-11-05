@@ -1170,6 +1170,9 @@ function engineAssets() {
     // (engine-client.js's SOURCE_FILES), so a render loads it like any other
     // engine source.
     "spessasynth.js": readFileSync(join(BUNDLE_DIR, "vendor", "spessasynth", "spessasynth.js"), "utf8"),
+    // The SoundFont hosts (one synth per font, one channel per track) ride in the
+    // worklet module with the synth they drive.
+    "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };

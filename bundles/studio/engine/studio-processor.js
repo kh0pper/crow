@@ -1,19 +1,20 @@
 /**
  * Studio engine worklet processor — the SunVox host.
  *
- * `engine-client.js` concatenates six files into ONE module and loads it with
+ * `engine-client.js` concatenates these files into ONE module and loads it with
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + studio-processor.js
+ *       + spessasynth.js + font-voice.js + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
  * declares the `SunVoxLib` factory), with the pure sequencer
  * (`StudioSequencer` on `globalThis`), with the sampler's voice DSP
- * (`StudioSamplerVoice`) and with the performance-effects bus
- * (`StudioPerfFx`). Nothing here is imported: the same source runs in a
- * browser's `AudioWorkletGlobalScope` and in node-web-audio-api's worklet
- * thread.
+ * (`StudioSamplerVoice`), with the performance-effects bus (`StudioPerfFx`) and
+ * with the SoundFont hosts (`StudioFontVoice`, which drives the vendored
+ * synth's `SpessaSynthProcessor`). Nothing here is imported: the same source
+ * runs in a browser's `AudioWorkletGlobalScope` and in node-web-audio-api's
+ * worklet thread.
  *
  * ## One SunVox engine per track, mixed in JavaScript
  *
@@ -94,6 +95,35 @@
  *
  * Track gain, pan, mute and solo apply to an audio track exactly as they do to
  * an engine's output: in the mix below, after the voices are summed.
+ *
+ * ## SoundFont tracks: one synth per font, one channel per track
+ *
+ * A track whose device is `{engine: "soundfont", font_id, bank, program}` plays
+ * an instrument out of the song's `library` (plan 1d). Its notes go to
+ * `font-voice.js` (`StudioFontVoice`), which parses ONE bank per font however
+ * many tracks play it and gives each track its own MIDI channel. Every run is
+ * rendered through the synth once and each soundfont track reads its own
+ * channel's dry stereo pair, so its gain, pan, mute, solo (and, from PR B, its
+ * inserts) work exactly as they do on any other track:
+ *
+ *     StudioFontVoice.process(frames) → track id → {left, right}
+ *
+ * **Channels are assigned in snapshot track order** among the tracks on one
+ * font (0-15), which is the order both hosts read the song in, so a page and a
+ * render put the same track on the same channel. The GM drum bank (128) is
+ * `setDrums(true)` on that track's own channel, never by reserving channel 9.
+ * A preset (or a font) that changed is applied at the next block's first frame:
+ * `syncSlots` runs on the message path, between two blocks, and never inside
+ * one.
+ *
+ * **Loading happens while the transport is stopped.** `{type:"library"}` arrives
+ * with the bank's bytes; a load that arrives while the playhead runs is held and
+ * parsed on the next `{type:"stop"}`, and answered with
+ * `{type:"library_deferred"}` so the page can say "Loads when you stop." A
+ * track whose font is not loaded is silent and is reported once per font id as
+ * `{type:"library_needed"}`; a bank that will not parse is silent and reported
+ * once as `{type:"library_failed"}`. Neither throws: a font costs its own
+ * tracks and never the song.
  *
  * ## Sampler tracks: a pool of pad voices, JS DSP
  *
@@ -280,10 +310,11 @@
  * `{type:"seek", bar}`, `{type:"flush", id}`,
  * `{type:"nextBarFrame", id}`, `{type:"audio", take_id, channels}`,
  * `{type:"audio_unload", take_id}`, `{type:"sample", sample_id, channels}`,
- * `{type:"sample_unload", sample_id}`, `{type:"live", track_id, bank_id,
- * index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name, amount, on}`,
- * `{type:"looper", action}`, `{type:"looper_buffers", left, right}`,
- * `{type:"looper_take", id}`
+ * `{type:"sample_unload", sample_id}`, `{type:"library", library_id, kind,
+ * bytes}`, `{type:"library_unload", library_id}`, `{type:"live", track_id,
+ * bank_id, index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name,
+ * amount, on}`, `{type:"looper", action}`, `{type:"looper_buffers", left,
+ * right}`, `{type:"looper_take", id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth, patterns}` (at most every
  * 50 ms of audio; `patterns` maps each sampler track that was playing a pattern
@@ -296,7 +327,12 @@
  * (one ack per `audio` message, so the client knows the PCM is in),
  * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
  * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
- * loaded, once per sample id), `{type:"tap_block", target, frame, channels}`
+ * loaded, once per sample id), `{type:"library_loaded", library_id, ok,
+ * reason?}` (one ack per `library` message), `{type:"library_deferred",
+ * library_id}` (a load that waits for Stop), `{type:"library_needed",
+ * library_id}` (a track's font is not loaded, once per font id),
+ * `{type:"library_failed", library_id, reason}` (a bank that will not parse or
+ * render, once per font id), `{type:"tap_block", target, frame, channels}`
  * (while a tap is on, one per block), `{type:"looper_buffer", id, left, right,
  * frames, rate, bars}` (one answer per `looper_take`; the `left`/`right` buffers
  * are transferred, and the page hands them back with `looper_buffers`)
@@ -393,6 +429,64 @@
 
   /** The device engine that marks a track as a sampler one (see `isSamplerTrack`). */
   const SAMPLER_ENGINE = "sampler";
+
+  /**
+   * The device engine that marks a track as a SoundFont one (see
+   * `isFontTrack`): it plays a preset of one library font through
+   * `font-voice.js`.
+   */
+  const FONT_ENGINE = "soundfont";
+
+  /**
+   * How many bytes of fonts one processor holds at once when the client names
+   * no other cap: the plan's 1 GiB. An offline render may pass its own
+   * (`processorOptions.maxFontBytes`), exactly as it does for samples; past the
+   * cap the least recently played font is unloaded and requested again.
+   */
+  const DEFAULT_MAX_FONT_BYTES = 1024 * 1024 * 1024;
+
+  /**
+   * A font host that holds nothing, for an engine module built without
+   * `font-voice.js` (a host that composes its own file list, as two of the
+   * engine's tests do). Every call is a no-op, so a soundfont track in such an
+   * engine is silent and reported like a font that is not loaded, and nothing
+   * throws on the audio thread.
+   * @type {Readonly<object>}
+   */
+  const NO_FONTS = Object.freeze({
+    load: function load() {
+      return Promise.reject(new Error("the SoundFont host is not part of this engine"));
+    },
+    unload: function unload() {},
+    isLoaded: function isLoaded() {
+      return false;
+    },
+    assign: function assign() {},
+    channelFor: function channelFor() {
+      return null;
+    },
+    outputFor: function outputFor() {
+      return null;
+    },
+    noteOn: function noteOn() {},
+    noteOff: function noteOff() {},
+    process: function process() {
+      return new Map();
+    },
+    missing: function missing() {
+      return [];
+    },
+    takeEvicted: function takeEvicted() {
+      return [];
+    },
+    takeFailures: function takeFailures() {
+      return [];
+    },
+    loadedIds: function loadedIds() {
+      return [];
+    },
+    destroy: function destroy() {},
+  });
 
   /** How many voices one sampler track holds, and how many the song may sound. */
   const SAMPLER_VOICES_PER_TRACK = 16;
@@ -628,6 +722,34 @@
   }
 
   /**
+   * Whether a track plays a preset of a library font. A soundfont track's device
+   * is `{engine: "soundfont", font_id, bank, program}` (see `doc.js`).
+   * @param {object} track
+   * @returns {boolean}
+   */
+  function isFontTrack(track) {
+    const device = track && typeof track === "object" ? track.device : null;
+    return !!(device && typeof device === "object" && device.engine === FONT_ENGINE);
+  }
+
+  /**
+   * The font spec one soundfont track contributes to its font host, in snapshot
+   * order: the entry it plays and the preset inside it.
+   * @param {object} track
+   * @returns {{track_id: string, font_id: string, bank: number, program: number}}
+   */
+  function fontSpecOf(track) {
+    const device = track && typeof track === "object" ? track.device : null;
+    const plain = device && typeof device === "object" ? device : {};
+    return {
+      track_id: typeof track.id === "string" ? track.id : "",
+      font_id: typeof plain.font_id === "string" ? plain.font_id : "",
+      bank: clamp(Math.round(Number(plain.bank)), 0, 128),
+      program: clamp(Math.round(Number(plain.program)), 0, 127),
+    };
+  }
+
+  /**
    * The key one pad lives under in the song's `pads` container — the same key
    * `doc.js` writes, so a pad is one lookup and never a walk over the kit.
    * @param {string} trackId
@@ -647,6 +769,25 @@
    */
   function sliceKey(sampleId, sliceId) {
     return `${asId(sampleId)}/${asId(sliceId)}`;
+  }
+
+  /**
+   * Copy the bytes of a transferred bank into a JS-owned `Uint8Array`. A view
+   * into a larger buffer is copied, so the parser never reads past the file.
+   * @param {unknown} value
+   * @returns {Uint8Array}
+   */
+  function readBytes(value) {
+    if (value instanceof Uint8Array) {
+      return value.byteLength === value.buffer.byteLength && value.byteOffset === 0
+        ? value
+        : new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    }
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    }
+    return new Uint8Array(0);
   }
 
   /**
@@ -1069,11 +1210,48 @@
       const askedCap = Number(processorOptions.maxSampleBytes);
       this.maxSampleBytes = Number.isFinite(askedCap) && askedCap > 0 ? askedCap : DEFAULT_MAX_SAMPLE_BYTES;
 
+      /**
+       * The cap the fonts are held under: the plan's 1 GiB, or what the caller
+       * asked for (`processorOptions.maxFontBytes`, which an offline render
+       * uses to hold a render to its own window).
+       */
+      const askedFontCap = Number(processorOptions.maxFontBytes);
+      const fontCap = Number.isFinite(askedFontCap) && askedFontCap > 0 ? askedFontCap : DEFAULT_MAX_FONT_BYTES;
+
       /** A counter every trigger bumps, so the oldest sample is the least recently played. */
       this.sampleClock = 0;
 
       /** Sample ids already reported as not loaded, so each is reported once. */
       this.missingSamples = new Set();
+
+      /**
+       * The SoundFont hosts (`font-voice.js`): one synth per font id, one MIDI
+       * channel per track, and each track's own dry stereo pair (see the header).
+       * Built on the first font the song (or a load) names: a song with no
+       * soundfont tracks never pays for it. `null` until then.
+       */
+      this.fonts = null;
+
+      /** The cap those fonts are held under (`processorOptions.maxFontBytes`). */
+      this.maxFontBytes = fontCap;
+
+      /**
+       * The song's soundfont tracks, in snapshot order, as the font host reads
+       * them (`fontSpecOf`). Rebuilt by every `syncSlots`.
+       */
+      this.fontTracks = [];
+
+      /**
+       * Bank loads that arrived while the playhead ran: id → the parsed kind and
+       * the file's bytes, waiting for the next Stop (see `loadLibrary`).
+       */
+      this.deferredFonts = new Map();
+
+      /** Font ids a track wanted and the engine reported already (once each). */
+      this.fontNeeded = new Set();
+
+      /** Font ids that failed to parse or render, reported once each (silent after). */
+      this.fontFailed = new Set();
 
       /**
        * The song's pads, slices and sample rates, flattened by `setSong`: the
@@ -1174,6 +1352,20 @@
     }
 
     /**
+     * @returns {object} the SoundFont hosts, building them on first use (and a
+     *   no-op host when this module was composed without `font-voice.js`)
+     */
+    fontHost() {
+      if (this.fonts === null) {
+        this.fonts =
+          typeof StudioFontVoice === "object" && StudioFontVoice !== null
+            ? StudioFontVoice.create(sampleRate, { maxBytes: this.maxFontBytes })
+            : NO_FONTS;
+      }
+      return this.fonts;
+    }
+
+    /**
      * Compile the wasm and tell the client. Failures are reported, never
      * thrown: a worklet that throws in its constructor would take the whole
      * audio thread down.
@@ -1251,6 +1443,9 @@
           break;
         case "stop":
           this.sequencer.stop();
+          // Parsing a bank happens only while the transport is stopped, so a
+          // load that arrived while the song played lands here.
+          this.drainDeferredFonts();
           break;
         case "setMode":
           this.sequencer.setMode(message.mode);
@@ -1269,6 +1464,12 @@
           break;
         case "sample_unload":
           this.unloadSample(asId(message.sample_id));
+          break;
+        case "library":
+          this.loadLibrary(message);
+          break;
+        case "library_unload":
+          this.unloadLibrary(message.library_id);
           break;
         case "live":
           this.live(message);
@@ -1426,6 +1627,140 @@
     }
 
     /**
+     * Take one bank from the client.
+     *
+     * Parsing a font happens in the worklet ONLY while the transport is stopped
+     * (plan 1d, Global Constraints): a load that arrives while the playhead runs
+     * is held — bytes and all — and answered with `library_deferred`, so the page
+     * can say "Loads when you stop." — and parsed on the next Stop.
+     *
+     * Only `kind: "font"` is this engine's business today; the captures (`nam`)
+     * and cabinets (`ir`) of PR C are acknowledged and left alone, so a page that
+     * loads a song's whole library does not have to know which entry is which.
+     * @param {{library_id?: string, kind?: string, bytes?: unknown}} message
+     * @returns {void}
+     */
+    loadLibrary(message) {
+      const id = asId(message.library_id);
+      if (id === "") return;
+      const kind = asId(message.kind) === "" ? "font" : asId(message.kind);
+      const bytes = readBytes(message.bytes);
+      if (kind !== "font") {
+        this.port.postMessage({ type: "library_loaded", library_id: id, kind: kind, ok: true });
+        return;
+      }
+      if (this.sequencer.isPlaying()) {
+        // The last load of one id wins: the bytes are replaced, not queued twice.
+        this.deferredFonts.set(id, bytes);
+        this.port.postMessage({ type: "library_deferred", library_id: id });
+        return;
+      }
+      this.parseFont(id, bytes);
+    }
+
+    /**
+     * Parse one bank and give it to the font host, on the processor's own work
+     * queue so a song posted after it is assigned after it.
+     *
+     * A bank that will not parse leaves nothing behind: the track that wanted it
+     * stays silent and the failure is reported once per font id, through both the
+     * ack (`library_loaded` with `ok: false`) and `library_failed`.
+     * @param {string} id
+     * @param {Uint8Array} bytes
+     * @returns {void}
+     */
+    parseFont(id, bytes) {
+      this.enqueue(async () => {
+        try {
+          await this.fontHost().load(id, bytes);
+        } catch (error) {
+          const reason = error && error.message ? error.message : String(error);
+          this.port.postMessage({ type: "library_loaded", library_id: id, ok: false, reason: reason });
+          this.reportFontFailure(id, reason);
+          return;
+        }
+        // A load that worked clears both marks, so a font the cap evicts later is
+        // requested (and, if it goes bad again, reported) once more.
+        this.fontNeeded.delete(id);
+        this.fontFailed.delete(id);
+        this.port.postMessage({ type: "library_loaded", library_id: id, ok: true });
+        this.bindFonts();
+      });
+    }
+
+    /**
+     * Parse every bank that waited for a Stop, in arrival order. The work goes on
+     * the queue, so a `flush` posted after the `stop` answers only once the banks
+     * are in.
+     * @returns {void}
+     */
+    drainDeferredFonts() {
+      if (this.deferredFonts.size === 0) return;
+      const waiting = Array.from(this.deferredFonts.entries());
+      this.deferredFonts.clear();
+      for (const [id, bytes] of waiting) this.parseFont(id, bytes);
+    }
+
+    /**
+     * Drop one bank from the engine (a song that no longer plays it).
+     * @param {unknown} libraryId
+     * @returns {void}
+     */
+    unloadLibrary(libraryId) {
+      const id = asId(libraryId);
+      if (id === "") return;
+      this.deferredFonts.delete(id);
+      this.fontNeeded.delete(id);
+      this.fontFailed.delete(id);
+      this.fontHost().unload(id);
+      this.bindFonts();
+    }
+
+    /**
+     * Give the font host the song's soundfont tracks and report what it cannot
+     * play.
+     *
+     * The host assigns channels and applies presets itself (`assign`); what is
+     * left here is the reporting: a track whose font is missing is silent and is
+     * reported ONCE per font id, and a font the memory cap pushed out (or one that
+     * broke while rendering) is reported once too.
+     * @returns {void}
+     */
+    bindFonts() {
+      // A song with no soundfont tracks never builds a host (and a page that
+      // preloads a bank still gets one, through `parseFont`).
+      if (this.fontTracks.length === 0 && this.fonts === null) return;
+      const fonts = this.fontHost();
+      fonts.assign(this.fontTracks);
+      for (const failure of fonts.takeFailures()) this.reportFontFailure(failure.id, failure.reason);
+      // An evicted font is simply missing again: the loop below asks for it.
+      for (const id of fonts.takeEvicted()) this.fontNeeded.delete(id);
+      for (const id of fonts.missing()) {
+        if (this.fontFailed.has(id) || this.fontNeeded.has(id)) continue;
+        this.fontNeeded.add(id);
+        this.port.postMessage({ type: "library_needed", library_id: id });
+      }
+    }
+
+    /**
+     * Report a font that cannot be read (or that failed while rendering) once,
+     * and stop reporting it: its tracks are silent from here on.
+     *
+     * `library_failed` is the one report (the client turns it into the page's
+     * message and its log), which is why it is posted here and nowhere else.
+     * @param {string} id
+     * @param {string} reason
+     * @returns {void}
+     */
+    reportFontFailure(id, reason) {
+      const fontId = asId(id);
+      if (fontId === "" || this.fontFailed.has(fontId)) return;
+      this.fontFailed.add(fontId);
+      this.fontNeeded.delete(fontId);
+      this.port.postMessage({ type: "library_failed", library_id: fontId, reason: String(reason) });
+    }
+
+    /**
      * Turn a tap on or off: `"master"` for the mix, or a track's id for that
      * track's own output. Off is the default and costs nothing.
      * @param {unknown} target
@@ -1553,17 +1888,29 @@
       const previous = this.slots;
       const next = [];
       const trackSlots = new Map();
+      const fontTracks = [];
 
       for (let index = 0; index < tracks.length; index += 1) {
         const track = tracks[index] && typeof tracks[index] === "object" ? tracks[index] : {};
         const id = typeof track.id === "string" ? track.id : "";
         const audio = isAudioTrack(track);
         const sampler = !audio && isSamplerTrack(track);
-        const type = audio ? AUDIO_ENGINE : sampler ? SAMPLER_ENGINE : deviceType(track);
+        const font = !audio && !sampler && isFontTrack(track);
+        const type = audio
+          ? AUDIO_ENGINE
+          : sampler
+            ? SAMPLER_ENGINE
+            : font
+              ? FONT_ENGINE
+              : deviceType(track);
         let record = previous[index];
         if (
           record &&
-          (record.track_id !== id || record.type !== type || !!record.audio !== audio || !!record.sampler !== sampler)
+          (record.track_id !== id ||
+            record.type !== type ||
+            !!record.audio !== audio ||
+            !!record.sampler !== sampler ||
+            !!record.font !== font)
         ) {
           this.teardown(record);
           record = null;
@@ -1573,13 +1920,17 @@
         if (!record) {
           if (audio) record = this.buildAudioSlot(index, id);
           else if (sampler) record = this.buildSamplerSlot(index, id);
+          else if (font) record = this.buildFontSlot(index, id);
           else record = await this.buildSlot(index, id, type);
         }
         next.push(record);
+        // The font host assigns channels in snapshot order, so the song's own
+        // track order is collected here, as the song arrived.
+        if (font) fontTracks.push(fontSpecOf(track));
         if (record.failed) continue;
-        if (!record.audio && !record.sampler && !record.engine) continue;
+        if (!record.audio && !record.sampler && !record.font && !record.engine) continue;
         this.applyMix(record, track, anySolo);
-        if (!record.audio && !record.sampler) this.applyParams(record, track);
+        if (!record.audio && !record.sampler && !record.font) this.applyParams(record, track);
         if (id !== "") trackSlots.set(id, index);
       }
 
@@ -1589,6 +1940,8 @@
 
       this.slots = next;
       this.trackSlots = trackSlots;
+      this.fontTracks = fontTracks;
+      this.bindFonts();
     }
 
     /**
@@ -1650,6 +2003,36 @@
         voices: voices,
         /** Stolen voices ringing out their 64-frame fade; empty until one is needed. */
         tails: [],
+      };
+    }
+
+    /**
+     * Build one soundfont track's slot: no engine and no module, because the
+     * track's audio comes from its font host's own channel (see the header).
+     * Nothing here can fail, so it is synchronous — a soundfont track is
+     * playable as soon as its font is loaded.
+     * @param {number} index the track's position in the song
+     * @param {string} trackId
+     * @returns {object} the track's record
+     */
+    buildFontSlot(index, trackId) {
+      return {
+        index: index,
+        track_id: trackId,
+        type: FONT_ENGINE,
+        audio: false,
+        sampler: false,
+        font: true,
+        failed: false,
+        engine: null,
+        module: -1,
+        outPtr: 0,
+        frames: 0,
+        clock: 0,
+        ctlNames: null,
+        paramsKey: null,
+        left: 0,
+        right: 0,
       };
     }
 
@@ -2036,6 +2419,9 @@
       }
 
       this.frame += count;
+      // A font that failed while rendering was dropped by its host mid-run; it is
+      // reported once here, after the block, and its tracks stay silent.
+      this.reportFontFailures();
       this.reportPosition(count, events.patterns);
     }
 
@@ -2070,7 +2456,8 @@
      * Render `frames` of every track, mix them with their gain and pan, run the
      * master bus (looper, then performance effects), and hard clip at ±1.0 —
      * 1a's whole master stage. An audio track contributes its PCM voices here
-     * instead of a SunVox engine, through the very same mix.
+     * instead of a SunVox engine, and a soundfont track its own MIDI channel's
+     * dry pair, through the very same mix.
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
@@ -2078,6 +2465,10 @@
      * @returns {void}
      */
     render(frames, left, right, offset) {
+      // The font hosts render every loaded bank once for this run, whichever
+      // tracks read them (a font played by eight tracks is still parsed and
+      // rendered once). Each soundfont track then adds its own channel below.
+      if (this.fonts !== null) this.fonts.process(frames);
       const slots = this.slots;
       const tapped = this.tapIndex;
       for (let index = 0; index < slots.length; index += 1) {
@@ -2138,6 +2529,10 @@
         this.renderSampler(record, frames, left, right, offset);
         return;
       }
+      if (record.font) {
+        this.renderFont(record, frames, left, right, offset);
+        return;
+      }
       if (!record.engine || record.module < 0) return;
       // Every engine is rendered every sub-block, muted or not: its voices
       // have to advance with the song, or a track would come back mid-note.
@@ -2149,6 +2544,38 @@
       for (let at = 0; at < frames; at += 1) {
         left[offset + at] += interleaved[at * 2] * gainLeft;
         if (right) right[offset + at] += interleaved[at * 2 + 1] * gainRight;
+      }
+    }
+
+    /**
+     * Mix one soundfont track's own output over a run of frames: its channel's
+     * dry stereo pair from the font host, through the very same track gain and
+     * pan every other track gets.
+     *
+     * The synth has already rendered by the time this runs (`render` calls
+     * `StudioFontVoice.process` once per run), so a muted or fully panned-away
+     * track still advances its voices — it comes back where it should be, exactly
+     * like an engine's or a sampler's.
+     * @param {object} record
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array|null} right
+     * @param {number} offset
+     * @returns {void}
+     */
+    renderFont(record, frames, left, right, offset) {
+      const gainLeft = record.left;
+      const gainRight = record.right;
+      if (gainLeft === 0 && gainRight === 0) return;
+      if (this.fonts === null) return;
+      const channels = this.fonts.outputFor(record.track_id);
+      if (!channels) return;
+      const sourceLeft = channels.left;
+      const sourceRight = channels.right;
+      const count = Math.min(frames, sourceLeft.length);
+      for (let at = 0; at < count; at += 1) {
+        left[offset + at] += sourceLeft[at] * gainLeft;
+        if (right) right[offset + at] += sourceRight[at] * gainRight;
       }
     }
 
@@ -2668,8 +3095,22 @@
     }
 
     /**
+     * Report every font that failed while rendering this block (a bank that threw
+     * out of the synth), and re-bind the tracks so the ones whose font is still
+     * there keep playing.
+     * @returns {void}
+     */
+    reportFontFailures() {
+      if (this.fonts === null) return;
+      const failures = this.fonts.takeFailures();
+      if (failures.length === 0) return;
+      for (const failure of failures) this.reportFontFailure(failure.id, failure.reason);
+      this.bindFonts();
+    }
+
+    /**
      * Apply one sequencer event at the cursor: an audio start or stop goes to
-     * its track's voices, a note on or off to its track's engine.
+     * its track's voices, a note on or off to its track's engine or font.
      * @param {{frame: number, type: string}} event
      * @returns {void}
      */
@@ -3088,7 +3529,8 @@
     }
 
     /**
-     * Send one sequencer event to its track's device.
+     * Send one sequencer event to its track's device: a note of a SunVox engine,
+     * or of a soundfont track's channel.
      * @param {{track_id: string, type: string, p: number, v: number}} event
      * @returns {void}
      */
@@ -3096,7 +3538,17 @@
       const index = this.trackSlots.get(event.track_id);
       if (index === undefined) return;
       const record = this.slots[index];
-      if (!record || !record.engine || record.module < 0) return;
+      if (!record) return;
+      if (record.font) {
+        // A soundfont track's note goes to its own MIDI channel. A track whose
+        // font is not loaded has no channel and stays silent; the engine has
+        // already asked for the font (`library_needed`).
+        if (this.fonts === null) return;
+        if (event.type === "on") this.fonts.noteOn(record.track_id, event.p, event.v);
+        else this.fonts.noteOff(record.track_id, event.p);
+        return;
+      }
+      if (!record.engine || record.module < 0) return;
       const module = record.module + 1;
       if (event.type === "on") {
         record.engine.sendEvent(SLOT, 0, noteFor(event.p), sunvoxVelocity(event.v), module, 0, 0);

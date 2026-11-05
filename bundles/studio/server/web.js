@@ -211,6 +211,9 @@ const ASSET_FILES = new Map([
   ["calibrate-detector.js", join("engine", "calibrate-detector.js")],
   ["recorder-processor.js", join("engine", "recorder-processor.js")],
   ["studio-processor.js", join("engine", "studio-processor.js")],
+  // The SoundFont hosts: one synth per font, one MIDI channel per track. Part of
+  // the worklet module (engine-client.js's SOURCE_FILES) like the rest.
+  ["font-voice.js", join("engine", "font-voice.js")],
   ["engine-client.js", join("engine", "engine-client.js")],
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],
   ["sunvox.wasm", join("vendor", "sunvox", "sunvox.wasm")],
