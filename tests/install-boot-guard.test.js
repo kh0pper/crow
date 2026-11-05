@@ -8,7 +8,7 @@
  */
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -87,21 +87,36 @@ function fakePrivileged(base) {
 }
 
 /**
- * A fake `systemctl show` that merges a fixture unit with its drop-ins (later
- * wins) and prints the four properties `--value` style, one per line. It refuses
- * any other argument list, which pins the command the installer is required to
- * use.
+ * A fake `systemctl show` that merges a fixture unit with its drop-ins, and
+ * prints properties the way real systemd does: ExecStart (from the service
+ * table) FIRST, then the exec-context fields Environment, WorkingDirectory,
+ * User — whatever order the `-p` flags were given in — with every
+ * `Environment=` line (unit and drop-ins) merged into ONE space-separated line,
+ * in systemd's real `{ path=… ; argv[]=… ; … }` ExecStart form. Each call is
+ * logged, so a test can pin "one property per call".
  */
 function fakeSystemctlMerging(base, unitDir) {
   const dir = join(base, "fake-systemctl-bin");
   mkdirSync(dir, { recursive: true });
   const path = join(dir, "fake-systemctl");
+  const log = join(base, "systemctl.log");
   writeFileSync(path, `#!/bin/sh
-case "$*" in
-  *"-p Environment -p WorkingDirectory -p User -p ExecStart --value"*) ;;
-  *) echo "unexpected arguments: $*" >&2; exit 2 ;;
+log=${JSON.stringify(log)}
+printf '%s\\n' "$*" >> "$log"
+unit=""
+wanted=" "
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) shift; wanted="$wanted$1 " ;;
+    --user|--value) ;;
+    -*) echo "unexpected flag: $1" >&2; exit 2 ;;
+    *) unit="$1" ;;
+  esac
+  shift
+done
+case "$unit" in
+  "") echo "no unit named" >&2; exit 1 ;;
 esac
-for a in "$@"; do unit="$a"; done
 file="${unitDir}/$unit"
 body=""
 [ -f "$file" ] && body="$(cat "$file")"
@@ -113,13 +128,52 @@ $(cat "$f")"
   done
 fi
 val() { printf '%s\\n' "$body" | sed -n "s/^[[:space:]]*$1=//p" | tail -n 1; }
-printf '%s\\n' "$(val Environment)"
-printf '%s\\n' "$(val WorkingDirectory)"
-printf '%s\\n' "$(val User)"
-printf '%s\\n' "$(val ExecStart)"
+# systemd merges EVERY Environment= line into ONE space-separated line.
+envs="$(printf '%s\\n' "$body" | sed -n 's/^[[:space:]]*Environment=//p' | tr '\\n' ' ')"
+raw="$(val ExecStart)"
+case "$raw" in
+  -*) raw="\${raw#-}" ;;
+esac
+# path= is systemd's RESOLVED program: the longest prefix naming a file (a
+# program path may contain spaces; argv[] is space-joined and cannot say where
+# the program ends).
+exe="$raw"
+while [ -n "$exe" ] && [ ! -f "$exe" ]; do
+  next="\${exe% *}"
+  [ "$next" = "$exe" ] && break
+  exe="$next"
+done
+[ -n "$exe" ] || exe="\${raw%% *}"
+emit() { case "$wanted" in *" $1 "*) printf '%s\\n' "$2" ;; esac; }
+emit ExecStart "{ path=$exe ; argv[]=$raw ; ignore_errors=no ; start_time=[Thu 2026-11-05 11:20:12 CST] ; stop_time=[n/a] ; pid=1234 ; code=(null) ; status=0/0 }"
+emit Environment "$envs"
+emit WorkingDirectory "$(val WorkingDirectory)"
+emit User "$(val User)"
+exit 0
 `);
   chmodSync(path, 0o755);
-  return path;
+  return { path, log };
+}
+
+/**
+ * A PATH prefix that makes the installer believe it runs as root: `id -u`
+ * prints 0, `sudo` drops `-u <user>` and execs the rest, and any `chown` is
+ * logged instead of run. The log proves root never chowns inside the guard dir.
+ */
+function fakeRootShims(base) {
+  const dir = join(base, "root-shims");
+  mkdirSync(dir, { recursive: true });
+  const log = join(base, "root.log");
+  for (const [name, body] of [
+    ["id", `#!/bin/sh\nprintf '0\\n'\n`],
+    ["sudo", `#!/bin/sh\nprintf 'sudo %s\\n' "$*" >> ${JSON.stringify(log)}\n[ "$1" = "-u" ] && shift 2\nexec "$@"\n`],
+    ["chown", `#!/bin/sh\nprintf 'chown %s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`],
+    ["systemctl", `#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`],
+  ]) {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  }
+  return { dir, log };
 }
 
 /** The drop-in body the dry run printed. */
@@ -152,6 +206,10 @@ test("system unit: dry run names <unit>.d/10-boot-guard.conf and writes nothing"
   assert.match(dropin, /^TimeoutStartSec=15min$/m, "the guard runs npm install, so the start timeout must cover it");
   assert.match(dropin, /^Environment=CROW_BOOT_GUARD=1$/m);
   assert.doesNotMatch(r.stdout, /sudo/, "a dry run must never escalate");
+  // The dry run DOES read the merged unit values through `systemctl show`, so the
+  // banner must not claim systemctl is never called.
+  assert.doesNotMatch(r.stdout, /systemctl is never called/);
+  assert.match(r.stdout, /dry run:.*nothing will be written/);
   assert.match(r.stdout, /would install: \/srv\/crow-home\/boot-guard\/crow-boot-guard\.mjs \(dir 0700, file 0600\)/);
 });
 
@@ -252,8 +310,9 @@ test("CROW_HOME and WorkingDirectory come from the MERGED unit, drop-ins include
   mkdirSync(join(unitDir, "crow-gateway.service.d"), { recursive: true });
   writeFileSync(join(unitDir, "crow-gateway.service.d", "20-home.conf"), `[Service]\nEnvironment=CROW_HOME=${mergedHome}\n`);
 
+  const fake = fakeSystemctlMerging(base, unitDir);
   const r = run(["--dry-run"], {
-    CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fakeSystemctlMerging(base, unitDir),
+    CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path,
   });
   assert.equal(r.status, 0, r.stderr);
   const dropin = printedDropin(r.stdout);
@@ -262,6 +321,105 @@ test("CROW_HOME and WorkingDirectory come from the MERGED unit, drop-ins include
   // the path is quoted with % doubled.
   assert.ok(dropin.includes(`--app-root "${appRoot.replace("%", "%%")}"`), dropin);
   assert.match(r.stdout, /would install: .*merged-home\/boot-guard\/crow-boot-guard\.mjs/);
+  // The unit's own Environment= and the drop-in's are ONE merged line, so the
+  // LAST CROW_HOME wins and the unit's PATH is still found.
+  assert.ok(dropin.includes(`ExecStartPre=-"${node}" `), dropin);
+});
+
+test("one property per call: systemd's output order cannot misassign the values", () => {
+  // systemctl prints ExecStart first, then Environment, WorkingDirectory, User,
+  // whatever order the -p flags had. Reading them positionally hands every
+  // variable its neighbour's value: the drop-in then carries the Environment
+  // string as --app-root and the user name as the node path.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  const appRoot = join(base, "app");
+  fixtureUnit(unitDir, "crow-gateway.service", UNIT({ node, crowHome, workdir: appRoot }));
+  const fake = fakeSystemctlMerging(base, unitDir);
+
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path });
+  assert.equal(r.status, 0, r.stderr);
+  const dropin = printedDropin(r.stdout);
+  assert.ok(dropin.includes(`ExecStartPre=-"${node}" "${crowHome}/boot-guard/crow-boot-guard.mjs" --app-root "${appRoot}"`),
+    `every value must come from its own property:\n${dropin}`);
+
+  const calls = readFileSync(fake.log, "utf8").trim().split("\n");
+  assert.equal(calls.length, 4, `expected one show call per property:\n${calls.join("\n")}`);
+  for (const call of calls) {
+    assert.equal((call.match(/-p /g) || []).length, 1, `one property per call, got: ${call}`);
+  }
+});
+
+test("a node path containing a space comes from ExecStart's path= field", () => {
+  // argv[] is space-joined, so the program path is ambiguous there; systemd's
+  // path= is not.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "node dir"), "24.21.0");
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome: join(base, "crow-home"), workdir: join(base, "app") }));
+  const fake = fakeSystemctlMerging(base, unitDir);
+
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(printedDropin(r.stdout).includes(`ExecStartPre=-"${node}" `), printedDropin(r.stdout));
+});
+
+test("a quoted Environment value keeps its space through the merged line", () => {
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow home");
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome: "PLACEHOLDER", workdir: join(base, "app") })
+      .replace("Environment=CROW_HOME=PLACEHOLDER", `Environment="CROW_HOME=${crowHome}"`));
+  const fake = fakeSystemctlMerging(base, unitDir);
+
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes(`would install: ${crowHome}/boot-guard/crow-boot-guard.mjs`), r.stdout);
+  assert.ok(printedDropin(r.stdout).includes(`"${crowHome}/boot-guard/crow-boot-guard.mjs"`), printedDropin(r.stdout));
+});
+
+test("a \\x20 escape in a merged Environment value is a space", () => {
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow home");
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome: "PLACEHOLDER", workdir: join(base, "app") })
+      .replace("Environment=CROW_HOME=PLACEHOLDER", `Environment=CROW_HOME=${crowHome.replace(" ", "\\x20")}`));
+  const fake = fakeSystemctlMerging(base, unitDir);
+
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(printedDropin(r.stdout).includes(`"${crowHome}/boot-guard/crow-boot-guard.mjs"`), printedDropin(r.stdout));
+});
+
+test("CROW_HOME from a drop-in Environment line is merged with the unit's PATH", () => {
+  // The raven shape: an `npm run gateway` unit whose PATH is in the unit file and
+  // whose CROW_HOME is only in a drop-in. One show call per property still has to
+  // see both.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const pathbin = join(base, "nvm-bin");
+  const node = fakeNode(pathbin, "24.21.0");
+  const mergedHome = join(base, "merged-home");
+  const appRoot = join(base, "app");
+  fixtureUnit(unitDir, "crow-gateway.service", UNIT({
+    node: "/nonexistent", execStart: "/usr/bin/npm run gateway", crowHome: join(base, "unit-home"), workdir: appRoot,
+  }).replace("Environment=NODE_ENV=production", `Environment=PATH=${pathbin}:/usr/bin:/bin\nEnvironment=NODE_ENV=production`));
+  mkdirSync(join(unitDir, "crow-gateway.service.d"), { recursive: true });
+  writeFileSync(join(unitDir, "crow-gateway.service.d", "20-home.conf"), `[Service]\nEnvironment=CROW_HOME=${mergedHome}\n`);
+  const fake = fakeSystemctlMerging(base, unitDir);
+
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(printedDropin(r.stdout).includes(
+    `ExecStartPre=-"${node}" "${mergedHome}/boot-guard/crow-boot-guard.mjs" --app-root "${appRoot}"`),
+  printedDropin(r.stdout));
 });
 
 test("a templated unit is refused with a clear message", () => {
@@ -290,12 +448,15 @@ test("the real write path uses mktemp + a privileged install, not a redirect", (
   const node = fakeNode(join(base, "bin"), "24.21.0");
   const crowHome = join(base, "crow-home");
   const appRoot = join(base, "app");
+  const tmpDir = join(base, "tmp");
+  mkdirSync(tmpDir, { recursive: true });
   fixtureUnit(unitDir, "crow-gateway.service",
     UNIT({ node, crowHome, workdir: appRoot }).replace("User=alice\n", ""));
   const priv = fakePrivileged(base);
 
   const r = run([], {
     CROW_SYSTEMD_UNIT_DIR: unitDir,
+    TMPDIR: tmpDir,
     PATH: `${priv.dir}:${process.env.PATH}`,
   });
   assert.equal(r.status, 0, r.stderr);
@@ -303,13 +464,54 @@ test("the real write path uses mktemp + a privileged install, not a redirect", (
   const dropinPath = join(unitDir, "crow-gateway.service.d", "10-boot-guard.conf");
   assert.ok(existsSync(dropinPath), `the drop-in must be written:\n${r.stdout}\n${r.stderr}`);
   const log = readFileSync(priv.log, "utf8");
-  assert.match(log, /sudo install -m 644 \S+ \S*10-boot-guard\.conf/,
-    `the drop-in must be installed, not redirected into the unit dir:\n${log}`);
+  // The body comes from mktemp OUTSIDE the unit dir, and lands through install.
+  assert.match(log, new RegExp(`sudo install -m 644 ${tmpDir}/crow-boot-guard\\.\\w+ \\S*10-boot-guard\\.conf`),
+    `the drop-in must be installed from a temp file outside the unit dir:\n${log}`);
   assert.doesNotMatch(log, /sudo cp /, "the old redirect + cp path must be gone");
-  // Nothing but the drop-in is left in the drop-in directory (no temp files).
+  // ...and what lands on disk is the body the installer meant to write.
+  const body = readFileSync(dropinPath, "utf8");
+  assert.match(body, /^\[Service\]$/m, body);
+  assert.ok(body.includes(`ExecStartPre=-"${node}" "${crowHome}/boot-guard/crow-boot-guard.mjs" --app-root "${appRoot}"`), body);
+  assert.ok(body.includes(`ExecStopPost=-"${node}" "${crowHome}/boot-guard/crow-boot-guard.mjs" --app-root "${appRoot}" --record-exit`), body);
+  assert.match(body, /^TimeoutStartSec=15min$/m, body);
+  assert.match(body, /^Environment=CROW_BOOT_GUARD=1$/m, body);
+  // Nothing but the drop-in is left in the drop-in directory (no temp files),
+  // and the temp dir the body was staged in is empty again.
   assert.deepEqual(readdirSync(join(unitDir, "crow-gateway.service.d")), ["10-boot-guard.conf"]);
+  assert.deepEqual(readdirSync(tmpDir), []);
   // And the launcher copy landed in the unit's own CROW_HOME, mode 0600.
   const copy = join(crowHome, "boot-guard", "crow-boot-guard.mjs");
+  assert.ok(existsSync(copy), "the launcher copy must be installed");
+  assert.equal(readFileSync(copy, "utf8"), readFileSync(join(import.meta.dirname, "..", "scripts", "boot-guard", "crow-boot-guard.mjs"), "utf8"));
+  assert.equal(statSync(copy).mode & 0o777, 0o600, "the launcher copy is 0600");
+});
+
+test("as root no chown runs on any path inside the guard dir", () => {
+  // Root behaviour without root: shims put `id -u` = 0 and capture every sudo /
+  // chown argv. The copy must be made BY the unit's user (sudo -u), so root never
+  // chowns a predictable temp path in a directory that user can rewrite.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  // User=alice, so the installer has an owner to hand the copy to.
+  fixtureUnit(unitDir, "crow-gateway.service", UNIT({ node, crowHome, workdir: join(base, "app") }));
+  const shims = fakeRootShims(base);
+
+  const r = run([], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir,
+    PATH: `${shims.dir}:${process.env.PATH}`,
+  });
+  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+
+  const log = readFileSync(shims.log, "utf8");
+  const guard = join(crowHome, "boot-guard");
+  assert.doesNotMatch(log, /(^|\n|sudo )chown /, `root must never chown inside the guard dir:\n${log}`);
+  assert.ok(log.includes(`sudo -u alice mkdir -m 700 -p ${guard}`), `the guard dir must be made by its owner:\n${log}`);
+  assert.ok(log.includes(`sudo -u alice install -m 600 `), `the copy must be installed by its owner:\n${log}`);
+  assert.ok(log.includes(` ${guard}/crow-boot-guard.mjs.tmp.`), `the copy must land in the guard dir:\n${log}`);
+
+  const copy = join(guard, "crow-boot-guard.mjs");
   assert.ok(existsSync(copy), "the launcher copy must be installed");
   assert.equal(readFileSync(copy, "utf8"), readFileSync(join(import.meta.dirname, "..", "scripts", "boot-guard", "crow-boot-guard.mjs"), "utf8"));
 });
@@ -340,10 +542,16 @@ test("a symlinked boot-guard directory is refused, never written through", () =>
 
 test("as root the launcher copy is installed as the unit's user", () => {
   // Root must not leave a root-owned file in a directory the service user can
-  // rewrite (and the gateway refreshes this copy itself). Root behaviour cannot
-  // be exercised from an unprivileged test run, so the source is pinned.
+  // rewrite (and the gateway refreshes this copy itself). The root branch is
+  // walked with a shimmed `id` in "as root no chown runs …"; this pins the
+  // source so neither branch can quietly come back.
   const source = readFileSync(SCRIPT, "utf8");
+  assert.match(source, /sudo -u "\$owner" mkdir -m 700 -p "\$dir"/, "the guard dir must be made by the unit's user");
   assert.match(source, /sudo -u "\$owner" install -m 600/, "the copy must run as the unit's user");
+  // `install -o` is the no-sudo fallback only: no chown of a temp path anywhere.
+  assert.match(source, /install -m 600 -o "\$owner"/);
+  assert.doesNotMatch(source, /\bchown\b/, "root must never chown inside the guard dir");
+  assert.doesNotMatch(source, /run chmod 700 "\$dir"/, "no check-then-act chmod of the guard dir");
   // And never through a symlinked directory.
   assert.match(source, /if \[ -L "\$dir" \]; then/);
 });

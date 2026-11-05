@@ -21,7 +21,8 @@
 # and refreshes it from its own commit.
 #
 # Flags:
-#   --dry-run   print every action, write nothing, never call systemctl
+#   --dry-run   print every action, write nothing, restart nothing (the read-only
+#               `systemctl show` reads still run — they change nothing)
 #   --user      ~/.config/systemd/user, no sudo
 #
 # Env test seams: CROW_SYSTEMD_UNIT_DIR / CROW_SYSTEMD_USER_UNIT_DIR override the
@@ -122,37 +123,59 @@ unit_value() { # <file> <key>
   sed -n "s/^[[:space:]]*$2=//p" "$1" | tail -n 1
 }
 
-# Every token of every Environment= line, one per line, unquoted.
+# Split ONE Environment= value into tokens the way systemd does: whitespace
+# separates tokens, double quotes group them (and are removed), and the escapes
+# \" \\ and \xHH stand for a quote, a backslash and one byte. systemd merges
+# every Environment= line of the unit AND its drop-ins into ONE such line, so
+# `Environment="CROW_HOME=/srv/crow home"` must yield one token, not two.
+env_tokens() { # <value string>
+  local s="$1" n=${#1} i=0 c nxt hex out="" q=0 tab
+  tab="$(printf '\t')"
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    if [ "$c" = "\\" ]; then
+      i=$((i + 1))
+      [ "$i" -lt "$n" ] || break
+      nxt="${s:$i:1}"
+      case "$nxt" in
+        '"') out+='"' ;;
+        "\\") out+="\\" ;;
+        x)
+          hex="${s:$((i + 1)):2}"
+          case "$hex" in
+            [0-9a-fA-F][0-9a-fA-F])
+              out+="$(printf '%b' "\\x${hex}")"
+              i=$((i + 2))
+              ;;
+            *) out+='x' ;;
+          esac
+          ;;
+        *) out+="$nxt" ;;
+      esac
+    elif [ "$c" = '"' ]; then
+      q=$((1 - q))
+    elif [ "$q" -eq 0 ] && { [ "$c" = ' ' ] || [ "$c" = "$tab" ]; }; then
+      if [ -n "$out" ]; then printf '%s\n' "$out"; out=""; fi
+    else
+      out+="$c"
+    fi
+    i=$((i + 1))
+  done
+  if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+  return 0
+}
+
+# Every token of every Environment= line of a unit FILE, one per line (the
+# fallback path, for a host where systemd cannot answer for the unit).
 unit_env_tokens() { # <file>
-  local line tok
+  local line
   while IFS= read -r line; do
-    for tok in $line; do
-      tok="${tok%\"}"; tok="${tok#\"}"
-      printf '%s\n' "$tok"
-    done
+    env_tokens "$line"
   done < <(sed -n 's/^[[:space:]]*Environment=//p' "$1")
 }
 
 unit_env_value() { # <file> <KEY>
   unit_env_tokens "$1" | sed -n "s/^$2=//p" | tail -n 1
-}
-
-# Split one Environment= value into tokens, honouring systemd's quotes, so
-# `CROW_HOME="/srv/crow home"` yields one token instead of two.
-env_tokens() { # <value string>
-  local s="$1" c out="" q="" i=0 n=${#1}
-  while [ "$i" -lt "$n" ]; do
-    c="${s:$i:1}"
-    if [ -n "$q" ]; then
-      if [ "$c" = "$q" ]; then q=""; else out+="$c"; fi
-    elif [ "$c" = '"' ] || [ "$c" = "'" ]; then q="$c"
-    elif [ "$c" = ' ' ] || [ "$c" = "$(printf '\t')" ]; then
-      if [ -n "$out" ]; then printf '%s\n' "$out"; out=""; fi
-    else out+="$c"; fi
-    i=$((i + 1))
-  done
-  [ -n "$out" ] && printf '%s\n' "$out"
-  return 0
 }
 
 # Quote one argument for an Exec= line: a path may contain spaces, and a literal
@@ -165,14 +188,51 @@ sd_quote() { # <arg>
   printf '"%s"' "$s"
 }
 
-# `systemctl [--user] show -p … --value <unit>`: the values systemd actually
-# merged from the unit AND every drop-in (audit L1 fix 5c).
-systemctl_show() { # <unit>
+# ONE `systemctl [--user] show -p <Property> --value <unit>` call PER PROPERTY:
+# the values systemd actually merged from the unit AND every drop-in (audit L1
+# fix 5c). systemctl prints the properties in ITS order — ExecStart comes from
+# the service table and is printed before the exec-context fields (Environment,
+# WorkingDirectory, User) — whatever order the -p flags were given in, so asking
+# for several at once and assigning them by line number gives every variable its
+# neighbour's value. Read-only: safe to call in a dry run.
+systemctl_prop() { # <unit> <Property>
+  local out
   if [ "$MODE" = "user" ]; then
-    "$SYSTEMCTL" --user show -p Environment -p WorkingDirectory -p User -p ExecStart --value "$1" 2>/dev/null
+    out="$("$SYSTEMCTL" --user show -p "$2" --value "$1" 2>/dev/null)" || return 1
   else
-    "$SYSTEMCTL" show -p Environment -p WorkingDirectory -p User -p ExecStart --value "$1" 2>/dev/null
+    out="$("$SYSTEMCTL" show -p "$2" --value "$1" 2>/dev/null)" || return 1
   fi
+  printf '%s\n' "$out"
+}
+
+# One field of systemctl's ExecStart struct, which runs up to ` ; `:
+#   { path=/usr/bin/node ; argv[]=/usr/bin/node x.js ; ignore_errors=no ; … }
+# A path containing a space is NOT quoted inside argv[] (systemd joins argv with
+# spaces), so `path=` is the only unambiguous source for the program there.
+exec_start_field() { # <execstart> <field-sed-regex>
+  printf '%s' "$1" | sed -n "s/.*$2=\([^;]*\).*/\1/p" | sed -e 's/[[:space:]]*$//'
+}
+
+# ExecStart's program: argv[0], except that a space in the path makes argv[0]
+# ambiguous, which is what `path=` is for.
+exec_start_program() { # <execstart>
+  local v="$1" argv0 path0
+  case "$v" in
+    \{*)
+      argv0="$(exec_start_field "$v" 'argv\[\]')"
+      argv0="${argv0%% *}"
+      path0="$(exec_start_field "$v" 'path')"
+      if [ -n "$path0" ] && [ "$(basename "$path0")" = "node" ]; then
+        printf '%s\n' "$path0"
+      else
+        printf '%s\n' "${argv0:-$path0}"
+      fi
+      ;;
+    *)
+      v="${v#-}"
+      printf '%s\n' "${v%% *}"
+      ;;
+  esac
 }
 
 expand_specifiers() { # <value> <home>
@@ -181,12 +241,16 @@ expand_specifiers() { # <value> <home>
   printf '%s\n' "$v"
 }
 
-# ExecStart's argv[0] when it is node; otherwise the first node on the unit's
-# Environment=PATH (an `npm run gateway` unit has no node in ExecStart).
-resolve_node() { # <execstart> <unit-path-env>
-  local execstart first dirs d candidate
-  execstart="${1#-}"
-  first="${execstart%% *}"
+# The node binary to run the launcher with: the unit's program when that IS
+# node, otherwise the first node on the unit's Environment=PATH (an
+# `npm run gateway` unit has no node in ExecStart). The caller passes ONE
+# program, already de-quoted from ExecStart — a path may contain spaces, so it
+# must not be cut here.
+resolve_node() { # <program> <unit-path-env>
+  local program first dirs d candidate
+  program="${1#-}"
+  first="$program"
+  [ -n "$first" ] || return 1
   if [ "$(basename "$first")" = "node" ]; then
     if [ -x "$first" ]; then printf '%s\n' "$first"; return 0; fi
     if command -v "$first" >/dev/null 2>&1; then command -v "$first"; return 0; fi
@@ -236,30 +300,29 @@ install_launcher() { # <crow_home> <owner>
     say "would install: $file (dir 0700, file 0600)"
     return 0
   fi
-  if [ ! -d "$dir" ]; then
-    run mkdir -p "$dir"
-    run chmod 700 "$dir"
-    if [ -n "$owner" ]; then run chown "$owner" "$dir"; fi
-  fi
   if [ -f "$file" ] && cmp -s "$LAUNCHER_SRC" "$file"; then
     say "launcher copy up to date: $file"
     return 0
   fi
   tmp="$file.tmp.$$"
-  # Copy AS THE UNIT'S USER when root is doing the install: the gateway refreshes
-  # this copy itself, so it must own it, and root must never leave a root-owned
-  # file in a directory that user can rewrite.
-  if [ -n "$owner" ] && [ "$(id -u)" -eq 0 ]; then
-    # As the unit's user when possible; a root without sudo still has install -o.
-    if command -v sudo >/dev/null 2>&1; then
-      run sudo -u "$owner" install -m 600 "$LAUNCHER_SRC" "$tmp"
-    else
-      run install -m 600 -o "$owner" "$LAUNCHER_SRC" "$tmp"
-    fi
+  # AS THE UNIT'S USER when root is doing the install: the gateway refreshes this
+  # copy itself, so it must own it, and root must never leave a root-owned file
+  # in a directory that user can rewrite. Both the directory and the copy are made
+  # by that user — root never hands ownership of the temp path over afterwards (a
+  # predictable name in a directory the user can write: that follows a swapped-in
+  # symlink) nor races a check of $dir with a later mkdir/mode/owner change of it
+  # (audit L1 fix 5b). `install -o` is only the no-sudo fallback: install does not
+  # follow links.
+  if [ -n "$owner" ] && [ "$(id -u)" -eq 0 ] && command -v sudo >/dev/null 2>&1; then
+    if [ ! -d "$dir" ]; then run sudo -u "$owner" mkdir -m 700 -p "$dir"; fi
+    run sudo -u "$owner" install -m 600 "$LAUNCHER_SRC" "$tmp"
+  elif [ -n "$owner" ] && [ "$(id -u)" -eq 0 ]; then
+    if [ ! -d "$dir" ]; then run mkdir -m 700 -p "$dir"; fi
+    run install -m 600 -o "$owner" "$LAUNCHER_SRC" "$tmp"
   else
+    if [ ! -d "$dir" ]; then run mkdir -m 700 -p "$dir"; fi
     run install -m 600 "$LAUNCHER_SRC" "$tmp"
   fi
-  if [ -n "$owner" ]; then run chown "$owner" "$tmp" 2>/dev/null || true; fi
   run mv -f "$tmp" "$file"
   say "installed launcher copy: $file"
 }
@@ -309,7 +372,7 @@ say "repo root: $REPO_ROOT"
 say "unit dir:  $UNIT_DIR"
 say "launcher:  $LAUNCHER_SRC"
 say "mode:      ${MODE}"
-if [ "$DRY_RUN" = "1" ]; then say "dry run:   nothing will be written and systemctl is never called"; fi
+if [ "$DRY_RUN" = "1" ]; then say "dry run:   nothing will be written, installed, daemon-reloaded or restarted"; fi
 
 changed=0
 for unit in "${units[@]}"; do
@@ -325,31 +388,33 @@ for unit in "${units[@]}"; do
   esac
 
   # Read the MERGED values from systemd when it can answer (it includes every
-  # drop-in and EnvironmentFile=; the unit file alone does not). The file is the
-  # fallback for a host where systemd is not the init system.
+  # drop-in and EnvironmentFile=; the unit file alone does not). One call per
+  # property — never one call whose lines are assigned by position, because the
+  # order is systemd's, not ours. The file is the fallback for a host where
+  # systemd is not the init system.
   merged_ok=0
-  merged=()
-  mapfile -t merged < <(systemctl_show "$unit" || true)
-  if [ "${#merged[@]}" -eq 4 ]; then merged_ok=1; fi
+  exec_start=""
+  env_line=""
+  working_dir=""
+  unit_user=""
+  if exec_start="$(systemctl_prop "$unit" ExecStart)" \
+    && env_line="$(systemctl_prop "$unit" Environment)" \
+    && working_dir="$(systemctl_prop "$unit" WorkingDirectory)" \
+    && unit_user="$(systemctl_prop "$unit" User)"; then
+    merged_ok=1
+  fi
 
   if [ "$merged_ok" = "1" ]; then
-    env_line="${merged[0]}"
-    working_dir="${merged[1]}"
-    unit_user="${merged[2]}"
-    exec_start="${merged[3]}"
     unit_path="$(env_tokens "$env_line" | sed -n 's/^PATH=//p' | tail -n 1)"
     crow_home="$(env_tokens "$env_line" | sed -n 's/^CROW_HOME=//p' | tail -n 1)"
-    # systemctl prints ExecStart as `{ path=/usr/bin/node ; argv[]=… ; … }`.
-    case "$exec_start" in
-      \{*) exec_argv0="$(printf '%s' "$exec_start" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')" ;;
-      *) exec_argv0="$exec_start" ;;
-    esac
-    [ -n "$exec_argv0" ] || exec_argv0="$exec_start"
+    # ExecStart is `{ path=/usr/bin/node ; argv[]=… ; … }` here, not a command line.
+    exec_argv0="$(exec_start_program "$exec_start")"
   else
     note "warning: $unit: systemctl could not report the merged unit values — reading $unit only (drop-ins may be missed)"
     working_dir="$(unit_value "$unit_file" "WorkingDirectory")"
     exec_start="$(unit_value "$unit_file" "ExecStart")"
-    exec_argv0="$exec_start"
+    exec_argv0="${exec_start#-}"
+    exec_argv0="${exec_argv0%% *}"
     unit_path="$(unit_env_value "$unit_file" "PATH")"
     crow_home="$(unit_env_value "$unit_file" "CROW_HOME")"
     unit_user=""
