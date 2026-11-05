@@ -25,7 +25,9 @@ tools: []
    ```bash
    bash scripts/backup.sh
    ```
-   This creates both a SQL dump (text, diffable) and a binary copy in `~/.crow/backups/`.
+   This writes a verified binary copy of the database into the backup directory — `~/backups/crow` by default, or `CROW_BACKUP_DIR`. When the `sqlite3` command-line tool is installed it also writes a SQL dump (text, diffable) named like the copy with `.sql`; without it the binary copy is complete on its own.
+
+   The live database is never opened with `sqlite3`: if the gateway is running it is asked for the copy, otherwise the script makes one with better-sqlite3. The files are named per instance (`<label>-<date>.db`; a second gateway with its own `CROW_HOME` gets `<label>-<home>-<hash>-<date>.db`) and come with an `.owner.json` sidecar, the same as the dashboard's "Run backup now".
 
 2. For a preview without writing files:
    ```bash
@@ -34,13 +36,13 @@ tools: []
 
 ### Backup Destinations
 
-- **Local** (always): `~/.crow/backups/` — runs by default, no config needed
+- **Local** (always): `~/backups/crow` (`CROW_BACKUP_DIR`) — runs by default, no config needed. The directory is `0700` and everything in it is `0600`.
 - **S3/MinIO**: Set `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` in `.env`. Bucket: `CROW_BACKUP_S3_BUCKET` (default: `crow-backups`)
 - **Git repo**: Set `CROW_BACKUP_GIT_REPO` in `.env` (e.g., a private Gitea repo). Only SQL dumps are committed — never binary `.db` files
 
 ### Retention
 
-Old backups are pruned automatically. Default: 7 days. Configure with `CROW_BACKUP_KEEP_DAYS` in `.env`.
+Old backups are pruned automatically, per instance (a run never deletes another instance's files). Default: 7 days. Configure with `CROW_BACKUP_KEEP_DAYS` in `.env`.
 
 ### Automated Schedule
 
@@ -56,32 +58,36 @@ crontab -e
    ```bash
    bash scripts/restore.sh --list
    ```
+   Backups in the old `~/.crow/backups` directory are listed under "Older backups" and can still be restored by name.
 
 2. Preview what a restore would do:
    ```bash
    bash scripts/restore.sh <backup-file> --dry-run
    ```
 
-3. Restore from a backup:
+3. Restore from a backup (STOP THE GATEWAY FIRST — the script refuses while the gateway answers on its port, and there is no `--force`):
    ```bash
+   systemctl --user stop crow-gateway
    bash scripts/restore.sh <backup-file>
+   systemctl --user start crow-gateway
    ```
 
-The script automatically backs up the current database before overwriting it.
+The script always saves the current database as `<db>.pre-restore-TIMESTAMP` before overwriting it. That copy is made with better-sqlite3, not `cp`, so data still sitting in `crow.db-wal` is included. Stale `crow.db-wal` / `crow.db-shm` of the database being replaced are removed, and the restored file is verified (integrity check plus table and memory counts) before the script reports success.
 
 ### Restore Types
 
-- `.sql` files: Drops and recreates the database from the SQL dump
-- `.db` files: Direct binary copy (faster, but less portable)
+- `.db` files: binary copy — needs no external tool, and is the recommended kind
+- `.sql` files: replayed with the `sqlite3` command-line tool; if it is not installed the script says so and stops rather than leaving a half-restored database
 
 ## Safety Confirmations
 
 - Before restoring: Always show the backup file details (size, date, contents preview via `--dry-run`) and warn that the current database will be overwritten
 - Before deleting backups: Confirm the number of files and date range being pruned
 - The restore script always saves the current database as `.pre-restore-TIMESTAMP` before overwriting
+- Never restore while the gateway is running: stop it first
 
 ## Tips
 
-- SQL dumps are portable and work across SQLite versions
-- Binary copies are faster to restore but version-dependent
+- SQL dumps are portable and work across SQLite versions (they need the `sqlite3` command-line tool)
+- Binary copies restore without any external tool and are the product's own format
 - The backup script respects `CROW_DB_PATH` and `CROW_DATA_DIR` environment variables

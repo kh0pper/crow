@@ -9,7 +9,8 @@
  * gateway process avoids that entirely.
  *
  * Destination directory defaults to ~/backups/crow/, configurable via
- * CROW_BACKUP_DIR. File names, ownership sidecars and per-instance retention
+ * CROW_BACKUP_DIR (one backup dir, shared with scripts/backup.sh and
+ * scripts/restore.sh). File names, ownership sidecars and per-instance retention
  * (CROW_BACKUP_KEEP_DAYS, default 7) live in servers/shared/backup-naming.js —
  * read its header for the co-hosted naming scheme and the restore note.
  *
@@ -40,6 +41,26 @@ import { classifyPeer } from "../../shared/peer-class.js";
 // Kept for existing callers/tests; the logic lives in shared/backup-naming.js.
 export function getInstanceLabel() {
   return backupLabel(process.env);
+}
+
+// N1c-12: a backup is a full copy of everything Crow knows, so the directory is
+// 0700 and every file in it 0600. Enforced here as well as in scripts/backup.sh
+// because the dashboard "Run backup now" action writes through this endpoint with
+// whatever umask the gateway happens to run under.
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
+function chmodQuiet(p, mode) {
+  try { fs.chmodSync(p, mode); } catch { /* gone, or not ours to change */ }
+}
+
+/** Create the backup directory 0700 and tighten it when it is ours. */
+function ensurePrivateDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+  try {
+    const st = fs.statSync(dir);
+    if (typeof process.getuid !== "function" || st.uid === process.getuid()) chmodQuiet(dir, DIR_MODE);
+  } catch { /* raced away */ }
 }
 
 // Verify a freshly-written backup file is a structurally sound SQLite db, and
@@ -175,7 +196,7 @@ async function runBackupInner({ now = new Date() } = {}) {
   const name = backupFileName(label, tag, date);
   const dest = path.join(dir, name);
 
-  fs.mkdirSync(dir, { recursive: true });
+  ensurePrivateDir(dir);
 
   // Never replace a same-day file another instance owns (co-hosted gateways
   // sharing one backup dir). Checked before the copy and again before rename.
@@ -235,6 +256,7 @@ async function runBackupInner({ now = new Date() } = {}) {
     // replayed onto the new copy.
     for (const suffix of ["-wal", "-shm"]) unlinkQuiet(dest + suffix);
     fs.renameSync(tmp, dest);
+    chmodQuiet(dest, FILE_MODE);
   } catch (err) {
     removeBackupFile(tmp);
     throw err;
@@ -244,8 +266,9 @@ async function runBackupInner({ now = new Date() } = {}) {
     // size + mtime fingerprint: a later in-place rewrite of the file (a
     // co-hosted gateway still on old code) shows up as a "mismatch".
     const st = fs.statSync(dest);
-    fs.writeFileSync(sidecarTmp, JSON.stringify({ ...me, written_at: new Date().toISOString(), size_bytes: st.size, mtime_ms: st.mtimeMs }, null, 2) + "\n");
+    fs.writeFileSync(sidecarTmp, JSON.stringify({ ...me, written_at: new Date().toISOString(), size_bytes: st.size, mtime_ms: st.mtimeMs }, null, 2) + "\n", { mode: FILE_MODE });
     fs.renameSync(sidecarTmp, ownerPath(dest));
+    chmodQuiet(ownerPath(dest), FILE_MODE);
   } catch (err) {
     unlinkQuiet(sidecarTmp);
     console.warn("[admin-backup] could not write owner sidecar:", err.message);
