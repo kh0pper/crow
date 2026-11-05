@@ -26,8 +26,10 @@
 #   --user      ~/.config/systemd/user, no sudo
 #
 # Env test seams: CROW_SYSTEMD_UNIT_DIR / CROW_SYSTEMD_USER_UNIT_DIR override the
-# two unit directories, and CROW_SYSTEMCTL names the systemctl binary used for the
-# merged `show` read (both used by the tests against fixture units).
+# two unit directories, CROW_SYSTEMCTL names the systemctl binary used for the
+# merged `show` read, and CROW_SUDO names the sudo binary (both used by the tests
+# against fixture units; point CROW_SUDO at a path that does not exist to walk the
+# root-without-sudo branch).
 
 set -euo pipefail
 
@@ -72,12 +74,18 @@ if [ ! -f "$LAUNCHER_SRC" ]; then
   exit 1
 fi
 
+# The sudo binary: what `run` prefixes in system mode, and what the launcher
+# branch escalates through. Overridable so a test can walk the "root, no sudo"
+# branch (CROW_SUDO at a path that does not exist).
+SUDO_BIN="${CROW_SUDO:-sudo}"
+have_sudo() { command -v "$SUDO_BIN" >/dev/null 2>&1; }
+
 if [ "$MODE" = "user" ]; then
   UNIT_DIR="${CROW_SYSTEMD_USER_UNIT_DIR:-${HOME}/.config/systemd/user}"
   SUDO=()
 else
   UNIT_DIR="${CROW_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
-  if [ "$(id -u)" -ne 0 ]; then SUDO=(sudo); else SUDO=(); fi
+  if [ "$(id -u)" -ne 0 ]; then SUDO=("$SUDO_BIN"); else SUDO=(); fi
 fi
 
 # The systemctl binary to ask for the MERGED unit values. Overridable so the
@@ -209,7 +217,10 @@ systemctl_prop() { # <unit> <Property>
 #   { path=/usr/bin/node ; argv[]=/usr/bin/node x.js ; ignore_errors=no ; … }
 # A path containing a space is NOT quoted inside argv[] (systemd joins argv with
 # spaces), so `path=` is the only unambiguous source for the program there.
-exec_start_field() { # <execstart> <field-sed-regex>
+# The selector is anchored on the `{ ` / `; ` that precedes the field: a bare
+# `path` is matched by a greedy prefix against the LAST `path=` in the string,
+# which an argument such as `--db-path=/x` supplies (audit L1 review 3 nit).
+exec_start_field() { # <execstart> <anchored selector, e.g. '{ path'>
   printf '%s' "$1" | sed -n "s/.*$2=\([^;]*\).*/\1/p" | sed -e 's/[[:space:]]*$//'
 }
 
@@ -219,9 +230,9 @@ exec_start_program() { # <execstart>
   local v="$1" argv0 path0
   case "$v" in
     \{*)
-      argv0="$(exec_start_field "$v" 'argv\[\]')"
+      argv0="$(exec_start_field "$v" '; argv\[\]')"
       argv0="${argv0%% *}"
-      path0="$(exec_start_field "$v" 'path')"
+      path0="$(exec_start_field "$v" '{ path')"
       if [ -n "$path0" ] && [ "$(basename "$path0")" = "node" ]; then
         printf '%s\n' "$path0"
       else
@@ -281,6 +292,18 @@ node_version_ok() { # <node>
   return 1
 }
 
+# True when <owner> names the account running this script (a unit's User= may be
+# a name or a numeric uid).
+is_current_user() { # <owner>
+  local owner="$1" me
+  me="$(id -un 2>/dev/null || true)"
+  if [ -n "$me" ] && [ "$owner" = "$me" ]; then return 0; fi
+  case "$owner" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$owner" = "$(id -u 2>/dev/null || true)" ]
+}
+
 install_launcher() { # <crow_home> <owner>
   local crow_home="$1" owner="${2:-}" dir file tmp
   dir="$crow_home/boot-guard"
@@ -305,25 +328,49 @@ install_launcher() { # <crow_home> <owner>
     return 0
   fi
   tmp="$file.tmp.$$"
-  # AS THE UNIT'S USER when root is doing the install: the gateway refreshes this
-  # copy itself, so it must own it, and root must never leave a root-owned file
-  # in a directory that user can rewrite. Both the directory and the copy are made
-  # by that user — root never hands ownership of the temp path over afterwards (a
-  # predictable name in a directory the user can write: that follows a swapped-in
-  # symlink) nor races a check of $dir with a later mkdir/mode/owner change of it
-  # (audit L1 fix 5b). `install -o` is only the no-sudo fallback: install does not
-  # follow links.
-  if [ -n "$owner" ] && [ "$(id -u)" -eq 0 ] && command -v sudo >/dev/null 2>&1; then
-    if [ ! -d "$dir" ]; then run sudo -u "$owner" mkdir -m 700 -p "$dir"; fi
-    run sudo -u "$owner" install -m 600 "$LAUNCHER_SRC" "$tmp"
-  elif [ -n "$owner" ] && [ "$(id -u)" -eq 0 ]; then
-    if [ ! -d "$dir" ]; then run mkdir -m 700 -p "$dir"; fi
-    run install -m 600 -o "$owner" "$LAUNCHER_SRC" "$tmp"
-  else
-    if [ ! -d "$dir" ]; then run mkdir -m 700 -p "$dir"; fi
+  # EVERYTHING BELOW RUNS AS THE UNIT'S USER, and never through `run`: in system
+  # mode `run` prefixes sudo, and `sudo install`/`sudo mkdir` leave the guard
+  # directory and the launcher copy root-owned (0700/0600) inside the operator's
+  # CROW_HOME — the gateway's own user cannot read them, so ExecStartPre fails
+  # invisibly behind its `-` prefix (audit L1 review 3, 5b(a)). The gateway
+  # refreshes this copy itself, so it must own it, and root must never own a file
+  # in a directory that user can rewrite. `install -d` makes the directory (0700,
+  # parents included) in one step instead of a `[ -d ]` test plus a mkdir, so
+  # there is no check-then-act window on its mode or its owner. The third step is
+  # a rename inside the same directory: rename(2) does not follow a symlink at
+  # the TARGET, it replaces the link, so a link planted after the check above
+  # cannot redirect the copy.
+  if [ -z "$owner" ]; then
+    # No owner to hand it to (a --user unit, or a system unit without User=, which
+    # runs as root): the copy belongs to whoever runs the unit — this user, or
+    # root through the privileged hop.
+    run install -d -m 700 "$dir"
     run install -m 600 "$LAUNCHER_SRC" "$tmp"
+    run mv -f "$tmp" "$file"
+  elif is_current_user "$owner"; then
+    # We ARE the unit's user: no escalation at all.
+    install -d -m 700 "$dir"
+    install -m 600 "$LAUNCHER_SRC" "$tmp"
+    mv -f "$tmp" "$file"
+  elif have_sudo; then
+    # Someone else's user — `sudo scripts/ops/install-boot-guard.sh` (the planned
+    # live install), or a non-root operator with sudo: the same three steps, run
+    # BY that user, so both land owned by it and root never touches them.
+    "$SUDO_BIN" -u "$owner" install -d -m 700 "$dir"
+    "$SUDO_BIN" -u "$owner" install -m 600 "$LAUNCHER_SRC" "$tmp"
+    "$SUDO_BIN" -u "$owner" mv -f "$tmp" "$file"
+  elif [ "$(id -u)" -eq 0 ]; then
+    # Root without sudo (a minimal container): root makes both with `-o`, so the
+    # service user owns the directory and the copy and root never "hands over" a
+    # predictable temp path afterwards. (The final rename stays root's; see above
+    # for why that is safe.)
+    install -d -m 700 -o "$owner" "$dir"
+    install -m 600 -o "$owner" "$LAUNCHER_SRC" "$tmp"
+    mv -f "$tmp" "$file"
+  else
+    note "error: $dir must be installed as $owner, but this user cannot become $owner (no sudo) — run this as root"
+    exit 1
   fi
-  run mv -f "$tmp" "$file"
   say "installed launcher copy: $file"
 }
 

@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -77,7 +77,9 @@ function fakePrivileged(base) {
   mkdirSync(dir, { recursive: true });
   const log = join(base, "privileged.log");
   for (const [name, body] of [
-    ["sudo", `#!/bin/sh\nprintf 'sudo %s\\n' "$*" >> ${JSON.stringify(log)}\nexec "$@"\n`],
+    // `-u <user>` is dropped: this test is not root, so the real command must run
+    // as the current user — the log still records the argv the installer used.
+    ["sudo", `#!/bin/sh\nprintf 'sudo %s\\n' "$*" >> ${JSON.stringify(log)}\n[ "$1" = "-u" ] && shift 2\nexec "$@"\n`],
     ["systemctl", `#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`],
   ]) {
     writeFileSync(join(dir, name), body);
@@ -174,6 +176,48 @@ function fakeRootShims(base) {
     chmodSync(join(dir, name), 0o755);
   }
   return { dir, log };
+}
+
+/**
+ * Shims for the branch a minimal container takes: `id` says root and there is NO
+ * usable sudo (the test points CROW_SUDO at a missing path). `install` logs its
+ * argv and drops `-o <owner>` before running the real install — this test is not
+ * root, so the real one would refuse to change ownership. Returns null when
+ * coreutils' install cannot be found.
+ */
+function fakeRootNoSudoShims(base) {
+  const which = spawnSync("sh", ["-c", "command -v install"], { encoding: "utf8" });
+  const real = (which.stdout || "").trim();
+  if (which.status !== 0 || !real) return null;
+  const dir = join(base, "root-nosudo-shims");
+  mkdirSync(dir, { recursive: true });
+  const log = join(base, "root-nosudo.log");
+  const installShim = `#!/usr/bin/env bash
+printf 'install %s\\n' "$*" >> ${JSON.stringify(log)}
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec ${real} "\${args[@]}"
+`;
+  for (const [name, body] of [
+    ["id", `#!/bin/sh\nprintf '0\\n'\n`],
+    ["chown", `#!/bin/sh\nprintf 'chown %s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`],
+    ["systemctl", `#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`],
+    ["install", installShim],
+  ]) {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  }
+  return { dir, log };
+}
+
+/** Every logged command that touches the guard directory (one per line). */
+function guardCommands(log, guard) {
+  return log.split("\n").filter((line) => line.trim() !== "" && line.includes(guard));
 }
 
 /** The drop-in body the dry run printed. */
@@ -367,6 +411,29 @@ test("a node path containing a space comes from ExecStart's path= field", () => 
   assert.ok(printedDropin(r.stdout).includes(`ExecStartPre=-"${node}" `), printedDropin(r.stdout));
 });
 
+test("an argv carrying --db-path= does not shadow ExecStart's path= field", () => {
+  // exec_start_field matched with a greedy `.*path=`, i.e. the LAST `path=` in the
+  // struct — which an argument like `--db-path=/x` supplies. The node path here
+  // contains a space, where argv[0] is ambiguous and path= is the only source, so
+  // the installer fell back to the first node on the runner's $PATH and wired the
+  // drop-in to a different node than the unit runs (audit L1 review 3 nit).
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "node dir"), "24.21.0");
+  fixtureUnit(unitDir, "crow-gateway.service", UNIT({
+    node,
+    crowHome: join(base, "crow-home"),
+    workdir: join(base, "app"),
+    execStart: `${node} servers/gateway/index.js --db-path=/x`,
+  }));
+  const fake = fakeSystemctlMerging(base, unitDir);
+
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fake.path });
+  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+  const dropin = printedDropin(r.stdout);
+  assert.ok(dropin.includes(`ExecStartPre=-"${node}" `), `node must still come from path=:\n${dropin}`);
+});
+
 test("a quoted Environment value keeps its space through the merged line", () => {
   const base = scratch();
   const unitDir = join(base, "units");
@@ -507,13 +574,140 @@ test("as root no chown runs on any path inside the guard dir", () => {
   const log = readFileSync(shims.log, "utf8");
   const guard = join(crowHome, "boot-guard");
   assert.doesNotMatch(log, /(^|\n|sudo )chown /, `root must never chown inside the guard dir:\n${log}`);
-  assert.ok(log.includes(`sudo -u alice mkdir -m 700 -p ${guard}`), `the guard dir must be made by its owner:\n${log}`);
+  assert.ok(log.includes(`sudo -u alice install -d -m 700 ${guard}`), `the guard dir must be made by its owner:\n${log}`);
   assert.ok(log.includes(`sudo -u alice install -m 600 `), `the copy must be installed by its owner:\n${log}`);
   assert.ok(log.includes(` ${guard}/crow-boot-guard.mjs.tmp.`), `the copy must land in the guard dir:\n${log}`);
+  assert.ok(log.includes(`sudo -u alice mv -f `), `the replace must be the owner's rename too:\n${log}`);
+  // Nothing may go through a bare `sudo`: in system mode that is root doing the
+  // write inside the service user's directory.
+  assert.doesNotMatch(log, /^sudo (mkdir|install|mv) /m, `no root write in the guard dir:\n${log}`);
 
   const copy = join(guard, "crow-boot-guard.mjs");
   assert.ok(existsSync(copy), "the launcher copy must be installed");
   assert.equal(readFileSync(copy, "utf8"), readFileSync(join(import.meta.dirname, "..", "scripts", "boot-guard", "crow-boot-guard.mjs"), "utf8"));
+});
+
+test("a non-root system-mode run with User= as itself installs the copy directly", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: there is no unprivileged sudo hop to observe");
+    return;
+  }
+  // In system mode `run` prefixes sudo, and the old launcher branch went through
+  // it: `sudo mkdir -m 700` and `sudo install -m 600` left the guard dir and the
+  // copy root-owned 0700/0600 inside the operator's CROW_HOME, so the gateway's
+  // own user could not read them and ExecStartPre failed behind its silent `-`
+  // (audit L1 review 3, 5b(a)).
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  const guard = join(crowHome, "boot-guard");
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome, workdir: join(base, "app") }).replace("User=alice", `User=${userInfo().username}`));
+  const priv = fakePrivileged(base);
+
+  const r = run([], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir,
+    PATH: `${priv.dir}:${process.env.PATH}`,
+  });
+  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+
+  const log = readFileSync(priv.log, "utf8");
+  // The copy belongs to the unit's user, and that user is us: nothing escalates.
+  assert.deepEqual(guardCommands(log, guard), [], `no sudo may touch the guard dir:\n${log}`);
+  assert.doesNotMatch(log, /sudo install -m 600/, `the copy must not be installed by root:\n${log}`);
+  // The drop-in itself still needs the hop: it lives in the (root-owned) unit dir.
+  assert.match(log, /sudo install -m 644 /, `the drop-in still goes through sudo:\n${log}`);
+
+  const copy = join(guard, "crow-boot-guard.mjs");
+  assert.ok(existsSync(copy), "the launcher copy must be installed");
+  assert.equal(readFileSync(copy, "utf8"),
+    readFileSync(join(import.meta.dirname, "..", "scripts", "boot-guard", "crow-boot-guard.mjs"), "utf8"));
+  assert.equal(statSync(copy).mode & 0o777, 0o600, "the launcher copy is 0600");
+  assert.equal(statSync(guard).mode & 0o777, 0o700, "the guard dir is 0700");
+});
+
+test("a non-root system-mode run with another owner runs the three steps as that owner", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: the installer would take the root branch");
+    return;
+  }
+  // `sudo mkdir -m 700` + `sudo install -m 600` (the old branch) put a root-owned
+  // 0700 dir and 0600 copy in the service user's CROW_HOME. Every guard-dir step
+  // must instead be run BY that user.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  const guard = join(crowHome, "boot-guard");
+  // A name that is never the test runner: the branch under test is the sudo -u one.
+  const owner = "bg-owner";
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome, workdir: join(base, "app") }).replace("User=alice", `User=${owner}`));
+  const priv = fakePrivileged(base);
+
+  const r = run([], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir,
+    PATH: `${priv.dir}:${process.env.PATH}`,
+  });
+  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+
+  const log = readFileSync(priv.log, "utf8");
+  const lines = guardCommands(log, guard);
+  assert.ok(lines.length >= 3, `expected the dir, the copy and the replace:\n${log}`);
+  for (const line of lines) {
+    assert.match(line, new RegExp(`^sudo -u ${owner} `), `every guard-dir command must run as its owner:\n${line}`);
+  }
+  assert.ok(lines.includes(`sudo -u ${owner} install -d -m 700 ${guard}`), `the dir must be made as the owner:\n${log}`);
+  assert.ok(lines.some((l) => l.startsWith(`sudo -u ${owner} install -m 600 `)
+    && l.includes(`${guard}/crow-boot-guard.mjs.tmp.`)), `the copy must be installed as the owner:\n${log}`);
+  assert.ok(lines.some((l) => l.startsWith(`sudo -u ${owner} mv -f `)), `the replace must run as the owner:\n${log}`);
+  // Never a bare `sudo install -m 600`: that is root writing the copy.
+  assert.doesNotMatch(log, /^sudo install -m 600/m, `the copy may not be written by root:\n${log}`);
+
+  const copy = join(guard, "crow-boot-guard.mjs");
+  assert.ok(existsSync(copy), "the launcher copy must be installed");
+  assert.equal(statSync(copy).mode & 0o777, 0o600);
+  assert.equal(statSync(guard).mode & 0o777, 0o700);
+});
+
+test("as root without sudo the guard dir and the copy are made with -o <owner>", (t) => {
+  // A minimal container has root and no sudo: the old branch ran `mkdir -m 700`
+  // as root there, so the directory was root-owned and the service user could not
+  // even traverse it (audit L1 review 3, 5b(b)).
+  const base = scratch();
+  const shims = fakeRootNoSudoShims(base);
+  if (!shims) {
+    t.skip("coreutils' install is not available");
+    return;
+  }
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  const guard = join(crowHome, "boot-guard");
+  fixtureUnit(unitDir, "crow-gateway.service", UNIT({ node, crowHome, workdir: join(base, "app") }));
+
+  const r = run([], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir,
+    PATH: `${shims.dir}:${process.env.PATH}`,
+    // A path that does not exist: root with no sudo, so the `-o` fallback is taken.
+    CROW_SUDO: join(base, "no-such-sudo"),
+  });
+  assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+
+  const lines = readFileSync(shims.log, "utf8").split("\n");
+  assert.ok(lines.includes(`install -d -m 700 -o alice ${guard}`),
+    `the guard dir must be made with -o so its owner owns it:\n${lines.join("\n")}`);
+  assert.ok(lines.some((l) => l.startsWith("install -m 600 -o alice ") && l.includes(`${guard}/crow-boot-guard.mjs.tmp.`)),
+    `the copy must be made with -o so its owner owns it:\n${lines.join("\n")}`);
+  assert.doesNotMatch(lines.join("\n"), /^sudo /m, "there is no sudo here");
+  // Root creates both as the owner and never changes the owner afterwards.
+  assert.doesNotMatch(lines.join("\n"), /\bchown\b/, lines.join("\n"));
+
+  const copy = join(guard, "crow-boot-guard.mjs");
+  assert.ok(existsSync(copy), "the launcher copy must be installed");
+  assert.equal(statSync(copy).mode & 0o777, 0o600);
+  assert.equal(statSync(guard).mode & 0o777, 0o700);
 });
 
 test("a symlinked boot-guard directory is refused, never written through", () => {
@@ -546,10 +740,16 @@ test("as root the launcher copy is installed as the unit's user", () => {
   // walked with a shimmed `id` in "as root no chown runs …"; this pins the
   // source so neither branch can quietly come back.
   const source = readFileSync(SCRIPT, "utf8");
-  assert.match(source, /sudo -u "\$owner" mkdir -m 700 -p "\$dir"/, "the guard dir must be made by the unit's user");
-  assert.match(source, /sudo -u "\$owner" install -m 600/, "the copy must run as the unit's user");
-  // `install -o` is the no-sudo fallback only: no chown of a temp path anywhere.
+  assert.match(source, /"\$SUDO_BIN" -u "\$owner" install -d -m 700 "\$dir"/, "the guard dir must be made by the unit's user");
+  assert.match(source, /"\$SUDO_BIN" -u "\$owner" install -m 600/, "the copy must run as the unit's user");
+  assert.match(source, /"\$SUDO_BIN" -u "\$owner" mv -f/, "the replace must run as the unit's user");
+  // `install -o` is the root-without-sudo fallback only.
+  assert.match(source, /install -d -m 700 -o "\$owner" "\$dir"/, "a root without sudo must make the dir with -o");
   assert.match(source, /install -m 600 -o "\$owner"/);
+  // No `run` anywhere in that branch: `run` prefixes sudo in system mode, which
+  // is how a non-root run used to leave a root-owned 0700/0600 copy behind.
+  assert.doesNotMatch(source, /run sudo -u/, "the owner branch must not go through run");
+  assert.doesNotMatch(source, /run mkdir -m 700/, "no mkdir through run for the guard dir");
   assert.doesNotMatch(source, /\bchown\b/, "root must never chown inside the guard dir");
   assert.doesNotMatch(source, /run chmod 700 "\$dir"/, "no check-then-act chmod of the guard dir");
   // And never through a symlinked directory.
