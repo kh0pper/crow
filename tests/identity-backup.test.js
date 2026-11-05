@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -212,6 +212,32 @@ test("CLI export: refuses without a passphrase when non-interactive", () => {
   const out = runCli("exportIdentity", [], { CROW_DATA_DIR: dataDir });
   assert.equal(out.status, 1, "exit 1");
   assert.match(out.stderr, /passphrase/i, "clear message names the passphrase");
+});
+
+test("CLI export records identity_backup_exported_at when the instance has a crow.db", async () => {
+  // The CLI is a real way to make the passphrase-protected copy, so it must
+  // stop the boot nudge exactly like the dashboard handler does (N1c-10).
+  const dir = join(scratch, "cliexport", "data");
+  mkdirSync(dir, { recursive: true });
+  const stored = JSON.parse(readFileSync(join(dataDir, "identity.json"), "utf-8"));
+  writeFileSync(join(dir, "identity.json"), JSON.stringify(stored, null, 2), { mode: 0o600 });
+  const dbPath = join(dir, "crow.db");
+  const { default: Database } = await import("better-sqlite3");
+  const db = new Database(dbPath);
+  db.exec("CREATE TABLE dashboard_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)");
+  db.close();
+
+  const exp = runCli("exportIdentity", ["--", "--passphrase", PASSPHRASE], {
+    CROW_DATA_DIR: dir,
+    CROW_DB_PATH: dbPath,
+  });
+  assert.equal(exp.status, 0, `export succeeds: ${exp.stderr}`);
+  assert.ok(!exp.stdout.includes(stored.seed), "the export output still never carries the plaintext seed");
+
+  const after = new Database(dbPath, { readonly: true });
+  const row = after.prepare("SELECT value FROM dashboard_settings WHERE key = 'identity_backup_exported_at'").get();
+  after.close();
+  assert.ok(row && row.value, "the CLI export recorded identity_backup_exported_at");
 });
 
 test("CLI export → import round-trip: encrypted output, restore writes a plaintext-seed identity.json", () => {

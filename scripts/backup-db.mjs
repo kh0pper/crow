@@ -49,14 +49,18 @@
  *      owner can take anywhere is the passphrase-protected Export
  *      (buildIdentityBackup), and everything under <CROW_HOME>/secrets is
  *      never copied at all. backup.sh's S3 and git steps have an explicit
- *      allow-list (this run's .db and .sql) plus a guard that refuses any
- *      file whose name says identity or that lives under secrets/.
+ *      allow-list (this run's .db and .sql) plus a guard that refuses exactly
+ *      what must not leave — this instance's identity copy name, any
+ *      identity.json, and anything under <CROW_HOME>/secrets
+ *      (uploadRefusalReason in servers/shared/backup-naming.js, asked through
+ *      `--may-leave` below).
  *
  * Modes (backup.sh calls these; nothing else should need them):
  *   --report <file> --db <path>            make the copy (+ dump + identity), report what landed
  *   --names --report <file> --db <path>    dry run: report the names only, write nothing
  *   --backup-dir                           print resolveBackupDir() and exit
  *   --naming                               print stem, tag and artifacts dir name
+ *   --may-leave <file>                     may this file be uploaded/committed? exit 0 yes, 3 no (+ why)
  *   --prune [--dry-run] [--db <path>]      per-instance retention for .db, .sql and the identity copies
  *
  * The report file is a shell-sourceable list (DB_FILE=..., SQL_FILE=...,
@@ -80,6 +84,7 @@ import { dbHolders, holdersText } from "./restore-db.mjs";
 import {
   localBackupContext, backupFileName, backupStem, artifactStoreName, ownerPath, readOwner,
   isForeignOwner, resolveBackupDir, identityBackupFileName, identityFilePath, ownIdentityRegex,
+  uploadRefusalReason,
 } from "../servers/shared/backup-naming.js";
 
 const FILE_MODE = 0o600;
@@ -407,10 +412,10 @@ async function localCopy(dbPath, dir, name, me) {
  * Security audit N1c-10, the operator's ruling: the identity stays on THIS
  * machine (restore.sh --with-identity puts it back on the same hardware), so
  * the copy lives only in the local backup folder — never in S3, never in the
- * git repo (backup.sh's steps allow-list this run's .db and .sql and refuse
- * anything named *identity*). Nothing under <CROW_HOME>/secrets is touched:
- * the keychain key never leaves the machine, and the Keychain's own passphrase
- * Export is how those entries travel.
+ * git repo (backup.sh's steps allow-list this run's .db and .sql and ask
+ * uploadRefusalReason() about every other name). Nothing under
+ * <CROW_HOME>/secrets is touched: the keychain key never leaves the machine,
+ * and the Keychain's own passphrase Export is how those entries travel.
  *
  * A same-day copy whose sidecar names ANOTHER instance is left alone (a
  * warning, not a refusal: the database copy is already written and sound, and
@@ -434,7 +439,12 @@ function copyIdentity({ dbPath, dir, ctx, date, me }) {
   }
   const tmp = tmpBeside(dir, path.basename(dest)) + ".json";
   try {
-    fs.copyFileSync(source, tmp);
+    // 0600 FROM CREATION (open 'wx' + mode, never a copyFileSync + chmod): the
+    // file holds the master seed, so it must not be readable by anyone else
+    // even for the instant between writing and renaming it into place.
+    const bytes = fs.readFileSync(source);
+    const fd = fs.openSync(tmp, "wx", FILE_MODE);
+    try { fs.writeSync(fd, bytes); } finally { fs.closeSync(fd); }
     chmodQuiet(tmp, FILE_MODE);
     fs.renameSync(tmp, dest);
     chmodQuiet(dest, FILE_MODE);
@@ -711,11 +721,12 @@ async function prune({ dryRun, dbPath }) {
 /* ------------------------------------------------------------------- main */
 
 function parseArgs(argv) {
-  const opts = { mode: "make", dryRun: false, dbPath: null, report: null };
+  const opts = { mode: "make", dryRun: false, dbPath: null, report: null, file: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--report") { opts.report = argv[++i]; }
     else if (a === "--db") { opts.dbPath = argv[++i]; }
+    else if (a === "--may-leave") { opts.mode = "may-leave"; opts.file = argv[++i]; }
     else if (a === "--names") { opts.mode = "names"; }
     else if (a === "--backup-dir") { opts.mode = "backup-dir"; }
     else if (a === "--naming") { opts.mode = "naming"; }
@@ -730,8 +741,17 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   if (opts.mode === "help") {
-    console.log("usage: node scripts/backup-db.mjs [--report FILE --db PATH] [--names] [--backup-dir] [--naming] [--prune [--dry-run]]");
+    console.log("usage: node scripts/backup-db.mjs [--report FILE --db PATH] [--names] [--backup-dir] [--naming] [--may-leave FILE] [--prune [--dry-run]]");
     return 0;
+  }
+  if (opts.mode === "may-leave") {
+    // The upload guard's single definition (uploadRefusalReason): silence and 0
+    // when the file may leave, the reason on stdout and 3 when it must not.
+    if (!opts.file) throw new Error("--may-leave <file> is required");
+    const why = uploadRefusalReason(opts.file);
+    if (!why) return 0;
+    process.stdout.write(`${why}\n`);
+    return 3;
   }
   if (opts.mode === "backup-dir") {
     process.stdout.write(resolveBackupDir() + "\n");

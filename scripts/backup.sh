@@ -32,13 +32,17 @@
 # hardware (`npm run restore -- <backup> --with-identity`).
 #
 #   - The S3 step and the git step have an EXPLICIT allow-list — this run's .db
-#     and .sql, nothing else — and a guard that refuses to upload or commit any
-#     file whose name matches `*identity*` or that lives under
-#     <CROW_HOME>/secrets. A file added to the backup dir later cannot start
-#     travelling by accident.
-#   - <CROW_HOME>/secrets (keychain.key, vault-device-id, …) is NEVER copied,
-#     by this script or by any backup. Those entries move between machines with
-#     the Keychain's own passphrase Export.
+#     and .sql, nothing else — and a guard that refuses exactly what must not
+#     travel: this instance's identity copy name
+#     (`<stem>-identity-<date>.json`), any `identity.json`, and anything under
+#     <CROW_HOME>/secrets. The guard is uploadRefusalReason() in
+#     servers/shared/backup-naming.js (asked through `backup-db.mjs
+#     --may-leave`), so a database copy whose stem merely contains the word
+#     "identity" is not mistaken for identity data. A file added to the backup
+#     dir later cannot start travelling by accident.
+#   - <CROW_HOME>/secrets is NEVER copied, by this script or by any backup:
+#     those entries move between machines with the Keychain's own passphrase
+#     Export.
 #   - A copy of the identity the owner can take anywhere is the
 #     passphrase-protected identity backup (Settings → Help & setup, or
 #     `npm run identity:export`). Crow asks for it once, on boot.
@@ -165,27 +169,18 @@ trap 'rm -f "$REPORT_FILE"' EXIT
 # --- Upload guards (N1c-10) ---
 # Two independent refusals, on purpose: the allow-list below never offers an
 # unseen file, and this guard catches one that reaches a step anyway. Identity
-# data and the keychain key never leave this machine.
-SECRETS_DIR="${CROW_HOME:-$HOME/.crow}/secrets"
-
+# data and the keychain key never leave this machine. What counts as "identity"
+# is decided in ONE place (uploadRefusalReason in servers/shared/backup-naming.js):
+# this instance's identity copy name, any identity.json, and anything under
+# <CROW_HOME>/secrets — never "any name containing identity", so a database
+# copy whose stem contains the word still uploads.
 file_may_leave() {
-  local f="$1" base real secrets_real
-  base="$(basename -- "$f")"
-  case "$base" in
-    *identity*)
-      echo "  Refusing to send $base anywhere: identity data never leaves this machine."
-      return 1
-      ;;
-  esac
-  real="$(cd "$(dirname -- "$f")" 2>/dev/null && pwd -P)/$base"
-  secrets_real="$(cd "$SECRETS_DIR" 2>/dev/null && pwd -P || printf '%s' "$SECRETS_DIR")"
-  case "$real" in
-    "$secrets_real"/*)
-      echo "  Refusing to send $base anywhere: it is inside $SECRETS_DIR (the keychain key has its own passphrase Export)."
-      return 1
-      ;;
-  esac
-  return 0
+  local f="$1" why
+  if why="$("$NODE_BIN" "$BACKUP_HELPER" --may-leave "$f" 2>&1)"; then
+    return 0
+  fi
+  echo "  Refusing to send $(basename -- "$f") anywhere: ${why:-it must not leave this machine}"
+  return 1
 }
 
 # --- Step 1: the binary copy (and the SQL dump taken from it) ---
@@ -270,22 +265,43 @@ if [[ -n "$S3_EP" && -n "$S3_AK" && -n "$S3_SK" ]]; then
       # written. Nothing else is ever offered to `mc` — in particular neither
       # <stem>-identity-<date>.json nor anything under <CROW_HOME>/secrets. The
       # names come from the run's own report file, and file_may_leave() refuses
-      # an identity name or a secrets/ path even if one ever reached the list.
+      # an identity copy, an identity.json or a path in the secrets directory
+      # even if one ever reached the list.
       S3_FILES=()
+      S3_REFUSED=()
       for f in "$DB_FILE" "${SQL_FILE:-}"; do
         [[ -n "$f" && -f "$f" ]] || continue
-        file_may_leave "$f" || continue
-        S3_FILES+=("$f")
+        if file_may_leave "$f"; then
+          S3_FILES+=("$f")
+        else
+          S3_REFUSED+=("$(basename -- "$f")")
+        fi
       done
       mc alias set crow-backup "$S3_EP" "$S3_AK" "$S3_SK" --quiet 2>/dev/null || true
       mc mb --ignore-existing "crow-backup/$BUCKET" --quiet 2>/dev/null || true
+      S3_UPLOADED=()
       for f in ${S3_FILES[@]+"${S3_FILES[@]}"}; do
         case "$f" in
-          *.sql) mc cp "$f" "crow-backup/$BUCKET/sql/" --quiet ;;
-          *)     mc cp "$f" "crow-backup/$BUCKET/db/" --quiet ;;
+          *.sql) where="sql/" ;;
+          *)     where="db/" ;;
         esac
+        if mc cp "$f" "crow-backup/$BUCKET/$where" --quiet; then
+          S3_UPLOADED+=("$where$(basename -- "$f")")
+        else
+          echo "  Warning: could not upload $(basename -- "$f") to S3."
+        fi
       done
-      echo "  Uploaded this run's files to S3."
+      # Say what actually went, or that it refused — never a blanket "uploaded
+      # this run's files" after a refusal.
+      if [[ ${#S3_UPLOADED[@]} -gt 0 ]]; then
+        echo "  Uploaded to S3: ${S3_UPLOADED[*]}"
+      fi
+      if [[ ${#S3_REFUSED[@]} -gt 0 ]]; then
+        echo "  Refused to upload: ${S3_REFUSED[*]}"
+      fi
+      if [[ ${#S3_UPLOADED[@]} -eq 0 && ${#S3_REFUSED[@]} -eq 0 ]]; then
+        echo "  Nothing to upload to S3."
+      fi
     else
       echo "  [dry-run] Would upload $SQL_FILE and $DB_FILE to $BUCKET (never the identity copy)"
     fi
@@ -325,9 +341,9 @@ if [[ -n "${CROW_BACKUP_GIT_REPO:-}" ]]; then
       # EXPLICIT ALLOW-LIST (N1c-10): the only file that ever enters this repo
       # is this run's SQL dump, under the two names below (never the binary
       # .db, never <stem>-identity-<date>.json, never anything under
-      # <CROW_HOME>/secrets). file_may_leave() refuses an identity name or a
-      # secrets/ path, and the staged-files check before the commit refuses a
-      # commit that carries either one.
+      # <CROW_HOME>/secrets). file_may_leave() refuses an identity copy, an
+      # identity.json or a path in the secrets directory, and the staged-files
+      # check before the commit refuses a commit that carries either one.
       if ! file_may_leave "$GIT_DIR/$GIT_LATEST" || ! file_may_leave "$GIT_DIR/$GIT_DATED"; then
         echo "  Git backup skipped: a staged name was refused."
       else
@@ -352,12 +368,13 @@ GITIGNORE
           git add .gitignore
         fi
 
-        # Nothing staged may carry identity data or a secrets/ entry: refuse
-        # the whole commit (and unstage) rather than let one through.
+        # Nothing staged may carry identity data or an entry from the secrets
+        # directory: refuse the whole commit (and unstage) rather than let one
+        # through.
         STAGED_IDENTITY="$(git diff --cached --name-only | { grep -Ei '(^|/)[^/]*identity|(^|/)secrets(/|$)' || true; })"
         if [[ -n "$STAGED_IDENTITY" ]]; then
           git reset --quiet
-          echo "  Refusing to commit: a staged file carries identity data or an entry from secrets/."
+          echo "  Refusing to commit: a staged file carries identity data or an entry from the secrets directory."
         elif git diff --cached --quiet; then
           echo "  No changes to commit."
         else

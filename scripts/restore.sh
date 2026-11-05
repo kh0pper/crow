@@ -13,11 +13,20 @@
 # identity.json in the backup directory as `<stem>-identity-<date>.json`, for
 # THIS machine only. `--with-identity` restores the copy from the same run
 # (same stem and date) as well as the database — and only when the target has
-# no identity.json yet, or already holds the SAME crow id. A DIFFERENT existing
-# identity is refused ("Move it aside yourself if you mean to replace it"):
-# every bot key, contact and share derives from the seed in that file, so it is
-# never replaced silently. Without --with-identity, identity.json is never
-# touched.
+# no identity.json yet, or already holds the SAME crow id. The copy itself is
+# checked first: a symlink is refused, a copy whose owner sidecar names another
+# instance is refused ("That identity copy belongs to another Crow instance; it
+# is not restored here."), and a copy whose seed does not derive the crow id it
+# claims is refused. A DIFFERENT existing identity is refused ("Move it aside
+# yourself if you mean to replace it"): every bot key, contact and share derives
+# from the seed in that file, so it is never replaced silently. Without
+# --with-identity, identity.json is never touched.
+#
+# To move to NEW hardware, restore the database and files there and bring the
+# identity with the passphrase-protected identity backup (`npm run
+# identity:import`, or the copy the owner downloaded from the onboarding done
+# step / Settings → Help & setup) — never copy the backup folder's identity
+# copy to another machine.
 #
 # Backups are read from the same directory `npm run backup` and the dashboard's
 # "Run backup now" write to (CROW_BACKUP_DIR, else ~/backups/crow). Files still
@@ -147,6 +156,8 @@ if [[ "${1:-}" == "--list" ]]; then
   echo "$COUNT backup file(s) found."
   echo "An identity copy (*-identity-<date>.json) is restored with the database by"
   echo "  restore.sh <backup> --with-identity — only on the machine it came from."
+  echo "To move to new hardware, restore the database and files there and bring the"
+  echo "  identity with the passphrase-protected backup (npm run identity:import)."
 
   # The old location: only this product's own file shapes, only when it is a
   # different directory (a host that never had one prints nothing).

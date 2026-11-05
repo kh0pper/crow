@@ -900,8 +900,11 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // 4-PR3: identity backup download (onboarding done step + Settings → Help &
   // Setup). Hand-registered — panels expose GET handlers only — and mounted
   // AFTER dashboardAuth + csrfMiddleware above, so it is session-authed and
-  // CSRF-protected exactly like the fix-it action POST.
-  router.post("/dashboard/onboarding/identity-backup", handleIdentityBackupPost);
+  // CSRF-protected exactly like the fix-it action POST. The wrapper passes an
+  // explicit empty opts: Express would otherwise hand `next` to the handler as
+  // its third argument, i.e. as the options object.
+  router.post("/dashboard/onboarding/identity-backup", (req, res) =>
+    handleIdentityBackupPost(req, res, {}));
 
   // Task 7: onboarding AI step's cloud-provider paste-a-key form — same
   // mounting slot as identity-backup above (session-authed + CSRF-protected).
