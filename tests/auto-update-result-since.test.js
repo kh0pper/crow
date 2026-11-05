@@ -61,6 +61,9 @@ function settingsDb(initial = {}) {
         const value = rows.get(args[0]);
         return { rows: value == null ? [] : [{ value }] };
       }
+      if (/^\s*SELECT key, value FROM dashboard_settings WHERE key IN \(\?, \?\)/.test(sql || "")) {
+        return { rows: args.filter((k) => rows.get(k) != null).map((k) => ({ key: k, value: rows.get(k) })) };
+      }
       if (/INSERT INTO dashboard_settings/.test(sql || "")) {
         rows.set(args[0], args[1]);
         saved[args[0]] = args[1];
@@ -141,6 +144,24 @@ test("auto_update_result_since: an unreadable previous result re-stamps instead 
     // side: an old `since` must never outlive the result it described and turn
     // into a false warn.
     assert.ok(writes.includes("auto_update_result_since"));
+  } finally {
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    fx.cleanup();
+  }
+});
+test("auto_update_result_since: an install already on a result with no stamp gets one on the next tick", async () => {
+  const fx = fixture();
+  // Deployed onto a gateway already stuck on the same code: a result, no stamp.
+  const db = settingsDb({ auto_update_last_result: "Skipped: not on main (on 'feature/old')" });
+  try {
+    g(fx.work, "checkout", "-b", "feature/x");
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+    const r = await checkForUpdates();
+    assert.equal(r.skipped, "not-on-main");
+    assert.ok(db.writes.includes("auto_update_result_since"), "the same code, but no stamp yet: stamp it");
+    assert.ok(Number.isFinite(Date.parse(db.rows.get("auto_update_result_since"))));
   } finally {
     _setAppRootForTest(REAL_APP_ROOT);
     _setDbForTest(null);

@@ -207,17 +207,21 @@ async function saveSetting(key, value) {
 async function stampResultSince(nextValue) {
   if (!db) return;
   let prev;
+  let hasSince = false;
   try {
     const { rows } = await db.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = ?",
-      args: [RESULT_KEY],
+      sql: "SELECT key, value FROM dashboard_settings WHERE key IN (?, ?)",
+      args: [RESULT_KEY, RESULT_SINCE_KEY],
     });
-    prev = rows?.[0]?.value ?? null;
+    prev = rows?.find((r) => r.key === RESULT_KEY)?.value ?? null;
+    hasSince = Boolean(rows?.find((r) => r.key === RESULT_SINCE_KEY)?.value);
   } catch {
     prev = undefined; // unreadable: cannot compare, so re-stamp rather than age
   }
   const codeOf = (v) => classifyUpdateResult(v)?.code ?? null;
-  if (prev !== undefined && codeOf(prev) === codeOf(nextValue)) return;
+  // An install already stuck on a result when this shipped has no stamp yet:
+  // stamp it on the next tick, or its wait would never start aging.
+  if (prev !== undefined && hasSince && codeOf(prev) === codeOf(nextValue)) return;
   const now = new Date().toISOString();
   try {
     await db.execute({
