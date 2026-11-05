@@ -300,8 +300,14 @@ export async function attemptLogin(password, ip, deviceTrustToken = null, userAg
         // Need 2FA verification — create pending token
         await auditLog(db, 'auth_password_verified', { ip });
         // The on-host flag rides the pending token, so the 2FA step mints an
-        // 'onhost' session even when its own request comes from elsewhere.
-        const pending2faToken = await createPending2faToken(onHost ? { onhost: true } : null);
+        // 'onhost' session even when its own request comes from elsewhere. A
+        // dashboard-consent hand-off (`next`) rides it too, so the 2FA step can
+        // return to the app's consent page instead of the dashboard home; the
+        // caller has already checked it with oauth-consent.js's isConsentNext.
+        const pendingCtx = {};
+        if (onHost) pendingCtx.onhost = true;
+        if (typeof opts?.next === "string" && opts.next) pendingCtx.next = opts.next;
+        const pending2faToken = await createPending2faToken(Object.keys(pendingCtx).length ? pendingCtx : null);
         return { requires2fa: true, pending2faToken };
       }
     } else {

@@ -9,6 +9,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { createDbClient, auditLog } from "../db.js";
+import { createPendingAuthorization } from "./oauth-consent.js";
 
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -75,6 +76,29 @@ export class CrowOAuthProvider {
   }
 
   async authorize(client, params, res) {
+    // Redirect URI first, unchanged: an unregistered one is refused before
+    // anything is recorded anywhere.
+    if (!client.redirect_uris || !client.redirect_uris.includes(params.redirectUri)) {
+      res.status(400).json({ error: "invalid_request", error_description: "Unregistered redirect_uri" });
+      return;
+    }
+
+    // The security audit's finding: this used to mint the code right here, for
+    // any registered client, with no dashboard login and no consent — client
+    // registration is open, so that handed a full operator MCP token to whoever
+    // could reach the gateway. Now the request is only PENDING: the browser goes
+    // to the consent page (oauth-consent.js) and a code exists only after the
+    // owner clicks Allow (issueAuthorizationCode below).
+    const id = createPendingAuthorization(client, params);
+    res.redirect("/dashboard/oauth/consent?req=" + id);
+  }
+
+  /**
+   * Mint the authorization code for a request the owner allowed. Called only by
+   * the consent POST (oauth-consent.js), never by any HTTP route of its own.
+   * Returns the full redirect URL the browser should be sent to.
+   */
+  issueAuthorizationCode(client, params) {
     const code = randomUUID();
     const searchParams = new URLSearchParams({ code });
 
@@ -84,14 +108,9 @@ export class CrowOAuthProvider {
 
     this.codes.set(code, { client, params, expiresAt: Date.now() + 600000 }); // 10 min
 
-    if (!client.redirect_uris || !client.redirect_uris.includes(params.redirectUri)) {
-      res.status(400).json({ error: "invalid_request", error_description: "Unregistered redirect_uri" });
-      return;
-    }
-
     const targetUrl = new URL(params.redirectUri);
     targetUrl.search = searchParams.toString();
-    res.redirect(targetUrl.toString());
+    return targetUrl.toString();
   }
 
   async challengeForAuthorizationCode(client, authorizationCode) {
