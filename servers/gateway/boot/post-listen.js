@@ -331,6 +331,36 @@ export async function runPostListenSetup(server, app, deps) {
     console.error("[auto-update] Failed to start:", err.message);
   });
 
+  // Boot guard (security audit N1c-3, Layer 1). This process is the only one that
+  // can tell the launcher two things it cannot see: that an exit was planned
+  // (markPlanned, wired to crow:shutdown and SIGTERM in index.js), and that a sha
+  // has actually been up for ten minutes (markStable — which is also the only
+  // moment the installed launcher copy is refreshed). It also reports a rollback
+  // the launcher performed before this process started.
+  //
+  // Runs after startAutoUpdate(): recordUpdateResult() funnels through the same
+  // saveSetting() as every tick, so it needs that module's db handle.
+  setImmediate(async () => {
+    try {
+      const bg = await import("../boot-guard-state.js");
+      const conv = await import("../convergence.js");
+      const bootSha = conv.getBootSha();
+      let dbPath = null;
+      try { dbPath = (await conv.resolveInstance()).dbPath; } catch { /* paths unresolved: keep the recorded one */ }
+      // The result line and its bell belong to the instance's own dashboard, so a
+      // --no-auth secondary gateway skips them like every other dashboard surface;
+      // the stable mark below is plain instance bookkeeping and always runs.
+      if (!noAuth) await bg.recordGuardResult({ log: (m) => console.log(`[boot-guard] ${m}`) });
+      bg.scheduleStableMark({
+        bootSha,
+        dbPath,
+        log: (m) => console.log(`[boot-guard] ${m}`),
+      });
+    } catch (err) {
+      console.warn("[boot-guard] bookkeeping skipped:", err?.message || err);
+    }
+  });
+
   // Post-settle migration pass + verification of the convergence that caused
   // this restart, if there was one.
   import("../convergence.js").then(async (conv) => {

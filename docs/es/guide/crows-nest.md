@@ -92,6 +92,30 @@ systemctl --user enable crow-gateway
 systemctl --user start crow-gateway
 ```
 
+**Revertir automáticamente una actualización mala (recomendado).** Sin esto, una
+actualización cuyo código falla al arrancar se reinicia para siempre y nunca llega
+a descargar su propio arreglo: el actualizador solo corre dentro de un proceso que
+llegó hasta ahí. El guardián de arranque corre antes de cada arranque, desde una
+copia fuera del checkout, y mueve `main` atrás tras tres fallos. El instalador lo
+escribe por ti:
+
+```bash
+cd ~/.crow/app
+scripts/ops/install-boot-guard.sh --user     # añade --dry-run para verlo antes
+systemctl --user daemon-reload
+```
+
+Escribe `~/.config/systemd/user/crow-gateway.service.d/10-boot-guard.conf` (un
+`ExecStartPre=`, un `ExecStopPost=`, `TimeoutStartSec=15min` y
+`Environment=CROW_BOOT_GUARD=1`) y copia el lanzador a
+`~/.crow/boot-guard/crow-boot-guard.mjs`. Nunca reinicia nada, así que el drop-in
+surte efecto en el siguiente arranque. Vuelve a ejecutarlo si mueves el checkout, y
+tén en cuenta que el lanzador necesita Node 22.13 o superior (`node:sqlite`). Para
+una unidad a nivel de sistema usa el mismo script sin `--user` y con `sudo`.
+
+Ver [Actualización automática → Reversión automática](./auto-update.md#boot-guard)
+para saber qué rechaza y cómo recuperarse de un rechazo.
+
 **Verifica que esté corriendo:**
 
 ```bash

@@ -8,6 +8,7 @@ import * as registry from "../../shared/fix-it/registry.js";
 import * as store from "../../shared/fix-it/store.js";
 import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
+import bootGuardDetector from "./detectors/boot-guard.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import { createNotification } from "../../shared/notifications.js";
 import { getInstance } from "../instance-registry.js";
@@ -19,9 +20,16 @@ export function wireFixIt() {
   if (wired) return;
   registry.registerDetector(remoteExposureDetector);
   registry.registerDetector(caddyProxySocketDetector);
+  registry.registerDetector(bootGuardDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   wired = true;
 }
+
+/**
+ * The detectors runBootChecks() drives. A condition no request emits an event for
+ * belongs here; the list is exported so the set can be asserted, not grepped.
+ */
+export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector]);
 
 /** Build a db-bound store; the bound upsertItem also fires urgent push. */
 function boundStore(db) {
@@ -65,16 +73,20 @@ export async function emitFixIt(db, eventName, payload) {
 }
 
 /**
- * Boot checks — conditions no request emits an event for. Currently one: a
- * Caddyfile on this machine that still dials the gateway over loopback (the
- * security audit's finding). Fire-and-forget: never throws.
+ * Boot checks — conditions no request emits an event for. Two: a Caddyfile on
+ * this machine that still dials the gateway over loopback (the security audit's
+ * finding), and a boot guard that is installed but did not run (N1c-3 L1).
+ * Fire-and-forget: never throws, and one broken detector never hides the other.
  */
 export async function runBootChecks(db, opts = {}) {
-  try {
-    wireFixIt();
-    await caddyProxySocketDetector.check(boundStore(db), opts);
-  } catch (err) {
-    console.warn("[fix-it] boot checks failed:", err.message);
+  wireFixIt();
+  const bound = boundStore(db);
+  for (const detector of BOOT_CHECK_DETECTORS) {
+    try {
+      await detector.check(bound, opts);
+    } catch (err) {
+      console.warn(`[fix-it] boot check "${detector.source}" failed:`, err?.message || err);
+    }
   }
 }
 

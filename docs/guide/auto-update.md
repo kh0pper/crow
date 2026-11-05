@@ -100,11 +100,111 @@ Every co-hosted instance sharing the checkout honors the same marker: none of
 them migrates or restarts into a quarantined commit, and each one separately
 verifies that *its own* environment can load the tree before migrating.
 
-**Layer 1 (next).** A crash that Layer 0 cannot see — anything behind a dynamic
-import, or a failure that only appears under the service manager's environment —
-is caught by a boot guard that runs from outside the gateway's module graph,
-before each start, and rolls the checkout back after three crashes. It ships
-separately; until then, a crash loop still needs the manual rollback below.
+### Layer 1: the boot guard {#boot-guard}
+
+Layer 0 can only see crashes that happen while a healthy process is still
+running. Anything behind a dynamic import, or a failure that only appears under
+the service manager's environment, can still loop forever. The boot guard is the
+backstop, and it runs **outside** the gateway's module graph.
+
+**How it is wired.** The service unit gets two extra commands (a drop-in,
+`10-boot-guard.conf`): one *before every start*, including every automatic
+restart, and one *after every stop*. The script they run is not the copy in your
+checkout — it lives in `~/.crow/boot-guard/crow-boot-guard.mjs` and is refreshed
+only by a gateway that has already been up for ten minutes. A commit whose code
+cannot start therefore can never replace the thing that judges it.
+
+**What it does.**
+
+- Every start is recorded. An exit is counted as a crash only when it really is
+  one: a non-zero exit (other than 78, which means "this instance's paths are
+  refused"), a core dump, or a signal other than TERM/INT/HUP/KILL. A restart
+  Crow asked for (an update, a bundle install, `systemctl restart`) never counts,
+  and neither does running out of memory — that is usually the machine, so it
+  gets one notification instead. (If your unit starts the gateway through
+  `npm run gateway`, the exit status the guard sees describes npm rather than
+  node; npm passes a killed node on as a non-zero exit, which the guard counts.)
+- After **three** counted crashes, the next start (the fourth) moves `main` back
+  to the last commit this host proved it could boot, writes the quarantine marker
+  so no instance pulls the bad commit again, reinstalls dependencies if they
+  changed, and leaves the previous code running. You get one alert, and Settings
+  → Updates shows `Rolled back: …`.
+- It arms itself: after a manual `git pull` and restart it will guard the new
+  commit too, but **only** for commits that are already on `origin/main` and
+descend from the last healthy one. Your own unpushed commits on `main` are never
+  rolled back.
+- If two Crow instances share one checkout, exactly one of them moves the tree;
+  the other notices and reports `Rolled back: … a co-hosted instance rolled it back`.
+
+**What it refuses** (nothing is changed in any of these cases):
+
+| Situation | Why |
+|---|---|
+| No record of a commit that booted healthily | it cannot know what to move back to |
+| The checkout is not on `main` | resetting would detach HEAD and stop all updates |
+| The previous commit is not an ancestor of the failing one | moving back would drop commits |
+| The checkout is read-only for this instance | the instance that pulls it must roll back |
+| A `git index.lock` exists | another git command is running; the guard never deletes it |
+| The database moved ahead: `user_version` is past what the previous commit expects | its migrations may not be reversible |
+| `scripts/init-db.js` changed between the two commits | it rebuilds tables without bumping the schema generation |
+| A database migration ran that does not declare it is safe to run the old code on the new shape | older code may not understand the data |
+
+**A rejection that cannot clear by itself is not retried.** When the guard
+refuses because the database moved ahead (`user_version`), because
+`scripts/init-db.js` changed, or because an applied migration does not declare
+that the previous code can run on the new shape, nothing you can do in the
+gateway will change the answer: the guard leaves `main` where it is, keeps the
+alert and the `STATUS` file, and does **not** re-arm the same commit on the next
+start — otherwise it would boot the failing commit three more times per cycle
+for nothing. The other refusals (no proven previous commit, a checkout that is
+not on `main`, a read-only checkout, an `index.lock`) can clear on their own, so
+these are re-checked on the next start.
+
+**Recovering from a refusal.** The alert and `~/.crow/boot-guard/STATUS` carry
+the exact steps for the case that fired. In general:
+
+```bash
+# 1. Stop the loop.
+sudo systemctl stop crow-gateway
+
+# 2. If the alert says the database moved (a schema generation, an init-db
+#    change, or a migration that is not rollback-safe), put back the backup the
+#    migration guard took BEFORE touching git.
+ls ~/backups/crow            # or wherever your backup directory is
+
+# 3. Move main back to a commit you know starts, keeping unrelated local edits.
+cd ~/crow
+git log --oneline -5
+git reset --keep <that-commit>
+
+# 4. Start it again.
+sudo systemctl start crow-gateway
+```
+
+Do not `git checkout <commit>`: that detaches HEAD, the updater then skips every
+check with `Skipped: not on main`, and updates stop silently.
+
+**What this protects against.** The guard is a defence against *accidental* bad
+commits: an import that throws, a syntax error, a dependency that will not
+start. It is **not** a defence against a deliberately malicious commit. Such a
+commit runs as the service user, exactly like the gateway, so it can rewrite
+`~/.crow/boot-guard/crow-boot-guard.mjs`, the state file next to it, or this
+repository's `.git/config` before the next start. The launcher's isolation
+(`core.hooksPath=/dev/null`, `GIT_*` stripped, no tree code imported) exists so
+that an honest bad commit's hooks and modules cannot run during the reset — it
+buys nothing against an attacker. Treat write access to `main` as equivalent to
+a shell as the service user.
+
+**Installing it.** New installs get it automatically. For an existing host, run
+`sudo scripts/ops/install-boot-guard.sh` from the checkout (or
+`scripts/ops/install-boot-guard.sh --user` for a user unit); it writes a drop-in
+per gateway unit and copies the launcher, takes effect at the next start, and
+never restarts anything itself. The Docker image is not covered: it has no
+`.git`, so nothing is ever pulled there and there is nothing to roll back.
+
+If the drop-in is present but the guard does not run (a moved `node`, a deleted
+launcher copy), the Crow's Nest shows a "The boot guard did not run" card on the
+next boot instead of failing silently.
 
 ## Graceful Restart
 

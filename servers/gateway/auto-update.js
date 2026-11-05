@@ -290,6 +290,23 @@ async function notifyUpdateFailure(value, nowMs = Date.now()) {
   }
 }
 
+/**
+ * Record an `auto_update_last_result` value from OUTSIDE the tick. The boot guard
+ * (scripts/boot-guard/crow-boot-guard.mjs, via boot-guard-state.js) rolls a
+ * crash-looping commit back before any gateway process exists, so its result has
+ * no tick to travel on. Routing it through saveSetting keeps the classification,
+ * the result-since stamp and the failure bell identical to every other path.
+ *
+ * @returns {Promise<boolean>} whether it was actually written (false when no db
+ *   handle exists, e.g. auto-update disabled on this instance — the caller must
+ *   then retry on the next boot rather than mark the record done).
+ */
+export async function recordUpdateResult(value) {
+  if (!db) return false;
+  await saveSetting(RESULT_KEY, value);
+  return true;
+}
+
 async function saveSetting(key, value) {
   if (!db) return;
   try {
