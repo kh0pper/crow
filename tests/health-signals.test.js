@@ -765,7 +765,7 @@ test("privacy: every interface with the host firewall OFF warns about the local 
     assert.match(issue.label, /while the host firewall is off/);
     assert.doesNotMatch(issue.label, /could not be read/);
     assert.equal(issue.label, fill(t("signals.exposure.lanIssue", "en"), { where: t("signals.exposure.everyInterface", "en") }));
-    assert.equal(issue.actionHref, "/dashboard/settings");
+    assert.equal(issue.actionHref, "/dashboard/settings?section=connections");
   } finally {
     funnelMissing();
     ufwUnreadable();

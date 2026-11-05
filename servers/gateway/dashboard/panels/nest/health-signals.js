@@ -1219,7 +1219,9 @@ async function exposureSignal(db, lang, nowFn, opts = {}) {
   };
   const bindAction = {
     actionLabel: t("signals.exposure.bindAction", lang),
-    actionHref: "/dashboard/settings",
+    // The connections section, not the bare settings page: the mascot sheet's
+    // own Settings link is the bare URL, and an issue must not stand in for it.
+    actionHref: "/dashboard/settings?section=connections",
   };
 
   const out = [];
