@@ -401,8 +401,22 @@ async function loadAlertChannels() {
   return { sendNtfyNotification: ntfy.sendNtfyNotification, sendEmailNotification: email.sendEmailNotification };
 }
 
-/** DB-free loud alert (PR #124 pattern) — never throws. */
-export async function fireMigrationAlert({ title, body }) {
+/**
+ * DB-free loud alert (PR #124 pattern) — never throws.
+ *
+ * Two railings, both DB-free: the ntfy/email push (unchanged) AND a small file
+ * in the instance's alert spool, which the gateway turns into an in-app bell
+ * notification once its DB is up. ntfy/email are unconfigured on a default
+ * install, so without the spool a quarantined migration was silent (audit
+ * N1c-2). The file is written FIRST: a channel that throws must not lose it.
+ */
+export async function fireMigrationAlert({ title, body, code = null }) {
+  try {
+    const { writeAlertFile } = await import("./alert-spool.js");
+    writeAlertFile({ code: code || title, title, body });
+  } catch (err) {
+    console.warn(`[migration-guard] alert spool write failed: ${err?.message}`);
+  }
   try {
     const ch = await loadAlertChannels();
     const payload = { title, body, url: "/dashboard", priority: "high", type: "system" };
@@ -479,6 +493,7 @@ export async function runGuardedInitDb({
       }
     } catch {}
     await fireMigrationAlert({
+      code: "db-unreadable",
       title: "Crow DB unreadable before migration",
       body: `The database at ${dbPath} could not be read before a migration run. File copies were saved to ${dir}. If the migration fails, run \`npm run recover-db\`.`,
     });
@@ -505,6 +520,7 @@ export async function runGuardedInitDb({
   if (!backup.ok) {
     log(`backup failed: ${backup.reason} — proceeding WITHOUT a safety backup (fail open)`);
     await fireMigrationAlert({
+      code: "no-backup",
       title: "Crow migration running without a safety backup",
       body: `Pre-migration backup failed (${backup.reason}) for ${dbPath}. The migration will proceed; free disk space to restore protection. Backups live in ${backupDir(dbPath)}.`,
     });
@@ -541,6 +557,7 @@ export async function runGuardedInitDb({
     }
     const marker = writeQuarantine({ appRoot, dbPath, sha, fromGeneration: fromGen, toGeneration: toGen, report: result.report });
     await fireMigrationAlert({
+      code: "migration-loss",
       title: "Crow migration guard: data loss detected — migration quarantined",
       body:
         `A migration on ${dbPath} destroyed data (${summary}). ` +
@@ -566,6 +583,7 @@ export async function runGuardedInitDb({
   if (result.verdict === "suspect") {
     if (backup.ok) pinBackup(backup.path);
     await fireMigrationAlert({
+      code: "migration-suspect",
       title: "Crow migration guard: suspicious changes (proceeding)",
       body: `A migration on ${dbPath} produced unexplained changes (${summary}). The system proceeded (fail open). Pre-migration backup: ${backup.ok ? backup.path : "NONE (disk)"} — kept pinned for 30 days.`,
     });
