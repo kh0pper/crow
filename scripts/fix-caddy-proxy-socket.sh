@@ -158,7 +158,7 @@ set -e
 
 # 1. The socket unit: systemd, not the gateway, owns the socket. 0660 root:caddy
 #    means exactly the local Caddy can connect; DirectoryMode=0755 gives it the
-#    /run/crow-proxy directory to traverse, owned by the directory systemd creates root-owned.
+#    /run/crow-proxy directory to traverse, the directory systemd creates is root-owned.
 cat > "$SOCKET_UNIT" <<'EOF'
 [Unit]
 Description=Crow gateway proxy socket (for the local Caddy only)

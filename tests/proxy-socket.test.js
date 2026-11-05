@@ -486,7 +486,7 @@ test("detector matches the same line shapes the fix script rewrites (a ` {`, a t
   }
 });
 
-test("detector stays quiet on a fixed Caddyfile, a missing file, another port, and an installed socket unit", () => {
+test("detector stays quiet on a fixed Caddyfile, a missing file, and another port", () => {
   const loopbackFile = fixture("loopback2", LOOPBACK_CADDYFILE);
   assert.equal(caddyProxySocketProblem({ caddyfile: fixture("socket", SOCKET_CADDYFILE), socketUnit: NO_SOCKET_UNIT }), null);
   assert.equal(caddyProxySocketProblem({ caddyfile: join(FIXTURE_DIR, "nope"), socketUnit: NO_SOCKET_UNIT }), null);
