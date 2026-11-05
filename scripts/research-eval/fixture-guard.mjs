@@ -6,5 +6,5 @@
  */
 import { protectedHit, protectedRoots, realish, realUserCrowDir, within } from "../lib/protected-paths.mjs";
 
-export { assertEvalEnv } from "../lib/eval-guard.mjs";
+export { assertEvalEnv, FIXTURE_START_MARKER } from "../lib/eval-guard.mjs";
 export { protectedHit, protectedRoots, realish, realUserCrowDir, within };

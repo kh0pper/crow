@@ -58,6 +58,7 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, rea
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { protectedHit, protectedRoots, realish, realUserCrowDir, within } from "./protected-paths.mjs";
+import { checkMcpOverrides } from "./eval-guard.mjs";
 import { scratchEnv } from "./eval-scratch.mjs";
 import { INSTANCE_PATH_ENV_KEYS, PINNED_PATH_ENV_KEYS } from "../../servers/shared/crow-home.js";
 import { SECRET_NAME_RE } from "../../servers/shared/bot-env.js";
@@ -73,6 +74,13 @@ const refuse = (msg) => { throw new DriverRefusal(`live pi driver refused: ${msg
 const strictlyInside = (p, root) => p !== root && within(p, root);
 
 export const EXTRA_ENV_ALLOW = Object.freeze(["CROW_SESSION_SUMMARIES", "CROW_SESSION_BRIEFING"]);
+/**
+ * The extra names pi (and its MCP children) may inherit from the driver child's env: the run marker
+ * (survivorsByMarker) and PI_OFFLINE=1, which turns off pi's startup model refresh, version check
+ * and telemetry (pi main.js). Without it the only outbound call besides the arm endpoint is the
+ * judge; with it, no other one exists.
+ */
+export const BOT_ENV_ALLOW = Object.freeze(["CROW_EVAL_RUN_ID", "PI_OFFLINE"]);
 /** Perch's session id shape (briefing.js briefingPromptFile): a briefed thread's id must have it. */
 export const PERCH_SID_RE = /^perchlive-[0-9a-f]{8}$/;
 /**
@@ -126,6 +134,29 @@ export function checkEndpoints(models, { allowHosts = [], gatewayPort = process.
     if (!allowed) refuse(`provider ${name} host ${hostPort} is not loopback and not in allowHosts`);
     if (blocked.has(port)) refuse(`provider ${name} port ${port} is a gateway port`);
     if (/\/(llm|proxy)\//.test(`${u.pathname.toLowerCase()}/`)) refuse(`provider ${name} path ${u.pathname} goes through a gateway`);
+  }
+}
+
+/**
+ * The lazy-loader tell (moved here from live-pi-driver-child.mjs so the live preflight can refuse
+ * one before any request: a model swapped in on demand would make an arm's endpoint a router).
+ * Covers llm-router.js's provider kinds and ollama's port.
+ */
+export const LAZY_LOADER_RE = /ollama|llama[-_ ]?swap|lemonade|lm[-_ ]?studio|localai/i;
+export const LAZY_LOADER_PORT_RE = /:11434(\/|$)/;
+/** True when a provider or a base URL is a model loader rather than a resident model server. */
+export const isLazyLoader = (providerType, baseUrl) => LAZY_LOADER_RE.test(String(providerType ?? "")) || LAZY_LOADER_PORT_RE.test(String(baseUrl ?? ""));
+
+/**
+ * Refuse a malformed opts.mcpOverrides before anything spawns. The child is the real gate (it runs
+ * in the eval env, where assertEvalSeam passes); this is the parent's early, cheap refusal.
+ */
+export function checkOverridesOption(mcpOverrides, scratchHome) {
+  if (mcpOverrides === undefined || mcpOverrides === null) return null;
+  try {
+    return checkMcpOverrides(mcpOverrides, realish(scratchHome));
+  } catch (err) {
+    refuse(err && err.message ? err.message : "mcpOverrides is not valid");
   }
 }
 
@@ -294,8 +325,10 @@ export function childEnv({ home, botId, runId, piCli, extraEnv = {}, turnTimeout
     PIBOT_PROMPT_ACK_TIMEOUT_MS: "60000",
     CROW_EVAL_RUN_ID: runId,
     // buildBotBaseEnv's operator extra-allow list: pi (and its MCP children) carry the run
-    // marker too, so survivorsByMarker sees an escaped pi. Pinned: a parent value never lands.
-    CROW_BOT_ENV_ALLOW: "CROW_EVAL_RUN_ID",
+    // marker too, so survivorsByMarker sees an escaped pi, and PI_OFFLINE keeps pi's startup off
+    // the network. Pinned: a parent value never lands.
+    PI_OFFLINE: "1",
+    CROW_BOT_ENV_ALLOW: BOT_ENV_ALLOW.join(","),
     PIBOT_PI_CLI: piCli,
     ...(resv !== undefined ? { CROW_BOX_RESERVATION_PATH: resv } : {}),
     ...extra,
@@ -707,6 +740,7 @@ export async function runConversation({
   // parentEnv never weakens a guard: the real process.env always applies, parentEnv only adds.
   const protectedEnv = { CROW_SUITE_PROTECTED_ROOTS: [process.env, parentEnv].map((e) => e.CROW_SUITE_PROTECTED_ROOTS || "").join("\n") };
   const home = checkScratchHome(scratchHome, protectedEnv);
+  const checkedOverrides = checkOverridesOption(mcpOverrides, home);
   if (!Array.isArray(gatewayPorts)) refuse("gatewayPorts must be an array");
   const extraPort = parentEnv.CROW_GATEWAY_PORT;
   const envPorts = extraPort !== undefined && extraPort !== "" && Number.isFinite(Number(extraPort)) ? [Number(extraPort)] : [];
@@ -768,7 +802,7 @@ export async function runConversation({
   for (const thread of threads) {
     if (Date.now() >= wallEnd) { contaminated = "conversation exceeded wallMs"; break; }
     const r = await runThread({ thread, home, cenv, runId, sinceBootSec, turnMs, wallEnd, say, job: {
-      botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount, mcpOverrides, runId, thread,
+      botDef, gatewayType, allowServers, allowSkills, allowToolless, prodMaxPi, capacityCount, mcpOverrides: checkedOverrides, runId, thread,
       pr4, quickModel,
     } });
     if (meta.flags === null && r.flags) meta.flags = r.flags;

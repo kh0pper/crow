@@ -590,7 +590,8 @@ test("cloneSpawnOpts keeps an own __proto__ key, and a non-plain value is named 
 
 test("bridge.mjs: the evalSpawnTransform block opens with the guard, and nothing imports perch or the guard statically", () => {
   const src = readFileSync(join(REPO, "scripts", "pi-bots", "bridge.mjs"), "utf8");
-  const HEAD = 'if (typeof opts.evalSpawnTransform === "function") {';
+  // Object.hasOwn first: only an OWN option counts, so a prototype-injected value cannot open it.
+  const HEAD = 'if (Object.hasOwn(opts, "evalSpawnTransform") && typeof opts.evalSpawnTransform === "function") {';
   assert.equal(src.split(HEAD).length - 1, 1, "exactly one seam block");
   const body = src.slice(src.indexOf(HEAD) + HEAD.length);
   assert.ok(body.replace(/^\s*/, "").startsWith('const sealedHome = (await import("../lib/eval-guard.mjs")).assertEvalSeam();'), "the first statement is the guard; nothing precedes it");
