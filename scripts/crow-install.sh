@@ -38,9 +38,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# How many `error`s this run printed. The closing "Crow is ready!" banner is
+# gated on it (security audit N1c-15: the installer printed the banner, and
+# exited 0, right after its own gateway health check had failed).
+INSTALL_ERRORS=0
+
 log()   { echo -e "  ${GREEN}✓${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}!${NC} $1"; }
-error() { echo -e "  ${RED}✗${NC} $1"; }
+error() { echo -e "  ${RED}✗${NC} $1"; INSTALL_ERRORS=$((INSTALL_ERRORS + 1)); }
 header() {
   echo ""
   echo "═══════════════════════════════════════════════"
@@ -147,6 +152,118 @@ sd_quote() { # <arg>
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
   printf '"%s"' "$s"
+}
+
+# ─── Port precheck (security audit N1c-15) ───────────────
+# Nothing may be installed or started while another program already owns one of
+# the three ports this installer binds: the new units would fail — or, worse,
+# half-start and be shadowed — and the operator would find out from a browser
+# error much later. `ss` is iproute2's socket tool and ships on Debian/Ubuntu;
+# `-ltnH` lists TCP listeners without a header and without needing root (the
+# check only asks WHETHER a port is busy; the fix-it hint asks root for the PID).
+CROW_INSTALL_PORTS=(3001 80 443)   # gateway · HTTP (Caddy) · HTTPS (Caddy)
+
+port_is_listening() { # <port> — 0 when a TCP socket listens on it
+  local listeners=""
+  command -v ss >/dev/null 2>&1 || return 1
+  listeners="$(ss -ltnH "sport = :$1" 2>/dev/null || true)"
+  [ -n "$listeners" ]
+}
+
+crow_owns_port() { # <port> — 0 when an EXISTING Crow install already holds it
+  # A re-run must not trip over its own services: only the "already cloned"
+  # path can have these units, and only they may hold these ports.
+  [ -d "$CROW_APP" ] || return 1
+  case "$1" in
+    3001) systemctl is-active --quiet crow-gateway 2>/dev/null ;;
+    80|443) systemctl is-active --quiet caddy 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+check_ports_free() { # 0 when every CROW_INSTALL_PORTS entry is free or Crow's
+  local port busy=0
+  if ! command -v ss >/dev/null 2>&1; then
+    warn "ss (iproute2) is missing — skipping the port check"
+    return 0
+  fi
+  for port in "${CROW_INSTALL_PORTS[@]}"; do
+    port_is_listening "$port" || continue
+    if crow_owns_port "$port"; then
+      continue
+    fi
+    error "Port ${port} is already in use by another program (see: sudo ss -ltnp 'sport = :${port}')."
+    error "Stop that program or free the port, then run the installer again."
+    busy=1
+  done
+  [ "$busy" -eq 0 ]
+}
+
+# ─── SSH port detection (security audit N1c-15) ──────────
+# `ufw --force enable` opens the firewall instantly: a host whose sshd listens
+# on anything but 22 would drop the operator's own session at that moment, and
+# they could not get back in. Two probes, both needing no root: SSH_CONNECTION's
+# 4th field is the port THIS session arrived on, and sshd_config's own Port lines
+# are world-readable on Debian/Ubuntu (the drop-in directory is where distro
+# packages and cloud images put them). Best-effort only — 22 is always allowed
+# as well, and OpenSSH's default is what remains when neither probe answers.
+# shellcheck disable=SC2120  # the config-file params are test-only seams; the prod call passes none
+ssh_ports() { # [config_file…] — every port found, one per line
+  local p cfgs=()
+  if [ -n "${SSH_CONNECTION:-}" ]; then
+    read -r _ _ _ p <<< "$SSH_CONNECTION" || true
+    case "${p:-}" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$p" ;;
+    esac
+  fi
+  if [ "$#" -gt 0 ]; then
+    cfgs=("$@")
+  else
+    cfgs=(/etc/ssh/sshd_config)
+    for p in /etc/ssh/sshd_config.d/*.conf; do
+      if [ -r "$p" ]; then cfgs+=("$p"); fi
+    done
+  fi
+  for p in "${cfgs[@]}"; do
+    if [ -r "$p" ]; then
+      sed -n 's/^[[:space:]]*[Pp]ort[[:space:]][[:space:]]*\([0-9]\{1,5\}\).*/\1/p' "$p" 2>/dev/null || true
+    fi
+  done
+}
+
+# ─── Failure tracking + gateway verification (audit N1c-15) ──
+# "Crow is ready!" is a promise; it may only be printed when nothing failed.
+install_failed() { # 0 when this run printed at least one error
+  [ "${INSTALL_ERRORS:-0}" -ne 0 ]
+}
+
+# verify_gateway — the service check plus HTTP health probe that decide whether
+# this run may claim to be finished. Every failure goes through `error` (so the
+# banner below is blocked too) and names the commands that show the cause.
+verify_gateway() {
+  local ok=false
+  if systemctl is-active --quiet crow-gateway 2>/dev/null; then
+    log "Gateway service: running"
+  else
+    error "Gateway service is not running (see: sudo systemctl status crow-gateway)"
+  fi
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS -o /dev/null http://localhost:3001/health 2>/dev/null; then
+      ok=true
+      break
+    fi
+    sleep 2
+  done
+  if [ "$ok" = true ]; then
+    log "Gateway responding at http://localhost:3001"
+    return 0
+  fi
+  error "Gateway did not respond at http://localhost:3001 after 10 attempts — Crow is not ready."
+  echo "    1. Check the service:   sudo systemctl status crow-gateway"
+  echo "    2. Read its last lines: sudo journalctl -u crow-gateway -n 50"
+  echo "    3. Fix what they show, then run the installer again."
+  return 1
 }
 
 # ─── Automatic security updates (security audit K6) ──────
@@ -289,6 +406,16 @@ if ! ask_yn "Continue?" Y; then
   echo "  Cancelled."
   exit 0
 fi
+
+# ─── Pre-flight: ports 3001, 80, 443 ─────────────────────
+# Before anything is installed or started: if another program already owns one
+# of the ports Crow binds, stop now with a sentence the operator can act on
+# instead of half-finishing an install that nothing can reach.
+header "Pre-flight: ports 3001, 80 and 443"
+if ! check_ports_free; then
+  exit 1
+fi
+log "Ports 3001, 80 and 443 are available"
 
 # ─── Step 1: System updates ──────────────────────────────
 
@@ -444,9 +571,81 @@ if [ ! -L "$CROW_APP/.env" ]; then
   ln -sf "$CROW_HOME/.env" "$CROW_APP/.env"
 fi
 
-# ─── Step 8: Configure Services ──────────────────────────
+# ─── Step 8: Security Hardening ──────────────────────────
+# The firewall comes UP BEFORE any Crow unit is enabled or started (security
+# audit N1c-15): a half-finished install — or the seconds between starting the
+# gateway and closing its port — must never be reachable. Nothing here needs
+# Crow running; ufw-docker only needs Docker (Step 3).
 
-header "Step 8/10: System Services"
+header "Step 8/10: Security"
+
+# UFW firewall
+if command -v ufw >/dev/null 2>&1; then
+  log "UFW already installed"
+else
+  sudo apt install -y -o DPkg::Lock::Timeout=300 ufw
+fi
+
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+# SSH is allowed FIRST and unconditionally: `ufw --force enable` two blocks down
+# would cut a remote operator's session the instant it ran if the port that
+# session arrived on were not open. 22 is the always-safe rule; ssh_ports adds
+# any other port this host's sshd is actually configured for.
+sudo ufw allow 22/tcp comment 'SSH'
+# shellcheck disable=SC2119  # no args on purpose: the helper defaults to this host's sshd config
+SSH_EXTRA_PORTS="$(ssh_ports)"
+while IFS= read -r _ssh_port; do
+  if [ -z "$_ssh_port" ] || [ "$_ssh_port" = "22" ]; then continue; fi
+  sudo ufw allow "${_ssh_port}/tcp" comment 'SSH'
+done <<< "$SSH_EXTRA_PORTS"
+
+# 443 serves only Caddy's LAN vhost (https://${MDNS_HOST}); on a cloud VM
+# that is an unintended PUBLIC surface (F-INSTALL-2). Cloud heuristic: the
+# link-local metadata endpoint answers on AWS/Oracle/GCP/Azure/DO and never
+# on home LANs. (Local-address checks don't work — Oracle NATs a private IP.)
+IS_CLOUD_HOST=false
+if curl -s -m 2 -o /dev/null http://169.254.169.254/ 2>/dev/null; then
+  IS_CLOUD_HOST=true
+fi
+OPEN_443_DEFAULT=Y
+if [ "$IS_CLOUD_HOST" = true ]; then
+  OPEN_443_DEFAULT=N
+  warn "Cloud/VPS environment detected — opening 443 would expose it to the internet."
+fi
+if ask_yn "Open port 443 for LAN access to https://${MDNS_HOST}?" "$OPEN_443_DEFAULT"; then
+  sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
+  log "Port 443 open (LAN HTTPS via Caddy)"
+else
+  warn "Port 443 closed — use Tailscale for remote access"
+fi
+
+sudo ufw --force enable
+log "Firewall enabled"
+
+# Install ufw-docker to fix Docker/UFW conflict
+if [ ! -f /usr/local/bin/ufw-docker ]; then
+  sudo curl -fsSL https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker -o /usr/local/bin/ufw-docker
+  sudo chmod +x /usr/local/bin/ufw-docker
+  sudo ufw-docker install
+  log "ufw-docker installed (Docker/UFW conflict resolved)"
+else
+  log "ufw-docker already installed"
+fi
+
+# Fail2ban
+if command -v fail2ban-client >/dev/null 2>&1; then
+  log "fail2ban already installed"
+else
+  sudo apt install -y -o DPkg::Lock::Timeout=300 fail2ban
+  sudo systemctl enable --now fail2ban
+  log "fail2ban installed and enabled"
+fi
+
+# ─── Step 9: Configure Services ──────────────────────────
+# Only now, with the firewall already up, are the units written and started.
+
+header "Step 9/10: System Services"
 
 # The gateway's proxy socket — SYSTEMD owns it, as root:caddy 0660, so only the
 # local Caddy can open it. A loopback dial carrying X-Forwarded-For from
@@ -548,63 +747,6 @@ sudo systemctl restart caddy
 log "Gateway service enabled and started"
 log "Caddy configured for https://${MDNS_HOST}"
 
-# ─── Step 9: Security Hardening ──────────────────────────
-
-header "Step 9/10: Security"
-
-# UFW firewall
-if command -v ufw >/dev/null 2>&1; then
-  log "UFW already installed"
-else
-  sudo apt install -y -o DPkg::Lock::Timeout=300 ufw
-fi
-
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp comment 'SSH'
-
-# 443 serves only Caddy's LAN vhost (https://${MDNS_HOST}); on a cloud VM
-# that is an unintended PUBLIC surface (F-INSTALL-2). Cloud heuristic: the
-# link-local metadata endpoint answers on AWS/Oracle/GCP/Azure/DO and never
-# on home LANs. (Local-address checks don't work — Oracle NATs a private IP.)
-IS_CLOUD_HOST=false
-if curl -s -m 2 -o /dev/null http://169.254.169.254/ 2>/dev/null; then
-  IS_CLOUD_HOST=true
-fi
-OPEN_443_DEFAULT=Y
-if [ "$IS_CLOUD_HOST" = true ]; then
-  OPEN_443_DEFAULT=N
-  warn "Cloud/VPS environment detected — opening 443 would expose it to the internet."
-fi
-if ask_yn "Open port 443 for LAN access to https://${MDNS_HOST}?" "$OPEN_443_DEFAULT"; then
-  sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
-  log "Port 443 open (LAN HTTPS via Caddy)"
-else
-  warn "Port 443 closed — use Tailscale for remote access"
-fi
-
-sudo ufw --force enable
-log "Firewall enabled"
-
-# Install ufw-docker to fix Docker/UFW conflict
-if [ ! -f /usr/local/bin/ufw-docker ]; then
-  sudo curl -fsSL https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker -o /usr/local/bin/ufw-docker
-  sudo chmod +x /usr/local/bin/ufw-docker
-  sudo ufw-docker install
-  log "ufw-docker installed (Docker/UFW conflict resolved)"
-else
-  log "ufw-docker already installed"
-fi
-
-# Fail2ban
-if command -v fail2ban-client >/dev/null 2>&1; then
-  log "fail2ban already installed"
-else
-  sudo apt install -y -o DPkg::Lock::Timeout=300 fail2ban
-  sudo systemctl enable --now fail2ban
-  log "fail2ban installed and enabled"
-fi
-
 # ─── Step 10: Tailscale Hostname ──────────────────────────
 
 header "Step 10/10: Tailscale (Remote Access)"
@@ -699,31 +841,29 @@ fi
 
 header "Verification"
 
-# (a) Gateway service check
-if systemctl is-active --quiet crow-gateway 2>/dev/null; then
-  log "Gateway service: running"
-else
-  error "Gateway service is not running — check: journalctl -u crow-gateway -n 50"
-fi
-
-# (b) HTTP health probe — up to 10 attempts, 2s apart
-GATEWAY_OK=false
-for _ in $(seq 1 10); do
-  if curl -fsS -o /dev/null http://localhost:3001/health 2>/dev/null; then
-    GATEWAY_OK=true
-    break
-  fi
-  sleep 2
-done
-
-if [ "$GATEWAY_OK" = true ]; then
-  log "Gateway responding at http://localhost:3001"
-else
-  error "Gateway did not respond at http://localhost:3001 after 10 attempts"
-  error "Check the logs: journalctl -u crow-gateway -n 50"
+# The health check decides how this run ends. It fails → this exits 1 HERE, so
+# the "Crow is ready!" banner further down is unreachable (security audit
+# N1c-15: the installer printed that banner, and exited 0, over a gateway that
+# never answered). verify_gateway names the three commands that show the cause.
+if ! verify_gateway; then
+  echo ""
+  echo "  Installation incomplete — fix the cause above, then run the installer again."
+  echo ""
+  exit 1
 fi
 
 # ─── Done ─────────────────────────────────────────────────
+
+# Belt and braces: any `error` at all (a failed service check included) also
+# withholds the banner, because a claim that Crow is ready must be true.
+if install_failed; then
+  header "Installation Incomplete"
+  echo ""
+  echo "  Crow is not ready: ${INSTALL_ERRORS} check(s) above failed."
+  echo "  Fix what they show, then run the installer again."
+  echo ""
+  exit 1
+fi
 
 header "Installation Complete"
 

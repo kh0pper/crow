@@ -696,3 +696,184 @@ test("K6: the step never restarts a service and never reboots", () => {
   // …and apt never runs non-interactively in a way that takes a reboot itself.
   assert.doesNotMatch(autoUpdatesHelpers(s), /Needrestart|needrestart -r/);
 });
+
+// ─── Security audit N1c-15: firewall first, port precheck, honest ending ─────
+// The audit saw three things on one half-finished install (INSTALL_EXIT=0):
+// the gateway and Caddy enabled/restarted BEFORE ufw came up, no check that
+// 3001/80/443 were free, and "Crow is ready!" printed right after
+// "Gateway did not respond …". Everything below either reads the script or
+// runs a helper against a SCRATCH PATH/HOME (a fake ss/systemctl/curl/sleep),
+// so no test can see the real socket table, service manager or Crow install.
+
+/** Write an executable shim called `name` into `dir`. */
+function shim(dir, name, body) {
+  writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return join(dir, name);
+}
+
+/** A scratch PATH dir + HOME for the precheck helpers: `ss` reports ONLY the
+ *  ports this test pretends are busy, `systemctl` knows ONLY the units this
+ *  test pretends are active, and `rerun` creates $HOME/.crow/app so the script
+ *  takes its "Crow is already cloned" path. */
+function portScratch({ busy = [], active = [], rerun = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ports-"));
+  const bin = join(dir, "bin");
+  const home = join(dir, "home");
+  mkdirSync(bin);
+  mkdirSync(home);
+  const ssCases = busy.map((p) => `    *:${p}*) echo "LISTEN 0 4096 0.0.0.0:${p} 0.0.0.0:*" ;;`).join("\n");
+  shim(bin, "ss", `case "$*" in\n${ssCases}\n  *) : ;;\nesac\nexit 0`);
+  const unitCases = active.map((u) => `    *${u}*) exit 0 ;;`).join("\n");
+  shim(bin, "systemctl", `case "$*" in\n${unitCases}\n  *) : ;;\nesac\nexit 1`);
+  if (rerun) mkdirSync(join(home, ".crow", "app"), { recursive: true });
+  return { dir, bin, home, env: { PATH: `${bin}:${process.env.PATH}`, HOME: home } };
+}
+
+test("N1c-15: the firewall is up BEFORE crow-gateway and Caddy are enabled/started", () => {
+  const s = src();
+  const enable = s.search(/^sudo ufw --force enable$/m);
+  assert.ok(enable > -1, "the step must still enable ufw with --force, not a piped echo");
+  // Every rule the step needs must be in place BEFORE the firewall opens — a
+  // rule added afterwards is a window with the door open, and SSH in
+  // particular is the difference between a remote install and a lockout.
+  for (const rule of [
+    /^sudo ufw default deny incoming$/m,
+    /^sudo ufw default allow outgoing$/m,
+    /^sudo ufw allow 22\/tcp comment 'SSH'$/m,
+    /^  sudo ufw allow 443\/tcp comment 'HTTPS \(Caddy\)'$/m,
+  ]) {
+    const idx = s.search(rule);
+    assert.ok(idx > -1, `rule/step missing: ${rule}`);
+    assert.ok(idx < enable, `must sit above \`ufw --force enable\`: ${rule}`);
+  }
+  // ufw-docker closes the Docker/UFW hole (a container's published port bypasses
+  // ufw), so it belongs to the same "before anything listens" window.
+  const dockerFixIdx = s.search(/^  sudo ufw-docker install$/m);
+  assert.ok(dockerFixIdx > -1, "the ufw-docker step must still be there");
+  // The audit's finding: the units were enabled and restarted first, so a
+  // half-finished install listened on 3001/443 with no firewall in front of it.
+  for (const re of [
+    /^sudo systemctl enable crow-gateway$/m,
+    /^sudo systemctl restart crow-gateway\n/m,
+    /^sudo systemctl restart caddy$/m,
+  ]) {
+    const idx = s.search(re);
+    assert.ok(idx > -1, `expected to find ${re}`);
+    assert.ok(enable < idx, `the firewall must be enabled before: ${re}`);
+    assert.ok(dockerFixIdx < idx, `ufw-docker must be installed before: ${re}`);
+  }
+  // The gateway's socket unit belongs to the same activation sequence.
+  const socketIdx = s.indexOf("systemctl enable --now crow-gateway-proxy.socket");
+  assert.ok(socketIdx > -1 && enable < socketIdx, "the firewall must come up before the socket unit too");
+});
+
+test("N1c-15: the port precheck runs before Step 1 — nothing is installed or started first", () => {
+  const s = src();
+  const callIdx = s.search(/^if ! check_ports_free; then$/m);
+  assert.ok(callIdx > -1, "the install body must call check_ports_free");
+  const step1 = s.indexOf('header "Step 1/10: System Updates"');
+  assert.ok(step1 > -1 && callIdx < step1, "the precheck must sit above the first install step");
+  const firstApt = s.search(/^sudo apt update$/m);
+  assert.ok(firstApt > -1 && callIdx < firstApt, "…and above the first apt call");
+  // Below the source-only seam, i.e. this is the executed body, not the helper.
+  assert.ok(callIdx > s.indexOf("CROW_INSTALL_SOURCE_ONLY"), "the call must be in the install body");
+  assert.match(s.slice(callIdx, s.indexOf("\nfi\n", callIdx)), /exit 1/);
+});
+
+test("N1c-15: ssh_ports reads SSH_CONNECTION and sshd's Port lines (config-path seam)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-sshports-"));
+  const cfg = join(dir, "sshd_config");
+  // Commented `#Port 22` must stay out (Debian/Ubuntu ship the default that way).
+  writeFileSync(cfg, "#Port 22\nPort 2222\n  Port 2200\nPubkeyAuthentication yes\n");
+  const viaConf = runWithHelpers(`ssh_ports "${cfg}"`, { SSH_CONNECTION: "" });
+  assert.equal(viaConf.status, 0, viaConf.stderr);
+  assert.deepEqual(viaConf.stdout.trim().split("\n"), ["2222", "2200"]);
+  // SSH_CONNECTION's 4th field is the port this very session arrived on — the
+  // one the operator would be cut off from the moment ufw came up.
+  const viaEnv = runWithHelpers(`ssh_ports "${cfg}"`, {
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 2200",
+  });
+  assert.equal(viaEnv.status, 0, viaEnv.stderr);
+  const found = [...new Set(viaEnv.stdout.trim().split("\n"))].sort();
+  assert.deepEqual(found, ["2200", "2222"]);
+  // A missing config file is not an error, and an unset SSH_CONNECTION prints nothing.
+  const none = runWithHelpers("ssh_ports /definitely/not/sshd_config", { SSH_CONNECTION: "" });
+  assert.equal(none.status, 0, none.stderr);
+  assert.equal(none.stdout.trim(), "");
+});
+
+test("N1c-15 (behaviour): a foreign listener on :443 stops the install with plain words and exit 1", () => {
+  const scratch = portScratch({ busy: [443] });
+  const r = runWithHelpers("check_ports_free", scratch.env);
+  assert.equal(r.status, 1, `a busy port must be a non-zero exit:\n${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /Port 443 is already in use by another program/);
+  assert.match(r.stdout, /see: sudo ss -ltnp 'sport = :443'/);
+  assert.match(r.stdout, /Stop that program or free the port, then run the installer again\./);
+  // 3001 and 80 were free in this fixture: nothing else is reported.
+  assert.doesNotMatch(r.stdout, /Port 3001/);
+  assert.doesNotMatch(r.stdout, /Port 80 /);
+});
+
+test("N1c-15 (behaviour): free ports pass, and a re-run does not trip over Crow's own services", () => {
+  const free = portScratch({ busy: [] });
+  const clean = runWithHelpers("check_ports_free && echo PORTS_OK", free.env);
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+  assert.match(clean.stdout, /PORTS_OK/);
+
+  // A second run: the gateway (3001) and Caddy (80/443) the installer itself
+  // started are listening — re-installing must not call that "another program".
+  const rerun = portScratch({ busy: [3001, 80, 443], active: ["crow-gateway", "caddy"], rerun: true });
+  const again = runWithHelpers("check_ports_free && echo PORTS_OK", rerun.env);
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.match(again.stdout, /PORTS_OK/);
+
+  // …but the same listener with NO Crow checkout on disk is a foreign program,
+  // even if a unit happens to share the name: only the re-run path is trusted.
+  const noCheckout = portScratch({ busy: [443], active: ["caddy"] });
+  const foreign = runWithHelpers("check_ports_free", noCheckout.env);
+  assert.equal(foreign.status, 1, foreign.stdout + foreign.stderr);
+  assert.match(foreign.stdout, /Port 443 is already in use/);
+});
+
+test("N1c-15 (behaviour): any `error` withholds the ready banner (install_failed)", () => {
+  const clean = runWithHelpers('if install_failed; then echo BANNER; else echo NO_BANNER; fi');
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.equal(clean.stdout.trim(), "NO_BANNER", "a run without errors stays ready-able");
+  const failed = runWithHelpers('error "Gateway did not respond"; if install_failed; then echo NO_BANNER; else echo BANNER; fi; echo "ERRORS=${INSTALL_ERRORS}"');
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.match(failed.stdout, /NO_BANNER/);
+  assert.match(failed.stdout, /ERRORS=1/);
+});
+
+test("N1c-15 (behaviour): a failed health check names the next steps and returns non-zero", () => {
+  // Behavioural, not static: verify_gateway runs against shims — systemctl says
+  // inactive, curl never answers, sleep is a no-op — so there is no 20s wait
+  // and no contact with the real gateway.
+  const scratch = portScratch({ active: [] });
+  shim(scratch.bin, "curl", "exit 7");
+  shim(scratch.bin, "sleep", "exit 0");
+  const r = runWithHelpers('if verify_gateway; then echo READY_BANNER; else echo NO_BANNER; fi', scratch.env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /NO_BANNER/, "verify_gateway must fail when the health endpoint never answers");
+  assert.doesNotMatch(r.stdout, /READY_BANNER/);
+  assert.match(r.stdout, /Gateway did not respond at http:\/\/localhost:3001 after 10 attempts/);
+  assert.match(r.stdout, /sudo systemctl status crow-gateway/);
+  assert.match(r.stdout, /sudo journalctl -u crow-gateway -n 50/);
+  assert.match(r.stdout, /then run the installer again/);
+});
+
+test("N1c-15: the install body exits 1 on a failed health check, and the banner sits behind that gate", () => {
+  const s = src();
+  const guardIdx = s.search(/^if ! verify_gateway; then$/m);
+  assert.ok(guardIdx > -1, "the verification must be gated on verify_gateway");
+  const guard = s.slice(guardIdx, s.indexOf("\nfi\n", guardIdx));
+  assert.match(guard, /exit 1/, "a failed health check must end the install non-zero");
+  const bannerIdx = s.indexOf('header "Installation Complete"');
+  const readyIdx = s.indexOf('echo "  Crow is ready!"');
+  assert.ok(guardIdx < bannerIdx, "the guard must sit above the banner header");
+  assert.ok(guardIdx < readyIdx, "the guard must sit above the 'Crow is ready!' echo");
+  // Belt and braces: any other `error` (a dead unit that still answers, say)
+  // also blocks the banner — and that second gate is above it too.
+  const gateIdx = s.search(/^if install_failed; then$/m);
+  assert.ok(gateIdx > -1 && gateIdx < bannerIdx, "install_failed must gate the banner as well");
+});
