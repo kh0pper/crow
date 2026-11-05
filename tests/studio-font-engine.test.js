@@ -695,9 +695,13 @@ test("each font load is answered for its own request", async () => {
   // broken one after it fails, and neither answer is taken for the other's.
   host.post({ type: "library", request_id: "req-good", library_id: FONT_ID, kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
   await host.flush();
-  assert.deepEqual(answersTo(host.posts, "req-good"), [
-    { type: "library_loaded", library_id: FONT_ID, ok: true, request_id: "req-good" },
-  ]);
+  const good = answersTo(host.posts, "req-good");
+  assert.equal(good.length, 1, `the good load has to be answered once, got ${JSON.stringify(good)}`);
+  // Its presets are the bank's own, which the instrument picker lists (the
+  // presets themselves are pinned by "a loaded bank lists its presets").
+  const { presets, ...answer } = good[0];
+  assert.deepEqual(answer, { type: "library_loaded", library_id: FONT_ID, ok: true, request_id: "req-good" });
+  assert.equal(Array.isArray(presets) && presets.length, TINY_SF2_PRESETS.length, "a loaded bank lists its presets");
 
   const garbage = new TextEncoder().encode("RIFF0000not a bank at all");
   host.post({ type: "library", request_id: "req-bad", library_id: FONT_ID, kind: "font", bytes: garbage });
@@ -1660,4 +1664,43 @@ test("a dense soundfont song renders faster than real time in Node", async () =>
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
   }
+});
+
+test("a loaded bank lists its presets", async () => {
+  // The page's instrument picker lists a bank's own presets, and only the engine
+  // can read them. A load's answer therefore carries them: `{bank, program,
+  // name}`, sorted by bank and then program, with the GM drum bank as 128
+  // whatever number the file wrote its kit with. They are read on the message
+  // path — when the load is answered — and never inside `process()`.
+  const host = await processorHost();
+  host.post({ type: "song", snapshot: fontSong([fontTrack(0)], { bpm: 125 }) });
+  host.post({ type: "library", request_id: "presets", library_id: FONT_ID, kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+  await host.flush();
+
+  const answers = postsOfType(host.posts, "library_loaded").filter((message) => message.request_id === "presets");
+  assert.equal(answers.length, 1, `the load has to be answered once, got ${JSON.stringify(answers)}`);
+  assert.equal(answers[0].ok, true);
+  assert.deepEqual(
+    answers[0].presets,
+    TINY_SF2_PRESETS.map((preset) => ({ bank: preset.bank, program: preset.program, name: preset.name })),
+    "the bank's presets, in bank then program order",
+  );
+  // Bank 128 is the drum bank, and it sorts last.
+  assert.equal(answers[0].presets[answers[0].presets.length - 1].bank, 128);
+  // A failed load has no presets to name, and says why instead.
+  const corrupt = await processorHost();
+  corrupt.post({ type: "song", snapshot: fontSong([fontTrack(0)], { bpm: 125 }) });
+  corrupt.post({
+    type: "library",
+    request_id: "empty",
+    library_id: FONT_ID,
+    kind: "font",
+    bytes: tinySf2({ presets: [] }),
+  });
+  await corrupt.flush();
+  const refused = postsOfType(corrupt.posts, "library_loaded").filter((message) => message.request_id === "empty");
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0].ok, false);
+  assert.equal(refused[0].presets, undefined, "a bank that would not load lists nothing");
+  assert.match(String(refused[0].reason), /no instruments/);
 });

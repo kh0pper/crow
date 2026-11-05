@@ -127,8 +127,12 @@
  *   (`maxFontBytes` on `create()` for a host that knows its own window), counted
  *   as the files plus their decoded sample data: past it the least recently
  *   played font no track of the song plays is dropped and requested again, and a
- *   load the song's own fonts leave no room for comes back `failed` with the
- *   reason to show.
+ *   load comes back `failed` with the
+ *   reason to show. A font that did load answers with its `presets` too —
+ *   `[{bank, program, name}]`, sorted by bank then program — which is what the
+ *   instrument picker lists, and `onLibraryPresets(listener)` follows them for a
+ *   bank that finished loading after its asker stopped waiting (a load that
+ *   waited for Stop answers `deferred` first, and its presets arrive later).
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
@@ -287,6 +291,29 @@
       copy[at] = value > 1 ? 1 : value < -1 ? -1 : value;
     }
     return copy;
+  }
+
+  /**
+   * The presets a loaded bank announced, kept to the three fields the instrument
+   * picker needs: `{bank, program, name}`, with whole numbers inside MIDI's range.
+   * Anything else in a message is dropped rather than trusted.
+   * @param {unknown[]} list what the processor posted
+   * @returns {Array<{bank: number, program: number, name: string}>}
+   */
+  function presetsOf(list) {
+    const out = [];
+    for (const item of list) {
+      if (!item || typeof item !== "object") continue;
+      const bank = Math.trunc(Number(item.bank));
+      const program = Math.trunc(Number(item.program));
+      if (!Number.isFinite(bank) || !Number.isFinite(program)) continue;
+      out.push({
+        bank: Math.min(128, Math.max(0, bank)),
+        program: Math.min(127, Math.max(0, program)),
+        name: item.name === undefined || item.name === null ? "" : String(item.name),
+      });
+    }
+    return out;
   }
 
   /** @returns {boolean} whether this script runs in Node rather than a browser. */
@@ -1188,6 +1215,7 @@
     const errorListeners = new Set();
     const sampleNeededListeners = new Set();
     const libraryNeededListeners = new Set();
+    const libraryPresetsListeners = new Set();
     const tapListeners = new Set();
     /**
      * Hand one failure to the error listeners and the console: a fault after
@@ -1355,7 +1383,22 @@
         // posted with: a later load of the same font never answers an earlier
         // one. A load resolves with what became of it — `loaded`, `deferred` (it
         // waits for Stop) or `failed` (with the reason the processor gave, which
-        // is also posted once per font id as `library_failed`).
+        // is also posted once per font id as `library_failed`). A font that
+        // loaded also carries the presets of the bank it parsed, which is what
+        // the page's instrument picker lists.
+        const presets = Array.isArray(message.presets) ? presetsOf(message.presets) : null;
+        if (presets) {
+          // Handed to the listeners whoever asked: a load answered `deferred`
+          // resolves at once, and its presets arrive here when it is parsed on
+          // Stop, with no request left waiting for them.
+          for (const listener of libraryPresetsListeners) {
+            try {
+              listener(String(message.library_id), presets);
+            } catch {
+              /* one bad listener must not stop the others hearing about it */
+            }
+          }
+        }
         const waiting = pendingLibrary.get(message.request_id);
         if (waiting === undefined) return;
         pendingLibrary.delete(message.request_id);
@@ -1368,7 +1411,7 @@
           waiting({ status: "failed", reason: reason });
           return;
         }
-        waiting({ status: "loaded" });
+        waiting(presets ? { status: "loaded", presets: presets } : { status: "loaded" });
         return;
       }
       if (message.type === "library_failed") {
@@ -1764,9 +1807,11 @@
        * @param {string} kind `"font"` (a capture or cabinet is acknowledged and
        *   left to the host that reads them)
        * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes the file itself
-       * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string}>}
+       * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string,
+       *   presets?: Array<{bank: number, program: number, name: string}>}>}
        *   `failed` carries why: a bank that will not parse, one with no
-       *   instruments, or one the song's own fonts have left no room for; an
+       *   instruments, or one the song's own fonts have left no room for; a font
+       *   that loaded carries the `presets` of the bank it parsed; an
        *   empty id is refused here, before anything is posted
        */
       loadLibrary(libraryId, kind, bytes) {
@@ -1814,6 +1859,22 @@
         libraryNeededListeners.add(listener);
         return function unsubscribe() {
           libraryNeededListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow the presets a bank announced once it loaded: `(library_id,
+       * [{bank, program, name}])`, sorted by bank then program. A load that waits
+       * for Stop answers `deferred` to its asker, so this is how a page hears
+       * about the presets that arrive when the bank is finally parsed.
+       * @param {(libraryId: string, presets: Array<{bank: number, program: number, name: string}>) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onLibraryPresets(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        libraryPresetsListeners.add(listener);
+        return function unsubscribe() {
+          libraryPresetsListeners.delete(listener);
         };
       },
 

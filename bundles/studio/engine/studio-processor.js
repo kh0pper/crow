@@ -1765,16 +1765,21 @@
 
     /**
      * Answer one load's own request: its ack, matched by the request id it
-     * arrived with. A failed ack carries the reason the client shows.
+     * arrived with. A failed ack carries the reason the client shows, and a font
+     * that loaded carries its `presets` — the instruments the parsed bank holds,
+     * sorted by bank then program — so the page can list them without reading a
+     * bank itself.
      * @param {unknown} requestId
      * @param {string} id
      * @param {boolean} ok
      * @param {string} [reason]
+     * @param {Array<{bank: number, program: number, name: string}>} [presets]
      * @returns {void}
      */
-    answerLibrary(requestId, id, ok, reason) {
+    answerLibrary(requestId, id, ok, reason, presets) {
       const message = { type: "library_loaded", library_id: id, ok: ok, request_id: requestId };
       if (!ok && reason !== undefined) message.reason = String(reason);
+      if (ok && Array.isArray(presets)) message.presets = presets;
       this.port.postMessage(message);
     }
 
@@ -1866,9 +1871,27 @@
         this.fontNeeded.delete(id);
         this.fontFailed.delete(id);
         this.fontCapFailed.delete(id);
-        this.answerLibrary(requestId, id, true);
+        this.answerLibrary(requestId, id, true, undefined, this.fontPresets(fonts, id));
         this.bindFonts();
       });
+    }
+
+    /**
+     * The presets a bank that just loaded carries, for the page's instrument
+     * picker. Read here, when a load is answered — never in `process()` — and []
+     * for a host that keeps no preset list.
+     * @param {object} fonts the font host the load went through
+     * @param {string} id
+     * @returns {Array<{bank: number, program: number, name: string}>}
+     */
+    fontPresets(fonts, id) {
+      if (!fonts || typeof fonts.presets !== "function") return [];
+      try {
+        const list = fonts.presets(id);
+        return Array.isArray(list) ? list : [];
+      } catch {
+        return [];
+      }
     }
 
     /**

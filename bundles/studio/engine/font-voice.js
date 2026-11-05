@@ -361,9 +361,13 @@
     const maxBytes = Number.isFinite(askedCap) && askedCap > 0 ? askedCap : DEFAULT_MAX_FONT_BYTES;
 
     /**
-     * font id → `{id, synth, rawBytes, decodedBytes, bytes, samples, decoded,
-     * serial, lastPlayed, capacity, channelOutputs, mainLeft, mainRight,
-     * owners, draining, drainingSince, activeChannels, held, epoch}`.
+     * font id → `{id, synth, bank, rawBytes, decodedBytes, bytes, samples,
+     * decoded, serial, lastPlayed, capacity, channelOutputs, mainLeft,
+     * mainRight, owners, draining, drainingSince, activeChannels, held, epoch}`.
+     *
+     * `bank` is the parsed bank itself, kept so `presets()` can name the
+     * instruments it holds for the page's picker; it is only read on the message
+     * path, never in `process()`.
      *
      * `bytes` is what that font counts against the cap: the file's own bytes
      * plus its decoded Float32 sample data. `serial` counts the parses of that
@@ -981,6 +985,7 @@
         const font = {
           id: id,
           synth: synth,
+          bank: bank,
           rawBytes: rawBytes,
           decodedBytes: decoded.bytes,
           bytes: rawBytes + decoded.bytes,
@@ -1060,6 +1065,34 @@
           rawBytes: font.rawBytes,
           decodedBytes: font.decodedBytes,
         };
+      },
+
+      /**
+       * The presets one loaded bank carries, as `{bank, program, name}`, sorted by
+       * bank and then program: what the page's instrument picker lists. The GM
+       * drum bank is 128, whatever bank word the file wrote its kit with.
+       *
+       * This walks the parsed bank, so it belongs on the message path (a load's
+       * own answer), never in `process()`.
+       * @param {string} fontId
+       * @returns {Array<{bank: number, program: number, name: string}>}
+       */
+      presets(fontId) {
+        const font = fonts.get(asId(fontId));
+        if (!font || !font.bank) return [];
+        const source = Array.isArray(font.bank.presets) ? font.bank.presets : [];
+        const list = [];
+        for (let index = 0; index < source.length; index += 1) {
+          const preset = source[index];
+          if (!preset) continue;
+          list.push({
+            bank: preset.isGMGSDrum ? GM_DRUM_BANK : clampInt(preset.bankMSB, 0, GM_DRUM_BANK - 1, 0),
+            program: clampInt(preset.program, 0, MAX_PROGRAM, 0),
+            name: preset.name === undefined || preset.name === null ? "" : String(preset.name),
+          });
+        }
+        list.sort((a, b) => a.bank - b.bank || a.program - b.program || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        return list;
       },
 
       /**

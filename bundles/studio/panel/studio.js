@@ -46,7 +46,7 @@
  * installed copy, then the app root's.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -103,6 +103,30 @@ async function loadPanelScript(name, exportName) {
 
 /** The client script, loaded once when the panel module is imported. */
 const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
+
+/**
+ * The catalog's default entry: the one row `library/catalog.json` marks
+ * `default: true`, which is what "Get the default instruments" downloads. Read
+ * once, from the bundle the page is served out of; a bundle with no catalog
+ * (or a page rendered on its own) leaves it empty, and the panel's action says
+ * so instead of guessing an id.
+ * @returns {string}
+ */
+function findCatalogDefault() {
+  const dir = findBundleDir();
+  if (!dir) return "";
+  try {
+    const catalog = JSON.parse(readFileSync(join(dir, "library", "catalog.json"), "utf8"));
+    const entries = Array.isArray(catalog?.entries) ? catalog.entries : [];
+    const entry = entries.find((row) => row && row.default === true);
+    return entry && typeof entry.id === "string" ? entry.id : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The catalog entry the default-instruments action downloads, or "". */
+const CATALOG_DEFAULT = findCatalogDefault();
 
 /**
  * The local-first take store, loaded once: it must reach the page BEFORE the
@@ -722,6 +746,33 @@ const STYLES = `
     background: #2A2418; font-size: 12px;
   }
   .studio .st-step-lock-text { color: var(--st-text); }
+  /* The instrument picker (plan 1d, Task 4): a soundfont track's header holds
+     the presets of the bank it plays, the chooser when the song has more than
+     one bank, that bank's credit, and the two ways to get another one. The
+     presets are a real list box, so a pick is one clicked row. */
+  .studio .st-instrument { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .studio .st-instrument-title {
+    margin: 0; font-size: 11px; font-weight: 600; color: var(--st-muted);
+  }
+  .studio .st-instrument-current {
+    margin: 0; font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px; color: var(--st-text);
+  }
+  .studio .st-preset {
+    min-height: 44px; height: auto; max-height: 180px; overflow-y: auto;
+    font-size: 12px; padding: 2px;
+  }
+  .studio .st-preset option { padding: 3px 4px; }
+  .studio .st-font-choice { font-size: 12px; }
+  .studio .st-credit { margin: 0; font-size: 10px; line-height: 1.4; color: var(--st-muted); }
+  .studio .st-font-state { margin: 0; font-size: 11px; line-height: 1.4; color: var(--st-human); }
+  .studio .st-note { margin: 0; font-size: 10px; line-height: 1.4; color: var(--st-muted); }
+  .studio .st-instrument-acts { flex-wrap: wrap; }
+  .studio .st-instrument-acts .st-btn { flex: 1 1 100%; }
+  /* An edit the agent made wears the agent's colour, as its clips do. */
+  .studio .st-agent-edit {
+    outline: 2px solid var(--st-agent); outline-offset: 2px; border-radius: 8px;
+  }
   /* The steps, the clip's loop, the patterns and the chain. */
   .studio .st-steps {
     border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
@@ -884,7 +935,7 @@ function studioPage({ songId, render, res }) {
   const id = escapeHtml(songId);
   const content = `
     <style>${STYLES}</style>
-    <div class="studio" data-studio-song="${id}">
+    <div class="studio" data-studio-song="${id}" data-catalog-default="${escapeHtml(CATALOG_DEFAULT)}">
       <header class="st-bar">
         <a class="st-back" href="/dashboard/studio">← Songs</a>
         <span class="st-title" data-role="title">Song</span>
