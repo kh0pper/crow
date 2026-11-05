@@ -62,7 +62,7 @@ Crow is modular — start with memory and the dashboard, then add features as yo
 **Optional layers (add when ready):**
 - **20+ integrations** — Gmail, GitHub, Slack, Notion, Trello, and more
 - **Encrypted P2P sharing** — share memories and projects with other Crow users
-- **File storage** — upload and manage files with S3-compatible storage (requires MinIO)
+- **File storage** — upload and manage files with S3-compatible storage (Garage, installed as the File Storage extension or run with `--profile storage`)
 - **Blog platform** — publish posts with Markdown, RSS feeds, and themes
 - **Self-hosting add-ons** — install Ollama, Nextcloud, Immich, Obsidian, and Home Assistant from the Extensions panel
 - **Auto-updates** — opt-in automatic updates from GitHub

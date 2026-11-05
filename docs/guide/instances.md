@@ -116,7 +116,7 @@ Sync is **eventually consistent**. When two instances are online and can reach e
 
 - Identity keys (already shared during setup)
 - Gateway sessions and OAuth tokens
-- Storage files (S3 objects stay on their local MinIO)
+- Storage files (S3 objects stay on their local object storage)
 
 ## Federation
 

@@ -4,16 +4,16 @@ title: Instalación Completa
 
 # Instalación Completa
 
-Ejecuta la plataforma Crow completa — gateway, almacenamiento MinIO, blog y Crow's Nest — con un solo comando de Docker Compose.
+Ejecuta la plataforma Crow completa — gateway, almacenamiento de objetos Garage, blog y Crow's Nest — con un solo comando de Docker Compose.
 
 ## ¿Qué es esto?
 
-El perfil de instalación completa inicia todos los servicios de Crow juntos: el gateway MCP, MinIO para almacenamiento de archivos y el Crow's Nest. Esta es la forma recomendada de ejecutar Crow si quieres tener todas las funciones disponibles.
+La instalación completa inicia todos los servicios de Crow juntos: el gateway MCP, el almacenamiento de objetos [Garage](https://garagehq.deuxfleurs.fr/) y el Crow's Nest. Esta es la forma recomendada de ejecutar Crow si quieres tener todas las funciones disponibles.
 
 ## ¿Por qué querría esto?
 
 - **Todo a la vez** — Un comando para iniciar la plataforma completa
-- **Almacenamiento de archivos incluido** — MinIO corre junto al gateway, sin configuración separada
+- **Almacenamiento de archivos incluido** — Garage corre junto al gateway, sin configuración separada
 - **Blog listo** — Empieza a publicar inmediatamente después de la configuración
 - **Acceso al Crow's Nest** — Gestión visual desde tu navegador
 
@@ -36,29 +36,48 @@ cp .env.example .env
 Abre `.env` y define los valores requeridos:
 
 ```bash
-# MinIO (almacenamiento de archivos)
-MINIO_ENDPOINT=minio          # Usa "minio" para Docker, "localhost" para local
-MINIO_PORT=9000
-MINIO_ROOT_USER=crowadmin
-MINIO_ROOT_PASSWORD=change-this-to-a-secure-password
-MINIO_USE_SSL=false
+# Garage (almacenamiento de archivos) — el almacenamiento de objetos por defecto
+S3_ENDPOINT=garage:3900        # "garage" para Docker Compose, 127.0.0.1:3900 fuera de Docker
+S3_ACCESS_KEY=change-this-to-a-key-id        # = GARAGE_DEFAULT_ACCESS_KEY de abajo
+S3_SECRET_KEY=change-this-to-a-secret-key    # = GARAGE_DEFAULT_SECRET_KEY de abajo
+S3_USE_SSL=false
+S3_REGION=us-east-1            # debe coincidir con s3_region en bundles/garage/garage.toml
+
+# Secretos propios del contenedor Garage (genera cada uno con: openssl rand -hex 32)
+GARAGE_RPC_SECRET=change-this-to-a-random-hex-string
+GARAGE_ADMIN_TOKEN=change-this-to-a-random-secret
+GARAGE_METRICS_TOKEN=change-this-to-a-random-secret
+GARAGE_DEFAULT_ACCESS_KEY=change-this-to-a-key-id
+GARAGE_DEFAULT_SECRET_KEY=change-this-to-a-secret-key
 
 # Cuota de almacenamiento (en MB)
 STORAGE_QUOTA_MB=1024
 ```
 
-Cuando ejecutes dentro de Docker Compose, define `MINIO_ENDPOINT=minio` (el nombre del servicio en Docker). Para instalaciones locales (sin Docker), usa `MINIO_ENDPOINT=localhost`. La configuración del blog se gestiona vía la herramienta MCP `crow_blog_settings` o el Crow's Nest — no se necesitan variables de entorno.
+El puerto va dentro de `S3_ENDPOINT` (no existe `S3_PORT`), y `S3_ACCESS_KEY` / `S3_SECRET_KEY` del gateway deben ser el mismo par que `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage crea esa clave en el primer arranque. La configuración del blog se gestiona vía la herramienta MCP `crow_blog_settings` o el Crow's Nest — no se necesitan variables de entorno.
+
+::: warning MinIO ya no es el valor por defecto — y su imagen ya no se publica
+Garage pasó a ser el almacenamiento de objetos por defecto el 2026-11-05. **Las imágenes públicas de MinIO ya no están:** Docker Hub y Quay rechazan las descargas anónimas desde esa fecha, así que una instalación nueva ya no puede descargar MinIO. MinIO quedó detrás del perfil `minio-legacy`.
+
+**¿Ya tienes MinIO corriendo?** Tus datos no cambian. Arranca el perfil heredado en lugar de `storage`:
+
+```bash
+docker compose --profile cloud --profile minio-legacy up -d
+```
+
+Conserva tus ajustes `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — los nombres antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*` — y exporta el volumen `minio-data` existente a Garage cuando quieras moverte. Las instalaciones nuevas deben usar `--profile storage` y los ajustes `S3_*` de arriba.
+:::
 
 ## Paso 3: Iniciar Todo
 
 ```bash
-docker compose --profile full up --build
+docker compose --profile cloud --profile storage up --build
 ```
 
 Esto inicia:
 
 - **Gateway** en el puerto `3001` — servidor MCP, blog y API
-- **MinIO** en los puertos `9000` (API) y `9001` (consola) — almacenamiento de archivos
+- **Garage** — almacenamiento de archivos; la API S3 se queda en la red de compose y solo la API de administración responde en `127.0.0.1:3903`
 - **Crow's Nest** en `/dashboard` en el gateway
 
 En la primera ejecución, Docker descarga las imágenes y construye el gateway. Los inicios posteriores son más rápidos.
@@ -80,9 +99,8 @@ Esto crea la base de datos SQLite con todas las tablas requeridas.
 | Chequeo de salud del gateway | `http://localhost:3001/health` |
 | Crow's Nest | `http://localhost:3001/dashboard` |
 | Blog | `http://localhost:3001/blog` |
-| Consola de MinIO | `http://localhost:9001` |
 
-La consola de MinIO te permite explorar los archivos almacenados directamente. Inicia sesión con tu `MINIO_ROOT_USER` y `MINIO_ROOT_PASSWORD`.
+Los archivos almacenados se navegan en la página **Archivos** del Crow's Nest — Garage no tiene consola web propia (su API de administración en `127.0.0.1:3903` es para herramientas, no para el navegador).
 
 ## Paso 6: Generar la Configuración MCP
 
@@ -92,27 +110,27 @@ Para usar el servidor de almacenamiento con Claude u otras plataformas de IA:
 npm run mcp-config
 ```
 
-Esto regenera `.mcp.json` con el servidor de almacenamiento incluido (solo si las variables de entorno de MinIO están definidas).
+Esto regenera `.mcp.json` con el servidor de almacenamiento incluido (solo si las variables de entorno `S3_*` están definidas).
 
 ## Ejecutar en Segundo Plano
 
 Para mantener los servicios corriendo después de cerrar la terminal:
 
 ```bash
-docker compose --profile full up --build -d
+docker compose --profile cloud --profile storage up --build -d
 ```
 
 Ver registros:
 
 ```bash
-docker compose logs -f gateway
-docker compose logs -f minio
+docker compose logs -f crow-gateway
+docker compose logs -f garage
 ```
 
 Detener todo:
 
 ```bash
-docker compose --profile full down
+docker compose --profile cloud --profile storage down
 ```
 
 ## Datos Persistidos
@@ -120,12 +138,12 @@ docker compose --profile full down
 Los datos se almacenan en volúmenes de Docker:
 
 - **crow-data** — Base de datos SQLite, archivos de identidad
-- **minio-data** — Todos los archivos subidos
+- **garage-meta** / **garage-data** — Metadatos de Garage y todos los archivos subidos
 
 Estos persisten entre reinicios de contenedores. Para reiniciar todo desde cero:
 
 ```bash
-docker compose --profile full down -v
+docker compose --profile cloud --profile storage down -v
 ```
 
 Esto elimina todos los datos. Úsalo con precaución.
@@ -184,6 +202,6 @@ docker compose restart gateway
 
 ## Próximos Pasos
 
-- [Guía de almacenamiento](/es/guide/storage) — Aprende a subir y gestionar archivos
+- [Guía de almacenamiento](/es/guide/storage) — Aprende a subir y gestionar archivos (Garage, la extensión File Storage)
 - [Guía del blog](/es/guide/blog) — Empieza a escribir y publicar entradas
 - [Guía del Crow's Nest](/es/guide/crows-nest) — Explora el panel de control visual

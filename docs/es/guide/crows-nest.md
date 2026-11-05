@@ -168,7 +168,7 @@ Un centro de mensajería unificado de tres paneles inspirado en WhatsApp/Signal/
 - **Área de chat** (centro) — Vista completa del chat con burbujas de mensajes, marcas de tiempo, vistas previas de respuestas y archivos adjuntos. Las conversaciones de IA usan streaming SSE con visualización de llamadas a herramientas. Los mensajes peer usan cifrado E2E de Nostr. Escribe un mensaje y presiona Enter o haz clic en Enviar.
 - **Barra lateral de información** (derecha) — Perfil del contacto (avatar, Crow ID, estado en línea, información de cifrado) o detalles de la conversación de IA (proveedor, modelo, conteo de tokens). Bloquea/desbloquea contactos, elimina conversaciones y copia Crow IDs. Plegable con el botón "Info".
 
-**Archivos adjuntos:** Si el almacenamiento MinIO está configurado, un botón de clip te permite adjuntar archivos a los mensajes peer. Las imágenes se muestran en línea; los demás archivos aparecen como tarjetas de descarga.
+**Archivos adjuntos:** Si el almacenamiento de objetos está configurado, un botón de clip te permite adjuntar archivos a los mensajes peer. Las imágenes se muestran en línea; los demás archivos aparecen como tarjetas de descarga.
 
 **Hilos de mensajes:** Haz clic en "Responder" sobre cualquier mensaje peer recibido para citarlo. La respuesta aparece con una vista previa resaltada del mensaje original.
 

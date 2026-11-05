@@ -167,7 +167,7 @@ A unified three-panel messaging hub inspired by WhatsApp/Signal/Telegram.
 - **Chat area** (center) — Full chat view with message bubbles, timestamps, reply previews, and file attachments. AI conversations use SSE streaming with tool call display. Peer messages use Nostr E2E encryption. Type a message and press Enter or click Send.
 - **Info sidebar** (right) — Contact profile (avatar, Crow ID, online status, encryption info) or AI conversation details (provider, model, token count). Block/unblock contacts, delete conversations, and copy Crow IDs. Collapsible via the "Info" button.
 
-**File attachments:** If MinIO storage is configured, a paperclip button lets you attach files to peer messages. Images render inline; other files show as download cards.
+**File attachments:** If object storage is configured, a paperclip button lets you attach files to peer messages. Images render inline; other files show as download cards.
 
 **Message threading:** Click "Reply" on any received peer message to quote it. The reply appears with a highlighted preview of the original message.
 

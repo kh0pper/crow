@@ -33,8 +33,8 @@ Crow crea y gestiona su bucket (`crow-files`) automáticamente — no necesitas 
 Cualquier servicio compatible con S3 funciona. Configúralo en **Ajustes → Almacenamiento compartido** (se replica a las instancias emparejadas y tiene prioridad sobre `.env`), o define `S3_ENDPOINT`, `S3_ACCESS_KEY` y `S3_SECRET_KEY` en `.env`.
 :::
 
-::: warning MinIO está obsoleto
-La extensión MinIO ya no tiene mantenimiento upstream y su imagen ya no se puede descargar, así que ya no se puede instalar. Una instalación de MinIO existente sigue funcionando; los ajustes antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*`.
+::: warning MinIO está obsoleto — y sus imágenes ya no se publican
+Garage es el almacenamiento de objetos por defecto desde el 2026-11-05. Las imágenes públicas de MinIO ya no están: Docker Hub y Quay rechazan las descargas anónimas desde esa fecha, así que MinIO ya no se puede instalar (ni descargar con un perfil de compose en una máquina que todavía no tenga la imagen). Una instalación de MinIO existente sigue funcionando — arráncala con `docker compose --profile minio-legacy up` y conserva los ajustes antiguos `MINIO_*`, que se siguen leyendo cuando no hay ningún ajuste `S3_*`. Sus datos no cambian; consulta [Instalación Completa](/es/getting-started/full-setup) para el cambio.
 :::
 
 ## Subir archivos
@@ -126,14 +126,14 @@ Cuando el almacenamiento S3 está configurado, habilita capacidades en toda la p
 - **Archivos de proyectos** — Adjunta PDFs, conjuntos de datos y materiales de referencia a tus proyectos de investigación.
 - **Compartir archivos** — Comparte archivos con tus peers conectados a través del sistema de compartición P2P existente.
 
-El almacenamiento es opcional — Crow funciona sin él. Pero configurar MinIO desbloquea estas funciones sin configuración adicional.
+El almacenamiento es opcional — Crow funciona sin él. Pero configurar Garage desbloquea estas funciones sin configuración adicional.
 
 ## Eliminar archivos
 
 > "Elimina el archivo old-draft.pdf del almacenamiento"
 
-La eliminación es permanente. Los archivos se eliminan tanto de MinIO como del índice de la base de datos.
+La eliminación es permanente. Los archivos se eliminan tanto del almacenamiento de objetos como del índice de la base de datos.
 
 ## Bajo el capó
 
-¿Te da curiosidad cómo funcionan internamente las URLs prefirmadas, las cuotas y el cliente de MinIO? Consulta la [arquitectura del servidor de almacenamiento](/es/architecture/storage-server).
+¿Te da curiosidad cómo funcionan internamente las URLs prefirmadas, las cuotas y el cliente S3? Consulta la [arquitectura del servidor de almacenamiento](/es/architecture/storage-server).

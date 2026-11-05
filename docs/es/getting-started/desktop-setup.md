@@ -26,7 +26,7 @@ Copia el archivo env de ejemplo y agrega tus claves:
 cp .env.example .env
 ```
 
-Edita `.env` y agrega claves para los servicios que quieras. Todos los servidores principales (memoria, investigación, compartición, blog) funcionan sin ninguna clave de API — solo el almacenamiento (requiere MinIO) y las integraciones externas necesitan claves.
+Edita `.env` y agrega claves para los servicios que quieras. Todos los servidores principales (memoria, investigación, compartición, blog) funcionan sin ninguna clave de API — solo el almacenamiento (Garage, la extensión File Storage) y las integraciones externas necesitan claves.
 
 > **Nota de seguridad**: Tu archivo `.env` contiene claves de API que funcionan como contraseñas. Nunca lo compartas, lo subas a GitHub ni publiques su contenido en ningún lugar. El archivo ya está incluido en `.gitignore` para que git no lo rastree, pero siempre verifica antes de hacer push de tu código. Consulta la [Guía de Seguridad](https://github.com/kh0pper/crow/blob/main/SECURITY.md) para más información sobre cómo mantener tus claves seguras.
 

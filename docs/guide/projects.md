@@ -9,7 +9,7 @@ A **project space** is the unit of shareable, collaborative work in Crow. Every 
 
 - A **slug** (human-readable, used in URLs and storage paths)
 - A **workspace directory** on disk for bots and agents to write into
-- A **MinIO storage prefix** for project-scoped files
+- A **storage prefix** for project-scoped files
 - **Members** with roles and per-member capability overrides
 - An **audit log** of who did what, when
 - Optional **attached assets**: research sources, notes, data backends, files
@@ -26,7 +26,7 @@ The AI calls `crow_create_project`. Behind the scenes, Crow creates:
 - A row in `project_spaces` (with a generated slug like `spring-2026-research-12`)
 - An owner row in `project_members` for the local user
 - A workspace directory at `~/.crow/data/projects/<slug>/workspace/`
-- A MinIO key prefix `crow-files/projects/<slug>/`
+- A storage key prefix `crow-files/projects/<slug>/`
 
 You can immediately add sources, notes, data backends, and members.
 

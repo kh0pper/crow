@@ -4,7 +4,7 @@ This document is the **single source of truth** for every host port consumed by 
 
 1. Every host port in any `bundles/<id>/docker-compose*.yml` (overlays such as `docker-compose.tailnet.yml` included) is listed here. A host port written as `${VAR:-N}` or `${VAR-N}` counts as `N`, the port a fresh install publishes. A host port that is a variable with no default (`${VAR}`) has no number to check.
 2. No two bundles publish the same host port on overlapping addresses: the same host IP, or either side a wildcard (no IP, `0.0.0.0`, `::`). Two different specific addresses on one port (loopback and the tailnet IP, the 8004 case below) do not clash. A host-IP variable with no default (`${CROW_TAILSCALE_IP}`) is a wildcard, because unset publishes on every address; write it as `${CROW_TAILSCALE_IP:?…}` (required) to make it one specific address. Two services of one bundle are checked against each other too.
-3. The repo-root `docker-compose.yml` is scanned as well. Its optional `minio` service is the minio bundle's alternative deployment (the two never run together), so its 9001 counts as the minio bundle's. A ports entry the checker cannot read is printed as a WARNING.
+3. The repo-root `docker-compose.yml` is scanned as well. Its `garage` service (`--profile storage`, the default object storage) is the garage bundle's alternative deployment, and its `minio` service (`--profile minio-legacy`) is the minio bundle's (the two never run together), so their ports count as those bundles'. A ports entry the checker cannot read is printed as a WARNING.
 
 ## Conventions
 

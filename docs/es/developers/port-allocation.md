@@ -4,7 +4,7 @@ Este documento es la **única fuente de verdad** para cada puerto del host consu
 
 1. Cada puerto del host en cualquier `bundles/<id>/docker-compose*.yml` (incluidas las capas como `docker-compose.tailnet.yml`) esté listado aquí. Un puerto escrito como `${VAR:-N}` o `${VAR-N}` cuenta como `N`, el puerto que publica una instalación nueva. Un puerto que es una variable sin valor por defecto (`${VAR}`) no tiene número que verificar.
 2. Ningún par de bundles publique el mismo puerto del host en direcciones que se solapan: la misma IP del host, o una de las dos comodín (sin IP, `0.0.0.0`, `::`). Dos direcciones concretas distintas en un mismo puerto (loopback y la IP de la tailnet) no chocan. Una variable de IP sin valor por defecto (`${CROW_TAILSCALE_IP}`) cuenta como comodín, porque sin definir publica en todas las direcciones; escríbela como `${CROW_TAILSCALE_IP:?…}` (obligatoria) para que sea una dirección concreta. También se comparan entre sí los servicios de un mismo bundle.
-3. También se revisa el `docker-compose.yml` de la raíz del repo. Su servicio opcional `minio` es la alternativa al bundle minio (nunca corren juntos), así que su 9001 cuenta como del bundle minio. Una entrada de `ports` que el verificador no puede leer se imprime como WARNING.
+3. También se revisa el `docker-compose.yml` de la raíz del repo. Su servicio `garage` (`--profile storage`, el almacenamiento de objetos por defecto) es la alternativa al bundle garage, y su servicio `minio` (`--profile minio-legacy`) la del bundle minio (nunca corren juntos), así que sus puertos cuentan como los de esos bundles. Una entrada de `ports` que el verificador no puede leer se imprime como WARNING.
 
 ## Convenciones
 

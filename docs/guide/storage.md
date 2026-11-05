@@ -33,8 +33,8 @@ Crow creates and manages its bucket (`crow-files`) automatically — no bucket s
 Any S3-compatible service works. Configure it in **Settings → Shared Storage** (it replicates to paired instances and takes precedence over `.env`), or set `S3_ENDPOINT`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` in `.env`.
 :::
 
-::: warning MinIO is deprecated
-The MinIO extension is no longer maintained upstream and its image can no longer be downloaded, so it can't be installed any more. An existing MinIO install keeps running; the older `MINIO_*` settings are still read when no `S3_*` setting is present.
+::: warning MinIO is deprecated — and its images are no longer published
+Garage has been the default object storage since 2026-11-05. MinIO's public images are gone: Docker Hub and Quay refuse anonymous pulls as of that date, so MinIO can no longer be installed (nor pulled by a compose profile on a machine that does not already have the image). An existing MinIO install keeps running — start it with `docker compose --profile minio-legacy up` and keep the older `MINIO_*` settings, which are still read when no `S3_*` setting is present. Its data does not change; see [Full Setup](/getting-started/full-setup) for the switch.
 :::
 
 ## Uploading Files
@@ -126,14 +126,14 @@ When S3 storage is configured, it enables capabilities across the platform — n
 - **Project files** — Attach PDFs, datasets, and reference materials to research projects.
 - **File sharing** — Share files with connected peers through the existing P2P sharing system.
 
-Storage is optional — Crow works without it. But configuring MinIO unlocks these features with no additional setup.
+Storage is optional — Crow works without it. But configuring Garage unlocks these features with no additional setup.
 
 ## Deleting Files
 
 > "Delete the file old-draft.pdf from storage"
 
-Deletion is permanent. Files are removed from both MinIO and the database index.
+Deletion is permanent. Files are removed from both object storage and the database index.
 
 ## Under the Hood
 
-Curious how presigned URLs, quotas, and the MinIO client work internally? See the [Storage Server architecture](/architecture/storage-server).
+Curious how presigned URLs, quotas, and the S3 client work internally? See the [Storage Server architecture](/architecture/storage-server).

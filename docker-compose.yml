@@ -1,10 +1,21 @@
 ## Crow — Docker Compose
 ##
 ## Cloud deployment:
-##   docker compose --profile cloud up --build
+##   docker compose --profile cloud --profile storage up --build
 ##
 ## Local with Cloudflare Tunnel:
-##   docker compose --profile local up --build
+##   docker compose --profile local --profile storage up --build
+##
+## Object storage (default) is Garage:
+##   docker compose --profile storage up   # garage
+##
+## Profiles:
+##   cloud, local   — the gateway (crow-gateway); `local` also starts the Cloudflare tunnel
+##   storage        — Garage, the default S3-compatible object storage
+##   minio-legacy   — MinIO, for existing deployments only (see the service comment)
+##
+## Keeping an existing MinIO install running (no data change):
+##   docker compose --profile cloud --profile minio-legacy up --build
 
 services:
   crow-gateway:
@@ -26,8 +37,48 @@ services:
       retries: 3
     profiles: [cloud, local]
 
-  # Optional: MinIO S3-compatible storage
+  garage:
+    # Default object storage: Garage (S3-compatible). Same image, command, env and
+    # healthcheck as the File Storage (Garage) extension (bundles/garage), so an
+    # Extensions install and this profile behave identically. The gateway reaches
+    # it at S3_ENDPOINT=garage:3900 (see .env.example) with the key created on
+    # first start by --default-access-key.
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    command: ["/garage", "server", "--single-node", "--default-access-key"]
+    environment:
+      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET:?Set GARAGE_RPC_SECRET in .env (e.g. openssl rand -hex 32)}"
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:?Set GARAGE_ADMIN_TOKEN in .env}"
+      GARAGE_METRICS_TOKEN: "${GARAGE_METRICS_TOKEN:?Set GARAGE_METRICS_TOKEN in .env}"
+      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY:?Set GARAGE_DEFAULT_ACCESS_KEY in .env (the gateway's S3_ACCESS_KEY)}"
+      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY:?Set GARAGE_DEFAULT_SECRET_KEY in .env (the gateway's S3_SECRET_KEY)}"
+    volumes:
+      # The extension's own rendered config, mounted read-only rather than copied:
+      # one file keeps the bundle install and this profile from drifting apart.
+      - ./bundles/garage/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    # S3 API 3900 stays on the compose network (the gateway dials "garage") and
+    # RPC 3901 is never published; only the admin API is reachable, from loopback.
+    expose:
+      - "3900"
+    ports:
+      - "127.0.0.1:3903:3903"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/garage", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    profiles: [storage]
+
   minio:
+    # LEGACY — for existing deployments only. MinIO's public images are no longer published
+    # (Docker Hub and Quay refuse anonymous pulls as of 2026-11-05), so a fresh
+    # `docker compose up` cannot fetch this one. New deployments use `--profile storage`
+    # (Garage). Keeping MinIO means `--profile minio-legacy` plus the older MINIO_*
+    # settings in .env; the same minio-data volume and image pin are kept, so an
+    # existing volume is read as-is with no data change.
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
     environment:
@@ -46,7 +97,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-    profiles: [storage]
+    profiles: [minio-legacy]
 
   # Optional: Cloudflare Tunnel for home network access
   tunnel:
@@ -61,4 +112,6 @@ services:
     profiles: [local]
 
 volumes:
+  garage-meta:
+  garage-data:
   minio-data:

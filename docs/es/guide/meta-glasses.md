@@ -170,17 +170,17 @@ curl -X POST http://localhost:3000/api/meta-glasses/say \
 ### Reproducir música (Funkwhale "manos libres")
 
 Si instalaste el complemento de Funkwhale (disponible en Extensiones)
-y configuraste almacenamiento compartido MinIO/S3, los lentes pueden reproducir tu
+y configuraste almacenamiento compartido S3 (Garage por defecto), los lentes pueden reproducir tu
 biblioteca por sus altavoces de oído abierto sin que jamás saques el teléfono.
 
 Instala y configura una sola vez:
 
-1. Agrega la configuración de MinIO en **Configuración → Avanzado →
+1. Agrega el endpoint en **Configuración → Avanzado →
    Almacenamiento compartido** (un solo endpoint, aplica a cada instancia de Crow
    emparejada).
 2. Instala el complemento de Funkwhale desde Extensiones. El gateway inyecta
    automáticamente las credenciales `AWS_*` en el contenedor de Funkwhale, así que
-   las subidas de audio aterrizan en el MinIO compartido en lugar del disco local.
+   las subidas de audio aterrizan en el almacenamiento de objetos compartido en lugar del disco local.
 3. Define `PROXY_MEDIA=False` en `~/.crow/bundles/funkwhale/.env` (ya es
    el valor predeterminado de instalación para las nuevas instalaciones con
    almacenamiento compartido) para que Funkwhale redirija a URLs prefirmadas de S3
@@ -195,7 +195,7 @@ Luego di:
 > "Reproduce *Comfy in Nautica* de Panda Bear desde mi biblioteca."
 
 La cadena corre completamente del lado del servidor — `fw_search` → `fw_play(track_uuid)`
-→ Funkwhale responde 302 hacia una URL prefirmada de MinIO → el gateway la descarga con
+→ Funkwhale responde 302 hacia una URL prefirmada de S3 → el gateway la descarga con
 `Authorization: Bearer <token>` (el token nunca sale del servidor) → frames binarios
 por el WebSocket del dispositivo → `MediaCodec` de Android decodifica →
 el `AudioTrack` de `musicTrack` reproduce por los altavoces de los lentes.

@@ -169,16 +169,16 @@ curl -X POST http://localhost:3000/api/meta-glasses/say \
 ### Play music ("hands-free" Funkwhale)
 
 If you've installed the Funkwhale bundle (available in Extensions)
-and configured shared MinIO/S3 storage, the glasses can play your library
+and configured shared S3 storage (Garage by default), the glasses can play your library
 through their open-ear speakers without ever pulling out your phone.
 
 Install + configure once:
 
-1. Add MinIO config in **Settings → Advanced → Shared Storage** (one
+1. Add the endpoint in **Settings → Advanced → Shared Storage** (one
    endpoint, applies to every paired Crow instance).
 2. Install the Funkwhale bundle from Extensions. The gateway auto-injects
    `AWS_*` credentials into Funkwhale's container, so audio uploads land
-   on shared MinIO instead of local disk.
+   on shared object storage instead of local disk.
 3. Set `PROXY_MEDIA=False` in `~/.crow/bundles/funkwhale/.env` (already
    the install default for new shared-storage installs) so Funkwhale
    redirects to S3 presigned URLs instead of nginx X-Accel.
@@ -192,7 +192,7 @@ Then say:
 > "Play *Comfy in Nautica* by Panda Bear from my library."
 
 The chain runs entirely server-side — `fw_search` → `fw_play(track_uuid)`
-→ Funkwhale 302 to a presigned MinIO URL → gateway fetches with
+→ Funkwhale 302 to a presigned S3 URL → gateway fetches with
 `Authorization: Bearer <token>` (token never leaves the server) → binary
 frames over the device WebSocket → Android `MediaCodec` decodes →
 `musicTrack` `AudioTrack` plays through the glasses speakers.

@@ -69,7 +69,7 @@ All three connection patterns access the **same database, same tools, and same d
 | Memories | Full-text searchable, tagged, scored by importance |
 | Projects & sources | Research, data connectors, notes, citations |
 | Blog posts | Drafts, published posts, themes, RSS feeds |
-| Files | S3-compatible storage (when MinIO is configured) |
+| Files | S3-compatible storage (when object storage is configured) |
 | Contacts & messages | Peer identities, Nostr DMs, shared items |
 | Behavioral context | crow.md identity, protocols, and custom sections |
 

@@ -9,7 +9,7 @@ Un **espacio de proyecto** es la unidad de trabajo colaborativo y compartible en
 
 - Un **slug** (legible para humanos, usado en URLs y rutas de almacenamiento)
 - Un **directorio de espacio de trabajo** en disco donde los bots y agentes pueden escribir
-- Un **prefijo de almacenamiento MinIO** para archivos con alcance de proyecto
+- Un **prefijo de almacenamiento** para archivos con alcance de proyecto
 - **Miembros** con roles y anulaciones de capacidades por miembro
 - Un **registro de auditoría** de quién hizo qué y cuándo
 - **Recursos adjuntos** opcionales: fuentes de investigación, notas, backends de datos, archivos
@@ -26,7 +26,7 @@ La IA llama a `crow_create_project`. Tras bambalinas, Crow crea:
 - Una fila en `project_spaces` (con un slug generado como `spring-2026-research-12`)
 - Una fila de propietario en `project_members` para el usuario local
 - Un directorio de espacio de trabajo en `~/.crow/data/projects/<slug>/workspace/`
-- Un prefijo de claves MinIO `crow-files/projects/<slug>/`
+- Un prefijo de claves `crow-files/projects/<slug>/`
 
 Puedes agregar fuentes, notas, backends de datos y miembros de inmediato.
 

@@ -98,7 +98,7 @@ La sincronización es de **consistencia eventual**. Cuando dos instancias están
 
 - Claves de identidad (ya compartidas durante la configuración)
 - Sesiones del gateway y tokens OAuth
-- Archivos de almacenamiento (los objetos S3 se quedan en su MinIO local)
+- Archivos de almacenamiento (los objetos S3 se quedan en su almacenamiento de objetos local)
 
 ## Federación
 
