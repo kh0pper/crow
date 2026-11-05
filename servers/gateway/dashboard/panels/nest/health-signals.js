@@ -587,6 +587,9 @@ const UPDATE_CAUSE_KEYS = {
   "branch-unknown": "signals.updates.causeBranchUnknown",
   "ci-red": "signals.updates.causeCiRed",
   "ci-pending": "signals.updates.causeCiPending",
+  // Review S2: GitHub answered, but with none of our three checks — a fork
+  // without this repo's CI. Never "CI is still running" for days.
+  "no-ci": "signals.updates.causeNoCi",
   // N1c-5: GitHub could not be asked. Two codes, so an outage that clears reads
   // differently from one that has paused updates for good.
   "ci-unavailable": "signals.updates.causeCiUnavailable",

@@ -64,7 +64,21 @@ When GitHub answers, the answer decides:
 | all three green | the update proceeds |
 | any of them red | skipped, retried on the next check |
 | any of them still running | skipped, retried on the next check |
-| no run for our three checks | treated as **still running**: an unverified commit is never deployed. A push that raced the check answers on the next tick; a fork that strips those checks keeps being skipped instead |
+| one of the three missing (the others reported) | skipped until it reports: **green needs all three**, so a sha where only `audit` has finished is never deployed |
+| no run for our three checks | skipped as **no CI** (see below): an unverified commit is never deployed. A push that raced the check answers on the next tick; a fork that strips those checks keeps being skipped instead |
+
+**No CI.** GitHub answered, but with none of the three required checks —
+typically a fork that does not carry this repo's CI, or a push whose workflows
+have not registered yet. The commit is unverified, so this tick is skipped with
+its own message:
+
+```
+Skipped: origin/main (1a2b3c4d5) has none of the required CI checks (a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate
+```
+
+It is recorded as a transient result, so it never rings the bell; if it repeats
+past two check intervals the Nest's Updates card warns that the required checks
+never ran on main. `CROW_UPDATE_CI_GATE=0` is the way out.
 
 Two outcomes are *not* a CI result:
 

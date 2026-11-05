@@ -66,7 +66,22 @@ Cuando GitHub responde, la respuesta decide:
 | los tres en verde | la actualización continúa |
 | alguno en rojo | se pospone y se reintenta en la próxima comprobación |
 | alguno aún en ejecución | se pospone y se reintenta en la próxima comprobación |
-| ningún check-run de nuestros tres | se trata como **aún en ejecución**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
+| falta uno de los tres (los demás ya informaron) | se pospone hasta que informe: **verde exige los tres**, así que un sha en el que solo `audit` ha terminado nunca se despliega |
+| ningún check-run de nuestros tres | se pospone como **sin CI** (ver abajo): un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
+
+**Sin CI.** GitHub respondió, pero sin ninguno de los tres checks requeridos —
+típicamente un fork que no lleva la CI de este repositorio, o un push cuyos
+workflows aún no se han registrado. El commit queda sin verificar, así que esta
+comprobación se pospone con su propio mensaje:
+
+```
+Skipped: origin/main (1a2b3c4d5) has none of the required CI checks (a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate
+```
+
+Se registra como resultado transitorio, así que nunca hace sonar la campana; si
+se repite más de dos intervalos de comprobación, la tarjeta de Actualizaciones
+del Nest avisa de que los checks requeridos nunca se ejecutaron en main.
+`CROW_UPDATE_CI_GATE=0` es la salida.
 
 Dos resultados *no* son un resultado de CI:
 

@@ -17,7 +17,7 @@ import { join } from "node:path";
 
 import {
   runLockedUpdate, checkForUpdates, classifyUpdateResult,
-  _setAppRootForTest, _setDbForTest, _setCiVerdictForTest, _setCiFetchForTest,
+  _setAppRootForTest, _setDbForTest, _setCiVerdictForTest, _setCiFetchForTest, _setCiRemoteUrlForTest,
   _resolveCiVerdictForTest, CI_UNAVAILABLE_COUNT_KEY, CI_GATE_SETTING_KEY,
 } from "../servers/gateway/auto-update.js";
 
@@ -70,16 +70,15 @@ function stubDb(initial = {}) {
 /**
  * A bare origin plus a clone one commit behind.
  *
- * `github: true` puts the bare repo at <root>/github.com/acme/crow.git: the
- * origin URL the updater reads then matches the GitHub pattern while git can
- * still fetch it from disk — the only way to drive the REAL resolveCiVerdict
- * through runLockedUpdate (and its real skip/pull) without a network.
+ * The origin is always a LOCAL bare repo, because git has to be able to fetch
+ * from it. The GitHub case is driven through `_setCiRemoteUrlForTest` (review
+ * round 1, S1): the old fixture put the bare repo at <root>/github.com/acme/
+ * crow.git and relied on a substring match on "github.com", which is exactly the
+ * fail-open the shared parser now refuses — a local path is not GitHub.
  */
-function fixture({ github = true } = {}) {
+function fixture() {
   const root = mkdtempSync(join(tmpdir(), "au-cigap-"));
-  const origin = github
-    ? join(root, "github.com", "acme", "crow.git")
-    : join(root, "origin.git");
+  const origin = join(root, "origin.git");
   mkdirSync(join(origin, ".."), { recursive: true });
   const work = join(root, "work");
   execFileSync("git", ["init", "--bare", "-b", "main", origin], { stdio: "pipe" });
@@ -121,12 +120,32 @@ test("resolveCiVerdict: every failure to read GitHub is 'unavailable', never 'un
       assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "unavailable", name);
     }
     // A GitHub-shaped origin that answers is still classified by check-runs …
-    _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => GREEN }));
+    let seenUrl = null;
+    _setCiFetchForTest((url) => { seenUrl = url; return Promise.resolve({ ok: true, status: 200, json: async () => GREEN }); });
     assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "green");
+    // Review S3: ask for a full page — the default 30 silently truncated a
+    // commit with more runs, and a now-required context could then never arrive.
+    assert.equal(
+      seenUrl,
+      `https://api.github.com/repos/acme/crow/commits/${SHA}/check-runs?per_page=100`,
+    );
     // … and a payload with no run for our three contexts is unverifiable, which
-    // is "pending" (retry), never green and never the old deploy-on-unknown.
+    // is "no-ci" (review S2: its own verdict, never the old deploy-on-unknown
+    // and no longer "CI still running").
     _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ check_runs: [] }) }));
+    assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "no-ci");
+    // A payload where only SOME of the three reported is pending (S3), not green.
+    _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => ({
+      check_runs: [{ name: "audit", status: "completed", conclusion: "success" }],
+    }) }));
     assert.equal(await _resolveCiVerdictForTest(GH_URL, SHA), "pending");
+    // The documented SSH-over-443 form is GitHub too — it used to read as
+    // "not-applicable" and deploy without the gate (S1). The fetch seam
+    // receives the OWNER/REPO parsed from it.
+    let sshUrl = null;
+    _setCiFetchForTest((url) => { sshUrl = url; return Promise.resolve({ ok: true, status: 200, json: async () => GREEN }); });
+    assert.equal(await _resolveCiVerdictForTest("ssh://git@ssh.github.com:443/acme/crow.git", SHA), "green");
+    assert.match(sshUrl, /^https:\/\/api\.github\.com\/repos\/acme\/crow\/commits\//);
   } finally {
     _setCiFetchForTest(null);
   }
@@ -134,6 +153,9 @@ test("resolveCiVerdict: every failure to read GitHub is 'unavailable', never 'un
   // No CI to ask for is a different answer: the gate can never apply there.
   assert.equal(await _resolveCiVerdictForTest("/srv/git/crow.git", SHA), "not-applicable");
   assert.equal(await _resolveCiVerdictForTest("git@example.com:acme/crow.git", SHA), "not-applicable");
+  // A local path containing github.com/o/r is a local path, not GitHub (S1).
+  assert.equal(await _resolveCiVerdictForTest("/tmp/github.com/acme/crow.git", SHA), "not-applicable");
+  assert.equal(await _resolveCiVerdictForTest("https://github.com.evil.tld/acme/crow.git", SHA), "not-applicable");
   assert.equal(await _resolveCiVerdictForTest("", SHA), "not-applicable");
 });
 
@@ -143,7 +165,8 @@ test("unavailable does not pull; three in a row turn into a failure and exactly 
   try {
     _setAppRootForTest(fx.work);
     _setDbForTest(db);
-    // The REAL resolver, a GitHub-shaped origin, and a GitHub that is down.
+    // The REAL resolver, a GitHub origin (the seam), and a GitHub that is down.
+    _setCiRemoteUrlForTest(GH_URL);
     _setCiFetchForTest(() => Promise.resolve({ ok: false, status: 503, json: async () => ({}) }));
     const before = g(fx.work, "rev-parse", "HEAD");
     const lastResult = () => db.settings.get("auto_update_last_result");
@@ -188,6 +211,7 @@ test("unavailable does not pull; three in a row turn into a failure and exactly 
     assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "green");
   } finally {
     _setCiFetchForTest(null);
+    _setCiRemoteUrlForTest(null);
     _setCiVerdictForTest(null);
     _setDbForTest(null);
     _setAppRootForTest(REAL_APP_ROOT);
@@ -195,8 +219,48 @@ test("unavailable does not pull; three in a row turn into a failure and exactly 
   }
 });
 
+test("a GitHub origin with none of our checks is 'no-ci' (review S2): skipped, transient, no bell", async () => {
+  const fx = fixture();
+  const db = stubDb();
+  try {
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+    // A real GitHub origin (the seam). Before review S2 an answer carrying no
+    // run of ours was recorded as "CI still running", so the card warned "CI is
+    // still running on main (for 12h)" for a fork forever.
+    _setCiRemoteUrlForTest(GH_URL);
+    // One unreadable tick first: no-ci must clear that streak (any verdict other
+    // than "unavailable" resets the count).
+    _setCiFetchForTest(() => Promise.resolve({ ok: false, status: 503, json: async () => ({}) }));
+    assert.equal((await runLockedUpdate(() => {})).skipped, "ci-unavailable");
+    assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "1");
+
+    _setCiFetchForTest(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ check_runs: [] }) }));
+    const before = g(fx.work, "rev-parse", "HEAD");
+    const res = await runLockedUpdate(() => {});
+    assert.equal(res.updated, false, JSON.stringify(res));
+    assert.equal(res.skipped, "no-ci");
+    assert.equal(
+      res.message,
+      `Skipped: origin/main (${g(fx.work, "rev-parse", "origin/main").slice(0, 9)}) has none of the required CI checks (a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate`,
+    );
+    assert.equal(res.converge, undefined, "no converge:false — this refuses the NEXT commit, not the tree on disk");
+    assert.equal(g(fx.work, "rev-parse", "HEAD"), before, "an unverified sha must not pull");
+    assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "no-ci");
+    assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "0", "no-ci resets the outage streak");
+    assert.deepEqual(classifyUpdateResult(db.settings.get("auto_update_last_result")), { kind: "transient", code: "no-ci" });
+    assert.equal(db.notifications.length, 0, "a transient no-ci never rings the bell");
+  } finally {
+    _setCiFetchForTest(null);
+    _setCiRemoteUrlForTest(null);
+    _setDbForTest(null);
+    _setAppRootForTest(REAL_APP_ROOT);
+    fx.cleanup();
+  }
+});
+
 test("a non-GitHub origin is 'not-applicable': it pulls, logs, and records the setting", async () => {
-  const fx = fixture({ github: false });
+  const fx = fixture();
   const db = stubDb();
   const logs = [];
   try {
@@ -226,6 +290,7 @@ test("Check for updates now goes through the same gate: an unreadable answer ski
   try {
     _setAppRootForTest(fx.work);
     _setDbForTest(db);
+    _setCiRemoteUrlForTest(GH_URL);
     _setCiVerdictForTest("unavailable");
     const before = g(fx.work, "rev-parse", "HEAD");
 
@@ -237,6 +302,58 @@ test("Check for updates now goes through the same gate: an unreadable answer ski
     assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "1");
   } finally {
     _setCiVerdictForTest(null);
+    _setCiRemoteUrlForTest(null);
+    _setDbForTest(null);
+    _setAppRootForTest(REAL_APP_ROOT);
+    fx.cleanup();
+  }
+});
+
+test("N1: an up-to-date checkout resets the outage streak and clears the recorded gate", async () => {
+  // Two unreadable ticks, then the operator pulls by hand: without the reset the
+  // count stays at 2, so the NEXT single GitHub blip (days later) rings the
+  // "updates are paused" bell. The stale gate reading is cleared too, or a
+  // not-applicable info line outlived an origin change.
+  const fx = fixture();
+  const db = stubDb({ [CI_UNAVAILABLE_COUNT_KEY]: "2", [CI_GATE_SETTING_KEY]: "not-applicable" });
+  try {
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+    // Fast-forward the checkout onto origin/main so behindCount is 0.
+    g(fx.work, "pull", "--ff-only", "origin", "main");
+    const res = await runLockedUpdate(() => {});
+    assert.equal(res.updated, false, JSON.stringify(res));
+    assert.equal(res.skipped, undefined, "plain up-to-date, not a CI skip");
+    assert.equal(db.settings.get("auto_update_last_result"), "Up to date");
+    assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "0", "the streak must not survive an up-to-date tick");
+    assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "", "the stale gate reading is cleared");
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REAL_APP_ROOT);
+    fx.cleanup();
+  }
+});
+
+test("N1: the gate-disabled path (CROW_UPDATE_CI_GATE=0) resets both keys too", async () => {
+  const fx = fixture();
+  const db = stubDb({ [CI_UNAVAILABLE_COUNT_KEY]: "2", [CI_GATE_SETTING_KEY]: "not-applicable" });
+  try {
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+    // A GitHub origin, but the gate is switched off: no verdict is consulted.
+    _setCiRemoteUrlForTest(GH_URL);
+    _setCiFetchForTest(() => { throw new Error("the disabled gate must not ask GitHub"); });
+    process.env.CROW_UPDATE_CI_GATE = "0";
+    const before = g(fx.work, "rev-parse", "HEAD");
+    const res = await runLockedUpdate(() => {});
+    assert.equal(res.updated, true, JSON.stringify(res));
+    assert.notEqual(g(fx.work, "rev-parse", "HEAD"), before);
+    assert.equal(db.settings.get(CI_UNAVAILABLE_COUNT_KEY), "0", "a streak from before the switch must not ring later");
+    assert.equal(db.settings.get(CI_GATE_SETTING_KEY), "", "no stale not-applicable notice");
+  } finally {
+    delete process.env.CROW_UPDATE_CI_GATE;
+    _setCiFetchForTest(null);
+    _setCiRemoteUrlForTest(null);
     _setDbForTest(null);
     _setAppRootForTest(REAL_APP_ROOT);
     fx.cleanup();
