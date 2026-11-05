@@ -88,6 +88,33 @@ test("classifyCheckRuns moved to a shared module; auto-update re-exports the sam
   assert.equal(classifyCheckRuns(red), "red");
 });
 
+test("githubCheckRuns parses the origin with the shared parser and asks for a full page (review S1 + S3)", async () => {
+  // The old inline regex needed "github.com[:/]o/r" in the URL and could not
+  // read GitHub's documented SSH-over-443 form (the port was taken as the
+  // owner), so a satellite on that remote never updated. It also omitted
+  // per_page=100, so a commit with more runs was truncated and now (S3) would
+  // read as pending forever.
+  const seen = [];
+  const runner = async () => ({ stdout: "ssh://git@ssh.github.com:443/acme/crow.git\n", stderr: "" });
+  const got = await U.githubCheckRuns({
+    runner, appRoot: "/nonexistent", sha: TARGET,
+    fetchImpl: async (url) => { seen.push(url); return { ok: true, json: async () => green }; },
+  });
+  assert.deepEqual(got, green);
+  assert.deepEqual(seen, [`https://api.github.com/repos/acme/crow/commits/${TARGET}/check-runs?per_page=100`]);
+
+  // A local path is not GitHub: no request at all, so the verdict is "unknown"
+  // and the satellite refuses (it fails closed, as it always has).
+  let asked = false;
+  const none = await U.githubCheckRuns({
+    runner: async () => ({ stdout: "/srv/git/github.com/acme/crow.git\n", stderr: "" }),
+    appRoot: "/nonexistent", sha: TARGET,
+    fetchImpl: async () => { asked = true; return { ok: true, json: async () => green }; },
+  });
+  assert.equal(none, null);
+  assert.equal(asked, false, "a local path must not be asked about at api.github.com");
+});
+
 test("constants", () => {
   assert.equal(U.UPDATE_RESTART_EXIT_CODE, 75);
   assert.equal(U.UNREACHABLE_MAX_MS, 7 * DAY);
@@ -115,8 +142,12 @@ test("refused: a bad sha, the current sha, a target that is not on origin/main, 
   for (const x of [off, behind, unknown]) assert.ok(!x.runner.lines().some((l) => l.startsWith("git merge --ff-only")));
 });
 
-test("refused unless CI is green: red, pending and unknown all refuse", async () => {
-  for (const [checkRuns, verdict] of [[red, "red"], [{ check_runs: [{ name: "suite", status: "in_progress" }] }, "pending"], [null, "unknown"]]) {
+test("refused unless CI is green: red, pending, a partial context set and unknown all refuse", async () => {
+  // A subset of the required contexts is "pending" now (review S3: green needs
+  // all three), so the satellite is stricter with the gateway — a sha whose
+  // `suite`/`static-checks` have not reported is no longer accepted.
+  const partial = { check_runs: [{ name: "audit", status: "completed", conclusion: "success" }] };
+  for (const [checkRuns, verdict] of [[red, "red"], [{ check_runs: [{ name: "suite", status: "in_progress" }] }, "pending"], [partial, "pending"], [null, "unknown"]]) {
     const w = world({ checkRuns });
     const r = await w.updater.check(TARGET);
     assert.equal(r.ok, false);

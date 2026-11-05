@@ -1,6 +1,12 @@
 // A5: CI-gate on auto-update — classifyCheckRuns (pure) and the wired skip in
 // runLockedUpdate (via the verdict test hook; fixture remotes are local paths,
-// so the real fetch path naturally fails open as "unknown").
+// so the real fetch path answers "not-applicable" — no CI to ask).
+// N1c-5 (the unreadable-answer half: unavailable, the 3-in-a-row bell and the
+// not-applicable setting) lives in auto-update-ci-gate-unavailable.test.js.
+//
+// Review round 1: S3 — green now needs ALL THREE contexts, so a subset of them
+// is "pending"; and S1 — the origin is parsed by parseGithubRemote, not a
+// substring match on "github.com". The URL-form table lives here.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +19,7 @@ import {
   classifyCheckRuns, runLockedUpdate,
   _setAppRootForTest, _setDbForTest, _setCiVerdictForTest,
 } from "../servers/gateway/auto-update.js";
+import { parseGithubRemote } from "../servers/shared/ci-check-runs.js";
 
 delete process.env.INVOCATION_ID;
 delete process.env.CROW_SUPERVISED;
@@ -29,6 +36,8 @@ test("classifyCheckRuns: all three green (extra runs ignored)", () => {
 });
 
 test("classifyCheckRuns: any named failure is red", () => {
+  // Red wins over a missing context too: a reported failure is decisive even
+  // when another required check has not reported yet.
   assert.equal(classifyCheckRuns({ check_runs: [
     run("suite", "completed", "failure"),
     run("static-checks", "completed", "success"),
@@ -43,11 +52,68 @@ test("classifyCheckRuns: incomplete named run is pending", () => {
   ] }), "pending");
 });
 
-test("classifyCheckRuns: neutral/skipped conclusions count as green", () => {
+test("classifyCheckRuns: neutral/skipped conclusions count as green (all three present)", () => {
   assert.equal(classifyCheckRuns({ check_runs: [
     run("suite", "completed", "success"),
+    run("static-checks", "completed", "neutral"),
     run("audit", "completed", "skipped"),
   ] }), "green");
+});
+
+test("classifyCheckRuns: green requires ALL THREE contexts (review S3)", () => {
+  // Before review round 1 the classifier returned green when ANY subset of the
+  // three was present and passing, so a sha where only `audit` had reported was
+  // deployed before `suite` and `static-checks` ever ran. A missing context is
+  // now "pending" (it has not reported yet) — never green.
+  const all = {
+    suite: run("suite", "completed", "success"),
+    "static-checks": run("static-checks", "completed", "success"),
+    audit: run("audit", "completed", "success"),
+  };
+  assert.equal(classifyCheckRuns({ check_runs: [all.audit] }), "pending", "audit alone was green before");
+  assert.equal(classifyCheckRuns({ check_runs: [all.suite, all.audit] }), "pending");
+  assert.equal(classifyCheckRuns({ check_runs: [all.suite, all["static-checks"]] }), "pending");
+  assert.equal(classifyCheckRuns({ check_runs: [all.suite, all["static-checks"], all.audit] }), "green");
+  // All three present but one unfinished is still pending, as before.
+  assert.equal(classifyCheckRuns({ check_runs: [
+    all.suite, all["static-checks"], run("audit", "in_progress", null),
+  ] }), "pending");
+});
+
+test("parseGithubRemote: every real GitHub remote form is GitHub (review S1)", () => {
+  const forms = [
+    "https://github.com/acme/crow",
+    "https://github.com/acme/crow.git",
+    "http://github.com/acme/crow.git",
+    "https://github.com/acme/crow/",                    // trailing slash
+    "https://github.com/acme/crow.git/",                // .git + slash
+    "https://GitHub.com/acme/crow",                     // uppercase host
+    "https://WWW.GitHub.com/acme/crow.git",
+    "git@github.com:acme/crow.git",                     // scp-like
+    "ssh://git@github.com/acme/crow.git",               // ssh scheme
+    "ssh://git@ssh.github.com:443/acme/crow.git",       // SSH over 443 (was not-applicable: a fail-open deploy)
+  ];
+  for (const url of forms) assert.deepEqual(parseGithubRemote(url), { owner: "acme", repo: "crow" }, url);
+});
+
+test("parseGithubRemote: another host or a local path is NOT GitHub (review S1)", () => {
+  const forms = [
+    "https://github.com.evil.tld/acme/crow.git",
+    "https://evilgithub.com/acme/crow.git",
+    "git@github.com.evil.tld:acme/crow.git",
+    // The old fixture put a bare repo at exactly this path and the substring
+    // regex read it as GitHub; it is a local path, so the gate has no API.
+    "/tmp/au-cigate-1234/github.com/acme/crow.git",
+    "./github.com/acme/crow.git",
+    "file:///srv/github.com/acme/crow.git",
+    "/srv/git/crow.git",
+    "git@example.com:acme/crow.git",
+    "github.com/acme/crow.git",                          // no scheme, no colon
+    "",
+    null,
+    undefined,
+  ];
+  for (const url of forms) assert.equal(parseGithubRemote(url), null, String(url));
 });
 
 test("classifyCheckRuns: no named runs (fork without our CI) is unknown", () => {
@@ -138,13 +204,13 @@ test("CROW_UPDATE_CI_GATE=0 disables the gate even on red", async () => {
   }
 });
 
-test("local (non-GitHub) remotes fail open without the test hook", async () => {
+test("local (non-GitHub) remotes are not CI-gated: the update proceeds without the test hook", async () => {
   const fx = fixture();
   try {
     _setAppRootForTest(fx.work);
     _setDbForTest(stubDb());
     const res = await runLockedUpdate(() => {});
-    assert.equal(res.updated, true, "unknown verdict (local remote) proceeds");
+    assert.equal(res.updated, true, "not-applicable verdict (local remote) proceeds");
   } finally {
     _setDbForTest(null);
     _setAppRootForTest(join(import.meta.dirname, ".."));

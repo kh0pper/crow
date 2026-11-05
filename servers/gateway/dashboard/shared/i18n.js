@@ -330,6 +330,15 @@ export const translations = {
   "signals.updates.causeBranchUnknown": { en: "Crow can't read the git branch", es: "Crow no puede leer la rama de git" },
   "signals.updates.causeCiRed": { en: "CI is red on main", es: "la CI está en rojo en main" },
   "signals.updates.causeCiPending": { en: "CI is still running on main", es: "la CI aún se está ejecutando en main" },
+  // Review S2: a GitHub origin whose payload carries none of our checks is not
+  // "still running" — it is a fork without this repo's CI. Review round 2: the
+  // same wording covers a fork that carries only SOME of them, so it says "not
+  // all" rather than "never".
+  "signals.updates.causeNoCi": { en: "the required CI checks didn't all run on main", es: "los checks de CI requeridos no se ejecutaron todos en main" },
+  // N1c-5: the CI gate could not read GitHub, and the 3-in-a-row pause.
+  "signals.updates.causeCiUnavailable": { en: "Crow can't read the CI result for main", es: "Crow no puede leer el resultado de CI de main" },
+  "signals.updates.causeCiUnavailablePaused": { en: "Crow can't read the CI result for main, so updates are paused", es: "Crow no puede leer el resultado de CI de main, así que las actualizaciones están en pausa" },
+  "signals.updates.ciGateNotApplicable": { en: "Updates are not CI-gated here: this Crow's origin is not GitHub, so there is no CI result to check.", es: "Aquí las actualizaciones no pasan por la puerta de CI: el origen de este Crow no es GitHub, así que no hay ningún resultado de CI que comprobar." },
   "signals.updates.causeBranchChanged": { en: "the branch changed during the update", es: "la rama cambió durante la actualización" },
   "signals.updates.causeFetchFailed": { en: "Crow can't fetch from origin", es: "Crow no puede descargar desde origin" },
   "signals.updates.causePullFailed": { en: "the pull failed, local changes may conflict", es: "la descarga falló, puede haber cambios locales en conflicto" },

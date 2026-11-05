@@ -11,7 +11,9 @@
  *   - after `git fetch origin main` it is a known commit, an ancestor of (or equal to)
  *     origin/main, and a fast-forward of HEAD;
  *   - classifyCheckRuns (shared with the gateway's auto-update) says "green" for it. Unlike the
- *     gateway, "unknown" and "pending" refuse: a satellite updates only to a knowably green sha.
+ *     gateway, "unknown" and "pending" refuse: a satellite updates only to a knowably green sha
+ *     (and since review round 1 "green" means ALL three required contexts reported green, not a
+ *     subset — the satellite got stricter with the gateway, which is the correct direction).
  * Then (apply): satellite.db backup → `git merge --ff-only <target>` → `npm ci --omit=dev` only if
  * package-lock.json changed (systemd-run --user --scope -p MemoryMax=600M, nice, ionice; the MCP
  * children are paused first via `beforeInstall`, and resumed by `afterRollback` if the update
@@ -28,7 +30,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as execRun } from "../gateway/bundle-core.js";
-import { classifyCheckRuns } from "../shared/ci-check-runs.js";
+import { classifyCheckRuns, parseGithubRemote } from "../shared/ci-check-runs.js";
 import { SATELLITE_DB_FILE } from "./db.js";
 
 export const UPDATE_RESTART_EXIT_CODE = 75;
@@ -55,13 +57,22 @@ export function npmCiCommand() {
 
 const backupDir = (satHome) => join(satHome, "backups", "satellite-db");
 
-/** GitHub check-runs for `sha` on origin's repo, or null (not GitHub, network, non-200). */
-async function githubCheckRuns({ runner, appRoot, sha, fetchImpl = globalThis.fetch }) {
+/**
+ * GitHub check-runs for `sha` on origin's repo, or null (not GitHub, network, non-200).
+ *
+ * The origin is parsed by the shared parseGithubRemote (review round 1, S1): the old inline regex
+ * read any string containing `github.com/o/r` — a local path included — as GitHub, and missed
+ * `ssh://git@ssh.github.com:443/o/r.git`. Here a miss fails CLOSED (null → "unknown" → refused),
+ * but it also means a satellite on a remote the regex could not read never updates at all.
+ * `?per_page=100` (S3): the default 30 silently truncated a commit with more runs, which then
+ * failed closed as an incomplete set.
+ */
+export async function githubCheckRuns({ runner, appRoot, sha, fetchImpl = globalThis.fetch }) {
   try {
     const { stdout } = await runner("git", ["remote", "get-url", "origin"], { cwd: appRoot, timeout: 15000 });
-    const m = /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\s*$/.exec(String(stdout || ""));
-    if (!m) return null;
-    const resp = await fetchImpl(`https://api.github.com/repos/${m[1]}/${m[2]}/commits/${sha}/check-runs`, {
+    const remote = parseGithubRemote(String(stdout || ""));
+    if (!remote) return null;
+    const resp = await fetchImpl(`https://api.github.com/repos/${remote.owner}/${remote.repo}/commits/${sha}/check-runs?per_page=100`, {
       headers: { Accept: "application/vnd.github+json", "User-Agent": "crow-satellite-update" }, signal: AbortSignal.timeout(15000),
     });
     return resp.ok ? await resp.json() : null;

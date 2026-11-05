@@ -557,6 +557,43 @@ test("updates: a CI run still in progress is not a warning until the RESULT is o
   assert.notEqual(unknownAge.card.state, "warn", "an unknown result age is not a warn");
 });
 
+test("updates: a GitHub origin with none of our checks reads as no-ci, never 'CI is still running' (review S2)", async () => {
+  const { classifyUpdateResult } = await import("../servers/gateway/auto-update.js");
+  const noCi = "Skipped: origin/main has none of the required CI checks (abc123456; a fork without this repo's CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate";
+  // Its own code, transient: the tick retries and nothing rings.
+  assert.deepEqual(classifyUpdateResult(noCi), { kind: "transient", code: "no-ci" });
+  // Review round 2: a fork carrying only SOME of the three checks (nothing still
+  // running) is the same no-CI case, with its own sentence.
+  assert.deepEqual(
+    classifyUpdateResult("Skipped: origin/main has only some of the required CI checks (abc123456; missing audit — a fork without this repo's full CI?) — not deploying an unverified commit; set CROW_UPDATE_CI_GATE=0 to update without the gate"),
+    { kind: "transient", code: "no-ci" },
+  );
+  // The prefixes name the fork sentence, so any OTHER `Skipped: origin/main …`
+  // message is no longer swallowed as no-ci (the old prefix was the bare
+  // `Skipped: origin/main (`) — an unclassified sentence stays a failure.
+  assert.deepEqual(
+    classifyUpdateResult("Skipped: origin/main (abc123456) is not something we know"),
+    { kind: "failure", code: "other" },
+  );
+
+  // Fresh: no warn yet (a push that raced the workflow looks like this).
+  const fresh = await updatesOf({
+    result: noCi, lastCheck: iso(NOW - 60_000), resultSince: iso(NOW - HOUR),
+  }, { uptimeMs: 2 * HOUR });
+  assert.equal(fresh.card.state, "ok");
+
+  // Stuck: the cause names the fork case instead of claiming a build is running.
+  const stuck = await updatesOf({
+    result: noCi, lastCheck: iso(NOW - 60_000), resultSince: iso(NOW - 13 * HOUR),
+  }, { uptimeMs: 14 * HOUR });
+  assert.equal(stuck.card.state, "warn");
+  assert.match(stuck.card.value, /required CI checks didn't all run on main/);
+  assert.doesNotMatch(stuck.card.value, /still running/);
+
+  // en + es both exist and differ.
+  assert.notEqual(t("signals.updates.causeNoCi", "es"), t("signals.updates.causeNoCi", "en"));
+});
+
 test("updates: a last check older than 2x the interval warns even when the result reads fine", async () => {
   const stale = await updatesOf({ result: "Up to date", lastCheck: iso(NOW - 13 * HOUR) }, { uptimeMs: 14 * HOUR });
   assert.equal(stale.card.state, "warn");
