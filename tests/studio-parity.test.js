@@ -30,7 +30,8 @@ import { CLIENT_SCRIPT, COMMANDS } from "../bundles/studio/panel/client.js";
 /**
  * The tools that are not registry commands: the song/history reads, the two
  * history steps, the render and the engine reference (plan Task 9), plus the
- * takes and samples reads Tasks 8 and 1c Task 7 add.
+ * takes and samples reads Tasks 8 and 1c Task 7 add, and the instrument
+ * library's read (plan 1d Task 5).
  * @type {ReadonlySet<string>}
  */
 const DOCUMENTED_TOOLS = new Set([
@@ -40,6 +41,7 @@ const DOCUMENTED_TOOLS = new Set([
   "studio_get_clip",
   "studio_takes",
   "studio_samples",
+  "studio_library",
   "studio_midi",
   "studio_history",
   "studio_undo",

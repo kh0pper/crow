@@ -35,10 +35,13 @@ import { createClient } from "@libsql/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createStudioServer, patternClipRead } from "../bundles/studio/server/mcp.js";
+import { createRenderer } from "../bundles/studio/server/render.js";
+import { decodeWav } from "../bundles/studio/server/wav.js";
 import { listCommands } from "../bundles/studio/server/commands/registry.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { actorFromEnv, resolveCallActor } from "../servers/research/actor.js";
+import { tinySf2 } from "./fixtures/tiny-sf2.mjs";
 
 /** The render url the fake renderer answers with (a placeholder host). */
 const RENDER_URL = "https://storage.example/studio/song-1/render.wav";
@@ -176,8 +179,15 @@ function makeRenderer() {
  * Build the server and a client talking to it over an in-memory transport.
  * @returns {Promise<Client>}
  */
-async function connect({ hub, renderer, env = {}, actor = null }) {
-  const server = createStudioServer({ hub, renderer, catalogue: STUB_CATALOGUE, env, actor });
+async function connect({ hub, renderer, env = {}, actor = null, catalog = null }) {
+  const server = createStudioServer({
+    hub,
+    renderer,
+    catalogue: STUB_CATALOGUE,
+    env,
+    actor,
+    ...(catalog ? { catalog } : {}),
+  });
   const client = new Client({ name: "studio-mcp-test", version: "0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -1443,4 +1453,370 @@ test("a long motion lane is read as a spread of at most 256 points", () => {
   assert.equal(lane.points.length, 256, "and sends a spread of 256");
   assert.equal(lane.sampled, true);
   assert.deepEqual(lane.points[0], points[0], "starting at its first point");
+});
+
+// ---- the instrument library over MCP --------------------------------------
+
+/**
+ * The project storage prefix a real renderer's database answers with. The
+ * scratch studio database has no `project_spaces` table, so the renderer's one
+ * SELECT and its one INSERT are answered here and everything else goes through.
+ */
+const RENDER_PREFIX = "projects/21/";
+
+/** The library ids the instrument tests add to their song. */
+const LIB_TINY = "lib-tiny";
+const LIB_ALPHA = "lib-alpha";
+const LIB_BETA = "lib-beta";
+const LIB_UNUSED = "lib-unused";
+
+/** The tiny but valid bank the render below plays, and its two presets' tones. */
+const TINY_FONT = tinySf2();
+const TONE_PROGRAM_0 = 340;
+const TONE_PROGRAM_1 = 420;
+
+/**
+ * The database a real renderer needs, on top of the scratch studio database: the
+ * song project's storage prefix, and the `storage_files` row a render files.
+ * @param {object} db the scratch libsql client
+ * @param {{prefix?: string}} [options]
+ * @returns {object}
+ */
+function renderDbOf(db, { prefix = RENDER_PREFIX } = {}) {
+  return {
+    async execute(statement) {
+      const sql = typeof statement === "string" ? statement : statement.sql;
+      if (/^\s*SELECT\s+storage_prefix/i.test(sql)) return { rows: [{ storage_prefix: prefix }] };
+      if (/INSERT\s+INTO\s+storage_files/i.test(sql)) return { rows: [] };
+      return db.execute(statement);
+    },
+  };
+}
+
+/** A project ACL for the real renderer: it grants `write_files` and keeps the audits. */
+function renderAcl() {
+  const audits = [];
+  return {
+    audits,
+    async assertLocalCapability() {
+      return { role: "owner", capabilities: { write_files: true } };
+    },
+    async appendAudit(db, entry) {
+      audits.push(entry);
+    },
+  };
+}
+
+/**
+ * An S3 client for a real renderer: it records the WAVs a render stores, and
+ * serves the objects a test puts in `objects` (the song's bank).
+ * @returns {object}
+ */
+function renderStorage() {
+  const uploads = [];
+  const objects = new Map();
+  const gets = [];
+  return {
+    uploads,
+    objects,
+    gets,
+    async uploadObject(key, data, options) {
+      uploads.push({ key, data, options });
+    },
+    async getPresignedUrl(key) {
+      return `https://storage.invalid/${key}?signature=test`;
+    },
+    async deleteObject() {},
+    async getObject(key) {
+      gets.push(key);
+      const bytes = objects.get(key);
+      if (!bytes) {
+        const error = new Error(`The specified key does not exist: ${key}`);
+        error.code = "NoSuchKey";
+        throw error;
+      }
+      return {
+        stat: { size: bytes.length, metaData: {} },
+        stream: (async function* streamOnce() {
+          yield bytes;
+        })(),
+      };
+    },
+  };
+}
+
+/**
+ * The amplitude of one frequency in a window of samples: a Hann-windowed
+ * single-bin DFT, scaled so a pure tone of amplitude A reads back A.
+ * @param {Float32Array} samples
+ * @param {number} from the first frame of the window
+ * @param {number} count the frames in it
+ * @param {number} freq Hz
+ * @param {number} [rate]
+ * @returns {number}
+ */
+function toneAmplitude(samples, from, count, freq, rate = 48000) {
+  let real = 0;
+  let imaginary = 0;
+  let windowSum = 0;
+  for (let frame = 0; frame < count; frame += 1) {
+    const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * frame) / (count - 1));
+    const phase = (2 * Math.PI * freq * frame) / rate;
+    const value = samples[from + frame] * window;
+    real += value * Math.cos(phase);
+    imaginary -= value * Math.sin(phase);
+    windowSum += window;
+  }
+  return (2 * Math.hypot(real, imaginary)) / windowSum;
+}
+
+/**
+ * A library entry as the gateway's upload finish route builds one.
+ * @param {string} songId
+ * @param {string} id
+ * @param {object} [overrides]
+ * @returns {object}
+ */
+function makeLibraryEntry(songId, id, overrides = {}) {
+  return {
+    id,
+    kind: "font",
+    name: `Bank ${id}`,
+    source: "upload",
+    storage_key: `${RENDER_PREFIX}studio/${songId}/library/${id}.sf2`,
+    sha256: "a".repeat(64),
+    bytes: TINY_FONT.byteLength,
+    licence: "MIT",
+    credit: "",
+    author_label: "the operator",
+    ...overrides,
+  };
+}
+
+/**
+ * Add one library entry the way Studio itself does: `internal: true`, as the
+ * gateway's download and upload finish routes issue it.
+ * @param {object} hub
+ * @param {string} songId
+ * @param {object} entry
+ * @returns {Promise<object>}
+ */
+async function addLibraryEntry(hub, songId, entry) {
+  const added = await hub.runCommand({
+    song_id: songId,
+    cmd_id: `add-library-${entry.id}`,
+    command: "library.add",
+    args: { entry },
+    author: HUMAN,
+    internal: true,
+  });
+  assert.equal(added.ok, true, `library.add was refused: ${added.error}`);
+  return added;
+}
+
+/**
+ * Run one command through the real hub and assert it applied.
+ * @param {object} hub
+ * @param {string} songId
+ * @param {string} cmdId
+ * @param {string} command
+ * @param {object} args
+ * @returns {Promise<object>}
+ */
+async function seed(hub, songId, cmdId, command, args) {
+  const applied = await hub.runCommand({ song_id: songId, cmd_id: cmdId, command, args, author: HUMAN });
+  assert.equal(applied.ok, true, `${command} was refused: ${applied.error}`);
+  return applied;
+}
+
+test("agent sets a program and hears it in a render", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+
+  // The operator's own half of the setup: the bank in the song's library, a
+  // soundfont track playing it, and a bar that holds middle C.
+  await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_TINY, { credit: "Tiny Font by a person" }));
+  await seed(hub, songId, "seed-font-track", "track.add", {
+    id: "piano",
+    name: "Piano",
+    kind: "soundfont",
+    font_id: LIB_TINY,
+  });
+  await seed(hub, songId, "seed-font-scene", "scene.add", { id: "verse", name: "Verse" });
+  await seed(hub, songId, "seed-font-clip", "clip.write", {
+    clip_id: "hold",
+    track_id: "piano",
+    scene_id: "verse",
+    name: "Hold",
+    length_bars: 1,
+    notes: [{ t: 0, d: 4, p: 60, v: 100 }],
+  });
+
+  const storage = renderStorage();
+  storage.objects.set(makeLibraryEntry(songId, LIB_TINY).storage_key, TINY_FONT);
+  const acl = renderAcl();
+  const renderer = createRenderer({ db: renderDbOf(db), storage, acl, maxSeconds: 300 });
+  const client = await connect({ hub: hubClientOf(hub, db), renderer });
+  try {
+    /** Render the verse once and hand back what the agent was told. */
+    const render = async () => {
+      const result = await client.callTool({
+        name: "studio_render",
+        arguments: { song_id: songId, scene_id: "verse", seconds: 1 },
+      });
+      assert.notEqual(result.isError, true, textOf(result));
+      return JSON.parse(textOf(result));
+    };
+
+    // Program 0 of the bank is a 340 Hz tone.
+    const first = await render();
+    assert.ok(first.url, "the first render is stored");
+    assert.deepEqual(first.credits, ["Tiny Font by a person"], "the credit line comes back with the render");
+    assert.equal(first.missing_library, undefined, "every font was on this device");
+    assert.equal(storage.gets.length, 1, "the bank was read once, from the song's own storage key");
+    assert.equal(storage.gets[0], makeLibraryEntry(songId, LIB_TINY).storage_key);
+    const before = decodeWav(storage.uploads[0].data).channels[0];
+    assert.ok(toneAmplitude(before, 4800, 24000, TONE_PROGRAM_0) > 0.01, "program 0's 340 Hz tone sounds");
+    assert.ok(toneAmplitude(before, 4800, 24000, TONE_PROGRAM_1) < 0.005, "program 1's tone does not");
+
+    // The agent picks another preset of the SAME bank: one undoable step.
+    const picked = await client.callTool({
+      name: "studio_track_set_program",
+      arguments: { song_id: songId, track_id: "piano", bank: 0, program: 1 },
+    });
+    assert.notEqual(picked.isError, true, textOf(picked));
+    assert.match(textOf(picked), /program 2 \(Bright Acoustic Piano\)/);
+    const entries = await hub.history(songId, { limit: 10 });
+    const step = entries.find((row) => row.command === "track.set_program");
+    assert.ok(step, "the program change is one history step");
+    assert.equal(step.author.kind, "agent", "filed as the agent's step");
+    assert.equal(step.author.id, "mcp");
+
+    // The next render proves the change reached the engine: the bank was
+    // already loaded, so this is the program the render HEARD.
+    const second = await render();
+    assert.equal(storage.uploads.length, 2, "the second render is its own file");
+    const after = decodeWav(storage.uploads[1].data).channels[0];
+    assert.ok(toneAmplitude(after, 4800, 24000, TONE_PROGRAM_1) > 0.01, "program 1's 420 Hz tone sounds");
+    assert.ok(toneAmplitude(after, 4800, 24000, TONE_PROGRAM_0) < 0.005, "and program 0's is gone");
+    assert.notEqual(second.url, first.url, "two renders, two files");
+
+    // Nothing about the bank itself was the agent's to touch: the font is the
+    // operator's, so a set_font step is refused in the hub's own sentence.
+    await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_BETA, { name: "Other bank" }));
+    const swapped = await client.callTool({
+      name: "studio_track_set_font",
+      arguments: { song_id: songId, track_id: "piano", font_id: LIB_BETA },
+    });
+    assert.equal(swapped.isError, true, "an agent cannot replace the bank a track plays");
+    assert.match(textOf(swapped), /Only the operator changes the instrument a track plays/);
+  } finally {
+    await client.close();
+  }
+});
+
+test("studio_library lists licences and credits", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+
+  // Three banks in the song: one CC-BY with a credit on two tracks, one plain
+  // and in use, and one nothing plays. None of them is a file path.
+  await addLibraryEntry(
+    hub,
+    songId,
+    makeLibraryEntry(songId, LIB_ALPHA, {
+      name: "Alpha bank",
+      licence: "CC-BY-4.0",
+      credit: "Alpha bank by a person",
+    }),
+  );
+  await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_BETA, { name: "Beta bank" }));
+  await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_UNUSED, { name: "Unused bank" }));
+  await seed(hub, songId, "lib-track-piano", "track.add", {
+    id: "piano",
+    name: "Piano",
+    kind: "soundfont",
+    font_id: LIB_ALPHA,
+  });
+  await seed(hub, songId, "lib-track-bass", "track.add", {
+    id: "bass",
+    name: "Bass",
+    kind: "soundfont",
+    font_id: LIB_BETA,
+  });
+
+  // A stub catalog: what this Crow could download, without depending on the
+  // checked-in catalog file's contents.
+  const catalog = async () => ({
+    entries: [
+      {
+        id: "musescore-general",
+        kind: "font",
+        name: "MuseScore General",
+        licence: "MIT",
+        credit: "MuseScore General by the MuseScore team",
+        default: true,
+      },
+    ],
+  });
+
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer, catalog });
+  try {
+    const tools = (await client.listTools()).tools;
+    const tool = tools.find((entry) => entry.name === "studio_library");
+    assert.ok(tool, "studio_library is a read tool the agent has");
+    assert.match(tool.description, /read-only/i);
+    assert.match(tool.description, /operator downloads or uploads/i, "the description says a download is the person's action");
+    assert.match(tool.description, /studio_track_set_program/, "and which tools change an instrument");
+
+    const result = await client.callTool({ name: "studio_library", arguments: { song_id: songId } });
+    assert.notEqual(result.isError, true, textOf(result));
+    const body = JSON.parse(textOf(result));
+
+    assert.deepEqual(
+      body.entries.map((row) => row.id),
+      [LIB_ALPHA, LIB_BETA, LIB_UNUSED],
+      "every entry, in a fixed order",
+    );
+    assert.deepEqual(body.entries[0], {
+      id: LIB_ALPHA,
+      kind: "font",
+      name: "Alpha bank",
+      source: "upload",
+      licence: "CC-BY-4.0",
+      credit: "Alpha bank by a person",
+      used_by: [{ track_id: "piano", track_name: "Piano" }],
+    });
+    assert.deepEqual(body.entries[1].used_by, [{ track_id: "bass", track_name: "Bass" }]);
+    assert.equal(body.entries[1].credit, "");
+    assert.deepEqual(body.entries[2].used_by, [], "an entry nothing plays says so");
+
+    assert.deepEqual(body.available_catalog, [
+      { catalog_id: "musescore-general", name: "MuseScore General", licence: "MIT", default: true },
+    ]);
+
+    // Nothing in the answer is a place on this device: no storage key, no path.
+    const text = textOf(result);
+    assert.ok(!text.includes("storage_key"), "the answer carries no storage key");
+    assert.ok(!/\/library\//.test(text), "and no file path");
+
+    // A catalog this Crow cannot read still lists the song's own banks, and
+    // offers no download rather than failing the read.
+    const missingCatalog = await connect({
+      hub: hubClientOf(hub, db),
+      renderer: makeRenderer().renderer,
+      catalog: async () => {
+        throw new Error("no catalog here");
+      },
+    });
+    try {
+      const without = await missingCatalog.callTool({ name: "studio_library", arguments: { song_id: songId } });
+      assert.notEqual(without.isError, true, textOf(without));
+      const answer = JSON.parse(textOf(without));
+      assert.equal(answer.entries.length, 3, "the song's own banks are still listed");
+      assert.deepEqual(answer.available_catalog, [], "and there is nothing to download");
+    } finally {
+      await missingCatalog.close();
+    }
+  } finally {
+    await client.close();
+  }
 });

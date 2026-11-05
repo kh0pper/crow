@@ -13,6 +13,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import v8 from "node:v8";
@@ -23,6 +25,7 @@ import { renderSong, createRenderer } from "../bundles/studio/server/render.js";
 import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js";
 import { decodeWav, encodeWav24 } from "../bundles/studio/server/wav.js";
+import { tinySf2 } from "./fixtures/tiny-sf2.mjs";
 
 const SAMPLE_RATE = 48000;
 
@@ -1231,4 +1234,429 @@ test("a render reports a missing sample", async () => {
   } finally {
     await client.close();
   }
+});
+
+// --- renders with instruments -----------------------------------------------
+
+/** The library ids the instrument tests here use. */
+const FONT_UPLOAD = "lib-upload";
+const FONT_CATALOG = "lib-catalog";
+const FONT_MUTED = "lib-muted";
+const FONT_GONE = "lib-gone";
+
+/** The sha256 a catalog entry is trusted by (64 hexadecimal characters). */
+const CATALOG_SHA = "c".repeat(64);
+
+/** A missing catalog file's hash, which this instance does not hold. */
+const GONE_SHA = "d".repeat(64);
+
+/** The tiny but valid bank the instrument tests render (two of its presets). */
+const TINY_FONT = tinySf2();
+
+/**
+ * The bank bytes a reader answers with. The engine TRANSFERS the array a load
+ * posts (so the worklet owns it and the caller's copy is detached), exactly as
+ * `loadSample` does, so every read hands over its own copy — the production
+ * readers get one from the disk or the storage stream.
+ * @returns {Uint8Array}
+ */
+function fontBytes() {
+  return TINY_FONT.slice();
+}
+
+/** The tone preset 0 of the tiny font plays, and the one preset 1 plays. */
+const TONE_PROGRAM_0 = 340;
+const TONE_PROGRAM_1 = 420;
+
+/**
+ * The key an uploaded bank of one song is stored at: the song's project prefix,
+ * then `studio/<song_id>/library/<library_id>.<ext>`.
+ * @param {string} libraryId
+ * @param {{songId?: string, prefix?: string}} [options]
+ * @returns {string}
+ */
+function fontKey(libraryId, { songId = "song-1", prefix = PREFIX } = {}) {
+  return `${prefix}studio/${songId}/library/${libraryId}.sf2`;
+}
+
+/**
+ * A library entry as a snapshot carries it: an upload of the tiny font unless
+ * the test says otherwise.
+ * @param {string} libraryId
+ * @param {object} [overrides]
+ * @returns {object}
+ */
+function fontEntryOf(libraryId, overrides = {}) {
+  return {
+    id: libraryId,
+    kind: "font",
+    name: `Font ${libraryId}`,
+    source: "upload",
+    catalog_id: null,
+    storage_key: fontKey(libraryId),
+    upload_id: null,
+    sha256: "a".repeat(64),
+    bytes: TINY_FONT.byteLength,
+    licence: "MIT",
+    credit: "",
+    author_label: "the operator",
+    ...overrides,
+  };
+}
+
+/**
+ * A song of soundfont tracks, each holding middle C through the font and preset
+ * it names.
+ * @param {Array<{id: string, name: string, font_id: string, bank?: number,
+ *                program?: number, mute?: boolean}>} tracks
+ * @param {object} library
+ * @returns {object}
+ */
+function fontSong(tracks, library) {
+  return {
+    meta: { title: "Fonts", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: tracks.map((track) => ({
+      id: track.id,
+      name: track.name,
+      color: "#E8C07A",
+      device: {
+        engine: "soundfont",
+        font_id: track.font_id,
+        bank: track.bank ?? 0,
+        program: track.program ?? 0,
+      },
+      mute: track.mute === true,
+      solo: false,
+      gain_db: 0,
+      pan: 0,
+      locked: false,
+    })),
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: Object.fromEntries(
+      tracks.map((track) => [
+        `${track.id}-clip`,
+        {
+          id: `${track.id}-clip`,
+          track_id: track.id,
+          scene_id: "scene-1",
+          name: "Hold",
+          length_bars: 1,
+          notes: [{ t: 0, d: 4, p: 60, v: 100 }],
+        },
+      ]),
+    ),
+    library,
+  };
+}
+
+/**
+ * The amplitude of one frequency in a window of samples: a Hann-windowed
+ * single-bin DFT, scaled so a pure tone of amplitude A reads back A.
+ * @param {Float32Array} samples
+ * @param {number} from the first frame of the window
+ * @param {number} count the frames in it
+ * @param {number} freq Hz
+ * @param {number} [rate]
+ * @returns {number}
+ */
+function toneAmplitude(samples, from, count, freq, rate = SAMPLE_RATE) {
+  let real = 0;
+  let imaginary = 0;
+  let windowSum = 0;
+  for (let frame = 0; frame < count; frame += 1) {
+    const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * frame) / (count - 1));
+    const phase = (2 * Math.PI * freq * frame) / rate;
+    const value = samples[from + frame] * window;
+    real += value * Math.cos(phase);
+    imaginary -= value * Math.sin(phase);
+    windowSum += window;
+  }
+  return (2 * Math.hypot(real, imaginary)) / windowSum;
+}
+
+/**
+ * A library store that holds the one catalog file a test writes to disk, and
+ * nothing else — the shape `createLibraryStore` answers with.
+ * @param {string} sha256 the hash it holds
+ * @param {string} path where those bytes really are
+ * @returns {{holds: Function, fileForHash: Function}}
+ */
+function fakeLibraryStore(sha256, path) {
+  return {
+    async holds(hash) {
+      return String(hash).toLowerCase() === sha256;
+    },
+    async fileForHash(hash) {
+      return String(hash).toLowerCase() === sha256 ? path : null;
+    },
+  };
+}
+
+test("a render loads the fonts its tracks use", async () => {
+  // Four tracks: one bank plays on two of them (so it is read once), one bank is
+  // only played by a MUTED track (a muted track is still the song's, so its
+  // instrument is loaded — and then silence), and one plays a catalog entry this
+  // Crow really holds.
+  const song = fontSong(
+    [
+      { id: "piano", name: "Piano", font_id: FONT_UPLOAD, program: 0 },
+      { id: "bass", name: "Bass", font_id: FONT_UPLOAD, program: 0 },
+      { id: "pad", name: "Pad", font_id: FONT_MUTED, program: 2, mute: true },
+      { id: "lead", name: "Lead", font_id: FONT_CATALOG, program: 1 },
+    ],
+    {
+      [FONT_UPLOAD]: fontEntryOf(FONT_UPLOAD, { credit: "Tiny Font by a person" }),
+      [FONT_MUTED]: fontEntryOf(FONT_MUTED, { credit: "" }),
+      [FONT_CATALOG]: fontEntryOf(FONT_CATALOG, {
+        source: "catalog",
+        catalog_id: "tiny-test-font",
+        storage_key: null,
+        sha256: CATALOG_SHA,
+        credit: "Tiny Font by a person",
+      }),
+    },
+  );
+
+  const asked = [];
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    libraryBytes: async (entry) => {
+      asked.push(entry.id);
+      return fontBytes();
+    },
+  });
+
+  assert.deepEqual(
+    asked,
+    [FONT_UPLOAD, FONT_MUTED, FONT_CATALOG],
+    "each font the tracks name, once each, in first-use order, the muted track's included",
+  );
+  assert.deepEqual(rendered.missing_library, [], "every font this render asked for was loaded");
+  assert.ok(
+    toneAmplitude(rendered.left, 4800, 24000, TONE_PROGRAM_0) > 0.01,
+    "the uploaded bank's program 0 (340 Hz) sounds",
+  );
+  assert.ok(
+    toneAmplitude(rendered.left, 4800, 24000, TONE_PROGRAM_1) > 0.01,
+    "the catalog bank's program 1 (420 Hz) sounds",
+  );
+  assert.ok(
+    toneAmplitude(rendered.left, 4800, 24000, 500) < 0.005,
+    "the muted track's bank is loaded and still plays nothing",
+  );
+  assert.deepEqual(rendered.credits, ["Tiny Font by a person"], "one credit line, deduped, in first-use order");
+
+  // Through the storage rail, the production reader runs: an upload comes from
+  // its own storage key, and a catalog entry only from a verified copy this
+  // Crow holds on disk.
+  const directory = mkdtempSync(join(tmpdir(), "studio-fonts-"));
+  const stored = join(directory, `${CATALOG_SHA}.sf2`);
+  writeFileSync(stored, TINY_FONT);
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  storage.objects.set(fontKey(FONT_UPLOAD), TINY_FONT);
+  storage.objects.set(fontKey(FONT_MUTED), TINY_FONT);
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    library: fakeLibraryStore(CATALOG_SHA, stored),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(result.missing_library, [], "the rail loaded both fonts");
+  assert.deepEqual(result.credits, ["Tiny Font by a person"]);
+  assert.deepEqual(
+    storage.gets.map((get) => get.key),
+    [fontKey(FONT_UPLOAD), fontKey(FONT_MUTED)],
+    "the uploads are read from their own keys, and the catalog file from the disk",
+  );
+  const audio = decodeWav(storage.uploads[0].data);
+  assert.ok(
+    toneAmplitude(audio.channels[0], 4800, 24000, TONE_PROGRAM_0) > 0.01,
+    "the stored render really plays the uploaded bank",
+  );
+  assert.ok(
+    toneAmplitude(audio.channels[0], 4800, 24000, TONE_PROGRAM_1) > 0.01,
+    "and the catalog bank",
+  );
+  const audit = acl.audits.find((entry) => entry.action === "studio.render");
+  assert.ok(audit, "the render is audited");
+  assert.deepEqual(audit.payload.credits, ["Tiny Font by a person"], "the audit line carries the credits too");
+  assert.deepEqual(audit.payload.missing_library, []);
+});
+
+test("a render reports a missing font", async () => {
+  // The song names a catalog file this device never downloaded. Its track plays
+  // silence and the render says why; the track on the bank we do hold still
+  // sounds, and nothing throws (Review Focus 5).
+  const song = fontSong(
+    [
+      { id: "piano", name: "Piano", font_id: FONT_UPLOAD, program: 0 },
+      { id: "pad", name: "Pad", font_id: FONT_GONE, program: 1 },
+    ],
+    {
+      [FONT_UPLOAD]: fontEntryOf(FONT_UPLOAD),
+      [FONT_GONE]: fontEntryOf(FONT_GONE, {
+        source: "catalog",
+        catalog_id: "never-downloaded",
+        storage_key: null,
+        sha256: GONE_SHA,
+      }),
+    },
+  );
+
+  const asked = [];
+  const rendered = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    libraryBytes: async (entry) => {
+      asked.push(entry.id);
+      return entry.id === FONT_UPLOAD ? fontBytes() : null;
+    },
+  });
+  assert.deepEqual(asked, [FONT_UPLOAD, FONT_GONE], "both fonts are asked about, once each");
+  assert.deepEqual(rendered.missing_library, [{ id: FONT_GONE, reason: "not on this device" }]);
+  assert.equal(rendered.seconds, 1, "the render still happened");
+  assert.ok(
+    toneAmplitude(rendered.left, 4800, 24000, TONE_PROGRAM_0) > 0.01,
+    "the bank this device holds still sounds",
+  );
+  assert.ok(
+    toneAmplitude(rendered.left, 4800, 24000, TONE_PROGRAM_1) < 0.005,
+    "the missing font's preset is silent",
+  );
+
+  // A track that names a font the song's library does not hold at all is
+  // reported the same way, and nothing is read for it.
+  const orphaned = structuredClone(song);
+  delete orphaned.library[FONT_GONE];
+  const read = [];
+  const orphan = await renderSong(orphaned, {
+    scene_id: "scene-1",
+    seconds: 1,
+    libraryBytes: async (entry) => {
+      read.push(entry.id);
+      return fontBytes();
+    },
+  });
+  assert.deepEqual(read, [FONT_UPLOAD], "a font the song does not hold is never read");
+  assert.deepEqual(orphan.missing_library, [{ id: FONT_GONE, reason: "not on this device" }]);
+
+  // A reader that fails is "could not be read"; the engine's own refusal is
+  // passed on in the engine's words.
+  const unreadable = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    libraryBytes: async (entry) => {
+      if (entry.id === FONT_GONE) throw new Error("EIO: the disk went away");
+      return fontBytes();
+    },
+  });
+  assert.deepEqual(unreadable.missing_library, [{ id: FONT_GONE, reason: "could not be read" }]);
+
+  const refused = await renderSong(song, {
+    scene_id: "scene-1",
+    seconds: 1,
+    libraryBytes: async (entry) => (entry.id === FONT_GONE ? new Uint8Array([0, 1, 2, 3]) : fontBytes()),
+  });
+  assert.equal(refused.missing_library.length, 1, "a bank that will not parse is missing too");
+  assert.equal(refused.missing_library[0].id, FONT_GONE);
+  assert.ok(
+    refused.missing_library[0].reason !== "not on this device" && refused.missing_library[0].reason !== "could not be read",
+    `the engine's own reason is passed on, got ${refused.missing_library[0].reason}`,
+  );
+
+  // Through the storage rail: storage holds the upload and the instrument store
+  // holds no catalog file, so the result names the catalog font and the audit
+  // line carries the same list.
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  storage.objects.set(fontKey(FONT_UPLOAD), TINY_FONT);
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    library: fakeLibraryStore(CATALOG_SHA, join(tmpdir(), "this-file-does-not-exist.sf2")),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(result.missing_library, [{ id: FONT_GONE, reason: "not on this device" }]);
+  const audit = acl.audits.find((entry) => entry.action === "studio.render");
+  assert.deepEqual(audit.payload.missing_library, result.missing_library, "the audit line names the font");
+  assert.equal(storage.uploads.length, 1, "the render is still stored");
+});
+
+test("a render whose fonts pass 1 GiB is refused before it starts", async () => {
+  const MB = 1024 * 1024;
+  // Declared file sizes alone put the window past the budget: the refusal is
+  // arithmetic, so no font is read, decoded or allocated.
+  const song = fontSong(
+    [
+      { id: "piano", name: "Piano", font_id: FONT_UPLOAD, program: 0 },
+      { id: "pad", name: "Pad", font_id: FONT_CATALOG, program: 1 },
+    ],
+    {
+      [FONT_UPLOAD]: fontEntryOf(FONT_UPLOAD, { bytes: 700 * MB }),
+      [FONT_CATALOG]: fontEntryOf(FONT_CATALOG, { bytes: 700 * MB }),
+    },
+  );
+
+  const asked = [];
+  await assert.rejects(
+    renderSong(song, {
+      scene_id: "scene-1",
+      seconds: 1,
+      libraryBytes: async (entry) => {
+        asked.push(entry.id);
+        return fontBytes();
+      },
+    }),
+    { message: "This render's instruments need 1400 MB; a render takes up to 1024 MB of instruments." },
+  );
+  assert.deepEqual(asked, [], "no font is read for a render that cannot hold them");
+
+  // The budget is overridable exactly as the sample cap is (a test names a
+  // handful of bytes), and the refusal names the cap it used.
+  await assert.rejects(
+    renderSong(song, {
+      scene_id: "scene-1",
+      seconds: 1,
+      fontCapBytes: 1024,
+      libraryBytes: async () => fontBytes(),
+    }),
+    { message: "This render's instruments need 1400 MB; a render takes up to 1 MB of instruments." },
+  );
+
+  // The same render, inside the budget, is a render: nothing is refused for
+  // being merely close to it.
+  const under = fontSong(
+    [{ id: "piano", name: "Piano", font_id: FONT_UPLOAD, program: 0 }],
+    { [FONT_UPLOAD]: fontEntryOf(FONT_UPLOAD, { bytes: 512 * MB }) },
+  );
+  const rendered = await renderSong(under, {
+    scene_id: "scene-1",
+    seconds: 1,
+    libraryBytes: async () => fontBytes(),
+  });
+  assert.equal(rendered.seconds, 1);
+  assert.deepEqual(rendered.missing_library, []);
 });

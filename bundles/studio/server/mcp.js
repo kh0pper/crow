@@ -45,6 +45,13 @@
  * the song's sounds with their slices and the pads that play them, and the
  * chop and pad commands to work with them — never a way to add or drop a sound.
  *
+ * `studio_library` is the instrument library's read: the banks a song's soundfont
+ * tracks can play, with their licences, their credits and the tracks that play
+ * them, plus the catalog rows this Crow could download. It is read-only, and it
+ * has no sibling that downloads or uploads a bank: those are the person's own
+ * actions (plan 1d, Global Constraints "Who can change a sound"). What an agent
+ * may change about an instrument is the preset, with `studio_track_set_program`.
+ *
  * `studio_session_summary` exists because a song does not fit in a prompt: it
  * returns the tracks, scenes and a page of clips with note counts, and the
  * agent asks for one clip's notes with `studio_get_clip` when it needs them.
@@ -76,6 +83,11 @@ import "./commands/midi.js";
 import "./commands/library.js";
 import "./commands/instruments.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
+import { libraryUsers } from "./doc.js";
+// The vetted instrument catalog: what `studio_library` says this Crow could
+// download. It is the bundle's own module (Node built-ins only), and a caller
+// may inject its own reader so a test never depends on the checked-in file.
+import { readCatalog } from "./library-store.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
 export const MCP_AUTHOR = Object.freeze({ kind: "agent", id: "mcp", label: "Agent (MCP)" });
@@ -470,6 +482,65 @@ export function sampleList(snapshot, sampleId = null) {
 }
 
 /**
+ * The song's instrument library, the way `studio_library` reports it: one row
+ * per library entry a soundfont track can play, and the catalog rows this Crow
+ * could download.
+ *
+ * A row carries what the picker and the licence ask for — the kind, the name,
+ * where the file came from, its licence and its credit line — and which tracks
+ * play it, so the agent can tell an instrument in use from one merely sitting in
+ * the song. Nothing here is a file path and nothing is a storage key: the file
+ * lives on this device and is not the agent's to read or write.
+ *
+ * `used_by` is `libraryUsers` from the song document, so a second kind of user
+ * (an amp insert's capture or cabinet, plan 1d PR C) joins the answer when it
+ * joins the document rather than here.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {object[]} [catalogEntries] - the catalog rows this Crow could download
+ * @returns {{entries: object[], available_catalog: object[]}}
+ */
+export function libraryList(snapshot, catalogEntries = []) {
+  const library = snapshot?.library && typeof snapshot.library === "object" ? snapshot.library : {};
+  const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
+  /** @returns {string} a track's name, or its id when the song no longer holds it. */
+  const trackName = (id) => tracks.find((track) => track?.id === id)?.name ?? id;
+
+  const entries = Object.values(library)
+    .filter((entry) => entry && typeof entry === "object" && typeof entry.id === "string")
+    // A fixed order (name, then id), whatever order the document's map holds
+    // them in after a reload or a merge.
+    .sort(
+      (left, right) =>
+        String(left.name ?? "").localeCompare(String(right.name ?? "")) ||
+        String(left.id).localeCompare(String(right.id)),
+    )
+    .map((entry) => ({
+      id: entry.id,
+      kind: typeof entry.kind === "string" ? entry.kind : "font",
+      name: typeof entry.name === "string" ? entry.name : "",
+      source: typeof entry.source === "string" ? entry.source : "",
+      licence: typeof entry.licence === "string" ? entry.licence : "",
+      credit: typeof entry.credit === "string" ? entry.credit : "",
+      used_by: libraryUsers(snapshot, entry.id).map((trackId) => ({
+        track_id: trackId,
+        track_name: trackName(trackId),
+      })),
+    }));
+
+  const available = (Array.isArray(catalogEntries) ? catalogEntries : [])
+    .filter((row) => row && typeof row === "object" && typeof row.id === "string")
+    .map((row) => ({
+      catalog_id: row.id,
+      name: typeof row.name === "string" ? row.name : "",
+      licence: typeof row.licence === "string" ? row.licence : "",
+      default: row.default === true,
+    }));
+
+  return { entries, available_catalog: available };
+}
+
+/**
  * The sample listing's neighbours: the plain words a MIDI mapping is reported
  * in, and the listing `studio_midi` answers with.
  *
@@ -639,6 +710,9 @@ async function projectIdFor(hub, songId, opened, author) {
  * @param {object} options.hub - the hub client (`createHubClient`)
  * @param {{render: Function}} options.renderer - the offline renderer
  * @param {() => Promise<{modules: object}>} [options.catalogue] - the module catalogue generator
+ * @param {() => Promise<{entries: object[]}>} [options.catalog] - the instrument
+ *   catalog reader (`library-store.js`'s `readCatalog`); what `studio_library`
+ *   says this Crow could download
  * @param {NodeJS.ProcessEnv|object} [options.env] - the env the base actor comes from
  * @param {{actorFromEnv: Function, resolveCallActor: Function}|null} [options.actor]
  *   the app's actor helpers; without them every call is the generic MCP agent
@@ -648,6 +722,7 @@ export function createStudioServer({
   hub,
   renderer,
   catalogue = moduleCatalogue,
+  catalog = readCatalog,
   env = process.env,
   actor = null,
 } = {}) {
@@ -871,6 +946,45 @@ export function createStudioServer({
     },
   );
 
+  // ---- the instrument library --------------------------------------------
+
+  /**
+   * The catalog rows this Crow could download, or none: a bundle without a
+   * readable catalog still lists the song's own banks, and the download offer is
+   * simply empty rather than an error the agent has to explain.
+   * @returns {Promise<object[]>}
+   */
+  async function catalogEntries() {
+    try {
+      const read = typeof catalog === "function" ? await catalog() : null;
+      return Array.isArray(read?.entries) ? read.entries : [];
+    } catch {
+      return [];
+    }
+  }
+
+  server.registerTool(
+    "studio_library",
+    {
+      title: "List the song's instruments",
+      description:
+        "Every instrument the song's library holds — the banks a soundfont track can play: id, kind, name, where it came from (catalog, upload or bundled), its licence and its credit line, and the tracks that play it (track_id, track_name). Also lists available_catalog: the instruments this Crow could download (catalog_id, name, licence, default). Read-only, and it names no file path. Only the operator downloads or uploads a bank — both are their own actions and you have no tool for either — and which bank a track plays (studio_track_set_font) is theirs too. What you may change is the preset that track plays, with studio_track_set_program.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song whose instruments to list"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        return textResult(libraryList(opened.snapshot, await catalogEntries()));
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
   // ---- the controllers ----------------------------------------------------
 
   server.registerTool(
@@ -985,7 +1099,7 @@ export function createStudioServer({
     {
       title: "Render the song to audio",
       description:
-        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB). The operator's render length limit applies; listen before and after a change and report the numbers.",
+        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB). The operator's render length limit applies; listen before and after a change and report the numbers. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to render"),
         scene_id: z.string().min(1).optional().describe("render this scene (every clip it holds)"),
@@ -1019,12 +1133,21 @@ export function createStudioServer({
         // A pad whose sample could not be loaded plays silence; the render
         // still happened, so the agent is told which sound it did not hear.
         const missing = Array.isArray(out.missing_samples) ? out.missing_samples : [];
+        // A font this device does not hold is silence too (Review Focus 5): the
+        // agent names the instrument and offers the download instead of guessing
+        // why a track is quiet.
+        const missingLibrary = Array.isArray(out.missing_library) ? out.missing_library : [];
+        // Every credit-bearing instrument the render heard, so the agent can
+        // repeat the credit its licence asks for.
+        const credits = Array.isArray(out.credits) ? out.credits.filter((credit) => typeof credit === "string" && credit !== "") : [];
         return textResult({
           url: out.url,
           lufs: out.lufs,
           true_peak_db: out.true_peak_db,
           seconds: out.seconds,
           ...(missing.length > 0 ? { missing_samples: missing } : {}),
+          ...(missingLibrary.length > 0 ? { missing_library: missingLibrary } : {}),
+          ...(credits.length > 0 ? { credits } : {}),
         });
       } catch (err) {
         return errorResult(errorText(err));

@@ -52,6 +52,22 @@ A song page carries an **Ask the agent** box. It opens a chat with the song proj
 
 The bot can render the song, one scene, or one clip through the same engine your browser plays, and it hears the result through that render. Each render is written into the project's storage as a WAV and reports its **integrated loudness** (LUFS) and **true peak** (dBTP), so a mix can be compared by numbers rather than by memory. Renders are limited in length by the instance's setting (see below).
 
+## Instruments
+
+**+ Instrument** adds a **soundfont track**: a track that plays one **preset** of one **bank** — a SoundFont (SF2 or SF3) file in the song's library, the list of instruments the song can use. Select a preset in the track header and the change is one undoable step; the song's banks belong to the song, so every track can share one.
+
+**Get the default instruments.** A new track with no bank says where they come from, and **Get the default instruments** downloads the vetted default bank (MuseScore General) once for this Crow, checked against its published sha256 before anything is kept. Its credit line shows under the picker, and so does every bank's licence. A track whose bank this device does not have says **Get this instrument** instead: press it and the preset list appears. Nothing is re-downloaded for the next song that wants the same bank.
+
+**Your own bank.** **Add your own bank…** uploads an SF2 or SF3 file you own. Studio checks the file's type and size in the browser and again on the server and never parses it outside the audio engine. Under the button it says it plainly: *For your own use: you are responsible for this bank's licence.* A bank can be up to 512 MB, a song can hold 32 of them, and the song's library can hold 256 entries in all.
+
+**Loads when you stop.** A bank is parsed only while the transport is stopped, because parsing it during playback would break the sound. A bank you pick while the song is playing parses when you press Stop, and the track says *Loads when you stop.* until it has. A bank this browser cannot read — a corrupt download, a file that is not really a bank — plays silence and says why on the track; a render that could not load one names it in its `missing_library` list.
+
+**Presets.** The list is read from the bank itself, so it is the bank's own instruments, not a guess: `bank:program Name`, with bank 128 the General MIDI drum bank, where the program picks the drum kit and the note picks the drum (the bot's skills carry the 35–81 drum map).
+
+**What the bot can do with instruments.** It reads the library — id, name, licence, credit, and which tracks play each bank — and it picks presets, one undoable step each, outlined in its colour like any other agent edit. It cannot add a bank to the song, download one, or point a track at a different bank: those are your actions, and Studio refuses it with *Only the operator changes the instrument a track plays.* A bank that a track plays cannot be removed from the library at all until that track plays another one.
+
+**Credits.** Every bank's licence and credit are shown where the instrument is chosen and in the library list, and a render's metadata carries a `credits` list of the banks it heard.
+
 ## Recording takes
 
 Add an **audio track** (**+ Audio track**) to record a guitar, a voice or anything else through your audio interface.
@@ -156,6 +172,11 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Locks per step | 8 | — |
 | MIDI mappings per song | 256 | — |
 | Decoded samples held in memory | 256 MB | — |
+| Fonts (SoundFont banks) per song | 32 | — |
+| Library entries per song | 256 | — |
+| Bank file | 512 MB | — |
+| Banks loaded in a page | 1024 MB | — |
+| Instruments a render holds | 1024 MB, refused before it starts | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
 
@@ -166,6 +187,8 @@ Every limit refuses with a plain-English error that names it; nothing is ever tr
 
 ## Credits
 
-> Powered by SunVox (modular synth & tracker) Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru
+> Powered by SunVox (modular synth & tracker) Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru>
+>
+> The default instruments are downloaded, not redistributed with Crow: MuseScore General by S. Christian Collins, from FluidR3Mono by Michael Cowgill and FluidR3 by Frank Wen; Temple Blocks by Ethan Winer; Drumline Cymbals by Michael Schorsch — MIT, per its own licence file.
 
 Studio's engine runs SunVox (the WebAssembly build of the SunVox library) so the browser and the server's offline renders use the same synthesizer. The full licence texts — SunVox's own, plus the tremor.txt, sundog.txt and libflac.txt notices from the SunVox archive — ship with the bundle in `bundles/studio/vendor/sunvox/THIRD-PARTY-NOTICES.txt`.
