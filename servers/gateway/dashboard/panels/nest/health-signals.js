@@ -1992,9 +1992,11 @@ async function bundleImagesSignal(lang, nowFn) {
 // A check that cannot run is at most info and NAMES itself — never ok.
 export const APT_CONF_DIR = "/etc/apt/apt.conf.d";
 export const AUTO_UPGRADES_CONF = "20auto-upgrades";
-// apt reads only the files whose names carry no dot (subdirectories and
-// `foo.conf.bak` are skipped), so the switch lives in a set of plain files.
-const APT_CONF_NAME_RE = /^[A-Za-z0-9_-]+$/;
+// apt reads a file in apt.conf.d when its name is [A-Za-z0-9_.-] and either
+// carries no dot at all (`20auto-upgrades`) or ends in `.conf` (`99-local.conf`).
+// Anything else is not a setting apt would load: a subdirectory, a
+// `99-local.conf.bak` (a `.conf`-suffixed name is still not one), `.dpkg-old`.
+const APT_CONF_NAME_RE = /^(?:[A-Za-z0-9_-]+|[A-Za-z0-9_.-]*\.conf)$/;
 export const REBOOT_REQUIRED_PATH = "/var/run/reboot-required";
 export const REBOOT_PKGS_PATH = "/var/run/reboot-required.pkgs";
 export const UNATTENDED_STAMP_PATH = "/var/lib/apt/periodic/unattended-upgrades-stamp";

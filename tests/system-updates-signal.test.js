@@ -209,6 +209,35 @@ test("a later file in apt.conf.d overrides an earlier one, as apt does", async (
   assert.equal(on.detail.state, "ok");
 });
 
+test("a later `99-local.conf` overrides 20auto-upgrades: .conf names are read", async () => {
+  // apt.conf(5): apt loads every file in apt.conf.d whose name has no extension
+  // or ends in `.conf`, so `99-local.conf` is a setting and its "0" wins.
+  const { detail, issue } = await systemUpdates(fakeRoot({
+    files: {
+      [AUTO_CONF]: autoConf("1"),
+      [join(APT_CONF_DIR, "99-local.conf")]: 'APT::Periodic::Unattended-Upgrade "0";\n',
+    },
+    mtimes: { [UNATTENDED_STAMP_PATH]: NOW - DAY },
+  }));
+  assert.equal(detail.state, "info", "the .conf file turns the daily run off");
+  assert.match(detail.value, /automatic security updates are off/);
+  assert.equal(issue.id, "systemUpdates:off");
+});
+
+test("`99-local.conf.bak` saying \"0\" is ignored, as apt ignores it → on", async () => {
+  const { detail, issue, issues } = await systemUpdates(fakeRoot({
+    files: {
+      [AUTO_CONF]: autoConf("1"),
+      [join(APT_CONF_DIR, "99-local.conf.bak")]: 'APT::Periodic::Unattended-Upgrade "0";\n',
+    },
+    mtimes: { [UNATTENDED_STAMP_PATH]: NOW - DAY },
+  }));
+  assert.equal(detail.state, "ok", "a .bak of a .conf is not a file apt reads");
+  assert.match(detail.value, /security updates are current/);
+  assert.equal(issue, undefined);
+  assert.deepEqual(issues, []);
+});
+
 test("a reboot and a stale run warn separately, each with its own issue id", async () => {
   const days = UPDATES_STALE_DAYS + 1;
   const { detail, issues } = await systemUpdates(fakeRoot({
