@@ -243,3 +243,23 @@ test("delivery: delivered/ keeps only the newest 100 files", async (t) => {
   assert.ok(!left.includes("2026-01-01T00-00-00-000Z-old.json"), "the oldest five are gone");
   assert.ok(left.includes(newest), "the newest is kept");
 });
+test("a symlinked alerts/pending is refused: nothing is written outside CROW_HOME", async () => {
+  const { mkdtempSync, mkdirSync, symlinkSync, readdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "alert-symlink-home-"));
+  const outside = mkdtempSync(join(tmpdir(), "alert-symlink-outside-"));
+  const prev = process.env.CROW_HOME;
+  try {
+    process.env.CROW_HOME = home;
+    mkdirSync(join(home, "alerts"), { recursive: true });
+    symlinkSync(outside, join(home, "alerts", "pending"));
+    const { writeAlertFile } = await import("../servers/shared/alert-spool.js");
+    assert.equal(writeAlertFile({ code: "x", title: "t" }), null, "refused, never throws");
+    assert.deepEqual(readdirSync(outside), [], "nothing landed outside the home");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});

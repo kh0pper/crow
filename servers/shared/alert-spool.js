@@ -16,7 +16,7 @@
  * Nothing in here throws: an alerting failure must never become the guard's
  * failure. Callers get null / a zeroed result instead.
  */
-import {
+import { lstatSync,
   chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -52,6 +52,10 @@ export function alertsDirs() {
 /** 0700, always — the alert text can name a database path. */
 function ensureDir(dir) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // A planted symlink must never redirect a write (or the chmod) outside CROW_HOME.
+  for (const d of [alertsRoot(), dir]) {
+    if (lstatSync(d).isSymbolicLink()) throw new Error(`${d} is a symlink; refusing to use it`);
+  }
   try { chmodSync(dir, 0o700); } catch {}
 }
 
@@ -82,7 +86,8 @@ export function writeAlertFile({ code = "alert", title, body = null, at = new Da
       at: String(at),
     };
     tmp = join(dirs.pending, `.${name}.${process.pid}.tmp`);
-    writeFileSync(tmp, JSON.stringify(record, null, 2), { mode: 0o600 });
+    // "wx": create only, never through an existing file or symlink at that name.
+    writeFileSync(tmp, JSON.stringify(record, null, 2), { mode: 0o600, flag: "wx" });
     try { chmodSync(tmp, 0o600); } catch {} // umask can only clear bits, but be explicit
     renameSync(tmp, join(dirs.pending, name));
     tmp = null;
