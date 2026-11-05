@@ -85,6 +85,10 @@ import { loadDynamicBackends } from "./proxy.js";
 import { dashboardAuth } from "./dashboard/auth.js";
 import { SessionManager } from "./session-manager.js";
 import { startParentWatch } from "./parent-watch.js";
+// Boot guard bookkeeping (audit N1c-3 L1): an exit we asked for must not count
+// toward the launcher's crash threshold. Static import so a shutdown handler
+// never has to await a dynamic one mid-exit.
+import { markPlanned } from "./boot-guard-state.js";
 import { generateInstructions } from "../shared/instructions.js";
 // startAutoUpdate/startScheduler/connectedServers/initProxyServers/loadRemoteInstances
 // are imported directly by boot/post-listen.js (not needed here).
@@ -842,7 +846,12 @@ const server = app.listen(PORT, BIND, (error) => {
 
 // A supervised restart closes the TCP listener in post-listen; close the proxy
 // listener alongside it, so no connection is left accepted on a dying process.
-process.on("crow:shutdown", () => closeProxySocket(proxyServer));
+process.on("crow:shutdown", () => {
+  // Planned exits (auto-update restart, bundle install) exit 1 on purpose, so the
+  // launcher must be told before the process goes away.
+  markPlanned();
+  closeProxySocket(proxyServer);
+});
 
 // --- Graceful Shutdown ---
 //
@@ -881,6 +890,8 @@ function closeAndWait(listener) {
 async function gracefulShutdown() {
   if (shuttingDown) return;
   shuttingDown = true;                                           // step 1
+  // SIGTERM/SIGINT is an operator or service-manager stop, never a crash.
+  markPlanned();
   console.log("\nShutting down gateway...");
 
   // Step 1b — stop scheduler first so no new ticks fire during the drain window

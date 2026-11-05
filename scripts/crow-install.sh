@@ -336,6 +336,14 @@ DirectoryMode=0755
 WantedBy=sockets.target
 SOCKETEOF
 
+# The boot guard's launcher, installed OUTSIDE the checkout (audit N1c-3 L1):
+# the unit below runs it before every start, and any gateway that stays up for
+# ten minutes refreshes this copy from its own commit.
+mkdir -p "$CROW_HOME/boot-guard"
+chmod 700 "$CROW_HOME/boot-guard"
+install -m 600 scripts/boot-guard/crow-boot-guard.mjs "$CROW_HOME/boot-guard/crow-boot-guard.mjs"
+log "Boot guard installed at $CROW_HOME/boot-guard"
+
 # Crow Gateway systemd service
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
 [Unit]
@@ -360,11 +368,24 @@ Type=simple
 User=$USER
 WorkingDirectory=$CROW_APP
 ExecStart=$(which node) servers/gateway/index.js
+# Audit N1c-3 Layer 1: the boot guard. It runs before EVERY start (including
+# every automatic restart) and counts real crash exits; after three of them it
+# moves main back to the last commit this host booted, so a commit that throws
+# while loading is never a forever crash loop. It is executed from
+# $CROW_HOME/boot-guard/, a copy OUTSIDE this checkout, because the failing
+# commit's own copy cannot be trusted to roll itself back. The '-' prefix keeps
+# a guard failure from blocking the start, and TimeoutStartSec covers the
+# guard's own npm install (up to 5 minutes) plus a rollback.
+ExecStartPre=-$(which node) $CROW_HOME/boot-guard/crow-boot-guard.mjs --app-root $CROW_APP
+ExecStopPost=-$(which node) $CROW_HOME/boot-guard/crow-boot-guard.mjs --app-root $CROW_APP --record-exit
+TimeoutStartSec=15min
+Environment=CROW_BOOT_GUARD=1
 Restart=on-failure
 RestartSec=5
 # 78 = refused instance paths (servers/shared/crow-home.js): a config error, not a crash
 RestartPreventExitStatus=78
 Environment=NODE_ENV=production
+Environment=CROW_HOME=$CROW_HOME
 Environment=CROW_DATA_DIR=$CROW_DATA
 Environment=CROW_DB_PATH=$CROW_DATA/crow.db
 

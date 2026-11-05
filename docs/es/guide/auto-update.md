@@ -103,12 +103,92 @@ Toda instancia co-alojada que comparte el checkout respeta el mismo marcador:
 ninguna migra ni se reinicia dentro de un commit en cuarentena, y cada una
 verifica por separado que *su propio* entorno puede cargar el árbol antes de migrar.
 
-**Capa 1 (siguiente).** Un fallo que la capa 0 no puede ver — algo detrás de una
-importación dinámica, o un fallo que solo aparece con el entorno del gestor de
-servicios — lo detecta un guardián de arranque que corre fuera del grafo de módulos
-del gateway, antes de cada arranque, y revierte el checkout tras tres fallos. Se
-publica aparte; hasta entonces, un bucle de fallos sigue necesitando la reversión
-manual de abajo.
+### Capa 1: el guardián de arranque {#boot-guard}
+
+La capa 0 solo ve los fallos que ocurren mientras un proceso sano sigue vivo. Lo
+que esté detrás de una importación dinámica, o un fallo que solo aparece con el
+entorno del gestor de servicios, todavía puede repetirse para siempre. El guardián
+de arranque es la red de seguridad, y corre **fuera** del grafo de módulos del
+gateway.
+
+**Cómo se conecta.** La unidad de servicio recibe dos comandos más (un drop-in,
+`10-boot-guard.conf`): uno *antes de cada arranque*, incluidos todos los reinicios
+automáticos, y otro *después de cada parada*. El script que ejecutan no es la
+copia de tu checkout — vive en `~/.crow/boot-guard/crow-boot-guard.mjs` y solo lo
+refresca un gateway que ya lleva diez minutos en pie. Por eso un commit cuyo
+código no arranca nunca puede reemplazar a quien lo juzga.
+
+**Qué hace.**
+
+- Registra cada arranque. Una salida cuenta como fallo solo cuando lo es de
+  verdad: salida distinta de cero (salvo 78, que significa "las rutas de esta
+  instancia están rechazadas"), un volcado de memoria, o una señal que no sea
+  TERM/INT/HUP/KILL. Un reinicio que pidió Crow (una actualización, la instalación
+  de un bundle, `systemctl restart`) nunca cuenta, y quedarse sin memoria tampoco
+  — normalmente es la máquina, así que recibe una sola notificación. (Si tu
+  unidad arranca el gateway con `npm run gateway`, el estado de salida que ve el
+  guardián describe a npm y no a node; npm propaga un node matado como salida
+  distinta de cero, que el guardián sí cuenta.)
+- Tras **tres** fallos contados, el siguiente arranque (el cuarto) mueve `main`
+  atrás hasta el último commit que este host demostró poder arrancar, escribe el
+  marcador de cuarentena para que ninguna instancia vuelva a descargar el commit
+  malo, reinstala las dependencias si cambiaron, y deja corriendo el código
+  anterior. Recibes un aviso, y Settings → Updates muestra `Rolled back: …`.
+- Se arma solo: tras un `git pull` manual y un reinicio también vigilará el commit
+  nuevo, pero **solo** si el commit ya está en `origin/main` y desciende del
+  último sano. Tus propios commits sin publicar en `main` nunca se revierten.
+- Si dos instancias de Crow comparten un checkout, exactamente una mueve el árbol;
+  la otra lo detecta y reporta `Rolled back: … a co-hosted instance rolled it back`.
+
+**Qué rechaza** (en ninguno de estos casos se cambia nada):
+
+| Situación | Por qué |
+|---|---|
+| No hay registro de un commit que arrancara bien | no puede saber a qué volver |
+| El checkout no está en `main` | revertirlo separaría HEAD y detendría todas las actualizaciones |
+| El commit anterior no es ancestro del que falla | volver atrás descartaría commits |
+| El checkout es de solo lectura para esta instancia | debe revertirlo la instancia que lo descarga |
+| Existe un `git index.lock` | hay otro comando git en marcha; el guardián nunca lo borra |
+| La base de datos avanzó: `user_version` está más allá de lo que espera el commit anterior | sus migraciones pueden no ser reversibles |
+| `scripts/init-db.js` cambió entre los dos commits | reconstruye tablas sin subir la generación de esquema |
+| Se aplicó una migración que no declara que el código anterior puede con la forma nueva | el código viejo puede no entender los datos |
+
+**Recuperarse de un rechazo.** El aviso y `~/.crow/boot-guard/STATUS` llevan los
+pasos exactos para el caso que se disparó. En general:
+
+```bash
+# 1. Detén el bucle.
+sudo systemctl stop crow-gateway
+
+# 2. Si el aviso dice que la base de datos avanzó (una generación de esquema, un
+#    cambio en init-db, o una migración no reversible), restaura la copia que la
+#    guarda de migraciones hizo ANTES de tocar git.
+ls ~/backups/crow            # o donde esté tu directorio de copias
+
+# 3. Mueve main atrás a un commit que sepas que arranca, conservando cambios
+#    locales no relacionados.
+cd ~/crow
+git log --oneline -5
+git reset --keep <ese-commit>
+
+# 4. Arráncalo otra vez.
+sudo systemctl start crow-gateway
+```
+
+No uses `git checkout <commit>`: eso separa HEAD, el actualizador omite entonces
+todas las comprobaciones con `Skipped: not on main`, y las actualizaciones se
+detienen en silencio.
+
+**Instalarlo.** Las instalaciones nuevas lo traen. En un host existente, ejecuta
+`sudo scripts/ops/install-boot-guard.sh` desde el checkout (o
+`scripts/ops/install-boot-guard.sh --user` para una unidad de usuario); escribe un
+drop-in por unidad de gateway y copia el lanzador, surte efecto en el siguiente
+arranque, y nunca reinicia nada por sí mismo. La imagen Docker no está cubierta:
+no tiene `.git`, así que allí nunca se descarga nada y no hay nada que revertir.
+
+Si el drop-in existe pero el guardián no corre (un `node` que se movió, una copia
+del lanzador borrada), la Crow's Nest muestra una tarjeta "The boot guard did not
+run" en el siguiente arranque en vez de fallar en silencio.
 
 ## Reinicio ordenado
 

@@ -92,6 +92,29 @@ systemctl --user enable crow-gateway
 systemctl --user start crow-gateway
 ```
 
+**Roll back a bad update automatically (recommended).** Without this, an update
+whose code throws on startup restarts forever and never fetches its own fix: the
+updater only runs inside a process that got that far. The boot guard runs before
+every start, from a copy outside the checkout, and moves `main` back after three
+crashes. The installer writes it for you:
+
+```bash
+cd ~/.crow/app
+scripts/ops/install-boot-guard.sh --user     # add --dry-run to preview
+systemctl --user daemon-reload
+```
+
+It writes `~/.config/systemd/user/crow-gateway.service.d/10-boot-guard.conf`
+(an `ExecStartPre=`, an `ExecStopPost=`, `TimeoutStartSec=15min` and
+`Environment=CROW_BOOT_GUARD=1`) and copies the launcher to
+`~/.crow/boot-guard/crow-boot-guard.mjs`. It never restarts anything, so the
+drop-in takes effect at the next start. Re-run it after moving the checkout, and
+note that the launcher needs Node 22.13 or newer (`node:sqlite`). For a
+system-level unit use the same script without `--user` and with `sudo`.
+
+See [Auto-Update → Automatic rollback](./auto-update.md#boot-guard) for what it
+refuses and how to recover from a refusal.
+
 **Verify it's running:**
 
 ```bash
