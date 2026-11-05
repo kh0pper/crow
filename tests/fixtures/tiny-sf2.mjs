@@ -209,25 +209,59 @@ export function tinySf2(options = {}) {
   const presets = Array.isArray(options.presets) ? options.presets : TINY_SF2_PRESETS;
 
   // --- the sample data: every preset's loop, back to back, in points --------
-  const points = [];
   const samples = [];
+  let offsetPoints = 0;
   for (let index = 0; index < presets.length; index += 1) {
-    const start = points.length;
     const pcm = sineSample(presets[index].freq);
-    for (const value of pcm) points.push(value);
-    samples.push({ start: start, end: start + pcm.length });
+    const data = new Uint8Array(pcm.length * 2);
+    const view = new DataView(data.buffer);
+    for (let frame = 0; frame < pcm.length; frame += 1) view.setInt16(frame * 2, pcm[frame], true);
+    samples.push({
+      name: presets[index].name,
+      data: data,
+      // For an uncompressed sample the SF2 header holds POINTS (the parser
+      // multiplies them by two to find the byte).
+      start: offsetPoints,
+      end: offsetPoints + pcm.length,
+      loopStart: offsetPoints,
+      loopEnd: offsetPoints + LOOP_FRAMES,
+      sampleRate: SAMPLE_RATE,
+      compressed: false,
+    });
+    offsetPoints += pcm.length;
   }
+  return buildSoundFont({ presets: presets, samples: samples, version: [2, 1] });
+}
+
+/**
+ * Lay a SoundFont file out around ready-made sample data. Shared by `tinySf2`
+ * (16-bit PCM) and `tinySf3` (Ogg Vorbis, sample type bit 16 set): the two
+ * differ only in the bytes in `smpl` and how the sample header names them.
+ * @param {{presets: ReadonlyArray<object>, samples: ReadonlyArray<{
+ *   name: string, data: Uint8Array, start: number, end: number,
+ *   loopStart: number, loopEnd: number, sampleRate: number,
+ *   compressed: boolean}>, version?: [number, number]}} [options]
+ *   `start`/`end` are POINTS for an uncompressed sample and BYTES of the Ogg
+ *   stream for a compressed one, exactly as SF2 / SF3 write them
+ * @returns {Uint8Array} the file's bytes
+ */
+export function buildSoundFont(options = {}) {
+  const presets = Array.isArray(options.presets) ? options.presets : [];
+  const samples = Array.isArray(options.samples) ? options.samples : [];
+  const version = Array.isArray(options.version) ? options.version : [2, 1];
+
+  // --- the sample data: every sample's bytes, back to back ------------------
   const smpl = new Bytes();
+  for (let index = 0; index < samples.length; index += 1) smpl.raw(samples[index].data);
   // A bank carries sample data even when it has nothing to play (a 46-point
   // silent "sample" nothing references), so the chunk is never empty.
-  if (points.length === 0) for (let index = 0; index < ZERO_TAIL; index += 1) smpl.u16(0);
-  for (const point of points) smpl.u16(point & 0xffff);
+  if (smpl.values.length === 0) for (let index = 0; index < ZERO_TAIL; index += 1) smpl.u16(0);
   const smplChunk = chunk("smpl", smpl.bytes());
 
   // --- INFO: a version, the sample engine and a name ---------------------
   // `isng` names the synthesis engine the bank was made for (SF2 requires it);
   // `INAM` is the bank's name.
-  const ifil = new Bytes().u16(2).u16(1);
+  const ifil = new Bytes().u16(version[0]).u16(version[1]);
   const isng = new TextEncoder().encode("EMU8000");
   const info = list("INFO", [
     chunk("ifil", ifil.bytes()),
@@ -318,19 +352,19 @@ export function tinySf2(options = {}) {
   const shdr = new Bytes();
   for (let index = 0; index < samples.length; index += 1) {
     shdr
-      .name(presets[index].name)
+      .name(samples[index].name)
       .u32(samples[index].start)
       .u32(samples[index].end)
-      // The loop is the whole loop, in points: the zero tail after it is not
-      // part of it, and a held note reads round the loop for ever.
-      .u32(samples[index].start)
-      .u32(samples[index].start + LOOP_FRAMES)
-      .u32(SAMPLE_RATE)
+      // The loop, in points: for an uncompressed sample the absolute point, for
+      // an SF3 sample the point relative to the decoded sample's start.
+      .u32(samples[index].loopStart)
+      .u32(samples[index].loopEnd)
+      .u32(samples[index].sampleRate)
       .u8(60)
       .u8(0)
       .u16(0)
-      // 1 = a mono sample.
-      .u16(1);
+      // 1 = a mono sample; bit 16 (0x10) marks Ogg Vorbis data (SF3).
+      .u16(samples[index].compressed ? 0x11 : 1);
   }
   shdr.name("EOS").u32(0).u32(0).u32(0).u32(0).u32(0).u8(0).u8(0).u16(0).u16(0);
 

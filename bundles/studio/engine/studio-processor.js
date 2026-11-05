@@ -125,8 +125,10 @@
  * loaded is silent and is reported once per font id as
  * `{type:"library_needed"}`; a bank that will not parse (or that the song's own
  * fonts leave no room for under the cap) is silent and reported once as
- * `{type:"library_failed", reason}`. Neither throws: a font costs its own
- * tracks and never the song.
+ * `{type:"library_failed", reason}`. A refusal for ROOM is retried — reported as
+ * `library_needed` again — when a font is unloaded or the song's font set
+ * shrinks, because that is what makes room for it. Neither throws: a font costs
+ * its own tracks and never the song.
  *
  * ## Sampler tracks: a pool of pad voices, JS DSP
  *
@@ -466,9 +468,6 @@
   /** The empty per-track map a host without a synth hands back every run. */
   const NO_OUTPUTS = Object.freeze(new Map());
 
-  /** The soundfont tracks last given to the no-op host (`NO_FONTS.assign`). */
-  let noFontSpecs = [];
-
   /**
    * A font host that holds nothing, for an engine module built without
    * `font-voice.js` (a host that composes its own file list, as two of the
@@ -476,63 +475,72 @@
    * engine is silent and reported like a font that is not loaded, and nothing
    * throws on the audio thread.
    *
-   * It still answers `missing()` with EVERY soundfont track's font, so the page
-   * is told once per font id that nothing here can play it — and it hands back
-   * the same empty map and lists every run, so it allocates nothing per block.
-   * @type {Readonly<object>}
+   * It is built per processor — its `assign` remembers that processor's own
+   * soundfont tracks, so two engines in one process never share them. It still
+   * answers `missing()` with EVERY soundfont track's font, so the page is told
+   * once per font id that nothing here can play it — and it hands back the same
+   * empty map and lists every run, so it allocates nothing per block.
+   * @returns {object}
    */
-  const NO_FONTS = Object.freeze({
-    load: function load() {
-      return Promise.reject(new Error("the SoundFont host is not part of this engine"));
-    },
-    unload: function unload() {},
-    isLoaded: function isLoaded() {
-      return false;
-    },
-    assign: function assign(list) {
-      noFontSpecs = Array.isArray(list) ? list : [];
-    },
-    channelFor: function channelFor() {
-      return null;
-    },
-    outputFor: function outputFor() {
-      return null;
-    },
-    noteOn: function noteOn() {},
-    noteOff: function noteOff() {},
-    process: function process() {
-      return NO_OUTPUTS;
-    },
-    missing: function missing() {
-      // There is no synth at all, so every font the song's tracks name is
-      // missing. The processor reports each id once (`fontNeeded`).
-      const ids = new Set();
-      for (let index = 0; index < noFontSpecs.length; index += 1) {
-        const spec = noFontSpecs[index];
-        const id = spec && spec.font_id !== undefined && spec.font_id !== null ? String(spec.font_id) : "";
-        if (id !== "") ids.add(id);
-      }
-      return Array.from(ids).sort();
-    },
-    takeEvicted: function takeEvicted() {
-      return NO_IDS;
-    },
-    takeFailures: function takeFailures() {
-      return NO_IDS;
-    },
-    loadedIds: function loadedIds() {
-      return NO_IDS;
-    },
-    stats: function stats() {
-      return null;
-    },
-    fontSynth: function fontSynth() {
-      return null;
-    },
-    destroy: function destroy() {
-      noFontSpecs = [];
-    },
-  });
+  function noFontHost() {
+    /** The soundfont tracks last given to this no-op host. */
+    let noFontSpecs = [];
+    return {
+      ready: function ready() {
+        return Promise.resolve();
+      },
+      load: function load() {
+        return Promise.reject(new Error("the SoundFont host is not part of this engine"));
+      },
+      unload: function unload() {},
+      isLoaded: function isLoaded() {
+        return false;
+      },
+      assign: function assign(list) {
+        noFontSpecs = Array.isArray(list) ? list : [];
+      },
+      channelFor: function channelFor() {
+        return null;
+      },
+      outputFor: function outputFor() {
+        return null;
+      },
+      noteOn: function noteOn() {},
+      noteOff: function noteOff() {},
+      process: function process() {
+        return NO_OUTPUTS;
+      },
+      missing: function missing() {
+        // There is no synth at all, so every font the song's tracks name is
+        // missing. The processor reports each id once (`fontNeeded`).
+        const ids = new Set();
+        for (let index = 0; index < noFontSpecs.length; index += 1) {
+          const spec = noFontSpecs[index];
+          const id = spec && spec.font_id !== undefined && spec.font_id !== null ? String(spec.font_id) : "";
+          if (id !== "") ids.add(id);
+        }
+        return Array.from(ids).sort();
+      },
+      takeEvicted: function takeEvicted() {
+        return NO_IDS;
+      },
+      takeFailures: function takeFailures() {
+        return NO_IDS;
+      },
+      loadedIds: function loadedIds() {
+        return NO_IDS;
+      },
+      stats: function stats() {
+        return null;
+      },
+      fontSynth: function fontSynth() {
+        return null;
+      },
+      destroy: function destroy() {
+        noFontSpecs = [];
+      },
+    };
+  }
 
   /** How many voices one sampler track holds, and how many the song may sound. */
   const SAMPLER_VOICES_PER_TRACK = 16;
@@ -1310,6 +1318,17 @@
       this.fontFailed = new Set();
 
       /**
+       * The font ids refused only for the cap (their `load` threw a `font_cap`
+       * error). A refusal is not permanent: when a font is unloaded or the
+       * song's font set shrinks, the room may be there now, so these are cleared
+       * and reported as `library_needed` again (see `retryCapRefusals`).
+       */
+      this.fontCapFailed = new Set();
+
+      /** The distinct font ids the song's soundfont tracks named last time. */
+      this.fontIds = new Set();
+
+      /**
        * The song's pads, slices and sample rates, flattened by `setSong`: the
        * key is the ref id `doc.js` uses (`padKey` / `sliceKey`).
        */
@@ -1416,7 +1435,7 @@
         this.fonts =
           typeof StudioFontVoice === "object" && StudioFontVoice !== null
             ? StudioFontVoice.create(sampleRate, { maxBytes: this.maxFontBytes })
-            : NO_FONTS;
+            : noFontHost();
       }
       return this.fonts;
     }
@@ -1763,13 +1782,20 @@
      * Parse one bank and give it to the font host, on the processor's own work
      * queue so a song posted after it is assigned after it.
      *
-     * The job re-reads the transport when it RUNS: a load that was queued before
-     * the playhead started is put back in the deferred queue (`library_deferred`)
-     * instead of parsing while the song plays.
+     * The job re-reads the transport when it RUNS, and again after any await:
+     * a load that was queued before the playhead started, or one whose decoder
+     * was still compiling when Play arrived, is put back in the deferred queue
+     * (`library_deferred`) instead of parsing while the song plays.
      *
      * A bank that will not parse leaves nothing behind: the track that wanted it
      * stays silent and the failure is reported once per font id, through both the
-     * ack (`library_loaded` with `ok: false`) and `library_failed`.
+     * ack (`library_loaded` with `ok: false`) and `library_failed`. A font
+     * refused only for ROOM is remembered (`fontCapFailed`) so a later shrink of
+     * the song's font set can try it again.
+     *
+     * A load that was unloaded (or replaced) while it parsed is discarded in
+     * SILENCE: its request was answered when it was cancelled, and a font nobody
+     * wants must not post a second answer or a `library_failed`.
      * @param {string} id
      * @param {Uint8Array} bytes
      * @param {unknown} requestId the load's own request id
@@ -1795,11 +1821,35 @@
           this.deferFont(id, bytes, requestId);
           return;
         }
+        const fonts = this.fontHost();
+        // Getting the decoder ready is an await of its own (the vendored Vorbis
+        // decoder compiles on first use). Play can arrive while we wait, and a
+        // bank is parsed only while stopped, so the transport is read again
+        // AFTER that wait — before a byte is parsed or one sample decoded.
+        if (typeof fonts.ready === "function") {
+          try {
+            await fonts.ready();
+          } catch {
+            /* no Ogg decoder: SF2 banks are unaffected */
+          }
+          if (this.fontLoads.get(id) !== requestId) return;
+          if (this.sequencer.isPlaying()) {
+            this.fontLoads.delete(id);
+            this.deferFont(id, bytes, requestId);
+            return;
+          }
+        }
         try {
-          await this.fontHost().load(id, bytes);
+          await fonts.load(id, bytes);
         } catch (error) {
-          if (this.fontLoads.get(id) === requestId) this.fontLoads.delete(id);
+          // Unloaded (or replaced) while it parsed: its request was answered
+          // when it was cancelled, so the result is discarded silently — no
+          // second answer, no `library_failed` for a font nobody wants.
+          if (this.fontLoads.get(id) !== requestId) return;
+          this.fontLoads.delete(id);
           const reason = error && error.message ? error.message : String(error);
+          if (error && error.code === "font_cap") this.fontCapFailed.add(id);
+          else this.fontCapFailed.delete(id);
           this.answerLibrary(requestId, id, false, reason);
           this.reportFontFailure(id, reason);
           return;
@@ -1811,10 +1861,11 @@
           return;
         }
         this.fontLoads.delete(id);
-        // A load that worked clears both marks, so a font the cap evicts later is
+        // A load that worked clears every mark, so a font the cap evicts later is
         // requested (and, if it goes bad again, reported) once more.
         this.fontNeeded.delete(id);
         this.fontFailed.delete(id);
+        this.fontCapFailed.delete(id);
         this.answerLibrary(requestId, id, true);
         this.bindFonts();
       });
@@ -1858,8 +1909,25 @@
       }
       this.fontNeeded.delete(id);
       this.fontFailed.delete(id);
+      this.fontCapFailed.delete(id);
+      // The room this font held is free now: a font refused for the cap may fit
+      // again, and is asked for once more rather than staying silent for ever.
+      this.retryCapRefusals();
       this.fontHost().unload(id);
       this.bindFonts();
+    }
+
+    /**
+     * Forget every font that was refused only for ROOM, so the next
+     * `bindFonts()` reports the ones the song still wants as `library_needed`
+     * again. Called when a font is unloaded and when the song's font set shrinks:
+     * either is what makes room for a previously refused bank.
+     * @returns {void}
+     */
+    retryCapRefusals() {
+      if (this.fontCapFailed.size === 0) return;
+      for (const id of this.fontCapFailed) this.fontFailed.delete(id);
+      this.fontCapFailed.clear();
     }
 
     /**
@@ -1870,9 +1938,33 @@
      * left here is the reporting: a track whose font is missing is silent and is
      * reported ONCE per font id, and a font the memory cap pushed out (or one that
      * broke while rendering) is reported once too.
+     *
+     * A song whose font set shrinks (a track that played its own bank left) may
+     * have room for a font the cap refused earlier: that refusal is retried in
+     * the same pass, so the page gets a fresh `library_needed` for it.
      * @returns {void}
      */
     bindFonts() {
+      const ids = new Set();
+      for (let index = 0; index < this.fontTracks.length; index += 1) {
+        const spec = this.fontTracks[index];
+        const id = spec && spec.font_id !== undefined && spec.font_id !== null ? String(spec.font_id) : "";
+        if (id !== "") ids.add(id);
+      }
+      if (this.fontCapFailed.size > 0) {
+        let shrank = ids.size < this.fontIds.size;
+        if (!shrank) {
+          for (const id of this.fontIds) {
+            if (!ids.has(id)) {
+              shrank = true;
+              break;
+            }
+          }
+        }
+        if (shrank) this.retryCapRefusals();
+      }
+      this.fontIds = ids;
+
       // A song with no soundfont tracks never builds a host (and a page that
       // preloads a bank still gets one, through `parseFont`).
       if (this.fontTracks.length === 0 && this.fonts === null) return;

@@ -1766,9 +1766,15 @@
        * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes the file itself
        * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string}>}
        *   `failed` carries why: a bank that will not parse, one with no
-       *   instruments, or one the song's own fonts have left no room for
+       *   instruments, or one the song's own fonts have left no room for; an
+       *   empty id is refused here, before anything is posted
        */
       loadLibrary(libraryId, kind, bytes) {
+        // An empty id names nothing: answer at once, without posting a message
+        // the processor would only have to ignore.
+        if (libraryId === undefined || libraryId === null || String(libraryId) === "") {
+          return Promise.resolve({ status: "failed", reason: "A library load needs an id." });
+        }
         const id = String(libraryId);
         const data = bytesOf(bytes);
         // A view into a larger buffer is copied: transferring it would hand the

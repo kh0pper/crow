@@ -23,48 +23,59 @@
  * chorus and insertion are off (`effectsEnabled: false`), so nothing a track
  * hears comes from the bank's own effects.
  *
- * ## Channels are assigned deterministically
+ * ## Channels are STICKY
  *
- * `assign(tracks)` takes the song's soundfont tracks IN SNAPSHOT ORDER and hands
- * the tracks of a font channels 0, 1, 2 … — the order the document lists the
- * tracks in, which is the order both hosts agree on, so a rendered page and a
- * rendered file put the same track on the same channel. A song has at most 16
- * tracks (`MAX_TRACKS`), so a font never needs more than 16 channels and no
- * track is ever left without one. The GM drum bank is `setDrums(true)` on that
- * track's own channel: channel 9 is NOT reserved for drums, so a song with 16
- * tracks still gets 16 channels.
+ * A track keeps its channel for as long as it stays on that font. Adding or
+ * deleting another track never moves it: a new track takes the LOWEST FREE
+ * channel of its font, and the channels the tracks that stay already hold are
+ * reserved first, so a channel a later track keeps is never handed out to an
+ * earlier new one. A song has at most 16 tracks (`MAX_TRACKS`), so one font
+ * never needs more than 16 channels and no track is ever left without one. The
+ * GM drum bank is `setDrums(true)` on that track's own channel: channel 9 is
+ * NOT reserved for drums, so a song with 16 tracks still gets 16 channels.
+ *
+ * ## A freed channel DRAINS; a removed track's tail is dropped
+ *
+ * A channel that a track leaves (the track changed font, or left the song) is
+ * released — every note this file started on it gets a note-off — and then it
+ * DRAINS: the font keeps rendering it (a font with any active voice is
+ * rendered), so the release envelope the note started with is heard, and the
+ * channel is not handed to another track until its voices have all ended. A
+ * track that changes font keeps reading its OLD channel, mixed into its own
+ * pair, until those voices end, so the release is heard on the same track. A
+ * track that LEFT the song has no pair left to read: its tail is dropped (it is
+ * still rendered while draining, but nothing routes it into the mix). If a new
+ * track needs a channel and every other one is free -- all 16 are owned or
+ * draining -- the lowest draining one is taken after an all-sound-off on that
+ * channel (a forced cut, the only one this file ever makes).
+ *
+ * `stopAllNotes(true)` is otherwise never used: it would cut a tail dead.
  *
  * A preset is applied when its channel, its (font, bank, program) or the parsed
  * font itself changed since the last assignment — a program change therefore
  * takes effect at the next block's first frame, because `assign` runs on the
  * message path between two blocks and never inside one.
  *
- * ## Held notes are RELEASED, never cut
- *
- * Every note this file starts is remembered per channel (`font.held`), and a
- * channel that changes hands — a track that moved to another channel because an
- * earlier track on the same font left the song, a track whose program changed,
- * a track whose font changed, a track that left the song — gets a note-off for
- * each of them. The release envelope the note started with then rings out, so a
- * program change or a re-assignment never truncates a sound. `stopAllNotes` is
- * never used: `stopAllNotes(true)` would cut the tail dead.
- *
  * ## Loading while stopped; the memory cap
  *
  * Parsing a bank is the processor's business: `load(id, bytes)` is only ever
  * called while the transport is stopped (see `studio-processor.js`, which queues
- * a load that arrives while playing and parses it on the next stop). `load` is
- * async because an SF3 bank's Ogg samples need the vendored Vorbis decoder,
- * which compiles on first use (`BasicSoundBank.ready`); a decoder that will not
- * compile is NOT a failed load — an uncompressed SF2 bank parses and plays
- * without it.
+ * a load that arrives while playing, and does not even start one until the
+ * decoder is ready and the transport was re-checked). `ready()` awaits the
+ * vendored Vorbis decoder that an SF3 bank's Ogg samples need (it compiles on
+ * first use, `BasicSoundBank.ready`); a decoder that will not compile is NOT a
+ * failed load — an uncompressed SF2 bank parses and plays without it.
  *
  * **Every sample is decoded here, at load.** `load` walks the whole bank and
  * calls `sample.getAudioData()` on each sample before it returns (that is the
  * call that decodes an SF3 sample's Ogg data, and an SF2 sample's 16-bit data),
  * so nothing decodes on the audio thread while the song plays. The synth is
- * given `decodedSampleBudget` = the room left under the cap, so its own
- * lazy-decode cache can never hold more than that either.
+ * given NO `decodedSampleBudget`: a finite budget turns on its own per-note
+ * decode cache bookkeeping, and this file already bounds the bank itself. The
+ * cap is enforced here instead — the file's bytes are checked BEFORE the bank
+ * is parsed or one sample decoded, the decoded Float32 data is checked again
+ * before the font is installed, and a reload of an id releases the copy it
+ * replaces before decoding the new one.
  *
  * The fonts loaded here are held to `maxBytes` (1 GiB by default), counted as
  * the FILES' bytes PLUS the decoded Float32 sample data (`stats(id).decodedBytes`)
@@ -88,8 +99,10 @@
  *
  * `process()` walks arrays rebuilt by `assign()`: the fonts the song's tracks
  * actually read (`renderFonts` — a loaded font no track plays is not rendered
- * at all), each font's used channels, and its buffers. No Map or Set iterator is
- * created per run and no array is built per run.
+ * at all), each font's active channels, the track entries and their buffers. It
+ * sums each track's channels into that track's own pair (a channel freed by a
+ * font change is one of them, for as long as it drains). No Map or Set iterator
+ * is created per run and no array is built per run.
  *
  * It is a classic script (no `import`/`export`): it assigns
  * `globalThis.StudioFontVoice` for the worklet scope and `module.exports` when a
@@ -148,6 +161,19 @@
     const megabytes = maxBytes / (1024 * 1024);
     const shown = megabytes >= 1 ? String(Math.round(megabytes)) : megabytes.toFixed(1);
     return "This song's instruments need more than " + shown + " MB; remove an instrument or use a smaller bank.";
+  }
+
+  /**
+   * The error a cap refusal carries: its `code` lets the processor tell a font
+   * that was refused for ROOM from one that would not parse, so it can try the
+   * refused one again when the room comes back.
+   * @param {number} maxBytes
+   * @returns {Error}
+   */
+  function capError(maxBytes) {
+    const error = new Error(capMessage(maxBytes));
+    error.code = "font_cap";
+    return error;
   }
 
   /** @returns {string} an id in the form a Map is keyed by. */
@@ -251,15 +277,14 @@
    *
    * Its effects are OFF: reverb, chorus, delay, insertion and the GS equaliser
    * all belong to the mixer from PR B on, and a bank's own effects would be
-   * baked into one track's output where nothing could undo them. The decoded
-   * sample data is bounded by `decodedSampleBudget` — the room this font has
-   * left under the host's cap — so the synth can never hold more decoded data
-   * than the cap allows.
+   * baked into one track's output where nothing could undo them. It is given no
+   * `decodedSampleBudget`: a finite budget makes the synth track (and evict)
+   * decoded samples per note, and this file already decodes everything at load
+   * and holds the whole bank under its own cap.
    * @param {number} sampleRate
-   * @param {number} decodedSampleBudget bytes, or Infinity for no bound
    * @returns {object} a `SpessaSynthProcessor`
    */
-  function makeSynth(sampleRate, decodedSampleBudget) {
+  function makeSynth(sampleRate) {
     const Spessa = spessa();
     if (!Spessa || typeof Spessa.SpessaSynthProcessor !== "function") {
       throw new Error("the SoundFont synth is not loaded");
@@ -269,9 +294,6 @@
       eventsEnabled: false,
       maxBufferSize: RENDER_BLOCK,
     };
-    if (Number.isFinite(decodedSampleBudget) && decodedSampleBudget >= 0) {
-      options.decodedSampleBudget = decodedSampleBudget;
-    }
     const synth = new Spessa.SpessaSynthProcessor(sampleRate, options);
     // A smaller pool than a player's: the cap is per FONT, and a song has at
     // most 16 tracks on it.
@@ -281,6 +303,16 @@
       /* a synth whose cap cannot be lowered keeps its own; nothing breaks */
     }
     return synth;
+  }
+
+  /** @param {object} synth @returns {void} free a synth that never took a bank. */
+  function destroySynth(synth) {
+    if (!synth || typeof synth.destroy !== "function") return;
+    try {
+      synth.destroy();
+    } catch {
+      /* the synth is going away; a failed teardown has nothing left to do */
+    }
   }
 
   /**
@@ -330,15 +362,17 @@
 
     /**
      * font id → `{id, synth, rawBytes, decodedBytes, bytes, samples, decoded,
-     * serial, lastPlayed, capacity, channelOutputs, outputs, mainLeft,
-     * mainRight, usedChannels, held, rendered}`.
+     * serial, lastPlayed, capacity, channelOutputs, mainLeft, mainRight,
+     * owners, draining, drainingSince, activeChannels, held, epoch}`.
      *
      * `bytes` is what that font counts against the cap: the file's own bytes
      * plus its decoded Float32 sample data. `serial` counts the parses of that
      * font id, so a font that is loaded again re-applies every preset that plays
-     * it; `usedChannels` is the channels assigned to tracks right now (only those
-     * are cleared before a render) and `held` the notes this file started on each
-     * channel, which a channel that changes hands gets a note-off for.
+     * it; `owners` is the track entry holding each of its channels right now,
+     * `draining` the channels a track left whose voices have not ended yet, and
+     * `activeChannels` every channel to clear and render (the two together, the
+     * only list the per-run path walks). `held` is the notes this file started
+     * on each channel, which a channel that changes hands gets a note-off for.
      */
     const fonts = new Map();
 
@@ -346,9 +380,11 @@
     let fontList = [];
 
     /**
-     * track id → `{track_id, font_id, channel, key, serial, output}`. An entry
-     * with a `channel` of null is a track whose font is not loaded: it is
+     * track id → `{track_id, font_id, channel, key, serial, drains, output}`. An
+     * entry with a `channel` of null is a track whose font is not loaded: it is
      * silent, and named in `missing()` so the processor can ask the page for it.
+     * `drains` holds the old font channels still ringing out into this track
+     * after a font change, until their voices end.
      */
     const tracks = new Map();
 
@@ -385,7 +421,7 @@
     /**
      * Make sure one font's per-channel buffers can hold `frames` frames, growing
      * them (and the scratch main pair) when a host hands a longer block than any
-     * before. Growing re-points every track entry at its channel's new pair.
+     * before.
      * @param {object} font
      * @param {number} frames
      * @returns {void}
@@ -397,19 +433,26 @@
         const left = new Float32Array(capacity);
         const right = new Float32Array(capacity);
         font.channelOutputs[channel] = [left, right];
-        font.outputs[channel] = { left: left, right: right };
       }
       font.mainLeft = new Float32Array(capacity);
       font.mainRight = new Float32Array(capacity);
       font.capacity = capacity;
-      for (let index = 0; index < trackEntries.length; index += 1) {
-        const entry = trackEntries[index];
-        if (entry.font_id !== font.id || entry.channel === null) continue;
-        entry.output = font.outputs[entry.channel];
-        // The map a caller reads after `process()` has to point at the new pair
-        // too: it is the same object `outputFor` hands back.
-        outputs.set(entry.track_id, entry.output);
-      }
+    }
+
+    /**
+     * Give one track entry a stereo pair of its own, big enough for `frames`:
+     * the sum of every channel it reads (its own, and any old font channel still
+     * draining into it).
+     * @param {object} entry
+     * @param {number} frames
+     * @returns {void}
+     */
+    function ensureEntryOutput(entry, frames) {
+      if (entry.output && entry.output.left.length >= frames) return;
+      const capacity = Math.max(RENDER_BLOCK, Math.trunc(frames));
+      entry.output = { left: new Float32Array(capacity), right: new Float32Array(capacity) };
+      // The map a caller reads after `process()` has to point at the new pair.
+      outputs.set(entry.track_id, entry.output);
     }
 
     /**
@@ -425,16 +468,101 @@
       if (at >= 0) fontList.splice(at, 1);
       totalBytes -= font.bytes;
       if (totalBytes < 0) totalBytes = 0;
-      if (font.synth && typeof font.synth.destroy === "function") {
-        try {
-          font.synth.destroy();
-        } catch {
-          /* the synth is going away; a failed teardown has nothing left to do */
+      destroySynth(font.synth);
+      font.synth = null;
+      font.owners.fill(null);
+      font.draining.length = 0;
+      font.activeChannels.length = 0;
+      return font;
+    }
+
+    /** @returns {boolean} whether one font's channel is still draining. */
+    function isDraining(font, channel) {
+      const list = font.draining;
+      for (let index = 0; index < list.length; index += 1) {
+        if (list[index] === channel) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Mark a channel as draining: it is released, but its voices are still
+     * sounding and it may not be handed to another track until they end.
+     * @param {object} font
+     * @param {number} channel
+     * @returns {void}
+     */
+    function markDraining(font, channel) {
+      if (isDraining(font, channel)) return;
+      font.draining.push(channel);
+      font.drainingSince[channel] = font.epoch;
+    }
+
+    /** @param {object} font @param {number} channel @returns {void} */
+    function clearDraining(font, channel) {
+      const at = font.draining.indexOf(channel);
+      if (at >= 0) font.draining.splice(at, 1);
+      font.drainingSince[channel] = -1;
+    }
+
+    /** @param {object} font @param {number} channel @returns {void} */
+    function removeActiveChannel(font, channel) {
+      const at = font.activeChannels.indexOf(channel);
+      if (at >= 0) font.activeChannels.splice(at, 1);
+    }
+
+    /**
+     * A drain that has finished stops routing into its track; the channel is
+     * then free again (and the next `bind()` gives it to a new track).
+     * @param {string} fontId
+     * @param {number} serial
+     * @param {number} channel
+     * @returns {void}
+     */
+    function dropDrainRoutes(fontId, serial, channel) {
+      for (const entry of tracks.values()) {
+        const drains = entry.drains;
+        for (let index = drains.length - 1; index >= 0; index -= 1) {
+          const drain = drains[index];
+          if (drain.channel === channel && drain.font_id === fontId && drain.serial === serial) drains.splice(index, 1);
         }
       }
-      font.synth = null;
-      font.usedChannels.length = 0;
-      return font;
+    }
+
+    /**
+     * Free every drain of one font whose voices have ended. A drain only
+     * counts once the font has rendered a block since it began: `voiceCount` is
+     * written by `process()`, so before that it still describes an older block.
+     * @param {object} font
+     * @returns {void}
+     */
+    function settleFont(font) {
+      const list = font.draining;
+      for (let index = list.length - 1; index >= 0; index -= 1) {
+        const channel = list[index];
+        if (font.epoch <= font.drainingSince[channel]) continue;
+        const midi = font.synth && font.synth.midiChannels[channel];
+        const voices = midi && typeof midi.voiceCount === "number" ? midi.voiceCount : 0;
+        if (voices > 0) continue;
+        list.splice(index, 1);
+        font.drainingSince[channel] = -1;
+        removeActiveChannel(font, channel);
+        dropDrainRoutes(font.id, font.serial, channel);
+      }
+    }
+
+    /** Forget any drain whose font is gone, was parsed again, or has ended. */
+    function pruneDrains() {
+      for (const entry of tracks.values()) {
+        const drains = entry.drains;
+        for (let index = drains.length - 1; index >= 0; index -= 1) {
+          const drain = drains[index];
+          const font = fonts.get(drain.font_id);
+          if (!font || !font.synth || font.serial !== drain.serial || !isDraining(font, drain.channel)) {
+            drains.splice(index, 1);
+          }
+        }
+      }
     }
 
     /**
@@ -443,23 +571,94 @@
      * `stopAllNotes(true)` — that would cut the tail dead.
      * @param {string} fontId
      * @param {number|null} channel
-     * @returns {void}
+     * @returns {boolean} whether anything is still sounding on that channel (so
+     *   it has to drain before another track may take it)
      */
     function releaseChannel(fontId, channel) {
-      if (channel === null || channel === undefined) return;
+      if (channel === null || channel === undefined) return false;
       const font = fonts.get(fontId);
-      if (!font || !font.synth) return;
+      if (!font || !font.synth) return false;
+      let sounding = false;
       const held = font.held[channel];
-      if (!held || held.size === 0) return;
-      const notes = Array.from(held);
-      held.clear();
-      for (let at = 0; at < notes.length; at += 1) {
-        try {
-          font.synth.noteOff(channel, notes[at]);
-        } catch {
-          /* a channel that will not release is not worth a failed block */
+      if (held && held.size > 0) {
+        sounding = true;
+        const notes = Array.from(held);
+        held.clear();
+        for (let at = 0; at < notes.length; at += 1) {
+          try {
+            font.synth.noteOff(channel, notes[at]);
+          } catch {
+            /* a channel that will not release is not worth a failed block */
+          }
         }
       }
+      const midi = font.synth.midiChannels[channel];
+      if (midi && typeof midi.voiceCount === "number" && midi.voiceCount > 0) sounding = true;
+      return sounding;
+    }
+
+    /**
+     * A track leaves a font channel: release it, and keep it ringing into this
+     * track (as a drain) while its voices last. A channel with nothing left on
+     * it is simply free.
+     * @param {object} entry
+     * @returns {void}
+     */
+    function detach(entry) {
+      const channel = entry.channel;
+      const fontId = entry.font_id;
+      if (channel === null || fontId === "") return;
+      const font = fonts.get(fontId);
+      const sounding = releaseChannel(fontId, channel);
+      if (!font || !font.synth) return;
+      if (!sounding) {
+        clearDraining(font, channel);
+        return;
+      }
+      markDraining(font, channel);
+      const drains = entry.drains;
+      for (let index = 0; index < drains.length; index += 1) {
+        const drain = drains[index];
+        if (drain.font_id === fontId && drain.channel === channel && drain.serial === font.serial) return;
+      }
+      drains.push({ font_id: fontId, channel: channel, serial: font.serial });
+    }
+
+    /**
+     * The lowest channel of a font that no track holds and that is not
+     * draining. When every one is owned or draining, the lowest draining one is
+     * taken after an all-sound-off on that channel — the only forced cut this
+     * file makes, and only because a track would otherwise have no channel.
+     * @param {object} font
+     * @returns {number|null}
+     */
+    function claimChannel(font) {
+      for (let channel = 0; channel < MAX_CHANNELS; channel += 1) {
+        if (font.owners[channel] === null && !isDraining(font, channel)) return channel;
+      }
+      for (let channel = 0; channel < MAX_CHANNELS; channel += 1) {
+        if (font.owners[channel] !== null || !isDraining(font, channel)) continue;
+        const midi = font.synth && font.synth.midiChannels[channel];
+        if (midi && typeof midi.stopAllNotes === "function") {
+          try {
+            midi.stopAllNotes(true);
+          } catch {
+            /* a channel that will not stop is not worth a failed block */
+          }
+        }
+        const held = font.held[channel];
+        if (held) held.clear();
+        clearDraining(font, channel);
+        removeActiveChannel(font, channel);
+        dropDrainRoutes(font.id, font.serial, channel);
+        return channel;
+      }
+      return null;
+    }
+
+    /** @param {object} font @param {number} channel @returns {void} */
+    function ensureHeld(font, channel) {
+      if (!font.held[channel]) font.held[channel] = new Set();
     }
 
     /**
@@ -467,75 +666,124 @@
      * after anything moved under them (a font parsed, unloaded, evicted or
      * failed), and rebuild the arrays the per-run path walks.
      *
-     * Called on the message path and after a failure, never mid-block.
+     * Channels are sticky: a track that stays on its font keeps its channel
+     * whatever else the song does, and only a genuinely new channel claim moves
+     * a track. Called on the message path and after a failure, never mid-block.
      * @returns {void}
      */
     function bind() {
-      /** font id → the next channel to hand out. */
-      const next = new Map();
-      const bound = new Map();
       const needed = new Set();
+      const bound = new Map();
 
+      // A drain that has finished is a free channel again: settle them before
+      // any channel is handed out, and forget routes whose font is gone.
+      for (let index = 0; index < fontList.length; index += 1) settleFont(fontList[index]);
+      pruneDrains();
+
+      // The channels a track keeps are reserved first, so a new track earlier
+      // in the song never takes one a later track is still holding.
+      for (let index = 0; index < fontList.length; index += 1) {
+        const font = fontList[index];
+        for (let channel = 0; channel < MAX_CHANNELS; channel += 1) font.owners[channel] = null;
+      }
+
+      const orders = [];
       for (let at = 0; at < specs.length; at += 1) {
         const spec = specs[at];
         const trackId = asId(spec && spec.track_id);
         if (trackId === "") continue;
         const fontId = asId(spec && spec.font_id);
-        const bank = clampInt(spec && spec.bank, 0, GM_DRUM_BANK, 0);
-        const program = clampInt(spec && spec.program, 0, MAX_PROGRAM, 0);
-        const font = fontId === "" ? null : fonts.get(fontId) || null;
         if (fontId !== "") needed.add(fontId);
+        orders.push({
+          track_id: trackId,
+          font_id: fontId,
+          bank: clampInt(spec && spec.bank, 0, GM_DRUM_BANK, 0),
+          program: clampInt(spec && spec.program, 0, MAX_PROGRAM, 0),
+        });
+      }
 
-        let channel = null;
-        if (font && font.synth) {
-          const used = next.get(fontId) || 0;
-          if (used < MAX_CHANNELS) {
-            channel = used;
-            next.set(fontId, used + 1);
+      for (let at = 0; at < orders.length; at += 1) {
+        const order = orders[at];
+        const previous = tracks.get(order.track_id);
+        if (!previous || previous.font_id !== order.font_id || previous.channel === null) continue;
+        const font = fonts.get(order.font_id);
+        const channel = previous.channel;
+        if (!font || !font.synth || channel < 0 || channel >= MAX_CHANNELS || font.owners[channel] !== null) {
+          previous.channel = null;
+          previous.key = "";
+          continue;
+        }
+        font.owners[channel] = previous;
+        ensureHeld(font, channel);
+      }
+
+      for (let at = 0; at < orders.length; at += 1) {
+        const order = orders[at];
+        const fontId = order.font_id;
+        const font = fontId === "" ? null : fonts.get(fontId) || null;
+        let entry = tracks.get(order.track_id);
+        if (entry && entry.font_id !== fontId) {
+          // The track changed font: the old font keeps that channel, routed
+          // into this same track, until its release has rung out.
+          detach(entry);
+          entry.font_id = fontId;
+          entry.channel = null;
+          entry.key = "";
+          entry.serial = -1;
+        } else if (!entry) {
+          // A new track: its own pair, and the lowest free channel of its font.
+          entry = { track_id: order.track_id, font_id: fontId, channel: null, key: "", serial: -1, drains: [], output: null };
+        }
+        if (!entry.output) ensureEntryOutput(entry, RENDER_BLOCK);
+
+        if (!font || !font.synth) {
+          // Its font is not loaded: release what it held, and stay silent.
+          if (entry.channel !== null) {
+            detach(entry);
+            entry.channel = null;
+            entry.key = "";
+          }
+          bound.set(order.track_id, entry);
+          continue;
+        }
+
+        if (entry.channel === null || font.owners[entry.channel] !== entry) {
+          const channel = claimChannel(font);
+          if (channel !== null) {
+            if (entry.channel !== null) detach(entry);
+            entry.channel = channel;
+            entry.key = "";
+            font.owners[channel] = entry;
+            ensureHeld(font, channel);
+          } else if (entry.channel !== null) {
+            detach(entry);
+            entry.channel = null;
+            entry.key = "";
           }
         }
 
-        const previous = tracks.get(trackId);
-        let entry = previous;
-        if (!previous || previous.font_id !== fontId) {
-          // A track whose font changed (or a track that is new): the notes it
-          // holds on the channel it is leaving are released there, so they ring
-          // out instead of being cut.
-          if (previous) releaseChannel(previous.font_id, previous.channel);
-          entry = { track_id: trackId, font_id: fontId, channel: null, key: "", serial: -1, output: null };
-        }
-        if (entry.channel !== channel) {
-          // The track moved to another channel (an earlier track on its font
-          // left the song, or its font arrived): its held notes are released
-          // where they sound, never silenced.
-          releaseChannel(entry.font_id, entry.channel);
-          entry.channel = channel;
-          entry.key = "";
-        }
-        if (channel !== null) {
-          const key = fontId + "|" + bank + "|" + program;
-          // A channel change and a font that was parsed again both make the
+        if (entry.channel !== null) {
+          const key = fontId + "|" + order.bank + "|" + order.program;
+          // A preset change and a font that was parsed again both make the
           // preset that channel holds meaningless: apply it once more. A held
           // note is released BEFORE the change, so the release it plays is the
           // one it started with.
           if (entry.key !== key || entry.serial !== font.serial) {
-            releaseChannel(fontId, channel);
-            applyPreset(font.synth, channel, bank, program);
+            releaseChannel(fontId, entry.channel);
+            applyPreset(font.synth, entry.channel, order.bank, order.program);
             entry.key = key;
             entry.serial = font.serial;
           }
-          entry.output = font.outputs[channel];
-        } else {
-          entry.output = null;
         }
-        bound.set(trackId, entry);
+        bound.set(order.track_id, entry);
       }
 
       // A track that left the song (or became a non-font track) must not keep
-      // sounding: its channel's held notes are released and its entry dropped.
+      // sounding: its channel is released (and drains, unrouted), its entry and
+      // its own tail are dropped.
       for (const [trackId, entry] of tracks) {
         if (bound.has(trackId)) continue;
-        releaseChannel(entry.font_id, entry.channel);
+        detach(entry);
       }
       tracks.clear();
       for (const [trackId, entry] of bound) tracks.set(trackId, entry);
@@ -546,22 +794,26 @@
       for (const entry of bound.values()) trackEntries.push(entry);
 
       outputs.clear();
+      for (let index = 0; index < trackEntries.length; index += 1) {
+        const entry = trackEntries[index];
+        if (entry.output) outputs.set(entry.track_id, entry.output);
+      }
+
       for (let index = 0; index < fontList.length; index += 1) {
         const font = fontList[index];
-        font.usedChannels.length = 0;
-        font.rendered = false;
-      }
-      for (const [trackId, entry] of bound) {
-        if (entry.channel === null || !entry.output) continue;
-        const font = fonts.get(entry.font_id);
-        if (!font) continue;
-        font.usedChannels.push(entry.channel);
-        font.rendered = true;
-        outputs.set(trackId, entry.output);
+        const active = font.activeChannels;
+        active.length = 0;
+        for (let channel = 0; channel < MAX_CHANNELS; channel += 1) {
+          if (font.owners[channel] !== null) active.push(channel);
+        }
+        const draining = font.draining;
+        for (let at = 0; at < draining.length; at += 1) {
+          if (active.indexOf(draining[at]) < 0) active.push(draining[at]);
+        }
       }
       const rendered = [];
       for (let index = 0; index < fontList.length; index += 1) {
-        if (fontList[index].rendered) rendered.push(fontList[index]);
+        if (fontList[index].activeChannels.length > 0) rendered.push(fontList[index]);
       }
       // A fresh array: a `process()` already walking the old one keeps walking
       // it safely (a dropped font's `synth` is null, and is skipped).
@@ -630,7 +882,49 @@
       bind();
     }
 
+    /**
+     * Sum one channel's dry pair into a track's pair.
+     * @param {string} fontId
+     * @param {number|null} channel
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} total
+     * @returns {void}
+     */
+    function addChannel(fontId, channel, left, right, total) {
+      if (channel === null || channel === undefined) return;
+      const font = fonts.get(fontId);
+      if (!font || !font.synth) return;
+      const pair = font.channelOutputs[channel];
+      if (!pair) return;
+      const sourceLeft = pair[0];
+      const sourceRight = pair[1];
+      const count = Math.min(total, sourceLeft.length);
+      for (let at = 0; at < count; at += 1) {
+        left[at] += sourceLeft[at];
+        right[at] += sourceRight[at];
+      }
+    }
+
     return {
+      /**
+       * Await the decoder an SF3 bank's Ogg samples need. Resolves at once for a
+       * host that has no such decoder (an SF2 bank plays without it), and never
+       * rejects: a decoder that will not compile is not a failed load.
+       * @returns {Promise<void>}
+       */
+      async ready() {
+        const Spessa = spessa();
+        const bank = Spessa && Spessa.BasicSoundBank;
+        const pending = bank && bank.ready;
+        if (!pending || typeof pending.then !== "function") return;
+        try {
+          await pending;
+        } catch {
+          /* no Ogg decoder: SF2 banks are unaffected */
+        }
+      },
+
       /**
        * Parse one bank, decode every one of its samples, and give it to a synth.
        * Resolves when the synth holds it and nothing is left to decode.
@@ -638,7 +932,10 @@
        * Throws (to this caller only: the processor reports it as
        * `library_failed`) when the bytes are not a bank it can read, when the
        * bank carries no preset at all, and when the song's own fonts leave no
-       * room for it under the cap. Nothing is left behind when it throws.
+       * room for it under the cap. A cap refusal carries `code: "font_cap"`, so
+       * the processor can tell it from a broken bank. Nothing is left behind when
+       * it throws (except that a reload of the same id has already released the
+       * copy it replaces).
        * @param {string} fontId
        * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes
        * @returns {Promise<void>}
@@ -648,16 +945,21 @@
         if (id === "") throw new Error("a font needs an id");
         const data = readBytes(bytes);
         const rawBytes = data.byteLength;
+
+        // The file alone past the room left under the cap: refused BEFORE the
+        // bank is parsed or one sample decoded. There is no point reading bytes
+        // that could never fit.
+        const room = roomFor(id, rawBytes);
+        if (room < 0) throw capError(maxBytes);
+
         const bank = parseBank(data);
         if (!hasInstruments(bank)) throw new Error(NO_INSTRUMENTS);
 
-        // What the cap leaves for this font once every font that may be evicted
-        // is gone — and, within that, the room its decoded samples have. A load
-        // that cannot fit refuses BEFORE anything is decoded or installed.
-        const room = roomFor(id, rawBytes);
-        if (room < 0) throw new Error(capMessage(maxBytes));
+        // A reload of the same id releases the copy it replaces before the new
+        // one is decoded, so the two never sit in memory together.
+        dropFont(id);
 
-        const synth = makeSynth(rateHz, room);
+        const synth = makeSynth(rateHz);
         // An SF3 bank's samples are decoded below, through the vendored Vorbis
         // decoder, which compiles on first use. Awaiting it here means the
         // decode pass can read them; a host without a decoder still plays an
@@ -671,18 +973,10 @@
         // Every sample, now: nothing may decode on the audio thread later.
         const decoded = decodeSamples(bank);
         if (decoded.bytes > room) {
-          if (synth && typeof synth.destroy === "function") {
-            try {
-              synth.destroy();
-            } catch {
-              /* the synth never played a note; nothing left to clean */
-            }
-          }
-          throw new Error(capMessage(maxBytes));
+          destroySynth(synth);
+          throw capError(maxBytes);
         }
 
-        // The same id loaded again replaces the old bank (and its memory).
-        dropFont(id);
         fontSerial += 1;
         const font = {
           id: id,
@@ -696,12 +990,14 @@
           lastPlayed: 0,
           capacity: 0,
           channelOutputs: new Array(MAX_CHANNELS),
-          outputs: new Array(MAX_CHANNELS),
           mainLeft: null,
           mainRight: null,
-          usedChannels: [],
+          owners: new Array(MAX_CHANNELS).fill(null),
+          draining: [],
+          drainingSince: new Array(MAX_CHANNELS).fill(-1),
+          activeChannels: [],
           held: new Array(MAX_CHANNELS),
-          rendered: false,
+          epoch: 0,
         };
         ensureBuffers(font, RENDER_BLOCK);
         // The bank is in the synth before the first track asks for a preset: the
@@ -710,7 +1006,8 @@
         synth.soundBankManager.addSoundBank(bank, id);
         fonts.set(id, font);
         fontList.push(font);
-        totalBytes += font.bytes;        trim(id);
+        totalBytes += font.bytes;
+        trim(id);
         bind();
       },
 
@@ -779,8 +1076,9 @@
 
       /**
        * Give the song's soundfont tracks their channels and presets, in snapshot
-       * order. Cheap enough to run on every song: a track whose (font, bank,
-       * program) has not changed keeps its channel and its preset untouched.
+       * order. Cheap enough to run on every song: a track that stays on its font
+       * keeps its channel and, while its (font, bank, program) is unchanged, its
+       * preset untouched.
        * @param {object[]} list one `{track_id, font_id, bank, program}` per
        *   soundfont track, in the song's own track order
        * @returns {void}
@@ -801,8 +1099,8 @@
       },
 
       /**
-       * The stereo pair a track reads after the last `process()`: the track's own
-       * channel, dry, `frames` samples of it.
+       * The stereo pair a track reads after the last `process()`: its own
+       * channels summed, dry, `frames` samples of it.
        * @param {string} trackId
        * @returns {{left: Float32Array, right: Float32Array}|null}
        */
@@ -827,13 +1125,10 @@
         const level = clampInt(velocity, MIN_VELOCITY, MAX_NOTE, MAX_NOTE);
         font.lastPlayed = playClock += 1;
         // Remember the note, so a channel that changes hands is RELEASED rather
-        // than cut (see `releaseChannel`).
-        let held = font.held[entry.channel];
-        if (!held) {
-          held = new Set();
-          font.held[entry.channel] = held;
-        }
-        held.add(note);
+        // than cut (see `releaseChannel`). The Set is allocated when the channel
+        // is assigned, never here.
+        const held = font.held[entry.channel];
+        if (held) held.add(note);
         try {
           font.synth.noteOn(entry.channel, note, level);
         } catch (error) {
@@ -864,12 +1159,13 @@
 
       /**
        * Render `frames` of every font the song's tracks read, and hand back the
-       * per-track pairs. A loaded font no track reads is not rendered at all.
+       * per-track pairs. A font no track reads and that has no draining channel
+       * is not rendered at all.
        *
        * The map is the host's own and is valid until the next call: the track's
        * pair holds at least `frames` samples, and the caller reads only those.
-       * Nothing here allocates: the fonts, their used channels and the track
-       * entries are arrays rebuilt by `assign()`.
+       * Nothing here allocates: the fonts, their active channels, the track
+       * entries and their buffers are all rebuilt by `assign()`.
        * @param {number} frames
        * @returns {Map<string, {left: Float32Array, right: Float32Array}>}
        */
@@ -881,14 +1177,15 @@
           const font = list[index];
           const synth = font.synth;
           if (!synth) continue;
-          // A longer block than any before grows the buffers; every entry of
-          // this font is re-pointed at its channel's new pair there.
+          // A longer block than any before grows the buffers.
           if (font.capacity < total) ensureBuffers(font, total);
           // The synth ADDS into every buffer it is handed, so a run starts from
-          // silence — and only the channels a track holds are worth clearing.
-          const used = font.usedChannels;
-          for (let at = 0; at < used.length; at += 1) {
-            const pair = font.channelOutputs[used[at]];
+          // silence — and only the channels in use (held or draining) are worth
+          // clearing.
+          const active = font.activeChannels;
+          for (let at = 0; at < active.length; at += 1) {
+            const pair = font.channelOutputs[active[at]];
+            if (!pair) continue;
             pair[0].fill(0, 0, total);
             pair[1].fill(0, 0, total);
           }
@@ -901,6 +1198,39 @@
               break;
             }
           }
+          font.epoch += 1;
+        }
+
+        // Each track's pair is the sum of the channels it reads: its own, plus
+        // any old font channel still ringing out after a font change.
+        for (let index = 0; index < trackEntries.length; index += 1) {
+          const entry = trackEntries[index];
+          if (!entry.output) continue;
+          if (entry.output.left.length < total) ensureEntryOutput(entry, total);
+          const left = entry.output.left;
+          const right = entry.output.right;
+          left.fill(0, 0, total);
+          right.fill(0, 0, total);
+          addChannel(entry.font_id, entry.channel, left, right, total);
+          const drains = entry.drains;
+          for (let at = 0; at < drains.length; at += 1) {
+            const drain = drains[at];
+            const font = fonts.get(drain.font_id);
+            if (!font || font.serial !== drain.serial) continue;
+            addChannel(drain.font_id, drain.channel, left, right, total);
+          }
+        }
+
+        // A drain whose voices have ended frees its channel, and a font nothing
+        // reads any more stops being rendered at all.
+        for (let index = list.length - 1; index >= 0; index -= 1) {
+          const font = list[index];
+          if (!font.synth) {
+            list.splice(index, 1);
+            continue;
+          }
+          settleFont(font);
+          if (font.activeChannels.length === 0) list.splice(index, 1);
         }
         return outputs;
       },

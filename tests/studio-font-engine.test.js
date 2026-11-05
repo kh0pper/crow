@@ -51,6 +51,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { TINY_SF2_DECODED_BYTES, TINY_SF2_PRESETS, tinySf2 } from "./fixtures/tiny-sf2.mjs";
+import { TINY_SF3_DECODED_BYTES, TINY_SF3_DECODED_SAMPLES, TINY_SF3_SAMPLE_RATE, tinySf3 } from "./fixtures/tiny-sf3.mjs";
 
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
 const VENDOR_DIR = fileURLToPath(new URL("../bundles/studio/vendor/sunvox/", import.meta.url));
@@ -75,6 +76,10 @@ const BLOCK = 128;
 /** The bank every test in this file plays, built once. */
 const FONT_BYTES = tinySf2();
 const FONT_ID = "font-tiny";
+
+/** A real SF3 bank (Ogg Vorbis samples), built once from the committed fixture. */
+const SF3_BYTES = tinySf3();
+const SF3_ID = "font-sf3";
 
 /** What one font counts against the cap: its file's bytes plus its decoded samples. */
 const FONT_FOOTPRINT = FONT_BYTES.byteLength + TINY_SF2_DECODED_BYTES;
@@ -229,6 +234,13 @@ function peakOf(samples) {
     if (value > peak) peak = value;
   }
   return peak;
+}
+
+/** @param {Float32Array} samples @returns {number} the mean sample (DC offset). */
+function meanOf(samples) {
+  let total = 0;
+  for (let index = 0; index < samples.length; index += 1) total += samples[index];
+  return total / samples.length;
 }
 
 /** @returns {number} `count` frames' of a song at a tempo, in frames. */
@@ -848,29 +860,226 @@ test("eight tracks on one bank load it once and mix separately", async () => {
   }
 });
 
-test("an sf3 bank is fully decoded when it loads", async () => {
-  // The engine decodes EVERY sample at load, while the transport is stopped, so
-  // nothing decodes on the audio thread once the song plays. `getAudioData()` is
-  // that decode, for an SF3 bank's Ogg samples through the vendored Vorbis
-  // decoder and for an SF2 bank's 16-bit samples through the very same call (the
-  // vendored synth ships a decoder and no encoder, so the test font is an
-  // uncompressed bank — the code path the assertion pins is the same one).
+test("deleting a track does not move or cut another track's held note", async () => {
+  // Both tracks hold the four-second-release program, on channels 0 and 1.
+  // Deleting the first track must not move the second one's note: with channels
+  // assigned by snapshot order the second track slid from channel 1 to channel
+  // 0, its held note was released where it was and its output went silent. A
+  // sticky channel keeps it exactly where it was, at exactly its level.
   const host = await loadedHost();
-  const stats = host.stats(FONT_ID);
-  assert.ok(stats, "a loaded font has to report what it holds");
-  assert.equal(stats.samples, TINY_SF2_PRESETS.length, "every preset of the test font carries one sample");
-  assert.equal(stats.decoded, stats.samples, `every sample has to be decoded at load, ${stats.decoded}/${stats.samples} were`);
-  assert.equal(stats.decodedBytes, TINY_SF2_DECODED_BYTES, "the decoded data is Float32 sample data, all of it");
-  assert.equal(stats.rawBytes, FONT_BYTES.byteLength);
+  const spec = (trackId) => ({ track_id: trackId, font_id: FONT_ID, bank: 0, program: 8 });
+  host.assign([spec("track-a"), spec("track-b")]);
+  assert.equal(host.channelFor("track-a"), 0, "the first track holds channel 0");
+  assert.equal(host.channelFor("track-b"), 1, "the second track holds channel 1");
 
-  // Playing the bank decodes nothing more: the accounting is the same after it.
-  host.assign([{ track_id: "track-1", font_id: FONT_ID, bank: 0, program: 0 }]);
+  host.noteOn("track-a", 60, 100);
+  host.noteOn("track-b", 60, 100);
+  // A window of a whole number of the tone's cycles (98 at 980 Hz), so the
+  // measurement does not depend on the phase it starts at. One window is a
+  // warm-up; the next is the level the note has settled at.
+  const window = 4800;
+  host.process(window);
+  const beforeOut = host.process(window);
+  const before = toneAmplitude(beforeOut.get("track-b").left, 0, window, toneOf(0, 8));
+  assert.ok(before > 0.01, `the second track has to be sounding before the delete, it reads ${before}`);
+
+  // Delete the first track: the second one keeps channel 1 and its held note.
+  host.assign([spec("track-b")]);
+  assert.equal(host.channelFor("track-b"), 1, "a track keeps its channel when another one is deleted");
+
+  const afterOut = host.process(window);
+  const after = toneAmplitude(afterOut.get("track-b").left, 0, window, toneOf(0, 8));
+  assert.ok(after > 0.01, `the surviving track's next block has to be non-silent, it reads ${after}`);
+  assert.ok(
+    Math.abs(after - before) <= before / 100,
+    `the held note must not move or be cut: it went from ${before} to ${after}`,
+  );
+  host.destroy();
+});
+
+test("a removed track's tail does not play through the next track", async () => {
+  // A track leaves the song while a four-second release is ringing. Its channel
+  // keeps draining (rendered) so the release is not cut, but its output is gone;
+  // no other track may inherit that tail.
+  const host = await loadedHost();
+  const longTrack = { track_id: "track-a", font_id: FONT_ID, bank: 0, program: 8 };
+  const shortTrack = { track_id: "track-b", font_id: FONT_ID, bank: 0, program: 1 };
+  host.assign([longTrack, shortTrack]);
+  host.noteOn("track-a", 60, 100);
+  host.noteOn("track-b", 60, 100);
+  const beforeOut = host.process(2048);
+  assert.ok(
+    toneAmplitude(beforeOut.get("track-b").left, 0, 2048, toneOf(0, 1)) > 0.01,
+    "the surviving track has to be sounding before the delete",
+  );
+
+  host.assign([shortTrack]);
+  const afterOut = host.process(8192);
+  const own = toneAmplitude(afterOut.get("track-b").left, 0, 8192, toneOf(0, 1));
+  const leaked = toneAmplitude(afterOut.get("track-b").left, 0, 8192, toneOf(0, 8));
+  assert.ok(own > 0.01, `the next track still plays its own program, it reads ${own}`);
+  assert.ok(
+    leaked < own / 20,
+    `a removed track's release must not be routed into another track, it leaks ${leaked} against ${own}`,
+  );
+  host.destroy();
+});
+
+test("a draining channel is not handed to a new track until its voices end", async () => {
+  // A removed track's channel is released and keeps ringing, so it is not free
+  // for a new track yet. Once its release has ended it is the lowest free
+  // channel again.
+  const host = await loadedHost();
+  const longTrack = { track_id: "track-a", font_id: FONT_ID, bank: 0, program: 8 };
+  const shortTrack = { track_id: "track-b", font_id: FONT_ID, bank: 0, program: 1 };
+  host.assign([longTrack, shortTrack]);
+  host.noteOn("track-a", 60, 100);
+  host.process(2048);
+
+  // Remove track A: channel 0 starts draining (a four-second release).
+  host.assign([shortTrack]);
+  const newcomer = { track_id: "track-c", font_id: FONT_ID, bank: 0, program: 2 };
+  host.assign([shortTrack, newcomer]);
+  assert.equal(host.channelFor("track-b"), 1, "the surviving track keeps channel 1");
+  assert.equal(host.channelFor("track-c"), 2, "a draining channel must not be handed to a new track");
+
+  // Five seconds later the release is over: channel 0 is free for the next one.
+  host.process(SAMPLE_RATE * 5);
+  const later = { track_id: "track-d", font_id: FONT_ID, bank: 0, program: 3 };
+  host.assign([shortTrack, newcomer, later]);
+  assert.equal(host.channelFor("track-b"), 1, "no channel moves when a drain ends");
+  assert.equal(host.channelFor("track-c"), 2, "no channel moves when a drain ends");
+  assert.equal(host.channelFor("track-d"), 0, "a drained channel is the lowest free channel again");
+  host.destroy();
+});
+
+test("a new track takes a draining channel only after an all-sound-off", async () => {
+  // Sixteen tracks on one font fill every channel. The track on channel 15 is
+  // removed while its long release rings, and a new track arrives: there is no
+  // free channel left, so it takes the draining one after an all-sound-off on
+  // that channel (the only forced cut this engine makes).
+  const host = await loadedHost();
+  const specs = [];
+  for (let index = 1; index <= 15; index += 1) {
+    specs.push({ track_id: `track-${index}`, font_id: FONT_ID, bank: 0, program: index - 1 });
+  }
+  specs.push({ track_id: "track-16", font_id: FONT_ID, bank: 0, program: 8 });
+  host.assign(specs);
+  for (const spec of specs) host.noteOn(spec.track_id, 60, 100);
+  assert.equal(host.channelFor("track-16"), 15, "the sixteenth track holds channel 15");
+  host.process(2048);
+
+  // Remove it: channel 15 drains (its four-second release is still ringing).
+  host.assign(specs.slice(0, 15));
+  host.process(2048);
+
+  const newcomer = { track_id: "track-new", font_id: FONT_ID, bank: 0, program: 2 };
+  host.assign([...specs.slice(0, 15), newcomer]);
+  assert.equal(
+    host.channelFor("track-new"),
+    15,
+    "with every other channel owned, a new track takes the draining one",
+  );
+  host.noteOn("track-new", 60, 100);
+  const out = host.process(4096);
+  const own = toneAmplitude(out.get("track-new").left, 0, 4096, toneOf(0, 2));
+  const cut = toneAmplitude(out.get("track-new").left, 0, 4096, toneOf(0, 8));
+  assert.ok(own > 0.01, `the new track's program has to sound, it reads ${own}`);
+  assert.ok(cut < own / 20, `the all-sound-off has to cut the old tail, it reads ${cut} against ${own}`);
+  host.destroy();
+});
+
+test("a font change releases the old font's held notes on the same track", async () => {
+  // The track moves from a long-release preset in one bank to a new program in
+  // another. The old bank keeps rendering its channel INTO THE SAME TRACK until
+  // the release has rung out; the new program starts at once.
+  processorClass();
+  const host = globalThis.StudioFontVoice.create(SAMPLE_RATE, {});
+  await host.load("font-a", Uint8Array.from(FONT_BYTES));
+  await host.load("font-b", Uint8Array.from(FONT_BYTES));
+
+  host.assign([{ track_id: "track-1", font_id: "font-a", bank: 0, program: 8 }]);
+  host.noteOn("track-1", 60, 100);
+  const held = host.process(2048);
+  const before = toneAmplitude(held.get("track-1").left, 0, 2048, toneOf(0, 8));
+  assert.ok(before > 0.01, `the old font's note has to be held first, it reads ${before}`);
+
+  host.assign([{ track_id: "track-1", font_id: "font-b", bank: 0, program: 0 }]);
+  host.noteOn("track-1", 60, 100);
+  const changed = host.process(4096);
+  const released = toneAmplitude(changed.get("track-1").left, 0, 4096, toneOf(0, 8));
+  const fresh = toneAmplitude(changed.get("track-1").left, 0, 4096, toneOf(0, 0));
+  assert.ok(
+    released > before / 2,
+    `the old font's released note has to keep sounding through the same track, it reads ${released} against ${before}`,
+  );
+  assert.ok(fresh > 0.01, `the new font's program has to start, it reads ${fresh}`);
+
+  // The release is four seconds long: after five it is gone, and the new note
+  // (a looped sample) still sounds.
+  host.process(SAMPLE_RATE * 5);
+  const later = host.process(4096);
+  const gone = toneAmplitude(later.get("track-1").left, 0, 4096, toneOf(0, 8));
+  const stillFresh = toneAmplitude(later.get("track-1").left, 0, 4096, toneOf(0, 0));
+  assert.ok(gone < before / 20, `the old font's release has to end, it reads ${gone}`);
+  assert.ok(stillFresh > 0.01, `the new font's note is still sounding, it reads ${stillFresh}`);
+  host.destroy();
+});
+
+test("an sf3 bank is fully decoded when it loads", async () => {
+  // The REAL compressed path: an SF3 bank whose smpl chunk is Ogg Vorbis, made
+  // from the committed `tests/fixtures/tiny-sine.ogg`. Every sample has to be
+  // decoded before the song plays, and playing a note must not decode anything.
+  processorClass();
+  const host = globalThis.StudioFontVoice.create(SAMPLE_RATE, {});
+  await host.load(SF3_ID, Uint8Array.from(SF3_BYTES));
+
+  const stats = host.stats(SF3_ID);
+  assert.ok(stats, "a loaded font has to report what it holds");
+  assert.equal(stats.samples, 1, "the sf3 fixture carries one sample");
+  assert.equal(TINY_SF3_DECODED_SAMPLES, Math.round(0.25 * TINY_SF3_SAMPLE_RATE), "the fixture is the 0.25 s sine");
+  assert.equal(stats.decoded, stats.samples, `every sample has to be decoded at load, ${stats.decoded}/${stats.samples} were`);
+  assert.equal(stats.decodedBytes, TINY_SF3_DECODED_BYTES, "the decoded data is Float32 sample data, all of it");
+  assert.equal(stats.rawBytes, SF3_BYTES.byteLength);
+
+  // Every sample holds its decoded Float32 data BEFORE play. This is the state
+  // that makes a note impossible to decode later.
+  const synth = host.fontSynth(SF3_ID);
+  assert.ok(synth, "the host has to hold the bank's synth");
+  const samples = synth.soundBankManager.soundBankList[0].soundBank.samples;
+  assert.equal(samples.length, stats.samples);
+  for (const sample of samples) {
+    assert.ok(sample.audioData instanceof Float32Array, "every sample has to carry its decoded data before play");
+    assert.equal(sample.audioData.length, TINY_SF3_DECODED_SAMPLES, "the Ogg stream has to decode to its granule length");
+    assert.equal(sample.sampleRate, TINY_SF3_SAMPLE_RATE);
+  }
+
+  // Spy on the two decode entry points the vendored synth has. Playing the bank
+  // may call getAudioData() (it returns the cache), but it must never reach a
+  // decode.
+  let decodes = 0;
+  for (const sample of samples) {
+    const decodeVorbis = sample.decodeVorbis;
+    sample.decodeVorbis = function decodeSpy(...args) {
+      decodes += 1;
+      return decodeVorbis.apply(this, args);
+    };
+    const decodeS16LE = sample.decodeS16LE;
+    sample.decodeS16LE = function decodeSpy(...args) {
+      decodes += 1;
+      return decodeS16LE.apply(this, args);
+    };
+  }
+
+  host.assign([{ track_id: "track-1", font_id: SF3_ID, bank: 0, program: 0 }]);
   host.noteOn("track-1", 60, 100);
   const out = host.process(4096);
   host.noteOff("track-1", 60);
-  assert.ok(toneAmplitude(out.get("track-1").left, 0, 4096, toneOf(0, 0)) > 0.01, "the decoded bank has to play");
-  assert.deepEqual(host.stats(FONT_ID), stats, "nothing may decode while the song plays");
+  assert.ok(peakOf(out.get("track-1").left) > 0.001, "the decoded sf3 bank has to be audible");
+  assert.equal(decodes, 0, "playing a note must decode nothing: every sample was decoded at load");
+  assert.deepEqual(host.stats(SF3_ID), stats, "nothing may decode while the song plays");
   assert.equal(host.bytes, stats.rawBytes + stats.decodedBytes);
+  host.destroy();
 });
 
 test("decoded samples count against the cap", async () => {
@@ -903,6 +1112,301 @@ function loadedCapHost(maxBytes) {
   processorClass();
   return globalThis.StudioFontVoice.create(SAMPLE_RATE, { maxBytes: maxBytes });
 }
+
+/**
+ * Replace the vendored Vorbis decoder's ready promise with one this test
+ * settles by hand, so Play can arrive while the parse job is waiting for the
+ * decoder. Restore it in a `finally`.
+ * @returns {{resolve: function(): void, restore: function(): void}}
+ */
+function deferDecoderReady() {
+  processorClass();
+  const bank = globalThis.StudioSpessa.BasicSoundBank;
+  const real = bank.ready;
+  let release = null;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  bank.ready = pending;
+  return {
+    resolve() {
+      release();
+    },
+    restore() {
+      bank.ready = real;
+    },
+  };
+}
+
+/**
+ * A font host whose `load` a test settles by hand, so a bank can be held
+ * MID-PARSE (the processor's job is inside `await load`) deterministically.
+ * Installed by replacing the processor instance's own `fontHost`.
+ * @returns {{host: object, started: boolean, resolve: function(): void,
+ *   reject: function(Error): void}}
+ */
+function gatedFontHost() {
+  let settle = null;
+  const host = {
+    ready: function ready() {
+      return Promise.resolve();
+    },
+    load: function load() {
+      return new Promise((resolve, reject) => {
+        settle = { resolve: resolve, reject: reject };
+      });
+    },
+    unload: function unload() {},
+    assign: function assign() {},
+    missing: function missing() {
+      return [];
+    },
+    takeFailures: function takeFailures() {
+      return [];
+    },
+    takeEvicted: function takeEvicted() {
+      return [];
+    },
+    isLoaded: function isLoaded() {
+      return false;
+    },
+    loadedIds: function loadedIds() {
+      return [];
+    },
+  };
+  return {
+    host: host,
+    get started() {
+      return settle !== null;
+    },
+    resolve() {
+      settle.resolve();
+    },
+    reject(error) {
+      settle.reject(error);
+    },
+  };
+}
+
+test("a font whose bytes alone cannot fit is refused before it is parsed", async () => {
+  // The raw file alone is already past the room left under the cap: there is no
+  // point parsing it or decoding a sample, so the refusal happens first.
+  processorClass();
+  const loader = globalThis.StudioSpessa.SoundBankLoader;
+  const real = loader.fromArrayBuffer;
+  let parses = 0;
+  loader.fromArrayBuffer = function countingParse(...args) {
+    parses += 1;
+    return real.apply(this, args);
+  };
+  try {
+    const host = loadedCapHost(FONT_BYTES.byteLength - 1);
+    await assert.rejects(() => host.load(FONT_ID, Uint8Array.from(FONT_BYTES)), {
+      message: /This song's instruments need more than .* MB; remove an instrument or use a smaller bank\./,
+    });
+    assert.equal(parses, 0, "a font that cannot fit must be refused before its bank is parsed");
+    assert.equal(host.fontCount, 0);
+    assert.equal(host.bytes, 0);
+    host.destroy();
+  } finally {
+    loader.fromArrayBuffer = real;
+  }
+});
+
+test("a reload releases the old copy before decoding the new one", async () => {
+  // A reload of the same id must not keep the copy it replaces in memory while
+  // it decodes the new one: the old font's bytes are gone by the first decode.
+  processorClass();
+  const host = globalThis.StudioFontVoice.create(SAMPLE_RATE, {});
+  await host.load(SF3_ID, Uint8Array.from(SF3_BYTES));
+  assert.ok(host.bytes > 0, "the first load has to hold its bytes");
+
+  const samplePrototype = globalThis.StudioSpessa.BasicSample.prototype;
+  const real = samplePrototype.decodeVorbis;
+  let bytesDuringDecode = -1;
+  samplePrototype.decodeVorbis = function spyDecode(...args) {
+    bytesDuringDecode = host.bytes;
+    return real.apply(this, args);
+  };
+  try {
+    await host.load(SF3_ID, Uint8Array.from(SF3_BYTES));
+  } finally {
+    samplePrototype.decodeVorbis = real;
+  }
+  assert.equal(bytesDuringDecode, 0, "the copy being replaced has to be released before the new one is decoded");
+  assert.ok(host.bytes > 0, "the reloaded font is held after it decodes");
+  host.destroy();
+});
+
+test("a play that arrives while the decoder is getting ready defers the parse", async () => {
+  // The parse job awaits the Vorbis decoder before it parses. Play can arrive
+  // while it waits: the transport is read again after that await, and the bank
+  // goes back to the deferred queue without being parsed.
+  const host = await processorHost();
+  const gate = deferDecoderReady();
+  try {
+    host.post({ type: "song", snapshot: fontSong([fontTrack(0)], { bpm: 125 }) });
+    await host.flush();
+    host.post({ type: "library", request_id: "slow-decoder", library_id: FONT_ID, kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+    // Let the queued job reach its wait for the decoder.
+    await settle();
+    host.post({ type: "play" });
+    await settle();
+    gate.resolve();
+    await host.flush();
+
+    assert.equal(host.processor.fonts === null ? 0 : host.processor.fonts.fontCount, 0, "a bank must not parse once Play arrived");
+    assert.equal(postsOfType(host.posts, "library_loaded").length, 0, "a deferred load must not be acked loaded");
+    assert.deepEqual(answersTo(host.posts, "slow-decoder"), [
+      { type: "library_deferred", library_id: FONT_ID, request_id: "slow-decoder" },
+    ]);
+  } finally {
+    gate.restore();
+  }
+});
+
+test("an unload mid-parse discards the parse result silently", async () => {
+  // A bank held MID-PARSE (the parse job is inside `await load`) and then
+  // unloaded: the load was already answered when it was cancelled, so its late
+  // result — a success or a failure — must not answer again or post
+  // library_failed.
+  for (const failing of [false, true]) {
+    const host = await processorHost();
+    const gate = gatedFontHost();
+    host.processor.fontHost = () => gate.host;
+    host.post({ type: "song", snapshot: fontSong([fontTrack(0)], { bpm: 125 }) });
+    await host.flush();
+
+    host.post({ type: "library", request_id: "doomed-parse", library_id: FONT_ID, kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+    const started = await waitFor(() => gate.started);
+    assert.ok(started, "the parse job has to reach the load before the unload is posted");
+    host.post({ type: "library_unload", library_id: FONT_ID });
+    await settle();
+    // The parse finishes AFTER its cancellation, one way or the other.
+    if (failing) gate.reject(Object.assign(new Error("no room for this bank"), { code: "font_cap" }));
+    else gate.resolve();
+    await host.flush();
+
+    const answers = answersTo(host.posts, "doomed-parse");
+    assert.equal(answers.length, 1, `the cancelled load is answered once (failing=${failing}), got ${JSON.stringify(answers)}`);
+    assert.equal(answers[0].ok, false);
+    assert.equal(
+      postsOfType(host.posts, "library_failed").length,
+      0,
+      `a cancelled parse must not report a failure (failing=${failing})`,
+    );
+  }
+});
+
+test("a font refused for the cap is asked for again when the room comes back", async () => {
+  // The song plays two banks and the cap holds only one, so the second is
+  // refused. When the first track leaves the song there is room again: the
+  // refusal has to be forgotten and the font asked for once more.
+  const first = { engine: "soundfont", font_id: "font-first", bank: 0, program: 0 };
+  const second = { engine: "soundfont", font_id: "font-second", bank: 0, program: 0 };
+  const both = fontSong([
+    fontTrack(0, { device: first }),
+    fontTrack(1, { device: second }),
+  ], { bpm: 125 });
+  const secondOnly = fontSong([fontTrack(1, { device: second })], { bpm: 125 });
+
+  const host = await processorHost({ maxFontBytes: FONT_FOOTPRINT });
+  host.post({ type: "song", snapshot: both });
+  host.post({ type: "library", request_id: "first", library_id: "font-first", kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+  await host.flush();
+  host.post({ type: "library", request_id: "second", library_id: "font-second", kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+  await host.flush();
+  assert.equal(answersTo(host.posts, "second")[0].ok, false, "the second font does not fit while the first is loaded");
+  const neededBefore = postsOfType(host.posts, "library_needed").filter((message) => message.library_id === "font-second").length;
+
+  // The song's font set shrinks to the refused one: room is back (the first
+  // font is no longer needed and may be evicted), so it is asked for again.
+  host.post({ type: "song", snapshot: secondOnly });
+  await host.flush();
+  const neededAfter = postsOfType(host.posts, "library_needed").filter((message) => message.library_id === "font-second").length;
+  assert.equal(neededAfter, neededBefore + 1, "the refused font has to be reported as needed again");
+
+  host.post({ type: "library", request_id: "second-again", library_id: "font-second", kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+  await host.flush();
+  const again = answersTo(host.posts, "second-again");
+  assert.equal(again.length, 1);
+  assert.equal(again[0].ok, true, `the font has to load now that there is room, got ${JSON.stringify(again[0])}`);
+  assert.ok(host.processor.fonts.isLoaded("font-second"));
+});
+
+test("unloading a font re-asks for one the cap refused", async () => {
+  // The other half of the retry: an explicit unload of the bank that was using
+  // the room also makes the refused bank worth asking for again.
+  const first = { engine: "soundfont", font_id: "font-first", bank: 0, program: 0 };
+  const second = { engine: "soundfont", font_id: "font-second", bank: 0, program: 0 };
+  const song = fontSong([
+    fontTrack(0, { device: first }),
+    fontTrack(1, { device: second }),
+  ], { bpm: 125 });
+
+  const host = await processorHost({ maxFontBytes: FONT_FOOTPRINT });
+  host.post({ type: "song", snapshot: song });
+  host.post({ type: "library", request_id: "first", library_id: "font-first", kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+  await host.flush();
+  host.post({ type: "library", request_id: "second", library_id: "font-second", kind: "font", bytes: Uint8Array.from(FONT_BYTES) });
+  await host.flush();
+  assert.equal(answersTo(host.posts, "second")[0].ok, false);
+  const neededBefore = postsOfType(host.posts, "library_needed").filter((message) => message.library_id === "font-second").length;
+
+  host.post({ type: "library_unload", library_id: "font-first" });
+  await host.flush();
+  const neededAfter = postsOfType(host.posts, "library_needed").filter((message) => message.library_id === "font-second").length;
+  assert.equal(neededAfter, neededBefore + 1, "unloading the other bank has to make the refused one needed again");
+});
+
+test("an engine with no font host keeps each processor's own tracks", async () => {
+  // The no-op host is per PROCESSOR: two engines in one process must not share
+  // (or clear) each other's soundfont tracks.
+  const first = await processorHost({ withoutFontHost: true });
+  const second = await processorHost({ withoutFontHost: true });
+  const songA = fontSong([fontTrack(0, { device: { engine: "soundfont", font_id: "font-a", bank: 0, program: 0 } })], { bpm: 125 });
+  const songB = fontSong([fontTrack(0, { device: { engine: "soundfont", font_id: "font-b", bank: 0, program: 0 } })], { bpm: 125 });
+  first.post({ type: "song", snapshot: songA });
+  await first.flush();
+  second.post({ type: "song", snapshot: songB });
+  await second.flush();
+
+  assert.deepEqual(first.processor.fonts.missing(), ["font-a"], "the first processor keeps its own tracks");
+  assert.deepEqual(second.processor.fonts.missing(), ["font-b"], "the second processor keeps its own tracks");
+  first.processor.fonts.destroy();
+  assert.deepEqual(second.processor.fonts.missing(), ["font-b"], "destroying one no-op host must not clear another's tracks");
+  assert.deepEqual(
+    postsOfType(first.posts, "library_needed").map((message) => message.library_id),
+    ["font-a"],
+  );
+  assert.deepEqual(
+    postsOfType(second.posts, "library_needed").map((message) => message.library_id),
+    ["font-b"],
+  );
+});
+
+test("an empty library id fails without posting anything", async () => {
+  // A load with no id names nothing: the client answers it at once and posts
+  // nothing the processor would have to ignore.
+  const context = new OfflineAudioContext({ numberOfChannels: 2, length: 128, sampleRate: SAMPLE_RATE });
+  let engine = null;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: ASSETS });
+    let posted = 0;
+    const port = engine.node.port;
+    const realPost = port.postMessage.bind(port);
+    port.postMessage = function countingPost(...args) {
+      posted += 1;
+      return realPost(...args);
+    };
+    const result = await engine.loadLibrary("", "font", new Uint8Array(4));
+    assert.deepEqual(result, { status: "failed", reason: "A library load needs an id." });
+    assert.equal(posted, 0, "an empty library id must not post a message");
+  } finally {
+    if (engine) engine.dispose();
+    await releaseWorklet(context);
+  }
+});
 
 test("two fonts over the cap do not evict each other", async () => {
   // One font's footprint of room. The song plays two fonts, so neither may be
@@ -1009,39 +1513,56 @@ test("a soundfont track plays its program", async () => {
   assertTone(drummed.left, 2048, 8192, toneOf(128, 0), toneOf(0, 0), "bank 128 program 0 (the drums)");
 });
 
-test("the synth's own effects stay out of the mix", async () => {
-  // The host reads each channel's DRY pair and throws the synth's main pair
-  // away, and the synth's effects are off. A held note of the long-release
-  // preset is released here; the two renders — one with the channel's reverb
-  // send at zero, one with it wide open — have to be BIT-IDENTICAL. A synth with
-  // its effects on would add the bank's reverb tail to the main pair, so a host
-  // that mixed that pair in (or a synth whose reverb was live) shows here.
-  const dry = await renderReleasedNote(0);
-  const wet = await renderReleasedNote(127);
-  assert.deepEqual(wet, dry, "the channel's reverb send must not reach the track's audio");
+test("the synth's own main pair is never mixed into a track", async () => {
+  // A reverb-send comparison (0 vs 127) CANNOT fail: `channelOutputs` is
+  // documented as each channel's DRY data, and even with `effectsEnabled: true`
+  // the synth writes reverb/chorus/delay into its own main pair and effect
+  // blocks only, never into a channel's dry pair. So the test gives the synth's
+  // main L/R a distinct signal instead: the wrapper writes a ±0.5 DC offset
+  // into the main pair after the synth has rendered (which is exactly what a
+  // live effect's wet output would look like there) and the track's output must
+  // stay BIT-IDENTICAL to the dry render. A host that read the main pair — or
+  // an engine that passed effects through — would show the DC at once.
+  const dry = await renderReleasedNote({ injectMain: false });
+  const injected = await renderReleasedNote({ injectMain: true });
+  assert.ok(injected.frames > 0, "the test has to have written its signal into the main pair");
+  assert.deepEqual(injected.samples, dry.samples, "the synth's main L/R must never reach a track");
+  assert.ok(
+    Math.abs(meanOf(dry.samples.subarray(0, 4096))) < 0.001,
+    `the track carries the dry note, not the main pair's DC: mean was ${meanOf(dry.samples.subarray(0, 4096))}`,
+  );
 
   // And the released tail is a real release, not a cut: it sounds right after
   // the note off, and it decays.
-  const early = peakOf(dry.subarray(2048, 4096));
-  const late = peakOf(dry.subarray(dry.length - 2048));
+  const early = peakOf(dry.samples.subarray(2048, 4096));
+  const late = peakOf(dry.samples.subarray(dry.samples.length - 2048));
   assert.ok(early > 0.01, `the released note has to still sound, peak was ${early}`);
   assert.ok(late < early / 2, `the release has to decay, it went from ${early} to ${late}`);
 });
 
 /**
  * Render the long-release preset's note held for 2048 frames and then released
- * for a second, with the channel's reverb send at `send`.
- * @param {number} send 0-127
- * @returns {Promise<Float32Array>} the track's own (dry) left channel
+ * for a second. With `injectMain`, the synth's main pair is overwritten with a
+ * distinct DC signal after every render, so anything that read it would show.
+ * @param {{injectMain?: boolean}} [options]
+ * @returns {Promise<{samples: Float32Array, frames: number}>} the track's own
+ *   (dry) left channel, and how many frames of main signal were written
  */
-async function renderReleasedNote(send) {
+async function renderReleasedNote(options = {}) {
   const host = await loadedHost();
   host.assign([{ track_id: "track-1", font_id: FONT_ID, bank: 0, program: 8 }]);
   const synth = host.fontSynth(FONT_ID);
   assert.ok(synth, "the host has to hold the bank's synth");
-  // Controller 91 is the channel's reverb send: the very thing a live reverb
-  // would be fed from.
-  synth.midiChannels[0].controllerChange(91, send);
+  let frames = 0;
+  if (options.injectMain === true) {
+    const realProcess = synth.process.bind(synth);
+    synth.process = function processWithMainSignal(left, right, start, count, channels) {
+      realProcess(left, right, start, count, channels);
+      left.fill(0.5, start, start + count);
+      right.fill(-0.5, start, start + count);
+      frames += count;
+    };
+  }
   host.noteOn("track-1", 60, 100);
   const heldFrames = 2048;
   const tailFrames = SAMPLE_RATE;
@@ -1054,7 +1575,7 @@ async function renderReleasedNote(send) {
     host.process(count);
     out.set(host.outputFor("track-1").left.subarray(0, count), heldFrames + at);
   }
-  return out;
+  return { samples: out, frames: frames };
 }
 
 test("a font not on this device is silent and offers the download", async () => {
