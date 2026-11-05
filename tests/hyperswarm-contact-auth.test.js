@@ -697,7 +697,7 @@ test("H-C10a new<->new siblings: an own-Crow-ID cb_sig admits as instance, no co
   assert.deepEqual(s1.calls.peerConnected, []);
 });
 
-test("H-C10b an old sibling gets the deferred bare reply, with the piggyback, only after its own proof", T, async (t) => {
+test("H-C10b (PT-2b) an old sibling gets the deferred bare reply, without any feed key, only after its own proof", T, async (t) => {
   const me = id();
   for (const newInitiator of [true, false]) {
     const sNew = sibling(me, "inst-new");
@@ -710,11 +710,13 @@ test("H-C10b an old sibling gets the deferred bare reply, with the piggyback, on
     const resp = L.wa[iResp];
     assert.equal(typeof resp.signature, "string");
     assert.equal(resp.instance_id, "inst-new");
-    assert.equal(resp.feed_key_hex, sNew.feed);
+    // PT-2b deleted the pre-auth piggyback both ways.
+    assert.equal(resp.feed_key_hex, undefined, "no feed key on the bare reply");
     assert.equal(resp._snap, false, "the reply precedes mutual admission: the old side admits us only after it");
-    assert.ok(await until(() => sOld.calls.keyReceived.length && sNew.calls.keyReceived.length, 3000));
-    assert.deepEqual(sOld.calls.keyReceived, [["inst-new", sNew.feed]]);
-    assert.deepEqual(sNew.calls.keyReceived, [["inst-old", sOld.feed]]);
+    assert.ok(await until(() => sOld.calls.instanceConnected.length && sNew.calls.instanceConnected.length, 3000));
+    await sleep(300);
+    assert.deepEqual(sOld.calls.keyReceived, [], "an old sibling is admitted but learns no key");
+    assert.deepEqual(sNew.calls.keyReceived, [], "its own piggyback is not applied either");
     assert.deepEqual(sNew.calls.instanceConnected, [[me.crowId, "inst-old"]]);
   }
 });
@@ -1272,12 +1274,16 @@ test("H-C24 (S3) once a sibling binds, the sibling pin is written; an old siblin
     wireContactBinding(s.pm, { db: side.db, localInstanceId: side.localId });
     return { side, ...s };
   };
-  // Positive control: before the pin, an old sibling works.
+  // Positive control: before the pin, an old sibling is admitted (it learns no
+  // feed key: PT-2b deleted the piggyback both ways).
   {
     const n = await mk("N0");
     const o = sibling(me, "inst-old0", { PM: OldPeerManager });
     await link(t, n.pm, o.pm);
-    assert.ok(await until(() => n.calls.instanceConnected.length === 1 && o.calls.keyReceived.length === 1, 3000), "control: unpinned, the old sibling connects and gets the key");
+    assert.ok(await until(() => n.calls.instanceConnected.length === 1 && o.calls.instanceConnected.length === 1, 3000), "control: unpinned, the old sibling connects");
+    await sleep(300);
+    assert.deepEqual(o.calls.keyReceived, [], "no feed key rides the bare reply");
+    assert.deepEqual(n.calls.keyReceived, [], "nor is its piggyback applied");
     assert.equal(await instancePin(n.side, me.crowId), null, "a bare-signature sibling writes no pin");
   }
   const n = await mk("N1"), n2 = await mk("N2");

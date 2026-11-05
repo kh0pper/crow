@@ -1164,3 +1164,184 @@ test("U-H9 runtime spy (I5): on every refusal above, onInstanceConnected, onInst
     assert.deepEqual([s.instanceConnected.length, s.keyReceived.length, s.feedKeyAsked.length, s.replicate.length], [0, 0, 0, 0], label);
   }
 });
+
+// ================================================================ U-H13/U-H14
+/**
+ * One leg of a seed-holding relay: terminates Noise with the node and speaks
+ * the handshake itself, re-signing cb_sig for THIS leg (so the channel binding
+ * holds), then sends the pair-binding frame the relay "forwarded" from its
+ * other leg (`pbFrom`) and an instance-key with a rewritten feed key.
+ * `pbFrame: false` models the relay also stripping `pb: 1` from the challenge.
+ */
+async function seedRelayLeg(t, N, identity, { claimsId, pairKey, pbFrom = "foreign", pbFrame = true, feedKeyHex = null } = {}) {
+  const [p, r] = await streams(t, true);
+  const frames = tapWrites(p);
+  let closed = false;
+  r.once("close", () => { closed = true; });
+  const got = [];
+  let buf = "";
+  r.on("data", (d) => {
+    buf += d.toString();
+    const ls = buf.split("\n");
+    buf = ls.pop();
+    for (const l of ls) if (l.trim()) { try { got.push(JSON.parse(l)); } catch {} }
+  });
+  N.pm._handleConnection(p, {});
+  const ask = { type: "challenge", challenge: randomBytes(32).toString("hex"), cb: 1, pubkey: identity.ed25519Pubkey, crowId: identity.crowId, instance_id: claimsId };
+  if (pbFrame) ask.pb = 1;
+  r.write(JSON.stringify(ask) + "\n");
+  assert.ok(await until(() => got.some((f) => f.type === "challenge"), W(3000), 5), "the node sent its challenge");
+  const theirs = got.find((f) => f.type === "challenge");
+  await p.opened;
+  const hh = Buffer.from(p.handshakeHash).toString("hex");
+  const resp = {
+    type: "challenge-response", crowId: identity.crowId, pubkey: identity.ed25519Pubkey, instance_id: claimsId,
+    cb_sig: sign(contactCbMessage({ role: r.isInitiator ? "init" : "resp", signerCrowId: identity.crowId, challengeHex: theirs.challenge, handshakeHashHex: hh }), identity.ed25519Priv),
+  };
+  const out = [resp];
+  if (pbFrame) {
+    // The MAC the relay captured on its OTHER leg: a genuine MAC under the pair
+    // key, but over a different challenge and handshake hash.
+    const foreign = { challenge: randomBytes(32).toString("hex"), hh: randomBytes(32).toString("hex") };
+    const src = pbFrom === "foreign" ? foreign : { challenge: theirs.challenge, hh };
+    out.push({ type: "pair-binding", pb_mac: hyperswarmMac(pairSubkey(pairKey), { responder: claimsId, challenger: theirs.instance_id, challenge: src.challenge, handshakeHash: src.hh }) });
+  }
+  out.push({ type: "authenticated", instance_id: claimsId });
+  if (feedKeyHex) out.push({ type: "instance-key", instance_id: claimsId, feed_key_hex: feedKeyHex });
+  r.write(out.map((o) => JSON.stringify(o) + "\n").join(""));
+  return { p, frames, closed: () => closed, theirs, hh };
+}
+
+test("U-H13 (regression, expected-green on main) a seed-holding Noise relay between two genuine siblings, re-signing cb_sig per leg and forwarding pair-binding, is refused guard:pb_invalid on both sides and never gets a rewritten instance-key applied", T, async (t) => {
+  const { identity, a, b, pairKey } = await makePair(t);
+  const REWRITTEN = randomBytes(32).toString("hex");
+  logs.length = 0;
+  const A = newNode(a), B = newNode(b);
+  const la = await seedRelayLeg(t, A, identity, { claimsId: b.id, pairKey, feedKeyHex: REWRITTEN });
+  const lb = await seedRelayLeg(t, B, identity, { claimsId: a.id, pairKey, feedKeyHex: REWRITTEN });
+  // The cb_sig DID verify on each leg (the relay re-signed per leg)…
+  assert.ok(await until(() => refusalRegistry.length >= 0 && logs.some((l) => l.includes("guard:pb_invalid")), W(8000)), pmLogs());
+  // …and the forwarded pair-binding MAC did not: different challenge, different hash.
+  assert.ok(refusedFor("guard:pb_invalid"), pmLogs());
+  await sleep(200);
+  assert.equal(la.closed(), true, "leg A destroyed");
+  assert.equal(lb.closed(), true, "leg B destroyed");
+  assertInert(A, "U-H13 A", { frames: la.frames });
+  assertInert(B, "U-H13 B", { frames: lb.frames });
+  assert.deepEqual(A.spies.keyReceived, [], "the rewritten feed key is never applied on A");
+  assert.deepEqual(B.spies.keyReceived, [], "the rewritten feed key is never applied on B");
+  assert.equal(await pairPin(a, b.id), null);
+  assert.equal(await pairPin(b, a.id), null);
+});
+
+test("U-H14 (red on main) the same relay also strips pb: 1: the default mode refuses guard:pb_required on both sides and the rewritten key is never applied; documenting control: explicit auto with no pins admits it as legacy and the swap lands", T, async (t) => {
+  const { identity, a, b, pairKey } = await makePair(t);
+  const REWRITTEN = randomBytes(32).toString("hex");
+  {
+    logs.length = 0;
+    const A = newNode(a, { mode: "require" }), B = newNode(b, { mode: "require" });
+    const la = await seedRelayLeg(t, A, identity, { claimsId: b.id, pairKey, pbFrame: false, feedKeyHex: REWRITTEN });
+    const lb = await seedRelayLeg(t, B, identity, { claimsId: a.id, pairKey, pbFrame: false, feedKeyHex: REWRITTEN });
+    assert.ok(await until(() => A.spies.kills.length > 0 && B.spies.kills.length > 0, W(8000)), pmLogs());
+    await sleep(200);
+    assert.ok(refusedFor("guard:pb_required"), pmLogs());
+    assertInert(A, "U-H14 require A", { frames: la.frames });
+    assertInert(B, "U-H14 require B", { frames: lb.frames });
+    assert.equal(await pairPin(a, b.id), null);
+  }
+  {
+    // Documenting control: auto, nothing pinned → admitted as legacy, and the
+    // rewritten feed key lands (this is why `auto` is only a rollback state).
+    logs.length = 0;
+    const A = newNode(a, { mode: "auto" });
+    const la = await seedRelayLeg(t, A, identity, { claimsId: b.id, pairKey, pbFrame: false, feedKeyHex: REWRITTEN });
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(5000)), pmLogs());
+    assert.ok(await until(() => A.spies.keyReceived.length === 1, W(5000)), pmLogs());
+    assert.deepEqual(A.spies.keyReceived, [[b.id, REWRITTEN]], "auto + legacy: the swapped key is applied");
+    assert.equal(la.closed(), false);
+  }
+});
+
+// ================================================================ U-H15
+test("U-H15 (regression, expected-green on main) a raw-byte relay that flips one byte after mutual admission destroys both streams and applies nothing after the flip; control: no flip, markers flow", T, async (t) => {
+  /** A pure byte relay between two socket pairs (`flipNext` flips one byte of the next chunk). */
+  const byteRelay = async (t2) => {
+    const [a1, x1] = await socketPair();
+    const [x2, b1] = await socketPair();
+    const st = { flipped: false, flipNext: false };
+    const maybeFlip = (d) => {
+      if (!st.flipNext || st.flipped) return d;
+      st.flipNext = false; st.flipped = true;
+      const copy = Buffer.from(d);
+      copy[copy.length - 1] ^= 0x01;
+      return copy;
+    };
+    x1.on("data", (d) => { try { x2.write(maybeFlip(d)); } catch {} });
+    x2.on("data", (d) => { try { x1.write(d); } catch {} });
+    for (const s of [a1, x1, x2, b1]) s.on("error", () => {});
+    onTeardown(t2, "byte relay", () => { for (const s of [a1, x1, x2, b1]) { try { s.destroy(); } catch {} } });
+    return { a1, b1, st };
+  };
+  const run = async (t2, flip) => {
+    const { a, b } = await makePair(t2);
+    const { a1, b1, st } = await byteRelay(t2);
+    const A = newNode(a), B = newNode(b);
+    const sa = new NoiseSecretStream(true, a1), sb = new NoiseSecretStream(false, b1);
+    for (const s of [sa, sb]) s.on("error", () => {});
+    onTeardown(t2, "noise pair", () => { try { sa.destroy(); } catch {} try { sb.destroy(); } catch {} });
+    A.pm._handleConnection(sa, {});
+    B.pm._handleConnection(sb, {});
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1 && B.spies.instanceConnected.length === 1, W(10_000)), pmLogs());
+    return { a, b, A, B, sa, sb, st };
+  };
+
+  {
+    // Control: the same raw-byte relay with no flip.
+    const { a, b } = await run(t, false);
+    await markers(a, b, { label: "u-h15 control" });
+  }
+
+  {
+    const { a, b, A, B, sa, sb, st } = await run(t, true);
+    const before = A.spies.keyReceived.length;
+    st.flipNext = true;
+    // Traffic in the flipped direction: a plaintext write makes protomux emit a
+    // Noise frame, which the relay corrupts.
+    sa.write(Buffer.from("x".repeat(64)));
+    assert.ok(await until(() => sa.destroyed || sb.destroyed, W(10_000)), "a flipped ciphertext byte destroys a stream");
+    const m = ++marker;
+    await writeAndEmit(a, m, "u-h15 after flip");
+    await sleep(1000);
+    assert.equal(await hasMemory(b.db, m), false, "no entry is applied after the flip");
+    assert.equal(A.spies.keyReceived.length, before, "no feed key arrives from the tampered stream");
+  }
+});
+
+// ================================================================ U-H16
+test("U-H16 (red on main) no challenge-response ever carries a feed key, and a bare-signature sibling's piggyback never reaches onInstanceKeyReceived", T, async (t) => {
+  // (a) On a real new↔new link neither side's reply carries a feed key.
+  {
+    const { a, b } = await makePair(t);
+    const A = newNode(a), B = newNode(b);
+    const L = await link(t, A, B);
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1 && B.spies.instanceConnected.length === 1, W(8000)), pmLogs());
+    for (const [w, who] of [[L.wx, "A"], [L.wy, "B"]]) {
+      for (const f of framesOf(w, "challenge-response")) assert.equal("feed_key_hex" in f, false, `${who}: no piggyback`);
+    }
+    assert.equal(feedKeyVia(L.wx), "instance-key");
+    assert.equal(feedKeyVia(L.wy), "instance-key");
+  }
+  // (b) A bare-signature sibling that DOES send a feed key in its response is
+  // never credited with it (pre-PT-3 old siblings simply stop learning keys).
+  {
+    const { identity, a, b } = await makePair(t);
+    const FEED = randomBytes(32).toString("hex");
+    const A = newNode(a, { mode: "auto" });
+    const R = await rawSibling(t, A, identity, { challengeId: b.id, responseId: b.id, proof: "sig", pb: false });
+    assert.ok(await until(() => A.spies.instanceConnected.length === 1, W(8000)), pmLogs());
+    await sleep(200);
+    assert.deepEqual(A.spies.keyReceived, [], "a piggybacked feed key is never applied");
+    assert.equal(feedKeyVia(R.pmFrames), null, "the deferred reply carries no feed key either");
+    assert.equal(typeof framesOf(R.pmFrames, "challenge-response")[0]?.signature, "string", "the bare reply itself still exists (pre-PT-3 contacts need it)");
+  }
+});

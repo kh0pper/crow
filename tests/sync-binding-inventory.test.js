@@ -174,8 +174,81 @@ test("tailnet inventory positive control: each planted unguarded call in a temp 
   assert.deepEqual(scanTailnet(f), [], "a plant inside a comment is not code");
 });
 
+/**
+ * PT-2b's tailnet rule: on each side of the handshake, every side effect that
+ * the session check protects comes after `session.open(` in the same function,
+ * and every control frame after the hellos is sent near a `session.seal(`.
+ * Textual, so it cannot catch the CLIENT's backfill reordering on its own —
+ * U-S4(b) is that guard; this scan catches the gross regressions.
+ */
+const SESSION_FNS = ["handleAcceptedConnection", "PeerDialer.connect"];
+const SESSION_EFFECTS = [
+  { what: "backfillPeerAddress(", re: /\bbackfillPeerAddress\s*\(/g },
+  { what: "validateIncomingFeedKey(", re: /\bvalidateIncomingFeedKey\s*\(/g },
+  { what: "initInstance(", re: /\.\s*initInstance\s*\(/g },
+  { what: "UPDATE crow_instances", re: /\bUPDATE\s+crow_instances\b/gi },
+  { what: ".replicate(", re: /\.\s*replicate\s*\(/g },
+];
+const UNSEALED_WINDOW = 600; // chars of context that must mention session.seal(
+
+function scanTailnetSession(file) {
+  const src = stripComments(readFileSync(file, "utf8"));
+  const { body } = functionSpans(src);
+  const v = [];
+  for (const fn of SESSION_FNS) {
+    const b = body(fn);
+    if (!b) { v.push(`no ${fn}`); continue; }
+    const openAt = b.text.search(/\b(?:session\.)?open\s*\(\s*"(?:proof|feed)"/);
+    if (openAt < 0) { v.push(`${fn} never opens a session frame`); continue; }
+    for (const rule of SESSION_EFFECTS) {
+      for (const m of b.text.matchAll(rule.re)) {
+        if (m.index < openAt) v.push(`${rule.what} before the session check in ${fn}`);
+      }
+    }
+    for (const m of b.text.matchAll(/ws\.send\(\s*JSON\.stringify\(/g)) {
+      const before = b.text.slice(Math.max(0, m.index - UNSEALED_WINDOW), m.index);
+      if (!/session\.seal\s*\(/.test(before)) v.push(`ws.send(JSON.stringify( without a session seal in ${fn}`);
+    }
+  }
+  return v;
+}
+
+test("tailnet session inventory: every post-hello control frame is sealed, and every side effect follows the session check", T, () => {
+  assert.deepEqual(scanTailnetSession(TAILNET), []);
+});
+
+test("tailnet session inventory positive control: an unsealed frame and a pre-check side effect in a temp copy both fail the scan", T, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pt2b-scan-session-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const src = readFileSync(TAILNET, "utf8");
+  const at = (anchor, line) => {
+    const i = src.indexOf(anchor);
+    assert.ok(i > 0, `anchor ${anchor}`);
+    const j = src.indexOf("\n", i) + 1;
+    return src.slice(0, j) + line + src.slice(j);
+  };
+  const f = join(dir, "tailnet-sync.js");
+  const plants = [
+    ["ws.send(JSON.stringify( without a session seal in handleAcceptedConnection",
+      at("  const remoteInstanceId = peerHandshake.instance_id;", "  ws.send(JSON.stringify({ feed_key_hex: 'ab' }));\n")],
+    ["initInstance( before the session check in handleAcceptedConnection",
+      at("    peerRow = rows[0];", "    await instanceSyncManager.initInstance(remoteInstanceId, null);\n")],
+  ];
+  for (const [want, text] of plants) {
+    assert.notEqual(text, src, `plant for ${want} changed the file`);
+    writeFileSync(f, text);
+    const v = scanTailnetSession(f);
+    assert.ok(v.includes(want), `planted "${want}" is caught: ${JSON.stringify(v)}`);
+  }
+  writeFileSync(f, at("  const remoteInstanceId = peerHandshake.instance_id;", "  // ws.send(JSON.stringify({ x: 1 }))\n"));
+  assert.deepEqual(scanTailnetSession(f), [], "a plant inside a comment is not code");
+});
+
 // ---------------------------------------------------------------- Hyperswarm
-const ADMISSION = ["PeerManager._admit", "PeerManager._completeAdmit", "PeerManager._sendDeferredReply", "PeerManager._dispatchAdmitted"];
+// `_sendDeferredReply` is deliberately NOT here any more: since PT-2b it looks
+// no feed key up at all, so a (re)introduced `getFeedKeyForInstance(` there is
+// a violation rather than an allowed piggyback.
+const ADMISSION = ["PeerManager._admit", "PeerManager._completeAdmit", "PeerManager._dispatchAdmitted"];
 const HS_CALLS = [
   { what: "onInstanceConnected(", re: /\.\s*onInstanceConnected\s*\(/g },
   { what: "onInstanceKeyReceived(", re: /\.\s*onInstanceKeyReceived\s*\(/g },
@@ -252,6 +325,7 @@ test("Hyperswarm inventory positive control: each planted call in a temp copy fa
     ["onInstanceKeyReceived(msg.instance_id) in PeerManager._dispatchAdmitted", at("  async _dispatchAdmitted(conn, msg, state) {", "    if (msg.instance_id === state.remoteInstanceId) this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex);\n")],
     ["\"instance-key\" send before the id resolution in _admit", at("  async _admit(conn, state, msg, kind) {", "    conn.write(JSON.stringify({ type: \"instance-key\", instance_id: this.localInstanceId }) + \"\\n\");\n")],
     ["\"pair-binding\" send in PeerManager._onChallenge", at("  async _onChallenge(conn, msg, state) {", "    conn.write(JSON.stringify({ type: \"pair-binding\", pb_mac: null }) + \"\\n\");\n")],
+    ["getFeedKeyForInstance( in PeerManager._sendDeferredReply", at("  async _sendDeferredReply(conn, state) {", "    await this.getFeedKeyForInstance(state.remoteInstanceId);\n")],
     ["side effect state.authenticated = true before the guard in _admit", at("    const guard = this.admitGuards?.[kind];", "    state.authenticated = true;\n")],
   ];
   const f = join(dir, "peer-manager.js");

@@ -78,7 +78,9 @@ test("H-R1 positive control: a sibling (owner's key) gets the instance path", as
   const { pm, calls } = makePm();
   const conn = await respond(pm, owner, { crowId: owner.crowId, instance_id: "instB", feed_key_hex: FEED });
   assert.equal(conn.destroyed, false);
-  assert.deepEqual(calls.keyReceived, [["instB", FEED]]);
+  // PT-2b: a feed key on a challenge-response is no longer honoured (the
+  // pre-auth piggyback is gone); the sibling path itself is what this controls.
+  assert.deepEqual(calls.keyReceived, []);
   assert.deepEqual(calls.instanceConnected, [[owner.crowId, "instB"]]);
 });
 
@@ -114,8 +116,8 @@ test("H-R4 switch off: an unauthenticated peer presenting our crowId AND our pub
 // Formerly a known gap (test.todo): the challenge reply piggybacked the feed
 // key before the peer had proved anything. PT-3 holds that reply until the
 // asker proves our key on the connection.
-test("PT-2a: with the switch on, the feed key is sent only after the peer proves our key", async () => {
-  // Positive control, same connection shape: a proving sibling gets the key.
+test("PT-2a: with the switch on, the bare deferred reply is written only after the peer proves our key, and carries no feed key", async () => {
+  // Positive control, same connection shape: a proving sibling gets the reply.
   {
     const { pm, calls } = makePm();
     const conn = fakeConn();
@@ -127,10 +129,10 @@ test("PT-2a: with the switch on, the feed key is sent only after the peer proves
     const types = conn.written.map((m) => m.type);
     assert.deepEqual(types, ["authenticated", "challenge-response"], "the reply follows admission");
     const reply = conn.written[1];
-    assert.equal(reply.feed_key_hex, FEED);
+    assert.equal(reply.feed_key_hex, undefined, "PT-2b: no feed-key piggyback, either direction");
     assert.equal(reply.instance_id, "instA");
     assert.equal(typeof reply.signature, "string");
-    assert.deepEqual(calls.feedKeyAsked, ["instB"]);
+    assert.deepEqual(calls.feedKeyAsked, [], "the reply looks no feed key up");
   }
   // A stranger presenting our Crow ID and our pubkey never proves our key.
   const { pm, calls } = makePm();

@@ -9,7 +9,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { makeFleet, linkPeers, until, hasMemory, writeAndEmit } from "./fixtures/sync-fleet.mjs";
 import { sign } from "../servers/sharing/identity.js";
-import { entryOriginMode } from "../servers/sharing/instance-sync.js";
+import { entryOriginMode, _resetEntryOriginModeLog } from "../servers/sharing/instance-sync.js";
 
 function forge(identity, id, content, claimed) {
   const entry = {
@@ -54,21 +54,38 @@ async function runCase(mode, expectApplied) {
   }
 }
 
-describe("entryOriginMode", () => {
-  it("defaults to observe; only the exact value enforce enforces", () => {
-    assert.equal(entryOriginMode({}), "observe");
-    assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "enforce" }), "enforce");
-    assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "observe" }), "observe");
-    assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "bogus" }), "observe");
+describe("entryOriginMode (PT-2b default: enforce)", () => {
+  it("unset and empty enforce; observe is the explicit escape; anything else is observe, warned once", () => {
+    const warns = [];
+    const orig = console.warn;
+    console.warn = (...a) => warns.push(a.join(" "));
+    try {
+      _resetEntryOriginModeLog();
+      assert.equal(entryOriginMode({}), "enforce");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "" }), "enforce");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "enforce" }), "enforce");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "observe" }), "observe");
+      assert.equal(warns.length, 0, "valid values never warn");
+      // A typo is a failed rollback: it must fail to the HARMLESS direction
+      // (observe applies the entry; enforce consumes it for good), loudly.
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "enforced" }), "observe");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "Enforce" }), "observe");
+      assert.equal(warns.length, 1, "warned once per boot");
+      assert.match(warns[0], /CROW_SYNC_ENTRY_ORIGIN/);
+      assert.match(warns[0], /observe/);
+    } finally {
+      console.warn = orig;
+      _resetEntryOriginModeLog();
+    }
   });
 });
 
 describe("entry origin", () => {
-  it("observe (default): forged entry applies, counted + logged once", async () => {
-    await runCase(undefined, true);
+  it("enforce (default): the forged entry is skipped, the seq still advances, the genuine entry right after applies", async () => {
+    await runCase(undefined, false);
   });
-  it("enforce: forged entry skipped, seq advances, genuine entry applies", async () => {
-    await runCase("enforce", false);
+  it("observe (the explicit escape): the forged entry applies, counted + logged once, and the genuine one applies", async () => {
+    await runCase("observe", true);
   });
 });
 

@@ -258,14 +258,14 @@ test("U-P5 (regression, expected-green on main) inbound sync never writes or del
 });
 
 // ── U-P6 ───────────────────────────────────────────────────────────────────
-test("U-P6 pairBindingMode: auto by default in PT-2a, an unknown value is require (logged once)", () => {
+test("U-P6' pairBindingMode: require by default, an unknown value is require (logged once)", () => {
   const warns = [];
   const orig = console.warn;
   console.warn = (...a) => warns.push(a.join(" "));
   try {
     _resetPairBindingModeLog();
-    assert.equal(pairBindingMode({}), "auto");
-    assert.equal(pairBindingMode({ CROW_SYNC_PAIR_BINDING: "" }), "auto");
+    assert.equal(pairBindingMode({}), "require");
+    assert.equal(pairBindingMode({ CROW_SYNC_PAIR_BINDING: "" }), "require");
     assert.equal(pairBindingMode({ CROW_SYNC_PAIR_BINDING: "auto" }), "auto");
     assert.equal(pairBindingMode({ CROW_SYNC_PAIR_BINDING: "require" }), "require");
     assert.equal(warns.length, 0);

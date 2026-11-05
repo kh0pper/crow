@@ -640,7 +640,7 @@ test("G13: stale-snapshot tailnet handshake cannot swap back a concurrently-rece
       return realExec(q);
     }};
     server = http.createServer();
-    setupTailnetSyncServer(server, { identity: b.mgr.identity, instanceSyncManager: b.mgr, db: dbWrapper });
+    setupTailnetSyncServer(server, { identity: b.mgr.identity, instanceSyncManager: b.mgr, db: dbWrapper, pairBindingMode: "auto" });
     await new Promise((r) => server.listen(0, "127.0.0.1", r));
     // Dial as A with a REAL signed handshake.
     ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/api/instance-sync/stream`);

@@ -58,6 +58,9 @@ async function gateway(fleet, side) {
     ctx: {
       identity: fleet.identity, instanceSyncManager: side.mgr, db: side.db, gatewayPort: port,
       idleRecheckMs: IDLE_MS, fallbackDialAfterMs: FALLBACK_MS, log: { warn: () => {} },
+      // These legs are about addresses, not key material: model a pair with no
+      // pair key (which PT-2b's default `require` would refuse).
+      pairBindingMode: "auto",
       // Never ladder onto 3001/3002: on a dev box those are LIVE gateways.
       standardPorts: [],
       selfAddress: async () => g.advertise,

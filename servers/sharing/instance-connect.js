@@ -233,9 +233,9 @@ export function wireInstanceSync(peerManager, { db, instanceSyncManager, pairKey
   };
 
   // Persist a peer-advertised feed key so we can open their incoming feed.
-  // Called only after the sibling proved our key: from a new sibling's
-  // `instance-key` frame, or an old sibling's challenge-response piggyback
-  // (instance_id, feed_key_hex). See peer-manager.js.
+  // Called only after the sibling proved our key, and only from the
+  // `instance-key` frame (see peer-manager.js). A bare-signature sibling's
+  // challenge-response no longer carries one (PT-2b).
   peerManager.onInstanceKeyReceived = async (remoteInstanceId, feedKeyHex) => {
     try {
       const { rows } = await db.execute({
