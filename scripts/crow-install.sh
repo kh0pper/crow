@@ -235,11 +235,16 @@ else
   log "Caddy installed"
 fi
 
-# The gateway's dedicated proxy socket (the security audit's finding) is a unix
-# socket at /run/crow/gateway.sock, created by systemd for the gateway's user
-# with mode 0660. Caddy runs as the 'caddy' service user, so it needs to be in
-# this user's group to traverse the 0750 directory and open the socket.
-sudo usermod -aG "$USER" caddy
+# The gateway's dedicated proxy socket (the security audit's finding) is owned
+# by systemd, not by the gateway: crow-gateway-proxy.socket listens on
+# /run/crow-proxy/gateway.sock as root:caddy with mode 0660, and the gateway
+# receives that listening fd by socket activation. Caddy runs as the 'caddy'
+# service user, which is why the socket's group is 'caddy' — no user is added to
+# anybody's group, so Caddy never gains access to the operator's files.
+if ! id caddy >/dev/null 2>&1 || ! getent group caddy >/dev/null 2>&1; then
+  error "the 'caddy' user/group is missing — the proxy socket unit needs SocketGroup=caddy"
+  exit 1
+fi
 
 # ─── Step 5: Install Avahi (mDNS for crow.local) ─────────
 
@@ -312,13 +317,41 @@ fi
 
 header "Step 7/9: System Services"
 
+# The gateway's proxy socket — SYSTEMD owns it, as root:caddy 0660, so only the
+# local Caddy can open it. A loopback dial carrying X-Forwarded-For from
+# anywhere else (a bot running as the gateway's own user included) stays an
+# unverifiable peer, and the gateway never creates, chmods or unlinks the path.
+# Enable and start it BEFORE the gateway, which receives its fd by activation.
+sudo tee /etc/systemd/system/crow-gateway-proxy.socket > /dev/null << 'SOCKETEOF'
+[Unit]
+Description=Crow gateway proxy socket (for the local Caddy only)
+[Socket]
+ListenStream=/run/crow-proxy/gateway.sock
+SocketUser=root
+SocketGroup=caddy
+SocketMode=0660
+DirectoryMode=0755
+[Install]
+WantedBy=sockets.target
+SOCKETEOF
+
 # Crow Gateway systemd service
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
 [Unit]
 Description=Crow Gateway
 Wants=network-online.target
 After=network-online.target docker.service tailscaled.service
+After=crow-gateway-proxy.socket
 Requires=docker.service
+# The dedicated proxy socket Caddy dials (the security audit's finding): a
+# loopback connection carrying X-Forwarded-For is unverifiable (any local
+# process can write the same header), so Caddy's visitors would be turned away
+# by the dashboard's network gate. CROW_TRUSTED_PROXIES=loopback is not the fix
+# (it makes every same-box caller the proxy and breaks the loopback-only doors).
+# systemd owns the socket (root:caddy 0660) and passes this service its
+# listening fd by socket activation — see the socket unit above.
+Sockets=crow-gateway-proxy.socket
+Requires=crow-gateway-proxy.socket
 
 [Service]
 Type=simple
@@ -332,16 +365,6 @@ RestartPreventExitStatus=78
 Environment=NODE_ENV=production
 Environment=CROW_DATA_DIR=$CROW_DATA
 Environment=CROW_DB_PATH=$CROW_DATA/crow.db
-# The dedicated proxy socket Caddy dials (the security audit's finding): a
-# loopback connection carrying X-Forwarded-For is unverifiable (any local
-# process can write the same header), so Caddy's visitors would be turned away
-# by the dashboard's network gate. CROW_TRUSTED_PROXIES=loopback is not the fix
-# (it makes every same-box caller the proxy and breaks the loopback-only doors).
-# RuntimeDirectory=crow owns /run/crow; the socket is chmod 0660 by the gateway,
-# and the caddy user is in this user's group.
-RuntimeDirectory=crow
-RuntimeDirectoryMode=0750
-Environment=CROW_PROXY_SOCKET=/run/crow/gateway.sock
 
 [Install]
 WantedBy=multi-user.target
@@ -356,11 +379,12 @@ EOF
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
 ${MDNS_HOST} {
     tls internal
-    reverse_proxy unix//run/crow/gateway.sock
+    reverse_proxy unix//run/crow-proxy/gateway.sock
 }
 EOF
 
 sudo systemctl daemon-reload
+sudo systemctl enable --now crow-gateway-proxy.socket
 sudo systemctl enable --now crow-gateway
 sudo systemctl restart caddy
 log "Gateway service enabled and started"

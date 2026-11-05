@@ -7,22 +7,29 @@
  * owner was locked out of their own instance right after first-run setup.
  *
  * CROW_TRUSTED_PROXIES=loopback is not the fix (see loopbackProxyWarning).
- * Instead the gateway also listens on a unix socket whose filesystem mode
- * decides who may connect; Caddy dials it, and every connection accepted there
- * is marked (PROXY_SOCKET) so classifyPeer can name the client Caddy named.
+ * Instead SYSTEMD owns a unix socket (crow-gateway-proxy.socket: root:caddy
+ * 0660) and the gateway listens on the fd it inherits (LISTEN_FDS). Only the
+ * local Caddy can open it, so a process running as the gateway's own user
+ * cannot dial it with a forged header; every connection accepted there is
+ * marked (PROXY_SOCKET) so classifyPeer can name the client Caddy named — the
+ * rightmost X-Forwarded-For hop, and only that hop.
  *
  * These tests pin:
  *   - a marked socket is `proxy` with the rightmost X-Forwarded-For hop, and
  *     isAllowedNetwork validates it exactly like any declared proxy;
+ *   - the rightmost hop wins even when it is itself in CROW_TRUSTED_PROXIES;
  *   - a marked socket with a public hop, a chain containing one, or no header
  *     at all is refused (fail closed);
  *   - an UNMARKED loopback socket with the same header is still unverified and
  *     refused, so forgery stays impossible;
  *   - a real HTTP round trip over a unix socket sees the same classification;
- *   - isSelfOrigin follows the effective client through the proxy socket;
- *   - the Access Denied page no longer advises CROW_DASHBOARD_PUBLIC=true;
- *   - the fix-it detector fires on a loopback Caddyfile and stays quiet
- *     otherwise.
+ *   - the fd-selection rule (LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES) and the fact
+ *     that no listener exists without it, or under --no-auth;
+ *   - a child process handed the listening fd as fd 3 (exactly what socket
+ *     activation does) serves requests over it, marked;
+ *   - the Access Denied page no longer advises CROW_DASHBOARD_PUBLIC;
+ *   - the fix-it detector fires on a loopback Caddyfile with no socket unit,
+ *     and resolves its card once the unit exists.
  *
  * Placeholder addresses only: the LAN client is 192.168.1.20, the public one
  * 8.8.8.8.
@@ -30,11 +37,14 @@
 import { test, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import express from "express";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { classifyPeer, resolveClientMiddleware, PROXY_SOCKET } from "../servers/shared/peer-class.js";
 import { resetPeerWarningsForTests } from "../servers/shared/peer-uid.js";
 import { isAllowedNetwork, dashboardAuth } from "../servers/gateway/dashboard/auth.js";
@@ -42,11 +52,12 @@ import { isSelfOrigin, effectiveClient } from "../servers/shared/self-origin.js"
 import { setInterfaceTableForTests } from "../servers/shared/ip-classify.js";
 import { translations, SUPPORTED_LANGS, t } from "../servers/gateway/dashboard/shared/i18n.js";
 import {
-  listenProxySocket, closeProxySocket, proxySocketPath,
+  startActivatedProxySocket, listenProxySocketForTests, closeProxySocket, pickProxyFd,
+  PROXY_SOCKET_UNIT,
 } from "../servers/gateway/proxy-socket.js";
-import detector, { caddyProxySocketProblem } from "../servers/gateway/fix-it/detectors/caddy-proxy-socket.js";
+import detector, { caddyProxySocketProblem, DEDUP_KEY } from "../servers/gateway/fix-it/detectors/caddy-proxy-socket.js";
 
-const ENV_KEYS = ["CROW_DASHBOARD_PUBLIC", "CROW_TRUSTED_PROXIES", "CROW_ALLOWED_IPS", "CROW_PROXY_SOCKET"];
+const ENV_KEYS = ["CROW_DASHBOARD_PUBLIC", "CROW_TRUSTED_PROXIES", "CROW_ALLOWED_IPS"];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -87,6 +98,22 @@ test("a marked socket whose chain names a public hop anywhere is refused (a head
   const req = marked({ "x-forwarded-for": "8.8.8.8, 192.168.1.20" });
   assert.equal(classifyPeer(req).client, "192.168.1.20");
   assert.equal(isAllowedNetwork(req), false);
+});
+
+test("on the proxy socket the client is the RIGHTMOST hop only — never one further left", () => {
+  // 10.0.0.9 is a proxy this box also lists, but Caddy is the one that spoke to
+  // the socket: the visitor it saw is the client, and reading the earlier hop
+  // would let the header move the client one proxy deeper.
+  process.env.CROW_TRUSTED_PROXIES = "10.0.0.0/8";
+  try {
+    const req = marked({ "x-forwarded-for": "192.168.1.5, 10.0.0.9" });
+    const p = classifyPeer(req);
+    assert.equal(p.via, "proxy");
+    assert.equal(p.client, "10.0.0.9");
+    assert.equal(isAllowedNetwork(req), true, "both hops are private, so the request passes");
+  } finally {
+    delete process.env.CROW_TRUSTED_PROXIES;
+  }
 });
 
 test("a marked socket with no forwarding header names nobody and is refused (fail closed)", () => {
@@ -138,10 +165,23 @@ test("isSelfOrigin follows the effective client through the proxy socket", () =>
   assert.equal(isSelfOrigin(marked({ "x-forwarded-for": "10.0.0.5" })), true, "the box's own LAN address");
 });
 
-// ─── a real HTTP round trip over the socket ───
+// ─── a real HTTP round trip over the socket (TEST-ONLY path listener) ───
 
 const tmpDir = mkdtempSync(join(tmpdir(), "crow-proxy-socket-"));
 after(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+/** Resolve once `text` appears in the stream's output. */
+function waitForText(stream, text, stderr = () => "") {
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    stream.on("data", (c) => {
+      buf += c;
+      if (buf.includes(text)) resolve();
+    });
+    stream.on("end", () => reject(new Error(`stream ended before "${text}"; stderr:\n${stderr()}`)));
+    stream.on("error", reject);
+  });
+}
 
 function requestUnix(socketPath, headers = {}, path = "/who") {
   return new Promise((resolve, reject) => {
@@ -155,7 +195,8 @@ function requestUnix(socketPath, headers = {}, path = "/who") {
   });
 }
 
-test("real HTTP round trip: the unix socket marks the connection and the client is classified", async () => {
+/** The app shape every round-trip test serves: the classifier's verdict. */
+function whoApp() {
   const app = express();
   app.use(resolveClientMiddleware());
   app.get("/who", (req, res) => res.json({
@@ -164,14 +205,15 @@ test("real HTTP round trip: the unix socket marks the connection and the client 
     proxySocket: req.crowPeer.proxySocket,
     ip: req.ip,
     allowed: isAllowedNetwork(req),
+    selfOrigin: isSelfOrigin(req),
   }));
+  return app;
+}
 
+test("real HTTP round trip on a marked unix socket: LAN allowed, public denied, no header denied", async () => {
   const socketPath = join(tmpDir, "gateway.sock");
-  assert.equal(proxySocketPath({ CROW_PROXY_SOCKET: socketPath }), socketPath);
-  assert.equal(proxySocketPath({}), null);
-
-  const server = listenProxySocket(app, http.createServer(), socketPath, { log: () => {} });
-  assert.ok(server, "a configured path starts a listener");
+  const server = listenProxySocketForTests(whoApp(), http.createServer(), socketPath, { log: () => {} });
+  assert.ok(server, "the test-only path listener starts");
   try {
     await once(server, "listening");
     const ok = await requestUnix(socketPath, { "x-forwarded-for": "192.168.1.20" });
@@ -190,13 +232,168 @@ test("real HTTP round trip: the unix socket marks the connection and the client 
     const bare = JSON.parse((await requestUnix(socketPath, {})).body);
     assert.equal(bare.client, null);
     assert.equal(bare.allowed, false);
+
+    // The box's own loopback address through Caddy is still "this machine".
+    const selfReq = JSON.parse((await requestUnix(socketPath, { "x-forwarded-for": "127.0.0.1" })).body);
+    assert.equal(selfReq.client, "127.0.0.1");
+    assert.equal(selfReq.selfOrigin, true);
   } finally {
-    closeProxySocket(server, socketPath);
+    await closeProxySocket(server);
   }
 });
 
-test("no CROW_PROXY_SOCKET means no second listener", () => {
-  assert.equal(listenProxySocket(express(), http.createServer(), null), null);
+test("real TCP loopback with a forged X-Forwarded-For stays unverified — no marker, no trust", async () => {
+  const server = http.createServer(whoApp());
+  server.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const { port } = server.address();
+    const body = await new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: "127.0.0.1", port, path: "/who", headers: { "x-forwarded-for": "192.168.1.20" } },
+        (res) => {
+          let raw = "";
+          res.on("data", (c) => { raw += c; });
+          res.on("end", () => resolve(JSON.parse(raw)));
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    assert.equal(body.via, "unverified", "any same-box program can write that header");
+    assert.equal(body.proxySocket, false);
+    assert.equal(body.allowed, false);
+    // And it reads as this machine, which is why the gate refuses it: the only
+    // way to look like a distinct client Caddy vouched for is the marker, and
+    // the marker can only be set by a connection systemd's socket accepted.
+    assert.equal(body.selfOrigin, true);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test("the test-only listener is a no-op without a target, and closeProxySocket never throws twice", async () => {
+  assert.equal(listenProxySocketForTests(express(), http.createServer(), null), null);
+  assert.equal(listenProxySocketForTests(express(), http.createServer(), ""), null);
+  const closed = await closeProxySocket(null);
+  assert.equal(closed, undefined);
+  const none = await closeProxySocket(null, { force: true });
+  assert.equal(none, undefined);
+});
+
+// ─── the production path: an fd from systemd (socket activation) ───
+
+test("pickProxyFd: only a matching LISTEN_PID with fds yields an fd, named for our unit", () => {
+  const pid = 4242;
+  assert.equal(pickProxyFd({}, pid), null, "no activation at all");
+  assert.equal(pickProxyFd({ LISTEN_PID: String(pid) }, pid), null, "LISTEN_FDS missing");
+  assert.equal(pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "0" }, pid), null, "no fds passed");
+  assert.equal(
+    pickProxyFd({ LISTEN_PID: String(pid + 1), LISTEN_FDS: "1" }, pid), null,
+    "a foreign LISTEN_PID (an inherited environment) is ignored",
+  );
+  assert.equal(pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "1" }, pid), 3, "no names: the first fd");
+  assert.equal(
+    pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "1", LISTEN_FDNAMES: PROXY_SOCKET_UNIT }, pid), 3,
+  );
+  assert.equal(
+    pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "2", LISTEN_FDNAMES: `other.socket:${PROXY_SOCKET_UNIT}` }, pid), 4,
+    "the fd is picked by NAME, not by position",
+  );
+  assert.equal(
+    pickProxyFd({ LISTEN_PID: String(pid), LISTEN_FDS: "2", LISTEN_FDNAMES: "a.socket:b.socket" }, pid), null,
+    "several fds and none of them ours is ambiguous — refuse",
+  );
+});
+
+test("no activation fd means no proxy listener at all", () => {
+  const mk = () => http.createServer();
+  assert.equal(startActivatedProxySocket(express(), mk(), { env: {}, pid: process.pid, log: () => {} }), null);
+  assert.equal(
+    startActivatedProxySocket(express(), mk(), { env: { LISTEN_PID: "1", LISTEN_FDS: "1" }, pid: process.pid, log: () => {} }),
+    null,
+    "a stray LISTEN_PID from another process must not make this one listen",
+  );
+});
+
+test("the gateway skips the proxy socket under --no-auth and reads no path from the environment", () => {
+  const root = resolve(import.meta.dirname, "..");
+  const index = readFileSync(join(root, "servers", "gateway", "index.js"), "utf8");
+  const mod = readFileSync(join(root, "servers", "gateway", "proxy-socket.js"), "utf8");
+  assert.match(index, /if \(!noAuth\) proxyServer = startActivatedProxySocket\(app, server\)/);
+  for (const src of [index, mod]) {
+    assert.doesNotMatch(src, /CROW_PROXY_SOCKET/, "the path-based socket mode is gone");
+    assert.doesNotMatch(src, /listenProxySocket\(/, "nothing but the test helper listens on a path");
+    assert.doesNotMatch(src, /chmodSync|rmSync\(socketPath/, "the gateway never chmods or unlinks a socket");
+  }
+  // Step 3 of the drain waits for BOTH listeners.
+  assert.match(index, /Promise\.all\(\[tcpClosed, proxyClosed\]\)/);
+});
+
+test("LISTEN_FDS: a child handed the listening fd as fd 3 serves marked requests over it", async (t) => {
+  // An abstract socket (Linux namespace, leading NUL) has no file to unlink, so
+  // closing this process's own listener cannot remove the path the child is
+  // still serving on.
+  const socketPath = `\0crow-proxy-activate-${process.pid}-${Date.now()}`;
+
+  // This test is "systemd": it creates the listening socket, then hands the fd
+  // to the child as fd 3 (the first activation fd), exactly as the socket unit
+  // does. The child sets LISTEN_PID to its OWN pid, which systemd also does.
+  const handed = net.createServer();
+  await new Promise((r) => handed.listen(socketPath, r));
+  const fd = handed._handle?.fd;
+  if (!Number.isInteger(fd)) { handed.close(); return t.skip("this node exposes no listening fd"); }
+
+  const root = resolve(import.meta.dirname, "..");
+  const url = (p) => pathToFileURL(join(root, p)).href;
+  const script = `
+    process.env.LISTEN_PID = String(process.pid);
+    process.env.LISTEN_FDS = "1";
+    process.env.LISTEN_FDNAMES = ${JSON.stringify(PROXY_SOCKET_UNIT)};
+    const http = (await import("node:http")).default;
+    const express = (await import("express")).default;
+    const { resolveClientMiddleware } = await import(${JSON.stringify(url("servers/shared/peer-class.js"))});
+    const { isAllowedNetwork } = await import(${JSON.stringify(url("servers/gateway/dashboard/auth.js"))});
+    const { startActivatedProxySocket } = await import(${JSON.stringify(url("servers/gateway/proxy-socket.js"))});
+    const app = express();
+    app.use(resolveClientMiddleware());
+    app.get("/who", (req, res) => res.json({
+      via: req.crowPeer.via,
+      client: req.crowPeer.client,
+      proxySocket: req.crowPeer.proxySocket,
+      allowed: isAllowedNetwork(req),
+    }));
+    const proxy = startActivatedProxySocket(app, http.createServer(), { log: () => {} });
+    if (!proxy) { console.error("NO_LISTENER"); process.exit(3); }
+    proxy.once("listening", () => console.log("READY"));
+  `;
+  const env = { ...process.env };
+  delete env.LISTEN_PID; delete env.LISTEN_FDS; delete env.LISTEN_FDNAMES;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: root, stdio: ["ignore", "pipe", "pipe", fd], env,
+  });
+
+  let stderr = "";
+  child.stderr.on("data", (c) => { stderr += c; });
+  // The child holds its own descriptor; closing ours must leave the socket open.
+  handed.close();
+  try {
+    await Promise.race([
+      waitForText(child.stdout, "READY", () => stderr),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`child never listened; stderr:\n${stderr}`)), 20_000)),
+    ]);
+    const body = JSON.parse((await requestUnix(socketPath, { "x-forwarded-for": "192.168.1.20" })).body);
+    assert.equal(body.via, "proxy", "a connection accepted on the activated fd is marked");
+    assert.equal(body.client, "192.168.1.20");
+    assert.equal(body.proxySocket, true);
+    assert.equal(body.allowed, true);
+
+    const pub = JSON.parse((await requestUnix(socketPath, { "x-forwarded-for": "8.8.8.8" })).body);
+    assert.equal(pub.allowed, false, "and it fails closed for a public client");
+  } finally {
+    child.kill("SIGKILL");
+    try { await once(child, "exit"); } catch {}
+  }
 });
 
 // ─── the Access Denied page ───
@@ -251,33 +448,55 @@ function fixture(name, text) {
 }
 
 const LOOPBACK_CADDYFILE = "<host>.local {\n    tls internal\n    reverse_proxy localhost:3001\n}\n";
-const SOCKET_CADDYFILE = "<host>.local {\n    tls internal\n    reverse_proxy unix//run/crow/gateway.sock\n}\n";
+const SOCKET_CADDYFILE = "<host>.local {\n    tls internal\n    reverse_proxy unix//run/crow-proxy/gateway.sock\n}\n";
+const NO_SOCKET_UNIT = join(FIXTURE_DIR, "no-such.socket");
+const SOCKET_UNIT_FIXTURE = fixture(
+  "crow-gateway-proxy.socket",
+  "[Socket]\nListenStream=/run/crow-proxy/gateway.sock\nSocketUser=root\nSocketGroup=caddy\nSocketMode=0660\n",
+);
 
-test("detector fires on a loopback Caddyfile and carries the exact command to run", () => {
-  const problem = caddyProxySocketProblem({ caddyfile: fixture("loopback", LOOPBACK_CADDYFILE), env: {} });
-  assert.ok(problem, "must fire on `reverse_proxy localhost:3001`");
+test("detector fires on a loopback Caddyfile with no socket unit, and carries the exact command", () => {
+  const problem = caddyProxySocketProblem({ caddyfile: fixture("loopback", LOOPBACK_CADDYFILE), socketUnit: NO_SOCKET_UNIT });
+  assert.ok(problem, "must fire on `reverse_proxy localhost:3001` + a missing unit");
   assert.match(problem.title, /turned away/);
   assert.match(problem.why, /Crow does not run as root/);
   assert.match(problem.fixCommand, /^sudo bash .*scripts\/fix-caddy-proxy-socket\.sh$/);
   assert.ok(problem.why.includes(problem.fixCommand), "the card text carries the command");
   assert.doesNotMatch(problem.why, /CROW_DASHBOARD_PUBLIC/);
 
-  const dotted = caddyProxySocketProblem({ caddyfile: fixture("dotted", "x {\n\treverse_proxy 127.0.0.1:3001\n}\n"), env: {} });
+  const dotted = caddyProxySocketProblem({ caddyfile: fixture("dotted", "x {\n\treverse_proxy 127.0.0.1:3001\n}\n"), socketUnit: NO_SOCKET_UNIT });
   assert.ok(dotted, "127.0.0.1:3001 fires too");
 });
 
-test("detector stays quiet on a fixed Caddyfile, a missing file, another port, and a set CROW_PROXY_SOCKET", () => {
-  assert.equal(caddyProxySocketProblem({ caddyfile: fixture("socket", SOCKET_CADDYFILE), env: {} }), null);
-  assert.equal(caddyProxySocketProblem({ caddyfile: join(FIXTURE_DIR, "nope"), env: {} }), null);
-  assert.equal(caddyProxySocketProblem({ caddyfile: fixture("other-port", "x {\n\treverse_proxy localhost:3002\n}\n"), env: {} }), null);
-  // A gateway already listening on the socket is not the problem (upgrade in progress).
-  assert.equal(caddyProxySocketProblem({ caddyfile: fixture("loopback2", LOOPBACK_CADDYFILE), env: { CROW_PROXY_SOCKET: "/run/crow/gateway.sock" } }), null);
+test("detector matches the same line shapes the fix script rewrites (a ` {`, a trailing comment)", () => {
+  for (const line of [
+    "    reverse_proxy localhost:3001 {",
+    "    reverse_proxy localhost:3001   # old loopback dial",
+    "    reverse_proxy 127.0.0.1:3001\t{",
+  ]) {
+    const caddyfile = fixture(`shape-${Math.random().toString(36).slice(2)}`, `x {\n${line}\n}\n`);
+    assert.ok(caddyProxySocketProblem({ caddyfile, socketUnit: NO_SOCKET_UNIT }), `must fire on: ${line}`);
+  }
+  // ...and stays quiet on ports/lines it must not touch.
+  for (const line of ["    reverse_proxy localhost:30010", "    reverse_proxy localhost:3002", "#    reverse_proxy localhost:3001"]) {
+    const caddyfile = fixture(`notshape-${Math.random().toString(36).slice(2)}`, `x {\n${line}\n}\n`);
+    assert.equal(caddyProxySocketProblem({ caddyfile, socketUnit: NO_SOCKET_UNIT }), null, `must not fire on: ${line}`);
+  }
+});
+
+test("detector stays quiet on a fixed Caddyfile, a missing file, another port, and an installed socket unit", () => {
+  const loopbackFile = fixture("loopback2", LOOPBACK_CADDYFILE);
+  assert.equal(caddyProxySocketProblem({ caddyfile: fixture("socket", SOCKET_CADDYFILE), socketUnit: NO_SOCKET_UNIT }), null);
+  assert.equal(caddyProxySocketProblem({ caddyfile: join(FIXTURE_DIR, "nope"), socketUnit: NO_SOCKET_UNIT }), null);
+  assert.equal(caddyProxySocketProblem({ caddyfile: fixture("other-port", "x {\n\treverse_proxy localhost:3002\n}\n"), socketUnit: NO_SOCKET_UNIT }), null);
+  // systemd owns the socket now: the unit existing is the fix.
+  assert.equal(caddyProxySocketProblem({ caddyfile: loopbackFile, socketUnit: SOCKET_UNIT_FIXTURE }), null);
 });
 
 test("detector.check upserts one boot card (no one-click remedy: the gateway is not root)", async () => {
   const items = [];
   const store = { upsertItem: async (i) => { items.push(i); return { id: 1, notify: true }; }, resolveByKey: async () => {} };
-  await detector.check(store, { caddyfile: fixture("loopback3", LOOPBACK_CADDYFILE), env: {} });
+  await detector.check(store, { caddyfile: fixture("loopback3", LOOPBACK_CADDYFILE), socketUnit: NO_SOCKET_UNIT });
   assert.equal(items.length, 1);
   assert.equal(items[0].source, "caddy-proxy-socket");
   assert.equal(items[0].severity, "warn");
@@ -285,6 +504,26 @@ test("detector.check upserts one boot card (no one-click remedy: the gateway is 
   assert.match(items[0].why, /fix-caddy-proxy-socket\.sh/);
 
   items.length = 0;
-  await detector.check(store, { caddyfile: fixture("socket2", SOCKET_CADDYFILE), env: {} });
+  await detector.check(store, { caddyfile: fixture("socket2", SOCKET_CADDYFILE), socketUnit: NO_SOCKET_UNIT });
   assert.equal(items.length, 0, "nothing is written when the Caddyfile is fine");
+});
+
+test("detector.check RESOLVES its card once the problem is gone (the socket unit exists)", async () => {
+  const items = [];
+  const resolved = [];
+  const store = {
+    upsertItem: async (i) => { items.push(i); return { id: 1, notify: true }; },
+    resolveByKey: async (source, key) => { resolved.push([source, key]); },
+  };
+  const caddyfile = fixture("loopback4", LOOPBACK_CADDYFILE);
+  await detector.check(store, { caddyfile, socketUnit: NO_SOCKET_UNIT });
+  assert.equal(items.length, 1);
+  assert.deepEqual(resolved, [], "nothing to resolve while the problem is there");
+
+  await detector.check(store, { caddyfile, socketUnit: SOCKET_UNIT_FIXTURE });
+  assert.equal(items.length, 1, "no card is written when the socket unit exists");
+  assert.deepEqual(resolved, [["caddy-proxy-socket", DEDUP_KEY]], "the stale card is resolved");
+
+  // A store without resolveByKey (or one that throws) must not break boot.
+  await detector.check({ upsertItem: async () => ({ id: 1, notify: false }) }, { caddyfile, socketUnit: SOCKET_UNIT_FIXTURE });
 });

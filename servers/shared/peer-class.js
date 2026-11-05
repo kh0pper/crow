@@ -13,8 +13,9 @@
  *   funnel      loopback socket owned by a Serve uid, Funnel header,        the XFF address
  *               exactly one XFF value that is a PUBLIC address
  *   proxy       socket listed in CROW_TRUSTED_PROXIES, or a connection       rightmost undeclared XFF hop
- *               accepted on the dedicated proxy socket (PROXY_SOCKET; null
- *               when it carried no X-Forwarded-For, which denies)
+ *               accepted on the dedicated proxy socket (PROXY_SOCKET: the
+ *               rightmost XFF hop only; null when it carried none, which
+ *               denies)
  *   direct      any other non-loopback socket                                the socket
  *   unverified  any other loopback request (forged or undeclared-proxy      the socket
  *               headers, a Serve/Funnel shape from the wrong uid, a
@@ -31,11 +32,12 @@
  *
  * PROXY_SOCKET marks a connection accepted on the gateway's dedicated proxy
  * socket (servers/gateway/proxy-socket.js, the security audit's finding): a
- * unix socket has no peer address, so it is trusted by construction (its
- * filesystem permissions decide who may connect) and the client is the
- * rightmost X-Forwarded-For hop. The installer's Caddy dials that socket, so
- * its visitors are a verified `proxy` instead of an unverifiable loopback
- * peer. CROW_TRUSTED_PROXIES=loopback is deliberately NOT the fix — see
+ * unix socket has no peer address, so it is trusted by construction (systemd
+ * owns it — SocketUser=root, SocketGroup=caddy, mode 0660 — so only the local
+ * Caddy can connect) and the client is EXACTLY the rightmost X-Forwarded-For
+ * hop, never an earlier one. The installer's Caddy dials that socket, so its
+ * visitors are a verified `proxy` instead of an unverifiable loopback peer.
+ * CROW_TRUSTED_PROXIES=loopback is deliberately NOT the fix — see
  * loopbackProxyWarning below.
  *
  * Residuals (also in docs/architecture/dashboard.md): a process running as
@@ -232,9 +234,8 @@ function undeclaredHint(addr) {
 }
 
 /** Express proxy-addr semantics: walk X-Forwarded-For from the right while the
- * current address is a declared proxy. `sock === null` marks a connection on
- * the dedicated proxy socket (PROXY_SOCKET), trusted by construction, so the
- * walk starts there and the rightmost hop that is not a declared proxy wins. */
+ * current address is a declared proxy (CROW_TRUSTED_PROXIES). The first
+ * address that is not a declared proxy is the client. */
 function proxyClient(sock, headers) {
   let client = sock;
   const xff = headerValues(headers["x-forwarded-for"]).map((v) => v.trim()).filter(Boolean);
@@ -245,6 +246,21 @@ function proxyClient(sock, headers) {
     client = normalizeAddr(a);
   }
   return client;
+}
+
+/** The client on a connection accepted on the dedicated proxy socket: exactly
+ * the rightmost X-Forwarded-For hop — never walk further left. The socket
+ * itself is the trust anchor (systemd owns it; only the caddy group can open
+ * it), so the address Caddy saw is the client, even when that hop happens to be
+ * another proxy this box also lists in CROW_TRUSTED_PROXIES: the visitor behind
+ * it is still the address Caddy named, and reading an earlier hop would let the
+ * header move the client a proxy deeper. No X-Forwarded-For → nobody to vouch
+ * for (null, which denies). */
+function proxySocketClient(headers) {
+  const xff = headerValues(headers["x-forwarded-for"]).map((v) => v.trim()).filter(Boolean);
+  if (!xff.length) return null;
+  const a = bareForwardedAddr(xff[xff.length - 1]);
+  return a ? normalizeAddr(a) : null;
 }
 
 function loginOf(headers) {
@@ -285,12 +301,12 @@ export function classifyPeer(req) {
 
   if (proxySocket) {
     // A connection accepted on the dedicated proxy socket (proxy-socket.js):
-    // no peer address at all, trusted because only the members of the socket's
-    // group can connect. The client is the rightmost hop Caddy named; with no
+    // no peer address at all, trusted because only the socket unit's group can
+    // connect. The client is exactly the rightmost hop Caddy named; with no
     // X-Forwarded-For there is nobody to vouch for, and client stays null
     // (isAllowedNetwork denies it — fail closed).
     out.via = "proxy";
-    out.client = proxyClient(null, headers);
+    out.client = proxySocketClient(headers);
   } else if (!sock) {
     // no peer address: stays unverified
   } else if (isTrustedProxy(sock)) {

@@ -7,26 +7,38 @@
  * header), so the dashboard's network gate turned the owner away right after
  * first-run setup (the security audit's finding N1a-3/N1a-4).
  *
- * The fix is the dedicated proxy socket (servers/gateway/proxy-socket.js):
- * Caddy dials the unix socket and its visitors classify as `proxy`. The
- * gateway is not root, so it cannot rewrite /etc/caddy/Caddyfile or add the
- * unit lines itself — the card carries the command to run instead.
+ * The fix is the dedicated proxy socket (servers/gateway/proxy-socket.js),
+ * owned by a systemd socket unit: only the local Caddy can open it, and the
+ * gateway receives its listening fd by socket activation. The gateway is not
+ * root, so it cannot rewrite /etc/caddy/Caddyfile or install the unit itself —
+ * the card carries the command to run instead.
  *
  * No event fires for a config file, so this is a BOOT check: fix-it/index.js's
- * runBootChecks() calls `check()` once per gateway start. `caddyProxySocketProblem`
- * is pure and takes the Caddyfile path, so tests use fixtures.
+ * runBootChecks() calls `check()` once per gateway start. The problem test is
+ * pure and takes the Caddyfile and socket-unit paths (plus the file readers),
+ * so tests use fixtures.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CADDYFILE = "/etc/caddy/Caddyfile";
-export const SOCKET_PATH = "/run/crow/gateway.sock";
+/** The systemd socket unit that owns the socket (root:caddy 0660). */
+export const SOCKET_UNIT = "/etc/systemd/system/crow-gateway-proxy.socket";
+/** Where that unit listens. The gateway only ever sees the fd. */
+export const SOCKET_PATH = "/run/crow-proxy/gateway.sock";
 export const DEDUP_KEY = "caddy:loopback-reverse-proxy";
 
-/** The loopback dial the installer used to write. */
-const LOOPBACK_PROXY_LINE = /^[ \t]*reverse_proxy[ \t]+(?:localhost|127\.0\.0\.1):3001\b/m;
+/**
+ * The loopback dial the installer used to write.
+ *
+ * `(?:[^A-Za-z0-9.:]|$)` — not a word character — keeps `:30010` and
+ * `:3001.5` out, and matches exactly the shapes the fix script rewrites: the
+ * end of the line, a trailing ` {`, or a trailing comment. The detector's grep
+ * and the script's sed/re-grep use the same shape on purpose.
+ */
+const LOOPBACK_PROXY_LINE = /^[ \t]*reverse_proxy[ \t]+(?:localhost|127\.0\.0\.1):3001(?:[^A-Za-z0-9.:]|$)/m;
 
 /** The app checkout this gateway runs from (the fix script lives in it). */
 export function appRoot() {
@@ -35,17 +47,24 @@ export function appRoot() {
 
 /**
  * → the card's text when a readable Caddyfile still dials the gateway over
- * loopback and CROW_PROXY_SOCKET is unset; null otherwise (no Caddy here, a
- * socket-based Caddyfile, or the gateway already has its proxy socket).
+ * loopback AND the socket unit is not installed; null otherwise (no Caddy here,
+ * a socket-based Caddyfile, or systemd already owns the socket).
  *
- * `caddyfile`, `env`, `app` and `readFile` are for tests.
+ * `caddyfile`, `socketUnit`, `app`, `readFile` and `exists` are for tests.
  */
-export function caddyProxySocketProblem({ caddyfile = CADDYFILE, env = process.env, app = appRoot(), readFile = readFileSync } = {}) {
-  // Already fixed (or the operator opted out): nothing to say.
-  if (String(env.CROW_PROXY_SOCKET || "").trim()) return null;
+export function caddyProxySocketProblem({
+  caddyfile = CADDYFILE,
+  socketUnit = SOCKET_UNIT,
+  app = appRoot(),
+  readFile = readFileSync,
+  exists = existsSync,
+} = {}) {
   let text;
   try { text = String(readFile(caddyfile, "utf8")); } catch { return null; } // no Caddy, or not readable
   if (!LOOPBACK_PROXY_LINE.test(text)) return null;
+  // systemd owns the socket now: once the unit exists the gateway gets its fd
+  // and Caddy's visitors are a verified `proxy`, so there is nothing to say.
+  try { if (exists(socketUnit)) return null; } catch { /* unreadable: keep the card */ }
 
   const fixCommand = `sudo bash ${resolve(app, "scripts", "fix-caddy-proxy-socket.sh")}`;
   return {
@@ -62,10 +81,17 @@ export default {
   // A config file emits no event: runBootChecks() calls check() at gateway start.
   events: [],
   async onEvent() {},
-  /** Upsert the card when the problem is present. Never throws into boot. */
+  /**
+   * Upsert the card when the problem is present, RESOLVE it when the problem is
+   * gone (the fix script ran, or the Caddyfile was edited by hand) so the Nest
+   * stops asking. Never throws into boot.
+   */
   async check(store, opts = {}) {
     const problem = caddyProxySocketProblem(opts);
-    if (!problem) return null;
+    if (!problem) {
+      try { await store.resolveByKey("caddy-proxy-socket", DEDUP_KEY); } catch { /* no row yet, or no store */ }
+      return null;
+    }
     await store.upsertItem({
       source: "caddy-proxy-socket",
       dedupKey: DEDUP_KEY,
