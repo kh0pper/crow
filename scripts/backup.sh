@@ -25,6 +25,24 @@
 #
 # Retention: CROW_BACKUP_KEEP_DAYS (default: 7), per instance.
 #
+# Identity (security audit N1c-10, the operator's ruling 2026-11-05): this script
+# also copies <data dir>/identity.json into the backup directory as
+# `<stem>-identity-<date>.json` — 0600, owner sidecar, pruned with the run it
+# belongs to. That copy stays on THIS machine: it is for restoring the same
+# hardware (`npm run restore -- <backup> --with-identity`).
+#
+#   - The S3 step and the git step have an EXPLICIT allow-list — this run's .db
+#     and .sql, nothing else — and a guard that refuses to upload or commit any
+#     file whose name matches `*identity*` or that lives under
+#     <CROW_HOME>/secrets. A file added to the backup dir later cannot start
+#     travelling by accident.
+#   - <CROW_HOME>/secrets (keychain.key, vault-device-id, …) is NEVER copied,
+#     by this script or by any backup. Those entries move between machines with
+#     the Keychain's own passphrase Export.
+#   - A copy of the identity the owner can take anywhere is the
+#     passphrase-protected identity backup (Settings → Help & setup, or
+#     `npm run identity:export`). Crow asks for it once, on boot.
+#
 # Artifacts: the Crow Artifacts blob store (<dataDir>/artifacts) is copied to
 # <backup dir>/artifacts — or, for an instance with its own CROW_HOME (a
 # tagged instance), <backup dir>/artifacts-<stem>. Each instance rsyncs
@@ -144,6 +162,32 @@ echo ""
 REPORT_FILE="$(mktemp "${TMPDIR:-/tmp}/crow-backup-report.XXXXXX")"
 trap 'rm -f "$REPORT_FILE"' EXIT
 
+# --- Upload guards (N1c-10) ---
+# Two independent refusals, on purpose: the allow-list below never offers an
+# unseen file, and this guard catches one that reaches a step anyway. Identity
+# data and the keychain key never leave this machine.
+SECRETS_DIR="${CROW_HOME:-$HOME/.crow}/secrets"
+
+file_may_leave() {
+  local f="$1" base real secrets_real
+  base="$(basename -- "$f")"
+  case "$base" in
+    *identity*)
+      echo "  Refusing to send $base anywhere: identity data never leaves this machine."
+      return 1
+      ;;
+  esac
+  real="$(cd "$(dirname -- "$f")" 2>/dev/null && pwd -P)/$base"
+  secrets_real="$(cd "$SECRETS_DIR" 2>/dev/null && pwd -P || printf '%s' "$SECRETS_DIR")"
+  case "$real" in
+    "$secrets_real"/*)
+      echo "  Refusing to send $base anywhere: it is inside $SECRETS_DIR (the keychain key has its own passphrase Export)."
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # --- Step 1: the binary copy (and the SQL dump taken from it) ---
 
 if [[ "$DRY_RUN" == true ]]; then
@@ -154,6 +198,9 @@ if [[ "$DRY_RUN" == true ]]; then
   # shellcheck disable=SC1090
   source "$REPORT_FILE"
   echo "  [dry-run] Would create: $DB_FILE"
+  if [[ -n "${IDENTITY_FILE:-}" ]]; then
+    echo "  [dry-run] Would create (this machine only, never uploaded): $IDENTITY_FILE"
+  fi
   echo "Creating SQL dump from that copy..."
   echo "  [dry-run] Would create: $SQL_FILE"
 else
@@ -219,15 +266,28 @@ if [[ -n "$S3_EP" && -n "$S3_AK" && -n "$S3_SK" ]]; then
 
   if command -v mc &>/dev/null; then
     if [[ "$DRY_RUN" == false ]]; then
+      # EXPLICIT ALLOW-LIST (N1c-10): this run's .db, and its .sql when one was
+      # written. Nothing else is ever offered to `mc` — in particular neither
+      # <stem>-identity-<date>.json nor anything under <CROW_HOME>/secrets. The
+      # names come from the run's own report file, and file_may_leave() refuses
+      # an identity name or a secrets/ path even if one ever reached the list.
+      S3_FILES=()
+      for f in "$DB_FILE" "${SQL_FILE:-}"; do
+        [[ -n "$f" && -f "$f" ]] || continue
+        file_may_leave "$f" || continue
+        S3_FILES+=("$f")
+      done
       mc alias set crow-backup "$S3_EP" "$S3_AK" "$S3_SK" --quiet 2>/dev/null || true
       mc mb --ignore-existing "crow-backup/$BUCKET" --quiet 2>/dev/null || true
-      if [[ -n "${SQL_FILE:-}" && -f "$SQL_FILE" ]]; then
-        mc cp "$SQL_FILE" "crow-backup/$BUCKET/sql/" --quiet
-      fi
-      mc cp "$DB_FILE" "crow-backup/$BUCKET/db/" --quiet
+      for f in ${S3_FILES[@]+"${S3_FILES[@]}"}; do
+        case "$f" in
+          *.sql) mc cp "$f" "crow-backup/$BUCKET/sql/" --quiet ;;
+          *)     mc cp "$f" "crow-backup/$BUCKET/db/" --quiet ;;
+        esac
+      done
       echo "  Uploaded this run's files to S3."
     else
-      echo "  [dry-run] Would upload $SQL_FILE and $DB_FILE to $BUCKET"
+      echo "  [dry-run] Would upload $SQL_FILE and $DB_FILE to $BUCKET (never the identity copy)"
     fi
   else
     echo "  Warning: 'mc' (an S3 client) not found. Skipping S3 upload."
@@ -262,17 +322,26 @@ if [[ -n "${CROW_BACKUP_GIT_REPO:-}" ]]; then
         GIT_DATED="crow-${DATE_ONLY}.sql"
       fi
 
-      cp "$SQL_FILE" "$GIT_DIR/$GIT_LATEST"
-      cd "$GIT_DIR"
-      git add "$GIT_LATEST"
+      # EXPLICIT ALLOW-LIST (N1c-10): the only file that ever enters this repo
+      # is this run's SQL dump, under the two names below (never the binary
+      # .db, never <stem>-identity-<date>.json, never anything under
+      # <CROW_HOME>/secrets). file_may_leave() refuses an identity name or a
+      # secrets/ path, and the staged-files check before the commit refuses a
+      # commit that carries either one.
+      if ! file_may_leave "$GIT_DIR/$GIT_LATEST" || ! file_may_leave "$GIT_DIR/$GIT_DATED"; then
+        echo "  Git backup skipped: a staged name was refused."
+      else
+        cp "$SQL_FILE" "$GIT_DIR/$GIT_LATEST"
+        cd "$GIT_DIR"
+        git add "$GIT_LATEST"
 
-      # Also keep dated snapshots (but only SQL — never binary .db)
-      cp "$SQL_FILE" "$GIT_DIR/$GIT_DATED"
-      git add "$GIT_DATED"
+        # Also keep dated snapshots (but only SQL — never binary .db)
+        cp "$SQL_FILE" "$GIT_DIR/$GIT_DATED"
+        git add "$GIT_DATED"
 
-      # Ensure .gitignore blocks binary and sensitive files
-      if [[ ! -f .gitignore ]] || ! grep -q '*.db' .gitignore; then
-        cat >> .gitignore << 'GITIGNORE'
+        # Ensure .gitignore blocks binary and sensitive files
+        if [[ ! -f .gitignore ]] || ! grep -q '*.db' .gitignore; then
+          cat >> .gitignore << 'GITIGNORE'
 *.db
 *.db-wal
 *.db-shm
@@ -280,18 +349,25 @@ if [[ -n "${CROW_BACKUP_GIT_REPO:-}" ]]; then
 *.key
 *.pem
 GITIGNORE
-        git add .gitignore
-      fi
+          git add .gitignore
+        fi
 
-      if git diff --cached --quiet; then
-        echo "  No changes to commit."
-      else
-        git commit -m "Crow backup ${TIMESTAMP}" --quiet
-        git push --quiet 2>/dev/null || echo "  Warning: git push failed. Commit saved locally."
-        echo "  Committed and pushed SQL dump."
+        # Nothing staged may carry identity data or a secrets/ entry: refuse
+        # the whole commit (and unstage) rather than let one through.
+        STAGED_IDENTITY="$(git diff --cached --name-only | { grep -Ei '(^|/)[^/]*identity|(^|/)secrets(/|$)' || true; })"
+        if [[ -n "$STAGED_IDENTITY" ]]; then
+          git reset --quiet
+          echo "  Refusing to commit: a staged file carries identity data or an entry from secrets/."
+        elif git diff --cached --quiet; then
+          echo "  No changes to commit."
+        else
+          git commit -m "Crow backup ${TIMESTAMP}" --quiet
+          git push --quiet 2>/dev/null || echo "  Warning: git push failed. Commit saved locally."
+          echo "  Committed and pushed SQL dump."
+        fi
       fi
     else
-      echo "  [dry-run] Would commit SQL dump to $GIT_DIR"
+      echo "  [dry-run] Would commit SQL dump to $GIT_DIR (never the identity copy)"
     fi
   fi
 fi

@@ -176,6 +176,17 @@ export const translations = {
   "notif.ram": { en: "RAM", es: "RAM" },
   "notif.cpus": { en: "CPUs", es: "CPUs" },
   "notif.uptime": { en: "Uptime", es: "Tiempo activo" },
+  // N1c-10: the one-time "keep a copy of your identity off this machine"
+  // notification (servers/gateway/boot/identity-backup-nudge.js). The en text
+  // is the operator's ruling, verbatim.
+  "notif.identityBackup.title": {
+    en: "Keep a copy of your Crow identity off this machine",
+    es: "Guarda una copia de tu identidad de Crow fuera de esta máquina",
+  },
+  "notif.identityBackup.body": {
+    en: "Your nightly backups keep your identity on this machine only. Make a passphrase-protected copy and store it somewhere else, so a lost disk does not lose your Crow identity.",
+    es: "Tus copias nocturnas guardan tu identidad solo en esta máquina. Crea una copia protegida con contraseña y guárdala en otro lugar, para que un disco perdido no signifique perder tu identidad de Crow.",
+  },
   // ─── PT-3 N-5: items from someone not in your contacts (begin) ───
   "notif.notContactLabel": { en: "Not in your contacts", es: "No está en tus contactos" },
   "notif.notContactCallWarning": { en: "Someone who is not in your contacts says they are calling. Open the link only if you expected this call.", es: "Alguien que no está en tus contactos dice que te está llamando. Abre el enlace solo si esperabas esta llamada." },

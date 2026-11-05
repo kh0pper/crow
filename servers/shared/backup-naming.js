@@ -23,6 +23,14 @@
  * newest backup is owned by someone else. Files without a sidecar (written
  * before this change) are "unknown", never "foreign".
  *
+ * The identity copy (security audit N1c-10): `npm run backup` also copies this
+ * instance's identity.json into the SAME local backup directory, as
+ * `<stem>-identity-<date>.json` — 0600, owner sidecar, pruned by the same
+ * per-instance rule. It is LOCAL ONLY by ruling: the S3 and git steps carry an
+ * explicit allow-list (this run's .db and .sql) and refuse anything whose name
+ * says identity or whose path is under secrets/. Identity's off-machine story
+ * is the passphrase-protected Export, never the nightly backup.
+ *
  * Restore compatibility: the .db files are unchanged plain SQLite copies made
  * by better-sqlite3's online .backup(); restore exactly as before (stop the
  * gateway, copy the .db over crow.db, remove stale crow.db-wal/-shm, start).
@@ -32,8 +40,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
-import { isDefaultCrowHome, resolveCrowHome, readLocalInstanceIdOrNull } from "./crow-home.js";
+import { basename, dirname, join, resolve } from "node:path";
+import { isDefaultCrowHome, resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull } from "./crow-home.js";
 import { resolveDataDir } from "../db.js";
 
 export const OWNER_SUFFIX = ".owner.json";
@@ -59,6 +67,57 @@ export function backupStem(label, tag) {
 
 export function backupFileName(label, tag, date) {
   return `${backupStem(label, tag)}-${date}.db`;
+}
+
+/**
+ * This run's LOCAL-ONLY identity copy: `<stem>-identity-<date>.json`, the same
+ * stem and date as the run's .db (security audit N1c-10). The word "identity"
+ * in the name is what the S3 and git steps' allow-list guards key on, and it
+ * can never collide with a .db/.sql name (ownBackupRegex anchors the date right
+ * after the stem).
+ */
+export function identityBackupFileName(label, tag, date) {
+  return `${backupStem(label, tag)}-identity-${date}.json`;
+}
+
+/** Matches exactly this instance's identity copies; group 1 = date. */
+export function ownIdentityRegex(label, tag) {
+  return new RegExp(`^${escapeRe(backupStem(label, tag))}-identity-(${DATE_RE})\\.json$`);
+}
+
+/**
+ * The identity copy that belongs to a nightly backup file: `<stem>-<date>.db`
+ * (or `.sql`) → `<dir>/<stem>-identity-<date>.json`. null when `backupFile` is
+ * not one of this product's nightly names (a hand-made backup, say) — the
+ * caller then simply has no identity copy to restore.
+ * @returns {{path:string, stem:string, date:string}|null}
+ */
+export function identityCopyForBackup(backupFile) {
+  const m = new RegExp(`^(.*)-(${DATE_RE})\\.(?:db|sql)$`).exec(basename(backupFile));
+  if (!m) return null;
+  return { path: join(dirname(backupFile), `${m[1]}-identity-${m[2]}.json`), stem: m[1], date: m[2] };
+}
+
+/**
+ * This instance's identity.json — the file servers/sharing/identity.js reads.
+ *
+ * identity.js pins its data dir once at import (CROW_DATA_DIR → a non-default
+ * CROW_HOME's data dir → ~/.crow/data → ./data). Callers here must resolve it
+ * from an ENVIRONMENT they were given, so:
+ *
+ *   1. CROW_DATA_DIR wins — that is the dir identity.js would read.
+ *   2. Otherwise `dbPath`'s own directory, when the caller has the database in
+ *      hand (the scripts do): identity.json sits beside crow.db in every
+ *      instance layout, including a co-hosted one, where identity.js's rule is
+ *      dirname(CROW_DB_PATH) too.
+ *   3. Otherwise resolveInstanceDataDir(env) — identity.js's own rule, for a
+ *      caller (a boot module) that has only the environment.
+ * @param {{dbPath?:string|null, env?:NodeJS.ProcessEnv}} [opts]
+ */
+export function identityFilePath({ dbPath = null, env = process.env } = {}) {
+  if (env.CROW_DATA_DIR) return join(resolve(env.CROW_DATA_DIR), "identity.json");
+  if (dbPath) return join(dirname(resolve(dbPath)), "identity.json");
+  return join(resolveInstanceDataDir(env), "identity.json");
 }
 
 /**

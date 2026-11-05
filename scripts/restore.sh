@@ -4,9 +4,20 @@
 # Restores crow.db from a binary copy (.db) or a SQL dump (.sql).
 #
 # Usage:
-#   ./scripts/restore.sh <backup-file>            # Restore from file
-#   ./scripts/restore.sh <backup-file> --dry-run  # Preview without restoring
-#   ./scripts/restore.sh --list                   # List available backups
+#   ./scripts/restore.sh <backup-file>                       # Restore from file
+#   ./scripts/restore.sh <backup-file> --dry-run              # Preview without restoring
+#   ./scripts/restore.sh <backup-file> --with-identity        # …and its identity copy
+#   ./scripts/restore.sh --list                               # List available backups
+#
+# Identity (security audit N1c-10): `npm run backup` keeps this instance's
+# identity.json in the backup directory as `<stem>-identity-<date>.json`, for
+# THIS machine only. `--with-identity` restores the copy from the same run
+# (same stem and date) as well as the database — and only when the target has
+# no identity.json yet, or already holds the SAME crow id. A DIFFERENT existing
+# identity is refused ("Move it aside yourself if you mean to replace it"):
+# every bot key, contact and share derives from the seed in that file, so it is
+# never replaced silently. Without --with-identity, identity.json is never
+# touched.
 #
 # Backups are read from the same directory `npm run backup` and the dashboard's
 # "Run backup now" write to (CROW_BACKUP_DIR, else ~/backups/crow). Files still
@@ -119,11 +130,13 @@ if [[ "${1:-}" == "--list" ]]; then
   COUNT=0
   if [[ -d "$BACKUP_DIR" ]]; then
     shopt -s nullglob
-    ENTRIES=("$BACKUP_DIR"/*.db "$BACKUP_DIR"/*.sql)
+    # Identity copies are listed too (N1c-10): they are kept beside the run they
+    # belong to, and `--with-identity` picks the one with the same stem and date.
+    ENTRIES=("$BACKUP_DIR"/*.db "$BACKUP_DIR"/*.sql "$BACKUP_DIR"/*-identity-*.json)
     shopt -u nullglob
     COUNT=${#ENTRIES[@]}
     if [[ "$COUNT" -gt 0 ]]; then
-      print_entries "${ENTRIES[@]}"
+      print_entries ${ENTRIES[@]+"${ENTRIES[@]}"}
     else
       echo "  (none)"
     fi
@@ -132,6 +145,8 @@ if [[ "${1:-}" == "--list" ]]; then
   fi
   echo ""
   echo "$COUNT backup file(s) found."
+  echo "An identity copy (*-identity-<date>.json) is restored with the database by"
+  echo "  restore.sh <backup> --with-identity — only on the machine it came from."
 
   # The old location: only this product's own file shapes, only when it is a
   # different directory (a host that never had one prints nothing).
@@ -154,18 +169,33 @@ fi
 # --- Validate arguments ---
 
 if [[ -z "${1:-}" ]]; then
-  echo "Usage: $0 <backup-file> [--dry-run]"
+  echo "Usage: $0 <backup-file> [--dry-run] [--with-identity]"
   echo "       $0 --list"
   echo ""
   echo "Restores crow.db from a .db binary copy or a .sql dump."
+  echo "--with-identity also restores the identity copy from the same run (0600),"
+  echo "  but only when there is no identity.json here yet or it is the same identity."
   exit 1
 fi
 
 BACKUP_FILE="$1"
 DRY_RUN=false
-if [[ "${2:-}" == "--dry-run" ]]; then
-  DRY_RUN=true
-fi
+WITH_IDENTITY=false
+for arg in "${@:2}"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    --with-identity) WITH_IDENTITY=true ;;
+    --force)
+      echo "Error: there is no --force. Stop whatever holds the database and run the restore again."
+      exit 1
+      ;;
+    *)
+      echo "Error: unknown option '$arg'"
+      echo "Usage: $0 <backup-file> [--dry-run] [--with-identity]"
+      exit 1
+      ;;
+  esac
+done
 
 # If given just a filename (not a path), look in the backup dir, then the old
 # one, and only then the current directory.
@@ -200,7 +230,35 @@ echo "  Backup file: $BACKUP_FILE ($BACKUP_SIZE)"
 echo "  Backup date: $BACKUP_DATE"
 echo "  Target DB:   $DB_PATH"
 echo "  Type:        $EXT"
+if [[ "$WITH_IDENTITY" == true ]]; then
+  echo "  Identity:    restore this run's identity copy too"
+fi
 echo ""
+
+# --- The identity copy (N1c-10), checked BEFORE anything changes ---
+# Read-only in --check mode, so a refusal leaves the database untouched even
+# though --with-identity was asked for. `identity-restore` then applies the
+# same decision after the database is back (and says the same thing).
+if [[ "$WITH_IDENTITY" == true ]]; then
+  set +e
+  IDENTITY_CHECK="$("$NODE_BIN" "$RESTORE_HELPER" identity "$BACKUP_FILE" "$DB_PATH" --check 2>&1)"
+  IDENTITY_STATUS=$?
+  set -e
+  if [[ -n "$IDENTITY_CHECK" ]]; then
+    echo "$IDENTITY_CHECK"
+  fi
+  if [[ "$IDENTITY_STATUS" -eq 4 ]]; then
+    echo ""
+    echo "Nothing has been changed."
+    exit 1
+  fi
+  if [[ "$IDENTITY_STATUS" -ne 0 ]]; then
+    echo "Error: could not check the identity copy for $BACKUP_FILE."
+    echo "Nothing has been changed."
+    exit 1
+  fi
+  echo ""
+fi
 
 # --- Dry run: preview contents (read-only, so it is allowed while the gateway runs) ---
 
@@ -317,6 +375,20 @@ fi
 echo ""
 echo "Verifying restored database..."
 "$NODE_BIN" "$RESTORE_HELPER" verify "$DB_PATH"
+
+# The identity copy from the same run (N1c-10). Never fatal to the database
+# restore — the rows are already in place and the message says exactly why the
+# identity was refused.
+if [[ "$WITH_IDENTITY" == true ]]; then
+  echo ""
+  set +e
+  "$NODE_BIN" "$RESTORE_HELPER" identity "$BACKUP_FILE" "$DB_PATH"
+  IDENTITY_APPLY_STATUS=$?
+  set -e
+  if [[ "$IDENTITY_APPLY_STATUS" -ne 0 ]]; then
+    echo "The database IS restored; the identity was not (see above)."
+  fi
+fi
 
 echo ""
 echo "Restore complete."

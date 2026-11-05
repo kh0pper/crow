@@ -33,6 +33,8 @@ tools: []
 
    The Crow Artifacts blob store (`<data dir>/artifacts`) is copied too, to `<backup dir>/artifacts` — or, for an instance with its own `CROW_HOME` (a co-hosted second gateway), to `<backup dir>/artifacts-<stem>`. Each instance's `rsync --delete` stays inside its own subdirectory, so two instances never prune each other's blobs.
 
+   **The identity is kept, locally only (N1c-10).** The instance's `identity.json` is copied into the same backup directory as `<stem>-identity-<date>.json` — `0600`, with the same `.owner.json` sidecar as the database copy, pruned with the run it belongs to. It stays on THIS machine: the S3 and git steps have an explicit allow-list (this run's `.db` and `.sql`) and a guard that refuses any file whose name contains `identity` or that lives under `<CROW_HOME>/secrets`, so neither the identity nor the keychain key is ever uploaded or committed. `<CROW_HOME>/secrets` is never copied by any backup. A copy the owner can take anywhere is the passphrase-protected identity backup on the onboarding done step (Settings → Help & setup, or `npm run identity:export`); Crow asks for it once, on boot, in a dismissable notification. Keychain entries move with the Keychain's own passphrase Export.
+
    **After upgrading a tagged instance** (one with its own `CROW_HOME`): before the per-instance split its artifacts were copied into the shared `<backup dir>/artifacts`. The first backup after upgrading writes `<backup dir>/artifacts-<stem>`, and the host-default instance's next run (`rsync --delete` into `artifacts/`) drops the tagged instance's old files from that shared directory — so run a backup once right after upgrading, and the tagged instance's blobs then live in their own subdirectory. `restore.sh` prints the same note.
 
 2. For a preview without writing files:
@@ -64,7 +66,7 @@ crontab -e
    ```bash
    bash scripts/restore.sh --list
    ```
-   Backups in the old `~/.crow/backups` directory are listed under "Older backups" and can still be restored by name.
+   Backups in the old `~/.crow/backups` directory are listed under "Older backups" and can still be restored by name. This instance's identity copies (`*-identity-<date>.json`) are listed too.
 
 2. Preview what a restore would do:
    ```bash
@@ -77,6 +79,14 @@ crontab -e
    bash scripts/restore.sh <backup-file>
    systemctl --user start crow-gateway
    ```
+
+   Add `--with-identity` to put this machine's identity back from the same run (same stem and date):
+   ```bash
+   bash scripts/restore.sh <backup-file> --with-identity
+   ```
+   It writes `identity.json` `0600` only when the target has none yet, or already holds the same crow id. A DIFFERENT existing identity is refused ("This instance already has a different identity (crow id …). Move it aside yourself if you mean to replace it.") before anything changes — every bot key, contact and share derives from that seed, so it is never replaced silently. Without `--with-identity`, `identity.json` is never touched.
+
+Moving to NEW hardware? Copy the backup directory over, restore with `--with-identity`, or — for an identity that does not depend on this disk at all — import the passphrase-protected identity backup (`npm run identity:import -- <blob>`, or the same Export the owner downloaded from Settings → Help & setup).
 
 The script always saves the current database as `<db>.pre-restore-TIMESTAMP` before overwriting it. That copy is made with better-sqlite3, not `cp`, so data still sitting in `crow.db-wal` is included; if it cannot be made or does not verify, the restore stops and the database is NOT replaced. Before anything changes, the backup FILE is checked too: one that is the live database itself (or its `-wal`/`-shm`), one that is empty, or one that fails `quick_check` is refused. The copy then lands in a temp file beside the database, is verified there, and only then replaces it — so a failed restore leaves the old database and its WAL exactly as they were. A `.sql` dump must also create at least one table and end with `COMMIT;`: a dump cut short at a statement boundary replays "successfully" into half a database, so it is refused instead. Stale `crow.db-wal` / `crow.db-shm` of the database being replaced are removed at that last step, the restored file keeps the old file's owner and mode, and the result is verified (integrity check plus table and memory counts) before the script reports success. A database reached through a symlink is handled by replacing the real file, leaving the symlink in place.
 

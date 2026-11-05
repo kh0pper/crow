@@ -112,4 +112,4 @@ The base Crow platform (memory, projects, sharing, blog, gateway) uses roughly 1
 
 ## Migrating Between Tiers
 
-The migration path is straightforward: back up your `~/.crow/data/` directory using `npm run backup`, set up Crow on the new hardware, and restore your data with `npm run restore`. Your database, files, and identity all travel with you.
+The migration path is straightforward: back up with `npm run backup` (your database, files and — on this machine only — your identity), set up Crow on the new hardware, and restore with `npm run restore -- <backup> --with-identity`. For a copy of your identity you can take anywhere, make the passphrase-protected identity backup (Settings → Help & setup). Keychain entries move with the Keychain's own passphrase Export; backups never include the keychain key.

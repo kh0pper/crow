@@ -33,6 +33,17 @@
  *   precheck     THE GATE. Is any other process holding the database open
  *                (dbHolders), and is anything answering on the gateway port?
  *                restore.sh refuses to run while either is true.
+ *   identity     `restore.sh <backup> --with-identity`: put back the identity
+ *                copy from the SAME run (`<stem>-identity-<date>.json`, written
+ *                by scripts/backup-db.mjs). The target's identity.json is
+ *                written 0600 ONLY when it does not exist yet or already holds
+ *                the same crow id; a DIFFERENT existing identity is refused —
+ *                replacing one silently would orphan every bot key, contact
+ *                and share derived from it, so moving it aside is the owner's
+ *                deliberate act. With `--check` it only reports, which is what
+ *                restore.sh runs before it touches anything (so a refusal
+ *                stops the restore while the database is still untouched).
+ *                Without --with-identity this never runs at all.
  *
  * CROW_RESTORE_TEST_FAIL=copy
  *                A TEST SEAM (tests/backup-script.test.js), not a feature.
@@ -60,6 +71,7 @@ import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import { gatewayListenPort } from "../servers/gateway/listen-port.js";
 import { probeGateway } from "./backup-db.mjs";
+import { identityCopyForBackup, identityFilePath } from "../servers/shared/backup-naming.js";
 
 const FILE_MODE = 0o600;
 
@@ -630,6 +642,93 @@ async function precheck(dbPath) {
   return 0;
 }
 
+/* ------------------------------------------------- the identity copy (N1c-10) */
+
+/** The crow id a stored identity.json (or an identity copy) names, or null. */
+function readCrowId(file) {
+  try {
+    const rec = JSON.parse(fs.readFileSync(file, "utf8"));
+    return rec && typeof rec.crowId === "string" && rec.crowId ? rec.crowId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `restore.sh <backup> --with-identity`: restore the identity copy that came
+ * from the SAME run — same stem, same date — beside the database.
+ *
+ * Rules (security audit N1c-10, the operator's ruling):
+ *   - no copy for this run → say so, touch nothing; exit 0
+ *   - the target has NO identity.json → copy it in, 0600, via a temp + rename
+ *   - the target already holds the SAME crow id → leave it exactly as it is
+ *   - a DIFFERENT existing identity → refuse (exit 4): the owner must move it
+ *     aside deliberately. Never a silent replace: every bot key, contact and
+ *     share derives from the seed in that file.
+ *
+ * `check` reports the same decision without writing anything.
+ * @returns {number} 0 ok/nothing to do, 4 refused
+ */
+function identityRestore(backupFile, dbPath, { check = false } = {}) {
+  const copy = identityCopyForBackup(backupFile);
+  if (!copy) {
+    process.stdout.write(
+      `  --with-identity: ${path.basename(backupFile)} is not a nightly backup name, so there is no ` +
+      `identity copy from the same run; identity.json is not touched.\n`,
+    );
+    return 0;
+  }
+  if (!fs.existsSync(copy.path)) {
+    process.stdout.write(
+      `  No identity copy from this run (${path.basename(copy.path)}), so identity.json is not touched.\n`,
+    );
+    return 0;
+  }
+  const incoming = readCrowId(copy.path);
+  if (!incoming) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: it carries no crow id, so it is not a Crow identity — ` +
+      `identity.json is not touched\n`,
+    );
+    return 4;
+  }
+
+  const dest = identityFilePath({ dbPath });
+  if (fs.existsSync(dest)) {
+    const there = readCrowId(dest);
+    if (there === incoming) {
+      process.stdout.write(`  ${dest} already holds this identity (crow id ${incoming}); left untouched.\n`);
+      return 0;
+    }
+    process.stdout.write(
+      `This instance already has a different identity (crow id ${there || "unknown"}). ` +
+      `Move it aside yourself if you mean to replace it.\n`,
+    );
+    return 4;
+  }
+
+  if (check) {
+    process.stdout.write(`  Would restore the identity copy ${copy.path} to ${dest} (0600).\n`);
+    return 0;
+  }
+  // 0600 from the copy onward, renamed into place in the data dir (same
+  // filesystem → atomic): a crash leaves either the old state or the copy.
+  const dir = path.dirname(dest);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(dir, `.identity.json.restore-${Date.now()}-${process.pid}.tmp`);
+  try {
+    fs.copyFileSync(copy.path, tmp);
+    chmodQuiet(tmp, FILE_MODE);
+    fs.renameSync(tmp, dest);
+    chmodQuiet(dest, FILE_MODE);
+  } catch (err) {
+    unlinkQuiet(tmp);
+    throw err;
+  }
+  process.stdout.write(`  Identity restored: ${dest} (crow id ${incoming}, 0600).\n`);
+  return 0;
+}
+
 /* ------------------------------------------------------------------- main */
 
 export async function main(argv = process.argv.slice(2)) {
@@ -656,8 +755,11 @@ export async function main(argv = process.argv.slice(2)) {
     case "precheck":
       if (!a) throw new Error("usage: restore-db.mjs precheck <db>");
       return await precheck(a);
+    case "identity":
+      if (!a || !b) throw new Error("usage: restore-db.mjs identity <backup-file> <db> [--check]");
+      return identityRestore(a, b, { check: argv.includes("--check") });
     default:
-      console.log("usage: node scripts/restore-db.mjs safety-copy <db> <dest> | check-source <backup-file> <db> | apply <backup-file> <db> | inspect <backup.db> | verify <db> | precheck <db>");
+      console.log("usage: node scripts/restore-db.mjs safety-copy <db> <dest> | check-source <backup-file> <db> | apply <backup-file> <db> | inspect <backup.db> | verify <db> | precheck <db> | identity <backup-file> <db> [--check]");
       return 2;
   }
 }
