@@ -33,6 +33,21 @@
  *   precheck     THE GATE. Is any other process holding the database open
  *                (dbHolders), and is anything answering on the gateway port?
  *                restore.sh refuses to run while either is true.
+ *   identity     `restore.sh <backup> --with-identity`: put back the identity
+ *                copy from the SAME run (`<stem>-identity-<date>.json`, written
+ *                by scripts/backup-db.mjs). The copy is checked before it is
+ *                used: it must be a regular file (not a symlink), its owner
+ *                sidecar must name THIS instance (isForeignOwner — the same
+ *                rule the backup prune applies), and its seed must derive the
+ *                crow id the copy claims. The target's identity.json is
+ *                written 0600 ONLY when it does not exist yet or already holds
+ *                the same crow id; a DIFFERENT existing identity is refused —
+ *                replacing one silently would orphan every bot key, contact
+ *                and share derived from it, so moving it aside is the owner's
+ *                deliberate act. With `--check` it only reports, which is what
+ *                restore.sh runs before it touches anything (so a refusal
+ *                stops the restore while the database is still untouched).
+ *                Without --with-identity this never runs at all.
  *
  * CROW_RESTORE_TEST_FAIL=copy
  *                A TEST SEAM (tests/backup-script.test.js), not a feature.
@@ -60,6 +75,8 @@ import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import { gatewayListenPort } from "../servers/gateway/listen-port.js";
 import { probeGateway } from "./backup-db.mjs";
+import { identityCopyForBackup, identityFilePath, isForeignOwner, localBackupContext, readOwner } from "../servers/shared/backup-naming.js";
+import { deriveInstanceIdentity } from "../servers/sharing/identity.js";
 
 const FILE_MODE = 0o600;
 
@@ -630,6 +647,184 @@ async function precheck(dbPath) {
   return 0;
 }
 
+/* ------------------------------------------------- the identity copy (N1c-10) */
+
+/** The crow id a stored identity.json (or an identity copy) names, or null. */
+function readCrowId(file) {
+  try {
+    const rec = JSON.parse(fs.readFileSync(file, "utf8"));
+    return rec && typeof rec.crowId === "string" && rec.crowId ? rec.crowId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `seedHex` derives `crowId` — the same derivation every caller of
+ * identity.json runs on (deriveInstanceIdentity). A pure check with no I/O, so
+ * a copy can be judged before anything is written.
+ */
+function seedDerivesCrowId(seedHex, crowId) {
+  if (typeof seedHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(seedHex)) return false;
+  if (typeof crowId !== "string" || !crowId) return false;
+  try {
+    return deriveInstanceIdentity(Buffer.from(seedHex, "hex")).crowId === crowId;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `restore.sh <backup> --with-identity`: restore the identity copy that came
+ * from the SAME run — same stem, same date — beside the database.
+ *
+ * Rules (security audit N1c-10, the operator's ruling):
+ *   - no copy for this run → say so, touch nothing; exit 0
+ *   - the copy is a symlink, or not one of this product's nightly names →
+ *     refused: the restore only ever puts back a file this run wrote
+ *   - the copy's OWNER SIDECAR names another instance (isForeignOwner, the
+ *     same rule the backup prune applies) → refused: another instance's
+ *     identity is not ours to install here
+ *   - the copy's seed must DERIVE the crow id the copy claims (a pure check,
+ *     identity.js's own derivation) → a mismatch is refused: the file is not
+ *     the identity it says it is, so installing it would orphan every bot key,
+ *     contact and share derived from the real seed
+ *   - the target has NO identity.json → copy it in, 0600, via a temp + rename
+ *   - the target already holds the SAME crow id → leave it exactly as it is
+ *   - a DIFFERENT existing identity → refuse (exit 4): the owner must move it
+ *     aside deliberately. Never a silent replace.
+ *
+ * `check` reports the same decision without writing anything.
+ * @returns {number} 0 ok/nothing to do, 4 refused
+ */
+function identityRestore(backupFile, dbPath, { check = false } = {}) {
+  const copy = identityCopyForBackup(backupFile);
+  if (!copy) {
+    process.stdout.write(
+      `  --with-identity: ${path.basename(backupFile)} is not a nightly backup name, so there is no ` +
+      `identity copy from the same run; identity.json is not touched.\n`,
+    );
+    return 0;
+  }
+  // lstat, not stat: a symlink planted under the copy's name is not the copy
+  // this run wrote, and copying whatever it points at is not a restore.
+  let st = null;
+  try { st = fs.lstatSync(copy.path); } catch { st = null; }
+  if (!st) {
+    process.stdout.write(
+      `  No identity copy from this run (${path.basename(copy.path)}), so identity.json is not touched.\n`,
+    );
+    return 0;
+  }
+  if (st.isSymbolicLink()) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: it is a symbolic link, not the identity copy this run wrote — ` +
+      `identity.json is not touched\n`,
+    );
+    return 4;
+  }
+  if (!st.isFile()) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: it is not a regular file — identity.json is not touched\n`,
+    );
+    return 4;
+  }
+  // The copy must belong to THIS instance: the same owner-sidecar rule the
+  // backup run and the prune use. A copy from another CROW_HOME is never
+  // installed here, however well-formed it looks.
+  const ctx = localBackupContext(process.env);
+  const me = { ...ctx.me, db_path: path.resolve(dbPath) };
+  const owner = readOwner(copy.path);
+  // Restore is strict where the prune is lenient: a copy with no owner record
+  // (or one naming nothing) names no instance, so it is not proven to be ours.
+  if (!owner || (!owner.crow_home && !owner.db_path && !owner.instance_id)) {
+    process.stdout.write(
+      "That identity copy has no owner record naming this Crow instance; it is not restored here.\n",
+    );
+    return 4;
+  }
+  // The same CROW_HOME path exists on another machine too, so the instance id
+  // must also agree whenever both sides have one: a backup folder carried to
+  // new hardware does not restore its plaintext seed there.
+  const otherInstance = owner.instance_id && me.instance_id && owner.instance_id !== me.instance_id;
+  if (otherInstance || isForeignOwner(owner, me)) {
+    process.stdout.write("That identity copy belongs to another Crow instance; it is not restored here.\n");
+    return 4;
+  }
+  // Read the copy ONCE, without following a link, and judge and write those
+  // same bytes: nothing can swap the file between the check and the copy.
+  let bytes;
+  try {
+    const fd = fs.openSync(copy.path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      if (!fs.fstatSync(fd).isFile()) throw new Error("not a regular file");
+      bytes = fs.readFileSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: it could not be read as a plain file (${err.code || err.message}) — ` +
+      `identity.json is not touched\n`,
+    );
+    return 4;
+  }
+  let record = null;
+  try { record = JSON.parse(bytes.toString("utf8")); } catch { record = null; }
+  const incoming = record && typeof record.crowId === "string" && record.crowId ? record.crowId : null;
+  if (!incoming) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: it carries no crow id, so it is not a Crow identity — ` +
+      `identity.json is not touched\n`,
+    );
+    return 4;
+  }
+  if (!seedDerivesCrowId(record && typeof record.seed === "string" ? record.seed : null, incoming)) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: its seed does not derive the crow id it claims (${incoming}) — ` +
+      `identity.json is not touched\n`,
+    );
+    return 4;
+  }
+
+  const dest = identityFilePath({ dbPath });
+  if (fs.existsSync(dest)) {
+    const there = readCrowId(dest);
+    if (there === incoming) {
+      process.stdout.write(`  ${dest} already holds this identity (crow id ${incoming}); left untouched.\n`);
+      return 0;
+    }
+    process.stdout.write(
+      `This instance already has a different identity (crow id ${there || "unknown"}). ` +
+      `Move it aside yourself if you mean to replace it.\n`,
+    );
+    return 4;
+  }
+
+  if (check) {
+    process.stdout.write(`  Would restore the identity copy ${copy.path} to ${dest} (0600).\n`);
+    return 0;
+  }
+  // 0600 FROM CREATION (open 'wx' + mode, never copyFileSync + chmod): this
+  // file holds the master seed, so it is never readable by anyone else, not
+  // even for the instant before the rename into place.
+  const dir = path.dirname(dest);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(dir, `.identity.json.restore-${Date.now()}-${process.pid}.tmp`);
+  try {
+    const fd = fs.openSync(tmp, "wx", FILE_MODE);
+    try { fs.writeSync(fd, bytes); } finally { fs.closeSync(fd); }
+    chmodQuiet(tmp, FILE_MODE);
+    fs.renameSync(tmp, dest);
+    chmodQuiet(dest, FILE_MODE);
+  } catch (err) {
+    unlinkQuiet(tmp);
+    throw err;
+  }
+  process.stdout.write(`  Identity restored: ${dest} (crow id ${incoming}, 0600).\n`);
+  return 0;
+}
+
 /* ------------------------------------------------------------------- main */
 
 export async function main(argv = process.argv.slice(2)) {
@@ -656,8 +851,11 @@ export async function main(argv = process.argv.slice(2)) {
     case "precheck":
       if (!a) throw new Error("usage: restore-db.mjs precheck <db>");
       return await precheck(a);
+    case "identity":
+      if (!a || !b) throw new Error("usage: restore-db.mjs identity <backup-file> <db> [--check]");
+      return identityRestore(a, b, { check: argv.includes("--check") });
     default:
-      console.log("usage: node scripts/restore-db.mjs safety-copy <db> <dest> | check-source <backup-file> <db> | apply <backup-file> <db> | inspect <backup.db> | verify <db> | precheck <db>");
+      console.log("usage: node scripts/restore-db.mjs safety-copy <db> <dest> | check-source <backup-file> <db> | apply <backup-file> <db> | inspect <backup.db> | verify <db> | precheck <db> | identity <backup-file> <db> [--check]");
       return 2;
   }
 }

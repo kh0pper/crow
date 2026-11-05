@@ -36,6 +36,44 @@ import { setPreviewsEnabled, previewsEnabled, previewRenderer } from "../../prev
 export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"];
 
 /**
+ * dashboard_settings key: the owner made the passphrase-protected identity
+ * backup, so the one-time boot nudge (servers/gateway/boot/identity-backup-nudge.js)
+ * must never fire. Keep in step with that module's EXPORTED_SETTING — the
+ * nudge test drives this handler and then the nudge, so a drift fails there.
+ */
+const IDENTITY_BACKUP_EXPORTED_SETTING = "identity_backup_exported_at";
+
+/**
+ * Record that the encrypted identity backup was made. Best-effort by design:
+ * an owner who just downloaded their backup must not get an error page because
+ * the flag could not be written, and a context with no database at all (a CLI
+ * or unit-test import of this module) has nothing to record.
+ */
+async function recordIdentityBackupExported({ db = null, dbFactory = null } = {}) {
+  let own = null;
+  try {
+    let handle = db;
+    if (!handle) {
+      const { createDbClient, resolveDbPath } = await import("../../../db.js");
+      const { existsSync } = await import("node:fs");
+      // No crow.db on disk means there is nothing to record in (never create a
+      // database just to write a flag — a CLI/unit context).
+      if (!existsSync(resolveDbPath())) return;
+      own = (dbFactory || createDbClient)();
+      handle = own;
+    }
+    await handle.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+      args: [IDENTITY_BACKUP_EXPORTED_SETTING, new Date().toISOString()],
+    });
+  } catch (err) {
+    console.warn("[onboarding] could not record the identity backup:", err.message);
+  } finally {
+    try { own?.close?.(); } catch { /* already closed */ }
+  }
+}
+
+/**
  * Resolve language cookie-first. The panel-dispatch lang derives from the DB
  * "language" setting, which a brand-new user has not set, so it would default
  * to English even for a user who chose Spanish on the setup/login pages. Those
@@ -601,8 +639,13 @@ function renderBackupSection(lang, ctx = {}) {
  * match), then streams the buildIdentityBackup payload as an attachment.
  * Never logs or echoes the passphrase; unexpected failures redirect with a
  * generic message instead of 500ing.
+ *
+ * On success it records `identity_backup_exported_at` (N1c-10), which is what
+ * stops the one-time "keep a copy of your identity off this machine" nudge:
+ * the owner has the copy they can take anywhere. `opts.db` is an injection seam
+ * for tests; production passes nothing and the handler opens its own client.
  */
-export async function handleIdentityBackupPost(req, res) {
+export async function handleIdentityBackupPost(req, res, opts = {}) {
   const lang = resolveLang(req);
   const doneIdx = STEP_KEYS.indexOf("done");
   const back = (msgKey) =>
@@ -613,6 +656,9 @@ export async function handleIdentityBackupPost(req, res) {
     if (passphrase.length < 12) return back("onboarding.backup.errTooShort");
     if (passphrase !== confirm) return back("onboarding.backup.errMismatch");
     const payload = buildIdentityBackup(passphrase);
+    // After the payload exists (so a failed build records nothing) and before
+    // the download is sent.
+    await recordIdentityBackupExported({ db: opts.db || null, dbFactory: opts.dbFactory || null });
     res.setHeader("Content-Disposition", 'attachment; filename="crow-identity-backup.json"');
     return res.type("application/json").send(JSON.stringify(payload, null, 2));
   } catch (err) {

@@ -564,10 +564,40 @@ async function promptPassphrase(promptText) {
 }
 
 /**
+ * Record that the passphrase-protected identity backup was made, so the
+ * one-time boot nudge (servers/gateway/boot/identity-backup-nudge.js) never
+ * fires. Same `dashboard_settings` key the dashboard handler writes.
+ *
+ * Best effort by design (N1c-10): the export itself must never fail because
+ * the flag could not be written, and a host with no crow.db on disk has
+ * nothing to record in — a database is never created just for a flag.
+ */
+async function recordIdentityBackupExported() {
+  let own = null;
+  try {
+    const { createDbClient, resolveDbPath } = await import("../db.js");
+    if (!existsSync(resolveDbPath())) return;
+    own = createDbClient();
+    await own.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+      args: ["identity_backup_exported_at", new Date().toISOString()],
+    });
+  } catch (err) {
+    console.warn(`Could not record the identity backup in dashboard_settings: ${err.message}`);
+  } finally {
+    try { own?.close?.(); } catch { /* already closed */ }
+  }
+}
+
+/**
  * Export encrypted identity (for `npm run identity:export`).
  * Requires a passphrase (--passphrase <p>, or a TTY prompt); the output is a
  * base64-encoded buildIdentityBackup payload — the seed is scrypt+AES-256-GCM
  * encrypted, so the "Encrypted Identity Export" label is true.
+ *
+ * On success it also records `identity_backup_exported_at` when this instance's
+ * crow.db exists (N1c-10): the CLI is a real way to make the copy the boot
+ * nudge asks for, so it must stop the nudge too. Never fatal to the export.
  */
 export async function exportIdentity() {
   if (!existsSync(IDENTITY_PATH)) {
@@ -593,6 +623,7 @@ export async function exportIdentity() {
     process.exit(1);
   }
   const exportData = Buffer.from(JSON.stringify(payload)).toString("base64");
+  await recordIdentityBackupExported();
   console.log("\n  Encrypted Identity Export\n");
   console.log("  Copy this entire string to import on another device");
   console.log("  (npm run identity:import -- <string> — it will prompt for the passphrase):\n");

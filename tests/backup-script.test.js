@@ -29,14 +29,16 @@ import {
   readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { rmScratch } from "./helpers/safe-rm.js";
 import { artifactStoreName, instanceBackupTag } from "../servers/shared/backup-naming.js";
+import { deriveInstanceIdentity } from "../servers/sharing/identity.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const BACKUP_SH = join(ROOT, "scripts", "backup.sh");
+const BACKUP_HELPER = join(ROOT, "scripts", "backup-db.mjs");
 const RESTORE_SH = join(ROOT, "scripts", "restore.sh");
 const BASH = (() => {
   const r = spawnSync("sh", ["-c", "command -v bash"], { encoding: "utf8" });
@@ -592,20 +594,27 @@ test("prune removes this instance's old .db and .sql, keeps fresh files, and a d
   const oldDb = join(ctx.backupDir, "primary-2026-01-01.db");
   const oldSql = join(ctx.backupDir, "primary-2026-01-01.sql");
   const freshDb = join(ctx.backupDir, "primary-2999-01-01.db");
-  for (const f of [oldDb, oldSql, freshDb]) writeFileSync(f, "x");
+  // The identity copies are pruned with the run they belong to (N1c-10), and
+  // only this instance's: the same per-instance rule, oldest first.
+  const oldIdentity = join(ctx.backupDir, "primary-identity-2026-01-01.json");
+  const oldIdentityOwner = `${oldIdentity}.owner.json`;
+  const freshIdentity = join(ctx.backupDir, "primary-identity-2999-01-01.json");
+  for (const f of [oldDb, oldSql, freshDb, oldIdentity, oldIdentityOwner, freshIdentity]) writeFileSync(f, "x");
   const old = Date.now() / 1000 - 10 * 86_400;
-  for (const f of [oldDb, oldSql]) utimesSync(f, old, old);
+  for (const f of [oldDb, oldSql, oldIdentity]) utimesSync(f, old, old);
 
   const dry = await run(BACKUP_SH, ["--dry-run"], envFor(ctx));
   assert.equal(dry.status, 0, dry.out);
-  assert.match(dry.out, /\[dry-run\] Would prune up to 2 file/);
-  for (const f of [oldDb, oldSql, freshDb]) assert.ok(existsSync(f), "a dry run deletes nothing");
+  assert.match(dry.out, /\[dry-run\] Would prune up to 3 file/);
+  for (const f of [oldDb, oldSql, freshDb, oldIdentity, freshIdentity]) assert.ok(existsSync(f), "a dry run deletes nothing");
 
   const real = await run(BACKUP_SH, [], envFor(ctx));
   assert.equal(real.status, 0, real.out);
   assert.equal(existsSync(oldDb), false, "the old copy of this instance is pruned");
   assert.equal(existsSync(oldSql), false, "its dump is pruned with it");
   assert.equal(existsSync(freshDb), true, "a fresh file inside the retention window is kept");
+  assert.equal(existsSync(oldIdentity), false, "its identity copy is pruned with it");
+  assert.equal(existsSync(freshIdentity), true, "a fresh identity copy inside the window is kept");
 });
 
 /* ---------------------------------------------------------------------------
@@ -695,6 +704,451 @@ test("two instances' artifacts copies do not delete each other", { skip: !HAS_RS
 // A backup that is not a database passes nothing: quick_check (read-only) of the
 // SOURCE happens before the safety copy, before the -wal/-shm removal and before
 // anything is renamed into place.
+/* ---------------------------------------------------------------------------
+ * N1c-10 — identity in backups (the operator's ruling, 2026-11-05).
+ *
+ *   identity.json is copied into the LOCAL backup folder only — 0600 from
+ *   creation, owner sidecar, pruned with the run it belongs to — and never to
+ *   S3, never to the git repo: the upload guard refuses exactly this
+ *   instance's identity copy name, any identity.json and anything under
+ *   <CROW_HOME>/secrets (not every name containing the word). A restore puts
+ *   the identity back with --with-identity, and only when the copy is this
+ *   instance's (owner sidecar), its seed derives the crow id it claims, and
+ *   the target has no identity.json yet or holds the SAME crow id.
+ * ------------------------------------------------------------------------- */
+
+const IDENTITY_SEED = "4d1e".repeat(16);
+
+/**
+ * identity.json content. The crow id is DERIVED from the seed (the restore now
+ * checks that a copy's seed gives the crow id it claims), so fixtures are built
+ * from a seed rather than a hand-written id.
+ */
+function identityJson(crowId, seed = IDENTITY_SEED) {
+  return JSON.stringify({
+    version: 1,
+    crowId,
+    ed25519Pubkey: "22".repeat(32),
+    secp256k1Pubkey: "33".repeat(33),
+    createdAt: "2026-11-05T00:00:00.000Z",
+    seed,
+  }, null, 2);
+}
+
+/** The crow id a seed really derives (identity.js's own derivation). */
+const seedCrowId = (seed) => deriveInstanceIdentity(Buffer.from(seed, "hex")).crowId;
+
+/** A fresh, real (crowId, seed) pair for a fixture. */
+const identityFor = (seed) => ({ seed, crowId: seedCrowId(seed) });
+
+/** Write `<dir>/identity.json` (0600, like servers/sharing/identity.js does). */
+function writeIdentity(dir, crowId, seed) {
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, "identity.json");
+  writeFileSync(p, identityJson(crowId, seed), { mode: 0o600 });
+  chmodSync(p, 0o600);
+  return p;
+}
+
+/** Every file under `dir`, relative and sorted (an empty missing dir → []). */
+function treeOf(dir) {
+  const out = [];
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else out.push(relative(dir, p));
+    }
+  };
+  if (existsSync(dir)) walk(dir);
+  return out.sort();
+}
+
+/** A stub `mc` that records every invocation instead of talking to an endpoint. */
+function stubMc(ctx) {
+  const bin = join(ctx.root, "mc-bin");
+  mkdirSync(bin, { recursive: true });
+  const log = join(ctx.root, "mc.log");
+  const p = join(bin, "mc");
+  writeFileSync(p, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`);
+  chmodSync(p, 0o755);
+  return {
+    bin,
+    calls: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : []),
+  };
+}
+
+/** `git` env for a scratch commit (a CI box has no user.email). */
+const GIT_ENV = {
+  GIT_AUTHOR_NAME: "crow test", GIT_AUTHOR_EMAIL: "test@example.invalid",
+  GIT_COMMITTER_NAME: "crow test", GIT_COMMITTER_EMAIL: "test@example.invalid",
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
+const HAS_GIT = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+
+test("backup keeps identity.json 0600 in the local backup folder", async () => {
+  const ctx = await ctxNew();
+  makeDb(join(ctx.data, "crow.db"), ["a row"]).close();
+  const mine = identityFor(IDENTITY_SEED);
+  writeIdentity(ctx.data, mine.crowId, mine.seed);
+  assert.equal(mode(join(ctx.data, "identity.json")), 0o600);
+
+  const r = await run(BACKUP_SH, [], envFor(ctx));
+  assert.equal(r.status, 0, r.out);
+
+  const name = `primary-identity-${today()}.json`;
+  const copy = join(ctx.backupDir, name);
+  assert.ok(existsSync(copy), `expected the identity copy of this run, saw ${names(ctx.backupDir)}\n${r.out}`);
+  assert.equal(mode(copy), 0o600, "the identity copy is 0600");
+  assert.equal(mode(`${copy}.owner.json`), 0o600, "it carries this instance's owner sidecar, 0600");
+  assert.equal(JSON.parse(readFileSync(copy, "utf8")).crowId, mine.crowId, "it is this instance's identity");
+  assert.match(r.out, /Identity copy \(this machine only\): /, r.out);
+
+  // Same stem and date as this run's database copy, and the same sidecar owner.
+  const dbName = names(ctx.backupDir).find((n) => n.endsWith(".db"));
+  assert.equal(name.replace("-identity-", "-").replace(/\.json$/, ".db"), dbName, "same stem and date as the .db");
+  const owner = JSON.parse(readFileSync(`${copy}.owner.json`, "utf8"));
+  assert.equal(owner.label, "primary");
+  assert.equal(owner.tag, null);
+  assert.equal(owner.db_path, join(ctx.data, "crow.db"));
+
+  // The live identity is untouched, and no secrets directory was invented.
+  assert.equal(readFileSync(join(ctx.data, "identity.json"), "utf8"), identityJson(mine.crowId, mine.seed));
+  assert.equal(mode(join(ctx.data, "identity.json")), 0o600);
+});
+
+test("identity never leaves for S3 or git", { skip: (!HAS_GIT || !HAS_SQLITE3) && "git and sqlite3 are needed for the upload steps" }, async () => {
+  const ctx = await ctxNew();
+  makeDb(join(ctx.data, "crow.db"), ["upload me"]).close();
+  const mine = identityFor(IDENTITY_SEED);
+  writeIdentity(ctx.data, mine.crowId, mine.seed);
+
+  // A keychain key on this host: it must never travel either.
+  const secrets = join(ctx.home, ".crow", "secrets");
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  writeFileSync(join(secrets, "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: "AAAA" }), { mode: 0o600 });
+
+  const mc = stubMc(ctx);
+
+  // A local bare repo as the git destination, plus a scratch clone dir.
+  const bare = join(ctx.root, "backup.git");
+  const init = spawnSync("git", ["init", "--bare", "--quiet", bare], { encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+  assert.equal(init.status, 0, init.stderr);
+  const gitDir = join(ctx.root, "backup-repo");
+
+  const r = await run(BACKUP_SH, [], envFor(ctx, {
+    PATH: `${mc.bin}:${process.env.PATH}`,
+    S3_ENDPOINT: "s3.example.invalid", S3_ACCESS_KEY: "ak", S3_SECRET_KEY: "sk",
+    CROW_BACKUP_S3_BUCKET: "crow-backups",
+    CROW_BACKUP_GIT_REPO: bare,
+    CROW_BACKUP_GIT_DIR: gitDir,
+    ...GIT_ENV,
+  }));
+  assert.equal(r.status, 0, r.out);
+
+  // The allow-list sent THIS run's database and dump, and nothing else.
+  const calls = mc.calls();
+  const cps = calls.filter((c) => c.startsWith("cp "));
+  assert.ok(cps.some((c) => c.includes(".db")), `expected the database copy to be uploaded, saw ${JSON.stringify(calls)}`);
+  assert.ok(cps.some((c) => c.includes(".sql")), `expected this run's SQL dump to be uploaded, saw ${JSON.stringify(calls)}`);
+  for (const c of calls) {
+    assert.doesNotMatch(c, /identity/i, `an identity file reached mc: ${c}`);
+    assert.doesNotMatch(c, /secrets|keychain/i, `a secrets file reached mc: ${c}`);
+  }
+
+  // The git tree holds the SQL dump and nothing else sensitive.
+  const staged = spawnSync("git", ["-C", gitDir, "ls-files"], { encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+  assert.equal(staged.status, 0, staged.stderr);
+  const tracked = staged.stdout.trim().split("\n").filter(Boolean);
+  assert.ok(tracked.some((f) => f.endsWith(".sql")), `expected a committed SQL dump, saw ${JSON.stringify(tracked)}`);
+  for (const f of tracked) {
+    assert.doesNotMatch(f, /identity/i, `an identity file was committed: ${f}`);
+    assert.doesNotMatch(f, /secrets|keychain/i, `a secrets file was committed: ${f}`);
+  }
+  // ...and the commit itself carries no identity file either (name or content).
+  const commitFiles = spawnSync("git", ["-C", gitDir, "log", "--name-only", "--pretty=format:"], { encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+  assert.equal(commitFiles.status, 0, commitFiles.stderr);
+  assert.doesNotMatch(commitFiles.stdout, /identity|keychain|secrets/i, commitFiles.stdout);
+  const blob = spawnSync("git", ["-C", gitDir, "grep", "-l", mine.crowId], { encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+  assert.notEqual(blob.status, 0, "the identity's crow id is nowhere in the committed tree");
+
+  // Both files DID land in the local backup folder, which is the point.
+  const localTree = treeOf(ctx.backupDir);
+  assert.ok(localTree.some((f) => f.includes("-identity-")), `the identity copy stays local: ${localTree}`);
+  assert.ok(localTree.some((f) => f.endsWith(".sql")), localTree.join(", "));
+});
+
+test("backup never copies the secrets folder", async () => {
+  const ctx = await ctxNew();
+  makeDb(join(ctx.data, "crow.db"), ["a row"]).close();
+  const mine = identityFor(IDENTITY_SEED);
+  writeIdentity(ctx.data, mine.crowId, mine.seed);
+
+  // <CROW_HOME>/secrets: the keychain key (and anything else kept there).
+  const secrets = join(ctx.home, ".crow", "secrets");
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  writeFileSync(join(secrets, "keychain.key"), JSON.stringify({ v: 1, id: "0123456789abcdef", key: "AAAA" }), { mode: 0o600 });
+  writeFileSync(join(secrets, "vault-device-id"), "device-1234\n", { mode: 0o600 });
+
+  const r = await run(BACKUP_SH, [], envFor(ctx));
+  assert.equal(r.status, 0, r.out);
+
+  const tree = treeOf(ctx.backupDir);
+  assert.ok(tree.length > 0, "the backup wrote something");
+  for (const f of tree) {
+    assert.doesNotMatch(f, /secrets/i, `a secrets file was copied into the backup dir: ${f}`);
+    assert.doesNotMatch(f, /keychain|vault-device/i, `a keychain file was copied into the backup dir: ${f}`);
+  }
+  assert.ok(tree.some((f) => f.includes("-identity-")), "the identity copy itself is kept (locally)");
+});
+
+/** This instance's owner sidecar for a hand-made backup file (what backup-db.mjs writes). */
+function ownSidecar(ctx, file) {
+  writeFileSync(`${file}.owner.json`, JSON.stringify({
+    instance_id: null,
+    crow_home: join(ctx.home, ".crow"),
+    db_path: join(ctx.data, "crow.db"),
+    label: "primary",
+    tag: null,
+    written_at: new Date().toISOString(),
+  }, null, 2), { mode: 0o600 });
+}
+
+test("restore with-identity puts it back only when it is the same identity or none", async () => {
+  const identityCopy = (ctx, ident) => {
+    mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+    const p = join(ctx.backupDir, `primary-identity-${today()}.json`);
+    writeFileSync(p, identityJson(ident.crowId, ident.seed), { mode: 0o600 });
+    chmodSync(p, 0o600);
+    ownSidecar(ctx, p);
+    return p;
+  };
+  const backupDb = (ctx, rows) => {
+    mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+    const p = join(ctx.backupDir, `primary-${today()}.db`);
+    makeDb(p, rows).close();
+    return p;
+  };
+
+  // (a) NO identity.json here yet → the copy of the same run is restored, 0600.
+  {
+    const ctx = await ctxNew();
+    const mine = identityFor(IDENTITY_SEED);
+    makeDb(join(ctx.data, "crow.db"), ["before"]).close();
+    backupDb(ctx, ["from the backup"]);
+    const copy = identityCopy(ctx, mine);
+
+    // --list mentions the identity copy, so an owner can see it is there.
+    const list = await run(RESTORE_SH, ["--list"], envFor(ctx));
+    assert.equal(list.status, 0, list.out);
+    assert.ok(list.out.includes(`primary-identity-${today()}.json`), list.out);
+
+    const r = await run(RESTORE_SH, ["primary-" + today() + ".db", "--with-identity"], envFor(ctx));
+    assert.equal(r.status, 0, r.out);
+    const restored = join(ctx.data, "identity.json");
+    assert.ok(existsSync(restored), `expected identity.json back:\n${r.out}`);
+    assert.equal(mode(restored), 0o600, "the restored identity is 0600");
+    assert.equal(readFileSync(restored, "utf8"), readFileSync(copy, "utf8"));
+    assert.ok(r.out.includes(`Identity restored: ${restored} (crow id ${mine.crowId}, 0600).`), r.out);
+    assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["from the backup"]);
+    // The seed's identity is what the copy claims: identity.js derives it.
+    assert.equal(seedCrowId(JSON.parse(readFileSync(restored, "utf8")).seed), mine.crowId);
+  }
+
+  // (b) the SAME crow id already here → allowed, and the file is left alone.
+  {
+    const ctx = await ctxNew();
+    const mine = identityFor(IDENTITY_SEED);
+    makeDb(join(ctx.data, "crow.db"), ["before"]).close();
+    backupDb(ctx, ["from the backup"]);
+    identityCopy(ctx, mine);
+    // The owner's own file, marked so a rewrite would be visible.
+    const here = join(ctx.data, "identity.json");
+    writeFileSync(here, JSON.stringify({ ...JSON.parse(identityJson(mine.crowId, mine.seed)), mine: true }, null, 2), { mode: 0o600 });
+    chmodSync(here, 0o600);
+    const before = readFileSync(here, "utf8");
+
+    const r = await run(RESTORE_SH, ["primary-" + today() + ".db", "--with-identity"], envFor(ctx));
+    assert.equal(r.status, 0, r.out);
+    assert.ok(r.out.includes(`already holds this identity (crow id ${mine.crowId}); left untouched`), r.out);
+    assert.equal(readFileSync(here, "utf8"), before, "the owner's own file was not rewritten");
+  }
+
+  // (c) a DIFFERENT identity here → refused, nothing touched — not even the database.
+  {
+    const ctx = await ctxNew();
+    const theirs = identityFor(IDENTITY_SEED);
+    const ours = identityFor("77".repeat(32));
+    makeDb(join(ctx.data, "crow.db"), ["keep me"]).close();
+    backupDb(ctx, ["from the backup"]);
+    identityCopy(ctx, theirs);
+    const here = writeIdentity(ctx.data, ours.crowId, ours.seed);
+    const before = readFileSync(here, "utf8");
+
+    const r = await run(RESTORE_SH, ["primary-" + today() + ".db", "--with-identity"], envFor(ctx));
+    assert.notEqual(r.status, 0, "a different identity must stop the restore");
+    assert.ok(r.out.includes(`This instance already has a different identity (crow id ${ours.crowId}). Move it aside yourself if you mean to replace it.`), r.out);
+    assert.match(r.out, /Nothing has been changed/);
+    assert.equal(readFileSync(here, "utf8"), before, "the existing identity is untouched");
+    assert.equal(mode(here), 0o600);
+    assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["keep me"], "the database is untouched too");
+    assert.deepEqual(names(ctx.data).filter((n) => n.includes("pre-restore")), []);
+  }
+
+  // (d) without --with-identity, identity.json is never touched.
+  {
+    const ctx = await ctxNew();
+    const theirs = identityFor(IDENTITY_SEED);
+    makeDb(join(ctx.data, "crow.db"), ["before"]).close();
+    backupDb(ctx, ["restored without the identity"]);
+    identityCopy(ctx, theirs);
+
+    const r = await run(RESTORE_SH, ["primary-" + today() + ".db"], envFor(ctx));
+    assert.equal(r.status, 0, r.out);
+    assert.equal(existsSync(join(ctx.data, "identity.json")), false, "no identity was written");
+    assert.doesNotMatch(r.out, /Identity restored/);
+    assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["restored without the identity"]);
+  }
+});
+
+// A co-hosted instance shares the backup directory. Its identity copy carries
+// ITS .owner.json sidecar, so `--with-identity` must refuse it with the same
+// rule the backup run and the prune use — never install another instance's
+// identity over this machine's.
+test("restore with-identity refuses another instance's identity copy", async () => {
+  const ctx = await ctxNew();
+  const otherHome = join(ctx.home, ".crow-r4");
+  const otherData = join(ctx.root, "r4data");
+  const theirs = identityFor(IDENTITY_SEED);
+
+  makeDb(join(ctx.data, "crow.db"), ["keep me"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  const backup = join(ctx.backupDir, `primary-${today()}.db`);
+  makeDb(backup, ["from another instance"]).close();
+
+  // The other instance's copy: same stem and date, ITS sidecar — and a seed and
+  // crow id that agree, so the only thing wrong with it is whose it is.
+  const copy = join(ctx.backupDir, `primary-identity-${today()}.json`);
+  writeFileSync(copy, identityJson(theirs.crowId, theirs.seed), { mode: 0o600 });
+  writeFileSync(`${copy}.owner.json`, JSON.stringify({
+    instance_id: "inst-r4",
+    crow_home: otherHome,
+    db_path: join(otherData, "crow.db"),
+    label: "primary",
+    tag: null,
+    written_at: "2026-11-05T00:00:00.000Z",
+  }, null, 2), { mode: 0o600 });
+
+  const r = await run(RESTORE_SH, [`primary-${today()}.db`, "--with-identity"], envFor(ctx));
+  assert.notEqual(r.status, 0, "another instance's identity copy must stop the restore");
+  assert.match(r.out, /That identity copy belongs to another Crow instance; it is not restored here\./, r.out);
+  assert.match(r.out, /Nothing has been changed/);
+
+  // Nothing happened: no identity, no restore, no safety copy.
+  assert.equal(existsSync(join(ctx.data, "identity.json")), false, "no identity was written");
+  assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["keep me"], "the database is untouched");
+  assert.deepEqual(names(ctx.data).filter((n) => n.includes("pre-restore")), []);
+});
+
+// A copy whose seed does not derive the crow id it claims is not the identity
+// it says it is: installing it would orphan every bot key, contact and share
+// that the real seed derives, so it is refused before anything changes.
+test("restore with-identity refuses a copy whose seed does not match its crow id", async () => {
+  const ctx = await ctxNew();
+  const claimed = identityFor(IDENTITY_SEED);
+  const other = identityFor("2a".repeat(32));
+  assert.notEqual(claimed.crowId, other.crowId);
+
+  makeDb(join(ctx.data, "crow.db"), ["keep me"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  const backup = join(ctx.backupDir, `primary-${today()}.db`);
+  makeDb(backup, ["from the backup"]).close();
+
+  // The claimed crow id, somebody else's seed — under this instance's own
+  // sidecar, so only the seed check can catch it.
+  const copy = join(ctx.backupDir, `primary-identity-${today()}.json`);
+  writeFileSync(copy, identityJson(claimed.crowId, other.seed), { mode: 0o600 });
+  ownSidecar(ctx, copy);
+
+  const r = await run(RESTORE_SH, [`primary-${today()}.db`, "--with-identity"], envFor(ctx));
+  assert.notEqual(r.status, 0, "a copy whose seed does not give its crow id must stop the restore");
+  assert.match(r.out, /its seed does not derive the crow id it claims/, r.out);
+  assert.match(r.out, /Nothing has been changed/);
+
+  assert.equal(existsSync(join(ctx.data, "identity.json")), false, "no identity was written");
+  assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["keep me"], "the database is untouched");
+  assert.deepEqual(names(ctx.data).filter((n) => n.includes("pre-restore")), []);
+});
+
+// The upload guard refuses exactly what must not leave: this instance's identity
+// copy name, any identity.json, and anything under secrets/ — NOT every name
+// that happens to contain the word, so a database copy whose stem contains it
+// still uploads.
+test("the upload guard refuses an identity file but not a stem that contains the word", async () => {
+  const ctx = await ctxNew();
+  const date = today();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+
+  // The guard itself, exactly as backup.sh asks it (`backup-db.mjs --may-leave`).
+  const guard = (file, env = envFor(ctx)) => {
+    const r = spawnSync(process.execPath, [BACKUP_HELPER, "--may-leave", file], { encoding: "utf8", env });
+    return { status: r.status, out: `${r.stdout || ""}${r.stderr || ""}` };
+  };
+
+  // 1. This instance's identity copy → refused.
+  const inside = identityFor(IDENTITY_SEED);
+  const identityCopyPath = join(ctx.backupDir, `primary-identity-${date}.json`);
+  writeFileSync(identityCopyPath, identityJson(inside.crowId, inside.seed), { mode: 0o600 });
+  const refused = guard(identityCopyPath);
+  assert.equal(refused.status, 3, `the identity copy must not leave: ${refused.out}`);
+  assert.match(refused.out, /identity copy/);
+
+  // 2. Any identity.json → refused.
+  const bare = join(ctx.root, "identity.json");
+  writeFileSync(bare, "{}");
+  assert.equal(guard(bare).status, 3, "a bare identity.json never leaves");
+
+  // 3. A .db/.sql whose STEM contains the word → allowed (it is a database copy).
+  const dbNamedIdentity = join(ctx.backupDir, `primary-identity-${date}.db`);
+  writeFileSync(dbNamedIdentity, "a database copy, not an identity");
+  const allowedDb = guard(dbNamedIdentity);
+  assert.equal(allowedDb.status, 0, `a .db whose stem contains "identity" may leave: ${allowedDb.out}`);
+  const sqlNamedIdentity = join(ctx.backupDir, `primary-identity-${date}.sql`);
+  writeFileSync(sqlNamedIdentity, "-- a dump, not an identity\n");
+  assert.equal(guard(sqlNamedIdentity).status, 0, "a .sql whose stem contains \"identity\" may leave");
+
+  // 4. Anything under <CROW_HOME>/secrets → refused.
+  const secrets = join(ctx.home, ".crow", "secrets");
+  mkdirSync(secrets, { recursive: true, mode: 0o700 });
+  const keychain = join(secrets, "keychain.key");
+  writeFileSync(keychain, "{\n}");
+  const refusedSecret = guard(keychain);
+  assert.equal(refusedSecret.status, 3, "the keychain key never leaves");
+  assert.match(refusedSecret.out, /secrets/);
+
+  // …and the S3 step agrees end to end: a label whose stem contains the word
+  // uploads its database copy (and never the identity copy beside it).
+  const mine = identityFor(IDENTITY_SEED);
+  writeIdentity(ctx.data, mine.crowId, mine.seed);
+  makeDb(join(ctx.data, "crow.db"), ["a row"]).close();
+  const mc = stubMc(ctx);
+  const r = await run(BACKUP_SH, [], envFor(ctx, {
+    NTFY_TOPIC: "identity-rich",
+    PATH: `${mc.bin}:${process.env.PATH}`,
+    S3_ENDPOINT: "s3.example.invalid", S3_ACCESS_KEY: "ak", S3_SECRET_KEY: "sk",
+    CROW_BACKUP_S3_BUCKET: "crow-backups",
+  }));
+  assert.equal(r.status, 0, r.out);
+  const cps = mc.calls().filter((c) => c.startsWith("cp "));
+  assert.ok(cps.some((c) => c.includes(`identity-rich-${date}.db`)),
+    `a stem containing "identity" still uploads its .db: ${JSON.stringify(mc.calls())}`);
+  assert.ok(existsSync(join(ctx.backupDir, `identity-rich-identity-${date}.json`)),
+    `the run's identity copy is kept locally: ${names(ctx.backupDir)}`);
+  assert.match(r.out, /Uploaded to S3: /, r.out);
+  assert.doesNotMatch(r.out, /Refused to upload/, `the identity copy is never offered to S3:\n${r.out}`);
+});
+
 test("a corrupt backup is refused before anything changes", async () => {
   const ctx = await ctxNew();
   const live = join(ctx.data, "crow.db");
@@ -935,4 +1389,18 @@ test("backup refuses an answering gateway that does not say which database it ba
   assert.match(r.out, /update Crow, or stop the gateway and run the backup again/, r.out);
   assert.doesNotMatch(r.out, /making the copy here with better-sqlite3/, "no fall-through to a local copy");
   assert.deepEqual(names(ctx.backupDir).filter((n) => n.endsWith(".db")), [], "no copy was filed");
+});
+test("restore with-identity refuses a copy with no owner record", async () => {
+  const ctx = await ctxNew();
+  const mine = identityFor(IDENTITY_SEED);
+  makeDb(join(ctx.data, "crow.db"), ["keep me"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  makeDb(join(ctx.backupDir, `primary-${today()}.db`), ["from the backup"]).close();
+  const copy = join(ctx.backupDir, `primary-identity-${today()}.json`);
+  writeFileSync(copy, identityJson(mine.crowId, mine.seed), { mode: 0o600 });
+  const r = await run(RESTORE_SH, [`primary-${today()}.db`, "--with-identity"], envFor(ctx));
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /no owner record naming this Crow instance/);
+  assert.equal(existsSync(join(ctx.data, "identity.json")), false, "no identity was installed");
+  assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["keep me"], "and the database was not replaced");
 });

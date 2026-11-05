@@ -112,4 +112,8 @@ La plataforma base de Crow (memoria, proyectos, compartir, blog, gateway) usa ap
 
 ## Migrar entre niveles
 
-La ruta de migración es directa: respalda tu directorio `~/.crow/data/` con `npm run backup`, configura Crow en el nuevo hardware y restaura tus datos con `npm run restore`. Tu base de datos, tus archivos y tu identidad viajan contigo.
+La ruta de migración es directa: respalda con `npm run backup` (tu base de datos, tus archivos y —solo en esta máquina— una copia de tu identidad), configura Crow en el nuevo hardware y restaura allí la base de datos y los archivos con `npm run restore -- <respaldo>`.
+
+La copia de identidad en texto plano que hay en el directorio de respaldos sirve para restaurar **en esta máquina**: `npm run restore -- <respaldo> --with-identity` la devuelve junto a la base de datos restaurada, y solo aquí — nunca la copies a otra máquina. Para llevar tu identidad a hardware NUEVO, lleva el respaldo de identidad protegido con contraseña: créalo aquí (`npm run identity:export`, o la descarga del paso final del onboarding / Ajustes → Ayuda y configuración) e impórtalo allí con `npm run identity:import`.
+
+Las entradas del llavero viajan con la Exportación con contraseña del propio llavero; los respaldos nunca incluyen la clave del llavero.

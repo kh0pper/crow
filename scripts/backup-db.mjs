@@ -42,16 +42,31 @@
  *   3. The SQL dump is made from the VERIFIED COPY (never the live DB) and
  *      only when the sqlite3 CLI is installed. Without it the dump is
  *      skipped with one line: the binary copy is complete on its own.
+ *   4. This instance's identity.json is copied into the SAME local backup
+ *      directory as `<stem>-identity-<date>.json` (0600, owner sidecar,
+ *      pruned with the rest) — and NOWHERE else. Security audit N1c-10, the
+ *      operator's ruling (2026-11-05): identity stays on this machine; a copy
+ *      owner can take anywhere is the passphrase-protected Export
+ *      (buildIdentityBackup), and everything under <CROW_HOME>/secrets is
+ *      never copied at all. backup.sh's S3 and git steps have an explicit
+ *      allow-list (this run's .db and .sql) plus a guard that refuses exactly
+ *      what must not leave — this instance's identity copy name, any
+ *      identity.json, and anything under <CROW_HOME>/secrets
+ *      (uploadRefusalReason in servers/shared/backup-naming.js, asked through
+ *      `--may-leave` below).
  *
  * Modes (backup.sh calls these; nothing else should need them):
- *   --report <file> --db <path>            make the copy (+ dump), report what landed
+ *   --report <file> --db <path>            make the copy (+ dump + identity), report what landed
  *   --names --report <file> --db <path>    dry run: report the names only, write nothing
  *   --backup-dir                           print resolveBackupDir() and exit
  *   --naming                               print stem, tag and artifacts dir name
- *   --prune [--dry-run] [--db <path>]      per-instance retention for .db and .sql
+ *   --may-leave <file>                     may this file be uploaded/committed? exit 0 yes, 3 no (+ why)
+ *   --prune [--dry-run] [--db <path>]      per-instance retention for .db, .sql and the identity copies
  *
  * The report file is a shell-sourceable list (DB_FILE=..., SQL_FILE=...,
- * SOURCE=..., copied by backup.sh for its S3/git steps).
+ * SOURCE=..., plus IDENTITY_FILE in a dry run). backup.sh copies it for its
+ * S3/git steps, which allow-list DB_FILE and SQL_FILE only: IDENTITY_FILE is
+ * there for the dry-run line and no upload step may read it.
  *
  * Mode bits (N1c-12): every file here is 0600, written that way from creation.
  * A directory this script CREATES is 0700; an existing backup directory is
@@ -68,7 +83,8 @@ import { gatewayListenPort } from "../servers/gateway/listen-port.js";
 import { dbHolders, holdersText } from "./restore-db.mjs";
 import {
   localBackupContext, backupFileName, backupStem, artifactStoreName, ownerPath, readOwner,
-  isForeignOwner, resolveBackupDir,
+  isForeignOwner, resolveBackupDir, identityBackupFileName, identityFilePath, ownIdentityRegex,
+  uploadRefusalReason,
 } from "../servers/shared/backup-naming.js";
 
 const FILE_MODE = 0o600;
@@ -387,6 +403,62 @@ async function localCopy(dbPath, dir, name, me) {
   }
 }
 
+/* ------------------------------------------------------- the identity copy */
+
+/**
+ * Copy this instance's identity.json into the backup dir, 0600, with the same
+ * owner sidecar as the database copy.
+ *
+ * Security audit N1c-10, the operator's ruling: the identity stays on THIS
+ * machine (restore.sh --with-identity puts it back on the same hardware), so
+ * the copy lives only in the local backup folder — never in S3, never in the
+ * git repo (backup.sh's steps allow-list this run's .db and .sql and ask
+ * uploadRefusalReason() about every other name). Nothing under
+ * <CROW_HOME>/secrets is touched: the keychain key never leaves the machine,
+ * and the Keychain's own passphrase Export is how those entries travel.
+ *
+ * A same-day copy whose sidecar names ANOTHER instance is left alone (a
+ * warning, not a refusal: the database copy is already written and sound, and
+ * another instance's identity is never ours to overwrite).
+ * @returns {{path:string, size:number}|null}
+ */
+function copyIdentity({ dbPath, dir, ctx, date, me }) {
+  // identity.js's file, anchored on the database this run actually copied (see
+  // identityFilePath: CROW_DATA_DIR, else crow.db's own directory).
+  const source = identityFilePath({ dbPath });
+  if (!fs.existsSync(source)) {
+    console.log("  no identity.json yet (nothing to keep)");
+    return null;
+  }
+  const dest = path.join(dir, identityBackupFileName(ctx.label, ctx.tag, date));
+  const existing = fs.existsSync(dest) ? readOwner(dest) : null;
+  if (existing && isForeignOwner(existing, me)) {
+    const who = existing.crow_home || existing.instance_id || "another instance";
+    console.warn(`  Warning: ${dest} belongs to a different instance (${who}); leaving it alone.`);
+    return null;
+  }
+  const tmp = tmpBeside(dir, path.basename(dest)) + ".json";
+  try {
+    // 0600 FROM CREATION (open 'wx' + mode, never a copyFileSync + chmod): the
+    // file holds the master seed, so it must not be readable by anyone else
+    // even for the instant between writing and renaming it into place.
+    const bytes = fs.readFileSync(source);
+    const fd = fs.openSync(tmp, "wx", FILE_MODE);
+    try { fs.writeSync(fd, bytes); } finally { fs.closeSync(fd); }
+    chmodQuiet(tmp, FILE_MODE);
+    fs.renameSync(tmp, dest);
+    chmodQuiet(dest, FILE_MODE);
+    writeSidecar(dest, me);
+    const size = fs.statSync(dest).size;
+    console.log(`  Identity copy (this machine only): ${dest} (${fmtBytes(size)})`);
+    return { path: dest, size };
+  } catch (err) {
+    unlinkQuiet(tmp);
+    console.warn(`  Warning: could not copy the identity (${err.message}); the database copy is complete.`);
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------- SQL dumping */
 
 function sqlite3Available() {
@@ -442,13 +514,21 @@ async function make({ dbPath, reportFile, dryRun }) {
   const date = utcDate();
   const name = backupFileName(ctx.label, ctx.tag, date);
   const planned = path.join(dir, name);
+  // The identity copy this run WOULD keep, local only. It is in the report for
+  // the dry-run line backup.sh prints; no upload step may read it (see the
+  // allow-list guards in backup.sh).
+  const plannedIdentity = path.join(dir, identityBackupFileName(ctx.label, ctx.tag, date));
 
   if (dryRun) {
-    writeReport(reportFile, {
+    const vars = {
       DB_FILE: planned,
       SQL_FILE: planned.replace(/\.db$/, ".sql"),
       SOURCE: "names",
-    });
+    };
+    // Only when there IS one to copy: a dry run must not promise a file the
+    // real run would report as "no identity.json yet".
+    if (fs.existsSync(identityFilePath({ dbPath }))) vars.IDENTITY_FILE = plannedIdentity;
+    writeReport(reportFile, vars);
     return 0;
   }
 
@@ -553,6 +633,10 @@ async function make({ dbPath, reportFile, dryRun }) {
   }
 
   writeReport(reportFile, { DB_FILE: copy.file, DB_SIZE: String(copy.size), SQL_FILE: sqlFile, SOURCE: source });
+
+  // Local only (N1c-10): never in the report, so no upload step can pick it up.
+  copyIdentity({ dbPath, dir, ctx, date, me });
+
   return 0;
 }
 
@@ -562,7 +646,8 @@ async function make({ dbPath, reportFile, dryRun }) {
  * Per-instance retention. The .db half is the endpoint's own pruneOwnBackups
  * (same name pattern, same foreign-owner guard), so a script-pruned dir looks
  * exactly like an endpoint-pruned one; the .sql half removes this instance's
- * dumps older than CROW_BACKUP_KEEP_DAYS.
+ * dumps older than CROW_BACKUP_KEEP_DAYS, and the identity half its
+ * `<stem>-identity-<date>.json` copies by the same rule.
  */
 async function prune({ dryRun, dbPath }) {
   const keepDays = parseInt(process.env.CROW_BACKUP_KEEP_DAYS || "7", 10);
@@ -577,15 +662,18 @@ async function prune({ dryRun, dbPath }) {
   const me = dbPath ? { ...ctx.me, db_path: path.resolve(dbPath) } : ctx.me;
   const cutoff = Date.now() - keepDays * 24 * 3600 * 1000;
   const sqlRe = new RegExp(`^${escapeRe(backupStem(label, tag))}-(${DATE_RE})\\.sql$`);
+  const identityRe = ownIdentityRegex(label, tag);
 
-  const ownSql = () => {
+  // This instance's own files of one name pattern, older than the cutoff and
+  // never one whose sidecar names another instance.
+  const ownOlder = (re) => {
     const out = [];
     let names = [];
     try { names = fs.readdirSync(dir); } catch { return out; }
     for (const name of names) {
-      if (!sqlRe.test(name)) continue;
+      if (!re.test(name)) continue;
       const full = path.join(dir, name);
-      // The same guard as the .db half: a dump whose sidecar names another
+      // The same guard as the .db half: a file whose sidecar names another
       // instance is never ours to delete.
       if (isForeignOwner(readOwner(full), me)) continue;
       try {
@@ -595,11 +683,14 @@ async function prune({ dryRun, dbPath }) {
     }
     return out;
   };
+  const ownSql = () => ownOlder(sqlRe);
+  const ownIdentity = () => ownOlder(identityRe);
 
   if (dryRun) {
     const { listOwnBackups } = await import("../servers/shared/backup-naming.js");
     const dbCount = listOwnBackups(dir, label, tag).filter((f) => f.mtimeMs < cutoff).length;
-    console.log(`  [dry-run] Would prune up to ${dbCount + ownSql().length} file(s) older than ${keepDays} days (this instance's only).`);
+    const count = dbCount + ownSql().length + ownIdentity().length;
+    console.log(`  [dry-run] Would prune up to ${count} file(s) older than ${keepDays} days (this instance's only).`);
     return 0;
   }
 
@@ -610,10 +701,19 @@ async function prune({ dryRun, dbPath }) {
     removeWithJournals(full);
     sqlPruned++;
   }
-  if (!pruned && !sqlPruned) {
+  // An identity copy is pruned with the run it belongs to, sidecar and all —
+  // the same per-instance rule, so a co-hosted instance's copies survive.
+  let identityPruned = 0;
+  for (const full of ownIdentity()) {
+    removeWithJournals(full);
+    unlinkQuiet(ownerPath(full));
+    identityPruned++;
+  }
+  if (!pruned && !sqlPruned && !identityPruned) {
     console.log("  No old backups to prune.");
   } else {
-    console.log(`  Pruned ${pruned} database cop${pruned === 1 ? "y" : "ies"} and ${sqlPruned} SQL dump${sqlPruned === 1 ? "" : "s"} older than ${keepDays} days.`);
+    const identityPart = identityPruned ? ` and ${identityPruned} identity cop${identityPruned === 1 ? "y" : "ies"}` : "";
+    console.log(`  Pruned ${pruned} database cop${pruned === 1 ? "y" : "ies"} and ${sqlPruned} SQL dump${sqlPruned === 1 ? "" : "s"}${identityPart} older than ${keepDays} days.`);
   }
   return 0;
 }
@@ -621,11 +721,12 @@ async function prune({ dryRun, dbPath }) {
 /* ------------------------------------------------------------------- main */
 
 function parseArgs(argv) {
-  const opts = { mode: "make", dryRun: false, dbPath: null, report: null };
+  const opts = { mode: "make", dryRun: false, dbPath: null, report: null, file: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--report") { opts.report = argv[++i]; }
     else if (a === "--db") { opts.dbPath = argv[++i]; }
+    else if (a === "--may-leave") { opts.mode = "may-leave"; opts.file = argv[++i]; }
     else if (a === "--names") { opts.mode = "names"; }
     else if (a === "--backup-dir") { opts.mode = "backup-dir"; }
     else if (a === "--naming") { opts.mode = "naming"; }
@@ -640,8 +741,17 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   if (opts.mode === "help") {
-    console.log("usage: node scripts/backup-db.mjs [--report FILE --db PATH] [--names] [--backup-dir] [--naming] [--prune [--dry-run]]");
+    console.log("usage: node scripts/backup-db.mjs [--report FILE --db PATH] [--names] [--backup-dir] [--naming] [--may-leave FILE] [--prune [--dry-run]]");
     return 0;
+  }
+  if (opts.mode === "may-leave") {
+    // The upload guard's single definition (uploadRefusalReason): silence and 0
+    // when the file may leave, the reason on stdout and 3 when it must not.
+    if (!opts.file) throw new Error("--may-leave <file> is required");
+    const why = uploadRefusalReason(opts.file);
+    if (!why) return 0;
+    process.stdout.write(`${why}\n`);
+    return 3;
   }
   if (opts.mode === "backup-dir") {
     process.stdout.write(resolveBackupDir() + "\n");

@@ -443,6 +443,20 @@ export async function runPostListenSetup(server, app, deps) {
   import("../routes/admin-backup.js").then(({ backupSelfCheck }) => backupSelfCheck())
     .catch((err) => console.warn(`[backup] self-check failed: ${err.message}`));
 
+  // Identity backup nudge (security audit N1c-10): ONCE, ever, when this
+  // instance has an identity and the owner has neither been asked nor made the
+  // passphrase-encrypted copy. The local nightly backup keeps identity.json on
+  // this machine only, so a lost disk loses the identity unless that copy
+  // exists. Skipped on a --no-auth gateway (never the operator's dashboard).
+  // Own db client, closed inside. Never throws.
+  if (!noAuth) {
+    setImmediate(() => {
+      import("./identity-backup-nudge.js")
+        .then(({ runIdentityBackupNudge }) => runIdentityBackupNudge())
+        .catch((err) => console.warn(`[identity-backup] nudge skipped: ${err?.message ?? err}`));
+    });
+  }
+
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
