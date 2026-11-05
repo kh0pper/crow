@@ -17,11 +17,14 @@ The auto-updater runs as a background task inside the gateway process:
    Disable with `CROW_UPDATE_CI_GATE=0`.
 3. **Quarantine check** — if this host already rolled a commit back, and that
    commit is still the head of `main`, the update is skipped (see
-   [Automatic rollback](#automatic-rollback))
+   [Automatic rollback](#automatic-rollback); a rollback taken for a machine-side
+   reason expires after 6 hours, so it retries even if `main` never moves)
 4. **Pull** — runs `git pull --ff-only origin main` (fast-forward only, no merge commits).
    Local changes are **not** stashed: `git pull` refuses only when the incoming
    diff overlaps a file you modified, and leaves every other local edit alone.
-5. **Dependencies** — runs `npm install` if `package.json` or `package-lock.json` changed
+5. **Dependencies** — runs `npm install` if `package.json` or `package-lock.json` changed.
+   If the install fails, the update stops right there and is rolled back: no import
+   check, no migration, no restart (see [Automatic rollback](#automatic-rollback))
 6. **Import check** — loads the pulled gateway's whole import graph in a short-lived
    child process. If it does not load, the update is rolled back before it is ever
    started (see [Automatic rollback](#automatic-rollback))
@@ -67,28 +70,48 @@ An update that cannot start is worse than a late update: systemd restarts a
 crashing gateway every few seconds, so the fix on `main` is never even fetched.
 Crow therefore checks the pulled code **before** committing to it.
 
-**Layer 0 (this release).** After the pull and `npm install`, and *before*
-`init-db` runs, the updater launches the pulled `servers/gateway/index.js` in a
-child process with `CROW_GATEWAY_IMPORT_CHECK=1`, using the environment the unit
-actually configures. That file answers with a one-line token and exit code 0 as
-its very first statement, which proves the entire static import graph loaded. On
-a clean non-zero exit, a timeout (60 s), or a missing token, the updater:
+**Layer 0 (this release).** After the pull, the updater installs dependencies
+first: if `npm install` exits non-zero, the update is abandoned at that point —
+no import check, no `init-db`, no restart — because the checks that follow would
+be judging a tree whose dependencies nobody installed, and the migration would
+run for a commit that may never start. The rollback steps below apply to it too,
+with `deps-failed` as the recorded reason.
+
+Then, and *before* `init-db` runs, the updater launches the pulled
+`servers/gateway/index.js` in a child process with `CROW_GATEWAY_IMPORT_CHECK=1`,
+using the environment the unit actually configures. That file answers with a
+one-line token and exit code 0 as its very first statement, which proves the
+entire static import graph loaded. On a clean non-zero exit, a timeout (60 s), or
+a missing token, the updater:
 
 1. writes `<git-dir>/crow-update-quarantine.json` naming the commit — so no
    instance on this checkout pulls it again;
 2. moves the checkout back with `git reset --keep <previous>`, which refuses
    rather than destroying local changes that overlap;
 3. reinstalls dependencies if they changed, and
-4. records `Rolled back: <sha> fails to load (…)` in Settings > Updates and
-   rings the notification bell.
+4. records `Rolled back: …` in Settings > Updates — `… fails to load (…)` for a
+   commit that cannot load, `… — npm install failed` for one whose dependencies
+   could not be installed — and rings the notification bell.
 
 Nothing restarts into the bad commit. A commit whose code does not load stays
 quarantined until `main` moves past it; a rollback taken for a machine-side
 reason (a timeout, a failed `npm install`, a failed `init-db` that changed
-nothing) also expires after 6 hours. If `git reset --keep` refuses because local
-changes overlap, the quarantine stays, the restart is withheld, and the result
-says `Update rollback blocked` — including the case where the checkout is still
-holding the bad commit, so the next restart or reboot would boot it.
+nothing) also expires after 6 hours. Neither applies to the marker a *blocked*
+rollback leaves behind (the checkout still holds the refused commit): that marker
+is never deleted and never times out, so `main` moving on does not unfreeze it
+either — the next restart or reboot would boot exactly that commit. If `git reset
+--keep` refuses because local changes overlap, the restart is withheld, the
+result says `Update rollback blocked`, and the marker is re-written WITHOUT an
+expiry — the checkout is still holding the bad commit, so a later check reports
+it instead of `Up to date`, and the next restart or reboot would boot it. As soon
+as the checkout no longer holds that commit (move `main` back by hand, for
+example) the marker is back to an ordinary one: a machine-side reason (the
+dependencies never installed) expires 6 hours after it was written and that same
+commit is retried, and one whose code does not load waits for `main` as usual.
+Nothing has to be deleted by hand. A marker a rollback that *succeeded* wrote is
+ordinary from the start: if you fix the cause and put that same commit on `main`
+yourself (a manual `git pull --ff-only`), the marker expires as usual and `main`
+moving on clears it, so it cannot freeze updates.
 
 `init-db` failing after a pull is only rolled back when nothing about the new
 code can have reached the database: the pull must not cross a schema generation,
@@ -97,8 +120,10 @@ still be readable, and `user_version` must not have advanced. Otherwise the
 tree is left where it is and the alert says so.
 
 Every co-hosted instance sharing the checkout honors the same marker: none of
-them migrates or restarts into a quarantined commit, and each one separately
-verifies that *its own* environment can load the tree before migrating.
+them migrates or restarts into a commit a blocked rollback left checked out —
+not even once its 6 hours have passed, as long as the checkout still holds that
+commit — and each one separately verifies that *its own* environment can load
+the tree before migrating.
 
 ### Layer 1: the boot guard {#boot-guard}
 
@@ -131,7 +156,7 @@ cannot start therefore can never replace the thing that judges it.
   → Updates shows `Rolled back: …`.
 - It arms itself: after a manual `git pull` and restart it will guard the new
   commit too, but **only** for commits that are already on `origin/main` and
-descend from the last healthy one. Your own unpushed commits on `main` are never
+  descend from the last healthy one. Your own unpushed commits on `main` are never
   rolled back.
 - If two Crow instances share one checkout, exactly one of them moves the tree;
   the other notices and reports `Rolled back: … a co-hosted instance rolled it back`.
@@ -161,7 +186,8 @@ not on `main`, a read-only checkout, an `index.lock`) can clear on their own, so
 these are re-checked on the next start.
 
 **Recovering from a refusal.** The alert and `~/.crow/boot-guard/STATUS` carry
-the exact steps for the case that fired. In general:
+the exact steps for the case that fired. In general (`CROW_APP` is your checkout:
+`~/.crow/app` for an installer setup, or wherever you cloned the repo):
 
 ```bash
 # 1. Stop the loop.
@@ -173,7 +199,8 @@ sudo systemctl stop crow-gateway
 ls ~/backups/crow            # or wherever your backup directory is
 
 # 3. Move main back to a commit you know starts, keeping unrelated local edits.
-cd ~/crow
+CROW_APP="${CROW_APP:-$HOME/.crow/app}"
+cd "$CROW_APP"
 git log --oneline -5
 git reset --keep <that-commit>
 
@@ -219,24 +246,38 @@ the old one has released the port.
 
 ## Manual Update
 
-If you prefer to update manually:
+If you prefer to update manually (`CROW_APP` is your checkout: `~/.crow/app` for
+an installer setup, or wherever you cloned the repo):
 
 ```bash
-cd ~/crow
-git pull origin main
-npm install
-npm run init-db
+CROW_APP="${CROW_APP:-$HOME/.crow/app}"
+cd "$CROW_APP"
+git pull --ff-only origin main
+npm install --omit=dev
+node scripts/guarded-init-db.mjs   # guarded migration: backup first, restore on data loss
 sudo systemctl restart crow-gateway
 ```
+
+`node scripts/guarded-init-db.mjs` uses the same guard the updater uses: it takes
+a pre-migration backup, classifies the result for data loss and restores the
+backup if the migration damaged the store. `npm run init-db` still
+exists, but it is the bare, unguarded run with no backup — use it only on a
+scratch database, never on one you care about.
+
+`bash "$CROW_APP/scripts/crow-update.sh"` does the same sequence in one step and
+goes further: it verifies the new code actually answers `/health` and rolls back
+with `git reset --keep` if it does not.
 
 Or trigger a one-time check from the Settings page without enabling automatic checks.
 
 ## Rollback
 
-If an update causes issues, roll back **on `main`**:
+If an update causes issues, roll back **on `main`** (`CROW_APP` is your checkout:
+`~/.crow/app` for an installer setup, or wherever you cloned the repo):
 
 ```bash
-cd ~/crow
+CROW_APP="${CROW_APP:-$HOME/.crow/app}"
+cd "$CROW_APP"
 git log --oneline -5             # Find the previous commit
 git reset --keep <commit-hash>   # Move main back, keeping unrelated local edits
 sudo systemctl restart crow-gateway
@@ -274,13 +315,29 @@ Update activity is logged to the gateway's stdout (visible in `journalctl -u cro
 [auto-update] import check unavailable in 1a2b3c4d5 (no CROW_GATEWAY_IMPORT_CHECK seam) — relying on the boot guard
 [auto-update] Running database migrations...
 [auto-update] Updated: c29e19c → 9d18049
-[auto-update] Restarting gateway via systemd...
+[auto-update] Restarting to run 9d18049...
 ```
 
 A rollback reads:
 
 ```
 [auto-update] Rolled back: 9d18049 fails to load (import-check); running c29e19c; updates resume when main moves past it
+[auto-update] Rolled back: 9d18049 — npm install failed; running c29e19c; retried after 6 h or when main moves
+```
+
+If the rollback's OWN `npm install` fails, the result (and the notification) carry
+one more clause — install before the next restart, because `node_modules` may be
+half-written even though the old code keeps running from memory:
+
+```
+; its dependencies could not be reinstalled — run npm install --omit=dev in the checkout before the next restart
+```
+
+A failed `npm install` logs its exit code and the tail of npm's own output (which
+is why it stays in the log and never in the notification):
+
+```
+[auto-update] npm install failed (exit 1): npm ERR! …
 ```
 
 Update results are also saved to the database and visible in Settings > Updates.

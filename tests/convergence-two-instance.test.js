@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
-import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
+import { checkForUpdates, _setAppRootForTest, _setDbForTest, _setCiVerdictForTest } from "../servers/gateway/auto-update.js";
 import { _setAlertChannelsForTest } from "../servers/shared/migration-guard.js";
 import {
   _setLockWaitForTest,
@@ -201,6 +201,46 @@ test("BOTH co-hosted instances converge — the lock loser must not starve", asy
   assert.equal(b.pulled, false, "the lock loser must not pull — the tree is shared");
   assert.equal(b.converged, true, "the lock loser must still converge");
   assert.equal(restarts.length, 2, "each converging instance restarts exactly once");
+});
+
+test("a CI-red tick refuses the NEXT commit but a peer still converges onto the tree", async () => {
+  // Round 4: the CI gate refuses the commit on origin/main, NOT the code on disk.
+  // A co-hosted peer that booted before a sibling pulled must still migrate and
+  // restart into what the shared checkout ALREADY holds — otherwise a red main
+  // leaves the whole host on old code (version skew) for as long as CI stays red.
+  const f = twoInstanceFixture();
+  restarts.length = 0;
+  const boot = g(f.work, "rev-parse", "HEAD");
+  setBootSha(boot);
+  _setAppRootForTest(f.work);
+  // A sibling pulls the next commit, so the shared tree already holds it.
+  f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+  g(f.work, "pull", "--ff-only", "origin", "main");
+  const checkedOut = g(f.work, "rev-parse", "HEAD");
+  assert.notEqual(checkedOut, boot, "fixture: HEAD is a commit this instance has not run");
+  // One MORE commit lands on main; its CI is red, so the pull of THAT is refused.
+  f.advanceOrigin("0003-later.mjs", `export const id = "0003-later";\nexport function run() {}\n`);
+  assert.notEqual(g(f.work, "rev-parse", "origin/main"), checkedOut, "fixture: main is one commit ahead");
+
+  _setCiVerdictForTest("red");
+  _setSupervisedForTest(() => true);
+  _setRestartForTest((_log, msg) => { restarts.push(msg); });
+  _setDbForTest(stubDb());
+  try {
+    const r = await checkForUpdates({ instance: f.instances[1] });
+
+    assert.equal(r.skipped, "ci-red", JSON.stringify(r));
+    assert.equal(r.pulled, false, "the red commit is never pulled");
+    assert.equal(g(f.work, "rev-parse", "HEAD"), checkedOut, "the tree is left where it is");
+    assert.equal(r.converged, true, "the peer still converges to the code already checked out");
+    assert.ok(hasProbe(f.instances[1].tasksDbPath), "its own store is migrated to that code");
+    assert.equal(restarts.length, 1, "and it restarts exactly once into it");
+  } finally {
+    _setCiVerdictForTest(null);
+    _setRestartForTest(null);
+    _setSupervisedForTest(null);
+    _setDbForTest(null);
+  }
 });
 
 test("convergeInstance writes the cookie with the REAL pre-restart baseline", async () => {

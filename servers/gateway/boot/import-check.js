@@ -185,8 +185,9 @@ export function runImportCheck({
  * Seam check + run, the shape both callers want.
  *
  * `reason` is what the quarantine marker records: a timeout is transient (6 h
- * TTL), a clean failure is not (it waits for main to move). The puller overrides
- * it with `deps-failed` when its own npm install had just failed.
+ * TTL), a clean failure is not (it waits for main to move). A failed npm
+ * install never reaches this function: the puller rolls back on its own exit
+ * code first, with `deps-failed`.
  *
  * @returns {Promise<{ok?:boolean, skipped?:string, reason?:string, detail?:object}>}
  */

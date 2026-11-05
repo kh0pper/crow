@@ -14,7 +14,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
 import {
-  evaluateUpdateQuarantine, quarantinePath, readUpdateQuarantine, writeUpdateQuarantine,
+  activeUpdateQuarantine, evaluateUpdateQuarantine, quarantineExpired, quarantinePath,
+  readUpdateQuarantine, updateQuarantineHeldAtHead, writeUpdateQuarantine,
 } from "../servers/shared/update-quarantine.js";
 
 delete process.env.INVOCATION_ID;
@@ -160,20 +161,288 @@ test("a transient reason expires after its 6 h TTL", async () => {
   } finally { cleanup(); }
 });
 
+test("a blocked deps-failed marker regains its TTL once HEAD moves off it", async () => {
+  // A blocked rollback persists its marker WITHOUT an expiry because the refused
+  // commit is still checked out. The operator then moves main back by hand, so
+  // HEAD is no longer that sha: a machine-side reason (a registry outage is not a
+  // bad commit) must expire from the marker's own `at` and the same commit must
+  // be retried. Without that, a failed install pauses updates until main moves
+  // past a commit main does not even point at any more.
+  const f = fixture();
+  const db = stubDb();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    g(f.work, "pull", "--ff-only", "origin", "main"); // the checkout HOLDS the refused sha
+    writeUpdateQuarantine({
+      gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "deps-failed",
+      now: Date.now() - 7 * 60 * 60 * 1000, persist: true,
+    });
+    const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.equal(marker.reason, "deps-failed");
+    assert.equal(marker.expires_at, undefined, "a blocked rollback persists without a TTL");
+    // While the refused sha IS checked out the exemption holds, whatever the age.
+    assert.equal(activeUpdateQuarantine({ gitDir: f.gitDir, localHeadSha: bad })?.sha, bad,
+      "a checkout still sitting on the refused commit never times out");
+    assert.equal(evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: bad, localHeadSha: bad }).blocked, true);
+
+    // The operator puts main back: HEAD is the previous healthy commit.
+    g(f.work, "reset", "--keep", f.prev);
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+
+    const r = await checkForUpdates();
+
+    assert.equal(r.updated, true,
+      `a machine-side marker expires once HEAD moved off it: ${JSON.stringify(r)}`);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), bad, "the same commit is pulled again");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "the spent record is cleared");
+  } finally { cleanup(); }
+});
+
+test("a manual pull onto a successful rollback's marker sha does not wedge updates", async () => {
+  // Round 4: "held at HEAD" belongs to a BLOCKED rollback only. A SUCCESSFUL
+  // deps-failed rollback leaves an ordinary TTL marker for the sha it moved the
+  // tree OFF. If the operator fixes the registry and fast-forwards HEAD onto
+  // that same commit, HEAD names the marker — but the operator chose it, so the
+  // round-2 rules apply: main moving past it clears it and the pull goes ahead.
+  // Round 3 froze ANY marker naming HEAD, so this path recorded "Update rollback
+  // blocked: … is still checked out" on every tick and never pulled again until
+  // the marker was deleted by hand.
+  const f = fixture();
+  const db = stubDb();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    // The rollback wrote an ordinary marker (6 h TTL, no `held`) and its reset
+    // left the checkout on the previous commit — the fixture already is.
+    writeUpdateQuarantine({ gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "deps-failed" });
+    const written = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.equal(written.held, undefined, "a rollback that moved the tree back does not write a held marker");
+    assert.ok(Date.parse(written.expires_at) > Date.now(), "…it is an ordinary marker with the 6 h TTL");
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev, "fixture: the rollback left the checkout on the previous sha");
+
+    // The operator fixes the registry and pulls that same commit by hand.
+    g(f.work, "pull", "--ff-only", "origin", "main");
+    assert.equal(g(f.work, "rev-parse", "HEAD"), bad, "the operator put the quarantined commit on HEAD by hand");
+
+    // Main then moves on to a newer commit.
+    const fix = pushToOrigin(f, "c.txt", "three\n");
+    assert.notEqual(fix, bad);
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+
+    const r = await checkForUpdates();
+
+    assert.equal(r.updated, true,
+      `main moved past it, so the marker clears and the pull goes ahead: ${JSON.stringify(r)}`);
+    assert.equal(r.blocked, undefined, JSON.stringify(r));
+    assert.equal(r.skipped, undefined, JSON.stringify(r));
+    assert.equal(g(f.work, "rev-parse", "HEAD"), fix, "the newer commit is pulled normally");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "the spent marker is removed");
+  } finally { cleanup(); }
+});
+
+test("a reason that is not transient keeps waiting for main even after HEAD moved", async () => {
+  // The TTL is only for machine-side reasons. A sha whose CODE does not load is
+  // never retried just because the operator reset the checkout.
+  const f = fixture();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    writeUpdateQuarantine({
+      gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "import-check",
+      now: Date.now() - 7 * 60 * 60 * 1000, persist: true,
+    });
+    assert.equal(quarantineExpired(readUpdateQuarantine({ gitDir: f.gitDir }), Date.now(), f.prev), false);
+    const uq = evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: bad, localHeadSha: f.prev });
+    assert.equal(uq.blocked, true, "an import-check marker waits for main, not for the clock");
+    assert.ok(existsSync(quarantinePath(f.gitDir)), "and is not cleared");
+  } finally { f.cleanup(); }
+});
+
+test("a marker that expired this tick is not reported as blocked", async () => {
+  // The up-to-date defence used to hold a pre-evaluation COPY of the marker, so
+  // a marker the evaluator had just expired AND DELETED still produced "Update
+  // rollback blocked" — plus a failure bell — for exactly one tick. (The marker
+  // here names a commit the checkout does NOT hold: a marker naming HEAD is never
+  // expired away at all — see the round-3 tests below.)
+  const f = fixture();
+  const db = stubDb();
+  try {
+    // A real commit that HEAD is then moved OFF, so the expired marker is spent.
+    writeFileSync(join(f.work, "g.txt"), "gone\n");
+    g(f.work, "add", "g.txt");
+    g(f.work, "commit", "-m", "away");
+    const away = g(f.work, "rev-parse", "HEAD");
+    g(f.work, "reset", "--hard", f.prev); // HEAD == origin/main == f.prev
+    // An expiring marker (the shape a successful rollback writes) that ran out
+    // one minute ago.
+    writeUpdateQuarantine({
+      gitDir: f.gitDir, sha: away, previous: f.prev, reason: "import-timeout",
+      now: Date.now() - 6 * 60 * 60 * 1000 - 60 * 1000,
+    });
+    const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.ok(Date.parse(marker.expires_at) <= Date.now(), "the fixture marker really is expired");
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+
+    const r = await checkForUpdates();
+
+    assert.equal(db.settings.get("auto_update_last_result"), "Up to date",
+      "an expired and cleared marker is not a blocked rollback");
+    assert.equal(r.updated, false);
+    assert.equal(r.blocked, undefined, JSON.stringify(r));
+    assert.equal(db.notifications.length, 0, `no false failure bell: ${JSON.stringify(db.notifications)}`);
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null);
+  } finally { cleanup(); }
+});
+
+test("the evaluator never deletes a HELD marker whose sha is HEAD — main moved or expired", () => {
+  // Round 3: a refused commit that is STILL CHECKED OUT must stay refused. The
+  // "main moved past it" and "it expired" cleanups both used to delete the
+  // record while HEAD was its sha, leaving the refused commit checked out with
+  // nothing left to refuse it (a peer would then migrate and restart into it).
+  // Only a marker a BLOCKED rollback wrote carries that rule (`held: true`, set
+  // by `persist`); an unflagged marker naming HEAD is ordinary (see the manual-
+  // pull test below).
+  const f = fixture();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    g(f.work, "pull", "--ff-only", "origin", "main"); // HEAD == bad
+    // A blocked rollback's marker, recorded by a release that still carried the
+    // TTL for the reason: held AND expired.
+    writeFileSync(quarantinePath(f.gitDir), JSON.stringify({
+      v: 1, sha: bad, previous: f.prev, reason: "import-timeout",
+      at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(), by: "test",
+      expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      held: true,
+    }));
+    const fix = pushToOrigin(f, "c.txt", "three\n"); // origin/main moved PAST bad
+    assert.notEqual(fix, bad);
+
+    // (a) main moved past it, HEAD still the refused sha: reported, not cleared.
+    const headNow = g(f.work, "rev-parse", "HEAD");
+    assert.equal(headNow, bad, "fixture: the checkout holds the refused sha");
+    let uq = evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: fix, localHeadSha: headNow });
+    assert.equal(uq.blocked, false, JSON.stringify(uq));
+    assert.equal(uq.heldAtHead, true, JSON.stringify(uq));
+    assert.ok(existsSync(quarantinePath(f.gitDir)), "the marker survives while HEAD is its sha");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).sha, bad);
+
+    // (b) an unreadable local HEAD may still be that sha: no cleanup on a guess.
+    uq = evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: fix, localHeadSha: "" });
+    assert.equal(uq.heldAtHead, true, JSON.stringify(uq));
+    assert.ok(existsSync(quarantinePath(f.gitDir)), "an unreadable HEAD never clears the marker");
+
+    // (c) the marker's own expiry cannot delete it either, and it stays ACTIVE
+    // for the convergence gate whatever its age.
+    assert.ok(Date.parse(readUpdateQuarantine({ gitDir: f.gitDir }).expires_at) <= Date.now());
+    assert.equal(activeUpdateQuarantine({ gitDir: f.gitDir, localHeadSha: bad })?.sha, bad,
+      "a marker naming HEAD is active however expired it is");
+    assert.equal(updateQuarantineHeldAtHead({ gitDir: f.gitDir, localHeadSha: bad })?.sha, bad);
+    uq = evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: fix, localHeadSha: bad });
+    assert.equal(uq.heldAtHead, true, JSON.stringify(uq));
+    assert.ok(existsSync(quarantinePath(f.gitDir)));
+
+    // (d) once HEAD is OFF the sha the round-2 rules return: the expired record
+    // is cleared, and so is a spent one main has moved past.
+    uq = evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: fix, localHeadSha: f.prev });
+    assert.equal(uq.expired, true, JSON.stringify(uq));
+    assert.equal(uq.heldAtHead, undefined);
+    assert.ok(!existsSync(quarantinePath(f.gitDir)), "an expired marker the checkout moved off is spent");
+
+    writeUpdateQuarantine({ gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "import-check" });
+    uq = evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: fix, localHeadSha: f.prev });
+    assert.equal(uq.cleared, true, JSON.stringify(uq));
+    assert.equal(uq.heldAtHead, undefined);
+    assert.ok(!existsSync(quarantinePath(f.gitDir)), "a marker main moved past is spent once HEAD is off it");
+  } finally { f.cleanup(); }
+});
+
+test("a marker whose sha is still checked out blocks the tick when main moves past it", async () => {
+  // Round 3: origin/main moving on used to delete the marker and pull the newer
+  // commit while HEAD was STILL the refused sha. The refused commit stayed
+  // checked out (so the next restart boots it) with no marker left to stop any
+  // peer, and convergence was free to restart into it.
+  const f = fixture();
+  const db = stubDb();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    g(f.work, "pull", "--ff-only", "origin", "main"); // the checkout HOLDS the bad sha
+    writeUpdateQuarantine({
+      gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "deps-failed", persist: true,
+    });
+    const fix = pushToOrigin(f, "c.txt", "three\n"); // a NEWER commit on main
+    assert.notEqual(fix, bad);
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+
+    const r = await checkForUpdates();
+
+    assert.equal(r.skipped, "update-rollback-blocked", JSON.stringify(r));
+    assert.equal(r.blocked, true, JSON.stringify(r));
+    assert.equal(r.converge, false, "the refused commit is still checked out — no restart into it");
+    assert.equal(r.converged, false, JSON.stringify(r));
+    assert.match(db.settings.get("auto_update_last_result"),
+      new RegExp(`Update rollback blocked: ${bad.slice(0, 9)} is still checked out`));
+    assert.ok(existsSync(quarantinePath(f.gitDir)), "the marker is never deleted while HEAD is its sha");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).sha, bad);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), bad, "the tree is left where it is");
+    assert.ok(!existsSync(join(f.work, "c.txt")), "the newer commit is not pulled over the refusal");
+  } finally { cleanup(); }
+});
+
+test("an expired HELD marker whose sha is still checked out still blocks the tick", async () => {
+  // Round 3: the TTL used to delete the marker and let the tick carry on with
+  // the refused commit still checked out. It expires the marker, not the fact
+  // that a commit this host refused is the one on disk. (The marker is HELD — a
+  // blocked rollback wrote it; an ordinary marker's TTL still applies.)
+  const f = fixture();
+  const db = stubDb();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    g(f.work, "pull", "--ff-only", "origin", "main"); // HEAD == origin/main == bad
+    writeFileSync(quarantinePath(f.gitDir), JSON.stringify({
+      v: 1, sha: bad, previous: f.prev, reason: "import-timeout",
+      at: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString(), by: "test",
+      expires_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      held: true,
+    }));
+    assert.ok(Date.parse(readUpdateQuarantine({ gitDir: f.gitDir }).expires_at) <= Date.now(),
+      "the fixture marker really is past its TTL");
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+
+    const r = await checkForUpdates();
+
+    assert.equal(r.skipped, "update-rollback-blocked", JSON.stringify(r));
+    assert.equal(r.blocked, true, JSON.stringify(r));
+    assert.equal(r.converge, false, "no restart into a refused commit, expired marker or not");
+    assert.match(db.settings.get("auto_update_last_result"),
+      new RegExp(`Update rollback blocked: ${bad.slice(0, 9)} is still checked out`));
+    assert.ok(existsSync(quarantinePath(f.gitDir)), "the expired marker is NOT deleted while HEAD is its sha");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).sha, bad);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), bad);
+  } finally { cleanup(); }
+});
+
 test("an init-db-failed marker also expires, an import-check one does not", () => {
   const f = fixture();
   try {
     const sha = f.prev;
+    // A local HEAD that is NOT the marker's sha: only then does a TTL apply
+    // (while HEAD is the sha the marker never expires — round 3).
+    const elsewhere = "0".repeat(40);
     const old = Date.now() - 7 * 60 * 60 * 1000;
     writeUpdateQuarantine({ gitDir: f.gitDir, sha, reason: "init-db-failed", now: old });
-    assert.equal(evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: sha }).blocked, false);
+    assert.equal(
+      evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: sha, localHeadSha: elsewhere }).blocked, false);
     assert.ok(!existsSync(quarantinePath(f.gitDir)), "the expired record is cleaned up");
 
     // A sha whose CODE does not load gets no deadline: it waits for main.
     writeUpdateQuarantine({ gitDir: f.gitDir, sha, reason: "import-check", now: old });
     const m = readUpdateQuarantine({ gitDir: f.gitDir });
     assert.equal(m.expires_at, undefined, "a clean import failure has no TTL");
-    assert.equal(evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: sha }).blocked, true);
+    assert.equal(
+      evaluateUpdateQuarantine({ gitDir: f.gitDir, originHeadSha: sha, localHeadSha: elsewhere }).blocked, true);
   } finally { f.cleanup(); }
 });
 
@@ -215,7 +484,8 @@ test("a blocked rollback says the bad commit is still checked out (S5)", async (
   try {
     const bad = pushToOrigin(f, "b.txt", "two\n");
     g(f.work, "pull", "--ff-only", "origin", "main"); // the checkout HOLDS the bad sha
-    writeUpdateQuarantine({ gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "import-check" });
+    // A blocked rollback wrote it: HELD, so the refusal survives TTL and main.
+    writeUpdateQuarantine({ gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "import-check", persist: true });
     _setAppRootForTest(f.work);
     _setDbForTest(db);
 
