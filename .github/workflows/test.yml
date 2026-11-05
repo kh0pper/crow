@@ -36,7 +36,7 @@ jobs:
     # setup alone used the whole 15 minutes and every suite was cancelled
     # before a test ran. The cache below takes the browser download off the
     # path; the margin covers a slow mirror.
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
