@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -11,9 +11,20 @@ const src = () => readFileSync(SCRIPT, "utf-8");
 /** Source the installer's helper layer (CROW_INSTALL_SOURCE_ONLY=1) and run a
  *  snippet against it. detached:true puts the child in a new session with no
  *  controlling terminal, so the /dev/tty open-probe fails → HAS_TTY=false and
- *  the headless path is exercised even from an interactive terminal. */
-function runWithHelpers(snippet, env = {}) {
-  return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"; ${snippet}`], {
+ *  the headless path is exercised even from an interactive terminal.
+ *  scriptArgs are passed to `source`, i.e. they become the installer's own
+ *  arguments (the `curl … | bash -s -- --no-auto-updates` case). */
+function runWithHelpers(snippet, env = {}, scriptArgs = []) {
+  // Safety rail: a snippet that can reach the auto-updates step may only run
+  // with the scratch seams, so a regression in the env parsing can never run a
+  // real `sudo apt install` (or hang on a sudo prompt) on the suite's machine.
+  if (/install_auto_updates|apt_install|write_crow_apt_conf|write_auto_upgrades_conf/.test(snippet)) {
+    for (const key of ["APT_CONF_DIR", "CROW_SUDO", "CROW_APT"]) {
+      if (!env[key]) throw new Error(`${key} is required to run the auto-updates step in a test`);
+    }
+  }
+  const args = scriptArgs.map((a) => ` ${a}`).join("");
+  return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"${args}; ${snippet}`], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     env: { ...process.env, ...env },
@@ -195,7 +206,7 @@ test("4c: platform gate is defined above the source-only seam and CALLED below i
   assert.ok(defIdx < seamIdx, "definition must sit ABOVE the seam so tests can source it");
   const callIdx = s.indexOf(callMatch[0]);
   assert.ok(callIdx > seamIdx, "the call must sit BELOW the seam (in the install body)");
-  assert.ok(callIdx < s.indexOf("Step 1/9"), "the gate must run before Step 1 (first apt mutation)");
+  assert.ok(callIdx < s.indexOf("Step 1/10"), "the gate must run before Step 1 (first apt mutation)");
   // The refusal must name the docs manual path and exit 1, not half-install.
   const refusal = s.slice(callIdx, s.indexOf("fi", callIdx));
   assert.match(refusal, /docs\/getting-started/, "refusal must point at the manual path");
@@ -282,7 +293,7 @@ test("Task 10 MUTATION: only ONE IS_CLOUD_HOST is declared (the metadata-probe o
 
 test("Task 10: Docker step no longer warns about re-login — the extensions banner is the point-of-use now", () => {
   const s = src();
-  const dockerStep = s.slice(s.indexOf('header "Step 3/9: Docker"'), s.indexOf('header "Step 4/9: Caddy"'));
+  const dockerStep = s.slice(s.indexOf('header "Step 3/10: Docker"'), s.indexOf('header "Step 4/10: Caddy"'));
   assert.doesNotMatch(dockerStep, /log out and back in/i);
   assert.match(dockerStep, /log "Docker installed"/, "the install-success log line must remain");
 });
@@ -299,8 +310,8 @@ test("libatomic1 is installed in the Node step, before any npm install/ci (rocks
   const npmIdx = s.indexOf(npmLine);
   assert.ok(aptIdx < npmIdx, "libatomic1 must be installed before npm runs");
   // Inside Step 2 (Node), after the branch that may skip the nodejs install.
-  const step2 = s.indexOf('header "Step 2/9: Node.js');
-  const step3 = s.indexOf('header "Step 3/9: Docker"');
+  const step2 = s.indexOf('header "Step 2/10: Node.js');
+  const step3 = s.indexOf('header "Step 3/10: Docker"');
   assert.ok(step2 < aptIdx && aptIdx < step3, "libatomic1 belongs to the Node step");
   // After the whole Node if/else, so both paths (installed / just installed) run it.
   assert.ok(aptIdx > s.indexOf("\nfi\n", step2), "must run on the Node-already-installed path too");
@@ -476,4 +487,212 @@ test("proxy socket units pass systemd-analyze verify when available (skips other
   const r = spawnSync("systemd-analyze", ["verify", "--man=no", join(dir, "crow-gateway-proxy.socket"), join(dir, "crow-gateway.service")], { encoding: "utf-8" });
   const out = (r.stdout || "") + (r.stderr || "");
   assert.doesNotMatch(out, /Unknown key name|cannot be started|not loaded/, out);
+});
+
+// ─── Automatic security updates (security audit K6) ──────────────────────────
+// The step wires unattended-upgrades to the repos this installer added (Node,
+// Docker, Caddy) with automatic reboots OFF. Everything below either reads the
+// script or runs the step against a SCRATCH apt.conf.d with shims for sudo/apt,
+// so it can never touch the real /etc/apt of the machine running the suite.
+
+/** The step's own text: its header up to the mDNS step that follows it. */
+function autoUpdatesStepBlock(s) {
+  const start = s.indexOf('header "Step 5/10: Automatic Security Updates"');
+  const end = s.indexOf('header "Step 6/10: mDNS (crow.local)"');
+  return start === -1 || end === -1 ? "" : s.slice(start, end);
+}
+
+/** Every helper the step can run (they sit above the source-only seam). */
+function autoUpdatesHelpers(s) {
+  const start = s.indexOf("# ─── Automatic security updates (security audit K6)");
+  const end = s.indexOf("# Test seam: tests source the helpers");
+  return start === -1 || end === -1 ? "" : s.slice(start, end);
+}
+
+/** The origin lines the operator confirmed from each repo's live Release file. */
+const ORIGIN_LINES = [
+  '"origin=. nodistro,codename=nodistro";',
+  '"origin=Docker,archive=${distro_codename}";',
+  '"origin=cloudsmith/caddy/stable,codename=any-version";',
+];
+
+/** A scratch "root": an empty apt.conf.d plus shims for sudo and apt. */
+function autoUpdatesScratch() {
+  const dir = mkdtempSync(join(tmpdir(), "crow-autoupdates-"));
+  const confDir = join(dir, "apt.conf.d");
+  mkdirSync(confDir);
+  const aptLog = join(dir, "apt.log");
+  // apt shim: records its arguments and succeeds — no package is installed.
+  const apt = join(dir, "apt-shim");
+  writeFileSync(apt, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(aptLog)}\n`, { mode: 0o755 });
+  // sudo shim: runs the command as this user (the scratch dir needs no root).
+  const sudo = join(dir, "sudo-shim");
+  writeFileSync(sudo, '#!/bin/sh\nexec "$@"\n', { mode: 0o755 });
+  return { dir, confDir, aptLog, apt, sudo };
+}
+
+/** Run the step against a scratch root through the path/command seams. */
+function runAutoUpdates(scratch, opts = {}) {
+  return runWithHelpers(opts.snippet || "install_auto_updates", {
+    APT_CONF_DIR: scratch.confDir,
+    CROW_SUDO: scratch.sudo,
+    CROW_APT: scratch.apt,
+    ...(opts.env || {}),
+  }, opts.args || []);
+}
+
+test("K6: the step sits after Docker and Caddy and runs install_auto_updates", () => {
+  const s = src();
+  const step = autoUpdatesStepBlock(s);
+  assert.ok(step, "there must be a Step 5/10: Automatic Security Updates");
+  assert.match(step, /^install_auto_updates$/m);
+  // Its origins only exist once Docker's and Caddy's apt repos are configured.
+  assert.ok(
+    s.indexOf('header "Step 3/10: Docker"') < s.indexOf('header "Step 5/10: Automatic Security Updates"')
+      && s.indexOf('header "Step 4/10: Caddy"') < s.indexOf('header "Step 5/10: Automatic Security Updates"'),
+    "the auto-updates step must come after Docker and Caddy",
+  );
+});
+
+test("K6: Crow's origins file carries exactly the three origins and Automatic-Reboot false", () => {
+  const helpers = autoUpdatesHelpers(src());
+  assert.ok(helpers, "the step's helpers must be defined above the source-only seam");
+  const writer = helpers.slice(helpers.indexOf("write_crow_apt_conf()"), helpers.indexOf("write_auto_upgrades_conf()"));
+  const originLines = writer.split("\n").map((l) => l.trim()).filter((l) => l.startsWith('"origin='));
+  // Exactly three, exactly as read from each repo's Release file: an invented
+  // origin (or a fourth line repeating the distro's own security origins) would
+  // silently widen or narrow what installs itself.
+  assert.deepEqual(originLines, ORIGIN_LINES);
+  assert.match(writer, /^Unattended-Upgrade::Automatic-Reboot "false";$/m);
+  assert.match(writer, /52crow-unattended-upgrades/);
+  // The distro's own file is never written or edited.
+  assert.doesNotMatch(src(), /50unattended-upgrades["' ]*>/);
+});
+
+test("K6 (behaviour): the step installs unattended-upgrades and writes both files in a scratch root", () => {
+  const scratch = autoUpdatesScratch();
+  const r = runAutoUpdates(scratch);
+  assert.equal(r.status, 0, r.stderr);
+
+  const origins = readFileSync(join(scratch.confDir, "52crow-unattended-upgrades"), "utf-8");
+  const originLines = origins.split("\n").map((l) => l.trim()).filter((l) => l.startsWith('"origin='));
+  assert.deepEqual(originLines, ORIGIN_LINES);
+  assert.match(origins, /^Unattended-Upgrade::Automatic-Reboot "false";$/m);
+
+  assert.equal(
+    readFileSync(join(scratch.confDir, "20auto-upgrades"), "utf-8"),
+    'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n',
+  );
+  // The distro package is installed through apt with the script's own -y style.
+  assert.match(readFileSync(scratch.aptLog, "utf-8"), /install -y unattended-upgrades/);
+});
+
+test("K6 (behaviour): re-running rewrites 52crow only when its content differs", () => {
+  const scratch = autoUpdatesScratch();
+  assert.equal(runAutoUpdates(scratch).status, 0);
+  const dest = join(scratch.confDir, "52crow-unattended-upgrades");
+  const before = statSync(dest);
+  const second = runAutoUpdates(scratch);
+  assert.equal(second.status, 0, second.stderr);
+  const after = statSync(dest);
+  // The step compares first and skips install(1) entirely when the bytes match,
+  // so the destination's inode (and mtime) must be untouched.
+  assert.equal(after.ino, before.ino, "an identical file must not be rewritten");
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.match(second.stdout, /already configured/);
+});
+
+test("K6 (behaviour): 20auto-upgrades is written only when it is absent", () => {
+  const scratch = autoUpdatesScratch();
+  const conf = join(scratch.confDir, "20auto-upgrades");
+  writeFileSync(conf, 'APT::Periodic::Unattended-Upgrade "0";\n');
+  const r = runAutoUpdates(scratch);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(conf, "utf-8"), 'APT::Periodic::Unattended-Upgrade "0";\n',
+    "an existing periodic switch is never overruled");
+  assert.match(r.stdout, /already exists/);
+});
+
+test("K6 (behaviour): CROW_NO_AUTO_UPDATES=1 skips the step — no apt call, no file written", () => {
+  const scratch = autoUpdatesScratch();
+  const r = runAutoUpdates(scratch, { env: { CROW_NO_AUTO_UPDATES: "1" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /skipped/);
+  assert.deepEqual(readdirSync(scratch.confDir), []);
+  assert.equal(existsSync(scratch.aptLog), false, "the opt-out must not run apt at all");
+});
+
+test("K6 (behaviour): the --no-auto-updates argument given to the script skips the step", () => {
+  const scratch = autoUpdatesScratch();
+  // `source … --no-auto-updates` is what `curl … | bash -s -- --no-auto-updates`
+  // does: the arguments reach the script's own flag loop.
+  const r = runAutoUpdates(scratch, {
+    args: ["--no-auto-updates"],
+    snippet: 'echo "AUTO=$AUTO_UPDATES"; install_auto_updates',
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /AUTO=false/);
+  assert.match(r.stdout, /skipped/);
+  assert.deepEqual(readdirSync(scratch.confDir), []);
+  assert.equal(existsSync(scratch.aptLog), false, "the opt-out must not run apt at all");
+});
+
+test("K6: the step can only run in tests with the scratch seams set", () => {
+  // The rail in runWithHelpers: without it a broken env parse would run the
+  // suite's machine's real `sudo apt install unattended-upgrades`.
+  assert.throws(
+    () => runWithHelpers("install_auto_updates", { CROW_NO_AUTO_UPDATES: "1" }),
+    /APT_CONF_DIR is required/,
+  );
+});
+
+test("K6: the flag and CROW_NO_AUTO_UPDATES are parsed next to --yes and documented in the usage text", () => {
+  const s = src();
+  assert.match(s, /--no-auto-updates\) AUTO_UPDATES=false ;;/);
+  assert.match(s, /CROW_NO_AUTO_UPDATES:-\}" = "1" \]; then AUTO_UPDATES=false; fi/);
+  const usage = s.slice(0, s.indexOf("set -euo pipefail"));
+  assert.match(usage, /^#   --no-auto-updates/m,
+    "the opt-out belongs in the script's usage text");
+  // Both pipe forms: the documented one-liner feeds the script to bash on
+  // stdin, so a flag cannot be appended after the URL.
+  assert.match(usage, /crow-install\.sh \| bash -s -- --no-auto-updates/);
+  assert.match(usage, /crow-install\.sh \| CROW_NO_AUTO_UPDATES=1 bash/);
+  const scratch = autoUpdatesScratch();
+  const r = runAutoUpdates(scratch, {
+    env: { CROW_NO_AUTO_UPDATES: "1" },
+    snippet: 'echo "AUTO=$AUTO_UPDATES"; install_auto_updates',
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /AUTO=false/);
+  assert.match(r.stdout, /skipped/);
+});
+
+test("K6: every apt call after this step waits for the dpkg lock", () => {
+  const s = src();
+  const stepIdx = s.indexOf('header "Step 5/10: Automatic Security Updates"');
+  assert.ok(stepIdx > -1, "the step must exist");
+  // From here on apt-daily-upgrade.timer can hold the dpkg lock (20auto-upgrades
+  // says "1"); without the timeout apt fails and `set -e` stops the install.
+  const later = s.slice(stepIdx);
+  const calls = later.match(/^\s*(?:sudo\s+)?(?:apt|apt-get)\s+(?:-y\s+)?(?:install|update|upgrade)\b.*$/gm) || [];
+  assert.ok(calls.length >= 3, `expected the later apt calls, found ${calls.length}`);
+  for (const line of calls) {
+    assert.match(line, /-o DPkg::Lock::Timeout=300/, `missing the lock timeout: ${line.trim()}`);
+  }
+  // The step's own install runs before the timer is switched on, so it needs none.
+  assert.doesNotMatch(autoUpdatesStepBlock(s), /DPkg::Lock::Timeout/);
+});
+
+test("K6: the step never restarts a service and never reboots", () => {
+  const s = src();
+  for (const block of [autoUpdatesStepBlock(s), autoUpdatesHelpers(s)]) {
+    assert.ok(block, "block must exist");
+    assert.doesNotMatch(block, /systemctl/, "no service is restarted or reloaded by this step");
+    assert.doesNotMatch(block, /shutdown/, "no shutdown either");
+    // A reboot COMMAND is forbidden; the Automatic-Reboot setting is not a reboot.
+    assert.doesNotMatch(block, /^\s*(sudo\s+)?(reboot|systemctl\s+reboot)\s*$/m);
+  }
+  assert.match(autoUpdatesHelpers(s), /Automatic-Reboot "false"/);
+  // …and apt never runs non-interactively in a way that takes a reboot itself.
+  assert.doesNotMatch(autoUpdatesHelpers(s), /Needrestart|needrestart -r/);
 });

@@ -454,6 +454,31 @@ export const translations = {
   "signals.bundleImages.count": { en: "{n} bundle image(s) older than 90 days", es: "{n} imagen(es) de extensión con más de 90 días" },
   "signals.bundleImages.action": { en: "Open extensions", es: "Abrir extensiones" },
 
+  // System updates (audit K6) — the OS-level security updates the installer
+  // turns on (unattended-upgrades + the NodeSource, Docker and Caddy origins).
+  // Warn only for a reboot still owed or a run long overdue; the installed
+  // versions are information, never a claim about what is "latest".
+  "signals.systemUpdates.label": { en: "System updates", es: "Actualizaciones del sistema" },
+  "signals.systemUpdates.ok": { en: "security updates are current", es: "las actualizaciones de seguridad están al día" },
+  "signals.systemUpdates.rebootNeeded": { en: "a reboot is needed to finish updates", es: "hace falta reiniciar para terminar las actualizaciones" },
+  "signals.systemUpdates.rebootNeededPkgs": { en: "a reboot is needed to finish updates ({packages})", es: "hace falta reiniciar para terminar las actualizaciones ({packages})" },
+  "signals.systemUpdates.autoOff": { en: "automatic security updates are off", es: "las actualizaciones de seguridad automáticas están desactivadas" },
+  "signals.systemUpdates.autoOffIssue": { en: "Automatic security updates are off, so security fixes for the system, Node, Docker and Caddy will not install themselves. The updates guide explains what the installer turned on and how to turn it back on.", es: "Las actualizaciones de seguridad automáticas están desactivadas, así que las correcciones de seguridad del sistema, Node, Docker y Caddy no se instalarán solas. La guía de actualizaciones explica qué activó el instalador y cómo volver a activarlo." },
+  "signals.systemUpdates.staleRun": { en: "security updates last ran {days} days ago", es: "las actualizaciones de seguridad se ejecutaron por última vez hace {days} días" },
+  "signals.systemUpdates.staleRunIssue": { en: "Security updates have not run for {days} days. The daily unattended-upgrades run may be stopped or failing — check it on this machine.", es: "Las actualizaciones de seguridad no se ejecutan desde hace {days} días. La ejecución diaria de unattended-upgrades puede estar detenida o fallando — revísala en esta máquina." },
+  "signals.systemUpdates.notRunYet": { en: "updates have not run yet", es: "las actualizaciones aún no se han ejecutado" },
+  "signals.systemUpdates.notRunYetIssue": { en: "Automatic security updates are on, but the daily run has not happened yet: a fresh install has no run record for its first day. If this is still here after that, check that the unattended-upgrades timer is running on this machine.", es: "Las actualizaciones de seguridad automáticas están activadas, pero la ejecución diaria aún no ha ocurrido: una instalación nueva no tiene registro hasta su primer día. Si esto sigue apareciendo después, comprueba que el temporizador de unattended-upgrades se esté ejecutando en esta máquina." },
+  "signals.systemUpdates.unknown": { en: "couldn't check: {list}", es: "no se pudo comprobar: {list}" },
+  "signals.systemUpdates.unknownIssue": { en: "Crow couldn't run these update checks: {list}. Until they work it can't say whether this machine is up to date.", es: "Crow no pudo ejecutar estas comprobaciones de actualizaciones: {list}. Mientras no funcionen, no puede decir si esta máquina está al día." },
+  "signals.systemUpdates.versions": { en: "versions: Node {node}, Docker {docker}", es: "versiones: Node {node}, Docker {docker}" },
+  "signals.systemUpdates.dockerUnknown": { en: "unknown", es: "desconocida" },
+  "signals.systemUpdates.dockerNotInstalled": { en: "not installed", es: "no instalado" },
+  "signals.systemUpdates.checkReboot": { en: "whether a reboot is needed", es: "si hace falta reiniciar" },
+  "signals.systemUpdates.checkAuto": { en: "whether automatic updates are on", es: "si las actualizaciones automáticas están activadas" },
+  "signals.systemUpdates.checkLastRun": { en: "when updates last ran", es: "cuándo se ejecutaron por última vez" },
+  "signals.systemUpdates.checkDocker": { en: "the Docker version", es: "la versión de Docker" },
+  "signals.systemUpdates.action": { en: "Read the updates guide", es: "Leer la guía de actualizaciones" },
+
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },

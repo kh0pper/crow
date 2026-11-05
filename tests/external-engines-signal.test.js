@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   collectHealthSignals, invalidateHealthCache, _setTailscaleReader, _setDiskReader,
   _setDockerPortsReader, _setFirewallReader, _setContainerReader,
+  _setSystemUpdateReaders,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import {
   setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
@@ -39,6 +40,10 @@ _setContainerReader(() => false);
 // for the same reason: MINIO_ENDPOINT makes storageSignal probe the network
 // (warn when unreachable); the exposure flags warn when set in the shell.
 _setDiskReader(() => "Avail Size\n500000M 1000000M\n");
+// systemUpdates reads /etc/apt, /var/run/reboot-required and the real Docker
+// daemon: a host that owes a reboot would warn and drive `all.ok` false. No apt
+// = no card, on any host.
+_setSystemUpdateReaders({ aptPresent: () => false });
 delete process.env.MINIO_ENDPOINT;
 delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;

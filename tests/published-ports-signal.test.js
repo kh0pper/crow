@@ -49,6 +49,7 @@ import {
   _setDockerPortsReader,
   _setFirewallReader,
   _setContainerReader,
+  _setSystemUpdateReaders,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import { t, translations } from "../servers/gateway/dashboard/shared/i18n.js";
 import {
@@ -76,6 +77,10 @@ _setDockerPortsReader(() => { throw new Error("no docker"); });
 process.env.CROW_GATEWAY_BIND = "127.0.0.1";
 _setFirewallReader(() => { throw new Error("no ufw.conf"); });
 _setContainerReader(() => false);
+// systemUpdates reads /etc/apt, /var/run/reboot-required and the real Docker
+// daemon: a host that owes a reboot warns, and `result.ok` would go false here.
+// No apt = no card, on any host.
+_setSystemUpdateReaders({ aptPresent: () => false });
 delete process.env.MINIO_ENDPOINT;
 delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;

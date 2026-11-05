@@ -427,3 +427,97 @@ is why it stays in the log and never in the notification):
 ```
 
 Update results are also saved to the database and visible in Settings > Updates.
+
+## System updates {#system-updates}
+
+Everything above is about **Crow's own code**. The machine underneath is kept
+patched too: the installer turns on `unattended-upgrades`, so Debian/Ubuntu
+security updates install themselves once a day, and adds the repositories Crow
+installed to the same run. "System" here means exactly what the distribution's
+own unattended-upgrades configuration counts as a security archive — Crow
+neither narrows nor widens it.
+
+### What the installer turns on
+
+| What it covers | Origin |
+|---|---|
+| Node.js (NodeSource) | `origin=. nodistro,codename=nodistro` |
+| Docker Engine and its packages | `origin=Docker,archive=${distro_codename}` |
+| Caddy | `origin=cloudsmith/caddy/stable,codename=any-version` |
+
+The three origins live in Crow's own file,
+`/etc/apt/apt.conf.d/52crow-unattended-upgrades`. The distribution's
+`50unattended-upgrades` is never edited, and its own security origins stay
+exactly as they were: Crow only adds to them. `/etc/apt/apt.conf.d/20auto-upgrades`
+turns the daily run on, and is written only when it does not exist yet — a host
+that already configured unattended-upgrades keeps its own settings. Re-running
+the installer rewrites Crow's file only when its content differs.
+
+### Reboots are never automatic
+
+`Unattended-Upgrade::Automatic-Reboot` is set to `"false"`. When an update needs
+a reboot, the Crow's Nest shows a **System updates** card saying a reboot is
+needed, with the packages that asked for it (up to ten names). Restart when it
+suits you:
+
+```bash
+sudo reboot
+```
+
+The same card says whether the daily run is still on and when it last ran, so a
+timer that stopped shows up as "security updates last ran N days ago" instead of
+silence. On a fresh install it says the run has not happened yet until its first
+day passes — that is not an error. It also lists the installed Node and Docker
+versions — as information only, without looking up the newest release.
+
+### Services can restart briefly
+
+A Node, Docker or Caddy security update replaces the package. Docker and Caddy
+restart their own service as part of that, so the dashboard can be unreachable
+for a few seconds while it happens. Restarting `dockerd` stops **every**
+container on the machine; only the containers with a restart policy come back,
+and Crow's bundles use `restart: unless-stopped`, so they do. Crow itself is not
+restarted by these updates — [Auto-Update](#auto-update) handles Crow's code. A
+Node update only takes effect once the gateway is restarted, so apply it with
+`sudo systemctl restart crow-gateway` when it suits you.
+
+### Turning automatic updates off {#turning-off}
+
+Two different things can be turned off: whether the daily run happens at all,
+and whether it also covers the repositories Crow added.
+
+- **Install without it:** pass the opt-out to the installer. The documented
+  one-liner sends the script to bash on stdin, so the option goes to bash
+  itself:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash -s -- --no-auto-updates
+  curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
+  ```
+
+  Nothing under `/etc/apt/apt.conf.d` is changed: neither
+  `52crow-unattended-upgrades` nor `20auto-upgrades` is written. The other
+  install steps still add their repository sources and keyrings (NodeSource in
+  `/etc/apt/sources.list.d`, the Caddy keyring in `/usr/share/keyrings`), so apt
+  keeps offering those packages — nothing installs them on its own.
+
+  With a downloaded copy the same two options work: `bash crow-install.sh --no-auto-updates`
+  or `CROW_NO_AUTO_UPDATES=1 bash crow-install.sh`.
+
+- **Drop Crow's extra origins:** `sudo rm /etc/apt/apt.conf.d/52crow-unattended-upgrades`.
+  This only removes Crow's additions: Node, Docker and Caddy stop updating
+  themselves, while the daily run stays on and the distribution's own security
+  updates keep installing themselves.
+
+- **Stop the daily run:** set the switch to off in `/etc/apt/apt.conf.d/20auto-upgrades`:
+
+  ```
+  APT::Periodic::Unattended-Upgrade "0";
+  ```
+
+  or run `sudo dpkg-reconfigure unattended-upgrades` and answer *No*. This turns
+  every automatic run off, Crow's extra origins included.
+
+Once automatic updates are off, the Nest's **System updates** card says so and
+links back here. It never claims the machine is current while nothing is
+checking.
