@@ -176,7 +176,7 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Library entries per song | 256 | — |
 | Bank file | 512 MB | — |
 | Banks loaded in a page | 1024 MB | — |
-| Instruments a render holds | 1024 MB, refused before it starts | — |
+| Instruments a render holds (all of the song's banks) | 1024 MB, refused before it starts | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
 
