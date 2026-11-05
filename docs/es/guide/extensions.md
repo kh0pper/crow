@@ -55,7 +55,7 @@ Las extensiones con interfaces web se sirven automáticamente a través del prox
 ### Almacenamiento y Productividad
 | Extensión | Tipo | Descripción |
 |-----------|------|-------------|
-| Almacenamiento de Archivos (MinIO) | Bundle | Almacenamiento de archivos compatible con S3 |
+| Almacenamiento de Archivos (Garage) | Bundle | Almacenamiento de archivos compatible con S3 (MinIO, la opción anterior, está obsoleto y sus imágenes ya no se publican) |
 | Nextcloud | Bundle | Sincronización de archivos vía WebDAV |
 | Obsidian Vault | Servidor MCP | Lee y busca en notas de Obsidian |
 
@@ -79,7 +79,7 @@ Las extensiones con interfaces web se sirven automáticamente a través del prox
 
 ## Interfaces Web de las Extensiones
 
-Algunas extensiones proveen interfaces web (visor VNC, consola de MinIO, etc.). Se accede a ellas de dos maneras:
+Algunas extensiones proveen interfaces web (visor VNC, una wiki, un panel, etc.). Se accede a ellas de dos maneras:
 
 ### Modo Proxy (predeterminado)
 La interfaz de la extensión se sirve a través del gateway de Crow en `/proxy/<id>/`. No se necesitan puertos extra ni reglas de firewall. Funciona para apps simples (VNC/noVNC).
@@ -89,7 +89,7 @@ La interfaz de la extensión se sirve a través del gateway de Crow en `/proxy/<
 ### Modo Directo
 Para apps SPA (React, Vue) que no pueden funcionar detrás de un proxy con subruta. El puerto de la extensión se abre en el firewall y se sirve vía HTTPS de Tailscale.
 
-**Ejemplo**: `https://your-machine.ts.net:9001/` (consola de MinIO)
+**Ejemplo**: `https://your-machine.ts.net:8080/` (la interfaz web propia de una extensión — Almacenamiento de Archivos (Garage) no tiene ninguna; navega tus archivos en la página **Archivos** del Crow's Nest)
 
 Esto se configura automáticamente durante la instalación — los puertos se abren y el HTTPS de Tailscale queda listo.
 

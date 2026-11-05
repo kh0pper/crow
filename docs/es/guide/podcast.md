@@ -52,13 +52,13 @@ Hay dos formas de adjuntar audio a un episodio:
 
 ### Opción A: Subir directamente (recomendado)
 
-Si tienes [almacenamiento MinIO](/es/guide/storage) configurado, el panel de Podcast muestra una **zona de carga de arrastrar y soltar** para archivos de audio. Puedes:
+Si tienes [almacenamiento de objetos](/es/guide/storage) configurado, el panel de Podcast muestra una **zona de carga de arrastrar y soltar** para archivos de audio. Puedes:
 
 - **Arrastrar y soltar** un archivo de audio (MP3, M4A, OGG o WAV) sobre la zona de carga
 - **Hacer clic en la zona de carga** para abrir un explorador de archivos
 - Después de subirlo, verás el nombre del archivo y su tamaño con una marca de verificación verde
 
-El archivo subido se almacena en tu almacenamiento MinIO y la URL se rellena automáticamente. No necesitas copiar ni pegar nada.
+El archivo subido se almacena en tu almacenamiento de objetos (Garage por defecto) y la URL se rellena automáticamente. No necesitas copiar ni pegar nada.
 
 ::: tip
 Si prefieres alojar el audio en otro lugar (p. ej., en un CDN), aún puedes escribir una URL en el campo de URL manual debajo de la zona de carga. La URL manual tiene prioridad sobre cualquier archivo subido.
@@ -165,7 +165,7 @@ CROW_GATEWAY_URL=https://yourdomain.com
 | Qué | Dónde | Notas |
 |------|-------|-------|
 | Metadatos de episodios | Base de datos de Crow | Insignificante — solo texto |
-| Archivos de audio (si se suben) | Almacenamiento MinIO | Depende de la duración y el formato del episodio. Un MP3 de 60 minutos a 128kbps son ~57 MB |
-| Arte de episodios (si se sube) | Almacenamiento MinIO | Típicamente 100 KB – 2 MB por imagen |
+| Archivos de audio (si se suben) | Almacenamiento de objetos | Depende de la duración y el formato del episodio. Un MP3 de 60 minutos a 128kbps son ~57 MB |
+| Arte de episodios (si se sube) | Almacenamiento de objetos | Típicamente 100 KB – 2 MB por imagen |
 
 Si alojas el audio externamente (CDN, S3, etc.), no se usa almacenamiento local para los archivos de audio.

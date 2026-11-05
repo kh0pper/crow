@@ -88,7 +88,7 @@ This is per-track-on-start, not scrobble-grade ("50% or 4 minutes"). Good enough
 
 **Audio stops when I navigate to another panel** → Turbo Drive is on by default; check that it hasn't been disabled with `CROW_ENABLE_TURBO=0` on the gateway (see [Turbo Drive](/developers/platform-capabilities#turbo-drive)). With the flag off, each sidebar click is a full page reload that tears down `<audio>`; Chrome's autoplay policy then blocks resumed playback. With Turbo on, the player bar is `data-turbo-permanent` so it and the audio element survive across every panel navigation.
 
-**Play All silently does nothing** → The stream endpoint is returning 502, usually because the gateway's upstream fetch to Funkwhale or MinIO failed. Check `docker ps` for the Funkwhale and MinIO containers, and confirm shared MinIO on the paired `crow` host (if you're using one) is healthy — the media presigned URLs Funkwhale hands out point at MinIO, and a dead MinIO produces a `{"error":"fetch failed"}` response. See [Tailscale setup](/getting-started/tailscale-setup) if shared storage is newly unreachable after a reboot.
+**Play All silently does nothing** → The stream endpoint is returning 502, usually because the gateway's upstream fetch to Funkwhale or object storage failed. Check `docker ps` for the Funkwhale and storage containers (`garage`, or `minio` on a legacy install), and confirm the shared object storage the paired Crow host uses (if you're using one) is healthy — the media presigned URLs Funkwhale hands out point at that storage, and a dead backend produces a `{"error":"fetch failed"}` response. See [Tailscale setup](/getting-started/tailscale-setup) if shared storage is newly unreachable after a reboot.
 
 ## Roadmap
 

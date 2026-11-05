@@ -69,7 +69,7 @@ Los tres patrones de conexión acceden a la **misma base de datos, las mismas he
 | Memorias | Búsqueda de texto completo, etiquetadas, puntuadas por importancia |
 | Proyectos y fuentes | Investigación, conectores de datos, notas, citas |
 | Entradas de blog | Borradores, publicaciones, temas, feeds RSS |
-| Archivos | Almacenamiento compatible con S3 (cuando MinIO está configurado) |
+| Archivos | Almacenamiento compatible con S3 (cuando el almacenamiento de objetos está configurado) |
 | Contactos y mensajes | Identidades de peers, DMs de Nostr, elementos compartidos |
 | Contexto de comportamiento | Identidad crow.md, protocolos y secciones personalizadas |
 

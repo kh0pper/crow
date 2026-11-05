@@ -63,7 +63,7 @@ GPU apps that are not model bundles, such as Ollama, LocalAI, Kokoro TTS or SDXL
 ### Storage & Productivity
 | Extension | Type | Description |
 |-----------|------|-------------|
-| File Storage (MinIO) | Bundle | S3-compatible file storage |
+| File Storage (Garage) | Bundle | S3-compatible file storage (MinIO, the older option, is deprecated and its images are no longer published) |
 | Nextcloud | Bundle | File sync via WebDAV |
 | Obsidian Vault | MCP Server | Read and search Obsidian notes |
 
@@ -87,7 +87,7 @@ GPU apps that are not model bundles, such as Ollama, LocalAI, Kokoro TTS or SDXL
 
 ## Extension Web UIs
 
-Some extensions provide web interfaces (VNC viewer, MinIO console, etc.). These are accessed in two ways:
+Some extensions provide web interfaces (VNC viewer, a wiki, a dashboard, etc.). These are accessed in two ways:
 
 ### Proxy Mode (default)
 The extension UI is proxied through the Crow gateway at `/proxy/<id>/`. No extra ports or firewall rules needed. Works for simple apps (VNC/noVNC).
@@ -97,7 +97,7 @@ The extension UI is proxied through the Crow gateway at `/proxy/<id>/`. No extra
 ### Direct Mode
 For SPA apps (React, Vue) that can't work behind a subpath proxy. The extension port is opened in the firewall and served via Tailscale HTTPS.
 
-**Example**: `https://your-machine.ts.net:9001/` (MinIO console)
+**Example**: `https://your-machine.ts.net:8080/` (an extension's own web UI — File Storage (Garage) has none; browse your files in the Crow's Nest **Files** page)
 
 This is configured automatically during installation — ports are opened and Tailscale HTTPS is set up.
 

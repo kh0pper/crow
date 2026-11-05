@@ -231,7 +231,7 @@ export default defineConfig({
           { text: 'Cloud Deploy (Legacy)', link: '/getting-started/cloud-deploy' },
           { text: 'Cross-Platform Guide', link: '/guide/cross-platform' },
           { text: 'Desktop Setup (Claude Desktop)', link: '/getting-started/desktop-setup' },
-          { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
+          { text: 'Full Setup (Garage + Gateway)', link: '/getting-started/full-setup' },
           { text: 'Raspberry Pi (Crow OS)', link: '/getting-started/raspberry-pi' },
           { text: 'Multi-Device Quick Start', link: '/getting-started/multi-device' },
           { text: 'Free Cloud AI Options', link: '/getting-started/free-cloud-ai' },

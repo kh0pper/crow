@@ -7,6 +7,7 @@ data/*.corrupt
 data/*.sql
 data/claude-ai-test-results.md
 .env
+.env.garage
 .mcp.json
 *.log
 .worktrees/

@@ -5,7 +5,7 @@ Every environment variable Crow reads, in one place. Crow follows a **zero-confi
 Configuration lives in `.env` at the repo root (copied from `.env.example` by `npm run setup`). After editing, run `npm run mcp-config` to regenerate the MCP client config, and restart the gateway.
 
 ::: tip Day-1 essentials
-A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote access), `MINIO_ENDPOINT` + `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` (file storage), and one or two integration API keys. Everything else has a working default.
+A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote access), `S3_ENDPOINT` + `S3_ACCESS_KEY`/`S3_SECRET_KEY` (file storage on Garage), and one or two integration API keys. Everything else has a working default.
 :::
 
 ## Core (paths, ports, identity)
@@ -79,15 +79,20 @@ get in three ways:
 When no providers are configured, model pickers show an honest empty state and
 link here — there is no built-in fallback model list.
 
-## Storage (MinIO / S3)
+## Storage (S3 / Garage)
+
+`S3_*` wins over `MINIO_*`: with `S3_ENDPOINT` set, `MINIO_PORT` and friends are ignored. Garage is the default backend (the File Storage extension, or `docker compose --profile storage`).
+
+Garage's own container secrets (`GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_METRICS_TOKEN` and the `GARAGE_DEFAULT_*` key pair) do **not** go in `.env`: the root compose's `garage` service reads them from its own `.env.garage` (copy `.env.garage.example` — it is gitignored). The gateway must never receive them; it gets only `S3_ACCESS_KEY` / `S3_SECRET_KEY`, the one pair it needs to read objects.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MINIO_ENDPOINT` | *(unset = storage disabled)* | MinIO host (or host:port). |
-| `MINIO_PORT` | from endpoint | Port override. |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `crowadmin` / *(required)* | Credentials. |
-| `MINIO_USE_SSL` | `false` | TLS to MinIO. |
-| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *(unset)* | Any S3-compatible alternative to MinIO. |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *(unset)* | Any S3-compatible endpoint — Garage, or someone else's S3. The port belongs to the endpoint (`garage:3900`); there is no `S3_PORT`. |
+| `S3_USE_SSL` / `S3_REGION` | `false` / `us-east-1` | TLS, and the region the server expects (`s3_region` in `bundles/garage/garage.toml`). |
+| `MINIO_ENDPOINT` | *(unset = storage disabled)* | Legacy MinIO host (or host:port). Only read when `S3_ENDPOINT` is not set; the `minio` compose service lives behind `--profile minio-legacy` and its public images are no longer published. |
+| `MINIO_PORT` | from endpoint | Legacy port override. |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `crowadmin` / *(required)* | Legacy credentials. |
+| `MINIO_USE_SSL` | `false` | Legacy TLS to MinIO. |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MB) | HTTP upload cap (bytes). |
 | `STORAGE_QUOTA_MB` | `5120` | Per-user quota. |
 

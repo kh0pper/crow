@@ -105,6 +105,7 @@ import { mountAdminApi } from "./boot/admin-api.js";
 import { mountPeerPublicApi } from "./boot/peer-public-api.js";
 import { mountLateRoutes } from "./boot/late-mounts.js";
 import { runPostListenSetup } from "./boot/post-listen.js";
+import { runStorageServiceGuard } from "./boot/storage-service-guard.js";
 import { frameAncestorsFor, createPeerFrameHosts } from "./frame-ancestors.js";
 import { getTrustedInstances } from "./dashboard/panels/nest/data-queries.js";
 
@@ -265,6 +266,17 @@ try {
     process.exit(1);
   }
 }
+
+// Object storage service check: the root docker-compose.yml makes Garage the
+// default (`--profile storage`) and moves MinIO to `--profile minio-legacy`. A
+// .env still saying MINIO_ENDPOINT=minio with no minio service would boot a
+// gateway whose every upload dies on DNS, so refuse (exit 78, EX_CONFIG). It
+// exits on that one shape only, and never when a complete Shared Storage config
+// in the DB means the client ignores MINIO_* altogether — that read is read-only
+// and safe here, after the schema guard and the migration registry have made
+// dashboard_settings exist (a client opened before either could outlive a
+// restore). See boot/storage-service-guard.js.
+await runStorageServiceGuard();
 
 // Record the sha this process booted on, for convergence. Captured once, here,
 // so every later comparison is against the code actually running rather than

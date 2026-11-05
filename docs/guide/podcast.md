@@ -52,13 +52,13 @@ There are two ways to attach audio to an episode:
 
 ### Option A: Upload directly (recommended)
 
-If you have [MinIO storage](/guide/storage) set up, the Podcast panel shows a **drag-and-drop upload zone** for audio files. You can:
+If you have [object storage](/guide/storage) set up, the Podcast panel shows a **drag-and-drop upload zone** for audio files. You can:
 
 - **Drag and drop** an audio file (MP3, M4A, OGG, or WAV) onto the upload zone
 - **Click the upload zone** to open a file browser
 - After uploading, you'll see the filename and size with a green checkmark
 
-The uploaded file is stored in your MinIO storage and the URL is automatically filled in. You don't need to copy or paste anything.
+The uploaded file is stored in your object storage (Garage by default) and the URL is automatically filled in. You don't need to copy or paste anything.
 
 ::: tip
 If you prefer to host audio elsewhere (e.g., on a CDN), you can still type a URL into the manual URL field below the upload zone. The manual URL overrides any uploaded file.
@@ -165,7 +165,7 @@ CROW_GATEWAY_URL=https://yourdomain.com
 | What | Where | Notes |
 |------|-------|-------|
 | Episode metadata | Crow database | Negligible — text only |
-| Audio files (if uploaded) | MinIO storage | Depends on episode length and format. A 60-minute MP3 at 128kbps is ~57 MB |
-| Episode artwork (if uploaded) | MinIO storage | Typically 100 KB – 2 MB per image |
+| Audio files (if uploaded) | Object storage | Depends on episode length and format. A 60-minute MP3 at 128kbps is ~57 MB |
+| Episode artwork (if uploaded) | Object storage | Typically 100 KB – 2 MB per image |
 
 If you host audio externally (CDN, S3, etc.), no local storage is used for audio files.

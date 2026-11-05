@@ -5,7 +5,7 @@ Cada variable de entorno que Crow lee, en un solo lugar. Crow sigue una filosof�
 La configuración vive en `.env` en la raíz del repositorio (copiado desde `.env.example` por `npm run setup`). Después de editarlo, ejecuta `npm run mcp-config` para regenerar la configuración del cliente MCP, y reinicia el gateway.
 
 ::: tip Esenciales del día 1
-Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acceso remoto), `MINIO_ENDPOINT` + `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` (almacenamiento de archivos) y una o dos claves de API de integraciones. Todo lo demás tiene un valor predeterminado funcional.
+Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acceso remoto), `S3_ENDPOINT` + `S3_ACCESS_KEY`/`S3_SECRET_KEY` (almacenamiento de archivos en Garage) y una o dos claves de API de integraciones. Todo lo demás tiene un valor predeterminado funcional.
 :::
 
 ## Núcleo (rutas, puertos, identidad)
@@ -53,15 +53,20 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 | `SDXL_SERVICE_URL` | `http://127.0.0.1:3005` | Servicio de generación de imágenes para las herramientas de almacenamiento. |
 | `GPU_IDLE_CHECK_INTERVAL_MS` / `GPU_IDLE_REVERT_MS` | `120000` / `1200000` | Sondeo de inactividad del orquestador de GPU / ventana de reversión. |
 
-## Almacenamiento (MinIO / S3)
+## Almacenamiento (S3 / Garage)
+
+`S3_*` gana sobre `MINIO_*`: con `S3_ENDPOINT` definido, `MINIO_PORT` y compañía se ignoran. Garage es el backend por defecto (la extensión File Storage, o `docker compose --profile storage`).
+
+Los secretos propios del contenedor Garage (`GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_METRICS_TOKEN` y el par `GARAGE_DEFAULT_*`) **no** van en `.env`: el servicio `garage` del compose raíz los lee de su propio `.env.garage` (copia `.env.garage.example` — está en `.gitignore`). El gateway nunca debe recibirlos; solo obtiene `S3_ACCESS_KEY` / `S3_SECRET_KEY`, el único par que necesita para leer objetos.
 
 | Variable | Predeterminado | Propósito |
 |---|---|---|
-| `MINIO_ENDPOINT` | *(sin definir = almacenamiento desactivado)* | Host de MinIO (o host:puerto). |
-| `MINIO_PORT` | del endpoint | Override del puerto. |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `crowadmin` / *(requerida)* | Credenciales. |
-| `MINIO_USE_SSL` | `false` | TLS hacia MinIO. |
-| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *(sin definir)* | Cualquier alternativa a MinIO compatible con S3. |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *(sin definir)* | Cualquier endpoint compatible con S3 — Garage, o el S3 de otro. El puerto va dentro del endpoint (`garage:3900`); no existe `S3_PORT`. |
+| `S3_USE_SSL` / `S3_REGION` | `false` / `us-east-1` | TLS, y la región que espera el servidor (`s3_region` en `bundles/garage/garage.toml`). |
+| `MINIO_ENDPOINT` | *(sin definir = almacenamiento desactivado)* | Host de MinIO heredado (o host:puerto). Solo se lee cuando `S3_ENDPOINT` no está definido; el servicio `minio` del compose vive detrás de `--profile minio-legacy` y sus imágenes públicas ya no se publican. |
+| `MINIO_PORT` | del endpoint | Override del puerto heredado. |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `crowadmin` / *(requerida)* | Credenciales heredadas. |
+| `MINIO_USE_SSL` | `false` | TLS heredado hacia MinIO. |
 | `MAX_UPLOAD_SIZE` | `104857600` (100 MB) | Límite de subida HTTP (bytes). |
 | `STORAGE_QUOTA_MB` | `5120` | Cuota por usuario. |
 
