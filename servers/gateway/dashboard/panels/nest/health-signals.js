@@ -587,6 +587,10 @@ const UPDATE_CAUSE_KEYS = {
   "branch-unknown": "signals.updates.causeBranchUnknown",
   "ci-red": "signals.updates.causeCiRed",
   "ci-pending": "signals.updates.causeCiPending",
+  // N1c-5: GitHub could not be asked. Two codes, so an outage that clears reads
+  // differently from one that has paused updates for good.
+  "ci-unavailable": "signals.updates.causeCiUnavailable",
+  "ci-gate-unavailable": "signals.updates.causeCiUnavailablePaused",
   "branch-changed": "signals.updates.causeBranchChanged",
   "fetch-failed": "signals.updates.causeFetchFailed",
   "pull-failed": "signals.updates.causePullFailed",
@@ -623,6 +627,7 @@ async function updatesSignal(db, nowFn, opts = {}) {
     auto_update_result_since: null,
     auto_update_current_version: null,
     auto_update_latest_version: null,
+    auto_update_ci_gate: null,
   };
   try {
     const { rows } = await db.execute({
@@ -655,6 +660,15 @@ async function updatesSignal(db, nowFn, opts = {}) {
     MIN_INTERVAL_HOURS,
     parseInt(settings.auto_update_interval_hours, 10) || DEFAULT_INTERVAL_HOURS,
   );
+  // N1c-5: an origin that is not GitHub has no CI to ask, so the CI gate can
+  // never apply there. The card keeps its reading and gains ONE info line, so
+  // "updates are not gated here" is stated instead of being guessed at.
+  const withCiGate = (card) => settings.auto_update_ci_gate === "not-applicable"
+    ? [card, {
+      id: "updates:ci-gate", severity: "info", state: "info", issueOnly: true, label,
+      issueLabel: t("signals.updates.ciGateNotApplicable", lang),
+    }]
+    : card;
   const stuckMs = 2 * intervalHours * 60 * 60 * 1000;
   const now = nowFn();
   const lastCheckMs = settingTimeMs(settings.auto_update_last_check);
@@ -694,7 +708,7 @@ async function updatesSignal(db, nowFn, opts = {}) {
   }
 
   if (cause) {
-    return {
+    return withCiGate({
       id: "updates",
       severity: "warn",
       state: "warn",
@@ -702,11 +716,11 @@ async function updatesSignal(db, nowFn, opts = {}) {
       value: cause,
       issueLabel: fill(t("signals.updates.stuckIssue", lang), { cause }),
       ...action,
-    };
+    });
   }
 
   if (current && latest && current !== latest) {
-    return {
+    return withCiGate({
       id: "updates",
       severity: "info",
       state: "info",
@@ -714,16 +728,16 @@ async function updatesSignal(db, nowFn, opts = {}) {
       value: fill(t("signals.updates.availableValue", lang), { version: latest }),
       issueLabel: t("signals.updates.availableIssue", lang),
       ...action,
-    };
+    });
   }
 
-  return {
+  return withCiGate({
     id: "updates",
     severity: null,
     state: "ok",
     label,
     value: current ? fill(t("signals.updates.currentValue", lang), { version: current }) : t("signals.updates.upToDate", lang),
-  };
+  });
 }
 
 async function syncConflictsSignal(db) {

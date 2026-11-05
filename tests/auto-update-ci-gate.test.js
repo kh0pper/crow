@@ -1,6 +1,8 @@
 // A5: CI-gate on auto-update — classifyCheckRuns (pure) and the wired skip in
 // runLockedUpdate (via the verdict test hook; fixture remotes are local paths,
-// so the real fetch path naturally fails open as "unknown").
+// so the real fetch path answers "not-applicable" — no CI to ask).
+// N1c-5 (the unreadable-answer half: unavailable, the 3-in-a-row bell and the
+// not-applicable setting) lives in auto-update-ci-gate-unavailable.test.js.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -138,13 +140,13 @@ test("CROW_UPDATE_CI_GATE=0 disables the gate even on red", async () => {
   }
 });
 
-test("local (non-GitHub) remotes fail open without the test hook", async () => {
+test("local (non-GitHub) remotes are not CI-gated: the update proceeds without the test hook", async () => {
   const fx = fixture();
   try {
     _setAppRootForTest(fx.work);
     _setDbForTest(stubDb());
     const res = await runLockedUpdate(() => {});
-    assert.equal(res.updated, true, "unknown verdict (local remote) proceeds");
+    assert.equal(res.updated, true, "not-applicable verdict (local remote) proceeds");
   } finally {
     _setDbForTest(null);
     _setAppRootForTest(join(import.meta.dirname, ".."));

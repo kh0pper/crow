@@ -13,8 +13,9 @@ The auto-updater runs as a background task inside the gateway process:
 1. **Fetch** — runs `git fetch origin main` to check for new commits
 2. **CI gate** — checks the target commit's required CI results on GitHub
    (`suite`, `static-checks`, `audit`). A red or still-running build skips the
-   update until the next check; forks without those CI checks are unaffected.
-   Disable with `CROW_UPDATE_CI_GATE=0`.
+   update until the next check; an origin that is not GitHub has no CI to ask
+   and updates as before; a GitHub answer that cannot be read also skips it
+   (see [The CI gate](#the-ci-gate)). Disable with `CROW_UPDATE_CI_GATE=0`.
 3. **Quarantine check** — if this host already rolled a commit back, and that
    commit is still the head of `main`, the update is skipped (see
    [Automatic rollback](#automatic-rollback); a rollback taken for a machine-side
@@ -48,6 +49,59 @@ Go to **Settings > Updates** in the Crow's Nest to:
 - See the current version (git commit hash)
 - See when the last check ran and what it found
 - Manually trigger an update check
+
+## The CI gate {#the-ci-gate}
+
+Before pulling, the updater asks GitHub for the required check-runs of the very
+commit it is about to deploy (`suite`, `static-checks`, `audit`). Both the
+6-hourly tick and **Check for updates now** in Settings > Updates go through the
+same gate, so the manual button cannot bypass it.
+
+When GitHub answers, the answer decides:
+
+| Answer | What happens |
+|---|---|
+| all three green | the update proceeds |
+| any of them red | skipped, retried on the next check |
+| any of them still running | skipped, retried on the next check |
+| no run for our three checks | treated as **still running**: an unverified commit is never deployed. A push that raced the check answers on the next tick; a fork that strips those checks keeps being skipped instead |
+
+Two outcomes are *not* a CI result:
+
+**Not applicable.** The origin is not GitHub — a bare repository on disk, or
+another host — so there is no CI to ask and the gate can never apply. The update
+proceeds exactly as it always has, the log says
+
+```
+[auto-update] CI gate not applicable (origin is not GitHub)
+```
+
+and the Nest's Updates card carries one info line saying updates are not
+CI-gated for this origin.
+
+**Unavailable.** The origin *is* GitHub and no answer could be read: a network
+failure, a timeout, a `403`/`429` rate limit, any other non-200 response, or a
+body that is not valid JSON. The commit is unverified, so this tick is **skipped
+exactly like a running build** — nothing is pulled, so the code on disk keeps
+running and the next check retries:
+
+```
+Skipped: CI status could not be read for origin/main (1a2b3c4d5) — will retry next tick
+```
+
+The first two unreadable ticks in a row are transient, so a short GitHub outage
+stays quiet. The third in a row is recorded as a failure and rings the
+notification bell once (its 24-hour per-code cooldown keeps it to one):
+
+```
+Skipped: CI status unreadable for 3 checks in a row — updates are paused until GitHub answers (or set CROW_UPDATE_CI_GATE=0)
+```
+
+Any other answer — green, red, running, or not applicable — resets that count,
+so an outage that clears needs no action. If this machine can never reach
+GitHub's API (an offline install whose origin is still a GitHub URL), set
+`CROW_UPDATE_CI_GATE=0` in the unit's environment and restart Crow: the gate is
+then skipped entirely.
 
 ## Local changes
 
@@ -324,6 +378,7 @@ Update activity is logged to the gateway's stdout (visible in `journalctl -u cro
 ```
 [auto-update] Enabled — checking every 6h
 [auto-update] 3 new commit(s) available. Updating...
+[auto-update] CI gate not applicable (origin is not GitHub)
 [auto-update] Dependencies changed — running npm install...
 [auto-update] import check unavailable in 1a2b3c4d5 (no CROW_GATEWAY_IMPORT_CHECK seam) — relying on the boot guard
 [auto-update] Running database migrations...

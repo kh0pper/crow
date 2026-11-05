@@ -77,6 +77,11 @@ export const UPDATE_RESULT_PREFIXES = Object.freeze([
   { prefix: "Tree pull skipped: the checkout is read-only", kind: "ok", code: "tree-external" },
   { prefix: "Tree pull skipped: another instance holds the checkout lock", kind: "ok", code: "tree-locked" },
   { prefix: "Skipped: CI still running", kind: "transient", code: "ci-pending" },
+  // N1c-5: GitHub could not be asked at all. The first two ticks of an outage
+  // are transient (it usually clears itself); the third is a failure, so the
+  // operator hears about an updater that is paused indefinitely.
+  { prefix: "Skipped: CI status could not be read", kind: "transient", code: "ci-unavailable" },
+  { prefix: "Skipped: CI status unreadable for ", kind: "failure", code: "ci-gate-unavailable" },
   { prefix: "Skipped: branch changed mid-update", kind: "transient", code: "branch-changed" },
   { prefix: "Skipped: not on main", kind: "failure", code: "not-on-main" },
   { prefix: "Skipped: cannot determine branch", kind: "failure", code: "branch-unknown" },
@@ -212,6 +217,7 @@ const UPDATE_FAILURE_TEXT = Object.freeze({
   "not-on-main": ["Crow updates stopped: not on the main branch", "The checkout is on another branch, so updates are skipped. Switch it back to main, then run Check for updates now."],
   "branch-unknown": ["Crow updates stopped: branch could not be read", "The checkout could not report its branch (a broken or shallow git checkout). Repair the checkout, then run Check for updates now."],
   "ci-red": ["Crow updates stopped: CI is red", "Updates are held back because the latest build failed its required tests. Retries continue on their own; once main is green again the next check deploys it."],
+  "ci-gate-unavailable": ["Crow updates paused: the CI result could not be read", "GitHub could not be asked whether the newest commit on main passed its required tests, so that commit stays undeployed for as long as the answers keep failing — Crow keeps retrying on every check. If this machine can never read GitHub's API, set CROW_UPDATE_CI_GATE=0 in the environment and restart Crow."],
   "migration-quarantined": ["Crow updates paused: migration quarantined", "A migration damaged data and was rolled back, so that commit is quarantined. Updates resume by themselves when a fix lands on main; after 3 attempts the quarantine marker files have to be deleted."],
   "fetch-failed": ["Crow updates stopped: fetch failed", "The updater could not reach the git remote. Check network access and the remote URL, then run Check for updates now."],
   "pull-failed": ["Crow updates stopped: pull failed", "The update could not be applied, usually because local changes overlap it. Resolve them, then run Check for updates now."],
@@ -254,8 +260,8 @@ const UPDATE_ROLLED_BACK_CRASH_TEXT = Object.freeze([
  * stderr, which can hold paths and secrets (audit N1c-2).
  */
 const RESULT_TEXT_IS_SAFE = new Set([
-  "not-on-main", "ci-red", "migration-quarantined", "migration-failed", "init-db-failed",
-  "update-rolled-back", "update-quarantined", "update-rollback-blocked",
+  "not-on-main", "ci-red", "ci-gate-unavailable", "migration-quarantined", "migration-failed",
+  "init-db-failed", "update-rolled-back", "update-quarantined", "update-rollback-blocked",
 ]);
 
 /**
@@ -334,6 +340,20 @@ export async function recordUpdateResult(value, { notify = true } = {}) {
   if (!db) return false;
   await saveSetting(RESULT_KEY, value, { notify });
   return true;
+}
+
+/** One dashboard_settings value, or null when there is no db handle / no row. */
+async function readSettingValue(key) {
+  if (!db) return null;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+      args: [key],
+    });
+    return rows?.[0]?.value ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function saveSetting(key, value, { notify = true } = {}) {
@@ -654,9 +674,10 @@ export async function checkForUpdates({ instance = null } = {}) {
     // quarantine markers guard the genuinely-bad shas), but this process must not
     // restart into code it just declined. Its own skip code is kept
     // (`update-rollback-blocked`, `not-on-main`, …) — Settings and the bell
-    // classification key off it. The CI gate deliberately does NOT set it: red or
-    // pending CI refuses the NEXT commit on main, not the tree already checked
-    // out, so a co-hosted peer must still converge onto that tree.
+    // classification key off it. The CI gate deliberately does NOT set it: red
+    // or pending CI (or an unreadable CI answer, N1c-5) refuses the NEXT commit
+    // on main, not the tree already checked out, so a co-hosted peer must still
+    // converge onto that tree.
     if (treeResult?.converge === false) {
       log("instance half skipped — this process's own update refused a restart");
       return { ...treeResult, pulled, converged: false, skipped: treeResult.skipped ?? "refused" };
@@ -682,7 +703,9 @@ const QUARANTINE_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 let _quarantineAlertAt = 0;
 
 // ---------------------------------------------------------------------------
-// A5: CI gate — never pull a commit whose required CI is red or still running.
+// A5: CI gate — never pull a commit whose required CI is red or still running,
+// and never pull one whose CI cannot be verified at all (N1c-5: a GitHub outage
+// used to read as "not GitHub" and deploy the unverified sha).
 // Q6 gates merges; this gates DEPLOYS (a direct admin push to main previously
 // reached every instance within 6h regardless of CI state).
 // ---------------------------------------------------------------------------
@@ -693,32 +716,67 @@ export { classifyCheckRuns };
 
 let _ciVerdictOverride = null;
 /** Test hook: force the CI-gate verdict (fixture repos have non-GitHub
- *  remotes, so the real fetch path naturally skips). */
+ *  remotes, so the real path answers "not-applicable"). */
 export function _setCiVerdictForTest(v) { _ciVerdictOverride = v; }
 
+let _ciFetch = null;
+/** Test hook: replace the GitHub request, so the REAL resolveCiVerdict's failure
+ *  mapping (503/403/timeout/bad JSON) is exercised without a network. */
+export function _setCiFetchForTest(fn) { _ciFetch = fn; }
+
+// Consecutive unreadable-CI ticks before the recorded result becomes a FAILURE
+// (which is what rings the bell; its 24 h per-code cooldown prevents spam).
+export const CI_UNAVAILABLE_FAILURE_TICKS = 3;
+export const CI_UNAVAILABLE_COUNT_KEY = "auto_update_ci_unavailable_count";
+export const CI_GATE_SETTING_KEY = "auto_update_ci_gate";
+
 /**
- * Resolve the CI verdict for the sha the pull would land on. Fail-open
- * ("unknown") on: non-GitHub origin, network failure, non-200, bad JSON.
+ * Resolve the CI verdict for the sha the pull would land on.
+ *
+ * Four outcomes, and the difference between the last two is the whole point of
+ * N1c-5:
+ *   "green"/"red"/"pending" — GitHub answered.
+ *   "not-applicable"        — the origin is NOT GitHub, so there is no CI to ask
+ *                             and the gate can never apply: the tick proceeds.
+ *   "unavailable"           — the origin IS GitHub and the answer could not be
+ *                             read (network error, timeout, 403/429, any other
+ *                             non-200, bad JSON). An unverified sha must not
+ *                             deploy during an outage, so the tick skips.
+ *
+ * classifyCheckRuns' own "unknown" (a payload carrying no run for our three
+ * contexts) becomes "pending": unverified is never green, and retrying it is
+ * what resolves a push race on the next tick. A GitHub origin that strips our
+ * CI now reads as "CI still running" instead of deploying unverified code;
+ * CROW_UPDATE_CI_GATE=0 is the way out of that.
+ *
  * One unauthenticated call per update tick — far under the anonymous limit.
  */
 async function resolveCiVerdict(remoteUrl, sha) {
   if (_ciVerdictOverride) return _ciVerdictOverride;
   const m = /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(remoteUrl || "");
-  if (!m) return "unknown";
+  if (!m) return "not-applicable";
+  const doFetch = _ciFetch || ((...a) => fetch(...a));
   try {
-    const resp = await fetch(
+    const resp = await doFetch(
       `https://api.github.com/repos/${m[1]}/${m[2]}/commits/${sha}/check-runs`,
       {
         headers: { Accept: "application/vnd.github+json", "User-Agent": "crow-auto-update" },
         signal: AbortSignal.timeout(15000),
       },
     );
-    if (!resp.ok) return "unknown";
-    return classifyCheckRuns(await resp.json());
+    if (!resp.ok) return "unavailable";
+    // json() throwing (a rate-limit HTML page, a truncated body) lands in the
+    // catch below, which is exactly where an unreadable answer belongs.
+    const verdict = classifyCheckRuns(await resp.json());
+    return verdict === "unknown" ? "pending" : verdict;
   } catch {
-    return "unknown";
+    return "unavailable";
   }
 }
+
+/** Test-only: the real resolver, so the failure mapping can be exercised
+ *  directly (the tick itself needs a git origin it can actually fetch). */
+export const _resolveCiVerdictForTest = resolveCiVerdict;
 
 // ---------------------------------------------------------------------------
 // Layer 0 rollback (audit N1c-3): a pulled sha that does not load, or whose
@@ -1170,11 +1228,41 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
 
   // A5: consult the target sha's required check-runs before pulling. Red or
   // still-running CI skips this tick (self-heals when main is fixed or CI
-  // completes); unknown fails open. CROW_UPDATE_CI_GATE=0 disables.
+  // completes); a non-GitHub origin has no CI to ask and proceeds; GitHub
+  // failing to answer skips too — an unverified sha is not a green one (N1c-5).
+  // CROW_UPDATE_CI_GATE=0 disables.
   if (process.env.CROW_UPDATE_CI_GATE !== "0") {
     const remote = await git(["remote", "get-url", "origin"]);
     const targetSha = (await git(["rev-parse", "origin/main"])).stdout;
     const ci = await resolveCiVerdict(remote.stdout, targetSha);
+    // Recorded for the Nest's Updates card; reset on every verdict that is not
+    // "unavailable", so the 3-in-a-row pause needs three CONSECUTIVE ones.
+    await saveSetting(CI_GATE_SETTING_KEY, ci);
+    if (ci !== "unavailable") await saveSetting(CI_UNAVAILABLE_COUNT_KEY, "0");
+
+    if (ci === "not-applicable") {
+      // Self-hosted origins (a bare repo on disk, another host) have no GitHub
+      // check-runs at all — the gate cannot apply and they must keep updating.
+      log("CI gate not applicable (origin is not GitHub)");
+    } else if (ci === "unavailable") {
+      // GitHub could not be asked: 403/429 rate limits, an outage, a timeout.
+      // Skipping is the whole fix — one bad answer used to deploy the sha.
+      // Same shape as the pending branch below and for the same reason, so NO
+      // converge:false: this refuses the NEXT commit on main, not the tree
+      // already checked out, and a co-hosted peer must still converge onto it.
+      const n = (parseInt(await readSettingValue(CI_UNAVAILABLE_COUNT_KEY), 10) || 0) + 1;
+      await saveSetting(CI_UNAVAILABLE_COUNT_KEY, String(n));
+      // The first two ticks of an outage are transient (GitHub usually answers
+      // again on its own); the third is a failure, which is what rings the bell.
+      const msg = n >= CI_UNAVAILABLE_FAILURE_TICKS
+        ? `Skipped: CI status unreadable for ${n} checks in a row — updates are paused until GitHub answers (or set CROW_UPDATE_CI_GATE=0)`
+        : `Skipped: CI status could not be read for origin/main (${targetSha.slice(0, 9)}) — will retry next tick`;
+      log(msg);
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, skipped: "ci-unavailable", message: msg, ciUnavailableCount: n };
+    }
+
     if (ci === "red" || ci === "pending") {
       const msg = ci === "red"
         ? `Skipped: CI is RED on origin/main (${targetSha.slice(0, 9)}) — not deploying a failing build; will retry next tick`

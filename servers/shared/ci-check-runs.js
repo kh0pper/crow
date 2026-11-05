@@ -10,10 +10,10 @@ export const CI_GATE_CONTEXTS = ["suite", "static-checks", "audit"];
 
 /**
  * Pure classification of a GitHub check-runs payload for the target sha.
- * "unknown" (no named runs — a fork without our CI, or an API oddity) FAILS
- * OPEN in the gateway's auto-update: strangers' forks and non-GitHub
- * deployments must still update; the gate only defends against a KNOWABLY red
- * main. (The satellite accepts only "green".)
+ * "unknown" (no named runs — a fork without our CI, or a push that raced the
+ * workflow) is not a deployment decision: nothing here can verify the sha, so it
+ * is never green. The gateway's auto-update maps it to "pending" (retry next
+ * tick) and the satellite accepts only "green".
  */
 export function classifyCheckRuns(payload) {
   const runs = (payload?.check_runs || []).filter((r) => CI_GATE_CONTEXTS.includes(r?.name));

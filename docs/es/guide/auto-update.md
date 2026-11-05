@@ -13,8 +13,10 @@ El actualizador automático se ejecuta como una tarea en segundo plano dentro de
 1. **Fetch** — ejecuta `git fetch origin main` para buscar nuevos commits
 2. **Puerta de CI** — consulta en GitHub los resultados de CI requeridos del commit
    destino (`suite`, `static-checks`, `audit`). Una compilación en rojo o aún en
-   ejecución pospone la actualización hasta la próxima comprobación; los forks sin
-   esos checks no se ven afectados. Se desactiva con `CROW_UPDATE_CI_GATE=0`.
+   ejecución pospone la actualización hasta la próxima comprobación; un origen que
+   no es GitHub no tiene CI que consultar y se actualiza como siempre; una respuesta
+   de GitHub que no se puede leer también la pospone (ver
+   [La puerta de CI](#la-puerta-de-ci)). Se desactiva con `CROW_UPDATE_CI_GATE=0`.
 3. **Comprobación de cuarentena** — si este host ya revirtió un commit y ese commit
    sigue siendo la cabeza de `main`, la actualización se omite (ver
    [Reversión automática](#reversion-automatica); una reversión tomada por una razón
@@ -49,6 +51,61 @@ Ve a **Settings > Updates** en el Crow's Nest para:
 - Ver la versión actual (hash del commit de git)
 - Ver cuándo se ejecutó la última comprobación y qué encontró
 - Disparar manualmente una comprobación de actualización
+
+## La puerta de CI {#la-puerta-de-ci}
+
+Antes de hacer el pull, el actualizador pide a GitHub los check-runs requeridos
+del commit exacto que va a desplegar (`suite`, `static-checks`, `audit`). Tanto la
+comprobación cada 6 horas como **Check for updates now** en Settings > Updates
+pasan por la misma puerta, así que el botón manual no puede saltársela.
+
+Cuando GitHub responde, la respuesta decide:
+
+| Respuesta | Qué pasa |
+|---|---|
+| los tres en verde | la actualización continúa |
+| alguno en rojo | se pospone y se reintenta en la próxima comprobación |
+| alguno aún en ejecución | se pospone y se reintenta en la próxima comprobación |
+| ningún check-run de nuestros tres | se trata como **aún en ejecución**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
+
+Dos resultados *no* son un resultado de CI:
+
+**No aplicable.** El origen no es GitHub — un repositorio desnudo en disco, u otro
+host — así que no hay CI que consultar y la puerta nunca puede aplicarse. La
+actualización continúa exactamente como siempre, el registro dice
+
+```
+[auto-update] CI gate not applicable (origin is not GitHub)
+```
+
+y la tarjeta de Actualizaciones del Nest muestra una línea informativa diciendo
+que las actualizaciones no pasan por la puerta de CI en este origen.
+
+**No disponible.** El origen *sí* es GitHub y no se pudo leer ninguna respuesta:
+un fallo de red, un tiempo de espera agotado, un límite de peticiones `403`/`429`,
+cualquier otra respuesta que no sea 200, o un cuerpo que no es JSON válido. El
+commit queda sin verificar, así que esta comprobación se **pospone exactamente
+igual que una compilación en ejecución** — no se descarga nada, el código en
+disco sigue corriendo y la próxima comprobación lo reintenta:
+
+```
+Skipped: CI status could not be read for origin/main (1a2b3c4d5) — will retry next tick
+```
+
+Las dos primeras comprobaciones ilegibles seguidas son transitorias, así que una
+caída breve de GitHub pasa en silencio. La tercera seguida se registra como fallo
+y hace sonar la campana de notificaciones una vez (su enfriamiento de 24 horas por
+código la mantiene en una):
+
+```
+Skipped: CI status unreadable for 3 checks in a row — updates are paused until GitHub answers (or set CROW_UPDATE_CI_GATE=0)
+```
+
+Cualquier otra respuesta — verde, rojo, en ejecución o no aplicable — reinicia ese
+contador, así que una caída que se resuelve no requiere ninguna acción. Si esta
+máquina nunca puede alcanzar la API de GitHub (una instalación sin conexión cuyo
+origen sigue siendo una URL de GitHub), pon `CROW_UPDATE_CI_GATE=0` en el entorno
+de la unidad y reinicia Crow: la puerta se omite por completo.
 
 ## Cambios locales {#cambios-locales}
 
@@ -339,6 +396,7 @@ La actividad de actualización se registra en el stdout del gateway (visible con
 ```
 [auto-update] Enabled — checking every 6h
 [auto-update] 3 new commit(s) available. Updating...
+[auto-update] CI gate not applicable (origin is not GitHub)
 [auto-update] Dependencies changed — running npm install...
 [auto-update] import check unavailable in 1a2b3c4d5 (no CROW_GATEWAY_IMPORT_CHECK seam) — relying on the boot guard
 [auto-update] Running database migrations...
