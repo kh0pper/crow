@@ -28,7 +28,7 @@ CREATE TABLE crow_instances (
 );
 ```
 
-Instances are also tracked in `~/.crow/instances.json` for use by the CLI and startup scripts before the database is available.
+Instances are also tracked in `~/.crow/instances.json` for use by the CLI and startup scripts before the database is available. The file is written atomically and created at mode `0600` (it holds every same-machine instance's directory and gateway URL); a gateway boot tightens an existing file that carries any group/other bit, and never follows a symlink to do it.
 
 ### Registration Flow
 

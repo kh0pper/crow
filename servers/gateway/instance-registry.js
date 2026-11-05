@@ -11,8 +11,9 @@
 
 import { randomBytes, createHash } from "crypto";
 import { resolvePeerLabel } from "../shared/peer-label.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, lstatSync, chmodSync } from "fs";
 import { resolve, dirname } from "path";
+import { writePrivateFile } from "./bundle-env-secrets.js";
 import { hostname as osHostname, tmpdir } from "os";
 import { resolveCrowHome, resolveInstanceDataDir, readLocalInstanceIdOrNull, isDefaultCrowHome } from "../shared/crow-home.js";
 import bus from "../shared/event-bus.js";
@@ -384,20 +385,48 @@ function removeFromLocalInstancesJson(id) {
 }
 
 /**
- * Write the instances.json file.
+ * Write the instances.json file — mode 0600, atomically.
+ *
+ * The file lists every same-machine instance's directory and gateway URL, so it
+ * is never world-readable, not even between create and chmod: writePrivateFile
+ * (bundle-env-secrets.js) creates an exclusive 0600 temp file in the same
+ * directory, chmods it to 0600 and renames it over the target — a reader (or a
+ * crash mid-write) never sees a torn file either. A plain writeFileSync used the
+ * process umask (0644 on a fresh install, N3-3 audit finding).
  */
 function writeLocalInstancesJson(instances) {
   try {
     const p = instancesJsonPath();
     mkdirSync(dirname(p), { recursive: true });
-    // write-then-rename: a reader (or a crash mid-write) never sees a torn file.
-    const tmp = `${p}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(instances, null, 2));
-    renameSync(tmp, p);
+    writePrivateFile(p, JSON.stringify(instances, null, 2));
     return true;
   } catch (err) {
     console.warn("[instance-registry] Failed to write instances.json:", err.message);
     return false;
+  }
+}
+
+/**
+ * Boot repair for an install made before writeLocalInstancesJson was private:
+ * tighten an existing instances.json to 0600 when it carries any group or other
+ * bit. Only a REGULAR file that is this process's own (lstat, so a symlink is
+ * never followed and its target is never chmod'ed); a file owned by someone
+ * else is left alone. Never throws — a boot repair must not block boot.
+ *
+ * @returns {boolean} true when the mode was changed
+ */
+export function tightenInstancesJsonPermissions({ path = instancesJsonPath(), uid = process.getuid?.() ?? null, log = (m) => console.log(m) } = {}) {
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile()) return false;                 // symlink or directory: not ours to chmod through
+    if (uid != null && st.uid !== uid) return false; // another user's file: leave it
+    const mode = st.mode & 0o777;
+    if ((mode & 0o077) === 0) return false;          // already private
+    chmodSync(path, 0o600);
+    log(`[instance-registry] tightened ${path} to 0600 (was ${mode.toString(8).padStart(3, "0")})`);
+    return true;
+  } catch {
+    return false;                                   // missing file, EPERM, a race — never throws
   }
 }
 
@@ -478,7 +507,8 @@ export async function removeStaleLocalInstances(db, { confirm = false, expected 
   const p = instancesJsonPath();
   const current = readLocalInstances();
   try {
-    writeFileSync(`${p}.bak-hygiene-${new Date().toISOString().replace(/[:.]/g, "-")}`, JSON.stringify(current, null, 2));
+    // The backup holds the same content as the file, so it is private too.
+    writePrivateFile(`${p}.bak-hygiene-${new Date().toISOString().replace(/[:.]/g, "-")}`, JSON.stringify(current, null, 2));
   } catch (err) {
     return { error: `could not back up ${p}: ${err.message}`, removed: 0, scan };
   }
@@ -636,6 +666,10 @@ export async function selfPairingAddress(db, { env = process.env, port = gateway
  * row — detection can pick the wrong Serve port.
  */
 export async function ensureLocalInstanceRegistered(db, { crowId, gatewayUrl, name, gatewayUrlConfigured = false, tailscaleIp = null } = {}) {
+  // Boot repair: an existing instances.json written by an older install has
+  // whatever mode the umask gave it (0644). Tighten it before the first write
+  // of this boot; the write below would replace the inode, not its mode.
+  tightenInstancesJsonPermissions();
   const instanceId = getOrCreateLocalInstanceId();
 
   const existing = await getInstance(db, instanceId);
