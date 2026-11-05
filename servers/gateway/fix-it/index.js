@@ -7,6 +7,7 @@
 import * as registry from "../../shared/fix-it/registry.js";
 import * as store from "../../shared/fix-it/store.js";
 import remoteExposureDetector from "./detectors/remote-exposure.js";
+import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import { createNotification } from "../../shared/notifications.js";
 import { getInstance } from "../instance-registry.js";
@@ -17,6 +18,7 @@ let wired = false;
 export function wireFixIt() {
   if (wired) return;
   registry.registerDetector(remoteExposureDetector);
+  registry.registerDetector(caddyProxySocketDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   wired = true;
 }
@@ -62,6 +64,20 @@ export async function emitFixIt(db, eventName, payload) {
   }
 }
 
+/**
+ * Boot checks — conditions no request emits an event for. Currently one: a
+ * Caddyfile on this machine that still dials the gateway over loopback (the
+ * security audit's finding). Fire-and-forget: never throws.
+ */
+export async function runBootChecks(db, opts = {}) {
+  try {
+    wireFixIt();
+    await caddyProxySocketDetector.check(boundStore(db), opts);
+  } catch (err) {
+    console.warn("[fix-it] boot checks failed:", err.message);
+  }
+}
+
 function remedyButton(item, r, req) {
   const gated = r.kind === "confirm" || r.kind === "guided";
   // v1 ships only `instant`. A gated remedy renders disabled with a note so a
@@ -88,6 +104,7 @@ export async function renderFixItCards(db, { lang, req } = {}) {
     const techRows = [];
     if (ctx.capability) techRows.push(`Capability: <code>${escapeHtml(ctx.capability)}</code>`);
     if (ctx.requestingInstance) techRows.push(`Requesting instance: <code>${escapeHtml(ctx.requestingInstance)}</code>`);
+    if (ctx.caddyfile) techRows.push(`Caddyfile: <code>${escapeHtml(ctx.caddyfile)}</code>`);
     const details = techRows.length
       ? `<details style="margin-top:0.5rem"><summary style="cursor:pointer;color:var(--crow-text-muted);font-size:0.8rem">Technical details</summary>
            <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-top:0.3rem">${techRows.join("<br>")}</div></details>`

@@ -133,6 +133,10 @@ Si `CROW_TRUSTED_PROXIES` incluye una dirección de loopback (`loopback`, `127.0
 Un proxy en la misma máquina que Crow (loopback, una de las direcciones propias de la máquina o un bridge de contenedores) no se distingue de cualquier programa local que escriba el mismo `X-Forwarded-For`, así que Crow trata cada petición que pasa por él como venida de la propia máquina. Esas peticiones nunca son tu propio turno: los servicios conectados y la aprobación de llamadas del teléfono necesitan que entres a Crow directamente, por Tailscale Serve o desde otra máquina de tu LAN. Todo lo demás funciona igual. Consulta [Peticiones desde esta máquina](../architecture/dashboard.md#peticiones-desde-esta-maquina).
 :::
 
+::: tip El Caddy del instalador usa un socket de proxy dedicado
+En una máquina instalada con `crow-install.sh`, Caddy se conecta a Crow por un socket unix (`CROW_PROXY_SOCKET=/run/crow/gateway.sock`) en lugar de loopback, así que sus visitantes son un proxy verificado con el cliente que nombró Caddy — sin entrada en `CROW_TRUSTED_PROXIES` y sin perder el turno del dueño. Una instalación que aún tenga `reverse_proxy localhost:3001` en `/etc/caddy/Caddyfile` recibe una tarjeta de Fix-it en el Nest; la solución es `sudo bash scripts/fix-caddy-proxy-socket.sh` en el directorio de la app.
+:::
+
 En Linux, Crow respeta los encabezados de Tailscale Serve solo en conexiones abiertas por el usuario de tailscaled (`CROW_SERVE_PEER_UIDS`, por defecto `0`, leído de `/proc/net/tcp`). En un host sin `/proc` (macOS, Windows nativo) esa verificación no puede correr, así que falla en cerrado y se rechaza a los usuarios de la tailnet que llegan por Serve. Para aceptarlos de todos modos, configura `CROW_SERVE_PEER_UIDS=off` (queda registrado como advertencia: cualquier proceso local podría falsificar una identidad de la tailnet).
 
 ## Paso 4: Configura la URL Pública

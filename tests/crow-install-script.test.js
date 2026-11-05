@@ -305,3 +305,59 @@ test("libatomic1 is installed in the Node step, before any npm install/ci (rocks
   // After the whole Node if/else, so both paths (installed / just installed) run it.
   assert.ok(aptIdx > s.indexOf("\nfi\n", step2), "must run on the Node-already-installed path too");
 });
+
+// ─── The dedicated proxy socket (the security audit's finding N1a-3/N1a-4) ───
+
+const FIX_SCRIPT = resolve(import.meta.dirname, "..", "scripts", "fix-caddy-proxy-socket.sh");
+const fixSrc = () => readFileSync(FIX_SCRIPT, "utf-8");
+
+test("proxy socket: the unit carries RuntimeDirectory=crow and CROW_PROXY_SOCKET", () => {
+  const s = src();
+  assert.match(s, /^RuntimeDirectory=crow$/m);
+  assert.match(s, /^RuntimeDirectoryMode=0750$/m);
+  assert.match(s, /^Environment=CROW_PROXY_SOCKET=\/run\/crow\/gateway\.sock$/m);
+  // The unit block, not just a comment: all three sit between Environment= lines.
+  const unit = s.slice(s.indexOf("sudo tee /etc/systemd/system/crow-gateway.service"), s.indexOf("# Caddy reverse proxy"));
+  assert.match(unit, /RuntimeDirectory=crow/);
+  assert.match(unit, /CROW_PROXY_SOCKET=/);
+});
+
+test("proxy socket: Caddy dials the unix socket, never loopback with forwarded headers", () => {
+  const s = src();
+  assert.match(s, /reverse_proxy unix\/\/run\/crow\/gateway\.sock/);
+  assert.doesNotMatch(s, /reverse_proxy (localhost|127\.0\.0\.1):3001/);
+  // The caddy service user must reach the 0750 dir and the 0660 socket.
+  assert.match(s, /^sudo usermod -aG "\$USER" caddy$/m);
+});
+
+test("fix-caddy-proxy-socket.sh: bash -n parses", () => {
+  execFileSync("bash", ["-n", FIX_SCRIPT]);
+});
+
+test("fix-caddy-proxy-socket.sh: shellcheck passes when available (skips otherwise)", (t) => {
+  const which = spawnSync("shellcheck", ["--version"], { stdio: "ignore" });
+  if (which.error) return t.skip("shellcheck not installed");
+  const r = spawnSync("shellcheck", [FIX_SCRIPT], { encoding: "utf-8" });
+  assert.equal(r.status, 0, r.stdout);
+});
+
+test("fix-caddy-proxy-socket.sh: idempotent, backed up, drop-in + usermod + validate + reload", () => {
+  const s = fixSrc();
+  // Idempotent: a re-run that finds both changes already applied stops here.
+  assert.match(s, /Caddy already dials the gateway's proxy socket — nothing to do\./);
+  // Backups before any change, and a restore trap that says so.
+  assert.match(s, /cp -a "\$CADDYFILE" "\$BACKUP_DIR\/Caddyfile"/);
+  assert.match(s, /trap restore ERR/);
+  assert.match(s, /restoring the backups/);
+  // The unit lines go in through the drop-in, not a rewritten unit file.
+  assert.match(s, /DROP_IN="\$DROP_IN_DIR\/proxy-socket\.conf"/);
+  assert.match(s, /RuntimeDirectory=crow/);
+  assert.match(s, /CROW_PROXY_SOCKET=\/run\/crow\/gateway\.sock/);
+  // Only the loopback dial line is rewritten, then validated before restarting.
+  assert.match(s, /reverse_proxy unix\/\/run\/crow\/gateway\.sock/);
+  assert.match(s, /usermod -aG "\$OWNER" "\$CADDY_GROUP"/);
+  assert.match(s, /caddy validate --config "\$CADDYFILE"/);
+  assert.match(s, /systemctl daemon-reload/);
+  assert.match(s, /systemctl restart crow-gateway/);
+  assert.match(s, /systemctl reload caddy/);
+});

@@ -285,6 +285,26 @@ export async function runPostListenSetup(server, app, deps) {
   // listen, never on the boot path.
   setImmediate(() => { upgradeLocalMarksAtBoot({ noAuth }); });
 
+  // Fix-it boot checks — conditions no request emits an event for. The one
+  // that matters for existing installs: a Caddyfile still dialling the
+  // gateway over loopback, which turns Caddy's visitors away (the security
+  // audit's finding). Skipped on a --no-auth secondary gateway, which has no
+  // operator dashboard to show the card on. Own db client, closed here.
+  if (!noAuth) {
+    setImmediate(async () => {
+      let db;
+      try {
+        const { runBootChecks } = await import("../fix-it/index.js");
+        db = createDbClient();
+        await runBootChecks(db);
+      } catch (err) {
+        console.warn("[fix-it] boot checks skipped:", err.message);
+      } finally {
+        try { db?.close?.(); } catch {}
+      }
+    });
+  }
+
   // Start auto-update checker
   startAutoUpdate(createDbClient(), { noAuth }).catch((err) => {
     console.error("[auto-update] Failed to start:", err.message);

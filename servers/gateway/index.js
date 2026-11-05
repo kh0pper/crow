@@ -59,6 +59,7 @@ import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
 import { refuseRelayedInternal } from "./middleware/internal-guard.js";
 import { gatewayListenPort } from "./listen-port.js";
+import { proxySocketPath, listenProxySocket, closeProxySocket } from "./proxy-socket.js";
 
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
@@ -790,6 +791,9 @@ const { setupCallsSignaling: _setupCallsSignaling, setupCompanionProxy: _setupCo
 const { bodyErrorHandler } = await import("./body-error-handler.js");
 app.use(bodyErrorHandler);
 
+const PROXY_SOCKET_PATH = proxySocketPath();
+let proxyServer = null;
+
 const server = app.listen(PORT, BIND, (error) => {
   if (error) {
     console.error("Failed to start gateway:", error);
@@ -805,7 +809,20 @@ const server = app.listen(PORT, BIND, (error) => {
     BIND,
     noAuth,
   });
+
+  // The dedicated proxy socket (the security audit's finding): the installer's
+  // Caddy dials this unix socket instead of loopback, so its visitors are a
+  // verified `proxy` with the client Caddy named instead of an unverifiable
+  // loopback peer the dashboard turns away (servers/gateway/proxy-socket.js).
+  // Started after the post-listen setup so the sync WS handlers exist; any
+  // handler wired later is still seen, because upgrades look them up per
+  // request. Never throws: a socket that cannot start only costs the proxy path.
+  proxyServer = listenProxySocket(app, server, PROXY_SOCKET_PATH);
 });
+
+// A supervised restart closes the TCP listener in post-listen; close the proxy
+// listener alongside it so its socket file is gone before the successor binds.
+process.on("crow:shutdown", () => closeProxySocket(proxyServer, PROXY_SOCKET_PATH));
 
 // --- Graceful Shutdown ---
 //
@@ -842,6 +859,7 @@ async function gracefulShutdown() {
   // Step 2 — stop accepting new connections; release idle keep-alive sockets
   server.close();
   server.closeIdleConnections();
+  closeProxySocket(proxyServer, PROXY_SOCKET_PATH);
 
   // Step 3 — wait for in-flight requests (drain window)
   await Promise.race([
@@ -851,6 +869,7 @@ async function gracefulShutdown() {
 
   // Step 4 — sever any remaining sockets (SSE/Turbo-Stream etc.)
   server.closeAllConnections();
+  closeProxySocket(proxyServer, PROXY_SOCKET_PATH, { force: true });
 
   // Step 5 — session + proxy shutdown, same semantics as before
   const { shutdownAll } = await import("./proxy.js");

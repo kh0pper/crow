@@ -235,6 +235,12 @@ else
   log "Caddy installed"
 fi
 
+# The gateway's dedicated proxy socket (the security audit's finding) is a unix
+# socket at /run/crow/gateway.sock, created by systemd for the gateway's user
+# with mode 0660. Caddy runs as the 'caddy' service user, so it needs to be in
+# this user's group to traverse the 0750 directory and open the socket.
+sudo usermod -aG "$USER" caddy
+
 # ─── Step 5: Install Avahi (mDNS for crow.local) ─────────
 
 header "Step 5/9: mDNS (crow.local)"
@@ -326,16 +332,31 @@ RestartPreventExitStatus=78
 Environment=NODE_ENV=production
 Environment=CROW_DATA_DIR=$CROW_DATA
 Environment=CROW_DB_PATH=$CROW_DATA/crow.db
+# The dedicated proxy socket Caddy dials (the security audit's finding): a
+# loopback connection carrying X-Forwarded-For is unverifiable (any local
+# process can write the same header), so Caddy's visitors would be turned away
+# by the dashboard's network gate. CROW_TRUSTED_PROXIES=loopback is not the fix
+# (it makes every same-box caller the proxy and breaks the loopback-only doors).
+# RuntimeDirectory=crow owns /run/crow; the socket is chmod 0660 by the gateway,
+# and the caddy user is in this user's group.
+RuntimeDirectory=crow
+RuntimeDirectoryMode=0750
+Environment=CROW_PROXY_SOCKET=/run/crow/gateway.sock
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Caddy reverse proxy with self-signed cert for the actual hostname
+# Caddy reverse proxy with self-signed cert for the actual hostname.
+# Caddy dials the gateway's dedicated proxy socket (the security audit's
+# finding) rather than loopback: on a unix socket the gateway can tell Caddy's
+# visitors apart from any other same-box caller and classifies them `proxy` with
+# the client Caddy names. Caddy 2 ignores a client-sent X-Forwarded-For unless
+# trusted_proxies is configured, so the rightmost hop it sends is the real client.
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
 ${MDNS_HOST} {
     tls internal
-    reverse_proxy localhost:3001
+    reverse_proxy unix//run/crow/gateway.sock
 }
 EOF
 

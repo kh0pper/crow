@@ -133,6 +133,10 @@ With `CROW_TRUSTED_PROXIES` covering a loopback address (`loopback`, `127.0.0.1`
 A proxy on the same machine as Crow (loopback, one of the machine's own addresses, or a container bridge) can't be told apart from any local program writing the same `X-Forwarded-For`, so Crow treats every request through it as coming from the machine itself. Those requests are never your own turn: connected services and phone call approvals need you to reach Crow directly, through Tailscale Serve or from another machine on your LAN. Everything else works as usual. See [Requests from this machine](../architecture/dashboard.md#requests-from-this-machine).
 :::
 
+::: tip The installer's Caddy uses a dedicated proxy socket instead
+On a machine set up by `crow-install.sh`, Caddy dials Crow on a unix socket (`CROW_PROXY_SOCKET=/run/crow/gateway.sock`) rather than loopback, so its visitors are a verified proxy with the client Caddy names — no `CROW_TRUSTED_PROXIES` entry, and no owner's turn lost. An install that still has `reverse_proxy localhost:3001` in `/etc/caddy/Caddyfile` gets a Fix-it card on the Nest; the fix is `sudo bash scripts/fix-caddy-proxy-socket.sh` in the app directory.
+:::
+
 On Linux, Crow honours Tailscale Serve's headers only on connections opened by tailscaled's user (`CROW_SERVE_PEER_UIDS`, default `0`, read from `/proc/net/tcp`). On a host without `/proc` (macOS, Windows native) that check cannot run, so it fails closed and tailnet users through Serve are refused. To accept them anyway, set `CROW_SERVE_PEER_UIDS=off` (logged as a warning: any local process could then forge a tailnet identity).
 
 ## Step 4: Set the Public URL

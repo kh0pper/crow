@@ -30,6 +30,8 @@ Enforced in three layers:
 
 If you touch any of these, run `tests/auth-network.test.js`.
 
+Unrelated to Funnel, but easy to confuse with it: the installer's Caddy reaches the gateway over a dedicated unix socket (`CROW_PROXY_SOCKET`, `servers/gateway/proxy-socket.js`), not loopback, so its visitors are a verified `proxy` with the client Caddy named. `CROW_TRUSTED_PROXIES=loopback` is **not** an acceptable fix for an owner locked out behind Caddy (see `loopbackProxyWarning` in `servers/shared/peer-class.js`); existing installs get a Fix-it card pointing at `scripts/fix-caddy-proxy-socket.sh`.
+
 ## Maintaining CLAUDE.md vs crow.md
 
 | | CLAUDE.md (this file) | crow.md |
