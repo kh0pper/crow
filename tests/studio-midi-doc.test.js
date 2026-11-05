@@ -310,8 +310,9 @@ test("an FCB1010 profile proposes one pedal per scene in order", (t) => {
   assert.equal(routed(s.doc, { device_name: "FCB1010", ...message("cc", 1, 27) }), null);
 
   // The MPK Mini's profile, on the same song: its pads play the first sampler
-  // track's bank A pads 1-8, its knobs turn macro knobs 1-8, and the keys are one
-  // mapping on channel 1.
+  // track's bank A pads 1-8 and its knobs turn macro knobs 1-8. It proposes no
+  // keys row: the page does not play keys yet, so `keys.play` would claim a
+  // channel and play nothing.
   s.run("midi.propose_profile", { device: "mpk_mini", device_name: "MPK Mini" }, AGENT);
   const withMpk = snapshot(s.doc);
   for (let index = 0; index < MPK_MINI_PROFILE.pads.count; index += 1) {
@@ -322,12 +323,15 @@ test("an FCB1010 profile proposes one pedal per scene in order", (t) => {
     assert.deepEqual(knob.message, { type: "cc", channel: 1, number: 70 + index });
     assert.deepEqual(knob.action, { kind: "macro.set", index });
   }
-  const keys = withMpk.midi_maps["mpk_mini-keys"];
-  assert.deepEqual(keys.message, { type: "note", channel: 1, number: 0 });
-  assert.deepEqual(keys.action, { kind: "keys.play" });
+  assert.equal(withMpk.midi_maps["mpk_mini-keys"], undefined, "no keys row is proposed yet");
+  assert.equal(
+    Object.values(withMpk.midi_maps).filter((mapping) => mapping.action.kind === "keys.play").length,
+    0,
+    "and nothing else claims the keys",
+  );
   assert.equal(
     Object.keys(withMpk.midi_maps).filter((id) => id.startsWith("mpk_mini-")).length,
-    MPK_MINI_PROFILE.pads.count + MPK_MINI_PROFILE.knobs.count + 1,
+    MPK_MINI_PROFILE.pads.count + MPK_MINI_PROFILE.knobs.count,
   );
 
   // A song that already holds one of a profile's rows is refused the whole
@@ -476,7 +480,9 @@ test("an operator's mapping is live at once and an edit is one step", (t) => {
   const s = studio(t);
   const scene = addScene(s.doc, "Verse");
   const bass = addTrack(s.doc, "Bass");
-  const pedal = message("pc", 1, 0);
+  // A control change, because the edit below rides a level: a value control
+  // needs a CC (panel/midi-route.js says so, and midi.map refuses the rest).
+  const pedal = message("cc", 1, 27);
 
   const created = s.run(
     "midi.map",
@@ -488,7 +494,7 @@ test("an operator's mapping is live at once and an edit is one step", (t) => {
     },
     HUMAN,
   );
-  assert.match(created.result.summary, /^Mapped program change 0 on "FCB1010" to launch scene "Verse"/);
+  assert.match(created.result.summary, /^Mapped control change 27 on "FCB1010" to launch scene "Verse"/);
 
   const live = snapshot(s.doc).midi_maps["pedal-1"];
   assert.equal(live.proposed, false, "the operator's mapping is live at once");
@@ -636,6 +642,76 @@ test("the router routes only allow-listed actions, whatever the document holds",
     row.set("proposed", false);
   });
   assert.equal(routed(s.doc, { device_name: "FCB1010", type: "pc", channel: 1, number: 0 }), null);
+});
+
+test("a program change cannot hold an effect", (t) => {
+  const s = studio(t);
+  const { trackId } = addKit(s.doc);
+  const held = { kind: "fx.hold", name: "stutter" };
+
+  // A held effect is pressed and let go: a program change never comes up, so it
+  // has no release to give. The refusal names what the action needs.
+  const refused = refuses(
+    () =>
+      s.run(
+        "midi.map",
+        { id: "fx-pc", device_name: "FCB1010", message: message("pc", 1, 4), action: held },
+        HUMAN,
+      ),
+    "invalid",
+  );
+  assert.equal(
+    refused.message,
+    "Invalid arguments for midi.map: A held effect needs a pedal or pad that sends a note or a CC; a program change has no release.",
+  );
+  assert.deepEqual(snapshot(s.doc).midi_maps, {}, "nothing was written");
+  assert.equal(s.entries.length, 0, "and a refused mapping is not a history step");
+
+  // A CC holds it (the FCB1010's expression pedal) and so does a pad's note.
+  s.run(
+    "midi.map",
+    { id: "fx-cc", device_name: "FCB1010", message: message("cc", 1, 27), action: held },
+    HUMAN,
+  );
+  s.run(
+    "midi.map",
+    { id: "fx-note", device_name: "Pad kit", message: message("note", 10, 36), action: held },
+    HUMAN,
+  );
+  assert.equal(snapshot(s.doc).midi_maps["fx-cc"].proposed, false, "the CC mapping is live");
+  assert.equal(snapshot(s.doc).midi_maps["fx-note"].proposed, false, "and so is the note one");
+
+  // A value control is the other way round: only a CC carries a value.
+  const sweep = { kind: "pad.param", track_id: trackId, param: "cutoff_hz", min: 20, max: 2000 };
+  const refusedNote = refuses(
+    () =>
+      s.run(
+        "midi.map",
+        { id: "sweep-note", device_name: "Pad kit", message: message("note", 10, 40), action: sweep },
+        HUMAN,
+      ),
+    "invalid",
+  );
+  assert.match(refusedNote.message, /control change/);
+  s.run(
+    "midi.map",
+    { id: "sweep-cc", device_name: "Pad kit", message: message("cc", 1, 74), action: sweep },
+    HUMAN,
+  );
+
+  // A scene launch is neither: any of the three sets it off, so the pedal's own
+  // program change still maps.
+  const scene = addScene(s.doc, "Verse");
+  s.run(
+    "midi.map",
+    {
+      id: "scene-pc",
+      device_name: "FCB1010",
+      message: message("pc", 1, 3),
+      action: { kind: "scene.launch", scene_id: scene },
+    },
+    HUMAN,
+  );
 });
 
 test("one live keys mapping per channel, and only on notes", (t) => {

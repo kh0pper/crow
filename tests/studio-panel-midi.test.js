@@ -865,8 +865,9 @@ function incoming(over = {}) {
  * Every routing case the review's parity probe ran, plus the ones it named: a
  * malformed scene id, an extra argument, an inherited effect name, a pad field
  * no control sweeps, a range upside down, a pad index past the end, a macro
- * index past the end, a numeric device name, channel 0, an empty device name and
- * a map key that is not the mapping's own id.
+ * index past the end, a numeric device name, channel 0, an empty device name, a
+ * map key that is not the mapping's own id, and the two pairings the message rule
+ * refuses (an effect on a program change, a value control on a note).
  */
 const ROUTE_CASES = [
   {
@@ -903,6 +904,17 @@ const ROUTE_CASES = [
     name: "an inherited effect name",
     maps: { a: liveMapping("a", { kind: "fx.hold", name: "constructor" }, CC3) },
     message: incoming({ type: "cc" }),
+    routed: false,
+  },
+  {
+    name: "an effect on a program change",
+    maps: { a: liveMapping("a", { kind: "fx.hold", name: "stutter" }, PC3) },
+    routed: false,
+  },
+  {
+    name: "a value control on a note",
+    maps: { a: liveMapping("a", { kind: "mix.gain", track_id: "t" }, NOTE3) },
+    message: incoming({ type: "note" }),
     routed: false,
   },
   {
@@ -1250,6 +1262,41 @@ test("the rest of the gesture Learn mapped is not played", async () => {
   assert.deepEqual(ui.engine.releases, [], "and its note-off reached nothing");
 });
 
+test("a mapped trigger fires on the press, not on the release", async () => {
+  const doc = await midiDoc();
+  await writeMapping(doc, {
+    id: "note-launch",
+    device_name: DEVICE,
+    message: { type: "note", channel: 1, number: 60 },
+    action: { kind: "scene.launch", scene_id: SCENE },
+  });
+  await writeMapping(doc, {
+    id: "cc-clip",
+    device_name: DEVICE,
+    message: { type: "cc", channel: 1, number: 20 },
+    action: { kind: "clip.launch", clip_id: CLIP },
+  });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  // A note launches on its note-on, and the note-off only lets go.
+  ui.pedal(DEVICE, [0x90, 60, 100]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [SCENE], "the note-on launches the scene");
+  ui.pedal(DEVICE, [0x80, 60, 0]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [SCENE], "letting the note go launches nothing");
+
+  // A CC below 64 is the release side; 64 and above is the press.
+  ui.pedal(DEVICE, [0xb0, 20, 63]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.clips, [], "a CC below 64 is not a press");
+  ui.pedal(DEVICE, [0xb0, 20, 64]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.clips, [CLIP], "a CC at 64 launches the clip it names");
+});
+
 test("a knob's Learn waits for a control change", async () => {
   const doc = await midiDoc();
   const ui = await bootMidi({ doc });
@@ -1281,6 +1328,78 @@ test("a knob's Learn waits for a control change", async () => {
   assert.equal(maps.length, 1, "the knob maps the control");
   assert.equal(maps[0].args.action.kind, "pad.param");
   assert.equal(maps[0].args.action.param, "gain_db");
+});
+
+test("learn refuses a program change for an effect", async () => {
+  const ui = await bootMidi();
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  ui.click(`[data-act=open-clip][data-clip-id=${CLIP}]`);
+  await ui.settle();
+  const stutter = ui.document.querySelector("[data-act=fx-hold][data-fx-name=stutter]");
+  assert.ok(stutter, "the Stutter button is on the page");
+
+  // Learn on, then the effect: picking it applies nothing, and the next message
+  // is the one it should learn from.
+  ui.click("[data-act=midi-learn]");
+  stutter.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [], "the press that picks an effect applies nothing");
+
+  // The pedal presses a program change. A held effect has no release for one, so
+  // Learn refuses it in the router's own sentence and keeps waiting.
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+  assert.equal(commands(ui, "midi.map").length, 0, "a program change cannot hold an effect");
+  assert.equal(
+    ui.toastText(),
+    "A held effect needs a pedal or pad that sends a note or a CC; a program change has no release.",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-act=midi-learn]").getAttribute("aria-pressed"),
+    "true",
+    "Learn is still waiting",
+  );
+
+  // A control change is what it needs, and it is learned as fx.hold.
+  ui.pedal(DEVICE, [0xb0, 20, 100]);
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1);
+  assert.deepEqual(maps[0].args.action, { kind: "fx.hold", name: "stutter" });
+  assert.deepEqual(maps[0].args.message, { type: "cc", channel: 1, number: 20 });
+});
+
+test("re-learning a row never removes another controller's mapping", async () => {
+  const doc = await midiDoc();
+  // Two controllers, both holding program change 3: one row each.
+  await mapPedal(doc, { id: "pedal-a", number: 5, sceneId: SCENE });
+  await mapPedal(doc, { id: "pad-b", number: 3, sceneId: CHORUS, device: "Pad kit" });
+
+  const midi = fakeMidiAccess({ names: [DEVICE, "Pad kit"] });
+  const ui = await bootMidi({ doc, midi });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  // Re-learn the pedal's own row, then press program change 3 on the PEDAL: the
+  // other controller's row holds that message too, and it is not ours to remove.
+  ui.click("[data-act=midi-learn-row][data-mapping-id=pedal-a]");
+  await ui.settle();
+  ui.pedal(DEVICE, [0xc0, 3]);
+  await ui.settle();
+
+  assert.equal(commands(ui, "midi.remove").length, 0, "no other controller's row was removed");
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the row keeps its id and its action, with the new message");
+  assert.equal(maps[0].args.id, "pedal-a");
+  assert.deepEqual(maps[0].args.message, { type: "pc", channel: 1, number: 3 });
+
+  await ui.apply("midi.map", maps[0].args, { kind: "human" });
+  const stored = await mappingsOf(ui.doc);
+  assert.deepEqual(stored["pedal-a"].message, { type: "pc", channel: 1, number: 3 }, "the pedal's row follows the pedal");
+  assert.equal(stored["pedal-a"].device_name, DEVICE);
+  assert.deepEqual(stored["pad-b"].message, { type: "pc", channel: 1, number: 3 }, "the other controller's row is untouched");
+  assert.equal(stored["pad-b"].device_name, "Pad kit");
 });
 
 test("the MIDI lock is let go when the page closes before it is granted", async () => {

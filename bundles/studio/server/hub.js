@@ -71,6 +71,7 @@ import * as Y from "yjs";
 import {
   SAMPLER_DEVICE,
   bankKey,
+  motionParts,
   newSongDoc,
   parseObjectRef,
   sampleUsers,
@@ -757,9 +758,10 @@ function normalizeAuthor(author) {
  * A clip belongs to the track it sits on; a track is itself; a scene or the
  * song's meta belong to no track. The sampler's objects name their track the
  * same way the rest do: a bank and a pad say which track's kit they belong to,
- * a pattern and a step belong to the track of their clip, and a sample or a
- * slice touches EVERY track that plays it — re-chopping or renaming a sound is
- * a write to every kit that has it on a pad, so a locked one among them refuses
+ * a pattern, a step and a motion lane belong to the track of their clip, and a
+ * sample or a slice touches EVERY track that plays it — re-chopping or renaming
+ * a sound is a write to every kit that has it on a pad, so a locked one among
+ * them refuses
  * the step (see `sampleUsers`). Nothing here walks to a clip's track from a
  * *focused* ref — focus matches the ref exactly.
  * @param {object} snap - a plain snapshot
@@ -786,6 +788,14 @@ function trackIdsForRef(snap, ref) {
   }
   if (target.kind === "step") {
     return trackOfClip(snap, snap.steps?.[target.id]?.clip_id ?? keyHead(target.id));
+  }
+  // A motion lane is one field of one pattern of one clip
+  // (`<clip_id>/<pattern_id>/<lane>`), so the clip the ref names is the track
+  // whose kit plays it — and a locked track's lane is off-limits on undo and
+  // redo exactly as it is on the branch's own write.
+  if (target.kind === "motion") {
+    const parts = motionParts(target.id);
+    return parts ? trackOfClip(snap, parts.clipId) : [];
   }
   if (target.kind === "sample") return sampleUsers(snap, target.id);
   if (target.kind === "slice") {

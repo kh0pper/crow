@@ -248,7 +248,56 @@ export function sessionSummary(songId, snapshot, page = 1) {
 }
 
 /**
- * The takes of a song, newest first, the way `studio_takes` reports them.
+ * A pattern clip as `studio_get_clip` reports it: the clip itself, then its
+ * patterns with their steps and their motion.
+ *
+ * A pattern clip holds no notes, so its notes list is always empty and reading
+ * it alone says nothing about what it plays. Each pattern comes with its steps
+ * grouped under it (position, pad, velocity, locks) in the order the pattern
+ * plays them, and each of its motion lanes as a lane name → its points and how
+ * many there are. Everything is read from the snapshot, so the answer is the
+ * document as the operator and the engine have it.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {object} clip - the pattern clip
+ * @returns {object} the clip, its patterns, their steps and their motion
+ */
+export function patternClipRead(snapshot, clip) {
+  const patterns = Object.values(snapshot?.patterns ?? {})
+    .filter((pattern) => pattern && pattern.clip_id === clip.id)
+    .sort((left, right) => (Number(left.order) || 0) - (Number(right.order) || 0));
+  const steps = Object.values(snapshot?.steps ?? {}).filter(
+    (step) => step && step.clip_id === clip.id,
+  );
+
+  return {
+    ...clip,
+    patterns: patterns.map((pattern) => ({
+      id: pattern.id,
+      name: pattern.name,
+      order: Number(pattern.order) || 0,
+      steps: steps
+        .filter((step) => step.pattern_id === pattern.id)
+        .sort((left, right) => (Number(left.at) || 0) - (Number(right.at) || 0))
+        .map((step) => ({
+          at: Number(step.at) || 0,
+          bank_id: step.bank_id,
+          index: Number(step.index) || 0,
+          v: Number(step.v) || 0,
+          locks: step.locks && typeof step.locks === "object" ? step.locks : {},
+        })),
+      motion: Object.fromEntries(
+        Object.entries(pattern.motion && typeof pattern.motion === "object" ? pattern.motion : {})
+          .map(([lane, points]) => {
+            const list = Array.isArray(points) ? points : [];
+            return [lane, { count: list.length, points: list }];
+          }),
+      ),
+    })),
+  };
+}
+
+/**
  *
  * A take's stored shape is what the document needs (frames, an offset in the
  * host's frames, a storage key); its readers want seconds and milliseconds,
@@ -718,7 +767,7 @@ export function createStudioServer({
     {
       title: "Summarise the session",
       description:
-        "The song's tracks (with their device type and lock state), scenes and clips — no note data, one note count per clip. Call this first: it is how you see what the operator has. Clips are paged 50 per page; read one clip's notes with studio_get_clip.",
+        "The song's tracks (with their device type and lock state), scenes and clips — no note data, one note count per clip. Call this first: it is how you see what the operator has. Clips are paged 50 per page; read one clip's notes, or a pattern clip's steps and motion, with studio_get_clip.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to summarise"),
         page: z.number().int().min(1).optional().describe("clip page, 50 clips each; default 1"),
@@ -741,7 +790,7 @@ export function createStudioServer({
     {
       title: "Read one clip",
       description:
-        "One clip in full, notes included: each note is {t, d, p, v} — start and length in beats, MIDI pitch 0-127, velocity 1-127.",
+        "One clip in full. A notes clip answers with its notes, each {t, d, p, v} — start and length in beats, MIDI pitch 0-127, velocity 1-127. A pattern clip answers with its patterns (id, name, order), each pattern's steps (at, bank_id, index, v, locks) and each of its motion lanes (lane → {count, points}), so you can read a sampler part before you change it.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song the clip is in"),
         clip_id: z.string().min(1).describe("the clip to read"),
@@ -751,9 +800,10 @@ export function createStudioServer({
       try {
         const opened = await hub.snapshot(args.song_id, authorFor(extra));
         if (isRefusal(opened)) return errorResult(refusalText(opened));
-        const clip = opened?.snapshot?.clips?.[args.clip_id] ?? null;
+        const snap = opened?.snapshot;
+        const clip = snap?.clips?.[args.clip_id] ?? null;
         if (!clip) return errorResult(`There is no clip "${args.clip_id}" in this song.`);
-        return textResult(clip);
+        return textResult(clip.kind === "pattern" ? patternClipRead(snap, clip) : clip);
       } catch (err) {
         return errorResult(errorText(err));
       }

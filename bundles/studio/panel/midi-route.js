@@ -25,7 +25,11 @@
  * the operator said yes. The router is the last gate before an action runs, so
  * whatever a document holds — an old one, a hand-synced one — the action must
  * also pass `validRoutedAction`: the allow-list and its per-kind arguments,
- * exactly the arguments `MIDI_ACTIONS` in `server/commands/midi.js` accepts.
+ * exactly the arguments `MIDI_ACTIONS` in `server/commands/midi.js` accepts —
+ * and the pairing has to make sense too: `acceptsMessageType` says which kinds
+ * of message an action can be driven by (a pedal that sends a program change
+ * cannot hold a held effect), and it is the same table `midi.map` refuses on
+ * and Learn waits for.
  *
  * Every mapping then matches its own message, except `keys.play`: a keys row
  * claims EVERY note on its channel (that is what lets one row drive a keyboard),
@@ -58,6 +62,92 @@ export const MIDI_ROUTE_SCRIPT = [
   "",
   "  // The performance effects a pedal or a knob may hold.",
   "  var FX_HOLD_NAMES = ['filter_sweep', 'lofi', 'stutter', 'tape_stop', 'reverb_throw'];",
+  "",
+  "  // What each action can be driven by: the message types a mapping of that",
+  "  // kind may hold, and the sentence a mismatch is refused with. This is the",
+  "  // ONE table Learn, midi.map and the router all read: a program change has no",
+  "  // release, so it cannot hold an effect or play a pad, and only a control",
+  "  // change carries a value.",
+  "  var MESSAGE_RULES = {",
+  "    'scene.launch': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Launching a scene takes a note, a CC or a program change.'",
+  "    },",
+  "    'clip.launch': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Launching a clip takes a note, a CC or a program change.'",
+  "    },",
+  "    'transport.play': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Play takes a note, a CC or a program change.'",
+  "    },",
+  "    'transport.stop': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Stop takes a note, a CC or a program change.'",
+  "    },",
+  "    'record.toggle': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Record takes a note, a CC or a program change.'",
+  "    },",
+  "    'stop_all': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Stop everything takes a note, a CC or a program change.'",
+  "    },",
+  "    'looper.cycle': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'The looper takes a note, a CC or a program change.'",
+  "    },",
+  "    'looper.to_pad': {",
+  "      types: ['note', 'cc', 'pc'],",
+  "      needs: 'Loop to pad takes a note, a CC or a program change.'",
+  "    },",
+  "    'pad.play': {",
+  "      types: ['note', 'cc'],",
+  "      needs: 'Playing a pad needs a note or a CC; a program change has no release.'",
+  "    },",
+  "    'fx.hold': {",
+  "      types: ['note', 'cc'],",
+  "      needs: 'A held effect needs a pedal or pad that sends a note or a CC; a program change has no release.'",
+  "    },",
+  "    'pad.param': {",
+  "      types: ['cc'],",
+  "      needs: 'Sweeping a pad field needs a control change (CC); a note or a program change carries no value.'",
+  "    },",
+  "    'mix.gain': {",
+  "      types: ['cc'],",
+  "      needs: 'Riding a level needs a control change (CC); a note or a program change carries no value.'",
+  "    },",
+  "    'macro.set': {",
+  "      types: ['cc'],",
+  "      needs: 'Turning a macro knob needs a control change (CC); a note or a program change carries no value.'",
+  "    },",
+  "    'track.macro': {",
+  "      types: ['cc'],",
+  "      needs: 'Turning a macro knob needs a control change (CC); a note or a program change carries no value.'",
+  "    },",
+  "    'keys.play': {",
+  "      types: ['note'],",
+  "      needs: 'The keys send notes, so a keys mapping needs a note; a CC or a program change is not a key.'",
+  "    }",
+  "  };",
+  "",
+  "  // The rule for one action kind, or null for a kind that is not allow-listed.",
+  "  function messageRule(kind) {",
+  "    return hasOwn(MESSAGE_RULES, kind) ? MESSAGE_RULES[kind] : null;",
+  "  }",
+  "",
+  "  // Whether a mapping of this kind may hold this message type.",
+  "  function acceptsMessageType(kind, type) {",
+  "    var rule = messageRule(kind);",
+  "    if (!rule) return false;",
+  "    return rule.types.indexOf(String(type)) >= 0;",
+  "  }",
+  "",
+  "  // What one kind needs, in the sentence a refusal and a toast both use.",
+  "  function messageNeedsText(kind) {",
+  "    var rule = messageRule(kind);",
+  "    return rule ? rule.needs : 'That is not an action a message can run.';",
+  "  }",
   "",
   "  function hasOwn(object, key) {",
   "    return Object.prototype.hasOwnProperty.call(object, key);",
@@ -194,6 +284,7 @@ export const MIDI_ROUTE_SCRIPT = [
   "      if (mapping.proposed !== false) continue;",
   "      if (!sameValue(mapping.action, mapping.accepted_action)) continue;",
   "      if (!validRoutedAction(mapping.action)) continue;",
+  "      if (!acceptsMessageType(mapping.action.kind, wanted.type)) continue;",
   "      if (mapping.device_name !== wanted.device_name) continue;",
   "      var stored = mapping.message;",
   "      if (!stored || typeof stored !== 'object') continue;",
@@ -213,7 +304,9 @@ export const MIDI_ROUTE_SCRIPT = [
   "",
   "  window.StudioMidiRoute = {",
   "    routeFor: routeFor,",
-  "    validRoutedAction: validRoutedAction",
+  "    validRoutedAction: validRoutedAction,",
+  "    acceptsMessageType: acceptsMessageType,",
+  "    messageNeedsText: messageNeedsText",
   "  };",
   "})();",
 ].join("\n");
@@ -248,4 +341,25 @@ export function routeFor(snap, message) {
  */
 export function validRoutedAction(action) {
   return routeApi.validRoutedAction(action);
+}
+
+/**
+ * Whether a mapping of one action kind may hold one message type: the ONE rule
+ * `midi.map` refuses on, Learn waits for, and the router gates on.
+ * @param {string} kind - an action kind
+ * @param {string} type - "note", "cc" or "pc"
+ * @returns {boolean}
+ */
+export function acceptsMessageType(kind, type) {
+  return routeApi.acceptsMessageType(kind, type);
+}
+
+/**
+ * What an action kind's message needs, in the one sentence a refusal and a
+ * Learn toast both use.
+ * @param {string} kind - an action kind
+ * @returns {string}
+ */
+export function messageNeedsText(kind) {
+  return routeApi.messageNeedsText(kind);
 }

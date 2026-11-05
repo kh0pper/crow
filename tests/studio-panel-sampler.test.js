@@ -34,6 +34,7 @@ import { createStudioWeb } from "../bundles/studio/server/web.js";
 import { createTakeUploads } from "../bundles/studio/server/takes-upload.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import studioPanel from "../bundles/studio/panel/studio.js";
+import { acceptsMessageType, messageNeedsText } from "../bundles/studio/panel/midi-route.js";
 import { encodeWav24, decodeWav } from "../bundles/studio/server/wav.js";
 
 /** The sampler track of the fixture song, and its one bank. */
@@ -692,6 +693,10 @@ async function bootSampler(options = {}) {
     windowStub.StudioMidiRoute = {
       routeFor: (snap, message) =>
         typeof options.midi.route === "function" ? options.midi.route(snap, message) : null,
+      // The message-type rule is the router's own, so Learn on this page enforces
+      // exactly what the hub enforces (see panel/midi-route.js).
+      acceptsMessageType,
+      messageNeedsText,
     };
   }
 
@@ -1199,6 +1204,39 @@ test("holding an effect button holds the effect until release", async () => {
   assert.equal(looperButton.getAttribute("aria-pressed"), "false");
 });
 
+test("the effect and Looper buttons answer the keyboard too", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+  const row = ui.slot("sampler-fx");
+  const stutter = row.querySelector("[data-act=fx-hold][data-fx-name=stutter]");
+
+  // Enter holds the effect exactly as a pointer press does, and a repeat is the
+  // key still down rather than a second hold.
+  stutter.dispatchEvent(ui.event("keydown", { key: "Enter" }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [{ name: "stutter", amount: 1, on: true }], "Enter holds the effect");
+  assert.equal(stutter.getAttribute("aria-pressed"), "true", "and the button says it is held");
+  stutter.dispatchEvent(ui.event("keydown", { key: "Enter", repeat: true }));
+  await ui.settle();
+  assert.equal(ui.engine.fx.length, 1, "a held key is one hold");
+
+  // Letting the key go returns to the dry signal.
+  stutter.dispatchEvent(ui.event("keyup", { key: "Enter" }));
+  await ui.settle();
+  assert.equal(ui.engine.fx[ui.engine.fx.length - 1].on, false, "the keyup releases it");
+  assert.equal(stutter.getAttribute("aria-pressed"), "false");
+
+  // Space steps the Looper once, and the release does not step it again.
+  const looper = row.querySelector("[data-act=looper-cycle]");
+  looper.dispatchEvent(ui.event("keydown", { key: " " }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.loopers, ["record"], "Space steps the looper on");
+  looper.dispatchEvent(ui.event("keyup", { key: " " }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.loopers, ["record"], "the keyup does not step it again");
+  assert.equal(looper.getAttribute("aria-pressed"), "false");
+});
+
 test("loop to pad uploads the loop as a sample on the selected pad", async () => {
   const ui = await bootSampler();
   const bankId = await bankIdOf(ui.doc);
@@ -1244,6 +1282,61 @@ test("loop to pad uploads the loop as a sample on the selected pad", async () =>
     before,
     "an empty looper uploads nothing",
   );
+});
+
+test("loop to pad says so when every pad of the bank holds a sound", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // A sound on every pad of the bank, and no pad picked: the capture has no
+  // empty pad to fall back on, and it must not replace pad 1 unasked.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "sample.add", {
+    sample: {
+      id: SAMPLE_ID,
+      storage_key: `${PREFIX}studio/song-1/samples/${SAMPLE_ID}.wav`,
+      rate: RATE,
+      channels: 2,
+      frames: FRAMES,
+      name: "porch-knocks",
+      origin: "import",
+      author_label: "You",
+    },
+  });
+  for (let index = 0; index < 16; index += 1) {
+    runCommand(ui.doc, "pad.assign", {
+      track_id: TRACK,
+      bank_id: bankId,
+      index,
+      sample_id: SAMPLE_ID,
+    });
+  }
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+
+  const capture = ui.slot("sampler-fx").querySelector("[data-act=looper-to-pad]");
+  assert.ok(capture, "the view still offers Loop to pad");
+  assert.equal(capture.getAttribute("data-pad-index"), null, "with no pad to land on");
+  const before = ui.requests.filter((request) => request.method === "PUT").length;
+  capture.dispatchEvent(ui.event("click", {}));
+  await ui.settle(40);
+  assert.equal(
+    String(ui.document.querySelector("[data-role=toast]").textContent),
+    "Every pad of this bank holds a sound; pick a pad first.",
+  );
+  assert.equal(
+    ui.requests.filter((request) => request.method === "PUT").length,
+    before,
+    "nothing was uploaded",
+  );
+
+  // Picking a pad is the way through: it replaces the pad the operator chose.
+  ui.pressPad(6);
+  ui.release();
+  await ui.settle();
+  const chosen = ui.slot("sampler-fx").querySelector("[data-act=looper-to-pad]");
+  assert.equal(chosen.getAttribute("data-pad-index"), "6", "the picked pad is the target");
 });
 
 test("an effect and the looper are Learn targets", async () => {

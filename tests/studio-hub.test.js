@@ -1344,6 +1344,77 @@ test("agent cannot undo the removal of a locked track", async (t) => {
   assert.equal((await hub.openSong(other)).snapshot.tracks[0].name, "Bass");
 });
 
+test("an agent cannot undo or redo motion on a locked track", async (t) => {
+  const { hub, db } = await setup(t);
+  const { song_id, track_id, bank_id, clip_id } = await seedSampleSong(hub);
+  const lane = `${bank_id}.0|cutoff_hz`;
+
+  // The operator records a cutoff curve on the pattern, then locks the track.
+  const written = await applies(
+    hub,
+    song_id,
+    "motion-1",
+    "motion.write",
+    {
+      clip_id,
+      pattern_id: "a",
+      bank_id,
+      index: 0,
+      param: "cutoff_hz",
+      points: [{ step_frac: 0, value: 500 }, { step_frac: 4, value: 900 }],
+    },
+    HUMAN,
+  );
+  await applies(hub, song_id, "motion-lock", "track.lock", { track_id }, HUMAN);
+  const curve = [{ step_frac: 0, value: 500 }, { step_frac: 4, value: 900 }];
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.patterns[`${clip_id}/a`].motion[lane],
+    curve,
+    "the operator's curve is on the pattern",
+  );
+
+  // A motion ref names its lane, and the lane names the clip whose track plays
+  // it: an agent's undo of that step is refused exactly as its own write is.
+  const before = await updateSeqs(db, song_id);
+  const refusedUndo = refuses(
+    await hub.undo({ song_id, cmd_id: "motion-undo", entry_id: written.entry.id, author: AGENT }),
+    "locked",
+  );
+  assert.equal(refusedUndo.error, 'Track "Drums" is locked by the operator.');
+  assert.deepEqual(await updateSeqs(db, song_id), before, "a refused undo writes nothing");
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.patterns[`${clip_id}/a`].motion[lane],
+    curve,
+    "and the curve is untouched",
+  );
+
+  // The other direction: the operator takes their own step back, and the agent's
+  // redo of it is refused for the same lock.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "motion-undo-operator",
+    entry_id: written.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.patterns[`${clip_id}/a`].motion[lane] ?? null,
+    null,
+    "the operator's undo took the lane away",
+  );
+  const beforeRedo = await updateSeqs(db, song_id);
+  refuses(
+    await hub.redo({ song_id, cmd_id: "motion-redo", entry_id: undone.entry.id, author: AGENT }),
+    "locked",
+  );
+  assert.deepEqual(await updateSeqs(db, song_id), beforeRedo, "a refused redo writes nothing");
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.patterns[`${clip_id}/a`].motion[lane] ?? null,
+    null,
+    "and the lane stays gone",
+  );
+});
+
 test("a broken undo chain is refused for agents", async (t) => {
   const { hub, db } = await setup(t);
   const song_id = await seedSong(hub);

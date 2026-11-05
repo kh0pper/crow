@@ -28,6 +28,10 @@
  *     `voice.talk` in 1c (see the plan's "Left open on purpose").
  *   - the ids an action names (a scene, a clip, a track, a bank) must exist in
  *     the song when the mapping is made, so a mapping never points at nothing.
+ *   - the message has to be one its action can run: the ONE table in
+ *     `panel/midi-route.js` says which types each kind takes (a held effect
+ *     needs a note or a CC, a value control needs a CC, a program change has no
+ *     release), and a mismatch is refused with that table's own sentence.
  *   - one message has one live action: two LIVE mappings for the same message on
  *     the same controller are refused, so the router never has to choose.
  *
@@ -44,7 +48,11 @@
  */
 
 import { z } from "zod";
-import { routeFor as routeInMidiRoute } from "../../panel/midi-route.js";
+import {
+  acceptsMessageType,
+  messageNeedsText,
+  routeFor as routeInMidiRoute,
+} from "../../panel/midi-route.js";
 import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   LIMITS,
@@ -129,7 +137,9 @@ export const FX_HOLD_NAMES = Object.freeze([
  * `panel/midi-route.js` holds the plain-JS twin the router gates on (it cannot
  * import zod: the page inlines it). The two must accept exactly the same
  * arguments, and a test rides them against each other kind by kind — change one
- * and change the other.
+ * and change the other. Which message types each kind takes (and the sentence a
+ * mismatch is refused with) is in that same script, because Learn, the router
+ * and this table all need the one answer.
  *
  * @type {Readonly<Object<string, import("zod").ZodTypeAny>>}
  */
@@ -214,8 +224,10 @@ export const FCB1010_PROFILE = Object.freeze({
 /**
  * The Akai MPK Mini's factory defaults — verify against the unit.
  *
- * The eight pads send notes 36-43 on channel 10, the eight knobs send control
- * changes 70-77 on channel 1, and the keys send notes on channel 1 as well. A
+ * The eight pads send notes 36-43 on channel 10 and the eight knobs send control
+ * changes 70-77 on channel 1. The unit's keys send notes on channel 1 as well,
+ * but Studio has no live note path for an instrument track yet, so the profile
+ * proposes no `keys.play` row: it would claim a channel and play nothing. A
  * unit can be reprogrammed, and these are the defaults the profile starts from.
  */
 export const MPK_MINI_PROFILE = Object.freeze({
@@ -225,13 +237,6 @@ export const MPK_MINI_PROFILE = Object.freeze({
   pads: Object.freeze({ type: "note", channel: 10, first_number: 36, count: 8 }),
   /** The eight knobs: control changes 70-77 on channel 1 — factory defaults, verify against the unit. */
   knobs: Object.freeze({ type: "cc", channel: 1, first_number: 70, count: 8 }),
-  /**
-   * The keys: ONE mapping, because a key mapping claims every note on its
-   * channel that no `pad.play` mapping takes (`routeFor` prefers a pad, so the
-   * pads still play). Its number is therefore only a placeholder, and 0 is a
-   * note the pads never send.
-   */
-  keys: Object.freeze({ type: "note", channel: 1, number: 0 }),
 });
 
 /** The message one mapping answers: a note, a control change or a program change. */
@@ -555,8 +560,13 @@ defineCommand({
     .superRefine((args, ctx) => {
       const refusal = actionRefusal(args.action);
       if (refusal) ctx.addIssue({ code: "custom", message: refusal });
-      if (args.action?.kind === "keys.play" && args.message?.type !== "note") {
-        ctx.addIssue({ code: "custom", message: "keys.play plays notes, so it maps a note message (its channel's notes), not a CC or a program change." });
+      // The message has to be one this action can run. The rule and the
+      // sentence are the router's own (panel/midi-route.js), so the refusal an
+      // agent gets here is the one Learn says and the one routing enforces.
+      const kind = args.action?.kind;
+      if (typeof kind !== "string" || !Object.hasOwn(MIDI_ACTIONS, kind)) return;
+      if (!acceptsMessageType(kind, args.message?.type)) {
+        ctx.addIssue({ code: "custom", message: messageNeedsText(kind) });
       }
     }),
   summary(args, snap, context) {
@@ -775,9 +785,10 @@ function planProfile(snap, args) {
     return planned;
   }
 
-  // The MPK Mini: its pads play the first sampler track's bank A pads 1-8, its
-  // knobs turn the selected track's macro knobs, and the keys play the selected
-  // instrument.
+  // The MPK Mini: its pads play the first sampler track's bank A pads 1-8 and
+  // its knobs turn the selected track's macro knobs. Its keys propose nothing:
+  // the page does not play keys yet, so a `keys.play` row would claim a channel
+  // and play silence. (`keys.play` stays on the allow-list for when it does.)
   const pads = MPK_MINI_PROFILE.pads;
   const sampler = (snap.tracks ?? []).find((track) => track?.device?.engine === SAMPLER_DEVICE.engine);
   const bank = sampler
@@ -802,11 +813,6 @@ function planProfile(snap, args) {
       action: { kind: "macro.set", index },
     });
   }
-  planned.push({
-    id: "mpk_mini-keys",
-    message: { ...MPK_MINI_PROFILE.keys },
-    action: { kind: "keys.play" },
-  });
   return planned;
 }
 
@@ -826,7 +832,7 @@ function profileSummary(args, planned) {
   const parts = [];
   if (padMappings > 0) parts.push(`${padMappings} pad mappings`);
   parts.push(`${knobs} knob mappings`);
-  parts.push(keys === 1 ? "the keys mapping" : `${keys} keys mappings`);
+  if (keys > 0) parts.push(keys === 1 ? "the keys mapping" : `${keys} keys mappings`);
   return `Proposed ${parts.join(", ")} for ${device}`;
 }
 

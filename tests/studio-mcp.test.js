@@ -1017,6 +1017,90 @@ test("agent writes a pattern and chains it", async (t) => {
   }
 });
 
+test("studio_get_clip shows a pattern clip's steps and motion", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  const bankId = await seedKit(hub, songId);
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+  try {
+    /** Run one tool that must succeed, and hand back the sentence it answered with. */
+    const run = async (name, args) => {
+      const result = await client.callTool({ name, arguments: { song_id: songId, ...args } });
+      assert.notEqual(result.isError, true, `${name} was refused: ${textOf(result)}`);
+      return textOf(result);
+    };
+
+    // A pattern clip with two patterns: A has two hits, one of them lock-snapped
+    // and swept by a cutoff curve; Fill has one hit and no motion.
+    await run("studio_clip_add_pattern", {
+      clip_id: "beat",
+      track_id: "drums",
+      scene_id: "verse",
+      name: "Drums A",
+      length_steps: 16,
+    });
+    await run("studio_pattern_add", { clip_id: "beat", id: "b", name: "Fill" });
+    await run("studio_step_toggle", { clip_id: "beat", pattern_id: "a", at: 0, bank_id: bankId, index: 0, v: 120 });
+    await run("studio_step_toggle", { clip_id: "beat", pattern_id: "a", at: 4, bank_id: bankId, index: 2 });
+    await run("studio_step_set", {
+      clip_id: "beat",
+      pattern_id: "a",
+      at: 4,
+      bank_id: bankId,
+      index: 2,
+      locks: { cutoff_hz: 900 },
+    });
+    await run("studio_step_toggle", { clip_id: "beat", pattern_id: "b", at: 8, bank_id: bankId, index: 0 });
+    await run("studio_motion_write", {
+      clip_id: "beat",
+      pattern_id: "a",
+      bank_id: bankId,
+      index: 2,
+      param: "cutoff_hz",
+      points: [{ step_frac: 0, value: 300 }, { step_frac: 2.5, value: 1400 }],
+    });
+
+    const read = await client.callTool({
+      name: "studio_get_clip",
+      arguments: { song_id: songId, clip_id: "beat" },
+    });
+    assert.notEqual(read.isError, true, textOf(read));
+    const body = JSON.parse(textOf(read));
+
+    assert.equal(body.kind, "pattern");
+    assert.equal(body.name, "Drums A");
+    assert.deepEqual(
+      body.patterns.map((pattern) => [pattern.id, pattern.name, pattern.order]),
+      [["a", "A", 0], ["b", "Fill", 1]],
+      "the clip's patterns, in their own order",
+    );
+
+    const first = body.patterns[0];
+    assert.deepEqual(first.steps.map((step) => step.at), [0, 4], "A's steps, in the order it plays them");
+    assert.deepEqual(
+      first.steps[0],
+      { at: 0, bank_id: bankId, index: 0, v: 120, locks: {} },
+      "a step's pad, its velocity and its (empty) locks",
+    );
+    assert.deepEqual(first.steps[1].locks, { cutoff_hz: 900 }, "the lock stays with the step it belongs to");
+    assert.deepEqual(
+      first.motion,
+      {
+        [`${bankId}.2|cutoff_hz`]: {
+          count: 2,
+          points: [{ step_frac: 0, value: 300 }, { step_frac: 2.5, value: 1400 }],
+        },
+      },
+      "each motion lane with how many points it holds and the points themselves",
+    );
+
+    const second = body.patterns[1];
+    assert.deepEqual(second.steps.map((step) => step.at), [8], "Fill keeps its own step");
+    assert.deepEqual(second.motion, {}, "and holds no motion yet");
+  } finally {
+    await client.close();
+  }
+});
+
 test("agent cannot drop a pad's sample or add a sample", async (t) => {
   const { db, hub, songId } = await realSong(t);
   const bankId = await seedKit(hub, songId);
