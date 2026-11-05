@@ -3,15 +3,17 @@
  *
  * The engine is one AudioWorklet node whose processor hosts SunVox and the
  * sequencer (`studio-processor.js`). A worklet cannot `import`, so this file
- * glues four sources into ONE module and hands it to
+ * glues six sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
- *     sequencer.js + resample.js + sampler-voice.js + sunvox.js + studio-processor.js
+ *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
+ *       + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
  * the client side of the port, before the PCM is handed over. `sampler-voice.js`
- * is the sampler's voice DSP, which the processor uses in that same scope.
+ * is the sampler's voice DSP, and `perf-fx.js` the performance-effects bus and
+ * its looper, which the processor uses in that same scope.
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -115,7 +117,19 @@
  *   the same clock `launched` and `nextBarFrame` report in. What record-into-pad
  *   and resampling listen to. Off by default. `onTap(listener)` follows those
  *   blocks as `{target, frame, channels}`; it resolves to an unsubscribe. A tap
- *   never changes the mix it copies.
+ *   never changes the mix it copies, and a MASTER tap copies it after the
+ *   performance bus, so what it records is what the room hears.
+ * - `fxHold(name, amount)` and `fxRelease(name)` hold or let go one performance
+ *   effect (`filter_sweep`, `lofi`, `stutter`, `tape_stop`, `reverb_throw`).
+ *   They are live state, never a command or a history step, and they take effect
+ *   at the next block's first frame. Nothing else releases them.
+ * - `looper(action)` drives the master looper: `record`, `overdub`, `play`,
+ *   `stop` or `clear`, all quantized to the sequencer's next bar line.
+ *   `looperTake()` resolves with `{channels, rate, bars}` — whole bars of the
+ *   master the looper recorded, clipped to [−1, 1], which record-into-pad turns
+ *   into a pad's sample. The looper's buffers are this page's (the audio thread
+ *   allocates none): eight bars at the song's tempo are sent before the first
+ *   record, and handed back and forth around a take.
  */
 (function () {
   "use strict";
@@ -125,6 +139,7 @@
     "sequencer.js",
     "resample.js",
     "sampler-voice.js",
+    "perf-fx.js",
     "sunvox.js",
     "studio-processor.js",
   ];
@@ -202,6 +217,38 @@
 
   /** A song can have at most this many SunVox tracks (one engine each). */
   const MAX_TRACKS = 16;
+
+  /** Four beats to the bar, everywhere in Studio. */
+  const BEATS_PER_BAR = 4;
+
+  /** The tempo a song without a usable `meta.bpm` is measured at. */
+  const DEFAULT_BPM = 120;
+
+  /** How many bars the looper's buffers hold: the longest take it records. */
+  const LOOPER_BARS = 8;
+
+  /**
+   * The page's own copy of one looper-take channel, clipped to [−1, 1].
+   *
+   * The looper taps the master BEFORE the clip, so a take can hold values past
+   * full scale; what the page keeps is clipped, so a pad made from a take is
+   * never louder than full scale. The copy is the page's: the processor's buffers
+   * are handed straight back, and the looper plays on from them.
+   * @param {Float32Array|ArrayBufferView|null} buffer the transferred channel
+   * @param {number} frames how many frames of it to copy
+   * @returns {Float32Array} the clipped copy (empty when there is no buffer)
+   */
+  function copyLooperChannel(buffer, frames) {
+    const length = Math.max(0, Math.trunc(Number(frames) || 0));
+    const copy = new Float32Array(length);
+    if (!buffer || typeof buffer.length !== "number") return copy;
+    const count = Math.min(length, buffer.length);
+    for (let at = 0; at < count; at += 1) {
+      const value = buffer[at];
+      copy[at] = value > 1 ? 1 : value < -1 ? -1 : value;
+    }
+    return copy;
+  }
 
   /** @returns {boolean} whether this script runs in Node rather than a browser. */
   function isNode() {
@@ -621,6 +668,12 @@
    *                    onPosition: function(function): function,
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
+   *                    onTap: function(function): function,
+   *                    fxHold: function(string, number): void,
+   *                    fxRelease: function(string): void,
+   *                    looper: function(string): void,
+   *                    looperTake: function(): Promise<{channels: Float32Array[],
+   *                      rate: number, bars: number}>,
    *                    onError: function(function): function,
    *                    calibrate: function(object): Promise<object>,
    *                    createRecorder: function(object): Promise<object>,
@@ -1113,6 +1166,17 @@
     const pendingAudio = new Map();
     /** sample id → resolvers waiting for the processor's `sample_loaded`. */
     const pendingSamples = new Map();
+    /** request id → the resolver waiting for the processor's `looper_buffer`. */
+    const pendingLooper = new Map();
+    let looperSeq = 0;
+    /**
+     * The frames the looper's buffers hold in the processor; 0 before the page has
+     * sent any. The processor allocates none of its own, so the page keeps this
+     * pair sized for eight bars at the song's tempo.
+     */
+    let looperBufferFrames = 0;
+    /** The tempo the song is at, as the last `setSong` read it. */
+    let looperSongBpm = DEFAULT_BPM;
     const post = (message, transfer) => {
       if (transfer && transfer.length > 0) {
         try {
@@ -1124,6 +1188,36 @@
         }
       }
       node.port.postMessage(message);
+    };
+
+    /**
+     * Hand the processor a fresh pair of looper buffers, transferred rather than
+     * copied.
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @returns {void}
+     */
+    const sendLooperBuffers = (left, right) => {
+      post({ type: "looper_buffers", left: left, right: right }, [left.buffer, right.buffer]);
+    };
+
+    /**
+     * Make sure the processor's looper buffers hold eight bars at the song's
+     * current tempo: they are sent before anything records into them, and again,
+     * larger, when the song slows down far enough that eight bars no longer fit.
+     * Never while a take is out — the looper is detached from its buffers then,
+     * and the take hands the same pair back.
+     * @param {number} bpm
+     * @returns {void}
+     */
+    const ensureLooperBuffers = (bpm) => {
+      const tempo = Number(bpm);
+      const usable = Number.isFinite(tempo) && tempo > 0 ? tempo : DEFAULT_BPM;
+      if (pendingLooper.size > 0) return;
+      const needed = Math.ceil((context.sampleRate * 60 * BEATS_PER_BAR * LOOPER_BARS) / usable);
+      if (needed <= looperBufferFrames) return;
+      looperBufferFrames = needed;
+      sendLooperBuffers(new Float32Array(needed), new Float32Array(needed));
     };
 
     try {
@@ -1201,6 +1295,43 @@
           const resolveSample = waiting.shift();
           if (waiting.length === 0) pendingSamples.delete(message.sample_id);
           resolveSample();
+        }
+        return;
+      }
+      if (message.type === "looper_buffer") {
+        // The looper's whole bars of the master, for a take this client asked for.
+        // The buffers arrive transferred and go straight back: the page keeps only
+        // its own copy of the loop's frames (clipped to [−1, 1]), so the looper
+        // keeps playing from what it had once they return.
+        const left = message.left instanceof Float32Array ? message.left : null;
+        const right = message.right instanceof Float32Array ? message.right : null;
+        const frames = Math.max(0, Math.trunc(Number(message.frames) || 0));
+        const channelFrames = left && right ? Math.min(frames, left.length, right.length) : 0;
+        const channels = [
+          copyLooperChannel(left, channelFrames),
+          copyLooperChannel(right, channelFrames),
+        ];
+        const rate = Number(message.rate);
+        const bars = Number(message.bars);
+        if (left && right) {
+          try {
+            sendLooperBuffers(left, right);
+            // A tempo that dropped while the take was out needs its larger buffers
+            // now: the looper copies what it holds into the bigger pair.
+            ensureLooperBuffers(looperSongBpm);
+          } catch {
+            // A host that will not take them back leaves the looper silent rather
+            // than taking the message path down; the page's copy is already made.
+          }
+        }
+        const waiting = pendingLooper.get(message.id);
+        if (waiting) {
+          pendingLooper.delete(message.id);
+          waiting({
+            channels: channels,
+            rate: Number.isFinite(rate) ? rate : context.sampleRate,
+            bars: Number.isFinite(bars) ? bars : 0,
+          });
         }
         return;
       }
@@ -1320,6 +1451,15 @@
         const tracks = snapshot && Array.isArray(snapshot.tracks) ? snapshot.tracks : [];
         if (tracks.length > MAX_TRACKS) throw new Error(`A song can have at most ${MAX_TRACKS} tracks.`);
         post({ type: "song", snapshot: snapshot });
+        // The looper's buffers are the page's, so they are sized off this song's
+        // tempo before anything can record into them.
+        const meta = snapshot && typeof snapshot.meta === "object" && snapshot.meta ? snapshot.meta : {};
+        const bpm = Number(meta.bpm);
+        looperSongBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : DEFAULT_BPM;
+        // Only a looper that is in use holds buffers: an engine that just plays (an
+        // offline render, say) never allocates eight bars of them. They are sent
+        // before the first record instead, and grown here if the song slowed down.
+        if (looperBufferFrames > 0) ensureLooperBuffers(looperSongBpm);
       },
 
       /** @param {string} id @returns {void} */
@@ -1573,6 +1713,75 @@
       },
 
       /**
+       * Hold one performance effect on the master bus. The effect is live state:
+       * it never enters the song, never becomes a history step, and nothing but
+       * `fxRelease` (a scene launch, a transport stop, a pattern change) ends it.
+       *
+       * `amount` is 0..1 and means what the effect makes of it; a `fxHold` on an
+       * effect that is already held follows the amount, which is how a knob
+       * sweeps the filter.
+       * @param {"filter_sweep"|"lofi"|"stutter"|"tape_stop"|"reverb_throw"} name
+       * @param {number} amount 0..1
+       * @returns {void}
+       */
+      fxHold(name, amount) {
+        const value = Number(amount);
+        post({ type: "fx", name: String(name), amount: Number.isFinite(value) ? value : 0, on: true });
+      },
+
+      /**
+       * Let one performance effect go: it crossfades back to the dry master over
+       * 64 frames (the reverb throw closes its send and rings out).
+       * @param {string} name
+       * @returns {void}
+       */
+      fxRelease(name) {
+        post({ type: "fx", name: String(name), amount: 0, on: false });
+      },
+
+      /**
+       * One looper command on the master bus, quantized to the sequencer's next bar
+       * line: `record` starts there, the next `play`/`overdub`/`record` ends the
+       * take on the bar line after it, `play` loops it into the master, `overdub`
+       * adds the live master into it, `clear` empties it.
+       *
+       * The looper's buffers are this page's (the audio thread allocates none), so a
+       * command that records sends a pair sized for eight bars at the song's tempo
+       * first — before the bar line it is quantized to, on the same port.
+       * @param {"record"|"overdub"|"play"|"stop"|"clear"} action
+       * @returns {void}
+       */
+      looper(action) {
+        const what = String(action);
+        if (what === "record" || what === "overdub") ensureLooperBuffers(looperSongBpm);
+        post({ type: "looper", action: what });
+      },
+
+      /**
+       * The looper's take: whole bars of the master it recorded, in two channels
+       * at the context's rate, clipped to [−1, 1]. Record-into-pad turns it into a
+       * sample.
+       *
+       * The processor transfers its looper buffers here; this copies the loop's
+       * frames out of them and transfers the same buffers straight back, so the
+       * looper plays on from where it was. While they are away (a moment, and only
+       * for a take) the looper contributes silence.
+       *
+       * Resolves when the processor answers, with a snapshot of the take at the
+       * moment it read the request: a take that is still recording answers the
+       * whole bars it has captured so far, and a looper that has recorded nothing
+       * answers no bars.
+       * @returns {Promise<{channels: Float32Array[], rate: number, bars: number}>}
+       */
+      looperTake() {
+        const id = ++looperSeq;
+        return new Promise((resolve) => {
+          pendingLooper.set(id, resolve);
+          post({ type: "looper_take", id: id });
+        });
+      },
+
+      /**
        * Follow a tap: one `{target, frame, channels}` per block while one is on,
        * `target` being "master" or the tapped track's id, `frame` the context
        * frame of the block's first sample, and `channels` the block's own copies
@@ -1661,6 +1870,7 @@
         tapListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
+        pendingLooper.clear();
         node.port.onmessage = null;
       },
     };
@@ -1669,6 +1879,7 @@
   const api = {
     create: createStudioEngine,
     createStudioEngine: createStudioEngine,
+    copyLooperChannel: copyLooperChannel,
     SOURCE_FILES: SOURCE_FILES,
     WORKLET_FILES: WORKLET_FILES,
     composeEngineModule: composeEngineModule,

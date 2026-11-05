@@ -28,6 +28,7 @@ import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/takes.js";
 import "../bundles/studio/server/commands/arrangement.js";
 import "../bundles/studio/server/commands/sampler.js";
+import "../bundles/studio/server/commands/midi.js";
 
 /** A take id, the way the recording client generates one. */
 const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
@@ -63,6 +64,9 @@ const TAKE_ARGS = {
   discarded: false,
 };
 
+/** A GUI command's author: the operator, for the steps only a person may run. */
+const HUMAN = { kind: "human", id: "local", label: "You" };
+
 /** Every registered command: the contract the GUI, the MCP tools and history share. */
 const COMMAND_IDS = [
   "arrangement.move",
@@ -86,6 +90,12 @@ const COMMAND_IDS = [
   "marker.add",
   "marker.remove",
   "marker.rename",
+  "midi.accept",
+  "midi.map",
+  "midi.propose_profile",
+  "midi.remove",
+  "motion.clear",
+  "motion.write",
   "pad.assign",
   "pad.assign_if_empty",
   "pad.clear",
@@ -186,8 +196,29 @@ const MINIMAL_ARGS = {
   "step.toggle": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0 },
   "step.set": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0, v: 100 },
   "step.clear_locks": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0 },
+  "motion.write": {
+    clip_id: "c1",
+    pattern_id: "p1",
+    bank_id: "b1",
+    index: 0,
+    param: "cutoff_hz",
+    points: [{ step_frac: 0, value: 1200 }],
+  },
+  "motion.clear": { clip_id: "c1", pattern_id: "p1", bank_id: "b1", index: 0 },
   "chain.set": { clip_id: "c1", chain: [] },
   "clip.add_pattern": { track_id: "t1", scene_id: "s1" },
+  "midi.map": {
+    device_name: "FCB1010",
+    message: { type: "pc", channel: 1, number: 0 },
+    action: { kind: "transport.play" },
+  },
+  // The operator's yes to a proposal: people-only, like a track's lock.
+  "midi.accept": {
+    id: "m1",
+    expect: { device_name: "FCB1010", message: { type: "pc", channel: 1, number: 0 }, action: { kind: "transport.play" } },
+  },
+  "midi.remove": { id: "m1" },
+  "midi.propose_profile": { device: "fcb1010", device_name: "FCB1010" },
 };
 
 /** A song document that is destroyed when the test ends. */
@@ -269,6 +300,9 @@ test("the registry lists every command", () => {
   assert.equal(getCommand("take.discard").humanOnly, true);
   // Emptying a pad is the operator's alone, like a track's lock.
   assert.equal(getCommand("pad.clear").humanOnly, true);
+  // So is the yes that makes a MIDI mapping live.
+  assert.equal(getCommand("midi.accept").humanOnly, true);
+  assert.equal(getCommand("midi.map").humanOnly, false);
   // A take only ever arrives through the gateway's upload finish route.
   assert.equal(getCommand("take.add").internal, true);
   // And a sample only ever arrives through the same finish route.
@@ -681,11 +715,70 @@ test("apply returns before/after for every touched field", (t) => {
       args: { clip_id: "kit-clip", pattern_id: "a", at: 0, bank_id: "kit-b", index: 0 },
       keys: ["step:kit-clip/a/0/kit-b.0|locks.cutoff_hz"],
     },
+    // A motion lane is one field of its pattern: writing the curve and clearing
+    // it are one key each, whatever the pattern's other lanes hold.
+    {
+      id: "motion.write",
+      args: {
+        clip_id: "kit-clip",
+        pattern_id: "a",
+        bank_id: "kit-b",
+        index: 0,
+        param: "cutoff_hz",
+        points: [
+          { step_frac: 0, value: 400 },
+          { step_frac: 4, value: 6000 },
+        ],
+      },
+      keys: ["motion:kit-clip/a/kit-b.0|cutoff_hz|*"],
+    },
+    {
+      id: "motion.clear",
+      args: { clip_id: "kit-clip", pattern_id: "a", bank_id: "kit-b", index: 0, param: "cutoff_hz" },
+      keys: ["motion:kit-clip/a/kit-b.0|cutoff_hz|*"],
+    },
     {
       id: "chain.set",
       args: { clip_id: "kit-clip", chain: ["a", "pb"] },
       keys: ["clip:kit-clip|chain"],
     },
+    // The MIDI commands: an agent's proposal, the FCB1010 profile's rows, the
+    // operator's accept and the removal that takes the mapping away again.
+    {
+      id: "midi.map",
+      args: {
+        id: "mm-1",
+        device_name: "FCB1010",
+        message: { type: "pc", channel: 1, number: 0 },
+        action: { kind: "scene.launch", scene_id: scene },
+      },
+      keys: ["midi:mm-1|*"],
+    },
+    {
+      id: "midi.propose_profile",
+      args: { device: "fcb1010", device_name: "FCB1010" },
+      keys: [
+        "midi:fcb1010-pedal-1|*",
+        "midi:fcb1010-pedal-2|*",
+        "midi:fcb1010-pedal-3|*",
+        "midi:fcb1010-exp-a|*",
+        "midi:fcb1010-exp-b|*",
+      ],
+    },
+    {
+      id: "midi.accept",
+      args: {
+        id: "mm-1",
+        expect: {
+          device_name: "FCB1010",
+          message: { type: "pc", channel: 1, number: 0 },
+          action: { kind: "scene.launch", scene_id: scene },
+        },
+      },
+      author: HUMAN,
+      keys: ["midi:mm-1|proposed", "midi:mm-1|accepted_action"],
+    },
+    { id: "midi.remove", args: { id: "mm-1" }, author: HUMAN, keys: ["midi:mm-1|*"] },
     {
       id: "pattern.remove",
       args: { clip_id: "kit-clip", pattern_id: "pb" },
@@ -705,8 +798,8 @@ test("apply returns before/after for every touched field", (t) => {
   // the expected key set being written down.
   assert.deepEqual([...new Set(cases.map((entry) => entry.id))].sort(), COMMAND_IDS);
 
-  for (const { id, args, keys } of cases) {
-    const result = runCommand(doc, id, args);
+  for (const { id, args, keys, author = { kind: "agent", id: "mcp", label: "Agent (MCP)" } } of cases) {
+    const result = runCommand(doc, id, args, { author });
     assert.equal(result.id, id);
 
     assert.deepEqual(Object.keys(result.before).sort(), [...keys].sort(), `${id} before keys`);

@@ -170,6 +170,58 @@
  * block at the clip-relative beat the playhead has reached, and nothing already
  * emitted is emitted a second time.
  *
+ * ## Motion
+ *
+ * A pattern's `motion` is a curve per pad field: `<bank_id>.<index>|<param>` →
+ * `[{step_frac, value}]`, sorted, `step_frac` a fractional step position inside
+ * the pattern's loop (`0 <= step_frac < length_steps`). Motion is not a note and
+ * not a pad trigger — it is a value that changes EVERY FRAME while the pattern
+ * plays, for the voices of its pad — so it is not an event and never appears in
+ * the block's event array. Instead every block carries, per sampler track per
+ * pattern slot it covers, one descriptor in a non-enumerable `motions` array on
+ * the block:
+ *
+ *     {frame, track_id, pattern_id, lanes, origin_frame, frames_per_beat,
+ *      slot_start_beat, step_beats, length_steps}
+ *
+ * `frame` is where in the block the slot's curve starts standing (0 for the slot
+ * the block begins in, the slot's own boundary frame when a chain turns over
+ * inside the block), `lanes` is that pattern's curve (`{pad, param, points}` per
+ * lane, built once per `setSong`), and the rest is the absolute clock the
+ * processor needs to put a frame on a step position:
+ *
+ *     step_frac(frame) = ((frame - origin_frame) / frames_per_beat
+ *                         - slot_start_beat) / step_beats
+ *
+ * Every term of that comes from the song and the transport, never from the block
+ * being built, so a value depends on the frame and nothing else — which is what
+ * makes the same song render identically at any block size. The host reads each
+ * lane linearly between its points, wrapping from the last point round to the
+ * first across the loop (see `studio-processor.js`).
+ *
+ * A descriptor describes a WINDOW, not the rest of the block: the slot's curve
+ * stands from the descriptor's own frame to the end of that slot at the latest,
+ * and a slot inside a segment that stops is cut at the segment's end, not at the
+ * block's. So when the segment a curve stands in ends inside the block, one more
+ * descriptor says the curve stops standing there (`lanes: null`) at that end
+ * frame — a host that turns the curve off at its own boundary never sweeps a
+ * voice past the segment, and never leaves one holding a stale value after a
+ * stop, a chain turn or a lane that was cleared.
+ *
+ * The block also says WHICH pattern each sampler track played, and where in the
+ * transport that pattern's slot sits, in a non-enumerable `patterns` map
+ * (track id → `{pattern_id, slot_start_beat, slot_beats, chain_index}`), whether
+ * or not that pattern has a curve: the chain slot follows from the beat alone
+ * (see `emitPads`), so a host can report what it actually played — a recorder
+ * writes a lane into that pattern, never into the one the editor happens to
+ * show. `slot_start_beat` is the beat the slot began at on the transport's own
+ * clock (the clock a position report is in), `slot_beats` how long the slot
+ * lasts, and `chain_index` the slot's place in the clip's chain — so a recorder
+ * can follow the chain past the end of the reported slot without waiting for
+ * the next report. The entry an object is REUSED across blocks and across
+ * songs: a block allocates nothing here, and a host that keeps one (a report it
+ * posts, say) must copy its fields.
+ *
  * ## Launch reports
  *
  * Every launch this file APPLIES is reported in the very block it takes effect
@@ -215,9 +267,11 @@
  * of pattern ids instead),
  * `takes{id: {id, clip_id, rate, offset_frames, discarded}}` for the takes
  * an audio clip's comp plays, and for the sampler
- * `patterns{"<clip_id>/<pattern_id>": {id, clip_id, order, name}}` and
+ * `patterns{"<clip_id>/<pattern_id>": {id, clip_id, order, name, motion}}` and
  * `steps{"<clip_id>/<pattern_id>/<at>/<bank_id>.<index>": {clip_id,
- * pattern_id, at, bank_id, index, v, locks}}` for a pattern clip's steps.
+ * pattern_id, at, bank_id, index, v, locks}}` for a pattern clip's steps. A
+ * pattern's `motion` is `"<bank_id>.<index>|<param>"` → `[{step_frac, value}]`
+ * (see "Motion" above).
  */
 (function () {
   "use strict";
@@ -232,6 +286,23 @@
   /** A pattern's step length when the document names none: a sixteenth note. */
   const DEFAULT_STEP_BEATS = 0.25;
 
+  /**
+   * The pad fields one motion lane may sweep — the pad's numeric lock fields
+   * (the document's `MOTION_PARAMS`). A lane naming anything else is dropped
+   * here: motion overrides a value the voice has, and a lane can only name one.
+   */
+  const MOTION_PARAMS = Object.freeze([
+    "pitch",
+    "gain_db",
+    "pan",
+    "attack_ms",
+    "decay_ms",
+    "sustain",
+    "release_ms",
+    "cutoff_hz",
+    "resonance",
+  ]);
+
   /** The most a pattern may swing, in step lengths (the document's own cap). */
   const MAX_SWING = 0.75;
 
@@ -240,6 +311,8 @@
   const EMPTY_LOCKS = Object.freeze({});
   /** A pattern clip's pattern id → its steps. Never written to. */
   const EMPTY_PATTERN_STEPS = new Map();
+  /** A pattern clip's pattern id → its motion lanes. Never written to. */
+  const EMPTY_PATTERN_MOTION = new Map();
 
   /** A beat holds four sixteenths, which `position()` reports. */
   const SIXTEENTHS_PER_BEAT = 4;
@@ -275,6 +348,8 @@
    *            seek: function(number): void,
    *            block: function(number, number): Array<object>,
    *            nextBarFrame: function(): {bar: number, beat: number, frame: number},
+   *            barLines: function(object): {barFrame: number|null,
+   *              nextBarFrame: number|null, bar: number|null},
    *            position: function(): {bar: number, beat: number, sixteenth: number},
    *            isPlaying: function(): boolean}}
    */
@@ -311,6 +386,12 @@
     let currentFrame = null; // absolute frame just past the last processed block
     let lastFrame = null; // absolute frame of the last processed frame
 
+    /**
+     * The object `barLines()` reads the next boundary into, so that answering the
+     * performance bus's bar question every block allocates nothing at all.
+     */
+    const barScratch = { bar: 0, beat: 0, frame: 0 };
+
     /** track id → [{track_id, clipId, startBeat, endBeat}] in beat order. */
     const segments = new Map();
 
@@ -346,6 +427,47 @@
 
     /** The events of the block being built. Reused; a block allocates nothing. */
     const events = [];
+
+    /**
+     * The motion descriptors of the block being built, in block frames. Hung
+     * off the events array as a non-enumerable `motions` property, so the events
+     * themselves keep exactly the shape every caller already iterates (motion is
+     * a curve, not an event). Reused like `events`.
+     */
+    const motions = [];
+    Object.defineProperty(events, "motions", {
+      value: motions,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    /**
+     * The pattern each sampler track played in the block being built, keyed by
+     * track id: the chain slot the block stands in. Hung off the events array as
+     * a non-enumerable `patterns` property, so a host can report what it played
+     * (the motion recorder writes into the pattern that sounded, never into the
+     * one the editor shows). Reused like `events`: a block allocates nothing.
+     *
+     * Each value is `{pattern_id, slot_start_beat, slot_beats, chain_index}` — the
+     * slot the block ENDS in, in the transport's beat clock — and it is a REUSED
+     * object from `patternSlots` below, never a fresh one, so a host that wants
+     * to keep it has to copy it.
+     */
+    const patterns = new Map();
+
+    /**
+     * track id → the one report entry that track writes into every block, so
+     * building a block allocates nothing (the entry is created the first time a
+     * track plays a pattern clip and mutated from then on).
+     */
+    const patternSlots = new Map();
+    Object.defineProperty(events, "patterns", {
+      value: patterns,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
 
     /**
      * The launches applied in the block being built, in block frames. Reused
@@ -526,6 +648,8 @@
       const idsByClip = new Map();
       /** clip id → pattern id → its steps, sorted below. */
       const listsByClip = new Map();
+      /** clip id → pattern id → the motion lanes its curve names. */
+      const motionByClip = new Map();
 
       for (const key of Object.keys(patterns)) {
         const pattern = patterns[key];
@@ -556,6 +680,15 @@
           listsByClip.set(clipId, lists);
         }
         if (!lists.has(id)) lists.set(id, []);
+        const lanes = readMotionLanes(pattern, clip.lengthSteps);
+        if (lanes.length > 0) {
+          let byPattern = motionByClip.get(clipId);
+          if (!byPattern) {
+            byPattern = new Map();
+            motionByClip.set(clipId, byPattern);
+          }
+          byPattern.set(id, lanes);
+        }
       }
 
       for (const key of Object.keys(steps)) {
@@ -584,6 +717,7 @@
 
       for (const [clipId, clip] of clipsById) {
         if (!clip.pattern) continue;
+        clip.patternMotion = motionByClip.get(clipId) ?? EMPTY_PATTERN_MOTION;
         const lists = listsByClip.get(clipId);
         if (!lists) {
           // A pattern clip with no patterns at all plays nothing.
@@ -714,6 +848,7 @@
         chainPlays: false,
         firstPattern: null,
         patternSteps: EMPTY_PATTERN_STEPS,
+        patternMotion: EMPTY_PATTERN_MOTION,
       };
     }
 
@@ -1614,6 +1749,45 @@
       return { bar: Math.round(beat / BEATS_PER_BAR), beat: beat, frame: frameNow() };
     }
 
+    /**
+     * Fill a caller's own object with the bar lines around the playhead, in this
+     * sequencer's own frames, WITHOUT allocating one: a host that reads them on
+     * every block (the performance bus's looper quantizes to them) must not make
+     * garbage on the audio thread.
+     *
+     * `barFrame` is the line the playhead is inside and `nextBarFrame` the next
+     * line at or after the next block's first frame, both from the very same
+     * rounding `nextBarFrom` applies. The previous line is therefore never a
+     * rounded difference — `round(origin + bar * barFrames) - barFrames` is a
+     * frame away from `round(origin + (bar - 1) * barFrames)` at a fractional
+     * frames-per-beat, which would start a quantized command off the grid.
+     *
+     * A stopped transport (or one that has not run yet) has no grid at all, so
+     * both answers are null: there is no bar for a command to wait for.
+     * @param {{barFrame: number|null, nextBarFrame: number|null, bar: number|null}} target
+     * @returns {object} the same object, filled in
+     */
+    function barLines(target) {
+      const out = target && typeof target === "object" ? target : {};
+      if (!playing || originFrame === null) {
+        out.barFrame = null;
+        out.nextBarFrame = null;
+        out.bar = null;
+        return out;
+      }
+      const barFrames = BEATS_PER_BAR * framesPerBeat;
+      const frame = frameNow();
+      const next = nextBarInto(barScratch, frame, originFrame, framesPerBeat);
+      out.bar = next.bar;
+      out.nextBarFrame = next.frame;
+      if (next.frame <= frame || next.bar < 1) {
+        out.barFrame = Math.round(originFrame + next.bar * barFrames);
+      } else {
+        out.barFrame = Math.round(originFrame + (next.bar - 1) * barFrames);
+      }
+      return out;
+    }
+
     // --- block -----------------------------------------------------------
 
     /**
@@ -1625,7 +1799,9 @@
      *                  take_frame?: number, voice?: number}>} events in
      *   block-relative frames, sorted by frame with the stops ("off",
      *   "audio_stop") before the starts at one frame. The array also carries
-     *   this block's launch reports as a non-enumerable `launches` property
+     *   this block's launch reports as a non-enumerable `launches` property, this
+     *   block's motion descriptors as a non-enumerable `motions` property, and
+     *   the pattern each sampler track played as a non-enumerable `patterns` map
      *   (see the header).
      */
     function block(frameStart, frames) {
@@ -1658,6 +1834,8 @@
     function emitBlock(frameStart, frames) {
       events.length = 0;
       fadeQueue.length = 0;
+      motions.length = 0;
+      patterns.clear();
       const frameEnd = frameStart + frames;
 
       emitForced();
@@ -1781,6 +1959,7 @@
       }
 
       events.sort(compareEvents);
+      if (motions.length > 1) motions.sort(byMotionFrame);
       // The launches this block applied, reported after the notes they brought
       // in: a host posts them as they are, so their offsets are framed against
       // the very block start the events use.
@@ -1979,12 +2158,60 @@
       const stepBeats = clip.stepBeats;
       const swing = clip.swing;
       const gateFrames = Math.max(1, Math.round(stepBeats * framesPerBeat));
+      const motion = clip.patternMotion;
+      /** Whether the last curve this segment put in the block still stands. */
+      let standing = false;
 
       for (let slot = first; slot <= last; slot += 1) {
         const slotStart = seg.startBeat + slot * clip.lengthBeats;
         if (slotStart >= segEndBeat) break;
         const patternId = chainLength > 0 ? chain[slot % chainLength] : clip.firstPattern;
         if (patternId === null) break;
+
+        // The slot's motion curve, handed over when the slot's own curve starts
+        // standing inside this block: at the block's first frame for the slot
+        // the block begins in, at the slot boundary for one a chain turns over
+        // into (see the header). A slot with no lanes says nothing at all — the
+        // processor reads a curve for one block and drops it — except at a
+        // boundary inside the block, where it says so, so a chain that turns
+        // from a curve onto a plain pattern stops sweeping there.
+        const lanes = motion.size > 0 ? motion.get(patternId) : undefined;
+        const slotFrame = beatToFrame(slotStart);
+        const slotEndFrame = beatToFrame(slotStart + clip.lengthBeats);
+        const inBlock = slotEndFrame > frameStart && slotFrame < frameEnd;
+        // What this track played in this block, and where its slot sits (the last
+        // slot it covers wins, so the chain slot the block ENDS in is the one
+        // reported: that is the slot a position report posted after the block is
+        // in). The entry is the track's reused one — a block allocates nothing.
+        if (inBlock) {
+          const trackKey = String(seg.track_id);
+          let entry = patternSlots.get(trackKey);
+          if (entry === undefined) {
+            entry = { pattern_id: "", slot_start_beat: 0, slot_beats: 0, chain_index: 0 };
+            patternSlots.set(trackKey, entry);
+          }
+          entry.pattern_id = patternId;
+          entry.slot_start_beat = slotStart;
+          entry.slot_beats = clip.lengthBeats;
+          entry.chain_index = chainLength > 0 ? slot % chainLength : 0;
+          patterns.set(trackKey, entry);
+        }
+        const hasLanes = lanes !== undefined && lanes.length > 0;
+        if (inBlock && (hasLanes || slotFrame > frameStart)) {
+          standing = hasLanes;
+          motions.push({
+            frame: slotFrame > frameStart ? slotFrame - frameStart : 0,
+            track_id: seg.track_id,
+            pattern_id: patternId,
+            lanes: hasLanes ? lanes : null,
+            origin_frame: originFrame === null ? 0 : originFrame,
+            frames_per_beat: framesPerBeat,
+            slot_start_beat: slotStart,
+            step_beats: stepBeats,
+            length_steps: clip.lengthSteps,
+          });
+        }
+
         const steps = clip.patternSteps.get(patternId);
         // A chain entry that names no pattern of this clip (or one with no
         // steps) keeps its slot and plays nothing in it: the cycle around it
@@ -2015,6 +2242,24 @@
             gate_frames: gateFrames,
           });
         }
+      }
+
+      // A segment that stops inside this block ends its curve at its own end
+      // frame, not at the block's: the descriptor below says the curve stops
+      // standing there, so nothing is swept past the segment's end (see the
+      // header). A slot that already handed over `null` needs nothing.
+      if (standing && segEndFrame > frameStart && segEndFrame < frameEnd) {
+        motions.push({
+          frame: segEndFrame > frameStart ? segEndFrame - frameStart : 0,
+          track_id: seg.track_id,
+          pattern_id: "",
+          lanes: null,
+          origin_frame: originFrame === null ? 0 : originFrame,
+          frames_per_beat: framesPerBeat,
+          slot_start_beat: 0,
+          step_beats: stepBeats,
+          length_steps: clip.lengthSteps,
+        });
       }
     }
 
@@ -2336,6 +2581,7 @@
       seek: seek,
       block: block,
       nextBarFrame: nextBarFrame,
+      barLines: barLines,
       position: position,
       isPlaying: function isPlaying() {
         return playing;
@@ -2365,6 +2611,21 @@
    *   0-based `bar`, the boundary in `beat`s and its rounded `frame`
    */
   function nextBarFrom(frame, originFrame, framesPerBeat) {
+    return nextBarInto({ bar: 0, beat: 0, frame: 0 }, frame, originFrame, framesPerBeat);
+  }
+
+  /**
+   * The same answer as `nextBarFrom`, written into the caller's own object: the
+   * performance bus asks for the bar lines on every block, and a block must not
+   * make garbage on the audio thread.
+   * @param {{bar: number, beat: number, frame: number}} target
+   * @param {number} frame
+   * @param {number} originFrame
+   * @param {number} framesPerBeat
+   * @returns {object} the same object, filled in
+   */
+  function nextBarInto(target, frame, originFrame, framesPerBeat) {
+    const out = target && typeof target === "object" ? target : {};
     const barFrames = BEATS_PER_BAR * framesPerBeat;
     let bar = Math.max(0, Math.ceil((frame - 0.5 - originFrame) / barFrames - EPSILON_BEATS));
     let boundary = Math.round(originFrame + bar * barFrames);
@@ -2373,7 +2634,10 @@
       bar += 1;
       boundary = Math.round(originFrame + bar * barFrames);
     }
-    return { bar: bar, beat: bar * BEATS_PER_BAR, frame: boundary };
+    out.bar = bar;
+    out.beat = bar * BEATS_PER_BAR;
+    out.frame = boundary;
+    return out;
   }
 
   /** @returns {number} launch reports in the order of their block frames. */
@@ -2496,6 +2760,57 @@
   /** @returns {number} the beat order of two fades. */
   function byFadeBeat(a, b) {
     return a.beat - b.beat;
+  }
+
+  /**
+   * Read one pattern's motion into the lanes the block path walks: one entry per
+   * swept pad field, with its points sorted by step position.
+   *
+   * A lane that names no pad field, and a point outside the pattern's loop, is
+   * dropped here — the document refuses them, but a song can arrive mid-edit,
+   * and a curve is read once per `setSong()` so the block path never has to
+   * check one again.
+   * @param {object} pattern a pattern in the shape `server/doc.js` writes
+   * @param {number} lengthSteps the clip's loop, in step positions
+   * @returns {Array<{pad: string, param: string, points: object[]}>}
+   */
+  function readMotionLanes(pattern, lengthSteps) {
+    const motion = pattern && pattern.motion && typeof pattern.motion === "object" ? pattern.motion : null;
+    if (!motion) return EMPTY_STEPS;
+    const lanes = [];
+    for (const key of Object.keys(motion)) {
+      const bar = key.lastIndexOf("|");
+      if (bar <= 0 || bar === key.length - 1) continue;
+      const pad = key.slice(0, bar);
+      const param = key.slice(bar + 1);
+      if (MOTION_PARAMS.indexOf(param) === -1) continue;
+      const raw = motion[key];
+      if (!Array.isArray(raw) || raw.length === 0) continue;
+      const points = [];
+      for (let at = 0; at < raw.length; at += 1) {
+        const item = raw[at];
+        if (!item || typeof item !== "object") continue;
+        const stepFrac = Number(item.step_frac);
+        const value = Number(item.value);
+        if (!Number.isFinite(stepFrac) || !Number.isFinite(value)) continue;
+        if (stepFrac < 0 || stepFrac >= lengthSteps) continue;
+        points.push({ step_frac: stepFrac, value: value });
+      }
+      if (points.length === 0) continue;
+      points.sort(byMotionStep);
+      lanes.push({ pad: pad, param: param, points: points });
+    }
+    return lanes.length === 0 ? EMPTY_STEPS : lanes;
+  }
+
+  /** @returns {number} the step order of two motion points. */
+  function byMotionStep(a, b) {
+    return a.step_frac - b.step_frac;
+  }
+
+  /** @returns {number} the frame order of two motion descriptors. */
+  function byMotionFrame(a, b) {
+    return a.frame - b.frame;
   }
 
   /** @returns {number} `value` folded into `[0, length)`. */

@@ -112,6 +112,22 @@ const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
 const TAKE_STORE_SCRIPT = await loadPanelScript("take-store.js", "TAKE_STORE_SCRIPT");
 
 /**
+ * Web MIDI access, loaded once: like the take store it reaches the page BEFORE
+ * the client, which asks `window.StudioMidi` for the devices and for the
+ * messages a controller sends. It is the only thing that ever calls
+ * `navigator.requestMIDIAccess`, and only from the Connect controllers button.
+ */
+const MIDI_SCRIPT = await loadPanelScript("midi.js", "MIDI_SCRIPT");
+
+/**
+ * The routing rule, loaded once: the SAME text `server/commands/midi.js`
+ * evaluates in Node, so the hub and the page can never answer a message
+ * differently. It comes before the client, which routes through
+ * `window.StudioMidiRoute.routeFor`.
+ */
+const MIDI_ROUTE_SCRIPT = await loadPanelScript("midi-route.js", "MIDI_ROUTE_SCRIPT");
+
+/**
  * Escape a value for use in HTML text or a double-quoted attribute.
  * @param {unknown} value
  * @returns {string}
@@ -241,6 +257,100 @@ const STYLES = `
     flex: 1 1 100%; font-size: 12px; line-height: 1.45; color: var(--st-human);
   }
   .studio .st-recordings { display: flex; flex-direction: column; gap: 6px; }
+  /* The controllers (mockup screen 4, the part the router and Learn need): the
+     two header buttons, and in the body the devices, the Learn line and one row
+     per mapping — the device and its message, what it does, and who set it. A
+     row lights for a moment when its own message arrives. */
+  .studio .st-midi-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .studio .st-midi-state { font-size: 12px; line-height: 1.4; color: var(--st-muted); }
+  .studio .st-midi-state:empty { display: none; }
+  .studio .st-midi {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+    display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  }
+  .studio .st-midi:empty { display: none; }
+  .studio .st-midi-title { margin: 0; font-size: 14px; font-weight: 600; }
+  .studio .st-midi-note { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-muted); }
+  .studio .st-midi-notice { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-human); }
+  .studio .st-midi-target { margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-text); }
+  .studio .st-midi-devices { display: flex; flex-wrap: wrap; gap: 6px; }
+  .studio .st-midi-device {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border: 1px solid var(--st-edge); border-radius: 8px; background: var(--st-head);
+    font-size: 12px;
+  }
+  .studio .st-midi-device-name { font-weight: 600; }
+  .studio .st-midi-device-state { color: var(--st-muted); font-size: 11px; }
+  .studio .st-midi-list { display: flex; flex-direction: column; gap: 4px; }
+  .studio .st-midi-row {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+    padding: 6px 10px; border: 1px solid var(--st-line); border-radius: 8px;
+    background: var(--st-head); font-size: 12px;
+  }
+  .studio .st-midi-hit { border-color: var(--st-human); background: #2A2418; }
+  .studio .st-midi-row .st-midi-device-name { min-width: 96px; }
+  .studio .st-midi-msg { color: var(--st-muted); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; }
+  .studio .st-midi-does { flex: 1 1 160px; }
+  .studio .st-midi-by { color: var(--st-muted); font-size: 11px; margin-left: auto; }
+  /* The MIDI page's own parts (mockup screen 4): a card per controller, the
+     Set up for menu, the notice above the bot's proposals, and the table —
+     Control, Sends, Does, Set by, and one pair of buttons per row. The table
+     scrolls sideways inside its own box, so the page never does. */
+  .studio .st-midi-card-top { display: flex; align-items: center; gap: 8px; }
+  .studio .st-midi-device { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .studio .st-midi-dot-on { background: #6BBF8A; }
+  .studio .st-midi-dot-off { background: #5C6167; }
+  .studio .st-midi-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+  .studio .st-midi-setup { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
+  .studio .st-midi-setup .st-select { width: auto; min-width: 140px; }
+  .studio .st-midi-proposals {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px;
+    border: 1px solid #2E4D6B; background: #17222D; border-radius: 10px; padding: 10px 12px;
+  }
+  .studio .st-midi-proposal-text { flex: 1 1 320px; font-size: 13px; line-height: 1.45; }
+  .studio .st-midi-table-wrap {
+    overflow-x: auto; border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+  }
+  .studio .st-midi-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
+  .studio .st-midi-th {
+    padding: 8px 12px; border-bottom: 1px solid var(--st-line); text-align: left;
+    font-size: 12px; font-weight: 600; color: var(--st-muted);
+  }
+  .studio .st-midi-table td { padding: 8px 12px; border-bottom: 1px solid var(--st-line-soft); }
+  .studio .st-midi-table tr:last-child td { border-bottom: 0; }
+  .studio .st-midi-control { font-weight: 600; }
+  .studio .st-midi-table .st-midi-msg { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: #C9C5BC; }
+  .studio .st-midi-table .st-midi-by { margin-left: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+  .studio .st-midi-row[data-proposed=true] { background: #17222D; }
+  .studio .st-midi-acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .studio .st-midi-acts .st-btn { min-height: 40px; }
+  /* In the table a row is a table row and its cells are cells: the list row's
+     flex box (above) must not reach them, or the header and the rows part. */
+  .studio tr.st-midi-row {
+    display: table-row; padding: 0; border: 0; border-radius: 0;
+    background: transparent; font-size: 13px;
+  }
+  .studio tr.st-midi-row[data-proposed=true] { background: #17222D; }
+  .studio tr.st-midi-row.st-midi-hit { background: #2A2418; }
+  .studio td.st-midi-does { flex: none; }
+  .studio td.st-midi-acts { display: table-cell; text-align: right; white-space: nowrap; }
+  .studio td.st-midi-acts .st-btn { margin-left: 6px; }
+  .studio .st-fx {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .studio .st-fx-btn {
+    min-height: 52px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--st-edge);
+    background: #24282D; color: var(--st-text); font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; touch-action: none;
+  }
+  .studio .st-fx-btn:hover { border-color: #4A5058; }
+  .studio .st-fx-btn.st-on { background: var(--st-agent); border-color: var(--st-agent); color: #0E1A26; }
+  .studio .st-fx-capture { font-weight: 500; }
+  /* The control Learn is waiting on: outlined until its message arrives. */
+  .studio .st-learn { outline: 2px solid var(--st-human); outline-offset: 2px; }
+  .studio .st-midi-bar .st-btn { min-height: 40px; }
   /* A performance the timeline refused: the server's sentence and the two
      buttons that settle it, above the lanes and never hidden by a render. */
   .studio .st-perf-notice {
@@ -663,6 +773,24 @@ const STYLES = `
   }
   .studio .st-chain-btn:disabled { opacity: 0.35; cursor: default; }
   .studio .st-chain-add { margin-left: 4px; }
+  /* A pattern's motion lanes: one line per swept pad field, its curve drawn as
+     one bar per point, and the Clear that takes the lane off. */
+  .studio .st-motion {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+    font-size: 12px; color: var(--st-muted);
+  }
+  .studio .st-motion-rec { color: var(--st-human); }
+  .studio .st-motion-lane {
+    display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px;
+    border: 1px solid #3A3F46; border-radius: 999px; background: #24282D;
+  }
+  .studio .st-motion-name { font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; }
+  .studio .st-motion-points { display: inline-flex; align-items: flex-end; gap: 1px; height: 18px; }
+  .studio .st-motion-point {
+    display: block; width: 2px; min-height: 2px; background: var(--st-human);
+    border-radius: 1px;
+  }
+  .studio .st-motion-count { color: var(--st-muted); font-size: 11px; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
@@ -743,6 +871,8 @@ async function libraryPage({ db, render, res }) {
       </div>
       <div class="st-toast" data-role="toast" hidden></div>
       <script>${TAKE_STORE_SCRIPT}
+${MIDI_ROUTE_SCRIPT}
+${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
     </div>`;
 
@@ -772,6 +902,13 @@ function studioPage({ songId, render, res }) {
           </label>
           <span class="st-pos" data-role="position">001.1.1</span>
         </div>
+        <div class="st-midi-bar">
+          <button class="st-btn st-small" type="button" data-act="midi-connect" aria-pressed="false"
+            title="Let this browser show Studio the MIDI controllers plugged in">Connect controllers</button>
+          <button class="st-btn st-small" type="button" data-act="midi-learn" aria-pressed="false"
+            title="Click a control, then move a knob or press a pad on your controller">Learn</button>
+          <span class="st-midi-state" data-role="midi-state"></span>
+        </div>
         <span class="st-rec-notice" data-role="rec-notice" hidden></span>
         <div class="st-tl-tools">
           <button class="st-btn st-tl-rec" type="button" data-act="rec-timeline" aria-pressed="false" title="Collect the scene launches you play into the timeline">
@@ -795,6 +932,7 @@ function studioPage({ songId, render, res }) {
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
           <section class="st-sampler" data-role="sampler" hidden></section>
+          <section class="st-midi" data-role="midi"></section>
         </main>
         <aside class="st-side">
           <div class="st-side-head">
@@ -816,6 +954,8 @@ function studioPage({ songId, render, res }) {
            client converts a take recorded at another rate with it, and so does
            its worker. -->
       <script>${TAKE_STORE_SCRIPT}
+${MIDI_ROUTE_SCRIPT}
+${MIDI_SCRIPT}
 ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>
     </div>`;

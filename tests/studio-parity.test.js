@@ -40,6 +40,7 @@ const DOCUMENTED_TOOLS = new Set([
   "studio_get_clip",
   "studio_takes",
   "studio_samples",
+  "studio_midi",
   "studio_history",
   "studio_undo",
   "studio_redo",

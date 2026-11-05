@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createStudioServer } from "../bundles/studio/server/mcp.js";
+import { createStudioServer, patternClipRead } from "../bundles/studio/server/mcp.js";
 import { listCommands } from "../bundles/studio/server/commands/registry.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
@@ -1017,6 +1017,90 @@ test("agent writes a pattern and chains it", async (t) => {
   }
 });
 
+test("studio_get_clip shows a pattern clip's steps and motion", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  const bankId = await seedKit(hub, songId);
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+  try {
+    /** Run one tool that must succeed, and hand back the sentence it answered with. */
+    const run = async (name, args) => {
+      const result = await client.callTool({ name, arguments: { song_id: songId, ...args } });
+      assert.notEqual(result.isError, true, `${name} was refused: ${textOf(result)}`);
+      return textOf(result);
+    };
+
+    // A pattern clip with two patterns: A has two hits, one of them lock-snapped
+    // and swept by a cutoff curve; Fill has one hit and no motion.
+    await run("studio_clip_add_pattern", {
+      clip_id: "beat",
+      track_id: "drums",
+      scene_id: "verse",
+      name: "Drums A",
+      length_steps: 16,
+    });
+    await run("studio_pattern_add", { clip_id: "beat", id: "b", name: "Fill" });
+    await run("studio_step_toggle", { clip_id: "beat", pattern_id: "a", at: 0, bank_id: bankId, index: 0, v: 120 });
+    await run("studio_step_toggle", { clip_id: "beat", pattern_id: "a", at: 4, bank_id: bankId, index: 2 });
+    await run("studio_step_set", {
+      clip_id: "beat",
+      pattern_id: "a",
+      at: 4,
+      bank_id: bankId,
+      index: 2,
+      locks: { cutoff_hz: 900 },
+    });
+    await run("studio_step_toggle", { clip_id: "beat", pattern_id: "b", at: 8, bank_id: bankId, index: 0 });
+    await run("studio_motion_write", {
+      clip_id: "beat",
+      pattern_id: "a",
+      bank_id: bankId,
+      index: 2,
+      param: "cutoff_hz",
+      points: [{ step_frac: 0, value: 300 }, { step_frac: 2.5, value: 1400 }],
+    });
+
+    const read = await client.callTool({
+      name: "studio_get_clip",
+      arguments: { song_id: songId, clip_id: "beat" },
+    });
+    assert.notEqual(read.isError, true, textOf(read));
+    const body = JSON.parse(textOf(read));
+
+    assert.equal(body.kind, "pattern");
+    assert.equal(body.name, "Drums A");
+    assert.deepEqual(
+      body.patterns.map((pattern) => [pattern.id, pattern.name, pattern.order]),
+      [["a", "A", 0], ["b", "Fill", 1]],
+      "the clip's patterns, in their own order",
+    );
+
+    const first = body.patterns[0];
+    assert.deepEqual(first.steps.map((step) => step.at), [0, 4], "A's steps, in the order it plays them");
+    assert.deepEqual(
+      first.steps[0],
+      { at: 0, bank_id: bankId, index: 0, v: 120, locks: {} },
+      "a step's pad, its velocity and its (empty) locks",
+    );
+    assert.deepEqual(first.steps[1].locks, { cutoff_hz: 900 }, "the lock stays with the step it belongs to");
+    assert.deepEqual(
+      first.motion,
+      {
+        [`${bankId}.2|cutoff_hz`]: {
+          count: 2,
+          points: [{ step_frac: 0, value: 300 }, { step_frac: 2.5, value: 1400 }],
+        },
+      },
+      "each motion lane with how many points it holds and the points themselves",
+    );
+
+    const second = body.patterns[1];
+    assert.deepEqual(second.steps.map((step) => step.at), [8], "Fill keeps its own step");
+    assert.deepEqual(second.motion, {}, "and holds no motion yet");
+  } finally {
+    await client.close();
+  }
+});
+
 test("agent cannot drop a pad's sample or add a sample", async (t) => {
   const { db, hub, songId } = await realSong(t);
   const bankId = await seedKit(hub, songId);
@@ -1215,4 +1299,148 @@ test("studio_samples lists samples with their slices and pads", async (t) => {
   } finally {
     await client.close();
   }
+});
+
+// ---- the controllers over MCP ----------------------------------------------
+
+test("studio_midi lists mappings with who set them", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+  try {
+    /** Run one operator step the way the panel or the MIDI page would. */
+    const asOperator = async (command, args, cmdId) => {
+      const result = await hub.runCommand({
+        song_id: songId,
+        cmd_id: cmdId,
+        command,
+        args,
+        author: HUMAN,
+      });
+      assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
+      return result;
+    };
+
+    // The song the two mappings are made against: two scenes.
+    await asOperator("scene.add", { id: "verse", name: "Verse" }, "seed-scene-verse");
+    await asOperator("scene.add", { id: "chorus", name: "Chorus" }, "seed-scene-chorus");
+
+    // The operator's own mapping is live at once.
+    await asOperator(
+      "midi.map",
+      {
+        id: "m-verse",
+        device_name: "FCB1010",
+        message: { type: "pc", channel: 1, number: 0 },
+        action: { kind: "scene.launch", scene_id: "verse" },
+      },
+      "operator-map-verse",
+    );
+
+    // The agent's mapping is a proposal, made through its own tool.
+    const proposed = await client.callTool({
+      name: "studio_midi_map",
+      arguments: {
+        song_id: songId,
+        id: "m-chorus",
+        device_name: "FCB1010",
+        message: { type: "pc", channel: 1, number: 1 },
+        action: { kind: "scene.launch", scene_id: "chorus" },
+      },
+    });
+    assert.notEqual(proposed.isError, true, textOf(proposed));
+    assert.match(textOf(proposed), /Proposed mapping/, "the answer says it proposed rather than mapped");
+
+    // The read: every mapping, with what it answers, what it does in plain words
+    // and as JSON, and who set it.
+    const listed = await client.callTool({ name: "studio_midi", arguments: { song_id: songId } });
+    assert.notEqual(listed.isError, true, textOf(listed));
+    const rows = JSON.parse(textOf(listed));
+    assert.deepEqual(rows.map((row) => row.id), ["m-chorus", "m-verse"], "one row per mapping, in a fixed order");
+
+    const mine = rows.find((row) => row.id === "m-verse");
+    assert.deepEqual(Object.keys(mine).sort(), [
+      "accepted",
+      "action",
+      "action_text",
+      "device_name",
+      "id",
+      "message",
+      "proposed",
+      "sends",
+      "set_by",
+    ]);
+    assert.equal(mine.device_name, "FCB1010");
+    assert.deepEqual(mine.message, { type: "pc", channel: 1, number: 0 });
+    assert.equal(mine.sends, "program change 0 on channel 1");
+    assert.deepEqual(mine.action, { kind: "scene.launch", scene_id: "verse" });
+    assert.equal(mine.action_text, 'launch scene "Verse"', "the action names the scene, not its id");
+    assert.equal(mine.set_by, "operator");
+    assert.equal(mine.proposed, false);
+    assert.equal(mine.accepted, true, "the operator's mapping is live");
+
+    const theirs = rows.find((row) => row.id === "m-chorus");
+    assert.equal(theirs.set_by, "agent", "the bot's row says the bot set it");
+    assert.equal(theirs.proposed, true, "and that it is only a proposal");
+    assert.equal(theirs.accepted, false, "a proposal routes nothing");
+    assert.equal(theirs.action_text, 'launch scene "Chorus"');
+
+    // The agent has no way to accept: midi.accept is people-only, so it is no
+    // tool at all, and the tools it does have say what a mapping of its is.
+    const tools = (await client.listTools()).tools;
+    const names = tools.map((tool) => tool.name);
+    assert.equal(names.includes("studio_midi_accept"), false, "an agent cannot say yes for the operator");
+    for (const name of ["studio_midi_map", "studio_midi_remove", "studio_midi_propose_profile"]) {
+      const tool = tools.find((item) => item.name === name);
+      assert.ok(tool, `${name} exists`);
+      assert.match(tool.description, /proposal/i, `${name} says a mapping of the agent's is a proposal`);
+      assert.match(tool.description, /operator/i, `${name} says the operator is who accepts it`);
+    }
+    const readTool = tools.find((tool) => tool.name === "studio_midi");
+    assert.ok(readTool, "the mapping read is a tool");
+    assert.match(readTool.description, /proposal/i, "the read says a proposal routes nothing");
+
+    // The operator's yes makes the bot's proposal live, and the listing says so.
+    await asOperator(
+      "midi.accept",
+      {
+        id: "m-chorus",
+        expect: {
+          device_name: "FCB1010",
+          message: { type: "pc", channel: 1, number: 1 },
+          action: { kind: "scene.launch", scene_id: "chorus" },
+        },
+      },
+      "operator-accept-chorus",
+    );
+    const after = JSON.parse(textOf(await client.callTool({ name: "studio_midi", arguments: { song_id: songId } })));
+    const accepted = after.find((row) => row.id === "m-chorus");
+    assert.equal(accepted.proposed, false, "the accepted mapping is live");
+    assert.equal(accepted.accepted, true);
+    assert.equal(accepted.set_by, "agent", "and it still says who set it");
+
+    // The agent cannot take the operator's yes back: an accepted mapping is
+    // theirs, so a bot's remove is refused in the hub's own sentence.
+    const taken = await client.callTool({
+      name: "studio_midi_remove",
+      arguments: { song_id: songId, id: "m-chorus" },
+    });
+    assert.equal(taken.isError, true, "removing an accepted mapping must be a tool error");
+    assert.match(textOf(taken), /Only the operator changes an accepted MIDI mapping/);
+  } finally {
+    await client.close();
+  }
+});
+
+test("a long motion lane is read as a spread of at most 256 points", () => {
+  const points = Array.from({ length: 4096 }, (_, at) => ({ step_frac: at / 256, value: at }));
+  const snapshot = {
+    patterns: { "c/a": { id: "a", clip_id: "c", order: 0, name: "A", motion: { "b.0|cutoff_hz": points } } },
+    steps: {},
+  };
+  const read = patternClipRead(snapshot, { id: "c", kind: "pattern" });
+  const lane = read.patterns[0].motion["b.0|cutoff_hz"];
+  assert.equal(lane.count, 4096, "the lane says how many points it holds");
+  assert.equal(lane.points.length, 256, "and sends a spread of 256");
+  assert.equal(lane.sampled, true);
+  assert.deepEqual(lane.points[0], points[0], "starting at its first point");
 });

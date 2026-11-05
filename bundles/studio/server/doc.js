@@ -48,9 +48,23 @@
  *                     bank_id, index, sample_id, slice_id, name, mode, pitch,
  *                     gain_db, pan, attack_ms, decay_ms, sustain, release_ms,
  *                     filter {type, cutoff_hz, resonance}, choke, reverse}
- *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order}
+ *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order,
+ *                     "motion|<bank>.<index>|<param>": [{step_frac, value}]}
  *   steps     Y.Map of "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" → Y.Map
  *                     {clip_id, pattern_id, at, bank_id, index, v, locks}
+ *
+ * A pattern's motion is one KEY per lane directly on the pattern's own map,
+ * `"motion|<bank_id>.<index>|<param>"` → `[{step_frac, value}]` sorted by
+ * `step_frac`, with `step_frac` a fractional step position inside the clip's
+ * loop and `param` one of the pad's numeric lock fields (see `MOTION_PARAMS`).
+ * One lane per key is what lets two writers move two lanes of one pattern at
+ * once without either overwriting the other, and it is what keeps a lane's undo
+ * from rolling back its neighbour; the snapshot still carries the lanes as one
+ * plain object (`{lane: [points]}`), which `motionOf` collects read-only.
+ * Nothing has to exist before the first lane write — a pattern made before
+ * motion existed takes two peers' first lanes as two keys of the map it already
+ * has — and motion rides ON the pattern object, so removing a pattern takes its
+ * motion with it in the same step.
  *
  * A sampler track's device says only `{engine: "sampler"}`: the kit lives in
  * `banks` and `pads`, never inside the device, so editing one pad never
@@ -60,6 +74,21 @@
  * ids. Its `length_bars` is derived from those (see `lengthBarsForSteps`) and
  * kept in the clip, so scenes and placements measure a pattern clip exactly
  * as they measure any other clip.
+ *
+ * A MIDI mapping (plan 1c, Task 8) routes one incoming message — a note, a
+ * control change or a program change on one named controller — to one
+ * allow-listed live action. Mappings are their own top-level container keyed by
+ * stable ids:
+ *
+ *   midi_maps  Y.Map of mapping id → Y.Map {id, device_name, message {type,
+ *                     channel, number}, action {kind, …}, set_by, proposed,
+ *                     accepted_action}
+ *
+ * `set_by` says who set the mapping ("operator" or "agent") and `proposed`
+ * says whether it is still waiting for the operator's yes. A mapping is live
+ * only when `proposed` is false AND its `action` still deep-equals its
+ * `accepted_action`: that pair is what the router reads (see `routeFor` in
+ * commands/midi.js), so an action edited after the accept stops routing.
  *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
@@ -89,7 +118,9 @@ import * as Y from "yjs";
  *         banksPerKit: number, padsPerBank: number, samplesPerSong: number,
  *         sampleSamples: number, slicesPerSample: number,
  *         stepPositions: number, stepEntriesPerPattern: number,
- *         patternsPerClip: number, chainLength: number, locksPerStep: number}}
+ *         patternsPerClip: number, chainLength: number, locksPerStep: number,
+ *         motionPointsPerLane: number, motionLanesPerPattern: number,
+ *         midiMaps: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -124,6 +155,16 @@ export const LIMITS = Object.freeze({
   patternsPerClip: 16,
   chainLength: 64,
   locksPerStep: 8,
+  // A pattern's motion lanes (plan 1c, Task 10): one lane per pad field, and a
+  // lane of hand-drawn points that stays a curve, not a sample stream. The lane
+  // cap is what ONE writer may put on a pattern (motion.write); two peers' own
+  // lanes merge into one pattern and the merge is not a fault (see
+  // `samplerReasons`).
+  motionPointsPerLane: 4096,
+  motionLanesPerPattern: 32,
+  // The MIDI mapping table of one song (plan 1c, Limits): every message the
+  // operator's controllers drive, proposed or live.
+  midiMaps: 256,
 });
 
 /**
@@ -159,11 +200,39 @@ export const SAMPLE_RATES = Object.freeze([44100, 48000, 88200, 96000]);
 /** How a sample came to be in the song. */
 export const SAMPLE_ORIGINS = Object.freeze(["import", "record", "resample"]);
 
+/** The three MIDI messages a mapping may answer: a note, a control, a program change. */
+export const MIDI_MESSAGE_TYPES = Object.freeze(["note", "cc", "pc"]);
+
+/** Who set one MIDI mapping: the operator, or an agent proposing one. */
+export const MIDI_SET_BY = Object.freeze(["operator", "agent"]);
+
 /** The filter kinds one pad may use; "off" is a pad that filters nothing. */
 export const PAD_FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
 
 /** The two ways a pad's voice ends: it runs out, or its step releases it. */
 export const PAD_MODES = Object.freeze(["oneshot", "gate"]);
+
+/**
+ * The pad fields a motion lane may sweep, each with the range the pad's own
+ * field holds. They are exactly the pad's numeric lock fields: a lane overrides
+ * one of them for every voice of its pad while the pattern plays, below a
+ * step's lock (see the plan's Task 10).
+ * @type {Readonly<Object<string, Readonly<number[]>>>}
+ */
+export const MOTION_PARAM_RANGES = Object.freeze({
+  pitch: Object.freeze([-24, 24]),
+  gain_db: Object.freeze([-60, 12]),
+  pan: Object.freeze([-1, 1]),
+  attack_ms: Object.freeze([0, 10000]),
+  decay_ms: Object.freeze([0, 10000]),
+  sustain: Object.freeze([0, 1]),
+  release_ms: Object.freeze([0, 10000]),
+  cutoff_hz: Object.freeze([20, 20000]),
+  resonance: Object.freeze([0, 1]),
+});
+
+/** The pad fields one motion lane may sweep, in the order the pad controls list them. */
+export const MOTION_PARAMS = Object.freeze(Object.keys(MOTION_PARAM_RANGES));
 
 /** 1a is four beats to the bar, in every scene. */
 export const BEATS_PER_BAR = 4;
@@ -209,6 +278,14 @@ const PARAM_FIELD_PREFIX = "device.params.";
 const LOCK_FIELD_PREFIX = "locks.";
 
 /**
+ * Prefix of one motion lane's own key on its pattern's map, e.g.
+ * `"motion|<bank_id>.<index>|<param>"`. The lane name is everything after the
+ * prefix, taken verbatim: a lane is one key of the pattern it belongs to, so
+ * two writers never touch the same field (see `setMotionLane`).
+ */
+const MOTION_FIELD_PREFIX = "motion|";
+
+/**
  * The key a command's `apply` hangs its history *guards* on.
  *
  * A guard is a field that must still hold the value it held when the step was
@@ -222,7 +299,7 @@ export const STEP_GUARDS = Symbol("studio.step-guards");
 
 /**
  * The ref a command, a lock or a history entry names one object by.
- * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"} kind
+ * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"|"motion"} kind
  * @param {string} id
  * @returns {string} e.g. `"clip:abc"`, `"take:abc"`, or `"song:meta"` for the song itself
  */
@@ -290,6 +367,21 @@ export function toPlain(value) {
  */
 export function objectMap(object) {
   return new Y.Map(Object.entries(object ?? {}));
+}
+
+/**
+ * Build the Y.Map a command inserts for a new pattern: its own fields, and
+ * nothing else.
+ *
+ * A lane needs no container of its own: every lane is its own key of this very
+ * map (`setMotionLane`), so two instances that write two lanes of the pattern at
+ * the same moment write two different keys and neither is lost, whether the
+ * pattern was made a moment ago or before motion existed.
+ * @param {object} pattern the pattern's own fields (`id`, `clip_id`, `name`, `order`)
+ * @returns {Y.Map<any>}
+ */
+export function newPatternMap(pattern) {
+  return objectMap(pattern);
 }
 
 /**
@@ -781,6 +873,35 @@ export function stepMap(doc) {
 }
 
 /**
+ * The MIDI mappings map, keyed by mapping id. Writers use this; a song written
+ * before the MIDI page existed gets the container the first time it is written
+ * to.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function midiMap(doc) {
+  return ensureContainer(doc, "midi_maps", () => new Y.Map());
+}
+
+/**
+ * Every MIDI mapping in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, mapping: Y.Map<any>}>}
+ */
+export function midiEntries(doc) {
+  return objectEntries(readContainer(doc, "midi_maps"), "mapping");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live MIDI mapping, or null
+ */
+export function getMidiMapping(doc, id) {
+  return liveObject(readContainer(doc, "midi_maps"), id);
+}
+
+/**
  * The key one sample's slice lives under in the song's `slices` map.
  * @param {string} sampleId
  * @param {string} sliceId
@@ -834,6 +955,110 @@ export function patternKey(clipId, patternId) {
  */
 export function stepKey(clipId, patternId, at, bankId, index) {
   return `${clipId}/${patternId}/${at}/${bankId}.${index}`;
+}
+
+/**
+ * The name one motion lane goes by: the pad it sweeps and the field it moves,
+ * e.g. `"kit-a.3|cutoff_hz"`. A lane is one pad field of one pattern, so this
+ * name is the lane's whole identity.
+ * @param {string} bankId
+ * @param {number} index
+ * @param {string} param
+ * @returns {string}
+ */
+export function motionLane(bankId, index, param) {
+  return `${bankId}.${index}|${param}`;
+}
+
+/**
+ * The key one motion lane lives under in the synthetic `motion` refs: the clip
+ * and the pattern name it, then the lane itself. (A lane is its own
+ * `motion|<lane>` key on the pattern; this key is what makes one lane one
+ * history field.)
+ * @param {string} clipId
+ * @param {string} patternId
+ * @param {string} lane
+ * @returns {string}
+ */
+export function motionKey(clipId, patternId, lane) {
+  return `${clipId}/${patternId}/${lane}`;
+}
+
+/**
+ * Split a motion ref id back into its clip, its pattern and its lane.
+ * @param {string} id - `"<clip_id>/<pattern_id>/<bank_id>.<index>|<param>"`
+ * @returns {{clipId: string, patternId: string, lane: string}|null}
+ */
+export function motionParts(id) {
+  const text = String(id ?? "");
+  const first = text.indexOf("/");
+  const second = first < 0 ? -1 : text.indexOf("/", first + 1);
+  if (first <= 0 || second < 0 || second === text.length - 1) return null;
+  return { clipId: text.slice(0, first), patternId: text.slice(first + 1, second), lane: text.slice(second + 1) };
+}
+
+/**
+ * Split one motion lane name back into the pad it sweeps and the field it moves.
+ * @param {string} lane - `"<bank_id>.<index>|<param>"`
+ * @returns {{bankId: string, index: number, param: string}|null}
+ */
+export function motionLaneParts(lane) {
+  const text = String(lane ?? "");
+  const bar = text.lastIndexOf("|");
+  if (bar <= 0 || bar === text.length - 1) return null;
+  const pad = text.slice(0, bar);
+  const dot = pad.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const index = Number(pad.slice(dot + 1));
+  if (!Number.isInteger(index) || index < 0) return null;
+  return { bankId: pad.slice(0, dot), index, param: text.slice(bar + 1) };
+}
+
+/**
+ * A pattern's motion lanes as plain JSON, keyed by lane name.
+ *
+ * Read-only, so a snapshot of a pattern nobody has swept writes nothing to the
+ * document: the lanes are the pattern's own `"motion|<lane>"` keys, collected
+ * here into the one object a snapshot, a history entry and the engine read.
+ * @param {Y.Map<any>|Object<string, any>|null|undefined} pattern
+ * @returns {Object<string, Array<{step_frac: number, value: number}>>} empty when
+ *   the pattern has no motion
+ */
+export function motionOf(pattern) {
+  const motion = {};
+  if (!pattern || typeof pattern !== "object") return motion;
+  const entries = typeof pattern.entries === "function" ? pattern.entries() : Object.entries(pattern);
+  for (const [key, value] of entries) {
+    if (typeof key !== "string" || !key.startsWith(MOTION_FIELD_PREFIX)) continue;
+    if (!Array.isArray(value)) continue;
+    motion[key.slice(MOTION_FIELD_PREFIX.length)] = toPlain(value);
+  }
+  return motion;
+}
+
+/**
+ * Write one lane of a pattern's motion, or (with `null`) take it away: one key
+ * of the pattern's own map, and nothing else in the song is touched.
+ *
+ * The key is created by the very write that needs it, so a pattern made before
+ * motion existed needs no upgrade: a lane written on one instance and a lane
+ * written on another at the same moment are two keys of one map, never two
+ * maps competing for one key.
+ * @param {Y.Map<any>} pattern - the live pattern
+ * @param {string} lane - `<bank_id>.<index>|<param>`
+ * @param {Array<{step_frac: number, value: number}>|null|undefined} points
+ * @returns {boolean} whether the document changed
+ */
+export function setMotionLane(pattern, lane, points) {
+  const key = MOTION_FIELD_PREFIX + String(lane);
+  const removing = points === null || points === undefined;
+  if (removing) {
+    if (pattern.get(key) === undefined) return false;
+    pattern.delete(key);
+    return true;
+  }
+  pattern.set(key, cloneJson(points));
+  return true;
 }
 
 /**
@@ -1136,6 +1361,7 @@ export function sampleUsers(snap, sampleId) {
  *            samples: Object<string, object>, slices: Object<string, object>,
  *            banks: Object<string, object>, pads: Object<string, object>,
  *            patterns: Object<string, object>, steps: Object<string, object>,
+ *            midi_maps: Object<string, object>,
  *            arrangement: {placements: Object<string, object>,
  *                          markers: Object<string, object>,
  *                          sections: Object<string, object>}}}
@@ -1144,8 +1370,13 @@ export function sampleUsers(snap, sampleId) {
  *   "<track_id>/<bank_id>", a pad by "<track_id>/<bank_id>/<index>", a pattern
  *   by "<clip_id>/<pattern_id>" and a step by
  *   "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" — so the engine can read a
- *   pad or a step without walking the track or the clip. A song written before
- *   the sampler existed reads all six as empty objects.
+ *   pad or a step without walking the track or the clip. A pattern carries its
+ *   own `motion` lanes (lane name → sorted points), which is how the engine
+ *   reads a curve without a second lookup. A song written before the sampler
+ *   existed reads all six as empty objects.
+ *   `midi_maps` is a plain object too, keyed by the mapping's own id, so the
+ *   page and the router read the whole table in one place; a song nobody has
+ *   mapped a controller in reads it as an empty object.
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -1190,6 +1421,7 @@ export function snapshot(doc) {
     pads: snapshotContainer(doc, "pads", normalizePad),
     patterns: snapshotContainer(doc, "patterns", normalizePattern),
     steps: snapshotContainer(doc, "steps", normalizeStep),
+    midi_maps: snapshotContainer(doc, "midi_maps", normalizeMidiMapping),
     arrangement: snapshotArrangement(doc),
   };
 }
@@ -1271,6 +1503,9 @@ function snapshotArrangement(doc) {
  *     per song, slices per sample, patterns per clip, chain length, step
  *     entries per pattern, locks per step) — the rules the sampler commands
  *     enforce on their own edits;
+ *   - a song holds at most `LIMITS.midiMaps` MIDI mappings, and no two live
+ *     ones answer the same message on the same controller (one message has one
+ *     live action) — the rules the midi commands enforce on their own edits;
  *   - the arrangement holds at most `LIMITS.placements` placements,
  *     `LIMITS.markers` markers and `LIMITS.sections` sections, ends at bar
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
@@ -1349,6 +1584,7 @@ export function checkInvariants(doc) {
 
   reasons.push(...arrangementReasons(song));
   reasons.push(...samplerReasons(song));
+  reasons.push(...midiReasons(song));
 
   return reasons;
 }
@@ -1470,10 +1706,19 @@ function arrangementReasons(song) {
  * song at once: every bank sits on a sampler track, every pad's sample is in
  * the song and the slice it names belongs to that sample, every chain entry is
  * a pattern of its own clip, every step names a pad of its clip's track inside
- * the clip's step positions, a slice stays inside its sample's frames, and no
- * count outgrows its limit (banks per kit, pads per bank, samples per song,
- * slices per sample, patterns per clip, chain length, step entries per pattern,
- * locks per step).
+ * the clip's step positions, every motion lane names a pad field of the clip's
+ * track with its points inside the loop and inside that field's own range, a
+ * slice stays inside its sample's frames, and no count outgrows its limit
+ * (banks per kit, pads per bank, samples per song, slices per sample, patterns
+ * per clip, chain length, step entries per pattern, locks per step, motion
+ * points per lane).
+ *
+ * The number of motion lanes of one pattern is deliberately NOT checked here. A
+ * lane is its own key of its pattern, so two peers writing their own lanes at
+ * the same moment can merge into a pattern past `LIMITS.motionLanesPerPattern`
+ * — and that is a merge, not a fault: the per-writer limit lives in
+ * `motion.write`, a merged pattern is still a pattern the song can play, and no
+ * undo elsewhere in the song may be refused because of it.
  *
  * The history dry-runs an undo's plan on a clone and calls this, so a plan that
  * would leave, say, a pad pointing at a slice a newer edit removed is refused
@@ -1672,7 +1917,111 @@ function samplerReasons(song) {
     );
   }
 
+  // Motion: one lane per pad field, each point inside the loop and inside the
+  // field's own range. A lane names a pad of the clip's track and a field the
+  // pad's own controls offer, so a curve can never aim at something the pad
+  // does not have.
+  for (const pattern of patterns) {
+    const motion = pattern.motion && typeof pattern.motion === "object" ? pattern.motion : {};
+    const lanes = Object.keys(motion);
+    if (lanes.length === 0) continue;
+    const clip = song.clips[pattern.clip_id];
+    const which = `The pattern "${nameOrId(pattern.name, pattern.id)}"`;
+    const positions = Number(clip?.length_steps) || 0;
+    const trackId = typeof clip?.track_id === "string" ? clip.track_id : "";
+    for (const lane of lanes) {
+      const laneParts = motionLaneParts(lane);
+      if (!laneParts) {
+        reasons.push(`${which} would hold the motion lane "${lane}", which names no pad and parameter.`);
+        continue;
+      }
+      const range = MOTION_PARAM_RANGES[laneParts.param];
+      if (!range) {
+        reasons.push(
+          `${which} would sweep "${laneParts.param}" on pad ${laneParts.index + 1}, which is not one of a pad's numeric fields (${MOTION_PARAMS.join(", ")}).`,
+        );
+        continue;
+      }
+      if (trackId !== "" && !padKeys.has(padKey(trackId, laneParts.bankId, laneParts.index))) {
+        reasons.push(
+          `${which} would sweep pad ${laneParts.index + 1} of bank "${laneParts.bankId}", which is not on the clip's track.`,
+        );
+        continue;
+      }
+      const points = Array.isArray(motion[lane]) ? motion[lane] : [];
+      if (points.length > LIMITS.motionPointsPerLane) {
+        reasons.push(
+          `${which} would hold ${points.length} motion points on one lane; a lane holds at most ${LIMITS.motionPointsPerLane} motion points.`,
+        );
+        continue;
+      }
+      if (!(positions > 0)) continue;
+      for (const point of points) {
+        const stepFrac = Number(point.step_frac);
+        const amount = Number(point.value);
+        if (!(stepFrac >= 0 && stepFrac < positions)) {
+          reasons.push(
+            `${which} would put a motion point at step ${beatText(stepFrac)}, outside its ${positions} step positions.`,
+          );
+          break;
+        }
+        if (!(amount >= range[0] && amount <= range[1])) {
+          reasons.push(
+            `${which} would sweep "${laneParts.param}" to ${amount} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
+          );
+          break;
+        }
+      }
+    }
+  }
+
   return reasons;
+}
+
+/**
+ * What is wrong with a song's MIDI mappings, in plain English.
+ *
+ * Two rules, both of which the midi commands keep on their own edits: the table
+ * stays inside `LIMITS.midiMaps`, and no two live mappings answer the same
+ * message on the same controller — one message has one live action, so the
+ * router can never have to choose between two of them.
+ * @param {object} song - a snapshot
+ * @returns {string[]}
+ */
+function midiReasons(song) {
+  const mappings = Object.values(song.midi_maps ?? {});
+  const reasons = [];
+  if (mappings.length > LIMITS.midiMaps) {
+    reasons.push(
+      `The song would hold ${mappings.length} MIDI mappings; a song can hold at most ${LIMITS.midiMaps} MIDI mappings.`,
+    );
+  }
+
+  const live = mappings.filter((mapping) => mapping.proposed !== true);
+  for (let index = 0; index < live.length; index += 1) {
+    for (let other = index + 1; other < live.length; other += 1) {
+      if (live[index].device_name !== live[other].device_name) continue;
+      if (!sameMessage(live[index].message, live[other].message)) continue;
+      reasons.push(
+        `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
+      );
+    }
+  }
+  return reasons;
+}
+
+/** @returns {boolean} whether two MIDI messages are the same message. */
+function sameMessage(left, right) {
+  if (!left || !right) return false;
+  return left.type === right.type && left.channel === right.channel && left.number === right.number;
+}
+
+/** @returns {string} a message in words, for a message about the mappings. */
+function messageName(message) {
+  const number = Number(message?.number);
+  if (message?.type === "note") return `note ${number}`;
+  if (message?.type === "cc") return `control change ${number}`;
+  return `program change ${number}`;
 }
 
 /** @returns {string} a name for a message, or the id when it has none. */
@@ -1776,6 +2125,14 @@ function barsText(bars) {
  *     object, and a plain field name (or `"locks.<name>"`) writes one field of
  *     one of them — which is how one pad, one step or one lock undoes without
  *     touching its neighbours;
+ *   - `"midi:abc|*"` does the same for one MIDI mapping, and a plain field name
+ *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
+ *   - `"motion:<clip>/<pattern>/<bank>.<index>|<param>|*"` writes ONE motion
+ *     lane of one pattern: an array of `{step_frac, value}` points, or `null`
+ *     to take the lane away. A lane is one key of its pattern
+ *     (`"motion|<lane>"`), so its other lanes are left exactly as they are —
+ *     two lanes of one pattern undo independently, and two writers on different
+ *     lanes never overwrite each other;
  *   - `"placement:abc|*"`, `"marker:abc|*"` and `"section:abc|*"` do the same
  *     for the three arrangement objects, and `"placement:abc|bars"` (and its
  *     siblings) writes one field of one of them;
@@ -1830,7 +2187,11 @@ export function applyBeforeAfter(doc, plan) {
       case "pad":
       case "pattern":
       case "step":
-        writeSamplerObject(doc, target.kind, target.id, split.field, value);
+      case "midi":
+        writeContainerObject(doc, target.kind, target.id, split.field, value);
+        break;
+      case "motion":
+        writeMotionLane(doc, target.id, split.field, value);
         break;
       case "placement":
       case "marker":
@@ -1884,11 +2245,20 @@ export function readField(doc, ref, field = "*") {
     return readPath(take, fieldPath(field));
   }
 
-  if (SAMPLER_MAP_OF[target.kind]) {
-    const object = samplerObject(doc, target.kind, target.id);
+  if (OBJECT_MAP_OF[target.kind]) {
+    const object = containerObject(doc, target.kind, target.id);
     if (!object) return ABSENT;
     if (field === "*") return toPlain(object);
     return readPath(object, fieldPath(field));
+  }
+
+  if (target.kind === "motion") {
+    const parts = motionParts(target.id);
+    const pattern = parts ? getPattern(doc, parts.clipId, parts.patternId) : null;
+    if (!pattern) return ABSENT;
+    const motion = motionOf(pattern);
+    if (!Object.hasOwn(motion, parts.lane)) return ABSENT;
+    return cloneJson(motion[parts.lane]);
   }
 
   if (target.kind === "placement" || target.kind === "marker" || target.kind === "section") {
@@ -2111,33 +2481,40 @@ function writeTake(doc, id, field, value) {
   writeField(take, field, value);
 }
 
-/** Which song container each sampler object kind lives in. */
-const SAMPLER_MAP_OF = Object.freeze({
+/** Which song container each id-keyed object kind lives in. */
+const OBJECT_MAP_OF = Object.freeze({
   sample: "samples",
   slice: "slices",
   bank: "banks",
   pad: "pads",
   pattern: "patterns",
   step: "steps",
+  midi: "midi_maps",
 });
 
-/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern or step, or null. */
-function samplerObject(doc, kind, id) {
-  const key = SAMPLER_MAP_OF[kind];
+/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern, step or MIDI mapping, or null. */
+function containerObject(doc, kind, id) {
+  const key = OBJECT_MAP_OF[kind];
   if (!key) return null;
   return liveObject(readContainer(doc, key), id);
 }
 
 /**
- * Write one field of a sampler object, or (re)create/delete it whole.
+ * Write one field of a sampler object or a MIDI mapping, or (re)create/delete
+ * it whole.
  *
  * A pad and a step carry no `id` of their own: their container key is their
  * identity (`<track>/<bank>/<index>` and `<clip>/<pattern>/<at>/<bank>.<index>`),
- * so nothing here invents one. A sample, slice, bank and pattern do carry one,
- * and it is the same value their key holds.
+ * so nothing here invents one. A sample, slice, bank, pattern and MIDI mapping
+ * do carry one, and it is the same value their key holds.
+ *
+ * A pattern's motion is stored as one key per lane on the pattern's own map
+ * (`setMotionLane`), and a whole-pattern restore (an undo of `pattern.remove`,
+ * say) puts each lane back under its own key (`patternMapFrom`), so the pattern
+ * it restores is still two writers' safe.
  */
-function writeSamplerObject(doc, kind, id, field, value) {
-  const key = SAMPLER_MAP_OF[kind];
+function writeContainerObject(doc, kind, id, field, value) {
+  const key = OBJECT_MAP_OF[kind];
   if (field === "*" && value === ABSENT) {
     const existing = readContainer(doc, key);
     if (existing instanceof Y.Map) existing.delete(id);
@@ -2148,12 +2525,69 @@ function writeSamplerObject(doc, kind, id, field, value) {
     const object = cloneJson(value) ?? {};
     delete object._index;
     const hasOwnId = kind !== "pad" && kind !== "step";
-    map.set(id, objectMap(hasOwnId ? { ...object, id: object.id ?? id } : object));
+    const stored = hasOwnId ? { ...object, id: object.id ?? id } : object;
+    map.set(id, kind === "pattern" ? patternMapFrom(stored) : objectMap(stored));
     return;
   }
   const object = map.get(id);
   if (!(object instanceof Y.Map)) throw new Error(`Studio: there is no ${kind} "${id}" to write to`);
+  if (kind === "pattern" && field === "motion") {
+    setPatternMotion(object, value === ABSENT ? null : value);
+    return;
+  }
   writeField(object, field, value);
+}
+
+/**
+ * Build the map one pattern is stored as: its own fields plus one key per
+ * motion lane (`motion|<lane>` → its points), which is how a whole-pattern
+ * restore writes its curves back.
+ *
+ * An entry recorded while the lanes still travelled as one plain object under
+ * `motion` has it spread into those same per-lane keys, so a restore does not
+ * lose a curve it was recorded with.
+ * @param {object} object the pattern, as a snapshot or a history entry holds it
+ * @returns {Y.Map<any>}
+ */
+function patternMapFrom(object) {
+  const fields = { ...object };
+  const motion = fields.motion && typeof fields.motion === "object" && !Array.isArray(fields.motion) ? fields.motion : null;
+  delete fields.motion;
+  const map = objectMap(fields);
+  if (!motion) return map;
+  for (const lane of Object.keys(motion)) {
+    if (!Array.isArray(motion[lane])) continue;
+    map.set(MOTION_FIELD_PREFIX + lane, cloneJson(motion[lane]));
+  }
+  return map;
+}
+
+/**
+ * Replace a pattern's whole motion with one key per lane.
+ *
+ * This is the one way a motion object goes into the document as a whole (a
+ * `pattern|motion` field write); every other write touches a single lane key
+ * (`writeMotionLane`, `setMotionLane`). It writes the lanes it is given under
+ * their own keys and takes away the ones the value does not name, so a lane
+ * another instance moves is either kept whole or removed whole, never
+ * half-overwritten.
+ * @param {Y.Map<any>} pattern - the live pattern
+ * @param {unknown} value - `{lane: points}` as a snapshot spells it, or `null`
+ * @returns {void}
+ */
+function setPatternMotion(pattern, value) {
+  const motion = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const wanted = new Set();
+  for (const lane of Object.keys(motion)) {
+    if (!Array.isArray(motion[lane])) continue;
+    wanted.add(lane);
+    pattern.set(MOTION_FIELD_PREFIX + lane, cloneJson(motion[lane]));
+  }
+  for (const key of [...pattern.keys()]) {
+    if (typeof key !== "string" || !key.startsWith(MOTION_FIELD_PREFIX)) continue;
+    if (wanted.has(key.slice(MOTION_FIELD_PREFIX.length))) continue;
+    pattern.delete(key);
+  }
 }
 
 /** Which sub-map of the arrangement each arrangement object kind lives in. */
@@ -2187,6 +2621,36 @@ function writeArrangementObject(doc, kind, id, field, value) {
   const object = map.get(id);
   if (!(object instanceof Y.Map)) throw new Error(`Studio: there is no ${kind} "${id}" to write to`);
   writeField(object, field, value);
+}
+
+/**
+ * Write one motion lane of one pattern, or (with `null`) take it away.
+ *
+ * A lane is one KEY of its pattern's own map (`setMotionLane`), so this touches
+ * that one key and nothing else: another lane, written by this page or by
+ * someone else at the same moment, is never overwritten. The pattern itself
+ * must be there — motion belongs to a pattern, and removing the pattern removes
+ * every lane of it in the same step.
+ * @param {Y.Doc} doc
+ * @param {string} id - `"<clip_id>/<pattern_id>/<lane>"`
+ * @param {string} field - always `"*"`: a lane is one whole field
+ * @param {any} value - the lane's points, or `null`
+ * @returns {void}
+ */
+function writeMotionLane(doc, id, field, value) {
+  if (field !== "*") {
+    throw new Error(`Studio: "motion:${id}|${field}" is not how one motion lane is written; a lane is one whole field`);
+  }
+  const parts = motionParts(id);
+  if (!parts) throw new Error(`Studio: "motion:${id}" does not name a clip, a pattern and a lane`);
+  const pattern = getPattern(doc, parts.clipId, parts.patternId);
+  if (!pattern) {
+    if (value === ABSENT) return;
+    throw new Error(`Studio: there is no pattern "${parts.patternId}" on clip "${parts.clipId}" to write motion to`);
+  }
+  // Taking a lane away that is not there writes nothing at all.
+  if (value === ABSENT) setMotionLane(pattern, parts.lane, null);
+  else setMotionLane(pattern, parts.lane, value);
 }
 
 /** @returns {any} the value without its internal `_index`/`_after`/`_before` hints. */
@@ -2386,7 +2850,41 @@ function normalizePattern(id, value) {
     clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
     name: typeof plain.name === "string" ? plain.name : "",
     order: integerOr(plain.order, 0),
+    motion: normalizeMotion(motionOf(value)),
   };
+}
+
+/**
+ * A pattern's motion lanes as a snapshot carries them: lane name → its points,
+ * sorted by step position. A point that is not two finite numbers is dropped,
+ * so the engine and the checks only ever read a usable curve.
+ * @param {unknown} value
+ * @returns {Object<string, Array<{step_frac: number, value: number}>>}
+ */
+function normalizeMotion(value) {
+  const motion = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  const out = {};
+  if (!motion) return out;
+  for (const lane of Object.keys(motion)) {
+    const raw = motion[lane];
+    if (!Array.isArray(raw)) continue;
+    const points = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const stepFrac = Number(item.step_frac);
+      const amount = Number(item.value);
+      if (!Number.isFinite(stepFrac) || !Number.isFinite(amount)) continue;
+      points.push({ step_frac: stepFrac, value: amount });
+    }
+    points.sort(byMotionStep);
+    if (points.length > 0) out[lane] = points;
+  }
+  return out;
+}
+
+/** @returns {number} the step order of two motion points. */
+function byMotionStep(a, b) {
+  return a.step_frac - b.step_frac;
 }
 
 /** A step as a snapshot carries it: every field present, nothing extra. */
@@ -2400,6 +2898,38 @@ function normalizeStep(id, value) {
     index: integerOr(plain.index, 0),
     v: integerOr(plain.v, 100),
     locks: plain.locks && typeof plain.locks === "object" ? cloneJson(plain.locks) : {},
+  };
+}
+
+/**
+ * A MIDI mapping as a snapshot carries it: every field present, nothing extra.
+ *
+ * `accepted_action` is `null` until the operator accepts the mapping, and
+ * `proposed` is what says whether it is waiting: only a mapping with
+ * `proposed: false` whose `action` still equals its `accepted_action` is live.
+ */
+function normalizeMidiMapping(id, value) {
+  const plain = stripHints(value);
+  const message = plain.message && typeof plain.message === "object" ? plain.message : {};
+  const action = plain.action && typeof plain.action === "object" ? plain.action : {};
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    device_name: typeof plain.device_name === "string" ? plain.device_name : "",
+    message: {
+      type: MIDI_MESSAGE_TYPES.includes(message.type) ? message.type : MIDI_MESSAGE_TYPES[0],
+      channel: integerOr(message.channel, 1),
+      number: integerOr(message.number, 0),
+    },
+    action: {
+      ...cloneJson(action),
+      kind: typeof action.kind === "string" ? action.kind : "",
+    },
+    set_by: MIDI_SET_BY.includes(plain.set_by) ? plain.set_by : MIDI_SET_BY[0],
+    proposed: plain.proposed === true,
+    accepted_action:
+      plain.accepted_action && typeof plain.accepted_action === "object"
+        ? cloneJson(plain.accepted_action)
+        : ABSENT,
   };
 }
 

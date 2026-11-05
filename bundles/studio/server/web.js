@@ -177,6 +177,7 @@ const ASSET_FILES = new Map([
   ["sequencer.js", join("engine", "sequencer.js")],
   ["resample.js", join("engine", "resample.js")],
   ["sampler-voice.js", join("engine", "sampler-voice.js")],
+  ["perf-fx.js", join("engine", "perf-fx.js")],
   ["resample-worker.js", join("engine", "resample-worker.js")],
   ["chop.js", join("engine", "chop.js")],
   ["chop-worker.js", join("engine", "chop-worker.js")],

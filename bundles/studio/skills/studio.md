@@ -35,7 +35,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 ## Read first
 
 - `studio_session_summary` — always your first call: tracks with device and lock state, scenes, clips with a note count each. It pages 50 clips at a time; ask for `page: 2`, `3`, … while it says there is more.
-- `studio_get_clip` — read a clip's notes before you change it.
+- `studio_get_clip` — read a clip before you change it: its notes, or a pattern clip's patterns, steps and motion lanes.
 - `studio_samples` — on a sampler track, read the song's samples first: id, name, seconds, origin, the pads that play each one and its slices in order. Ids come from there.
 - `studio_module_types` — the real controller names, ranges and defaults. A track device must be a generator: Analog generator, DrumSynth, Generator or SpectraVoice.
 - Load `studio-preferences` at the start of every session — it reads and stores preferences through `crow-memory` — and store one whenever the operator teaches you one.
@@ -117,6 +117,64 @@ You may write patterns, steps, locks, chains, slices and pad settings, but only 
 | *(no tool)* `pad.clear` | Take the sound off a pad and keep its settings. The operator's own step (the panel's **Clear pad**), so you have no tool for it: ask them. It is what a re-chop needs when a pad still plays a slice the new chop drops. |
 
 A pad whose sample you do not name plays the whole sample; `slice_id` narrows it to one slice. Pitches are resampling: `pitch` +12 plays an octave up in half the time, so a repitched hit changes length with its pitch.
+
+## Motion
+
+A **motion lane** is one pad field drawn as a curve across one pattern: points of `{step_frac, value}`, where `step_frac` is a position in steps (0 is the pattern's first step) and `value` is inside that field's own range. A pattern holds at most 32 lanes, one pad field each, and a lane at most 4096 points.
+
+| Tool | What it does |
+|---|---|
+| `studio_motion_write` | Set one lane: `{clip_id, pattern_id, bank_id, index, param, points}`. Its points replace the lane; an empty list takes it away. `param` is `pitch`, `gain_db`, `pan`, `attack_ms`, `decay_ms`, `sustain`, `release_ms`, `cutoff_hz` or `resonance`. |
+| `studio_motion_clear` | Clear every lane of one pad in one pattern: `{clip_id, pattern_id, bank_id, index}`; add `param` to clear just that field. |
+
+A step lock beats motion: the value a step locks is what that step's voice plays, whatever the curve says at its position.
+
+## MIDI controllers
+
+A song can be played from the floor: a pedal launches a scene, a pad plays a pad, a knob sweeps a filter. Each **mapping** belongs to the song — one message (a note, a control change or a program change on one named controller) routed to one live action — so the same pedals do the same thing on any device.
+
+**You propose; the operator accepts; an accepted mapping is theirs.** A `studio_midi_map` you run always creates a NEW proposal: it routes nothing, and it never edits a mapping that exists. The operator accepts a proposal on the MIDI page, and accepting is a people-only command (`midi.accept`), so you have no tool for it. From then on the row is live and theirs: no step of yours — command, undo or redo — can change or remove it, and `studio_midi_remove` takes away only a proposal.
+
+| Tool | What it does |
+|---|---|
+| `studio_midi` | Read every mapping: the controller and message, what it does (in plain words and as JSON), who set it, and whether it is still a proposal. Read this before you propose anything. |
+| `studio_midi_map` | Propose one message → one action, from the allow-list below. Nothing that edits the song can be mapped, and one message has one live action. |
+| `studio_midi_propose_profile` | Propose a whole device's rows at once: `fcb1010` or `mpk_mini`. Every row is a proposal. |
+| `studio_midi_remove` | Remove a proposal (an accepted mapping is the operator's own). |
+
+**The allow-listed actions** — one row each; a mapping runs nothing else:
+
+| Kind | What the control does |
+|---|---|
+| `scene.launch {scene_id}` | Launch a scene on the next bar |
+| `clip.launch {clip_id}` | Launch one clip |
+| `transport.play` / `transport.stop` | Start or stop the transport |
+| `record.toggle` | Start or stop recording |
+| `stop_all` | Stop everything |
+| `pad.play {track_id, bank_id, index}` | Play a sampler pad, at the note's velocity |
+| `pad.param {track_id, param, min, max}` | Sweep one pad field on the selected pad, from `min` to `max` |
+| `track.macro {track_id, index}` | Turn one of that track's eight macro knobs |
+| `macro.set {index}` | Turn macro knob n on the selected track |
+| `mix.gain {track_id}` | Ride a track's level |
+| `fx.hold {name}` | Hold a performance effect: `filter_sweep`, `lofi`, `stutter`, `tape_stop`, `reverb_throw` |
+| `looper.cycle` | Advance the looper: record, play, overdub, play |
+| `looper.to_pad {track_id, bank_id, index}` | Capture what the looper holds into that pad |
+| `keys.play` | Play the selected instrument from the keys (one row claims its channel's notes; a pad mapping on a note wins over it) |
+
+**The keys are not played yet.** `keys.play` stays on the allow-list for when they are, so no device profile proposes one.
+
+**The two device profiles** are factory defaults — check the operator's unit, because every unit can be reprogrammed:
+
+- **FCB1010** (foot controller, over a USB-MIDI cable): pedals 1–10 send program changes 0–9 on channel 1; expression pedal A sends CC 27 and B sends CC 7.
+- **MPK Mini** (pad keyboard): the eight pads send notes 36–43 on channel 10, the eight knobs send CC 70–77 on channel 1, and the keys send notes on channel 1.
+
+**Profile or single mapping?** `studio_midi_propose_profile` when the operator asks to set a whole controller up — "set up my pedalboard", "make the MPK play the kit". It lays the controller out in one step: FCB1010 is one pedal per scene in song order (pass `scene_order` to choose which scenes, at most ten) plus the expression pedals on the first tracks' levels; MPK Mini is the pads on the first sampler track's first bank and the knobs on the selected track's macro knobs. `studio_midi_map` is for one thing: "make pedal 10 start and stop the looper", or a row of the profile that needs another action. Either way, say what you proposed and that the operator has to accept it.
+
+## Performance effects and the looper
+
+Five performance effects — filter sweep, lo-fi, stutter, tape stop, reverb throw — and a looper sit on the master bus, held and released rather than switched: a pedal holds one for as long as it is down, and the page's own buttons work the same way. They are the operator's hands. They are live state, never a history step, they never enter the song, and nothing you can call holds one: you have no tool that presses them, and an `fx.hold` mapping runs only on the operator's own page.
+
+The looper records the master in whole bars, and `looper.to_pad` (or the page's **Loop → pad**) turns what it holds into a pad's sample. A looper that has recorded nothing answers with no bars. An agent render is always DRY: the performance effects and the looper are not in it, so what you measure is the song, not the performance.
 
 ## Editing etiquette
 

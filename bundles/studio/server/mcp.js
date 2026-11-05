@@ -66,6 +66,11 @@ import "./commands/takes.js";
 import "./commands/arrangement.js";
 // The 1c sampler commands — kits, pads, samples, patterns and steps.
 import "./commands/sampler.js";
+// The 1c MIDI commands — a mapping table, the operator's accept and the two
+// device profiles. An agent gets tools for `midi.map`, `midi.remove` and
+// `midi.propose_profile`; `midi.accept` is people-only, so mcp.js builds no tool
+// for it (the loop below skips every humanOnly command).
+import "./commands/midi.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */
@@ -76,6 +81,27 @@ export const SERVER_NAME = "studio";
 
 /** The one line every command tool carries about how an edit behaves. */
 const UNDO_LINE = "Every change shows up live for the operator, tagged as yours, and can be undone.";
+
+/**
+ * What a command's tool says about itself beyond its title.
+ *
+ * The MIDI commands need it: an agent's mapping is never live. `midi.map` run by
+ * an agent always creates a PROPOSAL, which the operator accepts on the MIDI page
+ * (the panel's Accept button, which is the people-only `midi.accept`). An accepted
+ * mapping is the operator's, so an agent cannot edit or remove one — and there is
+ * no tool for `midi.accept` at all, because the loop below skips a people-only
+ * command.
+ *
+ * @type {Readonly<Object<string, string>>}
+ */
+const COMMAND_NOTES = Object.freeze({
+  "midi.map":
+    "You propose; the operator accepts. A mapping you make is always a proposal — it plays nothing until the operator accepts it on the MIDI page — and an accepted mapping is theirs, so your next midi.map makes a new proposal instead of editing one. There is no tool for accepting: that yes is the operator's own click.",
+  "midi.remove":
+    "An agent may remove only a proposal; an accepted mapping is the operator's, and removing it needs their own click.",
+  "midi.propose_profile":
+    "Every row the profile lays out arrives as a proposal, which the operator accepts one by one or all at once. Read studio_midi first, so you can say which rows you proposed.",
+});
 
 /** Clips per page of `studio_session_summary` (the plan's Task 9 interface). */
 const SUMMARY_PAGE_SIZE = 50;
@@ -222,7 +248,62 @@ export function sessionSummary(songId, snapshot, page = 1) {
 }
 
 /**
- * The takes of a song, newest first, the way `studio_takes` reports them.
+ * A pattern clip as `studio_get_clip` reports it: the clip itself, then its
+ * patterns with their steps and their motion.
+ *
+ * A pattern clip holds no notes, so its notes list is always empty and reading
+ * it alone says nothing about what it plays. Each pattern comes with its steps
+ * grouped under it (position, pad, velocity, locks) in the order the pattern
+ * plays them, and each of its motion lanes as a lane name → its points and how
+ * many there are. Everything is read from the snapshot, so the answer is the
+ * document as the operator and the engine have it.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {object} clip - the pattern clip
+ * @returns {object} the clip, its patterns, their steps and their motion
+ */
+export function patternClipRead(snapshot, clip) {
+  const patterns = Object.values(snapshot?.patterns ?? {})
+    .filter((pattern) => pattern && pattern.clip_id === clip.id)
+    .sort((left, right) => (Number(left.order) || 0) - (Number(right.order) || 0));
+  const steps = Object.values(snapshot?.steps ?? {}).filter(
+    (step) => step && step.clip_id === clip.id,
+  );
+
+  return {
+    ...clip,
+    patterns: patterns.map((pattern) => ({
+      id: pattern.id,
+      name: pattern.name,
+      order: Number(pattern.order) || 0,
+      steps: steps
+        .filter((step) => step.pattern_id === pattern.id)
+        .sort((left, right) => (Number(left.at) || 0) - (Number(right.at) || 0))
+        .map((step) => ({
+          at: Number(step.at) || 0,
+          bank_id: step.bank_id,
+          index: Number(step.index) || 0,
+          v: Number(step.v) || 0,
+          locks: step.locks && typeof step.locks === "object" ? step.locks : {},
+        })),
+      motion: Object.fromEntries(
+        Object.entries(pattern.motion && typeof pattern.motion === "object" ? pattern.motion : {})
+          .map(([lane, points]) => {
+            const list = Array.isArray(points) ? points : [];
+            // A lane holds up to 4096 points; a read sends at most 256 of them,
+            // evenly spread, and says so, so one clip never answers in megabytes.
+            if (list.length <= MOTION_READ_POINTS) return [lane, { count: list.length, points: list }];
+            const step = list.length / MOTION_READ_POINTS;
+            const sampled = [];
+            for (let at = 0; at < MOTION_READ_POINTS; at += 1) sampled.push(list[Math.floor(at * step)]);
+            return [lane, { count: list.length, points: sampled, sampled: true }];
+          }),
+      ),
+    })),
+  };
+}
+
+/**
  *
  * A take's stored shape is what the document needs (frames, an offset in the
  * host's frames, a storage key); its readers want seconds and milliseconds,
@@ -276,6 +357,9 @@ export function takeList(snapshot, clipId = null) {
   rows.sort((a, b) => (a.recorded_at < b.recorded_at ? 1 : a.recorded_at > b.recorded_at ? -1 : 0));
   return rows;
 }
+
+/** The most motion points one lane sends in a read (studio_get_clip). */
+const MOTION_READ_POINTS = 256;
 
 /**
  * The samples of a song, the way `studio_samples` reports them.
@@ -382,6 +466,136 @@ export function sampleList(snapshot, sampleId = null) {
 }
 
 /**
+ * The sample listing's neighbours: the plain words a MIDI mapping is reported
+ * in, and the listing `studio_midi` answers with.
+ *
+ * A stored message is numbers (`{type, channel, number}`); a person reads a
+ * program change, a note or a control change on a channel. An action is a
+ * `{kind, ...}`; a person reads a sentence, with the scene, clip, track, bank or
+ * pad it names filled in from the song. Both are given, plus the action as JSON,
+ * because an agent edits with the ids and reports with the words.
+ */
+
+/** @returns {string} one stored message in plain words. */
+function messageWords(message) {
+  const number = Number(message?.number) || 0;
+  const channel = Number(message?.channel) || 1;
+  const words = message?.type === "note" ? `note ${number}`
+    : message?.type === "cc" ? `control change ${number}`
+      : `program change ${number}`;
+  return `${words} on channel ${channel}`;
+}
+
+/** @returns {string} a named id from one of the song's lists, or the id itself. */
+function nameFrom(list, id) {
+  const found = Array.isArray(list) ? list.find((item) => item && item.id === id) : null;
+  return typeof found?.name === "string" && found.name !== "" ? found.name : String(id);
+}
+
+/** @returns {string} one clip's name, or its id. */
+function clipNameFrom(snapshot, id) {
+  const clip = snapshot?.clips?.[id];
+  return typeof clip?.name === "string" && clip.name !== "" ? clip.name : String(id);
+}
+
+/** @returns {string} one bank's name, or its id. */
+function bankNameFrom(snapshot, trackId, bankId) {
+  const bank = snapshot?.banks?.[`${trackId}/${bankId}`];
+  return typeof bank?.name === "string" && bank.name !== "" ? bank.name : String(bankId);
+}
+
+/**
+ * One allow-listed action in plain words, with the objects it names read from
+ * the song. The effect and pad-field names are the ones a person uses.
+ * @param {object} action
+ * @param {object} snapshot
+ * @returns {string}
+ */
+export function actionWords(action, snapshot) {
+  const kind = action && typeof action.kind === "string" ? action.kind : "";
+  switch (kind) {
+    case "scene.launch":
+      return `launch scene "${nameFrom(snapshot?.scenes, action.scene_id)}"`;
+    case "clip.launch":
+      return `launch clip "${clipNameFrom(snapshot, action.clip_id)}"`;
+    case "transport.play":
+      return "play";
+    case "transport.stop":
+      return "stop";
+    case "record.toggle":
+      return "start or stop recording";
+    case "stop_all":
+      return "stop everything";
+    case "pad.play":
+      return `play pad ${(Number(action.index) || 0) + 1} of bank "${bankNameFrom(snapshot, action.track_id, action.bank_id)}" on "${nameFrom(snapshot?.tracks, action.track_id)}"`;
+    case "pad.param":
+      return `sweep ${String(action.param)} from ${Number(action.min)} to ${Number(action.max)} on the selected pad of "${nameFrom(snapshot?.tracks, action.track_id)}"`;
+    case "track.macro":
+      return `turn macro knob ${(Number(action.index) || 0) + 1} on "${nameFrom(snapshot?.tracks, action.track_id)}"`;
+    case "fx.hold":
+      return `hold the ${String(action.name).split("_").join(" ")} effect`;
+    case "looper.cycle":
+      return "advance the looper";
+    case "looper.to_pad":
+      return `capture the looper into pad ${(Number(action.index) || 0) + 1} of bank "${bankNameFrom(snapshot, action.track_id, action.bank_id)}" on "${nameFrom(snapshot?.tracks, action.track_id)}"`;
+    case "mix.gain":
+      return `ride the level of "${nameFrom(snapshot?.tracks, action.track_id)}"`;
+    case "keys.play":
+      return "play the keys";
+    case "macro.set":
+      return `turn macro knob ${(Number(action.index) || 0) + 1} on the selected track`;
+    default:
+      return kind || "nothing";
+  }
+}
+
+/** @returns {boolean} whether two JSON values are the same value. */
+function sameJson(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+/**
+ * The song's MIDI mappings, the way `studio_midi` reports them.
+ *
+ * A mapping is either LIVE (`proposed` false, and its `action` still the action
+ * the operator accepted) or a PROPOSAL, which routes nothing until the operator
+ * accepts it. `set_by` says who made it: `operator` or `agent`. The agent reads
+ * this to know what the controller already does before it proposes anything.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @returns {object[]} one row per mapping, in a fixed order
+ */
+export function midiList(snapshot) {
+  const maps = snapshot?.midi_maps && typeof snapshot.midi_maps === "object" ? snapshot.midi_maps : {};
+  const rows = [];
+  for (const mapping of Object.values(maps)) {
+    if (!mapping || typeof mapping !== "object") continue;
+    const message = mapping.message && typeof mapping.message === "object" ? mapping.message : {};
+    const action = mapping.action ?? null;
+    const proposed = mapping.proposed === true;
+    rows.push({
+      id: mapping.id,
+      device_name: String(mapping.device_name ?? ""),
+      message: {
+        type: message.type ?? null,
+        channel: Number(message.channel) || 0,
+        number: Number(message.number) || 0,
+      },
+      sends: messageWords(message),
+      action,
+      action_text: actionWords(action, snapshot),
+      set_by: mapping.set_by === "agent" ? "agent" : "operator",
+      proposed,
+      // Live means both: not a proposal, and still the action the operator said
+      // yes to (the router refuses anything else, so the listing says it too).
+      accepted: !proposed && sameJson(action, mapping.accepted_action),
+    });
+  }
+  rows.sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  return rows;
+}
+
+/**
  * The project a song belongs to, for a render (which is filed under it).
  *
  * The project comes from the hub and only from the hub: the song's snapshot
@@ -473,7 +687,9 @@ export function createStudioServer({
       name,
       {
         title: command.title,
-        description: `${command.title}. ${UNDO_LINE}`,
+        description: (COMMAND_NOTES[command.id]
+          ? `${command.title}. ${COMMAND_NOTES[command.id]}`
+          : command.title) + ` ${UNDO_LINE}`,
         // The command's own fields plus the song they apply to; strict, so a
         // typo in an argument is refused instead of silently ignored.
         inputSchema: z
@@ -560,7 +776,7 @@ export function createStudioServer({
     {
       title: "Summarise the session",
       description:
-        "The song's tracks (with their device type and lock state), scenes and clips — no note data, one note count per clip. Call this first: it is how you see what the operator has. Clips are paged 50 per page; read one clip's notes with studio_get_clip.",
+        "The song's tracks (with their device type and lock state), scenes and clips — no note data, one note count per clip. Call this first: it is how you see what the operator has. Clips are paged 50 per page; read one clip's notes, or a pattern clip's steps and motion, with studio_get_clip.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to summarise"),
         page: z.number().int().min(1).optional().describe("clip page, 50 clips each; default 1"),
@@ -583,7 +799,7 @@ export function createStudioServer({
     {
       title: "Read one clip",
       description:
-        "One clip in full, notes included: each note is {t, d, p, v} — start and length in beats, MIDI pitch 0-127, velocity 1-127.",
+        "One clip in full. A notes clip answers with its notes, each {t, d, p, v} — start and length in beats, MIDI pitch 0-127, velocity 1-127. A pattern clip answers with its patterns (id, name, order), each pattern's steps (at, bank_id, index, v, locks) and each of its motion lanes (lane → {count, points}), so you can read a sampler part before you change it.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song the clip is in"),
         clip_id: z.string().min(1).describe("the clip to read"),
@@ -593,9 +809,10 @@ export function createStudioServer({
       try {
         const opened = await hub.snapshot(args.song_id, authorFor(extra));
         if (isRefusal(opened)) return errorResult(refusalText(opened));
-        const clip = opened?.snapshot?.clips?.[args.clip_id] ?? null;
+        const snap = opened?.snapshot;
+        const clip = snap?.clips?.[args.clip_id] ?? null;
         if (!clip) return errorResult(`There is no clip "${args.clip_id}" in this song.`);
-        return textResult(clip);
+        return textResult(clip.kind === "pattern" ? patternClipRead(snap, clip) : clip);
       } catch (err) {
         return errorResult(errorText(err));
       }
@@ -644,6 +861,30 @@ export function createStudioServer({
         if (isRefusal(opened)) return errorResult(refusalText(opened));
         if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
         return textResult(sampleList(opened.snapshot, args.sample_id ?? null));
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
+  // ---- the controllers ----------------------------------------------------
+
+  server.registerTool(
+    "studio_midi",
+    {
+      title: "List the song's MIDI mappings",
+      description:
+        "Every MIDI mapping of the song: id, the controller's name, the message it answers (type, channel, number) and the same message in plain words, the action it runs as JSON and as a sentence naming the scene, clip, track, bank or pad, who set it (operator or agent), and whether it is still a proposal. A live mapping routes; a proposal does nothing until the operator accepts it. Read-only. Propose mappings with studio_midi_map or a whole device profile with studio_midi_propose_profile; only the operator accepts one, and once accepted it is theirs.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song whose mappings to list"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        return textResult(midiList(opened.snapshot));
       } catch (err) {
         return errorResult(errorText(err));
       }

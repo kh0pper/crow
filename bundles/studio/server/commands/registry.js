@@ -15,8 +15,17 @@
  *     schema,                           // zod, .strict() so typos are refused
  *     summary(args, snap) -> string,    // one human line for the history panel
  *     touches(args, snap) -> string[],  // object refs a lock/focus check looks at
- *     apply(doc, args, snap) -> {before, after},
+ *     apply(doc, args, snap, context) -> {before, after},
  *   });
+ *
+ * `context.author` says who is calling — `{kind, id, label}`, the same author
+ * the history records — because two rules are about the caller rather than the
+ * arguments: `midi.map` is live when the operator runs it and a proposal when
+ * an agent does, and an agent may neither change nor accept an accepted MIDI
+ * mapping. Everything a step writes is checked on its effective writes by the
+ * hub as well (see the MIDI guard there), so a command that ignored the author
+ * would still not get a live mapping past it. A caller that names no author is
+ * taken to be an agent, the strictest reading (the hub does the same).
  *
  * `before` and `after` are plain objects keyed `"<ref>|<field>"` (see
  * doc.js `applyBeforeAfter`) holding deep-cloned JSON: one entry per field the
@@ -93,6 +102,26 @@ export class StudioError extends Error {
 
 /** Command ids read like "clip.write": a namespace, then one verb. */
 const ID_PATTERN = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
+
+/**
+ * The author a direct caller is taken to be when it names none: an agent, the
+ * strictest reading (the hub's `normalizeAuthor` does the same).
+ */
+const DEFAULT_AUTHOR = Object.freeze({ kind: "agent", id: null, label: null });
+
+/**
+ * Normalise the author a command's `apply` sees.
+ * @param {{kind?: string, id?: string|null, label?: string|null}|null|undefined} author
+ * @returns {{kind: "human"|"agent", id: string|null, label: string|null}}
+ */
+function commandAuthor(author) {
+  if (!author || typeof author !== "object") return DEFAULT_AUTHOR;
+  return Object.freeze({
+    kind: author.kind === "human" ? "human" : "agent",
+    id: typeof author.id === "string" ? author.id : null,
+    label: typeof author.label === "string" ? author.label : null,
+  });
+}
 
 /** @type {Map<string, Readonly<object>>} */
 const COMMANDS = new Map();
@@ -236,10 +265,14 @@ export function addLimitIssue(ctx, message) {
  * @param {import("yjs").Doc} doc
  * @param {string} id
  * @param {unknown} args
- * @returns {{command: Readonly<object>, args: object, snap: object, touched: string[]}}
+ * @param {{author?: object|null}} [options] - who is calling; a call that names
+ *   nobody is taken to be an agent (see `commandAuthor`)
+ * @returns {{command: Readonly<object>, args: object, snap: object,
+ *            touched: string[], author: {kind: string, id: string|null,
+ *            label: string|null}}}
  * @throws {StudioError}
  */
-export function prepareCommand(doc, id, args) {
+export function prepareCommand(doc, id, args, options = {}) {
   const command = getCommand(id);
   const parsed = validateArgs(command, args);
   if (command.idField && (parsed[command.idField] === undefined || parsed[command.idField] === null)) {
@@ -254,7 +287,13 @@ export function prepareCommand(doc, id, args) {
   if (!Array.isArray(touched) || touched.some((ref) => typeof ref !== "string" || ref === "")) {
     throw new TypeError(`Studio: ${command.id} returned touched refs that are not strings`);
   }
-  return { command, args: prepared, snap, touched: [...new Set(touched)] };
+  return {
+    command,
+    args: prepared,
+    snap,
+    touched: [...new Set(touched)],
+    author: commandAuthor(options?.author),
+  };
 }
 
 /**
@@ -264,19 +303,24 @@ export function prepareCommand(doc, id, args) {
  * `doc.transact(fn, origin)`); it opens none of its own, so one command stays
  * one Yjs update and one history step.
  * @param {import("yjs").Doc} doc
- * @param {{command: Readonly<object>, args: object, snap: object}} prepared
+ * @param {{command: Readonly<object>, args: object, snap: object,
+ *          author?: object|null}} prepared
  * @returns {{summary: string, before: Object<string, any>, after: Object<string, any>}}
  * @throws {StudioError}
  */
 export function applyCommand(doc, prepared) {
   const { command, args, snap } = prepared;
-  const changes = command.apply(doc, args, snap);
+  // Who is calling travels as the command's fourth argument, so a rule about
+  // the caller (a MIDI mapping only the operator makes live) can be kept by
+  // the command itself, not only by the hub in front of it.
+  const context = Object.freeze({ author: commandAuthor(prepared.author) });
+  const changes = command.apply(doc, args, snap, context);
   if (!changes || typeof changes !== "object") {
     throw new TypeError(`Studio: ${command.id} returned no before/after`);
   }
   const before = changes.before ?? {};
   const after = changes.after ?? {};
-  const summary = command.summary(args, snap);
+  const summary = command.summary(args, snap, context);
   if (typeof summary !== "string" || summary === "") {
     throw new TypeError(`Studio: ${command.id} returned an empty summary`);
   }
@@ -292,12 +336,14 @@ export function applyCommand(doc, prepared) {
  * @param {import("yjs").Doc} doc
  * @param {string} id
  * @param {unknown} [args]
+ * @param {{author?: object|null}} [options] - who is calling, for the rules
+ *   about the caller (see `prepareCommand`)
  * @returns {{id: string, args: object, touched: string[], summary: string,
  *            before: Object<string, any>, after: Object<string, any>}}
  * @throws {StudioError}
  */
-export function runCommand(doc, id, args = {}) {
-  const prepared = prepareCommand(doc, id, args);
+export function runCommand(doc, id, args = {}, options = {}) {
+  const prepared = prepareCommand(doc, id, args, options);
   const { summary, before, after } = applyCommand(doc, prepared);
   return { id: prepared.command.id, args: prepared.args, touched: prepared.touched, summary, before, after };
 }

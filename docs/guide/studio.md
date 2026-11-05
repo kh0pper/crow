@@ -87,7 +87,33 @@ A **sampler track** plays a **kit**: banks of 16 pads, each pad holding one samp
 
 **Patterns and chains.** A pattern clip holds up to 16 patterns and a **chain**: an ordered list of them that loops (`A, B, A`), so one clip is a bar or a phrase and the chain is the part. Pattern tabs, the chain editor and the length and swing controls sit above the steps.
 
+**Motion record.** Press **Motion**, play the pattern, and turn a pad control or a MIDI knob: every move becomes a point on that field's **motion lane**, at the step the transport is on, for the pattern it is actually playing. One pass of the pattern ends the take and writes it, and each lane is one undoable step; **Clear** beside a lane takes that curve off the pattern.
+
 **What the bot can do with the sampler.** It writes patterns, steps, locks, chains, slices and pad settings, and every one of those is a step you can undo. It cannot bring a sound in — it can import nothing, record nothing and resample nothing — and no step of its, undo included, can drop or replace the sound a pad plays (clearing a pad is yours alone: **Clear pad**), undo the adding of a bank or a sampler track whose pads now hold sounds, swap a sampler track's device, or take back a sample's arrival. A track you lock keeps it off that kit, and re-chopping a sound a locked track plays is refused too. It cannot hover over a pad in your browser, so it cannot hear what you hear: ask it for a render and say what you think.
+
+## MIDI controllers
+
+A song can be played from a floor pedalboard or a pad keyboard. Every **mapping** belongs to the song — one message from one named controller, routed to one thing it does — so the same pedals do the same thing on any device you open the song on.
+
+1. **Connect controllers.** Press **Connect controllers** once in a browser and allow MIDI access; Studio asks for it only when you press that button, never on page load. The cards at the top of the MIDI section show what is plugged in. A controller you unplug stays listed as *Unplugged* and keeps its mappings; plug it back in (the same name) and it plays them again.
+2. **Learn.** Press **Learn**, click the control on the page — a scene's launch button, Play, Record, a pad, a pad setting, an effect, the looper — then move the pedal, press the pad or turn the knob you want. Escape cancels. The press that taught the mapping is not also played.
+3. **Set up for…** lays out a whole controller in one step: **FCB1010** (one pedal per scene, in song order, and the expression pedals on the first tracks' levels) or **MPK Mini** (the pads on the first sampler's pads and the knobs on the selected track's macro knobs). Every row it lays out arrives as a **proposal**.
+4. **The bot's proposals.** The agent can propose mappings, and it cannot make one live: the notice above the table says how many it proposed. **Accept** makes one live, **Reject** throws it away, **Accept all** takes the lot. Once you accept a row it is yours — no agent step, undo included, can change or remove it. The **Set by** column says who set each row: you (amber) or the bot (blue). When a proposal moved after the page drew it, accepting it is refused and nothing goes live: look at the row again and decide.
+5. **Every row** names the control the way the hardware calls it ("FCB1010 pedal 3"), what it **sends**, what it **does**, and offers **Learn** (learn another message for that row) and **Remove**.
+
+**The FCB1010 needs a USB-MIDI cable** — the pedalboard itself has only the round MIDI socket. Its factory layout is pedals 1–10 sending program changes 0–9, with expression pedals A and B on CC 27 and CC 7. The MPK Mini is USB and needs no driver: its pads send notes 36–43 on channel 10, its knobs CC 70–77, and its keys send notes. Every unit can be reprogrammed, so if a pedal does the wrong thing, **Learn** that row — the mapping follows the message, not the name.
+
+One tab per song listens to the controllers, so two open windows never double-trigger a pedal; a tab that is not the listener says so at the top of the section. A mapping the bot wrote for you (a row it proposed and you accepted) is played as you: the actions a controller can run are the page's own controls, never a change to the song.
+
+The keys are not played yet: `keys.play` stays on the list of what a mapping can run for when they are, and no profile proposes one.
+
+## Performance effects and the looper
+
+Under the steps of a sampler track sit six buttons: **Filter sweep**, **Lo-fi**, **Stutter**, **Looper**, **Tape stop** and **Reverb throw**. **Hold one to apply it and let go to return** to the dry mix — a filter sweep under a scene, a stutter on the last beat, a tape stop into the next section; the reverb throw's tail rings out after you let go. A pedal or knob you map to an effect holds it the same way, so the floor does what the screen does.
+
+**The looper** records the master in whole bars. Press **Looper** to start recording (it starts on the bar), again to play the loop, again to overdub, and again to go back to playing. **Loop → pad** turns what the looper holds into a sample on the pad you have selected — or the first empty pad of the bank when you have not picked one — named for its length, so a loop you just played becomes part of the kit; a bank whose pads all hold a sound says so and waits for you to pick the pad it replaces. A looper that has recorded nothing says so.
+
+None of this is a change to the song: the effects and the looper are live, they never become steps in the history, and the bot cannot hold them — it has no tool that presses one, and its renders are always dry.
 
 ## The timeline
 
@@ -128,6 +154,7 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Patterns per clip | 16 | — |
 | Chain length | 64 | — |
 | Locks per step | 8 | — |
+| MIDI mappings per song | 256 | — |
 | Decoded samples held in memory | 256 MB | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
