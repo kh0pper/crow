@@ -96,7 +96,10 @@ cap or the window end was reached (rows already written stay; `--resume` continu
    and an equal pair proves nothing — a server that ignores every field but is greedy, or that
    keeps a fixed seed of its own, passes every pair on its own); then the same request twice (same
    seed) must return the same text, and `top_k=1` — and separately `min_p=1` — across two different
-   seeds must return one output, because both settings make the choice greedy. The output read is
+   seeds must return one output, because both settings make the choice greedy — and the two seeds the
+   pin pairs use are the first two control seeds whose outputs actually differed, not simply the
+   first two, since an honest sampler can repeat on two seeds by chance and a pair of equal control
+   outputs would let a `top_k`- or `min_p`-ignoring arm pass that pin for free. The output read is
    `message.content` PLUS `message.reasoning_content`, so a thinking model whose content is empty is
    measured on what it emitted, and a probe that reads nothing at all is refused. That proves the
    fields are applied at all, not that intermediate values are. An arm that fails any step is

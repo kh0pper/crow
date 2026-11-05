@@ -124,7 +124,10 @@ export async function preflightModels({ baseUrl, model, timeoutMs = 5_000, fetch
  */
 export const PROBE_PROMPT = "Write one random English word.";
 export const PROBE_MAX_TOKENS = 16;
-/** Four seeds for the control; the first two are reused by the pin pairs. */
+/**
+ * Four seeds for the control; the pin pairs reuse the first two control seeds whose outputs DIFFERED
+ * (never simply the first two: see proveSampling).
+ */
 export const PROBE_SEEDS = Object.freeze([1000, 1001, 1002, 1003]);
 /** The probe's base: everything that could greedy-fy the sampler is disabled, so only the field under test can. */
 const PROBE_BASE = Object.freeze({ temperature: 1, top_p: 1, top_k: 0, min_p: 0 });
@@ -153,6 +156,10 @@ function probeText(choice) {
  *            Without this an equal pair proves nothing: a server that ignores every field but is
  *            deterministic (greedy, or a fixed server seed) returns the same text for any two
  *            requests, and the pin checks below would pass on an arm that pins nothing.
+ *            The pin pairs then use the FIRST TWO control seeds whose outputs differed — a sampler
+ *            that honours seed can still repeat on two seeds by chance ([A, A, B, C]), and a pair
+ *            of two equal control outputs would let a server that ignores top_k (or min_p) pass
+ *            that pin for free.
  *   seed:    the same request twice (same seed)               → same text ⇒ the seed reaches the sampler
  *   top_k:   top_k=1, two DIFFERENT seeds                     → same text ⇒ top_k is applied (k=1 is greedy)
  *   min_p:   min_p=1, two different seeds, top_k 0            → same text ⇒ min_p is applied (min_p=1
@@ -161,7 +168,7 @@ function probeText(choice) {
  * the output is content + reasoning_content (a thinking-only reply is read, not skipped).
  * What it does NOT prove: that intermediate top_k/min_p values are honoured, or anything about
  * top_p. The sampling itself is pre-registered (score.mjs SAMPLING); this is a floor.
- * @returns {Promise<{seed: true, top_k: true, min_p: true, requests: number}>}
+ * @returns {Promise<{seed: true, top_k: true, min_p: true, pair_seeds: number[], requests: number}>}
  */
 export async function proveSampling({ baseUrl, model, timeoutMs = 60_000, fetchImpl = fetch } = {}) {
   const refuse = (rule) => { throw new PreflightRefused(`preflight refused: ${rule}`); };
@@ -194,15 +201,26 @@ export async function proveSampling({ baseUrl, model, timeoutMs = 60_000, fetchI
     refuse("the sampling probe read an empty completion every time (content and reasoning_content were both empty)");
   }
   if (new Set(control).size < 2) refuse("cannot prove sampling: the arm is deterministic without the pins");
+  // The two pair seeds are two control seeds whose outputs actually DIFFERED (the first such pair).
+  // A real sampler can repeat on two seeds by chance ([A, A, B, C]): a pair built from that repeat
+  // says nothing, so a server that honours seed but ignores top_k (or min_p) would pass for free.
+  let i0 = -1;
+  let i1 = -1;
+  for (let i = 0; i < control.length && i0 < 0; i += 1) {
+    for (let j = i + 1; j < control.length; j += 1) {
+      if (control[i] !== control[j]) { i0 = i; i1 = j; break; }
+    }
+  }
+  const pairSeeds = [PROBE_SEEDS[i0], PROBE_SEEDS[i1]];
   // Then the three pins, on the same high-entropy prompt.
   const pair = async (name, a, b) => {
     const [x, y] = [await ask(a), await ask(b)];
     if (x !== y) refuse(`${name} is not honoured: two requests that can only differ by the seed returned different completions`);
   };
-  await pair("seed", { seed: PROBE_SEEDS[0] }, { seed: PROBE_SEEDS[0] });
-  await pair("top_k", { top_k: 1, seed: PROBE_SEEDS[0] }, { top_k: 1, seed: PROBE_SEEDS[1] });
-  await pair("min_p", { min_p: 1, seed: PROBE_SEEDS[0] }, { min_p: 1, seed: PROBE_SEEDS[1] });
-  return { seed: true, top_k: true, min_p: true, requests };
+  await pair("seed", { seed: pairSeeds[0] }, { seed: pairSeeds[0] });
+  await pair("top_k", { top_k: 1, seed: pairSeeds[0] }, { top_k: 1, seed: pairSeeds[1] });
+  await pair("min_p", { min_p: 1, seed: pairSeeds[0] }, { min_p: 1, seed: pairSeeds[1] });
+  return { seed: true, top_k: true, min_p: true, pair_seeds: pairSeeds, requests };
 }
 
 // ---------------------------------------------------------------------------------------------

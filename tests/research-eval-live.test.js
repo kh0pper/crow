@@ -47,10 +47,12 @@ const parseSse = (text) => text.split("\n\n").filter(Boolean).map((b) => (b.slic
  *   constant      identical text for every request (a greedy / fully field-ignoring server)
  *   seed: false   ignores the request's seed and varies per call (a fixed SERVER seed)
  *   topK: false   ignores top_k        minP: false  ignores min_p
+ *   collide       seeds 1000 and 1001 return the SAME text while 1002/1003 differ ([A, A, B, C]:
+ *                 what an honest sampler does when two seeds happen to pick the same word)
  *   thinking      the text is in reasoning_content and content is empty (a thinking model)
  *   empty         content and reasoning_content are both empty
  */
-async function samplerServer(t, { constant = false, seed = true, topK = true, minP = true, thinking = false, empty = false } = {}) {
+async function samplerServer(t, { constant = false, seed = true, topK = true, minP = true, thinking = false, empty = false, collide = false } = {}) {
   let n = 0;
   const bodies = [];
   const server = createServer((req, res) => {
@@ -67,7 +69,9 @@ async function samplerServer(t, { constant = false, seed = true, topK = true, mi
       bodies.push(b);
       n += 1;
       const greedy = (topK && b.top_k === 1) || (minP && b.min_p === 1);
-      const text = empty ? "" : constant ? "ready" : greedy ? "greedy" : seed ? `seed:${b.seed}` : `n:${n}`;
+      // A colliding honest sampler: seed 1001 lands on seed 1000's word (the control is [A,A,B,C]).
+      const seedKey = collide && b.seed === PROBE_SEEDS[1] ? PROBE_SEEDS[0] : b.seed;
+      const text = empty ? "" : constant ? "ready" : greedy ? "greedy" : seed ? `seed:${seedKey}` : `n:${n}`;
       const message = thinking ? { role: "assistant", content: "", reasoning_content: text } : { role: "assistant", content: text };
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ choices: [{ message }] }));
@@ -314,7 +318,7 @@ test("the sampling probe proves seed, top_k and min_p AFTER a control that the a
   const good = await samplerServer(t);
   const proof = await proveSampling({ baseUrl: good.baseUrl, model: MODEL });
   // Four control requests (four seeds) + one pair per pin.
-  assert.deepEqual(proof, { seed: true, top_k: true, min_p: true, requests: 10 });
+  assert.deepEqual(proof, { seed: true, top_k: true, min_p: true, pair_seeds: [PROBE_SEEDS[0], PROBE_SEEDS[1]], requests: 10 });
   for (const b of good.bodies) {
     assert.ok(b.max_tokens <= 16, String(b.max_tokens));
     assert.equal(b.temperature, 1, "temperature 1, so it can never greedy-fy a pair on its own");
@@ -330,7 +334,8 @@ test("the sampling probe proves seed, top_k and min_p AFTER a control that the a
     [[0, 0, PROBE_SEEDS[0]], [0, 0, PROBE_SEEDS[0]], [1, 0, PROBE_SEEDS[0]], [1, 0, PROBE_SEEDS[1]], [0, 1, PROBE_SEEDS[0]], [0, 1, PROBE_SEEDS[1]]]);
   // A thinking model answers in reasoning_content; reading it is what keeps its proof honest.
   const thinking = await samplerServer(t, { thinking: true });
-  assert.deepEqual(await proveSampling({ baseUrl: thinking.baseUrl, model: MODEL }), { seed: true, top_k: true, min_p: true, requests: 10 });
+  assert.deepEqual(await proveSampling({ baseUrl: thinking.baseUrl, model: MODEL }),
+    { seed: true, top_k: true, min_p: true, pair_seeds: [PROBE_SEEDS[0], PROBE_SEEDS[1]], requests: 10 });
   await assert.rejects(proveSampling({ baseUrl: (await samplerServer(t, { seed: false })).baseUrl, model: MODEL }), /seed is not honoured/);
   await assert.rejects(proveSampling({ baseUrl: (await samplerServer(t, { topK: false })).baseUrl, model: MODEL }), /top_k is not honoured/);
   await assert.rejects(proveSampling({ baseUrl: (await samplerServer(t, { minP: false })).baseUrl, model: MODEL }), /min_p is not honoured/);
@@ -358,6 +363,27 @@ test("B1: the probe refuses an arm that is deterministic without the pins", asyn
   const blank = await samplerServer(t, { empty: true });
   await assert.rejects(proveSampling({ baseUrl: blank.baseUrl, model: MODEL }),
     (e) => e instanceof PreflightRefused && /empty completion every time/.test(e.message));
+});
+
+test("B2: the pin pairs use two control seeds whose outputs actually differed", async (t) => {
+  // An honest sampler can repeat on two seeds by chance: [A, A, B, C] over seeds 1000-1003. The
+  // pairs must then be built from a DIFFERING pair (1000 and 1002), not from the first two seeds —
+  // otherwise a server that honours seed but ignores top_k (or min_p) passes that pin for free,
+  // because its two pair requests already agreed in the control.
+  const honest = await samplerServer(t, { collide: true });
+  assert.deepEqual(await proveSampling({ baseUrl: honest.baseUrl, model: MODEL }),
+    { seed: true, top_k: true, min_p: true, pair_seeds: [PROBE_SEEDS[0], PROBE_SEEDS[2]], requests: 10 });
+  // On the wire: the colliding seed 1001 is never a pair seed, and top_k/min_p still collapse the pick.
+  assert.deepEqual(honest.bodies.slice(4).map((b) => [b.top_k, b.min_p, b.seed]),
+    [[0, 0, PROBE_SEEDS[0]], [0, 0, PROBE_SEEDS[0]], [1, 0, PROBE_SEEDS[0]], [1, 0, PROBE_SEEDS[2]], [0, 1, PROBE_SEEDS[0]], [0, 1, PROBE_SEEDS[2]]]);
+  // The same collision, on an arm that ignores top_k: its pair now differs, so it is refused.
+  const ignoresTopK = await samplerServer(t, { collide: true, topK: false });
+  await assert.rejects(proveSampling({ baseUrl: ignoresTopK.baseUrl, model: MODEL }),
+    (e) => e instanceof PreflightRefused && /top_k is not honoured/.test(e.message));
+  // ... and the same for min_p.
+  const ignoresMinP = await samplerServer(t, { collide: true, minP: false });
+  await assert.rejects(proveSampling({ baseUrl: ignoresMinP.baseUrl, model: MODEL }),
+    (e) => e instanceof PreflightRefused && /min_p is not honoured/.test(e.message));
 });
 
 test("evalBotDef grants exactly the skill's crow-projects tools, selects the skill, and passes the driver's guards", async () => {
