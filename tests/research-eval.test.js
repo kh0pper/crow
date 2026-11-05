@@ -137,7 +137,9 @@ test("the guard module and the server entry load no server code before the guard
 test("the fixture server is never in the server registry, and nothing outside the eval references it", () => {
   assert.ok(!readFileSync(join(ROOT, "scripts/server-registry.js"), "utf8").includes("research-eval"));
   const hits = execFileSync("git", ["grep", "-l", "fixture-server.mjs"], { cwd: ROOT, encoding: "utf8" }).split("\n").filter(Boolean);
-  assert.deepEqual(hits.filter((f) => !f.startsWith("scripts/research-eval/") && !f.startsWith("tests/")), []);
+  // The one outside reference allowed is the eval guard's frozen override table, which names the
+  // only command the eval seam may point crow-projects at.
+  assert.deepEqual(hits.filter((f) => !f.startsWith("scripts/research-eval/") && !f.startsWith("tests/") && f !== "scripts/lib/eval-guard.mjs"), []);
 });
 
 test("a seam that is not a function refuses (no silent fallback to the real fetch or search)", () => {
