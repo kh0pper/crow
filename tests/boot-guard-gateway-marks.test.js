@@ -216,6 +216,8 @@ function writeHeldMarker(gitDir, sha, { by = "boot-guard", now = Date.now(), own
 const gitDirOf = (repo) => join(repo.work, ".git");
 /** This instance's owner id, derived exactly as markStable derives it. */
 const ownerOf = (stateDir) => ownerForHome(dirname(stateDir));
+/** A well-formed owner id for the tests that call `demoteHeldMarker` directly. */
+const OWNER = "0123456789abcdef";
 
 test("markStable leaves a HELD marker written by someone else alone (fix round 2)", () => {
   // Only the boot guard's own marker says anything about this instance's boot.
@@ -265,7 +267,9 @@ test("a marker that changes between the read and the write is left as it is (fix
   const demoteWith = (mutate) => {
     const gitDir = gitDirOf(r);
     clearUpdateQuarantine({ gitDir });
-    writeHeldMarker(gitDir, r.sha, { now: t0 });
+    // Both arguments are required (fix round 4): the marker must carry this
+    // instance's owner and the very stamp the refusal recorded.
+    const held = writeHeldMarker(gitDir, r.sha, { now: t0, owner: OWNER });
     let reads = 0;
     const readMarker = ({ gitDir: dir }) => {
       reads += 1;
@@ -273,7 +277,9 @@ test("a marker that changes between the read and the write is left as it is (fix
       mutate(dir); // the peer's write, in the window
       return readUpdateQuarantine({ gitDir: dir });
     };
-    const out = demoteHeldMarker({ gitDir, bootSha: r.sha, readMarker });
+    const out = demoteHeldMarker({
+      gitDir, bootSha: r.sha, readMarker, owner: OWNER, expectedAt: held.at,
+    });
     return { out, reads, gitDir };
   };
 
@@ -390,6 +396,65 @@ test("a demote whose write fails KEEPS the refusal record, and the next stable m
   assert.equal(retried.marker.demoted, true, JSON.stringify(retried.marker));
   assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
   assert.equal(loadState(stateDir).state.refusal, null);
+});
+
+test("a git-dir lookup failure KEEPS the refusal record, and the next stable mark retries (fix round 4)", () => {
+  // `git rev-parse --absolute-git-dir` can fail transiently (a busy checkout, a
+  // lock). That says nothing about the marker, so the record must survive and the
+  // next stable mark must demote — otherwise one momentary failure froze the box
+  // until the marker was deleted by hand.
+  const r = repoWithLauncher("// launcher\n");
+  const gitDir = gitDirOf(r);
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDir, r.sha, { owner: ownerOf(stateDir) });
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  const noGit = () => { throw new Error("fatal: not a git repository"); };
+  const first = markStable(r.sha, { appRoot: r.work, stateDir, install: false, execFile: noGit });
+  assert.equal(first.ok, true, first.reason);
+  assert.equal(first.marker.demoted, false, JSON.stringify(first.marker));
+  assert.equal(first.marker.reason, "no-git-dir", JSON.stringify(first.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, true, "nothing was written");
+  assert.deepEqual(loadState(stateDir).state.refusal, { sha: r.sha, marker_at: held.at },
+    "a transient git-dir failure must not spend the record — the next stable mark retries");
+
+  const retried = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(retried.marker.demoted, true, JSON.stringify(retried.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
+  assert.equal(loadState(stateDir).state.refusal, null);
+});
+
+test("demoteHeldMarker refuses a call without an owner or without the refusal's stamp (fix round 4)", () => {
+  // Both used to default to null and SKIP their check, so any caller that forgot
+  // one could demote a co-hosted peer's marker. On a marker that otherwise matches
+  // exactly, an absent or malformed argument must demote nothing.
+  const r = repoWithLauncher("// launcher\n");
+  const gitDir = gitDirOf(r);
+  const held = writeHeldMarker(gitDir, r.sha, { owner: OWNER });
+
+  const cases = [
+    [{ expectedAt: held.at }, "no-owner", "an omitted owner"],
+    [{ owner: "", expectedAt: held.at }, "no-owner", "an empty owner"],
+    [{ owner: OWNER.slice(0, 15), expectedAt: held.at }, "no-owner", "a short owner"],
+    [{ owner: OWNER.toUpperCase(), expectedAt: held.at }, "no-owner", "a non-hex owner"],
+    [{ owner: OWNER }, "no-at", "an omitted stamp"],
+    [{ owner: OWNER, expectedAt: "" }, "no-at", "an empty stamp"],
+    [{ owner: OWNER, expectedAt: "yesterday at noon" }, "no-at", "a non-time stamp"],
+  ];
+  for (const [args, reason, what] of cases) {
+    const out = demoteHeldMarker({ gitDir, bootSha: r.sha, ...args });
+    assert.equal(out.demoted, false, what);
+    assert.equal(out.reason, reason, `${what}: ${JSON.stringify(out)}`);
+    const marker = readUpdateQuarantine({ gitDir });
+    assert.equal(marker.held, true, `${what}: the marker must stay HELD`);
+    assert.equal(marker.at, held.at, `${what}: an untouched marker keeps its own stamp`);
+  }
+
+  // The very same marker IS demoted once both arguments are right: the refusals
+  // above are about the missing argument, not about the marker.
+  const ok = demoteHeldMarker({ gitDir, bootSha: r.sha, owner: OWNER, expectedAt: held.at });
+  assert.equal(ok.demoted, true, JSON.stringify(ok));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
 });
 
 test("a terminal answer clears the refusal record: the marker is gone (fix round 3)", () => {

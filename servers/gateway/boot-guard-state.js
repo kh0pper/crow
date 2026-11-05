@@ -30,7 +30,9 @@ import { fileURLToPath } from "node:url";
 import {
   BOOT_GUARD_DIR, FULL_SHA_RE, LAUNCHER_FILE, LAUNCHER_VERSION, freshState, loadState, saveState,
 } from "../../scripts/boot-guard/crow-boot-guard.mjs";
-import { readUpdateQuarantine, ownerForHome, writeUpdateQuarantine } from "../shared/update-quarantine.js";
+import {
+  QUARANTINE_OWNER_RE, readUpdateQuarantine, ownerForHome, writeUpdateQuarantine,
+} from "../shared/update-quarantine.js";
 
 /** Ten minutes up = proven. Matches the drop-in's TimeoutStartSec headroom. */
 export const STABLE_WINDOW_MS = 10 * 60 * 1000;
@@ -201,17 +203,33 @@ function gitDirForAppRoot(appRoot, execFile) {
  * marker is therefore re-read immediately before the write and left alone if
  * anything this function decided on has changed.
  *
- * @param {string} [owner] this instance's owner id: the marker must carry it.
- * @param {string} [expectedAt] the `at` recorded with the refusal: the marker
- *   must still be the very record this instance wrote.
+ * Both `owner` and `expectedAt` are REQUIRED: the marker file is shared by every
+ * instance on one checkout, so a caller that omits either one has nothing that
+ * proves the marker is its own. Treating an absent argument as "matches" is
+ * exactly how a peer's refusal got demoted, so an unusable one is refused
+ * (`no-owner` / `no-at`) rather than skipped.
+ *
+ * @param {string} owner this instance's owner id (16 hex): the marker must
+ *   carry it. Required.
+ * @param {string} expectedAt the `at` recorded with the refusal: the marker
+ *   must still be the very record this instance wrote. Required (an ISO time).
  * @param {function} [readMarker] test seam: the shared reader, twice.
  */
 export function demoteHeldMarker({
   appRoot = APP_ROOT, bootSha, gitDir = null, execFile = execFileSync, readMarker = readUpdateQuarantine,
-  owner = null, expectedAt = null,
+  owner, expectedAt,
 } = {}) {
   try {
     if (!FULL_SHA_RE.test(String(bootSha || ""))) return { demoted: false, reason: "no-sha" };
+    // Never skipped: without both of these the marker on disk cannot be shown to
+    // be this instance's own record, and demoting a peer's refusal would let the
+    // peer restart into the commit it refused.
+    if (typeof owner !== "string" || !QUARANTINE_OWNER_RE.test(owner)) {
+      return { demoted: false, reason: "no-owner" };
+    }
+    if (typeof expectedAt !== "string" || !Number.isFinite(Date.parse(expectedAt))) {
+      return { demoted: false, reason: "no-at" };
+    }
     const dir = gitDir || gitDirForAppRoot(appRoot, execFile);
     if (!dir) return { demoted: false, reason: "no-git-dir" };
     const marker = readMarker({ gitDir: dir });
@@ -222,8 +240,8 @@ export function demoteHeldMarker({
     // Whose refusal is it? Only a marker THIS instance stamped (and whose stamp
     // matches the record it kept) is the record its own stable mark proves
     // wrong; anything else belongs to a peer or to an earlier release.
-    if (owner != null && marker.owner !== owner) return { demoted: false, reason: "other-owner" };
-    if (expectedAt != null && marker.at !== expectedAt) return { demoted: false, reason: "changed-at" };
+    if (marker.owner !== owner) return { demoted: false, reason: "other-owner" };
+    if (marker.at !== expectedAt) return { demoted: false, reason: "changed-at" };
     // Close the read-then-write race: exactly the fields below are the ones the
     // write carries over, so a marker that changed in any of them (a peer's
     // fresher refusal, a different sha, another writer, another owner, a
@@ -259,11 +277,16 @@ function sameMarkerForDemotion(a, b) {
 }
 
 /** Reasons that leave `state.refusal` in place for a later stable mark to retry:
- *  the marker could not be written (or the state could not be saved first).
+ *  the marker could not be written, the state could not be saved first, or the
+ *  git dir could not be looked up (`no-git-dir` — a transient failure of `git
+ *  rev-parse`, e.g. a busy checkout, says nothing about the marker).
  *  Everything else — a demotion, or a marker that is gone, names another sha,
  *  another writer, another owner or another stamp — is terminal: the record no
- *  longer describes a marker this instance wrote. */
-const DEMOTE_RETRY_REASONS = new Set(["write-failed", "not-saved", "error"]);
+ *  longer describes a marker this instance wrote. `no-owner` / `no-at` are
+ *  terminal too, and cannot come from `markStable`: it always derives the owner
+ *  and passes the refusal's own `marker_at`, and the state validator refuses a
+ *  record whose sha or stamp is not well formed. */
+const DEMOTE_RETRY_REASONS = new Set(["write-failed", "not-saved", "no-git-dir", "error"]);
 
 function demoteIsTerminal(result) {
   if (result?.demoted === true) return true;
@@ -297,8 +320,10 @@ function demoteIsTerminal(result) {
  *     read-only git dir) has no record, so it can demote nothing.
  *
  * A terminal answer (demoted, or the marker is gone / another sha / another
- * writer / another owner / another stamp) clears the record; a WRITE failure
- * keeps it, so the next stable mark retries.
+ * writer / another owner / another stamp) clears the record; a failure that
+ * could pass — the marker could not be written, the state could not be saved
+ * first, or the git dir could not be looked up — keeps it, so the next stable
+ * mark retries.
  */
 export function markStable(bootSha, {
   appRoot = APP_ROOT, dbPath = null, stateDir = stateDirFor(), now = Date.now(),
