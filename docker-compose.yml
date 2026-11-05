@@ -17,16 +17,30 @@
 ## Keeping an existing MinIO install running (no data change):
 ##   docker compose --profile cloud --profile minio-legacy up --build
 ##
-## Required in .env — only for the profile you actually start. Compose interpolates
-## EVERY service in this file, including the ones whose profile is off, so a required
-## variable reference (a `:?` with an error message) would make an unrelated profile
-## fail before any container starts. Hence the empty-default `:-` form below: the values
-## are still required, but a blank one stops the container that needs it (Garage refuses
-## to start without its RPC secret, MinIO without a root password), not the whole
-## `docker compose config`.
-##   storage        — GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN, GARAGE_METRICS_TOKEN,
-##                    GARAGE_DEFAULT_ACCESS_KEY, GARAGE_DEFAULT_SECRET_KEY
-##   minio-legacy   — MINIO_ROOT_PASSWORD
+## Two environment files, and which service reads which:
+##   .env         — crow-gateway (and tunnel): Crow's own settings, including the
+##                  S3_ENDPOINT / S3_ACCESS_KEY / S3_SECRET_KEY the gateway reaches
+##                  object storage with. Copy it from .env.example.
+##   .env.garage  — the garage service ONLY: its five GARAGE_* secrets, read through
+##                  that service's own env_file. Copy it from .env.garage.example.
+##
+## Garage's admin token, RPC secret and metrics token must never reach the gateway. The
+## gateway only ever talks to Garage over S3, with the one key pair in S3_* (the same
+## rule the File Storage (Garage) extension follows — see tests/garage-bundle.test.js),
+## so no GARAGE_* reference appears in any service other than garage.
+##
+## Required keys — only for the profile you actually start. Compose interpolates EVERY
+## service in this file, including the ones whose profile is off, so a required variable
+## reference (a `:?` with an error message) would make an unrelated profile fail before
+## any container starts. Hence the empty-default `:-` form below for the one value that
+## is still interpolated: the value is still required, but a blank one stops the
+## container that needs it (MinIO without a root password), not the whole
+## `docker compose config`. Garage reads its secrets from .env.garage instead, where a
+## blank one stops the container (it refuses to start without an RPC secret).
+##   storage        — .env.garage: GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN,
+##                    GARAGE_METRICS_TOKEN, GARAGE_DEFAULT_ACCESS_KEY,
+##                    GARAGE_DEFAULT_SECRET_KEY
+##   minio-legacy   — MINIO_ROOT_PASSWORD in .env
 
 services:
   crow-gateway:
@@ -49,26 +63,24 @@ services:
     profiles: [cloud, local]
 
   garage:
-    # Default object storage: Garage (S3-compatible). Same image, command, env and
-    # healthcheck as the File Storage (Garage) extension (bundles/garage), so an
-    # Extensions install and this profile behave identically. The gateway reaches
-    # it at S3_ENDPOINT=garage:3900 (see .env.example) with the key created on
-    # first start by --default-access-key.
+    # Default object storage: Garage (S3-compatible). Same image, command, secrets and
+    # healthcheck as the File Storage (Garage) extension (bundles/garage) — the bundle
+    # passes the five GARAGE_* values through `environment:`, this service through the
+    # env file below — so an Extensions install and this profile behave identically. The
+    # gateway reaches it at S3_ENDPOINT=garage:3900 (see .env.example) with the key
+    # created on first start by --default-access-key.
     image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
     command: ["/garage", "server", "--single-node", "--default-access-key"]
-    environment:
-      # All five are required — set them in .env; see .env.example for the formats
-      # (RPC secret 64 hex, key ID "GK" + 24 hex, S3 secret 64 hex). The empty-default
-      # `:-` form, not a required `:?` reference, on purpose: Compose interpolates this
-      # service even when its profile is off, and a required reference would break
-      # `--profile cloud --profile minio-legacy`. A blank value stops Garage at
-      # container start instead — it will not run without an RPC secret — which is the
-      # only profile that ever reads these.
-      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET:-}"
-      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:-}"
-      GARAGE_METRICS_TOKEN: "${GARAGE_METRICS_TOKEN:-}"
-      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY:-}"
-      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY:-}"
+    # Garage's five secrets (RPC secret, admin token, metrics token, and the S3 key
+    # pair) come from its OWN env file — never from .env, which the gateway loads.
+    # The gateway must never hold the cluster admin token or the RPC secret; it gets
+    # S3_ACCESS_KEY / S3_SECRET_KEY only. `required: true` (long form, Compose Spec)
+    # makes a missing .env.garage a plain error instead of a Garage that starts with
+    # no secrets. Nothing else is passed in: the non-secret settings live in the
+    # mounted garage.toml, so this service needs no `environment:` block at all.
+    env_file:
+      - path: .env.garage
+        required: true
     volumes:
       # The extension's own rendered config, mounted read-only rather than copied:
       # one file keeps the bundle install and this profile from drifting apart.

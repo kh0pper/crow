@@ -9,10 +9,15 @@
  *  - `storage` is garage, `minio-legacy` is minio — and nothing else;
  *  - Garage's S3 API (3900) and RPC (3901) are never published to the host, only
  *    the admin API (3903) on loopback;
- *  - the compose hardcodes no credentials (every Garage secret is an empty-default
- *    ${VAR:-} reference — never a value, never a `${VAR:?}` that an unrelated
- *    profile would have to satisfy — and Garage's own key pair is the same pair the
- *    gateway gets as S3_ACCESS_KEY / S3_SECRET_KEY);
+ *  - **the gateway never receives a Garage secret.** Garage reads its five GARAGE_*
+ *    values from its own `.env.garage` (its `env_file:`), and `.env` — the file the
+ *    gateway loads — carries the S3 key pair in S3_* and nothing else. Garage's admin
+ *    token and RPC secret are cluster credentials: the same rule the File Storage
+ *    (Garage) extension follows ("the gateway gets S3_* only", tests/garage-bundle.test.js).
+ *    No service interpolates `${GARAGE_…}`, so no Garage secret can arrive through `.env`;
+ *  - the compose hardcodes no credentials (never a value, never a `${VAR:?}` that an
+ *    unrelated profile would have to satisfy) and Garage's own key pair is the same pair
+ *    the gateway gets as S3_ACCESS_KEY / S3_SECRET_KEY;
  *  - the image is the bundle's digest-pinned Garage, so the compose profile and
  *    an Extensions install can never drift onto different Garage builds.
  *
@@ -93,6 +98,38 @@ const profilesOf = (block) => {
   return m[1].split(",").map((s) => s.trim()).filter(Boolean);
 };
 
+/** The env file paths a service's `env_file:` declares — long form (`- path: x`) or short. */
+function envFilePaths(block) {
+  const paths = [];
+  const lines = block.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*env_file:\s*(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const inline = m[1].replace(/\s+#.*$/, "").trim();
+    if (inline) {
+      for (const part of inline.replace(/^\[/, "").replace(/\]$/, "").split(",")) {
+        paths.push(part.trim().replace(/^["']|["']$/g, ""));
+      }
+      continue;
+    }
+    for (let j = i + 1; j < lines.length; j++) {
+      const item = /^\s*-\s+(.+)$/.exec(lines[j]);
+      if (!item) break;
+      const raw = item[1].replace(/\s+#.*$/, "").trim();
+      paths.push((/^path:\s*(.+)$/.exec(raw)?.[1] ?? raw).trim().replace(/^["']|["']$/g, ""));
+    }
+  }
+  return paths;
+}
+
+/** Comment lines stripped: prose may NAME a variable without consuming it. */
+const codeLines = (block) => block.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+
+const GARAGE_SECRETS = [
+  "GARAGE_RPC_SECRET", "GARAGE_ADMIN_TOKEN", "GARAGE_METRICS_TOKEN",
+  "GARAGE_DEFAULT_ACCESS_KEY", "GARAGE_DEFAULT_SECRET_KEY",
+];
+
 // ── profiles ──
 
 test("`--profile storage` starts Garage, and only Garage", () => {
@@ -137,24 +174,60 @@ test("garage publishes the admin API on loopback only", () => {
   assert.deepEqual(mappings, [{ service: null, ip: "127.0.0.1", port: 3903 }]);
 });
 
-// ── no hardcoded credentials ──
+// ── no Garage secret reaches the gateway ──
 
-test("garage takes every secret from the environment, with no fallback value", () => {
+test("garage reads its five secrets from .env.garage, and interpolates none of them", () => {
   const block = garage();
-  const wanted = [
-    "GARAGE_RPC_SECRET", "GARAGE_ADMIN_TOKEN", "GARAGE_METRICS_TOKEN",
-    "GARAGE_DEFAULT_ACCESS_KEY", "GARAGE_DEFAULT_SECRET_KEY",
-  ];
-  for (const name of wanted) {
-    const m = new RegExp(`^\\s+${name}:\\s*(.+?)\\s*$`, "m").exec(block);
-    assert.ok(m, `${name} is set on the service`);
-    assert.match(m[1], new RegExp(`^"\\$\\{${name}:-\\}"$`),
-      `${name} must be an empty-default \${VAR:-} reference (a value would be a credential in git)`);
-  }
+  assert.deepEqual(envFilePaths(block), [".env.garage"],
+    "Garage's own env file — not .env, which the gateway loads");
+  assert.match(block, /^\s*env_file:\s*\n\s*-\s*path:\s*\.env\.garage\s*\n\s*required:\s*true\s*$/m,
+    "declared required: a missing .env.garage is an error, not a Garage with no secrets");
+  assert.doesNotMatch(codeLines(block), /\$\{?GARAGE_/,
+    "no GARAGE_* interpolation either — that would read the value from .env");
   // Nothing else in the service carries a literal secret-shaped value.
   for (const [key, value] of [...block.matchAll(/^\s+([A-Z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD)[A-Z0-9_]*):\s*(.+?)\s*$/gm)].map((m) => [m[1], m[2]])) {
     assert.ok(value.startsWith('"${'), `${key} is not hardcoded`);
   }
+});
+
+test("no service except garage sees a GARAGE_* value: the gateway gets an S3 key, never the admin token", () => {
+  const gw = SERVICES.get("crow-gateway");
+  assert.ok(gw, "the gateway service is still there");
+  assert.deepEqual(envFilePaths(gw), [".env"], "the gateway loads .env, not Garage's file");
+  for (const [name, block] of SERVICES) {
+    if (name === "garage") continue;
+    assert.ok(!envFilePaths(block).includes(".env.garage"), `${name} must not load .env.garage`);
+    assert.doesNotMatch(codeLines(block), /GARAGE_/, `${name} must not reference a Garage secret`);
+  }
+});
+
+test(".env.example (the gateway's file) carries no Garage secret — only a pointer to .env.garage.example", () => {
+  const example = readFileSync(join(ROOT, ".env.example"), "utf8");
+  assert.doesNotMatch(example, /^\s*#?\s*(?:export\s+)?GARAGE_[A-Z0-9_]*=/m,
+    "no GARAGE_* assignment line, commented out or not: .env must never hold one");
+  assert.match(example, /\.env\.garage\.example/, "points at the Garage file instead");
+  assert.match(example, /^# S3_ACCESS_KEY=/m, "the S3_* block stays (the gateway's own key)");
+  assert.match(example, /^# S3_SECRET_KEY=/m);
+});
+
+test(".env.garage.example: the five keys, empty, each with its generating command and the S3_* copy note", () => {
+  const text = readFileSync(join(ROOT, ".env.garage.example"), "utf8");
+  for (const name of GARAGE_SECRETS) {
+    assert.match(text, new RegExp(`^${name}=$`, "m"), `${name} is an empty key, never an example value`);
+    assert.ok(text.includes(`echo "${name}=`), `${name} carries its generating command`);
+  }
+  assert.match(text, /GARAGE_DEFAULT_ACCESS_KEY=GK\$\(openssl rand -hex 12\)/, "key ID: GK + 24 hex");
+  for (const name of ["GARAGE_RPC_SECRET", "GARAGE_ADMIN_TOKEN", "GARAGE_METRICS_TOKEN", "GARAGE_DEFAULT_SECRET_KEY"]) {
+    assert.ok(text.includes(`echo "${name}=$(openssl rand -hex 32)"`), `${name} is 32 random bytes`);
+  }
+  assert.match(text, /S3_ACCESS_KEY/, "says the access key is copied into .env");
+  assert.match(text, /S3_SECRET_KEY/, "says the secret key is copied into .env");
+});
+
+test(".gitignore lists .env.garage next to .env, so the secrets file is never committed", () => {
+  const lines = readFileSync(join(ROOT, ".gitignore"), "utf8").split("\n").map((l) => l.trim());
+  assert.ok(lines.includes(".env.garage"), ".env.garage is ignored");
+  assert.ok(lines.includes(".env"), ".env is still ignored");
 });
 
 test("no service with a profiles list uses ${VAR:?} — Compose interpolates inactive profiles too", () => {
@@ -163,7 +236,8 @@ test("no service with a profiles list uses ${VAR:?} — Compose interpolates ina
   // profile was OFF: Compose interpolates every service in the file before it filters
   // by profile. So a required `${VAR:?}` on a profiled service demands the values of
   // every other profile as well. These services keep `${VAR:-}` and fail at container
-  // start instead (Garage without an RPC secret, MinIO without a root password).
+  // start instead (MinIO without a root password; Garage now reads its own .env.garage
+  // through env_file and refuses to start without an RPC secret).
   // Comments are stripped first: prose may NAME the rejected form without using it.
   const code = (block) => block.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
   for (const [name, block] of SERVICES) {

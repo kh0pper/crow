@@ -57,6 +57,8 @@ Un operador recién llegado normalmente solo toca estas: `CROW_GATEWAY_URL` (acc
 
 `S3_*` gana sobre `MINIO_*`: con `S3_ENDPOINT` definido, `MINIO_PORT` y compañía se ignoran. Garage es el backend por defecto (la extensión File Storage, o `docker compose --profile storage`).
 
+Los secretos propios del contenedor Garage (`GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_METRICS_TOKEN` y el par `GARAGE_DEFAULT_*`) **no** van en `.env`: el servicio `garage` del compose raíz los lee de su propio `.env.garage` (copia `.env.garage.example` — está en `.gitignore`). El gateway nunca debe recibirlos; solo obtiene `S3_ACCESS_KEY` / `S3_SECRET_KEY`, el único par que necesita para leer objetos.
+
 | Variable | Predeterminado | Propósito |
 |---|---|---|
 | `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *(sin definir)* | Cualquier endpoint compatible con S3 — Garage, o el S3 de otro. El puerto va dentro del endpoint (`garage:3900`); no existe `S3_PORT`. |

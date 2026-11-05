@@ -83,6 +83,8 @@ link here — there is no built-in fallback model list.
 
 `S3_*` wins over `MINIO_*`: with `S3_ENDPOINT` set, `MINIO_PORT` and friends are ignored. Garage is the default backend (the File Storage extension, or `docker compose --profile storage`).
 
+Garage's own container secrets (`GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_METRICS_TOKEN` and the `GARAGE_DEFAULT_*` key pair) do **not** go in `.env`: the root compose's `garage` service reads them from its own `.env.garage` (copy `.env.garage.example` — it is gitignored). The gateway must never receive them; it gets only `S3_ACCESS_KEY` / `S3_SECRET_KEY`, the one pair it needs to read objects.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | *(unset)* | Any S3-compatible endpoint — Garage, or someone else's S3. The port belongs to the endpoint (`garage:3900`); there is no `S3_PORT`. |

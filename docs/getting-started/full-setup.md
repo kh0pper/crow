@@ -29,37 +29,45 @@ The full setup starts all Crow services together: the MCP gateway, [Garage](http
 git clone https://github.com/kh0pper/crow.git
 cd crow
 cp .env.example .env
+cp .env.garage.example .env.garage
 ```
+
+Two files, two readers:
+
+- **`.env`** — read by the gateway. Crow's own settings, plus the `S3_*` key it reaches object storage with.
+- **`.env.garage`** — read by the `garage` service only (its own `env_file:` in `docker-compose.yml`). Garage's five `GARAGE_*` secrets live here.
+
+Garage's admin token, RPC secret and metrics token never belong in `.env`: the gateway needs an S3 key, never Garage's cluster admin token. Only the one S3 key pair is shared between the two files, copied by hand.
 
 ## Step 2: Edit Environment Variables
 
-Open `.env` and set the required values:
+`.env` — the gateway's file. Only the S3 key pair comes from Garage:
 
 ```bash
-# Garage (file storage) — the default object storage.
-# The gateway's S3_* and the container's GARAGE_DEFAULT_* are ONE key pair: Garage
-# creates that key on its first start, so both sides must match exactly.
+# The gateway reaches Garage over S3 with this ONE key pair — nothing else from
+# Garage goes in this file. Garage creates that key on its first start
+# (--default-access-key), so copy the same pair from .env.garage below.
 S3_ENDPOINT=garage:3900        # "garage" for Docker Compose, 127.0.0.1:3900 outside Docker
-S3_ACCESS_KEY=                 # = GARAGE_DEFAULT_ACCESS_KEY below
-S3_SECRET_KEY=                 # = GARAGE_DEFAULT_SECRET_KEY below
+S3_ACCESS_KEY=                 # = GARAGE_DEFAULT_ACCESS_KEY in .env.garage
+S3_SECRET_KEY=                 # = GARAGE_DEFAULT_SECRET_KEY in .env.garage
 S3_USE_SSL=false
 S3_REGION=us-east-1            # must match s3_region in bundles/garage/garage.toml
-
-# The Garage container's own secrets — all five are required; generate them with the
-# commands below. Formats: the key ID is "GK" + 24 hex characters, the S3 secret and
-# the RPC secret are 64 hex characters, the admin/metrics tokens are any long random
-# string (64 hex is fine).
-GARAGE_RPC_SECRET=
-GARAGE_ADMIN_TOKEN=
-GARAGE_METRICS_TOKEN=
-GARAGE_DEFAULT_ACCESS_KEY=
-GARAGE_DEFAULT_SECRET_KEY=
 
 # Storage quota (in MB)
 STORAGE_QUOTA_MB=1024
 ```
 
-Generate the five Garage values and paste each line into `.env` — Compose does not expand `$(…)` inside an env file, so the values have to be literal there:
+`.env.garage` — the Garage container's own secrets (all five required). Formats: the key ID is `GK` + 24 hex characters, the S3 secret and the RPC secret are 64 hex characters, the admin/metrics tokens are any long random string (64 hex is fine):
+
+```bash
+GARAGE_RPC_SECRET=             # 64 hex — Garage will not start without it
+GARAGE_ADMIN_TOKEN=            # any long random string — full admin control
+GARAGE_METRICS_TOKEN=          # any long random string
+GARAGE_DEFAULT_ACCESS_KEY=     # key ID "GK" + 24 hex — copy to .env as S3_ACCESS_KEY
+GARAGE_DEFAULT_SECRET_KEY=     # 64 hex — copy to .env as S3_SECRET_KEY
+```
+
+Generate the five values and paste each line into `.env.garage` — Compose does not expand `$(…)` inside an env file, so the values have to be literal there. Then copy the access key and its secret into `.env` as `S3_ACCESS_KEY` / `S3_SECRET_KEY`:
 
 ```bash
 echo "GARAGE_DEFAULT_ACCESS_KEY=GK$(openssl rand -hex 12)"   # key ID: "GK" + 24 hex — copy as S3_ACCESS_KEY too
@@ -68,6 +76,8 @@ echo "GARAGE_RPC_SECRET=$(openssl rand -hex 32)"             # 64 hex — Garage
 echo "GARAGE_ADMIN_TOKEN=$(openssl rand -hex 32)"
 echo "GARAGE_METRICS_TOKEN=$(openssl rand -hex 32)"
 ```
+
+Why the split: the gateway talks to Garage over S3 and needs nothing but the key pair, so it must never hold the cluster admin token or the RPC secret — a leaked gateway env would otherwise hand over the whole storage cluster. `.env.garage` is read by the garage container alone (and listed in `.gitignore`, like `.env`).
 
 The port belongs to `S3_ENDPOINT` (there is no `S3_PORT`), and the gateway's `S3_ACCESS_KEY` / `S3_SECRET_KEY` must be the same pair as `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage creates that key on first start. Leave a `GARAGE_*` value blank and the Garage container stops on start (it refuses to run without an RPC secret), while the gateway itself still boots. Blog settings are managed via the `crow_blog_settings` MCP tool or the Crow's Nest — no env vars needed.
 
