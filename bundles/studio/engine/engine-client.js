@@ -3,17 +3,21 @@
  *
  * The engine is one AudioWorklet node whose processor hosts SunVox and the
  * sequencer (`studio-processor.js`). A worklet cannot `import`, so this file
- * glues six sources into ONE module and hands it to
+ * glues these sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + studio-processor.js
+ *       + spessasynth.js + font-voice.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
  * the client side of the port, before the PCM is handed over. `sampler-voice.js`
  * is the sampler's voice DSP, and `perf-fx.js` the performance-effects bus and
- * its looper, which the processor uses in that same scope.
+ * its looper, which the processor uses in that same scope. `spessasynth.js` is
+ * the vendored SoundFont synth: one import-free classic script that defines
+ * `globalThis.StudioSpessa` (see `vendor/spessasynth/`), which is the only shape
+ * a worklet can load; `font-voice.js` is the host that drives it, one synth per
+ * font with one MIDI channel per track (plan 1d).
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -108,6 +112,27 @@
  *   an offline render does): past that the engine drops the least-recently
  *   played one, and `onSampleNeeded(listener)` says which sample a trigger
  *   wanted so the page can load it back.
+ * - `loadLibrary(id, kind, bytes)` hands the engine one library FILE — a
+ *   SoundFont bank today (`kind: "font"`), a capture or cabinet later —
+ *   transferred rather than copied, and resolves with what became of it:
+ *   `{status: "loaded" | "deferred" | "failed", reason?}`. There is no fetch on
+ *   the audio thread, so the page (or a render) reads the file and posts it
+ *   here. Banks are parsed ONLY while the transport is stopped (the plan's
+ *   loading rule): a load posted while the song plays is answered `deferred` and
+ *   parsed on the next `stop()`, which is what the page's "Loads when you stop."
+ *   says. `unloadLibrary(id)` drops one file again (and cancels a load of it that
+ *   has not been parsed yet), and `onLibraryNeeded(listener)` follows the fonts a
+ *   track wanted but the engine does not hold, so the page can load them (or
+ *   offer a download). The processor holds at most 1 GiB of banks per page
+ *   (`maxFontBytes` on `create()` for a host that knows its own window), counted
+ *   as the files plus their decoded sample data: past it the least recently
+ *   played font no track of the song plays is dropped and requested again, and a
+ *   load comes back `failed` with the
+ *   reason to show. A font that did load answers with its `presets` too —
+ *   `[{bank, program, name}]`, sorted by bank then program — which is what the
+ *   instrument picker lists, and `onLibraryPresets(listener)` follows them for a
+ *   bank that finished loading after its asker stopped waiting (a load that
+ *   waited for Stop answers `deferred` first, and its presets arrive later).
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
@@ -141,8 +166,26 @@
     "sampler-voice.js",
     "perf-fx.js",
     "sunvox.js",
+    // The vendored SoundFont synth, before the processor that hosts it: it is
+    // one import-free classic script that defines globalThis.StudioSpessa.
+    "spessasynth.js",
+    // The SoundFont hosts: one synth per font, one MIDI channel per track (see
+    // font-voice.js). Before the processor that hosts them.
+    "font-voice.js",
     "studio-processor.js",
   ];
+
+  /**
+   * The engine sources that live outside this directory: the vendored scripts
+   * `SOURCE_FILES` names, as paths from here. A Node caller that supplies no
+   * `assetBytes` for one of them (a test that predates it passes only the files
+   * it knows) is still handed the very same file a browser is served.
+   * @type {Readonly<Object<string, string[]>>}
+   */
+  const VENDORED_SOURCES = Object.freeze({
+    "sunvox.js": ["..", "vendor", "sunvox", "sunvox.js"],
+    "spessasynth.js": ["..", "vendor", "spessasynth", "spessasynth.js"],
+  });
 
   /**
    * The audio contexts that already have the Studio processor registered. A
@@ -250,6 +293,29 @@
     return copy;
   }
 
+  /**
+   * The presets a loaded bank announced, kept to the three fields the instrument
+   * picker needs: `{bank, program, name}`, with whole numbers inside MIDI's range.
+   * Anything else in a message is dropped rather than trusted.
+   * @param {unknown[]} list what the processor posted
+   * @returns {Array<{bank: number, program: number, name: string}>}
+   */
+  function presetsOf(list) {
+    const out = [];
+    for (const item of list) {
+      if (!item || typeof item !== "object") continue;
+      const bank = Math.trunc(Number(item.bank));
+      const program = Math.trunc(Number(item.program));
+      if (!Number.isFinite(bank) || !Number.isFinite(program)) continue;
+      out.push({
+        bank: Math.min(128, Math.max(0, bank)),
+        program: Math.min(127, Math.max(0, program)),
+        name: item.name === undefined || item.name === null ? "" : String(item.name),
+      });
+    }
+    return out;
+  }
+
   /** @returns {boolean} whether this script runs in Node rather than a browser. */
   function isNode() {
     return typeof process !== "undefined" && !!(process && process.versions && process.versions.node);
@@ -322,9 +388,12 @@
       const fs = req("node:fs");
       const path = req("node:path");
       // Only a plain file name: a caller's name is never turned into a path
-      // outside this module's own directory.
+      // outside this module's own directory. A vendored source's path is fixed
+      // here, never taken from the caller.
       if (name !== path.basename(name)) return null;
-      const file = path.join(__dirname, name);
+      const file = VENDORED_SOURCES[name]
+        ? path.join(__dirname, ...VENDORED_SOURCES[name])
+        : path.join(__dirname, name);
       if (!fs.existsSync(file)) return null;
       return fs.readFileSync(file, "utf8");
     } catch {
@@ -647,13 +716,15 @@
    *
    * @param {BaseAudioContext} context an AudioContext or OfflineAudioContext
    * @param {{assetBase?: string, assetBytes?: object, readyTimeoutMs?: number,
-   *          testHooks?: boolean, maxSampleBytes?: number}} options
+   *          testHooks?: boolean, maxSampleBytes?: number, maxFontBytes?: number}} options
    *   `assetBase` is a URL prefix the engine files are fetched from;
    *   `assetBytes` is a map of file name → string/Uint8Array, which wins over
    *   `assetBase` for the names it holds (Node callers read the files
    *   themselves); `testHooks` arms the processor's test-only faults;
    *   `maxSampleBytes` is the song-wide cap on decoded samples, the browser's
-   *   256 MB when omitted (an offline render passes the bytes its window needs)
+   *   256 MB when omitted (an offline render passes the bytes its window needs);
+   *   `maxFontBytes` is the cap on the library banks parsed in the engine, the
+   *   plan's 1 GiB when omitted (an offline render passes its own font window)
    * @returns {Promise<{node: AudioWorkletNode,
    *                    setSong: function(object): void,
    *                    launchScene: function(string): void,
@@ -669,6 +740,9 @@
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onTap: function(function): function,
+  *                    loadLibrary: function(string, string, Uint8Array): Promise<{status: string, reason?: string}>,
+ *                    unloadLibrary: function(string): void,
+ *                    onLibraryNeeded: function(function): function,
    *                    fxHold: function(string, number): void,
    *                    fxRelease: function(string): void,
    *                    looper: function(string): void,
@@ -1132,6 +1206,7 @@
         wasmBinary: wasmBinary,
         testHooks: opts.testHooks === true,
         ...(Number(opts.maxSampleBytes) > 0 ? { maxSampleBytes: Number(opts.maxSampleBytes) } : {}),
+        ...(Number(opts.maxFontBytes) > 0 ? { maxFontBytes: Number(opts.maxFontBytes) } : {}),
       },
     });
 
@@ -1139,6 +1214,8 @@
     const launchListeners = new Set();
     const errorListeners = new Set();
     const sampleNeededListeners = new Set();
+    const libraryNeededListeners = new Set();
+    const libraryPresetsListeners = new Set();
     const tapListeners = new Set();
     /**
      * Hand one failure to the error listeners and the console: a fault after
@@ -1166,6 +1243,9 @@
     const pendingAudio = new Map();
     /** sample id → resolvers waiting for the processor's `sample_loaded`. */
     const pendingSamples = new Map();
+    /** request id → the resolver waiting for that load's `library_loaded` / `library_deferred`. */
+    const pendingLibrary = new Map();
+    let librarySeq = 0;
     /** request id → the resolver waiting for the processor's `looper_buffer`. */
     const pendingLooper = new Map();
     let looperSeq = 0;
@@ -1295,6 +1375,62 @@
           const resolveSample = waiting.shift();
           if (waiting.length === 0) pendingSamples.delete(message.sample_id);
           resolveSample();
+        }
+        return;
+      }
+      if (message.type === "library_loaded" || message.type === "library_deferred") {
+        // One ack per library message, matched by the request id the load was
+        // posted with: a later load of the same font never answers an earlier
+        // one. A load resolves with what became of it — `loaded`, `deferred` (it
+        // waits for Stop) or `failed` (with the reason the processor gave, which
+        // is also posted once per font id as `library_failed`). A font that
+        // loaded also carries the presets of the bank it parsed, which is what
+        // the page's instrument picker lists.
+        const presets = Array.isArray(message.presets) ? presetsOf(message.presets) : null;
+        if (presets) {
+          // Handed to the listeners whoever asked: a load answered `deferred`
+          // resolves at once, and its presets arrive here when it is parsed on
+          // Stop, with no request left waiting for them.
+          for (const listener of libraryPresetsListeners) {
+            try {
+              listener(String(message.library_id), presets);
+            } catch {
+              /* one bad listener must not stop the others hearing about it */
+            }
+          }
+        }
+        const waiting = pendingLibrary.get(message.request_id);
+        if (waiting === undefined) return;
+        pendingLibrary.delete(message.request_id);
+        if (message.type === "library_deferred") {
+          waiting({ status: "deferred" });
+          return;
+        }
+        if (message.ok === false) {
+          const reason = message.reason === undefined ? "" : String(message.reason);
+          waiting({ status: "failed", reason: reason });
+          return;
+        }
+        waiting(presets ? { status: "loaded", presets: presets } : { status: "loaded" });
+        return;
+      }
+      if (message.type === "library_failed") {
+        // A bank that will not parse (or that failed while rendering): its tracks
+        // are silent and the processor reports it once per font id.
+        notifyError(`The instrument ${message.library_id} could not be read: ${message.reason}`);
+        return;
+      }
+      if (message.type === "library_needed") {
+        // A track's font is not loaded on this device (never fetched, still
+        // uploading, or dropped by the engine's font cap): the page owns the
+        // bytes, so it loads them — or offers the download.
+        const id = String(message.library_id);
+        for (const listener of libraryNeededListeners) {
+          try {
+            listener(id);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
         }
         return;
       }
@@ -1656,6 +1792,93 @@
       },
 
       /**
+       * Hand the processor one library FILE, already read (there is no fetch in
+       * the worklet): a SoundFont bank today (`kind: "font"`). The bytes are
+       * transferred, so the caller must not use the array it passed once this
+       * resolves.
+       *
+       * A bank is parsed only while the transport is stopped (the plan's loading
+       * rule). A load posted while the song plays is parked and parsed on the
+       * next `stop()`, and resolves `{status: "deferred"}` at once — the page
+       * shows "Loads when you stop." in the meantime. Each load carries its own
+       * request id, so its promise settles for THAT load and never for another
+       * load of the same font.
+       * @param {string} libraryId
+       * @param {string} kind `"font"` (a capture or cabinet is acknowledged and
+       *   left to the host that reads them)
+       * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes the file itself
+       * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string,
+       *   presets?: Array<{bank: number, program: number, name: string}>}>}
+       *   `failed` carries why: a bank that will not parse, one with no
+       *   instruments, or one the song's own fonts have left no room for; a font
+       *   that loaded carries the `presets` of the bank it parsed; an
+       *   empty id is refused here, before anything is posted
+       */
+      loadLibrary(libraryId, kind, bytes) {
+        // An empty id names nothing: answer at once, without posting a message
+        // the processor would only have to ignore.
+        if (libraryId === undefined || libraryId === null || String(libraryId) === "") {
+          return Promise.resolve({ status: "failed", reason: "A library load needs an id." });
+        }
+        const id = String(libraryId);
+        const data = bytesOf(bytes);
+        // A view into a larger buffer is copied: transferring it would hand the
+        // processor (and detach here) the whole underlying buffer.
+        const payload = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : data.slice();
+        librarySeq += 1;
+        const requestId = librarySeq;
+        return new Promise((resolve) => {
+          pendingLibrary.set(requestId, resolve);
+          post(
+            { type: "library", request_id: requestId, library_id: id, kind: String(kind || "font"), bytes: payload },
+            [payload.buffer],
+          );
+        });
+      },
+
+      /**
+       * Drop one library file's bytes from the engine (a font the song no longer
+       * plays). A track that still names it asks for it again, exactly as an
+       * evicted font does.
+       * @param {string} libraryId
+       * @returns {void}
+       */
+      unloadLibrary(libraryId) {
+        post({ type: "library_unload", library_id: String(libraryId) });
+      },
+
+      /**
+       * Follow the fonts a track wanted but the engine does not hold: one per
+       * font id, once — the page loads the file it has, or offers the download
+       * for one it does not.
+       * @param {(libraryId: string) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onLibraryNeeded(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        libraryNeededListeners.add(listener);
+        return function unsubscribe() {
+          libraryNeededListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow the presets a bank announced once it loaded: `(library_id,
+       * [{bank, program, name}])`, sorted by bank then program. A load that waits
+       * for Stop answers `deferred` to its asker, so this is how a page hears
+       * about the presets that arrive when the bank is finally parsed.
+       * @param {(libraryId: string, presets: Array<{bank: number, program: number, name: string}>) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onLibraryPresets(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        libraryPresetsListeners.add(listener);
+        return function unsubscribe() {
+          libraryPresetsListeners.delete(listener);
+        };
+      },
+
+      /**
        * Audition one pad: a live trigger that goes straight to a voice, never
        * through a command or a history step, and is never quantized to the bar.
        * A `oneshot` pad plays to its end; a `gate` pad holds until
@@ -1867,9 +2090,11 @@
         launchListeners.clear();
         errorListeners.clear();
         sampleNeededListeners.clear();
+        libraryNeededListeners.clear();
         tapListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
+        pendingLibrary.clear();
         pendingLooper.clear();
         node.port.onmessage = null;
       },

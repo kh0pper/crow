@@ -21,6 +21,9 @@
  *   - a fault inside `process()` is reported once and the node goes silent
  *     instead of throwing into the audio thread;
  *   - a device that cannot be built is not retried on every `setSong`;
+ *   - every soundfont track of a song sounds on its own, and a song whose
+ *     engine was composed WITHOUT the SoundFont host (`font-voice.js`) is
+ *     silent while every font it names is asked for once;
  *   - headless Chromium and Node render the same song bit-identically (one
  *     SHA-256 over the left+right float bytes), a song with an audio clip the
  *     same way, and the same holds for an arrangement render (placements, a
@@ -36,6 +39,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
+import { TINY_SF2_PRESETS, tinySf2 } from "./fixtures/tiny-sf2.mjs";
 
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
 const VENDOR_DIR = fileURLToPath(new URL("../bundles/studio/vendor/sunvox/", import.meta.url));
@@ -60,6 +64,12 @@ const ASSETS = {
   "sampler-voice.js": readFileSync(join(ENGINE_DIR, "sampler-voice.js"), "utf8"),
   "perf-fx.js": readFileSync(join(ENGINE_DIR, "perf-fx.js"), "utf8"),
   "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
+  // The vendored SoundFont synth is part of the worklet module (engine-client's
+  // SOURCE_FILES), so it is one of the engine assets like any other.
+  "spessasynth.js": readFileSync(join(VENDOR_DIR, "..", "spessasynth", "spessasynth.js"), "utf8"),
+  // The SoundFont hosts ride in the same module (engine-client's SOURCE_FILES),
+  // between the vendored synth and the processor that drives them.
+  "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
 };
@@ -255,11 +265,12 @@ function hashChannels(left, right) {
  * @param {object} song
  * @param {{seconds?: number, sampleRate?: number, audio?: object[],
  *          mode?: "session"|"arrangement", fromBar?: number,
- *          hold?: object[], release?: string[]}} [options]
+ *          hold?: object[], release?: string[], fonts?: object[]}} [options]
  *   `audio` is one `{id, channels, rate}` per take to load, and `samples` one
- *   `{id, channels, rate}` per sampled pad's PCM; `hold` is one
- *   `{name, amount}` per performance effect held before the transport starts,
- *   and `release` one effect name per effect let go of (also before it starts)
+ *   `{id, channels, rate}` per sampled pad's PCM; `fonts` is one `{id, bytes}`
+ *   per SoundFont bank the song plays; `hold` is one `{name, amount}` per
+ *   performance effect held before the transport starts, and `release` one
+ *   effect name per effect let go of (also before it starts)
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number}>}
  */
 async function renderSong(
@@ -273,6 +284,7 @@ async function renderSong(
     fromBar = 0,
     hold = [],
     release = [],
+    fonts = [],
   } = {},
 ) {
   const context = new OfflineAudioContext({
@@ -299,6 +311,10 @@ async function renderSong(
         sample.channels.map((channel) => Float32Array.from(channel)),
         sample.rate,
       );
+    }
+    for (const font of fonts) {
+      // A fresh copy per render: loadLibrary transfers the bytes to the worklet.
+      await engine.loadLibrary(font.id, "font", Uint8Array.from(font.bytes));
     }
     engine.setSong(song);
     // The performance effects are live state: held (or let go of) before the
@@ -762,6 +778,31 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderFont = async function (song, fontBase64, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  '  var binary = atob(fontBase64);',
+  "  var bytes = new Uint8Array(binary.length);",
+  "  for (var b = 0; b < binary.length; b++) bytes[b] = binary.charCodeAt(b);",
+  '  await engine.loadLibrary(song.tracks[0].device.font_id, "font", bytes);',
+  "  engine.setSong(song);",
+  "  engine.launchScene(song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var digestBytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < digestBytes.length; k++) { hex += ("0" + digestBytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -774,6 +815,8 @@ const SERVED = {
   "/assets/sampler-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["sampler-voice.js"]],
   "/assets/perf-fx.js": ["text/javascript; charset=utf-8", () => ASSETS["perf-fx.js"]],
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
+  "/assets/spessasynth.js": ["text/javascript; charset=utf-8", () => ASSETS["spessasynth.js"]],
+  "/assets/font-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["font-voice.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
 };
@@ -1888,6 +1931,203 @@ test("effects bit-identical in Chromium and Node", async (t) => {
         `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of an effects render (${item.label})`,
       );
     }
+  } finally {
+    tab.close();
+  }
+});
+
+test("soundfont tracks with no font host ask for every font and stay silent", async () => {
+  // The engine composed WITHOUT `font-voice.js` (and the vendored synth it drives)
+  // has no SoundFont host at all — the processor's own `NO_FONTS`. Every soundfont
+  // track is then silent, and every font they name is asked for once (the page
+  // owns the bytes), with nothing thrown on the audio thread.
+  const assetBytes = { ...ASSETS, "font-voice.js": "", "spessasynth.js": "" };
+  const song = {
+    meta: { title: "No font host", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      { id: "track-1", name: "A", color: "#E8C07A", device: { engine: "soundfont", font_id: "font-a", bank: 0, program: 0 }, mute: false, solo: false, gain_db: 0, pan: 0, locked: false },
+      { id: "track-2", name: "B", color: "#E8C07A", device: { engine: "soundfont", font_id: "font-b", bank: 0, program: 1 }, mute: false, solo: false, gain_db: 0, pan: 0, locked: false },
+      { id: "track-3", name: "C", color: "#E8C07A", device: { engine: "soundfont", font_id: "font-a", bank: 128, program: 0 }, mute: false, solo: false, gain_db: 0, pan: 0, locked: false },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": { id: "clip-1", track_id: "track-1", scene_id: "scene-1", name: "A", length_bars: 1, notes: [{ t: 0, d: 1, p: 60, v: 100 }] },
+      "clip-2": { id: "clip-2", track_id: "track-2", scene_id: "scene-1", name: "B", length_bars: 1, notes: [{ t: 0, d: 1, p: 64, v: 100 }] },
+      "clip-3": { id: "clip-3", track_id: "track-3", scene_id: "scene-1", name: "C", length_bars: 1, notes: [{ t: 0, d: 1, p: 36, v: 100 }] },
+    },
+  };
+
+  const needed = [];
+  const context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(0.4 * SAMPLE_RATE), sampleRate: SAMPLE_RATE });
+  let engine = null;
+  let rendered = false;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: assetBytes });
+    engine.onLibraryNeeded((id) => needed.push(id));
+    engine.setSong(song);
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
+    // Three tracks, TWO fonts: every track's font is reported, and each font id
+    // once — however many tracks play it.
+    assert.deepEqual(needed.slice().sort(), ["font-a", "font-b"], `every font has to be asked for once, got ${JSON.stringify(needed)}`);
+    const buffer = await context.startRendering();
+    rendered = true;
+    const left = channelOf(buffer, 0);
+    const right = channelOf(buffer, 1);
+    assert.ok(
+      peakOf(left) < 1e-9 && peakOf(right) < 1e-9,
+      `with no font host there is nothing to play, peak was ${Math.max(peakOf(left), peakOf(right))}`,
+    );
+    assert.deepEqual(needed.slice().sort(), ["font-a", "font-b"], "a font is asked for once, not once per block");
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
+test("every soundfont track of a song is non-silent", async () => {
+  // Three soundfont tracks on ONE bank, each its own program. Each is rendered
+  // alone (the other two muted) and has to sound: a mix that is audible overall
+  // would still pass if one track's channel never reached it.
+  const fontId = "font-tiny";
+  const font = { id: fontId, bytes: tinySf2() };
+  const track = (index, program) => ({
+    id: `track-${index}`,
+    name: `Track ${index}`,
+    color: "#E8C07A",
+    device: { engine: "soundfont", font_id: fontId, bank: 0, program: program },
+    mute: false,
+    solo: false,
+    gain_db: -6,
+    pan: 0,
+    locked: false,
+  });
+  const tracks = [track(1, 0), track(2, 1), track(3, 2)];
+  const song = {
+    meta: { title: "Every track", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: tracks,
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {},
+  };
+  for (let index = 0; index < tracks.length; index += 1) {
+    const id = tracks[index].id;
+    song.clips[`clip-${index + 1}`] = {
+      id: `clip-${index + 1}`,
+      track_id: id,
+      scene_id: "scene-1",
+      name: id,
+      length_bars: 1,
+      notes: [{ t: 0, d: 4, p: 60, v: 110 }],
+    };
+  }
+  assert.ok(TINY_SF2_PRESETS.length >= 3, "the test font has to carry three programs");
+
+  for (let solo = 0; solo < tracks.length; solo += 1) {
+    const only = {
+      ...song,
+      tracks: tracks.map((item, index) => (index === solo ? item : { ...item, mute: true })),
+    };
+    const render = await renderSong(only, { seconds: 0.5, sampleRate: SAMPLE_RATE, fonts: [font] });
+    const peak = Math.max(peakOf(render.left), peakOf(render.right));
+    assert.ok(peak > 0.005, `track ${solo + 1} has to sound on its own, peak was ${peak}`);
+  }
+});
+
+test("soundfont song bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // Three soundfont tracks on ONE bank: two melodic programs at different pans
+  // and gains, and the GM drum bank, so the round trip covers the parsed bank,
+  // the per-channel outputs, `setDrums`, the presets and the mix.
+  const fontId = "font-tiny";
+  const font = { id: fontId, bytes: tinySf2() };
+  const track = (index, device, gain_db, pan) => ({
+    id: `track-${index}`,
+    name: `Track ${index}`,
+    color: "#E8C07A",
+    device: device,
+    mute: false,
+    solo: false,
+    gain_db: gain_db,
+    pan: pan,
+    locked: false,
+  });
+  const song = {
+    meta: { title: "SoundFont parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      track(1, { engine: "soundfont", font_id: fontId, bank: 0, program: 0 }, -3, -0.4),
+      track(2, { engine: "soundfont", font_id: fontId, bank: 0, program: 3 }, -6, 0.3),
+      track(3, { engine: "soundfont", font_id: fontId, bank: 128, program: 0 }, -9, 0),
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "One",
+        length_bars: 1,
+        notes: [
+          { t: 0, d: 1, p: 60, v: 110 },
+          { t: 1.5, d: 0.75, p: 64, v: 80 },
+          { t: 2.5, d: 1.5, p: 67, v: 120 },
+        ],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "Two",
+        length_bars: 1,
+        notes: [
+          { t: 0.5, d: 1, p: 48, v: 90 },
+          { t: 2, d: 0.5, p: 55, v: 100 },
+        ],
+      },
+      "clip-3": {
+        id: "clip-3",
+        track_id: "track-3",
+        scene_id: "scene-1",
+        name: "Drums",
+        length_bars: 1,
+        notes: [
+          { t: 0, d: 0.25, p: 36, v: 120 },
+          { t: 1, d: 0.25, p: 38, v: 100 },
+          { t: 2, d: 0.25, p: 42, v: 110 },
+          { t: 3, d: 0.25, p: 36, v: 127 },
+        ],
+      },
+    },
+  };
+  assert.ok(TINY_SF2_PRESETS.length > 0, "the test font has to carry presets");
+
+  const seconds = 3;
+  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE, fonts: [font] });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node render has to be audible to compare anything, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderFont"), "function", "the engine page did not load");
+    const base64 = Buffer.from(font.bytes).toString("base64");
+    const browser = await tab.evaluate(
+      `window.studioRenderFont(${JSON.stringify(song)}, ${JSON.stringify(base64)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium render has to be audible too, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a soundfont song`,
+    );
   } finally {
     tab.close();
   }

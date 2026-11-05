@@ -66,6 +66,36 @@
  * take at the render's rate (`sampleCapFor`), and a window whose samples need
  * more than a render may hold (1 GiB) is refused before it starts.
  *
+ * ## The instruments
+ *
+ * A soundfont track plays a preset of a library FONT (`{engine: "soundfont",
+ * font_id, bank, program}`, plan 1d), and a font is a file outside the song
+ * document. A render therefore loads every font its soundfont tracks name —
+ * once each, muted tracks included, since a muted track is still the song's —
+ * before Play: a bank the worklet has not parsed is silence, and a render has
+ * no Stop to wait for (the engine defers a load until then). The bytes come
+ * from where this instance keeps them: a catalog entry reads the verified
+ * `<CROW_HOME>/studio/library/<sha256>.<ext>` copy, and only after the store
+ * says it still hashes to that name; an upload reads the exact storage key its
+ * upload wrote, under this song's own `studio/<song_id>/library/` — the same
+ * own-prefix rule the sample and take readers keep, so a render may read
+ * nothing of a song but that song's own files.
+ *
+ * A font that cannot be read — not on this device, a storage failure, a bank
+ * the engine will not parse — is NOT fatal: its tracks render silent and the
+ * answer carries `missing_library: [{id, reason}]`, with reason "not on this
+ * device", "could not be read", or the engine's own words (Review Focus 5: a
+ * song may name a file this device does not have, and nothing throws). The
+ * font FILES a render will hold are summed before it starts, against the
+ * plan's 1 GiB (`fontCapFor`, overridable through `fontCapBytes` as the sample
+ * cap is), because the engine's own cap would otherwise evict a font in the
+ * middle of a render that has no way to load it back.
+ *
+ * The answer also carries `credits`: the credit line of every library entry
+ * the render heard, deduped, in the order the song first uses them. Every
+ * CC-BY item shows its credit in the picker, the library list and here (plan
+ * 1d, Global Constraints).
+ *
  * ## The arrangement
  *
  * `{ mode: "arrangement", from_bar, seconds }` renders the song's timeline
@@ -89,11 +119,16 @@
  */
 
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { decodeWav, encodeWav24 } from "./wav.js";
 import { integratedLufs, truePeakDb } from "./loudness.js";
+// The instrument catalog and its one verified copy of each file. It is the
+// bundle's own module (Node built-ins only), not a Crow app module: the same
+// rule the renderer keeps for everything else it is handed.
+import { createLibraryStore } from "./library-store.js";
 
 /** The bundle's own dependency: the offline renderer and the worklet host. */
 const require = createRequire(import.meta.url);
@@ -187,6 +222,30 @@ const BROWSER_SAMPLE_CAP_BYTES = 256 * 1024 * 1024;
  */
 const RENDER_SAMPLE_BUDGET_BYTES = 1024 * 1024 * 1024;
 
+/**
+ * What one render may hold in instruments: the FONT FILES its soundfont tracks
+ * name. The same 1 GiB the plan gives a render, refused the same way and before
+ * the render starts (plan 1d, Global Constraints "Memory"). Tests lower it
+ * through `fontCapBytes`, exactly as they lower the sample cap.
+ */
+const RENDER_FONT_BUDGET_BYTES = 1024 * 1024 * 1024;
+
+/** The largest a bank file can be (plan 1d's limit table: 512 MB). */
+const MAX_FONT_BYTES = 512 * 1024 * 1024;
+
+/**
+ * The device engine that marks a track as a SoundFont one. It is `doc.js`'s
+ * `SOUNDFONT_DEVICE.engine`, spelled here so this file keeps importing no app
+ * module of the song document.
+ */
+const SOUNDFONT_ENGINE = "soundfont";
+
+/** Why a font this render does not hold is missing, in the plan's own words. */
+const FONT_NOT_HERE = "not on this device";
+
+/** Why a font this Crow should hold could not be read at all. */
+const FONT_UNREADABLE = "could not be read";
+
 /** Bytes in a megabyte, for the sentence a refused render gets. */
 const BYTES_PER_MB = 1024 * 1024;
 
@@ -220,6 +279,12 @@ let cachedReleaseSymbol;
  * reported instead, in `missing_samples` (see "Takes and samples" above); the
  * render itself still happens.
  *
+ * Every font the song's soundfont tracks name is loaded the same way, through
+ * `options.libraryBytes`, before Play — and a font that cannot be read is
+ * reported in `missing_library`, never thrown (see "The instruments" above).
+ * The font files' own bytes are summed first, so a window past the render's
+ * font budget is refused before its engine exists.
+ *
  * @param {object} snapshot the song as the hub's `snapshot()` returns it
  * @param {{scene_id?: string|null, clip_id?: string|null, seconds?: number,
  *          sampleRate?: number, mode?: "session"|"arrangement", from_bar?: number,
@@ -227,20 +292,30 @@ let cachedReleaseSymbol;
  *            channels: Float32Array[]}|null>,
  *          sampleAudio?: (sample: object) => Promise<{rate: number,
  *            channels: Float32Array[]}|null>,
- *          sampleCapBytes?: number}} [options]
+ *          libraryBytes?: (entry: object) => Promise<Uint8Array|Buffer|null>,
+ *          sampleCapBytes?: number, fontCapBytes?: number}} [options]
  *   `takeAudio` reads and decodes one take's WAV; it is only called for takes
  *   the render can hear, and only when the song has any. `sampleAudio` does the
- *   same for a sample the playing patterns' steps trigger. `mode` and `from_bar`
- *   render the arrangement (see above). `sampleCapBytes` is the cap a render's
- *   engine is never built under (the browser's 256 MB unless a test lowers it):
- *   the engine's real cap is that or the window's own sample bytes, whichever
- *   is larger, so no sample a render loads is trimmed away under it
+ *   same for a sample the playing patterns' steps trigger. `libraryBytes` reads
+ *   one library entry's FONT file, and answers null for one this device does not
+ *   hold; it is only called for fonts the song's soundfont tracks name. `mode`
+ *   and `from_bar` render the arrangement (see above). `sampleCapBytes` is the
+ *   cap a render's engine is never built under (the browser's 256 MB unless a
+ *   test lowers it): the engine's real cap is that or the window's own sample
+ *   bytes, whichever is larger, so no sample a render loads is trimmed away
+ *   under it. `fontCapBytes` is the same for the instrument budget (the plan's
+ *   1 GiB unless a test lowers it)
  * @returns {Promise<{left: Float32Array, right: Float32Array, sampleRate: number,
  *                    seconds: number,
- *                    missing_samples: Array<{id: string, reason: string}>}>}
- *   the rendered stereo channels, and every sample the render could not load
- *   (empty when there was none, or the song plays no sampler track)
- * @throws {Error} when the window's samples need more than a render may hold
+ *                    missing_samples: Array<{id: string, reason: string}>,
+ *                    missing_library: Array<{id: string, reason: string}>,
+ *                    credits: string[]}>}
+ *   the rendered stereo channels, every sample the render could not load
+ *   (empty when there was none, or the song plays no sampler track), every font
+ *   it could not load (empty when it heard them all), and the credit lines of
+ *   the library entries it heard
+ * @throws {Error} when the window's samples or its font files need more than a
+ *   render may hold
  */
 export async function renderSong(snapshot, options = {}) {
   const { scene_id = null, clip_id = null, seconds = 1, sampleRate = SAMPLE_RATE } = options;
@@ -276,6 +351,15 @@ export async function renderSong(snapshot, options = {}) {
   const baseCap = Number.isFinite(askedCap) && askedCap > 0 ? askedCap : BROWSER_SAMPLE_CAP_BYTES;
   const sampleCap = sampleCapFor(samples.samples, rate, baseCap);
 
+  // The fonts those tracks play are files, and a render has no reader to load
+  // one late: what the window will hold is summed before its engine exists, so
+  // a window past the font budget is refused with its megabytes, never rendered
+  // into a synth that would evict a bank it cannot get back.
+  const fonts = fontsOfSong(snapshot);
+  const askedFontCap = Number(options.fontCapBytes);
+  const baseFontCap = Number.isFinite(askedFontCap) && askedFontCap > 0 ? askedFontCap : RENDER_FONT_BUDGET_BYTES;
+  const fontBytes = fontCapFor(fonts, baseFontCap);
+
   const context = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: rate });
   let engine = null;
   let rendered = false;
@@ -283,6 +367,9 @@ export async function renderSong(snapshot, options = {}) {
     engine = await studioEngine.create(context, {
       assetBytes: engineAssets(),
       maxSampleBytes: sampleCap,
+      // Never below what this window's fonts take: a font the cap evicted could
+      // not be loaded again, and the render has nowhere to ask.
+      maxFontBytes: Math.max(baseFontCap, fontBytes),
     });
     engine.setSong(snapshot);
     if (mode === "arrangement") {
@@ -294,6 +381,10 @@ export async function renderSong(snapshot, options = {}) {
     }
     await loadTakes(engine, takes, options.takeAudio);
     const missingSamples = await loadSamples(engine, samples.samples, options.sampleAudio);
+    // Banks are parsed only while the transport is stopped, and this render's
+    // transport has not started yet: load every font now or its tracks are
+    // silent for the whole render.
+    const library = await loadFonts(engine, fonts, options.libraryBytes);
     engine.play();
     engine.node.connect(context.destination);
     // Without this the render can begin before the song reaches the processor.
@@ -317,6 +408,11 @@ export async function renderSong(snapshot, options = {}) {
       // A pad whose sample is missing plays silence (Review Focus 1); this says
       // which one, and why, so the agent can name it rather than guess.
       missing_samples: [...samples.missing, ...missingSamples],
+      // A font this device does not hold costs its own tracks and never the
+      // render (Review Focus 5); this names each one and why.
+      missing_library: library.missing,
+      // Every instrument the render heard, credited the way its licence asks.
+      credits: creditsOf(fonts, library.loaded),
     };
   } finally {
     if (engine) engine.dispose();
@@ -340,6 +436,13 @@ export async function renderSong(snapshot, options = {}) {
  *   plays recorded takes and samples through
  * @param {{assertLocalCapability: Function, appendAudit: Function}} options.acl
  *   the project ACL, injected for the same reason
+ * @param {{holds: Function, fileForHash: Function}|null} [options.library]
+ *   the instrument catalog and its one verified copy of each catalog file
+ *   (`createLibraryStore`). A render reads a catalog entry's bank through it; a
+ *   caller that injects none gets the store built over `options.crowHome` (or
+ *   this instance's `<CROW_HOME>`), which is what the MCP server uses
+ * @param {string} [options.crowHome] where the instrument store lives, when no
+ *   `library` is injected
  * @param {number} [options.maxSeconds] the longest render allowed; defaults to
  *   `STUDIO_MAX_RENDER_SECONDS`, else 300
  * @param {string} [options.bucket] the S3 bucket renders go to
@@ -348,12 +451,16 @@ export async function renderSong(snapshot, options = {}) {
  *   `renderSong`); tests and alternate hosts inject their own
  * @returns {{render: (request: object) => Promise<{storage_key: string, url: string,
  *            seconds: number, lufs: number, true_peak_db: number,
- *            missing_samples: Array<{id: string, reason: string}>}>}}
+ *            missing_samples: Array<{id: string, reason: string}>,
+ *            missing_library: Array<{id: string, reason: string}>,
+ *            credits: string[]}>}}
  */
 export function createRenderer({
   db,
   storage,
   acl,
+  library = null,
+  crowHome = null,
   maxSeconds = Number(process.env.STUDIO_MAX_RENDER_SECONDS) || 300,
   bucket = "crow-files",
   now = () => Date.now(),
@@ -368,6 +475,17 @@ export function createRenderer({
   }
   const limit = Number(maxSeconds);
   const longest = Number.isFinite(limit) && limit > 0 ? limit : 300;
+
+  // The instrument store, built on first use: a song with no font never touches
+  // the instrument directory, and a caller that injected a store (a test with
+  // its own catalog) keeps it.
+  let ownLibrary = null;
+  /** @returns {object} the store a catalog entry's bank is read through. */
+  function libraryStore() {
+    if (library) return library;
+    if (ownLibrary === null) ownLibrary = createLibraryStore({ crowHome: crowHome || defaultCrowHome() });
+    return ownLibrary;
+  }
 
   // The queue: at most one render running, at most MAX_WAITING of them waiting.
   // A call's slot covers its whole job (audio, upload, row), so two renders
@@ -420,9 +538,12 @@ export function createRenderer({
    *   who asked; a human author is audited as `local`, anything else as `bot`
    * @returns {Promise<{storage_key: string, url: string, seconds: number,
    *                    lufs: number, true_peak_db: number,
-   *                    missing_samples: Array<{id: string, reason: string}>}>}
-   *   where the render landed, how it measures, and every sample it could not
-   *   load (a pad with a missing sample plays silence; this names it)
+   *                    missing_samples: Array<{id: string, reason: string}>,
+   *                    missing_library: Array<{id: string, reason: string}>,
+   *                    credits: string[]}>}
+   *   where the render landed, how it measures, every sample and every font it
+   *   could not load (each plays silence; these name them), and the credit lines
+   *   of the instruments it heard
    */
   async function render(request = {}) {
     const { song_id, project_id = null, snapshot, scene_id = null, clip_id = null, seconds, author = null } = request;
@@ -447,6 +568,10 @@ export function createRenderer({
       const prefix = await storagePrefixFor(db, project_id);
       const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
       const sampleAudio = (sample) => sampleAudioFrom({ storage, bucket, prefix, songId: song_id, sample });
+      // A bank comes from the instrument store (a catalog entry) or from the
+      // upload's own storage key (an upload), never from anywhere else.
+      const libraryBytes = (entry) =>
+        fontBytesFrom({ library: libraryStore(), storage, bucket, prefix, songId: song_id, entry });
       const audio = await renderAudio(snapshot, {
         scene_id,
         clip_id,
@@ -455,12 +580,20 @@ export function createRenderer({
         from_bar: fromBar,
         takeAudio,
         sampleAudio,
+        libraryBytes,
       });
       const rate = Number(audio.sampleRate) || SAMPLE_RATE;
       const renderedSeconds = audio.seconds;
       // A pad whose sample could not be loaded plays silence; this is the list
       // the agent is told about, in the result and in the audit line.
       const missingSamples = Array.isArray(audio.missing_samples) ? audio.missing_samples : [];
+      // A bank this device does not hold plays silence too (Review Focus 5), and
+      // so does one the engine will not parse: named the same way.
+      const missingLibrary = Array.isArray(audio.missing_library) ? audio.missing_library : [];
+      // Every CC-BY instrument the render heard, credited in the metadata.
+      const credits = Array.isArray(audio.credits)
+        ? audio.credits.filter((credit) => typeof credit === "string" && credit !== "")
+        : [];
       const lufs = integratedLufs(audio.left, audio.right, rate);
       const truePeak = truePeakDb(audio.left, audio.right, rate);
       const wav = encodeWav24(audio.left, audio.right, rate);
@@ -506,6 +639,8 @@ export function createRenderer({
           lufs,
           true_peak_db: truePeak,
           missing_samples: missingSamples,
+          missing_library: missingLibrary,
+          credits: credits,
         },
       });
 
@@ -517,6 +652,8 @@ export function createRenderer({
         lufs,
         true_peak_db: truePeak,
         missing_samples: missingSamples,
+        missing_library: missingLibrary,
+        credits: credits,
       };
     } finally {
       release();
@@ -768,6 +905,171 @@ function sampleCapFor(samples, rate, base) {
 }
 
 /**
+ * The fonts a render has to load: every library entry a soundfont track names,
+ * once each, in the song's own track order.
+ *
+ * Muted and soloed-out tracks count. A muted track is still the song's, and a
+ * render that quietly left its instrument out would report a mix nobody can
+ * reproduce: unmute the track in the panel and the bank has to be there.
+ * A track whose `font_id` the song's library does not hold is included too, with
+ * `entry: null`, so it is REPORTED as missing rather than passed over.
+ *
+ * @param {object} snapshot the song
+ * @returns {Array<{id: string, entry: object|null}>} the fonts, first use first
+ */
+function fontsOfSong(snapshot) {
+  const tracks = snapshot && Array.isArray(snapshot.tracks) ? snapshot.tracks : [];
+  const library = snapshot && snapshot.library && typeof snapshot.library === "object" ? snapshot.library : {};
+  const fonts = [];
+  const seen = new Set();
+  for (const track of tracks) {
+    const device = track && track.device && typeof track.device === "object" ? track.device : null;
+    if (!device || device.engine !== SOUNDFONT_ENGINE) continue;
+    const id = typeof device.font_id === "string" ? device.font_id : "";
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    const entry = library[id] && typeof library[id] === "object" ? library[id] : null;
+    fonts.push({ id, entry });
+  }
+  return fonts;
+}
+
+/**
+ * The bytes one font's file takes, as the song's own library entry says: the
+ * size the server measured when it stored or verified the file.
+ * @param {{entry?: object|null}} font
+ * @returns {number} bytes, or 0 for an entry that says nothing useful
+ */
+function fontFileBytes(font) {
+  const bytes = Number(font && font.entry ? font.entry.bytes : NaN);
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+}
+
+/**
+ * The bytes a render's fonts take together, refused when past the budget — the
+ * same refusal, before the same start, as the sample cap.
+ *
+ * The sum is arithmetic over the sizes the song's library carries, so a window
+ * past the budget is refused before a file is opened, a context is built or a
+ * bank is parsed.
+ *
+ * @param {Array<{id: string, entry: object|null}>} fonts this render's fonts
+ * @param {number} cap the most it may hold, in bytes
+ * @returns {number} the bytes they take, for the engine's own cap
+ * @throws {Error} when they need more than `cap`
+ */
+function fontCapFor(fonts, cap) {
+  let bytes = 0;
+  for (const font of fonts) bytes += fontFileBytes(font);
+  if (bytes > cap) {
+    const limit = Math.max(1, Math.ceil(cap / BYTES_PER_MB));
+    throw new Error(
+      `This render's instruments need ${Math.ceil(bytes / BYTES_PER_MB)} MB; a render takes up to ${limit} MB of instruments.`,
+    );
+  }
+  return bytes;
+}
+
+/**
+ * Hand the engine every font the render's soundfont tracks play, and name the
+ * ones it cannot hear.
+ *
+ * `libraryBytes` is the caller's reader: it takes one library entry and answers
+ * the bank file's bytes, or `null` when this device does not hold the file at
+ * all. Its own refusals (a storage key outside the song's own `library/`, a
+ * disk that failed) are never read. A font it cannot produce is reported, not
+ * thrown: a track that names a bank this device does not have plays silence
+ * (Review Focus 5), and one missing bank must not turn into a failed render of
+ * a whole song. A render with no reader at all reports every font it wanted the
+ * same way, exactly as `loadSamples` does for samples.
+ *
+ * The engine's answer is reported too: a bank that will not parse carries the
+ * engine's own reason, which is what the operator has to read, and only a load
+ * that came back `loaded` counts as heard (a `deferred` load waits for a Stop
+ * an offline render never reaches, so its tracks are silent).
+ *
+ * @param {object} engine the engine `studioEngine.create()` returned
+ * @param {Array<{id: string, entry: object|null}>} fonts this render's fonts
+ * @param {Function|undefined} libraryBytes the caller's reader
+ * @returns {Promise<{missing: Array<{id: string, reason: string}>,
+ *                    loaded: Set<string>}>} what could not be heard, and what was
+ */
+async function loadFonts(engine, fonts, libraryBytes) {
+  const missing = [];
+  const loaded = new Set();
+  for (const font of fonts) {
+    const id = font.id;
+    if (!font.entry) {
+      // A track that names a font the song's library does not hold: there is no
+      // file to look for, so it is a font this device does not have.
+      missing.push({ id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    if (typeof libraryBytes !== "function" || typeof engine.loadLibrary !== "function") {
+      missing.push({ id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    let bytes = null;
+    try {
+      bytes = await libraryBytes(font.entry);
+    } catch {
+      missing.push({ id, reason: FONT_UNREADABLE });
+      continue;
+    }
+    if (!bytes) {
+      missing.push({ id, reason: FONT_NOT_HERE });
+      continue;
+    }
+    let answer = null;
+    try {
+      answer = await engine.loadLibrary(id, "font", bytes);
+    } catch (error) {
+      missing.push({ id, reason: engineReasonOf(error) });
+      continue;
+    }
+    const status = answer && typeof answer.status === "string" ? answer.status : "";
+    if (status === "loaded") {
+      loaded.add(id);
+      continue;
+    }
+    missing.push({ id, reason: engineReasonOf(answer) });
+  }
+  return { missing, loaded };
+}
+
+/**
+ * The engine's own words for a font that did not load, or the plain sentence
+ * when it gave none.
+ * @param {unknown} source the load's answer, or the error it threw
+ * @returns {string}
+ */
+function engineReasonOf(source) {
+  const reason = source && typeof source.reason === "string" ? source.reason.trim() : "";
+  if (reason !== "") return reason;
+  const message = source && typeof source.message === "string" ? source.message.trim() : "";
+  return message !== "" ? message : FONT_UNREADABLE;
+}
+
+/**
+ * The credit line of every font the render heard that carries one, deduped, in
+ * the song's own first-use order — what a CC-BY bank asks the render's metadata
+ * to show (plan 1d, Global Constraints "Credits").
+ * @param {Array<{id: string, entry: object|null}>} fonts this render's fonts
+ * @param {Set<string>} loaded the font ids the engine really loaded
+ * @returns {string[]}
+ */
+function creditsOf(fonts, loaded) {
+  const credits = [];
+  for (const font of fonts) {
+    if (!loaded.has(font.id)) continue;
+    const credit = font.entry && typeof font.entry.credit === "string" ? font.entry.credit.trim() : "";
+    if (credit === "" || credits.includes(credit)) continue;
+    credits.push(credit);
+  }
+  return credits;
+}
+
+/**
  * The patterns of one pattern clip that actually play: its chain in order, or
  * its first pattern when no entry names one.
  *
@@ -954,6 +1256,96 @@ async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
     tooBig: "its file is larger than a take can be",
     fail: (reason) => takeLoadFailure(id, reason),
   });
+}
+
+/**
+ * Read one library entry's FONT file, the way this instance keeps it.
+ *
+ * A catalog entry is read from the one verified copy at
+ * `<CROW_HOME>/studio/library/<sha256>.<ext>`, and only after the store says
+ * those bytes still hash to the name: a file whose name is not what it says is
+ * no bank any song may play (`library-store.js`). An uploaded entry is read from
+ * the exact storage key its upload wrote, and only when that key sits under
+ * this song's own `studio/<song_id>/library/`, named for this very entry — the
+ * same own-prefix rule the library file route keeps, so a render can read
+ * nothing of a song but that song's own files. A bundled file ships inside the
+ * bundle and nothing serves one yet, so it reads as a file this Crow does not
+ * have.
+ *
+ * `null` means "this device does not hold it" (nothing stored, a key that is
+ * not this song's, a storage object that is gone), which the render reports as
+ * "not on this device". A read that fails any other way throws, and the render
+ * reports "could not be read".
+ *
+ * @param {object} options
+ * @param {object|null} options.library the instrument store (`createLibraryStore`)
+ * @param {object} options.storage the S3 client (needs `getObject`)
+ * @param {string} options.bucket the bucket uploads live in
+ * @param {string} options.prefix the song's project storage prefix
+ * @param {string} options.songId the song the render is of
+ * @param {object} options.entry the library entry, as the snapshot holds it
+ * @returns {Promise<Uint8Array|Buffer|null>} the file's bytes, or null
+ */
+async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }) {
+  if (!entry || typeof entry !== "object") return null;
+  if (entry.kind !== "font") return null;
+  if (entry.source === "bundled") return null;
+
+  const catalogId = typeof entry.catalog_id === "string" ? entry.catalog_id : "";
+  if (catalogId !== "") {
+    if (!library || typeof library.holds !== "function" || typeof library.fileForHash !== "function") return null;
+    const sha256 = String(entry.sha256 ?? "").toLowerCase();
+    // Verify ON READ: a stored file that no longer hashes to the name its entry
+    // trusts is not this instrument, whatever it is called.
+    if (!(await library.holds(sha256))) return null;
+    const path = await library.fileForHash(sha256);
+    if (!path) return null;
+    const info = statSync(path);
+    if (!info.isFile()) return null;
+    if (info.size > MAX_FONT_BYTES) throw new Error("its file is larger than a bank can be");
+    return readFileSync(path);
+  }
+
+  const id = typeof entry.id === "string" ? entry.id : "";
+  const storedKey = typeof entry.storage_key === "string" ? entry.storage_key : "";
+  if (id === "" || storedKey === "") return null;
+  if (!storage || typeof storage.getObject !== "function") return null;
+  // An uploaded bank: the exact key its finish wrote, under this song's own
+  // `library/` directory, named for this entry. A key anywhere else — another
+  // song's, another project's, or one with a `..` in it — is not this song's.
+  const ownPrefix = `${prefix}studio/${songId}/library/${id}.`;
+  if (!storedKey.startsWith(ownPrefix) || storedKey.slice(ownPrefix.length).includes("/")) return null;
+  return readStoredFile({ storage, bucket, key: storedKey, maxBytes: MAX_FONT_BYTES });
+}
+
+/**
+ * Read one stored object whole, under a cap on its size, without decoding it.
+ *
+ * A storage object that is simply not there answers `null` (the key does not
+ * exist, which is a file this device does not hold); every other failure throws,
+ * because a disk that broke is not the same answer as a file nobody fetched.
+ *
+ * @param {object} options
+ * @param {object} options.storage the S3 client (needs `getObject`)
+ * @param {string} options.bucket
+ * @param {string} options.key the object's exact key
+ * @param {number} options.maxBytes the kind's own cap on a file
+ * @returns {Promise<Uint8Array|null>}
+ */
+async function readStoredFile({ storage, bucket, key, maxBytes }) {
+  let opened;
+  try {
+    opened = await storage.getObject(key, { bucket });
+  } catch (error) {
+    const code = String(error && error.code ? error.code : "");
+    if (code === "NotFound" || code === "NoSuchKey") return null;
+    throw error;
+  }
+  const size = Number(opened && opened.stat ? opened.stat.size : NaN);
+  if (Number.isFinite(size) && size > maxBytes) throw new Error("its file is larger than a bank can be");
+  const bytes = await streamBytes(opened && opened.stream);
+  if (bytes.length > maxBytes) throw new Error("its file is larger than a bank can be");
+  return bytes;
 }
 
 /**
@@ -1157,6 +1549,15 @@ function timestampOf(now) {
 }
 
 /**
+ * The Crow home the instrument store lives under: the instance's own, or the
+ * same `<CROW_HOME>` / `~/.crow` default the rest of the bundle uses.
+ * @returns {string}
+ */
+function defaultCrowHome() {
+  return process.env.CROW_HOME || join(homedir(), ".crow");
+}
+
+/**
  * The engine's sources and wasm binary, read once per process.
  * @returns {Object<string, string|Uint8Array>} name → text or bytes
  */
@@ -1166,6 +1567,13 @@ function engineAssets() {
     "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
     "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
     "sunvox_lib_loader.js": readFileSync(join(VENDOR_DIR, "sunvox_lib_loader.js"), "utf8"),
+    // The vendored SoundFont synth is part of the worklet module
+    // (engine-client.js's SOURCE_FILES), so a render loads it like any other
+    // engine source.
+    "spessasynth.js": readFileSync(join(BUNDLE_DIR, "vendor", "spessasynth", "spessasynth.js"), "utf8"),
+    // The SoundFont hosts (one synth per font, one channel per track) ride in the
+    // worklet module with the synth they drive.
+    "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };

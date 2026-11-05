@@ -12,7 +12,12 @@
  *   clip.write  clip.edit_notes  clip.set_length  clip.rename  clip.remove
  *
  * `track.add` also makes an audio track (`kind: "audio"`), the one kind that
- * plays recorded takes; the take commands themselves live in `takes.js`.
+ * plays recorded takes, a sampler track (`kind: "sampler"`), whose kit lives in
+ * the song's own banks and pads, and a soundfont track (`kind: "soundfont"`),
+ * which plays one preset of one font of the song's library. A soundfont track's
+ * instrument is set with `track.set_font` and `track.set_program` (see
+ * `instruments.js`), never by swapping its device. The take commands themselves
+ * live in `takes.js`.
  *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (a limit, an unknown object, a note past the clip's end) leaves the
@@ -28,6 +33,7 @@ import {
   INSTRUMENT_TYPES,
   LIMITS,
   SAMPLER_DEVICE,
+  SOUNDFONT_DEVICE,
   STEP_GUARDS,
   TRACK_COLORS,
   bankEntries,
@@ -40,12 +46,14 @@ import {
   findSceneIndex,
   findTrackIndex,
   getClip,
+  getLibraryFont,
   getScene,
   getTrack,
   isAudioClip,
   isAudioTrack,
   isPatternClip,
   isSamplerTrack,
+  isSoundfontTrack,
   newSamplerBank,
   objectMap,
   objectRef,
@@ -250,6 +258,20 @@ function refuseOnAudioTrack(track, what) {
 function refuseOnSamplerTrack(track, what) {
   if (!isSamplerTrack(track)) return;
   refuseInvalid(`Track "${track.get("name")}" is a sampler track; it has no ${what}.`);
+}
+
+/**
+ * Refuse an edit that only makes sense on a SunVox track, for a soundfont track:
+ * its instrument is a font and a preset of it, and swapping the device would
+ * throw both away.
+ * @param {Y.Map<any>} track
+ * @returns {void}
+ */
+function refuseOnSoundfontTrack(track) {
+  if (!isSoundfontTrack(track)) return;
+  refuseInvalid(
+    `Track "${track.get("name")}" is a soundfont track; a soundfont track's instrument is set with track.set_font / track.set_program.`,
+  );
 }
 
 /**
@@ -680,16 +702,30 @@ defineCommand({
       mute: z.boolean().optional(),
       solo: z.boolean().optional(),
       kind: z
-        .enum(["sunvox", "audio", "sampler"])
+        .enum(["sunvox", "audio", "sampler", "soundfont"])
         .optional()
         .describe(
-          'what the track plays: "sunvox" (the default), "audio" for recorded takes, or "sampler" for a kit of pads',
+          'what the track plays: "sunvox" (the default), "audio" for recorded takes, "sampler" for a kit of pads, or "soundfont" for an instrument from the song\'s library',
+        ),
+      // Its own schema, not `idSchema` again: the same schema reached twice in
+      // one object is published as a `$ref`, which tool grammars refuse.
+      font_id: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{1,40}$/, "an id is 1-40 letters, digits, dashes or underscores")
+        .optional()
+        .describe(
+          'a soundfont track\'s instrument: a font in the song\'s library; the track plays its first preset until track.set_program chooses another',
         ),
     })
     .strict(),
-  summary(args) {
+  summary(args, snap) {
     if (args.kind === "audio") return `Added audio track "${args.name}"`;
     if (args.kind === "sampler") return `Added sampler track "${args.name}"`;
+    if (args.kind === "soundfont") {
+      return args.font_id === undefined
+        ? `Added soundfont track "${args.name}"`
+        : `Added soundfont track "${args.name}" (${labelOfFont(snap, args.font_id)})`;
+    }
     return `Added track "${args.name}" (${args.device?.type ?? DEFAULT_DEVICE_TYPE})`;
   },
   touches(args) {
@@ -699,6 +735,12 @@ defineCommand({
    * A sampler track arrives with its kit: bank "A" and its sixteen empty pads,
    * created in the same step as the track, so one undo takes the whole thing
    * back and no track is ever left with a kit it does not have.
+   *
+   * A soundfont track arrives pointed at one font of the song's library (or at
+   * none, and then it is silent until `track.set_font` chooses one), playing
+   * program 0 of bank 0: the instrument is a library entry plus a preset, so
+   * the track holds nothing but the two, and `font_id` must already be in the
+   * library.
    */
   apply(doc, args) {
     const tracks = trackList(doc);
@@ -710,11 +752,24 @@ defineCommand({
     }
     const audio = args.kind === "audio";
     const sampler = args.kind === "sampler";
-    if ((audio || sampler) && args.device !== undefined) {
+    const soundfont = args.kind === "soundfont";
+    if ((audio || sampler || soundfont) && args.device !== undefined) {
       refuseInvalid(
         audio
           ? `An audio track has no instrument; leave the device out when adding one.`
-          : `A sampler track has no SunVox module; leave the device out when adding one.`,
+          : sampler
+            ? `A sampler track has no SunVox module; leave the device out when adding one.`
+            : `A soundfont track's instrument is its font; leave the device out and name a font_id instead.`,
+      );
+    }
+    if (!soundfont && args.font_id !== undefined) {
+      refuseInvalid(
+        `A font_id belongs to a soundfont track; add the track with kind "soundfont" to play a font.`,
+      );
+    }
+    if (soundfont && args.font_id !== undefined && !getLibraryFont(doc, args.font_id)) {
+      refuseInvalid(
+        `The song's library has no font with id "${args.font_id}"; add the font to the library before a track plays it.`,
       );
     }
     const index = tracks.length;
@@ -726,11 +781,13 @@ defineCommand({
         ? { ...AUDIO_DEVICE }
         : sampler
           ? { ...SAMPLER_DEVICE }
-          : {
-              engine: "sunvox",
-              type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
-              params: { ...(args.device?.params ?? {}) },
-            },
+          : soundfont
+            ? { ...SOUNDFONT_DEVICE, font_id: args.font_id ?? ABSENT, bank: 0, program: 0 }
+            : {
+                engine: "sunvox",
+                type: args.device?.type ?? DEFAULT_DEVICE_TYPE,
+                params: { ...(args.device?.params ?? {}) },
+              },
       mute: args.mute ?? false,
       solo: args.solo ?? false,
       gain_db: args.gain_db ?? 0,
@@ -873,6 +930,7 @@ defineCommand({
     const track = requireTrack(doc, args.track_id);
     refuseOnAudioTrack(track, "SunVox module to swap");
     refuseOnSamplerTrack(track, "SunVox module to swap");
+    refuseOnSoundfontTrack(track);
     const ref = trackRef(args.track_id);
     const before = fieldValue(track, "device");
     const device = { engine: "sunvox", type: args.type, params: { ...paramsDefaults(args.params) } };
@@ -910,6 +968,7 @@ defineCommand({
     const track = requireTrack(doc, args.track_id);
     refuseOnAudioTrack(track, "SunVox controller to set");
     refuseOnSamplerTrack(track, "SunVox controller to set");
+    refuseOnSoundfontTrack(track);
     const ref = trackRef(args.track_id);
     const device = toPlain(track.get("device")) ?? {
       engine: "sunvox",
@@ -1467,6 +1526,11 @@ function labelOfScene(snap, id) {
 /** @returns {string} a clip's name for a summary, or its id when unknown. */
 function labelOfClip(snap, id) {
   return snap.clips[id]?.name ?? id;
+}
+
+/** @returns {string} a library entry's name for a summary, or its id when unknown. */
+function labelOfFont(snap, id) {
+  return snap.library?.[id]?.name ?? id;
 }
 
 /** @returns {object} a device param record, safe to spread. */

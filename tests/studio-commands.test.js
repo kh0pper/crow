@@ -29,6 +29,10 @@ import "../bundles/studio/server/commands/takes.js";
 import "../bundles/studio/server/commands/arrangement.js";
 import "../bundles/studio/server/commands/sampler.js";
 import "../bundles/studio/server/commands/midi.js";
+// The 1d instrument library and the two preset commands a soundfont track plays
+// with.
+import "../bundles/studio/server/commands/library.js";
+import "../bundles/studio/server/commands/instruments.js";
 
 /** A take id, the way the recording client generates one. */
 const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
@@ -87,6 +91,8 @@ const COMMAND_IDS = [
   "clip.set_comp",
   "clip.set_length",
   "clip.write",
+  "library.add",
+  "library.remove",
   "marker.add",
   "marker.remove",
   "marker.rename",
@@ -129,8 +135,10 @@ const COMMAND_IDS = [
   "track.remove",
   "track.rename",
   "track.set_device",
+  "track.set_font",
   "track.set_mix",
   "track.set_param",
+  "track.set_program",
   "track.unlock",
 ];
 
@@ -141,7 +149,9 @@ const MINIMAL_ARGS = {
   "track.remove": { track_id: "t1" },
   "track.rename": { track_id: "t1", name: "Bass" },
   "track.set_device": { track_id: "t1", type: "Analog generator" },
+  "track.set_font": { track_id: "t1", font_id: "the-font" },
   "track.set_param": { track_id: "t1", name: "Cutoff", value: 40 },
+  "track.set_program": { track_id: "t1", bank: 0, program: 0 },
   "track.set_mix": { track_id: "t1", gain_db: -3 },
   "track.lock": { track_id: "t1" },
   "track.unlock": { track_id: "t1" },
@@ -219,6 +229,21 @@ const MINIMAL_ARGS = {
   },
   "midi.remove": { id: "m1" },
   "midi.propose_profile": { device: "fcb1010", device_name: "FCB1010" },
+  "library.add": {
+    entry: {
+      id: "the-font",
+      kind: "font",
+      name: "MuseScore General",
+      source: "catalog",
+      catalog_id: "ms-general",
+      storage_key: "studio/library/abc.sf3",
+      sha256: "a1".repeat(32),
+      bytes: 1024,
+      licence: "MIT",
+      credit: "MuseScore team",
+    },
+  },
+  "library.remove": { library_id: "the-font" },
 };
 
 /** A song document that is destroyed when the test ends. */
@@ -305,13 +330,22 @@ test("the registry lists every command", () => {
   assert.equal(getCommand("midi.map").humanOnly, false);
   // A take only ever arrives through the gateway's upload finish route.
   assert.equal(getCommand("take.add").internal, true);
-  // And a sample only ever arrives through the same finish route.
+  // A sample only ever arrives through the same finish route.
   assert.equal(getCommand("sample.add").internal, true);
+  // And a library file (a font, a capture or a cabinet) only ever arrives
+  // through the gateway's own library routes.
+  assert.equal(getCommand("library.add").internal, true);
+  assert.equal(getCommand("library.remove").internal, false);
+  assert.equal(getCommand("library.remove").humanOnly, false);
+  // Choosing what a soundfont track plays is an ordinary edit; only the font it
+  // plays is the operator's (the hub's sound guard, plan 1d).
+  assert.equal(getCommand("track.set_font").humanOnly, false);
+  assert.equal(getCommand("track.set_program").humanOnly, false);
   assert.equal(getCommand("clip.write").internal, false);
   assert.deepEqual(
     listCommands({ public: true }).map((command) => command.id),
     COMMAND_IDS.filter(
-      (id) => id !== "take.add" && id !== "sample.add" && id !== "pad.assign_if_empty",
+      (id) => id !== "take.add" && id !== "sample.add" && id !== "library.add" && id !== "pad.assign_if_empty",
     ),
     "the public list is the rest: the upload finish route's own commands are not in it",
   );
@@ -493,6 +527,61 @@ test("apply returns before/after for every touched field", (t) => {
       args: { track_id: track, name: "Cutoff", value: 40 },
       keys: [`${tr}|device.params.Cutoff`],
     },
+    // The instrument library (plan 1d): two fonts, a soundfont track playing one
+    // of them, its program, the font it moves to, and the font it no longer
+    // plays taken out of the library again — which is only allowed once nothing
+    // names it.
+    {
+      id: "library.add",
+      args: {
+        entry: {
+          id: "font-a",
+          kind: "font",
+          name: "MuseScore General",
+          source: "catalog",
+          catalog_id: "ms-general",
+          storage_key: "studio/library/a1.sf3",
+          sha256: "a1".repeat(32),
+          bytes: 2048,
+          licence: "MIT",
+          credit: "MuseScore team",
+        },
+      },
+      keys: ["library:font-a|*"],
+    },
+    {
+      id: "library.add",
+      args: {
+        entry: {
+          id: "font-b",
+          kind: "font",
+          name: "Studio Grand",
+          source: "upload",
+          upload_id: "up-1",
+          sha256: "b2".repeat(32),
+          bytes: 4096,
+          licence: "For your own use",
+          credit: "the operator",
+        },
+      },
+      keys: ["library:font-b|*"],
+    },
+    {
+      id: "track.add",
+      args: { id: "keys", name: "Keys", kind: "soundfont", font_id: "font-a" },
+      keys: ["track:keys|*"],
+    },
+    {
+      id: "track.set_program",
+      args: { track_id: "keys", bank: 128, program: 0 },
+      keys: ["track:keys|device.bank", "track:keys|device.program"],
+    },
+    {
+      id: "track.set_font",
+      args: { track_id: "keys", font_id: "font-b" },
+      keys: ["track:keys|device.font_id"],
+    },
+    { id: "library.remove", args: { library_id: "font-a" }, keys: ["library:font-a|*"] },
     { id: "track.lock", args: { track_id: track }, keys: [`${tr}|locked`] },
     { id: "track.unlock", args: { track_id: track }, keys: [`${tr}|locked`] },
     { id: "scene.add", args: { name: "Bridge", id: "bridge" }, keys: ["scene:bridge|*"] },

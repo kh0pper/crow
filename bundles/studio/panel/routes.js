@@ -7,7 +7,9 @@
  * WebSocket live in `../server/web.js`, which receives every gateway
  * dependency by injection; one session hub is built here for the life of the
  * gateway process, on the gateway's own database client, and its broadcasts go
- * straight back into the web layer so an edit reaches every open client.
+ * straight back into the web layer so an edit reaches every open client. The
+ * instrument library's housekeeping runs here too: one GC pass at start and
+ * then every 24 hours, over the sha256s every song on this instance names.
  * The bot scope is wired here too: a Crow bot's linked project comes from
  * `pi_bot_defs` on that same client, and the voice-bot rule from the app's own
  * `servers/gateway/voice/crow-voice.js`. The panel's "Ask the agent" box asks
@@ -55,7 +57,8 @@ const { isVoiceBotId } = await appImport("servers/gateway/voice/crow-voice.js");
 // The real project ACL module: the hub decides no access by itself.
 const projectAcl = await appImport("servers/shared/project-acl.js");
 const { createHub } = await bImport("server/hub.js");
-const { createStudioWeb, ensureAgentToken } = await bImport("server/web.js");
+const { createStudioWeb, ensureAgentToken, startLibraryGc } = await bImport("server/web.js");
+const { createLibraryStore } = await bImport("server/library-store.js");
 const { createTakeUploads } = await bImport("server/takes-upload.js");
 // The take storage adapter: the instance's object storage, narrowed to the
 // calls the uploads and the audio route make. It is built whether or not
@@ -96,6 +99,13 @@ let studioTablesReady = null;
  * same adapter refuses every call, which is the same 503.
  */
 const takeStorage = createTakeStorage({ client: s3, db });
+
+/**
+ * The instrument catalog and the one stored copy of each catalog file, on the
+ * instance's Crow home. Built here rather than left to the web layer so the
+ * housekeeping pass below and the routes read the same store.
+ */
+const libraryStore = createLibraryStore({ crowHome });
 
 /**
  * The studio tables are created by the hub before its own first use, and a
@@ -159,6 +169,12 @@ web = createStudioWeb({
   auth: { isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted, classifyPeer },
   crowHome,
   bundleDir: BUNDLE_DIR,
+  // The instrument catalog and the one stored copy of each file, shared with
+  // the housekeeping pass below.
+  libraryStore,
+  // A download needs `write_files` in the song's project, asserted on the
+  // gateway's client as the local operator before anything is fetched.
+  assertCanWrite: (projectId) => projectAcl.assertCapability(db, projectId, null, "write_files"),
   // The take upload routes (staging, the streamed WAV, the internal take.add)
   // and the object storage the finished take is streamed back from. A chunk's
   // raw body is the one body the gateway's JSON parser does not read, so the
@@ -210,6 +226,11 @@ try {
 } catch {
   console.warn("[studio] the agent token could not be minted at boot; the first agent call retries it");
 }
+
+// Instrument housekeeping: one pass now and one every 24 hours, with the
+// sha256s every song on THIS instance names as the files in use. A pass that
+// cannot read a song's document deletes nothing (see `startLibraryGc`).
+startLibraryGc({ hub, library: libraryStore });
 
 /** The panel's HTTP routes, mounted behind the dashboard's session check. */
 export default function studioRouter(dashboardAuth) {

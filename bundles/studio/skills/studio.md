@@ -9,6 +9,10 @@ triggers:
   - write a drum part
   - make it busier
   - change the instrument
+  - soundfont
+  - bank
+  - general midi
+  - which instrument
   - mute the pad
   - render the song
   - undo that
@@ -37,6 +41,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 - `studio_session_summary` — always your first call: tracks with device and lock state, scenes, clips with a note count each. It pages 50 clips at a time; ask for `page: 2`, `3`, … while it says there is more.
 - `studio_get_clip` — read a clip before you change it: its notes, or a pattern clip's patterns, steps and motion lanes.
 - `studio_samples` — on a sampler track, read the song's samples first: id, name, seconds, origin, the pads that play each one and its slices in order. Ids come from there.
+- `studio_library` — on a soundfont track, read the song's banks first: id, name, licence, credit and the tracks that play each one. Ids come from there.
 - `studio_module_types` — the real controller names, ranges and defaults. A track device must be a generator: Analog generator, DrumSynth, Generator or SpectraVoice.
 - Load `studio-preferences` at the start of every session — it reads and stores preferences through `crow-memory` — and store one whenever the operator teaches you one.
 
@@ -68,7 +73,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | "fade the guitar in" | `studio_arrangement_set_fades` on the audio placement (`fade_in_beats`, `fade_out_beats`; linear) |
 | "how does the whole song sound?" | `studio_render` with `mode: "arrangement"` (and `from_bar` to start later), then report LUFS and peak per section from separate renders |
 | "delete that track / scene / clip" | `studio_track_remove`, `studio_scene_remove` (both take their clips too) or `studio_clip_remove` — confirm first when notes would go |
-| "change the instrument" | `studio_track_set_device`: `params` **replace** the old set, so pass every value you want kept |
+| "change the instrument" | `studio_track_set_device`: `params` **replace** the old set, so pass every value you want kept. On a soundfont track the instrument is its preset: `studio_track_set_program` (the bank itself is the operator's, see **Instruments**) |
 | "darker / brighter / open the filter / shorten a drum" | `studio_track_set_param` with one real name from `studio_module_types`: `F.freq` or `F.resonance` (Analog generator), `Bass tone`, `Bass length`, `Snare tone`, `Snare length`, `Hihat length` (DrumSynth has no Attack or Release), `Volume` on every generator, `Attack`/`Release` only on Analog generator, Generator and SpectraVoice |
 | "write / replace a part" | `studio_clip_write` with the whole note list; it creates the clip when `clip_id` is omitted |
 | "fix, nudge or delete a note" | `studio_get_clip`, then `studio_clip_edit_notes` — `remove` by index, then `move`/`add`; indexes are the clip's own order |
@@ -88,6 +93,48 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | "record a guitar part" | You cannot record. Say what to do instead: arm the audio track, press Record, launch the scene; each loop pass becomes its own take |
 
 Refusals are information: a locked track (`locked`) or the clip the operator has open (`focused`) is off-limits. Say which one, and offer an alternative — another track, a new clip, or waiting for them to unlock it. Never reach around it.
+
+## Instruments
+
+A **soundfont track** (`studio_track_add` with `kind: "soundfont"` and a `font_id`) plays one **preset** of one **bank** — a SoundFont (SF2/SF3) file in the song's library. Bank 0–127 is melodic; **bank 128 is the General MIDI drum bank**, where the program names a kit and the note number picks the drum. Read the banks with `studio_library` before you touch an instrument: it gives each one's id, name, licence, credit and the tracks that play it.
+
+| Tool | What it does |
+|---|---|
+| `studio_library` | The song's library: `{id, kind, name, source, licence, credit, used_by: [{track_id, track_name}]}`, plus `available_catalog` — the banks this Crow could download. Read-only |
+| `studio_track_add` | `{kind: "soundfont", font_id}` makes a soundfont track playing program 0 of bank 0 of that bank; `font_id` must already be in the library |
+| `studio_track_set_program` | The preset: `{track_id, bank, program}`, bank 0–128 and program 0–127. ONE step, and one you may always make |
+| `studio_track_set_font` | Which bank a track plays. You may give a bank to a track that has none yet; once a track plays a bank, changing it is refused for you: it is the operator's step |
+
+**A bank is the person's choice.** Only the operator downloads a catalog bank (a track's **Get the default instruments**, or **Get this instrument**) or uploads their own file (**Add your own bank…**), and you have no tool for either. No command of yours can point a track that plays a bank at another one, or remove a track that plays one ("Only the operator changes the instrument a track plays."). `library.remove` works only on an entry nothing plays; for anyone, an entry a track still plays is refused with "… is in use by …; change what that track plays first." Nor may any undo or redo of yours add a library entry or take one away: the file's arrival and its departure are both the operator's steps. What you may change is the preset, and every program change is an ordinary undoable agent step.
+
+A bank the song names but this device does not hold plays **silence**: a render reports it in `missing_library` and the track offers the download. Say which instrument is missing and that the operator has to fetch it, rather than rewriting the part.
+
+### General MIDI programs
+
+The names Studio shows beside a program number, by family. The numbers are the `program` value you pass (0–127); Studio counts one higher when it speaks, so "program 2 (Bright Acoustic Piano)" is `program: 1`.
+
+| Program | Family | Names, program 0 first |
+|---|---|---|
+| 0–7 | Piano | Acoustic Grand Piano, Bright Acoustic Piano, Electric Grand Piano, Honky-tonk Piano, Electric Piano 1, Electric Piano 2, Harpsichord, Clavinet |
+| 8–15 | Chromatic percussion | Celesta, Glockenspiel, Music Box, Vibraphone, Marimba, Xylophone, Tubular Bells, Dulcimer |
+| 16–23 | Organ | Drawbar Organ, Percussive Organ, Rock Organ, Church Organ, Reed Organ, Accordion, Harmonica, Tango Accordion |
+| 24–31 | Guitar | Acoustic Guitar (nylon), Acoustic Guitar (steel), Electric Guitar (jazz), Electric Guitar (clean), Electric Guitar (muted), Overdriven Guitar, Distortion Guitar, Guitar Harmonics |
+| 32–39 | Bass | Acoustic Bass, Electric Bass (finger), Electric Bass (pick), Fretless Bass, Slap Bass 1, Slap Bass 2, Synth Bass 1, Synth Bass 2 |
+| 40–47 | Strings | Violin, Viola, Cello, Contrabass, Tremolo Strings, Pizzicato Strings, Orchestral Harp, Timpani |
+| 48–55 | Ensemble | String Ensemble 1, String Ensemble 2, SynthStrings 1, SynthStrings 2, Choir Aahs, Voice Oohs, Synth Voice, Orchestra Hit |
+| 56–63 | Brass | Trumpet, Trombone, Tuba, Muted Trumpet, French Horn, Brass Section, SynthBrass 1, SynthBrass 2 |
+| 64–71 | Reed | Soprano Sax, Alto Sax, Tenor Sax, Baritone Sax, Oboe, English Horn, Bassoon, Clarinet |
+| 72–79 | Pipe | Piccolo, Flute, Recorder, Pan Flute, Blown Bottle, Shakuhachi, Whistle, Ocarina |
+| 80–87 | Synth lead | Lead 1 (square), Lead 2 (sawtooth), Lead 3 (calliope), Lead 4 (chiff), Lead 5 (charang), Lead 6 (voice), Lead 7 (fifths), Lead 8 (bass + lead) |
+| 88–95 | Synth pad | Pad 1 (new age), Pad 2 (warm), Pad 3 (polysynth), Pad 4 (choir), Pad 5 (bowed), Pad 6 (metallic), Pad 7 (halo), Pad 8 (sweep) |
+| 96–103 | Synth effects | FX 1 (rain), FX 2 (soundtrack), FX 3 (crystal), FX 4 (atmosphere), FX 5 (brightness), FX 6 (goblins), FX 7 (echoes), FX 8 (sci-fi) |
+| 104–111 | Ethnic | Sitar, Banjo, Shamisen, Koto, Kalimba, Bag pipe, Fiddle, Shanai |
+| 112–119 | Percussive | Tinkle Bell, Agogo, Steel Drums, Woodblock, Taiko Drum, Melodic Tom, Synth Drum, Reverse Cymbal |
+| 120–127 | Sound effects | Guitar Fret Noise, Breath Noise, Seashore, Bird Tweet, Telephone Ring, Helicopter, Applause, Gunshot |
+
+**The drum bank (bank 128)** names a kit by program: 0 Standard, 8 Room, 16 Power, 24 Electronic, 25 TR-808, 32 Jazz, 40 Brush, 48 Orchestra, 56 SFX. There the program picks the kit and the NOTES pick the drums — the GM percussion map runs 35–81, from kick and snare up through toms, cymbals, Latin percussion and triangles. The map, the drum programming and the voicing for each family are in `studio-arranging-and-sound`.
+
+Every bank's presets are its own: the names above are what GM asks for, not a promise that this bank holds that sound. Pick a preset, render, and quote what you heard before you write the part around it.
 
 ## Sampler
 
@@ -215,7 +262,7 @@ Every solo step is an undoable edit, so say so before you start and offer to ski
 | `studio-counterpoint` | Writing or checking two or more lines against each other |
 | `studio-harmony` | Chords, progressions, melody and key |
 | `studio-rhythm-and-form` | Grooves, drums, sampler-style patterns, song structure |
-| `studio-arranging-and-sound` | Instrument ranges, voicing, SunVox patches |
+| `studio-arranging-and-sound` | Instrument ranges, voicing, General MIDI programs and drum notes, SunVox patches |
 | `studio-mixing` | Levels, loudness targets, delivery |
 | `studio-modern` | Post-tonal and experimental techniques |
 | `studio-preferences` | Always: read at the start, store when taught |

@@ -3,14 +3,15 @@
  *
  * oldTree(sha) adds a detached git worktree for `sha` in a scratch dir under
  * os.tmpdir(), links node_modules to this checkout's when package-lock.json is
- * unchanged between `sha` and HEAD (else runs `npm ci --ignore-scripts`), and
+ * unchanged between `sha` and HEAD (else runs `npm ci --ignore-scripts` and
+ * gives better-sqlite3 its native binary, see nativeSqlite), and
  * returns { dir, importModule(rel), cleanup() }. It never skips: a missing
  * object is fetched (`git fetch --depth=1 origin <sha>`), and any failure
  * throws. Memoised per sha within a process. Callers MUST call cleanup() in
  * after(); it removes the worktree and the scratch dir.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, realpathSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -47,6 +48,7 @@ async function build(sha) {
       symlinkSync(realpathSync(here), join(dir, "node_modules"), "dir");
     } else {
       execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: dir, stdio: "pipe", timeout: 600_000 });
+      nativeSqlite(dir, here);
     }
   } catch (err) {
     cleanup();
@@ -57,6 +59,35 @@ async function build(sha) {
     importModule: (rel) => import(pathToFileURL(join(dir, rel)).href),
     cleanup,
   };
+}
+
+/**
+ * `npm ci --ignore-scripts` leaves better-sqlite3 (the one dependency with an
+ * install script) without its native binary, so the old tree could not open a
+ * database. When the old tree pins the same better-sqlite3 version as this
+ * checkout, its build directory is linked to this checkout's; otherwise only
+ * that package's own install script runs (`npm rebuild better-sqlite3`).
+ * @param {string} dir the old tree
+ * @param {string} here this checkout's node_modules
+ */
+function nativeSqlite(dir, here) {
+  const versionOf = (root) => {
+    try {
+      return JSON.parse(readFileSync(join(root, "better-sqlite3", "package.json"), "utf8")).version;
+    } catch {
+      return null;
+    }
+  };
+  const theirs = versionOf(join(dir, "node_modules"));
+  if (theirs === null) return;
+  const ours = versionOf(here);
+  const ourBuild = join(here, "better-sqlite3", "build");
+  const theirBuild = join(dir, "node_modules", "better-sqlite3", "build");
+  if (theirs === ours && existsSync(ourBuild) && !existsSync(theirBuild)) {
+    symlinkSync(realpathSync(ourBuild), theirBuild, "dir");
+    return;
+  }
+  execFileSync("npm", ["rebuild", "better-sqlite3", "--no-audit", "--no-fund"], { cwd: dir, stdio: "pipe", timeout: 600_000 });
 }
 
 export function oldTree(sha) {

@@ -18,7 +18,7 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, openSync, closeSync, readdirSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -338,6 +338,72 @@ describe("4b — docker-type restriction + declared-root traversal rejection", (
 
     assert.equal(readAt(destBundleDir(id), "config/settings.yml"), "repo config\n");
     assert.equal(readAt(destBundleDir(id), "scripts/bootstrap.sh"), "#!/bin/sh\necho repo script\n");
+  });
+
+  test("non-docker bundle: vendor/ and library/ ship with a version bump", async () => {
+    const id = "widget-vendored";
+    const repoRoot = freshRoot("crowrepo-vendored-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "V", version: "2.0.0", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/vendor/lib/synth.js`, "new synth\n");
+    put(repoRoot, `${id}/library/catalog.json`, "{\"v\":2}\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${id}/vendor/lib/synth.js`, "old synth\n");
+    setInstalled([id]);
+
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+
+    assert.equal(readAt(destBundleDir(id), "vendor/lib/synth.js"), "new synth\n");
+    assert.equal(readAt(destBundleDir(id), "library/catalog.json"), "{\"v\":2}\n");
+  });
+
+  test("a refreshed vendor file is replaced, not rewritten in place", async () => {
+    const id = "widget-mapped";
+    const repoRoot = freshRoot("crowrepo-mapped-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "M", version: "2.0.0", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/vendor/sunvox/libsynth.so`, "NEW SYNTH BYTES\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${id}/vendor/sunvox/libsynth.so`, "OLD SYNTH BYTES\n");
+    setInstalled([id]);
+
+    const dest = join(destBundleDir(id), "vendor/sunvox/libsynth.so");
+    const before = statSync(dest);
+    // A running engine has this file open (mapped): truncating it in place would
+    // fault that process, so the refresh must give the path a NEW inode.
+    const mapped = openSync(dest, "r");
+    try {
+      const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+      assert.deepEqual(errors, []);
+
+      assert.equal(readAt(destBundleDir(id), "vendor/sunvox/libsynth.so"), "NEW SYNTH BYTES\n", "the path carries the new bytes");
+      assert.equal(readFileSync(mapped, "utf8"), "OLD SYNTH BYTES\n", "the old inode still holds the old bytes");
+      assert.notEqual(statSync(dest).ino, before.ino, "the file at the path is a new inode");
+      assert.deepEqual(readdirSync(join(destBundleDir(id), "vendor/sunvox")), ["libsynth.so"], "no temporary file is left beside it");
+    } finally {
+      closeSync(mapped);
+    }
+  });
+
+  test("a symlinked destination directory is replaced, never written through", async () => {
+    const id = "widget-linked";
+    const repoRoot = freshRoot("crowrepo-linked-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "L", version: "2.0.0", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/vendor/lib/synth.js`, "new synth\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    const outside = freshRoot("crow-outside-");
+    put(outside, "lib/synth.js", "outside bytes\n");
+    mkdirSync(join(destBundleDir(id), "vendor"), { recursive: true });
+    symlinkSync(join(outside, "lib"), join(destBundleDir(id), "vendor/lib"));
+    setInstalled([id]);
+
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+
+    assert.equal(readFileSync(join(outside, "lib/synth.js"), "utf8"), "outside bytes\n", "the link's target is untouched");
+    assert.equal(lstatSync(join(destBundleDir(id), "vendor/lib")).isDirectory(), true, "the destination is now a real directory");
+    assert.equal(readAt(destBundleDir(id), "vendor/lib/synth.js"), "new synth\n");
   });
 
   test("a docker bundle's declared widgets/ is code: the version bump ships widgets/x.js", async () => {

@@ -26,7 +26,7 @@ import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { withoutCredentialKeys } from "../../shared/credentials-env.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, readlinkSync, renameSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -395,20 +395,87 @@ function isValidPathSegment(seg) {
 }
 
 /**
+ * Replace one file at `dst` with a copy of `src` WITHOUT ever writing into the
+ * existing file.
+ *
+ * A refresh can land while a process is running from the installed copy: a
+ * shared library under `vendor/` (Studio's `sunvox.so`) is mapped by a live
+ * engine, and truncating that inode under it would fault the process. So the
+ * bytes go to a temporary file beside the destination, its mode is copied from
+ * the source, and a rename puts it in place — the path gets a new inode and
+ * whoever holds the old one keeps the old bytes. The temporary file joins the
+ * `.<name>.refresh-*` family and is removed on failure.
+ * @param {string} src
+ * @param {string} dst
+ * @returns {void}
+ */
+function replaceFileAtomic(src, dst) {
+  mkdirSync(dirname(dst), { recursive: true });
+  const temp = join(dirname(dst), `.${basename(dst)}.refresh-${randomBytes(6).toString("hex")}`);
+  try {
+    copyFileSync(src, temp);
+    // copyFileSync gives the temp file the source's permissions on Linux; set
+    // them explicitly anyway so an executable/read-only source keeps its bits.
+    chmodSync(temp, statSync(src).mode & 0o777);
+    renameSync(temp, dst);
+  } catch (err) {
+    try { unlinkSync(temp); } catch {}
+    throw err;
+  }
+}
+
+/**
+ * Copy a directory tree the way cpSync recursive does, but every file is
+ * replaced atomically (see replaceFileAtomic) and symlinks are recreated rather
+ * than followed. Files the destination has and the source does not are left
+ * alone, exactly as cpSync leaves them.
+ * @param {string} src
+ * @param {string} dst
+ * @returns {void}
+ */
+function replaceTreeAtomic(src, dst) {
+  // A destination that is a symlink (or a file) where the source has a
+  // directory is replaced, never followed: writing through it would land the
+  // copy wherever the link points. A directory made here takes the source
+  // directory's own permission bits.
+  const existing = lstatSync(dst, { throwIfNoEntry: false });
+  if (existing && !existing.isDirectory()) rmSync(dst, { force: true });
+  if (!existing || !existing.isDirectory()) {
+    mkdirSync(dirname(dst), { recursive: true });
+    mkdirSync(dst, { mode: statSync(src).mode & 0o777 });
+  }
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name);
+    const to = join(dst, entry.name);
+    if (entry.isSymbolicLink()) {
+      const target = readlinkSync(from);
+      rmSync(to, { force: true });
+      mkdirSync(dirname(to), { recursive: true });
+      symlinkSync(target, to);
+    } else if (entry.isDirectory()) {
+      replaceTreeAtomic(from, to);
+    } else if (entry.isFile()) {
+      replaceFileAtomic(from, to);
+    }
+  }
+}
+
+/**
  * Copy one explicit-include item (a top-level file or a directory) from a
  * bundle's repo source into its installed dest dir. No-op (returns false) if
- * the item doesn't exist in the repo source. cpSync is additive: dest-only
- * files not present in the source survive.
+ * the item doesn't exist in the repo source. Additive: dest-only files not
+ * present in the source survive. Never rewrites a destination file in place —
+ * a temp file beside each is renamed into place, so a library under `vendor/`
+ * that a running process has mapped keeps its old inode and bytes.
  */
 function copyBundleRefreshItem(appSrc, destDir, item) {
   const src = join(appSrc, item);
   if (!existsSync(src)) return false;
   const dst = join(destDir, item);
   if (statSync(src).isDirectory()) {
-    cpSync(src, dst, { recursive: true });
+    replaceTreeAtomic(src, dst);
   } else {
-    mkdirSync(dirname(dst), { recursive: true });
-    copyFileSync(src, dst);
+    replaceFileAtomic(src, dst);
   }
   return true;
 }
@@ -792,9 +859,12 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
   // engine/ + pdf/: tax's calculator, ingest and form filler (its panel imports the
   // installed engine/, so a version bump must ship it with the panel).
+  // vendor/ + library/: third-party code a bundle ships pre-built (Studio's SunVox
+  // and SoundFont synth) and its data catalogs — code and data the new version
+  // needs, refreshed like engine/.
   const dirs = isDocker
     ? ["server", "panel", "skills"]
-    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src", "engine", "pdf"];
+    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src", "engine", "pdf", "vendor", "library"];
   // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
   // .env*, node_modules/, data/ — simply absent from both lists above. The ONE
   // exception is a docker bundle's explicit opt-in, manifest.refreshFiles
