@@ -69,7 +69,11 @@
  * **Every sample is decoded here, at load.** `load` walks the whole bank and
  * calls `sample.getAudioData()` on each sample before it returns (that is the
  * call that decodes an SF3 sample's Ogg data, and an SF2 sample's 16-bit data),
- * so nothing decodes on the audio thread while the song plays. The synth is
+ * so nothing decodes on the audio thread while the song plays. A sample whose
+ * data is there but will not decode is NOT skipped: every note of that bank
+ * would play silence, so the whole bank is refused ("Studio could not read this
+ * bank's compressed samples."). Only a sample that carries no data at all — a
+ * bank loaded without sample data — is skipped, and stays silent. The synth is
  * given NO `decodedSampleBudget`: a finite budget turns on its own per-note
  * decode cache bookkeeping, and this file already bounds the bank itself. The
  * cap is enforced here instead — the file's bytes are checked BEFORE the bank
@@ -102,7 +106,10 @@
  * at all), each font's active channels, the track entries and their buffers. It
  * sums each track's channels into that track's own pair (a channel freed by a
  * font change is one of them, for as long as it drains). No Map or Set iterator
- * is created per run and no array is built per run.
+ * is created per run and no array is built per run — not even when a drain ends
+ * inside a run, which settles the font and drops that drain's route by walking
+ * the precomputed entries and swap-removing it from the array it sits in (a
+ * `splice` hands back a fresh array, an index swap hands back nothing).
  *
  * It is a classic script (no `import`/`export`): it assigns
  * `globalThis.StudioFontVoice` for the worklet scope and `module.exports` when a
@@ -149,6 +156,13 @@
 
   /** Why a bank nothing can be played out of is refused. */
   const NO_INSTRUMENTS = "This bank has no instruments.";
+
+  /**
+   * Why a bank whose compressed samples carry data that will not decode is
+   * refused: without its samples every note of it would play silence, so the
+   * bank is not half-loaded.
+   */
+  const UNDECODABLE_SAMPLES = "Studio could not read this bank's compressed samples.";
 
   /**
    * Why a load the song's own fonts leave no room for is refused. The cap is
@@ -245,9 +259,13 @@
    * the vendored Vorbis decoder, an SF2 sample's 16-bit data into Float32. Each
    * decoded array is cached on the sample itself, so after this pass a note can
    * never trigger a decode. A sample that carries no data (a bank loaded without
-   * sample data) is skipped — it is silent, not a failed load.
+   * sample data) is skipped — it is silent, not a failed load. A sample whose
+   * data IS there but that cannot be decoded fails the WHOLE bank: a bank that
+   * only played silence is not a bank this host can read, and half of one is
+   * worse than none.
    * @param {object} bank the parsed bank
    * @returns {{samples: number, decoded: number, bytes: number}}
+   * @throws {Error} when a sample that carries data will not decode
    */
   function decodeSamples(bank) {
     const list = bank && bank.samples;
@@ -261,9 +279,12 @@
       try {
         data = sample.getAudioData();
       } catch {
-        // No data, or a decoder that could not read it: the sample plays
-        // silence, which is the synth's own answer for it too.
-        continue;
+        // A sample with no data at all (neither decoded, nor compressed, nor
+        // 16-bit) plays silence, which is the synth's own answer for it too. A
+        // sample that HAS data and will not decode is a bank this decoder
+        // cannot read.
+        if (!sample.audioData && !sample.compressedData && !sample.s16leData) continue;
+        throw new Error(UNDECODABLE_SAMPLES);
       }
       if (!data || typeof data.byteLength !== "number") continue;
       decoded += 1;
@@ -480,7 +501,23 @@
       return font;
     }
 
-    /** @returns {boolean} whether one font's channel is still draining. */
+    /**
+     * Remove one entry from a preallocated array without shifting what follows:
+     * the last entry takes its place and the length shrinks. `splice` hands back
+     * a fresh array of what it removed, and the per-run path may not allocate
+     * anything at all.
+     * @param {Array} list
+     * @param {number} index
+     * @returns {void}
+     */
+    function removeAt(list, index) {
+      const last = list.length - 1;
+      if (index < 0 || index > last) return;
+      if (index !== last) list[index] = list[last];
+      list.length = last;
+    }
+
+    /** @param {object} font @param {number} channel @returns {boolean} whether one font's channel is still draining. */
     function isDraining(font, channel) {
       const list = font.draining;
       for (let index = 0; index < list.length; index += 1) {
@@ -504,31 +541,40 @@
 
     /** @param {object} font @param {number} channel @returns {void} */
     function clearDraining(font, channel) {
-      const at = font.draining.indexOf(channel);
-      if (at >= 0) font.draining.splice(at, 1);
+      for (let index = font.draining.length - 1; index >= 0; index -= 1) {
+        if (font.draining[index] === channel) removeAt(font.draining, index);
+      }
       font.drainingSince[channel] = -1;
     }
 
     /** @param {object} font @param {number} channel @returns {void} */
     function removeActiveChannel(font, channel) {
-      const at = font.activeChannels.indexOf(channel);
-      if (at >= 0) font.activeChannels.splice(at, 1);
+      for (let index = font.activeChannels.length - 1; index >= 0; index -= 1) {
+        if (font.activeChannels[index] === channel) removeAt(font.activeChannels, index);
+      }
     }
 
     /**
      * A drain that has finished stops routing into its track; the channel is
      * then free again (and the next `bind()` gives it to a new track).
+     *
+     * This runs from `process()` — a drain can end inside a block — so it walks
+     * the entries `bind()` precomputed (never `tracks.values()`, whose iterator is
+     * an allocation per run) and swap-removes the route from the array it sits in.
+     * An entry only ever gets a drain through `detach()`, and every entry that
+     * can hold one is in `trackEntries`.
      * @param {string} fontId
      * @param {number} serial
      * @param {number} channel
      * @returns {void}
      */
     function dropDrainRoutes(fontId, serial, channel) {
-      for (const entry of tracks.values()) {
-        const drains = entry.drains;
+      for (let at = 0; at < trackEntries.length; at += 1) {
+        const drains = trackEntries[at].drains;
         for (let index = drains.length - 1; index >= 0; index -= 1) {
           const drain = drains[index];
-          if (drain.channel === channel && drain.font_id === fontId && drain.serial === serial) drains.splice(index, 1);
+          if (drain.channel !== channel || drain.font_id !== fontId || drain.serial !== serial) continue;
+          removeAt(drains, index);
         }
       }
     }
@@ -548,7 +594,7 @@
         const midi = font.synth && font.synth.midiChannels[channel];
         const voices = midi && typeof midi.voiceCount === "number" ? midi.voiceCount : 0;
         if (voices > 0) continue;
-        list.splice(index, 1);
+        removeAt(list, index);
         font.drainingSince[channel] = -1;
         removeActiveChannel(font, channel);
         dropDrainRoutes(font.id, font.serial, channel);
@@ -935,11 +981,13 @@
        *
        * Throws (to this caller only: the processor reports it as
        * `library_failed`) when the bytes are not a bank it can read, when the
-       * bank carries no preset at all, and when the song's own fonts leave no
-       * room for it under the cap. A cap refusal carries `code: "font_cap"`, so
-       * the processor can tell it from a broken bank. Nothing is left behind when
-       * it throws (except that a reload of the same id has already released the
-       * copy it replaces).
+       * bank carries no preset at all, when a sample of the bank's compressed
+       * data will not decode, and when the song's own fonts leave no room for it
+       * under the cap. A cap refusal carries `code: "font_cap"`, so the processor
+       * can tell it from a broken bank. Nothing is left behind when it throws: a
+       * reload of the same id has already released the copy it replaces, so the
+       * tracks that read the font are re-bound here — they let go of a channel
+       * that no longer exists, and `missing()` names the font for the page again.
        * @param {string} fontId
        * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes
        * @returns {Promise<void>}
@@ -960,25 +1008,36 @@
         if (!hasInstruments(bank)) throw new Error(NO_INSTRUMENTS);
 
         // A reload of the same id releases the copy it replaces before the new
-        // one is decoded, so the two never sit in memory together.
+        // one is decoded, so the two never sit in memory together. From here on
+        // the old copy is GONE: whatever happens next, the tracks that read it
+        // may not keep its channel, so a refusal below re-binds them and
+        // `missing()` names the font for the page again.
         dropFont(id);
 
-        const synth = makeSynth(rateHz);
-        // An SF3 bank's samples are decoded below, through the vendored Vorbis
-        // decoder, which compiles on first use. Awaiting it here means the
-        // decode pass can read them; a host without a decoder still plays an
-        // uncompressed SF2, and an SF3 sample it cannot read is silent.
+        let synth = null;
+        let decoded = null;
         try {
-          await synth.ready;
-        } catch {
-          /* no Ogg decoder: SF2 banks are unaffected */
-        }
+          synth = makeSynth(rateHz);
+          // An SF3 bank's samples are decoded below, through the vendored Vorbis
+          // decoder, which compiles on first use. Awaiting it here means the
+          // decode pass can read them; a host without a decoder still plays an
+          // uncompressed SF2, and an SF3 sample it cannot read is silent.
+          try {
+            await synth.ready;
+          } catch {
+            /* no Ogg decoder: SF2 banks are unaffected */
+          }
 
-        // Every sample, now: nothing may decode on the audio thread later.
-        const decoded = decodeSamples(bank);
-        if (decoded.bytes > room) {
+          // Every sample, now: nothing may decode on the audio thread later.
+          decoded = decodeSamples(bank);
+          if (decoded.bytes > room) throw capError(maxBytes);
+        } catch (error) {
+          // The bank is refused for room, or its samples would not decode: free
+          // the synth and re-bind, so no track holds a channel of a font that is
+          // not there (which would keep it out of `missing()`).
           destroySynth(synth);
-          throw capError(maxBytes);
+          bind();
+          throw error;
         }
 
         fontSerial += 1;
@@ -1255,15 +1314,17 @@
         }
 
         // A drain whose voices have ended frees its channel, and a font nothing
-        // reads any more stops being rendered at all.
+        // reads any more stops being rendered at all. Both removals swap the last
+        // entry into the hole: this runs on the audio thread, and `splice` would
+        // allocate a result array.
         for (let index = list.length - 1; index >= 0; index -= 1) {
           const font = list[index];
           if (!font.synth) {
-            list.splice(index, 1);
+            removeAt(list, index);
             continue;
           }
           settleFont(font);
-          if (font.activeChannels.length === 0) list.splice(index, 1);
+          if (font.activeChannels.length === 0) removeAt(list, index);
         }
         return outputs;
       },

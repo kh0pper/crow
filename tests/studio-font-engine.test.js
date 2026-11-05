@@ -1030,6 +1030,76 @@ test("a font change releases the old font's held notes on the same track", async
   host.destroy();
 });
 
+test("a drain that ends while playing allocates nothing", async () => {
+  // A track that changes font leaves its old channel draining INTO ITS OWN pair.
+  // When that drain ends inside `process()`, the run settles the font, drops the
+  // route and stops rendering the old font — and it may not allocate a thing
+  // while it does: no `tracks.values()` iterator and no `splice` result. The run
+  // hands back the same map, and the track keeps the very same buffers, before
+  // and after the drain ends.
+  processorClass();
+  const host = globalThis.StudioFontVoice.create(SAMPLE_RATE, {});
+  await host.load("font-a", Uint8Array.from(FONT_BYTES));
+  await host.load("font-b", Uint8Array.from(FONT_BYTES));
+
+  const onB = { track_id: "track-1", font_id: "font-b", bank: 0, program: 1 };
+  host.assign([{ track_id: "track-1", font_id: "font-a", bank: 0, program: 8 }]);
+  host.noteOn("track-1", 60, 100);
+  host.process(4096);
+  assert.equal(host.channelFor("track-1"), 0, "the track holds channel 0 of font-a");
+
+  // The font change: font-a's channel 0 is released and keeps ringing into the
+  // same track (a drain) for its four-second release.
+  host.assign([onB]);
+  const started = host.process(4096);
+  assert.ok(
+    toneAmplitude(started.get("track-1").left, 0, 4096, toneOf(0, 8)) > 0.01,
+    "the old font's release has to be routed into the track as the drain starts",
+  );
+
+  // The probe: a Map iterator created from here on is an allocation the per-run
+  // path may not make (and the one a drain end used to create).
+  const mapProto = Map.prototype;
+  const realValues = mapProto.values;
+  const realEntries = mapProto.entries;
+  const realKeys = mapProto.keys;
+  const realIterator = mapProto[Symbol.iterator];
+  let iterators = 0;
+  const counting = (real) =>
+    function countedIterator(...args) {
+      iterators += 1;
+      return real.apply(this, args);
+    };
+  mapProto.values = counting(realValues);
+  mapProto.entries = counting(realEntries);
+  mapProto.keys = counting(realKeys);
+  mapProto[Symbol.iterator] = counting(realIterator);
+  try {
+    const map = host.process(4096);
+    const pair = host.outputFor("track-1");
+    // Five seconds of runs: the four-second release ends somewhere inside them.
+    const chunks = Math.ceil((SAMPLE_RATE * 5) / 4096);
+    for (let index = 0; index < chunks; index += 1) {
+      const out = host.process(4096);
+      assert.equal(out, map, "a run hands back its own map, never a new one");
+      assert.equal(out.get("track-1"), pair, "a track keeps its pair across the drain end");
+    }
+  } finally {
+    mapProto.values = realValues;
+    mapProto.entries = realEntries;
+    mapProto.keys = realKeys;
+    mapProto[Symbol.iterator] = realIterator;
+  }
+  assert.equal(iterators, 0, "a run must create no Map iterator, not even the one a drain end used to create");
+
+  // The drain really did end inside those runs: font-a's channel 0 is free (and
+  // is not drained into track-1 any more), so a new track takes it.
+  host.assign([onB, { track_id: "track-2", font_id: "font-a", bank: 0, program: 0 }]);
+  assert.equal(host.channelFor("track-1"), 0, "the track keeps its own channel on font-b");
+  assert.equal(host.channelFor("track-2"), 0, "a drained channel is the lowest free channel again");
+  host.destroy();
+});
+
 test("an sf3 bank is fully decoded when it loads", async () => {
   // The REAL compressed path: an SF3 bank whose smpl chunk is Ogg Vorbis, made
   // from the committed `tests/fixtures/tiny-sine.ogg`. Every sample has to be
@@ -1084,6 +1154,51 @@ test("an sf3 bank is fully decoded when it loads", async () => {
   assert.deepEqual(host.stats(SF3_ID), stats, "nothing may decode while the song plays");
   assert.equal(host.bytes, stats.rawBytes + stats.decodedBytes);
   host.destroy();
+});
+
+test("an sf3 bank whose samples cannot be decoded fails at load", async () => {
+  // Every sample of an SF3 bank is decoded at load. A sample that carries data
+  // the decoder cannot read must not be skipped: the bank is not half-loaded with
+  // silent samples, it fails as a WHOLE, with the reason the page shows, and
+  // nothing of it is held.
+  const host = await processorHost();
+  const samplePrototype = globalThis.StudioSpessa.BasicSample.prototype;
+  const real = samplePrototype.getAudioData;
+  let attempts = 0;
+  samplePrototype.getAudioData = function undecodable() {
+    attempts += 1;
+    throw new Error("the Ogg decoder could not read this sample");
+  };
+  try {
+    host.post({
+      type: "song",
+      snapshot: fontSong([
+        fontTrack(0, { device: { engine: "soundfont", font_id: SF3_ID, bank: 0, program: 0 } }),
+      ], { bpm: 125 }),
+    });
+    host.post({ type: "library", request_id: "undecodable", library_id: SF3_ID, kind: "font", bytes: Uint8Array.from(SF3_BYTES) });
+    await host.flush();
+  } finally {
+    samplePrototype.getAudioData = real;
+  }
+  assert.ok(attempts > 0, "the load has to have tried to decode the bank's samples");
+
+  const failed = postsOfType(host.posts, "library_failed");
+  assert.equal(failed.length, 1, `expected one library_failed, got ${JSON.stringify(failed)}`);
+  assert.equal(failed[0].library_id, SF3_ID);
+  assert.equal(failed[0].reason, "Studio could not read this bank's compressed samples.");
+  const answer = answersTo(host.posts, "undecodable");
+  assert.equal(answer.length, 1, `the load has to be answered once, got ${JSON.stringify(answer)}`);
+  assert.equal(answer[0].ok, false);
+  assert.equal(answer[0].reason, failed[0].reason);
+  assert.equal(host.processor.fonts.fontCount, 0, "a bank with undecodable samples is not held");
+  assert.equal(host.processor.fonts.bytes, 0, "and it counts nothing against the cap");
+
+  host.post({ type: "launchScene", id: "scene-1" });
+  host.post({ type: "play" });
+  await host.flush();
+  const silent = host.run(8);
+  assert.ok(peakOf(silent.left) < 1e-9, `a bank that would not decode has to be silent, peak was ${peakOf(silent.left)}`);
 });
 
 test("decoded samples count against the cap", async () => {
@@ -1239,6 +1354,45 @@ test("a reload releases the old copy before decoding the new one", async () => {
   }
   assert.equal(bytesDuringDecode, 0, "the copy being replaced has to be released before the new one is decoded");
   assert.ok(host.bytes > 0, "the reloaded font is held after it decodes");
+  host.destroy();
+});
+
+test("a reload refused for the cap leaves its tracks asking for the font", async () => {
+  // The cap holds the font's file AND its decoded samples, exactly. A reload with
+  // a bigger bank releases the copy it replaces before decoding the new one — and
+  // then finds no room for the decoded data. The tracks that played the font must
+  // not keep a channel of a copy that is gone: they are re-bound, so the font is
+  // reported missing again instead of playing nothing in silence.
+  processorClass();
+  const host = globalThis.StudioFontVoice.create(SAMPLE_RATE, { maxBytes: FONT_FOOTPRINT });
+  host.assign([{ track_id: "track-1", font_id: FONT_ID, bank: 0, program: 0 }]);
+  await host.load(FONT_ID, Uint8Array.from(FONT_BYTES));
+  assert.equal(host.channelFor("track-1"), 0, "the loaded font gives its track a channel");
+  assert.deepEqual(host.missing(), [], "a font that is loaded is not missing");
+
+  // One preset more than the cap holds: the file alone still fits, its decoded
+  // samples do not, so the refusal comes AFTER the old copy has been released.
+  const bigger = tinySf2({
+    presets: [...TINY_SF2_PRESETS, { name: "Sine 1060", bank: 0, program: 9, freq: 1060 }],
+  });
+  assert.ok(bigger.byteLength <= FONT_FOOTPRINT, "the bigger bank's file alone has to fit under the cap");
+  await assert.rejects(() => host.load(FONT_ID, Uint8Array.from(bigger)), {
+    message: /^This song's instruments need more than .* MB; remove an instrument or use a smaller bank\.$/,
+  });
+
+  assert.equal(host.fontCount, 0, "the copy the reload replaced is gone");
+  assert.equal(host.bytes, 0, "and it counts nothing against the cap");
+  assert.equal(host.channelFor("track-1"), null, "the track may not keep a channel of a font that is not there");
+  assert.deepEqual(host.missing(), [FONT_ID], "the refused font has to be asked for again");
+
+  // Silence until the font arrives…
+  const silent = host.process(4096);
+  assert.ok(peakOf(silent.get("track-1").left) < 1e-9, "a track whose font was refused is silent");
+  // …and a load that fits plays that track again.
+  await host.load(FONT_ID, Uint8Array.from(FONT_BYTES));
+  host.noteOn("track-1", 60, 100);
+  const back = host.process(4096);
+  assert.ok(peakOf(back.get("track-1").left) > 0.01, "the font that fits again has to play its track");
   host.destroy();
 });
 
