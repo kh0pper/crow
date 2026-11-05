@@ -2481,6 +2481,270 @@ test("a human can drop a pad's sample and undo it", async (t) => {
   assert.ok(reopened.samples[SAMPLE_A], "a sample belongs to the song, not to the track");
 });
 
+// --- A soundfont track's instrument -------------------------------------------
+
+/** What the agent's font guard answers with, word for word. */
+const FONT_NEEDS_A_YES = "Only the operator changes the instrument a track plays.";
+
+/** What the agent's library guard answers with, word for word. */
+const LIBRARY_NEEDS_A_YES = "Only the operator removes an instrument from the library.";
+
+/** A font's sha256, as the gateway's library route measures it. */
+const FONT_HASH = "a1b2c3d4".repeat(8);
+
+/**
+ * The library entry `library.add` accepts, as the gateway's library routes build
+ * it once the file is stored and hashed.
+ * @param {string} id
+ * @param {object} [overrides]
+ * @returns {object}
+ */
+function makeFont(id, overrides = {}) {
+  return {
+    id,
+    kind: "font",
+    name: `Font ${id}`,
+    source: "catalog",
+    catalog_id: `catalog-${id}`,
+    storage_key: `studio/library/${id}.sf3`,
+    sha256: FONT_HASH,
+    bytes: 1024,
+    licence: "MIT",
+    credit: "MuseScore_General by S. Christian Collins and the MuseScore team",
+    author_label: "the operator",
+    ...overrides,
+  };
+}
+
+/**
+ * Add one font the way Studio itself does: `internal: true`, as the gateway's
+ * library routes issue it.
+ * @param {object} hub
+ * @param {string} song_id
+ * @param {object} font
+ * @returns {Promise<object>} the applied step's result
+ */
+async function addFont(hub, song_id, font) {
+  const added = await hub.runCommand({
+    song_id,
+    cmd_id: `add-font-${font.id}`,
+    command: "library.add",
+    args: { entry: font },
+    author: HUMAN,
+    internal: true,
+  });
+  assert.equal(added.ok, true, `library.add was refused: ${added.error}`);
+  return added;
+}
+
+/**
+ * A song with two fonts in its library and one soundfont track playing the
+ * first of them — the shape every instrument rule is about.
+ * @param {object} hub
+ * @returns {Promise<{song_id: string, tracked: object}>}
+ */
+async function seedFontSong(hub) {
+  const created = await hub.createSong({ project_id: PROJECT, title: "Fonts", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const song_id = created.song_id;
+  await addFont(hub, song_id, makeFont("font-a"));
+  await addFont(hub, song_id, makeFont("font-b"));
+  const tracked = await applies(hub, song_id, "seed-keys", "track.add", {
+    id: "keys",
+    name: "Keys",
+    kind: "soundfont",
+    font_id: "font-a",
+  });
+  return { song_id, tracked };
+}
+
+test("an agent may change a program but not remove or replace a font", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id } = await seedFontSong(hub);
+
+  // Choosing what a track plays out of its font is an ordinary agent edit.
+  const played = await applies(
+    hub,
+    song_id,
+    "agent-program",
+    "track.set_program",
+    { track_id: "keys", bank: 0, program: 40 },
+    AGENT,
+  );
+  assert.equal(played.entry.command, "track.set_program");
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].device.program, 40);
+
+  // Even taking that back is the agent's own step: a program is a setting of
+  // the instrument, not the instrument.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "agent-undo-program",
+    entry_id: played.entry.id,
+    author: AGENT,
+  });
+  assert.equal(undone.ok, true, `the agent's undo of its own program change was refused: ${undone.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].device.program, 0);
+
+  // The font it plays is not: another bank is another sound.
+  const replaced = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-set-font",
+      command: "track.set_font",
+      args: { track_id: "keys", font_id: "font-b" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(replaced.error, FONT_NEEDS_A_YES);
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].device.font_id, "font-a");
+
+  // Nor is the entry itself: a font a track still plays cannot be taken out of
+  // the library, whoever asks.
+  const removed = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-font",
+      command: "library.remove",
+      args: { library_id: "font-a" },
+      author: AGENT,
+    }),
+    "conflict",
+  );
+  assert.match(removed.error, /in use by track "Keys"/);
+  assert.ok((await hub.openSong(song_id)).snapshot.library["font-a"], "the refused removal wrote nothing");
+
+  // The operator chooses the other font, and the history door onto that choice
+  // is closed for an agent as well: taking the step back would put the sound
+  // this session replaced back, which is the same decision.
+  const chosen = await applies(
+    hub,
+    song_id,
+    "operator-set-font",
+    "track.set_font",
+    { track_id: "keys", font_id: "font-b" },
+    HUMAN,
+  );
+  const undoneChoice = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-font", entry_id: chosen.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoneChoice.error, FONT_NEEDS_A_YES);
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].device.font_id, "font-b");
+
+  // The font nothing plays any more is an agent's to tidy away...
+  await applies(
+    hub,
+    song_id,
+    "agent-remove-unused-font",
+    "library.remove",
+    { library_id: "font-a" },
+    AGENT,
+  );
+  assert.equal((await hub.openSong(song_id)).snapshot.library["font-a"], undefined);
+
+  // ... while the one the track plays stays out of reach, and the program is
+  // still the agent's to set.
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-used-font",
+      command: "library.remove",
+      args: { library_id: "font-b" },
+      author: AGENT,
+    }),
+    "conflict",
+  );
+  await applies(
+    hub,
+    song_id,
+    "agent-drums",
+    "track.set_program",
+    { track_id: "keys", bank: 128, program: 0 },
+    AGENT,
+  );
+  const device = (await hub.openSong(song_id)).snapshot.tracks[0].device;
+  assert.equal(device.bank, 128);
+  assert.equal(device.program, 0);
+  assert.equal(device.font_id, "font-b");
+});
+
+test("undo of library.add is people-only", async (t) => {
+  const { hub } = await setup(t);
+  const created = await hub.createSong({ project_id: PROJECT, title: "Library", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const song_id = created.song_id;
+
+  // Nobody outside Studio adds a library file, and an agent cannot pretend to
+  // be Studio: the route's own word (`internal`) is what the hub reads.
+  const pretend = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-add-font",
+      command: "library.add",
+      args: { entry: makeFont("font-a") },
+      author: AGENT,
+    }),
+    "studio_only",
+  );
+  assert.match(pretend.error, /only be run by Studio itself/);
+
+  const added = await addFont(hub, song_id, makeFont("font-a"));
+  assert.ok((await hub.openSong(song_id)).snapshot.library["font-a"]);
+
+  // A library file is a download or an upload: its step is the operator's to
+  // take back, in both directions, even while nothing plays it.
+  const undone = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-font-add", entry_id: added.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undone.error, LIBRARY_NEEDS_A_YES);
+  assert.ok((await hub.openSong(song_id)).snapshot.library["font-a"], "the refused undo left the entry");
+
+  const back = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-font-add",
+    entry_id: added.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(back.ok, true, `the operator's undo was refused: ${back.error}`);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.library, {});
+
+  // Putting one into the song is refused the same way, and the operator does it.
+  const redone = refuses(
+    await hub.redo({ song_id, cmd_id: "agent-redo-font-add", entry_id: back.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(redone.error, LIBRARY_NEEDS_A_YES);
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.library, {});
+
+  const again = await hub.redo({
+    song_id,
+    cmd_id: "operator-redo-font-add",
+    entry_id: back.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(again.ok, true, `the operator's redo was refused: ${again.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.library["font-a"].sha256, FONT_HASH);
+
+  // A font a track plays is protected twice over, and both answers are the
+  // library's: the entry is the instrument, not a file nobody is using.
+  await applies(hub, song_id, "seed-keys", "track.add", {
+    id: "keys",
+    name: "Keys",
+    kind: "soundfont",
+    font_id: "font-a",
+  });
+  const inUse = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-used-font", entry_id: again.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(inUse.error, LIBRARY_NEEDS_A_YES);
+  const kept = await hub.openSong(song_id);
+  assert.ok(kept.snapshot.library["font-a"], "the refused undo left the font in the library");
+  assert.equal(kept.snapshot.tracks[0].device.font_id, "font-a");
+});
+
 // --- MIDI mappings ------------------------------------------------------------
 
 /** What the agent's MIDI guard answers with, word for word. */

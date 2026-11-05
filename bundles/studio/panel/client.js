@@ -272,6 +272,12 @@
  * `pad.clear` is — it is people-only, and the panel's **Accept** button is the
  * only way to run it), `midi.remove` takes a row away, and
  * `midi.propose_profile` fills a device's rows in one step.
+ *
+ * The instrument commands close it (plan 1d): `track.set_font` and
+ * `track.set_program` are what the instrument picker sends, one of them per
+ * pick, and `library.remove` is the panel's own way to tidy an entry no track
+ * plays. `library.add` is not here for the reason `sample.add` is not: only the
+ * gateway's library routes add a file, as Studio's own step.
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -282,6 +288,8 @@ export const COMMANDS = Object.freeze([
   "track.set_device",
   "track.set_param",
   "track.set_mix",
+  "track.set_font",
+  "track.set_program",
   "track.lock",
   "track.unlock",
   "scene.add",
@@ -335,6 +343,7 @@ export const COMMANDS = Object.freeze([
   "midi.accept",
   "midi.remove",
   "midi.propose_profile",
+  "library.remove",
 ]);
 
 /** The `var COMMANDS = [...]` declaration, built from the one list above. */

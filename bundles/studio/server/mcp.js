@@ -71,6 +71,10 @@ import "./commands/sampler.js";
 // `midi.propose_profile`; `midi.accept` is people-only, so mcp.js builds no tool
 // for it (the loop below skips every humanOnly command).
 import "./commands/midi.js";
+// The 1d instrument library and the two instrument commands a soundfont track
+// is played with: which font, and which preset of it.
+import "./commands/library.js";
+import "./commands/instruments.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 
 /** The author every call falls back to: an agent, never the person (spec §5.3). */

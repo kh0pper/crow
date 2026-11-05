@@ -90,6 +90,21 @@
  * `accepted_action`: that pair is what the router reads (see `routeFor` in
  * commands/midi.js), so an action edited after the accept stops routing.
  *
+ * A song's `library` (plan 1d) lists the instruments it can play: one entry per
+ * SoundFont bank, amp capture or cabinet IR, keyed by a stable id.
+ *
+ *   library  Y.Map of entry id → Y.Map {id, kind: "font"|"nam"|"ir", name,
+ *                     source: "catalog"|"upload"|"bundled", catalog_id?,
+ *                     storage_key?, upload_id?, sha256, bytes, licence,
+ *                     credit, author_label}
+ *
+ * A soundfont track's device names one entry of the library and the preset it
+ * plays — `{engine: "soundfont", font_id, bank, program}`, with bank 128 the GM
+ * drum bank — so a track's instrument is a library entry plus a preset, never a
+ * file of its own. The library file itself is not in the document either:
+ * `storage_key` (or the entry's sha256, for a catalog file stored once per
+ * instance) says where it lives.
+ *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
  * JSON, so `snapshot()` is a round trip away from the wire, storage or a
@@ -120,7 +135,8 @@ import * as Y from "yjs";
  *         stepPositions: number, stepEntriesPerPattern: number,
  *         patternsPerClip: number, chainLength: number, locksPerStep: number,
  *         motionPointsPerLane: number, motionLanesPerPattern: number,
- *         midiMaps: number}}
+ *         midiMaps: number, fontsPerSong: number,
+ *         libraryEntriesPerSong: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -165,6 +181,10 @@ export const LIMITS = Object.freeze({
   // The MIDI mapping table of one song (plan 1c, Limits): every message the
   // operator's controllers drive, proposed or live.
   midiMaps: 256,
+  // The instrument library (plan 1d, Limits): the hardest cap is the fonts a
+  // song may hold, because each parsed font costs memory in the page.
+  fontsPerSong: 32,
+  libraryEntriesPerSong: 256,
 });
 
 /**
@@ -187,6 +207,34 @@ export const AUDIO_DEVICE = Object.freeze({ engine: "audio" });
  * @type {Readonly<{engine: "sampler"}>}
  */
 export const SAMPLER_DEVICE = Object.freeze({ engine: "sampler" });
+
+/**
+ * The device of a soundfont track: the one track kind that plays an instrument
+ * out of the song's `library` instead of a SunVox module or a kit of pads.
+ *
+ * The device carries the instrument and the preset — `font_id` names a library
+ * entry of kind "font", `bank` and `program` choose the preset inside it —
+ * because a font plays one program at a time. Bank `GM_DRUM_BANK` means the GM
+ * drum kits, which the engine sets with `setDrums` rather than by reserving a
+ * channel.
+ * @type {Readonly<{engine: "soundfont"}>}
+ */
+export const SOUNDFONT_DEVICE = Object.freeze({ engine: "soundfont" });
+
+/** The bank a soundfont track's drum kits live in (the GM drum bank). */
+export const GM_DRUM_BANK = 128;
+
+/** The highest bank a soundfont track may name: 0-127 melodic, 128 the drums. */
+export const MAX_SOUNDFONT_BANK = GM_DRUM_BANK;
+
+/** The highest program a soundfont track may name, in either kind of bank. */
+export const MAX_SOUNDFONT_PROGRAM = 127;
+
+/** What a library entry holds: a SoundFont bank, an amp capture, or a cabinet IR. */
+export const LIBRARY_KINDS = Object.freeze(["font", "nam", "ir"]);
+
+/** Where a library entry came from: the catalog, an upload, or the bundle. */
+export const LIBRARY_SOURCES = Object.freeze(["catalog", "upload", "bundled"]);
 
 /** The step lengths a pattern may use, in beats (16ths, 8ths, 32nds, quarters). */
 export const STEP_BEATS_VALUES = Object.freeze([0.125, 0.25, 0.5, 1]);
@@ -269,6 +317,13 @@ const FIELD_SEPARATOR = "|";
  * controller.
  */
 const PARAM_FIELD_PREFIX = "device.params.";
+
+/**
+ * Prefix of a field path that reaches one field of a track's device, e.g.
+ * `"device.font_id"` on a soundfont track, or the `"device.type"` guard a
+ * controller edit carries.
+ */
+const DEVICE_FIELD_PREFIX = "device.";
 
 /**
  * Prefix of a field path that reaches one lock inside a step's `locks`, e.g.
@@ -901,6 +956,96 @@ export function getMidiMapping(doc, id) {
   return liveObject(readContainer(doc, "midi_maps"), id);
 }
 
+// --- The instrument library --------------------------------------------------
+
+/**
+ * The library map, keyed by entry id. Writers use this; a song written before
+ * the library existed gets the container the first time it is written to.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function libraryMap(doc) {
+  return ensureContainer(doc, "library", () => new Y.Map());
+}
+
+/**
+ * Every library entry in the song, in the order the map holds them. A song
+ * without a library has none.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, entry: Y.Map<any>}>}
+ */
+export function libraryEntries(doc) {
+  return objectEntries(readContainer(doc, "library"), "entry");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live library entry, or null
+ */
+export function getLibraryEntry(doc, id) {
+  return liveObject(readContainer(doc, "library"), id);
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live library entry, when it is a font
+ */
+export function getLibraryFont(doc, id) {
+  const entry = getLibraryEntry(doc, id);
+  return entry && entry.get("kind") === LIBRARY_KINDS[0] ? entry : null;
+}
+
+/**
+ * The tracks that play one library entry — the question "is this entry in use?"
+ * is asked on its effect: a font is in use exactly while a soundfont track's
+ * `font_id` names it.
+ *
+ * Inserts arrive in PR B and C of plan 1d: an amp insert's `model_id` and
+ * `ir_id` name a capture and a cabinet the same way, and they join this list
+ * here rather than at each caller.
+ * @param {object|Y.Doc} source - a snapshot, or a document (one is taken)
+ * @param {string} id - the library entry's id
+ * @returns {string[]} the track ids, sorted, each once
+ */
+export function libraryUsers(source, id) {
+  if (typeof id !== "string" || id === "") return [];
+  const song = songPlain(source);
+  const ids = new Set();
+  for (const track of song.tracks ?? []) {
+    if (track?.device?.engine !== SOUNDFONT_DEVICE.engine) continue;
+    if (track.device.font_id !== id) continue;
+    if (typeof track.id === "string" && track.id !== "") ids.add(track.id);
+  }
+  return [...ids].sort();
+}
+
+/**
+ * Whether anything in the song uses one library entry: a track's font_id now,
+ * and an amp insert's model_id or ir_id once the mixer exists (see
+ * `libraryUsers`). This is the check `library.remove` and the agent sound guard
+ * are built on.
+ * @param {object|Y.Doc} source - a snapshot, or a document
+ * @param {string} id
+ * @returns {boolean}
+ */
+export function libraryUses(source, id) {
+  return libraryUsers(source, id).length > 0;
+}
+
+/**
+ * A snapshot of whatever a reader handed in: a plain song as it is, a document
+ * taken through `snapshot()`.
+ * @param {object|Y.Doc|string} source - a snapshot, or a document
+ * @returns {object}
+ */
+function songPlain(source) {
+  if (source && typeof source === "object" && Array.isArray(source.tracks)) return source;
+  if (source && typeof source.getMap === "function") return snapshot(source);
+  return { tracks: [], library: {} };
+}
+
 /**
  * The key one sample's slice lives under in the song's `slices` map.
  * @param {string} sampleId
@@ -1321,6 +1466,16 @@ export function isSamplerTrack(track) {
 }
 
 /**
+ * Whether a track plays an instrument out of the song's library rather than a
+ * SunVox module or a kit of pads.
+ * @param {Y.Map<any>|null|undefined} track
+ * @returns {boolean}
+ */
+export function isSoundfontTrack(track) {
+  return deviceEngine(track) === SOUNDFONT_DEVICE.engine;
+}
+
+/**
  * Whether a clip holds steps and patterns (a pattern clip) rather than notes.
  * @param {Y.Map<any>|null|undefined} clip
  * @returns {boolean}
@@ -1362,6 +1517,7 @@ export function sampleUsers(snap, sampleId) {
  *            banks: Object<string, object>, pads: Object<string, object>,
  *            patterns: Object<string, object>, steps: Object<string, object>,
  *            midi_maps: Object<string, object>,
+ *            library: Object<string, object>,
  *            arrangement: {placements: Object<string, object>,
  *                          markers: Object<string, object>,
  *                          sections: Object<string, object>}}}
@@ -1377,6 +1533,9 @@ export function sampleUsers(snap, sampleId) {
  *   `midi_maps` is a plain object too, keyed by the mapping's own id, so the
  *   page and the router read the whole table in one place; a song nobody has
  *   mapped a controller in reads it as an empty object.
+ *   `library` is the song's instrument library, a plain object keyed by the
+ *   entry's own id; a song written before the library existed reads it as an
+ *   empty object, so every reader sees the same shape either way.
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -1422,6 +1581,7 @@ export function snapshot(doc) {
     patterns: snapshotContainer(doc, "patterns", normalizePattern),
     steps: snapshotContainer(doc, "steps", normalizeStep),
     midi_maps: snapshotContainer(doc, "midi_maps", normalizeMidiMapping),
+    library: snapshotContainer(doc, "library", normalizeLibraryEntry),
     arrangement: snapshotArrangement(doc),
   };
 }
@@ -1506,6 +1666,11 @@ function snapshotArrangement(doc) {
  *   - a song holds at most `LIMITS.midiMaps` MIDI mappings, and no two live
  *     ones answer the same message on the same controller (one message has one
  *     live action) — the rules the midi commands enforce on their own edits;
+ *   - the song's library stays inside its caps (`LIMITS.libraryEntriesPerSong`
+ *     entries, `LIMITS.fontsPerSong` fonts), and every soundfont track's
+ *     `font_id` names a font of that library with a bank and a program inside
+ *     the ranges a font has — the rules `library.*` and `track.set_font` /
+ *     `track.set_program` enforce on their own edits;
  *   - the arrangement holds at most `LIMITS.placements` placements,
  *     `LIMITS.markers` markers and `LIMITS.sections` sections, ends at bar
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
@@ -1585,6 +1750,7 @@ export function checkInvariants(doc) {
   reasons.push(...arrangementReasons(song));
   reasons.push(...samplerReasons(song));
   reasons.push(...midiReasons(song));
+  reasons.push(...libraryReasons(song));
 
   return reasons;
 }
@@ -2010,6 +2176,64 @@ function midiReasons(song) {
   return reasons;
 }
 
+/**
+ * What is wrong with a song's instrument library, in plain English.
+ *
+ * The rules one library edit can look after on its own, checked over the whole
+ * song at once: the library stays inside its caps, and every soundfont track
+ * names a font the song still holds with a preset inside the ranges a font has
+ * (bank 0-127 melodic, 128 the GM drums; program 0-127).
+ * The history dry-runs an undo's plan on a clone and calls this, so a plan that
+ * would remove a font a track still plays is refused whole — the same rule
+ * `library.remove` and the agent's sound guard keep on their own edits.
+ * @param {object} song - a snapshot
+ * @returns {string[]}
+ */
+function libraryReasons(song) {
+  const reasons = [];
+  const entries = Object.values(song.library ?? {});
+
+  if (entries.length > LIMITS.libraryEntriesPerSong) {
+    reasons.push(
+      `The song's library would hold ${entries.length} entries; a song's library holds at most ${LIMITS.libraryEntriesPerSong} entries.`,
+    );
+  }
+  reasons.push(...duplicateIdReasons(entries, "library entry"));
+
+  const fontIds = new Set();
+  let fonts = 0;
+  for (const entry of entries) {
+    if (entry.kind !== LIBRARY_KINDS[0]) continue;
+    fonts += 1;
+    fontIds.add(entry.id);
+  }
+  if (fonts > LIMITS.fontsPerSong) {
+    reasons.push(`The song's library would hold ${fonts} fonts; a song can hold at most ${LIMITS.fontsPerSong} fonts.`);
+  }
+
+  for (const track of song.tracks ?? []) {
+    if (track?.device?.engine !== SOUNDFONT_DEVICE.engine) continue;
+    const which = `The track "${nameOrId(track.name, track.id)}"`;
+    const fontId = track.device.font_id ?? ABSENT;
+    if (fontId !== ABSENT && !fontIds.has(fontId)) {
+      reasons.push(`${which} would play the font "${fontId}", which is not in the song's library.`);
+    }
+    const bank = track.device.bank;
+    if (!(Number.isInteger(bank) && bank >= 0 && bank <= MAX_SOUNDFONT_BANK)) {
+      reasons.push(
+        `${which} would play bank ${bank}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+      );
+    }
+    const program = track.device.program;
+    if (!(Number.isInteger(program) && program >= 0 && program <= MAX_SOUNDFONT_PROGRAM)) {
+      reasons.push(
+        `${which} would play program ${program}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
+      );
+    }
+  }
+  return reasons;
+}
+
 /** @returns {boolean} whether two MIDI messages are the same message. */
 function sameMessage(left, right) {
   if (!left || !right) return false;
@@ -2114,7 +2338,10 @@ function barsText(bars) {
  * Keys are `"<ref>|<field>"`:
  *   - `"track:abc|gain_db"` sets one field of that track;
  *   - `"track:abc|device.params.Cutoff"` sets one controller value inside the
- *     track's device and leaves its other controllers alone;
+ *     track's device and leaves its other controllers alone, and
+ *     `"track:abc|device.font_id"` (and its siblings) sets one field of a
+ *     soundfont track's device, so a font change and a program change undo
+ *     independently;
  *   - `"clip:abc|*"` with an object (re)creates the whole clip, and with
  *     `null` deletes it;
  *   - `"take:abc|*"` does the same for a take, and `"take:abc|offset_frames"`
@@ -2127,6 +2354,8 @@ function barsText(bars) {
  *     touching its neighbours;
  *   - `"midi:abc|*"` does the same for one MIDI mapping, and a plain field name
  *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
+ *   - `"library:abc|*"` does the same for one library entry, and
+ *     `"library:abc|credit"` (and its siblings) writes one field of one;
  *   - `"motion:<clip>/<pattern>/<bank>.<index>|<param>|*"` writes ONE motion
  *     lane of one pattern: an array of `{step_frac, value}` points, or `null`
  *     to take the lane away. A lane is one key of its pattern
@@ -2188,6 +2417,7 @@ export function applyBeforeAfter(doc, plan) {
       case "pattern":
       case "step":
       case "midi":
+      case "library":
         writeContainerObject(doc, target.kind, target.id, split.field, value);
         break;
       case "motion":
@@ -2293,9 +2523,9 @@ export function readField(doc, ref, field = "*") {
 /**
  * The keys a history field path names, outermost first.
  *
- * `"device.params.Cutoff"` is `["device", "params", "Cutoff"]`; anything else
- * is one field of the object, so a plain field name can never be mistaken for
- * a path.
+ * `"device.params.Cutoff"` is `["device", "params", "Cutoff"]`; a soundfont
+ * track's `"device.font_id"` is `["device", "font_id"]`; anything else is one
+ * field of the object, so a plain field name can never be mistaken for a path.
  * @param {string} field
  * @returns {string[]}
  */
@@ -2308,8 +2538,13 @@ function fieldPath(field) {
   if (field.startsWith(LOCK_FIELD_PREFIX) && field.length > LOCK_FIELD_PREFIX.length) {
     return ["locks", field.slice(LOCK_FIELD_PREFIX.length)];
   }
-  // The device-type guard a set_param entry carries (read-only, never restored).
-  if (field === "device.type") return ["device", "type"];
+  // One field inside a track's device: a soundfont track's instrument is the
+  // pair (font, preset), so setting the font and setting the program are two
+  // fields of one device and undo on their own. `device.type` is the
+  // device-type guard a set_param entry carries (read-only, never restored).
+  if (field.startsWith(DEVICE_FIELD_PREFIX) && field.length > DEVICE_FIELD_PREFIX.length) {
+    return ["device", field.slice(DEVICE_FIELD_PREFIX.length)];
+  }
   return [field];
 }
 
@@ -2490,6 +2725,7 @@ const OBJECT_MAP_OF = Object.freeze({
   pattern: "patterns",
   step: "steps",
   midi: "midi_maps",
+  library: "library",
 });
 
 /** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern, step or MIDI mapping, or null. */
@@ -2682,16 +2918,25 @@ function normalizeTrack(value) {
     id: typeof plain.id === "string" ? plain.id : "",
     name: typeof plain.name === "string" ? plain.name : "",
     color: typeof plain.color === "string" ? plain.color : TRACK_COLORS[0],
-    // A track that plays no SunVox module carries exactly {engine}: an audio
-    // track plays takes, and a sampler track plays the kit that lives in the
-    // song's own banks and pads (never inside this device).
+    // A track that plays no SunVox module carries only the fields its own kind
+    // reads: an audio track plays takes, a sampler track plays the kit that
+    // lives in the song's own banks and pads, and a soundfont track plays one
+    // preset of one library font (see SOUNDFONT_DEVICE). None of them keeps a
+    // SunVox module or its controllers inside the device.
     device: engine === AUDIO_DEVICE.engine || engine === SAMPLER_DEVICE.engine
       ? { engine }
-      : {
-          engine,
-          type: typeof device.type === "string" ? device.type : "",
-          params: device.params && typeof device.params === "object" ? cloneJson(device.params) : {},
-        },
+      : engine === SOUNDFONT_DEVICE.engine
+        ? {
+            engine,
+            font_id: typeof device.font_id === "string" ? device.font_id : ABSENT,
+            bank: integerOr(device.bank, 0),
+            program: integerOr(device.program, 0),
+          }
+        : {
+            engine,
+            type: typeof device.type === "string" ? device.type : "",
+            params: device.params && typeof device.params === "object" ? cloneJson(device.params) : {},
+          },
     mute: plain.mute === true,
     solo: plain.solo === true,
     gain_db: numberOr(plain.gain_db, 0),
@@ -2930,6 +3175,33 @@ function normalizeMidiMapping(id, value) {
       plain.accepted_action && typeof plain.accepted_action === "object"
         ? cloneJson(plain.accepted_action)
         : ABSENT,
+  };
+}
+
+/**
+ * A library entry as a snapshot carries it: every field present, nothing extra.
+ *
+ * The file itself is never in the document. A catalog entry says which catalog
+ * row it is (`catalog_id`) and where the instance keeps its copy
+ * (`storage_key`); an uploaded one names the upload it came from (`upload_id`).
+ * `sha256` and `bytes` are what the server checked before the entry was added,
+ * and `licence` and `credit` are what the picker shows beside the instrument.
+ */
+function normalizeLibraryEntry(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    kind: LIBRARY_KINDS.includes(plain.kind) ? plain.kind : LIBRARY_KINDS[0],
+    name: typeof plain.name === "string" ? plain.name : "",
+    source: LIBRARY_SOURCES.includes(plain.source) ? plain.source : LIBRARY_SOURCES[1],
+    catalog_id: typeof plain.catalog_id === "string" ? plain.catalog_id : ABSENT,
+    storage_key: typeof plain.storage_key === "string" ? plain.storage_key : ABSENT,
+    upload_id: typeof plain.upload_id === "string" ? plain.upload_id : ABSENT,
+    sha256: typeof plain.sha256 === "string" ? plain.sha256 : "",
+    bytes: integerOr(plain.bytes, 0),
+    licence: typeof plain.licence === "string" ? plain.licence : "",
+    credit: typeof plain.credit === "string" ? plain.credit : "",
+    author_label: typeof plain.author_label === "string" ? plain.author_label : "",
   };
 }
 
