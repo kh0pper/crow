@@ -112,7 +112,10 @@ describe("mixed: new A (gate unset), old B", () => {
   let P;
   const K = `k_${tag()}`;
   before(async () => {
-    P = await bootSyncPair({ repoB: old.dir });
+    // B runs an older Crow (PT-2a, no session MACs). This file tests the
+    // context wire, not pair binding: A takes the documented mixed-version
+    // escape (CROW_SYNC_PAIR_BINDING=auto) so the two still sync.
+    P = await bootSyncPair({ repoB: old.dir }, { CROW_SYNC_PAIR_BINDING: "auto" });
     seedSection(P.B, K, "B-global", null);
     seedSection(P.A, K, "A-own", 3);
   }, { timeout: 600_000 });
