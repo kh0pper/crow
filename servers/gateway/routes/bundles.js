@@ -792,9 +792,12 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
   // engine/ + pdf/: tax's calculator, ingest and form filler (its panel imports the
   // installed engine/, so a version bump must ship it with the panel).
+  // vendor/ + library/: third-party code a bundle ships pre-built (Studio's SunVox
+  // and SoundFont synth) and its data catalogs — code and data the new version
+  // needs, refreshed like engine/.
   const dirs = isDocker
     ? ["server", "panel", "skills"]
-    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src", "engine", "pdf"];
+    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src", "engine", "pdf", "vendor", "library"];
   // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
   // .env*, node_modules/, data/ — simply absent from both lists above. The ONE
   // exception is a docker bundle's explicit opt-in, manifest.refreshFiles

@@ -3,17 +3,20 @@
  *
  * The engine is one AudioWorklet node whose processor hosts SunVox and the
  * sequencer (`studio-processor.js`). A worklet cannot `import`, so this file
- * glues six sources into ONE module and hands it to
+ * glues these sources into ONE module and hands it to
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + studio-processor.js
+ *       + spessasynth.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
  * the client side of the port, before the PCM is handed over. `sampler-voice.js`
  * is the sampler's voice DSP, and `perf-fx.js` the performance-effects bus and
- * its looper, which the processor uses in that same scope.
+ * its looper, which the processor uses in that same scope. `spessasynth.js` is
+ * the vendored SoundFont synth: one import-free classic script that defines
+ * `globalThis.StudioSpessa` (see `vendor/spessasynth/`), which is the only shape
+ * a worklet can load.
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -141,8 +144,23 @@
     "sampler-voice.js",
     "perf-fx.js",
     "sunvox.js",
+    // The vendored SoundFont synth, before the processor that hosts it: it is
+    // one import-free classic script that defines globalThis.StudioSpessa.
+    "spessasynth.js",
     "studio-processor.js",
   ];
+
+  /**
+   * The engine sources that live outside this directory: the vendored scripts
+   * `SOURCE_FILES` names, as paths from here. A Node caller that supplies no
+   * `assetBytes` for one of them (a test that predates it passes only the files
+   * it knows) is still handed the very same file a browser is served.
+   * @type {Readonly<Object<string, string[]>>}
+   */
+  const VENDORED_SOURCES = Object.freeze({
+    "sunvox.js": ["..", "vendor", "sunvox", "sunvox.js"],
+    "spessasynth.js": ["..", "vendor", "spessasynth", "spessasynth.js"],
+  });
 
   /**
    * The audio contexts that already have the Studio processor registered. A
@@ -322,9 +340,12 @@
       const fs = req("node:fs");
       const path = req("node:path");
       // Only a plain file name: a caller's name is never turned into a path
-      // outside this module's own directory.
+      // outside this module's own directory. A vendored source's path is fixed
+      // here, never taken from the caller.
       if (name !== path.basename(name)) return null;
-      const file = path.join(__dirname, name);
+      const file = VENDORED_SOURCES[name]
+        ? path.join(__dirname, ...VENDORED_SOURCES[name])
+        : path.join(__dirname, name);
       if (!fs.existsSync(file)) return null;
       return fs.readFileSync(file, "utf8");
     } catch {

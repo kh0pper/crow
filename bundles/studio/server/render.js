@@ -1166,6 +1166,10 @@ function engineAssets() {
     "sequencer.js": readFileSync(join(ENGINE_DIR, "sequencer.js"), "utf8"),
     "sunvox.js": readFileSync(join(VENDOR_DIR, "sunvox.js"), "utf8"),
     "sunvox_lib_loader.js": readFileSync(join(VENDOR_DIR, "sunvox_lib_loader.js"), "utf8"),
+    // The vendored SoundFont synth is part of the worklet module
+    // (engine-client.js's SOURCE_FILES), so a render loads it like any other
+    // engine source.
+    "spessasynth.js": readFileSync(join(BUNDLE_DIR, "vendor", "spessasynth", "spessasynth.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };

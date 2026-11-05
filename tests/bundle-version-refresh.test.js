@@ -340,6 +340,23 @@ describe("4b — docker-type restriction + declared-root traversal rejection", (
     assert.equal(readAt(destBundleDir(id), "scripts/bootstrap.sh"), "#!/bin/sh\necho repo script\n");
   });
 
+  test("non-docker bundle: vendor/ and library/ ship with a version bump", async () => {
+    const id = "widget-vendored";
+    const repoRoot = freshRoot("crowrepo-vendored-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "V", version: "2.0.0", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/vendor/lib/synth.js`, "new synth\n");
+    put(repoRoot, `${id}/library/catalog.json`, "{\"v\":2}\n");
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${id}/vendor/lib/synth.js`, "old synth\n");
+    setInstalled([id]);
+
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+
+    assert.equal(readAt(destBundleDir(id), "vendor/lib/synth.js"), "new synth\n");
+    assert.equal(readAt(destBundleDir(id), "library/catalog.json"), "{\"v\":2}\n");
+  });
+
   test("a docker bundle's declared widgets/ is code: the version bump ships widgets/x.js", async () => {
     const id = "widget-docker-widgets";
     const repoRoot = freshRoot("crowrepo-dockerwidgets-");

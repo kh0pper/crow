@@ -148,6 +148,11 @@ jobs:
         run: node scripts/check-port-allocation.js
       - name: Registry build check
         run: node scripts/build-registry.mjs --check
+      # Studio's vendored scripts (the SoundFont synth today, the NAM glue in PR
+      # C) are checked in and rebuilt by esbuild. --check rebuilds to memory and
+      # byte-compares, so a dependency bump nobody re-vendored fails here.
+      - name: Studio vendor bundle check
+        run: node bundles/studio/tools/build-vendor.mjs --check
       # Every shipped bundle skill's current text must be in the ledger the
       # boot-time skill sync reads (bundles/skill-history.json), and the
       # ledger must stay append-only against the base (the PR's base commit,
