@@ -27,6 +27,11 @@ export default {
    */
   async check(store, opts = {}) {
     const problem = bootGuardProblem(opts.bootGuard || {});
+    // "unknown": the previous start happened before this boot (a power loss or a
+    // reboot), so no recorder stamp was ever due. Raising "the guard did not run"
+    // there would be a false alarm on every routine reboot, and resolving would
+    // hide a real card, so this case says nothing at all.
+    if (problem && problem.reason === "unknown") return null;
     if (!problem) {
       try { await store.resolveByKey(SOURCE, DEDUP_KEY); } catch { /* no row yet, or no store */ }
       return null;

@@ -25,7 +25,8 @@
 #   --user      ~/.config/systemd/user, no sudo
 #
 # Env test seams: CROW_SYSTEMD_UNIT_DIR / CROW_SYSTEMD_USER_UNIT_DIR override the
-# two unit directories (used with --dry-run against fixture units).
+# two unit directories, and CROW_SYSTEMCTL names the systemctl binary used for the
+# merged `show` read (both used by the tests against fixture units).
 
 set -euo pipefail
 
@@ -78,6 +79,20 @@ else
   if [ "$(id -u)" -ne 0 ]; then SUDO=(sudo); else SUDO=(); fi
 fi
 
+# The systemctl binary to ask for the MERGED unit values. Overridable so the
+# tests can drive a fixture unit tree without a running systemd.
+SYSTEMCTL="${CROW_SYSTEMCTL:-systemctl}"
+
+# Temp files that must never be left behind (a failed run must not litter /tmp
+# with drop-in bodies).
+TMPFILES=()
+cleanup_tmpfiles() {
+  local f
+  for f in ${TMPFILES[@]+"${TMPFILES[@]}"}; do [ -n "$f" ] && rm -f "$f"; done
+  return 0
+}
+trap cleanup_tmpfiles EXIT
+
 # Under sudo, $HOME is root's: the launcher copy and the default CROW_HOME belong
 # to the account that runs the gateway, not to root.
 OPERATOR_HOME="${HOME}"
@@ -100,7 +115,9 @@ run() {
   fi
 }
 
-# The LAST value of a key in a unit file (systemd: later assignments win).
+# The LAST value of a key in a unit file (systemd: later assignments win). Used
+# only when systemctl cannot answer for a unit (no systemd, e.g. a container):
+# reading only the main unit file misses every drop-in and EnvironmentFile=.
 unit_value() { # <file> <key>
   sed -n "s/^[[:space:]]*$2=//p" "$1" | tail -n 1
 }
@@ -118,6 +135,44 @@ unit_env_tokens() { # <file>
 
 unit_env_value() { # <file> <KEY>
   unit_env_tokens "$1" | sed -n "s/^$2=//p" | tail -n 1
+}
+
+# Split one Environment= value into tokens, honouring systemd's quotes, so
+# `CROW_HOME="/srv/crow home"` yields one token instead of two.
+env_tokens() { # <value string>
+  local s="$1" c out="" q="" i=0 n=${#1}
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    if [ -n "$q" ]; then
+      if [ "$c" = "$q" ]; then q=""; else out+="$c"; fi
+    elif [ "$c" = '"' ] || [ "$c" = "'" ]; then q="$c"
+    elif [ "$c" = ' ' ] || [ "$c" = "$(printf '\t')" ]; then
+      if [ -n "$out" ]; then printf '%s\n' "$out"; out=""; fi
+    else out+="$c"; fi
+    i=$((i + 1))
+  done
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return 0
+}
+
+# Quote one argument for an Exec= line: a path may contain spaces, and a literal
+# % is a systemd specifier (%% writes one).
+sd_quote() { # <arg>
+  local s="$1"
+  s="${s//%/%%}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
+# `systemctl [--user] show -p … --value <unit>`: the values systemd actually
+# merged from the unit AND every drop-in (audit L1 fix 5c).
+systemctl_show() { # <unit>
+  if [ "$MODE" = "user" ]; then
+    "$SYSTEMCTL" --user show -p Environment -p WorkingDirectory -p User -p ExecStart --value "$1" 2>/dev/null
+  else
+    "$SYSTEMCTL" show -p Environment -p WorkingDirectory -p User -p ExecStart --value "$1" 2>/dev/null
+  fi
 }
 
 expand_specifiers() { # <value> <home>
@@ -166,6 +221,17 @@ install_launcher() { # <crow_home> <owner>
   local crow_home="$1" owner="${2:-}" dir file tmp
   dir="$crow_home/boot-guard"
   file="$dir/crow-boot-guard.mjs"
+  # A symlink here is a redirect the service user controls. As root the copy
+  # would land in whatever directory the link names, owned by the user, and the
+  # unit would then run code from there. Refuse, never follow.
+  if [ -L "$dir" ]; then
+    note "error: $dir is a symlink — refusing to install the boot guard through it"
+    exit 1
+  fi
+  if [ -L "$file" ]; then
+    note "error: $file is a symlink — refusing to replace it"
+    exit 1
+  fi
   if [ "$DRY_RUN" = "1" ]; then
     say "would install: $file (dir 0700, file 0600)"
     return 0
@@ -180,9 +246,20 @@ install_launcher() { # <crow_home> <owner>
     return 0
   fi
   tmp="$file.tmp.$$"
-  run cp "$LAUNCHER_SRC" "$tmp"
-  run chmod 600 "$tmp"
-  if [ -n "$owner" ]; then run chown "$owner" "$tmp"; fi
+  # Copy AS THE UNIT'S USER when root is doing the install: the gateway refreshes
+  # this copy itself, so it must own it, and root must never leave a root-owned
+  # file in a directory that user can rewrite.
+  if [ -n "$owner" ] && [ "$(id -u)" -eq 0 ]; then
+    # As the unit's user when possible; a root without sudo still has install -o.
+    if command -v sudo >/dev/null 2>&1; then
+      run sudo -u "$owner" install -m 600 "$LAUNCHER_SRC" "$tmp"
+    else
+      run install -m 600 -o "$owner" "$LAUNCHER_SRC" "$tmp"
+    fi
+  else
+    run install -m 600 "$LAUNCHER_SRC" "$tmp"
+  fi
+  if [ -n "$owner" ]; then run chown "$owner" "$tmp" 2>/dev/null || true; fi
   run mv -f "$tmp" "$file"
   say "installed launcher copy: $file"
 }
@@ -202,11 +279,14 @@ write_dropin() { # <path> <content>
     return 0
   fi
   run mkdir -p "$dir"
-  tmp="$path.tmp.$$"
+  # The body is written by THIS user outside the unit directory (mktemp), and the
+  # privileged half is one `install` with the right mode: a non-root run cannot
+  # write inside /etc at all, which the old redirect + `cp` did.
+  tmp="$(mktemp "${TMPDIR:-/tmp}/crow-boot-guard.XXXXXX")"
+  TMPFILES+=("$tmp")
   printf '%s\n' "$content" > "$tmp"
-  run cp "$tmp" "$path"
+  run install -m 644 "$tmp" "$path"
   rm -f "$tmp"
-  run chmod 644 "$path"
   say "wrote: $path"
   return 0
 }
@@ -234,20 +314,61 @@ if [ "$DRY_RUN" = "1" ]; then say "dry run:   nothing will be written and system
 changed=0
 for unit in "${units[@]}"; do
   unit_file="$UNIT_DIR/$unit"
-  working_dir="$(unit_value "$unit_file" "WorkingDirectory")"
+
+  # A templated unit has one file for every instance: its WorkingDirectory, User
+  # and CROW_HOME belong to the instance (e.g. %i), not to the template.
+  case "$unit" in
+    *@*)
+      note "error: $unit is a templated unit — install the drop-in per instance by hand (its WorkingDirectory/User differ per instance)"
+      exit 1
+      ;;
+  esac
+
+  # Read the MERGED values from systemd when it can answer (it includes every
+  # drop-in and EnvironmentFile=; the unit file alone does not). The file is the
+  # fallback for a host where systemd is not the init system.
+  merged_ok=0
+  merged=()
+  mapfile -t merged < <(systemctl_show "$unit" || true)
+  if [ "${#merged[@]}" -eq 4 ]; then merged_ok=1; fi
+
+  if [ "$merged_ok" = "1" ]; then
+    env_line="${merged[0]}"
+    working_dir="${merged[1]}"
+    unit_user="${merged[2]}"
+    exec_start="${merged[3]}"
+    unit_path="$(env_tokens "$env_line" | sed -n 's/^PATH=//p' | tail -n 1)"
+    crow_home="$(env_tokens "$env_line" | sed -n 's/^CROW_HOME=//p' | tail -n 1)"
+    # systemctl prints ExecStart as `{ path=/usr/bin/node ; argv[]=… ; … }`.
+    case "$exec_start" in
+      \{*) exec_argv0="$(printf '%s' "$exec_start" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')" ;;
+      *) exec_argv0="$exec_start" ;;
+    esac
+    [ -n "$exec_argv0" ] || exec_argv0="$exec_start"
+  else
+    note "warning: $unit: systemctl could not report the merged unit values — reading $unit only (drop-ins may be missed)"
+    working_dir="$(unit_value "$unit_file" "WorkingDirectory")"
+    exec_start="$(unit_value "$unit_file" "ExecStart")"
+    exec_argv0="$exec_start"
+    unit_path="$(unit_env_value "$unit_file" "PATH")"
+    crow_home="$(unit_env_value "$unit_file" "CROW_HOME")"
+    unit_user=""
+    if [ "$MODE" = "system" ]; then unit_user="$(unit_value "$unit_file" "User")"; fi
+  fi
+
   if [ -z "$working_dir" ]; then
     note "warning: $unit has no WorkingDirectory= — skipped"
     continue
   fi
+  # The optional `-` prefix means "ignore a failure", not part of the path.
+  working_dir="${working_dir#-}"
   working_dir="$(expand_specifiers "$working_dir" "$OPERATOR_HOME")"
 
-  exec_start="$(unit_value "$unit_file" "ExecStart")"
   if [ -z "$exec_start" ]; then
     note "warning: $unit has no ExecStart= — skipped"
     continue
   fi
-  unit_path="$(unit_env_value "$unit_file" "PATH")"
-  node="$(resolve_node "$exec_start" "$unit_path" || true)"
+  node="$(resolve_node "$exec_argv0" "$unit_path" || true)"
   if [ -z "$node" ]; then
     note "error: $unit: no node found (ExecStart argv[0] is not node, and its Environment=PATH has none)"
     exit 1
@@ -257,13 +378,11 @@ for unit in "${units[@]}"; do
     exit 1
   fi
 
-  crow_home="$(unit_env_value "$unit_file" "CROW_HOME")"
   [ -n "$crow_home" ] || crow_home="$DEFAULT_CROW_HOME"
   crow_home="$(expand_specifiers "$crow_home" "$OPERATOR_HOME")"
+  if [ "$MODE" = "user" ]; then unit_user=""; fi
 
   launcher="$crow_home/boot-guard/crow-boot-guard.mjs"
-  unit_user=""
-  if [ "$MODE" = "system" ]; then unit_user="$(unit_value "$unit_file" "User")"; fi
 
   say ""
   say "$unit"
@@ -273,6 +392,12 @@ for unit in "${units[@]}"; do
 
   install_launcher "$crow_home" "$unit_user"
 
+  # Paths are quoted (they can contain spaces) and % is escaped, or systemd reads
+  # it as a specifier and the launcher never starts.
+  quoted_node="$(sd_quote "$node")"
+  quoted_launcher="$(sd_quote "$launcher")"
+  quoted_app_root="$(sd_quote "$working_dir")"
+
   content="# Installed by $REPO_ROOT/scripts/ops/install-boot-guard.sh
 # Audit N1c-3 Layer 1: roll back an update that keeps crashing on startup.
 # The launcher lives OUTSIDE this checkout, so the failing commit's own copy of
@@ -280,8 +405,8 @@ for unit in "${units[@]}"; do
 # the gateway from starting. TimeoutStartSec covers the guard's own npm install
 # (up to 5 minutes) plus a rollback.
 [Service]
-ExecStartPre=-$node $launcher --app-root $working_dir
-ExecStopPost=-$node $launcher --app-root $working_dir --record-exit
+ExecStartPre=-$quoted_node $quoted_launcher --app-root $quoted_app_root
+ExecStopPost=-$quoted_node $quoted_launcher --app-root $quoted_app_root --record-exit
 TimeoutStartSec=15min
 Environment=CROW_BOOT_GUARD=1"
 

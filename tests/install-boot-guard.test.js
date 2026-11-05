@@ -7,7 +7,9 @@
  * so what is asserted is the exact drop-in the operator will get.
  */
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, after } from "node:test";
@@ -58,8 +60,66 @@ WantedBy=multi-user.target
 
 function run(args, env) {
   return spawnSync("bash", [SCRIPT, ...args], {
-    env: { ...process.env, ...env }, encoding: "utf8", timeout: 60_000,
+    // No fake systemctl by default: /bin/false makes the merged read fail, so the
+    // fixture unit FILE is what the script reads (the pre-5c behaviour). Tests
+    // that exercise the merged read pass CROW_SYSTEMCTL explicitly.
+    env: { ...process.env, CROW_SYSTEMCTL: "/bin/false", ...env },
+    encoding: "utf8", timeout: 60_000,
   });
+}
+
+/**
+ * A `sudo` that logs its argv and then runs it, plus a `systemctl` that never
+ * reaches the real daemon (a test must not reload the machine's systemd).
+ */
+function fakePrivileged(base) {
+  const dir = join(base, "priv-bin");
+  mkdirSync(dir, { recursive: true });
+  const log = join(base, "privileged.log");
+  for (const [name, body] of [
+    ["sudo", `#!/bin/sh\nprintf 'sudo %s\\n' "$*" >> ${JSON.stringify(log)}\nexec "$@"\n`],
+    ["systemctl", `#!/bin/sh\nprintf 'systemctl %s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`],
+  ]) {
+    writeFileSync(join(dir, name), body);
+    chmodSync(join(dir, name), 0o755);
+  }
+  return { dir, log };
+}
+
+/**
+ * A fake `systemctl show` that merges a fixture unit with its drop-ins (later
+ * wins) and prints the four properties `--value` style, one per line. It refuses
+ * any other argument list, which pins the command the installer is required to
+ * use.
+ */
+function fakeSystemctlMerging(base, unitDir) {
+  const dir = join(base, "fake-systemctl-bin");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "fake-systemctl");
+  writeFileSync(path, `#!/bin/sh
+case "$*" in
+  *"-p Environment -p WorkingDirectory -p User -p ExecStart --value"*) ;;
+  *) echo "unexpected arguments: $*" >&2; exit 2 ;;
+esac
+for a in "$@"; do unit="$a"; done
+file="${unitDir}/$unit"
+body=""
+[ -f "$file" ] && body="$(cat "$file")"
+if [ -d "$file.d" ]; then
+  for f in "$file.d"/*.conf; do
+    [ -e "$f" ] || continue
+    body="$body
+$(cat "$f")"
+  done
+fi
+val() { printf '%s\\n' "$body" | sed -n "s/^[[:space:]]*$1=//p" | tail -n 1; }
+printf '%s\\n' "$(val Environment)"
+printf '%s\\n' "$(val WorkingDirectory)"
+printf '%s\\n' "$(val User)"
+printf '%s\\n' "$(val ExecStart)"
+`);
+  chmodSync(path, 0o755);
+  return path;
 }
 
 /** The drop-in body the dry run printed. */
@@ -85,9 +145,9 @@ test("system unit: dry run names <unit>.d/10-boot-guard.conf and writes nothing"
 
   const dropin = printedDropin(r.stdout);
   assert.match(dropin, /^\[Service\]$/m);
-  assert.ok(dropin.includes(`ExecStartPre=-${node} /srv/crow-home/boot-guard/crow-boot-guard.mjs --app-root /srv/crow`),
+  assert.ok(dropin.includes(`ExecStartPre=-"${node}" "/srv/crow-home/boot-guard/crow-boot-guard.mjs" --app-root "/srv/crow"`),
     dropin);
-  assert.ok(dropin.includes(`ExecStopPost=-${node} /srv/crow-home/boot-guard/crow-boot-guard.mjs --app-root /srv/crow --record-exit`),
+  assert.ok(dropin.includes(`ExecStopPost=-"${node}" "/srv/crow-home/boot-guard/crow-boot-guard.mjs" --app-root "/srv/crow" --record-exit`),
     dropin);
   assert.match(dropin, /^TimeoutStartSec=15min$/m, "the guard runs npm install, so the start timeout must cover it");
   assert.match(dropin, /^Environment=CROW_BOOT_GUARD=1$/m);
@@ -107,7 +167,7 @@ test("every crow-*gateway*.service in the unit dir gets the drop-in", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /crow-gateway\.service\.d\/10-boot-guard\.conf/);
   assert.match(r.stdout, /crow-b-gateway\.service\.d\/10-boot-guard\.conf/);
-  assert.match(r.stdout, /crow-b-home\/boot-guard\/crow-boot-guard\.mjs --app-root \/srv\/crow-b/);
+  assert.match(r.stdout, /crow-b-home\/boot-guard\/crow-boot-guard\.mjs" --app-root "\/srv\/crow-b/);
   assert.doesNotMatch(r.stdout, /crow-scheduler\.service\.d/);
 });
 
@@ -132,7 +192,7 @@ test("node comes from ExecStart's argv[0] when it is node", () => {
     UNIT({ node }).replace("Environment=NODE_ENV=production", `Environment=PATH=${join(base, "pathbin")}\nEnvironment=NODE_ENV=production`));
   const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir });
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(printedDropin(r.stdout).includes(`ExecStartPre=-${node} `), `expected ${node}:\n${r.stdout}`);
+  assert.ok(printedDropin(r.stdout).includes(`ExecStartPre=-"${node}" `), `expected ${node}:\n${r.stdout}`);
 });
 
 test("an `npm run gateway` ExecStart resolves node from the unit's Environment=PATH", () => {
@@ -145,7 +205,7 @@ test("an `npm run gateway` ExecStart resolves node from the unit's Environment=P
   }).replace("Environment=NODE_ENV=production", `Environment=PATH=${pathbin}:/usr/bin:/bin\nEnvironment=NODE_ENV=production`));
   const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(printedDropin(r.stdout).includes(`ExecStartPre=-${node} `), true, r.stdout);
+  assert.equal(printedDropin(r.stdout).includes(`ExecStartPre=-"${node}" `), true, r.stdout);
 });
 
 test("a node older than 22.13 is refused (the launcher needs node:sqlite)", () => {
@@ -172,10 +232,121 @@ test("--user writes the user unit dir and never escalates", () => {
   assert.match(r.stdout, new RegExp(`would write: ${unitDir}/crow-gateway\\.service\\.d/10-boot-guard\\.conf`));
   assert.doesNotMatch(r.stdout, /sudo/);
   assert.doesNotMatch(r.stderr, /sudo/);
-  assert.ok(printedDropin(r.stdout).includes("--app-root /home/u/crow"));
+  assert.ok(printedDropin(r.stdout).includes('--app-root "/home/u/crow"'));
+});
+
+/* ------------------------------------------- merged values (systemctl show) */
+
+test("CROW_HOME and WorkingDirectory come from the MERGED unit, drop-ins included", () => {
+  // A second co-hosted unit can set its own CROW_HOME in a drop-in; reading only
+  // the main unit file would wire it to the other instance's launcher copy.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const mergedHome = join(base, "merged-home");
+  // A space and a % in the path: the drop-in must quote it, and %% is how systemd
+  // writes one literal percent.
+  const appRoot = join(base, "crow app 100%");
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome: join(base, "unit-home"), workdir: `-${appRoot}` }));
+  mkdirSync(join(unitDir, "crow-gateway.service.d"), { recursive: true });
+  writeFileSync(join(unitDir, "crow-gateway.service.d", "20-home.conf"), `[Service]\nEnvironment=CROW_HOME=${mergedHome}\n`);
+
+  const r = run(["--dry-run"], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir, CROW_SYSTEMCTL: fakeSystemctlMerging(base, unitDir),
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const dropin = printedDropin(r.stdout);
+  assert.ok(dropin.includes(`"${mergedHome}/boot-guard/crow-boot-guard.mjs"`), `drop-in CROW_HOME ignored:\n${dropin}`);
+  // WorkingDirectory=-/path: the optional-exec '-' is not part of the path, and
+  // the path is quoted with % doubled.
+  assert.ok(dropin.includes(`--app-root "${appRoot.replace("%", "%%")}"`), dropin);
+  assert.match(r.stdout, /would install: .*merged-home\/boot-guard\/crow-boot-guard\.mjs/);
+});
+
+test("a templated unit is refused with a clear message", () => {
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  fixtureUnit(unitDir, "crow-gateway@1.service", UNIT({ node }));
+  const r = run(["--dry-run"], { CROW_SYSTEMD_UNIT_DIR: unitDir });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /templated unit/);
+  assert.equal(existsSync(join(unitDir, "crow-gateway@1.service.d")), false);
+});
+
+/* --------------------------------------------------- the real write path */
+
+test("the real write path uses mktemp + a privileged install, not a redirect", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: the installer has no sudo hop to observe");
+    return;
+  }
+  // NOT --dry-run: a non-root run must still be able to write the drop-in, and
+  // the privileged half must be a single `install -m 644` from a temp file that
+  // lives outside the unit directory.
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  const appRoot = join(base, "app");
+  fixtureUnit(unitDir, "crow-gateway.service",
+    UNIT({ node, crowHome, workdir: appRoot }).replace("User=alice\n", ""));
+  const priv = fakePrivileged(base);
+
+  const r = run([], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir,
+    PATH: `${priv.dir}:${process.env.PATH}`,
+  });
+  assert.equal(r.status, 0, r.stderr);
+
+  const dropinPath = join(unitDir, "crow-gateway.service.d", "10-boot-guard.conf");
+  assert.ok(existsSync(dropinPath), `the drop-in must be written:\n${r.stdout}\n${r.stderr}`);
+  const log = readFileSync(priv.log, "utf8");
+  assert.match(log, /sudo install -m 644 \S+ \S*10-boot-guard\.conf/,
+    `the drop-in must be installed, not redirected into the unit dir:\n${log}`);
+  assert.doesNotMatch(log, /sudo cp /, "the old redirect + cp path must be gone");
+  // Nothing but the drop-in is left in the drop-in directory (no temp files).
+  assert.deepEqual(readdirSync(join(unitDir, "crow-gateway.service.d")), ["10-boot-guard.conf"]);
+  // And the launcher copy landed in the unit's own CROW_HOME, mode 0600.
+  const copy = join(crowHome, "boot-guard", "crow-boot-guard.mjs");
+  assert.ok(existsSync(copy), "the launcher copy must be installed");
+  assert.equal(readFileSync(copy, "utf8"), readFileSync(join(import.meta.dirname, "..", "scripts", "boot-guard", "crow-boot-guard.mjs"), "utf8"));
+});
+
+test("a symlinked boot-guard directory is refused, never written through", () => {
+  const base = scratch();
+  const unitDir = join(base, "units");
+  const node = fakeNode(join(base, "bin"), "24.21.0");
+  const crowHome = join(base, "crow-home");
+  mkdirSync(crowHome, { recursive: true });
+  const elsewhere = join(base, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  symlinkSync(elsewhere, join(crowHome, "boot-guard"));
+  fixtureUnit(unitDir, "crow-gateway.service", UNIT({ node, crowHome, workdir: join(base, "app") }).replace("User=alice\n", ""));
+  const priv = fakePrivileged(base);
+
+  const r = run([], {
+    CROW_SYSTEMD_UNIT_DIR: unitDir,
+    PATH: `${priv.dir}:${process.env.PATH}`,
+  });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /symlink/);
+  assert.deepEqual(readdirSync(elsewhere), [], "nothing may be written through the link");
+  assert.equal(existsSync(join(unitDir, "crow-gateway.service.d")), false, "no drop-in points at a copy that was not installed");
 });
 
 /* ------------------------------------------------------------ idempotency */
+
+test("as root the launcher copy is installed as the unit's user", () => {
+  // Root must not leave a root-owned file in a directory the service user can
+  // rewrite (and the gateway refreshes this copy itself). Root behaviour cannot
+  // be exercised from an unprivileged test run, so the source is pinned.
+  const source = readFileSync(SCRIPT, "utf8");
+  assert.match(source, /sudo -u "\$owner" install -m 600/, "the copy must run as the unit's user");
+  // And never through a symlinked directory.
+  assert.match(source, /if \[ -L "\$dir" \]; then/);
+});
 
 test("a drop-in that already matches is left alone and no daemon-reload happens", () => {
   const base = scratch();

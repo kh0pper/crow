@@ -153,6 +153,17 @@ código no arranca nunca puede reemplazar a quien lo juzga.
 | `scripts/init-db.js` cambió entre los dos commits | reconstruye tablas sin subir la generación de esquema |
 | Se aplicó una migración que no declara que el código anterior puede con la forma nueva | el código viejo puede no entender los datos |
 
+**Un rechazo que no puede desaparecer solo no se reintenta.** Cuando el guardián
+rechaza porque la base de datos avanzó (`user_version`), porque cambió
+`scripts/init-db.js`, o porque una migración aplicada no declara que el código
+anterior puede correr con la forma nueva, nada de lo que hagas en el gateway
+cambiará la respuesta: el guardián deja `main` donde está, mantiene el aviso y el
+archivo `STATUS`, y **no** vuelve a armar el mismo commit en el siguiente
+arranque — si no, arrancaría el commit que falla tres veces más por ciclo, para
+nada. Los otros rechazos (sin commit anterior probado, un checkout que no está
+en `main`, un checkout de solo lectura, un `index.lock`) pueden desaparecer solos,
+así que se revisan otra vez en el siguiente arranque.
+
 **Recuperarse de un rechazo.** El aviso y `~/.crow/boot-guard/STATUS` llevan los
 pasos exactos para el caso que se disparó. En general:
 
@@ -178,6 +189,18 @@ sudo systemctl start crow-gateway
 No uses `git checkout <commit>`: eso separa HEAD, el actualizador omite entonces
 todas las comprobaciones con `Skipped: not on main`, y las actualizaciones se
 detienen en silencio.
+
+**Contra qué protege.** El guardián es una defensa contra commits malos
+*accidentales*: una importación que lanza, un error de sintaxis, una dependencia
+que no arranca. **No** es una defensa contra un commit deliberadamente
+malicioso. Un commit así corre como el usuario del servicio, igual que el
+gateway, así que puede reescribir `~/.crow/boot-guard/crow-boot-guard.mjs`, el
+archivo de estado que está junto a él, o el `.git/config` de este repositorio
+antes del siguiente arranque. El aislamiento del lanzador
+(`core.hooksPath=/dev/null`, `GIT_*` eliminadas, ningún módulo del árbol
+importado) existe para que los hooks y módulos de un commit malo *honesto* no
+corran durante la reversión — no aporta nada contra un atacante. Trata el acceso
+de escritura a `main` como equivalente a una shell como el usuario del servicio.
 
 **Instalarlo.** Las instalaciones nuevas lo traen. En un host existente, ejecuta
 `sudo scripts/ops/install-boot-guard.sh` desde el checkout (o

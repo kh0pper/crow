@@ -70,6 +70,16 @@ export const RESET_TIMEOUT_MS = 30 * 1000;
 export const NPM_TIMEOUT_MS = 5 * 60 * 1000;
 /** Budget that must remain BEFORE the first git write, or the run defers. */
 export const MIN_REMAINING_MS = 90 * 1000;
+/** Failed dependency reinstalls after a rollback before the guard stops paying
+ *  for npm on every start and asks the operator instead. */
+export const DEPS_MAX_ATTEMPTS = 3;
+
+/** Refusal reasons that cannot clear on their own: re-arming the same sha would
+ *  only cycle refused → pending → refused and boot the bad commit three more
+ *  times per cycle. The operator has to act (the alert says how). */
+export const PERMANENT_REFUSAL_REASONS = Object.freeze([
+  "db-ahead", "init-db-changed", "migration-not-rollback-safe",
+]);
 
 export const STATES = Object.freeze([
   "ok", "pending", "rolled-back", "rolled-back-by-peer", "rolled-back-deps-pending", "refused", "blocked",
@@ -117,12 +127,25 @@ export function crowHomeFor(env = process.env) {
 
 /* -------------------------------------------------------------------- git */
 
+/** The child environment for git: every GIT_* variable from the unit is dropped
+ *  (GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would point git at another repository),
+ *  then the two we do want are set. */
+export function gitChildEnv(env = process.env) {
+  const child = {};
+  for (const [key, value] of Object.entries(env || {})) {
+    if (!key.startsWith("GIT_")) child[key] = value;
+  }
+  child.GIT_TERMINAL_PROMPT = "0";
+  child.GIT_ASKPASS = "true";
+  return child;
+}
+
 export function gitRun(root, args, { timeout = 30_000, env = process.env } = {}) {
   try {
     const r = spawnSync("git", [...GIT_HOOKS_OFF, "-C", root, ...args], {
       timeout,
       encoding: "utf8",
-      env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "true" },
+      env: gitChildEnv(env),
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 8 * 1024 * 1024,
     });
@@ -181,8 +204,11 @@ export function freshState() {
     result: null,
     alerted: {},
     launcher_ran_at: null,
+    launcher_finished_at: null,
+    prev_launcher_ran_at: null,
     launcher_version: null,
     recorder_ran_at: null,
+    deps_attempts: 0,
   };
 }
 
@@ -345,11 +371,53 @@ function armDecision(state, facts) {
   if (!FULL_SHA_RE.test(head)) return { action: "idle", reason: "no-head" };
   if (!FULL_SHA_RE.test(lastOk)) return { action: "idle", reason: "no-baseline" };
   if (head === lastOk) return { action: "idle", reason: "current" };
+  // A permanent refusal cannot clear by itself, so arming the same sha again
+  // would only boot the failing commit three more times per cycle.
+  if (state?.state === "refused"
+      && String(state.pending_sha || "") === head
+      && PERMANENT_REFUSAL_REASONS.includes(String(state.result?.reason || ""))) {
+    return { action: "idle", reason: "permanent-refusal" };
+  }
   if (facts.branch !== "refs/heads/main") return { action: "idle", reason: "not-on-main" };
   if (!FULL_SHA_RE.test(String(facts.originMain || ""))) return { action: "idle", reason: "no-origin-main" };
   if (!facts.headIsAncestorOfOrigin) return { action: "idle", reason: "not-upstream" };
   if (!facts.lastOkIsAncestorOfHead) return { action: "idle", reason: "baseline-not-ancestor" };
   return { action: "arm" };
+}
+
+/** The state a finished trial leaves behind (no pending fields, no result). */
+export function clearTrialFields(state) {
+  return {
+    ...state,
+    state: "ok",
+    previous_sha: null,
+    pending_sha: null,
+    armed_at: null,
+    previous_proven: false,
+    failures: 0,
+    attempt: null,
+    deps_changed: false,
+    deps_pending: false,
+    deps_attempts: 0,
+    result: null,
+    alerted: {},
+    last_crash: null,
+  };
+}
+
+/**
+ * Is a `HEAD === previous` state a rollback by a co-hosted instance?
+ *
+ * Only the boot guard's own marker for THIS sha is evidence of that: a manual
+ * `git reset --keep <last good>` (or `scripts/crow-update.sh`) leaves the tree
+ * in exactly the same place and must never ring "crashed on startup on another
+ * instance".
+ */
+export function peerRollbackEvidence(marker, pending) {
+  return Boolean(marker)
+    && marker.sha === pending
+    && String(marker.reason || "") === "startup-crash"
+    && String(marker.by || "") === "boot-guard";
 }
 
 /**
@@ -360,7 +428,7 @@ function armDecision(state, facts) {
  *   { now, head, branch, originMain, headIsAncestorOfOrigin,
  *     lastOkIsAncestorOfHead, previousIsAncestorOfPending, failures,
  *     gitDirWritable, indexLock, schema: {ok, reason, detail},
- *     deadlineRemainingMs }
+ *     quarantine, deadlineRemainingMs }
  * @returns {{action: string, reason?: string, failures?: number, detail?: object}}
  */
 export function decide(state, facts = {}) {
@@ -368,8 +436,10 @@ export function decide(state, facts = {}) {
   const failures = Number.isFinite(facts.failures) ? facts.failures : num(state?.failures, 0);
 
   // A dependency install that timed out after a rollback: finish it first, it is
-  // the only thing between this checkout and booting the previous commit.
+  // the only thing between this checkout and booting the previous commit. Once
+  // the retries are exhausted it never runs npm on a start again.
   if (state?.state === "rolled-back-deps-pending") {
+    if (num(state.deps_attempts, 0) >= DEPS_MAX_ATTEMPTS) return { action: "idle", reason: "deps-blocked" };
     if (head && head === state.previous_sha) return { action: "deps-retry" };
     return { action: "discard", reason: "tree-moved" };
   }
@@ -381,9 +451,14 @@ export function decide(state, facts = {}) {
 
   if (head !== pending) {
     // Peers: another instance on this shared checkout already moved main back.
-    if (head && head === state.previous_sha) return { action: "peer", failures };
-    // Anything else: the record is about a commit the tree no longer holds.
-    return { action: "discard", reason: "tree-moved", failures };
+    if (head && head === state.previous_sha && peerRollbackEvidence(facts.quarantine, pending)) {
+      return { action: "peer", failures };
+    }
+    // Not evidence of a peer: the record is about a commit the tree no longer
+    // holds. Discard it — and let the shell arm whatever the tree holds now, so
+    // a discarded trial never leaves the next commit unguarded (`rearm`).
+    const reason = head && head === state.previous_sha ? "not-a-peer" : "tree-moved";
+    return { action: "discard", reason, failures, rearm: armDecision(clearTrialFields(state), facts) };
   }
 
   if (failures < FAILURE_THRESHOLD) return { action: "wait", failures };
@@ -891,9 +966,6 @@ export function runRecordExit({ stateDir, env = process.env, now = Date.now() } 
  * Returns the decision so tests can assert on it directly.
  */
 export function runPreStart({ appRoot, env = process.env, cwd = process.cwd(), now = Date.now() } = {}) {
-  const startedAt = now;
-  const deadlineRemainingMs = () => startedAt + envMs(env, "CROW_BOOT_GUARD_DEADLINE_MS", DEADLINE_MS) - Date.now();
-
   // 1. The app root comes from argv and must be the directory we were started in.
   const cwdReal = realpathOrNull(cwd);
   const root = appRoot ? realpathOrNull(appRoot) : null;
@@ -913,9 +985,35 @@ export function runPreStart({ appRoot, env = process.env, cwd = process.cwd(), n
   }
   const state = loaded.state || freshState();
 
-  // S13 stamp: the gateway's fix-it card uses this to prove the guard ran.
+  // S13 stamps. `launcher_ran_at` marks the START; the stamp the fix-it card
+  // checks is `launcher_finished_at`, written at the very end of this run — a
+  // rollback can spend minutes in npm after this line, and the gateway starts
+  // after it, so the start stamp alone would look stale on exactly the boot that
+  // was guarded. The previous start's stamp is kept so the card can ask whether
+  // the recorder ran AFTER it.
+  state.prev_launcher_ran_at = state.launcher_ran_at || null;
   state.launcher_ran_at = iso(now);
   state.launcher_version = LAUNCHER_VERSION;
+
+  try {
+    return preStartOnce({ root, crowHome, stateDir, state, env, now });
+  } finally {
+    stampLauncherFinished(stateDir);
+  }
+}
+
+/** END of the pre-start run (S13): reload whatever the run saved and stamp it. */
+function stampLauncherFinished(stateDir) {
+  const { state, error } = loadState(stateDir);
+  if (error || !state) return;
+  state.launcher_finished_at = iso(Date.now());
+  saveState(stateDir, state);
+}
+
+function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
+  const startedAt = now;
+  const budget = envMs(env, "CROW_BOOT_GUARD_DEADLINE_MS", DEADLINE_MS);
+  const deadlineRemainingMs = () => startedAt + budget - Date.now();
 
   const gitDir = gitDirFor(root);
   if (!gitDir) {
@@ -966,7 +1064,8 @@ export function runPreStart({ appRoot, env = process.env, cwd = process.cwd(), n
     gitDirWritable: null,
     indexLock: false,
     schema: null,
-    deadlineRemainingMs: deadlineRemainingMs(),
+    quarantine: null,
+    deadlineRemainingMs: Infinity,
   };
 
   // Ancestry git calls only where the answer can change the decision.
@@ -980,41 +1079,47 @@ export function runPreStart({ appRoot, env = process.env, cwd = process.cwd(), n
     facts.schema = evaluateSchema({ root, previous, pending, dbPath: state.db_path });
   }
 
+  // A peer rollback is only believed with the boot guard's own marker for this
+  // sha, so the marker is read before deciding (a manual reset to the previous
+  // commit looks identical otherwise).
+  if (state.state === "pending") facts.quarantine = readUpdateQuarantineFile(gitDir);
+  // S6: the budget is measured AFTER the facts above, so a slow schema read
+  // cannot make the remaining time look bigger than it is.
+  facts.deadlineRemainingMs = deadlineRemainingMs();
+
   const decision = decide(state, facts);
 
   if (decision.action === "arm") {
-    const armed = {
-      ...state,
-      state: "pending",
-      previous_sha: state.last_ok_sha,
-      pending_sha: head,
-      armed_at: iso(now),
-      previous_proven: true,
-      failures: 0,
-      last_crash: null,
-      deps_changed: false,
-      result: null,
-      attempt: { id: attemptId, started_at: iso(now), planned_at: null, exit: null },
-    };
-    saveState(stateDir, armed);
-    // A STATUS file describes the previous trial; a new commit starts clean.
-    if (state.pending_sha !== head) clearStatusFile(stateDir);
-    log(`armed: ${short(head)} on top of the last healthy ${short(armed.previous_sha)}`);
+    armTrial({ state, stateDir, head, attemptId, now });
     return decision;
   }
 
   if (decision.action === "idle") {
     saveState(stateDir, state);
     if (decision.reason === "no-origin-main") log("no refs/remotes/origin/main — not arming");
+    if (decision.reason === "permanent-refusal") {
+      log(`${short(head)} was refused for a reason that cannot clear on its own — not re-arming it`);
+    }
     return decision;
   }
 
   if (decision.action === "discard") {
-    const cleared = clearPendingFields(state);
+    // The record described a commit the tree no longer holds. Clear it, then arm
+    // whatever the tree holds now: returning here would leave the next commit
+    // unguarded and its first crash uncounted.
+    const cleared = clearTrialFields(state);
     saveState(stateDir, cleared);
     // The refusal text described a commit the tree no longer holds.
     clearStatusFile(stateDir);
     log(`discarded the trial record (${decision.reason}): the tree holds ${short(head)}`);
+    const armFacts = {
+      ...facts,
+      headIsAncestorOfOrigin: isAncestor(root, head, originMain),
+      lastOkIsAncestorOfHead: isAncestor(root, state.last_ok_sha, head),
+    };
+    if (decide(cleared, armFacts).action === "arm") {
+      armTrial({ state: cleared, stateDir, head, attemptId, now });
+    }
     return decision;
   }
 
@@ -1059,7 +1164,7 @@ export function runPreStart({ appRoot, env = process.env, cwd = process.cwd(), n
   }
 
   if (decision.action === "deps-retry") {
-    const done = retryDependencyInstall({ root, state, stateDir, env });
+    const done = retryDependencyInstall({ root, gitDir, state, stateDir, crowHome, env, now });
     return { ...decision, installed: done };
   }
 
@@ -1071,29 +1176,35 @@ export function runPreStart({ appRoot, env = process.env, cwd = process.cwd(), n
 
   return performRollback({
     root, gitDir, state, stateDir, crowHome, env, now, facts, decision,
-    deadlineAt: startedAt + envMs(env, "CROW_BOOT_GUARD_DEADLINE_MS", DEADLINE_MS),
+    deadlineAt: startedAt + budget,
   });
+}
+
+/** Open a trial for `head` on top of the last commit this host proved (B2/R2). */
+function armTrial({ state, stateDir, head, attemptId, now }) {
+  const armed = {
+    ...state,
+    state: "pending",
+    previous_sha: state.last_ok_sha,
+    pending_sha: head,
+    armed_at: iso(now),
+    previous_proven: true,
+    failures: 0,
+    last_crash: null,
+    deps_changed: false,
+    deps_attempts: 0,
+    result: null,
+    attempt: { id: attemptId, started_at: iso(now), planned_at: null, exit: null },
+  };
+  saveState(stateDir, armed);
+  // A STATUS file describes the previous trial; a new commit starts clean.
+  if (state.pending_sha !== head) clearStatusFile(stateDir);
+  log(`armed: ${short(head)} on top of the last healthy ${short(armed.previous_sha)}`);
+  return armed;
 }
 
 function fileExists(path) {
   try { lstatSync(path); return true; } catch { return false; }
-}
-
-function clearPendingFields(state) {
-  return {
-    ...state,
-    state: "ok",
-    previous_sha: null,
-    pending_sha: null,
-    armed_at: null,
-    previous_proven: false,
-    failures: 0,
-    attempt: null,
-    deps_changed: false,
-    result: null,
-    alerted: {},
-    last_crash: null,
-  };
 }
 
 /** `npm install --omit=dev` with its own kill, as the puller does it. */
@@ -1115,19 +1226,59 @@ function runNpmInstall({ root, env, timeoutMs }) {
   }
 }
 
-function retryDependencyInstall({ root, state, stateDir, env }) {
-  log("retrying the dependency install that a rollback left unfinished");
-  const r = runNpmInstall({ root, env, timeoutMs: envMs(env, "CROW_BOOT_GUARD_NPM_TIMEOUT_MS", NPM_TIMEOUT_MS) });
-  if (r.code === 0) {
-    const settled = { ...state, state: state.result ? "rolled-back" : "ok" };
-    saveState(stateDir, settled);
-    log("dependencies reinstalled — the previous commit is bootable");
-    return true;
+/**
+ * Retry the install a rollback left unfinished (S6). It runs under the SAME
+ * checkout lock as the puller: a peer's update tick rewrites the shared
+ * node_modules, and two npm runs at once break both instances.
+ */
+function retryDependencyInstall({ root, gitDir, state, stateDir, crowHome, env, now }) {
+  const lockPath = join(gitDir, LOCK_FILE);
+  const lock = acquireLockFileWaiting(lockPath, {
+    waitMs: envMs(env, "CROW_BOOT_GUARD_LOCK_WAIT_MS", LOCK_WAIT_MS),
+  });
+  if (!lock) {
+    log("the checkout lock is held elsewhere — the dependency retry waits for the next start");
+    return false;
   }
-  state.deps_pending = true;
-  saveState(stateDir, state);
-  log(`dependency install still failing (${r.timedOut ? "timed out" : `exit ${r.code}`}) — retried on the next start`);
-  return false;
+  try {
+    // Re-read HEAD under the lock: the tree may have moved while we waited.
+    const headNow = gitText(root, ["rev-parse", "HEAD"]) || "";
+    if (headNow !== state.previous_sha) {
+      log(`the tree holds ${short(headNow)}, not ${short(state.previous_sha)} — not reinstalling`);
+      return false;
+    }
+    log("retrying the dependency install that a rollback left unfinished");
+    const r = runNpmInstall({ root, env, timeoutMs: envMs(env, "CROW_BOOT_GUARD_NPM_TIMEOUT_MS", NPM_TIMEOUT_MS) });
+    if (r.code === 0) {
+      const settled = { ...state, state: state.result ? "rolled-back" : "ok", deps_pending: false, deps_attempts: 0 };
+      saveState(stateDir, settled);
+      log("dependencies reinstalled — the previous commit is bootable");
+      return true;
+    }
+    const attempts = num(state.deps_attempts, 0) + 1;
+    const next = { ...state, deps_pending: true, deps_attempts: attempts };
+    if (attempts >= DEPS_MAX_ATTEMPTS) {
+      // Stop paying for npm on every start, and say so: the previous code cannot
+      // boot without its dependencies, and a silent loop helps nobody.
+      spoolOnce(next, crowHome, "update-rollback-blocked", {
+        title: NO_ROLLBACK_TITLE,
+        body: `Commit ${short(state.pending_sha)} was rolled back, but the dependencies for `
+          + `${short(state.previous_sha)} could not be reinstalled (${DEPS_MAX_ATTEMPTS} attempts; the last `
+          + `${r.timedOut ? "one timed out" : `one exited ${r.code}`}), so the previous code may not start `
+          + `and nothing more will be retried automatically. To recover: run `
+          + `npm install --omit=dev in ${root} by hand, then restart the gateway.`,
+        now,
+      });
+      saveState(stateDir, next);
+      log(`the dependency install failed ${attempts} times — stopped retrying and spooled an alert`);
+      return false;
+    }
+    saveState(stateDir, next);
+    log(`dependency install still failing (${r.timedOut ? "timed out" : `exit ${r.code}`}) — retried on the next start`);
+    return false;
+  } finally {
+    releaseLockFile(lock);
+  }
 }
 
 /** Lock, re-read HEAD, quarantine, reset, dependencies. */
@@ -1157,6 +1308,8 @@ function performRollback({ root, gitDir, state, stateDir, crowHome, env, now, fa
       ...facts,
       head: headNow,
       schema: schemaNow,
+      // Re-read under the lock: the peer's marker was written before its reset.
+      quarantine: readUpdateQuarantineFile(gitDir),
       failures: decision.failures,
       // Recomputed: the wait for the lock may have eaten the budget (S6).
       deadlineRemainingMs: deadlineAt - Date.now(),
@@ -1185,6 +1338,14 @@ function performRollback({ root, gitDir, state, stateDir, crowHome, env, now, fa
         return reportRefusal({
           root, gitDir, state, stateDir, crowHome, now, decision: again, pending, previous, kind: again.action,
         });
+      }
+      if (again.action === "discard") {
+        // The tree moved while we waited, and not to the previous commit with a
+        // marker: the record is about a sha this checkout no longer holds.
+        saveState(stateDir, clearTrialFields(state));
+        clearStatusFile(stateDir);
+        log(`discarded the trial record under the lock (${again.reason}): the tree holds ${short(headNow)}`);
+        return again;
       }
       state.failures = decision.failures;
       saveState(stateDir, state);
@@ -1242,6 +1403,7 @@ function performRollback({ root, gitDir, state, stateDir, crowHome, env, now, fa
       failures: decision.failures,
       deps_changed: depsChanged,
       deps_pending: depsState === "rolled-back-deps-pending",
+      deps_attempts: 0,
       result: {
         code: "update-rolled-back",
         from: pending,

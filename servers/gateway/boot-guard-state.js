@@ -24,7 +24,7 @@ import {
   chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync,
   unlinkSync, writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, uptime as osUptime } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -157,6 +157,12 @@ export function markStable(bootSha, {
     if (current.state === "pending" && current.pending_sha && current.pending_sha !== bootSha) {
       return { ok: false, skipped: "pending-other" };
     }
+    // Install FIRST: what the state claims about the installed copy has to be
+    // what actually happened.
+    const launcher = install
+      ? installLauncherCopy({ appRoot, bootSha, stateDir, execFile })
+      : { installed: false, reason: "skipped" };
+    const copyOk = launcher.installed || launcher.reason === "current";
     const next = {
       ...current,
       state: "ok",
@@ -167,16 +173,22 @@ export function markStable(bootSha, {
       attempt: null,
       deps_changed: false,
       deps_pending: false,
+      deps_attempts: 0,
       previous_sha: null,
       pending_sha: null,
       armed_at: null,
       previous_proven: false,
-      result: null,
+      // An UNRECORDED rollback result survives the stable mark: the launcher may
+      // have rolled back while the DB was not up (or npm was still finishing) and
+      // the next boot still has to write the dashboard line. Everything else is
+      // stale here.
+      result: current.result && !current.result.recorded ? current.result : null,
       alerted: {},
-      launcher_version: LAUNCHER_VERSION,
+      // Only claim the version of the copy that is actually installed (a failed
+      // copy leaves the old file — and so the old version — in place).
+      launcher_version: copyOk ? LAUNCHER_VERSION : current.launcher_version,
     };
     const saved = saveState(stateDir, next);
-    const launcher = install ? installLauncherCopy({ appRoot, bootSha, stateDir, execFile }) : { installed: false, reason: "skipped" };
     return { ok: saved, launcher };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err) };
@@ -213,7 +225,9 @@ export function rolledBackResultText(state) {
   const to = String(r.to || state.previous_sha || "");
   if (!from || !to) return null;
   const n = Number.isFinite(r.failures) ? r.failures : 0;
-  const byPeer = state.state === "rolled-back-by-peer";
+  // The reason travels with the record, not with the state: markStable closes the
+  // trial but keeps an unrecorded result for the next boot to report.
+  const byPeer = r.reason === "peer" || state.state === "rolled-back-by-peer";
   return `Rolled back: ${from.slice(0, 9)} crashed on startup ${n} times; `
     + `${byPeer ? "a co-hosted instance rolled it back; " : ""}running ${to.slice(0, 9)}; `
     + `updates resume when main moves past it`;
@@ -227,7 +241,10 @@ export async function recordGuardResult({ record = null, stateDir = stateDirFor(
   try {
     const { state } = loadState(stateDir);
     if (!state) return null;
-    if (state.state !== "rolled-back" && state.state !== "rolled-back-by-peer") return null;
+    // Any state can carry an unrecorded rollback result: the launcher's own
+    // `rolled-back`, `rolled-back-by-peer`, and `rolled-back-deps-pending` (the
+    // previous commit is running, its dependencies are still being reinstalled),
+    // plus whatever markStable carried over from one of those.
     if (!state.result || state.result.recorded) return null;
     const text = rolledBackResultText(state);
     if (!text) return null;
@@ -257,34 +274,56 @@ export async function recordGuardResult({ record = null, stateDir = stateDirFor(
 /**
  * Did the guard actually run for THIS boot?
  *
- * The launcher's ExecStartPre stamp must be no older than this process's own
- * start (a minute of slack for the fork), and — once a previous boot existed —
- * the ExecStopPost recorder must have stamped too. A missing stamp means the
- * unit's drop-in points at nothing (a wrong node path, a deleted launcher copy),
- * which is exactly the silent breakage S13 is about: the gateway boots, and the
- * next bad update simply is not rolled back.
+ * Two stamps, two questions:
+ *   - `launcher_finished_at` must sit just before this process started. It is
+ *     written at the END of the pre-start run, not the start: a rollback can
+ *     wait for the checkout lock and spend five minutes in npm, and the gateway
+ *     starts after that, so `launcher_ran_at` alone looks stale on exactly the
+ *     boot the guard did most of its work.
+ *   - `recorder_ran_at` (ExecStopPost of the previous run) must be no older than
+ *     the PREVIOUS launcher run (`prev_launcher_ran_at`, which the launcher copies
+ *     before overwriting its start stamp). That is a fact about the previous
+ *     stop, not about boot time, so a slow stop cannot look broken.
  *
- * @returns {null|{reason: "unreadable"|"missing"|"launcher"|"recorder", …}}
+ * A previous start that happened before this boot (a power loss, a reboot, a
+ * planned `systemctl stop` long before the restart) never had a recorder stamp
+ * due in this boot. That case is reported as `unknown` and raises no card.
+ *
+ * @returns {null|{reason: "unreadable"|"missing"|"launcher"|"recorder"|"unknown", …}}
  */
 export function bootGuardProblem({
   env = process.env, stateDir = stateDirFor(), now = Date.now(), uptimeMs = process.uptime() * 1000,
+  systemUptimeMs = osUptime() * 1000,
 } = {}) {
   if (String(env?.CROW_BOOT_GUARD || "") !== "1") return null;
   const { state, error } = loadState(stateDir);
   if (error) return { reason: "unreadable", detail: error };
   if (!state) return { reason: "missing" };
   const bootAt = now - uptimeMs;
+  // The machine's own boot time: what separates "the previous start was in this
+  // boot" from "the previous start was before a reboot".
+  const machineBootAt = now - systemUptimeMs;
   const fresh = (stamp) => {
     const t = Date.parse(stamp || "");
     return Number.isFinite(t) && t >= bootAt - STAMP_TOLERANCE_MS && t <= now + STAMP_TOLERANCE_MS;
   };
-  if (!fresh(state.launcher_ran_at)) {
-    return { reason: "launcher", detail: state.launcher_ran_at || "never" };
+  if (!fresh(state.launcher_finished_at)) {
+    return { reason: "launcher", detail: state.launcher_finished_at || state.launcher_ran_at || "never" };
   }
   // The recorder only runs when a previous process ended; before the first
   // stable mark there is no earlier boot, so there is nothing to check.
   const hadEarlierBoot = Boolean(state.stable_at || state.result);
-  if (hadEarlierBoot && !fresh(state.recorder_ran_at)) {
+  if (!hadEarlierBoot) return null;
+  const prevLauncherAt = Date.parse(state.prev_launcher_ran_at || "");
+  if (!Number.isFinite(prevLauncherAt)) return null; // no earlier start recorded
+  // Only judge the recorder when the previous start happened in THIS boot: after
+  // a power loss or a reboot no ExecStopPost ran at all, so a missing stamp says
+  // nothing about whether the recorder works.
+  if (prevLauncherAt < machineBootAt - STAMP_TOLERANCE_MS) {
+    return { reason: "unknown", detail: `the previous start (${state.prev_launcher_ran_at}) was before this boot` };
+  }
+  const recorderAt = Date.parse(state.recorder_ran_at || "");
+  if (!Number.isFinite(recorderAt) || recorderAt < prevLauncherAt) {
     return { reason: "recorder", detail: state.recorder_ran_at || "never" };
   }
   return null;

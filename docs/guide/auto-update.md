@@ -149,6 +149,17 @@ descend from the last healthy one. Your own unpushed commits on `main` are never
 | `scripts/init-db.js` changed between the two commits | it rebuilds tables without bumping the schema generation |
 | A database migration ran that does not declare it is safe to run the old code on the new shape | older code may not understand the data |
 
+**A rejection that cannot clear by itself is not retried.** When the guard
+refuses because the database moved ahead (`user_version`), because
+`scripts/init-db.js` changed, or because an applied migration does not declare
+that the previous code can run on the new shape, nothing you can do in the
+gateway will change the answer: the guard leaves `main` where it is, keeps the
+alert and the `STATUS` file, and does **not** re-arm the same commit on the next
+start — otherwise it would boot the failing commit three more times per cycle
+for nothing. The other refusals (no proven previous commit, a checkout that is
+not on `main`, a read-only checkout, an `index.lock`) can clear on their own, so
+these are re-checked on the next start.
+
 **Recovering from a refusal.** The alert and `~/.crow/boot-guard/STATUS` carry
 the exact steps for the case that fired. In general:
 
@@ -172,6 +183,17 @@ sudo systemctl start crow-gateway
 
 Do not `git checkout <commit>`: that detaches HEAD, the updater then skips every
 check with `Skipped: not on main`, and updates stop silently.
+
+**What this protects against.** The guard is a defence against *accidental* bad
+commits: an import that throws, a syntax error, a dependency that will not
+start. It is **not** a defence against a deliberately malicious commit. Such a
+commit runs as the service user, exactly like the gateway, so it can rewrite
+`~/.crow/boot-guard/crow-boot-guard.mjs`, the state file next to it, or this
+repository's `.git/config` before the next start. The launcher's isolation
+(`core.hooksPath=/dev/null`, `GIT_*` stripped, no tree code imported) exists so
+that an honest bad commit's hooks and modules cannot run during the reset — it
+buys nothing against an attacker. Treat write access to `main` as equivalent to
+a shell as the service user.
 
 **Installing it.** New installs get it automatically. For an existing host, run
 `sudo scripts/ops/install-boot-guard.sh` from the checkout (or

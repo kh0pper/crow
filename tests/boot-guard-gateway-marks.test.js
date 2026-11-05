@@ -203,6 +203,64 @@ test("a state that is not rolled back writes nothing", async () => {
   assert.equal(calls.length, 0);
 });
 
+test("a rollback still waiting on dependencies is recorded too", async () => {
+  // The previous commit is running; npm is still being retried. The dashboard
+  // line must not be lost just because the state is not "rolled-back" yet.
+  const stateDir = join(scratch(), "boot-guard");
+  saveState(stateDir, {
+    ...freshState(), state: "rolled-back-deps-pending", previous_sha: A, pending_sha: B, failures: 3,
+    deps_pending: true,
+    result: { code: "update-rolled-back", from: B, to: A, failures: 3, reason: "startup-crash", at: new Date().toISOString(), recorded: false },
+  });
+  const calls = [];
+  const text = await recordGuardResult({ stateDir, record: async (v) => { calls.push(v); } });
+  assert.equal(calls.length, 1, "rolled-back-deps-pending must reach auto_update_last_result");
+  assert.equal(text, `Rolled back: ${B.slice(0, 9)} crashed on startup 3 times; running ${A.slice(0, 9)}; `
+    + `updates resume when main moves past it`);
+});
+
+test("markStable carries an unrecorded rollback result instead of clearing it", async () => {
+  // markStable cannot write the DB itself; it must not drop what the next boot
+  // still has to report (the launcher rolled back while the DB was not up).
+  const r = repoWithLauncher("// launcher as of A\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const result = { code: "update-rolled-back", from: B, to: A, failures: 3, reason: "startup-crash", at: new Date().toISOString(), recorded: false };
+  saveState(stateDir, { ...freshState(), state: "rolled-back-deps-pending", last_ok_sha: A, previous_sha: A, pending_sha: B, result });
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir });
+  assert.equal(out.ok, true, out.reason);
+  const { state } = loadState(stateDir);
+  assert.equal(state.state, "ok");
+  assert.equal(state.result?.recorded, false, "the unrecorded result must survive the stable mark");
+
+  const calls = [];
+  const text = await recordGuardResult({ stateDir, record: async (v) => { calls.push(v); } });
+  assert.equal(calls.length, 1, "the next boot must still be able to write the rollback line");
+  assert.match(text, /^Rolled back: /);
+});
+
+test("markStable only claims a launcher_version when the copy was installed", () => {
+  // A commit that does not carry the launcher (an old sha) must not make the
+  // state claim a copy that is not there.
+  const root = scratch("bg-gw-nolauncher-");
+  const work = join(root, "work");
+  mkdirSync(work, { recursive: true });
+  execFileSync("git", ["init", "-b", "main", work], { stdio: "pipe" });
+  const g = (...args) => execFileSync("git", args, { cwd: work, stdio: "pipe" }).toString().trim();
+  g("config", "user.email", "t@t");
+  g("config", "user.name", "t");
+  writeFileSync(join(work, "README.md"), "no launcher here\n");
+  g("add", "-A");
+  g("commit", "-m", "A without a launcher");
+  const sha = g("rev-parse", "HEAD");
+
+  const stateDir = join(scratch(), "boot-guard");
+  saveState(stateDir, { ...freshState(), state: "ok", last_ok_sha: A, launcher_version: "0" });
+  const out = markStable(sha, { appRoot: work, stateDir });
+  assert.equal(out.launcher.installed, false);
+  assert.equal(loadState(stateDir).state.launcher_version, "0", "no copy, no version claim");
+});
+
 /* ------------------------------------------------------- fix-it (S13) */
 
 test("a missing launcher stamp raises the boot-guard fix-it card", async () => {
@@ -213,39 +271,46 @@ test("a missing launcher stamp raises the boot-guard fix-it card", async () => {
 
   const stateDir = join(scratch(), "boot-guard");
   const now = Date.parse("2026-11-05T12:00:00Z");
+  const hourAgo = (ms) => new Date(now - ms).toISOString();
   const boot = (overrides) => saveState(stateDir, { ...freshState(), state: "ok", last_ok_sha: A, ...overrides });
+  // The machine has been up an hour, so a previous start 90 s ago was in this boot.
+  const opts = { env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000, systemUptimeMs: 3_600_000 };
 
   // CROW_BOOT_GUARD unset: the unit never asked for a guard, so nothing to check.
-  assert.equal(bootGuardProblem({ env: {}, stateDir, now, uptimeMs: 60_000 }), null);
+  assert.equal(bootGuardProblem({ ...opts, env: {} }), null);
 
   // No state at all.
   const empty = join(scratch(), "boot-guard");
-  assert.equal(bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir: empty, now, uptimeMs: 60_000 }).reason, "missing");
+  assert.equal(bootGuardProblem({ ...opts, stateDir: empty }).reason, "missing");
 
-  // The launcher never ran for this boot.
-  boot({ launcher_ran_at: null });
-  const missing = bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000 });
-  assert.equal(missing.reason, "launcher");
+  // The launcher never ran for this boot (nor finished).
+  boot({ launcher_ran_at: null, launcher_finished_at: null });
+  assert.equal(bootGuardProblem(opts).reason, "launcher");
 
   // The launcher ran, for this boot.
   boot({
-    launcher_ran_at: new Date(now - 30_000).toISOString(),
+    launcher_ran_at: hourAgo(30_000),
+    launcher_finished_at: hourAgo(25_000),
     stable_at: new Date(now - 86_400_000).toISOString(),
-    recorder_ran_at: new Date(now - 40_000).toISOString(),
+    prev_launcher_ran_at: hourAgo(90_000),
+    recorder_ran_at: hourAgo(40_000),
   });
-  assert.equal(bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000 }), null);
+  assert.equal(bootGuardProblem(opts), null);
 
   // A stamp from a PREVIOUS boot (the guard did not run this time).
-  boot({ launcher_ran_at: new Date(now - 86_400_000).toISOString() });
-  assert.equal(bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000 }).reason, "launcher");
+  boot({ launcher_ran_at: hourAgo(86_400_000), launcher_finished_at: hourAgo(86_400_000) });
+  assert.equal(bootGuardProblem(opts).reason, "launcher");
 
-  // The recorder never ran, though an earlier boot existed.
+  // The recorder never ran, though an earlier boot existed and the previous
+  // start was in THIS boot (so a clean stop would have run ExecStopPost).
   boot({
-    launcher_ran_at: new Date(now - 30_000).toISOString(),
+    launcher_ran_at: hourAgo(30_000),
+    launcher_finished_at: hourAgo(25_000),
     stable_at: new Date(now - 86_400_000).toISOString(),
+    prev_launcher_ran_at: hourAgo(90_000),
     recorder_ran_at: null,
   });
-  assert.equal(bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000 }).reason, "recorder");
+  assert.equal(bootGuardProblem(opts).reason, "recorder");
 
   // And the card itself.
   const items = [];
@@ -254,7 +319,7 @@ test("a missing launcher stamp raises the boot-guard fix-it card", async () => {
     upsertItem: async (item) => { items.push(item); return { notify: false }; },
     resolveByKey: async (source, key) => { resolved.push([source, key]); },
   };
-  const problem = await detector.check(store, { bootGuard: { env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000 } });
+  const problem = await detector.check(store, { bootGuard: opts });
   assert.equal(problem.reason, "recorder");
   assert.equal(items.length, 1);
   assert.equal(items[0].dedupKey, DEDUP_KEY);
@@ -262,10 +327,77 @@ test("a missing launcher stamp raises the boot-guard fix-it card", async () => {
   assert.match(items[0].why, /roll back a Crow update that keeps crashing/);
 
   // A healthy boot resolves the card instead.
-  boot({ launcher_ran_at: new Date(now - 30_000).toISOString(), recorder_ran_at: new Date(now - 40_000).toISOString() });
-  const fine = await detector.check(store, { bootGuard: { env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000 } });
+  boot({
+    launcher_finished_at: hourAgo(25_000),
+    stable_at: new Date(now - 86_400_000).toISOString(),
+    prev_launcher_ran_at: hourAgo(90_000),
+    recorder_ran_at: hourAgo(40_000),
+  });
+  const fine = await detector.check(store, { bootGuard: opts });
   assert.equal(fine, null);
   assert.deepEqual(resolved[0], ["boot-guard", DEDUP_KEY]);
+});
+
+test("a rollback whose dependency install took five minutes raises no card", () => {
+  // The launcher started six minutes ago, spent five in npm and finished just
+  // before this process; only the FINISH stamp shows that the guard did run.
+  const stateDir = join(scratch(), "boot-guard");
+  const now = Date.parse("2026-11-05T12:00:00Z");
+  const at = (ms) => new Date(now - ms).toISOString();
+  saveState(stateDir, {
+    ...freshState(),
+    state: "rolled-back",
+    last_ok_sha: A,
+    previous_sha: A,
+    pending_sha: B,
+    stable_at: at(86_400_000),
+    launcher_ran_at: at(6 * 60_000 + 40_000), // the start, before the lock+npm
+    launcher_finished_at: at(40_000), // the end of the pre-start run
+    prev_launcher_ran_at: at(7 * 60_000),
+    recorder_ran_at: at(6 * 60_000 + 45_000), // the previous stop, before that start
+    result: { code: "update-rolled-back", from: B, to: A, failures: 3, reason: "startup-crash", recorded: false },
+  });
+  assert.equal(
+    bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 30_000, systemUptimeMs: 10 * 60_000 }),
+    null,
+    "a long rollback is the guarded boot, not a broken guard",
+  );
+});
+
+test("a reboot gap raises no card: the previous stop is unknown, not broken", () => {
+  // The previous launcher ran before this boot, so no ExecStopPost was due in
+  // this boot at all. Saying "did not run" there would fire on every reboot.
+  const stateDir = join(scratch(), "boot-guard");
+  const now = Date.parse("2026-11-05T12:00:00Z");
+  const at = (ms) => new Date(now - ms).toISOString();
+  saveState(stateDir, {
+    ...freshState(),
+    state: "ok",
+    last_ok_sha: A,
+    stable_at: at(86_400_000),
+    launcher_ran_at: at(50_000),
+    launcher_finished_at: at(45_000),
+    prev_launcher_ran_at: at(10 * 60_000), // ten minutes ago, in the PREVIOUS boot
+    recorder_ran_at: at(20 * 60_000), // from an even earlier boot
+  });
+  const problem = bootGuardProblem({ env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000, systemUptimeMs: 60_000 });
+  assert.equal(problem.reason, "unknown", "we cannot tell, so we must not accuse the recorder");
+});
+
+test("the detector raises nothing for an unknown previous stop", async () => {
+  const { default: detector } = await import("../servers/gateway/fix-it/detectors/boot-guard.js");
+  const stateDir = join(scratch(), "boot-guard");
+  const now = Date.parse("2026-11-05T12:00:00Z");
+  const at = (ms) => new Date(now - ms).toISOString();
+  saveState(stateDir, {
+    ...freshState(), state: "ok", last_ok_sha: A, stable_at: at(86_400_000),
+    launcher_finished_at: at(45_000), prev_launcher_ran_at: at(10 * 60_000),
+  });
+  const items = [];
+  const store = { upsertItem: async (i) => { items.push(i); return { notify: false }; }, resolveByKey: async () => {} };
+  const problem = await detector.check(store, { bootGuard: { env: { CROW_BOOT_GUARD: "1" }, stateDir, now, uptimeMs: 60_000, systemUptimeMs: 60_000 } });
+  assert.equal(problem, null);
+  assert.equal(items.length, 0, "no card on a routine reboot");
 });
 
 test("index.js marks an exit planned on crow:shutdown AND in gracefulShutdown", () => {

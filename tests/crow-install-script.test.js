@@ -431,8 +431,12 @@ test("boot guard (N1c-3 L1): the generated unit runs the launcher copy twice and
   const unit = gatewayUnitBlock(s);
   // ExecStartPre runs before EVERY start (including every automatic restart),
   // ExecStopPost records how that start ended — from a copy OUTSIDE the tree.
-  assert.match(unit, /^ExecStartPre=-\$\(which node\) \$CROW_HOME\/boot-guard\/crow-boot-guard\.mjs --app-root \$CROW_APP$/m);
-  assert.match(unit, /^ExecStopPost=-\$\(which node\) \$CROW_HOME\/boot-guard\/crow-boot-guard\.mjs --app-root \$CROW_APP --record-exit$/m);
+  // Every path is quoted by sd_quote, which also doubles a literal % (systemd
+  // would otherwise read it as a specifier).
+  assert.match(unit,
+    /^ExecStartPre=-\$\(sd_quote "\$\(which node\)"\) \$\(sd_quote "\$CROW_HOME\/boot-guard\/crow-boot-guard\.mjs"\) --app-root \$\(sd_quote "\$CROW_APP"\)$/m);
+  assert.match(unit,
+    /^ExecStopPost=-\$\(sd_quote "\$\(which node\)"\) \$\(sd_quote "\$CROW_HOME\/boot-guard\/crow-boot-guard\.mjs"\) --app-root \$\(sd_quote "\$CROW_APP"\) --record-exit$/m);
   // TimeoutStartSec must cover the guard's own npm install (up to 5 minutes).
   assert.match(unit, /^TimeoutStartSec=15min$/m);
   assert.match(unit, /^Environment=CROW_BOOT_GUARD=1$/m);
@@ -441,6 +445,15 @@ test("boot guard (N1c-3 L1): the generated unit runs the launcher copy twice and
   assert.match(s, /install -m 600 scripts\/boot-guard\/crow-boot-guard\.mjs "\$CROW_HOME\/boot-guard\/crow-boot-guard\.mjs"/);
   assert.ok(s.indexOf("install -m 600 scripts/boot-guard/crow-boot-guard.mjs") < s.indexOf("sudo tee /etc/systemd/system/crow-gateway.service"),
     "the launcher copy must exist before the unit that runs it is written");
+});
+
+test("sd_quote: quotes a path, doubles a literal %, and escapes a quote", () => {
+  // The unit lines are written through sd_quote. A path with a space would split
+  // into two arguments; a raw % is a systemd specifier and the guard would exit
+  // before stamping, which the installer (not the operator) caused.
+  const r = runWithHelpers(`sd_quote '/home/u/crow 100%'; printf '\\n'; sd_quote '/home/u/a"b'; printf '\\n'`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trimEnd().split("\n"), ['"/home/u/crow 100%%"', '"/home/u/a\\"b"']);
 });
 
 test("proxy socket units pass systemd-analyze verify when available (skips otherwise)", (t) => {
@@ -453,6 +466,9 @@ test("proxy socket units pass systemd-analyze verify when available (skips other
     .replaceAll("$USER", process.env.USER || "nobody").replaceAll("$CROW_APP", "/tmp")
     .replaceAll("$(which node)", process.execPath).replaceAll("$CROW_DATA", "/tmp")
     .replaceAll("$CROW_HOME", "/tmp/crow-home")
+    // The heredoc is unquoted, so sd_quote runs at install time; here its
+    // argument is already substituted, so drop the wrapper and keep the quoting.
+    .replace(/\$\(sd_quote ("[^"]*")\)/g, "$1")
     .replace(/^Requires=docker\.service$/m, "").replace(/^After=.*docker.*$/m, "");
   const dir = mkdtempSync(join(tmpdir(), "crow-units-"));
   writeFileSync(join(dir, "crow-gateway-proxy.socket"), sock + "\n");

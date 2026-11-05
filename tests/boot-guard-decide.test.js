@@ -12,8 +12,8 @@ import { join } from "node:path";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import {
-  DEADLINE_MS, FAILURE_THRESHOLD, STATE_MAX_BYTES, STATE_FILE, decide, exitCountsAsCrash, freshState,
-  loadState, saveState,
+  DEADLINE_MS, DEPS_MAX_ATTEMPTS, FAILURE_THRESHOLD, STATE_MAX_BYTES, STATE_FILE, decide, exitCountsAsCrash,
+  freshState, loadState, saveState,
 } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const A = "a".repeat(40);
@@ -152,15 +152,66 @@ test("does not arm when the baseline is not an ancestor of HEAD", () => {
 
 /* ------------------------------------------------- peers and stale records */
 
-test("HEAD == previous → rolled-back-by-peer", () => {
-  const d = decide(trial(), rollbackFacts({ head: A }));
+test("HEAD == previous WITH the boot guard's own marker for B → rolled-back-by-peer", () => {
+  const marker = { v: 1, sha: B, previous: A, reason: "startup-crash", by: "boot-guard" };
+  const d = decide(trial(), rollbackFacts({ head: A, quarantine: marker }));
   assert.equal(d.action, "peer");
+});
+
+test("a manual reset to the previous commit is not a peer rollback (no marker)", () => {
+  // `scripts/crow-update.sh` and `git reset --keep <last good>` leave the tree in
+  // exactly this position with no crash at all; ringing "a co-hosted instance
+  // rolled it back" there would be a false alarm.
+  const d = decide(trial(), rollbackFacts({ head: A, quarantine: null }));
+  assert.equal(d.action, "discard");
+  assert.equal(d.reason, "not-a-peer");
+  // HEAD is the last healthy commit again, so there is nothing to arm.
+  assert.equal(d.rearm.action, "idle");
+  assert.equal(d.rearm.reason, "current");
+});
+
+test("the record for a sha the tree left behind is discarded, and the new HEAD is armed", () => {
+  // Returning after the discard would leave the commit the tree holds now
+  // unguarded: its first crash would go uncounted and the rollback would land on
+  // one start too late.
+  const d = decide(trial(), rollbackFacts({ head: C }));
+  assert.equal(d.action, "discard");
+  assert.equal(d.rearm.action, "arm", "the sha the tree holds now must still be guarded");
+});
+
+test("a marker for another sha or another writer is not peer evidence", () => {
+  const wrongSha = { v: 1, sha: C, reason: "startup-crash", by: "boot-guard" };
+  assert.equal(decide(trial(), rollbackFacts({ head: A, quarantine: wrongSha })).action, "discard");
+  const notACrash = { v: 1, sha: B, reason: "init-db-failed", by: "boot-guard" };
+  assert.equal(decide(trial(), rollbackFacts({ head: A, quarantine: notACrash })).action, "discard");
+  const notOurs = { v: 1, sha: B, reason: "startup-crash", by: "auto-update" };
+  assert.equal(decide(trial(), rollbackFacts({ head: A, quarantine: notOurs })).action, "discard");
 });
 
 test("a record for a sha that is not HEAD is discarded, never acted on", () => {
   const d = decide(trial(), rollbackFacts({ head: C }));
   assert.equal(d.action, "discard");
   assert.equal(d.reason, "tree-moved");
+});
+
+test("a permanent refusal does not re-arm the same sha", () => {
+  // db-ahead / init-db-changed / migration-not-rollback-safe cannot clear on
+  // their own; re-arming would boot the failing commit three more times per cycle.
+  for (const reason of ["db-ahead", "init-db-changed", "migration-not-rollback-safe"]) {
+    const state = {
+      ...freshState(), state: "refused", last_ok_sha: A, previous_sha: A, pending_sha: B,
+      failures: FAILURE_THRESHOLD, result: { code: "update-rollback-refused", from: B, to: A, reason, recorded: true },
+    };
+    const d = decide(state, rollbackFacts({ head: B }));
+    assert.equal(d.action, "idle", `${reason} must not be armed again`);
+    assert.equal(d.reason, "permanent-refusal");
+  }
+  // A refusal that can clear (a missing DB, an unproven previous) still re-arms.
+  const transient = {
+    ...freshState(), state: "refused", last_ok_sha: A, previous_sha: A, pending_sha: B,
+    failures: FAILURE_THRESHOLD, result: { code: "update-rollback-refused", from: B, to: A, reason: "db-unreadable", recorded: true },
+  };
+  assert.equal(decide(transient, rollbackFacts({ head: B })).action, "arm");
 });
 
 /* ------------------------------------------------------------ refusals */
@@ -214,7 +265,21 @@ test("a deadline that cannot cover the git write defers", () => {
   assert.equal(d.reason, "deadline");
 });
 
-/* --------------------------------------------------------- state reader */
+/* --------------------------------------------------------- dependencies */
+
+test("a deps-pending rollback stops retrying the install after three failures", () => {
+  const base = {
+    ...freshState(), state: "rolled-back-deps-pending", last_ok_sha: A, previous_sha: A, pending_sha: B,
+    result: { code: "update-rolled-back", from: B, to: A, failures: 3, reason: "startup-crash", recorded: false },
+  };
+  assert.equal(decide({ ...base, deps_attempts: 0 }, { head: A }).action, "deps-retry");
+  assert.equal(decide({ ...base, deps_attempts: DEPS_MAX_ATTEMPTS - 1 }, { head: A }).action, "deps-retry");
+  const exhausted = decide({ ...base, deps_attempts: DEPS_MAX_ATTEMPTS }, { head: A });
+  assert.equal(exhausted.action, "idle", "the fourth start must not run npm again");
+  assert.equal(exhausted.reason, "deps-blocked");
+});
+
+/* ------------------------------------------------------------- state reader */
 
 test("a malformed state file is ignored", () => {
   const dir = scratch();

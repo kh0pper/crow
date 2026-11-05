@@ -125,6 +125,16 @@ check_platform() {
   return 1
 }
 
+# Quote one argument for a systemd Exec= line: a path may contain spaces, and a
+# literal % is a systemd specifier (%% writes one).
+sd_quote() { # <arg>
+  local s="$1"
+  s="${s//%/%%}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
@@ -375,9 +385,11 @@ ExecStart=$(which node) servers/gateway/index.js
 # $CROW_HOME/boot-guard/, a copy OUTSIDE this checkout, because the failing
 # commit's own copy cannot be trusted to roll itself back. The '-' prefix keeps
 # a guard failure from blocking the start, and TimeoutStartSec covers the
-# guard's own npm install (up to 5 minutes) plus a rollback.
-ExecStartPre=-$(which node) $CROW_HOME/boot-guard/crow-boot-guard.mjs --app-root $CROW_APP
-ExecStopPost=-$(which node) $CROW_HOME/boot-guard/crow-boot-guard.mjs --app-root $CROW_APP --record-exit
+# guard's own npm install (up to 5 minutes) plus a rollback. Every path is
+# quoted (a home directory may contain a space) and a literal % is escaped as
+# %%, or systemd reads it as a specifier and the guard never starts.
+ExecStartPre=-$(sd_quote "$(which node)") $(sd_quote "$CROW_HOME/boot-guard/crow-boot-guard.mjs") --app-root $(sd_quote "$CROW_APP")
+ExecStopPost=-$(sd_quote "$(which node)") $(sd_quote "$CROW_HOME/boot-guard/crow-boot-guard.mjs") --app-root $(sd_quote "$CROW_APP") --record-exit
 TimeoutStartSec=15min
 Environment=CROW_BOOT_GUARD=1
 Restart=on-failure
@@ -385,9 +397,9 @@ RestartSec=5
 # 78 = refused instance paths (servers/shared/crow-home.js): a config error, not a crash
 RestartPreventExitStatus=78
 Environment=NODE_ENV=production
-Environment=CROW_HOME=$CROW_HOME
-Environment=CROW_DATA_DIR=$CROW_DATA
-Environment=CROW_DB_PATH=$CROW_DATA/crow.db
+Environment=$(sd_quote "CROW_HOME=$CROW_HOME")
+Environment=$(sd_quote "CROW_DATA_DIR=$CROW_DATA")
+Environment=$(sd_quote "CROW_DB_PATH=$CROW_DATA/crow.db")
 
 [Install]
 WantedBy=multi-user.target

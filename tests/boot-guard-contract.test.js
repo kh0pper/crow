@@ -7,7 +7,10 @@
  * from drifting — and what keeps the launcher's import list to builtins, because
  * importing tree code would execute the sha it is about to judge.
  */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, after } from "node:test";
@@ -15,8 +18,8 @@ import assert from "node:assert/strict";
 
 import {
   LOCK_STALE_MS, LOCK_WRITE_GRACE_MS, TRANSIENT_QUARANTINE_MS as LAUNCHER_TRANSIENT,
-  acquireLockFile, buildUpdateQuarantine, readUpdateQuarantineFile, readLockFile, releaseLockFile,
-  lockIsStale as launcherLockIsStale, saveState, loadState, freshState, writeSpoolAlert,
+  acquireLockFile, buildUpdateQuarantine, gitChildEnv, gitRun, readUpdateQuarantineFile, readLockFile,
+  releaseLockFile, lockIsStale as launcherLockIsStale, saveState, loadState, freshState, writeSpoolAlert,
   writeUpdateQuarantineFile,
 } from "../scripts/boot-guard/crow-boot-guard.mjs";
 import { _lockPrimitivesForTest } from "../servers/gateway/auto-update.js";
@@ -52,6 +55,29 @@ test("the launcher imports node: builtins only", () => {
   for (const spec of specifiers) {
     assert.match(spec, /^node:/, `the installed launcher cannot resolve "${spec}"`);
   }
+});
+
+/* ---------------------------------------------------------------- git env */
+
+test("every GIT_* variable is stripped from the git child environment", () => {
+  // A unit environment that carries GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would
+  // otherwise point EVERY check at another repository (or at nothing).
+  const root = scratch("bg-git-env-");
+  const work = join(root, "work");
+  mkdirSync(work, { recursive: true });
+  execFileSync("git", ["init", "-b", "main", work], { stdio: "pipe" });
+
+  const env = {
+    ...process.env,
+    GIT_DIR: join(root, "not-a-repo.git"),
+    GIT_WORK_TREE: join(root, "elsewhere"),
+    GIT_INDEX_FILE: join(root, "no-such-index"),
+  };
+  const r = gitRun(work, ["rev-parse", "--show-toplevel"], { env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(realpathSync(r.stdout), realpathSync(work), "GIT_DIR must not redirect the guard's own checks");
+  assert.equal(gitChildEnv(env).GIT_DIR, undefined);
+  assert.equal(gitChildEnv(env).GIT_TERMINAL_PROMPT, "0");
 });
 
 /* ---------------------------------------------------------------- lock */

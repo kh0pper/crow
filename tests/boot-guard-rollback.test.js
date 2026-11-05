@@ -76,16 +76,16 @@ function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9 
   git(work, "push", "origin", "main");
   const a = git(work, "rev-parse", "HEAD");
 
-  // B: an import-time crash, its OWN launcher (must never run), and a hook that
-  // would fire on the rollback's ref update (must never run).
+  // B: an import-time crash and its OWN launcher, which must never run. (The
+  // sentinel is kept because it is cheap, but the real coverage of "never run the
+  // bad sha's launcher" is tests/boot-guard-gateway-marks.test.js, which asserts
+  // that markStable installs the copy from `git show <bootSha>` — the worktree
+  // here always holds A while the trial runs, so this file would stay absent even
+  // if the installed copy were refreshed from the tree.)
   writeFileSync(join(work, "servers", "gateway", "index.js"), INDEX_B);
   writeFileSync(join(work, "servers", "gateway", "boom.js"), BOOM_B);
   writeFileSync(join(work, "scripts", "boot-guard", "crow-boot-guard.mjs"),
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(out, "bad-launcher-ran"))}, "x");\nprocess.exit(0);\n`);
-  mkdirSync(join(work, "scripts", "hooks"), { recursive: true });
-  writeFileSync(join(work, "scripts", "hooks", "reference-transaction"),
-    `#!/bin/sh\n: > ${JSON.stringify(join(out, "hook-ran"))}\n`);
-  chmodSync(join(work, "scripts", "hooks", "reference-transaction"), 0o755);
   if (changeInitDb) writeFileSync(join(work, "scripts", "init-db.js"), "// fixture init-db, rebuilt\nprocess.exit(0);\n");
   if (changePkg) writeFileSync(join(work, "package.json"), '{\n  "name": "fixture",\n  "version": "1.1.0"\n}\n');
   git(work, "add", "-A");
@@ -93,11 +93,23 @@ function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9 
   git(work, "push", "origin", "main");
   const b = git(work, "rev-parse", "HEAD");
 
-  // Live installs point core.hooksPath INTO the checkout. Set it only now, so
-  // the fixture's own commits/push above cannot fire the hook.
-  git(work, "config", "core.hooksPath", "scripts/hooks");
+  // A `reference-transaction` hook that would fire on the reset's ref update and
+  // must never run. It lives in an UNTRACKED directory outside the checkout, so
+  // it exists in BOTH states: a tracked hooks dir would be deleted by the reset
+  // before the ref update, and the sentinel would prove nothing (git reset
+  // rewrites the index and the worktree before the refs).
+  const hooksDir = join(root, "hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  writeFileSync(join(hooksDir, "reference-transaction"),
+    `#!/bin/sh\n: > ${JSON.stringify(join(out, "hook-ran"))}\n`);
+  chmodSync(join(hooksDir, "reference-transaction"), 0o755);
+
+  // Live installs point core.hooksPath INTO the checkout; this fixture points it
+  // at the untracked dir above. Set it only now, AFTER the fixture's own
+  // reset/update-ref, so the setup cannot fire the hook itself.
   gitNoHooks(work, "reset", "--hard", a); // the clone is genuinely behind again
   git(work, "update-ref", "refs/remotes/origin/main", b);
+  git(work, "config", "core.hooksPath", hooksDir);
 
   const dbPath = join(dataDir, "crow.db");
   const db = new DatabaseSync(dbPath);
@@ -232,6 +244,16 @@ test("a commit that throws at import is rolled back on start 4 by the installed 
   assert.ok(existsSync(join(f.out, "booted-A")), "the previous commit must actually boot after the rollback");
 });
 
+test("the hook sentinel CAN fire: the same reset without core.hooksPath=/dev/null writes it", () => {
+  // The control for the assertion above. Without this, "hook-ran is absent"
+  // would pass even if the hook were unreachable for an unrelated reason.
+  const f = makeFixture();
+  fastForwardTo(f, f.b);
+  execFileSync("git", ["reset", "--keep", f.a], { cwd: f.work, stdio: "pipe" });
+  assert.ok(existsSync(join(f.out, "hook-ran")), "the sentinel must fire when hooks are enabled");
+  assert.equal(f.git("rev-parse", "HEAD"), f.a);
+});
+
 test("a commit that throws at import never boots on the bad sha before the rollback", () => {
   const f = makeFixture();
   installAndStabilize(f);
@@ -243,6 +265,26 @@ test("a commit that throws at import never boots on the bad sha before the rollb
 });
 
 /* --------------------------------------------------------------- peers */
+
+test("a manual reset to the previous commit is not a peer rollback", () => {
+  // `git reset --keep <last good>` (and scripts/crow-update.sh) leaves the tree
+  // in exactly the state a peer rollback does, but with no crash and no marker:
+  // no alert, no result, and the sha the tree holds stays guarded.
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  runLauncher(f); // arms the trial on B
+  assert.equal(readState(f).state, "pending");
+
+  f.git("reset", "--keep", f.a);
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  const state = readState(f);
+  assert.equal(state.state, "ok", "a manual reset is not a rollback by a co-hosted instance");
+  assert.equal(state.result, null, "nothing to report");
+  assert.equal(spoolCodes(f.crowHome).includes("update-rolled-back"), false, "no rollback alert");
+  assert.equal(f.git("rev-parse", "HEAD"), f.a);
+});
 
 test("two CROW_HOMEs on one checkout perform exactly one reset", () => {
   const f = makeFixture();
@@ -440,11 +482,13 @@ test("a deadline that cannot cover the git write defers before touching the tree
 
 /* ---------------------------------------------------------- dependencies */
 
-test("an npm timeout leaves rolled-back-deps-pending and the next start retries the install", () => {
-  const f = makeFixture({ changePkg: true });
-  installAndStabilize(f);
-  fastForwardTo(f, f.b);
-
+/**
+ * Roll B back with a changed package.json, where npm never finishes: the state
+ * lands on `rolled-back-deps-pending` with A already checked out.
+ *
+ * @returns {{shimDir: string, npmPath: string, env: object}}
+ */
+function rollbackWithSlowNpm(f) {
   const shimDir = join(f.root, "shim");
   mkdirSync(shimDir, { recursive: true });
   const npmPath = join(shimDir, "npm");
@@ -455,8 +499,17 @@ test("an npm timeout leaves rolled-back-deps-pending and the next start retries 
   const r = cycle(f, { rounds: 6, exit: CRASH, launcherEnv: env });
   assert.equal(f.git("rev-parse", "HEAD"), f.a, "the reset happens before the install");
   assert.equal(r.state.state, "rolled-back-deps-pending");
-  assert.equal(r.state.result.code, "update-rolled-back");
-  assert.equal(r.state.deps_changed, true);
+  return { shimDir, npmPath, env };
+}
+
+test("an npm timeout leaves rolled-back-deps-pending and the next start retries the install", () => {
+  const f = makeFixture({ changePkg: true });
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  const { npmPath, env } = rollbackWithSlowNpm(f);
+  assert.equal(readState(f).state, "rolled-back-deps-pending");
+  assert.equal(readState(f).result.code, "update-rolled-back");
+  assert.equal(readState(f).deps_changed, true);
 
   // The next start retries the install FIRST — a fast npm now, which records that
   // it ran, before anything else in the run.
@@ -471,7 +524,80 @@ test("an npm timeout leaves rolled-back-deps-pending and the next start retries 
   assert.ok(spoolCodes(f.crowHome).includes("update-rolled-back"));
 });
 
+test("a held checkout lock defers the dependency retry", () => {
+  // A peer's update tick runs npm under the SAME lock; two installs at once
+  // rewrite the shared node_modules and break both instances.
+  const f = makeFixture({ changePkg: true });
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  const { npmPath, env } = rollbackWithSlowNpm(f);
+
+  const marker = join(f.out, "npm-ran");
+  writeFileSync(npmPath, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 0\n`);
+  chmodSync(npmPath, 0o755);
+
+  const lockPath = join(f.gitDir, "crow-auto-update.lock");
+  writeFileSync(lockPath, `${process.pid}\n${new Date().toISOString()}\n`);
+  try {
+    const run = runLauncher(f, { ...env, CROW_BOOT_GUARD_LOCK_WAIT_MS: "50" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /checkout lock/);
+    assert.equal(existsSync(marker), false, "npm must not run while another process holds the checkout lock");
+    assert.equal(readState(f).state, "rolled-back-deps-pending");
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+});
+
+test("three failed dependency retries raise ONE blocked alert and stop retrying", () => {
+  const f = makeFixture({ changePkg: true });
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  const { npmPath, env } = rollbackWithSlowNpm(f);
+
+  // Every retry fails, and records that it ran.
+  const counter = join(f.out, "npm-attempts");
+  writeFileSync(npmPath, `#!/bin/sh\necho x >> ${JSON.stringify(counter)}\nexit 1\n`);
+  chmodSync(npmPath, 0o755);
+  const attempts = () => (existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean).length : 0);
+
+  for (let i = 0; i < 3; i += 1) {
+    const run = runLauncher(f, env);
+    assert.equal(run.status, 0, run.stderr);
+  }
+  assert.equal(attempts(), 3, "every start before the limit must retry");
+  const blocked = spoolCodes(f.crowHome).filter((c) => c === "update-rollback-blocked");
+  assert.equal(blocked.length, 1, "the give-up alert is spooled exactly once");
+  assert.equal(readState(f).deps_attempts, 3);
+
+  // And the fourth start does not pay for npm again.
+  const after = runLauncher(f, env);
+  assert.equal(after.status, 0, after.stderr);
+  assert.equal(attempts(), 3, "the installer must not run on every start forever");
+  assert.equal(spoolCodes(f.crowHome).filter((c) => c === "update-rollback-blocked").length, 1);
+});
+
 /* ---------------------------------------------------------------- recorder */
+
+test("the launcher stamps its finish at the END of the run and keeps the previous start", () => {
+  // The fix-it card checks launcher_finished_at (a rollback can spend minutes in
+  // npm after launcher_ran_at) and compares the recorder's stamp with the
+  // PREVIOUS start, which the launcher has to preserve before overwriting it.
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+
+  runLauncher(f);
+  const first = readState(f);
+  assert.ok(Number.isFinite(Date.parse(first.launcher_ran_at)), "the start stamp must exist");
+  assert.ok(Number.isFinite(Date.parse(first.launcher_finished_at)), "the finish stamp must exist");
+  assert.ok(Date.parse(first.launcher_finished_at) >= Date.parse(first.launcher_ran_at));
+
+  runLauncher(f);
+  const second = readState(f);
+  assert.equal(second.prev_launcher_ran_at, first.launcher_ran_at,
+    "the previous start's stamp must survive the new one");
+});
 
 test("the ExecStopPost record is written only for the attempt it belongs to (R3)", () => {
   const f = makeFixture();

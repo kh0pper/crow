@@ -51,3 +51,15 @@ test("both languages agree on the drop-in name and the launcher path", () => {
     assert.ok(es.includes(token), `es docs lost ${token}`);
   }
 });
+
+test("both languages state the threat model and the permanent refusals", () => {
+  // The guard protects against accidents, not against a commit that is out to get
+  // the host; and a refusal that cannot clear on its own is not re-armed. Both
+  // are operator-facing facts, so neither may exist in one language only.
+  const en = read("docs/guide/auto-update.md");
+  const es = read("docs/es/guide/auto-update.md");
+  assert.match(en, /deliberately malicious commit/);
+  assert.match(es, /deliberadamente[\s\S]{0,40}malicioso/);
+  assert.match(en, /does \*\*not\*\* re-arm the same commit/);
+  assert.match(es, /\*\*no\*\* vuelve a armar el mismo commit/);
+});
