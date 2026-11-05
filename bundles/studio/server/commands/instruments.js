@@ -244,11 +244,6 @@ function trackRef(id) {
   return objectRef("track", id);
 }
 
-/** @returns {string} the ref of one library entry. */
-function libraryRef(id) {
-  return objectRef("library", id);
-}
-
 /** Refuse with an "invalid" message. */
 function refuseInvalid(message) {
   throw new StudioError("invalid", message);
@@ -315,12 +310,16 @@ defineCommand({
     return `Set track "${labelOfTrack(snap, args.track_id)}" to the font "${labelOfFont(snap, args.font_id)}"`;
   },
   /**
-   * The font's own entry is touched too: a lock or focus check on either end
-   * sees the write, and removing the font from the library afterwards is the
-   * one edit that would leave this track silent.
+   * Only the track: the write is one field of its own device, and the font's
+   * entry stays exactly where it is. So neither a lock on the library entry nor
+   * a lock on ANOTHER track that happens to play the same font says anything
+   * about this edit — a font is shared, a track's instrument is its own.
+   * Removing the font from the library is the edit that would leave this track
+   * silent, and `library.remove` names every track that plays it (see `touches`
+   * there).
    */
   touches(args) {
-    return [trackRef(args.track_id), libraryRef(args.font_id)];
+    return [trackRef(args.track_id)];
   },
   apply(doc, args) {
     const track = requireTrack(doc, args.track_id);

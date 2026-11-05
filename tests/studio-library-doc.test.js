@@ -298,6 +298,56 @@ test("33rd font refused", (t) => {
   assert.equal(Object.values(snapshot(doc).library).length, LIMITS.libraryEntriesPerSong);
 });
 
+test("a malformed soundfont device is reported", (t) => {
+  const doc = scratchDoc(t);
+  addEntry(doc, fontEntry("font-a"));
+  addSoundfontTrack(doc);
+  assert.deepEqual(checkInvariants(doc), []);
+
+  // A device written by hand, the way a bad migration or an edited history entry
+  // could leave one. A snapshot reads every field of it as a usable value —
+  // `font_id` as nothing, the bank as 0 — which is exactly why the check reads
+  // the document: a stored value that is not what the document promises is
+  // reported rather than tidied into one that passes.
+  const track = doc.getMap("song").get("tracks").get(0);
+  doc.transact(() => {
+    track.set("device", { engine: "soundfont", font_id: 7, bank: "grand", program: 200 });
+  });
+  const reasons = checkInvariants(doc);
+  assert.equal(reasons.length, 3, `unexpected reasons: ${reasons.join(" | ")}`);
+  assert.ok(
+    reasons.some((reason) => /would name the font 7; a font id is a string, or nothing at all/.test(reason)),
+    `the malformed font id was not reported: ${reasons.join(" | ")}`,
+  );
+  assert.ok(
+    reasons.some((reason) => /would play bank "grand"; a soundfont track plays banks 0 to 127, or 128 for the drums/.test(reason)),
+    `the malformed bank was not reported: ${reasons.join(" | ")}`,
+  );
+  assert.ok(
+    reasons.some((reason) => /would play program 200; a soundfont track plays programs 0 to 127/.test(reason)),
+    `the program out of range was not reported: ${reasons.join(" | ")}`,
+  );
+
+  // The snapshot still hands a reader a usable device, which is the point of the
+  // normalising: only an integer survives as itself.
+  assert.deepEqual(snapshot(doc).tracks[0].device, {
+    engine: SOUNDFONT_DEVICE.engine,
+    font_id: null,
+    bank: 0,
+    program: 200,
+  });
+
+  // A library entry whose kind is not one of the three is reported as it is
+  // stored, instead of being read as a font and counted against the font cap.
+  doc.transact(() => {
+    doc.getMap("song").get("library").set("odd", objectMap({ ...fontEntry("odd"), kind: "wav" }));
+  });
+  const kinds = checkInvariants(doc).filter((reason) => /would have the kind "wav"/.test(reason));
+  assert.equal(kinds.length, 1, "the malformed kind was not reported");
+  assert.match(kinds[0], /The library entry "Font odd" would have the kind "wav"/);
+  assert.match(kinds[0], /a library entry is a font, a capture or a cabinet/);
+});
+
 test("an old song opens with an empty library", (t) => {
   // A song written before the library existed: the containers 1a to 1c created
   // and nothing else. It reads exactly like a song with an empty library.

@@ -49,8 +49,11 @@
  * The same rule carries the instrument library (plan 1d, "Who can change a
  * sound"): an agent may choose the program a soundfont track plays, but the
  * font it plays, and the library entry that holds it, are the operator's — no
- * agent step may point a track at another font, take a font out of the library
- * while anything plays it, or take a `library.add` back.
+ * agent step may point a track at another font, remove a track that plays one,
+ * take a font out of the library while anything plays it, or make a library
+ * entry appear or disappear along the history (taking the operator's
+ * `library.add` back removes a file from the song, and taking their
+ * `library.remove` back puts one into it).
  *
  * A fourth rule guards the mapping table (see `changesLiveMapping`): an agent
  * may propose MIDI mappings — `midi.map` run by an agent always creates a
@@ -210,19 +213,14 @@ const SOUNDS_NEED_A_YES = "Changing recorded or imported sounds needs a yes from
 const FONT_NEEDS_A_YES = "Only the operator changes the instrument a track plays.";
 
 /**
- * What an agent is told when a step would take a file out of the song's library.
+ * What an agent is told when a step would take a file out of the song's library
+ * or put one into it.
  *
  * A library file is a download or an upload — a sound nothing in the song can
- * make again — so removing one needs the operator's yes, and so does taking
- * back the step that added one.
+ * make again — so neither end of its life is an agent's to decide: removing one
+ * needs the operator's yes, and so does taking back the step that added one.
  */
-const LIBRARY_NEEDS_A_YES = "Only the operator removes an instrument from the library.";
-
-/**
- * The people-only command over an instrument: a `library.add` step is the
- * operator's to take back, in either direction, like `sample.add`.
- */
-const LIBRARY_ADD_COMMAND = "library.add";
+const LIBRARY_NEEDS_A_YES = "Only the operator adds or removes an instrument in the library.";
 
 /**
  * The people-only command over a sound: a `sample.add` step is the operator's
@@ -237,6 +235,23 @@ const SAMPLE_ADD_COMMAND = "sample.add";
  * right, and an amp insert carries the capture and the cabinet it plays.
  */
 const SOUND_BEARING_KINDS = Object.freeze(["sample", "slice", "pad", "bank", "track", "library", "insert"]);
+
+/**
+ * The commands that write only a track's own non-sound fields — its name, its
+ * mix and its lock — and so cannot lose anything even though they name a track.
+ *
+ * They are the one case the sound guard skips its preview for: the preview
+ * clones the whole song, and an agent renaming or mixing a track in a song that
+ * holds a library would pay for that clone and learn nothing. Everything else
+ * still previews, so a command written later is judged on its writes until it is
+ * proven to belong here.
+ */
+const SOUNDLESS_TRACK_COMMANDS = Object.freeze([
+  "track.rename",
+  "track.set_mix",
+  "track.lock",
+  "track.unlock",
+]);
 
 /**
  * The ref kind a step reaches a MIDI mapping through. A mapping carries no
@@ -558,9 +573,27 @@ function bankHoldsSound(snap, trackId, bankId) {
   );
 }
 
-/** @returns {boolean} whether any pad of one track plays a sound. */
+/**
+ * Whether one track of a snapshot plays a sound: the sounds on a kit's pads, or
+ * the font a soundfont track names.
+ *
+ * A soundfont track holds the instrument its device names, so removing the track
+ * takes that font out of the song exactly as removing a sampler track takes the
+ * sounds on its pads — and it closes the two-step way round the font rule
+ * (remove the track, then point a new one at another font). The font id is asked
+ * for its presence, not its spelling: anything but nothing is an instrument the
+ * track plays, so a device that names something malformed is held rather than
+ * read as a silent track.
+ * @param {object} snap - a snapshot
+ * @param {string} trackId
+ * @returns {boolean}
+ */
 function trackHoldsSound(snap, trackId) {
-  return Object.values(snap?.pads ?? {}).some((pad) => pad?.track_id === trackId && playsSound(pad));
+  const pads = snap?.pads ?? {};
+  if (Object.values(pads).some((pad) => pad?.track_id === trackId && playsSound(pad))) return true;
+  if (!isSoundfontIn(snap, trackId)) return false;
+  const fontId = trackIn(snap, trackId)?.device?.font_id;
+  return fontId !== null && fontId !== undefined;
 }
 
 /** @returns {boolean} whether any pad plays one slice of one sample. */
@@ -694,8 +727,9 @@ function padWriteLosesSound(snap, key, field, value) {
 
 /**
  * Whether one write to a track loses a sound: a kit's pads lose theirs when the
- * track goes or its device (the kit's engine) is replaced, and a soundfont
- * track loses its instrument when the font it names moves to another value.
+ * track goes or its device (the kit's engine) is replaced, and a soundfont track
+ * loses its instrument when the track goes or the font it names moves to another
+ * value.
  *
  * A soundfont track's preset is NOT part of this question: bank and program are
  * settings of the instrument, and changing one is an ordinary agent edit (plan
@@ -742,11 +776,15 @@ function trackWriteLosesSound(snap, trackId, field, value) {
  * Judged on the values a step writes, never on the shape of its keys: a sampler
  * sound is lost through a whole-object delete, through a `sample_id` or
  * `slice_id` that moves off the value it holds, and through the bank, the track
- * or the device that carries it; an instrument is lost through the font a track
- * names, and through a library entry that something still plays. A write that
- * fills an empty pad, renames a sample, sets a program, or changes any other
- * field of a pad or a track is not a loss, and neither is putting back something
- * that was taken away.
+ * or the device that carries it; an instrument is lost through the track that
+ * plays it going, through the font that track names moving to another value, and
+ * through a library entry that something still plays — and a fresh
+ * `library.remove` of an entry nothing plays is an ordinary agent edit, which
+ * that command decides itself. (A step back along the history is stricter, and
+ * asks the question the command's name cannot: see `changesLibraryEntries`.) A
+ * write that fills an empty pad, renames a sample, sets a program, or changes
+ * any other field of a pad or a track is not a loss, and neither is putting back
+ * something that was taken away.
  *
  * Each kind of loss has its own sentence, because each asks the operator a
  * different question (plan 1d, "Who can change a sound").
@@ -763,6 +801,8 @@ function lostSound(changes, snap) {
     if (target.kind === "library") {
       // An entry goes when the whole object is deleted, and it is only a loss
       // while something plays it: an unused file may be tidied away by anyone.
+      // (Every step back along the history is refused library writes whole — see
+      // `changesLibraryEntries`.)
       if (split.field !== "*" || value !== null) continue;
       if (libraryUses(snap, target.id)) return LIBRARY_NEEDS_A_YES;
       continue;
@@ -794,6 +834,43 @@ function lostSound(changes, snap) {
     }
   }
   return null;
+}
+
+/**
+ * Whether a change set would make a library entry appear or take one away.
+ *
+ * Judged on the whole-object writes themselves, never on the name of the command
+ * a step moves: a step back along the history may be any command at all, and a
+ * whole-object write with an object where the song holds no entry makes one
+ * (undoing the operator's `library.remove`), while a whole-object write with
+ * `null` takes one away (undoing their `library.add`). Only one of those two
+ * commands is `library.add`, which is why the question cannot be asked of the
+ * command.
+ *
+ * The plan's "upload id" rule has nothing to read here and is gone: by the time
+ * an entry is in the document its `upload_id` is one field among many, and a
+ * step that writes an entry whole either makes it or removes it — there is no
+ * third write that only re-points a library file at an upload.
+ *
+ * This is the history rule and nothing else: a fresh `library.remove` of an
+ * entry nothing plays stays an agent's own edit (that command refuses while
+ * something plays the entry), while no step back onto the library is.
+ * @param {Map<string, any>|Object<string, any>|null|undefined} changes - the
+ *   writes the step makes, keyed `"<ref>|<field>"`
+ * @param {object} snap - the song as it stands before those writes
+ * @returns {boolean}
+ */
+function changesLibraryEntries(changes, snap) {
+  for (const [key, value] of changeEntries(changes)) {
+    const split = splitRefField(key);
+    const target = split ? parseObjectRef(split.ref) : null;
+    if (target?.kind !== "library" || split.field !== "*") continue;
+    // `Object.hasOwn`, because a snapshot's library is an ordinary object and an
+    // entry id like "__proto__" is one key of it like any other.
+    const held = Object.hasOwn(snap?.library ?? {}, target.id);
+    if (value === null ? held : !held) return true;
+  }
+  return false;
 }
 
 /**
@@ -1419,11 +1496,12 @@ export function createHub({
    * upload, so both get the take-loss rule's treatment: a step whose writes
    * delete a sample, drop or repoint a pad that plays one, remove the bank or
    * the sampler track the pad belongs to, replace a sampler track's device,
-   * delete a library entry something still plays, or move a soundfont track to
-   * another font is refused for anyone but the operator (see `lostSound`). A
-   * pad that plays nothing may be filled in, a sample may be renamed, a
-   * soundfont track's program may be set and an unused library entry may be
-   * tidied away — those write values that are still there afterwards.
+   * remove a soundfont track that plays a font, move a soundfont track to another
+   * font, or delete a library entry something still plays is refused for anyone
+   * but the operator (see `lostSound`). A pad that plays nothing may be filled
+   * in, a sample may be renamed, a soundfont track's program may be set and an
+   * unused library entry may be tidied away — those write values that are still
+   * there afterwards.
    * @param {{changes: Map<string, any>|Object<string, any>, snap: object,
    *          author: object}} check - the writes the step makes, and the song
    *   as it stands before them (a repoint is judged against it)
@@ -1440,10 +1518,12 @@ export function createHub({
    *
    * False when nobody can lose anything — a person is calling, or the song holds
    * no sound at all: no sample (a pad with a sound on it always comes from one),
-   * no library entry and no insert — and when the command names none of the
-   * objects a sound hangs off. When it is true the step is previewed on a clone
-   * and `soundLossRefusal` decides on the writes themselves.
-   * @param {{touched: string[], snap: object}} prepared
+   * no library entry and no insert — when the command names none of the objects
+   * a sound hangs off, and when it names only tracks and is one of the handful of
+   * commands that write nothing but a track's name, its mix or its lock (see
+   * `SOUNDLESS_TRACK_COMMANDS`). Otherwise the step is previewed on a clone and
+   * `soundLossRefusal` decides on the writes themselves.
+   * @param {{command: Readonly<object>, touched: string[], snap: object}} prepared
    * @param {object} author
    * @returns {boolean}
    */
@@ -1454,7 +1534,15 @@ export function createHub({
       && Object.keys(snap.library ?? {}).length === 0
       && Object.keys(snap.inserts ?? {}).length === 0;
     if (empty) return false;
-    return prepared.touched.some((ref) => SOUND_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
+    const bearing = prepared.touched.filter((ref) =>
+      SOUND_BEARING_KINDS.includes(parseObjectRef(ref)?.kind));
+    if (bearing.length === 0) return false;
+    // A command that names only tracks and writes none of their sound fields has
+    // nothing to lose, so it skips the clone `previewChanges` makes; everything
+    // else, `track.set_device` and `track.set_font` included, still previews.
+    const tracksOnly = bearing.every((ref) => parseObjectRef(ref)?.kind === "track");
+    if (tracksOnly && SOUNDLESS_TRACK_COMMANDS.includes(prepared.command.id)) return false;
+    return true;
   }
 
   /**
@@ -1937,10 +2025,15 @@ export function createHub({
       // directions — an agent neither drops one nor puts one into the song.
       if (original === SAMPLE_ADD_COMMAND) return refuse("human_only", SOUNDS_NEED_A_YES);
       // A library file is a download or an upload, and the same answer holds in
-      // both directions: neither dropping one nor putting one into the song is
-      // an agent's step (plan 1d, "Who can change a sound"). The entry's own id
-      // is what the step names, so a plan that writes it is the step this reads.
-      if (original === LIBRARY_ADD_COMMAND) return refuse("human_only", LIBRARY_NEEDS_A_YES);
+      // both directions: neither putting one into the song nor taking one out is
+      // an agent's step (plan 1d, "Who can change a sound"). Decided on the
+      // writes the step would put back and not on the command it came from: the
+      // undo of the operator's `library.remove` makes an entry appear just as the
+      // undo of their `library.add` takes one away, and only the second of those
+      // names `library.add` (see `changesLibraryEntries`).
+      if (changesLibraryEntries(target.inverse?.before, snap)) {
+        return refuse("human_only", LIBRARY_NEEDS_A_YES);
+      }
     }
 
     if (planError) return toRefusal(planError);

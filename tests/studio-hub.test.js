@@ -2487,7 +2487,7 @@ test("a human can drop a pad's sample and undo it", async (t) => {
 const FONT_NEEDS_A_YES = "Only the operator changes the instrument a track plays.";
 
 /** What the agent's library guard answers with, word for word. */
-const LIBRARY_NEEDS_A_YES = "Only the operator removes an instrument from the library.";
+const LIBRARY_NEEDS_A_YES = "Only the operator adds or removes an instrument in the library.";
 
 /** A font's sha256, as the gateway's library route measures it. */
 const FONT_HASH = "a1b2c3d4".repeat(8);
@@ -2667,6 +2667,240 @@ test("an agent may change a program but not remove or replace a font", async (t)
   assert.equal(device.bank, 128);
   assert.equal(device.program, 0);
   assert.equal(device.font_id, "font-b");
+});
+
+test("an agent cannot remove a track that plays a font", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id, tracked } = await seedFontSong(hub);
+
+  // A track that plays a font holds an instrument the way a sampler track holds
+  // the sounds on its pads: removing the track would take the font out of the
+  // song, so the step is the operator's.
+  const removed = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-font-track",
+      command: "track.remove",
+      args: { track_id: "keys" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(removed.error, FONT_NEEDS_A_YES);
+  const kept = await hub.openSong(song_id);
+  assert.equal(kept.snapshot.tracks.length, 1, "the refused removal wrote nothing");
+  assert.equal(kept.snapshot.tracks[0].device.font_id, "font-a");
+  assert.ok(kept.snapshot.library["font-a"], "the font it plays is still in the library");
+
+  // The history door onto the same loss is closed: undoing the operator's
+  // `track.add` would take the track and its instrument away in one step.
+  const undone = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-font-track", entry_id: tracked.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undone.error, FONT_NEEDS_A_YES);
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].device.font_id, "font-a");
+});
+
+test("an agent cannot replace a font by removing and re-adding the track", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id } = await seedFontSong(hub);
+
+  // The two-step way round the font rule would be: take the track away, then put
+  // a track of the same id back on another font. The first step is refused on
+  // what it would lose...
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-then-readd-1",
+      command: "track.remove",
+      args: { track_id: "keys" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+
+  // ... and the second cannot land on an id the song still holds, so the font
+  // the track plays is the one it played all along.
+  const readded = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-then-readd-2",
+      command: "track.add",
+      args: { id: "keys", name: "Keys", kind: "soundfont", font_id: "font-b" },
+      author: AGENT,
+    }),
+    "invalid",
+  );
+  assert.match(readded.error, /already exists/);
+  const snap = (await hub.openSong(song_id)).snapshot;
+  assert.equal(snap.tracks.length, 1);
+  assert.equal(snap.tracks[0].device.font_id, "font-a");
+});
+
+test("an agent cannot redo the operator's removal of a font track", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id } = await seedFontSong(hub);
+
+  // The operator takes the track away, which is theirs to do.
+  const removed = await applies(
+    hub,
+    song_id,
+    "operator-remove-font-track",
+    "track.remove",
+    { track_id: "keys" },
+    HUMAN,
+  );
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks.length, 0);
+
+  // An agent may put it back: a restore takes nothing away.
+  const restored = await hub.undo({
+    song_id,
+    cmd_id: "agent-undo-font-track-removal",
+    entry_id: removed.entry.id,
+    author: AGENT,
+  });
+  assert.equal(restored.ok, true, `the agent's undo of the removal was refused: ${restored.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.tracks[0].device.font_id, "font-a");
+
+  // Taking that undo back is removing the font track again, so it is not an
+  // agent's step — decided on the writes, not on the command it moves.
+  const redone = refuses(
+    await hub.redo({ song_id, cmd_id: "agent-redo-font-track-removal", entry_id: restored.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(redone.error, FONT_NEEDS_A_YES);
+  const after = await hub.openSong(song_id);
+  assert.equal(after.snapshot.tracks.length, 1, "the refused redo wrote nothing");
+  assert.equal(after.snapshot.tracks[0].device.font_id, "font-a");
+});
+
+test("an agent cannot undo the operator's library removal", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id } = await seedFontSong(hub);
+
+  // The unused font is the operator's to tidy away...
+  const dropped = await applies(
+    hub,
+    song_id,
+    "operator-remove-unused-font",
+    "library.remove",
+    { library_id: "font-b" },
+    HUMAN,
+  );
+  assert.equal((await hub.openSong(song_id)).snapshot.library["font-b"], undefined);
+
+  // ... and the step that puts it back is the same decision the other way round:
+  // a library file neither arrives nor leaves on an agent's say-so, whatever
+  // command the step moves (this one moves `library.remove`, not `library.add`).
+  const undone = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-unused-font", entry_id: dropped.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undone.error, LIBRARY_NEEDS_A_YES);
+  const kept = await hub.openSong(song_id);
+  assert.equal(kept.snapshot.library["font-b"], undefined, "the refused undo put nothing back");
+  assert.ok(kept.snapshot.library["font-a"], "the font the track plays is untouched");
+
+  // The operator's own undo still works.
+  const back = await hub.undo({
+    song_id,
+    cmd_id: "operator-undo-unused-font",
+    entry_id: dropped.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(back.ok, true, `the operator's undo was refused: ${back.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.library["font-b"].sha256, FONT_HASH);
+});
+
+test("set_font is not refused by a lock on another track using the same font", async (t) => {
+  const { hub } = await setup(t);
+  const { song_id } = await seedFontSong(hub);
+  await applies(hub, song_id, "seed-pads", "track.add", {
+    id: "pads",
+    name: "Pads",
+    kind: "soundfont",
+    font_id: "font-a",
+  });
+  await applies(hub, song_id, "operator-lock-pads", "track.lock", { track_id: "pads" }, HUMAN);
+
+  // Both tracks play font-a, but a font change is one field of THIS track's
+  // device: a font is shared and a track's instrument is its own, so the lock on
+  // the other track has nothing to say about this write — the font's entry is not
+  // touched by it.
+  await applies(
+    hub,
+    song_id,
+    "agent-keep-font",
+    "track.set_font",
+    { track_id: "keys", font_id: "font-a" },
+    AGENT,
+  );
+
+  // The other font is still the operator's choice, and the answer is the font
+  // rule's — not the lock the second track carries.
+  const moved = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-set-font-on-unlocked",
+      command: "track.set_font",
+      args: { track_id: "keys", font_id: "font-b" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(moved.error, FONT_NEEDS_A_YES);
+
+  // The operator may choose it, locked neighbour and all.
+  await applies(
+    hub,
+    song_id,
+    "operator-set-font-on-unlocked",
+    "track.set_font",
+    { track_id: "keys", font_id: "font-b" },
+    HUMAN,
+  );
+  const snap = (await hub.openSong(song_id)).snapshot;
+  assert.equal(snap.tracks.find((track) => track.id === "keys").device.font_id, "font-b");
+  assert.equal(snap.tracks.find((track) => track.id === "pads").device.font_id, "font-a");
+
+  // The locked track's own instrument is still the operator's...
+  refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-set-font-on-locked",
+      command: "track.set_font",
+      args: { track_id: "pads", font_id: "font-b" },
+      author: AGENT,
+    }),
+    "locked",
+  );
+
+  // ... and the font it plays is still in use, because `library.remove` keeps
+  // the library-to-tracks mapping both the lock check and its own rule need: an
+  // agent meets the lock, and the operator meets the "in use" refusal.
+  const lockedRemove = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-pads-font",
+      command: "library.remove",
+      args: { library_id: "font-a" },
+      author: AGENT,
+    }),
+    "locked",
+  );
+  assert.match(lockedRemove.error, /Track "Pads" is locked by the operator/);
+  const inUse = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "operator-remove-pads-font",
+      command: "library.remove",
+      args: { library_id: "font-a" },
+      author: HUMAN,
+    }),
+    "conflict",
+  );
+  assert.match(inUse.error, /in use by track "Pads"/);
 });
 
 test("undo of library.add is people-only", async (t) => {

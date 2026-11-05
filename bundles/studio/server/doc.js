@@ -1667,10 +1667,14 @@ function snapshotArrangement(doc) {
  *     ones answer the same message on the same controller (one message has one
  *     live action) — the rules the midi commands enforce on their own edits;
  *   - the song's library stays inside its caps (`LIMITS.libraryEntriesPerSong`
- *     entries, `LIMITS.fontsPerSong` fonts), and every soundfont track's
- *     `font_id` names a font of that library with a bank and a program inside
- *     the ranges a font has — the rules `library.*` and `track.set_font` /
- *     `track.set_program` enforce on their own edits;
+ *     entries, `LIMITS.fontsPerSong` fonts), every entry says what kind of file
+ *     it is, and every soundfont track's `font_id` names a font of that library
+ *     with a bank and a program inside the ranges a font has — the rules
+ *     `library.*` and `track.set_font` / `track.set_program` enforce on their
+ *     own edits. The library and the soundfont devices are read from the
+ *     document, not from the snapshot: see `libraryReasons` and
+ *     `soundfontDeviceReasons` for why a malformed stored value is reported
+ *     rather than tidied into a valid one;
  *   - the arrangement holds at most `LIMITS.placements` placements,
  *     `LIMITS.markers` markers and `LIMITS.sections` sections, ends at bar
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
@@ -1750,7 +1754,8 @@ export function checkInvariants(doc) {
   reasons.push(...arrangementReasons(song));
   reasons.push(...samplerReasons(song));
   reasons.push(...midiReasons(song));
-  reasons.push(...libraryReasons(song));
+  reasons.push(...libraryReasons(song, doc));
+  reasons.push(...soundfontDeviceReasons(doc));
 
   return reasons;
 }
@@ -2180,16 +2185,22 @@ function midiReasons(song) {
  * What is wrong with a song's instrument library, in plain English.
  *
  * The rules one library edit can look after on its own, checked over the whole
- * song at once: the library stays inside its caps, and every soundfont track
- * names a font the song still holds with a preset inside the ranges a font has
- * (bank 0-127 melodic, 128 the GM drums; program 0-127).
- * The history dry-runs an undo's plan on a clone and calls this, so a plan that
+ * song at once: the library stays inside its caps, every entry says what kind of
+ * file it is, and every soundfont track names a font the song still holds. The
+ * history dry-runs an undo's plan on a clone and calls this, so a plan that
  * would remove a font a track still plays is refused whole — the same rule
  * `library.remove` and the agent's sound guard keep on their own edits.
+ *
+ * The entries are counted as the DOCUMENT stores them, not as a snapshot tidies
+ * them up: `normalizeLibraryEntry` reads an unknown kind as a font, so a song
+ * holding one entry of kind `"wav"` would both pass unnoticed and be counted
+ * against the font cap. A kind that is not a font, a capture or a cabinet is
+ * reported here and is not one of the three.
  * @param {object} song - a snapshot
+ * @param {Y.Doc} doc - the live document, read as it stores what it stores
  * @returns {string[]}
  */
-function libraryReasons(song) {
+function libraryReasons(song, doc) {
   const reasons = [];
   const entries = Object.values(song.library ?? {});
 
@@ -2202,10 +2213,21 @@ function libraryReasons(song) {
 
   const fontIds = new Set();
   let fonts = 0;
-  for (const entry of entries) {
-    if (entry.kind !== LIBRARY_KINDS[0]) continue;
-    fonts += 1;
-    fontIds.add(entry.id);
+  for (const [id, entry] of storedLibraryEntries(doc)) {
+    if (!(entry instanceof Y.Map)) {
+      reasons.push(`The library entry "${id}" would not hold anything; a library entry is a font, a capture or a cabinet.`);
+      continue;
+    }
+    const kind = entry.get("kind");
+    if (kind === LIBRARY_KINDS[0]) {
+      fonts += 1;
+      fontIds.add(id);
+      continue;
+    }
+    if (LIBRARY_KINDS.includes(kind)) continue;
+    reasons.push(
+      `The library entry "${nameOrId(entry.get("name"), id)}" would have the kind ${describeValue(kind)}; a library entry is a font, a capture or a cabinet.`,
+    );
   }
   if (fonts > LIMITS.fontsPerSong) {
     reasons.push(`The song's library would hold ${fonts} fonts; a song can hold at most ${LIMITS.fontsPerSong} fonts.`);
@@ -2218,20 +2240,84 @@ function libraryReasons(song) {
     if (fontId !== ABSENT && !fontIds.has(fontId)) {
       reasons.push(`${which} would play the font "${fontId}", which is not in the song's library.`);
     }
-    const bank = track.device.bank;
-    if (!(Number.isInteger(bank) && bank >= 0 && bank <= MAX_SOUNDFONT_BANK)) {
+  }
+  return reasons;
+}
+
+/**
+ * What is wrong with the presets a song's soundfont devices name, read from the
+ * document instead of from a snapshot.
+ *
+ * `normalizeTrack` reads a `font_id` that is not a string as nothing at all and
+ * a bank or a program that is not an integer as 0, which is the right way for a
+ * reader to get a usable value and the wrong way to check one: a stored
+ * `font_id: 7` or `bank: "grand"` would pass every range check by having been
+ * replaced first. So this check reads the device as the song holds it, and
+ * reports a font id that is neither a string nor nothing, and a bank or a
+ * program that is not an integer inside the range a font has (bank 0-127
+ * melodic, 128 the GM drums; program 0-127).
+ *
+ * The agent's sound guard reads a font id the same lenient way, and in the other
+ * direction: anything but nothing is an instrument the track plays (see
+ * `trackHoldsSound` in hub.js).
+ * @param {Y.Doc} doc
+ * @returns {string[]}
+ */
+function soundfontDeviceReasons(doc) {
+  const reasons = [];
+  const tracks = readContainer(doc, "tracks");
+  if (!(tracks instanceof Y.Array)) return reasons;
+  for (const track of tracks.toArray()) {
+    if (!(track instanceof Y.Map)) continue;
+    const device = toPlain(track.get("device"));
+    const plain = device && typeof device === "object" ? device : {};
+    if (plain.engine !== SOUNDFONT_DEVICE.engine) continue;
+    const which = `The track "${nameOrId(track.get("name"), track.get("id"))}"`;
+    const fontId = plain.font_id;
+    if (!(typeof fontId === "string" || fontId === ABSENT || fontId === undefined)) {
       reasons.push(
-        `${which} would play bank ${bank}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+        `${which} would name the font ${describeValue(fontId)}; a font id is a string, or nothing at all.`,
       );
     }
-    const program = track.device.program;
+    const bank = plain.bank;
+    if (!(Number.isInteger(bank) && bank >= 0 && bank <= MAX_SOUNDFONT_BANK)) {
+      reasons.push(
+        `${which} would play bank ${describeValue(bank)}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+      );
+    }
+    const program = plain.program;
     if (!(Number.isInteger(program) && program >= 0 && program <= MAX_SOUNDFONT_PROGRAM)) {
       reasons.push(
-        `${which} would play program ${program}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
+        `${which} would play program ${describeValue(program)}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
       );
     }
   }
   return reasons;
+}
+
+/**
+ * One song's library as the document itself holds it: each key and its entry,
+ * untouched by a snapshot's normalising.
+ * @param {Y.Doc} doc
+ * @returns {Array<[string, any]>} empty when the song has no library
+ */
+function storedLibraryEntries(doc) {
+  const library = readContainer(doc, "library");
+  return library instanceof Y.Map ? [...library.entries()] : [];
+}
+
+/**
+ * One stored value as a sentence names it: `"font-a"`, `7`, `true`, `a list`,
+ * `an object`, or `nothing` when the field is not there at all.
+ * @param {any} value
+ * @returns {string}
+ */
+function describeValue(value) {
+  if (typeof value === "string") return `"${value}"`;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return "a list";
+  if (value && typeof value === "object") return "an object";
+  return "nothing";
 }
 
 /** @returns {boolean} whether two MIDI messages are the same message. */
