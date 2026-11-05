@@ -1584,6 +1584,188 @@ test("sampler pattern bit-identical in Chromium and Node", async (t) => {
   }
 });
 
+test("motion is bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // A sample with body in it, so a swept filter, level and pitch all show.
+  const frames = 24000;
+  const mono = new Float32Array(frames);
+  for (let at = 0; at < frames; at += 1) {
+    mono[at] =
+      (Math.sin((2 * Math.PI * 180 * at) / SAMPLE_RATE) * 0.5
+        + Math.sin((2 * Math.PI * 2400 * at) / SAMPLE_RATE) * 0.3) * (1 - at / frames);
+  }
+
+  const padOf = (index, over = {}) => ({
+    track_id: "track-1",
+    bank_id: "bank-a",
+    index,
+    sample_id: "sample-a",
+    slice_id: null,
+    name: "",
+    mode: "gate",
+    pitch: 0,
+    gain_db: 0,
+    pan: 0,
+    attack_ms: 0,
+    decay_ms: 0,
+    sustain: 1,
+    release_ms: 0,
+    filter: { type: "lp", cutoff_hz: 8000, resonance: 0.5 },
+    choke: 0,
+    reverse: false,
+    ...over,
+  });
+
+  const step = (at, index, over = {}) => ({
+    clip_id: "clip-1",
+    pattern_id: "a",
+    at,
+    bank_id: "bank-a",
+    index,
+    v: 110,
+    locks: {},
+    ...over,
+  });
+
+  const song = {
+    meta: { title: "Motion parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      {
+        id: "track-1",
+        name: "Kit",
+        color: "#E8C07A",
+        device: { engine: "sampler" },
+        mute: false,
+        solo: false,
+        gain_db: -2,
+        pan: 0.2,
+        locked: false,
+      },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Kit",
+        length_bars: 1,
+        notes: [],
+        kind: "pattern",
+        length_steps: 16,
+        step_beats: 0.25,
+        swing: 0,
+        chain: [],
+      },
+    },
+    samples: {
+      "sample-a": {
+        id: "sample-a",
+        storage_key: "studio/song-1/samples/sample-a.wav",
+        rate: SAMPLE_RATE,
+        channels: 1,
+        frames: frames,
+        name: "a",
+        origin: "record",
+        author_label: "the operator",
+      },
+    },
+    slices: {},
+    banks: { "track-1/bank-a": { id: "bank-a", track_id: "track-1", name: "A", order: 0 } },
+    pads: {
+      "track-1/bank-a/0": padOf(0),
+      // A step of this one locks its own cutoff, so a lock has to survive the
+      // render identically too.
+      "track-1/bank-a/1": padOf(1, { filter: { type: "hp", cutoff_hz: 300, resonance: 0.2 } }),
+    },
+    patterns: {
+      "clip-1/a": {
+        id: "a",
+        clip_id: "clip-1",
+        name: "A",
+        order: 0,
+        motion: {
+          "bank-a.0|cutoff_hz": [
+            { step_frac: 0, value: 200 },
+            { step_frac: 6, value: 12000 },
+            { step_frac: 12, value: 400 },
+          ],
+          "bank-a.0|gain_db": [
+            { step_frac: 0, value: -18 },
+            { step_frac: 10, value: 0 },
+          ],
+          "bank-a.0|pitch": [
+            { step_frac: 2, value: -3 },
+            { step_frac: 14, value: 4.5 },
+          ],
+          "bank-a.1|cutoff_hz": [{ step_frac: 0, value: 1500 }],
+        },
+      },
+    },
+    steps: {
+      "clip-1/a/0/bank-a.0": step(0, 0),
+      "clip-1/a/4/bank-a.0": step(4, 0),
+      "clip-1/a/8/bank-a.0": step(8, 0),
+      "clip-1/a/2/bank-a.1": step(2, 1, { locks: { cutoff_hz: 6000 } }),
+      "clip-1/a/12/bank-a.1": step(12, 1),
+    },
+  };
+
+  const payload = [
+    { id: "sample-a", rate: SAMPLE_RATE, channels: [Array.from(mono)] },
+  ];
+  const seconds = 3;
+  const node = await renderSong(song, {
+    seconds,
+    sampleRate: SAMPLE_RATE,
+    samples: [{ id: "sample-a", channels: [mono], rate: SAMPLE_RATE }],
+  });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node motion render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  // The very same song without its curves has to sound different: a motion path
+  // that silently did nothing would pass the hash comparison for the wrong
+  // reason.
+  const plain = {
+    ...song,
+    patterns: { "clip-1/a": { id: "a", clip_id: "clip-1", name: "A", order: 0 } },
+  };
+  const flat = await renderSong(plain, {
+    seconds,
+    sampleRate: SAMPLE_RATE,
+    samples: [{ id: "sample-a", channels: [mono], rate: SAMPLE_RATE }],
+  });
+  assert.notEqual(
+    hashChannels(flat.left, flat.right),
+    nodeHash,
+    "a song with motion and the same song without it must not render the same bytes",
+  );
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderSampler"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderSampler(${JSON.stringify(song)}, ${JSON.stringify(payload)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium motion render has to be audible too, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a motion render`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
 test("effects bit-identical in Chromium and Node", async (t) => {
   if (!chrome) {
     t.skip("no headless Chrome");

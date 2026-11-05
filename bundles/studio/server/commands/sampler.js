@@ -1,7 +1,7 @@
 /**
  * The Studio 1c sampler commands: a sampler track's kit of banks and pads, the
- * samples and slices the pads play, and the patterns, steps, locks and chains
- * of a pattern clip.
+ * samples and slices the pads play, and the patterns, steps, locks, motion lanes
+ * and chains of a pattern clip.
  *
  * Importing this module registers them, exactly as `core.js` does. The ids are
  * the contract between the panel, the gateway's sample upload finish route, the
@@ -13,13 +13,14 @@
  *   pattern.add  pattern.rename  pattern.remove  pattern.set_length
  *   pattern.set_steps_beat  pattern.set_swing
  *   step.toggle  step.set  step.clear_locks
+ *   motion.write  motion.clear
  *   chain.set  clip.add_pattern
  *
  * Every sampler object is its own small object with its own ref (see doc.js),
  * so one pad edit never rewrites the kit's device, and two edits to different
  * pads, different steps or different locks of one step undo independently.
  *
- * Three rules the rest of the sampler leans on:
+ * The rules the rest of the sampler leans on:
  *   - `sample.add` is Studio's own: only the gateway's upload finish route
  *     issues it, so no caller outside the process decides where a sample's
  *     audio lives.
@@ -32,11 +33,20 @@
  *     has), and the hub refuses the twin without `internal: true`.
  *   - a pad's sample and its slice are checked against the song before they are
  *     written, so a pad never points at a sound that is not there.
+ *   - a motion lane is ONE field of its pattern (`motion:<clip>/<pattern>/<lane>`,
+ *     see doc.js): writing a curve never rolls back a neighbour lane, and both
+ *     motion commands are open to everyone — a lane is a pattern edit, never a
+ *     sound leaving the song.
  *   - `pad.clear` is the operator's own: it takes the sound off a pad (and
  *     nothing else, so the pad keeps its envelope, filter and level), which is
  *     what a re-chop needs when a pad still plays one of the old slices. Being
  *     people-only, it has no MCP tool (mcp.js skips every `humanOnly` command),
  *     and the panel's **Clear pad** is the only way to run it.
+ *
+ * A pattern's motion lives inside the pattern object (`motion`, see doc.js), so
+ * `pattern.remove` takes its curves with it and one undo brings both back, a
+ * shorter loop trims every lane's points past its new end in the same step, and
+ * a lane is still its own history field.
  *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (a limit, an unknown pattern, a pad still playing a slice) leaves the
@@ -49,6 +59,8 @@ import { addLimitIssue, defineCommand, StudioError } from "./registry.js";
 import {
   DEFAULT_STEP_BEATS,
   LIMITS,
+  MOTION_PARAM_RANGES,
+  MOTION_PARAMS,
   PAD_FILTER_TYPES,
   PAD_MODES,
   SAMPLE_ORIGINS,
@@ -71,6 +83,9 @@ import {
   isPatternClip,
   isSamplerTrack,
   lengthBarsForSteps,
+  motionLane,
+  motionLaneParts,
+  motionOf,
   newSamplerBank,
   objectMap,
   objectRef,
@@ -163,6 +178,16 @@ function patternRef(clipId, patternId) {
 /** @returns {string} the ref of one step of one pattern. */
 function stepRef(clipId, patternId, at, bankId, index) {
   return objectRef("step", stepKey(clipId, patternId, at, bankId, index));
+}
+
+/**
+ * @param {string} clipId
+ * @param {string} patternId
+ * @param {string} lane - `"<bank_id>.<index>|<param>"`
+ * @returns {string} the ref of one motion lane of one pattern
+ */
+function motionRef(clipId, patternId, lane) {
+  return objectRef("motion", `${clipId}/${patternId}/${lane}`);
 }
 
 /** Refuse with a limit message that names the limit. */
@@ -1039,7 +1064,9 @@ defineCommand({
   },
   /**
    * Its steps go with it, and so does its place in the clip's chain: a chain
-   * cannot name a pattern that is gone. Both come back in the same undo.
+   * cannot name a pattern that is gone. Both come back in the same undo. Its
+   * motion lanes ride inside the pattern object, so they go and come back with
+   * it as well — a removed pattern never leaves a curve behind.
    */
   apply(doc, args) {
     const clip = requirePatternClip(doc, args.clip_id);
@@ -1110,12 +1137,25 @@ defineCommand({
       if (step.clip_id !== args.clip_id || step.at < args.length_steps) continue;
       refs.push(stepRef(step.clip_id, step.pattern_id, step.at, step.bank_id, step.index));
     }
+    // A lane whose curve reaches past the new end is one of this step's writes
+    // too: its points past the end are dropped with the steps that played them.
+    for (const pattern of Object.values(snap.patterns ?? {})) {
+      if (pattern.clip_id !== args.clip_id) continue;
+      const motion = pattern.motion && typeof pattern.motion === "object" ? pattern.motion : {};
+      for (const lane of Object.keys(motion)) {
+        const points = Array.isArray(motion[lane]) ? motion[lane] : [];
+        if (!points.some((point) => Number(point.step_frac) >= args.length_steps)) continue;
+        refs.push(motionRef(args.clip_id, pattern.id, lane));
+      }
+    }
     return refs;
   },
   /**
    * A shorter loop drops the steps at or past its new end: they could not play,
    * and leaving them behind would break the rule that a step sits inside its
-   * pattern. They are captured, so one undo brings them back with the length.
+   * pattern. Every pattern's motion loses its points past the same end, in this
+   * same step. All of it is captured, so one undo brings the steps and the
+   * curves back with the length.
    */
   apply(doc, args) {
     const clip = requirePatternClip(doc, args.clip_id);
@@ -1134,6 +1174,10 @@ defineCommand({
       steps.delete(id);
     }
 
+    for (const { pattern } of patternsForClip(doc, args.clip_id)) {
+      trimMotion(args.clip_id, pattern, args.length_steps, before, after);
+    }
+
     const bars = lengthBarsForSteps(args.length_steps, Number(clip.get("step_beats")) || DEFAULT_STEP_BEATS);
     if (bars !== fieldValue(clip, "length_bars")) {
       before[fieldKey(ref, "length_bars")] = fieldValue(clip, "length_bars");
@@ -1143,6 +1187,38 @@ defineCommand({
     return { before, after };
   },
 });
+
+/**
+ * Drop the motion points a shorter loop puts past its end, from every lane of
+ * one pattern, recording each changed lane under its own field.
+ *
+ * A lane the cut empties goes away with it, so a lane never lingers with no
+ * points to play. The pattern's `motion` object is written back once, with only
+ * the affected lanes changed.
+ * @param {string} clipId
+ * @param {import("yjs").Map<any>} pattern - the live pattern
+ * @param {number} lengthSteps - the loop's new length in step positions
+ * @param {Object<string, any>} before - the step's before map, filled in
+ * @param {Object<string, any>} after - the step's after map, filled in
+ * @returns {void}
+ */
+function trimMotion(clipId, pattern, lengthSteps, before, after) {
+  const motion = motionOf(pattern);
+  const lanes = Object.keys(motion);
+  let changed = false;
+  for (const lane of lanes) {
+    const points = Array.isArray(motion[lane]) ? motion[lane] : [];
+    const kept = points.filter((point) => Number(point.step_frac) < lengthSteps);
+    if (kept.length === points.length) continue;
+    const field = fieldKey(motionRef(clipId, pattern.get("id"), lane), "*");
+    before[field] = cloneJson(points);
+    after[field] = kept.length > 0 ? cloneJson(kept) : ABSENT;
+    if (kept.length > 0) motion[lane] = kept;
+    else delete motion[lane];
+    changed = true;
+  }
+  if (changed) pattern.set("motion", cloneJson(motion) ?? {});
+}
 
 /** @returns {Array<{id: string, step: object}>} every step of one clip, plain. */
 function stepsOfClip(doc, clipId) {
@@ -1393,6 +1469,223 @@ defineCommand({
       after[fieldKey(ref, `locks.${name}`)] = ABSENT;
     }
     if (Object.keys(before).length > 0) step.set("locks", {});
+    return { before, after };
+  },
+});
+
+// --- Motion lanes -----------------------------------------------------------
+
+/** What each swept pad field is called in a summary. */
+const motionParamLabels = {
+  pitch: "pitch",
+  gain_db: "level",
+  pan: "pan",
+  attack_ms: "attack",
+  decay_ms: "decay",
+  sustain: "sustain",
+  release_ms: "release",
+  cutoff_hz: "cutoff",
+  resonance: "resonance",
+};
+
+/** One motion point: a fractional step position and the value the field holds there. */
+const motionPointSchema = z
+  .object({
+    step_frac: z.number().finite().min(0).describe("the step position, in steps, from 0"),
+    value: z.number().finite().describe("the field's value at that step"),
+  })
+  .strict();
+
+/**
+ * The points one lane holds, in step order.
+ *
+ * Two points at one step position are one point (the later value wins), so a
+ * lane is always a curve a reader can interpolate without asking which of two
+ * points at a step it means.
+ * @param {Array<{step_frac: number, value: number}>} points
+ * @returns {Array<{step_frac: number, value: number}>}
+ */
+function normalizePoints(points) {
+  const sorted = points
+    .map((point) => ({ step_frac: point.step_frac, value: point.value }))
+    .sort((a, b) => a.step_frac - b.step_frac);
+  const out = [];
+  for (const point of sorted) {
+    const previous = out.length > 0 ? out[out.length - 1] : null;
+    if (previous && previous.step_frac === point.step_frac) out[out.length - 1] = point;
+    else out.push(point);
+  }
+  return out;
+}
+
+/**
+ * The lanes of one pad of one pattern, in lane-name order.
+ * @param {Object<string, any>} motion - a pattern's motion object
+ * @param {string} bankId
+ * @param {number} index
+ * @param {string} [param] - one field, or undefined for every field of the pad
+ * @returns {string[]}
+ */
+function padLanes(motion, bankId, index, param) {
+  const lanes = [];
+  for (const lane of Object.keys(motion)) {
+    const parts = motionLaneParts(lane);
+    if (!parts) continue;
+    if (parts.bankId !== bankId || parts.index !== index) continue;
+    if (param !== undefined && parts.param !== param) continue;
+    lanes.push(lane);
+  }
+  lanes.sort();
+  return lanes;
+}
+
+defineCommand({
+  id: "motion.write",
+  title: "Record a motion lane for one pad field of a pattern",
+  schema: z
+    .object({
+      clip_id: idSchema.describe("the pattern clip"),
+      pattern_id: idSchema.describe("the pattern the lane belongs to"),
+      bank_id: idSchema.describe("the bank the pad sits in"),
+      index: z.number().int().min(0).max(LIMITS.padsPerBank - 1).describe("the pad, 0-15"),
+      param: z
+        .enum(MOTION_PARAMS)
+        .describe(`the pad field the lane sweeps: ${MOTION_PARAMS.join(", ")}`),
+      points: z
+        .array(motionPointSchema)
+        .describe(
+          `the lane's points, in step order; they replace the lane (an empty list takes it away), so at most ${LIMITS.motionPointsPerLane} of them`,
+        ),
+    })
+    .strict()
+    .superRefine((args, ctx) => {
+      if (args.points.length > LIMITS.motionPointsPerLane) {
+        addLimitIssue(
+          ctx,
+          `A motion lane holds at most ${LIMITS.motionPointsPerLane} points; this one would have ${args.points.length}.`,
+        );
+      }
+    }),
+  summary(args, snap) {
+    const count = args.points.length;
+    const pieces = count === 1 ? "1 point" : `${count} points`;
+    const label = motionParamLabels[args.param] ?? args.param;
+    return `Recorded ${pieces} of ${label} motion on pad ${args.index + 1} of bank "${labelOfBank(snap, snap.clips?.[args.clip_id]?.track_id ?? "", args.bank_id)}" in pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}"`;
+  },
+  touches(args) {
+    // The pattern and the clip are named as well as the lane: a lock check has
+    // to see the track the pattern sits on, and a lane's ref names only the
+    // pattern.
+    return [
+      motionRef(args.clip_id, args.pattern_id, motionLane(args.bank_id, args.index, args.param)),
+      patternRef(args.clip_id, args.pattern_id),
+      clipRef(args.clip_id),
+    ];
+  },
+  /**
+   * One lane replaced in one step. The points are checked against the pattern's
+   * own loop (a point past the end could never play) and against the field's
+   * own range (a lane that went past it would be refused by the invariants
+   * afterwards, so it is refused here by name), and a pattern keeps at most
+   * `LIMITS.motionLanesPerPattern` lanes.
+   */
+  apply(doc, args) {
+    const clip = requirePatternClip(doc, args.clip_id);
+    const pattern = requirePattern(doc, args.clip_id, args.pattern_id);
+    checkPadOnTrack(doc, clip, args.bank_id, args.index);
+
+    const positions = Number(clip.get("length_steps")) || 0;
+    const range = MOTION_PARAM_RANGES[args.param];
+    for (const point of args.points) {
+      if (!(point.step_frac >= 0 && point.step_frac < positions)) {
+        refuseInvalid(
+          `A motion point at step ${point.step_frac} is outside the ${positions} step positions of clip "${clip.get("name")}".`,
+        );
+      }
+      if (!(point.value >= range[0] && point.value <= range[1])) {
+        refuseInvalid(
+          `The ${motionParamLabels[args.param] ?? args.param} of pad ${args.index + 1} holds ${range[0]} to ${range[1]}; ${point.value} is outside that.`,
+        );
+      }
+    }
+
+    const lane = motionLane(args.bank_id, args.index, args.param);
+    const motion = motionOf(pattern);
+    const present = Object.hasOwn(motion, lane);
+    if (!present && Object.keys(motion).length >= LIMITS.motionLanesPerPattern) {
+      refuseLimit(
+        `A pattern holds at most ${LIMITS.motionLanesPerPattern} motion lanes; this one already has ${LIMITS.motionLanesPerPattern}.`,
+      );
+    }
+    const points = normalizePoints(args.points);
+    const field = fieldKey(motionRef(args.clip_id, args.pattern_id, lane), "*");
+    const was = present ? cloneJson(motion[lane]) : ABSENT;
+    if (JSON.stringify(was) === JSON.stringify(points)) return { before: {}, after: {} };
+
+    if (points.length > 0) motion[lane] = points;
+    else delete motion[lane];
+    pattern.set("motion", cloneJson(motion) ?? {});
+    return {
+      before: { [field]: was },
+      after: { [field]: points.length > 0 ? cloneJson(points) : ABSENT },
+    };
+  },
+});
+
+defineCommand({
+  id: "motion.clear",
+  title: "Clear one motion lane of a pad, or every lane of it",
+  schema: z
+    .object({
+      clip_id: idSchema.describe("the pattern clip"),
+      pattern_id: idSchema.describe("the pattern the lanes belong to"),
+      bank_id: idSchema.describe("the bank the pad sits in"),
+      index: z.number().int().min(0).max(LIMITS.padsPerBank - 1).describe("the pad, 0-15"),
+      param: z
+        .enum(MOTION_PARAMS)
+        .optional()
+        .describe("one field to clear; every lane of the pad when omitted"),
+    })
+    .strict(),
+  summary(args, snap) {
+    const pad = `pad ${args.index + 1} of bank "${labelOfBank(snap, snap.clips?.[args.clip_id]?.track_id ?? "", args.bank_id)}"`;
+    const pattern = `pattern "${labelOfPattern(snap, args.clip_id, args.pattern_id)}"`;
+    if (args.param === undefined) return `Cleared the motion of ${pad} in ${pattern}`;
+    const label = motionParamLabels[args.param] ?? args.param;
+    return `Cleared the ${label} motion of ${pad} in ${pattern}`;
+  },
+  touches(args, snap) {
+    const refs = [];
+    const pattern = snap.patterns?.[patternKey(args.clip_id, args.pattern_id)];
+    const motion = pattern?.motion && typeof pattern.motion === "object" ? pattern.motion : {};
+    for (const lane of padLanes(motion, args.bank_id, args.index, args.param)) {
+      refs.push(motionRef(args.clip_id, args.pattern_id, lane));
+    }
+    // The pattern and the clip are named too: a lock check has to see the track
+    // the pattern sits on, and a lane's ref names only the pattern.
+    refs.push(patternRef(args.clip_id, args.pattern_id), clipRef(args.clip_id));
+    return refs;
+  },
+  /**
+   * Every lane it takes away is its own field, so one lane's later curve and an
+   * older clear of another lane never roll back together. A pad with no lane is
+   * nothing to do: the step writes nothing at all.
+   */
+  apply(doc, args) {
+    requirePatternClip(doc, args.clip_id);
+    const pattern = requirePattern(doc, args.clip_id, args.pattern_id);
+    const motion = motionOf(pattern);
+    const lanes = padLanes(motion, args.bank_id, args.index, args.param);
+    if (lanes.length === 0) return { before: {}, after: {} };
+
+    const before = {};
+    const after = {};
+    for (const lane of lanes) {
+      before[fieldKey(motionRef(args.clip_id, args.pattern_id, lane), "*")] = cloneJson(motion[lane]);
+      after[fieldKey(motionRef(args.clip_id, args.pattern_id, lane), "*")] = ABSENT;
+      delete motion[lane];
+    }
+    pattern.set("motion", cloneJson(motion) ?? {});
     return { before, after };
   },
 });

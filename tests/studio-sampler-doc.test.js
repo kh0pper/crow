@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   LIMITS,
+  MOTION_PARAM_RANGES,
+  MOTION_PARAMS,
   SAMPLER_DEVICE,
   bankKey,
   checkInvariants,
@@ -652,6 +654,7 @@ test("the engine sees the kit and the patterns from a snapshot", (t) => {
     clip_id: clip,
     name: "A",
     order: 0,
+    motion: {},
   });
   assert.equal(snap.patterns[patternKey(clip, second)].name, "Fill");
 
@@ -794,6 +797,228 @@ test("re-chop after Clear pad succeeds", (t) => {
   const again = s.run("pad.clear", { track_id: trackId, bank_id: bankId, index: 5 });
   assert.deepEqual(again.result.before, {});
   assert.deepEqual(again.result.after, {});
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("motion over 4096 points refused", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: LIMITS.stepPositions });
+  const lane = { clip_id: clip, pattern_id: "a", bank_id: bankId, index: 2, param: "cutoff_hz" };
+
+  // One lane holds 4096 points, and the 4097th is refused by name. Nothing is
+  // written: a refusal leaves the pattern exactly as it was.
+  const tooMany = Array.from({ length: LIMITS.motionPointsPerLane + 1 }, (unused, at) => ({
+    step_frac: at % LIMITS.stepPositions,
+    value: 100 + at,
+  }));
+  const refused = refuses(() => s.run("motion.write", { ...lane, points: tooMany }), "limit");
+  assert.match(refused.message, /4096/);
+  assert.deepEqual(snapshot(s.doc).patterns[patternKey(clip, "a")].motion, {});
+
+  // A lane inside the limit is ONE field of the pattern, sorted by step position
+  // whatever order the points came in.
+  const written = s.run("motion.write", {
+    ...lane,
+    points: [
+      { step_frac: 8, value: 6000 },
+      { step_frac: 0, value: 200 },
+    ],
+  });
+  assert.deepEqual(Object.keys(written.result.after), [`motion:${clip}/a/${bankId}.2|cutoff_hz|*`]);
+  assert.deepEqual(snapshot(s.doc).patterns[patternKey(clip, "a")].motion, {
+    [`${bankId}.2|cutoff_hz`]: [
+      { step_frac: 0, value: 200 },
+      { step_frac: 8, value: 6000 },
+    ],
+  });
+
+  // A point outside the loop, a value outside the field, and a field the pad
+  // does not sweep are each refused, and the lane stays as it was.
+  refuses(() => s.run("motion.write", { ...lane, points: [{ step_frac: 64, value: 500 }] }), "invalid");
+  refuses(() => s.run("motion.write", { ...lane, points: [{ step_frac: 0, value: 30000 }] }), "invalid");
+  refuses(
+    () => s.run("motion.write", { ...lane, param: "choke", points: [{ step_frac: 0, value: 2 }] }),
+    "invalid",
+  );
+  assert.equal(
+    snapshot(s.doc).patterns[patternKey(clip, "a")].motion[`${bankId}.2|cutoff_hz`].length,
+    2,
+    "the refused writes left the lane alone",
+  );
+
+  // A pattern holds 32 lanes: one per pad field of two pads is 18, so the
+  // remaining ones are filled pad by pad until the pattern is full, and the
+  // 33rd lane is refused naming 32.
+  let lanes = 1;
+  for (const param of MOTION_PARAMS) {
+    if (param === "cutoff_hz") continue;
+    s.run("motion.write", { ...lane, param, points: [{ step_frac: 0, value: MOTION_PARAM_RANGES[param][0] }] });
+    lanes += 1;
+  }
+  while (lanes < LIMITS.motionLanesPerPattern) {
+    const index = 3 + Math.floor((lanes - 9) / MOTION_PARAMS.length);
+    const param = MOTION_PARAMS[(lanes - 9) % MOTION_PARAMS.length];
+    s.run("motion.write", {
+      ...lane,
+      index,
+      param,
+      points: [{ step_frac: 0, value: MOTION_PARAM_RANGES[param][0] }],
+    });
+    lanes += 1;
+  }
+  assert.equal(Object.keys(snapshot(s.doc).patterns[patternKey(clip, "a")].motion).length, lanes);
+  const over = refuses(
+    () => s.run("motion.write", { ...lane, index: 9, param: "pitch", points: [{ step_frac: 0, value: 0 }] }),
+    "limit",
+  );
+  assert.match(over.message, /32/);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("removing a pattern removes its motion", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: 16 });
+  const second = s.run("pattern.add", { clip_id: clip, name: "Fill" }).result.args.id;
+
+  const lane = (patternId, index, param) => ({
+    clip_id: clip,
+    pattern_id: patternId,
+    bank_id: bankId,
+    index,
+    param,
+    points: [
+      { step_frac: 0, value: MOTION_PARAM_RANGES[param][0] },
+      { step_frac: 8, value: MOTION_PARAM_RANGES[param][1] },
+    ],
+  });
+  s.run("motion.write", lane(second, 1, "decay_ms"));
+  s.run("motion.write", lane(second, 1, "gain_db"));
+  // A lane of the pattern that stays, so the removal has something to leave be.
+  s.run("motion.write", lane("a", 0, "cutoff_hz"));
+
+  const removed = s.run("pattern.remove", { clip_id: clip, pattern_id: second });
+  // The pattern's whole object carries its motion, so one field brings it back.
+  assert.deepEqual(Object.keys(removed.result.before).sort(), [
+    `pattern:${clip}/${second}|*`,
+  ]);
+  assert.deepEqual(removed.result.before[`pattern:${clip}/${second}|*`].motion, {
+    [`${bankId}.1|decay_ms`]: [
+      { step_frac: 0, value: 0 },
+      { step_frac: 8, value: 10000 },
+    ],
+    [`${bankId}.1|gain_db`]: [
+      { step_frac: 0, value: -60 },
+      { step_frac: 8, value: 12 },
+    ],
+  });
+
+  const snap = snapshot(s.doc);
+  assert.equal(snap.patterns[patternKey(clip, second)], undefined, "the pattern is gone");
+  assert.equal(Object.keys(snap.patterns[patternKey(clip, "a")].motion).length, 1, "the other pattern kept its lane");
+  for (const pattern of Object.values(snap.patterns)) {
+    for (const laneName of Object.keys(pattern.motion)) {
+      assert.ok(!laneName.endsWith("|decay_ms"), "no lane of the removed pattern is left behind");
+    }
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // One undo brings the pattern and both of its lanes back.
+  const undone = s.undo(removed.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  const back = snapshot(s.doc).patterns[patternKey(clip, second)];
+  assert.ok(back, "the pattern came back");
+  assert.equal(Object.keys(back.motion).length, 2, "and so did its motion");
+  assert.deepEqual(back.motion[`${bankId}.1|decay_ms`], [
+    { step_frac: 0, value: 0 },
+    { step_frac: 8, value: 10000 },
+  ]);
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // Redo takes it away again, motion included.
+  s.redo(undone.entry);
+  assert.equal(snapshot(s.doc).patterns[patternKey(clip, second)], undefined);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("one motion lane undoes without touching another", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: 16 });
+  const lane = (param, points) => ({
+    clip_id: clip,
+    pattern_id: "a",
+    bank_id: bankId,
+    index: 0,
+    param,
+    points,
+  });
+
+  const first = s.run("motion.write", lane("cutoff_hz", [{ step_frac: 0, value: 500 }, { step_frac: 4, value: 900 }]));
+  // A newer lane of the same pad, and a newer curve on the very lane edited
+  // later: the first step's undo must leave that newer edit alone.
+  s.run("motion.write", lane("gain_db", [{ step_frac: 0, value: -3 }]));
+
+  const undone = s.undo(first.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.deepEqual([...undone.plan.apply.keys()], [`motion:${clip}/a/${bankId}.0|cutoff_hz|*`]);
+
+  const motion = snapshot(s.doc).patterns[patternKey(clip, "a")].motion;
+  assert.equal(motion[`${bankId}.0|cutoff_hz`], undefined, "the older lane went away");
+  assert.deepEqual(motion[`${bankId}.0|gain_db`], [{ step_frac: 0, value: -3 }], "the newer lane stayed");
+
+  // Redo puts the curve back and still leaves the other lane alone.
+  const redone = s.redo(undone.entry);
+  assert.deepEqual(redone.plan.conflicts, []);
+  assert.deepEqual(snapshot(s.doc).patterns[patternKey(clip, "a")].motion[`${bankId}.0|cutoff_hz`], [
+    { step_frac: 0, value: 500 },
+    { step_frac: 4, value: 900 },
+  ]);
+  assert.deepEqual(snapshot(s.doc).patterns[patternKey(clip, "a")].motion[`${bankId}.0|gain_db`], [
+    { step_frac: 0, value: -3 },
+  ]);
+
+  // Clearing every lane of the pad is one step carrying each lane's own field,
+  // and one undo brings them all back.
+  const cleared = s.run("motion.clear", { clip_id: clip, pattern_id: "a", bank_id: bankId, index: 0 });
+  assert.deepEqual(
+    Object.keys(cleared.result.after).sort(),
+    [`motion:${clip}/a/${bankId}.0|cutoff_hz|*`, `motion:${clip}/a/${bankId}.0|gain_db|*`].sort(),
+  );
+  assert.deepEqual(snapshot(s.doc).patterns[patternKey(clip, "a")].motion, {});
+  const back = s.undo(cleared.entry);
+  assert.deepEqual(back.plan.conflicts, []);
+  assert.deepEqual(
+    Object.keys(snapshot(s.doc).patterns[patternKey(clip, "a")].motion).sort(),
+    [`${bankId}.0|cutoff_hz`, `${bankId}.0|gain_db`].sort(),
+  );
+
+  // A clear with nothing to do writes nothing at all.
+  s.run("motion.clear", { clip_id: clip, pattern_id: "a", bank_id: bankId, index: 5 });
+  const empty = s.run("motion.clear", { clip_id: clip, pattern_id: "a", bank_id: bankId, index: 5 });
+  assert.deepEqual(empty.result.before, {});
+  assert.deepEqual(empty.result.after, {});
+
+  // A shorter loop drops the points past the new end in the same step, and one
+  // undo brings them back with the length.
+  const shortened = s.run("pattern.set_length", { clip_id: clip, length_steps: 4 });
+  const trimKey = `motion:${clip}/a/${bankId}.0|cutoff_hz|*`;
+  assert.deepEqual(shortened.result.before[trimKey], [
+    { step_frac: 0, value: 500 },
+    { step_frac: 4, value: 900 },
+  ]);
+  assert.deepEqual(shortened.result.after[trimKey], [{ step_frac: 0, value: 500 }]);
+  assert.deepEqual(snapshot(s.doc).patterns[patternKey(clip, "a")].motion[`${bankId}.0|cutoff_hz`], [
+    { step_frac: 0, value: 500 },
+  ]);
+  assert.deepEqual(checkInvariants(s.doc), []);
+  s.undo(shortened.entry);
+  assert.equal(snapshot(s.doc).patterns[patternKey(clip, "a")].motion[`${bankId}.0|cutoff_hz`].length, 2);
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 

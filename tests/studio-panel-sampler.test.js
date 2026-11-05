@@ -2642,6 +2642,137 @@ test("a file imported in Chrome lands on its pad through the real upload", async
   assert.equal(assigns[0].args.sample_id, sample.id, "and it is for the imported sample");
 });
 
+// ---- motion record ---------------------------------------------------------
+
+test("motion record writes one step", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The Motion arm sits with the pad tools, off until it is clicked.
+  const arm = () => {
+    const node = ui.view().querySelector("[data-act=motion-arm]");
+    assert.ok(node, "the pad view offers a Motion arm");
+    return node;
+  };
+  assert.equal(arm().getAttribute("aria-pressed"), "false", "Motion starts disarmed");
+  arm().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(arm().getAttribute("aria-pressed"), "true", "the arm is on");
+
+  // The transport runs the pattern clip, so the pad controls are a curve.
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  const cutoff = () => {
+    const node = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+    assert.ok(node, "the pad's cutoff is a control");
+    return node;
+  };
+  const turn = async (value) => {
+    const node = cutoff();
+    node.value = String(value);
+    node.dispatchEvent(ui.event("change", { target: node }));
+    await ui.settle();
+  };
+
+  // Five moves, each on its own sixteenth: the four of the first beat, then the
+  // first of the second. Every one still changes the pad as it always did.
+  for (const sixteenth of [1, 2, 3, 4]) {
+    ui.playhead(1, 1, sixteenth);
+    await ui.settle();
+    await turn(1000 * sixteenth * 2);
+  }
+  ui.playhead(1, 2, 1);
+  await ui.settle();
+  await turn(10000);
+
+  assert.equal(commands(ui, "pad.set").length, 5, "every move still sends its own pad.set");
+  assert.equal(commands(ui, "motion.write").length, 0, "nothing is written while the pass is still running");
+
+  // One whole pass of the pattern after the first value ends the take: the five
+  // moves are ONE motion.write, because a lane is one field of the pattern.
+  ui.playhead(2, 1, 1);
+  await ui.settle();
+  const written = commands(ui, "motion.write");
+  assert.equal(written.length, 1, `the pass has to be exactly one motion.write, got ${written.length}`);
+  assert.deepEqual(written[0].args.clip_id, CLIP);
+  assert.deepEqual(written[0].args.pattern_id, "a");
+  assert.equal(written[0].args.bank_id, bankId);
+  assert.equal(written[0].args.index, 0);
+  assert.equal(written[0].args.param, "cutoff_hz");
+  assert.deepEqual(
+    written[0].args.points.map((point) => point.step_frac),
+    [0, 1, 2, 3, 4],
+    "one point per quarter-step the moves landed on",
+  );
+  assert.deepEqual(
+    written[0].args.points.map((point) => point.value),
+    [2000, 4000, 6000, 8000, 10000],
+    "each point carries the value the control had there",
+  );
+
+  // Disarming writes nothing more.
+  arm().dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  assert.equal(arm().getAttribute("aria-pressed"), "false", "the arm is off again");
+  assert.equal(commands(ui, "motion.write").length, 1, "disarming a spent take writes nothing");
+});
+
+test("a motion lane is drawn under the steps and its Clear is one motion.clear", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // A lane on the song: two points on the selected pad's cutoff.
+  await ui.apply("motion.write", {
+    clip_id: CLIP,
+    pattern_id: "a",
+    bank_id: bankId,
+    index: 0,
+    param: "cutoff_hz",
+    points: [
+      { step_frac: 0, value: 400 },
+      { step_frac: 8, value: 9000 },
+    ],
+  });
+
+  const motion = ui.slot("sampler-steps").querySelector("[data-role=motion]");
+  assert.ok(motion, "the steps panel draws a motion row");
+  const lane = motion.querySelector(".st-motion-lane");
+  assert.ok(lane, "the lane is a line of its own");
+  assert.match(String(lane.textContent), /cutoff/, "it names the field it sweeps");
+  assert.match(String(lane.textContent), /2 points/, "and how many points it holds");
+  assert.equal(lane.querySelectorAll(".st-motion-point").length, 2, "one bar per point");
+
+  const clear = lane.querySelector("[data-act=motion-clear]");
+  assert.ok(clear, "the lane offers Clear");
+  clear.dispatchEvent(ui.event("click", { bubbles: true }));
+  await ui.settle();
+  const cleared = commands(ui, "motion.clear");
+  assert.equal(cleared.length, 1, "Clear is one motion.clear");
+  assert.deepEqual(cleared[0].args, {
+    clip_id: CLIP,
+    pattern_id: "a",
+    bank_id: bankId,
+    index: 0,
+    param: "cutoff_hz",
+  }, "for the very lane that was cleared");
+
+  // With no lane on the pad the row says so, and a step's lock is untouched.
+  await ui.apply("motion.clear", { clip_id: CLIP, pattern_id: "a", bank_id: bankId, index: 0, param: "cutoff_hz" });
+  assert.equal(
+    ui.slot("sampler-steps").querySelector("[data-role=motion] .st-motion-lane"),
+    null,
+    "the cleared lane is drawn no more",
+  );
+  assert.match(
+    String(ui.slot("sampler-steps").querySelector("[data-role=motion]").textContent),
+    /none on this pad/,
+    "an empty row says so",
+  );
+});
+
 // ---- real input events, through the DevTools protocol -----------------------
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

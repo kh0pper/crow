@@ -138,6 +138,40 @@
  *   `pan`, `reverse`, `cutoff_hz`, `resonance` and the filter's kind under
  *   `filter_type` — and all of them go through the same `field()` lookup.
  *
+ * ## Motion
+ *
+ * A pattern's motion lanes (`sequencer.js`, "Motion") sweep one of a pad's
+ * numeric fields while the pattern plays. The sequencer hands this file, for
+ * every sampler track and every pattern slot of every block, a descriptor in
+ * the block's non-enumerable `motions` array:
+ *
+ *     {frame, track_id, pattern_id, lanes, origin_frame, frames_per_beat,
+ *      slot_start_beat, step_beats, length_steps}
+ *
+ * `lanes` is that pattern's curve — `{pad, param, points}` per lane, `points`
+ * sorted by `step_frac` — or `null` for a slot that sweeps nothing.
+ *
+ * **Per frame, never per block.** A frame's step position is
+ * `((frame - origin_frame) / frames_per_beat - slot_start_beat) / step_beats`,
+ * which is built from the song and the transport alone; every lane is then read
+ * linearly between its points at that position (a lane with one point is a
+ * constant, and from the last point the curve wraps round the loop to the
+ * first). The value is written into each sounding voice of that lane's pad
+ * before that one frame is rendered, so the sweep does not depend on where the
+ * host put a block boundary: a pad with a live lane is rendered frame by frame,
+ * a pad without one keeps the whole-run fast path, and both produce the same
+ * samples in the same order.
+ *
+ * **Precedence:** a step's lock beats motion, and motion beats the pad's own
+ * field. A voice remembers the lock names its step carried, and a lane that
+ * names one of them leaves that voice alone; every other lane overrides the
+ * value the voice started with. Motion moves `pitch`, `gain_db`, `pan`,
+ * `sustain`, `cutoff_hz`, `resonance`, the envelope times of the stage the
+ * voice is in, and `release_ms` for a release still to come. The cutoff and
+ * resonance go through the very same coefficient maths as the pad's own filter
+ * (`StudioSamplerVoice.setFilter`), with the filter's state carried across, so
+ * a sweep is a moving filter and not a train of clicks.
+ *
  * ## Taps
  *
  * `{type:"tap", target, on}` turns on a copy of the master ("master") or of
@@ -361,6 +395,28 @@
   /** How long a comp-boundary crossfade runs, in frames. */
   const VOICE_FADE_FRAMES = 64;
 
+  /**
+   * The envelope stages `sampler-voice.js` counts through, as numbers: motion
+   * applies an envelope time to the stage the voice is in, and this file reads
+   * the stage number the voice carries.
+   */
+  const STAGE_ATTACK = 0;
+  const STAGE_DECAY = 1;
+  const STAGE_SUSTAIN = 2;
+
+  /** The pad's numeric fields a motion lane may sweep (see `MOTION_PARAMS`). */
+  const MOTION_RANGES = Object.freeze({
+    pitch: Object.freeze([-24, 24]),
+    gain_db: Object.freeze([-60, 12]),
+    pan: Object.freeze([-1, 1]),
+    attack_ms: Object.freeze([0, 10000]),
+    decay_ms: Object.freeze([0, 10000]),
+    sustain: Object.freeze([0, 1]),
+    release_ms: Object.freeze([0, 10000]),
+    cutoff_hz: Object.freeze([20, 20000]),
+    resonance: Object.freeze([0, 1]),
+  });
+
   /** Four beats to the bar, everywhere in Studio. */
   const BEATS_PER_BAR = 4;
 
@@ -384,6 +440,46 @@
     if (value < low) return low;
     if (value > high) return high;
     return value;
+  }
+
+  /**
+   * One motion lane's value at a step position: linear between two points, and
+   * wrapped round the loop from the last point to the first (a lane with one
+   * point holds it everywhere).
+   *
+   * Only IEEE doubles, in one fixed order, so both hosts read the same value for
+   * the same frame (see the parity note in the file header).
+   * @param {Array<{step_frac: number, value: number}>} points sorted by step
+   * @param {number} stepFrac where the loop stands, in steps
+   * @param {number} lengthSteps the loop's length, in steps
+   * @returns {number}
+   */
+  function motionValueAt(points, stepFrac, lengthSteps) {
+    const count = points.length;
+    if (count === 0) return 0;
+    if (count === 1) return points[0].value;
+    const first = points[0];
+    const last = points[count - 1];
+    // From the last point round to the first: the loop wraps, so the curve has
+    // no end and a sweep recorded anywhere plays back everywhere.
+    const wrap = first.step_frac + lengthSteps - last.step_frac;
+    if (stepFrac < first.step_frac) {
+      if (!(wrap > 0)) return last.value;
+      return last.value + (first.value - last.value) * ((stepFrac + lengthSteps - last.step_frac) / wrap);
+    }
+    if (stepFrac >= last.step_frac) {
+      if (!(wrap > 0)) return last.value;
+      return last.value + (first.value - last.value) * ((stepFrac - last.step_frac) / wrap);
+    }
+    for (let at = 1; at < count; at += 1) {
+      const next = points[at];
+      if (stepFrac >= next.step_frac) continue;
+      const previous = points[at - 1];
+      const span = next.step_frac - previous.step_frac;
+      if (!(span > 0)) return next.value;
+      return previous.value + (next.value - previous.value) * ((stepFrac - previous.step_frac) / span);
+    }
+    return last.value;
   }
 
   /** @returns {string} an id in the form a Map is keyed by. */
@@ -892,6 +988,16 @@
 
       /** A counter every sampler trigger bumps: the trigger order of the voices. */
       this.voiceSerial = 0;
+
+      /**
+       * track id → the motion curve standing right now, one record per sampler
+       * track, reused across blocks (`setMotion`). `serial` is the block the
+       * record was set in, so a curve from an earlier block is never read.
+       */
+      this.motion = new Map();
+
+      /** The block counter those records are stamped with (`setMotion`). */
+      this.motionSerial = 0;
 
       /** Whether the master is tapped (record-into-pad / resampling). */
       this.tapMaster = false;
@@ -1779,9 +1885,12 @@
       this.updateTransport();
 
       // The sequencer must see every block, ready or not: its events are
-      // measured from contiguous frame starts.
+      // measured from contiguous frame starts. A motion curve is stamped with
+      // this block's number, so one that no descriptor refreshed is not read.
+      this.motionSerial += 1;
       const events = this.sequencer.block(this.frame, count);
       this.reportLaunches(events.launches);
+      const motions = events.motions;
 
       if (!this.ready || this.failure) {
         this.frame += count;
@@ -1790,12 +1899,20 @@
 
       let cursor = 0;
       let next = 0;
+      let nextMotion = 0;
       while (cursor < count) {
         while (next < events.length && events[next].frame <= cursor) {
           this.applyEvent(events[next]);
           next += 1;
         }
-        const boundary = next < events.length ? Math.min(count, events[next].frame) : count;
+        // A curve stands from its own frame on: it is applied at that frame,
+        // before the run that starts there is rendered.
+        while (nextMotion < motions.length && motions[nextMotion].frame <= cursor) {
+          this.setMotion(motions[nextMotion]);
+          nextMotion += 1;
+        }
+        let boundary = next < events.length ? Math.min(count, events[next].frame) : count;
+        if (nextMotion < motions.length) boundary = Math.min(boundary, motions[nextMotion].frame);
         const frames = boundary > cursor ? boundary - cursor : count - cursor;
         this.render(frames, left, right, cursor);
         cursor += frames;
@@ -1933,18 +2050,56 @@
     renderSampler(record, frames, left, right, offset) {
       const gainLeft = record.left;
       const gainRight = record.right;
-      this.renderVoiceList(record.voices, frames, left, right, offset, gainLeft, gainRight);
+      const state = this.motionStateFor(record.track_id);
+      this.renderVoiceList(record.voices, frames, left, right, offset, gainLeft, gainRight, state);
       // A stolen voice rings out in a fade tail for 64 frames after its slot was
-      // taken (see `retireVoice`), through the very same mix.
+      // taken (see `retireVoice`), through the very same mix. A tail is on its
+      // way out, so no curve is read for it.
       if (record.tails && record.tails.length > 0) {
-        this.renderVoiceList(record.tails, frames, left, right, offset, gainLeft, gainRight);
+        this.renderVoiceList(record.tails, frames, left, right, offset, gainLeft, gainRight, null);
       }
     }
 
     /**
      * Mix one list of sampler voices over a run of frames, with the track's own
      * gain and pan.
+     *
+     * A voice whose pad a live motion lane sweeps is rendered ONE FRAME at a
+     * time, with the lane's value for that frame written into it first; every
+     * other voice keeps the whole-run path. Per array element the order of the
+     * additions is the same either way, so a curve changes the sound and never
+     * the mix.
      * @param {object[]} voices
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array|null} right
+     * @param {number} offset
+     * @param {number} gainLeft
+     * @param {number} gainRight
+     * @param {object|null} state the track's motion record, or null
+     * @returns {void}
+     */
+    renderVoiceList(voices, frames, left, right, offset, gainLeft, gainRight, state) {
+      for (let at = 0; at < voices.length; at += 1) {
+        const voice = voices[at];
+        if (!voice.sounding) continue;
+        if (state !== null && this.voiceSweeps(state, voice)) {
+          this.renderVoiceWithMotion(voice, state, frames, left, right, offset, gainLeft, gainRight);
+          continue;
+        }
+        StudioSamplerVoice.render(voice, frames, gainLeft === 0 ? null : left, gainRight === 0 ? null : right, offset, gainLeft, gainRight);
+      }
+    }
+
+    /**
+     * Render one voice frame by frame, writing the motion value of that very
+     * frame into it before the frame is rendered.
+     *
+     * The step position of a frame is built from the song's own clock — the
+     * origin frame, the tempo, the slot's start beat and its step length — so a
+     * different block size produces the same value for the same frame.
+     * @param {object} voice
+     * @param {object} state the track's motion record
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
@@ -1953,12 +2108,202 @@
      * @param {number} gainRight
      * @returns {void}
      */
-    renderVoiceList(voices, frames, left, right, offset, gainLeft, gainRight) {
-      for (let at = 0; at < voices.length; at += 1) {
-        const voice = voices[at];
-        if (!voice.sounding) continue;
-        StudioSamplerVoice.render(voice, frames, gainLeft === 0 ? null : left, gainRight === 0 ? null : right, offset, gainLeft, gainRight);
+    renderVoiceWithMotion(voice, state, frames, left, right, offset, gainLeft, gainRight) {
+      const lanes = state.lanes;
+      const base = this.frame + offset;
+      const framesPerBeat = state.frames_per_beat;
+      const stepBeats = state.step_beats;
+      for (let frame = 0; frame < frames; frame += 1) {
+        if (!voice.sounding) break;
+        const beat = framesPerBeat > 0 ? (base + frame - state.origin_frame) / framesPerBeat : 0;
+        const stepFrac = stepBeats > 0 ? (beat - state.slot_start_beat) / stepBeats : 0;
+        this.applyMotion(voice, lanes, stepFrac, state.length_steps);
+        StudioSamplerVoice.render(
+          voice,
+          1,
+          gainLeft === 0 ? null : left,
+          gainRight === 0 ? null : right,
+          offset + frame,
+          gainLeft,
+          gainRight,
+        );
       }
+    }
+
+    /**
+     * Take one motion descriptor from the sequencer: which pattern of which
+     * track is playing, its curve, and the clock its step positions are measured
+     * on. A descriptor with no curve silences the track's motion, which is how a
+     * chain turning onto a plain pattern stops a sweep at its own boundary.
+     * @param {{frame?: number, track_id: string, pattern_id: string,
+     *          lanes: object[]|null, origin_frame: number,
+     *          frames_per_beat: number, slot_start_beat: number,
+     *          step_beats: number, length_steps: number}} event
+     * @returns {void}
+     */
+    setMotion(event) {
+      const trackId = asId(event.track_id);
+      let state = this.motion.get(trackId);
+      if (!state) {
+        state = {
+          track_id: trackId,
+          serial: 0,
+          pattern_id: "",
+          lanes: null,
+          origin_frame: 0,
+          frames_per_beat: 0,
+          slot_start_beat: 0,
+          step_beats: 0,
+          length_steps: 0,
+        };
+        this.motion.set(trackId, state);
+      }
+      state.serial = this.motionSerial;
+      state.pattern_id = asId(event.pattern_id);
+      state.lanes = Array.isArray(event.lanes) && event.lanes.length > 0 ? event.lanes : null;
+      state.origin_frame = Number(event.origin_frame) || 0;
+      state.frames_per_beat = Number(event.frames_per_beat) || 0;
+      state.slot_start_beat = Number(event.slot_start_beat) || 0;
+      state.step_beats = Number(event.step_beats) || 0;
+      state.length_steps = Number(event.length_steps) || 0;
+    }
+
+    /**
+     * @param {string} trackId
+     * @returns {object|null} the motion record standing for this block, or null
+     *   when the track's pattern sweeps nothing right now
+     */
+    motionStateFor(trackId) {
+      const state = this.motion.get(trackId);
+      if (!state || state.serial !== this.motionSerial || state.lanes === null || state.lanes.length === 0) {
+        return null;
+      }
+      return state;
+    }
+
+    /**
+     * @param {object} state a motion record
+     * @param {object} voice a sampler voice
+     * @returns {boolean} whether any lane of the record sweeps this voice's pad
+     */
+    voiceSweeps(state, voice) {
+      const lanes = state.lanes;
+      for (let at = 0; at < lanes.length; at += 1) {
+        if (lanes[at].pad === voice.pad_key) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Write one frame's worth of motion into a voice. A lane whose field the
+     * voice's step locked is left alone: a step's lock beats motion, and motion
+     * beats the pad's own field (which is the voice's starting value).
+     * @param {object} voice a sounding sampler voice
+     * @param {object[]} lanes the pattern's curve
+     * @param {number} stepFrac where the loop stands, in steps
+     * @param {number} lengthSteps the loop's length, in steps (for the wrap)
+     * @returns {void}
+     */
+    applyMotion(voice, lanes, stepFrac, lengthSteps) {
+      for (let at = 0; at < lanes.length; at += 1) {
+        const lane = lanes[at];
+        if (lane.pad !== voice.pad_key) continue;
+        if (voice.locked !== null && voice.locked.indexOf(lane.param) !== -1) continue;
+        this.applyMotionValue(voice, lane.param, motionValueAt(lane.points, stepFrac, lengthSteps));
+      }
+    }
+
+    /**
+     * Put one swept value where the voice reads it.
+     *
+     * A cutoff or a resonance re-tunes the voice's biquad through the very same
+     * `setFilter` the pad itself used, then puts the filter's state back: a
+     * sweep moves a filter, it does not restart one. An envelope time lands on
+     * the stage the voice is in, and `release_ms` on the release still to come.
+     * @param {object} voice
+     * @param {string} param one of `MOTION_RANGES`'s names
+     * @param {number} value the value at this frame
+     * @returns {void}
+     */
+    applyMotionValue(voice, param, value) {
+      const range = MOTION_RANGES[param];
+      if (!range) return;
+      const held = clamp(value, range[0], range[1]);
+      switch (param) {
+        case "pitch":
+          voice.step = voice.reverse_sign * Math.pow(2, held / 12);
+          return;
+        case "gain_db":
+          voice.gain = StudioSamplerVoice.dbToLinear(held) * voice.velocity_gain;
+          return;
+        case "pan": {
+          const pan = StudioSamplerVoice.panCoefficients(held);
+          voice.panLeft = pan.left;
+          voice.panRight = pan.right;
+          return;
+        }
+        case "sustain":
+          voice.sustain = held;
+          if (voice.stage === STAGE_SUSTAIN) voice.level = held;
+          return;
+        case "attack_ms":
+          voice.attackFrames = StudioSamplerVoice.msToFrames(held, sampleRate);
+          if (voice.stage === STAGE_ATTACK && voice.attackFrames > 0) voice.increment = 1 / voice.attackFrames;
+          return;
+        case "decay_ms":
+          voice.decayFrames = StudioSamplerVoice.msToFrames(held, sampleRate);
+          if (voice.stage === STAGE_DECAY && voice.decayFrames > 0) {
+            voice.increment = (1 - voice.sustain) / voice.decayFrames;
+          }
+          return;
+        case "release_ms":
+          voice.releaseFrames = StudioSamplerVoice.msToFrames(held, sampleRate);
+          return;
+        case "cutoff_hz":
+          voice.motion_cutoff = held;
+          this.retuneVoice(voice);
+          return;
+        case "resonance":
+          voice.motion_resonance = held;
+          this.retuneVoice(voice);
+          return;
+        default:
+          return;
+      }
+    }
+
+    /**
+     * Re-tune one voice's filter to its swept cutoff and resonance, keeping the
+     * filter's four state values on each channel: the coefficients are the very
+     * ones `sampler-voice.js` computes for the pad's own filter, so a swept
+     * filter sounds like a filter and a sweep never clicks.
+     * @param {object} voice
+     * @returns {void}
+     */
+    retuneVoice(voice) {
+      const x1a = voice.x1a;
+      const x2a = voice.x2a;
+      const y1a = voice.y1a;
+      const y2a = voice.y2a;
+      const x1b = voice.x1b;
+      const x2b = voice.x2b;
+      const y1b = voice.y1b;
+      const y2b = voice.y2b;
+      StudioSamplerVoice.setFilter(
+        voice,
+        voice.motion_filter_type,
+        voice.motion_cutoff,
+        voice.motion_resonance,
+        sampleRate,
+      );
+      voice.x1a = x1a;
+      voice.x2a = x2a;
+      voice.y1a = y1a;
+      voice.y2a = y2a;
+      voice.x1b = x1b;
+      voice.x2b = x2b;
+      voice.y1b = y1b;
+      voice.y2b = y2b;
     }
 
     /**
@@ -2127,6 +2472,22 @@
         sampleRate: sampleRate,
       });
       if (!started) return;
+
+      // What a motion lane needs of this voice: the pad it came from, the lock
+      // names its step carried (a lock beats motion), and the values a lane
+      // overrides — the velocity gain, the reverse direction, and the filter the
+      // voice was built with.
+      const velocity = Number(event.v);
+      const velocityHeld = Number.isFinite(velocity) ? clamp(velocity, 1, 127) : 127;
+      const cutoff = Number(field("cutoff_hz", filter.cutoff_hz));
+      const resonance = Number(field("resonance", filter.resonance));
+      voice.pad_key = bankId + "." + index;
+      voice.locked = locks ? Object.keys(locks) : null;
+      voice.velocity_gain = (velocityHeld / 127) * (velocityHeld / 127);
+      voice.reverse_sign = field("reverse", pad.reverse === true) === true ? -1 : 1;
+      voice.motion_filter_type = typeof filterType === "string" ? filterType : "off";
+      voice.motion_cutoff = Number.isFinite(cutoff) ? clamp(cutoff, 20, 20000) : 20000;
+      voice.motion_resonance = Number.isFinite(resonance) ? clamp(resonance, 0, 1) : 0;
 
       // A new voice in choke group n cuts every other voice of that group on
       // this track, over the crossfade length.

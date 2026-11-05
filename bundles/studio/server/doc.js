@@ -48,9 +48,19 @@
  *                     bank_id, index, sample_id, slice_id, name, mode, pitch,
  *                     gain_db, pan, attack_ms, decay_ms, sustain, release_ms,
  *                     filter {type, cutoff_hz, resonance}, choke, reverse}
- *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order}
+ *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order,
+ *                     motion}
  *   steps     Y.Map of "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" → Y.Map
  *                     {clip_id, pattern_id, at, bank_id, index, v, locks}
+ *
+ * A pattern's `motion` is its motion lanes: `<bank_id>.<index>|<param>` →
+ * `[{step_frac, value}]`, sorted by `step_frac`, with `step_frac` a fractional
+ * step position inside the clip's loop and `param` one of the pad's numeric
+ * lock fields (see `MOTION_PARAMS`). Motion rides ON the pattern object rather
+ * than in a container of its own, so removing a pattern takes its motion with
+ * it in the same step; each lane is still its own history field, named by the
+ * synthetic ref `motion:<clip_id>/<pattern_id>/<lane>`, which is what keeps two
+ * lanes of one pattern undoable apart (`writeMotionLane` below).
  *
  * A sampler track's device says only `{engine: "sampler"}`: the kit lives in
  * `banks` and `pads`, never inside the device, so editing one pad never
@@ -105,6 +115,7 @@ import * as Y from "yjs";
  *         sampleSamples: number, slicesPerSample: number,
  *         stepPositions: number, stepEntriesPerPattern: number,
  *         patternsPerClip: number, chainLength: number, locksPerStep: number,
+ *         motionPointsPerLane: number, motionLanesPerPattern: number,
  *         midiMaps: number}}
  */
 /**
@@ -140,6 +151,10 @@ export const LIMITS = Object.freeze({
   patternsPerClip: 16,
   chainLength: 64,
   locksPerStep: 8,
+  // A pattern's motion lanes (plan 1c, Task 10): one lane per pad field, and a
+  // lane of hand-drawn points that stays a curve, not a sample stream.
+  motionPointsPerLane: 4096,
+  motionLanesPerPattern: 32,
   // The MIDI mapping table of one song (plan 1c, Limits): every message the
   // operator's controllers drive, proposed or live.
   midiMaps: 256,
@@ -189,6 +204,28 @@ export const PAD_FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
 
 /** The two ways a pad's voice ends: it runs out, or its step releases it. */
 export const PAD_MODES = Object.freeze(["oneshot", "gate"]);
+
+/**
+ * The pad fields a motion lane may sweep, each with the range the pad's own
+ * field holds. They are exactly the pad's numeric lock fields: a lane overrides
+ * one of them for every voice of its pad while the pattern plays, below a
+ * step's lock (see the plan's Task 10).
+ * @type {Readonly<Object<string, Readonly<number[]>>>}
+ */
+export const MOTION_PARAM_RANGES = Object.freeze({
+  pitch: Object.freeze([-24, 24]),
+  gain_db: Object.freeze([-60, 12]),
+  pan: Object.freeze([-1, 1]),
+  attack_ms: Object.freeze([0, 10000]),
+  decay_ms: Object.freeze([0, 10000]),
+  sustain: Object.freeze([0, 1]),
+  release_ms: Object.freeze([0, 10000]),
+  cutoff_hz: Object.freeze([20, 20000]),
+  resonance: Object.freeze([0, 1]),
+});
+
+/** The pad fields one motion lane may sweep, in the order the pad controls list them. */
+export const MOTION_PARAMS = Object.freeze(Object.keys(MOTION_PARAM_RANGES));
 
 /** 1a is four beats to the bar, in every scene. */
 export const BEATS_PER_BAR = 4;
@@ -247,7 +284,7 @@ export const STEP_GUARDS = Symbol("studio.step-guards");
 
 /**
  * The ref a command, a lock or a history entry names one object by.
- * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"} kind
+ * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"|"motion"} kind
  * @param {string} id
  * @returns {string} e.g. `"clip:abc"`, `"take:abc"`, or `"song:meta"` for the song itself
  */
@@ -891,6 +928,75 @@ export function stepKey(clipId, patternId, at, bankId, index) {
 }
 
 /**
+ * The name one motion lane goes by: the pad it sweeps and the field it moves,
+ * e.g. `"kit-a.3|cutoff_hz"`. A lane is one pad field of one pattern, so this
+ * name is the lane's whole identity.
+ * @param {string} bankId
+ * @param {number} index
+ * @param {string} param
+ * @returns {string}
+ */
+export function motionLane(bankId, index, param) {
+  return `${bankId}.${index}|${param}`;
+}
+
+/**
+ * The key one motion lane lives under in the synthetic `motion` refs: the clip
+ * and the pattern name it, then the lane itself. (A lane is stored inside its
+ * pattern's `motion` field; this key is what makes one lane one history field.)
+ * @param {string} clipId
+ * @param {string} patternId
+ * @param {string} lane
+ * @returns {string}
+ */
+export function motionKey(clipId, patternId, lane) {
+  return `${clipId}/${patternId}/${lane}`;
+}
+
+/**
+ * Split a motion ref id back into its clip, its pattern and its lane.
+ * @param {string} id - `"<clip_id>/<pattern_id>/<bank_id>.<index>|<param>"`
+ * @returns {{clipId: string, patternId: string, lane: string}|null}
+ */
+export function motionParts(id) {
+  const text = String(id ?? "");
+  const first = text.indexOf("/");
+  const second = first < 0 ? -1 : text.indexOf("/", first + 1);
+  if (first <= 0 || second < 0 || second === text.length - 1) return null;
+  return { clipId: text.slice(0, first), patternId: text.slice(first + 1, second), lane: text.slice(second + 1) };
+}
+
+/**
+ * Split one motion lane name back into the pad it sweeps and the field it moves.
+ * @param {string} lane - `"<bank_id>.<index>|<param>"`
+ * @returns {{bankId: string, index: number, param: string}|null}
+ */
+export function motionLaneParts(lane) {
+  const text = String(lane ?? "");
+  const bar = text.lastIndexOf("|");
+  if (bar <= 0 || bar === text.length - 1) return null;
+  const pad = text.slice(0, bar);
+  const dot = pad.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const index = Number(pad.slice(dot + 1));
+  if (!Number.isInteger(index) || index < 0) return null;
+  return { bankId: pad.slice(0, dot), index, param: text.slice(bar + 1) };
+}
+
+/**
+ * A pattern's motion lanes as plain JSON, keyed by lane name.
+ * @param {Y.Map<any>|null|undefined} pattern
+ * @returns {Object<string, Array<{step_frac: number, value: number}>>} empty when
+ *   the pattern has no motion
+ */
+export function motionOf(pattern) {
+  const stored = pattern?.get?.("motion");
+  if (stored === undefined || stored === null) return {};
+  const plain = toPlain(stored);
+  return plain && typeof plain === "object" && !Array.isArray(plain) ? plain : {};
+}
+
+/**
  * Every sample in the song, in the order the map holds them. A song without a
  * samples container has none.
  * @param {Y.Doc} doc
@@ -1199,8 +1305,10 @@ export function sampleUsers(snap, sampleId) {
  *   "<track_id>/<bank_id>", a pad by "<track_id>/<bank_id>/<index>", a pattern
  *   by "<clip_id>/<pattern_id>" and a step by
  *   "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" — so the engine can read a
- *   pad or a step without walking the track or the clip. A song written before
- *   the sampler existed reads all six as empty objects.
+ *   pad or a step without walking the track or the clip. A pattern carries its
+ *   own `motion` lanes (lane name → sorted points), which is how the engine
+ *   reads a curve without a second lookup. A song written before the sampler
+ *   existed reads all six as empty objects.
  *   `midi_maps` is a plain object too, keyed by the mapping's own id, so the
  *   page and the router read the whole table in one place; a song nobody has
  *   mapped a controller in reads it as an empty object.
@@ -1533,10 +1641,12 @@ function arrangementReasons(song) {
  * song at once: every bank sits on a sampler track, every pad's sample is in
  * the song and the slice it names belongs to that sample, every chain entry is
  * a pattern of its own clip, every step names a pad of its clip's track inside
- * the clip's step positions, a slice stays inside its sample's frames, and no
- * count outgrows its limit (banks per kit, pads per bank, samples per song,
- * slices per sample, patterns per clip, chain length, step entries per pattern,
- * locks per step).
+ * the clip's step positions, every motion lane names a pad field of the clip's
+ * track with its points inside the loop and inside that field's own range, a
+ * slice stays inside its sample's frames, and no count outgrows its limit
+ * (banks per kit, pads per bank, samples per song, slices per sample, patterns
+ * per clip, chain length, step entries per pattern, locks per step, motion
+ * points per lane, motion lanes per pattern).
  *
  * The history dry-runs an undo's plan on a clone and calls this, so a plan that
  * would leave, say, a pad pointing at a slice a newer edit removed is refused
@@ -1735,6 +1845,69 @@ function samplerReasons(song) {
     );
   }
 
+  // Motion: one lane per pad field, each point inside the loop and inside the
+  // field's own range. A lane names a pad of the clip's track and a field the
+  // pad's own controls offer, so a curve can never aim at something the pad
+  // does not have.
+  for (const pattern of patterns) {
+    const motion = pattern.motion && typeof pattern.motion === "object" ? pattern.motion : {};
+    const lanes = Object.keys(motion);
+    if (lanes.length === 0) continue;
+    const clip = song.clips[pattern.clip_id];
+    const which = `The pattern "${nameOrId(pattern.name, pattern.id)}"`;
+    if (lanes.length > LIMITS.motionLanesPerPattern) {
+      reasons.push(
+        `${which} would hold ${lanes.length} motion lanes; a pattern holds at most ${LIMITS.motionLanesPerPattern} motion lanes.`,
+      );
+    }
+    const positions = Number(clip?.length_steps) || 0;
+    const trackId = typeof clip?.track_id === "string" ? clip.track_id : "";
+    for (const lane of lanes) {
+      const laneParts = motionLaneParts(lane);
+      if (!laneParts) {
+        reasons.push(`${which} would hold the motion lane "${lane}", which names no pad and parameter.`);
+        continue;
+      }
+      const range = MOTION_PARAM_RANGES[laneParts.param];
+      if (!range) {
+        reasons.push(
+          `${which} would sweep "${laneParts.param}" on pad ${laneParts.index + 1}, which is not one of a pad's numeric fields (${MOTION_PARAMS.join(", ")}).`,
+        );
+        continue;
+      }
+      if (trackId !== "" && !padKeys.has(padKey(trackId, laneParts.bankId, laneParts.index))) {
+        reasons.push(
+          `${which} would sweep pad ${laneParts.index + 1} of bank "${laneParts.bankId}", which is not on the clip's track.`,
+        );
+        continue;
+      }
+      const points = Array.isArray(motion[lane]) ? motion[lane] : [];
+      if (points.length > LIMITS.motionPointsPerLane) {
+        reasons.push(
+          `${which} would hold ${points.length} motion points on one lane; a lane holds at most ${LIMITS.motionPointsPerLane} motion points.`,
+        );
+        continue;
+      }
+      if (!(positions > 0)) continue;
+      for (const point of points) {
+        const stepFrac = Number(point.step_frac);
+        const amount = Number(point.value);
+        if (!(stepFrac >= 0 && stepFrac < positions)) {
+          reasons.push(
+            `${which} would put a motion point at step ${beatText(stepFrac)}, outside its ${positions} step positions.`,
+          );
+          break;
+        }
+        if (!(amount >= range[0] && amount <= range[1])) {
+          reasons.push(
+            `${which} would sweep "${laneParts.param}" to ${amount} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
+          );
+          break;
+        }
+      }
+    }
+  }
+
   return reasons;
 }
 
@@ -1887,6 +2060,11 @@ function barsText(bars) {
  *     touching its neighbours;
  *   - `"midi:abc|*"` does the same for one MIDI mapping, and a plain field name
  *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
+ *   - `"motion:<clip>/<pattern>/<bank>.<index>|<param>|*"` writes ONE motion
+ *     lane of one pattern: an array of `{step_frac, value}` points, or `null`
+ *     to take the lane away. The lane lives inside its pattern's `motion`
+ *     field, and its other lanes are left exactly as they are, so two lanes of
+ *     one pattern undo independently;
  *   - `"placement:abc|*"`, `"marker:abc|*"` and `"section:abc|*"` do the same
  *     for the three arrangement objects, and `"placement:abc|bars"` (and its
  *     siblings) writes one field of one of them;
@@ -1943,6 +2121,9 @@ export function applyBeforeAfter(doc, plan) {
       case "step":
       case "midi":
         writeContainerObject(doc, target.kind, target.id, split.field, value);
+        break;
+      case "motion":
+        writeMotionLane(doc, target.id, split.field, value);
         break;
       case "placement":
       case "marker":
@@ -2001,6 +2182,15 @@ export function readField(doc, ref, field = "*") {
     if (!object) return ABSENT;
     if (field === "*") return toPlain(object);
     return readPath(object, fieldPath(field));
+  }
+
+  if (target.kind === "motion") {
+    const parts = motionParts(target.id);
+    const pattern = parts ? getPattern(doc, parts.clipId, parts.patternId) : null;
+    if (!pattern) return ABSENT;
+    const motion = motionOf(pattern);
+    if (!Object.hasOwn(motion, parts.lane)) return ABSENT;
+    return cloneJson(motion[parts.lane]);
   }
 
   if (target.kind === "placement" || target.kind === "marker" || target.kind === "section") {
@@ -2303,6 +2493,37 @@ function writeArrangementObject(doc, kind, id, field, value) {
   writeField(object, field, value);
 }
 
+/**
+ * Write one motion lane of one pattern, or (with `null`) take it away.
+ *
+ * A lane is a field of its pattern's `motion` object, and this writes that
+ * object back with only the one lane changed: the pattern's other lanes are
+ * copied through untouched, so a lane's undo never rolls back its neighbour.
+ * The pattern itself must be there — motion belongs to a pattern, and removing
+ * the pattern removes every lane of it in the same step.
+ * @param {Y.Doc} doc
+ * @param {string} id - `"<clip_id>/<pattern_id>/<lane>"`
+ * @param {string} field - always `"*"`: a lane is one whole field
+ * @param {any} value - the lane's points, or `null`
+ * @returns {void}
+ */
+function writeMotionLane(doc, id, field, value) {
+  if (field !== "*") {
+    throw new Error(`Studio: "motion:${id}|${field}" is not how one motion lane is written; a lane is one whole field`);
+  }
+  const parts = motionParts(id);
+  if (!parts) throw new Error(`Studio: "motion:${id}" does not name a clip, a pattern and a lane`);
+  const pattern = getPattern(doc, parts.clipId, parts.patternId);
+  if (!pattern) {
+    if (value === ABSENT) return;
+    throw new Error(`Studio: there is no pattern "${parts.patternId}" on clip "${parts.clipId}" to write motion to`);
+  }
+  const motion = motionOf(pattern);
+  if (value === ABSENT) delete motion[parts.lane];
+  else motion[parts.lane] = cloneJson(value);
+  pattern.set("motion", cloneJson(motion) ?? {});
+}
+
 /** @returns {any} the value without its internal `_index`/`_after`/`_before` hints. */
 function stripHints(value) {
   const object = toPlain(value) ?? {};
@@ -2500,7 +2721,41 @@ function normalizePattern(id, value) {
     clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
     name: typeof plain.name === "string" ? plain.name : "",
     order: integerOr(plain.order, 0),
+    motion: normalizeMotion(plain.motion),
   };
+}
+
+/**
+ * A pattern's motion lanes as a snapshot carries them: lane name → its points,
+ * sorted by step position. A point that is not two finite numbers is dropped,
+ * so the engine and the checks only ever read a usable curve.
+ * @param {unknown} value
+ * @returns {Object<string, Array<{step_frac: number, value: number}>>}
+ */
+function normalizeMotion(value) {
+  const motion = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  const out = {};
+  if (!motion) return out;
+  for (const lane of Object.keys(motion)) {
+    const raw = motion[lane];
+    if (!Array.isArray(raw)) continue;
+    const points = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const stepFrac = Number(item.step_frac);
+      const amount = Number(item.value);
+      if (!Number.isFinite(stepFrac) || !Number.isFinite(amount)) continue;
+      points.push({ step_frac: stepFrac, value: amount });
+    }
+    points.sort(byMotionStep);
+    if (points.length > 0) out[lane] = points;
+  }
+  return out;
+}
+
+/** @returns {number} the step order of two motion points. */
+function byMotionStep(a, b) {
+  return a.step_frac - b.step_frac;
 }
 
 /** A step as a snapshot carries it: every field present, nothing extra. */

@@ -94,6 +94,8 @@ const COMMAND_IDS = [
   "midi.map",
   "midi.propose_profile",
   "midi.remove",
+  "motion.clear",
+  "motion.write",
   "pad.assign",
   "pad.assign_if_empty",
   "pad.clear",
@@ -194,6 +196,15 @@ const MINIMAL_ARGS = {
   "step.toggle": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0 },
   "step.set": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0, v: 100 },
   "step.clear_locks": { clip_id: "c1", pattern_id: "p1", at: 0, bank_id: "b1", index: 0 },
+  "motion.write": {
+    clip_id: "c1",
+    pattern_id: "p1",
+    bank_id: "b1",
+    index: 0,
+    param: "cutoff_hz",
+    points: [{ step_frac: 0, value: 1200 }],
+  },
+  "motion.clear": { clip_id: "c1", pattern_id: "p1", bank_id: "b1", index: 0 },
   "chain.set": { clip_id: "c1", chain: [] },
   "clip.add_pattern": { track_id: "t1", scene_id: "s1" },
   "midi.map": {
@@ -703,6 +714,28 @@ test("apply returns before/after for every touched field", (t) => {
       id: "step.clear_locks",
       args: { clip_id: "kit-clip", pattern_id: "a", at: 0, bank_id: "kit-b", index: 0 },
       keys: ["step:kit-clip/a/0/kit-b.0|locks.cutoff_hz"],
+    },
+    // A motion lane is one field of its pattern: writing the curve and clearing
+    // it are one key each, whatever the pattern's other lanes hold.
+    {
+      id: "motion.write",
+      args: {
+        clip_id: "kit-clip",
+        pattern_id: "a",
+        bank_id: "kit-b",
+        index: 0,
+        param: "cutoff_hz",
+        points: [
+          { step_frac: 0, value: 400 },
+          { step_frac: 4, value: 6000 },
+        ],
+      },
+      keys: ["motion:kit-clip/a/kit-b.0|cutoff_hz|*"],
+    },
+    {
+      id: "motion.clear",
+      args: { clip_id: "kit-clip", pattern_id: "a", bank_id: "kit-b", index: 0, param: "cutoff_hz" },
+      keys: ["motion:kit-clip/a/kit-b.0|cutoff_hz|*"],
     },
     {
       id: "chain.set",

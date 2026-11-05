@@ -717,6 +717,24 @@ const STYLES = `
   }
   .studio .st-chain-btn:disabled { opacity: 0.35; cursor: default; }
   .studio .st-chain-add { margin-left: 4px; }
+  /* A pattern's motion lanes: one line per swept pad field, its curve drawn as
+     one bar per point, and the Clear that takes the lane off. */
+  .studio .st-motion {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+    font-size: 12px; color: var(--st-muted);
+  }
+  .studio .st-motion-rec { color: var(--st-human); }
+  .studio .st-motion-lane {
+    display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px;
+    border: 1px solid #3A3F46; border-radius: 999px; background: #24282D;
+  }
+  .studio .st-motion-name { font-family: 'JetBrains Mono', ui-monospace, monospace; font-weight: 600; }
+  .studio .st-motion-points { display: inline-flex; align-items: flex-end; gap: 1px; height: 18px; }
+  .studio .st-motion-point {
+    display: block; width: 2px; min-height: 2px; background: var(--st-human);
+    border-radius: 1px;
+  }
+  .studio .st-motion-count { color: var(--st-muted); font-size: 11px; }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }

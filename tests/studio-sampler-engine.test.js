@@ -34,6 +34,7 @@ const SYMBOLS_FILE = fileURLToPath(
 const bundleRequire = createRequire(join(ENGINE_DIR, "x.js"));
 const { OfflineAudioContext } = bundleRequire("node-web-audio-api");
 const studioEngine = bundleRequire(join(ENGINE_DIR, "engine-client.js"));
+const StudioSequencer = bundleRequire(join(ENGINE_DIR, "sequencer.js"));
 
 // `startRendering()` releases the worklet thread; a test that stops before it
 // gets there has to release it by hand or the process never exits.
@@ -219,6 +220,51 @@ function peakOf(samples) {
     if (value > peak) peak = value;
   }
   return peak;
+}
+
+/** @param {Float32Array} samples @returns {number} the largest absolute sample over a range */
+function peakBetween(samples, from, to) {
+  return peakOf(samples.subarray(from, to));
+}
+
+/**
+ * The step position the motion descriptors of a render put on one frame, read
+ * exactly the way the processor reads it: from the song's clock alone.
+ * @param {Array<{frame: number, motion: object}>} starts the descriptors, in frame order
+ * @param {number} frame an absolute frame
+ * @returns {number|null} the step position, or null when no curve stands there
+ */
+function stepFracAt(starts, frame) {
+  let standing = null;
+  for (let at = 0; at < starts.length; at += 1) {
+    if (starts[at].frame > frame) break;
+    standing = starts[at].motion;
+  }
+  if (!standing || !standing.lanes) return null;
+  const beat = (frame - standing.origin_frame) / standing.frames_per_beat;
+  return (beat - standing.slot_start_beat) / standing.step_beats;
+}
+
+/**
+ * Every motion descriptor a render produces, as absolute frames, at one block
+ * size. A different block size has to describe the very same curve for the very
+ * same frame; that is what makes the rendered sweep block-size independent.
+ * @param {object} song
+ * @param {number} blockSize
+ * @param {number} frames
+ * @returns {Array<{frame: number, motion: object}>}
+ */
+function motionStarts(song, blockSize, frames) {
+  const seq = StudioSequencer.create({ sampleRate: SAMPLE_RATE });
+  seq.setSong(song);
+  seq.launchScene("scene-1");
+  seq.play();
+  const starts = [];
+  for (let at = 0; at < frames; at += blockSize) {
+    const count = Math.min(blockSize, frames - at);
+    for (const motion of seq.block(at, count).motions) starts.push({ frame: at + motion.frame, motion });
+  }
+  return starts;
 }
 
 /** @param {BaseAudioContext} context @returns {Promise<void>} */
@@ -866,6 +912,144 @@ test("a pad whose sample is missing is silent and reported once", async () => {
   assert.equal(peakOf(right), 0, "a pad whose sample is not loaded plays nothing on the right either");
   assert.deepEqual(errors, ["Sample not-loaded is not loaded yet."], "it is reported exactly once");
   assert.deepEqual(needed, ["not-loaded"], "and the client is asked for the sample exactly once");
+});
+
+test("a recorded cutoff sweep plays back on the next loop", async () => {
+  const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4;
+  const STEPS = 16;
+  const STEP_FRAMES = FRAMES_PER_SIXTEENTH;
+
+  // A 4 kHz tone: a low pass at 200 Hz all but removes it and a low pass above
+  // it passes it whole, so the rendered level says what the cutoff was at that
+  // frame. One 16th long, so no two voices overlap.
+  const sampleFrames = STEP_FRAMES;
+  const pcm = new Float32Array(sampleFrames);
+  for (let at = 0; at < sampleFrames; at += 1) {
+    pcm[at] = Math.sin((2 * Math.PI * 4000 * at) / SAMPLE_RATE) * 0.5;
+  }
+
+  // The curve: shut at 200 Hz until step 7.5, then wide open at 16 kHz on step
+  // 8, and back down towards 200 Hz over the rest of the loop (the wrap).
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1", { length_steps: STEPS })],
+    pads: [
+      pad("track-1", 0, { filter: { type: "lp", cutoff_hz: 20000, resonance: 0 } }),
+    ],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, sampleFrames) },
+    steps: [step("clip-1", 0, 0, { v: 127 }), step("clip-1", 8, 0, { v: 127 })],
+    patterns: {
+      "clip-1/a": {
+        id: "a",
+        clip_id: "clip-1",
+        name: "A",
+        order: 0,
+        motion: {
+          [`${BANK}.0|cutoff_hz`]: [
+            { step_frac: 0, value: 200 },
+            { step_frac: 7.5, value: 200 },
+            { step_frac: 8, value: 16000 },
+          ],
+        },
+      },
+    },
+  });
+
+  const seconds = (2 * FRAMES_PER_BAR) / SAMPLE_RATE;
+  const { left } = await renderSamplerSong(song, {
+    seconds,
+    samples: [{ id: SAMPLE_ID, channels: [pcm] }],
+  });
+
+  // The first voice plays through a shut filter and the second one, half a bar
+  // in, through an open one: the sweep is audible inside one loop.
+  assert.ok(
+    peakBetween(left, 0, STEP_FRAMES) < 0.05,
+    `the sweep's start has to be shut, peak was ${peakBetween(left, 0, STEP_FRAMES)}`,
+  );
+  assert.ok(
+    peakBetween(left, 8 * STEP_FRAMES, 9 * STEP_FRAMES) > 0.2,
+    `the sweep's middle has to be open, peak was ${peakBetween(left, 8 * STEP_FRAMES, 9 * STEP_FRAMES)}`,
+  );
+
+  // And the next loop plays the very same sweep: every frame of bar two is the
+  // frame of bar one, sample for sample.
+  assert.deepEqual(
+    left.subarray(FRAMES_PER_BAR, FRAMES_PER_BAR * 2),
+    left.subarray(0, FRAMES_PER_BAR),
+    "the second pass of the loop has to be the first pass, frame for frame",
+  );
+
+  // The value of a lane depends on the frame and not on where the host put a
+  // block boundary: the descriptors of a 128-frame render and a 97-frame one
+  // put the very same step position on every frame of the loop.
+  const frames = FRAMES_PER_BAR * 2;
+  const even = motionStarts(song, 128, frames);
+  const odd = motionStarts(song, 97, frames);
+  assert.ok(even.length > 0, "the curve has to be described at all");
+  assert.ok(odd.length > 0, "the curve has to be described at the odd block size too");
+  let sawCurve = false;
+  for (let frame = 0; frame < frames; frame += 1) {
+    const a = stepFracAt(even, frame);
+    const b = stepFracAt(odd, frame);
+    assert.equal(a, b, `frame ${frame}: block sizes 128 and 97 disagree on the step position`);
+    if (a !== null) sawCurve = true;
+  }
+  assert.ok(sawCurve, "the frames have to be inside the curve");
+});
+
+test("a step lock beats motion, motion beats the pad", async () => {
+  const FRAMES_PER_BAR = FRAMES_PER_BEAT * 4;
+  const STEPS = 16;
+  const STEP_FRAMES = FRAMES_PER_SIXTEENTH;
+
+  // The same 4 kHz tone: a shut low pass is silent and an open one passes it, so
+  // each step's level says which of the three values won.
+  const sampleFrames = STEP_FRAMES;
+  const pcm = new Float32Array(sampleFrames);
+  for (let at = 0; at < sampleFrames; at += 1) {
+    pcm[at] = Math.sin((2 * Math.PI * 4000 * at) / SAMPLE_RATE) * 0.5;
+  }
+
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    // The PAD says 16 kHz: a voice that keeps the pad's own field would be loud.
+    clips: [patternClip("clip-1", "track-1", { length_steps: STEPS })],
+    pads: [pad("track-1", 0, { filter: { type: "lp", cutoff_hz: 16000, resonance: 0 } })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, sampleFrames) },
+    steps: [
+      // Step 0 has no lock: the curve's one point (200 Hz) beats the pad.
+      step("clip-1", 0, 0, { v: 127 }),
+      // Step 8 locks 16 kHz: the lock beats the curve.
+      step("clip-1", 8, 0, { v: 127, locks: { cutoff_hz: 16000 } }),
+    ],
+    patterns: {
+      "clip-1/a": {
+        id: "a",
+        clip_id: "clip-1",
+        name: "A",
+        order: 0,
+        // A lane with ONE point is a constant: 200 Hz for the whole loop.
+        motion: { [`${BANK}.0|cutoff_hz`]: [{ step_frac: 0, value: 200 }] },
+      },
+    },
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: (FRAMES_PER_BAR * 2) / SAMPLE_RATE,
+    samples: [{ id: SAMPLE_ID, channels: [pcm] }],
+  });
+
+  // Motion beats the pad: the pad's own 16 kHz never reaches this voice.
+  assert.ok(
+    peakBetween(left, 0, STEP_FRAMES) < 0.05,
+    `motion has to beat the pad's own 16 kHz, peak was ${peakBetween(left, 0, STEP_FRAMES)}`,
+  );
+  // The lock beats motion: this one voice keeps its own 16 kHz.
+  assert.ok(
+    peakBetween(left, 8 * STEP_FRAMES, 9 * STEP_FRAMES) > 0.2,
+    `the lock has to beat the curve's 200 Hz, peak was ${peakBetween(left, 8 * STEP_FRAMES, 9 * STEP_FRAMES)}`,
+  );
 });
 
 test("a dense sampler song renders faster than real time in Node", async () => {
