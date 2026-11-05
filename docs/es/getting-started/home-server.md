@@ -52,7 +52,15 @@ curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 ```
 
-Configura un nombre memorable en tu [consola de administración de Tailscale](https://login.tailscale.com/admin/machines) — renombra la máquina a `crow`. Con MagicDNS activado, tu servidor es accesible en `http://crow:3001` desde cualquier dispositivo en tu red Tailscale.
+Configura un nombre memorable en tu [consola de administración de Tailscale](https://login.tailscale.com/admin/machines) — renombra la máquina a `crow`. Con MagicDNS activado, los dispositivos de tu tailnet alcanzan la máquina como `crow`; para llegar al dashboard por HTTPS, pon el gateway detrás de Tailscale Serve.
+
+El script de instalación se ofrece a hacerlo y muestra la dirección resultante — configura Serve en `443`, así que el Crow's Nest queda en `https://crow.<tu-tailnet>.ts.net/dashboard`. Serve y Funnel comparten el puerto `443` en el mismo host, así que si además expones las rutas públicas del blog por Funnel, mueve el Serve del dashboard a su propio puerto (`8444` abajo) y deja el `443` a Funnel. Para configurarlo a mano, o dejarlo fuera del `443` desde el principio:
+
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+Desde cualquier dispositivo en tu red Tailscale, el Crow's Nest queda en `https://crow.<tu-tailnet>.ts.net:8444/dashboard`. `http://crow:3001` no mantendrá la sesión del navegador desde otro dispositivo: la cookie de sesión de producción es `Secure`, así que necesita el HTTPS que da Serve.
 
 ## Conectar Tu Plataforma de IA
 
@@ -63,7 +71,7 @@ Una vez que Crow esté funcionando, conéctalo desde cualquier plataforma de IA:
 - [Claude Code](/es/platforms/claude-code)
 - [Todas las plataformas](/es/platforms/)
 
-Visita `https://crow.local/setup` (red local) o `http://crow:3001/setup` (Tailscale) para ver el estado de las integraciones.
+Visita `https://crow.local/setup` (red local) o la dirección de Serve de arriba — `https://crow.<tu-tailnet>.ts.net/dashboard` o `https://crow.<tu-tailnet>.ts.net:8444` (Tailscale) — para ver el estado de las integraciones.
 
 ## Gestionar Tu Crow
 

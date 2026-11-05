@@ -94,7 +94,7 @@ When you're happy with a draft:
 
 > "Publish my post about local-first software"
 
-The post becomes publicly accessible at `http://your-server:3001/blog/notes-on-local-first-software`.
+The post becomes publicly accessible at `https://<hostname>.your-tailnet.ts.net/blog/notes-on-local-first-software` once your blog is reachable from the internet (see [Making Your Blog Public](#making-your-blog-public) below). Until then it is served only on the machine itself, at `http://localhost:3001/blog/notes-on-local-first-software`.
 
 To unpublish:
 
@@ -133,10 +133,10 @@ The theme controls:
 
 Feeds are generated automatically:
 
-- **RSS 2.0**: `http://your-server:3001/blog/feed.xml`
-- **Atom**: `http://your-server:3001/blog/feed.atom`
+- **RSS 2.0**: `https://<hostname>.your-tailnet.ts.net/blog/feed.xml`
+- **Atom**: `https://<hostname>.your-tailnet.ts.net/blog/feed.atom`
 
-Feeds include the 20 most recent published posts with full content.
+Feeds include the 20 most recent published posts with full content. On the machine itself the same feeds are at `http://localhost:3001/blog/feed.xml` and `http://localhost:3001/blog/feed.atom`.
 
 ## Exporting
 
@@ -220,7 +220,7 @@ Your blog has no web presence without the gateway running. How your blog becomes
 | Deployment | Blog accessible? | How |
 |---|---|---|
 | **Desktop (stdio)** | No | Gateway not running — no web blog |
-| **Self-hosted (Pi/server)** | LAN only by default | Available at `http://<server-ip>:3001/blog` on your local network |
+| **Self-hosted (Pi/server)** | LAN only by default | Available at `http://<server-ip>:3001/blog` on your local network if port 3001 is reachable; the installer's Caddy also serves `https://<hostname>.local/blog` |
 | **Cloud (Render/Oracle)** | Yes — public internet | Blog at `https://your-crow-server/blog` |
 
 For self-hosted setups, see the sections below to make your blog accessible from the internet.
@@ -233,13 +233,18 @@ For self-hosted setups, see the sections below to make your blog accessible from
 # Enable Funnel in your Tailscale admin console first:
 # https://login.tailscale.com/admin/dns → Enable Funnel
 
-# Then expose your gateway
-tailscale funnel --bg --https=443 http://localhost:3001
+# Then expose only the public blog paths
+tailscale funnel --bg --set-path=/blog http://localhost:3001/blog
+tailscale funnel --bg --set-path=/robots.txt http://localhost:3001/robots.txt
+tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
+tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
+
+Funnel publishes to the whole internet, so only these blog paths go on it — mapping `/` would put the dashboard, MCP and AI chat in front of the public. The Crow's Nest itself stays on `tailscale serve` (tailnet only); see the [Tailscale Setup Guide](../getting-started/tailscale-setup). Serve and Funnel share port `443` on the same host, so keep the dashboard on Serve's own port (`8444`) and let Funnel take `443`.
 
 Your blog is now publicly accessible at `https://<hostname>.your-tailnet.ts.net/blog`.
 
-The Crow's Nest remains private — requests from public IPs get a 403 response because they don't fall within the allowed network ranges. Only the blog (and other unauthenticated routes like `/health` and `/setup`) are effectively visible to the public.
+The Crow's Nest remains private — the gateway answers 403 to any funneled request outside its public allowlist (`/blog`, `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, `/manifest.json`), so the dashboard, MCP and AI chat are not reachable through Funnel by default, even if it is mapped wrong (`CROW_DASHBOARD_PUBLIC=true` or extra entries in `GATEWAY_FUNNEL_PUBLIC_PREFIXES` widen the allowlist).
 
 ### Custom Domain with Caddy
 

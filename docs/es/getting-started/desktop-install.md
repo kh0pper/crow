@@ -115,7 +115,8 @@ Por defecto, tu instalación de escritorio solo funciona en la máquina que ejec
 
 1. Inicia el gateway: `node servers/gateway/index.js`
 2. Instala [Tailscale](https://tailscale.com) en esta máquina y tus otros dispositivos
-3. Accede a tu Crow en `http://<nombre-tailscale>:3001` desde cualquier dispositivo
+3. Pon el gateway detrás de Tailscale Serve, para que otros dispositivos tengan HTTPS: `tailscale serve --bg --https=8444 http://localhost:3001`
+4. Accede a tu Crow en `https://<hostname>.<tu-tailnet>.ts.net:8444/dashboard` desde cualquier dispositivo — `http://<nombre-tailscale>:3001` no mantendrá tu sesión desde otro dispositivo, porque la cookie de sesión es `Secure`
 
 ## Limitaciones
 

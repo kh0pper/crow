@@ -110,20 +110,21 @@ Una vez que el gateway esté en ejecución:
 | Desde | URL |
 |---|---|
 | La misma máquina | `http://localhost:3001/dashboard` |
-| LAN (otro dispositivo en tu red) | `http://<server-ip>:3001/dashboard` |
-| Remoto vía Tailscale | `http://<tailscale-ip>:3001/dashboard` |
-| Remoto vía `tailscale serve` | `https://<hostname>.tail1234.ts.net/dashboard` |
+| LAN (otro dispositivo en tu red) | `https://<hostname>.local/dashboard` vía el Caddy del instalador; `http://<server-ip>:3001/dashboard` solo si abriste el puerto 3001 tú mismo |
+| Remoto vía Tailscale | `https://<hostname>.<tu-tailnet>.ts.net:8444/dashboard` — necesita el paso de `tailscale serve` de abajo |
 
 ### Acceso remoto con `tailscale serve`
 
-Si quieres HTTPS y un hostname apropiado sin exponer el Crow's Nest a internet:
+Si quieres HTTPS y un hostname apropiado sin exponer el Crow's Nest a internet, pon el gateway detrás de Tailscale Serve en el servidor:
 
 ```bash
 # Servir el gateway por Tailscale con un certificado HTTPS válido
-tailscale serve --bg --https=443 http://localhost:3001
+tailscale serve --bg --https=8444 http://localhost:3001
 ```
 
-Esto hace que el Crow's Nest esté disponible en `https://<hostname>.your-tailnet.ts.net/dashboard` desde cualquier dispositivo en tu red Tailscale. Solo los dispositivos conectados a Tailscale pueden alcanzarlo.
+Esto hace que el Crow's Nest esté disponible en `https://<hostname>.<tu-tailnet>.ts.net:8444/dashboard` desde cualquier dispositivo en tu red Tailscale. Solo los dispositivos conectados a Tailscale pueden alcanzarlo. Si Serve se configuró en `443` (lo que ofrece hacer el paso de Tailscale del instalador), la dirección no lleva puerto: `https://<hostname>.<tu-tailnet>.ts.net/dashboard`.
+
+Serve y Funnel comparten el puerto `443` en el mismo host, así que deja el dashboard en su propio puerto de Serve (`8444` aquí) y que Funnel se quede con el `443` para las rutas públicas del blog. Una instalación de producción marca su cookie de sesión como `Secure`, así que el navegador de otro dispositivo necesita la dirección HTTPS de Serve — `http://crow:3001` es para el servidor mismo.
 
 ## Primer inicio de sesión
 

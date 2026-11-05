@@ -61,7 +61,15 @@ curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 ```
 
-Set a memorable hostname in your [Tailscale admin console](https://login.tailscale.com/admin/machines) — rename the machine to `crow`. With MagicDNS enabled, your server is accessible at `http://crow:3001` from any device on your Tailscale network.
+Set a memorable hostname in your [Tailscale admin console](https://login.tailscale.com/admin/machines) — rename the machine to `crow`. With MagicDNS enabled, devices on your tailnet can reach the machine as `crow`; to reach the dashboard over HTTPS, put the gateway behind Tailscale Serve.
+
+The install script offers to do this for you and prints the resulting address — it wires Serve on `443`, so the Crow's Nest is at `https://crow.<your-tailnet>.ts.net/dashboard`. Serve and Funnel share port `443` on the same host, so if you also funnel the public blog paths, move the dashboard's Serve to its own port (`8444` below) and leave `443` to Funnel. To wire it by hand, or to keep it off `443` from the start:
+
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+From any device on your Tailscale network, the Crow's Nest is then at `https://crow.<your-tailnet>.ts.net:8444/dashboard`. Plain `http://crow:3001` will not keep a browser logged in from another device: a production session cookie is `Secure`, so it needs the HTTPS that Serve provides.
 
 See the [Tailscale Setup Guide](./tailscale-setup) for advanced configuration, including HTTPS certificates and Tailscale Funnel for public blog access.
 
@@ -89,7 +97,7 @@ Once Crow is running, connect it from any AI platform:
 - [Claude Code](../platforms/claude-code)
 - [All platforms](../platforms/)
 
-Visit `https://crow.local/setup` (local network) or `http://crow:3001/setup` (Tailscale) to see integration status and endpoint URLs.
+Visit `https://crow.local/setup` (local network) or the Serve address above — `https://crow.<your-tailnet>.ts.net/dashboard` or `https://crow.<your-tailnet>.ts.net:8444` (Tailscale) — to see integration status and endpoint URLs.
 
 ## Managing Your Crow
 

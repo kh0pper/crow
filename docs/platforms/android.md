@@ -43,7 +43,7 @@ On Android 8+, this setting is per-app. You only need to allow the browser you u
 
 ### Step 4: Connect to your gateway
 
-1. Enter your gateway URL (e.g., `http://100.64.20.2:3001` or `https://your-server.ts.net`)
+1. Enter your gateway URL — for a gateway on your tailnet that is `https://<hostname>.<tailnet>.ts.net:8444`, the address the `tailscale serve` step in the [Tailscale Setup guide](../getting-started/tailscale-setup) creates (on the same Wi-Fi you can also use `http://<server-ip>:3001` if port 3001 is reachable)
 2. Tap **Test Connection** to verify
 3. Log in with your Crow's Nest password
 
@@ -52,7 +52,7 @@ On Android 8+, this setting is per-app. You only need to allow the browser you u
 If you prefer not to install an APK, you can add the Crow's Nest as a home screen app directly from Chrome:
 
 1. Open Chrome on your Android device
-2. Navigate to your Crow's Nest URL (e.g., `http://100.64.20.2:3001`)
+2. Navigate to your Crow's Nest URL (e.g., `https://<hostname>.<tailnet>.ts.net:8444/dashboard`)
 3. Log in to the Crow's Nest
 4. Tap the **three-dot menu** (top right)
 5. Tap **Add to Home Screen**
@@ -67,7 +67,12 @@ If your Crow gateway runs on a home server or local network, install Tailscale t
 1. Install [Tailscale from the Play Store](https://play.google.com/store/apps/details?id=com.tailscale.ipn)
 2. Open Tailscale and sign in with the same account used on your server
 3. Toggle Tailscale **on**
-4. Use your server's Tailscale IP as the gateway URL (e.g., `http://100.64.20.2:3001`)
+4. On the server, put the gateway behind Tailscale Serve once: `tailscale serve --bg --https=8444 http://localhost:3001` (see the [Tailscale Setup guide](../getting-started/tailscale-setup))
+5. Use `https://<hostname>.<tailnet>.ts.net:8444` as the gateway URL
+
+::: info Why not http://100.x.x.x:3001
+A production install marks its session cookie `Secure`, so a browser refuses to keep a login over plain HTTP: logging in at `http://100.x.x.x:3001` fails. Reach Crow through Serve's HTTPS address instead.
+:::
 
 ::: tip
 Tailscale runs in the background with minimal battery impact. Your Crow connection stays available as long as Tailscale is active.

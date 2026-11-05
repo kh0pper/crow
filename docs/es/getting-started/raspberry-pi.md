@@ -181,11 +181,16 @@ Una vez instalado Tailscale, puedes usar [Tailscale Funnel](https://tailscale.co
 # Primero habilita Funnel en tu consola de administración de Tailscale:
 # https://login.tailscale.com/admin/dns → Enable Funnel
 
-# Exponer tu gateway públicamente
-tailscale funnel --bg --https=443 http://localhost:3001
+# Exponer solo las rutas públicas del blog
+tailscale funnel --bg --set-path=/blog http://localhost:3001/blog
+tailscale funnel --bg --set-path=/robots.txt http://localhost:3001/robots.txt
+tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
+tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-Tu blog ahora está en `https://<hostname>.your-tailnet.ts.net/blog`. El Crow's Nest permanece privado — las IPs públicas reciben una respuesta 403, así que en la práctica solo el blog es visible.
+Funnel publica a todo el internet, así que solo estas rutas del blog van en él — mapear `/` pondría la página de inicio de sesión del Crow's Nest frente al público. El Crow's Nest se queda en `tailscale serve` (solo tailnet); consulta la [Guía de Configuración de Tailscale](/es/getting-started/tailscale-setup). Serve y Funnel comparten el puerto `443` en el mismo host, así que deja el dashboard en el puerto propio de Serve (`8444`) y que Funnel se quede con el `443`.
+
+Tu blog ahora está en `https://<hostname>.your-tailnet.ts.net/blog`. El Crow's Nest permanece privado — una solicitud que llegue por Funnel a cualquier otra ruta recibe un 403.
 
 Para definir la URL pública y que los enlaces de RSS/vista previa social sean correctos:
 
