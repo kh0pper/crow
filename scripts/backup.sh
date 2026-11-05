@@ -371,7 +371,17 @@ GITIGNORE
         # Nothing staged may carry identity data or an entry from the secrets
         # directory: refuse the whole commit (and unstage) rather than let one
         # through.
-        STAGED_IDENTITY="$(git diff --cached --name-only | { grep -Ei '(^|/)[^/]*identity|(^|/)secrets(/|$)' || true; })"
+        # Each staged name goes through the same exact rule the S3 step uses
+        # (backup-db.mjs --may-leave), so a stem that merely contains the word
+        # still commits, and the identity copy, identity.json and the keychain
+        # directory never do.
+        STAGED_IDENTITY=""
+        while IFS= read -r staged; do
+          [[ -z "$staged" ]] && continue
+          if ! "$NODE_BIN" "$BACKUP_HELPER" --may-leave "$staged" >/dev/null 2>&1; then
+            STAGED_IDENTITY="$STAGED_IDENTITY $staged"
+          fi
+        done < <(git diff --cached --name-only)
         if [[ -n "$STAGED_IDENTITY" ]]; then
           git reset --quiet
           echo "  Refusing to commit: a staged file carries identity data or an entry from the secrets directory."

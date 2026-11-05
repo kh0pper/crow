@@ -903,12 +903,25 @@ test("backup never copies the secrets folder", async () => {
   assert.ok(tree.some((f) => f.includes("-identity-")), "the identity copy itself is kept (locally)");
 });
 
+/** This instance's owner sidecar for a hand-made backup file (what backup-db.mjs writes). */
+function ownSidecar(ctx, file) {
+  writeFileSync(`${file}.owner.json`, JSON.stringify({
+    instance_id: null,
+    crow_home: join(ctx.home, ".crow"),
+    db_path: join(ctx.data, "crow.db"),
+    label: "primary",
+    tag: null,
+    written_at: new Date().toISOString(),
+  }, null, 2), { mode: 0o600 });
+}
+
 test("restore with-identity puts it back only when it is the same identity or none", async () => {
   const identityCopy = (ctx, ident) => {
     mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
     const p = join(ctx.backupDir, `primary-identity-${today()}.json`);
     writeFileSync(p, identityJson(ident.crowId, ident.seed), { mode: 0o600 });
     chmodSync(p, 0o600);
+    ownSidecar(ctx, p);
     return p;
   };
   const backupDb = (ctx, rows) => {
@@ -1052,10 +1065,11 @@ test("restore with-identity refuses a copy whose seed does not match its crow id
   const backup = join(ctx.backupDir, `primary-${today()}.db`);
   makeDb(backup, ["from the backup"]).close();
 
-  // The claimed crow id, somebody else's seed — no sidecar, so only the seed
-  // check can catch it.
+  // The claimed crow id, somebody else's seed — under this instance's own
+  // sidecar, so only the seed check can catch it.
   const copy = join(ctx.backupDir, `primary-identity-${today()}.json`);
   writeFileSync(copy, identityJson(claimed.crowId, other.seed), { mode: 0o600 });
+  ownSidecar(ctx, copy);
 
   const r = await run(RESTORE_SH, [`primary-${today()}.db`, "--with-identity"], envFor(ctx));
   assert.notEqual(r.status, 0, "a copy whose seed does not give its crow id must stop the restore");
@@ -1375,4 +1389,18 @@ test("backup refuses an answering gateway that does not say which database it ba
   assert.match(r.out, /update Crow, or stop the gateway and run the backup again/, r.out);
   assert.doesNotMatch(r.out, /making the copy here with better-sqlite3/, "no fall-through to a local copy");
   assert.deepEqual(names(ctx.backupDir).filter((n) => n.endsWith(".db")), [], "no copy was filed");
+});
+test("restore with-identity refuses a copy with no owner record", async () => {
+  const ctx = await ctxNew();
+  const mine = identityFor(IDENTITY_SEED);
+  makeDb(join(ctx.data, "crow.db"), ["keep me"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  makeDb(join(ctx.backupDir, `primary-${today()}.db`), ["from the backup"]).close();
+  const copy = join(ctx.backupDir, `primary-identity-${today()}.json`);
+  writeFileSync(copy, identityJson(mine.crowId, mine.seed), { mode: 0o600 });
+  const r = await run(RESTORE_SH, [`primary-${today()}.db`, "--with-identity"], envFor(ctx));
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /no owner record naming this Crow instance/);
+  assert.equal(existsSync(join(ctx.data, "identity.json")), false, "no identity was installed");
+  assert.deepEqual(memoriesIn(join(ctx.data, "crow.db")), ["keep me"], "and the database was not replaced");
 });

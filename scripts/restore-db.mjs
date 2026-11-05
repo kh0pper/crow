@@ -659,16 +659,6 @@ function readCrowId(file) {
   }
 }
 
-/** The plaintext master seed hex a stored identity.json claims, or null. */
-function readSeedHex(file) {
-  try {
-    const rec = JSON.parse(fs.readFileSync(file, "utf8"));
-    return rec && typeof rec.seed === "string" ? rec.seed : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * True when `seedHex` derives `crowId` — the same derivation every caller of
  * identity.json runs on (deriveInstanceIdentity). A pure check with no I/O, so
@@ -744,11 +734,44 @@ function identityRestore(backupFile, dbPath, { check = false } = {}) {
   // installed here, however well-formed it looks.
   const ctx = localBackupContext(process.env);
   const me = { ...ctx.me, db_path: path.resolve(dbPath) };
-  if (isForeignOwner(readOwner(copy.path), me)) {
+  const owner = readOwner(copy.path);
+  // Restore is strict where the prune is lenient: a copy with no owner record
+  // (or one naming nothing) names no instance, so it is not proven to be ours.
+  if (!owner || (!owner.crow_home && !owner.db_path && !owner.instance_id)) {
+    process.stdout.write(
+      "That identity copy has no owner record naming this Crow instance; it is not restored here.\n",
+    );
+    return 4;
+  }
+  // The same CROW_HOME path exists on another machine too, so the instance id
+  // must also agree whenever both sides have one: a backup folder carried to
+  // new hardware does not restore its plaintext seed there.
+  const otherInstance = owner.instance_id && me.instance_id && owner.instance_id !== me.instance_id;
+  if (otherInstance || isForeignOwner(owner, me)) {
     process.stdout.write("That identity copy belongs to another Crow instance; it is not restored here.\n");
     return 4;
   }
-  const incoming = readCrowId(copy.path);
+  // Read the copy ONCE, without following a link, and judge and write those
+  // same bytes: nothing can swap the file between the check and the copy.
+  let bytes;
+  try {
+    const fd = fs.openSync(copy.path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      if (!fs.fstatSync(fd).isFile()) throw new Error("not a regular file");
+      bytes = fs.readFileSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    process.stdout.write(
+      `refusing to restore ${copy.path}: it could not be read as a plain file (${err.code || err.message}) — ` +
+      `identity.json is not touched\n`,
+    );
+    return 4;
+  }
+  let record = null;
+  try { record = JSON.parse(bytes.toString("utf8")); } catch { record = null; }
+  const incoming = record && typeof record.crowId === "string" && record.crowId ? record.crowId : null;
   if (!incoming) {
     process.stdout.write(
       `refusing to restore ${copy.path}: it carries no crow id, so it is not a Crow identity — ` +
@@ -756,7 +779,7 @@ function identityRestore(backupFile, dbPath, { check = false } = {}) {
     );
     return 4;
   }
-  if (!seedDerivesCrowId(readSeedHex(copy.path), incoming)) {
+  if (!seedDerivesCrowId(record && typeof record.seed === "string" ? record.seed : null, incoming)) {
     process.stdout.write(
       `refusing to restore ${copy.path}: its seed does not derive the crow id it claims (${incoming}) — ` +
       `identity.json is not touched\n`,
@@ -789,7 +812,6 @@ function identityRestore(backupFile, dbPath, { check = false } = {}) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = path.join(dir, `.identity.json.restore-${Date.now()}-${process.pid}.tmp`);
   try {
-    const bytes = fs.readFileSync(copy.path);
     const fd = fs.openSync(tmp, "wx", FILE_MODE);
     try { fs.writeSync(fd, bytes); } finally { fs.closeSync(fd); }
     chmodQuiet(tmp, FILE_MODE);
