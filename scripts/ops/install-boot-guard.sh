@@ -490,7 +490,11 @@ elif [ "$changed" = "0" ]; then
 fi
 
 say ""
-say "Boot guard installed. Verify after the next start with:"
+if [ "$DRY_RUN" = "1" ]; then
+  say "Dry run: nothing was installed. Without --dry-run, verify after the next start with:"
+else
+  say "Boot guard installed. Verify after the next start with:"
+fi
 say "  systemd-analyze cat-config systemd/system/$DROPIN_NAME   # system units"
 say "  systemctl --user show -p ExecStartPre crow-gateway       # user units"
 say "  journalctl -u ${units[0]} | grep boot-guard"
