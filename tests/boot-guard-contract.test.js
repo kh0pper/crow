@@ -17,14 +17,16 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  LOCK_STALE_MS, LOCK_WRITE_GRACE_MS, TRANSIENT_QUARANTINE_MS as LAUNCHER_TRANSIENT,
-  acquireLockFile, buildUpdateQuarantine, gitChildEnv, gitRun, readUpdateQuarantineFile, readLockFile,
-  releaseLockFile, lockIsStale as launcherLockIsStale, saveState, loadState, freshState, writeSpoolAlert,
-  writeUpdateQuarantineFile,
+  LOCK_STALE_MS, LOCK_WRITE_GRACE_MS, QUARANTINE_OWNER_RE as LAUNCHER_OWNER_RE,
+  TRANSIENT_QUARANTINE_MS as LAUNCHER_TRANSIENT,
+  acquireLockFile, buildUpdateQuarantine, gitChildEnv, gitRun, instanceOwnerId as launcherOwnerId,
+  readUpdateQuarantineFile, readLockFile, releaseLockFile, lockIsStale as launcherLockIsStale,
+  saveState, loadState, freshState, writeSpoolAlert, writeUpdateQuarantineFile,
 } from "../scripts/boot-guard/crow-boot-guard.mjs";
 import { _lockPrimitivesForTest } from "../servers/gateway/auto-update.js";
 import {
-  TRANSIENT_QUARANTINE_MS as GATEWAY_TRANSIENT, readUpdateQuarantine, writeUpdateQuarantine,
+  QUARANTINE_OWNER_RE as GATEWAY_OWNER_RE, TRANSIENT_QUARANTINE_MS as GATEWAY_TRANSIENT,
+  ownerForHome, readUpdateQuarantine, writeUpdateQuarantine,
 } from "../servers/shared/update-quarantine.js";
 import { _setAlertsRootForTest, drainAlertSpool } from "../servers/shared/alert-spool.js";
 
@@ -187,6 +189,63 @@ test("both implementations use the same transient TTL table", () => {
   writeUpdateQuarantineFile(dir, buildUpdateQuarantine({ sha: B, previous: A, reason: "init-db-failed", now }));
   const marker = readUpdateQuarantine({ gitDir: dir });
   assert.equal(Date.parse(marker.expires_at) - now, GATEWAY_TRANSIENT["init-db-failed"]);
+});
+
+/* ------------------------------------------------------------- owner (R3) */
+
+test("both implementations derive the same instance owner id (fix round 3)", () => {
+  assert.equal(LAUNCHER_OWNER_RE.source, GATEWAY_OWNER_RE.source, "the owner id has ONE format");
+  const home = scratch("bg-owner-");
+  const owner = ownerForHome(home);
+  assert.match(owner, /^[0-9a-f]{16}$/);
+  assert.equal(launcherOwnerId(home), owner,
+    "the gateway's stable mark and the launcher must agree on who wrote a marker");
+
+  // The same CROW_HOME reached through a symlink is the same instance: both
+  // sides hash realpath(), not the path as typed.
+  const link = join(scratch("bg-owner-link-"), "home");
+  symlinkSync(home, link);
+  assert.equal(ownerForHome(link), owner);
+  assert.equal(launcherOwnerId(link), owner);
+
+  // Two homes on one checkout are two instances.
+  assert.notEqual(launcherOwnerId(scratch("bg-owner-other-")), owner);
+});
+
+test("both writers stamp the owner on a HELD marker, and the reader accepts it (fix round 3)", () => {
+  const now = Date.parse("2026-01-02T03:04:05Z");
+  const owner = ownerForHome(scratch("bg-owner-marker-"));
+
+  // Launcher writes → the gateway's reader sees the owner.
+  const launcher = buildUpdateQuarantine({
+    sha: B, previous: A, reason: "startup-crash", persist: true, now, owner,
+  });
+  assert.equal(launcher.owner, owner);
+  const dir = scratch();
+  assert.equal(writeUpdateQuarantineFile(dir, launcher), true);
+  assert.equal(readUpdateQuarantine({ gitDir: dir }).owner, owner, "the gateway reader must see it");
+
+  // Gateway writes → the same record, and the launcher's reader sees it.
+  const other = scratch();
+  const gateway = writeUpdateQuarantine({
+    gitDir: other, sha: B, previous: A, reason: "startup-crash", by: "boot-guard", persist: true, now, owner,
+  });
+  assert.deepEqual(gateway, launcher, "the two writers must produce the same record");
+  assert.equal(readUpdateQuarantineFile(other).owner, owner, "the launcher's reader must see it");
+
+  // An id that is not 16 hex characters is DROPPED by both writers: losing the
+  // refusal over a bad owner tag would leave the refused commit pullable.
+  assert.equal(writeUpdateQuarantine({ gitDir: dir, sha: B, reason: "startup-crash", owner: "nope" }).owner, undefined);
+  assert.equal(buildUpdateQuarantine({ sha: B, reason: "startup-crash", owner: "nope" }).owner, undefined);
+
+  // A planted one is ignored by the gateway's reader, and the refusal itself —
+  // the sha, the reason — still counts (old markers stay valid).
+  writeFileSync(join(dir, "crow-update-quarantine.json"),
+    JSON.stringify({ ...launcher, owner: "NOT-HEX" }));
+  const planted = readUpdateQuarantine({ gitDir: dir });
+  assert.equal(planted.owner, undefined);
+  assert.equal(planted.sha, B);
+  assert.equal(planted.held, true);
 });
 
 /* ---------------------------------------------------------------- spool */

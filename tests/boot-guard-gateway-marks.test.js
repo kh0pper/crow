@@ -11,7 +11,7 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
@@ -20,7 +20,7 @@ import {
   rolledBackResultText, scheduleStableMark,
 } from "../servers/gateway/boot-guard-state.js";
 import {
-  clearUpdateQuarantine, readUpdateQuarantine, writeUpdateQuarantine,
+  clearUpdateQuarantine, ownerForHome, readUpdateQuarantine, writeUpdateQuarantine,
 } from "../servers/shared/update-quarantine.js";
 import { _setDbForTest } from "../servers/gateway/auto-update.js";
 import { _setAlertsRootForTest, drainAlertSpool } from "../servers/shared/alert-spool.js";
@@ -182,11 +182,12 @@ test("the stable mark is armed on an UNREF'd timer", async () => {
   assert.equal(loadState(stateDir).state.last_ok_sha, B);
 });
 
-/* ------------------------------------------- whose refusal is it (round 2) */
+/* ------------------------------------------- whose refusal is it (round 2/3) */
 
 /** The state a refusal leaves: `reportRefusal` in the launcher keeps
- *  `pending_sha` and writes `state: "refused"` (a block writes `"blocked"`). */
-function refusedState(pendingSha) {
+ *  `pending_sha`, writes `state: "refused"` (a block writes `"blocked"`), and
+ *  records the HELD marker it wrote as `refusal` (fix round 3). */
+function refusedState(pendingSha, markerAt = "2026-01-02T03:04:05.000Z") {
   return {
     ...freshState(),
     state: "refused",
@@ -195,6 +196,7 @@ function refusedState(pendingSha) {
     pending_sha: pendingSha,
     previous_proven: true,
     failures: 3,
+    refusal: { sha: pendingSha, marker_at: markerAt },
     result: {
       code: "update-rollback-refused", from: pendingSha, to: A, failures: 3, reason: "db-ahead",
       at: "2026-01-02T03:04:05.000Z", recorded: true,
@@ -203,22 +205,24 @@ function refusedState(pendingSha) {
 }
 
 /** The HELD marker a refusal / a blocked reset leaves in the shared git dir. */
-function writeHeldMarker(gitDir, sha, { by = "boot-guard", now = Date.now() } = {}) {
+function writeHeldMarker(gitDir, sha, { by = "boot-guard", now = Date.now(), owner = null } = {}) {
   const written = writeUpdateQuarantine({
-    gitDir, sha, previous: A, reason: "startup-crash", by, now, persist: true,
+    gitDir, sha, previous: A, reason: "startup-crash", by, now, persist: true, owner,
   });
   assert.ok(written, "fixture precondition: the marker must be written");
   return written;
 }
 
 const gitDirOf = (repo) => join(repo.work, ".git");
+/** This instance's owner id, derived exactly as markStable derives it. */
+const ownerOf = (stateDir) => ownerForHome(dirname(stateDir));
 
 test("markStable leaves a HELD marker written by someone else alone (fix round 2)", () => {
   // Only the boot guard's own marker says anything about this instance's boot.
   const r = repoWithLauncher("// launcher\n");
   const stateDir = join(scratch(), "boot-guard");
-  saveState(stateDir, refusedState(r.sha));
   const at = writeHeldMarker(gitDirOf(r), r.sha, { by: "crow-update" }).at;
+  saveState(stateDir, refusedState(r.sha, at));
 
   const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
   assert.equal(out.ok, true, out.reason);
@@ -235,8 +239,8 @@ test("markStable leaves a HELD marker naming another sha alone (fix round 2)", (
   const r = repoWithLauncher("// launcher\n");
   const C_SHA = "c".repeat(40);
   const stateDir = join(scratch(), "boot-guard");
-  saveState(stateDir, refusedState(r.sha));
-  const at = writeHeldMarker(gitDirOf(r), C_SHA).at;
+  const at = writeHeldMarker(gitDirOf(r), C_SHA, { owner: ownerOf(stateDir) }).at;
+  saveState(stateDir, refusedState(r.sha, at));
 
   const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
   assert.equal(out.ok, true, out.reason);
@@ -288,6 +292,128 @@ test("a marker that changes between the read and the write is left as it is (fix
   assert.equal(gone.out.demoted, false);
   assert.equal(gone.out.reason, "changed", JSON.stringify(gone.out));
   assert.equal(readUpdateQuarantine({ gitDir: gone.gitDir }), null, "a marker a peer cleared must not be resurrected");
+});
+
+/* ------------------------------------- bound to the refusal that wrote it (round 3) */
+
+test("a re-armed trial still demotes: the gate is the refusal record, not the state name (fix round 3)", () => {
+  // A refusal whose reason is not permanent lets the launcher re-arm on the next
+  // start, so the state is `pending` for B again. The HELD marker is still the
+  // one this instance wrote, and ten minutes up on B is still the proof that it
+  // runs — keying the gate on the state name froze every such box until an
+  // operator deleted the marker by hand.
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const owner = ownerOf(stateDir);
+  const held = writeHeldMarker(gitDirOf(r), r.sha, { owner });
+  saveState(stateDir, {
+    ...freshState(),
+    state: "pending",
+    last_ok_sha: A,
+    previous_sha: A,
+    pending_sha: r.sha,
+    previous_proven: true,
+    failures: 1,
+    refusal: { sha: r.sha, marker_at: held.at },
+    attempt: { id: "inv-rearm", started_at: "2026-01-02T03:04:05.000Z" },
+  });
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, true, JSON.stringify(out.marker));
+  assert.equal(readUpdateQuarantine({ gitDir: gitDirOf(r) }).held, undefined);
+  assert.equal(loadState(stateDir).state.refusal, null, "a demotion spends the refusal record");
+});
+
+test("a peer's HELD marker for the same sha is never demoted: the owner is not ours (fix round 3)", () => {
+  // One checkout, two instances. Y's state can name B (its own refusal of it)
+  // and still not be the instance that wrote the marker on disk.
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const peerOwner = "0123456789abcdef";
+  const held = writeHeldMarker(gitDirOf(r), r.sha, { owner: peerOwner });
+  saveState(stateDir, { ...refusedState(r.sha, held.at), pending_sha: r.sha });
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "other-owner", JSON.stringify(out.marker));
+  const marker = readUpdateQuarantine({ gitDir: gitDirOf(r) });
+  assert.equal(marker.held, true, "a peer's refusal must stay HELD");
+  assert.equal(marker.owner, peerOwner);
+  assert.equal(marker.at, held.at);
+  assert.equal(loadState(stateDir).state.refusal, null,
+    "the record cannot describe a marker this instance did not write");
+});
+
+test("a HELD marker from a release without an owner is left alone (fix round 3)", () => {
+  // Nothing in an owner-less marker proves which instance wrote it, so no stable
+  // mark may claim it (the record is readable and still refuses, as before).
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDirOf(r), r.sha);
+  assert.equal(held.owner, undefined, "fixture precondition: no owner field");
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "other-owner", JSON.stringify(out.marker));
+  assert.equal(readUpdateQuarantine({ gitDir: gitDirOf(r) }).held, true);
+});
+
+test("a demote whose write fails KEEPS the refusal record, and the next stable mark retries (fix round 3)", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: a 0555 directory is still writable");
+    return;
+  }
+  const r = repoWithLauncher("// launcher\n");
+  const gitDir = gitDirOf(r);
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDir, r.sha, { owner: ownerOf(stateDir) });
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  chmodSync(gitDir, 0o555);
+  let failed;
+  try {
+    failed = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  } finally {
+    chmodSync(gitDir, 0o755);
+  }
+  assert.equal(failed.ok, true, failed.reason);
+  assert.equal(failed.marker.demoted, false, JSON.stringify(failed.marker));
+  assert.equal(failed.marker.reason, "write-failed", JSON.stringify(failed.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, true, "nothing was written");
+  assert.deepEqual(loadState(stateDir).state.refusal, { sha: r.sha, marker_at: held.at },
+    "a transient write failure must not spend the record — the next stable mark retries");
+
+  const retried = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(retried.marker.demoted, true, JSON.stringify(retried.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
+  assert.equal(loadState(stateDir).state.refusal, null);
+});
+
+test("a terminal answer clears the refusal record: the marker is gone (fix round 3)", () => {
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  saveState(stateDir, refusedState(r.sha, "2026-01-02T03:04:05.000Z"));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "no-marker", JSON.stringify(out.marker));
+  assert.equal(loadState(stateDir).state.refusal, null, "there is no marker left to demote");
+});
+
+test("a terminal answer clears the refusal record: the marker names another sha (fix round 3)", () => {
+  const r = repoWithLauncher("// launcher\n");
+  const C_SHA = "c".repeat(40);
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDirOf(r), C_SHA, { owner: ownerOf(stateDir) });
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.marker.reason, "other-sha", JSON.stringify(out.marker));
+  assert.equal(loadState(stateDir).state.refusal, null, "the record no longer describes the marker on disk");
+  assert.equal(readUpdateQuarantine({ gitDir: gitDirOf(r) }).held, true, "and the marker itself is untouched");
 });
 
 /* ------------------------------------------------------------- planned */

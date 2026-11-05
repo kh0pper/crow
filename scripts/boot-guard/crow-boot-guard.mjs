@@ -33,6 +33,7 @@
  * facts and performs the effects it returns.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   accessSync, chmodSync, closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync,
   readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeSync,
@@ -43,13 +44,17 @@ import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 
 /** Bumped whenever the state file's meaning changes; stamped as launcher_version. */
-export const LAUNCHER_VERSION = "1";
+export const LAUNCHER_VERSION = "2";
 export const STATE_FORMAT = 1;
 /** Counted crashes before the rollback, so the decision lands on start N+1. */
 export const FAILURE_THRESHOLD = 3;
 /** The reader's ceiling: the real record is a few hundred bytes. */
 export const STATE_MAX_BYTES = 64 * 1024;
 export const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+/** An instance owner id — see `instanceOwnerId`. Duplicated in
+ *  servers/shared/update-quarantine.js (this copy cannot import it); the contract
+ *  test keeps the two in step. */
+export const QUARANTINE_OWNER_RE = /^[0-9a-f]{16}$/;
 export const BOOT_GUARD_DIR = "boot-guard";
 export const STATE_FILE = "state.json";
 export const STATUS_FILE = "STATUS";
@@ -123,6 +128,24 @@ function envMs(env, key, fallback) {
 export function crowHomeFor(env = process.env) {
   const raw = String(env?.CROW_HOME || "").trim();
   return raw ? raw : join(homedir(), ".crow");
+}
+
+/**
+ * This instance's owner id: the first 16 hex characters of
+ * sha256(realpath(CROW_HOME)).
+ *
+ * It goes on every HELD marker this launcher writes, so the gateway's stable
+ * mark can tell ITS OWN refusal from a co-hosted instance's (both share one
+ * checkout, so the marker file does not). Same computation as `ownerForHome` in
+ * servers/shared/update-quarantine.js, which this copy cannot import — the
+ * contract test compares them.
+ */
+export function instanceOwnerId(crowHome) {
+  const raw = String(crowHome ?? "").trim();
+  if (!raw) return null;
+  let real;
+  try { real = realpathSync(raw); } catch { real = resolve(raw); }
+  return createHash("sha256").update(real).digest("hex").slice(0, 16);
 }
 
 /* -------------------------------------------------------------------- git */
@@ -209,6 +232,12 @@ export function freshState() {
     launcher_version: null,
     recorder_ran_at: null,
     deps_attempts: 0,
+    // The HELD marker THIS instance wrote, and the stamp it carries (see
+    // reportRefusal). It survives every later transition — a re-armed trial, a
+    // discard, a rollback — because it is the only proof the gateway's stable
+    // mark has that the marker in the shared git dir is this instance's own
+    // refusal, and that it still exists.
+    refusal: null,
   };
 }
 
@@ -231,9 +260,20 @@ export function validateState(raw) {
   }
   if (raw.result != null && (typeof raw.result !== "object" || Array.isArray(raw.result))) return null;
   if (raw.alerted != null && (typeof raw.alerted !== "object" || Array.isArray(raw.alerted))) return null;
+  // The record of a HELD marker this instance wrote: the sha, and the marker's
+  // own `at` (so a peer that rewrote the marker cannot be mistaken for it).
+  let refusal = null;
+  if (raw.refusal != null) {
+    const r = raw.refusal;
+    if (typeof r !== "object" || Array.isArray(r)) return null;
+    if (typeof r.sha !== "string" || !FULL_SHA_RE.test(r.sha)) return null;
+    if (typeof r.marker_at !== "string" || !Number.isFinite(Date.parse(r.marker_at))) return null;
+    refusal = { sha: r.sha, marker_at: r.marker_at };
+  }
   return {
     ...freshState(),
     ...raw,
+    refusal,
     failures: Number.isInteger(raw.failures) ? raw.failures : 0,
     previous_proven: raw.previous_proven === true,
     deps_changed: raw.deps_changed === true,
@@ -385,7 +425,11 @@ function armDecision(state, facts) {
   return { action: "arm" };
 }
 
-/** The state a finished trial leaves behind (no pending fields, no result). */
+/** The state a finished trial leaves behind (no pending fields, no result).
+ *
+ * `refusal` is deliberately NOT cleared: a trial record says nothing about the
+ * HELD marker this instance wrote earlier, and that record is the only proof the
+ * gateway's stable mark has that the marker in the shared git dir is ours. */
 export function clearTrialFields(state) {
   return {
     ...state,
@@ -570,7 +614,7 @@ export function acquireLockFileWaiting(path, { waitMs = LOCK_WAIT_MS, pollMs = L
  * CHECKED OUT, so its marker must never expire into a silent "Up to date".
  */
 export function buildUpdateQuarantine({
-  sha, previous = null, reason, by = "boot-guard", now = Date.now(), persist = false,
+  sha, previous = null, reason, by = "boot-guard", now = Date.now(), persist = false, owner = null,
 } = {}) {
   if (!FULL_SHA_RE.test(String(sha || ""))) return null;
   if (typeof reason !== "string" || !reason.trim()) return null;
@@ -583,6 +627,8 @@ export function buildUpdateQuarantine({
     reason,
     at: iso(now),
     by,
+    // Only a well-formed id is written (a bad one must not lose the refusal).
+    ...(typeof owner === "string" && QUARANTINE_OWNER_RE.test(owner) ? { owner } : {}),
     ...(ttl ? { expires_at: iso(now + ttl) } : {}),
     ...(held ? { held: true } : {}),
   };
@@ -960,15 +1006,28 @@ function reportRefusal({ root, gitDir, state, stateDir, crowHome, now, decision,
   // soon as main moved.
   const stillCheckedOut = kind === "refuse"
     || decision.reason === "reset-failed" || decision.reason === "reset-mismatch";
+  // The marker is STAMPED with this instance's owner and the state keeps the
+  // same record (`refusal`), because one checkout can be shared by several
+  // instances and the marker file alone cannot say whose refusal it is. The
+  // gateway's stable mark demotes a HELD marker only when its own state names
+  // the same sha AND the marker's own `at` — and only for its own owner. See
+  // markStable/demoteHeldMarker in servers/gateway/boot-guard-state.js.
+  let refusal = null;
   if (stillCheckedOut) {
-    const quarantined = writeUpdateQuarantineFile(gitDir, buildUpdateQuarantine({
+    const record = buildUpdateQuarantine({
       sha: pending, previous, reason: "startup-crash", by: "boot-guard", now, persist: true,
-    }));
+      owner: instanceOwnerId(crowHome),
+    });
+    const quarantined = record ? writeUpdateQuarantineFile(gitDir, record) : false;
     if (!quarantined) log(`could not write the update quarantine for ${short(pending)}`);
+    // A failed write leaves any EARLIER refusal record in place: the marker on
+    // disk is still that one, so its record is still the true one.
+    else refusal = { sha: pending, marker_at: record.at };
   }
   const next = {
     ...state,
     state: kind === "refuse" ? "refused" : "blocked",
+    ...(refusal ? { refusal } : {}),
     failures: decision.failures,
     result: {
       code,
@@ -1275,6 +1334,10 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
 
 /** Open a trial for `head` on top of the last commit this host proved (B2/R2). */
 function armTrial({ state, stateDir, head, attemptId, now }) {
+  // `refusal` survives the spread below on purpose: a non-permanent refusal is
+  // re-armed on the next start, and the record of the HELD marker this instance
+  // wrote has to outlive that re-arm or the gateway's stable mark can never
+  // demote it (the S1 freeze).
   const armed = {
     ...state,
     state: "pending",
