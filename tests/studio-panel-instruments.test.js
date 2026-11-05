@@ -13,6 +13,13 @@
  *   - a bank that will not parse plays silence and the track says why — the
  *     reason coming from the REAL font host, loaded here in Node, not from a
  *     stand-in;
+ *   - a bank that is loading says so, a bank the song has lost says it is not on
+ *     this device (and offers no presets, and is unloaded from the engine once);
+ *   - a bank one track is already uploading is not uploaded twice, and leaving
+ *     the page stops an upload where it is (no finish, no command);
+ *   - the preset list is a real list box: arrow keys move the highlight and send
+ *     nothing, Enter sends one command, and the row picked is shown chosen at
+ *     once, before the snapshot comes back;
  *   - `Get the default instruments` downloads once (a second press while it
  *     runs does nothing) and the picker then lists the presets of the bank it
  *     brought;
@@ -52,6 +59,18 @@ const PREFIX = "projects/62/";
 
 /** The bank every test plays, the library ids it travels under, and its bytes. */
 const FONT_BYTES = tinySf2();
+
+/**
+ * The fixture bank padded out to a few megabytes, so an upload is several
+ * chunks long: the first twelve bytes are still the bank's own magic.
+ * @param {number} [bytes]
+ * @returns {Uint8Array}
+ */
+function bigBank(bytes = 3 * 1048576) {
+  const padded = new Uint8Array(bytes);
+  padded.set(FONT_BYTES, 0);
+  return padded;
+}
 const FONT_ID = "lib-tiny";
 const CATALOG_ID = "tiny-bank";
 const DOWNLOADED_ID = "lib-musescore-general";
@@ -229,6 +248,7 @@ function fakeContext() {
 function fakeEngine(answer) {
   const engine = {
     libraryLoads: [],
+    libraryUnloads: [],
     libraryNeeded: [],
     presetsListeners: [],
     songs: [],
@@ -272,7 +292,9 @@ function fakeEngine(answer) {
       }
       return Promise.resolve(planned);
     },
-    unloadLibrary() {},
+    unloadLibrary(id) {
+      engine.libraryUnloads.push(String(id));
+    },
     loadSample() {
       return Promise.resolve();
     },
@@ -298,6 +320,7 @@ function fakeEngine(answer) {
  * Boot the emitted client script against the page the handler renders, with a
  * fake browser around it, and hand back what it drew, sent and fetched.
  * @param {{doc?: object, engineAnswer?: Function|object, holdDownload?: boolean,
+ *          holdFile?: boolean, onRequest?: Function,
  *          libraryFile?: {status?: number, bytes?: Uint8Array},
  *          downloadAnswer?: object, history?: object[]}} [options]
  */
@@ -330,6 +353,15 @@ async function bootInstrument(options = {}) {
         releaseDownload = resolve;
       })
     : null;
+  // A bank's file held at the route, so the header can be watched while it is
+  // on its way.
+  let releaseFile = () => {};
+  const heldFile = options.holdFile
+    ? new Promise((resolve) => {
+        releaseFile = resolve;
+      })
+    : null;
+  const onRequest = typeof options.onRequest === "function" ? options.onRequest : null;
 
   const response = (status, body, bytes) => ({
     ok: status >= 200 && status < 300,
@@ -346,6 +378,9 @@ async function bootInstrument(options = {}) {
     const target = String(url);
     const method = init.method || "GET";
     requests.push({ url: target, method, body: typeof init.body === "string" ? init.body : null });
+    // What the page asked for, for the tests that act mid-flight (a teardown
+    // while a bank goes up).
+    if (onRequest) onRequest(target, method);
     if (target.includes("/module-types")) return response(200, { generators: ["Analog generator"], modules: {} });
     if (target.includes("/project-bot")) return response(404, { error: "not_found" });
     if (target === "/api/studio/songs") return response(200, [{ id: SONG, project_id: PROJECT, title: "Keys" }]);
@@ -362,6 +397,7 @@ async function bootInstrument(options = {}) {
       });
     }
     if (target.includes("/library/") && target.endsWith("/file")) {
+      if (heldFile) await heldFile;
       const file = options.libraryFile || {};
       if (Number(file.status) === 404) return response(404, { error: "This instrument is not on this Crow yet." });
       return response(200, {}, (file.bytes || FONT_BYTES).slice(0).buffer);
@@ -478,6 +514,10 @@ async function bootInstrument(options = {}) {
     releaseDownload() {
       releaseDownload();
     },
+    /** Let a held bank file answer, as the route does once it is read. */
+    releaseFile() {
+      releaseFile();
+    },
     /** @returns {object} the track's instrument picker */
     picker() {
       const node = document.querySelector(`[data-role=instrument][data-track-id="${TRACK}"]`);
@@ -593,6 +633,55 @@ test("picking a preset sends one set_program", async () => {
   assert.deepEqual(drums[1].args, { track_id: TRACK, bank: 128, program: 0 });
 });
 
+test("arrow keys in the preset list send nothing until Enter", async () => {
+  const ui = await bootInstrument();
+  // The page draws the list as the song has it: program 0 of bank 0.
+  assert.equal(ui.presetRows()[0].selected, true, "the preset the track plays is the row shown chosen");
+
+  const key = (name) => {
+    const picker = ui.picker().querySelector("[data-act=pick-preset]");
+    assert.ok(picker, "the picker offers its presets");
+    picker.dispatchEvent(ui.event("keydown", { key: name, target: picker }));
+  };
+
+  key("ArrowDown");
+  key("ArrowDown");
+  await ui.settle();
+  assert.equal(commands(ui, "track.set_program").length, 0, "the arrow keys send nothing");
+  const highlighted = ui.presetRows().filter((row) => row.selected === true);
+  assert.deepEqual(highlighted.map((row) => row.value), ["0:2"], "the highlight moved, and only the highlight");
+
+  // Enter sends the one command, for the row the highlight is on.
+  key("Enter");
+  await ui.settle();
+  const picks = commands(ui, "track.set_program");
+  assert.equal(picks.length, 1, `one Enter is one set_program, got ${JSON.stringify(picks)}`);
+  assert.deepEqual(picks[0].args, { track_id: TRACK, bank: 0, program: 2 });
+  assert.equal(ui.presetRows().filter((row) => row.selected === true)[0].value, "0:2", "and the row stays chosen");
+
+  // The pick is shown chosen until the snapshot answers: an update from
+  // anywhere — the song still holding program 0 — does not flick the list back.
+  await ui.apply("track.rename", { track_id: TRACK, name: "Keys 2" });
+  assert.equal(
+    ui.presetRows().filter((row) => row.selected === true)[0].value,
+    "0:2",
+    "a redraw before the snapshot keeps the picked row chosen",
+  );
+
+  // The snapshot confirms it, and the list keeps showing it.
+  await ui.apply("track.set_program", { track_id: TRACK, bank: 0, program: 2 });
+  assert.equal(ui.presetRows().filter((row) => row.selected === true)[0].value, "0:2");
+
+  // Another hand moves the track: what the song says replaces the pick.
+  await ui.apply("track.set_program", { track_id: TRACK, bank: 0, program: 0 });
+  assert.equal(
+    ui.presetRows().filter((row) => row.selected === true)[0].value,
+    "0:0",
+    "the snapshot's own preset is what the list shows once it disagrees",
+  );
+  assert.equal(commands(ui, "track.set_program").length, 1, "and none of that was this page's to send");
+});
+
 test("+ Instrument adds a soundfont track on the song's first bank", async () => {
   const ui = await bootInstrument();
   assert.ok(
@@ -663,6 +752,87 @@ test("a bank that is not on this device says so", async () => {
     libraryFile: { status: 404 },
   });
   assert.equal(uploaded.status(), "This bank is not on this device.");
+});
+
+test("a bank that is loading says Loading…", async () => {
+  // The file route is held, so the page sits in the one state that says so.
+  const ui = await bootInstrument({ holdFile: true });
+  assert.equal(ui.status(), "Loading…", "the track says what is happening, with no stray apostrophe");
+  assert.equal(ui.presetRows().length, 0, "a bank that has not parsed lists nothing yet");
+
+  ui.releaseFile();
+  await ui.settle(60);
+  assert.equal(ui.status(), "", "a loaded bank has nothing left to explain");
+  assert.equal(ui.presetRows().length, PRESETS.length, "and its presets are listed");
+});
+
+test("a track whose bank was removed says so and offers no presets", async () => {
+  const other = "lib-other";
+  const doc = await instrumentDoc();
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(doc, "library.add", { entry: libraryEntry(other, { name: "Another Bank" }) });
+  const ui = await bootInstrument({ doc });
+  assert.equal(ui.presetRows().length, PRESETS.length, "its bank's presets are listed to begin with");
+
+  // The song's library loses the bank the track plays (an undo of its add, or a
+  // peer's edit): the track keeps naming it, and nothing of it is left to play.
+  const { libraryMap } = await import("../bundles/studio/server/doc.js");
+  libraryMap(doc).delete(FONT_ID);
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+
+  assert.equal(ui.status(), "This bank is not on this device.", "the track says why it is silent");
+  assert.equal(ui.presetRows().length, 0, "and lists no preset of a bank the song does not hold");
+
+  // The chooser names the bank the track plays as missing, and nothing else —
+  // the one other bank of the song — is shown chosen in its place.
+  const chooser = ui.picker().querySelector("[data-act=pick-font]");
+  assert.ok(chooser, "the chooser still names the bank the track plays");
+  const options = [...chooser.querySelectorAll("option")];
+  assert.deepEqual(
+    options.map((option) => option.value),
+    [other, FONT_ID],
+    "the song's other bank, and the one the track plays",
+  );
+  const goneOption = options[1];
+  assert.equal(String(goneOption.textContent), "Tiny Test Font (missing)", "the bank is named, and marked missing");
+  assert.equal(goneOption.selected, true, "it is the option shown chosen");
+  assert.equal(options[0].selected, false, "the other bank is not passed off as the track's");
+
+  // Choosing either row asks for nothing here: the one is already the track's,
+  // and the other is not in the song any more.
+  chooser.dispatchEvent(ui.event("change", { target: chooser }));
+  await ui.settle();
+  assert.equal(commands(ui, "track.set_font").length, 0);
+  assert.equal(commands(ui, "track.set_program").length, 0, "and no preset of it can be asked for");
+});
+
+test("a bank removed from the song is unloaded from the engine", async () => {
+  const doc = await instrumentDoc();
+  const ui = await bootInstrument({ doc });
+  assert.deepEqual(ui.engine.libraryUnloads, [], "the engine holds the bank it was handed");
+
+  const { libraryMap } = await import("../bundles/studio/server/doc.js");
+  libraryMap(doc).delete(FONT_ID);
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  assert.deepEqual(ui.engine.libraryUnloads, [FONT_ID], "the engine let the bank go, once");
+
+  // A frame that changes nothing else does not unload it again.
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  assert.equal(ui.engine.libraryUnloads.length, 1, "once is enough");
+  assert.equal(ui.presetRows().length, 0);
+
+  // Added back, the same id is fetched and parsed afresh: the page forgot it,
+  // rather than remembering a bank it no longer holds.
+  const loads = ui.engine.libraryLoads.length;
+  await ui.apply("library.add", { entry: libraryEntry(FONT_ID) });
+  await ui.settle(60);
+  assert.equal(ui.engine.libraryLoads.length, loads + 1, "the bank is handed to the engine again");
+  assert.equal(ui.engine.libraryLoads.at(-1).library_id, FONT_ID);
+  assert.equal(ui.presetRows().length, PRESETS.length, "and its presets are listed again");
+  assert.equal(ui.status(), "");
 });
 
 test("an agent's instrument change outlines the picker", async () => {
@@ -738,6 +908,64 @@ test("a bank of my own uploads and its track picks it", async () => {
   assert.equal(picks.length, 1, `one set_font, got ${JSON.stringify(picks)}`);
   assert.deepEqual(picks[0].args, { track_id: TRACK, font_id: "lib-uploaded" });
   assert.match(String(ui.picker().querySelector(".st-note").textContent), /responsible for this bank's licence/);
+});
+
+test("a second bank on a track that is already uploading is refused", async () => {
+  // The second file is chosen while the first is on its way up — from inside the
+  // first one's begin request, so the upload is certainly in flight.
+  let chosen = false;
+  const ui = await bootInstrument({
+    onRequest(url, method) {
+      if (chosen) return;
+      if (method !== "PUT" || !url.includes("/api/studio/takes/")) return;
+      chosen = true;
+      ui.chooseFile("Second Bank.sf2", FONT_BYTES);
+    },
+  });
+
+  ui.chooseFile("First Bank.sf2", FONT_BYTES);
+  await ui.settle(80);
+  assert.equal(chosen, true, "the second file was chosen mid-upload");
+  assert.equal(ui.toast(), "A bank is already uploading on this track.");
+
+  const begins = requestsTo(ui, "PUT", "/api/studio/takes/").filter((request) => request.body);
+  assert.equal(begins.length, 1, "the first upload was not overwritten and a second never began");
+  assert.equal(JSON.parse(begins[0].body).file_name, "First Bank.sf2", "the file going up is still the first");
+  assert.equal(requestsTo(ui, "POST", "/finish").length, 1, "the first upload finished on its own");
+  assert.equal(commands(ui, "track.set_font").length, 1, "and the track picked the bank it was given");
+});
+
+test("leaving the page stops a bank upload", async () => {
+  // The page is torn down as the second chunk goes up, exactly as Turbo does it
+  // when a visit starts: from then on the upload must stop where it is.
+  let torn = false;
+  let teardown = () => {};
+  const ui = await bootInstrument({
+    onRequest(url, method) {
+      if (torn) return;
+      if (method !== "PUT" || !url.includes("/chunks/")) return;
+      if (!url.endsWith("/chunks/1")) return;
+      torn = true;
+      teardown();
+    },
+  });
+  const studioPage = ui.document.querySelector(".studio");
+  assert.ok(studioPage && studioPage.__studioSession, "the page keeps its session handle");
+  teardown = () => studioPage.__studioSession.teardown();
+
+  ui.chooseFile("Big Bank.sf2", bigBank());
+  await ui.settle(80);
+  assert.equal(torn, true, "the page was left in the middle of the upload");
+  const begins = requestsTo(ui, "PUT", "/api/studio/takes/").filter((request) => request.body);
+  assert.equal(begins.length, 1, "the bank began to go up");
+  const chunks = requestsTo(ui, "PUT", "/chunks/");
+  assert.deepEqual(
+    chunks.map((request) => request.url.split("/chunks/").at(-1)),
+    ["0", "1"],
+    "the chunk loop stopped with the page",
+  );
+  assert.equal(requestsTo(ui, "POST", "/finish").length, 0, "nothing was finished for a page that is gone");
+  assert.equal(commands(ui, "track.set_font").length, 0, "and no command was sent from a dead view");
 });
 
 // ---- a bank that will not parse -------------------------------------------
