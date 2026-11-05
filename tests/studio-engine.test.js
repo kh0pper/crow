@@ -21,6 +21,9 @@
  *   - a fault inside `process()` is reported once and the node goes silent
  *     instead of throwing into the audio thread;
  *   - a device that cannot be built is not retried on every `setSong`;
+ *   - every soundfont track of a song sounds on its own, and a song whose
+ *     engine was composed WITHOUT the SoundFont host (`font-voice.js`) is
+ *     silent while every font it names is asked for once;
  *   - headless Chromium and Node render the same song bit-identically (one
  *     SHA-256 over the left+right float bytes), a song with an audio clip the
  *     same way, and the same holds for an arrangement render (placements, a
@@ -1930,6 +1933,105 @@ test("effects bit-identical in Chromium and Node", async (t) => {
     }
   } finally {
     tab.close();
+  }
+});
+
+test("soundfont tracks with no font host ask for every font and stay silent", async () => {
+  // The engine composed WITHOUT `font-voice.js` (and the vendored synth it drives)
+  // has no SoundFont host at all — the processor's own `NO_FONTS`. Every soundfont
+  // track is then silent, and every font they name is asked for once (the page
+  // owns the bytes), with nothing thrown on the audio thread.
+  const assetBytes = { ...ASSETS, "font-voice.js": "", "spessasynth.js": "" };
+  const song = {
+    meta: { title: "No font host", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [
+      { id: "track-1", name: "A", color: "#E8C07A", device: { engine: "soundfont", font_id: "font-a", bank: 0, program: 0 }, mute: false, solo: false, gain_db: 0, pan: 0, locked: false },
+      { id: "track-2", name: "B", color: "#E8C07A", device: { engine: "soundfont", font_id: "font-b", bank: 0, program: 1 }, mute: false, solo: false, gain_db: 0, pan: 0, locked: false },
+      { id: "track-3", name: "C", color: "#E8C07A", device: { engine: "soundfont", font_id: "font-a", bank: 128, program: 0 }, mute: false, solo: false, gain_db: 0, pan: 0, locked: false },
+    ],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": { id: "clip-1", track_id: "track-1", scene_id: "scene-1", name: "A", length_bars: 1, notes: [{ t: 0, d: 1, p: 60, v: 100 }] },
+      "clip-2": { id: "clip-2", track_id: "track-2", scene_id: "scene-1", name: "B", length_bars: 1, notes: [{ t: 0, d: 1, p: 64, v: 100 }] },
+      "clip-3": { id: "clip-3", track_id: "track-3", scene_id: "scene-1", name: "C", length_bars: 1, notes: [{ t: 0, d: 1, p: 36, v: 100 }] },
+    },
+  };
+
+  const needed = [];
+  const context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(0.4 * SAMPLE_RATE), sampleRate: SAMPLE_RATE });
+  let engine = null;
+  let rendered = false;
+  try {
+    engine = await studioEngine.create(context, { assetBytes: assetBytes });
+    engine.onLibraryNeeded((id) => needed.push(id));
+    engine.setSong(song);
+    engine.launchScene("scene-1");
+    engine.play();
+    engine.node.connect(context.destination);
+    await engine.flush();
+    // Three tracks, TWO fonts: every track's font is reported, and each font id
+    // once — however many tracks play it.
+    assert.deepEqual(needed.slice().sort(), ["font-a", "font-b"], `every font has to be asked for once, got ${JSON.stringify(needed)}`);
+    const buffer = await context.startRendering();
+    rendered = true;
+    const left = channelOf(buffer, 0);
+    const right = channelOf(buffer, 1);
+    assert.ok(
+      peakOf(left) < 1e-9 && peakOf(right) < 1e-9,
+      `with no font host there is nothing to play, peak was ${Math.max(peakOf(left), peakOf(right))}`,
+    );
+    assert.deepEqual(needed.slice().sort(), ["font-a", "font-b"], "a font is asked for once, not once per block");
+  } finally {
+    if (engine) engine.dispose();
+    if (!rendered) await releaseWorklet(context);
+  }
+});
+
+test("every soundfont track of a song is non-silent", async () => {
+  // Three soundfont tracks on ONE bank, each its own program. Each is rendered
+  // alone (the other two muted) and has to sound: a mix that is audible overall
+  // would still pass if one track's channel never reached it.
+  const fontId = "font-tiny";
+  const font = { id: fontId, bytes: tinySf2() };
+  const track = (index, program) => ({
+    id: `track-${index}`,
+    name: `Track ${index}`,
+    color: "#E8C07A",
+    device: { engine: "soundfont", font_id: fontId, bank: 0, program: program },
+    mute: false,
+    solo: false,
+    gain_db: -6,
+    pan: 0,
+    locked: false,
+  });
+  const tracks = [track(1, 0), track(2, 1), track(3, 2)];
+  const song = {
+    meta: { title: "Every track", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: tracks,
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {},
+  };
+  for (let index = 0; index < tracks.length; index += 1) {
+    const id = tracks[index].id;
+    song.clips[`clip-${index + 1}`] = {
+      id: `clip-${index + 1}`,
+      track_id: id,
+      scene_id: "scene-1",
+      name: id,
+      length_bars: 1,
+      notes: [{ t: 0, d: 4, p: 60, v: 110 }],
+    };
+  }
+  assert.ok(TINY_SF2_PRESETS.length >= 3, "the test font has to carry three programs");
+
+  for (let solo = 0; solo < tracks.length; solo += 1) {
+    const only = {
+      ...song,
+      tracks: tracks.map((item, index) => (index === solo ? item : { ...item, mute: true })),
+    };
+    const render = await renderSong(only, { seconds: 0.5, sampleRate: SAMPLE_RATE, fonts: [font] });
+    const peak = Math.max(peakOf(render.left), peakOf(render.right));
+    assert.ok(peak > 0.005, `track ${solo + 1} has to sound on its own, peak was ${peak}`);
   }
 });
 

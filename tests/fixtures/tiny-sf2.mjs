@@ -11,17 +11,20 @@
  *        LIST <size> sdta     smpl <16-bit PCM, one sine loop per preset>
  *        LIST <size> pdta     phdr pbag pmod pgen inst ibag imod igen shdr
  *
- * Every preset is one sine wave that loops seamlessly: each sample is EXACTLY
- * one whole number of cycles long (`freq * 2400 / 48000` is an integer for all
- * of them), so a held note is a clean, measurable tone and a test can tell one
- * preset's channel from another's by frequency alone. The tones are 80 Hz
- * apart, far enough that even a short window can separate two channels.
+ * Every preset is one sine wave that loops seamlessly: each sample's loop is
+ * EXACTLY one whole number of cycles long (`freq * 2400 / 48000` is an integer
+ * for all of them), so a held note is a clean, measurable tone and a test can
+ * tell one preset's channel from another's by frequency alone. The tones are 80
+ * Hz apart, far enough that even a short window can separate two channels. Every
+ * sample ends with the 46 zero points SF2 asks for, and every zone ends with its
+ * terminal generator record, so the file is a strictly valid SF2.
  *
  * | bank | program | tone |
  * |------|---------|------|
  * | 0    | 0       | 340 Hz |
  * | 0    | 1       | 420 Hz |
  * | 0    | 2..7    | 500, 580, 660, 740, 820, 900 Hz |
+ * | 0    | 8       | 980 Hz, with a 4-second release |
  * | 128  | 0       | 220 Hz (the GM drum bank) |
  *
  * Bank 128 is the GM drum bank: a soundfont track that names it is played with
@@ -34,6 +37,7 @@ const GENERATOR = Object.freeze({
   instrument: 41,
   sampleID: 53,
   sampleModes: 54,
+  releaseVolEnv: 38,
 });
 
 /** The frames in one sample's loop, and the sample's rate. */
@@ -41,10 +45,18 @@ const LOOP_FRAMES = 2400;
 const SAMPLE_RATE = 48000;
 
 /**
- * One sample is the loop plus one guard frame: the last frame repeats the
- * first, so a voice reading at the loop's end never runs off the data.
+ * The zero sample points every sample ends with. SF2 asks for the last 46 points
+ * of a sample to be zero ("so that the sample data can be interpolated"), and a
+ * strictly valid bank has them; they also mean a voice reading past the loop
+ * end reads silence instead of the next sample's data.
  */
-const SAMPLE_FRAMES = LOOP_FRAMES + 1;
+const ZERO_TAIL = 46;
+
+/**
+ * One sample is the loop plus its zero tail: the loop is exactly 2400 points and
+ * the 46 points after it are silence.
+ */
+const SAMPLE_FRAMES = LOOP_FRAMES + ZERO_TAIL;
 
 /** The presets this font carries, in file order, with the tone each one plays. */
 export const TINY_SF2_PRESETS = Object.freeze([
@@ -56,8 +68,18 @@ export const TINY_SF2_PRESETS = Object.freeze([
   { name: "Sine 740", bank: 0, program: 5, freq: 740 },
   { name: "Sine 820", bank: 0, program: 6, freq: 820 },
   { name: "Sine 900", bank: 0, program: 7, freq: 900 },
+  // A four-second release (2400 timecents), so a test can watch a released note
+  // ring out instead of being cut.
+  { name: "Sine 980 long", bank: 0, program: 8, freq: 980, release: 2400 },
   { name: "Drum 220", bank: 128, program: 0, freq: 220 },
 ]);
+
+/**
+ * The Float32 bytes the decoded samples of the whole font take: one `SAMPLE_FRAMES`
+ * Float32 per preset. The font host counts this against its cap on top of the
+ * file's own bytes, so the engine tests can name a cap in exactly those terms.
+ */
+export const TINY_SF2_DECODED_BYTES = TINY_SF2_PRESETS.length * SAMPLE_FRAMES * 4;
 
 /** A little-endian byte builder: the whole file is one of these. */
 class Bytes {
@@ -161,14 +183,15 @@ function list(type, parts) {
 }
 
 /**
- * One sine sample's 16-bit PCM: the loop plus its guard frame, at half scale so
- * eight tracks of it still sum well under full scale.
+ * One sine sample's 16-bit PCM: the loop, then its zero tail (46 points, as SF2
+ * asks for), at half scale so eight tracks of it still sum well under full
+ * scale.
  * @param {number} freq Hz
  * @returns {Int16Array}
  */
 function sineSample(freq) {
   const data = new Int16Array(SAMPLE_FRAMES);
-  for (let frame = 0; frame < SAMPLE_FRAMES; frame += 1) {
+  for (let frame = 0; frame < LOOP_FRAMES; frame += 1) {
     data[frame] = Math.round(Math.sin((2 * Math.PI * freq * frame) / SAMPLE_RATE) * 0.5 * 32767);
   }
   return data;
@@ -176,10 +199,14 @@ function sineSample(freq) {
 
 /**
  * Build the whole font.
+ * @param {{presets?: ReadonlyArray<{name: string, bank: number, program: number,
+ *   freq: number, release?: number}>}} [options] `presets` defaults to the
+ *   font's own ten; an empty list builds a valid bank that carries NO preset,
+ *   which the engine refuses
  * @returns {Uint8Array} the SF2 file's bytes
  */
-export function tinySf2() {
-  const presets = TINY_SF2_PRESETS;
+export function tinySf2(options = {}) {
+  const presets = Array.isArray(options.presets) ? options.presets : TINY_SF2_PRESETS;
 
   // --- the sample data: every preset's loop, back to back, in points --------
   const points = [];
@@ -191,29 +218,47 @@ export function tinySf2() {
     samples.push({ start: start, end: start + pcm.length });
   }
   const smpl = new Bytes();
+  // A bank carries sample data even when it has nothing to play (a 46-point
+  // silent "sample" nothing references), so the chunk is never empty.
+  if (points.length === 0) for (let index = 0; index < ZERO_TAIL; index += 1) smpl.u16(0);
   for (const point of points) smpl.u16(point & 0xffff);
   const smplChunk = chunk("smpl", smpl.bytes());
 
-  // --- INFO: a version and a name, which is all an SF2 needs to exist ------
+  // --- INFO: a version, the sample engine and a name ---------------------
+  // `isng` names the synthesis engine the bank was made for (SF2 requires it);
+  // `INAM` is the bank's name.
   const ifil = new Bytes().u16(2).u16(1);
-  const info = list("INFO", [chunk("ifil", ifil.bytes()), chunk("INAM", new TextEncoder().encode("Tiny Test Font"))]);
+  const isng = new TextEncoder().encode("EMU8000");
+  const info = list("INFO", [
+    chunk("ifil", ifil.bytes()),
+    chunk("isng", isng),
+    chunk("INAM", new TextEncoder().encode("Tiny Test Font")),
+  ]);
 
   // --- pdta: one preset zone and one instrument zone per preset ------------
-  // A zone is its generators followed by a terminal record (operator 0, amount
-  // 0); the LAST zone of a chunk does not need one, because the parser drops the
-  // chunk's final record. Every index below is a running count of records.
+  // Every zone is its generators followed by a terminal record (operator 0,
+  // amount 0), which is where the spec puts it; the parser drops the LAST record
+  // of a chunk (it is the terminal of the last zone), so the final zone needs no
+  // special case. Every index below is a running count of records.
   const presetZones = [];
   const instrumentZones = [];
   for (let index = 0; index < presets.length; index += 1) {
     presetZones.push([{ op: GENERATOR.instrument, amount: index }, { op: 0, amount: 0 }]);
-    instrumentZones.push([
+    const zone = [
       { op: GENERATOR.sampleID, amount: index },
       // Loop the sample for ever: a held note is a steady tone. (The rest of the
       // envelope is SF2's own default: an instant attack, full sustain and a 1 ms
-      // release, so a note off leaves nothing behind.)
+      // release, so a note off leaves nothing behind — unless the preset names
+      // its own release, as the long one does.)
       { op: GENERATOR.sampleModes, amount: 1 },
-      { op: 0, amount: 0 },
-    ]);
+    ];
+    if (Number(presets[index].release) > 0) {
+      // releaseVolEnv, in timecents: 1200 per octave of seconds, so 2400 is 4 s.
+      zone.push({ op: GENERATOR.releaseVolEnv, amount: Math.round(presets[index].release) });
+    }
+    // The zone's terminal record is last, as the spec lays a zone out.
+    zone.push({ op: 0, amount: 0 });
+    instrumentZones.push(zone);
   }
   const presetGenerators = [];
   const instrumentGenerators = [];
@@ -276,7 +321,8 @@ export function tinySf2() {
       .name(presets[index].name)
       .u32(samples[index].start)
       .u32(samples[index].end)
-      // The loop is the whole sample, minus its guard frame, in points.
+      // The loop is the whole loop, in points: the zero tail after it is not
+      // part of it, and a held note reads round the loop for ever.
       .u32(samples[index].start)
       .u32(samples[index].start + LOOP_FRAMES)
       .u32(SAMPLE_RATE)

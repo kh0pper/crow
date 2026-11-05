@@ -114,17 +114,21 @@
  *   wanted so the page can load it back.
  * - `loadLibrary(id, kind, bytes)` hands the engine one library FILE — a
  *   SoundFont bank today (`kind: "font"`), a capture or cabinet later —
- *   transferred rather than copied, and resolves when the processor has
- *   answered. There is no fetch on the audio thread, so the page (or a render)
- *   reads the file and posts it here. Banks are parsed ONLY while the transport
- *   is stopped (the plan's loading rule): a load posted while the song plays is
- *   answered `library_deferred` and parsed on the next `stop()`, which is what
- *   the page's "Loads when you stop." says. `unloadLibrary(id)` drops one file
- *   again, and `onLibraryNeeded(listener)` follows the fonts a track wanted but
- *   the engine does not hold, so the page can load them (or offer a download).
- *   The processor holds at most 1 GiB of banks per page (`maxFontBytes` on
- *   `create()` for a host that knows its own window): past it the least
- *   recently played font is dropped and requested again the same way.
+ *   transferred rather than copied, and resolves with what became of it:
+ *   `{status: "loaded" | "deferred" | "failed", reason?}`. There is no fetch on
+ *   the audio thread, so the page (or a render) reads the file and posts it
+ *   here. Banks are parsed ONLY while the transport is stopped (the plan's
+ *   loading rule): a load posted while the song plays is answered `deferred` and
+ *   parsed on the next `stop()`, which is what the page's "Loads when you stop."
+ *   says. `unloadLibrary(id)` drops one file again (and cancels a load of it that
+ *   has not been parsed yet), and `onLibraryNeeded(listener)` follows the fonts a
+ *   track wanted but the engine does not hold, so the page can load them (or
+ *   offer a download). The processor holds at most 1 GiB of banks per page
+ *   (`maxFontBytes` on `create()` for a host that knows its own window), counted
+ *   as the files plus their decoded sample data: past it the least recently
+ *   played font no track of the song plays is dropped and requested again, and a
+ *   load the song's own fonts leave no room for comes back `failed` with the
+ *   reason to show.
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
@@ -709,7 +713,7 @@
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onTap: function(function): function,
- *                    loadLibrary: function(string, string, Uint8Array): Promise<void>,
+  *                    loadLibrary: function(string, string, Uint8Array): Promise<{status: string, reason?: string}>,
  *                    unloadLibrary: function(string): void,
  *                    onLibraryNeeded: function(function): function,
    *                    fxHold: function(string, number): void,
@@ -1211,8 +1215,9 @@
     const pendingAudio = new Map();
     /** sample id → resolvers waiting for the processor's `sample_loaded`. */
     const pendingSamples = new Map();
-    /** library id → resolvers waiting for a `library_loaded` / `library_deferred`. */
+    /** request id → the resolver waiting for that load's `library_loaded` / `library_deferred`. */
     const pendingLibrary = new Map();
+    let librarySeq = 0;
     /** request id → the resolver waiting for the processor's `looper_buffer`. */
     const pendingLooper = new Map();
     let looperSeq = 0;
@@ -1346,16 +1351,24 @@
         return;
       }
       if (message.type === "library_loaded" || message.type === "library_deferred") {
-        // One ack per library message, in order: a load resolves once the
-        // processor has the file (or has parked it until Stop), and a bank that
-        // would not parse resolves here too — the reason travels on
-        // `library_failed`, once per font id.
-        const waiting = pendingLibrary.get(message.library_id);
-        if (waiting && waiting.length > 0) {
-          const resolveLibrary = waiting.shift();
-          if (waiting.length === 0) pendingLibrary.delete(message.library_id);
-          resolveLibrary();
+        // One ack per library message, matched by the request id the load was
+        // posted with: a later load of the same font never answers an earlier
+        // one. A load resolves with what became of it — `loaded`, `deferred` (it
+        // waits for Stop) or `failed` (with the reason the processor gave, which
+        // is also posted once per font id as `library_failed`).
+        const waiting = pendingLibrary.get(message.request_id);
+        if (waiting === undefined) return;
+        pendingLibrary.delete(message.request_id);
+        if (message.type === "library_deferred") {
+          waiting({ status: "deferred" });
+          return;
         }
+        if (message.ok === false) {
+          const reason = message.reason === undefined ? "" : String(message.reason);
+          waiting({ status: "failed", reason: reason });
+          return;
+        }
+        waiting({ status: "loaded" });
         return;
       }
       if (message.type === "library_failed") {
@@ -1743,14 +1756,17 @@
        *
        * A bank is parsed only while the transport is stopped (the plan's loading
        * rule). A load posted while the song plays is parked and parsed on the
-       * next `stop()`, and the promise resolves then — with the page showing
-       * "Loads when you stop." in the meantime. A bank that will not parse leaves
-       * the track silent and is reported once through `onError`.
+       * next `stop()`, and resolves `{status: "deferred"}` at once — the page
+       * shows "Loads when you stop." in the meantime. Each load carries its own
+       * request id, so its promise settles for THAT load and never for another
+       * load of the same font.
        * @param {string} libraryId
        * @param {string} kind `"font"` (a capture or cabinet is acknowledged and
        *   left to the host that reads them)
        * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes the file itself
-       * @returns {Promise<void>} resolves when the processor has answered
+       * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string}>}
+       *   `failed` carries why: a bank that will not parse, one with no
+       *   instruments, or one the song's own fonts have left no room for
        */
       loadLibrary(libraryId, kind, bytes) {
         const id = String(libraryId);
@@ -1758,11 +1774,14 @@
         // A view into a larger buffer is copied: transferring it would hand the
         // processor (and detach here) the whole underlying buffer.
         const payload = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data : data.slice();
+        librarySeq += 1;
+        const requestId = librarySeq;
         return new Promise((resolve) => {
-          const waiting = pendingLibrary.get(id) || [];
-          waiting.push(resolve);
-          pendingLibrary.set(id, waiting);
-          post({ type: "library", library_id: id, kind: String(kind || "font"), bytes: payload }, [payload.buffer]);
+          pendingLibrary.set(requestId, resolve);
+          post(
+            { type: "library", request_id: requestId, library_id: id, kind: String(kind || "font"), bytes: payload },
+            [payload.buffer],
+          );
         });
       },
 

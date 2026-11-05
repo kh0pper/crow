@@ -117,12 +117,15 @@
  * one.
  *
  * **Loading happens while the transport is stopped.** `{type:"library"}` arrives
- * with the bank's bytes; a load that arrives while the playhead runs is held and
- * parsed on the next `{type:"stop"}`, and answered with
- * `{type:"library_deferred"}` so the page can say "Loads when you stop." A
- * track whose font is not loaded is silent and is reported once per font id as
- * `{type:"library_needed"}`; a bank that will not parse is silent and reported
- * once as `{type:"library_failed"}`. Neither throws: a font costs its own
+ * with the bank's bytes and the client's own `request_id`; a load that arrives
+ * while the playhead runs is held and answered `{type:"library_deferred"}` so
+ * the page can say "Loads when you stop.", and a load whose queued job finds the
+ * playhead running goes back to that same queue. Every ack repeats the
+ * `request_id`, so one load never answers another. A track whose font is not
+ * loaded is silent and is reported once per font id as
+ * `{type:"library_needed"}`; a bank that will not parse (or that the song's own
+ * fonts leave no room for under the cap) is silent and reported once as
+ * `{type:"library_failed", reason}`. Neither throws: a font costs its own
  * tracks and never the song.
  *
  * ## Sampler tracks: a pool of pad voices, JS DSP
@@ -328,8 +331,9 @@
  * `{type:"sample_loaded", sample_id}` (one ack per `sample` message),
  * `{type:"sample_needed", sample_id}` (a trigger for a sample that is not
  * loaded, once per sample id), `{type:"library_loaded", library_id, ok,
- * reason?}` (one ack per `library` message), `{type:"library_deferred",
- * library_id}` (a load that waits for Stop), `{type:"library_needed",
+ * reason?, request_id}` (one ack per `library` message, matched to that message's
+ * own `request_id`), `{type:"library_deferred", library_id, request_id}` (a load
+ * that waits for Stop), `{type:"library_needed",
  * library_id}` (a track's font is not loaded, once per font id),
  * `{type:"library_failed", library_id, reason}` (a bank that will not parse or
  * render, once per font id), `{type:"tap_block", target, frame, channels}`
@@ -440,10 +444,30 @@
   /**
    * How many bytes of fonts one processor holds at once when the client names
    * no other cap: the plan's 1 GiB. An offline render may pass its own
-   * (`processorOptions.maxFontBytes`), exactly as it does for samples; past the
-   * cap the least recently played font is unloaded and requested again.
+   * (`processorOptions.maxFontBytes`), exactly as it does for samples. The cap
+   * counts the files plus their decoded sample data; past it the least recently
+   * played font NO track of the current song plays is unloaded and requested
+   * again, and a load the song's own fonts leave no room for is refused with a
+   * reason the page shows.
    */
   const DEFAULT_MAX_FONT_BYTES = 1024 * 1024 * 1024;
+
+  /**
+   * Why a load's own request is answered without its bank being parsed: a newer
+   * load of the same font replaced it, or the font was unloaded before the job
+   * that would have parsed it ran (see `parseFont` and `unloadLibrary`).
+   */
+  const LOAD_SUPERSEDED = "A newer load of this instrument replaced this one.";
+  const LOAD_CANCELLED = "The instrument was unloaded before it finished loading.";
+
+  /** The empty list a host answers its `take*` calls with, so a run allocates none. */
+  const NO_IDS = Object.freeze([]);
+
+  /** The empty per-track map a host without a synth hands back every run. */
+  const NO_OUTPUTS = Object.freeze(new Map());
+
+  /** The soundfont tracks last given to the no-op host (`NO_FONTS.assign`). */
+  let noFontSpecs = [];
 
   /**
    * A font host that holds nothing, for an engine module built without
@@ -451,6 +475,10 @@
    * engine's tests do). Every call is a no-op, so a soundfont track in such an
    * engine is silent and reported like a font that is not loaded, and nothing
    * throws on the audio thread.
+   *
+   * It still answers `missing()` with EVERY soundfont track's font, so the page
+   * is told once per font id that nothing here can play it — and it hands back
+   * the same empty map and lists every run, so it allocates nothing per block.
    * @type {Readonly<object>}
    */
   const NO_FONTS = Object.freeze({
@@ -461,7 +489,9 @@
     isLoaded: function isLoaded() {
       return false;
     },
-    assign: function assign() {},
+    assign: function assign(list) {
+      noFontSpecs = Array.isArray(list) ? list : [];
+    },
     channelFor: function channelFor() {
       return null;
     },
@@ -471,21 +501,37 @@
     noteOn: function noteOn() {},
     noteOff: function noteOff() {},
     process: function process() {
-      return new Map();
+      return NO_OUTPUTS;
     },
     missing: function missing() {
-      return [];
+      // There is no synth at all, so every font the song's tracks name is
+      // missing. The processor reports each id once (`fontNeeded`).
+      const ids = new Set();
+      for (let index = 0; index < noFontSpecs.length; index += 1) {
+        const spec = noFontSpecs[index];
+        const id = spec && spec.font_id !== undefined && spec.font_id !== null ? String(spec.font_id) : "";
+        if (id !== "") ids.add(id);
+      }
+      return Array.from(ids).sort();
     },
     takeEvicted: function takeEvicted() {
-      return [];
+      return NO_IDS;
     },
     takeFailures: function takeFailures() {
-      return [];
+      return NO_IDS;
     },
     loadedIds: function loadedIds() {
-      return [];
+      return NO_IDS;
     },
-    destroy: function destroy() {},
+    stats: function stats() {
+      return null;
+    },
+    fontSynth: function fontSynth() {
+      return null;
+    },
+    destroy: function destroy() {
+      noFontSpecs = [];
+    },
   });
 
   /** How many voices one sampler track holds, and how many the song may sound. */
@@ -1242,10 +1288,20 @@
       this.fontTracks = [];
 
       /**
-       * Bank loads that arrived while the playhead ran: id → the parsed kind and
-       * the file's bytes, waiting for the next Stop (see `loadLibrary`).
+       * Bank loads that are waiting for a Stop: id → `{bytes, request_id}`, the
+       * file's bytes and the request that load's client is waiting on (see
+       * `loadLibrary`). A load that arrives while the playhead runs, or one whose
+       * parse job finds the playhead running again, lands here.
        */
       this.deferredFonts = new Map();
+
+      /**
+       * The load of a font that occupies the queue right now: id → the request
+       * id it was queued for. A parse job whose request is not the one held here
+       * was superseded by a newer load of the same font or cancelled by
+       * `library_unload`, and does nothing (see `parseFont`).
+       */
+      this.fontLoads = new Map();
 
       /** Font ids a track wanted and the engine reported already (once each). */
       this.fontNeeded = new Set();
@@ -1632,58 +1688,134 @@
      * Parsing a font happens in the worklet ONLY while the transport is stopped
      * (plan 1d, Global Constraints): a load that arrives while the playhead runs
      * is held — bytes and all — and answered with `library_deferred`, so the page
-     * can say "Loads when you stop." — and parsed on the next Stop.
+     * can say "Loads when you stop." — and parsed on the next Stop. A load that was
+     * queued while the transport stood still and was still queued when the
+     * playhead started is put back in that same queue by its job (see
+     * `parseFont`), so "stopped" is checked when the work happens, not when the
+     * message arrived.
+     *
+     * Every `library` message carries a `request_id` from its client and every
+     * answer repeats it: one ack per load, matched to the load that asked, so a
+     * later load of the same font never answers an earlier one.
      *
      * Only `kind: "font"` is this engine's business today; the captures (`nam`)
      * and cabinets (`ir`) of PR C are acknowledged and left alone, so a page that
      * loads a song's whole library does not have to know which entry is which.
-     * @param {{library_id?: string, kind?: string, bytes?: unknown}} message
+     * @param {{request_id?: unknown, library_id?: string, kind?: string,
+     *          bytes?: unknown}} message
      * @returns {void}
      */
     loadLibrary(message) {
       const id = asId(message.library_id);
       if (id === "") return;
+      const requestId = message.request_id;
       const kind = asId(message.kind) === "" ? "font" : asId(message.kind);
       const bytes = readBytes(message.bytes);
       if (kind !== "font") {
-        this.port.postMessage({ type: "library_loaded", library_id: id, kind: kind, ok: true });
+        this.port.postMessage({ type: "library_loaded", library_id: id, kind: kind, ok: true, request_id: requestId });
         return;
       }
       if (this.sequencer.isPlaying()) {
-        // The last load of one id wins: the bytes are replaced, not queued twice.
-        this.deferredFonts.set(id, bytes);
-        this.port.postMessage({ type: "library_deferred", library_id: id });
+        // This load supersedes one still queued for the same font: that one has
+        // not been parsed, and this one is what the page wants.
+        const queued = this.fontLoads.get(id);
+        if (queued !== undefined) {
+          this.fontLoads.delete(id);
+          this.answerLibrary(queued, id, false, LOAD_SUPERSEDED);
+        }
+        this.deferFont(id, bytes, requestId);
         return;
       }
-      this.parseFont(id, bytes);
+      this.parseFont(id, bytes, requestId);
+    }
+
+    /**
+     * Park one load until the next Stop and answer it `library_deferred`. The last
+     * load of a font wins: an older one waiting here is dropped, and its client
+     * already has its `deferred` answer (it is waiting for the parse, not for the
+     * parking), so nothing else has to be said about it.
+     * @param {string} id
+     * @param {Uint8Array} bytes
+     * @param {unknown} requestId
+     * @returns {void}
+     */
+    deferFont(id, bytes, requestId) {
+      this.deferredFonts.set(id, { bytes: bytes, request_id: requestId });
+      this.port.postMessage({ type: "library_deferred", library_id: id, request_id: requestId });
+    }
+
+    /**
+     * Answer one load's own request: its ack, matched by the request id it
+     * arrived with. A failed ack carries the reason the client shows.
+     * @param {unknown} requestId
+     * @param {string} id
+     * @param {boolean} ok
+     * @param {string} [reason]
+     * @returns {void}
+     */
+    answerLibrary(requestId, id, ok, reason) {
+      const message = { type: "library_loaded", library_id: id, ok: ok, request_id: requestId };
+      if (!ok && reason !== undefined) message.reason = String(reason);
+      this.port.postMessage(message);
     }
 
     /**
      * Parse one bank and give it to the font host, on the processor's own work
      * queue so a song posted after it is assigned after it.
      *
+     * The job re-reads the transport when it RUNS: a load that was queued before
+     * the playhead started is put back in the deferred queue (`library_deferred`)
+     * instead of parsing while the song plays.
+     *
      * A bank that will not parse leaves nothing behind: the track that wanted it
      * stays silent and the failure is reported once per font id, through both the
      * ack (`library_loaded` with `ok: false`) and `library_failed`.
      * @param {string} id
      * @param {Uint8Array} bytes
+     * @param {unknown} requestId the load's own request id
      * @returns {void}
      */
-    parseFont(id, bytes) {
+    parseFont(id, bytes, requestId) {
+      const replaced = this.fontLoads.get(id);
+      if (replaced !== undefined && replaced !== requestId) {
+        this.answerLibrary(replaced, id, false, LOAD_SUPERSEDED);
+      }
+      // A load parked for the next Stop is superseded too; its client already has
+      // its `deferred` answer, and this one replaces its bytes.
+      this.deferredFonts.delete(id);
+      this.fontLoads.set(id, requestId);
       this.enqueue(async () => {
+        // Cancelled (`library_unload`) or superseded before it ran: its request
+        // has already been answered, and nothing is parsed.
+        if (this.fontLoads.get(id) !== requestId) return;
+        // The transport may have started between the message and this job: a bank
+        // is parsed only while the song is stopped, so it goes back to the queue.
+        if (this.sequencer.isPlaying()) {
+          this.fontLoads.delete(id);
+          this.deferFont(id, bytes, requestId);
+          return;
+        }
         try {
           await this.fontHost().load(id, bytes);
         } catch (error) {
+          if (this.fontLoads.get(id) === requestId) this.fontLoads.delete(id);
           const reason = error && error.message ? error.message : String(error);
-          this.port.postMessage({ type: "library_loaded", library_id: id, ok: false, reason: reason });
+          this.answerLibrary(requestId, id, false, reason);
           this.reportFontFailure(id, reason);
           return;
         }
+        if (this.fontLoads.get(id) !== requestId) {
+          // Unloaded (or replaced) while it parsed: it must not come back.
+          this.fontHost().unload(id);
+          this.bindFonts();
+          return;
+        }
+        this.fontLoads.delete(id);
         // A load that worked clears both marks, so a font the cap evicts later is
         // requested (and, if it goes bad again, reported) once more.
         this.fontNeeded.delete(id);
         this.fontFailed.delete(id);
-        this.port.postMessage({ type: "library_loaded", library_id: id, ok: true });
+        this.answerLibrary(requestId, id, true);
         this.bindFonts();
       });
     }
@@ -1698,18 +1830,32 @@
       if (this.deferredFonts.size === 0) return;
       const waiting = Array.from(this.deferredFonts.entries());
       this.deferredFonts.clear();
-      for (const [id, bytes] of waiting) this.parseFont(id, bytes);
+      for (const [id, load] of waiting) this.parseFont(id, load.bytes, load.request_id);
     }
 
     /**
      * Drop one bank from the engine (a song that no longer plays it).
+     *
+     * A load of that font that has not been parsed yet is cancelled with it —
+     * deferred, or queued and not yet run — and its own request is answered, so a
+     * client that asked for a font it then unloaded is not left waiting. A job
+     * already queued for it finds its request gone and parses nothing.
      * @param {unknown} libraryId
      * @returns {void}
      */
     unloadLibrary(libraryId) {
       const id = asId(libraryId);
       if (id === "") return;
-      this.deferredFonts.delete(id);
+      const deferred = this.deferredFonts.get(id);
+      if (deferred) {
+        this.deferredFonts.delete(id);
+        this.answerLibrary(deferred.request_id, id, false, LOAD_CANCELLED);
+      }
+      const queued = this.fontLoads.get(id);
+      if (queued !== undefined) {
+        this.fontLoads.delete(id);
+        this.answerLibrary(queued, id, false, LOAD_CANCELLED);
+      }
       this.fontNeeded.delete(id);
       this.fontFailed.delete(id);
       this.fontHost().unload(id);
@@ -2465,9 +2611,10 @@
      * @returns {void}
      */
     render(frames, left, right, offset) {
-      // The font hosts render every loaded bank once for this run, whichever
-      // tracks read them (a font played by eight tracks is still parsed and
-      // rendered once). Each soundfont track then adds its own channel below.
+      // The font hosts render every font this song's tracks read once for this
+      // run, whichever tracks read it (a font played by eight tracks is still
+      // parsed and rendered once); a loaded font no track reads is not rendered
+      // at all. Each soundfont track then adds its own channel below.
       if (this.fonts !== null) this.fonts.process(frames);
       const slots = this.slots;
       const tapped = this.tapIndex;
