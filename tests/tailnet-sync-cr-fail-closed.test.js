@@ -42,8 +42,8 @@ test("U-4: with no local instance id, a legacy-only (CR-less) hello is refused; 
   const idless = new Proxy(b.mgr, {
     get: (t, k) => (k === "localInstanceId" ? undefined : Reflect.get(t, k, t)),
   });
-  const B0 = await startGateway(fleet, b, { instanceSyncManager: idless });
-  const B1 = await startGateway(fleet, b);
+  const B0 = await startGateway(fleet, b, { instanceSyncManager: idless, pairBindingMode: "auto" });
+  const B1 = await startGateway(fleet, b, { pairBindingMode: "auto" });
   try {
     // No local id: the guard cannot read a pin, so it must refuse.
     const c = await openRaw(B0.port);

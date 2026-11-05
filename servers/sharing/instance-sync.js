@@ -1288,21 +1288,26 @@ export async function applyRemoteOp(db, table, op, row, lamportTs = 0, origin = 
 /**
  * Entry-origin policy (PT-2): an in-feed has exactly one writer, so an entry
  * whose `instance_id` is not the peer it arrived from is forged or stale.
- * `observe` (PT-2a default) applies it, counts it and logs it; `enforce`
- * (PT-2b) skips it. Any value other than the exact string `enforce` means
- * observe: enforce can cut sync, so a typo must fall to the safe direction.
- * An unrecognised non-empty value is logged once.
+ * `enforce` (PT-2b default) skips it; `observe` applies it, counts it and logs
+ * it.
+ *
+ * Any OTHER value means `observe`, with a warning on every boot. Enforce
+ * CONSUMES a skipped entry (the applied seq advances past it), so a typo here
+ * would quietly drop data and a later switch back would not re-apply it: the
+ * failure mode of a mistaken value must be the harmless one.
  */
 let _warnedBadOriginMode = false;
 export function entryOriginMode(env = process.env) {
   const v = env?.CROW_SYNC_ENTRY_ORIGIN;
-  if (v === "enforce") return "enforce";
-  if (v !== undefined && v !== "" && v !== "observe" && !_warnedBadOriginMode) {
+  if (v === undefined || v === null || v === "" || v === "enforce") return "enforce";
+  if (v !== "observe" && !_warnedBadOriginMode) {
     _warnedBadOriginMode = true;
-    console.warn(`[instance-sync] unknown CROW_SYNC_ENTRY_ORIGIN "${v}", using observe`);
+    console.warn(`[instance-sync] WARNING: unknown CROW_SYNC_ENTRY_ORIGIN ${JSON.stringify(String(v)).slice(0, 40)}; using "observe" (valid: observe, enforce) — entries that claim another writer are APPLIED, not skipped`);
   }
   return "observe";
 }
+/** Test seam: forget that the unknown-mode warning was logged. */
+export function _resetEntryOriginModeLog() { _warnedBadOriginMode = false; }
 
 const ORIGIN_LOG_INTERVAL_MS = 3_600_000;
 
@@ -1314,6 +1319,13 @@ export class InstanceSyncManager {
    */
   constructor(identity, db, localInstanceId, { now = Date.now } = {}) {
     this._now = now; // injectable clock (origin-mismatch log rate limit)
+    // Resolve the entry-origin policy ONCE at startup: this is the call that
+    // makes docs/guide/instances.md's "a warning in the log at every start"
+    // true for an unknown CROW_SYNC_ENTRY_ORIGIN. entryOriginMode()'s other
+    // caller is the mismatch path, which only runs once a mismatching entry
+    // arrives — on a healthy fleet that is never, so the warning would never
+    // print. The manager is built on every gateway start (managers.js).
+    this.entryOriginMode = entryOriginMode();
     this.originMismatches = new Map(); // peer id -> entries whose instance_id != peer
     this._originLogAt = new Map();     // peer id -> last log time (ms)
     this.identity = identity;
@@ -2806,8 +2818,11 @@ export class InstanceSyncManager {
         this._originLogAt.set(remoteInstanceId, nowMs);
         console.warn(`[instance-sync] entry origin mismatch from ${remoteInstanceId}: claims ${instance_id}`);
       }
-      // PT-2b: skipped here; the caller's checkpoint still advances past it.
-      if (entryOriginMode() === "enforce") return;
+      // Skipped under the default (enforce); the caller's checkpoint still
+      // advances past it, so a skipped entry is CONSUMED, not retried. The mode
+      // was resolved at construction (one boot, one policy); the fallback keeps
+      // a partial `this` (a test seam that calls this method directly) working.
+      if ((this.entryOriginMode ?? entryOriginMode()) === "enforce") return;
     }
 
     // Verified: from here on every handler sees the row minus its local-only columns.
@@ -4125,9 +4140,9 @@ export class InstanceSyncManager {
    * (session-summary:<origin>:<threadId>); anything else (another instance's
    * stale copy, the old one-part source) is refused. This relies on
    * fleet-internal trust: the entry's instance_id is the signed claim of a
-   * same-identity peer, and it is only bound to the feed it arrived on when
-   * entryOriginMode() is "enforce" (PT-2b). In "observe" mode a trusted peer
-   * could still claim another origin.
+   * same-identity peer, and it is bound to the feed it arrived on by default
+   * (entryOriginMode() "enforce", PT-2b). Only an explicit "observe" leaves a
+   * trusted peer able to claim another origin.
    * project_uuid is mapped to the local project as for any memory. A key the
    * local table lacks rejects the entry (_wireColumnsValid), as on the generic
    * path.

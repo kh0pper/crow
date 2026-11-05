@@ -24,6 +24,12 @@
  *      the server's reply also carries pb_mac and the proof frame pb_proof,
  *      HMACs over both nonces under a subkey of the pair's signing_key. The
  *      binding decision runs before ANY side effect. See "pair binding" below.
+ *   3d. Session binding (PT-2b, when both hellos also carry `sm: 1`): every
+ *      control frame after the hellos carries a per-direction counter and an
+ *      HMAC under a key derived from the pair key with the two hello frames
+ *      as salt, and the feed frames carry the public key of this connection's
+ *      Noise keypair — checked against the peer's Noise handshake before
+ *      replication starts. See "session binding" below.
  *   4. After mutual auth, both sides:
  *        a. Run feed-key-exchange: send our outgoing feed key for them as a
  *           text frame {feed_key_hex}; persist theirs on receipt.
@@ -56,10 +62,20 @@ import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import {
   tailnetRespMac, tailnetProofMac, macEqual, pairBindingMode, pairSubkeyVia, decideAndRecordPairBinding,
 } from "../shared/sync-pair-binding.js";
+import { RefusalLog } from "./contact-binding.js";
+import { recordPairBindingRefusal, recordUnboundPeer } from "../shared/peer-trust-health.js";
+import {
+  SM_VERSION, SessionChannel, NULL_SESSION, transcriptHash, deriveSessionKeys, decideSession,
+} from "../shared/sync-session.js";
 import { testTunableMs } from "../shared/test-timing.js";
 
 const WS_PATH = "/api/instance-sync/stream";
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+// Handshake text frames are tiny (a hello, a proof, a feed key). The cap keeps
+// an unauthenticated WS client from queuing megabytes before the hello check.
+// `maxPayload` is deliberately NOT touched: it also bounds replication frames.
+export const HANDSHAKE_TEXT_FRAME_MAX = 64 * 1024;
+export const HANDSHAKE_QUEUE_MAX = 8;
 // The CROW_TEST_* overrides below apply only inside the test suite's
 // scratch env (servers/shared/test-timing.js); production uses the defaults.
 const RETRY_BASE_MS = testTunableMs("CROW_TEST_TAILNET_RETRY_BASE_MS", 5_000);
@@ -254,6 +270,77 @@ function pbEnabled(ctx) {
   return !ctx.legacyHandshake && ctx.pairBindingOffer !== false;
 }
 
+/* ---------------------------------------------------- session binding (PT-2b) */
+//
+// The hello MACs stop at the hellos. Everything after them — the feed keys,
+// the signed address — used to travel in the clear JSON phase, and the Noise
+// stream started on an unauthenticated keypair, so an on-path seed holder
+// could swap a feed, replay a frame, or read the replication stream.
+//
+// Session mode is negotiated in BOTH hellos (`sm: 1`, covered by the transcript
+// hash, so stripping or adding it makes the two sides' keys differ) AND needs
+// the pair decision to be `bound`: only then is there a pair key to derive
+// from. Every later control frame carries `sm_ctr` (0,1,… per direction) and
+// `sm`; the feed frames also carry the public key of a fresh per-connection
+// Noise keypair, checked against the peer's Noise handshake before replicate.
+//
+// An unbound peer in `auto` keeps PT-2a's semantics through NULL_SESSION; a
+// peer without `sm` in `require` is refused (`sm_required`).
+export const SESSION_BINDING_CLOSE_REASON = "session binding failed";
+
+/** Does this side speak the session check? (`sessionMacOffer: false` models PT-2a.) */
+function sessionOn(ctx) {
+  return pbEnabled(ctx) && ctx.sessionMacOffer !== false;
+}
+
+// One line per peer, side, frame kind and reason per hour: a refused peer
+// re-handshakes at backoff, and the Nest item carries the rest.
+const _sessionRefusalLog = new RefusalLog({ max: 512, intervalMs: 3_600_000 });
+/** Test seam: forget what was logged (each test file starts clean). */
+export function _resetSessionRefusalLogForTest() { _sessionRefusalLog.map.clear(); }
+
+const SESSION_CLOSE_REASONS = new Set(["sm_required", "missing", "bad_shape", "bad_ctr", "bad_mac", "noise_key_mismatch", "noise_timeout"]);
+
+/**
+ * Log and record ONE session refusal: the Nest item carries the wording, the
+ * log line the reason. Never a MAC value, a key, the transcript hash or a
+ * nonce — those are the things an attacker between us and the peer would
+ * need.
+ */
+function noteSessionRefusal(ctx, peerId, { side, kind = null, ctr = null, reason, now }) {
+  const why = SESSION_CLOSE_REASONS.has(reason) ? reason : "sm_invalid";
+  const nestReason = why === "sm_required" ? "sm_required" : "sm_invalid";
+  const peer = String(peerId ?? "(unknown)");
+  const key = `${peer}|${side}|${kind ?? "-"}|${why}`;
+  const at = typeof now === "function" ? now() : Date.now();
+  if (_sessionRefusalLog.shouldLog(key, at)) {
+    const frame = kind ? `, ${kind} frame` : "";
+    const c = ctr === null || ctr === undefined ? "" : `, ctr ${ctr}`;
+    (ctx.log || console).warn?.(`[tailnet-sync] session binding failed for ${peer.slice(0, 12)}… (${side} side${frame}${c}): ${why}`);
+  }
+  recordPairBindingRefusal(peer, nestReason, nestReason === "sm_required"
+    ? `sync refused: ${peer} runs an older Crow, or something on the network removed the session check; update it`
+    : `sync refused: frames from ${peer} failed the session check (something on the network path altered them)`, at);
+}
+
+/**
+ * An `auto` link to a peer that cannot do the session check (PT-2a): accepted
+ * with PT-2a semantics, and surfaced in the Nest so the rollout can see it.
+ * Once per peer per side per hour in the log; the Nest item lives until a
+ * session-bound link replaces it.
+ */
+const _legacySessionLog = new RefusalLog({ max: 256, intervalMs: 3_600_000 });
+export function _resetLegacySessionLogForTest() { _legacySessionLog.map.clear(); }
+
+function noteLegacySession(ctx, peerId, { side, now }) {
+  const peer = String(peerId ?? "(unknown)");
+  const at = typeof now === "function" ? now() : Date.now();
+  recordUnboundPeer(peer, `sibling ${peer} syncs without session MACs (older Crow); update it`, at);
+  if (_legacySessionLog.shouldLog(`${peer}|${side}`, at)) {
+    (ctx.log || console).warn?.(`[tailnet-sync] ${peer.slice(0, 12)}… syncs without session MACs (${side} side; older Crow)`);
+  }
+}
+
 /** The pair subkey for `peerId`, or null (no key, a bad key, or a lookup error). */
 function pairSubkeyFor(ctx, peerId) {
   return pairSubkeyVia(ctx.pairKeyLookup, peerId);
@@ -298,6 +385,52 @@ function armHeartbeat(ws, ctx, peerId) {
   }, every);
   timer.unref?.();
   ws.once("close", () => { clearInterval(timer); ws.off("pong", onPong); });
+}
+
+/** True when the peer's Noise static key is exactly the hex it MAC'd to us. */
+function noiseKeyMatches(remotePublicKey, expectedHex) {
+  if (!remotePublicKey || typeof expectedHex !== "string" || !/^[0-9a-f]{64}$/.test(expectedHex)) return false;
+  return Buffer.from(remotePublicKey).toString("hex") === expectedHex;
+}
+
+/**
+ * Await `opened`, bounded by our own timer (`opened` resolves false on a failed
+ * handshake; a silent peer never resolves it at all). The timer is always
+ * cleared, so a linked socket does not keep the process alive.
+ */
+function waitNoiseOpened(noiseStream, ms) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
+    const timer = setTimeout(() => done(false), ms);
+    timer.unref?.();
+    try { noiseStream.opened.then((v) => done(v === true), () => done(false)); } catch { done(false); }
+  });
+}
+
+/**
+ * Wrap the WS in a Noise stream and, in session mode, require the peer's static
+ * key to be the one it sent inside its MAC'd feed frame. Noise XX authenticates
+ * each side's static key, so a relay that terminates both legs cannot present
+ * the peer's key. The listeners go on BEFORE the await: a failing handshake or
+ * a socket that dies first must never leave an unobserved stream behind (that
+ * shape was a phantom link). The caller runs its side effects only after this
+ * resolves true.
+ */
+async function openNoiseStream({ ws, wsStream, isInitiator, keyPair, expectedPkHex, timeoutMs, peerId }) {
+  const noiseStream = new NoiseSecretStream(isInitiator, wsStream, keyPair ? { keyPair } : undefined);
+  noiseStream.on("error", () => {});
+  ws.once("close", () => { try { noiseStream.destroy(); } catch { /* already closed */ } });
+  noiseStream.once("close", () => recordLinkClosed(peerId));
+  if (!await waitNoiseOpened(noiseStream, timeoutMs)) {
+    try { noiseStream.destroy(); } catch { /* already gone */ }
+    return { ok: false, reason: "noise_timeout", noiseStream };
+  }
+  if (expectedPkHex && !noiseKeyMatches(noiseStream.remotePublicKey, expectedPkHex)) {
+    try { noiseStream.destroy(); } catch { /* already gone */ }
+    return { ok: false, reason: "noise_key_mismatch", noiseStream };
+  }
+  return { ok: true, reason: null, noiseStream };
 }
 
 function buildHandshakePayload(identity, localInstanceId, addr = null, extra = null) {
@@ -510,15 +643,22 @@ export function peerToWsUrlCandidates(peer, fallbackPort = 3002, standardPorts =
 
 /**
  * Attach a JSON-text-frame queue to a WebSocket and return a `readJsonFrame`
- * function that consumes frames in order. Necessary because the server
- * sometimes sends multiple text frames back-to-back during the handshake;
- * a one-shot ws.once("message") listener would miss the second frame.
+ * function that consumes frames in order (and `readJsonFrameWithRaw`, which
+ * also hands back the exact bytes the peer sent — the session transcript is
+ * made of those). Necessary because the server sometimes sends multiple text
+ * frames back-to-back during the handshake; a one-shot ws.once("message")
+ * listener would miss the second frame.
+ *
+ * The handshake phase is unauthenticated, so it is bounded: a text frame over
+ * HANDSHAKE_TEXT_FRAME_MAX, or more than HANDSHAKE_QUEUE_MAX frames waiting
+ * unread, ends the connection. Binary frames are not counted here (`maxPayload`
+ * bounds those, and replication needs the headroom).
  *
  * Once the WS hands off to Hypercore (binary replication), call detach() to
  * stop intercepting frames so binary data flows through cleanly.
  */
-export function attachFrameReader(ws) {
-  const queue = [];
+export function attachFrameReader(ws, { maxTextFrameBytes = HANDSHAKE_TEXT_FRAME_MAX, maxQueuedText = HANDSHAKE_QUEUE_MAX } = {}) {
+  const queue = []; // { msg, raw }
   const waiters = [];
   const binaryBuffer = []; // binary frames that raced the handshake — replayed at handoff
   let closed = false;
@@ -535,11 +675,22 @@ export function attachFrameReader(ws) {
       binaryBuffer.push(data);
       return;
     }
+    const raw = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (raw.length > maxTextFrameBytes) {
+      closed = true;
+      try { ws.close(1009, "handshake frame too big"); } catch { /* already closing */ }
+      return;
+    }
     let parsed;
-    try { parsed = JSON.parse(data.toString()); }
+    try { parsed = JSON.parse(raw.toString("utf8")); }
     catch { return; }
-    if (waiters.length > 0) waiters.shift().resolve(parsed);
-    else queue.push(parsed);
+    if (queue.length >= maxQueuedText) {
+      closed = true;
+      try { ws.close(1008, "handshake flood"); } catch { /* already closing */ }
+      return;
+    }
+    if (waiters.length > 0) waiters.shift().resolve({ msg: parsed, raw });
+    else queue.push({ msg: parsed, raw });
   }
   function onClose() {
     closed = true;
@@ -567,7 +718,7 @@ export function attachFrameReader(ws) {
     // detach can't double-replay.
     return binaryBuffer.splice(0);
   }
-  function readJsonFrame(timeoutMs) {
+  function readJsonFrameWithRaw(timeoutMs) {
     if (closed) return Promise.reject(closeReason || new Error("socket closed"));
     if (queue.length > 0) return Promise.resolve(queue.shift());
     return new Promise((resolve, reject) => {
@@ -584,7 +735,8 @@ export function attachFrameReader(ws) {
       w.reject = (e) => { clearTimeout(timer); origReject(e); };
     });
   }
-  return { readJsonFrame, detach };
+  const readJsonFrame = async (timeoutMs) => (await readJsonFrameWithRaw(timeoutMs)).msg;
+  return { readJsonFrame, readJsonFrameWithRaw, detach };
 }
 
 /**
@@ -608,7 +760,7 @@ export function handoffToStream(ws, frameReader) {
  * Server-side handler for an authenticated WS connection.
  * Performs reverse handshake, feed-key exchange, then pipes Hypercore replication.
  */
-async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, markPending = () => {}) {
+async function handleAcceptedConnection(ws, peerHandshake, c1Raw, frameReader, ctx, markPending = () => {}) {
   const { identity, instanceSyncManager, db, log = console } = ctx;
   const remoteInstanceId = peerHandshake.instance_id;
 
@@ -679,6 +831,15 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
     if (!d.ok) { ws.close(1008, PAIR_BINDING_CLOSE_REASON); return; }
   }
 
+  // Session binding (PT-2b): we offer it only to a client that asked for it,
+  // only when we can bind (a pair key + `pb`), and only when this build speaks
+  // it. Because the offer sits in our hello, it is covered by the transcript
+  // hash: a relay that adds or strips it makes the two sides' keys differ.
+  const clientOfferedSm = peerHandshake.sm === SM_VERSION;
+  const wantSession = sessionOn(ctx) && canBind;
+  const negotiateSm = wantSession && clientOfferedSm;
+  const sessionMode = ctx.pairBindingMode ?? pairBindingMode();
+
   // Our own handshake (proves to the client we hold the same identity), with
   // our signed dial address — sent only AFTER the peer is known to be a live
   // paired instance here, so a revoked/unknown instance learns nothing.
@@ -686,10 +847,24 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   const ourHs = buildHandshakePayload(identity, localId, await resolveSelfAddress(ctx));
   if (useCr) ourHs.cr_sig = sign(crRespMessage(localId, remoteInstanceId, peerHandshake.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv);
   if (canBind) ourHs.pb_mac = tailnetRespMac(k, { server: localId, client: remoteInstanceId, cN: peerHandshake.nonce_hex, sN: ourHs.nonce_hex });
-  ws.send(JSON.stringify(ourHs));
+  if (negotiateSm) ourHs.sm = SM_VERSION;
+  const s1Text = JSON.stringify(ourHs);
+  ws.send(s1Text);
+
+  let session = NULL_SESSION;
+  if (negotiateSm) {
+    const th = transcriptHash(c1Raw, Buffer.from(s1Text, "utf8"));
+    const keys = deriveSessionKeys(k, { client: remoteInstanceId, server: localId, cN: peerHandshake.nonce_hex, sN: ourHs.nonce_hex, th });
+    session = new SessionChannel({ keys, role: "server" });
+  }
+  const refuseSession = (kind, ctr, reason) => {
+    noteSessionRefusal(ctx, remoteInstanceId, { side: "server", kind, ctr, reason, now: ctx.now });
+    try { ws.close(1008, SESSION_BINDING_CLOSE_REASON); } catch { /* already closing */ }
+  };
 
   if (useCr) {
     let proof;
+    let pairBound = false;
     try { proof = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS); }
     catch (err) {
       log.warn?.(`[tailnet-sync] challenge proof missing from ${remoteInstanceId}: ${err.message}`);
@@ -710,6 +885,32 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
       }
       const d = await decideTailnetBinding(ctx, remoteInstanceId, { k, bound, macInvalid, side: "server" });
       if (!d.ok) { ws.close(1008, PAIR_BINDING_CLOSE_REASON); return; }
+      pairBound = bound;
+    }
+    // Session mode is negotiated AND bound on each side (rev 2): an `auto`,
+    // unpinned peer that proved no pair key leaves the pair decision "legacy",
+    // and a negotiated session must never run over an unbound pair. Refused
+    // BEFORE any side effect below (CR pin, address backfill, feed).
+    if (negotiateSm && !pairBound) {
+      refuseSession("proof", proof?.sm_ctr ?? null, "sm_invalid");
+      return;
+    }
+    // Session check AFTER the pair decision and BEFORE any side effect: the
+    // proof frame's MAC covers cr_proof and pb_proof, so a rewritten or
+    // replayed proof never reaches the CR pin, the address backfill or a feed.
+    if (negotiateSm) {
+      const r = session.open("proof", proof, ["cr_proof", "pb_proof"]);
+      const sd = decideSession({ bound: pairBound, negotiated: true, peerOffered: true, macResult: r, mode: sessionMode });
+      if (!sd.ok) { refuseSession("proof", proof?.sm_ctr ?? null, r.reason || sd.reason); return; }
+    } else if (wantSession) {
+      // A peer that proved the pair but did not offer (or had stripped) the
+      // session flag: PT-2a semantics in `auto`, refused in `require`.
+      const sd = decideSession({ bound: pairBound, negotiated: false, peerOffered: clientOfferedSm, mode: sessionMode });
+      if (!sd.ok) { refuseSession("proof", proof?.sm_ctr ?? null, sd.reason); return; }
+      // Only a peer whose PAIR is bound gets the session wording: a fully
+      // legacy peer already carries the pair-binding item, which is the more
+      // accurate one.
+      if (sd.legacySession && pairBound) noteLegacySession(ctx, remoteInstanceId, { side: "server", now: ctx.now });
     }
     await markPeerCr(ctx, remoteInstanceId);
     // Our own dial may have started while we waited for the proof.
@@ -734,7 +935,15 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   // The authenticated receipt at the feed-key exchange below drives any swap.
   await instanceSyncManager.initInstance(remoteInstanceId, null);
   const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
-  ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
+  const ourOutKeyHex = ourOutKey ? ourOutKey.toString("hex") : null;
+  // A fresh per-connection Noise keypair in session mode: its public half goes
+  // inside the MAC'd feed frame, so the peer can require that the Noise
+  // handshake it authenticates used exactly this key.
+  const nkp = negotiateSm ? NoiseSecretStream.keyPair() : null;
+  const ourNoisePk = nkp ? Buffer.from(nkp.publicKey).toString("hex") : null;
+  const feedFrame = { feed_key_hex: ourOutKeyHex };
+  if (negotiateSm) Object.assign(feedFrame, { noise_pk: ourNoisePk }, session.seal("feed", [ourOutKeyHex ?? "", ourNoisePk]));
+  ws.send(JSON.stringify(feedFrame));
 
   let peerKeyMsg;
   try { peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS); }
@@ -742,6 +951,15 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
     log.warn?.(`[tailnet-sync] feed-key frame missing from ${remoteInstanceId}: ${err.message}`);
     ws.close(1002, "no feed key");
     return;
+  }
+  // The session check comes FIRST: a relay that rewrites this frame's feed key
+  // must not reach validateIncomingFeedKey, sync_url or a feed hand-off.
+  let peerNoisePk = null;
+  if (negotiateSm) {
+    const r = session.open("feed", peerKeyMsg, ["feed_key_hex", "noise_pk"]);
+    const sd = decideSession({ bound: true, negotiated: true, peerOffered: true, macResult: r, mode: sessionMode });
+    if (!sd.ok) { refuseSession("feed", peerKeyMsg?.sm_ctr ?? null, r.reason || sd.reason); return; }
+    peerNoisePk = peerKeyMsg.noise_pk;
   }
   if (peerKeyMsg?.feed_key_hex && peerKeyMsg.feed_key_hex !== peerRow.sync_url) {
     const keyBuf = instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, peerKeyMsg.feed_key_hex);
@@ -759,14 +977,6 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
     }
   }
 
-  // Mark peer as active now — we just had a successful authenticated connection.
-  try {
-    await db.execute({
-      sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ? AND status != 'revoked'`,
-      args: [remoteInstanceId],
-    });
-  } catch {}
-
   // Hand the WS off to Hypercore for binary replication framing. Hypercore
   // expects a NoiseSecretStream; wrap the WS Duplex first. Server side =
   // isInitiator: false (the dialer is the initiator). handoffToStream
@@ -775,16 +985,29 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx, mar
   // stream built on a closed socket never emits close (phantom link).
   if (ws.readyState !== WebSocket.OPEN) { frameReader.detach(); return; }
   const wsStream = handoffToStream(ws, frameReader);
-  const noiseStream = new NoiseSecretStream(false, wsStream);
-  // A socket that closes before the Noise handshake completes leaves the
-  // Noise stream open — a phantom "dedicated stream" that made the dialer
-  // idle forever. The socket's close always ends the stream.
-  ws.once("close", () => { try { noiseStream.destroy(); } catch { /* already closed */ } });
-  noiseStream.on("error", () => {});
-  noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
+  const noise = await openNoiseStream({
+    ws, wsStream, isInitiator: false, keyPair: nkp, expectedPkHex: peerNoisePk,
+    timeoutMs: ctx.noiseTimeoutMs ?? HANDSHAKE_TIMEOUT_MS, peerId: remoteInstanceId,
+  });
+  const noiseStream = noise.noiseStream;
+  if (!noise.ok) {
+    // No liveness write, no heartbeat, no replication: a stream we could not
+    // bind is an attacker (or a peer that never finished Noise), not a link.
+    noteSessionRefusal(ctx, remoteInstanceId, { side: "server", kind: "noise", reason: noise.reason, now: ctx.now });
+    try { ws.close(1008, SESSION_BINDING_CLOSE_REASON); } catch { /* already gone */ }
+    return;
+  }
+  // Mark peer as active now — the Noise stream is bound to the peer's MAC'd key.
+  try {
+    await db.execute({
+      sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ? AND status != 'revoked'`,
+      args: [remoteInstanceId],
+    });
+  } catch {}
   armHeartbeat(ws, ctx, remoteInstanceId);
   await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
   recordLinkUp(remoteInstanceId, { direction: "inbound" });
+  if (negotiateSm) console.log(`[tailnet-sync] session-bound link with ${remoteInstanceId.slice(0,12)}… (server side)`);
   console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (server side)`);
 }
 
@@ -810,8 +1033,9 @@ export function setupTailnetSyncServer(server, ctx) {
     wss.handleUpgrade(req, socket, head, async (ws) => {
       const frameReader = attachFrameReader(ws);
       try {
-        // Read peer's handshake first.
-        const peerHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
+        // Read peer's handshake first — with its EXACT bytes: they are half of
+        // the session transcript's salt.
+        const { msg: peerHs, raw: c1Raw } = await frameReader.readJsonFrameWithRaw(HANDSHAKE_TIMEOUT_MS);
         if (!verifyHandshakePayload(peerHs, identity.ed25519Pubkey)) {
           log.warn?.(`[tailnet-sync] handshake sig invalid from ${req.socket.remoteAddress}`);
           ws.close(1008, "bad sig");
@@ -827,7 +1051,7 @@ export function setupTailnetSyncServer(server, ctx) {
         let marked = false;
         const markPending = () => { if (marked) return; marked = true; pending.set(pid, (pending.get(pid) || 0) + 1); };
         try {
-          await handleAcceptedConnection(ws, peerHs, frameReader, ctx, markPending);
+          await handleAcceptedConnection(ws, peerHs, c1Raw, frameReader, ctx, markPending);
         } finally {
           if (marked) {
             const n = (pending.get(pid) || 1) - 1;
@@ -1009,17 +1233,25 @@ export class PeerDialer {
     let linked = false;
     let closedByUs = false;
     let peerCloseCode = 0; // set when the PEER closed (refusal codes arrive before any frame)
+    // The peer's close reason, when it closed on us: a refusal that lands while
+    // we are still mid-handshake (the server refusing C3 closes with the session
+    // reason) must be classified as closed-by-peer, not as our own failure.
+    let peerCloseReason = "";
 
     const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
       try {
-        // Send our handshake (with our signed dial address), offering CR.
+        // Send our handshake (with our signed dial address), offering CR, pair
+        // binding, and — only with both — the session check.
         const offerPb = pbEnabled(this.ctx);
+        const offerSm = sessionOn(this.ctx) && offerPb;
+        const sessionMode = this.ctx.pairBindingMode ?? pairBindingMode();
         const ourHs = buildHandshakePayload(identity, instanceSyncManager.localInstanceId, await resolveSelfAddress(this.ctx),
-          this.ctx.legacyHandshake ? null : { cr: CR_VERSION, ...(offerPb ? { pb: PB_VERSION } : {}) });
-        ws.send(JSON.stringify(ourHs));
-        // Read server handshake.
-        const serverHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
+          this.ctx.legacyHandshake ? null : { cr: CR_VERSION, ...(offerPb ? { pb: PB_VERSION } : {}), ...(offerSm ? { sm: SM_VERSION } : {}) });
+        const c1Text = JSON.stringify(ourHs);
+        ws.send(c1Text);
+        // Read server handshake — with its exact bytes (the transcript's other half).
+        const { msg: serverHs, raw: s1Raw } = await frameReader.readJsonFrameWithRaw(HANDSHAKE_TIMEOUT_MS);
         if (!verifyHandshakePayload(serverHs, identity.ed25519Pubkey)) {
           console.warn(`[tailnet-sync] server handshake sig invalid from ${wsUrl}`);
           recordDialFailure(peerId, `${wsUrl}: server handshake signature invalid`);
@@ -1082,6 +1314,35 @@ export class PeerDialer {
         // nonce (a replayed server hello is not); then we answer its nonce.
         // A CR-less reply from a server that has done CR with us before is a
         // downgrade and is refused.
+        let session = NULL_SESSION;
+        let ourNoiseKeyPair = null;
+        let pairKeyForSession = null;
+        const clientOfferedSm = ourHs.sm === SM_VERSION;
+        const serverOfferedSm = serverHs.sm === SM_VERSION;
+        const refuseSession = (kind, ctr, reason) => {
+          recordDialFailure(peerId, `${wsUrl}: ${SESSION_BINDING_CLOSE_REASON} (${reason})`);
+          noteSessionRefusal(this.ctx, remoteInstanceId, { side: "client", kind, ctr, reason, now: this.ctx.now });
+          closedByUs = true;
+          ws.close(1008, SESSION_BINDING_CLOSE_REASON);
+          frameReader.detach();
+        };
+        /** Session mode = offered by both AND the pair decision bound. */
+        const settleSession = ({ pairBound, proofFrame }) => {
+          const negotiated = clientOfferedSm && serverOfferedSm && pairBound && Boolean(offerPb);
+          // No incoming MAC'd frame has been read yet at this point: the client's
+          // own C2 is sealed below, and its S2 check comes later. `macResult` is
+          // "nothing to check yet", not "a MAC failed".
+          const sd = decideSession({ bound: pairBound, negotiated, peerOffered: serverOfferedSm, macResult: negotiated ? { ok: true } : null, mode: sessionMode });
+          if (!sd.ok) { refuseSession("proof", proofFrame?.sm_ctr ?? null, sd.reason); return false; }
+          if (!negotiated) {
+            if (sd.legacySession && pairBound) noteLegacySession(this.ctx, remoteInstanceId, { side: "client", now: this.ctx.now });
+            return true;
+          }
+          const th = transcriptHash(Buffer.from(c1Text, "utf8"), s1Raw);
+          const keys = deriveSessionKeys(pairKeyForSession, { client: localId, server: remoteInstanceId, cN: ourHs.nonce_hex, sN: serverHs.nonce_hex, th });
+          session = new SessionChannel({ keys, role: "client" });
+          return true;
+        };
         if (!this.ctx.legacyHandshake) {
           if (serverHs.cr_sig !== undefined) {
             if (!safeVerify(crRespMessage(remoteInstanceId, instanceSyncManager.localInstanceId, ourHs.nonce_hex, serverHs.nonce_hex), serverHs.cr_sig, identity.ed25519Pubkey)) {
@@ -1093,17 +1354,22 @@ export class PeerDialer {
               return;
             }
             const proofFrame = { cr_proof: sign(crProofMessage(localId, remoteInstanceId, serverHs.nonce_hex, ourHs.nonce_hex), identity.ed25519Priv) };
+            let pairBound = false;
             if (offerPb) {
               const k = await pairSubkeyFor(this.ctx, remoteInstanceId);
-              let bound = false;
+              pairKeyForSession = k;
               let macInvalid = false;
               if (k && "pb_mac" in serverHs) {
-                bound = macEqual(serverHs.pb_mac, tailnetRespMac(k, { server: remoteInstanceId, client: localId, cN: ourHs.nonce_hex, sN: serverHs.nonce_hex }));
-                macInvalid = !bound;
+                pairBound = macEqual(serverHs.pb_mac, tailnetRespMac(k, { server: remoteInstanceId, client: localId, cN: ourHs.nonce_hex, sN: serverHs.nonce_hex }));
+                macInvalid = !pairBound;
               }
-              if (!await bindOrRefuse({ k, bound, macInvalid })) return;
-              if (bound) proofFrame.pb_proof = tailnetProofMac(k, { client: localId, server: remoteInstanceId, sN: serverHs.nonce_hex, cN: ourHs.nonce_hex });
+              if (!await bindOrRefuse({ k, bound: pairBound, macInvalid })) return;
+              if (pairBound) proofFrame.pb_proof = tailnetProofMac(k, { client: localId, server: remoteInstanceId, sN: serverHs.nonce_hex, cN: ourHs.nonce_hex });
             }
+            // Decided BEFORE C2 goes out: a server we will not speak to never
+            // learns cr_proof or pb_proof.
+            if (!settleSession({ pairBound, proofFrame })) return;
+            if (session !== NULL_SESSION) Object.assign(proofFrame, session.seal("proof", [proofFrame.cr_proof, proofFrame.pb_proof]));
             ws.send(JSON.stringify(proofFrame));
             await markPeerCr(this.ctx, remoteInstanceId);
           } else if (await peerCrRequired(this.ctx, remoteInstanceId)) {
@@ -1117,20 +1383,36 @@ export class PeerDialer {
             // A CR-less (older) server can never be bound.
             const k = await pairSubkeyFor(this.ctx, remoteInstanceId);
             if (!await bindOrRefuse({ k, bound: false, macInvalid: false })) return;
+            if (!settleSession({ pairBound: false, proofFrame: null })) return;
           }
         }
 
-        // Learn the server's dial address if our row lacks it.
-        await backfillPeerAddress(this.ctx, remoteInstanceId, verifiedAdvertisedAddress(serverHs, identity.ed25519Pubkey));
-
-        // Receive server's feed key.
+        // Receive server's feed key. The session check comes FIRST: nothing of
+        // this frame (the feed key, the peer's Noise key) is used before it.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
+        let peerNoisePk = null;
+        if (session !== NULL_SESSION) {
+          const r = session.open("feed", peerKeyMsg, ["feed_key_hex", "noise_pk"]);
+          const sd = decideSession({ bound: true, negotiated: true, peerOffered: true, macResult: r, mode: sessionMode });
+          if (!sd.ok) { refuseSession("feed", peerKeyMsg?.sm_ctr ?? null, r.reason || sd.reason); return; }
+          peerNoisePk = peerKeyMsg.noise_pk;
+        }
+        // The server's signed dial address is trusted only now: S2 proves it saw
+        // the same transcript, so its S1 address cannot have been swapped.
+        await backfillPeerAddress(this.ctx, remoteInstanceId, verifiedAdvertisedAddress(serverHs, identity.ed25519Pubkey));
         const incomingKeyBuf = peerKeyMsg?.feed_key_hex
           ? instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, peerKeyMsg.feed_key_hex)
           : null;
         await instanceSyncManager.initInstance(remoteInstanceId, incomingKeyBuf);
         const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
-        ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
+        const ourOutKeyHex = ourOutKey ? ourOutKey.toString("hex") : null;
+        const c3 = { feed_key_hex: ourOutKeyHex };
+        if (session !== NULL_SESSION) {
+          ourNoiseKeyPair = NoiseSecretStream.keyPair();
+          const ourNoisePk = Buffer.from(ourNoiseKeyPair.publicKey).toString("hex");
+          Object.assign(c3, { noise_pk: ourNoisePk }, session.seal("feed", [ourOutKeyHex ?? "", ourNoisePk]));
+        }
+        ws.send(JSON.stringify(c3));
 
         // Persist peer key if new (gated on the same validation result used for init above).
         if (incomingKeyBuf) {
@@ -1147,35 +1429,49 @@ export class PeerDialer {
           }
         }
 
-        // Mark peer as active.
-        await db.execute({
-          sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ? AND status != 'revoked'`,
-          args: [remoteInstanceId],
-        }).catch(() => {});
-
-        // Reset retry backoff + failure counter on successful auth, and pin
-        // the winning candidate so reconnects go straight back to it.
-        this.retryMs = RETRY_BASE_MS;
-        this.failCount = 0;
-        this.attempt -= 1; // re-dial this same candidate next time
-
+        // Mark peer as active, and reset retry backoff + failure counter, only
+        // AFTER the Noise check: a Noise relay must never look like a live link
+        // or reset the dialer's backoff.
         // Hand off to Hypercore. Client side = isInitiator: true.
         // handoffToStream replays any binary frames that raced the
         // handshake (defensive — the responder shouldn't write first,
         // but symmetric handling costs nothing).
         if (ws.readyState !== WebSocket.OPEN) { frameReader.detach(); return; } // closed mid-handshake: close handler retries
         const wsStream = handoffToStream(ws, frameReader);
-        const noiseStream = new NoiseSecretStream(true, wsStream);
-        // A socket that closes before the Noise handshake completes leaves the
-        // Noise stream open — a phantom "dedicated stream" that made the dialer
-        // idle forever. The socket's close always ends the stream.
-        ws.once("close", () => { try { noiseStream.destroy(); } catch { /* already closed */ } });
-        noiseStream.on("error", () => {});
-        noiseStream.once("close", () => recordLinkClosed(remoteInstanceId));
+        const noise = await openNoiseStream({
+          ws, wsStream, isInitiator: true, keyPair: ourNoiseKeyPair, expectedPkHex: peerNoisePk,
+          timeoutMs: this.ctx.noiseTimeoutMs ?? HANDSHAKE_TIMEOUT_MS, peerId: remoteInstanceId,
+        });
+        const noiseStream = noise.noiseStream;
+        if (!noise.ok) {
+          // The peer refused our feed frame and closed with the session reason
+          // while we were awaiting Noise. The close handler already recorded
+          // that as closed-by-peer; a noise_timeout line here would blame our
+          // own Noise step for the peer's refusal and plant a second, false
+          // "failed the session check" Nest item.
+          // Only a TIMEOUT is attributed to the peer's close: a close reason is
+          // the other end's word, so a key mismatch (a Noise MITM) is always
+          // recorded here, whatever the close said.
+          if (noise.reason === "noise_timeout" && peerCloseCode === 1008 && peerCloseReason === SESSION_BINDING_CLOSE_REASON) return;
+          recordDialFailure(peerId, `${wsUrl}: ${noise.reason}`);
+          noteSessionRefusal(this.ctx, remoteInstanceId, { side: "client", kind: "noise", reason: noise.reason, now: this.ctx.now });
+          closedByUs = true;
+          try { ws.close(1008, SESSION_BINDING_CLOSE_REASON); } catch { /* already gone */ }
+          return;
+        }
+        await db.execute({
+          sql: `UPDATE crow_instances SET status=${livenessStatusSql("active")}, last_seen_at=datetime('now') WHERE id = ? AND status != 'revoked'`,
+          args: [remoteInstanceId],
+        }).catch(() => {});
+        this.retryMs = RETRY_BASE_MS;
+        this.failCount = 0;
+        this.attempt -= 1; // re-dial this same candidate next time
+
         armHeartbeat(ws, this.ctx, remoteInstanceId);
         await instanceSyncManager.replicate(remoteInstanceId, noiseStream, { dedicated: true });
         linked = true;
         recordLinkUp(remoteInstanceId, { direction: "outbound" });
+        if (session !== NULL_SESSION) console.log(`[tailnet-sync] session-bound link with ${remoteInstanceId.slice(0,12)}… (client side${role === "fallback" ? ", fallback dial" : ""})`);
         console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side${role === "fallback" ? ", fallback dial" : ""})`);
       } catch (err) {
         frameReader.detach();
@@ -1194,7 +1490,7 @@ export class PeerDialer {
     ws.on("close", (code, reason) => {
       if (this.ws === ws) this.ws = null;
       const why = reason?.length ? String(reason) : "";
-      if (!closedByUs) peerCloseCode = code || -1;
+      if (!closedByUs) { peerCloseCode = code || -1; peerCloseReason = why; }
       if (linked) this.passiveSince = Date.now();
       if (closedByUs && !linked) return this.scheduleRetry(); // our refusal; failure already recorded
       // Peer already linked to us — nothing failed, nothing to retry.
@@ -1203,10 +1499,11 @@ export class PeerDialer {
         // Refused by the peer (bad sig, unknown peer, …).
         recordDialFailure(peerId, `${wsUrl}: closed by peer (${code}${why ? ` ${why}` : ""})`);
       }
-      if (!linked && code === 1008 && why === PAIR_BINDING_CLOSE_REASON) {
+      if (!linked && code === 1008 && (why === PAIR_BINDING_CLOSE_REASON || why === SESSION_BINDING_CLOSE_REASON)) {
         // A pair-binding refusal is usually a re-pair in progress (the two
-        // sides' keys are written moments apart): normal backoff, never the
-        // refused park below.
+        // sides' keys are written moments apart), and a session refusal is a
+        // restart still landing on the peer: normal backoff, never the refused
+        // park below.
         return this.scheduleRetry();
       }
       if (!linked && code === 1008 && (why === "unknown peer" || why === "not paired")) {

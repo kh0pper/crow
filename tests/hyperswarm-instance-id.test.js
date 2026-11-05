@@ -208,7 +208,7 @@ test("U-H7d self-loopback: a sibling challenging with our own id is killed befor
   }
 });
 
-test("U-H7e a sig sibling's piggybacked feed key is received under the one id (the challenge's, when the response carries none)", T, async (t) => {
+test("U-H7e (PT-2b) a sig sibling's piggybacked feed key is neither applied nor echoed: the pre-auth piggyback is gone in both directions", T, async (t) => {
   const me = deriveInstanceIdentity(randomBytes(32));
   const FEED = "cd".repeat(32);
   for (const responseExtra of [{ instance_id: "inst-old", feed_key_hex: FEED }, { feed_key_hex: FEED }]) {
@@ -216,11 +216,12 @@ test("U-H7e a sig sibling's piggybacked feed key is received under the one id (t
     const R = await rawSibling(t, n.pm, me, { challengeId: "inst-old", cb: false, mode: "sig", responseExtra });
     assert.ok(await until(() => n.calls.instanceConnected.length === 1, 3000), "admitted");
     assert.equal(n.calls.guard[0].remoteInstanceId, "inst-old");
-    assert.ok(await until(() => n.calls.keyReceived.length === 1, 3000), `key received (${JSON.stringify(Object.keys(responseExtra))})`);
-    assert.deepEqual(n.calls.keyReceived, [["inst-old", FEED]]);
+    await sleep(300);
+    assert.deepEqual(n.calls.keyReceived, [], `no feed key is applied (${JSON.stringify(Object.keys(responseExtra))})`);
     assert.deepEqual(n.calls.instanceConnected, [[me.crowId, "inst-old"]]);
-    // The deferred bare reply looked our feed key up for the same id.
-    assert.deepEqual(n.calls.feedKeyAsked, ["inst-old"]);
-    assert.equal(sent(R, "challenge-response")[0]?.feed_key_hex, n.feed);
+    // The deferred bare reply still exists (older contacts need it), but it
+    // looks no feed key up and carries none.
+    assert.deepEqual(n.calls.feedKeyAsked, []);
+    assert.equal(sent(R, "challenge-response")[0]?.feed_key_hex, undefined);
   }
 });

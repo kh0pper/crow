@@ -199,10 +199,10 @@ test("tailnet-sync: revoke destroys the dedicated socket, a redial is refused, a
   await new Promise((r) => http.listen(0, "127.0.0.1", r));
   const port = http.address().port;
   const quietLog = { warn: () => {} };
-  setupTailnetSyncServer(http, { identity: fleet.identity, instanceSyncManager: b.mgr, db: b.db, log: quietLog });
+  setupTailnetSyncServer(http, { identity: fleet.identity, instanceSyncManager: b.mgr, db: b.db, log: quietLog, pairBindingMode: "auto" });
   await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${port}`, b.id] });
   const peerRow = (await a.db.execute({ sql: "SELECT * FROM crow_instances WHERE id = ?", args: [b.id] })).rows[0];
-  const dialer = new PeerDialer(peerRow, { identity: fleet.identity, instanceSyncManager: a.mgr, db: a.db, gatewayPort: port });
+  const dialer = new PeerDialer(peerRow, { identity: fleet.identity, instanceSyncManager: a.mgr, db: a.db, gatewayPort: port, pairBindingMode: "auto" });
   const warn = console.warn; const log = console.log;
   console.warn = () => {}; console.log = () => {};
   try {

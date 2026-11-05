@@ -821,8 +821,11 @@ export class PeerManager {
     // the codebase ever SENT that message type, and the handler passed
     // state.remoteCrowId where onInstanceKeyReceived requires an INSTANCE id
     // (crow_id is shared fleet-wide and can never key a crow_instances row).
-    // Feed keys now ride `instance-key` (new siblings) or the deferred
-    // challenge-response (old siblings), both after the peer has proven our key.
+    // Feed keys now ride `instance-key` (new siblings) only, after the peer
+    // has proven our key. The pre-PT-3 piggyback on the deferred
+    // challenge-response is gone in both directions (PT-2b): a bare-sig
+    // sibling is never pair-bound, so under the default mode it is refused
+    // anyway.
   }
 
   /**
@@ -1105,8 +1108,10 @@ export class PeerManager {
       await this._sendDeferredReply(conn, state);
 
       if (kind === "instance") {
-        // A new sibling (cb proof) gets our feed key in its own frame; an old
-        // one got it on the deferred challenge-response above.
+        // A new sibling (cb proof) gets our feed key in its own frame. An older
+        // (bare-signature) sibling gets none: the pre-PT-3 piggyback on the
+        // deferred challenge-response is gone in both directions (PT-2b), and
+        // such a sibling is never pair-bound, so `require` refuses it anyway.
         if (state.proof === "cb" && this.localInstanceId && remoteInstanceId && this.getFeedKeyForInstance) {
           let feedKeyHex = null;
           try { feedKeyHex = await this.getFeedKeyForInstance(remoteInstanceId); } catch {}
@@ -1133,7 +1138,6 @@ export class PeerManager {
     if (state.mutual || !state.authenticated || !state.peerAuthed || state.refused || state.closed) return;
     state.mutual = true;
     state.clearTimer?.();
-    const msg = state.admitMsg;
     const crowId = state.remoteCrowId;
 
     const entry = {
@@ -1170,12 +1174,6 @@ export class PeerManager {
     }
 
     if (state.kind === "instance") {
-      // An old sibling piggybacks its feed key on its (now verified)
-      // challenge-response. Persist it before dispatching, so the
-      // onInstanceConnected handler can open the inbound feed at once.
-      if (state.proof === "sig" && state.remoteInstanceId && msg.feed_key_hex && this.onInstanceKeyReceived) {
-        fire(() => this.onInstanceKeyReceived(state.remoteInstanceId, msg.feed_key_hex));
-      }
       if (this.onInstanceConnected) fire(() => this.onInstanceConnected(crowId, conn, state.remoteInstanceId, { peerMuxEarly: state.peerMuxEarly === true }));
     } else if (this.onPeerConnected) {
       fire(() => this.onPeerConnected(crowId, conn));
@@ -1229,12 +1227,6 @@ export class PeerManager {
     // and asks with cb:1; anything else is not signed for.
     if (state.proof !== "sig") return;
     const isInstance = state.kind === "instance" && this.instanceSyncEnabled;
-    let feedKeyHex = null;
-    // d.instanceId (the challenge's id) equals state.remoteInstanceId whenever
-    // this fires: _admit refuses a response naming a different one.
-    if (isInstance && d.instanceId && this.getFeedKeyForInstance) {
-      try { feedKeyHex = await this.getFeedKeyForInstance(d.instanceId); } catch {}
-    }
     if (state.closed) return;
     const payload = {
       type: "challenge-response",
@@ -1242,8 +1234,10 @@ export class PeerManager {
       pubkey: this.identity.ed25519Pubkey,
       crowId: this.identity.crowId,
     };
+    // No `feed_key_hex`: a bare-signature sibling is never pair-bound, so the
+    // pre-auth feed-key piggyback is gone (PT-2b). Feed keys reach
+    // onInstanceKeyReceived only through `instance-key`, sent to cb siblings.
     if (isInstance && this.localInstanceId) payload.instance_id = this.localInstanceId;
-    if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
     conn.write(JSON.stringify(payload) + "\n");
   }
 

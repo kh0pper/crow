@@ -33,6 +33,9 @@ import { randomBytes } from "node:crypto";
 import {
   REPO, PT3_SHA, SYNC_TIMING, bootPair, pairInto, until, useLoopbackSync, writeMarker, hasMarker, markerDrained, outboxDiag, pairPinned, settingsRevoke,
 } from "./fixtures/peer-pair.mjs";
+
+/** PT-2a (#608): bound handshakes, but no session MACs and no Noise binding. */
+const PT2A_SHA = "b3d9de16e8e3db826f3d6685c5dcf0b44243a49d";
 import { oldTree } from "./fixtures/old-tree.mjs";
 import { makeRealDb, addPeerRow, writeAndEmit } from "./fixtures/sync-fleet.mjs";
 import { startGateway } from "./fixtures/sync-gateway.mjs";
@@ -53,8 +56,13 @@ const tag = () => randomBytes(4).toString("hex");
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const bound = (peerId, side) => new RegExp(`\\[tailnet-sync\\] pair-bound handshake with ${esc(peerId)} \\(${side} side\\)`);
+const sessionBound = (peerId, side) => new RegExp(`\\[tailnet-sync\\] session-bound link with ${esc(peerId.slice(0, 12))}`);
+const legacySession = (peerId, side) => new RegExp(`\\[tailnet-sync\\] ${esc(peerId.slice(0, 12))}[^\\n]* syncs without session MACs \\(${side} side`);
 const refused = (peerId, side, reason) => new RegExp(`\\[tailnet-sync\\] pair binding failed for ${esc(peerId)} \\(${side} side\\): ${reason}`);
+const sessionRefused = (peerId, side, reason) => new RegExp(`\\[tailnet-sync\\] session binding failed for ${esc(peerId.slice(0, 12))}[^\\n]* \\(${side} side[^\\n]*\\): ${reason}`);
 const legacy = (peerId, side) => new RegExp(`\\[tailnet-sync\\] ${esc(peerId)} syncs without pair binding \\(${side} side`);
+/** The server never received a proof: the dialer refused itself client side and closed. */
+const proofMissing = (peerId) => new RegExp(`\\[tailnet-sync\\] challenge proof missing from ${esc(peerId)}`);
 const anyRefusal = /\[tailnet-sync\] pair binding failed/;
 const anyLegacy = /syncs without pair binding/;
 const sinceLog = (inst, from) => inst.log.slice(from);
@@ -233,7 +241,7 @@ describe("new↔new pair (T1, T6, then T5, T8, T7 on the same link)", () => {
     assert.ok(await logShows(A, bound(B.id, "client"), from), "bound again");
   });
 
-  test("T8 one-sided rollback: old B refused; clearing A's pin restores sync as legacy; B on new code re-pins", T, async () => {
+  test("T8 one-sided rollback: old B refused; the pin clear PLUS CROW_SYNC_PAIR_BINDING=auto on A restores sync as legacy; B back on new code re-pins and the default is session-bound again", T, async () => {
     const { A, B } = P;
     await flows(B, A, "t8 control"); // positive control before the rollback
     assert.equal(pairPinned(A, B.id), true);
@@ -242,22 +250,35 @@ describe("new↔new pair (T1, T6, then T5, T8, T7 on the same link)", () => {
     assert.ok(await logShows(A, refused(B.id, "client", "pb_required_pinned"), from), "A refuses old B");
     const stuck = await blocked(B, A, "t8 old");
 
-    // The documented escape, with A running: the owner clears A's pin.
+    // The documented one-sided rollback is TWO steps (plan §4.4): clear A's pin
+    // (a pre-PT-2a peer) AND run the PT-2b host with
+    // CROW_SYNC_PAIR_BINDING=auto. Under the default `require`, clearing the pin
+    // alone does NOT restore legacy sync — an unbound pair is refused.
     const cl = await pinCli(A, ["--clear", B.id]);
     assert.equal(cl.code, 0, cl.out);
     assert.equal(pairPinned(A, B.id), false);
-    assert.ok(await until(() => hasMarker(A, stuck), FLOW_MS, 500), "the held marker flows after the clear (A's next handshake, normal backoff)");
+    await A.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
+    assert.ok(await until(() => hasMarker(A, stuck), FLOW_MS, 500), "the held marker flows after the clear + auto (A's next handshake, normal backoff)");
     await flowsBoth(A, B, "t8 cleared");
-    assert.ok(await logShows(A, legacy(B.id, "client"), from), "A raises the 'syncs without pair binding' item");
+    assert.ok(await logShows(A, legacy(B.id, "client"), 0), "A raises the 'syncs without pair binding' item");
 
     const from2 = A.log.length;
     await B.boot({ repo: REPO });
     assert.ok(await logShows(A, bound(B.id, "client"), from2), "bound again");
     assert.ok(await until(() => pairPinned(A, B.id), 15_000), "re-pinned");
+
+    // Back on the default mode: the pair keeps syncing, now session-bound.
+    await A.boot();
+    assert.ok(await logShows(A, sessionBound(B.id, "client"), 0), `session-bound again on the default\n${syncLines(A.log)}`);
+    await flowsBoth(A, B, "t8 default again");
   });
 
   test("T7 store mode 0644 on A: refused with 'no pair key', no crash; chmod 600 recovers without a restart", T, async () => {
     const { A, B } = P;
+    // A runs the default mode and is pinned for B (the legs above), so a
+    // key-less handshake is refused on A's own client side with
+    // pb_required_pinned. The recovery needs no restart: defaultPairKey re-reads
+    // the store on every call (and loadPeerCreds reads as empty at 0644).
     await flows(B, A, "t7 control");
     const pid = A.child.pid;
     chmodSync(A.tokensPath, 0o644);
@@ -311,10 +332,16 @@ describe("T2 a seed holder without a pairing", () => {
     await B.stop();
 
     imp = await makeImpostor(A, B.id);
+    const impLogs = [];
     const ctx = {
       identity: imp.identity, instanceSyncManager: imp.mgr, db: imp.db, gatewayPort: A.port,
       standardPorts: [], lookupTailnetIp: async () => null, selfAddress: async () => null, idleRecheckMs: 200,
-      pairKeyLookup: imp.side.pairKeyLookup, log: { warn: () => {}, log: () => {} },
+      pairKeyLookup: imp.side.pairKeyLookup,
+      // A real attacker does not refuse itself: run the impostor in `auto`, so
+      // it sends its proof with no pair binding and A's OWN server-side
+      // refusal is what is tested end to end.
+      pairBindingMode: "auto",
+      log: { warn: (m) => impLogs.push(String(m)), log: (m) => impLogs.push(String(m)) },
     };
     const peerRow = { id: A.id, name: "a", gateway_url: `http://127.0.0.1:${A.port}`, tailscale_ip: null, sync_url: null, status: "active" };
     const held = await imp.marker("t2 no-key");
@@ -322,10 +349,14 @@ describe("T2 a seed holder without a pairing", () => {
     const d1 = new PeerDialer(peerRow, ctx);
     dialers.push(d1);
     d1.start();
-    assert.ok(await logShows(A, refused(B.id, "server", "pb_required_pinned"), from, 60_000), `A refuses the key-less dialer\n${syncLines(sinceLog(A, from))}`);
+    // The key-less impostor (auto, so it does not refuse itself) sends its proof
+    // without a pair proof; A holds the key and has B pinned, so A refuses it
+    // on A's own server side.
+    assert.ok(await logShows(A, refused(B.id, "server", "pb_required_pinned"), from, 60_000),
+      `A refuses the key-less dialer\n${syncLines(sinceLog(A, from))}`);
     await new Promise((r) => setTimeout(r, QUIET_MS));
     assert.equal(hasMarker(A, held), false, "the impostor's marker never reaches A");
-    assert.doesNotMatch(sinceLog(A, from), /replicating with peer/, "no replication was set up");
+    assert.doesNotMatch(sinceLog(A, from), /pair-bound handshake|replicating with peer/, "A never accepted it");
     d1.stop();
 
     // The same dialer and manager, given B's real key from B's store: accepted.
@@ -423,7 +454,7 @@ describe("T3 a stale key after re-pair", () => {
 
 // ---------------------------------------------------------------- T4
 for (const oldSide of ["B", "A"]) {
-  describe(`T4 mixed: old ${oldSide}`, () => {
+  describe(`T4' mixed: old ${oldSide}`, () => {
     let P;
     before(async () => {
       P = await bootPair({ sameIdentity: true, ...(oldSide === "B" ? { repoB: old.dir } : { repoA: old.dir }) });
@@ -431,11 +462,15 @@ for (const oldSide of ["B", "A"]) {
       await useLoopbackSync(P.A, P.B);
       await P.B.boot();
       await P.A.boot();
+      // The new side starts on the documented escape: a pre-PT-2a peer cannot
+      // do the session check, and PT-2b's default would cut the pair.
+      const [newer] = oldSide === "B" ? [P.A] : [P.B];
+      await newer.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
       await primeLink(P.A, P.B);
     }, { timeout: 600_000 });
     after(async () => { await P?.cleanup(); }, { timeout: 120_000 });
 
-    test(`T4 old ${oldSide}: auto flows (legacy item), require refuses, auto flows again`, T, async () => {
+    test(`T4' old ${oldSide}: auto flows (legacy item), the DEFAULT refuses, auto flows again`, T, async () => {
       const { A, B } = P;
       // The new side decides; the old side never speaks pair binding.
       const [newer, older, side] = oldSide === "B" ? [A, B, "client"] : [B, A, "server"];
@@ -444,16 +479,116 @@ for (const oldSide of ["B", "A"]) {
       assert.equal(pairPinned(newer, older.id), false, "never pinned");
       assert.doesNotMatch(newer.log, anyRefusal);
 
+      // The default (require) refuses an unbound peer: the mixed pair is cut.
       let from = 0;
-      await newer.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "require" } });
-      assert.ok(await logShows(newer, refused(older.id, side, "pb_required"), from), `require refuses the old side\n${syncLines(newer.log)}`);
+      await newer.boot();
+      assert.ok(await logShows(newer, refused(older.id, side, "pb_required"), from), `the default refuses the old side\n${syncLines(newer.log)}`);
       const stuck = await blocked(older, newer, "t4 require");
 
       from = 0;
-      await newer.boot();
+      await newer.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
       assert.ok(await until(() => hasMarker(newer, stuck), FLOW_MS, 500), "back to auto: the held marker arrives");
       await flows(newer, older, "t4 auto again");
       assert.match(newer.log, legacy(older.id, side));
     });
   });
 }
+
+// ---------------------------------------------------------------- T4b
+for (const oldSide of ["B", "A"]) {
+  describe(`T4b mixed PT-2a: old ${oldSide}`, () => {
+    let P, pt2a;
+    before(async () => {
+      pt2a = await oldTree(PT2A_SHA);
+      P = await bootPair({ sameIdentity: true, ...(oldSide === "B" ? { repoB: pt2a.dir } : { repoA: pt2a.dir }) });
+      assert.ok(P.A.id < P.B.id, "A is the elected dialer");
+      await useLoopbackSync(P.A, P.B);
+      await P.B.boot();
+      await P.A.boot();
+      const [newer] = oldSide === "B" ? [P.A] : [P.B];
+      await newer.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
+      await primeLink(P.A, P.B);
+    }, { timeout: 600_000 });
+    after(async () => { await P?.cleanup(); pt2a?.cleanup(); }, { timeout: 120_000 });
+
+    test(`T4b old ${oldSide}: PT-2a syncs under auto (session item, no MACs); the DEFAULT cuts it (sm_required); auto flows again`, T, async () => {
+      const { A, B } = P;
+      const [newer, older, side] = oldSide === "B" ? [A, B, "client"] : [B, A, "server"];
+      // Positive control: the escape hatch works, and the pair IS bound (only
+      // the session check is missing).
+      await flowsBoth(A, B, "t4b auto");
+      assert.match(newer.log, legacySession(older.id, side), "the session item, not the pair-binding one");
+      assert.doesNotMatch(newer.log, anyRefusal);
+      assert.equal(pairPinned(newer, older.id), true, "a PT-2a handshake is pair-bound");
+
+      // Default: a bound pair without the session check is refused (design A).
+      let from = 0;
+      await newer.boot();
+      assert.ok(await logShows(newer, sessionRefused(older.id, side, "sm_required"), from), `the default refuses PT-2a\n${syncLines(newer.log)}`);
+      const stuck = await blocked(older, newer, "t4b require");
+
+      // Auto again: the held marker arrives.
+      from = 0;
+      await newer.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
+      assert.ok(await until(() => hasMarker(newer, stuck), FLOW_MS, 500), "back to auto: the held marker arrives");
+      await flows(newer, older, "t4b auto again");
+
+      // And the default refuses once more (a restart, not a one-off).
+      from = 0;
+      await newer.boot();
+      assert.ok(await logShows(newer, sessionRefused(older.id, side, "sm_required"), from), syncLines(newer.log));
+    });
+  });
+}
+
+// ---------------------------------------------------------------- T1b + T10
+describe("new↔new pair, session-bound (T1b, then the T10 rollback drill on the same link)", () => {
+  let P, pt2a;
+  before(async () => {
+    P = await bootPair({ sameIdentity: true });
+    assert.ok(P.A.id < P.B.id, "A is the elected dialer");
+    await useLoopbackSync(P.A, P.B);
+    await P.B.boot();
+    await P.A.boot();
+    await primeLink(P.A, P.B);
+  }, { timeout: 600_000 });
+  after(async () => { await P?.cleanup(); pt2a?.cleanup(); }, { timeout: 120_000 });
+
+  test("T1b new↔new end to end: markers both ways, pair-bound AND session-bound on both sides, no session refusal, pins on both sides", T, async () => {
+    const { A, B } = P;
+    await flowsBoth(A, B, "t1b");
+    assert.match(A.log, bound(B.id, "client"));
+    assert.match(B.log, bound(A.id, "server"));
+    assert.match(A.log, sessionBound(B.id, "client"));
+    assert.match(B.log, sessionBound(A.id, "server"));
+    for (const n of [A, B]) assert.doesNotMatch(n.log, /session binding failed/, `${n.name}: no session refusal`);
+    assert.ok(await until(() => pairPinned(A, B.id) && pairPinned(B, A.id), 15_000), "pinned both ways");
+  });
+
+  test("T10 rollback drill: B on PT-2a is cut (sm_required); A with auto flows again; NEITHER pin changes; back on new code both are session-bound with the default", T, async () => {
+    const { A, B } = P;
+    await flows(B, A, "t10 control");
+    assert.equal(pairPinned(A, B.id), true);
+    const pinsBefore = (await pinCli(A, ["--list"])).out;
+    pt2a = await oldTree(PT2A_SHA);
+
+    let from = A.log.length;
+    await B.boot({ repo: pt2a.dir });
+    assert.ok(await logShows(A, sessionRefused(B.id, "client", "sm_required"), from), `A refuses PT-2a B\n${syncLines(sinceLog(A, from))}`);
+    const stuck = await blocked(B, A, "t10 old");
+
+    // The documented one-host escape.
+    from = 0;
+    await A.boot({ extraEnv: { CROW_SYNC_PAIR_BINDING: "auto" } });
+    assert.ok(await until(() => hasMarker(A, stuck), FLOW_MS, 500), "the held marker arrives under auto");
+    await flowsBoth(A, B, "t10 auto");
+    assert.equal((await pinCli(A, ["--list"])).out, pinsBefore, "neither side's pins changed");
+
+    // Both back on new code, default mode: session-bound again.
+    from = 0;
+    await B.boot({ repo: REPO });
+    await A.boot();
+    assert.ok(await logShows(A, sessionBound(B.id, "client"), from), `session-bound again\n${syncLines(A.log)}`);
+    await flowsBoth(A, B, "t10 back");
+  });
+});

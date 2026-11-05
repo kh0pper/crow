@@ -89,13 +89,16 @@ export function defaultPairKey(peerId) {
   return typeof key === "string" && HEX_RE.test(key) ? key : null;
 }
 
-/** PT-2a's default; PT-2b changes it to "require". */
-export const DEFAULT_PAIR_BINDING_MODE = "auto";
+/** PT-2b's default: an unbound sibling is refused. */
+export const DEFAULT_PAIR_BINDING_MODE = "require";
 let _modeWarned = false;
 
 /**
  * `CROW_SYNC_PAIR_BINDING` = `auto` | `require` (unset or empty → the
  * default). There is no `off`: any other value means `require`, logged once.
+ * `auto` is the temporary escape hatch for a peer that cannot do the checks
+ * (an older Crow mid-rollout, or a one-host rollback); it is downgradeable by
+ * an on-path relay, so it is never a resting state.
  */
 export function pairBindingMode(env = process.env) {
   const raw = env?.CROW_SYNC_PAIR_BINDING;

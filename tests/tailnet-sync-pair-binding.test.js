@@ -290,7 +290,7 @@ test("U-T2b a replayed hello with pb stripped (no cr_proof possible) plants no N
   reset();
   const fleet = await makeFleet({ ids: ["inst2", "inst1"] });
   const { a, b, identity } = fleet;
-  const A = await startGateway(fleet, a, { log: LOG });
+  const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "auto" });
   const raws = [];
   // The hello signature covers only instance_id:nonce, so a replayer can
   // strip `pb` (keeping `cr`) but can never produce the cr_proof.
@@ -344,7 +344,7 @@ test("U-T3 impostor server with the seed: the dialer refuses a missing pb_mac (p
   reset();
   const fleet = await makeFleet();
   const { a, b, identity, pairKey } = fleet;
-  const A = await startGateway(fleet, a, { log: LOG });
+  const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "auto" });
   const B = await startGateway(fleet, b, { log: LOG });
   const imp = await impostorServer(identity, { asId: b.id, key: pairKey });
   try {
@@ -397,7 +397,7 @@ test("U-T4 mixed versions: an old sibling (legacy handshake, or CR without pb) s
   const fleet = await makeFleet(); // a sorts first: A is the elected dialer, B fallback-dials
   const { a, b } = fleet;
   const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "auto" });
-  const B = await startGateway(fleet, b, { log: LOG });
+  const B = await startGateway(fleet, b, { log: LOG, pairBindingMode: "auto" });
   try {
     capture();
     await pointAt(a, b, B.port);
@@ -458,7 +458,10 @@ test("U-T5 side-effect ordering, accept side: a refused handshake leaves the CR 
   reset();
   const fleet = await makeFleet({ ids: ["inst2", "inst1"] });
   const { a, b, identity, pairKey } = fleet;
-  const A = await startGateway(fleet, a, { log: LOG });
+  // The hand-built client speaks PT-2a's session semantics (no session MACs),
+  // so the gateway under test runs `auto` to exercise the side-effect ordering
+  // of a BOUND handshake; the pb refusals are decided before any session check.
+  const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "auto" });
   const calls = [];
   const addr = { gateway_url: "http://127.0.0.1:4999", tailscale_ip: "127.0.0.1", sync_port: 4999 };
   const raws = [];
@@ -482,12 +485,15 @@ test("U-T5 side-effect ordering, accept side: a refused handshake leaves the CR 
     const ok = await impostorClient(A.port, identity, { asId: b.id, serverId: a.id, addr, key: pairKey });
     raws.push(ok.c);
     assert.equal(ok.gotFeedKey, true);
-    assert.ok(await until(async () => (await peerRow(a, b.id)).last_seen_at !== before.last_seen_at, 3000), "last_seen_at moves");
+    // NOTE: `last_seen_at` is written only after the Noise check (PT-2b), so a
+    // hand-driven client that never completes Noise never marks the peer
+    // active — the pre-Noise side effects are the ones this test can see.
     const after = await peerRow(a, b.id);
     assert.equal(after.gateway_url, addr.gateway_url, "address backfilled");
     assert.equal(await override(a, `tailnet_sync_cr:${b.id}`), "1");
     assert.equal(await override(a, `tailnet_sync_port:${b.id}`), "4999");
     assert.ok(calls.length >= 1, "initInstance called after the decision");
+    assert.equal(after.last_seen_at, before.last_seen_at, "liveness waits for the Noise check");
   } finally {
     release();
     for (const c of raws) c.close();
@@ -502,7 +508,7 @@ test("U-T5 side-effect ordering, dial side: a refused server leaves the CR pin, 
   const { a, b, identity, pairKey } = fleet;
   const addr = { gateway_url: null, tailscale_ip: "127.0.0.1", sync_port: 4998 };
   const imp = await impostorServer(identity, { asId: b.id, key: pairKey, addr, feedKey: randomBytes(32).toString("hex") });
-  const A = await startGateway(fleet, a, { log: LOG });
+  const A = await startGateway(fleet, a, { log: LOG, pairBindingMode: "auto" });
   // The refresh loop's heal calls initInstance(peer, null) on its own; the
   // handshake's call is the one that carries the peer's feed key.
   const keyed = [];
@@ -526,12 +532,14 @@ test("U-T5 side-effect ordering, dial side: a refused server leaves the CR pin, 
 
     imp.opts.pbMac = "valid";
     await A.startClients();
-    assert.ok(await until(async () => (await peerRow(a, b.id)).last_seen_at !== before.last_seen_at, 5000), "last_seen_at moves");
+    // `last_seen_at` now waits for the Noise check, and this hand-driven server
+    // never completes Noise; the persisted feed key proves the handshake ran
+    // past the pair-binding decision.
+    assert.ok(await until(async () => (await peerRow(a, b.id)).sync_url !== before.sync_url, 5000), "sync_url persisted");
     assert.equal((await peerRow(a, b.id)).tailscale_ip, "127.0.0.1", "address backfilled");
     assert.equal(await override(a, `tailnet_sync_cr:${b.id}`), "1");
     assert.equal(await override(a, `tailnet_sync_port:${b.id}`), "4998");
     assert.ok(keyed.length >= 1, "initInstance called with the feed key after the decision");
-    assert.notEqual((await peerRow(a, b.id)).sync_url, before.sync_url, "sync_url persisted");
     A.stopClients();
   } finally {
     release();
@@ -583,7 +591,7 @@ test("U-T6 re-pair window, peer refusal: a pinned server refuses a dialer with n
     const fix = setTimeout(() => a.pairKeys.set(b.id, pairKey), 2000);
     const t0 = Date.now();
     await A.startClients();
-    assert.ok(await until(() => /closed by peer \(1008 pair binding failed\)/.test(dialErr(b.id)), 3000), dialErr(b.id));
+    assert.ok(await until(() => /pair binding failed/.test(dialErr(b.id)), 3000), dialErr(b.id));
     assert.ok(await until(() => linked(a, b), 15_000), `link within 15 s (${Date.now() - t0} ms)`);
     clearTimeout(fix);
     assert.equal(await pinRow(a, b.id), "1");

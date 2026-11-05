@@ -410,7 +410,7 @@ test("CR, server side: a REPLAYED client hello (plus its old proof) gets no feed
   _resetPeerDialHealth();
   const fleet = await makeFleet();
   const { a, b, identity } = fleet;
-  const B = await startGateway(fleet, b);
+  const B = await startGateway(fleet, b, { pairBindingMode: "auto" });
   quiet();
   try {
     // Positive control (legacy, before B has seen CR from A): a CR-less hello
@@ -497,7 +497,7 @@ test("CR, client side: a server that REPLAYS a recorded server hello is refused 
     });
   });
   await new Promise((r) => http.listen(0, "127.0.0.1", r));
-  const A = await startGateway(fleet, a);
+  const A = await startGateway(fleet, a, { pairBindingMode: "auto" });
   try {
     await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${http.address().port}`, b.id] });
     await A.startClients();
@@ -525,8 +525,8 @@ test("CR mixed versions over the real dialer: legacy↔new links both ways; afte
   _resetPeerDialHealth();
   const fleet = await makeFleet();
   const { a, b } = fleet;
-  const A = await startGateway(fleet, a, { legacyHandshake: true }); // old dialer
-  const B = await startGateway(fleet, b);                              // new server
+  const A = await startGateway(fleet, a, { legacyHandshake: true, pairBindingMode: "auto" }); // old dialer
+  const B = await startGateway(fleet, b, { pairBindingMode: "auto" });                       // new server
   quiet();
   try {
     await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${B.port}`, b.id] });
@@ -640,7 +640,7 @@ test("CR, client side downgrade: after CR with B, an endpoint answering B's id W
     });
   });
   await new Promise((r) => http.listen(0, "127.0.0.1", r));
-  const A = await startGateway(fleet, a);
+  const A = await startGateway(fleet, a, { pairBindingMode: "auto" });
   quiet();
   try {
     await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${http.address().port}`, b.id] });
@@ -739,7 +739,7 @@ test("DOWNGRADE, garbled CR fields: a PINNED peer whose hello carries a malforme
   _resetPeerDialHealth();
   const fleet = await makeFleet();
   const { a, b, identity } = fleet;
-  const B = await startGateway(fleet, b);
+  const B = await startGateway(fleet, b, { pairBindingMode: "auto" });
   quiet();
   const bad = ["1", 0, 1.5, null, true, { v: 1 }];
   try {
@@ -780,7 +780,7 @@ test("DOWNGRADE, garbled CR fields: a PINNED peer whose hello carries a malforme
     await new Promise((r) => http.listen(0, "127.0.0.1", r));
     await a.db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings_overrides (key, instance_id, value, updated_at) VALUES (?, ?, '1', datetime('now'))", args: [`tailnet_sync_cr:${b.id}`, a.id] });
     await a.db.execute({ sql: "UPDATE crow_instances SET gateway_url = ? WHERE id = ?", args: [`http://127.0.0.1:${http.address().port}`, b.id] });
-    const A = await startGateway(fleet, a);
+    const A = await startGateway(fleet, a, { pairBindingMode: "auto" });
     quiet();
     try {
       await A.startClients();

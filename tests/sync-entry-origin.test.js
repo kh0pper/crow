@@ -9,7 +9,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { makeFleet, linkPeers, until, hasMemory, writeAndEmit } from "./fixtures/sync-fleet.mjs";
 import { sign } from "../servers/sharing/identity.js";
-import { entryOriginMode } from "../servers/sharing/instance-sync.js";
+import { entryOriginMode, _resetEntryOriginModeLog, InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 
 function forge(identity, id, content, claimed) {
   const entry = {
@@ -54,21 +54,69 @@ async function runCase(mode, expectApplied) {
   }
 }
 
-describe("entryOriginMode", () => {
-  it("defaults to observe; only the exact value enforce enforces", () => {
-    assert.equal(entryOriginMode({}), "observe");
-    assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "enforce" }), "enforce");
-    assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "observe" }), "observe");
-    assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "bogus" }), "observe");
+describe("entryOriginMode (PT-2b default: enforce)", () => {
+  it("unset and empty enforce; observe is the explicit escape; anything else is observe, warned once", () => {
+    const warns = [];
+    const orig = console.warn;
+    console.warn = (...a) => warns.push(a.join(" "));
+    try {
+      _resetEntryOriginModeLog();
+      assert.equal(entryOriginMode({}), "enforce");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "" }), "enforce");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "enforce" }), "enforce");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "observe" }), "observe");
+      assert.equal(warns.length, 0, "valid values never warn");
+      // A typo is a failed rollback: it must fail to the HARMLESS direction
+      // (observe applies the entry; enforce consumes it for good), loudly.
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "enforced" }), "observe");
+      assert.equal(entryOriginMode({ CROW_SYNC_ENTRY_ORIGIN: "Enforce" }), "observe");
+      assert.equal(warns.length, 1, "warned once per boot");
+      assert.match(warns[0], /CROW_SYNC_ENTRY_ORIGIN/);
+      assert.match(warns[0], /observe/);
+    } finally {
+      console.warn = orig;
+      _resetEntryOriginModeLog();
+    }
   });
 });
 
 describe("entry origin", () => {
-  it("observe (default): forged entry applies, counted + logged once", async () => {
-    await runCase(undefined, true);
+  it("enforce (default): the forged entry is skipped, the seq still advances, the genuine entry right after applies", async () => {
+    await runCase(undefined, false);
   });
-  it("enforce: forged entry skipped, seq advances, genuine entry applies", async () => {
-    await runCase("enforce", false);
+  it("observe (the explicit escape): the forged entry applies, counted + logged once, and the genuine one applies", async () => {
+    await runCase("observe", true);
+  });
+});
+
+describe("the entry-origin policy is resolved at STARTUP (PT-2b fix wave)", () => {
+  it("constructing the manager with an unknown CROW_SYNC_ENTRY_ORIGIN warns once, with no mismatch needed", () => {
+    // docs/guide/instances.md promises "a warning in the log at every start".
+    // entryOriginMode()'s other caller is the mismatch path, which never runs on
+    // a healthy fleet — so the constructor must call it.
+    const prev = process.env.CROW_SYNC_ENTRY_ORIGIN;
+    const warns = [];
+    const origWarn = console.warn;
+    process.env.CROW_SYNC_ENTRY_ORIGIN = "obsrve";
+    _resetEntryOriginModeLog();
+    console.warn = (...a) => warns.push(a.join(" "));
+    try {
+      const identity = { ed25519Priv: Buffer.alloc(32, 0x11), ed25519Pubkey: "00", crowId: "crow:origin-test" };
+      const mgr = new InstanceSyncManager(identity, {}, "inst-origin-1");
+      assert.equal(mgr.entryOriginMode, "observe", "the typo fails to the harmless direction");
+      const lines = warns.filter((l) => l.includes("CROW_SYNC_ENTRY_ORIGIN"));
+      assert.equal(lines.length, 1, `warned once at construction: ${warns.join(" | ")}`);
+      assert.match(lines[0], /obsrve/);
+      assert.match(lines[0], /observe/);
+      // A second manager in the same process (the same boot) stays quiet.
+      new InstanceSyncManager(identity, {}, "inst-origin-2");
+      assert.equal(warns.filter((l) => l.includes("CROW_SYNC_ENTRY_ORIGIN")).length, 1);
+    } finally {
+      console.warn = origWarn;
+      _resetEntryOriginModeLog();
+      if (prev === undefined) delete process.env.CROW_SYNC_ENTRY_ORIGIN;
+      else process.env.CROW_SYNC_ENTRY_ORIGIN = prev;
+    }
   });
 });
 
