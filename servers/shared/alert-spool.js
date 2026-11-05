@@ -51,12 +51,20 @@ export function alertsDirs() {
 
 /** 0700, always — the alert text can name a database path. */
 function ensureDir(dir) {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // A planted symlink must never redirect a write (or the chmod) outside CROW_HOME.
+  // Walk alerts/ then the subdirectory BEFORE creating anything: a planted
+  // symlink (or a non-directory) is refused, never followed, so no write, mkdir
+  // or chmod can land outside CROW_HOME. Each level is created non-recursively.
+  // CROW_HOME itself may legitimately be a symlink and is not checked.
   for (const d of [alertsRoot(), dir]) {
-    if (lstatSync(d).isSymbolicLink()) throw new Error(`${d} is a symlink; refusing to use it`);
+    let st = null;
+    try { st = lstatSync(d); } catch (err) { if (err?.code !== "ENOENT") throw err; }
+    if (st === null) {
+      mkdirSync(d, { mode: 0o700 });
+      st = lstatSync(d);
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${d} is not a plain directory; refusing to use it`);
+    try { chmodSync(d, 0o700); } catch {}
   }
-  try { chmodSync(dir, 0o700); } catch {}
 }
 
 function slugFor(code) {

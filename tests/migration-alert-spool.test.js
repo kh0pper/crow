@@ -263,3 +263,23 @@ test("a symlinked alerts/pending is refused: nothing is written outside CROW_HOM
     rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test("a symlinked alerts/ is refused before anything is created through it", async () => {
+  const { mkdtempSync, symlinkSync, readdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "alert-symlink-root-"));
+  const outside = mkdtempSync(join(tmpdir(), "alert-symlink-root-out-"));
+  const prev = process.env.CROW_HOME;
+  try {
+    process.env.CROW_HOME = home;
+    symlinkSync(outside, join(home, "alerts"));
+    const { writeAlertFile } = await import("../servers/shared/alert-spool.js");
+    assert.equal(writeAlertFile({ code: "x", title: "t" }), null);
+    assert.deepEqual(readdirSync(outside), [], "not even an empty pending/ was created through the link");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_HOME; else process.env.CROW_HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
