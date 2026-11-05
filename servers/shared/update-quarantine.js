@@ -10,9 +10,18 @@
  *     (a rollback happens with the marker already in place);
  *   - it is never synced to another instance.
  *
- * Format v1: { v, sha, previous, reason, at, by, expires_at?, held? }. Both
- * shas are FULL 40-hex: a prefix would also match a different commit, so a
+ * Format v1: { v, sha, previous, reason, at, by, owner?, expires_at?, held? }.
+ * Both shas are FULL 40-hex: a prefix would also match a different commit, so a
  * marker whose sha is not a full sha is ignored by every reader.
+ *
+ * `owner` (16 hex) names the INSTANCE whose boot guard wrote a HELD marker — the
+ * first 16 hex characters of sha256(realpath(CROW_HOME)), see `ownerForHome()`.
+ * One checkout can be shared by several instances and a refusal belongs to the
+ * one that made it, so the stable mark of a peer that boots the same commit fine
+ * must not demote it. The field is OPTIONAL — a marker from a release before
+ * ownership existed is still a valid refusal (the reader accepts it, and the
+ * expiry / held-at-HEAD rules apply unchanged); it is simply never demoted,
+ * because nothing in it proves which instance wrote it.
  *
  * A rollback that a machine merely got wrong (a timeout, a busy DB) must not
  * pause updates forever, so those reasons carry a 6 h TTL. A sha whose CODE
@@ -42,13 +51,37 @@
  *
  * Nothing here throws: this runs inside a tick that must still record a result.
  */
-import { closeSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  closeSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
 
 export const UPDATE_QUARANTINE_FILE = "crow-update-quarantine.json";
 export const UPDATE_QUARANTINE_FORMAT = 1;
 /** Full shas only — see the header. */
 export const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+/** An instance owner id (see the header). Duplicated in the launcher, which
+ *  cannot import this module — `tests/boot-guard-contract.test.js` keeps the two
+ *  in step. */
+export const QUARANTINE_OWNER_RE = /^[0-9a-f]{16}$/;
+
+/**
+ * This instance's owner id: the first 16 hex characters of
+ * sha256(realpath(CROW_HOME)).
+ *
+ * A path, never a hostname or a user name: two CROW_HOMEs on one checkout are
+ * two instances, and the same CROW_HOME reached through a symlink is still the
+ * same instance (hence realpath — computed the same way in
+ * scripts/boot-guard/crow-boot-guard.mjs). Null for an empty home.
+ */
+export function ownerForHome(crowHome) {
+  const raw = String(crowHome ?? "").trim();
+  if (!raw) return null;
+  let real;
+  try { real = realpathSync(raw); } catch { real = resolve(raw); }
+  return createHash("sha256").update(real).digest("hex").slice(0, 16);
+}
 /** The reader's ceiling: the real record is a few hundred bytes. */
 export const UPDATE_QUARANTINE_MAX_BYTES = 64 * 1024;
 
@@ -103,7 +136,7 @@ function writeAtomic(path, record) {
  * marker can still be REPORTED instead of vanishing silently).
  *
  * @returns {null|{v:number, sha:string, previous:string|null, reason:string,
- *   at:string, by:string, expires_at?:string, held?:true}}
+ *   at:string, by:string, owner?:string, expires_at?:string, held?:true}}
  */
 export function readUpdateQuarantine({ gitDir, readFile = readFileSync, lstat = lstatSync } = {}) {
   if (!gitDir) return null;
@@ -132,6 +165,9 @@ export function readUpdateQuarantine({ gitDir, readFile = readFileSync, lstat = 
     reason: m.reason,
     at: m.at,
     by: typeof m.by === "string" ? m.by : "unknown",
+    // Which instance's guard wrote it. Optional: a marker from an older release
+    // has no field and stays a valid refusal (see the header).
+    ...(typeof m.owner === "string" && QUARANTINE_OWNER_RE.test(m.owner) ? { owner: m.owner } : {}),
     ...(typeof m.expires_at === "string" && Number.isFinite(Date.parse(m.expires_at))
       ? { expires_at: m.expires_at } : {}),
     // Only a blocked rollback writes this. A marker from an older release (or
@@ -147,9 +183,13 @@ export function readUpdateQuarantine({ gitDir, readFile = readFileSync, lstat = 
  *  the record WITHOUT `expires_at`, whatever the reason. The caller could not
  *  reset the checkout, so the sha really is still there and an expiry would only
  *  turn it into a silent "Up to date" later. `held` is what carries that rule —
- *  an unflagged marker that happens to name HEAD is an ordinary one. */
+ *  an unflagged marker that happens to name HEAD is an ordinary one.
+ *
+ *  `owner` (see `ownerForHome`) is written only when it is a well-formed id. A
+ *  malformed one is DROPPED, never written: the marker is the refusal, and losing
+ *  it over a bad owner tag would leave the refused commit pullable again. */
 export function writeUpdateQuarantine({
-  gitDir, sha, previous = null, reason, by = "gateway", now = Date.now(), persist = false,
+  gitDir, sha, previous = null, reason, by = "gateway", now = Date.now(), persist = false, owner = null,
 } = {}) {
   if (!gitDir || typeof sha !== "string" || !FULL_SHA_RE.test(sha)) return null;
   if (typeof reason !== "string" || !reason.trim()) return null;
@@ -162,6 +202,7 @@ export function writeUpdateQuarantine({
     reason,
     at: new Date(now).toISOString(),
     by,
+    ...(typeof owner === "string" && QUARANTINE_OWNER_RE.test(owner) ? { owner } : {}),
     ...(ttl ? { expires_at: new Date(now + ttl).toISOString() } : {}),
     ...(held ? { held: true } : {}),
   };

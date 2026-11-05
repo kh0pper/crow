@@ -33,23 +33,28 @@
  * facts and performs the effects it returns.
  */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   accessSync, chmodSync, closeSync, constants as fsConstants, lstatSync, mkdirSync, openSync,
   readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 
 /** Bumped whenever the state file's meaning changes; stamped as launcher_version. */
-export const LAUNCHER_VERSION = "1";
+export const LAUNCHER_VERSION = "2";
 export const STATE_FORMAT = 1;
 /** Counted crashes before the rollback, so the decision lands on start N+1. */
 export const FAILURE_THRESHOLD = 3;
 /** The reader's ceiling: the real record is a few hundred bytes. */
 export const STATE_MAX_BYTES = 64 * 1024;
 export const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+/** An instance owner id — see `instanceOwnerId`. Duplicated in
+ *  servers/shared/update-quarantine.js (this copy cannot import it); the contract
+ *  test keeps the two in step. */
+export const QUARANTINE_OWNER_RE = /^[0-9a-f]{16}$/;
 export const BOOT_GUARD_DIR = "boot-guard";
 export const STATE_FILE = "state.json";
 export const STATUS_FILE = "STATUS";
@@ -123,6 +128,24 @@ function envMs(env, key, fallback) {
 export function crowHomeFor(env = process.env) {
   const raw = String(env?.CROW_HOME || "").trim();
   return raw ? raw : join(homedir(), ".crow");
+}
+
+/**
+ * This instance's owner id: the first 16 hex characters of
+ * sha256(realpath(CROW_HOME)).
+ *
+ * It goes on every HELD marker this launcher writes, so the gateway's stable
+ * mark can tell ITS OWN refusal from a co-hosted instance's (both share one
+ * checkout, so the marker file does not). Same computation as `ownerForHome` in
+ * servers/shared/update-quarantine.js, which this copy cannot import — the
+ * contract test compares them.
+ */
+export function instanceOwnerId(crowHome) {
+  const raw = String(crowHome ?? "").trim();
+  if (!raw) return null;
+  let real;
+  try { real = realpathSync(raw); } catch { real = resolve(raw); }
+  return createHash("sha256").update(real).digest("hex").slice(0, 16);
 }
 
 /* -------------------------------------------------------------------- git */
@@ -209,6 +232,12 @@ export function freshState() {
     launcher_version: null,
     recorder_ran_at: null,
     deps_attempts: 0,
+    // The HELD marker THIS instance wrote, and the stamp it carries (see
+    // reportRefusal). It survives every later transition — a re-armed trial, a
+    // discard, a rollback — because it is the only proof the gateway's stable
+    // mark has that the marker in the shared git dir is this instance's own
+    // refusal, and that it still exists.
+    refusal: null,
   };
 }
 
@@ -231,9 +260,20 @@ export function validateState(raw) {
   }
   if (raw.result != null && (typeof raw.result !== "object" || Array.isArray(raw.result))) return null;
   if (raw.alerted != null && (typeof raw.alerted !== "object" || Array.isArray(raw.alerted))) return null;
+  // The record of a HELD marker this instance wrote: the sha, and the marker's
+  // own `at` (so a peer that rewrote the marker cannot be mistaken for it).
+  let refusal = null;
+  if (raw.refusal != null) {
+    const r = raw.refusal;
+    if (typeof r !== "object" || Array.isArray(r)) return null;
+    if (typeof r.sha !== "string" || !FULL_SHA_RE.test(r.sha)) return null;
+    if (typeof r.marker_at !== "string" || !Number.isFinite(Date.parse(r.marker_at))) return null;
+    refusal = { sha: r.sha, marker_at: r.marker_at };
+  }
   return {
     ...freshState(),
     ...raw,
+    refusal,
     failures: Number.isInteger(raw.failures) ? raw.failures : 0,
     previous_proven: raw.previous_proven === true,
     deps_changed: raw.deps_changed === true,
@@ -385,7 +425,11 @@ function armDecision(state, facts) {
   return { action: "arm" };
 }
 
-/** The state a finished trial leaves behind (no pending fields, no result). */
+/** The state a finished trial leaves behind (no pending fields, no result).
+ *
+ * `refusal` is deliberately NOT cleared: a trial record says nothing about the
+ * HELD marker this instance wrote earlier, and that record is the only proof the
+ * gateway's stable mark has that the marker in the shared git dir is ours. */
 export function clearTrialFields(state) {
   return {
     ...state,
@@ -565,13 +609,17 @@ export function acquireLockFileWaiting(path, { waitMs = LOCK_WAIT_MS, pollMs = L
 /**
  * The update quarantine record, byte-compatible with
  * servers/shared/update-quarantine.js (contract test compares both readers).
+ *
+ * `persist` is that module's HELD write: a refusal leaves the bad commit
+ * CHECKED OUT, so its marker must never expire into a silent "Up to date".
  */
 export function buildUpdateQuarantine({
-  sha, previous = null, reason, by = "boot-guard", now = Date.now(),
+  sha, previous = null, reason, by = "boot-guard", now = Date.now(), persist = false, owner = null,
 } = {}) {
   if (!FULL_SHA_RE.test(String(sha || ""))) return null;
   if (typeof reason !== "string" || !reason.trim()) return null;
-  const ttl = TRANSIENT_QUARANTINE_MS[reason];
+  const held = persist === true;
+  const ttl = held ? 0 : TRANSIENT_QUARANTINE_MS[reason];
   return {
     v: 1,
     sha,
@@ -579,7 +627,10 @@ export function buildUpdateQuarantine({
     reason,
     at: iso(now),
     by,
+    // Only a well-formed id is written (a bad one must not lose the refusal).
+    ...(typeof owner === "string" && QUARANTINE_OWNER_RE.test(owner) ? { owner } : {}),
     ...(ttl ? { expires_at: iso(now + ttl) } : {}),
+    ...(held ? { held: true } : {}),
   };
 }
 
@@ -774,52 +825,100 @@ export function depsChangedBetween(root, previous, pending, git = gitText) {
 
 /* --------------------------------------------------------------- messages */
 
-function refusalText(reason, { root, detail = {}, failures, pending, previous }) {
+/** Where the migration guard writes its pre-migration backups. Re-derived here
+ *  because the installed copy cannot import servers/shared/migration-guard.js
+ *  (contract test), and a refusal has to name the real directory, not a guess.
+ *  `resolve()` on the DB path exactly as `guardAnchor` does (a relative
+ *  CROW_DB_PATH would otherwise make every other path in the refusal wrong). */
+export function backupDirFor(dbPath) {
+  if (typeof dbPath !== "string" || !dbPath) return null;
+  return join(dirname(resolve(dbPath)), "backups", "migrations");
+}
+
+/** The backup the migration guard took for THIS schema-generation crossing, or
+ *  null.
+ *
+ *  `takeBackup` in servers/shared/migration-guard.js names each file
+ *  `crow-pre-g<from>-to-g<to>-<ts>.db`, so the pair of generations identifies the
+ *  backup for this change and nothing else. The directory is shared with every
+ *  earlier migration (retention keeps three), and restoring one of those loses
+ *  every write since it was taken — which is why a refusal names a file only when
+ *  it matches this crossing exactly (S2). */
+export function dbAheadBackupFile(dir, detail = {}) {
+  if (!dir) return null;
+  const from = Number(detail.previousGeneration);
+  const to = Number(detail.userVersion);
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return null;
+  const prefix = `crow-pre-g${from}-to-g${to}-`;
+  try {
+    // The timestamp suffix is ISO-8601 with `:`/`.` replaced by `-`, so a name
+    // sort is chronological and the last entry is the newest for this crossing.
+    const files = readdirSync(dir).filter((f) => f.startsWith(prefix) && f.endsWith(".db")).sort();
+    return files.length ? files[files.length - 1] : null;
+  } catch {
+    return null;
+  }
+}
+
+export function refusalText(reason, { root, detail = {}, failures, pending, previous, dbPath = null }) {
   const b = short(pending);
   const p = short(previous);
   const n = `${failures} times`;
-  const recover = `To recover: stop the gateway, run git -C ${root} log --oneline -5, choose a commit known to start, `
-    + `run git -C ${root} reset --keep <that commit>, then start the gateway.`;
-  const restore = `To recover: stop the gateway, restore the pre-migration backup the migration guard took, `
-    + `run git -C ${root} reset --keep ${previous}, then start the gateway.`;
+  const dir = backupDirFor(dbPath);
+  // ONLY a schema-generation crossing takes a backup, and only the file matching
+  // THIS pair of generations may be restored (S2). Every other reason took none,
+  // and the directory's older files belong to earlier migrations — naming one
+  // would send the operator to restore a stale database.
+  const backupFile = reason === "db-ahead" ? dbAheadBackupFile(dir, detail) : null;
+  const backups = backupFile
+    ? `The migration guard's pre-migration backup for this change is ${join(dir, backupFile)}.`
+    : (dir
+      ? `No backup was taken for this change. The migration guard's earlier backups, if any, are in ${dir}.`
+      : "No backup was taken for this change, so there is nothing to restore.");
+  // A restore step only when there is a backup of THIS change to restore.
+  const restoreStep = backupFile ? `restore ${join(dir, backupFile)}, ` : "";
+  const recover = `To recover: stop the gateway, ${restoreStep}run git -C ${root} log --oneline -5, `
+    + `choose a commit known to start, run git -C ${root} reset --keep <that commit>, then start the gateway.`;
+  const restore = `To recover: stop the gateway, ${restoreStep}run git -C ${root} reset --keep ${previous}, `
+    + "then start the gateway.";
   switch (reason) {
     case "db-ahead":
       return `Commit ${b} crashed on startup ${n}. The DB is ahead of ${p}: its schema generation is now `
         + `${detail.userVersion} and ${p} expects ${detail.previousGeneration}, so the previous code may not `
-        + `understand the database, and nothing was changed. The cause may not be ${b}. ${restore}`;
+        + `understand the database, and nothing was changed. The cause may not be ${b}. ${backups} ${restore}`;
     case "init-db-changed":
       return `Commit ${b} crashed on startup ${n} and also changed scripts/init-db.js, which rebuilds tables `
-        + `without bumping the schema generation, so ${p} may not understand the database. Nothing was changed. ${restore}`;
+        + `without bumping the schema generation, so ${p} may not understand the database. Nothing was changed. ${backups} ${restore}`;
     case "migration-not-rollback-safe":
       return `Commit ${b} crashed on startup ${n} and applied database migration ${detail.id}, which does not `
-        + `declare that the previous code can run on the new shape. Nothing was changed. ${restore}`;
+        + `declare that the previous code can run on the new shape. Nothing was changed. ${backups} ${restore}`;
     case "migration-unknown":
       return `Commit ${b} crashed on startup ${n} and the database records migration ${detail.id}, which is not `
-        + `readable in ${b}. Nothing was changed. ${restore}`;
+        + `readable in ${b}. Nothing was changed. ${backups} ${restore}`;
     case "generation-unreadable":
       return `Commit ${b} crashed on startup ${n}, and Crow could not read the schema generation of ${p}, so it `
-        + `cannot tell whether the database is still safe for the previous code. Nothing was changed. ${recover}`;
+        + `cannot tell whether the database is still safe for the previous code. Nothing was changed. ${backups} ${recover}`;
     case "init-db-unknown":
       return `Commit ${b} crashed on startup ${n}, and scripts/init-db.js could not be compared between ${p} and `
-        + `${b}, so the database may have been rebuilt. Nothing was changed. ${recover}`;
+        + `${b}, so the database may have been rebuilt. Nothing was changed. ${backups} ${recover}`;
     case "db-unreadable":
     case "db-path-invalid":
     case "db-unknown":
       return `Commit ${b} crashed on startup ${n}, and Crow could not read this instance's database to check `
-        + `whether the previous code can still use it. Nothing was changed. ${recover}`;
+        + `whether the previous code can still use it. Nothing was changed. ${backups} ${recover}`;
     case "unproven-previous":
       return `Commit ${b} crashed on startup ${n}, and Crow has no record of a commit that booted healthily `
-        + `before it, so it cannot know what to move back to. Nothing was changed. ${recover}`;
+        + `before it, so it cannot know what to move back to. Nothing was changed. ${backups} ${recover}`;
     case "not-on-main":
       return `Commit ${b} crashed on startup ${n}, and the checkout is not on main, so moving it back would `
-        + `detach HEAD and stop updates. Nothing was changed. To recover: put the checkout back on main `
+        + `detach HEAD and stop updates. Nothing was changed. ${backups} To recover: put the checkout back on main `
         + `(git -C ${root} checkout main), then run git -C ${root} reset --keep ${previous}.`;
     case "previous-not-ancestor":
       return `Commit ${b} crashed on startup ${n}, and the recorded previous commit ${p} is not an ancestor of `
-        + `it, so moving back would drop commits. Nothing was changed. ${recover}`;
+        + `it, so moving back would drop commits. Nothing was changed. ${backups} ${recover}`;
     default:
       return `Commit ${b} crashed on startup ${n}, and Crow could not check that moving back to ${p} is safe `
-        + `(${reason}). Nothing was changed. ${recover}`;
+        + `(${reason}). Nothing was changed. ${backups} ${recover}`;
   }
 }
 
@@ -889,11 +988,46 @@ function clearStatusFile(stateDir) {
 function reportRefusal({ root, gitDir, state, stateDir, crowHome, now, decision, pending, previous, kind }) {
   const code = kind === "refuse" ? "update-rollback-refused" : "update-rollback-blocked";
   const text = kind === "refuse"
-    ? refusalText(decision.reason, { root, detail: decision.detail, failures: decision.failures, pending, previous })
+    ? refusalText(decision.reason, {
+      root, detail: decision.detail, failures: decision.failures, pending, previous, dbPath: state.db_path,
+    })
     : blockedText(decision.reason, { root, gitDir, failures: decision.failures, pending, previous });
+  // A refusal leaves the bad commit CHECKED OUT — nothing was changed, so the
+  // next update tick would pull the same sha again and re-enter the crash loop
+  // the moment the operator follows the recovery steps (F2). HELD (`persist`),
+  // because the sha really is still checked out: only the checkout moving off it
+  // gives the marker its expiry back.
+  //
+  // S5: a BLOCKED rollback whose reset did not move the tree (reset-failed,
+  // reset-mismatch) is in the same state — B is still checked out — so the
+  // ordinary marker written before the reset must be re-written HELD too. Left
+  // ordinary, a co-hosted peer's convergence would not refuse B
+  // (`updateQuarantineHeldAtHead` keys off `held`) and the marker would clear as
+  // soon as main moved.
+  const stillCheckedOut = kind === "refuse"
+    || decision.reason === "reset-failed" || decision.reason === "reset-mismatch";
+  // The marker is STAMPED with this instance's owner and the state keeps the
+  // same record (`refusal`), because one checkout can be shared by several
+  // instances and the marker file alone cannot say whose refusal it is. The
+  // gateway's stable mark demotes a HELD marker only when its own state names
+  // the same sha AND the marker's own `at` — and only for its own owner. See
+  // markStable/demoteHeldMarker in servers/gateway/boot-guard-state.js.
+  let refusal = null;
+  if (stillCheckedOut) {
+    const record = buildUpdateQuarantine({
+      sha: pending, previous, reason: "startup-crash", by: "boot-guard", now, persist: true,
+      owner: instanceOwnerId(crowHome),
+    });
+    const quarantined = record ? writeUpdateQuarantineFile(gitDir, record) : false;
+    if (!quarantined) log(`could not write the update quarantine for ${short(pending)}`);
+    // A failed write leaves any EARLIER refusal record in place: the marker on
+    // disk is still that one, so its record is still the true one.
+    else refusal = { sha: pending, marker_at: record.at };
+  }
   const next = {
     ...state,
     state: kind === "refuse" ? "refused" : "blocked",
+    ...(refusal ? { refusal } : {}),
     failures: decision.failures,
     result: {
       code,
@@ -1023,15 +1157,26 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
   }
 
   const attemptId = attemptIdFor(env);
+  // Whether the attempt that just ended was one we asked for. The "wait" log
+  // below must not call a planned restart a crash (F8).
+  let plannedExit = false;
+  // F8 nit: the count AFTER the block may not have moved — an OOM, a clean exit,
+  // a timeout or an unrecorded exit all count for nothing — and "crashed N of 3"
+  // is only true when it did. Any exit that did not raise the count is logged as
+  // not counted, whatever the reason.
+  const failuresBefore = num(state.failures, 0);
 
   // 2. Count the attempt that just ended, then open this one (S5/R3). The first
   // start after arming has no previous attempt, so it is never counted.
   if (state.state === "pending") {
     const prev = state.attempt;
     if (prev && prev.started_at) {
-      if (exitCountsAsCrash(prev.exit, { planned: Boolean(prev.planned_at) })) {
+      const planned = Boolean(prev.planned_at);
+      if (exitCountsAsCrash(prev.exit, { planned })) {
         state.failures = num(state.failures, 0) + 1;
         if (prev.exit) state.last_crash = { ...prev.exit };
+      } else if (prev.exit && planned) {
+        plannedExit = true;
       } else if (prev.exit && String(prev.exit.service_result || "") === "oom-kill") {
         // OOM is never evidence about the commit (operator ruling 4): one alert.
         if (spoolOnce(state, crowHome, "update-oom-during-trial", {
@@ -1127,8 +1272,15 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
     saveState(stateDir, state);
     if (decision.action === "defer") {
       log(`${short(pending)} is still failing, but this start deferred (${decision.reason})`);
-    } else {
+    } else if (state.failures > failuresBefore) {
       log(`${short(pending)} crashed ${state.failures} of ${FAILURE_THRESHOLD} times`);
+    } else if (plannedExit) {
+      // A restart Crow asked for says nothing about the commit being tried (F8).
+      log(`${short(pending)}: planned restart, not counted (${state.failures} of ${FAILURE_THRESHOLD})`);
+    } else {
+      // OOM, a clean exit, a timeout, or no recorded exit: not evidence about
+      // the commit, so it must not read as a crash (F8 nit).
+      log(`${short(pending)}: exit not counted (${state.failures} of ${FAILURE_THRESHOLD})`);
     }
     return decision;
   }
@@ -1182,6 +1334,10 @@ function preStartOnce({ root, crowHome, stateDir, state, env, now }) {
 
 /** Open a trial for `head` on top of the last commit this host proved (B2/R2). */
 function armTrial({ state, stateDir, head, attemptId, now }) {
+  // `refusal` survives the spread below on purpose: a non-permanent refusal is
+  // re-armed on the next start, and the record of the HELD marker this instance
+  // wrote has to outlive that re-arm or the gateway's stable mark can never
+  // demote it (the S1 freeze).
   const armed = {
     ...state,
     state: "pending",

@@ -30,6 +30,9 @@ import { fileURLToPath } from "node:url";
 import {
   BOOT_GUARD_DIR, FULL_SHA_RE, LAUNCHER_FILE, LAUNCHER_VERSION, freshState, loadState, saveState,
 } from "../../scripts/boot-guard/crow-boot-guard.mjs";
+import {
+  QUARANTINE_OWNER_RE, readUpdateQuarantine, ownerForHome, writeUpdateQuarantine,
+} from "../shared/update-quarantine.js";
 
 /** Ten minutes up = proven. Matches the drop-in's TimeoutStartSec headroom. */
 export const STABLE_WINDOW_MS = 10 * 60 * 1000;
@@ -52,6 +55,19 @@ export function bootGuardHome(env = process.env) {
 
 export function stateDirFor(env = process.env) {
   return join(bootGuardHome(env), BOOT_GUARD_DIR);
+}
+
+/**
+ * This instance's owner id — the same value the launcher stamps on every HELD
+ * marker it writes: sha256(realpath(CROW_HOME)).slice(0, 16).
+ *
+ * It is derived from the state dir because `stateDirFor()` is
+ * `<CROW_HOME>/boot-guard`, so the parent of the state dir IS this instance's
+ * home (and a test that retargets `stateDir` at a scratch CROW_HOME gets the same
+ * answer without a second seam to keep in step).
+ */
+export function instanceOwnerIdFor(stateDir = stateDirFor()) {
+  return ownerForHome(dirname(String(stateDir || "")) || ".");
 }
 
 /* ---------------------------------------------------------------- planned */
@@ -139,11 +155,175 @@ export function installLauncherCopy({ appRoot = APP_ROOT, bootSha, stateDir = st
 /* --------------------------------------------------------------- stable */
 
 /**
+ * `<appRoot>`'s absolute git dir, found with the SAME hooks-off flags as every
+ * other git call on the live checkout (a live install points core.hooksPath into
+ * the tree). Null when this is not a readable checkout.
+ */
+function gitDirForAppRoot(appRoot, execFile) {
+  try {
+    const out = execFile("git", [...GIT_HOOKS_OFF, "-C", appRoot, "rev-parse", "--absolute-git-dir"], {
+      encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"],
+    });
+    const dir = String(out || "").trim();
+    return dir || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Demote the boot guard's own HELD refusal marker for a commit that has just
+ * proven it runs (S1).
+ *
+ * A refusal writes `held: true` because the refused sha is still checked out, and
+ * a held marker naming local HEAD is never deleted, never expires and refuses
+ * every convergence — which is right for a sha that keeps crashing and wrong for
+ * one that boots. The refusal text itself says "the cause may not be B", and a
+ * box where B later runs stably would otherwise never pull another update: every
+ * tick would answer "still checked out" even after a fix landed on main.
+ *
+ * A stable mark is the proof that it runs, so the marker is rewritten WITHOUT
+ * `held` through the shared writer (atomic temp+rename, one format, same path
+ * rules as the launcher): the ordinary expiry / "main moved" rules apply again,
+ * and a newer commit on main is pulled normally. Only the guard's own marker
+ * (`by: "boot-guard"`) naming exactly the stable HEAD is touched — a marker for
+ * another sha, or one a blocked rollback in the gateway wrote, says nothing about
+ * this boot.
+ *
+ * The marker is shared by every instance on one checkout, but a refusal belongs
+ * to the instance that refused: `markStable` therefore calls this only for its
+ * OWN refusal record, and passes that record's `owner` and `at` (see there). A
+ * peer that boots the same sha fine says nothing about the instance that refused
+ * it — and a marker written by a release before ownership existed carries no
+ * `owner`, so it can never be shown to be ours and is left alone.
+ *
+ * The decision is taken on a read, and the write is a rename of a record built
+ * from it, so a peer that rewrites the marker in between would be overwritten
+ * with stale fields (`at` would go back in time and un-spend the TTL). The
+ * marker is therefore re-read immediately before the write and left alone if
+ * anything this function decided on has changed.
+ *
+ * Both `owner` and `expectedAt` are REQUIRED: the marker file is shared by every
+ * instance on one checkout, so a caller that omits either one has nothing that
+ * proves the marker is its own. Treating an absent argument as "matches" is
+ * exactly how a peer's refusal got demoted, so an unusable one is refused
+ * (`no-owner` / `no-at`) rather than skipped.
+ *
+ * @param {string} owner this instance's owner id (16 hex): the marker must
+ *   carry it. Required.
+ * @param {string} expectedAt the `at` recorded with the refusal: the marker
+ *   must still be the very record this instance wrote. Required (an ISO time).
+ * @param {function} [readMarker] test seam: the shared reader, twice.
+ */
+export function demoteHeldMarker({
+  appRoot = APP_ROOT, bootSha, gitDir = null, execFile = execFileSync, readMarker = readUpdateQuarantine,
+  owner, expectedAt,
+} = {}) {
+  try {
+    if (!FULL_SHA_RE.test(String(bootSha || ""))) return { demoted: false, reason: "no-sha" };
+    // Never skipped: without both of these the marker on disk cannot be shown to
+    // be this instance's own record, and demoting a peer's refusal would let the
+    // peer restart into the commit it refused.
+    if (typeof owner !== "string" || !QUARANTINE_OWNER_RE.test(owner)) {
+      return { demoted: false, reason: "no-owner" };
+    }
+    if (typeof expectedAt !== "string" || !Number.isFinite(Date.parse(expectedAt))) {
+      return { demoted: false, reason: "no-at" };
+    }
+    const dir = gitDir || gitDirForAppRoot(appRoot, execFile);
+    if (!dir) return { demoted: false, reason: "no-git-dir" };
+    const marker = readMarker({ gitDir: dir });
+    if (!marker) return { demoted: false, reason: "no-marker" };
+    if (marker.held !== true) return { demoted: false, reason: "not-held" };
+    if (marker.sha !== bootSha) return { demoted: false, reason: "other-sha" };
+    if (String(marker.by || "") !== "boot-guard") return { demoted: false, reason: "other-writer" };
+    // Whose refusal is it? Only a marker THIS instance stamped (and whose stamp
+    // matches the record it kept) is the record its own stable mark proves
+    // wrong; anything else belongs to a peer or to an earlier release.
+    if (marker.owner !== owner) return { demoted: false, reason: "other-owner" };
+    if (marker.at !== expectedAt) return { demoted: false, reason: "changed-at" };
+    // Close the read-then-write race: exactly the fields below are the ones the
+    // write carries over, so a marker that changed in any of them (a peer's
+    // fresher refusal, a different sha, another writer, another owner, a
+    // demotion already done) is left as it is.
+    const latest = readMarker({ gitDir: dir });
+    if (!sameMarkerForDemotion(marker, latest)) return { demoted: false, reason: "changed" };
+    const written = writeUpdateQuarantine({
+      gitDir: dir,
+      sha: marker.sha,
+      previous: marker.previous,
+      reason: marker.reason,
+      by: String(marker.by),
+      // Counted from the original write: an ordinary marker of a transient reason
+      // gets exactly the TTL the rollback's own marker would have had.
+      now: Number.isFinite(Date.parse(marker.at)) ? Date.parse(marker.at) : Date.now(),
+      // `owner` is deliberately NOT carried over: it named the refusal, and this
+      // record no longer is one (the stable mark withdrew it).
+    });
+    return written ? { demoted: true, marker: written } : { demoted: false, reason: "write-failed" };
+  } catch (err) {
+    return { demoted: false, reason: "error", detail: String(err?.message || err) };
+  }
+}
+
+/** The fields `demoteHeldMarker` decides on and copies into its rewrite. */
+function sameMarkerForDemotion(a, b) {
+  return Boolean(a) && Boolean(b)
+    && a.sha === b.sha
+    && a.at === b.at
+    && a.by === b.by
+    && a.owner === b.owner
+    && (a.held === true) === (b.held === true);
+}
+
+/** Reasons that leave `state.refusal` in place for a later stable mark to retry:
+ *  the marker could not be written, the state could not be saved first, or the
+ *  git dir could not be looked up (`no-git-dir` — a transient failure of `git
+ *  rev-parse`, e.g. a busy checkout, says nothing about the marker).
+ *  Everything else — a demotion, or a marker that is gone, names another sha,
+ *  another writer, another owner or another stamp — is terminal: the record no
+ *  longer describes a marker this instance wrote. `no-owner` / `no-at` are
+ *  terminal too, and cannot come from `markStable`: it always derives the owner
+ *  and passes the refusal's own `marker_at`, and the state validator refuses a
+ *  record whose sha or stamp is not well formed. */
+const DEMOTE_RETRY_REASONS = new Set(["write-failed", "not-saved", "no-git-dir", "error"]);
+
+function demoteIsTerminal(result) {
+  if (result?.demoted === true) return true;
+  return !DEMOTE_RETRY_REASONS.has(String(result?.reason || ""));
+}
+
+/**
  * The commit has been up for the stable window.
  *
  * No-op while a trial is pending for a DIFFERENT sha: the launcher owns that
  * record and this process never booted it. When the pending sha IS this boot's,
- * this call is what flips it to ok (S4).
+ * this call is what flips it to ok (S4) — and, because ten minutes up is the
+ * proof that the commit runs, it also demotes the guard's HELD refusal marker for
+ * that same sha (S1; see demoteHeldMarker).
+ *
+ * The demotion happens ONLY for the refusal THIS instance recorded, and only for
+ * the very marker that record names. `state.refusal` is written by the launcher
+ * at the moment it writes a HELD marker (`{ sha, marker_at }`), and it survives
+ * every later transition — a re-armed trial, a discard, a rollback — so:
+ *
+ *   - `state.refusal.sha` must be the sha this boot just proved, which is what a
+ *     re-armed refusal (`state: "pending"` again) still carries. Round 2 keyed
+ *     the gate on `state: refused|blocked`, so a non-permanent refusal that the
+ *     next start re-armed could never be demoted and updates froze at HEAD;
+ *   - the marker must carry this instance's `owner`, so a co-hosted instance's
+ *     refusal is never demoted on a peer's say-so (the marker file is shared; the
+ *     refusal is not);
+ *   - the marker's `at` must equal the recorded `marker_at`, so a peer that
+ *     rewrote the marker for the same sha is not mistaken for ours;
+ *   - and a `blocked` state that wrote no marker at all (`index.lock`, a
+ *     read-only git dir) has no record, so it can demote nothing.
+ *
+ * A terminal answer (demoted, or the marker is gone / another sha / another
+ * writer / another owner / another stamp) clears the record; a failure that
+ * could pass — the marker could not be written, the state could not be saved
+ * first, or the git dir could not be looked up — keeps it, so the next stable
+ * mark retries.
  */
 export function markStable(bootSha, {
   appRoot = APP_ROOT, dbPath = null, stateDir = stateDirFor(), now = Date.now(),
@@ -189,7 +369,30 @@ export function markStable(bootSha, {
       launcher_version: copyOk ? LAUNCHER_VERSION : current.launcher_version,
     };
     const saved = saveState(stateDir, next);
-    return { ok: saved, launcher };
+    // Only a committed stable mark is evidence: a failed save leaves the launcher
+    // free to keep refusing the sha. And only the refusal record for THIS sha —
+    // read from `current`, before the stable mark replaced it — may demote the
+    // shared marker (see the doc comment above). `refusal` was carried into
+    // `next`; it is cleared below once the marker is settled, so a crash between
+    // the two leaves it recorded and the next stable mark retries.
+    const refusal = current.refusal && current.refusal.sha === bootSha ? current.refusal : null;
+    let marker;
+    if (!saved) marker = { demoted: false, reason: "not-saved" };
+    else if (!refusal) marker = { demoted: false, reason: "no-refusal" };
+    else {
+      marker = demoteHeldMarker({
+        appRoot,
+        bootSha,
+        execFile,
+        owner: instanceOwnerIdFor(stateDir),
+        expectedAt: refusal.marker_at,
+      });
+    }
+    if (refusal && demoteIsTerminal(marker)) {
+      next.refusal = null;
+      saveState(stateDir, next);
+    }
+    return { ok: saved, launcher, marker };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err) };
   }
@@ -248,9 +451,15 @@ export async function recordGuardResult({ record = null, stateDir = stateDirFor(
     if (!state.result || state.result.recorded) return null;
     const text = rolledBackResultText(state);
     if (!text) return null;
+    // The launcher spooled this same rollback into the alert spool, and the drain
+    // delivers it as a notification (source "migrations"). Ringing the
+    // auto-update bell as well would put TWO rows on one rollback (F4) — and the
+    // spool row is the one whose wording names the real cause. Only a spool that
+    // was NOT written leaves the bell as the sole channel.
+    const spooled = state.alerted?.[state.result.code] === state.result.from;
     const write = record || (async (value) => {
       const au = await import("./auto-update.js");
-      return au.recordUpdateResult(value);
+      return au.recordUpdateResult(value, { notify: !spooled });
     });
     const written = await write(text);
     // Only mark it recorded when the write really happened: with no db handle

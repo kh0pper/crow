@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSchema, validateDbPath } from "../scripts/boot-guard/crow-boot-guard.mjs";
+import { backupDirFor, evaluateSchema, refusalText, validateDbPath } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const _dirs = [];
 after(() => { for (const d of _dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} } });
@@ -200,6 +200,110 @@ test("a db_path that is not named crow.db is rejected", () => {
 test("a missing db_path refuses instead of guessing", () => {
   const f = fixture();
   assert.equal(check(f, null).reason, "db-unknown");
+});
+
+/* ------------------------------------------------------------ refusal text */
+
+/** Every refusal reason the launcher can print (the switch's cases + default). */
+const REFUSAL_REASONS = [
+  "db-ahead", "init-db-changed", "migration-not-rollback-safe", "migration-unknown",
+  "generation-unreadable", "init-db-unknown", "db-unreadable", "db-path-invalid", "db-unknown",
+  "unproven-previous", "not-on-main", "previous-not-ancestor", "something-new",
+];
+/** Backups are only ever named for the change that took one (S2) — the
+ *  directory the migration guard writes them to is re-derived here. */
+test("the backup directory is the migration guard's own (<db dir>/backups/migrations)", () => {
+  assert.equal(backupDirFor("/home/u/.crow/data/crow.db"), join("/home/u/.crow/data", "backups", "migrations"));
+  // `resolve()` first, exactly as guardAnchor does: a relative or dotted DB path
+  // must not produce a different directory than the one the guard writes to.
+  assert.equal(backupDirFor("/home/u/./.crow/data/crow.db"), join("/home/u", ".crow", "data", "backups", "migrations"));
+  assert.equal(backupDirFor("relative/crow.db"), join(process.cwd(), "relative", "backups", "migrations"));
+  assert.equal(backupDirFor(null), null);
+});
+
+const textFor = (reason, dbPath) => refusalText(reason, {
+  root: "/checkout",
+  detail: { id: "0009-new", userVersion: 10, previousGeneration: 9 },
+  failures: 3,
+  pending: "b".repeat(40),
+  previous: "a".repeat(40),
+  dbPath,
+});
+
+/** A crow.db whose guard backup directory holds exactly `files`. */
+function dbWithBackups({ withBackup = false, files = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "bg-texts-"));
+  _dirs.push(dir);
+  const backupDir = join(dir, "backups", "migrations");
+  mkdirSync(backupDir, { recursive: true });
+  const names = files ?? (withBackup ? ["crow-pre-g9-to-g10-2026-01-02.db"] : []);
+  for (const name of names) writeFileSync(join(backupDir, name), "not really a db\n");
+  return join(dir, "crow.db");
+}
+
+test("an older backup from another migration is never named or recommended (S2)", () => {
+  // init-db-changed, the registry reasons, an unreadable DB: NONE of them takes
+  // a backup, so the only file in the directory belongs to an EARLIER migration.
+  // Restoring it would silently lose every write since it was taken — the old
+  // text recommended exactly that ("restore the newest pre-migration backup").
+  const older = "crow-pre-g7-to-g8-2026-01-01-00-00-00-000Z.db";
+  const dbPath = dbWithBackups({ files: [older] });
+  const dir = backupDirFor(dbPath);
+  for (const reason of REFUSAL_REASONS) {
+    const text = textFor(reason, dbPath);
+    assert.ok(!text.includes(older), `${reason} named an unrelated older backup: ${text}`);
+    assert.match(text, /No backup was taken for this change/, `${reason} must say none was taken: ${text}`);
+    assert.ok(!/restore the/i.test(text), `${reason} must give no restore step: ${text}`);
+    assert.ok(text.includes(dir), `${reason} must still name the directory ${dir}`);
+  }
+});
+
+test("a db-ahead refusal names the backup taken for THAT crossing (S2)", () => {
+  const mine = "crow-pre-g9-to-g10-2026-02-03-04-05-06-000Z.db";
+  const older = "crow-pre-g8-to-g9-2026-01-01-00-00-00-000Z.db";
+  const dbPath = dbWithBackups({ files: [older, mine] });
+  const full = join(backupDirFor(dbPath), mine);
+  const text = textFor("db-ahead", dbPath);
+  assert.ok(text.includes(full), `db-ahead must name the g9→g10 backup: ${text}`);
+  assert.ok(!text.includes(older), `db-ahead must not name another crossing's backup: ${text}`);
+  assert.ok(text.includes(`restore ${full}, `), `the restore step must name that file: ${text}`);
+});
+
+test("a db-ahead refusal whose own backup is missing names no file and no restore (S2)", () => {
+  // The file name carries the pair of generations, so a directory full of older
+  // backups is NOT evidence that this crossing took one.
+  const dbPath = dbWithBackups({ files: ["crow-pre-g8-to-g9-2026-01-01-00-00-00-000Z.db"] });
+  const text = textFor("db-ahead", dbPath);
+  assert.match(text, /No backup was taken for this change/, text);
+  assert.ok(!/restore the/i.test(text), `no matching file, so no restore step: ${text}`);
+  assert.ok(text.includes(backupDirFor(dbPath)), "the directory is still named");
+});
+
+test("a registry migration refusal never sends the operator to a backup it never took (F3)", () => {
+  // The live report: `migration-not-rollback-safe` told the operator to restore
+  // "the pre-migration backup the migration guard took", and no such backup
+  // existed for that change.
+  for (const withBackup of [false, true]) {
+    const dbPath = dbWithBackups({ withBackup });
+    const text = textFor("migration-not-rollback-safe", dbPath);
+    assert.ok(!/restore the/i.test(text), `the registry refusal must not promise a restore: ${text}`);
+    assert.ok(!/To recover: stop the gateway, restore/.test(text),
+      "a registry migration leaves nothing of its own to restore");
+    assert.match(text, /reset --keep/, "the git recovery step is still there");
+  }
+});
+
+test("a refusal names the real backup directory when a backup exists (F3)", () => {
+  const dbPath = dbWithBackups({ withBackup: true });
+  const dir = backupDirFor(dbPath);
+  for (const reason of REFUSAL_REASONS) {
+    const text = textFor(reason, dbPath);
+    assert.ok(text.includes(dir), `${reason} must name ${dir}`);
+  }
+  // A generation crossing DOES take a backup, so its exact file is named and can
+  // be restored (S2: name the file, never "the newest" in the directory).
+  const backup = join(dir, "crow-pre-g9-to-g10-2026-01-02.db");
+  assert.ok(textFor("db-ahead", dbPath).includes(`restore ${backup}, `));
 });
 
 test("B's migration file is read as text and NEVER imported", () => {

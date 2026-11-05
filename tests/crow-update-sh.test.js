@@ -16,15 +16,28 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readUpdateQuarantine } from "../servers/shared/update-quarantine.js";
 
 const REAL_APP_ROOT = join(import.meta.dirname, "..");
 const src = readFileSync(join(REAL_APP_ROOT, "scripts", "crow-update.sh"), "utf8");
 // Comments mention the forbidden commands on purpose; only code counts.
 const code = src.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
 
-test("the rollback moves main with reset --keep, never checkout", () => {
-  assert.match(code, /git -c core\.hooksPath=\/dev\/null reset --keep "\$PREV_REF"/,
+test("every git command disables hooks and fsmonitor (F1)", () => {
+  assert.match(code, /GIT_SAFE=\(-c core\.hooksPath=\/dev\/null -c core\.fsmonitor=false\)/,
+    "one array prefixes both flags, so no call site can forget them");
+  assert.match(code, /git "\$\{GIT_SAFE\[@\]\}" pull --ff-only/,
+    "the pull must not run the incoming commit's own hooks");
+  assert.match(code, /git "\$\{GIT_SAFE\[@\]\}" reset --keep "\$PREV_REF"/,
     "the rollback must reset --keep the saved ref with hooks disabled");
+  // Every EXECUTED git command (log/echo text does not count) carries the flags.
+  const gitLines = code.split("\n").filter((l) => /\bgit\s+/.test(l) && !/^\s*(log|echo) /.test(l));
+  assert.ok(gitLines.length >= 4, `expected the script's git commands, found ${gitLines.length}`);
+  for (const line of gitLines) assert.match(line, /GIT_SAFE/, `a git command without the flags: ${line}`);
+});
+
+test("the rollback moves main with reset --keep, never checkout", () => {
+  assert.match(code, /reset --keep "\$PREV_REF"/, "the rollback keeps HEAD attached to main");
   assert.ok(!/\bgit\s+checkout\b/.test(code), "a checkout would detach HEAD and stop every future update");
   assert.ok(!/\bcheckout\s+"?\$\{?PREV_REF/.test(code), "no rollback path may checkout the previous ref");
 });
@@ -64,6 +77,9 @@ function harness({ nrestarts = "7", crash = false, resetFails = false, npmFailsA
   mkdirSync(join(root, "app"), { recursive: true });
   mkdirSync(state, { recursive: true });
   mkdirSync(bin, { recursive: true });
+  // The quarantine marker lands in the git dir the git shim reports.
+  const gitDir = join(state, "gitdir");
+  mkdirSync(gitDir, { recursive: true });
   const A = "a".repeat(40);
   const B = "b".repeat(40);
   writeFileSync(join(state, "head"), `${A}\n`);
@@ -84,6 +100,7 @@ case "$1" in
   rev-parse)
     case "$2" in
       --short) cut -c1-8 < "$SHIM_STATE/head" ;;
+      --absolute-git-dir) printf '%s\\n' "$SHIM_STATE/gitdir" ;;
       HEAD) cat "$SHIM_STATE/head" ;;
       *) exit 0 ;;
     esac ;;
@@ -103,7 +120,12 @@ if [ -n "$SHIM_NPM_FAIL_AFTER" ] && [ "$(wc -l < "$SHIM_STATE/npm.log")" -ge "$S
   exit 1
 fi
 exit 0`);
-  shim("node", "exit 0");
+  // The quarantine helper is the one node child that must really run: it writes
+  // the marker this file reads back through the gateway's own reader.
+  shim("node", `case "$1" in
+  *write-update-quarantine.mjs) exec ${JSON.stringify(process.execPath)} "$@" ;;
+  *) exit 0 ;;
+esac`);
   shim("systemctl", `case "$1" in
   show) cat "$SHIM_STATE/nrestarts" ;;
   is-active) exit 0 ;;
@@ -137,7 +159,7 @@ exit 0`);
     try { return readFileSync(join(state, "restarts.log"), "utf8").trim().split("\n").filter(Boolean).length; } catch { return 0; }
   })();
   const gitLog = (() => { try { return readFileSync(join(state, "git.log"), "utf8"); } catch { return ""; } })();
-  return { root, status: r.status, log, restarts, gitLog, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, status: r.status, log, restarts, gitLog, prevRef: A, newRef: B, gitDir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("behaviour: a healthy update on a unit that already restarted is NOT rolled back (S1)", () => {
@@ -158,6 +180,26 @@ test("behaviour: a refused rollback is logged, still restarts the service, exits
     assert.equal(h.restarts, 2,
       `the rollback must not stop the script before the restart (saw ${h.restarts}), log:\n${h.log}`);
     assert.match(h.log, /the rollback did not complete cleanly/);
+    assert.equal(readUpdateQuarantine({ gitDir: h.gitDir }), null,
+      "a rollback that never moved the tree must not quarantine the sha (the boot guard owns that case)");
+  } finally { h.cleanup(); }
+});
+
+test("behaviour: the rollback quarantines the commit it moved off (F7)", () => {
+  // Without this marker the next automatic tick re-pulls the sha the script just
+  // rolled back and starts the same crash loop again.
+  const h = harness({ nrestarts: "7", crash: true, http: "000", healthTimeout: "0" });
+  try {
+    assert.equal(h.status, 1, `log:\n${h.log}`);
+    assert.match(h.log, /Rolling back to/);
+    const marker = readUpdateQuarantine({ gitDir: h.gitDir });
+    assert.ok(marker, `the rolled-back commit must be quarantined, log:\n${h.log}`);
+    assert.equal(marker.sha, h.newRef, "the marker names the commit the rollback moved off");
+    assert.equal(marker.previous, h.prevRef);
+    assert.equal(marker.reason, "startup-crash");
+    assert.equal(marker.by, "crow-update");
+    assert.equal(marker.held, undefined, "the checkout is back on the previous commit, so the marker is ordinary");
+    assert.equal(marker.expires_at, undefined, "startup-crash waits for main to move, not for a clock");
   } finally { h.cleanup(); }
 });
 
@@ -168,5 +210,12 @@ test("behaviour: a failed npm install mid-rollback is logged and the restart sti
     assert.match(h.log, /npm install failed during the rollback/);
     assert.equal(h.restarts, 2,
       `a failed npm must not exit mid-rollback (saw ${h.restarts} restarts), log:\n${h.log}`);
+    // S4: the RESET moved the tree back, so the marker is still needed even
+    // though the rollback as a whole failed — the next tick would otherwise
+    // re-pull the sha this run just moved off.
+    const marker = readUpdateQuarantine({ gitDir: h.gitDir });
+    assert.ok(marker, `a reset that succeeded must quarantine its sha even when npm then fails, log:\n${h.log}`);
+    assert.equal(marker.sha, h.newRef);
+    assert.equal(marker.by, "crow-update");
   } finally { h.cleanup(); }
 });

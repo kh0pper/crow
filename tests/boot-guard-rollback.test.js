@@ -23,7 +23,11 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
 import { markPlanned, markStable } from "../servers/gateway/boot-guard-state.js";
-import { readUpdateQuarantine } from "../servers/shared/update-quarantine.js";
+import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
+import {
+  ownerForHome, readUpdateQuarantine, updateQuarantineHeldAtHead, writeUpdateQuarantine,
+} from "../servers/shared/update-quarantine.js";
+import { freshState, saveState } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const REPO = join(import.meta.dirname, "..");
 const repoFile = (p) => readFileSync(join(REPO, p), "utf8");
@@ -42,7 +46,7 @@ const INDEX_B = `import "./boom.js";
 const BOOM_B = `throw new Error("this gateway graph does not load");\n`;
 const INIT_DB = `// fixture init-db\nprocess.exit(0);\n`;
 
-function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9 } = {}) {
+function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9, noSchemaVersion = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "bg-int-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
@@ -66,7 +70,12 @@ function makeFixture({ changeInitDb = false, changePkg = false, userVersion = 9 
     mkdirSync(join(work, d), { recursive: true });
   }
   writeFileSync(join(work, "servers", "gateway", "index.js"), INDEX_A);
-  writeFileSync(join(work, "servers", "shared", "schema-version.js"), repoFile("servers/shared/schema-version.js"));
+  // Without it the guard cannot read the previous commit's schema generation,
+  // which is a NON-permanent refusal (`generation-unreadable`): the launcher
+  // re-arms the same sha on the next start.
+  if (!noSchemaVersion) {
+    writeFileSync(join(work, "servers", "shared", "schema-version.js"), repoFile("servers/shared/schema-version.js"));
+  }
   writeFileSync(join(work, "scripts", "init-db.js"), INIT_DB);
   writeFileSync(join(work, "scripts", "boot-guard", "crow-boot-guard.mjs"), repoFile("scripts/boot-guard/crow-boot-guard.mjs"));
   writeFileSync(join(work, "package.json"), '{\n  "name": "fixture",\n  "version": "1.0.0"\n}\n');
@@ -178,6 +187,23 @@ function installAndStabilize(f) {
 const fastForwardTo = (f, sha) => {
   f.git("reset", "--hard", sha);
 };
+
+/** Land a commit on origin only: the checkout stays exactly where it is. */
+function pushToOrigin(f, name, content) {
+  const pusher = mkdtempSync(join(f.root, "pusher-"));
+  execFileSync("git", ["clone", f.origin, pusher], { stdio: "pipe" });
+  const g = (cwd, ...args) => execFileSync(
+    "git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
+    { cwd, stdio: "pipe" },
+  ).toString().trim();
+  g(pusher, "config", "user.email", "t@t");
+  g(pusher, "config", "user.name", "t");
+  writeFileSync(join(pusher, name), content);
+  g(pusher, "add", name);
+  g(pusher, "commit", "-m", `up ${name}`);
+  g(pusher, "push", "origin", "main");
+  return g(pusher, "rev-parse", "HEAD");
+}
 
 /**
  * One "start": the launcher (ExecStartPre), the fake ExecStopPost, then the
@@ -415,6 +441,283 @@ test("a changed scripts/init-db.js refuses", () => {
   assert.equal(f.git("rev-parse", "HEAD"), f.b);
 });
 
+/* ---------------------------------------------------- quarantine on refusal */
+
+/** Refuse B for the db-ahead reason: the fast path to a refusal-class refusal. */
+function refusedFixture() {
+  const f = makeFixture();
+  const db = new DatabaseSync(f.dbPath);
+  db.exec("PRAGMA user_version = 10"); // one past the running commit's generation
+  db.close();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  const r = cycle(f, { rounds: 6 });
+  assert.equal(r.state.state, "refused");
+  assert.equal(r.state.result.reason, "db-ahead");
+  return f;
+}
+
+test("a refusal writes a HELD update quarantine for the commit it refused (F2)", () => {
+  const f = refusedFixture();
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.ok(marker, "without a marker the next tick re-pulls the sha the guard just refused");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.reason, "startup-crash");
+  assert.equal(marker.by, "boot-guard");
+  assert.equal(marker.held, true, "the refused commit is still checked out: the marker is HELD");
+  assert.equal(marker.expires_at, undefined, "a held marker must never time out into 'Up to date'");
+  assert.equal(f.git("rev-parse", "HEAD"), f.b, "a refusal still changes nothing in the tree");
+});
+
+test("after the operator's recovery, the refused sha is not pulled until main moves (F2)", async () => {
+  const f = refusedFixture();
+  // The operator follows the refusal's steps: nothing was migrated, so there is
+  // no backup to restore; just put main back and start the gateway.
+  f.git("reset", "--keep", f.a);
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  try {
+    const blocked = await checkForUpdates();
+    assert.equal(blocked.skipped, "update-quarantined", JSON.stringify(blocked));
+    assert.match(blocked.message, /waiting for a newer commit on main/);
+    assert.equal(f.git("rev-parse", "HEAD"), f.a, "the refused sha must not be pulled again");
+
+    // Main moves: the marker is spent and the newer commit is taken normally.
+    const fix = pushToOrigin(f, "c.txt", "three\n");
+    assert.notEqual(fix, f.b);
+    const pulled = await checkForUpdates();
+    assert.equal(pulled.updated, true, JSON.stringify(pulled));
+    assert.equal(f.git("rev-parse", "HEAD"), fix);
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "the spent marker is removed");
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+});
+
+/* ---------------------------------------------- a refusal that stops being true */
+
+test("a stable mark demotes the guard's HELD marker, so the next commit on main is pulled (S1)", async () => {
+  // The refusal itself says "the cause may not be B": here the DB was left ahead
+  // by something else, B boots fine, and ten minutes later the gateway marks it
+  // stable. The commit evidently runs, so the HELD marker must stop being held —
+  // otherwise every later tick answers "B is still checked out" and a fix landed
+  // on main is never pulled.
+  const f = refusedFixture();
+  const held = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(held.held, true, "fixture precondition: the refusal wrote a HELD marker");
+  assert.equal(held.sha, f.b);
+
+  const stable = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: f.stateDir, install: false });
+  assert.equal(stable.ok, true, stable.reason);
+  assert.equal(stable.marker.demoted, true, JSON.stringify(stable.marker));
+  const demoted = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(demoted.held, undefined, "a commit that runs stably must not stay refused as held");
+  assert.equal(demoted.sha, f.b, "the record still names the commit the guard refused");
+  assert.equal(demoted.by, "boot-guard", "rewritten through the same writer, same shape");
+
+  const fix = pushToOrigin(f, "c.txt", "three\n");
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  try {
+    const pulled = await checkForUpdates();
+    assert.equal(pulled.updated, true, `the new commit on main must be pulled: ${JSON.stringify(pulled)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), fix);
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+});
+
+test("a peer's stable mark leaves this instance's refusal HELD (fix round 2)", async () => {
+  // The marker lives in the shared git dir, but a refusal belongs to the
+  // instance that refused. Instance Y booting B fine says nothing about X's
+  // refusal: demoting on Y's say-so would let Z — still on A — lose its
+  // convergence refusal and restart into B.
+  const f = refusedFixture();
+  const held = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(held.held, true, "fixture precondition: the refusal wrote a HELD marker at B");
+
+  // Y: a second CROW_HOME on the same checkout, no refusal of its own, ten
+  // minutes up on B.
+  const yHome = join(f.root, "crow-home-y");
+  mkdirSync(yHome, { recursive: true });
+  const y = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: join(yHome, "boot-guard"), install: false });
+  assert.equal(y.ok, true, y.reason);
+  assert.equal(y.marker.demoted, false, JSON.stringify(y.marker));
+  assert.equal(y.marker.reason, "no-refusal", "only the instance that refused may demote its own marker");
+
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(marker.held, true, "a peer's stable mark must leave the refusal HELD");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.at, held.at, "the refusal's own record must be untouched");
+
+  // And Z — booted on A — still refuses to converge into B.
+  assert.ok(updateQuarantineHeldAtHead({ gitDir: f.gitDir, localHeadSha: f.b }),
+    "the convergence gate must still see the held marker");
+  const { convergeInstance, setBootSha } = await import("../servers/gateway/convergence.js");
+  const dataDir = join(f.root, "peer-z-data");
+  mkdirSync(dataDir, { recursive: true });
+  setBootSha(f.a);
+  try {
+    const r = await convergeInstance({
+      appRoot: f.work,
+      instance: { dataDir, dbPath: join(dataDir, "crow.db"), tasksDbPath: join(dataDir, "tasks.db") },
+    });
+    assert.equal(r.skipped, "update-quarantined",
+      `a peer converged into a commit another instance refused: ${JSON.stringify(r)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), f.b, "a peer never moves the tree");
+  } finally {
+    setBootSha(null);
+  }
+});
+
+/* ------------------------------------- bound to the refusal that wrote it (round 3) */
+
+test("a re-armed, non-permanent refusal no longer freezes updates (fix round 3)", async () => {
+  // `generation-unreadable` is NOT a permanent refusal, so the next start re-arms
+  // the same commit and the state is `pending` again. Round 2's gate keyed on
+  // `state: refused|blocked`, so a box where B then ran stably never demoted the
+  // HELD marker: every later tick answered "still checked out", main could move
+  // as much as it liked, and updates froze until an operator deleted the file.
+  const f = makeFixture({ noSchemaVersion: true });
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  const refused = cycle(f, { rounds: 6 });
+  assert.equal(refused.state.state, "refused");
+  assert.equal(refused.state.result.reason, "generation-unreadable");
+
+  const held = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(held.held, true, "the refusal wrote a HELD marker at B");
+  assert.equal(held.owner, ownerForHome(f.crowHome), "and stamped it with the instance that wrote it");
+  assert.deepEqual(readState(f).refusal, { sha: f.b, marker_at: held.at },
+    "the instance also records which marker its refusal wrote");
+
+  // The next start re-arms the same sha.
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  const armed = readState(f);
+  assert.equal(armed.state, "pending");
+  assert.equal(armed.pending_sha, f.b);
+  assert.deepEqual(armed.refusal, { sha: f.b, marker_at: held.at },
+    "re-arming a trial must not lose the refusal record");
+
+  // Ten minutes up: B evidently runs, so the marker stops being held.
+  const stable = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: f.stateDir, install: false });
+  assert.equal(stable.ok, true, stable.reason);
+  assert.equal(stable.marker.demoted, true, JSON.stringify(stable.marker));
+  assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).held, undefined);
+  assert.equal(readState(f).refusal, null, "a demotion spends the record");
+
+  // And a later commit on main is pulled by the real updater.
+  const fix = pushToOrigin(f, "c.txt", "three\n");
+  _setAppRootForTest(f.work);
+  _setDbForTest({ execute: async () => ({ rows: [] }) });
+  try {
+    const pulled = await checkForUpdates();
+    assert.equal(pulled.updated, true, `the new commit on main must be pulled: ${JSON.stringify(pulled)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), fix);
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REPO);
+  }
+});
+
+test("a peer's stable mark cannot demote this instance's refusal, refused state or not (fix round 3)", async () => {
+  // The marker lives in the shared git dir, so the state alone cannot say whose
+  // refusal it is: instance Y can hold a `refused` state naming B and the same
+  // `marker_at`, and still not be the instance that wrote the marker. Only the
+  // marker's `owner` separates them.
+  const f = refusedFixture();
+  const held = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(held.held, true, "fixture precondition: X's refusal is HELD at B");
+  assert.equal(held.owner, ownerForHome(f.crowHome));
+
+  const yHome = join(f.root, "crow-home-y");
+  mkdirSync(yHome, { recursive: true });
+  const yStateDir = join(yHome, "boot-guard");
+  saveState(yStateDir, {
+    ...freshState(),
+    state: "refused",
+    last_ok_sha: f.a,
+    previous_sha: f.a,
+    pending_sha: f.b,
+    previous_proven: true,
+    failures: 3,
+    refusal: { sha: f.b, marker_at: held.at },
+    result: {
+      code: "update-rollback-refused", from: f.b, to: f.a, failures: 3, reason: "db-ahead",
+      at: "2026-01-02T03:04:05.000Z", recorded: true,
+    },
+  });
+
+  const y = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: yStateDir, install: false });
+  assert.equal(y.ok, true, y.reason);
+  assert.equal(y.marker.demoted, false, JSON.stringify(y.marker));
+  assert.equal(y.marker.reason, "other-owner", JSON.stringify(y.marker));
+
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(marker.held, true, "X's refusal must stay HELD");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.at, held.at, "and keep X's own stamp");
+
+  // Z — booted on A — still refuses to converge into B.
+  assert.ok(updateQuarantineHeldAtHead({ gitDir: f.gitDir, localHeadSha: f.b }));
+  const { convergeInstance, setBootSha } = await import("../servers/gateway/convergence.js");
+  const dataDir = join(f.root, "peer-z-data-r3");
+  mkdirSync(dataDir, { recursive: true });
+  setBootSha(f.a);
+  try {
+    const r = await convergeInstance({
+      appRoot: f.work,
+      instance: { dataDir, dbPath: join(dataDir, "crow.db"), tasksDbPath: join(dataDir, "tasks.db") },
+    });
+    assert.equal(r.skipped, "update-quarantined",
+      `a peer converged into a commit another instance refused: ${JSON.stringify(r)}`);
+  } finally {
+    setBootSha(null);
+  }
+});
+
+test("a blocked state that wrote NO marker cannot demote a peer's HELD marker (fix round 3)", () => {
+  // `index.lock` blocks the rollback BEFORE any marker exists, so this instance
+  // has nothing in the shared git dir. Round 2 let its `blocked` state demote
+  // whatever held marker happened to name B — a co-hosted instance's refusal.
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  primeToThreshold(f);
+
+  const indexPath = join(f.gitDir, "index.lock");
+  writeFileSync(indexPath, "");
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  rmSync(indexPath, { force: true });
+
+  const blocked = readState(f);
+  assert.equal(blocked.state, "blocked");
+  assert.equal(blocked.result.reason, "index.lock");
+  assert.equal(blocked.refusal, null, "this instance wrote no HELD marker, so it has no record");
+  assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "and the git dir holds no marker of its own");
+
+  // A co-hosted instance's refusal for the same sha appears afterwards.
+  const peerOwner = ownerForHome(join(f.root, "crow-home-peer"));
+  const peer = writeUpdateQuarantine({
+    gitDir: f.gitDir, sha: f.b, previous: f.a, reason: "startup-crash", by: "boot-guard",
+    persist: true, owner: peerOwner,
+  });
+  assert.ok(peer, "fixture precondition: the peer's marker must be written");
+
+  const out = markStable(f.b, { appRoot: f.work, dbPath: f.dbPath, stateDir: f.stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "no-refusal", JSON.stringify(out.marker));
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.equal(marker.held, true, "the peer's refusal must be untouched");
+  assert.equal(marker.owner, peerOwner);
+  assert.equal(marker.at, peer.at);
+});
+
 /* ------------------------------------------------------------ counting */
 
 test("an OOM kill is never counted and spools one alert instead", () => {
@@ -444,6 +747,78 @@ test("a planned restart (crow:shutdown / SIGTERM) is never counted", () => {
   assert.equal(r.state.state, "pending");
   assert.equal(r.state.failures, 0, "a restart we asked for is not a crash");
   assert.equal(f.git("rev-parse", "HEAD"), f.b);
+});
+
+test("a planned restart does not log 'crashed 0 of 3 times' (F8)", () => {
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  runLauncher(f); // arms the trial on B
+  markPlanned({ stateDir: f.stateDir });
+  runRecorder(f, { exit: CRASH });
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /planned restart, not counted/);
+  assert.ok(!/crashed 0 of/.test(run.stderr), `a planned restart must not read as a crash:\n${run.stderr}`);
+  assert.equal(readState(f).failures, 0);
+});
+
+test("an exit that is neither planned nor counted is logged as not counted (F8)", () => {
+  // A clean exit, a timeout, an OOM or an unrecorded exit raise no count, so
+  // "crashed N of 3" is simply untrue for them (the wording nit).
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  runLauncher(f); // arms the trial on B
+  runRecorder(f, { exit: { SERVICE_RESULT: "exit-code", EXIT_CODE: "exited", EXIT_STATUS: "0" } });
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /exit not counted \(0 of 3\)/);
+  assert.ok(!/crashed 0 of/.test(run.stderr), `an uncounted exit must not read as a crash:\n${run.stderr}`);
+  assert.equal(readState(f).failures, 0);
+});
+
+/* -------------------------------------------------------- blocked rollbacks */
+
+test("a reset-failed block leaves a HELD marker, so a co-hosted peer refuses B (S5)", async () => {
+  // `reset --keep` refuses when unrelated local edits overlap B→A: nothing moved,
+  // so B is STILL checked out — the same state a refusal leaves. Its marker must
+  // therefore be held too, or a peer's convergence migrates and restarts into a
+  // commit this host's guard already refused (and the marker clears as soon as
+  // main moves).
+  const f = makeFixture();
+  installAndStabilize(f);
+  fastForwardTo(f, f.b);
+  primeToThreshold(f);
+  writeFileSync(join(f.work, "servers", "gateway", "index.js"), "// local edit overlapping the reset\n");
+
+  const run = runLauncher(f);
+  assert.equal(run.status, 0, run.stderr);
+  const state = readState(f);
+  assert.equal(state.state, "blocked");
+  assert.equal(state.result.reason, "reset-failed");
+  assert.equal(f.git("rev-parse", "HEAD"), f.b, "the refused reset left B checked out");
+
+  const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+  assert.ok(marker, "the marker written before the reset must survive");
+  assert.equal(marker.sha, f.b);
+  assert.equal(marker.held, true, "B is still checked out, so the marker must be HELD");
+
+  // A co-hosted peer (this one booted A) must not converge into B.
+  const { convergeInstance, setBootSha } = await import("../servers/gateway/convergence.js");
+  const dataDir = join(f.root, "peer-data");
+  mkdirSync(dataDir, { recursive: true });
+  setBootSha(f.a);
+  try {
+    const r = await convergeInstance({
+      appRoot: f.work,
+      instance: { dataDir, dbPath: join(dataDir, "crow.db"), tasksDbPath: join(dataDir, "tasks.db") },
+    });
+    assert.equal(r.skipped, "update-quarantined", `the peer converged into a refused commit: ${JSON.stringify(r)}`);
+    assert.equal(f.git("rev-parse", "HEAD"), f.b, "a peer never moves the tree");
+  } finally {
+    setBootSha(null);
+  }
 });
 
 /* ------------------------------------------------------- self-arming */

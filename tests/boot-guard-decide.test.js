@@ -295,6 +295,31 @@ test("a malformed state file is ignored", () => {
   assert.equal(loadState(dir).state, null, "a non-40-hex sha must invalidate the record");
 });
 
+test("the refusal record is shape-checked like every other field (fix round 3)", () => {
+  const dir = scratch();
+  const write = (refusal) => writeFileSync(join(dir, STATE_FILE), JSON.stringify({
+    ...freshState(), state: "refused", last_ok_sha: A, pending_sha: B, refusal,
+  }));
+
+  // A full sha and an ISO stamp: valid, and narrowed to exactly those fields.
+  write({ sha: B, marker_at: "2026-01-02T03:04:05.000Z", extra: "dropped" });
+  const ok = loadState(dir);
+  assert.equal(ok.error, null);
+  assert.deepEqual(ok.state.refusal, { sha: B, marker_at: "2026-01-02T03:04:05.000Z" });
+
+  for (const bad of [
+    { sha: "b".repeat(9), marker_at: "2026-01-02T03:04:05.000Z" }, // a prefix could name another commit
+    { sha: B, marker_at: "yesterday" }, // not a time
+    { sha: B }, // no stamp: the gate could not tell one marker from the next
+    "refused", // not an object
+    [B, "2026-01-02T03:04:05.000Z"], // not an array either
+  ]) {
+    write(bad);
+    assert.equal(loadState(dir).state, null,
+      `a malformed refusal must invalidate the record: ${JSON.stringify(bad)}`);
+  }
+});
+
 test("a symlinked state file is ignored", () => {
   const dir = scratch();
   const real = join(dir, "real.json");

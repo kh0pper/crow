@@ -743,6 +743,7 @@ test("an unresolvable previous sha is a distinct blocked reason, never a bogus r
     // checkout still sits on the previous sha: the pre-pull read is unresolvable.
     writeFileSync(join(shimDir, "git"), `#!/bin/sh
 printf '%s\\n' "$*" >> '${argvLog}'
+while [ "$1" = "-c" ]; do shift 2; done   # git -c k=v ... <cmd>
 if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ] && [ "$(${realGit} rev-parse HEAD)" = '${f.prev}' ]; then exit 0; fi
 exec ${realGit} "$@"
 `, { mode: 0o755 });

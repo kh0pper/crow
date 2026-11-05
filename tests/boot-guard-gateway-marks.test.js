@@ -11,15 +11,20 @@ import {
   chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  bootGuardProblem, installLauncherCopy, markPlanned, markStable, recordGuardResult,
+  bootGuardProblem, demoteHeldMarker, installLauncherCopy, markPlanned, markStable, recordGuardResult,
   rolledBackResultText, scheduleStableMark,
 } from "../servers/gateway/boot-guard-state.js";
-import { freshState, loadState, saveState } from "../scripts/boot-guard/crow-boot-guard.mjs";
+import {
+  clearUpdateQuarantine, ownerForHome, readUpdateQuarantine, writeUpdateQuarantine,
+} from "../servers/shared/update-quarantine.js";
+import { _setDbForTest } from "../servers/gateway/auto-update.js";
+import { _setAlertsRootForTest, drainAlertSpool } from "../servers/shared/alert-spool.js";
+import { freshState, loadState, saveState, writeSpoolAlert } from "../scripts/boot-guard/crow-boot-guard.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
@@ -32,7 +37,42 @@ function scratch(prefix = "bg-gw-") {
   _dirs.push(dir);
   return dir;
 }
-after(() => { for (const d of _dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} } });
+after(() => {
+  _setAlertsRootForTest(null);
+  _setDbForTest(null);
+  for (const d of _dirs) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
+});
+
+/** dashboard_settings behind a Map plus the notifications INSERT: enough for
+ *  saveSetting, stampResultSince, createNotification and the spool's dedupe. */
+function stubDb() {
+  const settings = new Map();
+  const notifications = [];
+  return {
+    settings,
+    notifications,
+    async execute({ sql, args = [] } = {}) {
+      if (/^\s*SELECT value FROM dashboard_settings WHERE key = \?/.test(sql || "")) {
+        return { rows: settings.has(args[0]) ? [{ value: settings.get(args[0]) }] : [] };
+      }
+      if (/SELECT key, value FROM dashboard_settings WHERE key IN \(\?, \?\)/.test(sql || "")) {
+        return { rows: args.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) })) };
+      }
+      if (/INSERT INTO dashboard_settings/.test(sql || "")) {
+        settings.set(args[0], args[1]);
+        return { rows: [], lastInsertRowid: 0 };
+      }
+      if (/INSERT INTO notifications/.test(sql || "")) {
+        notifications.push({
+          type: args[0], source: args[1], title: args[2], body: args[3],
+          priority: args[4], action_url: args[5], metadata: args[6],
+        });
+        return { rows: [], lastInsertRowid: notifications.length };
+      }
+      return { rows: [] }; // the spool's dedupe SELECT, and anything else
+    },
+  };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -142,6 +182,305 @@ test("the stable mark is armed on an UNREF'd timer", async () => {
   assert.equal(loadState(stateDir).state.last_ok_sha, B);
 });
 
+/* ------------------------------------------- whose refusal is it (round 2/3) */
+
+/** The state a refusal leaves: `reportRefusal` in the launcher keeps
+ *  `pending_sha`, writes `state: "refused"` (a block writes `"blocked"`), and
+ *  records the HELD marker it wrote as `refusal` (fix round 3). */
+function refusedState(pendingSha, markerAt = "2026-01-02T03:04:05.000Z") {
+  return {
+    ...freshState(),
+    state: "refused",
+    last_ok_sha: A,
+    previous_sha: A,
+    pending_sha: pendingSha,
+    previous_proven: true,
+    failures: 3,
+    refusal: { sha: pendingSha, marker_at: markerAt },
+    result: {
+      code: "update-rollback-refused", from: pendingSha, to: A, failures: 3, reason: "db-ahead",
+      at: "2026-01-02T03:04:05.000Z", recorded: true,
+    },
+  };
+}
+
+/** The HELD marker a refusal / a blocked reset leaves in the shared git dir. */
+function writeHeldMarker(gitDir, sha, { by = "boot-guard", now = Date.now(), owner = null } = {}) {
+  const written = writeUpdateQuarantine({
+    gitDir, sha, previous: A, reason: "startup-crash", by, now, persist: true, owner,
+  });
+  assert.ok(written, "fixture precondition: the marker must be written");
+  return written;
+}
+
+const gitDirOf = (repo) => join(repo.work, ".git");
+/** This instance's owner id, derived exactly as markStable derives it. */
+const ownerOf = (stateDir) => ownerForHome(dirname(stateDir));
+/** A well-formed owner id for the tests that call `demoteHeldMarker` directly. */
+const OWNER = "0123456789abcdef";
+
+test("markStable leaves a HELD marker written by someone else alone (fix round 2)", () => {
+  // Only the boot guard's own marker says anything about this instance's boot.
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const at = writeHeldMarker(gitDirOf(r), r.sha, { by: "crow-update" }).at;
+  saveState(stateDir, refusedState(r.sha, at));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, false);
+  assert.equal(out.marker.reason, "other-writer", JSON.stringify(out.marker));
+  const marker = readUpdateQuarantine({ gitDir: gitDirOf(r) });
+  assert.equal(marker.by, "crow-update", "another writer's marker must not be rewritten to by: boot-guard");
+  assert.equal(marker.held, true);
+  assert.equal(marker.at, at, "an untouched marker keeps its own stamp");
+});
+
+test("markStable leaves a HELD marker naming another sha alone (fix round 2)", () => {
+  // A state that refused B says nothing about a marker for C.
+  const r = repoWithLauncher("// launcher\n");
+  const C_SHA = "c".repeat(40);
+  const stateDir = join(scratch(), "boot-guard");
+  const at = writeHeldMarker(gitDirOf(r), C_SHA, { owner: ownerOf(stateDir) }).at;
+  saveState(stateDir, refusedState(r.sha, at));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, false);
+  assert.equal(out.marker.reason, "other-sha", JSON.stringify(out.marker));
+  const marker = readUpdateQuarantine({ gitDir: gitDirOf(r) });
+  assert.equal(marker.sha, C_SHA);
+  assert.equal(marker.held, true, "another sha's refusal must stay HELD");
+  assert.equal(marker.at, at);
+});
+
+test("a marker that changes between the read and the write is left as it is (fix round 2)", () => {
+  // The marker is shared, so a peer can rewrite it while this instance decides.
+  // The write is a rename of a record built from the FIRST read: without a
+  // re-read it would overwrite the peer's record (and push `at` back in time,
+  // re-spending a TTL).
+  const r = repoWithLauncher("// launcher\n");
+  const C_SHA = "c".repeat(40);
+  const t0 = Date.parse("2026-03-01T00:00:00.000Z");
+  const peerAt = "2026-03-01T00:02:00.000Z";
+
+  const demoteWith = (mutate) => {
+    const gitDir = gitDirOf(r);
+    clearUpdateQuarantine({ gitDir });
+    // Both arguments are required (fix round 4): the marker must carry this
+    // instance's owner and the very stamp the refusal recorded.
+    const held = writeHeldMarker(gitDir, r.sha, { now: t0, owner: OWNER });
+    let reads = 0;
+    const readMarker = ({ gitDir: dir }) => {
+      reads += 1;
+      if (reads === 1) return readUpdateQuarantine({ gitDir: dir });
+      mutate(dir); // the peer's write, in the window
+      return readUpdateQuarantine({ gitDir: dir });
+    };
+    const out = demoteHeldMarker({
+      gitDir, bootSha: r.sha, readMarker, owner: OWNER, expectedAt: held.at,
+    });
+    return { out, reads, gitDir };
+  };
+
+  // A fresher refusal for ANOTHER sha landed in the window.
+  const peer = demoteWith((dir) => writeHeldMarker(dir, C_SHA, { now: Date.parse(peerAt) }));
+  assert.equal(peer.reads, 2, "the marker must be re-read right before the write");
+  assert.equal(peer.out.demoted, false);
+  assert.equal(peer.out.reason, "changed", JSON.stringify(peer.out));
+  const kept = readUpdateQuarantine({ gitDir: peer.gitDir });
+  assert.equal(kept.sha, C_SHA, "the peer's marker must survive, not be replaced with this boot's sha");
+  assert.equal(kept.held, true);
+  assert.equal(kept.at, peerAt, "the peer's stamp must not be rewritten from the stale read");
+
+  // The peer CLEARED the marker (or demoted it) while this instance decided.
+  const gone = demoteWith((dir) => clearUpdateQuarantine({ gitDir: dir }));
+  assert.equal(gone.out.demoted, false);
+  assert.equal(gone.out.reason, "changed", JSON.stringify(gone.out));
+  assert.equal(readUpdateQuarantine({ gitDir: gone.gitDir }), null, "a marker a peer cleared must not be resurrected");
+});
+
+/* ------------------------------------- bound to the refusal that wrote it (round 3) */
+
+test("a re-armed trial still demotes: the gate is the refusal record, not the state name (fix round 3)", () => {
+  // A refusal whose reason is not permanent lets the launcher re-arm on the next
+  // start, so the state is `pending` for B again. The HELD marker is still the
+  // one this instance wrote, and ten minutes up on B is still the proof that it
+  // runs — keying the gate on the state name froze every such box until an
+  // operator deleted the marker by hand.
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const owner = ownerOf(stateDir);
+  const held = writeHeldMarker(gitDirOf(r), r.sha, { owner });
+  saveState(stateDir, {
+    ...freshState(),
+    state: "pending",
+    last_ok_sha: A,
+    previous_sha: A,
+    pending_sha: r.sha,
+    previous_proven: true,
+    failures: 1,
+    refusal: { sha: r.sha, marker_at: held.at },
+    attempt: { id: "inv-rearm", started_at: "2026-01-02T03:04:05.000Z" },
+  });
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, true, JSON.stringify(out.marker));
+  assert.equal(readUpdateQuarantine({ gitDir: gitDirOf(r) }).held, undefined);
+  assert.equal(loadState(stateDir).state.refusal, null, "a demotion spends the refusal record");
+});
+
+test("a peer's HELD marker for the same sha is never demoted: the owner is not ours (fix round 3)", () => {
+  // One checkout, two instances. Y's state can name B (its own refusal of it)
+  // and still not be the instance that wrote the marker on disk.
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const peerOwner = "0123456789abcdef";
+  const held = writeHeldMarker(gitDirOf(r), r.sha, { owner: peerOwner });
+  saveState(stateDir, { ...refusedState(r.sha, held.at), pending_sha: r.sha });
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.ok, true, out.reason);
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "other-owner", JSON.stringify(out.marker));
+  const marker = readUpdateQuarantine({ gitDir: gitDirOf(r) });
+  assert.equal(marker.held, true, "a peer's refusal must stay HELD");
+  assert.equal(marker.owner, peerOwner);
+  assert.equal(marker.at, held.at);
+  assert.equal(loadState(stateDir).state.refusal, null,
+    "the record cannot describe a marker this instance did not write");
+});
+
+test("a HELD marker from a release without an owner is left alone (fix round 3)", () => {
+  // Nothing in an owner-less marker proves which instance wrote it, so no stable
+  // mark may claim it (the record is readable and still refuses, as before).
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDirOf(r), r.sha);
+  assert.equal(held.owner, undefined, "fixture precondition: no owner field");
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "other-owner", JSON.stringify(out.marker));
+  assert.equal(readUpdateQuarantine({ gitDir: gitDirOf(r) }).held, true);
+});
+
+test("a demote whose write fails KEEPS the refusal record, and the next stable mark retries (fix round 3)", (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("running as root: a 0555 directory is still writable");
+    return;
+  }
+  const r = repoWithLauncher("// launcher\n");
+  const gitDir = gitDirOf(r);
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDir, r.sha, { owner: ownerOf(stateDir) });
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  chmodSync(gitDir, 0o555);
+  let failed;
+  try {
+    failed = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  } finally {
+    chmodSync(gitDir, 0o755);
+  }
+  assert.equal(failed.ok, true, failed.reason);
+  assert.equal(failed.marker.demoted, false, JSON.stringify(failed.marker));
+  assert.equal(failed.marker.reason, "write-failed", JSON.stringify(failed.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, true, "nothing was written");
+  assert.deepEqual(loadState(stateDir).state.refusal, { sha: r.sha, marker_at: held.at },
+    "a transient write failure must not spend the record — the next stable mark retries");
+
+  const retried = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(retried.marker.demoted, true, JSON.stringify(retried.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
+  assert.equal(loadState(stateDir).state.refusal, null);
+});
+
+test("a git-dir lookup failure KEEPS the refusal record, and the next stable mark retries (fix round 4)", () => {
+  // `git rev-parse --absolute-git-dir` can fail transiently (a busy checkout, a
+  // lock). That says nothing about the marker, so the record must survive and the
+  // next stable mark must demote — otherwise one momentary failure froze the box
+  // until the marker was deleted by hand.
+  const r = repoWithLauncher("// launcher\n");
+  const gitDir = gitDirOf(r);
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDir, r.sha, { owner: ownerOf(stateDir) });
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  const noGit = () => { throw new Error("fatal: not a git repository"); };
+  const first = markStable(r.sha, { appRoot: r.work, stateDir, install: false, execFile: noGit });
+  assert.equal(first.ok, true, first.reason);
+  assert.equal(first.marker.demoted, false, JSON.stringify(first.marker));
+  assert.equal(first.marker.reason, "no-git-dir", JSON.stringify(first.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, true, "nothing was written");
+  assert.deepEqual(loadState(stateDir).state.refusal, { sha: r.sha, marker_at: held.at },
+    "a transient git-dir failure must not spend the record — the next stable mark retries");
+
+  const retried = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(retried.marker.demoted, true, JSON.stringify(retried.marker));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
+  assert.equal(loadState(stateDir).state.refusal, null);
+});
+
+test("demoteHeldMarker refuses a call without an owner or without the refusal's stamp (fix round 4)", () => {
+  // Both used to default to null and SKIP their check, so any caller that forgot
+  // one could demote a co-hosted peer's marker. On a marker that otherwise matches
+  // exactly, an absent or malformed argument must demote nothing.
+  const r = repoWithLauncher("// launcher\n");
+  const gitDir = gitDirOf(r);
+  const held = writeHeldMarker(gitDir, r.sha, { owner: OWNER });
+
+  const cases = [
+    [{ expectedAt: held.at }, "no-owner", "an omitted owner"],
+    [{ owner: "", expectedAt: held.at }, "no-owner", "an empty owner"],
+    [{ owner: OWNER.slice(0, 15), expectedAt: held.at }, "no-owner", "a short owner"],
+    [{ owner: OWNER.toUpperCase(), expectedAt: held.at }, "no-owner", "a non-hex owner"],
+    [{ owner: OWNER }, "no-at", "an omitted stamp"],
+    [{ owner: OWNER, expectedAt: "" }, "no-at", "an empty stamp"],
+    [{ owner: OWNER, expectedAt: "yesterday at noon" }, "no-at", "a non-time stamp"],
+  ];
+  for (const [args, reason, what] of cases) {
+    const out = demoteHeldMarker({ gitDir, bootSha: r.sha, ...args });
+    assert.equal(out.demoted, false, what);
+    assert.equal(out.reason, reason, `${what}: ${JSON.stringify(out)}`);
+    const marker = readUpdateQuarantine({ gitDir });
+    assert.equal(marker.held, true, `${what}: the marker must stay HELD`);
+    assert.equal(marker.at, held.at, `${what}: an untouched marker keeps its own stamp`);
+  }
+
+  // The very same marker IS demoted once both arguments are right: the refusals
+  // above are about the missing argument, not about the marker.
+  const ok = demoteHeldMarker({ gitDir, bootSha: r.sha, owner: OWNER, expectedAt: held.at });
+  assert.equal(ok.demoted, true, JSON.stringify(ok));
+  assert.equal(readUpdateQuarantine({ gitDir }).held, undefined);
+});
+
+test("a terminal answer clears the refusal record: the marker is gone (fix round 3)", () => {
+  const r = repoWithLauncher("// launcher\n");
+  const stateDir = join(scratch(), "boot-guard");
+  saveState(stateDir, refusedState(r.sha, "2026-01-02T03:04:05.000Z"));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.marker.demoted, false, JSON.stringify(out.marker));
+  assert.equal(out.marker.reason, "no-marker", JSON.stringify(out.marker));
+  assert.equal(loadState(stateDir).state.refusal, null, "there is no marker left to demote");
+});
+
+test("a terminal answer clears the refusal record: the marker names another sha (fix round 3)", () => {
+  const r = repoWithLauncher("// launcher\n");
+  const C_SHA = "c".repeat(40);
+  const stateDir = join(scratch(), "boot-guard");
+  const held = writeHeldMarker(gitDirOf(r), C_SHA, { owner: ownerOf(stateDir) });
+  saveState(stateDir, refusedState(r.sha, held.at));
+
+  const out = markStable(r.sha, { appRoot: r.work, stateDir, install: false });
+  assert.equal(out.marker.reason, "other-sha", JSON.stringify(out.marker));
+  assert.equal(loadState(stateDir).state.refusal, null, "the record no longer describes the marker on disk");
+  assert.equal(readUpdateQuarantine({ gitDir: gitDirOf(r) }).held, true, "and the marker itself is untouched");
+});
+
 /* ------------------------------------------------------------- planned */
 
 test("markPlanned stamps the attempt in flight (crow:shutdown / SIGTERM)", () => {
@@ -237,6 +576,108 @@ test("markStable carries an unrecorded rollback result instead of clearing it", 
   const text = await recordGuardResult({ stateDir, record: async (v) => { calls.push(v); } });
   assert.equal(calls.length, 1, "the next boot must still be able to write the rollback line");
   assert.match(text, /^Rolled back: /);
+});
+
+/* ------------------------------------------------------------ bell rows (F4) */
+
+/** A state the launcher leaves after a rollback, spool alert and all. */
+function rolledBackState({ alerted }) {
+  return {
+    ...freshState(),
+    state: "rolled-back",
+    last_ok_sha: A,
+    previous_sha: A,
+    pending_sha: B,
+    failures: 3,
+    last_crash: { SERVICE_RESULT: "exit-code", EXIT_CODE: "exited", EXIT_STATUS: "1" },
+    alerted,
+    result: {
+      code: "update-rolled-back", from: B, to: A, failures: 3, reason: "startup-crash",
+      at: "2026-01-02T03:04:05.000Z", recorded: false,
+    },
+  };
+}
+
+const SPOOL_BODY = `Commit ${B.slice(0, 9)} crashed on startup 3 times, so the checkout was moved back to `
+  + `${A.slice(0, 9)} and the previous code is running again. ${B.slice(0, 9)} is quarantined: updates resume `
+  + "by themselves when main moves past it.";
+
+test("one boot-guard rollback gives ONE bell row: the spooled one (F4)", async () => {
+  // The launcher spools `update-rolled-back` and the boot-time drain delivers it;
+  // recordGuardResult then wrote the SAME event's result, whose saveSetting rang
+  // notifyUpdateFailure — two rows for one rollback whenever the 24 h per-code
+  // cooldown did not swallow the second.
+  const crowHome = scratch("bg-bell-");
+  const stateDir = join(crowHome, "boot-guard");
+  mkdirSync(join(crowHome, "alerts"), { recursive: true });
+  _setAlertsRootForTest(join(crowHome, "alerts"));
+  assert.ok(writeSpoolAlert({
+    crowHome,
+    code: "update-rolled-back",
+    title: "Crow rolled back an update that would not start",
+    body: SPOOL_BODY,
+    at: "2026-01-02T03:04:05.000Z",
+  }), "the launcher must have spooled its alert");
+  saveState(stateDir, rolledBackState({ alerted: { "update-rolled-back": B } }));
+
+  const db = stubDb();
+  const created = [];
+  const createNotification = async (_db, n) => { created.push(n); return { id: created.length }; };
+  try {
+    _setDbForTest(db);
+    await drainAlertSpool(db, { createNotification, log: () => {} });
+    const text = await recordGuardResult({ stateDir });
+
+    const rows = [...created, ...db.notifications];
+    assert.equal(rows.length, 1, `one rollback, one row: ${JSON.stringify(rows)}`);
+    assert.equal(created[0].source, "migrations", "the surviving row is the launcher's own alert");
+    assert.match(created[0].body, /crashed on startup 3 times/);
+    assert.ok(!/fails to load/.test(`${created[0].title} ${created[0].body}`),
+      "a startup crash must never be described as code that fails to load");
+    // The Settings → Updates line is still written: only the bell is deduped.
+    assert.match(text, /^Rolled back: /);
+    assert.match(db.settings.get("auto_update_last_result"), /^Rolled back: /);
+    assert.ok(!db.settings.has("auto_update_notified_code"),
+      "the suppressed bell must not claim a notification it never made");
+  } finally {
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("a rollback whose spool write failed still rings the auto-update bell (F4)", async () => {
+  // The suppression is conditional on the spool file really existing: with no
+  // spool, the result write is the only channel left, so it must ring.
+  const crowHome = scratch("bg-bell-nospool-");
+  const stateDir = join(crowHome, "boot-guard");
+  mkdirSync(join(crowHome, "alerts"), { recursive: true });
+  _setAlertsRootForTest(join(crowHome, "alerts"));
+  saveState(stateDir, rolledBackState({ alerted: {} }));
+
+  const db = stubDb();
+  const created = [];
+  const createNotification = async (_db, n) => { created.push(n); return { id: created.length }; };
+  try {
+    _setDbForTest(db);
+    await drainAlertSpool(db, { createNotification, log: () => {} });
+    const text = await recordGuardResult({ stateDir });
+
+    assert.equal(created.length, 0, "no spool file, so the drain delivers nothing");
+    assert.equal(db.notifications.length, 1, `the sole channel must ring once: ${JSON.stringify(db.notifications)}`);
+    assert.equal(db.notifications[0].source, "auto-update");
+    assert.match(db.notifications[0].body, /crashed on startup 3 times/, "the recorded result is quoted verbatim");
+    // S3: this row is the only channel left, and it is a STARTUP CRASH. The
+    // cause-neutral "its code does not load, or its dependencies could not be
+    // installed" is the Layer 0 wording and must not appear here.
+    assert.ok(!/does not load/.test(`${db.notifications[0].title} ${db.notifications[0].body}`),
+      `a startup crash must never be described as code that does not load: ${db.notifications[0].body}`);
+    assert.match(db.notifications[0].body, /crashed on startup, so it was rolled back/,
+      "the action text itself describes a startup crash (S3)");
+    assert.match(text, /^Rolled back: /);
+  } finally {
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
 });
 
 test("markStable only claims a launcher_version when the copy was installed", () => {
