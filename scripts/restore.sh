@@ -38,7 +38,15 @@
 # <backup dir>/artifacts (an instance with its own CROW_HOME:
 # <backup dir>/artifacts-<stem>). Rows reference blobs by sha256 key, so a full
 # recovery restores the database AND that directory; this script restores the
-# database only and prints where the blobs are.
+# database only and prints where THIS instance's blobs are — never another
+# instance's copy in the same shared backup directory.
+#
+# Upgrading note (printed for an instance with its own CROW_HOME): before the
+# per-instance split, a tagged instance's artifacts went into the shared
+# `artifacts/`. The first backup after upgrading writes `artifacts-<stem>/`,
+# and the host-default instance's next run (rsync --delete into `artifacts/`)
+# drops the tagged instance's old files from there — so a tagged instance
+# should run one backup right after upgrading.
 
 set -euo pipefail
 # The safety copy and the restored database are as sensitive as the original.
@@ -84,6 +92,19 @@ fi
 # Where backups lived before the backup directory was unified. Read-only
 # fallback: listed by --list and still restorable by bare file name.
 LEGACY_DIR="$HOME/.crow/backups"
+
+# --- This instance's names (stem, tag, artifacts subdirectory) ---
+# Same helper scripts/backup.sh uses: the artifacts store is `artifacts` for the
+# host-default instance and `artifacts-<stem>` for an instance with its own
+# CROW_HOME. Only THIS instance's copy is ever named below: a co-hosted
+# instance's blobs live in a sibling directory and are not what this restore of
+# THIS database needs.
+NAMING="$("$NODE_BIN" "$BACKUP_HELPER" --naming 2>/dev/null || true)"
+INSTANCE_TAG="$(printf '%s\n' "$NAMING" | sed -n 2p)"
+ARTIFACTS_NAME="$(printf '%s\n' "$NAMING" | sed -n 3p)"
+if [[ -z "$ARTIFACTS_NAME" ]]; then
+  ARTIFACTS_NAME="artifacts"
+fi
 
 # --- List mode ---
 
@@ -303,12 +324,20 @@ if [[ -n "$PRE_RESTORE" ]]; then
   echo "Previous database saved at: $PRE_RESTORE"
 fi
 # The blob store is NOT part of the database: rows reference blobs by sha256 key.
-# <backup dir>/artifacts is the host-default instance's copy; an instance with
-# its own CROW_HOME has its own <backup dir>/artifacts-<stem>.
-for artifacts_dir in "$BACKUP_DIR/artifacts" "$BACKUP_DIR"/artifacts-*; do
-  if [[ -d "$artifacts_dir" ]]; then
-    echo "Artifacts blobs for a full recovery: $artifacts_dir"
-    echo "  (copy them back with: rsync -a --delete \"$artifacts_dir/\" \"$(dirname "$DB_PATH")/artifacts/\")"
-  fi
-done
+# Only this instance's own copy is named — the backup directory may be shared
+# with a co-hosted instance, whose `artifacts-<stem>` is not this database's.
+ARTIFACTS_DIR="$BACKUP_DIR/$ARTIFACTS_NAME"
+if [[ -d "$ARTIFACTS_DIR" ]]; then
+  echo "Artifacts blobs for a full recovery: $ARTIFACTS_DIR"
+  echo "  (copy them back with: rsync -a --delete \"$ARTIFACTS_DIR/\" \"$(dirname "$DB_PATH")/artifacts/\")"
+fi
+if [[ -n "$INSTANCE_TAG" ]]; then
+  echo ""
+  echo "Note (one time, for an instance with its own CROW_HOME): before this version this"
+  echo "  instance's artifacts were copied into the shared \"$BACKUP_DIR/artifacts\". The first"
+  echo "  backup after upgrading writes \"$ARTIFACTS_DIR\", and the host-default instance's next"
+  echo "  backup (rsync --delete into \"artifacts/\") drops the old copies from the shared"
+  echo "  directory — so run a backup once now and this instance's blobs live in their own"
+  echo "  subdirectory."
+fi
 echo "Start the gateway again when you are ready: systemctl --user start crow-gateway"

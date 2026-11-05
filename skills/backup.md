@@ -33,6 +33,8 @@ tools: []
 
    The Crow Artifacts blob store (`<data dir>/artifacts`) is copied too, to `<backup dir>/artifacts` — or, for an instance with its own `CROW_HOME` (a co-hosted second gateway), to `<backup dir>/artifacts-<stem>`. Each instance's `rsync --delete` stays inside its own subdirectory, so two instances never prune each other's blobs.
 
+   **After upgrading a tagged instance** (one with its own `CROW_HOME`): before the per-instance split its artifacts were copied into the shared `<backup dir>/artifacts`. The first backup after upgrading writes `<backup dir>/artifacts-<stem>`, and the host-default instance's next run (`rsync --delete` into `artifacts/`) drops the tagged instance's old files from that shared directory — so run a backup once right after upgrading, and the tagged instance's blobs then live in their own subdirectory. `restore.sh` prints the same note.
+
 2. For a preview without writing files:
    ```bash
    bash scripts/backup.sh --dry-run
@@ -76,9 +78,9 @@ crontab -e
    systemctl --user start crow-gateway
    ```
 
-The script always saves the current database as `<db>.pre-restore-TIMESTAMP` before overwriting it. That copy is made with better-sqlite3, not `cp`, so data still sitting in `crow.db-wal` is included; if it cannot be made or does not verify, the restore stops and the database is NOT replaced. Before anything changes, the backup FILE is checked too: one that is the live database itself (or its `-wal`/`-shm`), one that is empty, or one that fails `quick_check` is refused. The copy then lands in a temp file beside the database, is verified there, and only then replaces it — so a failed restore leaves the old database and its WAL exactly as they were. Stale `crow.db-wal` / `crow.db-shm` of the database being replaced are removed at that last step, the restored file keeps the old file's owner and mode, and the result is verified (integrity check plus table and memory counts) before the script reports success.
+The script always saves the current database as `<db>.pre-restore-TIMESTAMP` before overwriting it. That copy is made with better-sqlite3, not `cp`, so data still sitting in `crow.db-wal` is included; if it cannot be made or does not verify, the restore stops and the database is NOT replaced. Before anything changes, the backup FILE is checked too: one that is the live database itself (or its `-wal`/`-shm`), one that is empty, or one that fails `quick_check` is refused. The copy then lands in a temp file beside the database, is verified there, and only then replaces it — so a failed restore leaves the old database and its WAL exactly as they were. A `.sql` dump must also create at least one table and end with `COMMIT;`: a dump cut short at a statement boundary replays "successfully" into half a database, so it is refused instead. Stale `crow.db-wal` / `crow.db-shm` of the database being replaced are removed at that last step, the restored file keeps the old file's owner and mode, and the result is verified (integrity check plus table and memory counts) before the script reports success. A database reached through a symlink is handled by replacing the real file, leaving the symlink in place.
 
-A database alone is not a full recovery: Artifacts rows point at blobs by sha256 key. This instance's blobs are in `<backup dir>/artifacts` (an instance with its own `CROW_HOME`: `<backup dir>/artifacts-<stem>`) — copy them back to `<data dir>/artifacts/` after the restore. The restore script prints the exact path when it exists.
+A database alone is not a full recovery: Artifacts rows point at blobs by sha256 key. This instance's blobs are in `<backup dir>/artifacts` (an instance with its own `CROW_HOME`: `<backup dir>/artifacts-<stem>`) — copy them back to `<data dir>/artifacts/` after the restore. The restore script prints the exact path when it exists, and it prints only THIS instance's copy: the backup directory may be shared with a co-hosted instance, whose `artifacts-<stem>` is not this database's blobs.
 
 ### Restore Types
 

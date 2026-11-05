@@ -25,8 +25,8 @@ import { spawnSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
+  readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -58,6 +58,7 @@ after(() => {
 const today = () => new Date().toISOString().slice(0, 10);
 const mode = (p) => statSync(p).mode & 0o777;
 const names = (dir) => (existsSync(dir) ? readdirSync(dir).sort() : []);
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function freePort() {
   return new Promise((done) => {
@@ -622,9 +623,11 @@ test("a .sql dump is replayed into a temp file before it replaces the database",
   mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
   const dump = join(ctx.backupDir, `primary-${today()}.sql`);
   writeFileSync(dump, [
+    "BEGIN TRANSACTION;",
     "CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT);",
     "INSERT INTO memories (content) VALUES ('from sql one');",
     "INSERT INTO memories (content) VALUES ('from sql two');",
+    "COMMIT;",
   ].join("\n") + "\n");
 
   const r = await run(RESTORE_SH, [dump], envFor(ctx));
@@ -769,4 +772,167 @@ test("restoring the live file onto itself is refused", async () => {
   // And through all of it the one database was never touched.
   assert.deepEqual(memoriesIn(live), ["only copy"]);
   assert.deepEqual(names(ctx.data).filter((n) => n.includes("pre-restore")), []);
+});
+
+/* ---------------------------------------------------------------------------
+ * Review fixes (round 3): a symlinked database path, a truncated .sql dump,
+ * and an artifacts hint that names only this instance's copy.
+ * ------------------------------------------------------------------------- */
+
+// A database reached through a symlink: the REAL file is what a restore has to
+// replace. SQLite keeps -wal/-shm beside the real file, and a rename onto the
+// link would replace the link itself — so every step of `apply` (temp file,
+// journal removal, rename, owner/mode) must work on the real path.
+test("a restore through a symlinked database path replaces the real file", async () => {
+  const ctx = await ctxNew();
+  const realDir = join(ctx.data, "real");
+  mkdirSync(realDir, { recursive: true });
+  const real = join(realDir, "crow.db");
+  // A WAL database with un-checkpointed rows and a stale -wal/-shm beside the
+  // REAL file (a killed writer), the way a symlinked data dir looks on disk.
+  await killedWriterDb(real, ["live 1", "live 2"]);
+  const realWal = join(realDir, "crow.db-wal");
+  assert.equal(existsSync(realWal), true, "the real file has its -wal");
+  const link = join(ctx.data, "crow.db");
+  symlinkSync(real, link);
+  chmodSync(real, 0o640);
+
+  const backup = join(ctx.backupDir, `primary-${today()}.db`);
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  makeDb(backup, ["from the backup", "and this one"]).close();
+
+  // CROW_DB_PATH is the SYMLINK.
+  const r = await run(RESTORE_SH, [backup], envFor(ctx));
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, new RegExp(`crow\\.db is a symlink; the real file ${escRe(real)} was replaced`), r.out);
+
+  // The link is still a link, and the real file is the restored database.
+  assert.equal(lstatSync(link).isSymbolicLink(), true, "the symlink was not replaced by a regular file");
+  assert.equal(readlinkSync(link), real);
+  assert.deepEqual(memoriesIn(real), ["from the backup", "and this one"]);
+  assert.equal(mode(real), 0o640, "the real file kept the old file's mode");
+
+  // The stale journals of the replaced database went from beside the REAL file...
+  assert.equal(existsSync(realWal), false, "the stale -wal of the real file is removed");
+  assert.equal(existsSync(join(realDir, "crow.db-shm")), false, "the stale -shm of the real file is removed");
+  // ...and no temp file was left beside the real file or beside the link.
+  assert.deepEqual(names(realDir).filter((n) => n.startsWith(".crow.db.restore-")), [], "no temp file beside the real file");
+  assert.deepEqual(names(ctx.data).filter((n) => n.startsWith(".crow.db.restore-")), [], "no temp file beside the link");
+});
+
+// A .sql dump cut off at a STATEMENT BOUNDARY replays without a single error
+// and exits 0: sqlite3 simply stops at the end of the file. Only the missing
+// `COMMIT;` (and, for an empty dump, the absent tables) gives it away, so a
+// restore must refuse rather than install half a database.
+test("a truncated sql dump is refused", { skip: !HAS_SQLITE3 && "sqlite3 not installed" }, async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["keep me"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+
+  const truncated = join(ctx.backupDir, `primary-${today()}.sql`);
+  writeFileSync(truncated, [
+    "PRAGMA foreign_keys=OFF;",
+    "BEGIN TRANSACTION;",
+    "CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT);",
+    "INSERT INTO memories (content) VALUES ('half the data');",
+  ].join("\n") + "\n");
+
+  const r = await run(RESTORE_SH, [truncated], envFor(ctx));
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /The SQL dump is incomplete \(it does not end with COMMIT;\); nothing was changed\./, r.out);
+  assert.match(r.out, /has NOT been replaced/, r.out);
+  assert.deepEqual(memoriesIn(live), ["keep me"], "the database is untouched");
+  assert.deepEqual(names(ctx.data).filter((n) => n.startsWith(".crow.db.restore-")), [], "no temp file left behind");
+
+  // The other half of the rule: a dump that does end with COMMIT; but creates
+  // no table at all is refused too.
+  const empty = join(ctx.backupDir, `primary-empty-${today()}.sql`);
+  writeFileSync(empty, "BEGIN TRANSACTION;\nCOMMIT;\n");
+  const r2 = await run(RESTORE_SH, [empty], envFor(ctx));
+  assert.notEqual(r2.status, 0, r2.out);
+  assert.match(r2.out, /The SQL dump is incomplete \(it creates no tables\); nothing was changed\./, r2.out);
+  assert.deepEqual(memoriesIn(live), ["keep me"], "the database is still untouched");
+  assert.deepEqual(names(ctx.data).filter((n) => n.startsWith(".crow.db.restore-")), [], "no temp file left behind");
+});
+
+// The backup directory can be shared by two co-hosted instances, each with its
+// own artifacts copy. A restore must name THIS instance's blobs only (another
+// instance's `artifacts-<stem>` is not what this database's rows point at), and
+// a tagged instance gets the one-time upgrade note about the split.
+test("restore names only this instance's artifacts copy", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["keep me"]).close();
+  mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
+  const backup = join(ctx.backupDir, `primary-${today()}.db`);
+  makeDb(backup, ["from the backup"]).close();
+
+  // Two artifacts copies side by side: the host-default instance's and a
+  // co-hosted (own CROW_HOME) instance's.
+  const r4Home = join(ctx.home, ".crow-r4");
+  const tag = instanceBackupTag({ CROW_HOME: r4Home });
+  const ourCopy = join(ctx.backupDir, "artifacts");
+  const otherCopy = join(ctx.backupDir, artifactStoreName("primary", tag));
+  assert.notEqual(ourCopy, otherCopy);
+  for (const d of [ourCopy, otherCopy]) mkdirSync(d, { recursive: true, mode: 0o700 });
+
+  const hint = (out) => {
+    const m = out.match(/Artifacts blobs for a full recovery: (.*)/);
+    return m ? m[1].trim() : null;
+  };
+  const hintCount = (out) => (out.match(/Artifacts blobs for a full recovery:/g) || []).length;
+
+  // The host-default instance: its own copy, and no other instance's.
+  const r = await run(RESTORE_SH, [backup], envFor(ctx));
+  assert.equal(r.status, 0, r.out);
+  assert.equal(hint(r.out), ourCopy, r.out);
+  assert.equal(hintCount(r.out), 1, `exactly one artifacts hint expected:\n${r.out}`);
+  assert.doesNotMatch(r.out, new RegExp(escRe(otherCopy)), "another instance's copy is never named");
+  assert.doesNotMatch(r.out, /Note \(one time/, "the upgrade note is for a tagged instance");
+
+  // A tagged instance (its own CROW_HOME): only ITS copy, plus that note.
+  const bData = join(ctx.root, "r4data");
+  mkdirSync(bData, { recursive: true });
+  makeDb(join(bData, "crow.db"), ["r4 row"]).close();
+  const r4 = await run(RESTORE_SH, [backup], envFor(ctx, {
+    CROW_HOME: r4Home,
+    CROW_DATA_DIR: bData,
+    CROW_DB_PATH: join(bData, "crow.db"),
+    PORT: String(await freePort()),
+  }));
+  assert.equal(r4.status, 0, r4.out);
+  assert.equal(hint(r4.out), otherCopy, r4.out);
+  assert.equal(hintCount(r4.out), 1, `exactly one artifacts hint expected:\n${r4.out}`);
+  assert.match(r4.out, /Note \(one time, for an instance with its own CROW_HOME\)/, r4.out);
+  assert.match(r4.out, /[Tt]he first\s+backup after upgrading writes/, r4.out);
+  assert.match(r4.out, /run a backup once now/, r4.out);
+});
+
+// An answering gateway that names no database at all is an older Crow: its copy
+// cannot be attributed either way, and the port is in use by a process holding
+// some crow.db — so the run stops with advice and never falls back to a local
+// copy of the live file.
+test("backup refuses an answering gateway that does not say which database it backed up", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["ours"]).close();
+  const template = join(ctx.root, "template.db");
+  makeDb(template, ["from the gateway"]).close();
+
+  // Its copy lands in its own directory, so nothing of it can be mistaken for
+  // this instance's backup.
+  const gatewayDir = join(ctx.root, "old-gateway-backups");
+  await startStubGateway(ctx, { copyFrom: template, dbPath: null, backupDir: gatewayDir });
+
+  const r = await run(BACKUP_SH, [], envFor(ctx));
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(
+    r.out,
+    new RegExp(`the gateway on port ${ctx.port} is older than this backup script and did not say which database it backed up`),
+    r.out,
+  );
+  assert.match(r.out, /update Crow, or stop the gateway and run the backup again/, r.out);
+  assert.doesNotMatch(r.out, /making the copy here with better-sqlite3/, "no fall-through to a local copy");
+  assert.deepEqual(names(ctx.backupDir).filter((n) => n.endsWith(".db")), [], "no copy was filed");
 });

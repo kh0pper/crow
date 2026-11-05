@@ -18,7 +18,14 @@
  *   apply        Replace the database: copy (or replay) into a temp file BESIDE
  *                it, quick_check the temp, then drop the old -wal/-shm and
  *                rename the temp into place. The restored file keeps the old
- *                file's owner and mode.
+ *                file's owner and mode. A symlinked database path is resolved
+ *                first, so the REAL file is what gets a temp file, loses the
+ *                stale -wal/-shm, is renamed over and keeps owner and mode —
+ *                and the symlink itself stays a symlink. A .sql dump is only
+ *                accepted when it replays into at least one table AND its last
+ *                non-blank line is `COMMIT;`; a dump cut short at a statement
+ *                boundary otherwise replays "successfully" and silently
+ *                restores half a database, so it is refused instead.
  *   inspect      --dry-run listing of a .db backup: quick_check, the table
  *                list and per-table row counts (read-only).
  *   verify       Post-restore check: quick_check plus the table and memories
@@ -26,6 +33,17 @@
  *   precheck     THE GATE. Is any other process holding the database open
  *                (dbHolders), and is anything answering on the gateway port?
  *                restore.sh refuses to run while either is true.
+ *
+ * CROW_RESTORE_TEST_FAIL=copy
+ *                A TEST SEAM (tests/backup-script.test.js), not a feature.
+ *                Half-way through `apply` — after the backup file has been
+ *                copied into the temp file, before that temp is verified,
+ *                before any -wal/-shm is removed and before the rename — the
+ *                copy is truncated and the restore stops. It can only ever
+ *                make a restore stop EARLIER than a real one would, never
+ *                change more than a real restore, which is exactly what makes
+ *                it safe: it proves that a restore that dies half-way leaves
+ *                the old database and its WAL untouched. Nothing else reads it.
  *
  * dbHolders() is exported because scripts/backup-db.mjs asks the same
  * question: "who has this database open" — not "which port answers" — is what
@@ -57,13 +75,20 @@ function unlinkQuiet(p) {
 
 /**
  * The paths a holder could have open: the database and its WAL sidecars.
- * Realpath where it exists, so a symlinked data dir compares equal.
+ *
+ * SQLite names -wal/-shm after the REAL file (it canonicalises the path), so a
+ * symlinked database path must be resolved first: `link-wal` is not the file a
+ * holder has open, `real.db-wal` is. The path as given is kept too (and
+ * realpathed where it exists), so a database reached both ways compares equal.
  */
 function dbTargets(dbPath) {
+  const bases = new Set([realpathOrResolve(dbPath), path.resolve(dbPath)]);
   const targets = new Set();
-  for (const suffix of ["", "-wal", "-shm"]) {
-    const p = dbPath + suffix;
-    try { targets.add(fs.realpathSync(p)); } catch { targets.add(path.resolve(p)); }
+  for (const base of bases) {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = base + suffix;
+      try { targets.add(fs.realpathSync(p)); } catch { targets.add(p); }
+    }
   }
   return targets;
 }
@@ -84,23 +109,38 @@ function commOf(pid) {
 
 /**
  * Linux: every /proc/<pid>/fd link whose target is the DB, its -wal or its
- * -shm. Unreadable pids (other users, vanished, hidden) are skipped quietly;
- * null when the scan told us nothing at all (no /proc, or not one fd dir
- * readable) — "unknown" must never be mistaken for "nobody".
- * @returns {{pid:number, comm:string}[]|null}
+ * -shm.
+ *
+ * A pid whose fd directory we may not list (EACCES/EPERM — another user's
+ * process) is counted, not skipped: that process could hold the database and
+ * we would never see it, so "nobody holds it" is not something this scan can
+ * claim. A pid that simply exited between the /proc read and the fd read
+ * (ENOENT/ESRCH) is not counted — it is gone, not hidden.
+ *
+ * null only when the scan told us nothing at all (no /proc, and not one fd dir
+ * readable or denied) — "unknown" must never be mistaken for "nobody".
+ * @returns {{holders:{pid:number, comm:string}[], unreadable:number}|null}
  */
 function procFsHolders(dbPath) {
   const targets = dbTargets(dbPath);
   let entries = null;
   try { entries = fs.readdirSync("/proc"); } catch { return null; }
   const found = [];
+  let unreadable = 0;
   let sawAnyFdDir = false;
   for (const name of entries) {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
     if (pid === process.pid) continue;
     let fds;
-    try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+    try {
+      fds = fs.readdirSync(`/proc/${pid}/fd`);
+    } catch (err) {
+      // Other users' processes: we cannot see their handles. Anything else
+      // (the pid went away) is a plain exit and tells us nothing.
+      if (err && (err.code === "EACCES" || err.code === "EPERM")) unreadable++;
+      continue;
+    }
     sawAnyFdDir = true;
     let holds = false;
     for (const fd of fds) {
@@ -111,14 +151,14 @@ function procFsHolders(dbPath) {
     }
     if (holds) found.push({ pid, comm: commOf(pid) });
   }
-  if (!sawAnyFdDir) return null;
-  return found.sort((a, b) => a.pid - b.pid);
+  if (!sawAnyFdDir && unreadable === 0) return null;
+  return { holders: found.sort((a, b) => a.pid - b.pid), unreadable };
 }
 
 /**
  * Fallback for hosts without procfs: `lsof -t` on the database and its
  * sidecars. null when lsof is not installed (nothing told us anything).
- * @returns {{pid:number, comm:string}[]|null}
+ * @returns {{holders:{pid:number, comm:string}[], unreadable:number}|null}
  */
 function lsofHolders(dbPath) {
   const pids = new Set();
@@ -135,7 +175,9 @@ function lsofHolders(dbPath) {
     }
   }
   if (!ran) return null;
-  return [...pids].sort((a, b) => a - b).map((pid) => ({ pid, comm: commOf(pid) }));
+  // lsof either lists a pid or knows it is not there, so nothing is hidden from
+  // this path; `unreadable` stays 0.
+  return { holders: [...pids].sort((a, b) => a - b).map((pid) => ({ pid, comm: commOf(pid) })), unreadable: 0 };
 }
 
 /**
@@ -148,8 +190,13 @@ function lsofHolders(dbPath) {
  * only visible as a port until you know it is ours. The file handles are the
  * fact; the port is a guess.
  *
- * @returns {{pid:number, comm:string}[]|null} holders (possibly empty), or
- *   null when this host gives no way to tell.
+ * `unreadable` is how many processes were invisible to the scan because they
+ * belong to another user: with any of those, "the holders are nobody" is not a
+ * fact this host can give, and the callers say so rather than guess.
+ *
+ * @returns {{holders:{pid:number, comm:string}[], unreadable:number}|null}
+ *   holders (possibly empty) plus the count of processes whose open files could
+ *   not be seen, or null when this host gives no way to tell at all.
  */
 export function dbHolders(dbPath) {
   if (process.platform === "linux") {
@@ -299,6 +346,59 @@ function replaySql(source, dest) {
   }
 }
 
+/** The last line of `file` that is not blank/whitespace (tail-read, so a huge
+ * dump is not loaded into memory). "" when the file holds no text at all. */
+function lastNonBlankLine(file, tailBytes = 1 << 16) {
+  const fd = fs.openSync(file, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, tailBytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString("utf8").split(/\r?\n/);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (line) return line;
+    }
+    return "";
+  } finally {
+    try { fs.closeSync(fd); } catch { /* closed */ }
+  }
+}
+
+/** Tables in an already-replayed dump (read-only, journals of our own read dropped). */
+function tableCountOf(file) {
+  const journalsBefore = journalsOf(file);
+  const check = quickCheck(file, { readonly: true });
+  if (!check.handle) return 0;
+  try {
+    return tablesOf(check.handle).length;
+  } catch {
+    return 0;
+  } finally {
+    try { check.handle.close(); } catch { /* closed */ }
+    dropCreatedJournals(file, journalsBefore);
+  }
+}
+
+/**
+ * A .sql dump replayed into a temp file can look like a success while being half
+ * a database: the sqlite3 CLI happily stops at the end of a file cut off at a
+ * statement boundary and exits 0. `sqlite3 db .dump` always ends with `COMMIT;`
+ * and always creates at least one table, so both are required before the temp
+ * file may replace anything.
+ * @returns {string|null} the refusal sentence, or null when the dump is whole.
+ */
+function sqlDumpProblem(source, replayed) {
+  if (lastNonBlankLine(source) !== "COMMIT;") {
+    return "The SQL dump is incomplete (it does not end with COMMIT;); nothing was changed.";
+  }
+  if (tableCountOf(replayed) < 1) {
+    return "The SQL dump is incomplete (it creates no tables); nothing was changed.";
+  }
+  return null;
+}
+
 /**
  * Replace `dbPath` with the backup at `source`.
  *
@@ -308,23 +408,33 @@ function replaySql(source, dest) {
  * removed and the temp renamed into place. `rename` is atomic and the temp is
  * on the same filesystem, so a failure at any point leaves the old database
  * and its WAL exactly as they were. A .sql dump is replayed into the temp file
- * and checked in the same way.
+ * and checked in the same way (plus the truncation check above).
+ *
+ * `dbPath` may be a SYMLINK (a data dir moved elsewhere, or crow.db linked into
+ * place): SQLite keeps the -wal/-shm beside the real file and `rename` onto the
+ * link would replace the link itself, so the real path is resolved once here and
+ * every step below — the temp file, the journal removal, the rename, the
+ * owner/mode — works on the real file.
  *
  * The restored file keeps the old database's OWNER and MODE when there was one
  * (a service user's crow.db stays that user's file); as a non-root user chown
  * cannot give a file away, which is said out loud.
  */
 function applyRestore(source, dbPath) {
-  const dir = path.dirname(dbPath);
-  const base = path.basename(dbPath);
+  const target = realpathOrResolve(dbPath);
+  const real = target !== path.resolve(dbPath);
+  const dir = path.dirname(target);
+  const base = path.basename(target);
   const tmp = path.join(dir, `.${base}.restore-${Date.now()}-${process.pid}.tmp`);
   const isSql = /\.sql$/i.test(source);
   let old = null;
-  try { old = fs.statSync(dbPath); } catch { /* no database yet */ }
+  try { old = fs.statSync(target); } catch { /* no database yet */ }
 
   try {
     if (isSql) {
       replaySql(source, tmp);
+      const problem = sqlDumpProblem(source, tmp);
+      if (problem) throw new Error(problem);
     } else {
       fs.copyFileSync(source, tmp);
       // Test seam (tests/backup-script.test.js): a copy that dies half-way,
@@ -343,8 +453,8 @@ function applyRestore(source, dbPath) {
     if (!check.ok) throw new Error(`the restored copy failed its integrity check (${check.result})`);
     // Verified. Only now may the old database's journals go, and only now is
     // the file under the real name replaced.
-    for (const suffix of ["-wal", "-shm"]) unlinkQuiet(dbPath + suffix);
-    fs.renameSync(tmp, dbPath);
+    for (const suffix of ["-wal", "-shm"]) unlinkQuiet(target + suffix);
+    fs.renameSync(tmp, target);
   } catch (err) {
     for (const p of [tmp, tmp + "-wal", tmp + "-shm"]) unlinkQuiet(p);
     throw err;
@@ -352,19 +462,20 @@ function applyRestore(source, dbPath) {
 
   if (old) {
     try {
-      fs.chownSync(dbPath, old.uid, old.gid);
+      fs.chownSync(target, old.uid, old.gid);
     } catch (err) {
       const why = err.code === "EPERM"
         ? "not permitted (only root can give a file to another user)"
         : err.message;
       console.log(`  Note: could not keep the old database's owner (${why}); ${base} is owned by the user running the restore.`);
     }
-    chmodQuiet(dbPath, old.mode & 0o7777);
+    chmodQuiet(target, old.mode & 0o7777);
   } else {
-    chmodQuiet(dbPath, FILE_MODE);
+    chmodQuiet(target, FILE_MODE);
   }
-  const size = fs.statSync(dbPath).size;
+  const size = fs.statSync(target).size;
   console.log(`  ${isSql ? "SQL dump replayed" : "Binary copy restored"}: ${dbPath} (${size} bytes).`);
+  if (real) console.log(`  ${dbPath} is a symlink; the real file ${target} was replaced and the link is unchanged.`);
   return 0;
 }
 
@@ -462,15 +573,18 @@ function verify(file) {
  *   - something is answering on the gateway port (a live gateway holds the
  *     -wal/-shm we are about to remove),
  *   - the holders cannot be determined AND something answers on the port.
- * Warns on stdout and allows (exit 0) when holders are unknown but nothing
- * answers on the port — the legacy behaviour, now said out loud.
+ * Warns on stdout and allows (exit 0) when the holders could not be fully
+ * determined but nothing answers on the port: the port probe is the only
+ * evidence left, and the warning says what was invisible. "Not fully
+ * determined" is both "this host has no /proc/<pid>/fd and no lsof" and "N
+ * processes belong to other users, so their open files could not be seen".
  */
 async function precheck(dbPath) {
   const name = path.basename(dbPath);
-  const holders = dbHolders(dbPath);
-  if (holders && holders.length) {
+  const scan = dbHolders(dbPath);
+  if (scan && scan.holders.length) {
     process.stdout.write(
-      `${name} is open by: ${holdersText(holders)}. Stop the gateway and any Crow server ` +
+      `${name} is open by: ${holdersText(scan.holders)}. Stop the gateway and any Crow server ` +
       `using this database, then run the restore again.\n`,
     );
     return 3;
@@ -498,10 +612,19 @@ async function precheck(dbPath) {
     return 3;
   }
 
-  if (holders === null) {
+  if (scan === null) {
     process.stdout.write(
       `Warning: could not check whether another process holds ${name} (no /proc/<pid>/fd and no ` +
       `lsof on this host); nothing answers on port ${port} either.\n`,
+    );
+  } else if (scan.unreadable > 0) {
+    // The port probe above is what is left: nothing could be seen holding the
+    // file, but N processes' open files were invisible, so say which evidence
+    // this restore is going on.
+    process.stdout.write(
+      `Warning: could not see the open files of ${scan.unreadable} process${scan.unreadable === 1 ? "" : "es"} ` +
+      `owned by other users, so ${name} may be held by one of them; nothing answers on port ${port} either, ` +
+      `so the restore goes ahead on the port probe alone.\n`,
     );
   }
   return 0;

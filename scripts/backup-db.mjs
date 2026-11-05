@@ -19,7 +19,10 @@
  *      .owner.json sidecar). Its answer is only used when it names OUR
  *      database (db_path) and a copy inside OUR backup dir: on a host running
  *      two gateways, the port may well belong to the other instance. This
- *      script never opens the live database on this path.
+ *      script never opens the live database on this path. An answer that names
+ *      NO database (db_path absent) is an older Crow: it cannot be attributed,
+ *      so the run stops and says to update Crow or stop that gateway — never a
+ *      silent fall-through to a local copy.
  *   2. Otherwise the deciding question is who has the DATABASE open, not which
  *      port answers (dbHolders() in scripts/restore-db.mjs — /proc/<pid>/fd,
  *      else lsof). With no holders, open the database READ-ONLY and run
@@ -28,7 +31,11 @@
  *      and rename it into place under the SAME name — with the same owner
  *      sidecar — the endpoint writes. With holders and no gateway of ours, or
  *      when the holders cannot be determined, refuse: an external open of a
- *      live WAL crow.db is what orphans the gateway's descriptors.
+ *      live WAL crow.db is what orphans the gateway's descriptors. "Cannot be
+ *      determined" includes processes whose fd directory we may not read (a
+ *      non-root run, other users' processes): their count is in the refusal,
+ *      and with a gateway that answered about ANOTHER database it refuses
+ *      rather than fall back to a local copy.
  *   2b. A port that answers but does not answer like a gateway (5xx, reset,
  *      garbage, timeout) also refuses: something there may well be holding the
  *      database.
@@ -265,6 +272,10 @@ function assertNotForeign(dest, me) {
  * copy: `db_path` must be the realpath of our database and the returned `path`
  * must be inside our backup dir. Otherwise `{foreign:true, reason}` is
  * returned — the caller then decides by dbHolders() instead.
+ *
+ * A reply with no `db_path` is not "foreign", it is unusable: an older gateway
+ * cannot say which database it copied, so `{refuse:true, reason}` tells the
+ * operator to either update Crow or stop the gateway and run the backup again.
  */
 async function gatewayCopy(port, { dbReal, dirReal }) {
   const token = process.env.CROW_BACKUP_TOKEN || "";
@@ -287,14 +298,25 @@ async function gatewayCopy(port, { dbReal, dirReal }) {
   // A co-hosted gateway (another CROW_HOME, another crow.db) answers /health
   // on its port too. Its copy is of ITS database, so taking it would either
   // back up the wrong instance or file it under the wrong name.
-  const answerDb = typeof body.db_path === "string" ? realpathOrResolve(body.db_path) : null;
+  //
+  // An answer that names no database at all is an older Crow: its copy cannot
+  // be attributed, and the port is in use by a process holding some crow.db, so
+  // stop here with advice instead of guessing (or opening our own file while a
+  // gateway we cannot identify is running).
+  if (typeof body.db_path !== "string") {
+    return {
+      refuse: true,
+      reason: `the gateway on port ${port} is older than this backup script and did not say which database it ` +
+        `backed up; update Crow, or stop the gateway and run the backup again`,
+    };
+  }
+  const answerDb = realpathOrResolve(body.db_path);
   const answerPath = typeof body.path === "string" ? body.path : null;
   const answerReal = answerPath ? realpathOrResolve(answerPath) : null;
-  const ours = answerDb !== null && answerDb === dbReal && answerReal !== null && isInsideDir(answerReal, dirReal);
+  const ours = answerReal !== null && answerDb === dbReal && isInsideDir(answerReal, dirReal);
   if (!ours) {
-    const where = answerDb ? ` (it backed up ${answerDb})` : " (its answer names no db_path)";
     const outside = answerReal && !isInsideDir(answerReal, dirReal) ? `, and its copy ${answerReal} is outside ${dirReal}` : "";
-    return { foreign: true, reason: `the gateway on port ${port} backs up another database${where}${outside} — ignoring it` };
+    return { foreign: true, reason: `the gateway on port ${port} backs up another database (it backed up ${answerDb})${outside} — ignoring it` };
   }
   if (!fs.existsSync(answerPath)) {
     throw new Error(`the gateway reported a copy at ${answerPath}, but no such file exists`);
@@ -414,6 +436,10 @@ async function make({ dbPath, reportFile, dryRun }) {
 
   let copy = null;
   let source = null;
+  // The reason a gateway that DID answer was not usable (it backs up another
+  // instance's database). Kept for the refusal below: with an answering gateway
+  // on the port, a local copy is the one thing that must not happen silently.
+  let gatewayReason = null;
 
   if (probe.up && !probe.ok) {
     // A port that answers but not like a gateway is a port that may well hold
@@ -424,7 +450,9 @@ async function make({ dbPath, reportFile, dryRun }) {
   if (probe.ok) {
     console.log(`  Gateway answering on 127.0.0.1:${port} — asking it for the copy (the live database is not opened here).`);
     const answer = await gatewayCopy(port, { dbReal, dirReal });
+    if (answer.refuse) throw new Error(answer.reason);
     if (answer.foreign) {
+      gatewayReason = answer.reason;
       console.log(`  ${answer.reason}.`);
     } else {
       source = "gateway";
@@ -434,22 +462,38 @@ async function make({ dbPath, reportFile, dryRun }) {
 
   if (!copy) {
     // Nobody to ask, or the one we asked was not ours: the file handles decide.
-    const holders = dbHolders(dbPath);
-    if (holders && holders.length) {
-      const who = holdersText(holders);
-      throw new Error(
-        probe.ok
-          ? `${dbName} is open by: ${who} but no gateway for it answers on port ${port}; ` +
-            `set PORT/CROW_GATEWAY_PORT to its port, or stop those processes.`
-          : `${dbName} is open by: ${who}. Stop the gateway and any Crow server using this ` +
-            `database, then run the backup again (or set PORT/CROW_GATEWAY_PORT to the port of ` +
-            `the gateway that serves it).`,
-      );
-    }
-    if (holders === null) {
+    const scan = dbHolders(dbPath);
+    if (scan === null) {
       throw new Error(
         `could not check whether another process holds ${dbPath} (no /proc/<pid>/fd and no lsof ` +
         `on this host) — refusing to open it directly in case something does`,
+      );
+    }
+    const holders = scan.holders;
+    // Processes whose open files we could not see (another user's): "nobody
+    // holds it" is not a fact this host can give, so it is said out loud and
+    // never used to justify opening the live database while a gateway answers.
+    const blind = scan.unreadable > 0
+      ? `could not see the open files of ${scan.unreadable} process${scan.unreadable === 1 ? "" : "es"} owned by other users`
+      : null;
+    if (holders.length) {
+      const who = holdersText(holders);
+      const base = probe.ok
+        ? `${dbName} is open by: ${who} but no gateway for it answers on port ${port}; ` +
+          `set PORT/CROW_GATEWAY_PORT to its port, or stop those processes.`
+        : `${dbName} is open by: ${who}. Stop the gateway and any Crow server using this ` +
+          `database, then run the backup again (or set PORT/CROW_GATEWAY_PORT to the port of ` +
+          `the gateway that serves it).`;
+      throw new Error(blind ? `${base} Also, ${blind}.` : base);
+    }
+    if (blind && probe.ok) {
+      // A gateway answered, but not about OUR database: whatever is behind that
+      // port may be the process holding our file, and the handles cannot rule it
+      // out. Never fall through to a local copy on that evidence.
+      throw new Error(
+        `${blind}, and ${gatewayReason} — refusing to copy ${dbPath} here in case one of those ` +
+        `processes is holding it. Stop that gateway, or set PORT/CROW_GATEWAY_PORT to the port of the ` +
+        `gateway that serves this database, then run the backup again.`,
       );
     }
     source = "local";

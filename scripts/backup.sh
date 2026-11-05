@@ -31,6 +31,11 @@
 # `--delete` into its OWN subdirectory only, so two co-hosted instances never
 # prune each other's blobs. A restore needs the database AND that subdirectory.
 #
+# Upgrading a tagged instance: before this split its blobs went into the shared
+# `artifacts/`, and the host-default instance's next run (rsync --delete into
+# `artifacts/`) drops them from there — so a tagged instance should run one
+# backup right after upgrading, which writes its own `artifacts-<stem>/` copy.
+#
 # Mode bits: everything this script writes is 0600 in a 0700 directory. A
 # directory this script CREATES is 0700; an existing directory is never clamped
 # (it may be shared) — it is warned about once instead, and a chmod that fails
