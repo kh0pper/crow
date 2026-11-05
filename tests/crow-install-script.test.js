@@ -286,3 +286,22 @@ test("Task 10: Docker step no longer warns about re-login — the extensions ban
   assert.doesNotMatch(dockerStep, /log out and back in/i);
   assert.match(dockerStep, /log "Docker installed"/, "the install-success log line must remain");
 });
+
+test("libatomic1 is installed in the Node step, before any npm install/ci (rocksdb-native's prebuild needs libatomic.so.1)", () => {
+  const s = src();
+  // Unindented: it must sit after the Node if/else branch, so the
+  // "already installed" path runs it too.
+  const aptIdx = s.search(/^sudo apt install -y libatomic1$/m);
+  assert.ok(aptIdx > -1, "an unconditional `sudo apt install -y libatomic1` must exist");
+  // First real dependency install (comments excluded); `npm run identity` et al. do not count.
+  const npmLine = s.split("\n").find((l) => !/^\s*#/.test(l) && /\bnpm (?:ci|install|run setup)\b/.test(l));
+  assert.ok(npmLine, "the script installs dependencies somewhere");
+  const npmIdx = s.indexOf(npmLine);
+  assert.ok(aptIdx < npmIdx, "libatomic1 must be installed before npm runs");
+  // Inside Step 2 (Node), after the branch that may skip the nodejs install.
+  const step2 = s.indexOf('header "Step 2/9: Node.js');
+  const step3 = s.indexOf('header "Step 3/9: Docker"');
+  assert.ok(step2 < aptIdx && aptIdx < step3, "libatomic1 belongs to the Node step");
+  // After the whole Node if/else, so both paths (installed / just installed) run it.
+  assert.ok(aptIdx > s.indexOf("\nfi\n", step2), "must run on the Node-already-installed path too");
+});

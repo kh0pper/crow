@@ -316,6 +316,16 @@ test("static: never Funnel, never a path-prefixed Serve mapping, never rewrites 
   assert.doesNotMatch(code, /rm -rf?[^\n]*(vault|secrets|installed\.json|bundles|cert\.json|pinned\.json)/);
 });
 
+test("static: libatomic1 joins `missing` through a dpkg package check (rocksdb-native's prebuild needs libatomic.so.1)", () => {
+  const lines = src().split("\n");
+  const ld = lines.findIndex((l) => /dpkg -s libatomic1/.test(l) && /missing\+=\(libatomic1\)/.test(l));
+  assert.ok(ld > -1, "a `dpkg -s libatomic1 ... || missing+=(libatomic1)` line is required");
+  const start = lines.findIndex((l) => /^missing=\(\)$/.test(l));
+  const install = lines.findIndex((l) => /apt-get install -y -qq "\$\{missing\[@\]\}"/.test(l));
+  assert.ok(start > -1 && install > -1, "the base-packages block exists");
+  assert.ok(start < ld && ld < install, "the library check must run with the other missing-package checks, before the install");
+});
+
 test("crow-satellite wrapper: only status and pair-code, CROW_HOME defaults to ~/.crow-satellite", () => {
   const box = fakeBox();
   const env = { PATH: process.env.PATH, HOME: box.home };

@@ -345,6 +345,10 @@ for pkg_cmd in git:git curl:curl; do
   command -v "${pkg_cmd#*:}" >/dev/null 2>&1 || missing+=("${pkg_cmd%%:*}")
 done
 [ -e /etc/ssl/certs/ca-certificates.crt ] || missing+=(ca-certificates)
+# A library, not a command: rocksdb-native's prebuilt addon links libatomic.so.1
+# and minimal server images lack it. dpkg, not ldconfig: /sbin is often off a
+# non-root PATH, and there is no pipe to SIGPIPE under pipefail.
+dpkg -s libatomic1 >/dev/null 2>&1 || missing+=(libatomic1)
 if [ "${#missing[@]}" -gt 0 ]; then
   say "installing ${missing[*]}"
   sudo apt-get update -qq

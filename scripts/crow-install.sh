@@ -203,6 +203,11 @@ else
   log "Node.js $(node --version) installed"
 fi
 
+# libatomic is needed by rocksdb-native's prebuilt addon (pulled in through
+# hyperswarm); minimal server and cloud images do not ship it. Installed here,
+# on both Node paths, before any dependency install runs.
+sudo apt install -y libatomic1
+
 # ─── Step 3: Install Docker ──────────────────────────────
 
 header "Step 3/9: Docker"
