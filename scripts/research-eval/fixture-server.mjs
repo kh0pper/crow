@@ -16,10 +16,15 @@
  *   CROW_RESEARCH_EVAL=1, CROW_HOME (strictly below the temp dir), CROW_DB_PATH and
  *   CROW_RESEARCH_EVAL_FETCH_LOG (strictly inside CROW_HOME), CROW_ACTOR_KIND=bot,
  *   CROW_ACTOR_BOT_ID; CROW_RESEARCH_EVAL_CASE (the case JSON path).
+ *
+ * On start it writes FIXTURE_START_MARKER (pid, case id, run id) into CROW_HOME: the live runner
+ * asserts that marker, so a unit whose override never reached the fixture server is refused
+ * rather than scored against the real research server.
  */
-import { appendFileSync, readFileSync, realpathSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertEvalEnv } from "./fixture-guard.mjs";
+import { assertEvalEnv, FIXTURE_START_MARKER } from "./fixture-guard.mjs";
 
 async function main(env) {
   assertEvalEnv(env);
@@ -28,6 +33,9 @@ async function main(env) {
   const caseDef = JSON.parse(readFileSync(env.CROW_RESEARCH_EVAL_CASE, "utf8"));
   const fetchLogPath = env.CROW_RESEARCH_EVAL_FETCH_LOG;
   const dbPath = env.CROW_DB_PATH;
+  // The run id rides in on the pinned CROW_BOT_ENV_ALLOW, so the parent can tie this start to its run.
+  writeFileSync(join(env.CROW_HOME, FIXTURE_START_MARKER), JSON.stringify({ pid: process.pid, case: caseDef.id,
+    run_id: env.CROW_EVAL_RUN_ID ?? null, at: new Date().toISOString() }) + "\n", { mode: 0o600 });
 
   // The guard has passed: now the server stack may load.
   const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");

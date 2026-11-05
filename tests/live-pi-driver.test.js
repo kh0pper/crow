@@ -16,10 +16,12 @@ import Database from "better-sqlite3";
 import {
   runConversation, DriverRefusal, SESSION_MISSING, modelErrorOf, TURN_SLACK_MS, survivorsByMarker, settledSurvivorsByMarker, bootSecNow,
 } from "../scripts/lib/live-pi-driver.mjs";
+import { FIXTURE_SERVER } from "../scripts/lib/eval-guard.mjs";
 import { makeScratch, makeTemplate } from "../scripts/research-eval/scratch.mjs";
 
 const REPO = join(import.meta.dirname, "..");
 const DRIVER = join(REPO, "scripts", "lib", "live-pi-driver.mjs");
+const CHILD = join(REPO, "scripts", "lib", "live-pi-driver-child.mjs");
 const STUB = join(REPO, "tests", "fixtures", "live-pi-driver", "stub-pi.mjs");
 const BOT = "drv-bot";
 
@@ -471,15 +473,82 @@ test("child exit 6 maps to contaminated prod pi capacity through runConversation
     (e) => e instanceof DriverRefusal && /capacityCount/.test(e.message));
 });
 
-test("mcpOverrides reaches the child's job file", async (t) => {
-  const mcpOverrides = { "fixture-server": { command: "/bin/true", args: ["--x"] } };
-  const ctx = await setup(t, { over: { mcpOverrides } });
-  const r = await runConversation(ctx.opts);
+/** The eval MCP override the seam accepts, for one scratch home. */
+const evalOverride = (home) => ({
+  "crow-projects": {
+    command: process.execPath,
+    args: [FIXTURE_SERVER],
+    env: { CROW_RESEARCH_EVAL: "1", CROW_HOME: home, CROW_RESEARCH_EVAL_CASE: join(home, "case.json"),
+      CROW_RESEARCH_EVAL_FETCH_LOG: join(home, "fetch.jsonl"), TMPDIR: tmpdir() },
+  },
+});
+/** A def that selects a crow-projects tool, so the world config HAS a block to override. */
+const projectBotDef = () => botDef({ tools: { pi_builtin: [], crow_mcp: ["crow-projects/crow_list_projects"] } });
+
+test("mcpOverrides reaches the child's job file and pi's config, and every turn reports it", async (t) => {
+  const ctx = await setup(t, { over: { botDef: projectBotDef(), allowServers: ["crow-projects"] } });
+  const overrides = evalOverride(ctx.s.home);
+  const r = await runConversation({ ...ctx.opts, mcpOverrides: overrides });
   assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
   for (const id of ["day-1", "day-2"]) {
-    assert.deepEqual(JSON.parse(readFileSync(join(ctx.s.home, `job-${id}.json`), "utf8")).mcpOverrides, mcpOverrides, id);
+    assert.deepEqual(JSON.parse(readFileSync(join(ctx.s.home, `job-${id}.json`), "utf8")).mcpOverrides, overrides, id);
   }
+  for (const th of r.threads) for (const turn of th.turns) assert.deepEqual(turn.mcpOverridden, ["crow-projects"], th.id);
   await ctx.noSurvivors();
+});
+
+test("a thread that never asked for the override reports mcpOverridden null", async (t) => {
+  const ctx = await setup(t);
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
+  for (const th of r.threads) for (const turn of th.turns) assert.equal(turn.mcpOverridden, null, th.id);
+  await ctx.noSurvivors();
+});
+
+test("runConversation refuses a malformed mcpOverrides before any spawn", async (t) => {
+  const ctx = await setup(t, { over: { botDef: projectBotDef(), allowServers: ["crow-projects"] } });
+  const bad = {
+    "another command": { "crow-projects": { ...evalOverride(ctx.s.home)["crow-projects"], command: "/bin/sh" } },
+    "another program": { "crow-projects": { ...evalOverride(ctx.s.home)["crow-projects"], args: [join(REPO, "servers", "research", "index.js")] } },
+    "another home": { "crow-projects": { ...evalOverride(ctx.s.home)["crow-projects"], env: { ...evalOverride(ctx.s.home)["crow-projects"].env, CROW_HOME: tmpdir() } } },
+    "two blocks": { ...evalOverride(ctx.s.home), "crow-memory": evalOverride(ctx.s.home)["crow-projects"] },
+    "not an object": "crow-projects",
+  };
+  for (const [name, overrides] of Object.entries(bad)) {
+    await assert.rejects(runConversation({ ...ctx.opts, mcpOverrides: overrides }),
+      (e) => e instanceof DriverRefusal && /eval mcp override refused/.test(e.message), name);
+  }
+  assert.equal(existsSync(ctx.capture), false, "no pi ever started");
+  assert.equal(ctx.events.some((e) => e.ev === "spawn"), false);
+});
+
+test("PI_OFFLINE=1 reaches pi itself (the stub pi's capture)", async (t) => {
+  const ctx = await setup(t, { knobs: { PIBOT_TEST_REPLIES: JSON.stringify(["one"]) } });
+  const r = await runConversation(ctx.opts);
+  assert.equal(r.ok, true, `${r.contaminated}\n${r.reason}`);
+  const lines = readLines(ctx.capture);
+  assert.ok(lines.length >= 1);
+  // The driver child pins PI_OFFLINE; the pinned CROW_BOT_ENV_ALLOW lets it through to pi.
+  for (const line of lines) assert.equal(line.piOffline, "1");
+  await ctx.noSurvivors();
+});
+
+test("the lazy-loader regexes moved to the parent and still tell a loader from a model server", async () => {
+  const { LAZY_LOADER_RE, LAZY_LOADER_PORT_RE, isLazyLoader } = await import("../scripts/lib/live-pi-driver.mjs");
+  for (const s of ["ollama", "llama-swap", "llama_swap", "Lemonade", "LM Studio", "localai"]) assert.ok(LAZY_LOADER_RE.test(s), s);
+  assert.ok(LAZY_LOADER_PORT_RE.test("http://127.0.0.1:11434/v1"));
+  assert.equal(LAZY_LOADER_PORT_RE.test("http://127.0.0.1:114340/v1"), false);
+  assert.equal(isLazyLoader("ollama", "http://127.0.0.1:9/v1"), true);
+  assert.equal(isLazyLoader(null, "http://127.0.0.1:11434/v1"), true);
+  for (const [t, u] of [["llama-server", "http://127.0.0.1:8010/v1"], [undefined, "http://127.0.0.1:8010/v1"], ["openai", "https://arm.example/v1"]]) {
+    assert.equal(isLazyLoader(t, u), false, `${t} ${u}`);
+  }
+  // The child no longer carries its own copies (it imports the parent's helper).
+  const child = readFileSync(CHILD, "utf8");
+  assert.doesNotMatch(child, /const LAZY_LOADER_RE/);
+  assert.doesNotMatch(child, /const LAZY_LOADER_PORT_RE/);
+  assert.match(child, /isLazyLoader/);
+  assert.equal([...readFileSync(DRIVER, "utf8").matchAll(/export const LAZY_LOADER_(PORT_)?RE/g)].length, 2);
 });
 
 test("parentEnv never weakens the guards", async (t) => {

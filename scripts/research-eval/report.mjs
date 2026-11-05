@@ -8,12 +8,16 @@
  *   --cases  the expected case set (that directory's case files); without it, the expected set is
  *            the union of the case ids any arm has
  *
- * It prints rates only, never a gate verdict: the pass bars are the operator's, set before the
- * first live run and recorded outside this repo. Exit: 0 = the figures are complete · 2 = bad
- * usage · 6 = NO VERDICT (a contaminated or malformed row, a duplicate unit, a sampling setting
- * other than the pre-registered one, an (arm, case) of the expected set with fewer than MIN_REPS
- * scored reps (0 included), or scored rep counts that differ within an arm or across arms for a
- * case: the design fixes the reps per case).
+ * It prints rates and, for a live arm whose case set is the tracked measurement set, the
+ * operator's gate (§14, set 2026-11-05): (a) ≥ 80%, (b) ≥ 80%, (d) ≥ 95%, each as the mean over
+ * the cases where that criterion applies of the per-case pass proportion (operator ruling G), so
+ * undecided (b) counts as non-pass. The bars are NEVER applied to harness rows or to a
+ * `--cases` set other than `cases/`: those print "gate: not applied" with the reason.
+ * Exit: 0 = the figures are complete · 2 = bad usage · 6 = NO VERDICT (a contaminated or
+ * malformed row, a duplicate unit, a sampling setting other than the pre-registered one, an
+ * (arm, case) of the expected set with fewer than MIN_REPS scored reps (0 included), or scored
+ * rep counts that differ within an arm or across arms for a case: the design fixes the reps per
+ * case). No gate line is printed when there is a NO VERDICT.
  *
  * Rules fixed before any run (§5, §13 of the design):
  *   - a row's case pass is RECOMPUTED from row.criteria (every value that is not "n/a" is
@@ -26,18 +30,29 @@
  *   - a criterion rate leaves n/a out of the denominator.
  *
  * Row fields read: arm, case, type, rep, ok, contaminated, criteria {a,b,c,d}, sampling, judge_reason,
- * judge_calls (real judge invocations: the billed count), judge_spans (spans routed to the judge), and
- * evidence: evidence.reasons {a,b,c,d} (one string per failed check, an addition to the
- * design's §6 row format, from the scorer) gives the failing evidence; a contaminated row's evidence.errors is printed with it.
+ * judge_calls (real judge invocations: the billed count), judge_spans (spans routed to the judge),
+ * attempts (live rows: how many tries the unit took), config ({mode, case_set, …} — live gating),
+ * and evidence: evidence.reasons {a,b,c,d} (one string per failed check, an addition to the
+ * design's §6 row format, from the scorer) gives the failing evidence; a contaminated row's
+ * evidence.errors is printed with it.
  */
 import { pathToFileURL } from "node:url";
 import { SIGN_ALPHA, readRows, signTestP } from "../kiosk-eval/report.mjs";
-import { CASES_DIR, loadCases } from "./cases.mjs";
+import { CASES_DIR, caseSetIdentity, loadCases } from "./cases.mjs";
 import { SAMPLING, seedFor } from "./score.mjs";
 
 export { SIGN_ALPHA };
 export const MIN_REPS = 3;
 export const CRITERIA = Object.freeze(["a", "b", "c", "d"]);
+/**
+ * The operator's pass bars, set 2026-11-05 BEFORE any live run (design §14): an arm may back
+ * research bots only at ≥80% on (a), ≥80% on (b) and ≥95% on (d). A gate statistic is not allowed
+ * to move after a run, so this table is frozen and dated.
+ */
+export const GATES = Object.freeze({ set: "2026-11-05", a: 0.80, b: 0.80, d: 0.95 });
+/** Float comparisons of two means never land exactly on a bar: compare with this epsilon. */
+export const GATE_EPSILON = 1e-9;
+export const GATED_CRITERIA = Object.freeze(["a", "b", "d"]);
 /** The case types of the starter set (§4); a type outside it gets its own bucket too. */
 export const TYPES = Object.freeze(["number", "qualifier", "misattribution", "misquote", "date", "derived", "dead_page", "control"]);
 const VALUES = new Set(["pass", "fail", "n/a", "undecided"]);
@@ -68,19 +83,31 @@ const rates = (cnt) => Object.fromEntries(CRITERIA.map((k) => [k, rate(cnt[k].pa
 
 /**
  * rows (any number of arms) → { arms: Map<arm, {
- *   cases: Map<case, { type, reps, passes, pass_prop, criteria: {a,b,c,d} rates, rows }>,
+ *   cases: Map<case, { type, reps, passes, pass_prop, criteria: {a,b,c,d} rates, criteria_counts, rows }>,
  *   headline, criteria_rates, criteria_counts, undecided_rows: [{case, rep}],
  *   contaminated_rows: [{case, rep, reason}], judge: { calls, spans, uncounted },
+ *   live, measurement, retries: { extra, rows },
  *   by_type: { <type>: { cases, headline } } }> }
  * A case's reps count scored rows only; a case with none has pass_prop null and is left out of
  * the headline. judge.calls / judge.spans sum every row's judge_calls / judge_spans (contaminated
  * rows too: a call is paid for whatever became of the row); judge.uncounted = rows without them.
+ * live: every row of the arm is a live row (config.mode === "live"); measurement: live AND every
+ * row's config.case_set is the tracked measurement set; retries: attempts beyond the first, and
+ * how many rows needed one (operator ruling R: the report prints them per arm).
  */
 export function summarize(rows) {
   const arms = new Map();
+  // The measurement set as it is on disk right now: the gate is applied to this and nothing else.
+  const measurement = caseSetIdentity(CASES_DIR);
+  const isMeasurement = (id) => !!id && typeof id === "object" && id.sha === measurement.sha && id.dir === measurement.dir;
   for (const r of rows) {
-    if (!arms.has(r.arm)) arms.set(r.arm, { cases: new Map(), contaminated_rows: [], undecided_rows: [], cnt: counts(), judge: { calls: 0, spans: 0, uncounted: 0 } });
+    if (!arms.has(r.arm)) arms.set(r.arm, { cases: new Map(), contaminated_rows: [], undecided_rows: [], cnt: counts(), judge: { calls: 0, spans: 0, uncounted: 0 }, live: true, measurement: true, retries: { extra: 0, rows: 0 } });
     const a = arms.get(r.arm);
+    a.live = a.live && !!(r.config && r.config.mode === "live");
+    a.measurement = a.measurement && !!(r.config && r.config.mode === "live" && isMeasurement(r.config.case_set));
+    const tries = Number.isInteger(r.attempts) && r.attempts > 0 ? r.attempts : 1;
+    a.retries.extra += tries - 1;
+    if (tries > 1) a.retries.rows += 1;
     if (!a.cases.has(r.case)) a.cases.set(r.case, { type: r.type ?? null, reps: 0, passes: 0, cnt: counts(), rows: [] });
     const c = a.cases.get(r.case);
     if (Number.isInteger(r.judge_calls) && Number.isInteger(r.judge_spans)) { a.judge.calls += r.judge_calls; a.judge.spans += r.judge_spans; }
@@ -98,7 +125,7 @@ export function summarize(rows) {
   for (const [arm, a] of arms) {
     const cases = new Map();
     for (const [id, c] of a.cases) {
-      cases.set(id, { type: c.type, reps: c.reps, passes: c.passes, pass_prop: c.reps ? c.passes / c.reps : null, criteria: rates(c.cnt), rows: c.rows });
+      cases.set(id, { type: c.type, reps: c.reps, passes: c.passes, pass_prop: c.reps ? c.passes / c.reps : null, criteria: rates(c.cnt), criteria_counts: c.cnt, rows: c.rows });
     }
     const scored = [...cases.values()].filter((c) => c.reps > 0);
     const by_type = {};
@@ -109,6 +136,7 @@ export function summarize(rows) {
     out.set(arm, {
       cases, headline: mean(scored.map((c) => c.pass_prop)), criteria_rates: rates(a.cnt), criteria_counts: a.cnt,
       undecided_rows: a.undecided_rows, contaminated_rows: a.contaminated_rows, judge: a.judge, by_type,
+      live: a.live, measurement: a.measurement, retries: a.retries,
     });
   }
   return { arms: out };
@@ -238,6 +266,61 @@ const pc = (x) => (x === null ? "-" : `${Math.round(x * 1000) / 10}%`);
 const p4 = (x) => x.toFixed(4);
 const mark = { pass: "P", fail: "F", "n/a": "-", undecided: "U" };
 
+/**
+ * The gate statistic for one criterion (operator ruling G): the mean, over the cases where the
+ * criterion applies, of that case's criterion pass proportion — never a pooled rate, which would
+ * weight a case with fewer applicable reps more heavily. A case where the criterion is n/a in
+ * every rep leaves the mean. Undecided (b) is non-pass because the per-case proportion counts
+ * only "pass".
+ * @returns {{value: number|null, cases: number}}
+ */
+export function gateStatistic(arm, key) {
+  const per = [];
+  for (const c of arm.cases.values()) {
+    const cnt = c.criteria_counts?.[key];
+    if (!cnt || !cnt.n) continue;
+    per.push(cnt.pass / cnt.n);
+  }
+  return { value: per.length ? per.reduce((s, x) => s + x, 0) / per.length : null, cases: per.length };
+}
+
+/**
+ * The §14 gate for one arm: PASS when (a) ≥ 0.80, (b) ≥ 0.80 and (d) ≥ 0.95 by the statistic above,
+ * compared with an epsilon (float means never land exactly on a bar). `undecided` reports how many
+ * judge-routed spans were counted as non-pass, which the GATE line prints (ruling D+J).
+ * @returns {{pass: boolean, stats: {a,b,d: {value, cases}}, undecided: {spans, rows}}}
+ */
+export function gateVerdict(arm) {
+  const stats = {};
+  let pass = true;
+  for (const k of GATED_CRITERIA) {
+    stats[k] = gateStatistic(arm, k);
+    const v = stats[k].value;
+    if (v === null || v < GATES[k] - GATE_EPSILON) pass = false;
+  }
+  let spans = 0;
+  let rows = 0;
+  for (const c of arm.cases.values()) {
+    for (const r of c.rows) {
+      if (r.criteria.b !== "undecided") continue;
+      rows += 1;
+      spans += Number.isInteger(r.judge_spans) && r.judge_spans > 0 ? r.judge_spans : 1;
+    }
+  }
+  return { pass, stats, undecided: { spans, rows } };
+}
+
+/** The GATE line, or the reason no gate applies to this arm. */
+export function gateLine(arm, summary, refuseCount) {
+  if (!arm.live) return "gate: not applied (harness rows)";
+  if (!arm.measurement) return "gate: not applied (not the measurement set)";
+  if (refuseCount > 0) return "gate: not applied (a refusal below blocks a verdict)";
+  const v = gateVerdict(arm);
+  const fmt = (k) => `${k} ${pc(v.stats[k].value)} ≥${Math.round(GATES[k] * 100)}`;
+  return `GATE ${summary}: ${v.pass ? "PASS" : "FAIL"} (${GATED_CRITERIA.map(fmt).join(", ")}; bars set ${GATES.set}; `
+    + `${v.undecided.spans} undecided span${v.undecided.spans === 1 ? "" : "s"} in ${v.undecided.rows} row${v.undecided.rows === 1 ? "" : "s"} counted as non-pass)`;
+}
+
 /** One line of failing evidence for a scored row: the first reason under each failed criterion. */
 function failLine(r) {
   const parts = [];
@@ -248,11 +331,13 @@ function failLine(r) {
   return parts.join(" | ");
 }
 
-/** The printed report (lines), from rows; pure. */
-export function render(rows) {
+/** The printed report (lines), from rows; pure. `refusalsIn` is the CLI's refusal list (it uses
+ *  the report's own expected set); render recomputes one when it is not given. */
+export function render(rows, { refusalsIn = null } = {}) {
   const s = summarize(rows.filter((r) => typeof r?.arm === "string"));
+  const refused = refusalsIn ?? refusals(rows.filter((r) => typeof r?.arm === "string"));
   const L = [];
-  L.push("Rates only: no pass bar is applied here (the bars are pre-registered separately). Undecided (U) counts as non-pass.");
+  L.push(`Rates, plus the pre-registered gate for a live arm on the tracked measurement set (bars: a and b ≥${Math.round(GATES.a * 100)}%, d ≥${Math.round(GATES.d * 100)}%, set ${GATES.set}). Undecided (U) counts as non-pass.`);
   L.push("\nPer case (a b c d per rep; P pass, F fail, U undecided, - n/a):");
   for (const [arm, a] of s.arms) {
     for (const [id, c] of a.cases) {
@@ -267,7 +352,9 @@ export function render(rows) {
     const cr = CRITERIA.map((k) => `${k} ${pc(a.criteria_rates[k])} (${a.criteria_counts[k].pass}/${a.criteria_counts[k].n})`).join("  ");
     L.push(`  ${arm}: headline ${pc(a.headline)} over ${[...a.cases.values()].filter((c) => c.reps).length} cases;  ${cr}`);
     L.push(`    judge calls: ${a.judge.calls};  spans routed to the judge: ${a.judge.spans}${a.judge.uncounted ? ` (${a.judge.uncounted} rows carry no count)` : ""};  contaminated rows: ${a.contaminated_rows.length};  undecided rows: ${a.undecided_rows.length}`);
+    L.push(`    retries: ${a.retries.extra} extra attempt${a.retries.extra === 1 ? "" : "s"} on ${a.retries.rows} row${a.retries.rows === 1 ? "" : "s"}`);
     L.push(`    by type: ${Object.entries(a.by_type).map(([t, v]) => `${t} ${pc(v.headline)} (${v.cases})`).join(", ")}`);
+    L.push(`    ${gateLine(a, arm, refused.length)}`);
   }
   L.push("\nUndecided rows (non-pass for b):");
   let any = false;
@@ -301,8 +388,8 @@ function main() {
   for (const f of files) {
     try { rows.push(...readRows(f)); } catch (err) { unreadable.push(`unreadable file ${f}: ${err.message}`); }
   }
-  for (const line of render(rows)) console.log(line);
   const refuse = [...unreadable, ...refusals(rows, { cases: expected })];
+  for (const line of render(rows, { refusalsIn: refuse })) console.log(line);
   if (refuse.length) {
     console.log("\nRefusals:");
     for (const r of refuse) console.log(`  ${r}`);

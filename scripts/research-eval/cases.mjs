@@ -10,7 +10,8 @@
  * fetch runs through.
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { join, resolve } from "node:path";
 import { extractReadable } from "../../servers/shared/fetch-page-worker.js";
 import { PREVIEW_CHARS } from "../../servers/shared/fetch-page.js";
 import { MIN_PIECE_CHARS, matchQuote, normalizeForMatch, normalizeQuoteForMatch } from "../../servers/research/quote-match.js";
@@ -181,4 +182,26 @@ export function loadCases(dir = CASES_DIR) {
     return c;
   });
   return cases.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
+ * The identity of a case set: its resolved directory and a sha over its case files (names and
+ * contents, sorted). A live row records it, and report.mjs applies the operator's pass bars only
+ * when it is the tracked measurement set (`cases/`) — a private real-world set loaded with
+ * `--cases` is a face-validity aid and never feeds a gate (design §2).
+ * @returns {{dir: string, sha: string}}
+ */
+export function caseSetIdentity(dir = CASES_DIR) {
+  const root = resolve(dir);
+  const files = readdirSync(root).filter((f) => f.endsWith(".json")).sort();
+  const h = createHash("sha256");
+  for (const f of files) h.update(f).update("\0").update(readFileSync(join(root, f))).update("\0");
+  return { dir: root, sha: h.digest("hex") };
+}
+
+/** True when `identity` is the tracked measurement set as it is on disk right now. */
+export function isMeasurementSet(identity) {
+  if (!identity || typeof identity !== "object") return false;
+  const want = caseSetIdentity(CASES_DIR);
+  return identity.sha === want.sha && resolve(String(identity.dir ?? "")) === want.dir;
 }

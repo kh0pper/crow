@@ -24,8 +24,11 @@
  *   PIBOT_TEST_CRASH_ON_TURN=N       ack the Nth prompt of the session (1-based), then exit 1
  *   (none of these say "SESSION": SECRET_NAME_RE would strip the knob)
  *   PIBOT_TEST_CAPTURE     a file that gets one JSON line { prompt, sessionId, pid, ignoresTerm, runMarker,
- *                          appendSystemPrompt, appendSystemPromptText } per prompt (the last two: the
- *                          --append-system-prompt path and that file's text at prompt time, or null)
+ *                          appendSystemPrompt, appendSystemPromptText, mcpConfig, piOffline } per prompt (the
+ *                          last three: the --append-system-prompt path and that file's text at prompt time
+ *                          (or null), the MCP config the bridge handed over (fd PI_BOT_MCP_CONFIG_FD, else
+ *                          the PI_BOT_MCP_CONFIG file, else null), and PI_OFFLINE as pi saw it);
+ *                          also toolsCsv (the --tools argument, or null)
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -57,6 +60,25 @@ if (writeSession && resumeId) {
 }
 let lastId = null;
 const now = () => new Date().toISOString();
+
+/**
+ * The MCP config the bridge handed this pi: fd delivery pipes it on PI_BOT_MCP_CONFIG_FD (read to
+ * EOF, once), file delivery names PI_BOT_MCP_CONFIG. Parsed once and cached (reading the fd again
+ * would block: it is at EOF).
+ */
+let mcpConfig = null;
+let mcpConfigRead = false;
+function mcpConfigOnce() {
+  if (mcpConfigRead) return mcpConfig;
+  mcpConfigRead = true;
+  let raw = null;
+  try {
+    if (env.PI_BOT_MCP_CONFIG_FD) raw = readFileSync(Number(env.PI_BOT_MCP_CONFIG_FD), "utf8");
+    else if (env.PI_BOT_MCP_CONFIG) raw = readFileSync(env.PI_BOT_MCP_CONFIG, "utf8");
+  } catch { raw = null; }
+  try { mcpConfig = raw === null ? null : JSON.parse(raw); } catch { mcpConfig = null; }
+  return mcpConfig;
+}
 
 /** Prompts already in the session file (selects the reply index across per-turn processes). */
 function priorPrompts() {
@@ -105,7 +127,7 @@ process.stdin.on("data", (chunk) => {
         const sys = arg("--append-system-prompt") ?? null;
         let sysText = null;
         try { if (sys) sysText = readFileSync(sys, "utf8"); } catch { /* unreadable: null */ }
-        appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1", runMarker: env.CROW_EVAL_RUN_ID ?? null, appendSystemPrompt: sys, appendSystemPromptText: sysText }) + "\n");
+        appendFileSync(env.PIBOT_TEST_CAPTURE, JSON.stringify({ prompt: m.message, sessionId, pid: process.pid, ignoresTerm: env.PIBOT_TEST_IGNORE_TERM === "1", runMarker: env.CROW_EVAL_RUN_ID ?? null, appendSystemPrompt: sys, appendSystemPromptText: sysText, mcpConfig: mcpConfigOnce(), piOffline: env.PI_OFFLINE ?? null, toolsCsv: arg("--tools") ?? null }) + "\n");
       }
       if (Number(env.PIBOT_TEST_SKIP_USER_ON_TURN) !== n + 1) record("user", m.message);
       out({ type: "response", command: "prompt", id: m.id, success: true });

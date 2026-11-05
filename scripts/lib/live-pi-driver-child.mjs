@@ -125,7 +125,7 @@ async function main(argv, env) {
   const thread = job.thread.id;
 
   // Only now the driver helpers (crow-home.js, bot-env.js, pi_lifecycle.mjs: no DB, no bridge).
-  const { checkToolSurface, checkToolGrant, killTree } = await import("./live-pi-driver.mjs");
+  const { checkToolSurface, checkToolGrant, killTree, isLazyLoader } = await import("./live-pi-driver.mjs");
   installDeathWatch(killTree);
 
   // Pre-spawn asserts (R2, R7): no warm target, and the static tool surface.
@@ -201,7 +201,7 @@ async function main(argv, env) {
       try { await hooks.shell.assertLiveProject(pdb, job.thread.projectId); } catch (e) { throw refuse(`project ${job.thread.projectId}: ${e.message}`); }
       await hooks.shell.ensureItem(pdb, "perch_thread", thread, { projectId: job.thread.projectId, setBy: "operator" });
     }
-    await runThread({ job, env, thread, perch, pdb, hooks, handleInbound, getSession, countLivePi, progressPath });
+    await runThread({ job, env, thread, perch, pdb, hooks, handleInbound, getSession, countLivePi, progressPath, isLazyLoader });
   } finally { if (pdb) { try { pdb.close(); } catch { /* closed */ } } }
 }
 
@@ -224,9 +224,6 @@ function registryRows(env) {
 }
 
 const SUMMARY_CODE_RE = /^[a-z_]{1,32}$/;
-// llm-router.js: provider kinds (or ollama's port) that load a model on the first request.
-const LAZY_LOADER_RE = /ollama|llama[-_ ]?swap|lemonade|lm[-_ ]?studio|localai/i;
-const LAZY_LOADER_PORT_RE = /:11434(\/|$)/;
 
 /**
  * The summary job's model call (session-summary.js deps.complete), injected in place of
@@ -236,7 +233,7 @@ const LAZY_LOADER_PORT_RE = /:11434(\/|$)/;
  * run's checked models and only `quickModel` may be called. It never goes through llm-router, so
  * it neither reads the host's box reservation nor meters usage.
  */
-function injectedComplete(models, quickModel) {
+function injectedComplete(models, quickModel, isLazyLoader) {
   return async ({ model, prompt, maxTokens = 400, timeoutMs = 60_000 } = {}) => {
     if (!model || typeof prompt !== "string") throw new Error("completeText: model and prompt are required");
     if (String(model) !== quickModel) throw new Error("completeText: refused, not the run's quick model");
@@ -244,7 +241,8 @@ function injectedComplete(models, quickModel) {
     const p = models && models.providers && models.providers[String(model).slice(0, i)];
     if (!p || !p.baseUrl) throw new Error("completeText: no base url for the model");
     const baseUrl = String(p.baseUrl).replace(/\/$/, "");
-    if (LAZY_LOADER_RE.test(String(p.providerType || p.provider_type || "")) || LAZY_LOADER_PORT_RE.test(baseUrl)) {
+    // The lazy-loader tell lives in the parent module (the live preflight refuses one too).
+    if (isLazyLoader(p.providerType || p.provider_type, baseUrl)) {
       throw Object.assign(new Error("completeText: skipped, lazy_loader"), { reason: "lazy_loader" });
     }
     const apiKey = p.apiKey;
@@ -266,7 +264,7 @@ function injectedComplete(models, quickModel) {
 }
 const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 
-async function runThread({ job, env, thread, perch, pdb, hooks, handleInbound, getSession, countLivePi, progressPath }) {
+async function runThread({ job, env, thread, perch, pdb, hooks, handleInbound, getSession, countLivePi, progressPath, isLazyLoader }) {
 
   const fd = openSync(progressPath, "a");
   const emit = (o) => { if (dying) return; writeSync(fd, JSON.stringify(o) + "\n"); fsyncSync(fd); };
@@ -325,6 +323,8 @@ async function runThread({ job, env, thread, perch, pdb, hooks, handleInbound, g
         ev: "turn-end", thread, turn, injected, action: r && r.action, reply: replies.join("\n"),
         piSessionId: (r && r.piSessionId) || null, sessionDir: (session && session.pi_session_dir) || null,
         toolCalls: progressToolCalls(r && r.toolCalls),
+        // The MCP override's receipt (null unless the seam ran): which blocks the fixture replaced.
+        mcpOverridden: (r && r.mcpOverridden) || null,
       };
       emit(end);
       if (!OK_ACTIONS.has(end.action)) throw fail(4, `turn ${turn} ended with action ${end.action}${r && r.error ? `: ${r.error}` : ""}`);
@@ -350,7 +350,7 @@ async function runThread({ job, env, thread, perch, pdb, hooks, handleInbound, g
       // Perch's close hook: the model the session is on, trigger "close". The job reads the flag.
       const row = getSession(job.botDef.id, thread);
       const r = await hooks.summary.summarizeSessionByThread(pdb, thread, {
-        trigger: "close", sessionModelKey: (row && row.model) || null, complete: injectedComplete(readModelsJson(env), job.quickModel),
+        trigger: "close", sessionModelKey: (row && row.model) || null, complete: injectedComplete(readModelsJson(env), job.quickModel, isLazyLoader),
       });
       const detail = r && typeof r.detail === "string" && SUMMARY_CODE_RE.test(r.detail) ? { detail: r.detail } : {};
       // A missing or malformed result is reported as "missing" (the parent contaminates it).

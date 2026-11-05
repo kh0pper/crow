@@ -1469,6 +1469,18 @@ export async function handleInbound(opts) {
     if (typeof transform !== "function") throw new Error("eval spawn transform refused: not a function");
     evalSeam = { guard: await import("../lib/eval-guard.mjs"), sealedHome, transform };
   }
+  // Eval-only MCP override seam: the ONE server block an eval may replace (the research fixture
+  // server in place of servers/research/index.js), checked against a fixed table. Option only —
+  // no env var names an override and no bot-def field is read — and the same guard as above, so
+  // a prod gateway, pibot unit or channel turn fails it. Refused before buildBotWorld below, so a
+  // refused call writes no .mcp.json, spawns no pi and stamps no session.
+  const mcpOverridesOpt = opts.mcpOverrides; // read once
+  let evalMcp = null;
+  if (mcpOverridesOpt !== undefined && mcpOverridesOpt !== null) {
+    const guard = await import("../lib/eval-guard.mjs");
+    const sealedHome = guard.assertEvalSeam();
+    evalMcp = { guard, sealedHome, overrides: guard.checkMcpOverrides(mcpOverridesOpt, sealedHome) };
+  }
   const bot_id = opts.bot_id, gateway_thread_id = opts.gateway_thread_id, user_message = opts.user_message;
   // Gateway-agnostic: the inbound adapter (gmail bridge_tick, discord_gateway)
   // declares its transport. Defaults to gmail for legacy callers that omit it.
@@ -1725,6 +1737,22 @@ export async function handleInbound(opts) {
     spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { mcpConfig: world.mcpConfig });
   }
 
+  // The eval MCP override, at the only point the config is final: after bindWorldSession's rebuild
+  // and before warmModel and the spawn transform (that check compares against the overridden
+  // original, so it is unaffected). Both delivery modes are covered: the build below feeds fd mode
+  // through piRpcOpts and file mode rewrites the world .mcp.json inside the sealed home.
+  let mcpOverridden = null;
+  if (evalMcp !== null) {
+    const { config, changed } = evalMcp.guard.applyMcpOverrides(world.mcpConfig, evalMcp.overrides, evalMcp.sealedHome);
+    spawnPrep.piRpcOpts = Object.assign({}, spawnPrep.piRpcOpts, { mcpConfig: config });
+    world.mcpConfig = config;
+    if (world.mcpDelivery === "file") {
+      const path = evalMcp.guard.checkOverridePath(world.mcpConfigPath, evalMcp.sealedHome);
+      writeFileSync(path, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    }
+    mcpOverridden = changed;
+  }
+
   // Warm the resolved model bundle before spawning pi (same as runJob). The
   // bridge is a separate process from the gateway, so it warms over HTTP via
   // POST /llm/acquire; without this a cold on-demand model (:8003) makes pi
@@ -1876,6 +1904,8 @@ export async function handleInbound(opts) {
     runSkillReview({ bot_id, def, crowHome, sessionDir, transcript: postTurn,
       log: (m) => log("[skill-review] " + m) }).catch(() => {});
   }
+  // The seam's receipt, only when it ran: the caller asserts the fixture server was the one block replaced.
+  if (evalMcp !== null) result.mcpOverridden = mcpOverridden;
   return result;
 }
 
@@ -1933,7 +1963,8 @@ if (import.meta.url === "file://" + process.argv[1]) {
   }
   const inj = a[a.indexOf("--inject") + 1];
   if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T"); process.exit(2); }
-  const payload = JSON.parse(inj);
+  // A --inject payload is arbitrary JSON from a shell: the eval-only seams are never takable that way.
+  const { mcpOverrides: _mcpOverrides, evalSpawnTransform: _evalSpawnTransform, ...payload } = JSON.parse(inj);
   handleInbound(Object.assign({}, payload, {
     log: (m) => console.error("[bridge] " + m),
     sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),

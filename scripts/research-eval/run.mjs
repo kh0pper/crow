@@ -11,11 +11,12 @@
  *   --trajectory  careful | hank | correcting | <case>.<adversarial> (that case only)
  *   --judge       stub-pass is PLUMBING ONLY (every judged sentence passes); omitted = no judge,
  *                 so a judged (b) is undecided
- *   --mode=live   refused: it needs the pi driver (a later plan)
+ *   --mode=live   dispatch to live.mjs (one real model behind the sampling proxy); its own flags,
+ *                 see LIVE_USAGE there.
  *
  * A transport failure is retried with a fresh scratch, at most MAX_ATTEMPTS times; after that the
- * row is written as contaminated. Exit 2 = bad usage or live mode, 3 = --out is not empty and
- * --resume was not given.
+ * row is written as contaminated. Exit 2 = bad usage, 3 = --out is not empty and --resume was not
+ * given.
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -30,7 +31,6 @@ import { makeScratch, makeTemplate, ROOT, SKILL } from "./scratch.mjs";
 import { SAMPLING, noJudge, scoreRow, seedFor, stubPassJudge } from "./score.mjs";
 import { parseSession } from "./session-log.mjs";
 
-export const LIVE_REFUSAL = "live mode is not built yet: it needs the pi driver (a later plan)";
 export const JUDGES = Object.freeze({ "stub-pass": stubPassJudge });
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -126,9 +126,9 @@ export async function runUnit({ caseDef, steps, rep, arm, model, mode = "harness
   return { row: orderRow(row), scratch: null };
 }
 
-const ROW_KEYS = ["arm", "model", "config", "case", "type", "rep", "ok", "parse_ok", "contaminated", "wall_s", "completion_tokens",
+export const ROW_KEYS = Object.freeze(["arm", "model", "config", "case", "type", "rep", "ok", "parse_ok", "contaminated", "wall_s", "completion_tokens",
   "criteria", "case_pass", "evidence", "undecided", "no_prose", "off_set_fetches", "flagged_unconfirmed", "sampling",
-  "judge_reason", "judge_calls", "judge_spans", "skill_sha", "server_sha", "crow_sha"];
+  "judge_reason", "judge_calls", "judge_spans", "skill_sha", "server_sha", "crow_sha"]);
 const orderRow = (r) => Object.fromEntries(ROW_KEYS.map((k) => [k, r[k]]));
 
 /**
@@ -199,12 +199,17 @@ export function parseArgs(argv) {
 }
 
 const USAGE = "usage: run.mjs --mode=harness --trajectory=careful|hank|correcting|<case>.<adversarial> --out=<file>.jsonl "
-  + "[--arm=<label>] [--model=<id>] [--reps=3] [--cases=<dir>] [--concurrency=4] [--judge=stub-pass] [--resume]";
+  + "[--arm=<label>] [--model=<id>] [--reps=3] [--cases=<dir>] [--concurrency=4] [--judge=stub-pass] [--resume]\n"
+  + "       run.mjs --mode=live <live flags: see scripts/research-eval/live.mjs LIVE_USAGE>";
 
 async function main() {
   const arg = parseArgs(process.argv.slice(2));
   const mode = arg.mode || "harness";
-  if (mode === "live") { console.error(LIVE_REFUSAL); process.exit(2); }
+  // Live mode is a whole separate runner (one real model); it lives in live.mjs, loaded only then.
+  if (mode === "live") {
+    const { runLive } = await import("./live.mjs");
+    process.exit(await runLive(arg));
+  }
   if (mode !== "harness") { console.error(`unknown --mode=${mode}\n${USAGE}`); process.exit(2); }
   if (!arg.trajectory || !arg.out) { console.error(USAGE); process.exit(2); }
   if (arg.judge !== undefined && !JUDGES[arg.judge]) { console.error(`unknown --judge=${arg.judge}: only stub-pass exists in harness mode`); process.exit(2); }

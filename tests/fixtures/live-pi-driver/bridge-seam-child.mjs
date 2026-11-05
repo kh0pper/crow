@@ -14,8 +14,9 @@
  *   "narrowedTools" | "tools" | "def" | "newKey" | "remove" | "nonObject" | "mutateInPlace" |
  *   "mutateSpread" | "getter" | "proxy" | "symbol" | "envHome" | "envSet" | "envDelete" | "envProxy" |
  *   "envReplaced"  a forbidden change
- * out.json gets { error, action, called, loaded }: `loaded` is every module URL resolved after
- * this file started (node:module registerHooks), so a test can show what each path loads.
+ * out.json gets { error, action, called, loaded, overrode }: `loaded` is every module URL resolved
+ * after this file started (node:module registerHooks), so a test can show what each path loads;
+ * `overrode` is handleInbound's mcpOverridden receipt (the MCP override seam).
  */
 import { registerHooks } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -79,6 +80,7 @@ const [optsPath, outPath] = process.argv.slice(2);
 const opts = JSON.parse(readFileSync(optsPath, "utf8"));
 let error = null;
 let action = null;
+let overrode = null;
 const state = { called: false };
 const { transform, ...rest } = opts;
 const evalSpawnTransform = transformFor(transform, state);
@@ -86,7 +88,8 @@ try {
   const { handleInbound } = await import("../../../scripts/pi-bots/bridge.mjs");
   const r = await handleInbound({ gateway_type: "perch", sendReply: async () => {}, log: () => {}, ...rest, ...(evalSpawnTransform ? { evalSpawnTransform } : {}) });
   action = r && r.action;
+  overrode = r && r.mcpOverridden !== undefined ? r.mcpOverridden : null;
 } catch (e) { error = String(e && e.message); }
 finally { process.env = REAL_ENV; }
-writeFileSync(outPath, JSON.stringify({ error, action, called: state.called, loaded }));
+writeFileSync(outPath, JSON.stringify({ error, action, called: state.called, loaded, overrode }));
 process.exit(0);
