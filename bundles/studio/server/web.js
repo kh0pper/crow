@@ -1487,9 +1487,12 @@ export function createStudioWeb({
       });
     }
 
-    // Begin (or re-begin) one upload: a take, or — with `kind: "sample"` — a
-    // sample. Idempotent for the same details, so a client that lost the answer
-    // can simply ask again.
+    // Begin (or re-begin) one upload: a take, a sample, or — with
+    // `kind: "font"` — a SoundFont bank the operator brought. Idempotent for the
+    // same details, so a client that lost the answer can simply ask again. A
+    // bank sends no rate or channels: it sends the file's name, its size, and
+    // the first twelve bytes of it, so a file Studio cannot play is refused
+    // before any of it is staged.
     r.put(`${TAKES_BASE}/:take_id`, dashboardAuth, requireCsrf, takesHandled(async (req, res) => {
       const body = req.body ?? {};
       const begun = await takeUploads.begin(String(req.params.take_id ?? ""), {
@@ -1500,6 +1503,9 @@ export function createStudioWeb({
         name: body.name,
         origin: body.origin,
         target: body.target,
+        file_name: body.file_name,
+        bytes: body.bytes,
+        head: body.head,
         rate: body.rate,
         channels: body.channels,
         offset_frames: body.offset_frames,

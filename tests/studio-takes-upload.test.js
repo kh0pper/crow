@@ -154,14 +154,17 @@ function fakeAcl({ deny = false } = {}) {
 }
 
 /**
- * A session hub: `openSong` answers with the song's takes, samples and pads,
- * `runCommand` remembers what it was asked, answers a repeated `cmd_id` with the
- * result it gave the first time, and refuses an id the song already has.
+ * A session hub: `openSong` answers with the song's takes, samples, pads and
+ * library, `runCommand` remembers what it was asked, answers a repeated
+ * `cmd_id` with the result it gave the first time, and refuses an id the song
+ * already has.
  *
- * `take.add`, `sample.add` and the pad assignments behave the way the real ones
- * do where these tests depend on it: an object is added once, a pad points at
- * the sample an assignment names, and `pad.assign_if_empty` (Studio's own)
- * refuses a pad that already holds another sound.
+ * `take.add`, `sample.add`, `library.add` and the pad assignments behave the way
+ * the real ones do where these tests depend on it: an object is added once, a
+ * pad points at the sample an assignment names, `pad.assign_if_empty`
+ * (Studio's own) refuses a pad that already holds another sound, and
+ * `library.add` refuses past a song's own caps (256 entries, 32 fonts) with the
+ * sentences the real command uses.
  *
  * `runCommand` is the hub's per-song queue: one command at a time, in arrival
  * order, so a command's own check sees every write that reached the song before
@@ -171,18 +174,41 @@ function fakeAcl({ deny = false } = {}) {
  * be fooled by a snapshot that changes under it.
  *
  * `unreadable` makes `openSong` throw, the way a database or a locked song can.
- * @param {{takes?: object, samples?: object, pads?: object, bpm?: number,
- *          refuse?: {code: string, error: string}, unreadable?: boolean}} [options]
+ * @param {{takes?: object, samples?: object, pads?: object, library?: object,
+ *          bpm?: number, refuse?: {code: string, error: string},
+ *          unreadable?: boolean}} [options]
  */
-function fakeHub({ takes = {}, samples = {}, pads = {}, bpm = 124, refuse = null, unreadable = false } = {}) {
+function fakeHub({ takes = {}, samples = {}, pads = {}, library = {}, bpm = 124, refuse = null, unreadable = false } = {}) {
   const commands = [];
-  const state = { takes: { ...takes }, samples: { ...samples }, pads: { ...pads } };
+  const state = { takes: { ...takes }, samples: { ...samples }, pads: { ...pads }, library: { ...library } };
   const answers = new Map();
   let queue = Promise.resolve();
 
   /** @returns {object} the result of one command, as the hub would report it */
   function apply(request) {
     if (refuse) return { ok: false, code: refuse.code, error: refuse.error };
+    if (request.command === "library.add") {
+      const entry = request.args?.entry;
+      if (!entry || typeof entry.id !== "string" || entry.id === "") {
+        return { ok: false, code: "invalid", error: "that entry has no id" };
+      }
+      if (state.library[entry.id]) {
+        return {
+          ok: false,
+          code: "invalid",
+          error: `The library already holds an entry with id "${entry.id}".`,
+        };
+      }
+      const entries = Object.values(state.library);
+      if (entries.length >= 256) {
+        return { ok: false, code: "limit", error: `A song's library can hold at most 256 entries.` };
+      }
+      if (entry.kind === "font" && entries.filter((held) => held.kind === "font").length >= 32) {
+        return { ok: false, code: "limit", error: "A song can hold at most 32 fonts." };
+      }
+      state.library[entry.id] = { ...entry };
+      return { ok: true, entry: { command: request.command }, snapshot_version: 2 };
+    }
     if (request.command === "sample.add") {
       const sample = request.args.sample;
       if (state.samples[sample.id]) {
@@ -247,6 +273,7 @@ function fakeHub({ takes = {}, samples = {}, pads = {}, bpm = 124, refuse = null
           takes: state.takes,
           samples: state.samples,
           pads: state.pads,
+          library: state.library,
           clips: {},
         }),
         snapshot_version: 1,
@@ -1377,7 +1404,7 @@ test("two finishes racing on one sample assign once", async () => {
 test("a hostile kind is refused", async () => {
   const { uploads, staging } = setup();
 
-  // A kind is one of the two Studio has, and nothing else: a different case, a
+  // A kind is one of the three Studio has, and nothing else: a different case, a
   // padded or empty-looking string, or a name inherited from Object.prototype
   // (which a lookup table would answer for) is refused by name before a byte of
   // meta is written.
@@ -1408,4 +1435,262 @@ test("importing 40 hits at once does not hit the take cap", async () => {
   // The takes' own cap is untouched by them.
   const take = await uploads.begin(randomUUID(), beginRequest());
   assert.equal(take.chunk_bytes, 1048576);
+});
+
+// --- banks ------------------------------------------------------------------
+
+/**
+ * A small fake bank: the SoundFont magic (`RIFF`, four bytes, `sfbk`) and a
+ * deterministic tail, so the file is recognisable and its hash is the test's
+ * own.
+ * @param {number} [length]
+ * @returns {Buffer}
+ */
+function bankBytes(length = 3000) {
+  const bytes = Buffer.alloc(length);
+  bytes.write("RIFF", 0, "ascii");
+  bytes.writeUInt32LE(Math.max(0, length - 8), 4);
+  bytes.write("sfbk", 8, "ascii");
+  for (let at = 12; at < length; at += 1) bytes[at] = (at * 37) % 251;
+  return bytes;
+}
+
+/** @returns {string} the base64 of a file's first twelve bytes, as `begin` takes it. */
+function bankHead(bytes) {
+  return Buffer.from(bytes).subarray(0, 12).toString("base64");
+}
+
+/** @returns {object} the details a bank upload sends with `begin`. */
+function bankRequest(overrides = {}) {
+  const file = bankBytes(4096);
+  return {
+    kind: "font",
+    song_id: SONG,
+    project_id: PROJECT,
+    author: AUTHOR,
+    name: "My Bank",
+    file_name: "My Bank.sf2",
+    bytes: file.length,
+    head: bankHead(file),
+    ...overrides,
+  };
+}
+
+/** @returns {string} the storage key a bank is filed under. */
+function bankKeyOf(id, ext = "sf2") {
+  return `${PREFIX}studio/${SONG}/library/lib-${id}.${ext}`;
+}
+
+test("a bank upload is refused before it starts when it is not SF2/SF3", async () => {
+  const { uploads, staging } = setup();
+
+  // A file whose first twelve bytes are not `RIFF`…`sfbk`.
+  const notBank = bankBytes(4096);
+  notBank.write("RIFX", 0, "ascii");
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), bankRequest({ head: bankHead(notBank) })),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, "That file is not an SF2 or SF3 bank.");
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a file that is not a bank staged nothing");
+
+  // A file whose own name is neither `.sf2` nor `.sf3`.
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), bankRequest({ file_name: "My Bank.sfz" })),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, "Studio takes SF2 and SF3 banks.");
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a file Studio cannot play staged nothing");
+
+  // A declared size past 512 MB, refused by name.
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), bankRequest({ bytes: 536870913 })),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "That bank is 513 MB; Studio takes banks up to 512 MB.");
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a bank past the limit staged nothing");
+});
+
+test("the server refuses a non-bank at finish", async () => {
+  const { uploads, storage, hub, staging } = setup();
+  const id = randomUUID();
+  const file = bankBytes(2048);
+
+  // The client declares a bank's first bytes — and then sends something else of
+  // the same size, with no SoundFont magic anywhere in front.
+  await uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) }));
+  const hashes = await stageChunks(uploads, id, [Buffer.alloc(file.length, 7)]);
+
+  await assert.rejects(
+    () => uploads.finish(id, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, "That file is not an SF2 or SF3 bank.");
+      return true;
+    },
+  );
+  assert.equal(storage.uploads.length, 0, "nothing reached storage");
+  assert.equal(hub.commands.length, 0, "no library entry was added");
+  assert.deepEqual(storage.deleted, [], "and nothing had to be deleted");
+  // The staged bytes are still the only copy: a corrected upload can finish.
+  assert.deepEqual(stagedNames(staging, id), ["000000.pcm", "000000.pcm.sha256", "meta.json"]);
+});
+
+test("a bank chunk past the declared size is refused", async () => {
+  const { uploads, staging } = setup();
+  const id = randomUUID();
+  const file = bankBytes(64);
+  await uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) }));
+
+  // The first chunk fills the bank exactly; the next byte of it does not exist.
+  await uploads.putChunk(id, 0, file);
+  await assert.rejects(
+    () => uploads.putChunk(id, 1, Buffer.alloc(16, 1)),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.match(error.message, /declared 64 bytes/);
+      return true;
+    },
+  );
+  assert.equal(existsSync(join(staging, id, "000001.pcm")), false);
+});
+
+test("a finished bank upload adds one library entry", async () => {
+  const { uploads, storage, db, acl, hub, staging } = setup();
+  const id = randomUUID();
+  const file = bankBytes(3000);
+  const libraryId = `lib-${id}`;
+  const key = bankKeyOf(id);
+
+  await uploads.begin(id, bankRequest({ name: "My Bank", bytes: file.length, head: bankHead(file) }));
+  const hashes = await stageChunks(uploads, id, [file.subarray(0, 2000), file.subarray(2000)]);
+
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+
+  // One `library.add`, internal, from the person at the page, under the entry's
+  // own id and the key the finish wrote — never a caller's storage key.
+  assert.equal(hub.commands.length, 1);
+  const command = hub.commands[0];
+  assert.equal(command.command, "library.add");
+  assert.equal(command.internal, true);
+  assert.equal(command.cmd_id, `${id}:library`);
+  assert.equal(command.song_id, SONG);
+  assert.deepEqual(command.author, AUTHOR);
+  assert.deepEqual(command.args.entry, {
+    id: libraryId,
+    kind: "font",
+    name: "My Bank",
+    source: "upload",
+    upload_id: id,
+    storage_key: key,
+    sha256: hashOf(file),
+    bytes: file.length,
+    licence: "",
+    credit: "",
+    author_label: "You",
+  });
+
+  // The bank itself, whole and with nothing added: not a WAV, no header.
+  assert.equal(storage.uploads.length, 1);
+  const upload = storage.uploads[0];
+  assert.equal(upload.key, key);
+  assert.match(key, /\/library\/lib-[0-9a-f-]{36}\.sf2$/);
+  assert.equal(upload.size, file.length);
+  assert.deepEqual(upload.bytes, file);
+  assert.deepEqual(upload.options, { bucket: "crow-files", contentType: "application/octet-stream" });
+
+  const insert = db.statements.find(
+    (statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql),
+  );
+  assert.ok(insert, "a storage_files row was written");
+  assert.equal(insert.args[0], key);
+  assert.equal(insert.args[1], `${libraryId}.sf2`);
+  assert.equal(insert.args[2], "application/octet-stream");
+  assert.equal(insert.args[3], file.length);
+  assert.equal(insert.args[5], "studio_library");
+  assert.equal(insert.args[6], SONG);
+  assert.equal(insert.args[7], PROJECT);
+
+  assert.equal(acl.audits.length, 1);
+  assert.equal(acl.audits[0].action, "studio.library");
+  assert.equal(acl.audits[0].actor_type, "local");
+  assert.equal(acl.audits[0].payload.library_id, libraryId);
+  assert.equal(acl.audits[0].payload.storage_key, key);
+  assert.equal(acl.audits[0].payload.bytes, file.length);
+
+  assert.equal(finished.library.id, libraryId);
+  assert.equal(finished.library.sha256, hashOf(file));
+  assert.equal(finished.library.bytes, file.length);
+  assert.ok(hub.state.library[libraryId], "the entry is in the song");
+  assert.deepEqual(stagedNames(staging, id), ["meta.json"]);
+
+  // A retried finish answers with the recorded entry and adds nothing again.
+  const second = await uploads.finish(id, { chunk_hashes: hashes });
+  assert.deepEqual(second, finished);
+  assert.equal(hub.commands.length, 1, "no second library.add");
+  assert.equal(storage.uploads.length, 1, "no second upload");
+  assert.equal(acl.audits.length, 1, "no second audit line");
+});
+
+test("a bank past the song's font limit is refused at finish and leaves nothing stored", async () => {
+  // A song already holding its 32 fonts: the 33rd is `library.add`'s to refuse,
+  // and the upload must leave nothing behind when it does.
+  const fonts = {};
+  for (let index = 0; index < 32; index += 1) {
+    fonts[`lib-font-${index}`] = { id: `lib-font-${index}`, kind: "font", name: `Font ${index + 1}` };
+  }
+  const { uploads, storage, db, acl, hub } = setup({ hub: { library: fonts } });
+  const id = randomUUID();
+  const file = bankBytes(1024);
+  const key = bankKeyOf(id);
+
+  await uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) }));
+  const hashes = await stageChunks(uploads, id, [file]);
+
+  await assert.rejects(
+    () => uploads.finish(id, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 413);
+      assert.equal(error.message, "A song can hold at most 32 fonts.");
+      return true;
+    },
+  );
+
+  // The stored object and its row go, and the song never gained the entry.
+  assert.deepEqual(storage.deleted, [{ key, bucket: "crow-files" }]);
+  assert.equal(db.rows.has(key), false);
+  assert.equal(hub.state.library[`lib-${id}`], undefined);
+  assert.equal(Object.keys(hub.state.library).length, 32);
+  assert.equal(acl.audits.length, 0);
+});
+
+test("a bank id that belongs to a sample upload is refused", async () => {
+  const { uploads, staging } = setup();
+  const id = randomUUID();
+
+  // A finished sample owns its id: the staging, the key and the reference type
+  // are all the sample's, so the same id cannot become a bank.
+  await uploads.begin(id, sampleRequest());
+  const hashes = await stageChunks(uploads, id, [pcm24(signal(32, 2))]);
+  await uploads.finish(id, { chunk_hashes: hashes });
+
+  const file = bankBytes(64);
+  await assert.rejects(
+    () => uploads.begin(id, bankRequest({ bytes: file.length, head: bankHead(file) })),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.equal(error.message, "That id belongs to a sample upload.");
+      return true;
+    },
+  );
+  assert.equal(JSON.parse(readFileSync(join(staging, id, "meta.json"), "utf8")).kind, "sample");
 });
