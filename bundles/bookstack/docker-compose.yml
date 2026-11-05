@@ -1,6 +1,6 @@
 services:
   bookstack:
-    image: linuxserver/bookstack:latest
+    image: linuxserver/bookstack:26.09.2
     container_name: crow-bookstack
     ports:
       - "127.0.0.1:6875:80"

@@ -21,6 +21,7 @@ import { launcherPin } from "../../shared/resolve-command.js";
 import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
+import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
@@ -2802,6 +2803,20 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           appendLog(job, "Docker images pulled");
         } catch (err) {
           appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
+          // Log-only was invisible to an owner who never opens the job log (audit
+          // N1c-7): one bell per bundle per 24 h, fixed text, never the output.
+          // The compose text goes along so a service this repo BUILDS itself
+          // (companion, sdxl, scratch-offline) does not ring: it has nothing to
+          // download. An unreadable compose is no evidence of a local build, so
+          // the bell still rings then.
+          let pullComposeText = "";
+          try { pullComposeText = readFileSync(composePath, "utf8"); } catch { /* ring */ }
+          await reportImagePullFailure({
+            bundleId,
+            bundleName: manifest?.name,
+            composeText: pullComposeText,
+            output: `${err.stderr ?? ""}\n${err.message ?? ""}`,
+          });
         }
 
         // Start containers (add --build if compose file has build directives)

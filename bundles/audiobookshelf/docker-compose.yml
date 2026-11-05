@@ -1,6 +1,6 @@
 services:
   audiobookshelf:
-    image: advplyr/audiobookshelf:latest
+    image: advplyr/audiobookshelf:2.37.2
     container_name: crow-audiobookshelf
     ports:
       - "127.0.0.1:13378:80"

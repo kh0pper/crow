@@ -67,7 +67,7 @@ Si prefieres una configuración manual de Docker en lugar del instalador de bund
 ```yaml
 services:
   linkding:
-    image: sissbruecker/linkding:latest
+    image: sissbruecker/linkding:1.47.0
     container_name: crow-linkding
     ports:
       - "9090:9090"

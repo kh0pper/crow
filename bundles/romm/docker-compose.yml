@@ -9,7 +9,7 @@
 
 services:
   romm:
-    image: rommapp/romm:latest
+    image: rommapp/romm:5.4.1
     ports:
       - "127.0.0.1:3080:8080"
     depends_on:
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   romm-db:
-    image: mariadb:latest
+    image: mariadb:13.0.2
     volumes:
       - romm-db-data:/var/lib/mysql
     environment:

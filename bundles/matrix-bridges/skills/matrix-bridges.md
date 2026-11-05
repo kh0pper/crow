@@ -107,7 +107,7 @@ crow_identity_attest {
 
 ## Bridge updates + CVE awareness
 
-The mautrix project pushes fixes (including security) frequently. This bundle uses the floating `:latest` tag to stay current. `crow bundle restart matrix-bridges` pulls the newest image. Review mautrix changelogs before bridging against production accounts; breaking config changes sometimes require manual YAML edits under `~/.crow/matrix-bridges/<bridge>/config.yaml`.
+The mautrix project pushes fixes (including security) frequently. This bundle pins each bridge image to a released tag (`v0.8.0` signal, `v0.15.3` telegram, `v0.11.2` whatsapp) — a floating `:latest` would upgrade three bridges on a restart the owner did not ask for. Bumping a tag in `docker-compose.yml`, then `crow bundle restart matrix-bridges`, is the update path. Review mautrix changelogs before bridging against production accounts; breaking config changes sometimes require manual YAML edits under `~/.crow/matrix-bridges/<bridge>/config.yaml`.
 
 ## Troubleshooting
 

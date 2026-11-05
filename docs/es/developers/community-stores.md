@@ -109,7 +109,7 @@ Desactiva o elimina una tienda desde la configuración del panel de Extensiones.
 
 ## Buenas prácticas
 
-- Fija las versiones de las imágenes de Docker (no uses `:latest`)
+- Fija las versiones de las imágenes de Docker (no uses `:latest`) — `tests/compose-image-pins.test.js` revisa cada archivo compose de este repositorio, y `scripts/image-pin-allowlist.txt` solo contiene las imágenes que Crow construye por sí mismo
 - Documenta todas las variables de entorno requeridas
 - Incluye los requisitos de recursos en el manifiesto
 - Prueba en Raspberry Pi si tu público objetivo incluye dispositivos ARM

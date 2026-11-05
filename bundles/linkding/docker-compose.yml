@@ -1,6 +1,6 @@
 services:
   linkding:
-    image: sissbruecker/linkding:latest
+    image: sissbruecker/linkding:1.47.0
     container_name: crow-linkding
     ports:
       - "127.0.0.1:9090:9090"

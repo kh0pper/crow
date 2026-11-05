@@ -90,7 +90,7 @@ If you prefer manual Docker setup instead of the bundle installer:
 ```yaml
 services:
   wallabag:
-    image: wallabag/wallabag:latest
+    image: wallabag/wallabag:2.6.15.1
     container_name: crow-wallabag
     ports:
       - "8084:80"

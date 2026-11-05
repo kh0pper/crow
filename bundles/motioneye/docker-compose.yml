@@ -1,6 +1,6 @@
 services:
   motioneye:
-    image: ghcr.io/motioneye-project/motioneye:latest
+    image: ghcr.io/motioneye-project/motioneye:0.44.0
     container_name: crow-motioneye
     ports:
       # Loopback-only — Nest panel iframes this from the same host.

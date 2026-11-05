@@ -109,7 +109,7 @@ Disable or remove a store from the Extensions panel settings. Installed add-ons 
 
 ## Best Practices
 
-- Pin Docker image versions (don't use `:latest`)
+- Pin Docker image versions (don't use `:latest`) — `tests/compose-image-pins.test.js` checks every compose file in this repo, and `scripts/image-pin-allowlist.txt` holds only the images Crow builds itself
 - Document all required environment variables
 - Include resource requirements in the manifest
 - Test on Raspberry Pi if your target audience includes ARM devices

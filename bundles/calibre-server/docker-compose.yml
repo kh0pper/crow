@@ -1,6 +1,6 @@
 services:
   calibre-server:
-    image: linuxserver/calibre:latest
+    image: linuxserver/calibre:9.17.0
     container_name: crow-calibre-server
     ports:
       - "127.0.0.1:8081:8081"

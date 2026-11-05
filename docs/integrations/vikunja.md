@@ -72,7 +72,7 @@ If you prefer manual Docker setup instead of the bundle installer:
 ```yaml
 services:
   vikunja:
-    image: vikunja/vikunja:latest
+    image: vikunja/vikunja:2.8.0
     container_name: crow-vikunja
     ports:
       - "3456:3456"

@@ -1,7 +1,7 @@
 {
   "id": "shiori",
   "name": "Shiori",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Simple bookmark manager — save web pages with cached content for offline reading",
   "type": "bundle",
   "author": "Crow",

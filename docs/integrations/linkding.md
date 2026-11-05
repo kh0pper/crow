@@ -67,7 +67,7 @@ If you prefer manual Docker setup instead of the bundle installer:
 ```yaml
 services:
   linkding:
-    image: sissbruecker/linkding:latest
+    image: sissbruecker/linkding:1.47.0
     container_name: crow-linkding
     ports:
       - "9090:9090"

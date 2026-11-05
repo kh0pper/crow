@@ -187,6 +187,10 @@ export const translations = {
     en: "Your nightly backups keep your identity on this machine only. Make a passphrase-protected copy and store it somewhere else, so a lost disk does not lose your Crow identity.",
     es: "Tus copias nocturnas guardan tu identidad solo en esta máquina. Crea una copia protegida con contraseña y guárdala en otro lugar, para que un disco perdido no signifique perder tu identidad de Crow.",
   },
+  // N1c-7: a failed image pull during an install used to be a job-log line only
+  // (servers/gateway/bundle-pull-alert.js). Fixed text, no command output.
+  "bundles.imagePullFailed.title": { en: "Couldn't download the images for {name}", es: "No se pudieron descargar las imágenes de {name}" },
+  "bundles.imagePullFailed.body": { en: "The install carried on, but the extension's containers may be running an older image or none at all. Start it again from Extensions to retry the download.", es: "La instalación continuó, pero los contenedores de la extensión pueden estar usando una imagen anterior o ninguna. Iníciala de nuevo desde Extensiones para reintentar la descarga." },
   // ─── PT-3 N-5: items from someone not in your contacts (begin) ───
   "notif.notContactLabel": { en: "Not in your contacts", es: "No está en tus contactos" },
   "notif.notContactCallWarning": { en: "Someone who is not in your contacts says they are calling. Open the link only if you expected this call.", es: "Alguien que no está en tus contactos dice que te está llamando. Abre el enlace solo si esperabas esta llamada." },
@@ -427,6 +431,19 @@ export const translations = {
   "signals.publishedPorts.infoAllowlisted": { en: "{name}: port {port} on {addr} is on the published-ports allowlist", es: "{name}: el puerto {port} en {addr} está en la lista de permitidos de puertos publicados" },
   "signals.publishedPorts.kindAddressed": { en: "interface-pinned rule", es: "regla fijada a una interfaz" },
   "signals.publishedPorts.kindPortOnly": { en: "port-only rule", es: "regla solo de puerto" },
+
+  // Bundle images (audit N1c-7) — informational only, never a warn. An image
+  // older than BUNDLE_IMAGE_STALE_DAYS (bundle-images.js) gets one line naming
+  // its bundle.
+  "signals.bundleImages.label": { en: "Bundle images", es: "Imágenes de extensiones" },
+  "signals.bundleImages.ok": { en: "bundle images are recent", es: "las imágenes de las extensiones son recientes" },
+  "signals.bundleImages.unknown": { en: "unknown", es: "desconocido" },
+  "signals.bundleImages.unknownWhy": { en: "Crow can't ask Docker how old the installed extensions' images are ({reason}), so their age is unknown.", es: "Crow no puede preguntar a Docker la antigüedad de las imágenes de las extensiones instaladas ({reason}), así que se desconoce." },
+  "signals.bundleImages.reasonDocker": { en: "docker ps did not answer", es: "docker ps no respondió" },
+  "signals.bundleImages.reasonInspect": { en: "docker image inspect did not answer", es: "docker image inspect no respondió" },
+  "signals.bundleImages.old": { en: "{name}: image is {days} days old", es: "{name}: la imagen tiene {days} días" },
+  "signals.bundleImages.count": { en: "{n} bundle image(s) older than 90 days", es: "{n} imagen(es) de extensión con más de 90 días" },
+  "signals.bundleImages.action": { en: "Open extensions", es: "Abrir extensiones" },
 
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },

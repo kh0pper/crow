@@ -4,7 +4,7 @@
     {
       "id": "actual-budget",
       "name": "Actual Budget",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
       "type": "bundle",
       "author": "Crow",
@@ -241,7 +241,7 @@
     {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
       "type": "bundle",
       "author": "Crow",
@@ -317,7 +317,7 @@
     {
       "id": "bookstack",
       "name": "BookStack",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
       "type": "bundle",
       "author": "Crow",
@@ -681,7 +681,7 @@
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
       "type": "bundle",
       "author": "Crow",
@@ -758,7 +758,7 @@
     {
       "id": "calibre-web",
       "name": "Calibre-Web",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Web-based ebook reader and library manager for Calibre",
       "type": "bundle",
       "author": "Crow",
@@ -2485,7 +2485,7 @@
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "author": "Crow",
@@ -2570,7 +2570,7 @@
     {
       "id": "kavita",
       "name": "Kavita",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
       "type": "bundle",
       "author": "Crow",
@@ -2860,7 +2860,7 @@
     {
       "id": "kolibri",
       "name": "Kolibri",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Offline-first learning platform from Learning Equality — self-hosted STEM and literacy content for ages 5-18. Classroom-capable, LAN-sync built in, thousands of free educational channels curated by the global learning community.",
       "type": "bundle",
       "author": "Crow",
@@ -3042,7 +3042,7 @@
     {
       "id": "linkding",
       "name": "Linkding",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
       "type": "bundle",
       "author": "Crow",
@@ -3559,7 +3559,7 @@
     {
       "id": "matrix-bridges",
       "name": "Matrix Bridges",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp, custom crow-matrix-bridge). Opt-in per bridge; each has its own consent text and hardware requirements. Installs appservice registrations into Dendrite and restarts the homeserver.",
       "type": "bundle",
       "author": "Crow",
@@ -4139,7 +4139,7 @@
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -4319,7 +4319,7 @@
     {
       "id": "motioneye",
       "name": "motionEye",
-      "version": "0.43.1",
+      "version": "0.44.0",
       "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
       "type": "bundle",
       "author": "Crow",
@@ -4412,7 +4412,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -4842,7 +4842,7 @@
     {
       "id": "ollama",
       "name": "Ollama (Local AI)",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Run local AI models for embeddings, summarization, and content classification via Ollama",
       "type": "bundle",
       "author": "Crow",
@@ -4895,7 +4895,7 @@
     {
       "id": "paperless",
       "name": "Paperless-ngx",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Document management with OCR — scan, search, tag, and organize paper documents digitally",
       "type": "bundle",
       "author": "Crow",
@@ -5302,7 +5302,7 @@
     {
       "id": "plex",
       "name": "Plex",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "privileged": true,
       "install_consent_messages": {
         "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -5844,7 +5844,7 @@
       "id": "romm",
       "name": "RoMM",
       "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "bundle",
       "author": "Crow",
       "category": "gaming",
@@ -6221,7 +6221,7 @@
     {
       "id": "shiori",
       "name": "Shiori",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Simple bookmark manager — save web pages with cached content for offline reading",
       "type": "bundle",
       "author": "Crow",
@@ -6511,7 +6511,7 @@
     {
       "id": "tailscale",
       "name": "Tailscale",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "privileged": true,
       "install_consent_messages": {
         "en": "The Tailscale container joins this machine to your tailnet. It uses host networking, the NET_ADMIN capability and the /dev/net/tun device, so it creates a network interface and changes this machine's routing and firewall rules. Do not install it on a machine that already runs Tailscale.",
@@ -6702,7 +6702,7 @@
     {
       "id": "trilium",
       "name": "TriliumNext",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
       "type": "bundle",
       "author": "Crow",
@@ -7032,7 +7032,7 @@
     {
       "id": "vikunja",
       "name": "Vikunja",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
       "type": "bundle",
       "author": "Crow",
@@ -7098,7 +7098,7 @@
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",
@@ -7387,7 +7387,7 @@
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
       "type": "bundle",
       "author": "Crow",

@@ -92,7 +92,7 @@ If you prefer manual Docker setup instead of the bundle installer:
 ```yaml
 services:
   bookstack:
-    image: lscr.io/linuxserver/bookstack:latest
+    image: lscr.io/linuxserver/bookstack:26.09.2
     container_name: crow-bookstack
     ports:
       - "6875:80"

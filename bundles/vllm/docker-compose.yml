@@ -1,6 +1,6 @@
 services:
   vllm:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.33.0
     container_name: crow-vllm
     # NVIDIA Container Toolkit is required — install nvidia-container-toolkit
     # on the host and make sure `docker info | grep -i nvidia` lists the

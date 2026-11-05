@@ -1,7 +1,7 @@
 {
   "id": "actual-budget",
   "name": "Actual Budget",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
   "type": "bundle",
   "author": "Crow",
