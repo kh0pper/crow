@@ -165,6 +165,31 @@ function isConnectionRefused(err) {
  *   ok   = it answered 2xx, so it is a gateway and may be asked for a backup.
  *   status/error carry the reason for the refusal sentence.
  */
+/**
+ * Whether a user other than this one could be holding the database the way a
+ * gateway does (writing it): true when the file (or its -wal/-shm) belongs to
+ * someone else or lets its group or others write it. A crow.db is normally
+ * 0644 and the owner's, so other users can at most read it, which is not the
+ * live-WAL hazard a local copy must avoid. A stat failure counts as "could".
+ * @param {string} dbPath
+ * @returns {boolean}
+ */
+function othersCanOpen(dbPath) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch (err) {
+      if (err && err.code === "ENOENT" && file !== dbPath) continue;
+      return true;
+    }
+    if (uid !== null && st.uid !== uid) return true;
+    if ((st.mode & 0o022) !== 0) return true;
+  }
+  return false;
+}
+
 export async function probeGateway(port, timeoutMs = 2000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -470,9 +495,12 @@ async function make({ dbPath, reportFile, dryRun }) {
       );
     }
     const holders = scan.holders;
-    // Processes whose open files we could not see (another user's): "nobody
-    // holds it" is not a fact this host can give, so it is said out loud and
-    // never used to justify opening the live database while a gateway answers.
+    // Processes whose open files we could not see (another user's). For a
+    // normal user that is every root and system process, so it matters only
+    // when another user could write this database: a file owned by someone
+    // else, or one its group or others may write. Then
+    // "nobody holds it" is not a fact this host can give, and it is never used
+    // to justify opening the live database while a gateway answers.
     const blind = scan.unreadable > 0
       ? `could not see the open files of ${scan.unreadable} process${scan.unreadable === 1 ? "" : "es"} owned by other users`
       : null;
@@ -486,7 +514,7 @@ async function make({ dbPath, reportFile, dryRun }) {
           `the gateway that serves it).`;
       throw new Error(blind ? `${base} Also, ${blind}.` : base);
     }
-    if (blind && probe.ok) {
+    if (blind && probe.ok && othersCanOpen(dbPath)) {
       // A gateway answered, but not about OUR database: whatever is behind that
       // port may be the process holding our file, and the handles cannot rule it
       // out. Never fall through to a local copy on that evidence.
