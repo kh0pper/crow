@@ -9,6 +9,10 @@ import { addColumnIfMissing } from "./0006-bot-sessions-archived.mjs";
 
 export const id = "0016-crow-to-crow";
 
+// rollbackSafe: new c2c_* tables plus one additive project_members column;
+// older code never reads the tables and ignores the column.
+export const rollbackSafe = true;
+
 export const C2C_TABLES_SQL = `
   CREATE TABLE IF NOT EXISTS project_shared_items (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

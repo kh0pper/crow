@@ -300,8 +300,10 @@ test("a tree half that REFUSED a restart is not overridden by convergence", asyn
     const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "auto-update.js"), "utf8");
     assert.ok(src.includes("treeResult?.converge === false"),
       "checkForUpdates must honor its own tree half's refusal");
-    assert.equal((src.match(/converge: false/g) || []).length, 4,
-      "all FOUR restart-withholding branches must be marked (2 loss paths + 2 init-db failures)");
+    assert.equal((src.match(/converge: false/g) || []).length, 6,
+      "all SIX restart-withholding branches must be marked (2 loss paths + 2 init-db " +
+      "failures + the N1c-3 rollback and its blocked variant, which withhold the restart into " +
+      "a sha that was just rolled back)");
     assert.equal(converged, false);
   } finally {
     conv._setRestartForTest(null);

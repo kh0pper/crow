@@ -18,6 +18,9 @@ import { addColumnIfMissing } from "./0006-bot-sessions-archived.mjs";
 
 export const id = "0014-perch-session-files-kind";
 
+// rollbackSafe: additive perch_session_files columns; older code ignores them.
+export const rollbackSafe = true;
+
 export function run({ dbPath, log = () => {} }) {
   const results = [];
   const db = new Database(dbPath);

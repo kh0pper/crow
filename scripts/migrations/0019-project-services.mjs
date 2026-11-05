@@ -28,6 +28,10 @@ import {
 
 export const id = "0019-project-services";
 
+// rollbackSafe: a new table, its index and additive columns; older code never
+// reads the table and ignores the columns.
+export const rollbackSafe = true;
+
 const hasTable = (db, name) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 
 /** "added" | "no-op" | "absent" — runs the constant's own ALTER; never throws on a missing table. */

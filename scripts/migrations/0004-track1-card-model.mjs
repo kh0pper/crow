@@ -30,6 +30,9 @@ import { resolveSqlitePath } from "../pi-bots/instance-paths.mjs";
 
 export const id = "0004-track1-card-model";
 
+// rollbackSafe: NO — it DROPs tasks_items.plan_ref, which older code reads.
+export const rollbackSafe = false;
+
 export const BOARD_PLANS_DDL = `CREATE TABLE IF NOT EXISTS board_plans (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id INTEGER NOT NULL,

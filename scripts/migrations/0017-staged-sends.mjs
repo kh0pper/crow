@@ -16,6 +16,9 @@ import Database from "better-sqlite3";
 
 export const id = "0017-staged-sends";
 
+// rollbackSafe: a new table and its indexes only; older code never reads them.
+export const rollbackSafe = true;
+
 // Byte-for-byte the block in scripts/init-db.js ("staged_sends table").
 export const STAGED_SENDS_DDL = `
   CREATE TABLE IF NOT EXISTS staged_sends (

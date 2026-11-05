@@ -104,6 +104,23 @@ function pushFile(fx, name, content) {
   g(pusher, "add", name);
   g(pusher, "commit", "-m", `up ${name}`);
   g(pusher, "push", "origin", "main");
+  return g(pusher, "rev-parse", "HEAD");
+}
+
+/** Several files in one commit: a pulled sha whose gateway throws at import. */
+function pushFiles(fx, files) {
+  const pusher = mkdtempSync(join(fx.root, "pusher-"));
+  execFileSync("git", ["clone", fx.origin, pusher], { stdio: "pipe" });
+  g(pusher, "config", "user.email", "t@t");
+  g(pusher, "config", "user.name", "t");
+  for (const [name, content] of Object.entries(files)) {
+    mkdirSync(join(pusher, name, ".."), { recursive: true });
+    writeFileSync(join(pusher, name), content);
+  }
+  g(pusher, "add", "-A");
+  g(pusher, "commit", "-m", "pulled sha");
+  g(pusher, "push", "origin", "main");
+  return g(pusher, "rev-parse", "HEAD");
 }
 
 function pushCommit(fx) {
@@ -222,6 +239,50 @@ test("a stderr-carrying failure rings with the cause and action but no command o
     assert.match(n.body, /local changes overlap it/);
     // The raw result embeds `git pull` stderr — it must never reach the bell.
     assert.ok(!/a\.txt|error:|fatal:|local-dirty/i.test(`${n.title} ${n.body}`), `${n.title} | ${n.body}`);
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REAL_APP_ROOT);
+    fx.cleanup();
+  }
+});
+
+test("a rolled-back update and a quarantined commit each ring once, quoting our own sentence", async () => {
+  // N1c-3 Layer 0: the settings write is the only bell for these, so each new
+  // code needs an UPDATE_FAILURE_TEXT row AND a RESULT_TEXT_IS_SAFE entry —
+  // the recorded text is quoted into the body only for codes whose sentence is
+  // ours (no git/npm stderr).
+  const fx = originFixture();
+  const db = stubDb();
+  try {
+    const bad = pushFiles(fx, {
+      "servers/gateway/index.js": `import "./boom.js";
+if (process.env.CROW_GATEWAY_IMPORT_CHECK === "1") { process.stdout.write("crow-gateway-import-ok\\n"); process.exit(0); }
+`,
+      "servers/gateway/boom.js": "throw new Error('the gateway graph does not load');\n",
+    });
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+
+    const rolled = await checkForUpdates();
+    assert.equal(rolled.rolledBack, true, JSON.stringify(rolled));
+    assert.equal(db.notifications.length, 1, `one bell, saw ${JSON.stringify(db.notifications)}`);
+    const n = db.notifications[0];
+    assert.equal(JSON.parse(n.metadata).code, "update-rolled-back");
+    assert.equal(n.source, "auto-update");
+    assert.match(n.title, /rolled back an update that would not start/i);
+    assert.match(n.body, new RegExp(`Rolled back: ${bad.slice(0, 9)} fails to load \\(import-check\\)`),
+      "the recorded result is quoted verbatim: it is our own fixed sentence plus shas");
+
+    // Next tick: the same commit is still the head of main, so updates are
+    // skipped — a DIFFERENT code, so it rings too.
+    const quarantined = await checkForUpdates();
+    assert.equal(quarantined.skipped, "update-quarantined");
+    assert.equal(db.notifications.length, 2);
+    const q = db.notifications[1];
+    assert.equal(JSON.parse(q.metadata).code, "update-quarantined");
+    assert.match(q.title, /quarantined/i);
+    assert.match(q.body, /^Skipped: update quarantined \(/, "our own sentence, never command output");
+    assert.ok(!/boom|Error:|fatal:/i.test(`${q.title} ${q.body}`));
   } finally {
     _setDbForTest(null);
     _setAppRootForTest(REAL_APP_ROOT);

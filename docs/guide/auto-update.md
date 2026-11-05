@@ -15,13 +15,19 @@ The auto-updater runs as a background task inside the gateway process:
    (`suite`, `static-checks`, `audit`). A red or still-running build skips the
    update until the next check; forks without those CI checks are unaffected.
    Disable with `CROW_UPDATE_CI_GATE=0`.
-3. **Stash** — if there are local changes (modified files, uncommitted work), stashes them automatically
-4. **Pull** — runs `git pull --ff-only origin main` (fast-forward only, no merge commits)
+3. **Quarantine check** — if this host already rolled a commit back, and that
+   commit is still the head of `main`, the update is skipped (see
+   [Automatic rollback](#automatic-rollback))
+4. **Pull** — runs `git pull --ff-only origin main` (fast-forward only, no merge commits).
+   Local changes are **not** stashed: `git pull` refuses only when the incoming
+   diff overlaps a file you modified, and leaves every other local edit alone.
 5. **Dependencies** — runs `npm install` if `package.json` or `package-lock.json` changed
-6. **Migrations** — runs `node scripts/init-db.js` for any schema changes, wrapped in
+6. **Import check** — loads the pulled gateway's whole import graph in a short-lived
+   child process. If it does not load, the update is rolled back before it is ever
+   started (see [Automatic rollback](#automatic-rollback))
+7. **Migrations** — runs `node scripts/init-db.js` for any schema changes, wrapped in
    the migration guard (automatic pre-migration backup + data-loss protection — see
    the [database recovery guide](../developers/db-recovery.md))
-7. **Restore** — pops the stash to restore local changes. If there are conflicts, restores a clean state and logs a warning
 8. **Restart** — gracefully closes the HTTP server and exits so systemd restarts the process
 
 ## Configuration
@@ -40,18 +46,65 @@ Go to **Settings > Updates** in the Crow's Nest to:
 - See when the last check ran and what it found
 - Manually trigger an update check
 
-## Dirty Working Tree
+## Local changes
 
-If your instance has local modifications (common on development machines or after manual config edits), the auto-updater handles them gracefully:
+An instance with local modifications (a development machine, or a hand-edited
+config file) needs no special handling:
 
-1. Before pulling, runs `git stash --include-untracked` to save all local changes
-2. After the update completes, runs `git stash pop` to restore them
-3. If the restore has merge conflicts, the updater:
-   - Runs `git checkout -- .` to return to a clean post-update state
-   - Logs a warning with instructions to recover changes manually
-   - Your changes are preserved in `git stash list` and can be recovered with `git stash pop`
+1. The updater never stashes or discards anything. It runs `git pull --ff-only`,
+   which refuses only when the incoming diff overlaps a file you modified.
+2. Every other local edit survives the update untouched.
+3. A refused pull is reported in Settings > Updates (`Pull failed …`) and retried
+   on the next check. Commit, revert or stash the overlapping file to let the
+   update through.
 
-This means the gateway always restarts with valid source code, even if your local changes conflict with the update.
+There is no stash/pop cycle any more: a stash that failed to reapply used to
+leave the checkout clean but the operator's work parked in `git stash list`.
+
+## Automatic rollback
+
+An update that cannot start is worse than a late update: systemd restarts a
+crashing gateway every few seconds, so the fix on `main` is never even fetched.
+Crow therefore checks the pulled code **before** committing to it.
+
+**Layer 0 (this release).** After the pull and `npm install`, and *before*
+`init-db` runs, the updater launches the pulled `servers/gateway/index.js` in a
+child process with `CROW_GATEWAY_IMPORT_CHECK=1`, using the environment the unit
+actually configures. That file answers with a one-line token and exit code 0 as
+its very first statement, which proves the entire static import graph loaded. On
+a clean non-zero exit, a timeout (60 s), or a missing token, the updater:
+
+1. writes `<git-dir>/crow-update-quarantine.json` naming the commit — so no
+   instance on this checkout pulls it again;
+2. moves the checkout back with `git reset --keep <previous>`, which refuses
+   rather than destroying local changes that overlap;
+3. reinstalls dependencies if they changed, and
+4. records `Rolled back: <sha> fails to load (…)` in Settings > Updates and
+   rings the notification bell.
+
+Nothing restarts into the bad commit. A commit whose code does not load stays
+quarantined until `main` moves past it; a rollback taken for a machine-side
+reason (a timeout, a failed `npm install`, a failed `init-db` that changed
+nothing) also expires after 6 hours. If `git reset --keep` refuses because local
+changes overlap, the quarantine stays, the restart is withheld, and the result
+says `Update rollback blocked` — including the case where the checkout is still
+holding the bad commit, so the next restart or reboot would boot it.
+
+`init-db` failing after a pull is only rolled back when nothing about the new
+code can have reached the database: the pull must not cross a schema generation,
+`scripts/init-db.js` must be byte-identical in both commits, the database must
+still be readable, and `user_version` must not have advanced. Otherwise the
+tree is left where it is and the alert says so.
+
+Every co-hosted instance sharing the checkout honors the same marker: none of
+them migrates or restarts into a quarantined commit, and each one separately
+verifies that *its own* environment can load the tree before migrating.
+
+**Layer 1 (next).** A crash that Layer 0 cannot see — anything behind a dynamic
+import, or a failure that only appears under the service manager's environment —
+is caught by a boot guard that runs from outside the gateway's module graph,
+before each start, and rolls the checkout back after three crashes. It ships
+separately; until then, a crash loop still needs the manual rollback below.
 
 ## Graceful Restart
 
@@ -61,7 +114,8 @@ When the auto-updater (or a bundle install) triggers a restart, it:
 2. Waits 1 second for the socket to release
 3. Exits with code 1 so systemd's `Restart=on-failure` brings the service back up
 
-This prevents the common `EADDRINUSE` error where the new process starts before the old one has released the port.
+This prevents the common `EADDRINUSE` error where the new process starts before
+the old one has released the port.
 
 ## Manual Update
 
@@ -79,16 +133,35 @@ Or trigger a one-time check from the Settings page without enabling automatic ch
 
 ## Rollback
 
-If an update causes issues:
+If an update causes issues, roll back **on `main`**:
 
 ```bash
 cd ~/crow
-git log --oneline -5          # Find the previous commit
-git checkout <commit-hash>    # Roll back
+git log --oneline -5             # Find the previous commit
+git reset --keep <commit-hash>   # Move main back, keeping unrelated local edits
 sudo systemctl restart crow-gateway
 ```
 
-The auto-updater only uses fast-forward pulls, so `git reflog` always has the previous state.
+Use `reset`, never `checkout`: `git checkout <commit>` detaches HEAD, the
+checkout is no longer "on main", and the auto-updater then skips **every** check
+with `Skipped: not on main` — updates stop silently until someone moves the
+branch back.
+
+`git reset --keep` refuses if the commit you are moving to differs in a file you
+have modified; commit, stash or revert that file first. The auto-updater only
+uses fast-forward pulls, so `git reflog` always has the previous state.
+
+If you rolled back because a commit did not start, also write the quarantine so
+no instance re-pulls it:
+
+```bash
+printf '{"v":1,"sha":"<bad-sha>","previous":"<good-sha>","reason":"manual","at":"%s","by":"operator"}\n' \
+  "$(date -Iseconds)" > "$(git rev-parse --absolute-git-dir)/crow-update-quarantine.json"
+```
+
+The marker lives in the git dir, not in `.git/` by name: in a linked worktree the
+git dir is elsewhere, and `git rev-parse --absolute-git-dir` is the path the
+updater itself uses.
 
 ## Logs
 
@@ -98,10 +171,16 @@ Update activity is logged to the gateway's stdout (visible in `journalctl -u cro
 [auto-update] Enabled — checking every 6h
 [auto-update] 3 new commit(s) available. Updating...
 [auto-update] Dependencies changed — running npm install...
+[auto-update] import check unavailable in 1a2b3c4d5 (no CROW_GATEWAY_IMPORT_CHECK seam) — relying on the boot guard
 [auto-update] Running database migrations...
-[auto-update] Local changes stashed and restored successfully.
 [auto-update] Updated: c29e19c → 9d18049
 [auto-update] Restarting gateway via systemd...
+```
+
+A rollback reads:
+
+```
+[auto-update] Rolled back: 9d18049 fails to load (import-check); running c29e19c; updates resume when main moves past it
 ```
 
 Update results are also saved to the database and visible in Settings > Updates.

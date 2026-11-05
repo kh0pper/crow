@@ -17,6 +17,9 @@ import { addColumnIfMissing } from "./0005-bot-sessions-label-cwd.mjs";
 
 export const id = "0008-data-backend-approval";
 
+// rollbackSafe: one additive data_backends column; older code ignores it.
+export const rollbackSafe = true;
+
 export function run({ dbPath, log = () => {} }) {
   const db = new Database(dbPath);
   db.pragma("busy_timeout = 10000");

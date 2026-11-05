@@ -39,6 +39,8 @@ export function compareHealth(before, after) {
 
 import { readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import { checkTreeImport } from "./boot/import-check.js";
+import { activeUpdateQuarantine } from "../shared/update-quarantine.js";
 
 /** How long a convergence has to boot and verify before we call it failed.
  *  Must exceed the worst realistic boot: a guarded SCHEMA_GENERATION migration
@@ -316,14 +318,60 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
     log("could not acquire the checkout lock — deferring convergence to the next tick");
     return { pulled, converged: false, skipped: "tree-busy", sha: head, applied: [] };
   }
-  // A read-only tree's lock was only observed: if HEAD moved since it was
-  // read, a pull happened in between; migrate next tick from a settled tree.
-  if (lock.endsWith("#observed") && (await git(root, ["rev-parse", "HEAD"])).stdout !== head) {
-    log("read-only tree moved while converging — deferring to the next tick");
-    return { pulled, converged: false, skipped: "tree-busy", sha: head, applied: [] };
+
+  // S7: `head` was read BEFORE the lock, and a puller may have moved the tree
+  // in between. Decide on the sha the checkout actually holds now: a rollback
+  // that landed while we waited must not be converged into, and a tree that
+  // already equals the boot sha needs nothing at all.
+  const headNow = (await git(root, ["rev-parse", "HEAD"])).stdout;
+  if (headNow !== head) {
+    au.releaseCheckoutLock(lock);
+    if (headNow === boot) {
+      log(`the tree is back at the booted sha ${String(headNow).slice(0, 9)} — nothing to converge`);
+      return { pulled, converged: false, skipped: "current", sha: headNow, applied: [] };
+    }
+    log(`the tree moved to ${String(headNow).slice(0, 9)} while waiting for the lock — deferring to the next tick`);
+    return { pulled, converged: false, skipped: "tree-moved", sha: headNow, applied: [] };
+  }
+
+  // B3: a sha the updater rolled back is not migrated and not restarted into by
+  // anybody, including the peer that never pulled it. Without this a co-hosted
+  // instance whose own env loads the sha fine still converges into it.
+  const gitDir = await au.gitDirFor(root);
+  const uq = activeUpdateQuarantine({ gitDir });
+  if (uq && uq.sha === headNow) {
+    au.releaseCheckoutLock(lock);
+    log(`refusing to converge: ${headNow.slice(0, 9)} is update-quarantined (${uq.reason})`);
+    return { pulled, converged: false, skipped: "update-quarantined", sha: headNow, applied: [] };
   }
 
   try {
+    // L0.4: prove THIS instance's environment can load the tree before any
+    // migration touches its store. The puller's check ran with the same env, but
+    // an env-specific import crash (an instance-path gate refusal, a missing
+    // credential) is exactly what a peer has that the puller does not.
+    const importCheck = await checkTreeImport({ appRoot: root });
+    if (importCheck.skipped) {
+      log(`import check unavailable in ${String(headNow).slice(0, 9)} (no seam) — the boot guard is the backstop`);
+    } else if (!importCheck.ok) {
+      const reason = importCheck.reason || "import-check";
+      writeConvQuarantine({ appRoot: root, dataDir: inst.dataDir, sha: headNow, why: `import check failed (${reason})` });
+      try {
+        const { fireMigrationAlert } = await import("../shared/migration-guard.js");
+        await fireMigrationAlert({
+          code: "convergence-import-failed",
+          title: "Crow update quarantined: the gateway does not load here",
+          body:
+            `This instance could not load ${String(headNow).slice(0, 9)} (${reason}), so it withheld the ` +
+            `migration and the restart and keeps running its current code. That sha is quarantined on ` +
+            `this host. The tree was NOT rolled back: the puller's own check passed, so other ` +
+            `instances may be running it healthily.`,
+        });
+      } catch { /* alerting must never turn a quarantine into a crash */ }
+      log(`refusing to converge: ${headNow.slice(0, 9)} fails this instance's import check (${reason})`);
+      return { pulled, converged: false, skipped: "import-check-failed", sha: headNow, applied: [] };
+    }
+
     const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
     const { join: joinPath } = await import("node:path");
     var res = await runMigrations({

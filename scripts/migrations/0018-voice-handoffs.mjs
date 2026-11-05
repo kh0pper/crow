@@ -14,6 +14,9 @@ import Database from "better-sqlite3";
 
 export const id = "0018-voice-handoffs";
 
+// rollbackSafe: a new table and its indexes only; older code never reads them.
+export const rollbackSafe = true;
+
 // Byte-for-byte the block in scripts/init-db.js ("voice_handoffs table").
 export const VOICE_HANDOFFS_DDL = `
   CREATE TABLE IF NOT EXISTS voice_handoffs (

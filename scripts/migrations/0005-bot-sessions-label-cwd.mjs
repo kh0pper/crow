@@ -23,6 +23,9 @@ import Database from "better-sqlite3";
 
 export const id = "0005-bot-sessions-label-cwd";
 
+// rollbackSafe: additive bot_sessions columns only; older code ignores them.
+export const rollbackSafe = true;
+
 /** "added" | "no-op" | "absent" — never throws on a missing table. */
 export function addColumnIfMissing(db, table, column, ddl) {
   const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);

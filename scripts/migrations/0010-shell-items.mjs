@@ -13,6 +13,10 @@ import { ACTIVE_PROJECT_WHERE, deriveArtifactProject } from "../../servers/share
 
 export const id = "0010-shell-items";
 
+// rollbackSafe: NO — it backfills shell_items from projects, cards and
+// artifacts, so older code would see filings it never made.
+export const rollbackSafe = false;
+
 // Byte-for-byte the block in scripts/init-db.js ("shell_items table").
 export const SHELL_ITEMS_DDL = `
   CREATE TABLE IF NOT EXISTS shell_items (

@@ -16,6 +16,9 @@ import { NOTE_WITHDRAWAL_COLUMNS } from "../../servers/research/provenance-schem
 
 export const id = "0015-research-note-withdrawal";
 
+// rollbackSafe: additive research_notes columns, no backfill, no index change.
+export const rollbackSafe = true;
+
 export function run({ dbPath, log = () => {} }) {
   const db = new Database(dbPath);
   db.pragma("busy_timeout = 10000");

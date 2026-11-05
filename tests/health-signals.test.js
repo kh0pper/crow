@@ -708,6 +708,32 @@ test("updates: the shared classification covers every string auto-update.js writ
   assert.deepEqual(classifyUpdateResult("Skipped: CI still running on origin/main"), { kind: "transient", code: "ci-pending" });
 });
 
+test("updates: a rollback or a quarantined commit reads as a failure, never ok", async () => {
+  // N1c-3 Layer 0 writes three new results. "Skipped: …" makes them look
+  // transient and "Rolled back: …" makes them look successful to any prefix
+  // table that misses them, so each one gets an explicit row.
+  const { classifyUpdateResult } = await import("../servers/gateway/auto-update.js");
+
+  assert.deepEqual(
+    classifyUpdateResult("Rolled back: 9d18049 fails to load (import-check); running c29e19c; updates resume when main moves past it"),
+    { kind: "failure", code: "update-rolled-back" },
+  );
+  assert.deepEqual(
+    classifyUpdateResult("Skipped: update quarantined (9d18049, import-check); waiting for a newer commit on main"),
+    { kind: "failure", code: "update-quarantined" },
+  );
+  assert.deepEqual(
+    classifyUpdateResult("Update rollback blocked: 9d18049 fails to load (import-check) and the checkout could not be reset to c29e19c — local changes overlap it; restart withheld"),
+    { kind: "failure", code: "update-rollback-blocked" },
+  );
+  // S5: a BLOCKED rollback leaves the bad sha checked out, and the next restart
+  // boots it — still the blocked code, never a "waiting for a newer commit".
+  assert.deepEqual(
+    classifyUpdateResult("Update rollback blocked: 9d18049 is still checked out; the next restart will boot it"),
+    { kind: "failure", code: "update-rollback-blocked" },
+  );
+});
+
 // ─── Privacy: bind + host firewall + Funnel (audit N1c-16) ──────────────────
 
 // A tailscale that answers with no Funnel at all ("private" from Funnel's side).

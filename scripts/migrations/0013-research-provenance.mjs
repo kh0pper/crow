@@ -21,6 +21,10 @@ import { PROVENANCE_COLUMNS, PROVENANCE_INDEX_SQL } from "../../servers/research
 
 export const id = "0013-research-provenance";
 
+// rollbackSafe: additive columns plus one index; the one-time backfill writes
+// only the NEW columns, which older code never selects.
+export const rollbackSafe = true;
+
 const TABLES = ["research_sources", "research_notes"];
 
 /**

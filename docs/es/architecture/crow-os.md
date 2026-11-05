@@ -128,8 +128,9 @@ Los archivos de los bundles se almacenan en `~/.crow/bundles/<id>/`. Cada bundle
 3. `npm install` para las dependencias nuevas
 4. `npm run init-db` para las migraciones de esquema
 5. Reinicia `crow-gateway.service`
-6. Si el gateway no logra arrancar: reversión automática a la referencia anterior
-7. Registra los resultados en `~/.crow/update.log`
+6. El éxito significa que el gateway RESPONDE: HTTP 200 en `/health` en 90 s y el `NRestarts` de la unidad sin cambios
+7. Si no: `git reset --keep` a la referencia anterior (nunca `git checkout`, que dejaría HEAD desacoplado y detendría en silencio todas las actualizaciones futuras), reinicia y verifica otra vez
+8. Registra los resultados en `~/.crow/update.log`
 
 ## Opciones de HTTPS
 
