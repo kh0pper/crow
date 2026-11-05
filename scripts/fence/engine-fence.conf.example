@@ -43,3 +43,11 @@ publish port-only 8030
 # range or its ULA prefix) is refused here: that is what `publish tailnet` is
 # for, and a tailnet publish carries no source exemptions.
 publish lan 192.0.2.10 8011 consumer 192.0.2.20
+
+# IPv6 has NO directive and fails closed. A host that runs a v6 stack
+# (`/proc/net/if_inet6` exists), has a publish that applies to v6 (any `publish
+# tailnet`, any `publish port-only`, or a `publish lan` on a v6 address) and no
+# `ip6tables-restore` is REFUSED (exit 19): the v4 rules would look healthy
+# while a v6-reachable publish stayed open to every interface. The two ways out
+# are to install ip6tables (which provides ip6tables-restore) or to remove the
+# v6-reachable publish. There is no opt-out.
