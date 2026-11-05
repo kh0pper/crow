@@ -35,19 +35,20 @@ const TRACK = "drums";
 const SCENE = "verse";
 const CHORUS = "chorus";
 const CLIP = "c-beat";
-
 /** The controller the fixture mappings name, as its port names it. */
 const DEVICE = "FCB1010";
 
 // ---- the fixture song ------------------------------------------------------
 
 /**
- * The song these tests drive: a sampler track (so a pad can be mapped), two
- * scenes (so a pedal has something to launch) and a 16-step pattern clip (so
- * the pad-and-steps view has one).
+ * The song these tests drive: a sampler track (so a pad can be mapped), the
+ * scenes the mappings launch (so a pedal has something to launch, in the order
+ * the profile walks them) and a 16-step pattern clip (so the pad-and-steps view
+ * has one).
+ * @param {{scenes?: Array<[string, string]>}} [options] - the scenes, in order
  * @returns {Promise<import("yjs").Doc>}
  */
-async function midiDoc() {
+async function midiDoc(options = {}) {
   const { newSongDoc } = await import("../bundles/studio/server/doc.js");
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
   await import("../bundles/studio/server/commands/core.js");
@@ -56,8 +57,9 @@ async function midiDoc() {
 
   const doc = newSongDoc({ title: "Pedal song", bpm: 120 });
   runCommand(doc, "track.add", { id: TRACK, name: "Beat box", kind: "sampler" });
-  runCommand(doc, "scene.add", { id: SCENE, name: "Verse" });
-  runCommand(doc, "scene.add", { id: CHORUS, name: "Chorus" });
+  for (const [id, name] of options.scenes || [[SCENE, "Verse"], [CHORUS, "Chorus"]]) {
+    runCommand(doc, "scene.add", { id, name });
+  }
   runCommand(doc, "clip.add_pattern", {
     clip_id: CLIP,
     track_id: TRACK,
@@ -1397,4 +1399,161 @@ test("a routed action is held to what the page can really do", async () => {
   assert.equal(ui.toastText(), "", "and it is said once");
 
   ui.window.StudioMidiRoute = real;
+});
+
+// ---- the MIDI page: proposals, accept, and what a row sends -----------------
+
+/** The scenes the FCB1010 profile walks, so its third pedal launches the Chorus. */
+const FCB_SCENES = [["intro", "Intro"], [SCENE, "Verse"], [CHORUS, "Chorus"]];
+
+/** The pedal mappings a three-scene song's FCB1010 profile lays out. */
+const FCB_PEDALS = ["fcb1010-pedal-1", "fcb1010-pedal-2", "fcb1010-pedal-3"];
+
+test("agent proposes an FCB1010 setup and the operator accepts it", async () => {
+  const doc = await midiDoc({ scenes: FCB_SCENES });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+  assert.equal(ui.engine.launches.length, 0, "nothing is mapped yet");
+
+  // The bot runs the profile through its own tool's command: every row arrives
+  // as a proposal, and the page says what the operator can do with them.
+  await ui.apply("midi.propose_profile", { device: "fcb1010", device_name: DEVICE }, { kind: "agent" });
+  const notice = ui.document.querySelector("[data-role=midi] .st-midi-proposals");
+  assert.ok(notice, "the page carries a notice about the bot's proposals");
+  assert.match(
+    String(notice.textContent),
+    /The bot proposed 4 mappings\. Accept the ones you want, or press Learn and then the pedal or knob you want\./,
+    "three pedals and one expression pedal, said in the design's own words",
+  );
+
+  for (const id of FCB_PEDALS) {
+    const row = ui.mappingRow(id);
+    assert.ok(row, `${id} is listed`);
+    assert.equal(row.getAttribute("data-proposed"), "true", `${id} is only a proposal`);
+    assert.equal(String(row.querySelector(".st-midi-by").textContent), "proposed (by the bot)");
+  }
+  assert.equal(
+    String(ui.mappingRow("fcb1010-pedal-3").querySelector(".st-midi-control").textContent),
+    `${DEVICE} pedal 3`,
+    "the Control column names the pedal the hardware's own layout puts program change 2 on",
+  );
+  assert.match(String(ui.mappingRow("fcb1010-pedal-3").textContent), /program change 2/);
+  assert.match(String(ui.mappingRow("fcb1010-pedal-3").querySelector(".st-midi-does").textContent), /Chorus/);
+
+  // A proposal routes nothing: the pedal is pressed and plays nothing.
+  ui.pedal(DEVICE, [0xc0, 2]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [], "a proposal plays nothing");
+
+  // Accept all: one midi.accept per proposal drawn, each carrying its own row's
+  // expect.
+  ui.click("[data-act=midi-accept-all]");
+  const accepts = commands(ui, "midi.accept");
+  assert.equal(accepts.length, 4, "one accept per proposal, and no row left out");
+  const pedal3 = accepts.find((message) => message.args.id === "fcb1010-pedal-3");
+  assert.ok(pedal3, "the third pedal's own accept is there");
+  assert.deepEqual(pedal3.args.expect, {
+    device_name: DEVICE,
+    message: { type: "pc", channel: 1, number: 2 },
+    action: { kind: "scene.launch", scene_id: CHORUS },
+  }, "the expect is the row as it was drawn");
+
+  // Each yes is the operator's own step, run by the real command.
+  for (const accept of accepts) await ui.apply("midi.accept", accept.args, { kind: "human" });
+  const maps = await mappingsOf(ui.doc);
+  assert.equal(
+    Object.values(maps).filter((mapping) => mapping.proposed === true).length,
+    0,
+    "every proposal the operator accepted is live",
+  );
+  assert.ok(
+    Object.values(maps).every((mapping) => mapping.set_by === "agent"),
+    "they are still the bot's rows: the bot proposed and the operator said yes",
+  );
+  for (const id of FCB_PEDALS) {
+    const row = ui.mappingRow(id);
+    assert.equal(row.getAttribute("data-proposed"), "false", `${id} is live now`);
+    assert.equal(String(row.querySelector(".st-midi-by").textContent), "the bot (accepted)");
+  }
+
+  // And the pedalboard plays the song: pedal 3 is the Chorus.
+  ui.pedal(DEVICE, [0xc0, 2]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [CHORUS], "the accepted pedal 3 launches the Chorus");
+});
+
+test("accepted pedal 3 launches the chorus", async () => {
+  const doc = await midiDoc({ scenes: FCB_SCENES });
+  const ui = await bootMidi({ doc });
+  ui.click("[data-act=midi-connect]");
+  await ui.settle();
+
+  await ui.apply("midi.propose_profile", { device: "fcb1010", device_name: DEVICE }, { kind: "agent" });
+  assert.ok(ui.mappingRow("fcb1010-pedal-3"), "the profile proposed the pedals");
+
+  // One row, accepted on its own: the page builds the expect from the row.
+  ui.click("[data-act=midi-accept][data-mapping-id=fcb1010-pedal-3]");
+  const accepts = commands(ui, "midi.accept");
+  assert.equal(accepts.length, 1, "Accept on one row is one midi.accept");
+  assert.equal(accepts[0].args.id, "fcb1010-pedal-3");
+  assert.deepEqual(accepts[0].args.expect.action, { kind: "scene.launch", scene_id: CHORUS });
+  await ui.apply("midi.accept", accepts[0].args, { kind: "human" });
+  assert.equal(ui.mappingRow("fcb1010-pedal-3").getAttribute("data-proposed"), "false");
+
+  // The other pedals are still proposals, so they still play nothing.
+  ui.pedal(DEVICE, [0xc0, 1]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [], "pedal 2 is still a proposal");
+
+  const before = historyFrames(ui).length;
+  ui.pedal(DEVICE, [0xc0, 2]);
+  await ui.settle();
+  assert.deepEqual(ui.engine.launches, [CHORUS], "program change 2 is pedal 3, and it launches the Chorus");
+  assert.equal(historyFrames(ui).length, before, "a routed pedal is never a history step");
+});
+
+test("accept sends what the row showed", async () => {
+  const doc = await midiDoc();
+  await mapPedal(doc, { id: "m-proposed", number: 5, sceneId: CHORUS, agent: true });
+  const ui = await bootMidi({ doc });
+
+  // The row as the operator sees it: program change 5 launches the Chorus.
+  assert.match(
+    String(ui.mappingRow("m-proposed").querySelector(".st-midi-does").textContent),
+    /Chorus/,
+    "the drawn row says Chorus",
+  );
+
+  // The proposal moves after the page drew it: the bot takes it back and proposes
+  // the same message for the Verse instead. No state frame is sent, so the page
+  // still holds the row it drew — and that is what its Accept must send.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const bot = { author: { kind: "agent" } };
+  runCommand(doc, "midi.remove", { id: "m-proposed" }, bot);
+  runCommand(doc, "midi.map", {
+    id: "m-proposed",
+    device_name: DEVICE,
+    message: { type: "pc", channel: 1, number: 5 },
+    action: { kind: "scene.launch", scene_id: SCENE },
+  }, bot);
+
+  ui.click("[data-act=midi-accept][data-mapping-id=m-proposed]");
+  const accepts = commands(ui, "midi.accept");
+  assert.equal(accepts.length, 1, "one midi.accept");
+  assert.deepEqual(
+    accepts[0].args.expect.action,
+    { kind: "scene.launch", scene_id: CHORUS },
+    "the expect is what the row showed, not what the snapshot holds now",
+  );
+
+  // The hub refuses it, in its own words, and nothing goes live.
+  assert.throws(
+    () => runCommand(doc, "midi.accept", accepts[0].args, { author: { kind: "human" } }),
+    /not the proposal you were shown/,
+  );
+  const stored = (await mappingsOf(doc))["m-proposed"];
+  assert.equal(stored.proposed, true, "the mapping is still a proposal");
+  assert.deepEqual(stored.action, { kind: "scene.launch", scene_id: SCENE }, "and still the bot's newer one");
+  assert.ok(ui.mappingRow("m-proposed").getAttribute("data-proposed") !== "false", "nothing went live on the page either");
 });

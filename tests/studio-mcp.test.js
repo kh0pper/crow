@@ -1216,3 +1216,133 @@ test("studio_samples lists samples with their slices and pads", async (t) => {
     await client.close();
   }
 });
+
+// ---- the controllers over MCP ----------------------------------------------
+
+test("studio_midi lists mappings with who set them", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+  try {
+    /** Run one operator step the way the panel or the MIDI page would. */
+    const asOperator = async (command, args, cmdId) => {
+      const result = await hub.runCommand({
+        song_id: songId,
+        cmd_id: cmdId,
+        command,
+        args,
+        author: HUMAN,
+      });
+      assert.equal(result.ok, true, `${command} was refused: ${result.error}`);
+      return result;
+    };
+
+    // The song the two mappings are made against: two scenes.
+    await asOperator("scene.add", { id: "verse", name: "Verse" }, "seed-scene-verse");
+    await asOperator("scene.add", { id: "chorus", name: "Chorus" }, "seed-scene-chorus");
+
+    // The operator's own mapping is live at once.
+    await asOperator(
+      "midi.map",
+      {
+        id: "m-verse",
+        device_name: "FCB1010",
+        message: { type: "pc", channel: 1, number: 0 },
+        action: { kind: "scene.launch", scene_id: "verse" },
+      },
+      "operator-map-verse",
+    );
+
+    // The agent's mapping is a proposal, made through its own tool.
+    const proposed = await client.callTool({
+      name: "studio_midi_map",
+      arguments: {
+        song_id: songId,
+        id: "m-chorus",
+        device_name: "FCB1010",
+        message: { type: "pc", channel: 1, number: 1 },
+        action: { kind: "scene.launch", scene_id: "chorus" },
+      },
+    });
+    assert.notEqual(proposed.isError, true, textOf(proposed));
+    assert.match(textOf(proposed), /Proposed mapping/, "the answer says it proposed rather than mapped");
+
+    // The read: every mapping, with what it answers, what it does in plain words
+    // and as JSON, and who set it.
+    const listed = await client.callTool({ name: "studio_midi", arguments: { song_id: songId } });
+    assert.notEqual(listed.isError, true, textOf(listed));
+    const rows = JSON.parse(textOf(listed));
+    assert.deepEqual(rows.map((row) => row.id), ["m-chorus", "m-verse"], "one row per mapping, in a fixed order");
+
+    const mine = rows.find((row) => row.id === "m-verse");
+    assert.deepEqual(Object.keys(mine).sort(), [
+      "accepted",
+      "action",
+      "action_text",
+      "device_name",
+      "id",
+      "message",
+      "proposed",
+      "sends",
+      "set_by",
+    ]);
+    assert.equal(mine.device_name, "FCB1010");
+    assert.deepEqual(mine.message, { type: "pc", channel: 1, number: 0 });
+    assert.equal(mine.sends, "program change 0 on channel 1");
+    assert.deepEqual(mine.action, { kind: "scene.launch", scene_id: "verse" });
+    assert.equal(mine.action_text, 'launch scene "Verse"', "the action names the scene, not its id");
+    assert.equal(mine.set_by, "operator");
+    assert.equal(mine.proposed, false);
+    assert.equal(mine.accepted, true, "the operator's mapping is live");
+
+    const theirs = rows.find((row) => row.id === "m-chorus");
+    assert.equal(theirs.set_by, "agent", "the bot's row says the bot set it");
+    assert.equal(theirs.proposed, true, "and that it is only a proposal");
+    assert.equal(theirs.accepted, false, "a proposal routes nothing");
+    assert.equal(theirs.action_text, 'launch scene "Chorus"');
+
+    // The agent has no way to accept: midi.accept is people-only, so it is no
+    // tool at all, and the tools it does have say what a mapping of its is.
+    const tools = (await client.listTools()).tools;
+    const names = tools.map((tool) => tool.name);
+    assert.equal(names.includes("studio_midi_accept"), false, "an agent cannot say yes for the operator");
+    for (const name of ["studio_midi_map", "studio_midi_remove", "studio_midi_propose_profile"]) {
+      const tool = tools.find((item) => item.name === name);
+      assert.ok(tool, `${name} exists`);
+      assert.match(tool.description, /proposal/i, `${name} says a mapping of the agent's is a proposal`);
+      assert.match(tool.description, /operator/i, `${name} says the operator is who accepts it`);
+    }
+    const readTool = tools.find((tool) => tool.name === "studio_midi");
+    assert.ok(readTool, "the mapping read is a tool");
+    assert.match(readTool.description, /proposal/i, "the read says a proposal routes nothing");
+
+    // The operator's yes makes the bot's proposal live, and the listing says so.
+    await asOperator(
+      "midi.accept",
+      {
+        id: "m-chorus",
+        expect: {
+          device_name: "FCB1010",
+          message: { type: "pc", channel: 1, number: 1 },
+          action: { kind: "scene.launch", scene_id: "chorus" },
+        },
+      },
+      "operator-accept-chorus",
+    );
+    const after = JSON.parse(textOf(await client.callTool({ name: "studio_midi", arguments: { song_id: songId } })));
+    const accepted = after.find((row) => row.id === "m-chorus");
+    assert.equal(accepted.proposed, false, "the accepted mapping is live");
+    assert.equal(accepted.accepted, true);
+    assert.equal(accepted.set_by, "agent", "and it still says who set it");
+
+    // The agent cannot take the operator's yes back: an accepted mapping is
+    // theirs, so a bot's remove is refused in the hub's own sentence.
+    const taken = await client.callTool({
+      name: "studio_midi_remove",
+      arguments: { song_id: songId, id: "m-chorus" },
+    });
+    assert.equal(taken.isError, true, "removing an accepted mapping must be a tool error");
+    assert.match(textOf(taken), /Only the operator changes an accepted MIDI mapping/);
+  } finally {
+    await client.close();
+  }
+});

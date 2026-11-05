@@ -383,6 +383,33 @@ function fakeEngine() {
     liveRelease(trackId, bankId, index) {
       engine.releases.push({ track_id: String(trackId), bank_id: String(bankId), index: Number(index) });
     },
+    /** The performance effects the page held and let go, in order. */
+    fx: [],
+    fxHold(name, amount) {
+      engine.fx.push({ name: String(name), amount: Number(amount), on: true });
+    },
+    fxRelease(name) {
+      engine.fx.push({ name: String(name), amount: 0, on: false });
+    },
+    /** The looper commands the page pressed through. */
+    loopers: [],
+    looper(action) {
+      engine.loopers.push(String(action));
+    },
+    /** What the looper hands back for a Loop to pad; null means "two bars". */
+    looperTakeResult: null,
+    looperTake() {
+      if (engine.looperTakeResult) return Promise.resolve(engine.looperTakeResult);
+      const frames = 960;
+      return Promise.resolve({
+        channels: [
+          Float32Array.from({ length: frames }, (_, at) => Math.sin((at / RATE) * 2 * Math.PI * 220) * 0.4),
+          Float32Array.from({ length: frames }, (_, at) => Math.cos((at / RATE) * 2 * Math.PI * 220) * 0.3),
+        ],
+        rate: RATE,
+        bars: 2,
+      });
+    },
     loadSample(sampleId, channels, rate) {
       engine.samples.push({ sample_id: String(sampleId), channels: channels.length, rate: Number(rate) });
       return Promise.resolve();
@@ -1091,6 +1118,164 @@ test("keys 1 and Q play pads 1 and 9", async () => {
   ui.document.dispatchEvent(ui.event("keydown", { key: "q", repeat: true }));
   await ui.settle();
   assert.equal(ui.engine.livePads.length, before, "a held key is not played twice");
+});
+
+// ---- the performance effects and the looper -------------------------------
+
+test("holding an effect button holds the effect until release", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+
+  // The mockup's six buttons, in its order, with Loop to pad beside the Looper.
+  const row = ui.slot("sampler-fx");
+  const buttons = [...row.querySelectorAll("[data-fx-name]")];
+  assert.deepEqual(
+    buttons.map((node) => String(node.textContent)),
+    ["Filter sweep", "Lo-fi", "Stutter", "Looper", "Tape stop", "Reverb throw"],
+    "the design's effects, in its order",
+  );
+  assert.equal(
+    row.querySelector("[data-act=looper-cycle][data-fx-name]").className.includes("st-fx-btn"),
+    true,
+    "the Looper is one of the six, and it is the press that steps it on",
+  );
+  assert.ok(row.querySelector("[data-act=looper-to-pad]"), "Loop to pad sits with the Looper");
+  assert.match(String(row.textContent), /Performance effects \(hold to apply, release to return\)/);
+
+  // A press applies the effect and shows it is held; nothing is sent as a
+  // command, because a performance effect is live state, not a history step.
+  const stutter = row.querySelector("[data-act=fx-hold][data-fx-name=stutter]");
+  assert.ok(stutter, "the Stutter button is drawn");
+  const framesBefore = ui.sent.length;
+  stutter.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [{ name: "stutter", amount: 1, on: true }], "the press holds the stutter");
+  assert.equal(stutter.getAttribute("aria-pressed"), "true", "and the button says it is held");
+  assert.match(String(stutter.className), /st-on/);
+  assert.equal(ui.sent.length, framesBefore, "holding an effect sends no command");
+
+  // The release returns to the dry signal, and the button says so.
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(
+    ui.engine.fx,
+    [{ name: "stutter", amount: 1, on: true }, { name: "stutter", amount: 0, on: false }],
+    "the release lets it go",
+  );
+  assert.equal(stutter.getAttribute("aria-pressed"), "false");
+
+  // Leaving the button lets it go too (a finger that drags off it), and so does
+  // the window losing the focus.
+  const lofi = row.querySelector("[data-act=fx-hold][data-fx-name=lofi]");
+  lofi.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(
+    ui.engine.fx[ui.engine.fx.length - 1],
+    { name: "lofi", amount: 1, on: true },
+    "the lo-fi is held",
+  );
+  lofi.dispatchEvent(ui.event("pointerleave", {}));
+  await ui.settle();
+  assert.equal(ui.engine.fx[ui.engine.fx.length - 1].name, "lofi");
+  assert.equal(ui.engine.fx[ui.engine.fx.length - 1].on, false, "leaving the button releases it");
+
+  const tapeStop = row.querySelector("[data-act=fx-hold][data-fx-name=tape_stop]");
+  tapeStop.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  for (const handler of [...(ui.windowListeners.blur || [])]) handler(ui.event("blur", {}));
+  await ui.settle();
+  assert.equal(ui.engine.fx[ui.engine.fx.length - 1].name, "tape_stop");
+  assert.equal(ui.engine.fx[ui.engine.fx.length - 1].on, false, "a window blur releases it");
+
+  // The Looper is a press, not a hold: it walks record, play, overdub.
+  const looperButton = row.querySelector("[data-act=looper-cycle]");
+  looperButton.dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.loopers, ["record"], "the press starts the looper recording");
+  assert.equal(looperButton.getAttribute("aria-pressed"), "true", "and it shows the press");
+  ui.release();
+  await ui.settle();
+  assert.deepEqual(ui.engine.loopers, ["record"], "letting go does not stop it");
+  assert.equal(looperButton.getAttribute("aria-pressed"), "false");
+});
+
+test("loop to pad uploads the loop as a sample on the selected pad", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The pad the loop lands on is the one the view has selected: pad 3 here.
+  ui.pressPad(2);
+  ui.release();
+  await ui.settle();
+  assert.equal(ui.pad(2).getAttribute("aria-pressed"), "true");
+
+  const capture = ui.slot("sampler-fx").querySelector("[data-act=looper-to-pad]");
+  assert.ok(capture, "the view offers Loop to pad");
+  assert.equal(capture.getAttribute("data-pad-index"), "2", "pointed at the selected pad");
+  capture.dispatchEvent(ui.event("click", {}));
+  await ui.settle(40);
+
+  // The take goes through the very pending-sample upload an import does: a
+  // sample upload named for the loop, from the resampler, for that pad.
+  const begin = sampleBegin(ui);
+  assert.equal(begin.body.kind, "sample", "a loop becomes a sample");
+  assert.equal(begin.body.origin, "resample", "it came from the machine, not a file");
+  assert.equal(begin.body.name, "Loop 2 bars", "named for how long the loop is");
+  assert.equal(begin.body.rate, RATE);
+  assert.equal(begin.body.channels, 2);
+  assert.deepEqual(begin.body.target, { track_id: TRACK, bank_id: bankId, index: 2 }, "the selected pad");
+
+  const pending = ui.store.saved.filter((row) => row.kind === "sample");
+  assert.ok(pending.length >= 1, "the upload is staged on this device first");
+  assert.equal(pending[0].name, "Loop 2 bars");
+  assert.equal(pending[0].frames, 960, "the looper's own frames, whole");
+  assert.equal(pending[0].origin, "resample");
+
+  // A looper that has recorded nothing says so, and uploads nothing.
+  ui.engine.looperTakeResult = { channels: [], rate: RATE, bars: 0 };
+  const before = ui.requests.filter((request) => request.method === "PUT").length;
+  const again = ui.slot("sampler-fx").querySelector("[data-act=looper-to-pad]");
+  again.dispatchEvent(ui.event("click", {}));
+  await ui.settle(40);
+  assert.match(ui.document.querySelector("[data-role=toast]").textContent, /nothing recorded yet/);
+  assert.equal(
+    ui.requests.filter((request) => request.method === "PUT").length,
+    before,
+    "an empty looper uploads nothing",
+  );
+});
+
+test("an effect and the looper are Learn targets", async () => {
+  const ui = await bootSampler({ midi: {} });
+  await ui.openSampler();
+
+  // Learn, then the Stutter button: the press picks the control, it does not
+  // apply the effect, and the next control change is its mapping.
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  ui.slot("sampler-fx").querySelector("[data-fx-name=stutter]").dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.fx, [], "the press that picks a control applies nothing");
+  ui.midi({ device_name: "FCB1010", type: "cc", channel: 1, number: 20, value: 100, on: true });
+  await ui.settle();
+  const maps = commands(ui, "midi.map");
+  assert.equal(maps.length, 1, "the knob taught one mapping");
+  assert.deepEqual(maps[0].args.action, { kind: "fx.hold", name: "stutter" }, "an effect learns as fx.hold");
+
+  // The looper is looper.cycle, never an effect called looper.
+  ui.click("[data-act=midi-learn]");
+  await ui.settle();
+  ui.slot("sampler-fx")
+    .querySelector("[data-act=looper-cycle]")
+    .dispatchEvent(ui.event("pointerdown", { button: 0 }));
+  await ui.settle();
+  assert.deepEqual(ui.engine.loopers, [], "the press that picks the looper does not step it on");
+  ui.midi({ device_name: "FCB1010", type: "pc", channel: 1, number: 9 });
+  await ui.settle();
+  const after = commands(ui, "midi.map");
+  assert.equal(after.length, 2, "the pedal taught a second mapping");
+  assert.deepEqual(after[1].args.action, { kind: "looper.cycle" }, "the looper learns as looper.cycle");
 });
 
 // ---- samples in -----------------------------------------------------------

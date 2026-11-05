@@ -292,6 +292,51 @@ const STYLES = `
   .studio .st-midi-msg { color: var(--st-muted); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; }
   .studio .st-midi-does { flex: 1 1 160px; }
   .studio .st-midi-by { color: var(--st-muted); font-size: 11px; margin-left: auto; }
+  /* The MIDI page's own parts (mockup screen 4): a card per controller, the
+     Set up for menu, the notice above the bot's proposals, and the table —
+     Control, Sends, Does, Set by, and one pair of buttons per row. The table
+     scrolls sideways inside its own box, so the page never does. */
+  .studio .st-midi-card-top { display: flex; align-items: center; gap: 8px; }
+  .studio .st-midi-device { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .studio .st-midi-dot-on { background: #6BBF8A; }
+  .studio .st-midi-dot-off { background: #5C6167; }
+  .studio .st-midi-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+  .studio .st-midi-setup { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--st-muted); }
+  .studio .st-midi-setup .st-select { width: auto; min-width: 140px; }
+  .studio .st-midi-proposals {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px;
+    border: 1px solid #2E4D6B; background: #17222D; border-radius: 10px; padding: 10px 12px;
+  }
+  .studio .st-midi-proposal-text { flex: 1 1 320px; font-size: 13px; line-height: 1.45; }
+  .studio .st-midi-table-wrap {
+    overflow-x: auto; border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+  }
+  .studio .st-midi-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
+  .studio .st-midi-th {
+    padding: 8px 12px; border-bottom: 1px solid var(--st-line); text-align: left;
+    font-size: 12px; font-weight: 600; color: var(--st-muted);
+  }
+  .studio .st-midi-table td { padding: 8px 12px; border-bottom: 1px solid var(--st-line-soft); }
+  .studio .st-midi-table tr:last-child td { border-bottom: 0; }
+  .studio .st-midi-control { font-weight: 600; }
+  .studio .st-midi-table .st-midi-msg { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; color: #C9C5BC; }
+  .studio .st-midi-table .st-midi-by { margin-left: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+  .studio .st-midi-row[data-proposed=true] { background: #17222D; }
+  .studio .st-midi-acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .studio .st-midi-acts .st-btn { min-height: 40px; }
+  .studio .st-fx {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .studio .st-fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .studio .st-fx-btn {
+    min-height: 52px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--st-edge);
+    background: #24282D; color: var(--st-text); font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; touch-action: none;
+  }
+  .studio .st-fx-btn:hover { border-color: #4A5058; }
+  .studio .st-fx-btn.st-on { background: var(--st-agent); border-color: var(--st-agent); color: #0E1A26; }
+  .studio .st-fx-capture { font-weight: 500; }
   /* The control Learn is waiting on: outlined until its message arrives. */
   .studio .st-learn { outline: 2px solid var(--st-human); outline-offset: 2px; }
   .studio .st-midi-bar .st-btn { min-height: 40px; }
