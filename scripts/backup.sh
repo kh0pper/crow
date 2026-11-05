@@ -376,12 +376,12 @@ GITIGNORE
         # still commits, and the identity copy, identity.json and the keychain
         # directory never do.
         STAGED_IDENTITY=""
-        while IFS= read -r staged; do
+        while IFS= read -r -d '' staged; do
           [[ -z "$staged" ]] && continue
           if ! "$NODE_BIN" "$BACKUP_HELPER" --may-leave "$staged" >/dev/null 2>&1; then
             STAGED_IDENTITY="$STAGED_IDENTITY $staged"
           fi
-        done < <(git diff --cached --name-only)
+        done < <(git diff --cached --name-only -z)
         if [[ -n "$STAGED_IDENTITY" ]]; then
           git reset --quiet
           echo "  Refusing to commit: a staged file carries identity data or an entry from the secrets directory."
