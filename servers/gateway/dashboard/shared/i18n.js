@@ -274,6 +274,9 @@ export const translations = {
   "signals.exposure.firewallOff": { en: "the host firewall is off", es: "el cortafuegos del host está desactivado" },
   "signals.exposure.firewallUnknown": { en: "the host firewall could not be read", es: "no se pudo leer el cortafuegos del host" },
   "signals.exposure.lanIssue": { en: "The dashboard listens on {where} while the host firewall is off, so other machines on your local network may be able to reach it.", es: "El panel escucha en {where} mientras el cortafuegos del host está desactivado, así que otras máquinas de tu red local podrían alcanzarlo." },
+  "signals.exposure.lanIssueUnknown": { en: "The dashboard listens on {where} and the host firewall state could not be read (it may be firewalld or nftables, or unreadable), so other machines on your local network may be able to reach it.", es: "El panel escucha en {where} y no se pudo leer el estado del cortafuegos del host (puede ser firewalld o nftables, o no ser legible), así que otras máquinas de tu red local podrían alcanzarlo." },
+  "signals.exposure.containerValue": { en: "in a container — {bind}; the container's published ports on the host decide who can reach it", es: "en un contenedor — {bind}; los puertos publicados del contenedor en el host deciden quién puede alcanzarlo" },
+  "signals.exposure.containerIssue": { en: "Crow runs in a container, so the address it binds inside the container and the container's own firewall say nothing about who can reach the dashboard — the container's published ports on the host decide that.", es: "Crow se ejecuta en un contenedor, así que la dirección a la que se enlaza dentro del contenedor y el cortafuegos del propio contenedor no dicen nada sobre quién puede alcanzar el panel — lo deciden los puertos publicados del contenedor en el host." },
   "signals.exposure.lanInfo": { en: "The dashboard listens on {where} and {firewall}. Crow can read whether the host firewall is on — not which rules it allows.", es: "El panel escucha en {where} y {firewall}. Crow puede leer si el cortafuegos del host está activado, pero no qué reglas permite." },
   "signals.exposure.checkFunnel": { en: "internet sharing (Funnel)", es: "compartición en internet (Funnel)" },
   "signals.exposure.unknownList": { en: "unknown: {list}", es: "desconocido: {list}" },
@@ -320,7 +323,6 @@ export const translations = {
   "signals.updates.causeMigrationFailed": { en: "a database migration failed", es: "una migración de la base de datos falló" },
   "signals.updates.causeInitDbFailed": { en: "the database update failed", es: "la actualización de la base de datos falló" },
   "signals.updates.causeOther": { en: "it stopped on an unrecognised result", es: "se detuvo con un resultado no reconocido" },
-  "signals.updates.ageUnknown": { en: "a while", es: "un rato" },
   // backup
   "signals.backup.label": { en: "Backup", es: "Copia de seguridad" },
   "signals.keychainExport.label": { en: "Keychain export", es: "Exportación del llavero" },

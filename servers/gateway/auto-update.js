@@ -112,6 +112,7 @@ async function getSettings() {
     auto_update_interval_hours: String(DEFAULT_INTERVAL_HOURS),
     auto_update_last_check: null,
     auto_update_last_result: null,
+    auto_update_result_since: null,
     auto_update_current_version: null,
     auto_update_latest_version: null,
   };
@@ -168,16 +169,63 @@ export function _setDbForTest(database) {
 
 /**
  * Save a setting to DB
+ *
+ * `auto_update_last_result` is the one key with a companion: every tick rewrites
+ * `auto_update_last_check`, so the age of THAT value says nothing about how long
+ * the current result has been repeating — a CI run still in progress stays
+ * "fresh" forever (audit N1c-1 follow-up). `auto_update_result_since` records
+ * when the current result's CLASSIFICATION CODE first appeared, and the Nest's
+ * Updates card ages a transient result from it.
  */
+const RESULT_KEY = "auto_update_last_result";
+const RESULT_SINCE_KEY = "auto_update_result_since";
+
 async function saveSetting(key, value) {
   if (!db) return;
   try {
+    if (key === RESULT_KEY) await stampResultSince(value);
     await db.execute({
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
       args: [key, value, value],
     });
   } catch (err) {
     console.warn(`[auto-update] Failed to save ${key}:`, err.message);
+  }
+}
+
+/**
+ * Stamp `auto_update_result_since` ONLY when the result's classification code
+ * changes; the same code repeating keeps the first stamp. A changed message
+ * inside one code (`Skipped: not on main (on 'a')` → `…(on 'b')`, both
+ * not-on-main) is the same condition and must not restart the clock.
+ *
+ * Runs BEFORE the new result is written, so the SELECT still sees the previous
+ * one. When the previous value cannot be read, the code cannot be compared, so
+ * the stamp is reset — an old `since` must never outlive the result it described
+ * and turn into a false warn.
+ */
+async function stampResultSince(nextValue) {
+  if (!db) return;
+  let prev;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+      args: [RESULT_KEY],
+    });
+    prev = rows?.[0]?.value ?? null;
+  } catch {
+    prev = undefined; // unreadable: cannot compare, so re-stamp rather than age
+  }
+  const codeOf = (v) => classifyUpdateResult(v)?.code ?? null;
+  if (prev !== undefined && codeOf(prev) === codeOf(nextValue)) return;
+  const now = new Date().toISOString();
+  try {
+    await db.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+      args: [RESULT_SINCE_KEY, now, now],
+    });
+  } catch (err) {
+    console.warn(`[auto-update] Failed to save ${RESULT_SINCE_KEY}:`, err.message);
   }
 }
 
@@ -817,6 +865,7 @@ export async function getUpdateStatus() {
     intervalHours: parseInt(settings.auto_update_interval_hours, 10) || DEFAULT_INTERVAL_HOURS,
     lastCheck: settings.auto_update_last_check,
     lastResult: settings.auto_update_last_result,
+    resultSince: settings.auto_update_result_since,
     currentVersion: settings.auto_update_current_version,
     latestVersion: settings.auto_update_latest_version,
   };

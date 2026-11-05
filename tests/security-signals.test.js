@@ -13,17 +13,20 @@ import {
   _setTailscaleReader,
   _setDockerPortsReader,
   _setFirewallReader,
+  _setContainerReader,
   classifyFunnelTarget,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 
 // This file is about the exposure/logins/integrations LOGIC, so the machine's own
 // facts are pinned: a loopback bind (the Privacy card only reports a wide bind
 // when the gateway really has one), a loopback-only Docker (the publishedPorts
-// Docker fallback runs only with no snapshot), and "no ufw.conf". The tests that
+// Docker fallback runs only with no snapshot), "no ufw.conf", and "not in a
+// container" (inside one the bind + firewall are info by design). The tests that
 // are about those facts set them explicitly.
 process.env.CROW_GATEWAY_BIND = "127.0.0.1";
 _setDockerPortsReader(() => { throw new Error("no docker"); });
 _setFirewallReader(() => { throw new Error("ENOENT"); });
+_setContainerReader(() => false);
 
 // A stub db whose execute() answers each signal's query from `data`.
 function makeDb(data = {}) {

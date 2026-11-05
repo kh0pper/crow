@@ -16,13 +16,18 @@
  *               else trusted peers unseen >24h (info)
  *   updates   — auto_update_* state: the last result auto-update wrote,
  *               classified by auto-update.js (failure → warn, a still-running CI
- *               only after 2x the interval), a last check older than 2x the
- *               interval, else the version comparison (info if update
- *               available); disabled → neutral "off", never an ok "current"
+ *               only after 2x the interval of the result itself), a last check
+ *               older than 2x the interval (never before the gateway has been
+ *               up that long), else the version comparison (info if update
+ *               available); disabled in settings OR by the env/--no-auth gate →
+ *               neutral "off", never an ok "current"
  *   exposure  — Privacy: the gateway's actual bind (listen-host.js), the host
  *               firewall from ufw.conf (never root) and Funnel; bound beyond
- *               loopback + firewall off → warn, any check that could not run →
- *               at most info naming it, never ok
+ *               loopback + firewall off or unreadable → warn, any check that
+ *               could not run → at most info naming it, never ok. INSIDE A
+ *               CONTAINER the bind and firewall describe the container, not the
+ *               host, so they are info that points at the container's published
+ *               ports on the host; only the Funnel checks can still warn there.
  *   backup    — newest of THIS instance's files in CROW_BACKUP_DIR (none → info;
  *               >7d → warn; owned by another instance → warn)
  *   keychainExport — extension passwords that are in no keychain Export yet (info; no
@@ -66,7 +71,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { t, fill } from "../../shared/i18n.js";
@@ -75,7 +80,7 @@ import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
 import { gatewayListenHost } from "../../../listen-host.js";
-import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult } from "../../../auto-update.js";
+import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate } from "../../../auto-update.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
@@ -599,6 +604,7 @@ async function updatesSignal(db, nowFn, opts = {}) {
     auto_update_interval_hours: String(DEFAULT_INTERVAL_HOURS),
     auto_update_last_check: null,
     auto_update_last_result: null,
+    auto_update_result_since: null,
     auto_update_current_version: null,
     auto_update_latest_version: null,
   };
@@ -613,9 +619,19 @@ async function updatesSignal(db, nowFn, opts = {}) {
   const current = settings.auto_update_current_version || null;
   const latest = settings.auto_update_latest_version || null;
 
+  // Auto-update can be off for reasons the DB row never records: the
+  // CROW_AUTO_UPDATE=0|false kill switch always wins, and a --no-auth gateway
+  // defaults OFF until it opts in. Ask auto-update.js's own predicate — the
+  // card must never show a stale warn for a timer that was never going to
+  // start. `process.argv` is how this module reads gateway flags (see
+  // exposureSignal's --no-auth check); opts.noAuth overrides it for callers
+  // that hold the real flag.
+  const noAuth = typeof opts.noAuth === "boolean" ? opts.noAuth : process.argv.includes("--no-auth");
+  const envAllows = shouldStartAutoUpdate({ env: process.env, noAuth });
+
   // Disabled is its own neutral state: never ok-green, and never a version
   // claim that reads as "you are current".
-  if (settings.auto_update_enabled !== "true") {
+  if (settings.auto_update_enabled !== "true" || !envAllows) {
     return { id: "updates", severity: null, state: "off", label, value: t("signals.updates.off", lang) };
   }
 
@@ -626,25 +642,34 @@ async function updatesSignal(db, nowFn, opts = {}) {
   const stuckMs = 2 * intervalHours * 60 * 60 * 1000;
   const now = nowFn();
   const lastCheckMs = settingTimeMs(settings.auto_update_last_check);
+  const resultSinceMs = settingTimeMs(settings.auto_update_result_since);
   const result = classifyUpdateResult(settings.auto_update_last_result);
 
-  // A check older than two intervals means the timer itself stopped. Before the
-  // gateway has been up that long, "never checked" is just a boot.
+  // A check older than two intervals means the timer itself stopped — but only
+  // once this process has been up that long. A host that was off for days has a
+  // days-old last_check and a five-minute uptime: that is a boot, not a stuck
+  // timer, and it must not push "no update check for 2d" before its first tick.
   const upMs = Number.isFinite(opts.uptimeMs) ? opts.uptimeMs : process.uptime() * 1000;
   const checkAgeMs = lastCheckMs == null ? null : Math.max(0, now - lastCheckMs);
-  const checkIsStale = checkAgeMs == null ? upMs > stuckMs : checkAgeMs > stuckMs;
+  const checkIsStale = Math.min(checkAgeMs ?? Infinity, upMs) > stuckMs;
 
   const causeOf = (code) => t(UPDATE_CAUSE_KEYS[code] || UPDATE_CAUSE_KEYS.other, lang);
   let cause = null;
   if (result && result.kind === "failure") {
     cause = causeOf(result.code);
-  } else if (result && result.kind === "transient" && checkIsStale) {
-    // A CI run still going is normal for one tick; the same result after two
-    // whole intervals is not, so the cause line carries how long it has been.
-    cause = fill(t("signals.updates.causeStuckTransient", lang), {
-      cause: causeOf(result.code),
-      age: checkAgeMs == null ? t("signals.updates.ageUnknown", lang) : formatAge(checkAgeMs),
-    });
+  } else if (result && result.kind === "transient" && resultSinceMs != null) {
+    // Every pending tick rewrites auto_update_last_check, so the CHECK's age can
+    // never show a stuck transient. Age the RESULT instead: auto-update.js
+    // stamps auto_update_result_since when the classification code changes and
+    // leaves it alone while the same code keeps repeating. No stamp at all
+    // means "unknown age", which is never a warn.
+    const resultAgeMs = Math.max(0, now - resultSinceMs);
+    if (resultAgeMs > stuckMs) {
+      cause = fill(t("signals.updates.causeStuckTransient", lang), {
+        cause: causeOf(result.code),
+        age: formatAge(resultAgeMs),
+      });
+    }
   }
   if (!cause && checkIsStale) {
     cause = lastCheckMs == null
@@ -1076,6 +1101,29 @@ export function readHostFirewall() {
   return "unknown";
 }
 
+// ─── Container detection ─────────────────────────────────────────────────────
+// Inside a container the gateway binds 0.0.0.0 (the default) and there is no
+// /etc/ufw/ufw.conf, so the bind + firewall pair would be a PERMANENT warn on
+// every container install (docker-compose.yml, Railway, render). Both facts
+// describe the container, not the host: the host's firewall never shows up in
+// here, and who can reach the dashboard is decided by which ports the container
+// publishes on the host. So neither fact is ever a warn inside a container —
+// the Funnel checks still are, because those are about THIS Crow's routes.
+export const CONTAINER_MARKER_PATHS = Object.freeze(["/.dockerenv", "/run/.containerenv"]);
+const defaultContainerReader = () => CONTAINER_MARKER_PATHS.some((p) => existsSync(p));
+let _containerReader = defaultContainerReader;
+/** Test seam: replace the container-marker check; null restores the real one. */
+export function _setContainerReader(fn) { _containerReader = fn || defaultContainerReader; }
+
+/** true when this process runs inside a container (`/.dockerenv` or `/run/.containerenv`). */
+export function isRunningInContainer() {
+  try {
+    return !!_containerReader();
+  } catch {
+    return false; // an unreadable marker set is "not known to be a container"
+  }
+}
+
 // Scope: this check guards THIS Crow's routes (CLAUDE.md "Network exposure
 // invariant"). A Funnel proxy to another port/host belongs to another service
 // (or another Crow on this host, which judges its own paths against its own
@@ -1135,11 +1183,13 @@ async function exposureSignal(db, lang, nowFn, opts = {}) {
   //  (c) Funnel, above: a failed `tailscale` call is UNKNOWN, never "private".
   const bindHost = opts.bind ?? gatewayListenHost();
   const bindKind = classifyHostIp(bindHost).kind;
-  const everyInterface = bindKind === "wildcard" || bindKind === "empty";  // Anything that is not loopback and not this machine's tailnet address is
+  const everyInterface = bindKind === "wildcard" || bindKind === "empty";
+  // Anything that is not loopback and not this machine's tailnet address is
   // reachable from the local network — including a bind shape we cannot read,
   // which must not be reported as private.
   const onLocalNetwork = !(bindKind === "loopback" || bindKind === "tailnet");
   const firewall = readHostFirewall();
+  const inContainer = isRunningInContainer();
 
   // A noun phrase, so the value line and the issue sentence can share it.
   const where = everyInterface
@@ -1158,9 +1208,11 @@ async function exposureSignal(db, lang, nowFn, opts = {}) {
     ? fill(t("signals.exposure.unknownList", lang), { list: unknowns.join(", ") })
     : "";
   const withUnknowns = (value) => (unknownSuffix ? `${value} · ${unknownSuffix}` : value);
-  // Bound to every interface with a firewall that is off OR could not be read
-  // is a WARN: nothing confirms the local network is kept out, so the card must
-  // not read as protected. Other unknown checks (Funnel) are at most info.
+  // Bound anywhere the local network can reach, with a firewall that is off OR
+  // could not be read, is a WARN: nothing confirms the local network is kept
+  // out, so the card must not read as protected. Other unknown checks (Funnel)
+  // are at most info, and inside a container neither the bind nor the firewall
+  // is a warn at all (see the container branch below).
   const settingsAction = {
     actionLabel: t("signals.exposure.action", lang),
     actionHref: "/dashboard/settings?section=connections",
@@ -1177,11 +1229,29 @@ async function exposureSignal(db, lang, nowFn, opts = {}) {
       value: withUnknowns(t("signals.exposure.open", lang)), issueLabel: problems[0],
       ...settingsAction,
     });
+  } else if (inContainer) {
+    // The bind and the (missing) ufw.conf describe the CONTAINER, not the host:
+    // warning on them would be a permanent false alarm on every container
+    // install. Info instead, pointing at the only fact that matters there — the
+    // ports the container publishes on the host. Funnel problems, above, still
+    // warn the same way they do on a host.
+    out.push({
+      id: "exposure", severity: "info", state: "info", label,
+      value: withUnknowns(fill(t("signals.exposure.containerValue", lang), { bind: bindLine })),
+      issueLabel: t("signals.exposure.containerIssue", lang),
+      ...bindAction,
+    });
   } else if (onLocalNetwork && (firewall === "off" || firewall === "unknown")) {
     out.push({
       id: "exposure", severity: "warn", state: "warn", label,
       value: withUnknowns(`${bindLine}; ${firewallText}`),
-      issueLabel: fill(t("signals.exposure.lanIssue", lang), { where }),
+      // "off" and "unknown" are different facts and get different sentences: a
+      // firewall that could not be read (firewalld, nftables, no ufw.conf) is
+      // not the same claim as a firewall known to be off.
+      issueLabel: fill(t(
+        firewall === "unknown" ? "signals.exposure.lanIssueUnknown" : "signals.exposure.lanIssue",
+        lang,
+      ), { where }),
       ...bindAction,
     });
   } else if (onLocalNetwork) {
@@ -1766,6 +1836,8 @@ async function publishedPortsSignal(db, lang, nowFn, opts = {}) {
  *   read from listen-host.js, the same expression index.js binds with)
  * @param {number} [opts.uptimeMs]  test seam for the Updates card: how long this
  *   gateway process has been up (otherwise process.uptime())
+ * @param {boolean} [opts.noAuth]  test seam for the Updates card: the gateway's
+ *   --no-auth flag (otherwise read from process.argv, like exposureSignal)
  * @returns {Promise<{ok: boolean, issues: Array, details: Array}>}
  */
 export async function collectHealthSignals(db, opts = {}) {
@@ -1782,7 +1854,7 @@ export async function collectHealthSignals(db, opts = {}) {
     peersSignal(db, lang, nowFn),
     syncDialSignal(db, lang, nowFn),
     Promise.resolve().then(() => peerTrustSignal(lang, nowFn)),
-    updatesSignal(db, nowFn, { lang, uptimeMs: opts.uptimeMs }),
+    updatesSignal(db, nowFn, { lang, uptimeMs: opts.uptimeMs, noAuth: opts.noAuth }),
     backupSignal(db, nowFn, lang),
     keychainExportSignal(db, lang),
     syncConflictsSignal(db),
