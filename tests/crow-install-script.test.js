@@ -11,9 +11,20 @@ const src = () => readFileSync(SCRIPT, "utf-8");
 /** Source the installer's helper layer (CROW_INSTALL_SOURCE_ONLY=1) and run a
  *  snippet against it. detached:true puts the child in a new session with no
  *  controlling terminal, so the /dev/tty open-probe fails → HAS_TTY=false and
- *  the headless path is exercised even from an interactive terminal. */
-function runWithHelpers(snippet, env = {}) {
-  return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"; ${snippet}`], {
+ *  the headless path is exercised even from an interactive terminal.
+ *  scriptArgs are passed to `source`, i.e. they become the installer's own
+ *  arguments (the `curl … | bash -s -- --no-auto-updates` case). */
+function runWithHelpers(snippet, env = {}, scriptArgs = []) {
+  // Safety rail: a snippet that can reach the auto-updates step may only run
+  // with the scratch seams, so a regression in the env parsing can never run a
+  // real `sudo apt install` (or hang on a sudo prompt) on the suite's machine.
+  if (/install_auto_updates|apt_install|write_crow_apt_conf|write_auto_upgrades_conf/.test(snippet)) {
+    for (const key of ["APT_CONF_DIR", "CROW_SUDO", "CROW_APT"]) {
+      if (!env[key]) throw new Error(`${key} is required to run the auto-updates step in a test`);
+    }
+  }
+  const args = scriptArgs.map((a) => ` ${a}`).join("");
+  return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"${args}; ${snippet}`], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
     env: { ...process.env, ...env },
@@ -527,7 +538,7 @@ function runAutoUpdates(scratch, opts = {}) {
     CROW_SUDO: scratch.sudo,
     CROW_APT: scratch.apt,
     ...(opts.env || {}),
-  });
+  }, opts.args || []);
 }
 
 test("K6: the step sits after Docker and Caddy and runs install_auto_updates", () => {
@@ -602,25 +613,74 @@ test("K6 (behaviour): 20auto-upgrades is written only when it is absent", () => 
   assert.match(r.stdout, /already exists/);
 });
 
-test("K6 (behaviour): --no-auto-updates skips the step — no apt call, no file written", () => {
+test("K6 (behaviour): CROW_NO_AUTO_UPDATES=1 skips the step — no apt call, no file written", () => {
   const scratch = autoUpdatesScratch();
-  const r = runAutoUpdates(scratch, { snippet: "AUTO_UPDATES=false; install_auto_updates" });
+  const r = runAutoUpdates(scratch, { env: { CROW_NO_AUTO_UPDATES: "1" } });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /skipped/);
   assert.deepEqual(readdirSync(scratch.confDir), []);
   assert.equal(existsSync(scratch.aptLog), false, "the opt-out must not run apt at all");
 });
 
+test("K6 (behaviour): the --no-auto-updates argument given to the script skips the step", () => {
+  const scratch = autoUpdatesScratch();
+  // `source … --no-auto-updates` is what `curl … | bash -s -- --no-auto-updates`
+  // does: the arguments reach the script's own flag loop.
+  const r = runAutoUpdates(scratch, {
+    args: ["--no-auto-updates"],
+    snippet: 'echo "AUTO=$AUTO_UPDATES"; install_auto_updates',
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /AUTO=false/);
+  assert.match(r.stdout, /skipped/);
+  assert.deepEqual(readdirSync(scratch.confDir), []);
+  assert.equal(existsSync(scratch.aptLog), false, "the opt-out must not run apt at all");
+});
+
+test("K6: the step can only run in tests with the scratch seams set", () => {
+  // The rail in runWithHelpers: without it a broken env parse would run the
+  // suite's machine's real `sudo apt install unattended-upgrades`.
+  assert.throws(
+    () => runWithHelpers("install_auto_updates", { CROW_NO_AUTO_UPDATES: "1" }),
+    /APT_CONF_DIR is required/,
+  );
+});
+
 test("K6: the flag and CROW_NO_AUTO_UPDATES are parsed next to --yes and documented in the usage text", () => {
   const s = src();
   assert.match(s, /--no-auto-updates\) AUTO_UPDATES=false ;;/);
   assert.match(s, /CROW_NO_AUTO_UPDATES:-\}" = "1" \]; then AUTO_UPDATES=false; fi/);
-  assert.match(s.slice(0, s.indexOf("set -euo pipefail")), /^#   --no-auto-updates/m,
+  const usage = s.slice(0, s.indexOf("set -euo pipefail"));
+  assert.match(usage, /^#   --no-auto-updates/m,
     "the opt-out belongs in the script's usage text");
-  const r = runWithHelpers('echo "AUTO=$AUTO_UPDATES"; install_auto_updates', { CROW_NO_AUTO_UPDATES: "1" });
+  // Both pipe forms: the documented one-liner feeds the script to bash on
+  // stdin, so a flag cannot be appended after the URL.
+  assert.match(usage, /crow-install\.sh \| bash -s -- --no-auto-updates/);
+  assert.match(usage, /crow-install\.sh \| CROW_NO_AUTO_UPDATES=1 bash/);
+  const scratch = autoUpdatesScratch();
+  const r = runAutoUpdates(scratch, {
+    env: { CROW_NO_AUTO_UPDATES: "1" },
+    snippet: 'echo "AUTO=$AUTO_UPDATES"; install_auto_updates',
+  });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /AUTO=false/);
   assert.match(r.stdout, /skipped/);
+});
+
+test("K6: every apt call after this step waits for the dpkg lock", () => {
+  const s = src();
+  const stepIdx = s.indexOf('header "Step 5/10: Automatic Security Updates"');
+  assert.ok(stepIdx > -1, "the step must exist");
+  // From here on apt-daily-upgrade.timer can hold the dpkg lock (20auto-upgrades
+  // says "1"); without the timeout apt fails and `set -e` stops the install.
+  const later = s.slice(stepIdx);
+  const calls = later.match(/^\s*(?:sudo\s+)?(?:apt|apt-get)\s+(?:-y\s+)?(?:install|update|upgrade)\b.*$/gm) || [];
+  assert.ok(calls.length >= 3, `expected the later apt calls, found ${calls.length}`);
+  for (const line of calls) {
+    assert.match(line, /-o DPkg::Lock::Timeout=300/, `missing the lock timeout: ${line.trim()}`);
+  }
+  // The step's own install runs before the timer is switched on, so it needs none.
+  assert.doesNotMatch(autoUpdatesStepBlock(s), /DPkg::Lock::Timeout/);
 });
 
 test("K6: the step never restarts a service and never reboots", () => {

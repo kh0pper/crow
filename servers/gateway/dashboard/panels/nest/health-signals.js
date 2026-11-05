@@ -71,9 +71,14 @@
  *               and Caddy origins. A reboot still owed → warn (with up to 10
  *               package names from reboot-required.pkgs); the daily run switched
  *               off or missing → info linking to the guide; a last run (stamp or
- *               log mtime) older than 3 days while the timer is on → warn. Node
- *               and Docker versions are shown as information only (never a
- *               "latest" lookup). Any check that could not run → at most info,
+ *               log mtime) older than 3 days while the timer is on → warn; no
+ *               record of a run yet → info (a fresh box is not a failed check).
+ *               The switch is read the way apt reads it: every file in
+ *               apt.conf.d in name order, comments stripped, the LAST
+ *               APT::Periodic::Unattended-Upgrade assignment winning. Node and
+ *               Docker versions are information only (never a "latest" lookup);
+ *               a Docker that is not installed is stated, not counted as a
+ *               failed check. Any check that could not run → at most info,
  *               naming it, never ok. No apt (non-Debian, or a container) → no card.
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
@@ -1987,6 +1992,9 @@ async function bundleImagesSignal(lang, nowFn) {
 // A check that cannot run is at most info and NAMES itself — never ok.
 export const APT_CONF_DIR = "/etc/apt/apt.conf.d";
 export const AUTO_UPGRADES_CONF = "20auto-upgrades";
+// apt reads only the files whose names carry no dot (subdirectories and
+// `foo.conf.bak` are skipped), so the switch lives in a set of plain files.
+const APT_CONF_NAME_RE = /^[A-Za-z0-9_-]+$/;
 export const REBOOT_REQUIRED_PATH = "/var/run/reboot-required";
 export const REBOOT_PKGS_PATH = "/var/run/reboot-required.pkgs";
 export const UNATTENDED_STAMP_PATH = "/var/lib/apt/periodic/unattended-upgrades-stamp";
@@ -1998,6 +2006,7 @@ const SYSTEM_UPDATES_EXEC_TIMEOUT_MS = 5000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const defaultAptPresenceReader = () => existsSync("/etc/apt");
+const defaultAptConfListReader = (dir) => readdirSync(dir);
 const defaultUpdatesExistsReader = (p) => existsSync(p);
 const defaultUpdatesStatReader = (p) => statSync(p).mtimeMs;
 const defaultUpdatesFileReader = (p) => readFileSync(p, "utf-8");
@@ -2007,14 +2016,16 @@ const defaultUpdatesDockerVersionReader = () => execFileSync(
 );
 
 let _aptPresenceReader = defaultAptPresenceReader;
+let _aptConfListReader = defaultAptConfListReader;
 let _updatesExistsReader = defaultUpdatesExistsReader;
 let _updatesStatReader = defaultUpdatesStatReader;
 let _updatesFileReader = defaultUpdatesFileReader;
 let _updatesDockerVersionReader = defaultUpdatesDockerVersionReader;
 
 /** Test seams for the systemUpdates signal: any subset; omitted ones stay as they are. */
-export function _setSystemUpdateReaders({ aptPresent, exists, stat, readFile, dockerVersion } = {}) {
+export function _setSystemUpdateReaders({ aptPresent, listConfDir, exists, stat, readFile, dockerVersion } = {}) {
   if (aptPresent !== undefined) _aptPresenceReader = aptPresent || defaultAptPresenceReader;
+  if (listConfDir !== undefined) _aptConfListReader = listConfDir || defaultAptConfListReader;
   if (exists !== undefined) _updatesExistsReader = exists || defaultUpdatesExistsReader;
   if (stat !== undefined) _updatesStatReader = stat || defaultUpdatesStatReader;
   if (readFile !== undefined) _updatesFileReader = readFile || defaultUpdatesFileReader;
@@ -2024,6 +2035,22 @@ export function _setSystemUpdateReaders({ aptPresent, exists, stat, readFile, do
 /** The guide section that explains all of this (and how to turn it off). */
 export function systemUpdatesDocsHref(lang = "en") {
   return docsUrl((lang === "es" ? "es/" : "") + "guide/auto-update") + "#system-updates";
+}
+
+/**
+ * The daily-unattended-upgrade switch as unattended-upgrades ends up seeing it:
+ * apt.conf comments removed, the LAST assignment winning (apt(5): a later value
+ * replaces an earlier one), and a value of 1 or more meaning "on". Returns null
+ * when the file says nothing about it.
+ */
+function unattendedUpgradeSwitch(text) {
+  const stripped = String(text ?? "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ") // /* block comments */
+    .replace(/\/\/[^\n]*/g, " ");        // // line comments
+  const re = /^\s*APT::Periodic::Unattended-Upgrade\s+"?(\d+)"?\s*;/gm;
+  let last = null;
+  for (const m of stripped.matchAll(re)) last = Number(m[1]);
+  return last;
 }
 
 async function systemUpdatesSignal(lang, nowFn) {
@@ -2041,6 +2068,7 @@ async function systemUpdatesSignal(lang, nowFn) {
   const label = t("signals.systemUpdates.label", lang);
   const now = nowFn();
   const problems = []; // warn: a reboot owed, or a run long overdue
+  const notYet = [];   // info: the timer is on but has never run
   const infos = [];    // info: the timer is off
   const unknowns = []; // checks that could not run — at most info, never ok
 
@@ -2064,32 +2092,41 @@ async function systemUpdatesSignal(lang, nowFn) {
     const text = packages.length
       ? fill(t("signals.systemUpdates.rebootNeededPkgs", lang), { packages: packages.join(", ") })
       : t("signals.systemUpdates.rebootNeeded", lang);
-    problems.push({ text, issue: text });
+    problems.push({ kind: "reboot", text, issue: text });
   }
 
-  // (b) Is the daily run still on? The distro's own file, nothing else.
-  const confPath = join(APT_CONF_DIR, AUTO_UPGRADES_CONF);
+  // (b) Is the daily run still on? apt reads EVERY file in apt.conf.d in name
+  // order and the last assignment wins, so read them all: an operator turning
+  // this off may use a later file, and a commented-out line is not a setting.
   let autoOn = null;
-  let confExists = false;
+  let switchSeen = false;
   let confUnreadable = false;
+  let confFiles = [];
   try {
-    confExists = !!_updatesExistsReader(confPath);
+    confFiles = _aptConfListReader(APT_CONF_DIR).filter((f) => APT_CONF_NAME_RE.test(f)).sort();
   } catch {
     confUnreadable = true;
   }
+  if (!confUnreadable) {
+    for (const file of confFiles) {
+      let value = null;
+      try {
+        value = unattendedUpgradeSwitch(_updatesFileReader(join(APT_CONF_DIR, file)));
+      } catch {
+        // apt would read this file and we cannot: the switch is unknown.
+        confUnreadable = true;
+        continue;
+      }
+      if (value !== null) {
+        autoOn = value >= 1;
+        switchSeen = true;
+      }
+    }
+  }
   if (confUnreadable) {
     unknowns.push(t("signals.systemUpdates.checkAuto", lang));
-  } else if (!confExists) {
-    autoOn = false; // missing means unattended-upgrades was never switched on
-  } else {
-    try {
-      // The same switch apt itself reads: the periodic flag must be "1".
-      autoOn = /APT::Periodic::Unattended-Upgrade\s+"1"\s*;/.test(
-        String(_updatesFileReader(confPath) ?? ""),
-      );
-    } catch {
-      unknowns.push(t("signals.systemUpdates.checkAuto", lang));
-    }
+  } else if (!switchSeen) {
+    autoOn = false; // nothing in apt.conf.d switches the daily run on
   }
 
   if (autoOn === false) {
@@ -2104,6 +2141,7 @@ async function systemUpdatesSignal(lang, nowFn) {
   let lastRunMs = null;
   let lastRunKnown = false;
   if (autoOn === true) {
+    let statError = null;
     for (const p of [UNATTENDED_STAMP_PATH, UNATTENDED_LOG_PATH]) {
       try {
         const m = _updatesStatReader(p);
@@ -2112,16 +2150,27 @@ async function systemUpdatesSignal(lang, nowFn) {
           lastRunKnown = true;
           break;
         }
-      } catch {} // try the fallback
+      } catch (err) {
+        statError = err; // keep the error: ENOENT and EACCES mean different things
+      }
     }
     if (!lastRunKnown) {
-      // No record at all: a fresh install or a timer that never fired. Either
-      // way it is unknown, not "current".
-      unknowns.push(t("signals.systemUpdates.checkLastRun", lang));
+      // No stamp and no log. Missing files are a fresh install (the daily run
+      // has not come round yet), not a check Crow could not run; any other read
+      // failure is a real unknown. Either way it is not "current".
+      if (statError && statError.code !== "ENOENT") {
+        unknowns.push(t("signals.systemUpdates.checkLastRun", lang));
+      } else {
+        notYet.push({
+          text: t("signals.systemUpdates.notRunYet", lang),
+          issue: t("signals.systemUpdates.notRunYetIssue", lang),
+        });
+      }
     } else {
       const days = Math.floor((now - lastRunMs) / DAY_MS);
       if (days >= UPDATES_STALE_DAYS) {
         problems.push({
+          kind: "stale",
           text: fill(t("signals.systemUpdates.staleRun", lang), { days }),
           issue: fill(t("signals.systemUpdates.staleRunIssue", lang), { days }),
         });
@@ -2133,18 +2182,24 @@ async function systemUpdatesSignal(lang, nowFn) {
   // looking up the newest release would need the network, so this never does.
   const nodeVersion = process.version.replace(/^v/, "");
   let dockerVersion = null;
+  let dockerMissing = false;
   try {
     dockerVersion = String(_updatesDockerVersionReader() ?? "").trim() || null;
-  } catch {
+  } catch (err) {
+    // A box without Docker is a legitimate state, not a failed check: only a
+    // Docker that exists and cannot answer is an unknown, or the card could
+    // never reach ok here.
+    dockerMissing = err?.code === "ENOENT";
     dockerVersion = null;
   }
-  if (!dockerVersion) unknowns.push(t("signals.systemUpdates.checkDocker", lang));
+  if (!dockerVersion && !dockerMissing) unknowns.push(t("signals.systemUpdates.checkDocker", lang));
   const versionsLine = fill(t("signals.systemUpdates.versions", lang), {
     node: nodeVersion,
-    docker: dockerVersion || t("signals.systemUpdates.dockerUnknown", lang),
+    docker: dockerVersion
+      || t(dockerMissing ? "signals.systemUpdates.dockerNotInstalled" : "signals.systemUpdates.dockerUnknown", lang),
   });
 
-  const lines = [...problems.map((p) => p.text), ...infos.map((i) => i.text)];
+  const lines = [...problems.map((p) => p.text), ...notYet.map((n) => n.text), ...infos.map((i) => i.text)];
   if (unknowns.length > 0) {
     lines.push(fill(t("signals.systemUpdates.unknown", lang), { list: unknowns.join(", ") }));
   }
@@ -2152,10 +2207,9 @@ async function systemUpdatesSignal(lang, nowFn) {
 
   const state = problems.length > 0
     ? "warn"
-    : (infos.length + unknowns.length > 0 ? "info" : "ok");
+    : (notYet.length + infos.length + unknowns.length > 0 ? "info" : "ok");
   // "current" is a claim, so it is only made when every check actually ran.
   if (state === "ok") lines.unshift(t("signals.systemUpdates.ok", lang));
-  const first = problems[0] || infos[0];
   const card = {
     id: "systemUpdates",
     severity: state === "ok" ? null : state,
@@ -2163,18 +2217,42 @@ async function systemUpdatesSignal(lang, nowFn) {
     label,
     value: lines.join(" · "),
   };
-  if (first) {
-    card.issueLabel = first.issue;
-  } else if (unknowns.length > 0) {
-    card.issueLabel = fill(t("signals.systemUpdates.unknownIssue", lang), { list: unknowns.join(", ") });
+  if (state === "ok") return card;
+
+  // One issue per subject, each with its own id: the health monitor dedupes
+  // pushes per id for 24 h, so a reboot warning must not swallow a stale-run
+  // warning (or the other way round). The card itself is display only.
+  const entries = [];
+  for (const p of problems) {
+    entries.push({
+      id: `systemUpdates:${p.kind}`, severity: "warn", state: "warn",
+      label, issueLabel: p.issue,
+    });
   }
-  if (state === "info" && infos.some((i) => i.action)) {
-    // Automatic updates off is the one actionable state, so it links to the
-    // guide section that explains what is off and how to turn it back on.
-    card.actionLabel = t("signals.systemUpdates.action", lang);
-    card.actionHref = systemUpdatesDocsHref(lang);
+  for (const n of notYet) {
+    entries.push({
+      id: "systemUpdates:pending", severity: "info", state: "info",
+      label, issueLabel: n.issue,
+    });
   }
-  return card;
+  if (infos.length > 0) {
+    entries.push({
+      id: "systemUpdates:off", severity: "info", state: "info",
+      label, issueLabel: infos[0].issue,
+      // Automatic updates off is the one actionable state, so it links to the
+      // guide section that explains what is off and how to turn it back on.
+      actionLabel: t("signals.systemUpdates.action", lang),
+      actionHref: systemUpdatesDocsHref(lang),
+    });
+  }
+  if (unknowns.length > 0) {
+    entries.push({
+      id: "systemUpdates:check", severity: "info", state: "info",
+      label,
+      issueLabel: fill(t("signals.systemUpdates.unknownIssue", lang), { list: unknowns.join(", ") }),
+    });
+  }
+  return [{ ...card, cardOnly: true }, ...entries.map((e) => ({ ...e, issueOnly: true }))];
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────

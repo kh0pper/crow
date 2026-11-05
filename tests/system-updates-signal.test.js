@@ -22,7 +22,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   collectHealthSignals,
   invalidateHealthCache,
@@ -79,11 +79,17 @@ const autoConf = (flag = "1") =>
 /**
  * A fake machine. `files` and `mtimes` are path → content / mtime; `present`
  * lists paths that exist but carry no content (like /var/run/reboot-required).
+ * The apt.conf.d listing is derived from the files placed in that directory.
  */
-function fakeRoot({ apt = true, files = {}, present = [], mtimes = {}, dockerVersion } = {}) {
+function fakeRoot({ apt = true, files = {}, present = [], mtimes = {}, dockerVersion, confDirError } = {}) {
   const existing = new Set([...Object.keys(files), ...present, ...Object.keys(mtimes)]);
   return {
     aptPresent: () => apt,
+    listConfDir: (dir) => {
+      if (dir !== APT_CONF_DIR) throw Object.assign(new Error(`ENOENT: ${dir}`), { code: "ENOENT" });
+      if (confDirError) throw confDirError;
+      return Object.keys(files).filter((p) => dirname(p) === APT_CONF_DIR).map((p) => basename(p));
+    },
     exists: (p) => existing.has(p),
     readFile: (p) => {
       if (!(p in files)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
@@ -101,10 +107,12 @@ async function systemUpdates(root, opts = {}) {
   _setSystemUpdateReaders(root);
   invalidateHealthCache();
   const r = await collectHealthSignals(makeDb(), { now: () => opts.now ?? NOW, lang: opts.lang ?? "en" });
+  const issues = r.issues.filter((i) => i.id === "systemUpdates" || i.id.startsWith("systemUpdates:"));
   return {
     result: r,
     detail: r.details.find((d) => d.id === "systemUpdates"),
-    issue: r.issues.find((i) => i.id === "systemUpdates"),
+    issues,
+    issue: issues[0],
   };
 }
 
@@ -118,6 +126,7 @@ test("a reboot is owed → warn, listing at most ten package names", async () =>
 
   assert.equal(detail.state, "warn");
   assert.equal(issue.severity, "warn");
+  assert.equal(issue.id, "systemUpdates:reboot");
   assert.match(issue.label, /a reboot is needed to finish updates/);
   assert.match(issue.label, /pkg-1\b/);
   assert.match(issue.label, /pkg-10\b/);
@@ -137,6 +146,7 @@ test("a reboot is owed with no packages file → the plain sentence", async () =
 test("no 20auto-upgrades at all → info: automatic security updates are off, with the guide link", async () => {
   const { detail, issue } = await systemUpdates(fakeRoot());
   assert.equal(issue.severity, "info");
+  assert.equal(issue.id, "systemUpdates:off");
   assert.equal(detail.state, "info", "off is never a warn and never ok");
   assert.match(detail.value, /automatic security updates are off/);
   assert.equal(issue.actionHref, systemUpdatesDocsHref("en"));
@@ -159,6 +169,59 @@ test("the Spanish card links to the Spanish guide section", async () => {
   assert.equal(systemUpdatesDocsHref("es"), issue.actionHref);
 });
 
+// ─── The switch is read the way apt reads it ──────────────────────────────────
+
+test('a commented-out Unattended-Upgrade "1" is not a setting → off', async () => {
+  const commented = '// APT::Periodic::Unattended-Upgrade "1";\n/* APT::Periodic::Unattended-Upgrade "1"; */\n';
+  const { detail, issue } = await systemUpdates(fakeRoot({ files: { [AUTO_CONF]: commented } }));
+  assert.equal(detail.state, "info");
+  assert.match(detail.value, /automatic security updates are off/);
+  assert.equal(issue.id, "systemUpdates:off");
+});
+
+test('"1" then "0" in the same file → the last assignment wins → off', async () => {
+  const both = 'APT::Periodic::Unattended-Upgrade "1";\nAPT::Periodic::Unattended-Upgrade "0";\n';
+  const { detail } = await systemUpdates(fakeRoot({ files: { [AUTO_CONF]: both } }));
+  assert.equal(detail.state, "info");
+  assert.match(detail.value, /automatic security updates are off/);
+});
+
+test("a later file in apt.conf.d overrides an earlier one, as apt does", async () => {
+  const off = await systemUpdates(fakeRoot({
+    files: {
+      [AUTO_CONF]: autoConf("1"),
+      [join(APT_CONF_DIR, "99crow-off")]: 'APT::Periodic::Unattended-Upgrade "0";\n',
+    },
+    mtimes: { [UNATTENDED_STAMP_PATH]: NOW - DAY },
+  }));
+  assert.equal(off.detail.state, "info");
+  assert.match(off.detail.value, /automatic security updates are off/);
+  assert.equal(off.issue.id, "systemUpdates:off");
+
+  // …and the other way round: a later file switches it back on.
+  const on = await systemUpdates(fakeRoot({
+    files: {
+      [AUTO_CONF]: autoConf("0"),
+      [join(APT_CONF_DIR, "99crow-on")]: 'APT::Periodic::Unattended-Upgrade "1";\n',
+    },
+    mtimes: { [UNATTENDED_STAMP_PATH]: NOW - DAY },
+  }));
+  assert.equal(on.detail.state, "ok");
+});
+
+test("a reboot and a stale run warn separately, each with its own issue id", async () => {
+  const days = UPDATES_STALE_DAYS + 1;
+  const { detail, issues } = await systemUpdates(fakeRoot({
+    files: { [AUTO_CONF]: autoConf() },
+    present: [REBOOT_REQUIRED_PATH],
+    mtimes: { [UNATTENDED_STAMP_PATH]: NOW - days * DAY },
+  }));
+  assert.equal(detail.state, "warn");
+  // Separate ids: one 24 h push window each, so neither can swallow the other.
+  assert.deepEqual(issues.map((i) => i.id), ["systemUpdates:reboot", "systemUpdates:stale"]);
+  assert.ok(issues.every((i) => i.severity === "warn"));
+});
+
 test("a run older than the threshold → warn: security updates last ran N days ago", async () => {
   const days = UPDATES_STALE_DAYS + 2;
   const { detail, issue } = await systemUpdates(fakeRoot({
@@ -167,17 +230,19 @@ test("a run older than the threshold → warn: security updates last ran N days 
   }));
   assert.equal(detail.state, "warn");
   assert.equal(issue.severity, "warn");
+  assert.equal(issue.id, "systemUpdates:stale");
   assert.match(detail.value, new RegExp(`last ran ${days} days ago`));
   assert.match(issue.label, new RegExp(`have not run for ${days} days`));
 });
 
 test("a fresh run → ok, with the installed versions as information", async () => {
-  const { detail, issue } = await systemUpdates(fakeRoot({
+  const { detail, issue, issues } = await systemUpdates(fakeRoot({
     files: { [AUTO_CONF]: autoConf() },
     mtimes: { [UNATTENDED_STAMP_PATH]: NOW - DAY },
   }));
   assert.equal(detail.state, "ok");
   assert.equal(issue, undefined, "an ok card is not an issue");
+  assert.deepEqual(issues, [], "nothing to push when every check ran");
   assert.match(detail.value, /security updates are current/);
   assert.match(detail.value, new RegExp(`versions: Node ${NODE.replace(/\./g, "\\.")}, Docker 27\\.3\\.1`));
 });
@@ -190,11 +255,23 @@ test("the log's mtime is the fallback when the stamp is missing", async () => {
   assert.equal(detail.state, "ok");
 });
 
-test("no record of a run at all → info naming the check, never ok", async () => {
+test("no record of a run yet → info saying so (a fresh box is not a failed check)", async () => {
   const { detail, issue } = await systemUpdates(fakeRoot({ files: { [AUTO_CONF]: autoConf() } }));
   assert.equal(detail.state, "info");
+  assert.match(detail.value, /updates have not run yet/);
+  assert.doesNotMatch(detail.value, /couldn't check/, "a first day is not a broken check");
+  assert.equal(issue.id, "systemUpdates:pending");
+  assert.equal(issue.severity, "info");
+});
+
+test("a run record that cannot be read (EACCES, not ENOENT) → info naming the check", async () => {
+  const root = fakeRoot({ files: { [AUTO_CONF]: autoConf() } });
+  root.stat = () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); };
+  const { detail, issue } = await systemUpdates(root);
+  assert.equal(detail.state, "info");
   assert.match(detail.value, /couldn't check: when updates last ran/);
-  assert.match(issue.label, /couldn't run these update checks/);
+  assert.equal(issue.id, "systemUpdates:check");
+  assert.equal(issue.severity, "info");
 });
 
 test("a host with no apt (not Debian/Ubuntu) → no card", async () => {
@@ -224,9 +301,25 @@ test("Docker failing → info with an unknown version, never a warn", async () =
     dockerVersion: () => { throw new Error("docker daemon not running"); },
   }));
   assert.equal(detail.state, "info");
-  assert.match(detail.value, /Docker version unknown/);
+  // "Docker {docker}" with dockerUnknown = "unknown", not "Docker version unknown".
+  assert.match(detail.value, /versions: Node .*Docker unknown/);
+  assert.doesNotMatch(detail.value, /Docker Docker/);
   assert.match(detail.value, /couldn't check: the Docker version/);
+  assert.equal(issue.id, "systemUpdates:check");
   assert.equal(issue.severity, "info");
+});
+
+test("Docker not installed at all → ok, stated as 'not installed', not a failed check", async () => {
+  const enoent = Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" });
+  const { detail, issue, issues } = await systemUpdates(fakeRoot({
+    files: { [AUTO_CONF]: autoConf() },
+    mtimes: { [UNATTENDED_STAMP_PATH]: NOW - DAY },
+    dockerVersion: () => { throw enoent; },
+  }));
+  assert.equal(detail.state, "ok", "no Docker must not keep the card from ok");
+  assert.match(detail.value, /versions: Node .*Docker not installed/);
+  assert.equal(issue, undefined);
+  assert.deepEqual(issues, []);
 });
 
 test("an unreadable 20auto-upgrades → info naming the check, never ok", async () => {
@@ -240,6 +333,14 @@ test("an unreadable 20auto-upgrades → info naming the check, never ok", async 
   assert.equal(detail.state, "info");
   assert.match(detail.value, /whether automatic updates are on/);
   assert.equal(issue.severity, "info");
+});
+
+test("an apt.conf.d directory that cannot be listed → info naming the check, never ok", async () => {
+  const root = fakeRoot({ confDirError: Object.assign(new Error("EACCES"), { code: "EACCES" }) });
+  const { detail, issue } = await systemUpdates(root);
+  assert.equal(detail.state, "info");
+  assert.match(detail.value, /whether automatic updates are on/);
+  assert.equal(issue.id, "systemUpdates:check");
 });
 
 test("an unreadable reboot marker → info, not a warn and not an ok", async () => {
@@ -293,7 +394,23 @@ test("the guide documents the system updates section in both languages", () => {
     assert.ok(text.includes('APT::Periodic::Unattended-Upgrade "0"'), "the manual switch-off is documented");
     assert.match(text, /Automatic-Reboot/i, "reboots are stated to be manual");
     assert.ok(text.includes("sudo reboot"), "the operator is told how to reboot when it is needed");
+    // The documented one-liner has no stdin, so the opt-out goes to bash — both
+    // forms, with the installer URL the guides already use.
+    assert.ok(text.includes("crow-install.sh | bash -s -- --no-auto-updates"), "flag form through the pipe");
+    assert.ok(text.includes("crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash"), "env form through the pipe");
+    // The opt-out leaves apt.conf.d alone; the repo sources and keyrings of the
+    // other steps are still added, so the guide must not claim more than that.
+    assert.ok(text.includes("`/etc/apt/apt.conf.d`"), "the opt-out is scoped to apt.conf.d");
+    assert.doesNotMatch(text, /Nothing under `\/etc\/apt` is touched/, "no blanket /etc/apt claim");
+    assert.match(text, /sources\.list\.d/, "the repo sources the opt-out does NOT remove are named");
   }
   assert.match(en, /restart their own service/, "a Docker/Node update may bounce a service briefly");
   assert.match(es, /reinician su propio servicio/, "the same in Spanish");
+  // A dockerd restart stops every container; only a restart policy brings one back.
+  assert.match(en, /stops \*\*every\*\*\s+container/);
+  assert.match(es, /detiene \*\*todos\*\* los contenedores/);
+  assert.match(en, /restart: unless-stopped/, "Crow's bundles state the policy that saves them");
+  // A Node update needs a gateway restart to take effect.
+  assert.match(en, /systemctl restart crow-gateway/);
+  assert.match(es, /systemctl restart crow-gateway/);
 });

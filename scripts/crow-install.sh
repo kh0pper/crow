@@ -19,6 +19,11 @@
 # Options:
 #   -y, --yes          assume the default answer to every prompt (also CROW_INSTALL_YES=1)
 #   --no-auto-updates  do not turn on automatic security updates (also CROW_NO_AUTO_UPDATES=1)
+#
+# The one-liner above feeds the script to bash on stdin, so an option has to go
+# to bash itself and not after the URL:
+#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash -s -- --no-auto-updates
+#   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | CROW_NO_AUTO_UPDATES=1 bash
 
 set -euo pipefail
 
@@ -179,8 +184,9 @@ apt_install() { # <package> [packages…] — the same `-y` style as the rest of
 write_crow_apt_conf() {
   local dest="$APT_CONF_DIR/52crow-unattended-upgrades" tmp
   tmp="$(mktemp)"
-  # Quoted heredoc: ${distro_codename} is an apt variable that apt expands when
-  # it reads the file, so it must land literally (and `set -u` would choke).
+  # Quoted heredoc: ${distro_codename} is an apt variable that UNATTENDED-UPGRADES
+  # (not apt) substitutes when it reads the origins, so it must land literally
+  # (and `set -u` would choke on it).
   cat > "$tmp" << 'CROWAPTEOF'
 // Written by the Crow installer. Remove this file to stop Crow's additions;
 // see https://maestro.press/software/crow/guide/auto-update#system-updates
@@ -359,6 +365,13 @@ fi
 # Placed AFTER Docker and Caddy so their apt repositories exist: their origins
 # are the three this step adds to unattended-upgrades (see install_auto_updates
 # above). Nothing here restarts a service or reboots.
+#
+# From here on apt-daily-upgrade.timer can already be holding the dpkg lock when
+# the remaining steps install a package, so every later apt call passes
+# `-o DPkg::Lock::Timeout=300`: apt waits for the timer instead of taking the
+# lock error and, under `set -e`, stopping the install. Keeping this step here
+# (rather than moving it to the end) leaves it next to the repositories it names;
+# the three later calls are the only apt calls left after it.
 
 header "Step 5/10: Automatic Security Updates"
 
@@ -371,7 +384,7 @@ header "Step 6/10: mDNS (crow.local)"
 if dpkg -l avahi-daemon >/dev/null 2>&1; then
   log "Avahi already installed"
 else
-  sudo apt install -y avahi-daemon
+  sudo apt install -y -o DPkg::Lock::Timeout=300 avahi-daemon
   log "Avahi installed"
 fi
 
@@ -543,7 +556,7 @@ header "Step 9/10: Security"
 if command -v ufw >/dev/null 2>&1; then
   log "UFW already installed"
 else
-  sudo apt install -y ufw
+  sudo apt install -y -o DPkg::Lock::Timeout=300 ufw
 fi
 
 sudo ufw default deny incoming
@@ -587,7 +600,7 @@ fi
 if command -v fail2ban-client >/dev/null 2>&1; then
   log "fail2ban already installed"
 else
-  sudo apt install -y fail2ban
+  sudo apt install -y -o DPkg::Lock::Timeout=300 fail2ban
   sudo systemctl enable --now fail2ban
   log "fail2ban installed and enabled"
 fi
