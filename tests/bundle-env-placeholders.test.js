@@ -415,10 +415,14 @@ test("compose lint: no unquoted ${…} message or default carries ': ' or ' #' (
   assert.equal(unsafeUnquotedInterpolations('      - "PASS=${PASS:-a: b}"').length, 0);
 });
 
-test("compose lint: the repo-root compose keeps MinIO's root password on :? (no fallback)", () => {
+test("compose lint: the repo-root compose leaves MinIO's root password on an empty :- (no fallback, no :?)", () => {
+  // Empty `:-`, not a value (a static secret fallback) and not `:?`: Compose
+  // interpolates every service, so a required variable on the profiled `minio`
+  // service would also break a Garage-only run. Blank stops the container.
   const text = readFileSync(join(REPO, "docker-compose.yml"), "utf8");
-  assert.match(text, /\$\{MINIO_ROOT_PASSWORD:\?/);
+  assert.match(text, /\$\{MINIO_ROOT_PASSWORD:-\}/);
   assert.ok(!("MINIO_ROOT_PASSWORD" in composeFallbacks(text)));
+  assert.doesNotMatch(text, /\$\{[A-Za-z_][A-Za-z0-9_]*:\?/, "no required ${VAR:?} in the root compose (profiles are all interpolated)");
 });
 
 test("plex: ADVERTISE_IP never interpolates PLEX_URL (a full URL) and comes from the optional PLEX_ADVERTISE_URL", () => {

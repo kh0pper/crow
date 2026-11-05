@@ -36,25 +36,40 @@ cp .env.example .env
 Open `.env` and set the required values:
 
 ```bash
-# Garage (file storage) — the default object storage
+# Garage (file storage) — the default object storage.
+# The gateway's S3_* and the container's GARAGE_DEFAULT_* are ONE key pair: Garage
+# creates that key on its first start, so both sides must match exactly.
 S3_ENDPOINT=garage:3900        # "garage" for Docker Compose, 127.0.0.1:3900 outside Docker
-S3_ACCESS_KEY=change-this-to-a-key-id        # = GARAGE_DEFAULT_ACCESS_KEY below
-S3_SECRET_KEY=change-this-to-a-secret-key    # = GARAGE_DEFAULT_SECRET_KEY below
+S3_ACCESS_KEY=                 # = GARAGE_DEFAULT_ACCESS_KEY below
+S3_SECRET_KEY=                 # = GARAGE_DEFAULT_SECRET_KEY below
 S3_USE_SSL=false
 S3_REGION=us-east-1            # must match s3_region in bundles/garage/garage.toml
 
-# The Garage container's own secrets (generate them: openssl rand -hex 32)
-GARAGE_RPC_SECRET=change-this-to-a-random-hex-string
-GARAGE_ADMIN_TOKEN=change-this-to-a-random-secret
-GARAGE_METRICS_TOKEN=change-this-to-a-random-secret
-GARAGE_DEFAULT_ACCESS_KEY=change-this-to-a-key-id
-GARAGE_DEFAULT_SECRET_KEY=change-this-to-a-secret-key
+# The Garage container's own secrets — all five are required; generate them with the
+# commands below. Formats: the key ID is "GK" + 24 hex characters, the S3 secret and
+# the RPC secret are 64 hex characters, the admin/metrics tokens are any long random
+# string (64 hex is fine).
+GARAGE_RPC_SECRET=
+GARAGE_ADMIN_TOKEN=
+GARAGE_METRICS_TOKEN=
+GARAGE_DEFAULT_ACCESS_KEY=
+GARAGE_DEFAULT_SECRET_KEY=
 
 # Storage quota (in MB)
 STORAGE_QUOTA_MB=1024
 ```
 
-The port belongs to `S3_ENDPOINT` (there is no `S3_PORT`), and the gateway's `S3_ACCESS_KEY` / `S3_SECRET_KEY` must be the same pair as `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage creates that key on first start. Blog settings are managed via the `crow_blog_settings` MCP tool or the Crow's Nest — no env vars needed.
+Generate the five Garage values and paste each line into `.env` — Compose does not expand `$(…)` inside an env file, so the values have to be literal there:
+
+```bash
+echo "GARAGE_DEFAULT_ACCESS_KEY=GK$(openssl rand -hex 12)"   # key ID: "GK" + 24 hex — copy as S3_ACCESS_KEY too
+echo "GARAGE_DEFAULT_SECRET_KEY=$(openssl rand -hex 32)"     # 64 hex — copy as S3_SECRET_KEY too
+echo "GARAGE_RPC_SECRET=$(openssl rand -hex 32)"             # 64 hex — Garage will not start without it
+echo "GARAGE_ADMIN_TOKEN=$(openssl rand -hex 32)"
+echo "GARAGE_METRICS_TOKEN=$(openssl rand -hex 32)"
+```
+
+The port belongs to `S3_ENDPOINT` (there is no `S3_PORT`), and the gateway's `S3_ACCESS_KEY` / `S3_SECRET_KEY` must be the same pair as `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY` — Garage creates that key on first start. Leave a `GARAGE_*` value blank and the Garage container stops on start (it refuses to run without an RPC secret), while the gateway itself still boots. Blog settings are managed via the `crow_blog_settings` MCP tool or the Crow's Nest — no env vars needed.
 
 ::: warning MinIO is no longer the default — and its image is no longer published
 Garage became the default object storage on 2026-11-05. **MinIO's public images are gone:** Docker Hub and Quay refuse anonymous pulls as of that date, so a new deployment cannot download MinIO any more. MinIO now lives behind the `minio-legacy` compose profile.
@@ -65,7 +80,9 @@ Garage became the default object storage on 2026-11-05. **MinIO's public images 
 docker compose --profile cloud --profile minio-legacy up -d
 ```
 
-Keep your existing `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` settings — the older `MINIO_*` names are still read when no `S3_*` setting is present — and export the existing `minio-data` volume to Garage whenever you want to move. New deployments should use `--profile storage` and the `S3_*` settings above.
+Keep your existing `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` settings — the older `MINIO_*` names are still read when no `S3_*` setting is present — and stay there as long as you like.
+
+**Moving data to Garage is not automated.** Crow has no MinIO-to-Garage export or import command: a `--profile storage` deployment starts with empty `garage-meta` / `garage-data` volumes, and stored files are not carried over. Existing deployments can therefore keep running `--profile minio-legacy` as their storage; new deployments should use `--profile storage` and the `S3_*` settings above.
 :::
 
 ## Step 3: Start Everything
@@ -87,7 +104,7 @@ On first run, Docker downloads images and builds the gateway. Subsequent starts 
 In a separate terminal:
 
 ```bash
-docker compose exec gateway npm run init-db
+docker compose exec crow-gateway npm run init-db
 ```
 
 This creates the SQLite database with all required tables.
@@ -195,7 +212,7 @@ Docker instances can be chained with other Crow installations — cloud VMs, des
 
 ```bash
 sudo apt install libatomic1
-docker compose restart gateway
+docker compose restart crow-gateway
 ```
 
 (If the installer set the gateway up as a service, use `sudo systemctl restart crow-gateway` instead.)

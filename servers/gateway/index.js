@@ -271,7 +271,11 @@ try {
 // default (`--profile storage`) and moves MinIO to `--profile minio-legacy`. A
 // .env still saying MINIO_ENDPOINT=minio with no minio service would boot a
 // gateway whose every upload dies on DNS, so refuse (exit 78, EX_CONFIG). It
-// exits on that one shape only; see boot/storage-service-guard.js.
+// exits on that one shape only, and never when a complete Shared Storage config
+// in the DB means the client ignores MINIO_* altogether — that read is read-only
+// and safe here, after the schema guard and the migration registry have made
+// dashboard_settings exist (a client opened before either could outlive a
+// restore). See boot/storage-service-guard.js.
 await runStorageServiceGuard();
 
 // Record the sha this process booted on, for convergence. Captured once, here,

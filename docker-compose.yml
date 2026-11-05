@@ -16,6 +16,17 @@
 ##
 ## Keeping an existing MinIO install running (no data change):
 ##   docker compose --profile cloud --profile minio-legacy up --build
+##
+## Required in .env — only for the profile you actually start. Compose interpolates
+## EVERY service in this file, including the ones whose profile is off, so a required
+## variable reference (a `:?` with an error message) would make an unrelated profile
+## fail before any container starts. Hence the empty-default `:-` form below: the values
+## are still required, but a blank one stops the container that needs it (Garage refuses
+## to start without its RPC secret, MinIO without a root password), not the whole
+## `docker compose config`.
+##   storage        — GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN, GARAGE_METRICS_TOKEN,
+##                    GARAGE_DEFAULT_ACCESS_KEY, GARAGE_DEFAULT_SECRET_KEY
+##   minio-legacy   — MINIO_ROOT_PASSWORD
 
 services:
   crow-gateway:
@@ -46,11 +57,18 @@ services:
     image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
     command: ["/garage", "server", "--single-node", "--default-access-key"]
     environment:
-      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET:?Set GARAGE_RPC_SECRET in .env (e.g. openssl rand -hex 32)}"
-      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:?Set GARAGE_ADMIN_TOKEN in .env}"
-      GARAGE_METRICS_TOKEN: "${GARAGE_METRICS_TOKEN:?Set GARAGE_METRICS_TOKEN in .env}"
-      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY:?Set GARAGE_DEFAULT_ACCESS_KEY in .env (the gateway's S3_ACCESS_KEY)}"
-      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY:?Set GARAGE_DEFAULT_SECRET_KEY in .env (the gateway's S3_SECRET_KEY)}"
+      # All five are required — set them in .env; see .env.example for the formats
+      # (RPC secret 64 hex, key ID "GK" + 24 hex, S3 secret 64 hex). The empty-default
+      # `:-` form, not a required `:?` reference, on purpose: Compose interpolates this
+      # service even when its profile is off, and a required reference would break
+      # `--profile cloud --profile minio-legacy`. A blank value stops Garage at
+      # container start instead — it will not run without an RPC secret — which is the
+      # only profile that ever reads these.
+      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET:-}"
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN:-}"
+      GARAGE_METRICS_TOKEN: "${GARAGE_METRICS_TOKEN:-}"
+      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY:-}"
+      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY:-}"
     volumes:
       # The extension's own rendered config, mounted read-only rather than copied:
       # one file keeps the bundle install and this profile from drifting apart.
@@ -83,7 +101,12 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crowadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+      # Required — set it in .env; see .env.example (legacy MinIO section). The
+      # empty-default `:-` form for the same reason as garage: an off profile is still
+      # interpolated, and a required `:?` reference would also demand it from a
+      # `--profile cloud --profile storage` run. Blank stops the MinIO container at
+      # start (it needs a root password), which is the only profile that reads it.
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-}"
     volumes:
       - minio-data:/data
     ports:

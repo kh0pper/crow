@@ -9,9 +9,10 @@
  *  - `storage` is garage, `minio-legacy` is minio — and nothing else;
  *  - Garage's S3 API (3900) and RPC (3901) are never published to the host, only
  *    the admin API (3903) on loopback;
- *  - the compose hardcodes no credentials (every Garage secret is a required
- *    ${VAR:?…} reference, and Garage's own key pair is the same pair the gateway
- *    gets as S3_ACCESS_KEY / S3_SECRET_KEY);
+ *  - the compose hardcodes no credentials (every Garage secret is an empty-default
+ *    ${VAR:-} reference — never a value, never a `${VAR:?}` that an unrelated
+ *    profile would have to satisfy — and Garage's own key pair is the same pair the
+ *    gateway gets as S3_ACCESS_KEY / S3_SECRET_KEY);
  *  - the image is the bundle's digest-pinned Garage, so the compose profile and
  *    an Extensions install can never drift onto different Garage builds.
  *
@@ -147,12 +148,29 @@ test("garage takes every secret from the environment, with no fallback value", (
   for (const name of wanted) {
     const m = new RegExp(`^\\s+${name}:\\s*(.+?)\\s*$`, "m").exec(block);
     assert.ok(m, `${name} is set on the service`);
-    assert.match(m[1], new RegExp(`^"\\$\\{${name}:\\?[^}]+\\}"$`),
-      `${name} must be a required \${VAR:?…} reference (a default would be a credential in git)`);
+    assert.match(m[1], new RegExp(`^"\\$\\{${name}:-\\}"$`),
+      `${name} must be an empty-default \${VAR:-} reference (a value would be a credential in git)`);
   }
   // Nothing else in the service carries a literal secret-shaped value.
   for (const [key, value] of [...block.matchAll(/^\s+([A-Z0-9_]*(?:SECRET|TOKEN|KEY|PASSWORD)[A-Z0-9_]*):\s*(.+?)\s*$/gm)].map((m) => [m[1], m[2]])) {
     assert.ok(value.startsWith('"${'), `${key} is not hardcoded`);
+  }
+});
+
+test("no service with a profiles list uses ${VAR:?} — Compose interpolates inactive profiles too", () => {
+  // `docker compose --profile cloud --profile minio-legacy config` failed with
+  // "required variable GARAGE_DEFAULT_SECRET_KEY is missing a value" while Garage's
+  // profile was OFF: Compose interpolates every service in the file before it filters
+  // by profile. So a required `${VAR:?}` on a profiled service demands the values of
+  // every other profile as well. These services keep `${VAR:-}` and fail at container
+  // start instead (Garage without an RPC secret, MinIO without a root password).
+  // Comments are stripped first: prose may NAME the rejected form without using it.
+  const code = (block) => block.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  for (const [name, block] of SERVICES) {
+    if (!/^\s*profiles:\s*\[/m.test(block)) continue;
+    const hit = /\$\{[A-Za-z_][A-Za-z0-9_]*:\?/.exec(code(block));
+    assert.equal(hit, null,
+      name + " has profiles:, so " + (hit?.[0] || "") + " would break every run of another profile");
   }
 });
 
