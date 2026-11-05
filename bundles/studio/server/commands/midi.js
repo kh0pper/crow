@@ -694,7 +694,14 @@ defineCommand({
         `The mapping "${args.id}" is not the proposal you were shown any more; look at it again before accepting it.`,
       );
     }
-    checkOneLive(doc, mapping.get("device_name"), message, args.id, toPlain(mapping.get("action"))?.kind === "keys.play");
+    // An older proposal can carry a pairing the rules now refuse (a program
+    // change on a held effect): it would go live and do nothing, so it is not
+    // accepted.
+    const acceptedKind = toPlain(mapping.get("action"))?.kind;
+    if (!acceptsMessageType(acceptedKind, message?.type)) {
+      refuseInvalid(messageNeedsText(acceptedKind));
+    }
+    checkOneLive(doc, mapping.get("device_name"), message, args.id, acceptedKind === "keys.play");
     const ref = midiRef(args.id);
     const action = cloneJson(toPlain(mapping.get("action")));
     const before = {

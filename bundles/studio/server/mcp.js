@@ -290,7 +290,13 @@ export function patternClipRead(snapshot, clip) {
         Object.entries(pattern.motion && typeof pattern.motion === "object" ? pattern.motion : {})
           .map(([lane, points]) => {
             const list = Array.isArray(points) ? points : [];
-            return [lane, { count: list.length, points: list }];
+            // A lane holds up to 4096 points; a read sends at most 256 of them,
+            // evenly spread, and says so, so one clip never answers in megabytes.
+            if (list.length <= MOTION_READ_POINTS) return [lane, { count: list.length, points: list }];
+            const step = list.length / MOTION_READ_POINTS;
+            const sampled = [];
+            for (let at = 0; at < MOTION_READ_POINTS; at += 1) sampled.push(list[Math.floor(at * step)]);
+            return [lane, { count: list.length, points: sampled, sampled: true }];
           }),
       ),
     })),
@@ -351,6 +357,9 @@ export function takeList(snapshot, clipId = null) {
   rows.sort((a, b) => (a.recorded_at < b.recorded_at ? 1 : a.recorded_at > b.recorded_at ? -1 : 0));
   return rows;
 }
+
+/** The most motion points one lane sends in a read (studio_get_clip). */
+const MOTION_READ_POINTS = 256;
 
 /**
  * The samples of a song, the way `studio_samples` reports them.

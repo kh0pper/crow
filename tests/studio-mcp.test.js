@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createStudioServer } from "../bundles/studio/server/mcp.js";
+import { createStudioServer, patternClipRead } from "../bundles/studio/server/mcp.js";
 import { listCommands } from "../bundles/studio/server/commands/registry.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
@@ -1429,4 +1429,18 @@ test("studio_midi lists mappings with who set them", async (t) => {
   } finally {
     await client.close();
   }
+});
+
+test("a long motion lane is read as a spread of at most 256 points", () => {
+  const points = Array.from({ length: 4096 }, (_, at) => ({ step_frac: at / 256, value: at }));
+  const snapshot = {
+    patterns: { "c/a": { id: "a", clip_id: "c", order: 0, name: "A", motion: { "b.0|cutoff_hz": points } } },
+    steps: {},
+  };
+  const read = patternClipRead(snapshot, { id: "c", kind: "pattern" });
+  const lane = read.patterns[0].motion["b.0|cutoff_hz"];
+  assert.equal(lane.count, 4096, "the lane says how many points it holds");
+  assert.equal(lane.points.length, 256, "and sends a spread of 256");
+  assert.equal(lane.sampled, true);
+  assert.deepEqual(lane.points[0], points[0], "starting at its first point");
 });

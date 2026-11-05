@@ -728,3 +728,32 @@ test("one live keys mapping per channel, and only on notes", (t) => {
   // Another channel is another set of keys.
   s.run("midi.map", { id: "k4", device_name: "MPK mini", message: message("note", 2, 0), action: { kind: "keys.play" } }, HUMAN);
 });
+
+test("an old proposal whose message cannot work is not accepted", (t) => {
+  const s = studio(t);
+  // A proposal from before the message rules: a program change on a held
+  // effect, which has no release. Written straight into the document.
+  const maps = midiMap(s.doc);
+  s.doc.transact(() => {
+    const row = new (maps.constructor)();
+    maps.set("old", row);
+    row.set("id", "old");
+    row.set("device_name", "FCB1010");
+    row.set("message", { type: "pc", channel: 1, number: 4 });
+    row.set("action", { kind: "fx.hold", name: "stutter" });
+    row.set("accepted_action", null);
+    row.set("set_by", "agent");
+    row.set("proposed", true);
+  });
+  const refused = refuses(
+    () =>
+      s.run(
+        "midi.accept",
+        { id: "old", expect: { device_name: "FCB1010", message: message("pc", 1, 4), action: { kind: "fx.hold", name: "stutter" } } },
+        HUMAN,
+      ),
+    "invalid",
+  );
+  assert.match(refused.message, /program change has no release/);
+  assert.equal(snapshot(s.doc).midi_maps.old.proposed, true);
+});
