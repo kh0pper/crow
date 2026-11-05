@@ -1,3 +1,5 @@
+## Requires Docker Compose 2.24 or later (`docker compose version`) — the long-form env_file entries below need it.
+##
 ## Crow — Docker Compose
 ##
 ## Cloud deployment:

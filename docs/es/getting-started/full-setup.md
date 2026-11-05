@@ -19,7 +19,7 @@ La instalación completa inicia todos los servicios de Crow juntos: el gateway M
 
 ## Requisitos Previos
 
-- Docker y Docker Compose instalados
+- Docker y Docker Compose 2.24 o posterior (`docker compose version`) instalados
 - Git (para clonar el repositorio)
 - Una máquina con al menos 1 GB de RAM
 
@@ -90,7 +90,7 @@ Garage pasó a ser el almacenamiento de objetos por defecto el 2026-11-05. **Las
 docker compose --profile cloud --profile minio-legacy up -d
 ```
 
-Conserva tus ajustes `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — los nombres antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*` — y puedes seguir ahí todo el tiempo que quieras. Un `MINIO_ROOT_PASSWORD` en blanco, el valor por defecto `minioadmin`, o cualquier cosa de menos de 8 caracteres detiene el contenedor de MinIO al arrancar: el entrypoint del servicio lo rechaza (salida 78) en vez de dejar que MinIO caiga en sus credenciales públicas por defecto.
+Conserva tus ajustes `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — los nombres antiguos `MINIO_*` se siguen leyendo cuando no hay ningún ajuste `S3_*` — y puedes seguir ahí todo el tiempo que quieras. Un `MINIO_ROOT_PASSWORD` en blanco, el valor por defecto `minioadmin`, o cualquier cosa de menos de 8 caracteres detiene el contenedor de MinIO al arrancar: el entrypoint del servicio lo rechaza (salida 78) en vez de dejar que MinIO caiga en sus credenciales públicas por defecto. Por eso una instalación que venía usando `minioadmin` por defecto tiene que definir una contraseña real en `.env` antes de arrancar el perfil heredado.
 
 **Mover datos a Garage no está automatizado.** Crow no tiene ningún comando de exportación o importación de MinIO a Garage: una instalación con `--profile storage` arranca con los volúmenes `garage-meta` / `garage-data` vacíos, y los archivos guardados no se trasladan. Por eso las instalaciones existentes pueden seguir usando `--profile minio-legacy` como su almacenamiento; las instalaciones nuevas deben usar `--profile storage` y los ajustes `S3_*` de arriba.
 :::

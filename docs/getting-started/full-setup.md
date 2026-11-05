@@ -19,7 +19,7 @@ The full setup starts all Crow services together: the MCP gateway, [Garage](http
 
 ## Prerequisites
 
-- Docker and Docker Compose installed
+- Docker and Docker Compose 2.24 or later (`docker compose version`) installed
 - Git (to clone the repository)
 - A machine with at least 1 GB of RAM
 
@@ -90,7 +90,7 @@ Garage became the default object storage on 2026-11-05. **MinIO's public images 
 docker compose --profile cloud --profile minio-legacy up -d
 ```
 
-Keep your existing `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` settings — the older `MINIO_*` names are still read when no `S3_*` setting is present — and stay there as long as you like. A blank `MINIO_ROOT_PASSWORD`, the default `minioadmin`, or anything shorter than 8 characters stops the MinIO container at start: the service's entrypoint refuses it (exit 78) instead of letting MinIO fall back to its published default credentials.
+Keep your existing `MINIO_ENDPOINT` / `MINIO_PORT` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` settings — the older `MINIO_*` names are still read when no `S3_*` setting is present — and stay there as long as you like. A blank `MINIO_ROOT_PASSWORD`, the default `minioadmin`, or anything shorter than 8 characters stops the MinIO container at start: the service's entrypoint refuses it (exit 78) instead of letting MinIO fall back to its published default credentials. An install that was running on the default `minioadmin` must therefore set a real password in `.env` before starting the legacy profile.
 
 **Moving data to Garage is not automated.** Crow has no MinIO-to-Garage export or import command: a `--profile storage` deployment starts with empty `garage-meta` / `garage-data` volumes, and stored files are not carried over. Existing deployments can therefore keep running `--profile minio-legacy` as their storage; new deployments should use `--profile storage` and the `S3_*` settings above.
 :::
