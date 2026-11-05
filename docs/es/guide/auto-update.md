@@ -448,3 +448,72 @@ npm (por eso se queda en el log y nunca llega a la notificación):
 ```
 
 Los resultados de las actualizaciones también se guardan en la base de datos y son visibles en Settings > Updates.
+
+## Actualizaciones del sistema {#system-updates}
+
+Todo lo anterior trata del **código de Crow**. La máquina debajo también se
+mantiene parcheada: el instalador activa `unattended-upgrades`, así que las
+actualizaciones de seguridad de Debian/Ubuntu se instalan solas una vez al día, y
+añade a esa misma ejecución los repositorios que Crow instaló.
+
+### Qué activa el instalador
+
+| Qué cubre | Origen |
+|---|---|
+| Node.js (NodeSource) | `origin=. nodistro,codename=nodistro` |
+| Docker Engine y sus paquetes | `origin=Docker,archive=${distro_codename}` |
+| Caddy | `origin=cloudsmith/caddy/stable,codename=any-version` |
+
+Los tres orígenes viven en el archivo propio de Crow,
+`/etc/apt/apt.conf.d/52crow-unattended-upgrades`. El `50unattended-upgrades` de
+la distribución nunca se edita, y sus orígenes de seguridad quedan exactamente
+como estaban: Crow solo añade. `/etc/apt/apt.conf.d/20auto-upgrades` activa la
+ejecución diaria, y solo se escribe cuando aún no existe — una máquina que ya
+configuró unattended-upgrades conserva su propia configuración. Volver a ejecutar
+el instalador reescribe el archivo de Crow solo cuando su contenido cambia.
+
+### Los reinicios nunca son automáticos
+
+`Unattended-Upgrade::Automatic-Reboot` está en `"false"`. Cuando una actualización
+necesita reiniciar, el Nido del Cuervo muestra una tarjeta **Actualizaciones del
+sistema** diciendo que hace falta reiniciar, con los paquetes que lo pidieron
+(hasta diez nombres). Reinicia cuando te venga bien:
+
+```bash
+sudo reboot
+```
+
+La misma tarjeta dice si la ejecución diaria sigue activa y cuándo se ejecutó por
+última vez, así que un temporizador detenido aparece como "las actualizaciones de
+seguridad se ejecutaron por última vez hace N días" en vez de silencio. También
+lista las versiones instaladas de Node y Docker — solo como información, sin
+buscar la versión más reciente.
+
+### Los servicios pueden reiniciarse un momento
+
+Una actualización de seguridad de Node, Docker o Caddy reemplaza el paquete.
+Docker y Caddy reinician su propio servicio como parte de ello, así que el panel
+puede quedar inaccesible unos segundos mientras ocurre. Crow no se reinicia por
+estas actualizaciones — de eso se encarga la actualización automática, más arriba
+en esta misma página.
+
+### Desactivar las actualizaciones automáticas {#turning-off}
+
+Cualquiera de estas basta:
+
+- **Instalar sin ellas:** ejecuta el instalador con `--no-auto-updates` (o define
+  `CROW_NO_AUTO_UPDATES=1`). No se toca nada bajo `/etc/apt`.
+- **Quitar los orígenes extra de Crow:** `sudo rm /etc/apt/apt.conf.d/52crow-unattended-upgrades`.
+  Las actualizaciones de seguridad de la distribución siguen instalándose solas;
+  Node, Docker y Caddy dejan de actualizarse solos.
+- **Detenerlo todo:** pon el interruptor en off en `/etc/apt/apt.conf.d/20auto-upgrades`:
+
+  ```
+  APT::Periodic::Unattended-Upgrade "0";
+  ```
+
+  o ejecuta `sudo dpkg-reconfigure unattended-upgrades` y responde *No*.
+
+Con las actualizaciones automáticas desactivadas, la tarjeta **Actualizaciones
+del sistema** del Nido lo dice y enlaza aquí. Nunca afirma que la máquina está al
+día mientras nada las comprueba.

@@ -15,6 +15,10 @@
 #   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
 #   less crow-install.sh
 #   bash crow-install.sh
+#
+# Options:
+#   -y, --yes          assume the default answer to every prompt (also CROW_INSTALL_YES=1)
+#   --no-auto-updates  do not turn on automatic security updates (also CROW_NO_AUTO_UPDATES=1)
 
 set -euo pipefail
 
@@ -45,12 +49,17 @@ header() {
 # to their DEFAULT when it does not (headless / cloud-init / CI).
 # `--yes` / `-y` / CROW_INSTALL_YES=1 forces defaults everywhere.
 ASSUME_YES=false
+# Automatic security updates (K6) are ON by default; --no-auto-updates or
+# CROW_NO_AUTO_UPDATES=1 leaves the host's apt configuration alone entirely.
+AUTO_UPDATES=true
 for _arg in "$@"; do
   case "$_arg" in
     -y|--yes) ASSUME_YES=true ;;
+    --no-auto-updates) AUTO_UPDATES=false ;;
   esac
 done
 if [ "${CROW_INSTALL_YES:-}" = "1" ]; then ASSUME_YES=true; fi
+if [ "${CROW_NO_AUTO_UPDATES:-}" = "1" ]; then AUTO_UPDATES=false; fi
 
 # Real tty detection (R1-I1): [ -r /dev/tty ] only tests the device node's
 # permission bits and is TRUE even with no controlling terminal. Actually
@@ -135,6 +144,95 @@ sd_quote() { # <arg>
   printf '"%s"' "$s"
 }
 
+# ─── Automatic security updates (security audit K6) ──────
+# The installer writes ONE apt configuration file of its own
+# (52crow-unattended-upgrades) and never edits the distribution's
+# 50unattended-upgrades: our file only ADDS the origins of the repositories this
+# installer wired up (NodeSource, Docker, cloudsmith/Caddy), so a security fix
+# for Node, Docker or Caddy installs itself exactly like the distribution's own
+# security updates do. Automatic reboots stay OFF, and nothing here restarts a
+# service — a Docker or Node security update may bounce its own service for a
+# moment, and the Crow's Nest says when a reboot is still owed (the "System
+# updates" health card).
+#
+# The apt.conf.d directory and the two privileged commands are test seams: the
+# suite runs this step against a scratch directory with shims, so it can never
+# touch the real /etc/apt. The defaults are the real ones.
+APT_CONF_DIR="${APT_CONF_DIR:-/etc/apt/apt.conf.d}"
+CROW_SUDO="${CROW_SUDO:-sudo}"
+CROW_APT="${CROW_APT:-apt}"
+
+sudo_cmd() { # <cmd> [args…]
+  # Word-split on purpose: the seam may carry flags too (e.g. "sudo -n").
+  # shellcheck disable=SC2086
+  $CROW_SUDO "$@"
+}
+apt_install() { # <package> [packages…] — the same `-y` style as the rest of the script
+  sudo_cmd "$CROW_APT" install -y "$@"
+}
+
+# write_crow_apt_conf — Crow's own origins file. Idempotent: a re-run that would
+# write identical bytes does nothing (so the file's mtime, and any dpkg state,
+# stays untouched). The content is built in a temp file first and only then
+# installed with mode 644, so nothing under /etc/apt is opened for a partial
+# write by us.
+write_crow_apt_conf() {
+  local dest="$APT_CONF_DIR/52crow-unattended-upgrades" tmp
+  tmp="$(mktemp)"
+  # Quoted heredoc: ${distro_codename} is an apt variable that apt expands when
+  # it reads the file, so it must land literally (and `set -u` would choke).
+  cat > "$tmp" << 'CROWAPTEOF'
+// Written by the Crow installer. Remove this file to stop Crow's additions;
+// see https://maestro.press/software/crow/guide/auto-update#system-updates
+// for turning automatic updates off.
+Unattended-Upgrade::Origins-Pattern {
+    "origin=. nodistro,codename=nodistro";
+    "origin=Docker,archive=${distro_codename}";
+    "origin=cloudsmith/caddy/stable,codename=any-version";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+CROWAPTEOF
+  if [ -r "$dest" ] && cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"
+    log "Automatic security updates already configured ($dest unchanged)"
+    return 0
+  fi
+  sudo_cmd install -m 644 "$tmp" "$dest"
+  rm -f "$tmp"
+  log "Automatic security updates configured: system, Node, Docker and Caddy ($dest)"
+}
+
+# write_auto_upgrades_conf — the distro's periodic switch. Written ONLY when it
+# does not exist: on a host that already configured unattended-upgrades (or ran
+# dpkg-reconfigure), the operator's periodic settings are not overruled.
+write_auto_upgrades_conf() {
+  local dest="$APT_CONF_DIR/20auto-upgrades" tmp
+  if [ -e "$dest" ]; then
+    log "$dest already exists — left as it is"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  cat > "$tmp" << 'CROWAPTEOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+CROWAPTEOF
+  sudo_cmd install -m 644 "$tmp" "$dest"
+  rm -f "$tmp"
+  log "Daily automatic security updates enabled ($dest)"
+}
+
+# install_auto_updates — the whole step. Never restarts a service and never
+# reboots; both are the operator's call (the Nest shows when a reboot is owed).
+install_auto_updates() {
+  if [ "$AUTO_UPDATES" != true ]; then
+    warn "Automatic security updates skipped (--no-auto-updates)"
+    return 0
+  fi
+  apt_install unattended-upgrades
+  write_crow_apt_conf
+  write_auto_upgrades_conf
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
@@ -176,6 +274,7 @@ echo "    - Node.js ${NODE_MAJOR}"
 echo "    - Docker + Docker Compose"
 echo "    - Caddy (reverse proxy)"
 echo "    - Crow"
+echo "    - Automatic security updates (unattended-upgrades, reboots stay manual)"
 echo "    - Security hardening (UFW + fail2ban)"
 echo "    - Tailscale (offered if not installed — secure remote access)"
 echo "    - Tailscale hostname setup (if Tailscale is installed)"
@@ -187,7 +286,7 @@ fi
 
 # ─── Step 1: System updates ──────────────────────────────
 
-header "Step 1/9: System Updates"
+header "Step 1/10: System Updates"
 
 sudo apt update
 sudo apt upgrade -y
@@ -195,7 +294,7 @@ log "System updated"
 
 # ─── Step 2: Install Node.js ─────────────────────────────
 
-header "Step 2/9: Node.js ${NODE_MAJOR}"
+header "Step 2/10: Node.js ${NODE_MAJOR}"
 
 if command -v node >/dev/null 2>&1; then
   CURRENT_NODE=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
@@ -220,7 +319,7 @@ sudo apt install -y libatomic1
 
 # ─── Step 3: Install Docker ──────────────────────────────
 
-header "Step 3/9: Docker"
+header "Step 3/10: Docker"
 
 if command -v docker >/dev/null 2>&1; then
   log "Docker already installed: $(docker --version)"
@@ -232,7 +331,7 @@ fi
 
 # ─── Step 4: Install Caddy ───────────────────────────────
 
-header "Step 4/9: Caddy"
+header "Step 4/10: Caddy"
 
 if command -v caddy >/dev/null 2>&1; then
   log "Caddy already installed: $(caddy version)"
@@ -256,9 +355,18 @@ if ! id caddy >/dev/null 2>&1 || ! getent group caddy >/dev/null 2>&1; then
   exit 1
 fi
 
-# ─── Step 5: Install Avahi (mDNS for crow.local) ─────────
+# ─── Step 5: Automatic security updates ─────────────────
+# Placed AFTER Docker and Caddy so their apt repositories exist: their origins
+# are the three this step adds to unattended-upgrades (see install_auto_updates
+# above). Nothing here restarts a service or reboots.
 
-header "Step 5/9: mDNS (crow.local)"
+header "Step 5/10: Automatic Security Updates"
+
+install_auto_updates
+
+# ─── Step 6: Install Avahi (mDNS for crow.local) ─────────
+
+header "Step 6/10: mDNS (crow.local)"
 
 if dpkg -l avahi-daemon >/dev/null 2>&1; then
   log "Avahi already installed"
@@ -282,9 +390,9 @@ if [ "$CURRENT_HOSTNAME" != "crow" ]; then
 fi
 MDNS_HOST="$(hostname).local"
 
-# ─── Step 6: Clone and Setup Crow ────────────────────────
+# ─── Step 7: Clone and Setup Crow ────────────────────────
 
-header "Step 6/9: Crow Platform"
+header "Step 7/10: Crow Platform"
 
 mkdir -p "$CROW_HOME"
 
@@ -323,9 +431,9 @@ if [ ! -L "$CROW_APP/.env" ]; then
   ln -sf "$CROW_HOME/.env" "$CROW_APP/.env"
 fi
 
-# ─── Step 7: Configure Services ──────────────────────────
+# ─── Step 8: Configure Services ──────────────────────────
 
-header "Step 7/9: System Services"
+header "Step 8/10: System Services"
 
 # The gateway's proxy socket — SYSTEMD owns it, as root:caddy 0660, so only the
 # local Caddy can open it. A loopback dial carrying X-Forwarded-For from
@@ -427,9 +535,9 @@ sudo systemctl restart caddy
 log "Gateway service enabled and started"
 log "Caddy configured for https://${MDNS_HOST}"
 
-# ─── Step 8: Security Hardening ──────────────────────────
+# ─── Step 9: Security Hardening ──────────────────────────
 
-header "Step 8/9: Security"
+header "Step 9/10: Security"
 
 # UFW firewall
 if command -v ufw >/dev/null 2>&1; then
@@ -484,9 +592,9 @@ else
   log "fail2ban installed and enabled"
 fi
 
-# ─── Step 9: Tailscale Hostname ──────────────────────────
+# ─── Step 10: Tailscale Hostname ──────────────────────────
 
-header "Step 9/9: Tailscale (Remote Access)"
+header "Step 10/10: Tailscale (Remote Access)"
 
 if command -v tailscale &>/dev/null; then
   log "Tailscale is installed"

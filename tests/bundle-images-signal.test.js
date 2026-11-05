@@ -27,6 +27,7 @@ import {
   _setFirewallReader,
   _setContainerReader,
   _setBundleImageReaders,
+  _setSystemUpdateReaders,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import { BUNDLE_IMAGE_STALE_DAYS } from "../servers/gateway/dashboard/panels/nest/bundle-images.js";
 import { resolveCrowHome } from "../servers/shared/crow-home.js";
@@ -44,6 +45,10 @@ _setDiskReader(() => "Avail Size\n500000M 1000000M\n");
 _setDockerPortsReader(() => { throw new Error("no docker"); });
 _setFirewallReader(() => { throw new Error("no ufw.conf"); });
 _setContainerReader(() => false);
+// systemUpdates reads /etc/apt, /var/run/reboot-required and the real Docker
+// daemon: a host that owes a reboot warns, and `result.ok` would go false here.
+// No apt = no card, on any host.
+_setSystemUpdateReaders({ aptPresent: () => false });
 
 const NOW = Date.parse("2026-11-05T12:00:00Z");
 const DAY = 86_400_000;
