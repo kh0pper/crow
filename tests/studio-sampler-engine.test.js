@@ -932,6 +932,63 @@ test("a steal fades the stolen voice out over 64 frames", async () => {
   );
 });
 
+test("a stolen voice's tail keeps the values it was swept to", async () => {
+  const FRAMES = 105600;
+  const samples = constant(FRAMES, 0.5);
+  // The pad's OWN level is -60 dB: a voice that keeps the pad's field is all but
+  // silent, while the curve sweeps the pad's voices to unity. So the level says
+  // whether a stolen voice's tail went on at the value it was stolen with, or
+  // jumped back to the pad's own during its fade.
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    pads: [pad("track-1", 0, { gain_db: -60 })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, FRAMES) },
+    steps: [
+      step("clip-1", 0, 0, { v: 100 }),
+      ...Array.from({ length: 15 }, (unused, at) => step("clip-1", at + 1, 0, { v: 1 })),
+      // The 17th voice steals the loud one, which has been swept to unity.
+      step("clip-1", 16, 0, { v: 1 }),
+    ],
+    patterns: {
+      "clip-1/a": {
+        id: "a",
+        clip_id: "clip-1",
+        name: "A",
+        order: 0,
+        motion: { [`${BANK}.0|gain_db`]: [{ step_frac: 0, value: 0 }] },
+      },
+    },
+  });
+
+  const { left } = await renderSamplerSong(song, {
+    seconds: 2.2,
+    samples: [{ id: SAMPLE_ID, channels: [samples] }],
+  });
+
+  const gain = (velocity) => (velocity / 127) * (velocity / 127);
+  const base = 0.5 * CENTRE;
+  const trigger = 16 * FRAMES_PER_SIXTEENTH;
+  // A couple of frames into the fade the tail is still at the value it was
+  // stolen with (a linear 1 → 0 ramp over 64 frames), far above the pad's own
+  // -60 dB. A tail that got its pad's field back would be inaudible here.
+  assert.ok(
+    left[trigger + 8] > 0.1,
+    `the tail has to keep the swept level it was stolen with, level was ${left[trigger + 8]}`,
+  );
+  assert.ok(
+    left[trigger + 8] < base * (gain(100) + 16 * gain(1)),
+    "and it is already on its way down, not held at full",
+  );
+  // 64 frames later it is gone, exactly as a steal without a curve goes.
+  assertLevel(
+    left[trigger + 64],
+    base * (16 * gain(1) + 0.001 * gain(100)),
+    "the tail is cut off at the end of its fade",
+    2e-3,
+  );
+});
+
 test("an empty range never steals a voice", async () => {
   // A slice whose end is its start has nothing to play: its trigger must leave
   // the 16 sounding voices exactly as they were.
@@ -1135,6 +1192,24 @@ test("a recorded cutoff sweep plays back on the next loop", async () => {
   );
   assert.deepEqual(oddAudio.left, evenAudio.left, "every left sample is the same at both block sizes");
   assert.deepEqual(oddAudio.right, evenAudio.right, "and so is every right sample");
+
+  // And the very same song WITHOUT that lane has to render different samples: a
+  // curve that silently did nothing would pass every check above, because two
+  // renders of nothing are as equal as two renders of a sweep.
+  const plain = JSON.parse(JSON.stringify(song));
+  plain.patterns["clip-1/a"].motion = {};
+  const flatAudio = await renderProcessor(plain, 128, frames, [{ id: SAMPLE_ID, channels: [pcm] }]);
+  let laneDifference = -1;
+  for (let at = 0; at < frames; at += 1) {
+    if (evenAudio.left[at] === flatAudio.left[at]) continue;
+    laneDifference = at;
+    break;
+  }
+  assert.notEqual(
+    laneDifference,
+    -1,
+    "the same song without its lane must not render the same samples as the sweep",
+  );
 });
 
 test("a step lock beats motion, motion beats the pad", async () => {
@@ -1494,6 +1569,73 @@ test("a curve that stops applying gives the voice back its pad's value", async (
   assert.ok(
     peakOf(after.left) > 0.2,
     `the voice has to be heard through its pad's own filter again, peak was ${peakOf(after.left)}`,
+  );
+});
+
+test("clearing one of two lanes restores that parameter", async () => {
+  const FRAMES = 48000;
+
+  // A 4 kHz tone through a low pass: shut at 200 Hz, wide open at the pad's own
+  // 20 kHz. One 127-velocity step on a sample long enough to outlast the test,
+  // so the very same voice is heard across all three phases.
+  const pcm = new Float32Array(FRAMES);
+  for (let at = 0; at < FRAMES; at += 1) {
+    pcm[at] = Math.sin((2 * Math.PI * 4000 * at) / SAMPLE_RATE) * 0.5;
+  }
+
+  const song = samplerSong({
+    tracks: [track("track-1")],
+    clips: [patternClip("clip-1", "track-1", { length_steps: 32 })],
+    pads: [pad("track-1", 0, { filter: { type: "lp", cutoff_hz: 20000, resonance: 0 } })],
+    samples: { [SAMPLE_ID]: sampleDoc(SAMPLE_ID, FRAMES) },
+    steps: [step("clip-1", 0, 0, { v: 127 })],
+    patterns: {
+      "clip-1/a": {
+        id: "a",
+        clip_id: "clip-1",
+        name: "A",
+        order: 0,
+        // Two lanes on the same pad: the cutoff's 200 Hz keeps the voice shut
+        // while the pan lane beside it sweeps too.
+        motion: {
+          [`${BANK}.0|cutoff_hz`]: [{ step_frac: 0, value: 200 }],
+          [`${BANK}.0|pan`]: [{ step_frac: 0, value: 0 }],
+        },
+      },
+    },
+  });
+
+  const engine = await createProcessor(song, [{ id: SAMPLE_ID, channels: [pcm] }]);
+  const both = await engine.process(128, 3000);
+  assert.ok(
+    peakOf(both.left) < 0.01,
+    `the standing cutoff lane has to hold the voice shut, peak was ${peakOf(both.left)}`,
+  );
+
+  // The cutoff lane is cleared while the PAN lane of the very same pad keeps
+  // sweeping: that one parameter goes back to the pad's own 20 kHz on the next
+  // sub-step, even though a lane still sweeps the voice.
+  const cleared = JSON.parse(JSON.stringify(song));
+  cleared.patterns["clip-1/a"].motion = { [`${BANK}.0|pan`]: [{ step_frac: 0, value: 0 }] };
+  engine.post({ type: "song", snapshot: cleared });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const open = await engine.process(128, 4000);
+  assert.ok(
+    peakOf(open.left) > 0.2,
+    `the cleared cutoff has to go back to the pad's own 20 kHz while the pan lane still sweeps, peak was ${peakOf(open.left)}`,
+  );
+
+  // Clearing the pan lane too changes nothing more: the voice was already on its
+  // pad's own values, one field at a time.
+  const none = JSON.parse(JSON.stringify(song));
+  none.patterns["clip-1/a"].motion = {};
+  engine.post({ type: "song", snapshot: none });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const restored = await engine.process(128, 4000);
+  assert.deepEqual(engine.errors, [], "the processor must not report a fault");
+  assert.ok(
+    peakOf(restored.left) > 0.2,
+    `the voice stays on its pad's own values after the last lane goes, peak was ${peakOf(restored.left)}`,
   );
 });
 

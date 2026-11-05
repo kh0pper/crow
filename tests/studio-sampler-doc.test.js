@@ -200,6 +200,24 @@ function addPatternClip(doc, trackId, sceneId, extra = {}) {
   }).args.clip_id;
 }
 
+/**
+ * A second instance of the same song, synced the way two peers are: one shared
+ * update at a time, never a whole-document overwrite.
+ * @param {import("node:test").TestContext} t
+ * @param {{doc: import("yjs").Doc}} s the first peer's studio harness
+ * @returns {{other: import("yjs").Doc, sync: function(): void}}
+ */
+function pair(t, s) {
+  const other = new Y.Doc();
+  t.after(() => other.destroy());
+  const sync = () => {
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(s.doc, Y.encodeStateVector(other)));
+    Y.applyUpdate(s.doc, Y.encodeStateAsUpdate(other, Y.encodeStateVector(s.doc)));
+  };
+  sync();
+  return { other, sync };
+}
+
 test("a sampler track has one bank of 16 pads", (t) => {
   const s = studio(t);
   const { trackId, bankId } = addKit(s.doc, "Drums");
@@ -906,20 +924,20 @@ test("removing a pattern removes its motion", (t) => {
   s.run("motion.write", lane("a", 0, "cutoff_hz"));
 
   const removed = s.run("pattern.remove", { clip_id: clip, pattern_id: second });
-  // The pattern's whole object carries its motion, so one field brings it back.
+  // The pattern's whole object carries its motion — one key per lane, right on
+  // the pattern — so one field brings it all back.
   assert.deepEqual(Object.keys(removed.result.before).sort(), [
     `pattern:${clip}/${second}|*`,
   ]);
-  assert.deepEqual(removed.result.before[`pattern:${clip}/${second}|*`].motion, {
-    [`${bankId}.1|decay_ms`]: [
-      { step_frac: 0, value: 0 },
-      { step_frac: 8, value: 10000 },
-    ],
-    [`${bankId}.1|gain_db`]: [
-      { step_frac: 0, value: -60 },
-      { step_frac: 8, value: 12 },
-    ],
-  });
+  const stored = removed.result.before[`pattern:${clip}/${second}|*`];
+  assert.deepEqual(stored[`motion|${bankId}.1|decay_ms`], [
+    { step_frac: 0, value: 0 },
+    { step_frac: 8, value: 10000 },
+  ]);
+  assert.deepEqual(stored[`motion|${bankId}.1|gain_db`], [
+    { step_frac: 0, value: -60 },
+    { step_frac: 8, value: 12 },
+  ]);
 
   const snap = snapshot(s.doc);
   assert.equal(snap.patterns[patternKey(clip, second)], undefined, "the pattern is gone");
@@ -1104,6 +1122,153 @@ test("two writers on different motion lanes both keep their lane", (t) => {
   });
   assert.deepEqual(Object.keys(lane.result.after), [`motion:${clip}/a/${bankId}.0|pan|*`]);
   assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("two peers' first motion writes on an old pattern both survive", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: 16 });
+
+  // The pattern as a song written before motion existed carries it: no motion
+  // key of any kind, so the first lane write has to be the thing that makes its
+  // own key — nothing may be created ahead of it.
+  const pattern = songMap(s.doc).get("patterns").get(patternKey(clip, "a"));
+  assert.ok(pattern instanceof Y.Map, "the pattern is a Y.Map");
+  s.doc.transact(() => {
+    for (const key of [...pattern.keys()]) {
+      if (key === "motion" || String(key).indexOf("motion|") === 0) pattern.delete(key);
+    }
+  });
+  assert.deepEqual([...pattern.keys()].sort(), ["clip_id", "id", "name", "order"], "the old pattern carries no motion key");
+
+  // Two peers of that same old song, neither of which has seen the other's
+  // write: both lanes are the FIRST motion this pattern ever holds.
+  const { other, sync } = pair(t, s);
+  const write = (doc, param, value) =>
+    doc.transact(() =>
+      runCommand(doc, "motion.write", {
+        clip_id: clip,
+        pattern_id: "a",
+        bank_id: bankId,
+        index: 0,
+        param,
+        points: [
+          { step_frac: 0, value },
+          { step_frac: 8, value },
+        ],
+      }),
+    );
+  write(s.doc, "cutoff_hz", 2000);
+  write(other, "gain_db", -6);
+  sync();
+
+  for (const [name, doc] of [
+    ["the first peer", s.doc],
+    ["the second peer", other],
+  ]) {
+    const motion = snapshot(doc).patterns[patternKey(clip, "a")].motion;
+    assert.deepEqual(
+      Object.keys(motion).sort(),
+      [`${bankId}.0|cutoff_hz`, `${bankId}.0|gain_db`].sort(),
+      `${name} keeps both peers' first lanes`,
+    );
+    assert.deepEqual(motion[`${bankId}.0|cutoff_hz`], [
+      { step_frac: 0, value: 2000 },
+      { step_frac: 8, value: 2000 },
+    ]);
+    assert.deepEqual(motion[`${bankId}.0|gain_db`], [
+      { step_frac: 0, value: -6 },
+      { step_frac: 8, value: -6 },
+    ]);
+  }
+
+  // Each lane is its own key of the pattern itself — never a container that had
+  // to exist first, and never a nested map one peer's copy could win.
+  const keys = [...pattern.keys()].sort();
+  assert.deepEqual(keys, [
+    "clip_id",
+    "id",
+    `motion|${bankId}.0|cutoff_hz`,
+    `motion|${bankId}.0|gain_db`,
+    "name",
+    "order",
+  ]);
+  for (const value of pattern.values()) {
+    assert.equal(value instanceof Y.Map, false, "a lane is plain points, not a nested map");
+  }
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a merge past the lane limit does not block undo", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: 16 });
+
+  // One unrelated step, taken before the merge: this is the undo that must not
+  // be refused because two peers' lanes added up to more than one writer's cap.
+  const padStep = s.run("pad.set", {
+    track_id: trackId,
+    bank_id: bankId,
+    index: 0,
+    fields: { gain_db: -3 },
+  });
+
+  const { other, sync } = pair(t, s);
+  const lanes = [];
+  for (let index = 0; index < LIMITS.padsPerBank; index += 1) {
+    for (const param of MOTION_PARAMS) lanes.push({ index, param });
+  }
+  const write = (doc, lane) =>
+    doc.transact(() =>
+      runCommand(doc, "motion.write", {
+        clip_id: clip,
+        pattern_id: "a",
+        bank_id: bankId,
+        index: lane.index,
+        param: lane.param,
+        points: [{ step_frac: 0, value: MOTION_PARAM_RANGES[lane.param][0] }],
+      }),
+    );
+
+  // Each peer fills the pattern to its own limit; the merge holds both sets.
+  const cap = LIMITS.motionLanesPerPattern;
+  for (let at = 0; at < cap; at += 1) write(s.doc, lanes[at]);
+  for (let at = cap; at < cap * 2; at += 1) write(other, lanes[at]);
+  sync();
+  assert.equal(
+    Object.keys(snapshot(s.doc).patterns[patternKey(clip, "a")].motion).length,
+    cap * 2,
+    "the merge keeps both peers' lanes",
+  );
+  assert.deepEqual(checkInvariants(s.doc), [], "a merged pattern past the limit is still a consistent song");
+
+  // The per-writer limit is still the writer's own: one more NEW lane is refused.
+  const refused = refuses(
+    () =>
+      s.run("motion.write", {
+        clip_id: clip,
+        pattern_id: "a",
+        bank_id: bankId,
+        index: 12,
+        param: "pitch",
+        points: [{ step_frac: 0, value: 0 }],
+      }),
+    "limit",
+  );
+  assert.match(refused.message, /32/);
+
+  // And an undo elsewhere in the song is not blocked by the merged pattern.
+  const undone = s.undo(padStep.entry);
+  assert.deepEqual(undone.plan.blocked, []);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.equal(snapshot(s.doc).pads[padKey(trackId, bankId, 0)].gain_db, 0, "the pad's own value went back");
+
+  // A redo of it is not blocked either.
+  const redone = s.redo(undone.entry);
+  assert.deepEqual(redone.plan.blocked, []);
+  assert.equal(snapshot(s.doc).pads[padKey(trackId, bankId, 0)].gain_db, -3);
 });
 
 test("removing a sampler track and undoing it brings back its banks, pads, patterns and steps", (t) => {

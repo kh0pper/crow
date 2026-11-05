@@ -496,7 +496,10 @@ function fakeLocks() {
  * @param {{doc?: object, holdChunks?: boolean, holdRecorder?: boolean, rate?: number,
  *          holdInput?: boolean, store?: object, locks?: object, sampleAudio?: Uint8Array,
  *          sampleAudioStatus?: number,
+ *          midi?: {route: function(object, object): (object|null)},
  *          putChunkProblem?: (takeId: string, index: number) => boolean}} [options]
+ *   `midi` hands the page the two controller globals (the module and the routing
+ *   rule), which is what lets a test send a message as a pedal or a knob does.
  */
 async function bootSampler(options = {}) {
   const { parseHTML } = await import("linkedom");
@@ -627,6 +630,43 @@ async function bootSampler(options = {}) {
       if (at >= 0) list.splice(at, 1);
     },
   };
+
+  // The controller stand-ins, handed to the page only when a test asks for them:
+  // the controllers module (whose one message listener the page subscribes to)
+  // and the routing rule (which answers the message the test sends). They are the
+  // two globals the real page finds (`window.StudioMidi`, `window.StudioMidiRoute`),
+  // so a routing test drives the very same code a pedal does.
+  const midi = options.midi
+    ? {
+        /** Push one message, the way a controller's port does. */
+        send(message) {
+          if (typeof midi.listener === "function") midi.listener(message);
+        },
+      }
+    : null;
+  if (midi) {
+    windowStub.StudioMidi = {
+      onMessage(listener) {
+        midi.listener = listener;
+        return () => {
+          midi.listener = null;
+        };
+      },
+      onDevices() {
+        return () => {};
+      },
+      // Already granted: the page opens the controllers at boot and takes the
+      // routing lock, which is what lets a message route at all.
+      requestIfGranted: async () => true,
+      connect: async () => [],
+      devices: () => [],
+      close() {},
+    };
+    windowStub.StudioMidiRoute = {
+      routeFor: (snap, message) =>
+        typeof options.midi.route === "function" ? options.midi.route(snap, message) : null,
+    };
+  }
 
   const yjsUrl = pathToFileURL(
     new URL("../bundles/studio/node_modules/yjs/dist/yjs.mjs", import.meta.url).pathname,
@@ -788,10 +828,21 @@ async function bootSampler(options = {}) {
       const pending = timers.splice(0, timers.length);
       for (const fn of pending) fn();
     },
-    /** Push one transport position, as the engine's own frames do. */
-    playhead(bar, beat, sixteenth = 1) {
+    /**
+     * Push one transport position, as the engine's own frames do. `patterns` is
+     * what the engine says it PLAYED on each track at that block (track id →
+     * pattern id); a position without it is a report that carries no such news.
+     */
+    playhead(bar, beat, sixteenth = 1, patterns = null) {
       assert.ok(engine.positionListener, "the page follows the engine's position");
-      engine.positionListener({ bar, beat, sixteenth });
+      const position = { bar, beat, sixteenth };
+      if (patterns) position.patterns = patterns;
+      engine.positionListener(position);
+    },
+    /** Push one controller message, the way a pedal or a knob sends one. */
+    midi(message) {
+      assert.ok(midi, "bootSampler was asked for controllers");
+      midi.send(message);
     },
     /** Run the real server commands on the fixture song, then redraw the page. */
     async apply(command, args) {
@@ -2860,6 +2911,96 @@ test("motion records into the chain's playing pattern", async () => {
     {},
     "the write is sent, not applied locally",
   );
+});
+
+test("motion near a chain boundary lands in the pattern the engine played", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The clip's chain becomes A → Fill, and the editor keeps showing A.
+  await ui.apply("pattern.add", { clip_id: CLIP, name: "Fill" });
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const fill = Object.values(snapshot(ui.doc).patterns).find(
+    (pattern) => pattern.clip_id === CLIP && pattern.name === "Fill",
+  );
+  assert.ok(fill, "the second pattern is in the song");
+  await ui.apply("chain.set", { clip_id: CLIP, chain: ["a", fill.id] });
+
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // The transport stands a hair before the boundary the page's own estimate of
+  // the chain slot would still call pattern A — and the engine reports that it
+  // already played Fill there (the sequencer turned the slot on its own beat
+  // grid, a block earlier than the position frame says).
+  ui.playhead(1, 3, 4, { [TRACK]: fill.id });
+  await ui.settle();
+  const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  assert.ok(cutoff, "the pad's cutoff is a control");
+  cutoff.value = "1200";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  // A whole pass of that pattern later the take is written — into Fill, the
+  // pattern the ENGINE played, never the one the page's estimate names.
+  ui.playhead(2, 3, 4, { [TRACK]: fill.id });
+  await ui.settle();
+  const written = commands(ui, "motion.write");
+  assert.equal(written.length, 1, `the pass has to be one motion.write, got ${written.length}`);
+  assert.equal(written[0].args.pattern_id, fill.id, "the lane belongs to the pattern the engine played");
+  assert.notEqual(written[0].args.pattern_id, "a", "and never to the slot the page's estimate still named");
+  assert.deepEqual(written[0].args.points, [{ step_frac: 11, value: 1200 }], "one point, where the knob was turned");
+});
+
+test("a MIDI knob in lock mode records no motion", async () => {
+  // One mapped knob: a control change sweeping the fixture track's cutoff.
+  const ui = await bootSampler({
+    midi: {
+      route: (snap, message) =>
+        String(message.type) === "cc"
+          ? { id: "m-knob", action: { kind: "pad.param", track_id: TRACK, param: "cutoff_hz", min: 0, max: 127 } }
+          : null,
+    },
+  });
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 0));
+
+  // Motion armed, the transport playing, one step held: exactly the moment a
+  // knob move would be recorded — except that in lock mode the knob is that
+  // step's lock and nothing else, whichever hand turns it.
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.playhead(1, 1, 1);
+  await ui.settle();
+  ui.holdStep(0);
+  await ui.settle();
+
+  // One control change, then the idle window the knob's one command waits in.
+  ui.midi({ device_name: "Knob", type: "cc", channel: 1, number: 20, value: 30 });
+  await ui.settle();
+  ui.runTimers();
+  await ui.settle();
+  ui.release();
+  await ui.settle();
+  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "holding the step entered lock mode");
+
+  const locks = commands(ui, "step.set");
+  assert.equal(locks.length, 1, `the knob move is one step.set, got ${locks.length}`);
+  assert.deepEqual(locks[0].args.locks, { cutoff_hz: 30 }, "carrying the value the knob sent");
+  assert.equal(commands(ui, "pad.set").length, 0, "the pad itself did not move");
+
+  // A whole pass later there is still no take: a lock is the value its voice
+  // keeps, so it is never a motion point.
+  ui.playhead(2, 1, 1);
+  await ui.settle();
+  assert.equal(commands(ui, "motion.write").length, 0, "a MIDI knob in lock mode records no motion");
 });
 
 test("leaving the page mid-take keeps the motion", async () => {

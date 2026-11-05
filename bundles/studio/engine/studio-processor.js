@@ -285,8 +285,11 @@
  * `{type:"looper", action}`, `{type:"looper_buffers", left, right}`,
  * `{type:"looper_take", id}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
- * error}`, `{type:"position", bar, beat, sixteenth}` (at most every 50 ms of
- * audio), `{type:"launched", track_id, clip_id, scene_id, bar, frame}` (one
+ * error}`, `{type:"position", bar, beat, sixteenth, patterns}` (at most every
+ * 50 ms of audio; `patterns` maps each sampler track that was playing a pattern
+ * clip in that block to the id of the pattern it played, which is where the
+ * motion recorder puts a lane — see `reportPosition`), `{type:"launched",
+ * track_id, clip_id, scene_id, bar, frame}` (one
  * per launch the sequencer applied in that block; see below),
  * `{type:"nextBarFrame", id, frame, bar}`, `{type:"audio_loaded", take_id}`
  * (one ack per `audio` message, so the client knows the PCM is in),
@@ -457,6 +460,28 @@
     cutoff_hz: Object.freeze([20, 20000]),
     resonance: Object.freeze([0, 1]),
   });
+
+  /**
+   * Each sweepable field's bit in a voice's swept mask (`voice.motion_mask`):
+   * the fields one sub-step's lanes put on a voice, so the next sub-step knows
+   * exactly which of them no lane covers any more and gives those back — a
+   * cleared lane never leaves a stale value on a voice another lane still
+   * sweeps.
+   */
+  const MOTION_PARAM_BITS = Object.freeze({
+    pitch: 1,
+    gain_db: 2,
+    pan: 4,
+    attack_ms: 8,
+    decay_ms: 16,
+    sustain: 32,
+    release_ms: 64,
+    cutoff_hz: 128,
+    resonance: 256,
+  });
+
+  /** Every sweepable field, in the order `MOTION_PARAM_BITS` numbers them. */
+  const MOTION_PARAM_NAMES = Object.freeze(Object.keys(MOTION_PARAM_BITS));
 
   /** Four beats to the bar, everywhere in Studio. */
   const BEATS_PER_BAR = 4;
@@ -2010,7 +2035,7 @@
       }
 
       this.frame += count;
-      this.reportPosition(count);
+      this.reportPosition(count, events.patterns);
     }
 
     /**
@@ -2145,7 +2170,8 @@
       this.renderVoiceList(record.voices, frames, left, right, offset, gainLeft, gainRight, state);
       // A stolen voice rings out in a fade tail for 64 frames after its slot was
       // taken (see `retireVoice`), through the very same mix. A tail is on its
-      // way out, so no curve is read for it.
+      // way out, so no curve is read for it and no swept value of it is
+      // restored: it keeps the values it was stolen with through its fade.
       if (record.tails && record.tails.length > 0) {
         this.renderVoiceList(record.tails, frames, left, right, offset, gainLeft, gainRight, null);
       }
@@ -2330,6 +2356,11 @@
      * beats the pad's own field (which is the value the voice started with, kept
      * as its `base_*` values for `restorePadMotion`).
      *
+     * The fields this voice was holding from an earlier sub-step that NO current
+     * lane covers any more are given back in the same pass (`restoreMotionParam`):
+     * a lane cleared while another lane of the very same pad keeps moving leaves
+     * that one field on its pad's own value, not a stale swept one.
+     *
      * The cutoff and the resonance are collected and applied together, so a pad
      * whose filter moves on two lanes is re-tuned ONCE for this sub-step: two
      * `setFilter` calls would work out two sets of coefficients for one value of
@@ -2342,12 +2373,16 @@
     applyPadMotion(voice, state, values) {
       const lanes = state.lanes;
       const locked = voice.locked;
+      let mask = 0;
       let cutoff = NaN;
       let resonance = NaN;
       for (let at = 0; at < lanes.length; at += 1) {
         const lane = lanes[at];
         if (lane.pad !== voice.pad_key) continue;
         if (locked !== null && locked.indexOf(lane.param) !== -1) continue;
+        const bit = MOTION_PARAM_BITS[lane.param];
+        if (!bit) continue;
+        mask |= bit;
         if (lane.param === "cutoff_hz") {
           cutoff = values[at];
           continue;
@@ -2358,7 +2393,17 @@
         }
         this.applyMotionValue(voice, lane.param, values[at]);
       }
-      if (!Number.isFinite(cutoff) && !Number.isFinite(resonance)) return;
+      // Every field the previous sub-step swept that no lane covers now (a lane
+      // cleared, another pattern's curve, a lock that took it over) goes back to
+      // the pad's own value — or the step's lock, which is the base value.
+      const lost = voice.motion_mask & ~mask;
+      if (lost !== 0) {
+        for (let at = 0; at < MOTION_PARAM_NAMES.length; at += 1) {
+          if ((lost & MOTION_PARAM_BITS[MOTION_PARAM_NAMES[at]]) === 0) continue;
+          this.restoreMotionParam(voice, MOTION_PARAM_NAMES[at]);
+        }
+      }
+      voice.motion_mask = mask;
       if (Number.isFinite(cutoff)) voice.motion_cutoff = clamp(cutoff, MOTION_RANGES.cutoff_hz[0], MOTION_RANGES.cutoff_hz[1]);
       if (Number.isFinite(resonance)) {
         voice.motion_resonance = clamp(resonance, MOTION_RANGES.resonance[0], MOTION_RANGES.resonance[1]);
@@ -2370,7 +2415,7 @@
      * Give a voice back the values its pad (through its step's locks) gave it,
      * the moment its curve stops applying: a voice is never left holding a swept
      * value after a chain turns onto a pattern without that lane, the transport
-     * stops, a lane is cleared or a segment ends.
+     * stops, its lanes are cleared or a segment ends.
      *
      * An envelope stage the voice is still in keeps its own slope for the values
      * that came back, and a pad whose own sustain is 0 cannot hold: a voice that
@@ -2381,25 +2426,69 @@
      */
     restorePadMotion(voice) {
       voice.swept = false;
-      voice.step = voice.base_step;
-      voice.gain = voice.base_gain;
-      voice.panLeft = voice.base_pan_left;
-      voice.panRight = voice.base_pan_right;
-      voice.attackFrames = voice.base_attack_frames;
-      voice.decayFrames = voice.base_decay_frames;
-      voice.releaseFrames = voice.base_release_frames;
-      voice.sustain = voice.base_sustain;
-      if (voice.stage === STAGE_ATTACK) {
-        voice.increment = voice.attackFrames > 0 ? 1 / voice.attackFrames : 0;
-      } else if (voice.stage === STAGE_DECAY) {
-        voice.increment = voice.decayFrames > 0 ? (1 - voice.sustain) / voice.decayFrames : 0;
-      } else if (voice.stage === STAGE_SUSTAIN) {
-        if (voice.sustain > 0) voice.level = voice.sustain;
-        else StudioSamplerVoice.release(voice);
+      voice.motion_mask = 0;
+      for (let at = 0; at < MOTION_PARAM_NAMES.length; at += 1) {
+        this.restoreMotionParam(voice, MOTION_PARAM_NAMES[at]);
       }
-      voice.motion_cutoff = voice.base_cutoff;
-      voice.motion_resonance = voice.base_resonance;
       this.retuneVoiceIfChanged(voice);
+    }
+
+    /**
+     * Put ONE swept field of a voice back where its pad (through its step's
+     * locks) had it, the counterpart of `applyMotionValue` for a single field.
+     *
+     * `restorePadMotion` is this over every field; `applyPadMotion` uses it for
+     * the fields a lane no longer covers, so clearing one lane of a pad leaves
+     * the lanes beside it exactly where they are.
+     * @param {object} voice a sounding sampler voice
+     * @param {string} param one of `MOTION_RANGES`'s names
+     * @returns {void}
+     */
+    restoreMotionParam(voice, param) {
+      switch (param) {
+        case "pitch":
+          voice.step = voice.base_step;
+          return;
+        case "gain_db":
+          voice.gain = voice.base_gain;
+          return;
+        case "pan":
+          voice.panLeft = voice.base_pan_left;
+          voice.panRight = voice.base_pan_right;
+          return;
+        case "attack_ms":
+          voice.attackFrames = voice.base_attack_frames;
+          if (voice.stage === STAGE_ATTACK) {
+            voice.increment = voice.attackFrames > 0 ? 1 / voice.attackFrames : 0;
+          }
+          return;
+        case "decay_ms":
+          voice.decayFrames = voice.base_decay_frames;
+          if (voice.stage === STAGE_DECAY) {
+            voice.increment = voice.decayFrames > 0 ? (1 - voice.sustain) / voice.decayFrames : 0;
+          }
+          return;
+        case "sustain":
+          voice.sustain = voice.base_sustain;
+          if (voice.stage === STAGE_SUSTAIN) {
+            if (voice.sustain > 0) voice.level = voice.sustain;
+            else StudioSamplerVoice.release(voice);
+          } else if (voice.stage === STAGE_DECAY) {
+            voice.increment = voice.decayFrames > 0 ? (1 - voice.sustain) / voice.decayFrames : 0;
+          }
+          return;
+        case "release_ms":
+          voice.releaseFrames = voice.base_release_frames;
+          return;
+        case "cutoff_hz":
+          voice.motion_cutoff = voice.base_cutoff;
+          return;
+        case "resonance":
+          voice.motion_resonance = voice.base_resonance;
+          return;
+        default:
+          return;
+      }
     }
 
     /**
@@ -2717,6 +2806,9 @@
       voice.base_cutoff = voice.motion_cutoff;
       voice.base_resonance = voice.motion_resonance;
       voice.swept = false;
+      // Which fields a lane has put on this voice (`MOTION_PARAM_BITS`): the ones
+      // the next sub-step has to give back if no lane covers them any more.
+      voice.motion_mask = 0;
       // The biquad was built from these very values by `start`, so they are what
       // it is tuned to: a curve has to move one before a retune is due.
       voice.tuned_cutoff = voice.motion_cutoff;
@@ -2802,6 +2894,12 @@
       tail.gateRemaining = -1;
       tail.fadeRemaining = StudioSamplerVoice.FADE_FRAMES;
       tail.sounding = true;
+      // The tail is on its way out, so no curve is read for it (see
+      // `renderSampler`): it keeps the very values it had at the moment it was
+      // stolen, instead of jumping back to its pad's own during the 64-frame
+      // fade. Nothing restores a tail, so there is no swept field left to track.
+      tail.swept = false;
+      tail.motion_mask = 0;
     }
 
     /**
@@ -3056,19 +3154,33 @@
 
     /**
      * Post the transport position, at most every 50 ms of audio.
+     *
+     * The report also carries `patterns`: which pattern each sampler track was
+     * playing in this block (`events.patterns`, filled in by the sequencer's own
+     * chain slot). It is the one place a client can learn what the ENGINE played:
+     * a chain slot turns over on the sequencer's own beat grid, so a recorder
+     * that guessed the pattern from the transport position could write a lane
+     * into the slot before the boundary instead of the one that sounded.
      * @param {number} frames the frames the block held
+     * @param {Map<string, string>|undefined} patterns track id → the pattern id
+     *   the block played (empty when no pattern clip played)
      * @returns {void}
      */
-    reportPosition(frames) {
+    reportPosition(frames, patterns) {
       this.sincePosition += frames;
       if (this.sincePosition < this.positionEvery) return;
       this.sincePosition = 0;
       const position = this.sequencer.position();
+      const played = {};
+      if (patterns) {
+        for (const entry of patterns) played[entry[0]] = entry[1];
+      }
       this.port.postMessage({
         type: "position",
         bar: position.bar,
         beat: position.beat,
         sixteenth: position.sixteenth,
+        patterns: played,
       });
     }
 

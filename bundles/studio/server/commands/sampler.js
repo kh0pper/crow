@@ -43,10 +43,10 @@
  *     people-only, it has no MCP tool (mcp.js skips every `humanOnly` command),
  *     and the panel's **Clear pad** is the only way to run it.
  *
- * A pattern's motion lives inside the pattern object (`motion`, see doc.js), so
- * `pattern.remove` takes its curves with it and one undo brings both back, a
- * shorter loop trims every lane's points past its new end in the same step, and
- * a lane is still its own history field.
+ * A pattern's motion lives as one key per lane on the pattern object itself
+ * (`motion|<lane>`, see doc.js), so `pattern.remove` takes its curves with it and
+ * one undo brings both back, a shorter loop trims every lane's points past its
+ * new end in the same step, and a lane is still its own history field.
  *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (a limit, an unknown pattern, a pad still playing a slice) leaves the
@@ -1011,9 +1011,6 @@ defineCommand({
       clip_id: args.clip_id,
       name: args.name ?? letterAt(existing.length),
       order: existing.length,
-      // A pattern carries its motion container from the start, empty: see
-      // `newPatternMap` in doc.js.
-      motion: {},
     };
     patternMap(doc).set(patternKey(args.clip_id, pattern.id), newPatternMap(pattern));
     const ref = patternRef(args.clip_id, pattern.id);
@@ -1198,8 +1195,8 @@ defineCommand({
  * one pattern, recording each changed lane under its own field.
  *
  * A lane the cut empties goes away with it, so a lane never lingers with no
- * points to play. Each changed lane is written as its own key of the pattern's
- * motion map, with only the affected lanes changed.
+ * points to play. Each changed lane is written as its own key of the pattern
+ * (`motion|<lane>`), with only the affected lanes changed.
  * @param {string} clipId
  * @param {import("yjs").Map<any>} pattern - the live pattern
  * @param {number} lengthSteps - the loop's new length in step positions
@@ -1217,8 +1214,8 @@ function trimMotion(clipId, pattern, lengthSteps, before, after) {
     const field = fieldKey(motionRef(clipId, pattern.get("id"), lane), "*");
     before[field] = cloneJson(points);
     after[field] = kept.length > 0 ? cloneJson(kept) : ABSENT;
-    // One lane is one key of the pattern's motion map: the cut writes that key
-    // and leaves every other lane (and every other writer's lane) alone.
+    // One lane is one key of the pattern: the cut writes that key and leaves
+    // every other lane (and every other writer's lane) alone.
     setMotionLane(pattern, lane, kept.length > 0 ? kept : null);
   }
 }
@@ -1625,8 +1622,8 @@ defineCommand({
     const was = present ? cloneJson(motion[lane]) : ABSENT;
     if (JSON.stringify(was) === JSON.stringify(points)) return { before: {}, after: {} };
 
-    // One lane is one key of the pattern's motion map, so the write never
-    // touches a lane someone else is moving at the same moment.
+    // One lane is one key of the pattern, so the write never touches a lane
+    // someone else is moving at the same moment.
     setMotionLane(pattern, lane, points.length > 0 ? points : null);
     return {
       before: { [field]: was },
@@ -1826,7 +1823,7 @@ defineCommand({
     // The first pattern's id is fixed to "a": the clip's ref prefixes it, so it
     // still names one pattern for good, and a reader that only knows the clip
     // can name its first pattern without a lookup.
-    const pattern = { id: "a", clip_id: clip.id, name: "A", order: 0, motion: {} };
+    const pattern = { id: "a", clip_id: clip.id, name: "A", order: 0 };
     patternMap(doc).set(patternKey(clip.id, pattern.id), newPatternMap(pattern));
     return {
       before: {

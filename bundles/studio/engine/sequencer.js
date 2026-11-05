@@ -208,6 +208,12 @@
  * voice past the segment, and never leaves one holding a stale value after a
  * stop, a chain turn or a lane that was cleared.
  *
+ * The block also says WHICH pattern each sampler track played, in a
+ * non-enumerable `patterns` map (track id → pattern id), whether or not that
+ * pattern has a curve: the chain slot follows from the beat alone (see
+ * `emitPads`), so a host can report what it actually played — a recorder writes
+ * a lane into that pattern, never into the one the editor happens to show.
+ *
  * ## Launch reports
  *
  * Every launch this file APPLIES is reported in the very block it takes effect
@@ -423,6 +429,21 @@
     const motions = [];
     Object.defineProperty(events, "motions", {
       value: motions,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+
+    /**
+     * The pattern each sampler track played in the block being built, keyed by
+     * track id: the chain slot the block stands in. Hung off the events array as
+     * a non-enumerable `patterns` property, so a host can report what it played
+     * (the motion recorder writes into the pattern that sounded, never into the
+     * one the editor shows). Reused like `events`: a block allocates nothing.
+     */
+    const patterns = new Map();
+    Object.defineProperty(events, "patterns", {
+      value: patterns,
       enumerable: false,
       writable: false,
       configurable: false,
@@ -1758,8 +1779,9 @@
      *                  take_frame?: number, voice?: number}>} events in
      *   block-relative frames, sorted by frame with the stops ("off",
      *   "audio_stop") before the starts at one frame. The array also carries
-     *   this block's launch reports as a non-enumerable `launches` property and
-     *   this block's motion descriptors as a non-enumerable `motions` property
+     *   this block's launch reports as a non-enumerable `launches` property, this
+     *   block's motion descriptors as a non-enumerable `motions` property, and
+     *   the pattern each sampler track played as a non-enumerable `patterns` map
      *   (see the header).
      */
     function block(frameStart, frames) {
@@ -1793,6 +1815,7 @@
       events.length = 0;
       fadeQueue.length = 0;
       motions.length = 0;
+      patterns.clear();
       const frameEnd = frameStart + frames;
 
       emitForced();
@@ -2136,6 +2159,9 @@
         const slotFrame = beatToFrame(slotStart);
         const slotEndFrame = beatToFrame(slotStart + clip.lengthBeats);
         const inBlock = slotEndFrame > frameStart && slotFrame < frameEnd;
+        // What this track played in this block (the last slot it covers wins, so
+        // the chain slot the block ends in is the one reported).
+        if (inBlock) patterns.set(String(seg.track_id), patternId);
         const hasLanes = lanes !== undefined && lanes.length > 0;
         if (inBlock && (hasLanes || slotFrame > frameStart)) {
           standing = hasLanes;

@@ -49,22 +49,22 @@
  *                     gain_db, pan, attack_ms, decay_ms, sustain, release_ms,
  *                     filter {type, cutoff_hz, resonance}, choke, reverse}
  *   patterns  Y.Map of "<clip_id>/<pattern_id>" → Y.Map {id, clip_id, name, order,
- *                     motion}
+ *                     "motion|<bank>.<index>|<param>": [{step_frac, value}]}
  *   steps     Y.Map of "<clip_id>/<pattern_id>/<at>/<bank_id>.<index>" → Y.Map
  *                     {clip_id, pattern_id, at, bank_id, index, v, locks}
  *
- * A pattern's `motion` is a nested `Y.Map`: one KEY per lane, `<bank_id>.<index>|<param>`
- * → `[{step_frac, value}]` sorted by `step_frac`, with `step_frac` a fractional
- * step position inside the clip's loop and `param` one of the pad's numeric lock
- * fields (see `MOTION_PARAMS`). One lane per key is what lets two writers move
- * two lanes of one pattern at once without either overwriting the other, and it
- * is what keeps a lane's undo from rolling back its neighbour; the snapshot
- * still carries the lanes as one plain object (`{lane: [points]}`). Motion rides
- * ON the pattern object rather than in a container of its own, so removing a
- * pattern takes its motion with it in the same step. A pattern written before
- * the lanes had a map of their own holds them in one plain object under the same
- * key; `motionOf` reads both, and the first lane write upgrades the pattern in
- * place (`patternMotionMap`).
+ * A pattern's motion is one KEY per lane directly on the pattern's own map,
+ * `"motion|<bank_id>.<index>|<param>"` → `[{step_frac, value}]` sorted by
+ * `step_frac`, with `step_frac` a fractional step position inside the clip's
+ * loop and `param` one of the pad's numeric lock fields (see `MOTION_PARAMS`).
+ * One lane per key is what lets two writers move two lanes of one pattern at
+ * once without either overwriting the other, and it is what keeps a lane's undo
+ * from rolling back its neighbour; the snapshot still carries the lanes as one
+ * plain object (`{lane: [points]}`), which `motionOf` collects read-only.
+ * Nothing has to exist before the first lane write — a pattern made before
+ * motion existed takes two peers' first lanes as two keys of the map it already
+ * has — and motion rides ON the pattern object, so removing a pattern takes its
+ * motion with it in the same step.
  *
  * A sampler track's device says only `{engine: "sampler"}`: the kit lives in
  * `banks` and `pads`, never inside the device, so editing one pad never
@@ -156,7 +156,10 @@ export const LIMITS = Object.freeze({
   chainLength: 64,
   locksPerStep: 8,
   // A pattern's motion lanes (plan 1c, Task 10): one lane per pad field, and a
-  // lane of hand-drawn points that stays a curve, not a sample stream.
+  // lane of hand-drawn points that stays a curve, not a sample stream. The lane
+  // cap is what ONE writer may put on a pattern (motion.write); two peers' own
+  // lanes merge into one pattern and the merge is not a fault (see
+  // `samplerReasons`).
   motionPointsPerLane: 4096,
   motionLanesPerPattern: 32,
   // The MIDI mapping table of one song (plan 1c, Limits): every message the
@@ -275,6 +278,14 @@ const PARAM_FIELD_PREFIX = "device.params.";
 const LOCK_FIELD_PREFIX = "locks.";
 
 /**
+ * Prefix of one motion lane's own key on its pattern's map, e.g.
+ * `"motion|<bank_id>.<index>|<param>"`. The lane name is everything after the
+ * prefix, taken verbatim: a lane is one key of the pattern it belongs to, so
+ * two writers never touch the same field (see `setMotionLane`).
+ */
+const MOTION_FIELD_PREFIX = "motion|";
+
+/**
  * The key a command's `apply` hangs its history *guards* on.
  *
  * A guard is a field that must still hold the value it held when the step was
@@ -359,22 +370,18 @@ export function objectMap(object) {
 }
 
 /**
- * Build the Y.Map a command inserts for a new pattern: its own fields plus the
- * nested `motion` map every pattern carries from the moment it exists.
+ * Build the Y.Map a command inserts for a new pattern: its own fields, and
+ * nothing else.
  *
- * The map has to be there BEFORE two writers can move two lanes of the pattern:
- * a `motion` key created concurrently on two instances is two maps, and Yjs
- * keeps only one of them. With the (empty) container created once, alongside the
- * pattern that owns it, each lane write is its own key inside the very same
- * map, and a lane another instance moves at the same moment is never lost
- * (`setMotionLane`).
+ * A lane needs no container of its own: every lane is its own key of this very
+ * map (`setMotionLane`), so two instances that write two lanes of the pattern at
+ * the same moment write two different keys and neither is lost, whether the
+ * pattern was made a moment ago or before motion existed.
  * @param {object} pattern the pattern's own fields (`id`, `clip_id`, `name`, `order`)
  * @returns {Y.Map<any>}
  */
 export function newPatternMap(pattern) {
-  const map = objectMap(pattern);
-  map.set("motion", new Y.Map());
-  return map;
+  return objectMap(pattern);
 }
 
 /**
@@ -965,8 +972,9 @@ export function motionLane(bankId, index, param) {
 
 /**
  * The key one motion lane lives under in the synthetic `motion` refs: the clip
- * and the pattern name it, then the lane itself. (A lane is stored inside its
- * pattern's `motion` field; this key is what makes one lane one history field.)
+ * and the pattern name it, then the lane itself. (A lane is its own
+ * `motion|<lane>` key on the pattern; this key is what makes one lane one
+ * history field.)
  * @param {string} clipId
  * @param {string} patternId
  * @param {string} lane
@@ -1008,64 +1016,48 @@ export function motionLaneParts(lane) {
 
 /**
  * A pattern's motion lanes as plain JSON, keyed by lane name.
- * @param {Y.Map<any>|null|undefined} pattern
+ *
+ * Read-only, so a snapshot of a pattern nobody has swept writes nothing to the
+ * document: the lanes are the pattern's own `"motion|<lane>"` keys, collected
+ * here into the one object a snapshot, a history entry and the engine read.
+ * @param {Y.Map<any>|Object<string, any>|null|undefined} pattern
  * @returns {Object<string, Array<{step_frac: number, value: number}>>} empty when
  *   the pattern has no motion
  */
 export function motionOf(pattern) {
-  const stored = pattern?.get?.("motion");
-  if (stored === undefined || stored === null) return {};
-  const plain = toPlain(stored);
-  return plain && typeof plain === "object" && !Array.isArray(plain) ? plain : {};
-}
-
-/**
- * A pattern's motion as the live `Y.Map` its lanes are stored in: one key per
- * lane, so two writers moving different lanes of one pattern never touch the
- * same field, and a lane's undo leaves its neighbours exactly as they are.
- *
- * A pattern whose lanes still live in one plain object (a song written before
- * the map existed) is upgraded in place when `create` is set: the object's lanes
- * are copied into a fresh `Y.Map` under the same key, unchanged, so a snapshot
- * reads the same before and after the upgrade.
- * @param {Y.Map<any>} pattern - the live pattern
- * @param {boolean} [create] make (and store) the lane map when the pattern has none
- * @returns {Y.Map<any>|null} the lane map, or `null` with `create` false
- */
-export function patternMotionMap(pattern, create = false) {
-  const stored = pattern?.get?.("motion");
-  if (stored instanceof Y.Map) return stored;
-  if (!create) return null;
-  const legacy = stored && typeof stored === "object" && !Array.isArray(stored) ? toPlain(stored) ?? {} : {};
-  const map = new Y.Map();
-  pattern.set("motion", map);
-  for (const lane of Object.keys(legacy)) {
-    if (!Array.isArray(legacy[lane])) continue;
-    map.set(lane, cloneJson(legacy[lane]));
+  const motion = {};
+  if (!pattern || typeof pattern !== "object") return motion;
+  const entries = typeof pattern.entries === "function" ? pattern.entries() : Object.entries(pattern);
+  for (const [key, value] of entries) {
+    if (typeof key !== "string" || !key.startsWith(MOTION_FIELD_PREFIX)) continue;
+    if (!Array.isArray(value)) continue;
+    motion[key.slice(MOTION_FIELD_PREFIX.length)] = toPlain(value);
   }
-  return map;
+  return motion;
 }
 
 /**
  * Write one lane of a pattern's motion, or (with `null`) take it away: one key
- * of one `Y.Map`, and nothing else in the song is touched.
+ * of the pattern's own map, and nothing else in the song is touched.
  *
- * The container stays even when its last lane goes (a pattern always carries
- * one — see `newPatternMap`), so a lane written on one instance and a lane
+ * The key is created by the very write that needs it, so a pattern made before
+ * motion existed needs no upgrade: a lane written on one instance and a lane
  * written on another at the same moment are two keys of one map, never two
- * maps competing for one key. A pattern whose lanes still live in a plain
- * object is upgraded on the way (`patternMotionMap`).
+ * maps competing for one key.
  * @param {Y.Map<any>} pattern - the live pattern
  * @param {string} lane - `<bank_id>.<index>|<param>`
  * @param {Array<{step_frac: number, value: number}>|null|undefined} points
  * @returns {boolean} whether the document changed
  */
 export function setMotionLane(pattern, lane, points) {
+  const key = MOTION_FIELD_PREFIX + String(lane);
   const removing = points === null || points === undefined;
-  if (removing && !Object.hasOwn(motionOf(pattern), lane)) return false;
-  const map = patternMotionMap(pattern, true);
-  if (removing) map.delete(lane);
-  else map.set(lane, cloneJson(points));
+  if (removing) {
+    if (pattern.get(key) === undefined) return false;
+    pattern.delete(key);
+    return true;
+  }
+  pattern.set(key, cloneJson(points));
   return true;
 }
 
@@ -1719,7 +1711,14 @@ function arrangementReasons(song) {
  * slice stays inside its sample's frames, and no count outgrows its limit
  * (banks per kit, pads per bank, samples per song, slices per sample, patterns
  * per clip, chain length, step entries per pattern, locks per step, motion
- * points per lane, motion lanes per pattern).
+ * points per lane).
+ *
+ * The number of motion lanes of one pattern is deliberately NOT checked here. A
+ * lane is its own key of its pattern, so two peers writing their own lanes at
+ * the same moment can merge into a pattern past `LIMITS.motionLanesPerPattern`
+ * — and that is a merge, not a fault: the per-writer limit lives in
+ * `motion.write`, a merged pattern is still a pattern the song can play, and no
+ * undo elsewhere in the song may be refused because of it.
  *
  * The history dry-runs an undo's plan on a clone and calls this, so a plan that
  * would leave, say, a pad pointing at a slice a newer edit removed is refused
@@ -1928,11 +1927,6 @@ function samplerReasons(song) {
     if (lanes.length === 0) continue;
     const clip = song.clips[pattern.clip_id];
     const which = `The pattern "${nameOrId(pattern.name, pattern.id)}"`;
-    if (lanes.length > LIMITS.motionLanesPerPattern) {
-      reasons.push(
-        `${which} would hold ${lanes.length} motion lanes; a pattern holds at most ${LIMITS.motionLanesPerPattern} motion lanes.`,
-      );
-    }
     const positions = Number(clip?.length_steps) || 0;
     const trackId = typeof clip?.track_id === "string" ? clip.track_id : "";
     for (const lane of lanes) {
@@ -2135,10 +2129,10 @@ function barsText(bars) {
  *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
  *   - `"motion:<clip>/<pattern>/<bank>.<index>|<param>|*"` writes ONE motion
  *     lane of one pattern: an array of `{step_frac, value}` points, or `null`
- *     to take the lane away. A lane is one key of its pattern's nested `motion`
- *     map, so its other lanes are left exactly as they are — two lanes of one
- *     pattern undo independently, and two writers on different lanes never
- *     overwrite each other;
+ *     to take the lane away. A lane is one key of its pattern
+ *     (`"motion|<lane>"`), so its other lanes are left exactly as they are —
+ *     two lanes of one pattern undo independently, and two writers on different
+ *     lanes never overwrite each other;
  *   - `"placement:abc|*"`, `"marker:abc|*"` and `"section:abc|*"` do the same
  *     for the three arrangement objects, and `"placement:abc|bars"` (and its
  *     siblings) writes one field of one of them;
@@ -2514,10 +2508,10 @@ function containerObject(doc, kind, id) {
  * so nothing here invents one. A sample, slice, bank, pattern and MIDI mapping
  * do carry one, and it is the same value their key holds.
  *
- * A pattern's motion is written as the nested `Y.Map` of one key per lane
- * (`setPatternMotion`), never as a plain object: a whole-pattern restore (an
- * undo of `pattern.remove`, say) puts its lanes back as keys, so the pattern it
- * restores is still two writers' safe.
+ * A pattern's motion is stored as one key per lane on the pattern's own map
+ * (`setMotionLane`), and a whole-pattern restore (an undo of `pattern.remove`,
+ * say) puts each lane back under its own key (`patternMapFrom`), so the pattern
+ * it restores is still two writers' safe.
  */
 function writeContainerObject(doc, kind, id, field, value) {
   const key = OBJECT_MAP_OF[kind];
@@ -2532,9 +2526,7 @@ function writeContainerObject(doc, kind, id, field, value) {
     delete object._index;
     const hasOwnId = kind !== "pad" && kind !== "step";
     const stored = hasOwnId ? { ...object, id: object.id ?? id } : object;
-    const created = objectMap(stored);
-    if (kind === "pattern") setPatternMotion(created, stored.motion);
-    map.set(id, created);
+    map.set(id, kind === "pattern" ? patternMapFrom(stored) : objectMap(stored));
     return;
   }
   const object = map.get(id);
@@ -2547,28 +2539,55 @@ function writeContainerObject(doc, kind, id, field, value) {
 }
 
 /**
- * Replace a pattern's whole motion with a map of one key per lane.
+ * Build the map one pattern is stored as: its own fields plus one key per
+ * motion lane (`motion|<lane>` → its points), which is how a whole-pattern
+ * restore writes its curves back.
  *
- * This is the one way a motion object goes into the document as a whole (an
- * undo restoring a whole pattern, or a `pattern|motion` field write); every
- * other write touches a single lane key (`writeMotionLane`). The map is always
- * stored, even when it holds no lane: a missing container is what lets two
- * instances create it at once and lose one of the two lanes (see
- * `newPatternMap`).
+ * An entry recorded while the lanes still travelled as one plain object under
+ * `motion` has it spread into those same per-lane keys, so a restore does not
+ * lose a curve it was recorded with.
+ * @param {object} object the pattern, as a snapshot or a history entry holds it
+ * @returns {Y.Map<any>}
+ */
+function patternMapFrom(object) {
+  const fields = { ...object };
+  const motion = fields.motion && typeof fields.motion === "object" && !Array.isArray(fields.motion) ? fields.motion : null;
+  delete fields.motion;
+  const map = objectMap(fields);
+  if (!motion) return map;
+  for (const lane of Object.keys(motion)) {
+    if (!Array.isArray(motion[lane])) continue;
+    map.set(MOTION_FIELD_PREFIX + lane, cloneJson(motion[lane]));
+  }
+  return map;
+}
+
+/**
+ * Replace a pattern's whole motion with one key per lane.
+ *
+ * This is the one way a motion object goes into the document as a whole (a
+ * `pattern|motion` field write); every other write touches a single lane key
+ * (`writeMotionLane`, `setMotionLane`). It writes the lanes it is given under
+ * their own keys and takes away the ones the value does not name, so a lane
+ * another instance moves is either kept whole or removed whole, never
+ * half-overwritten.
  * @param {Y.Map<any>} pattern - the live pattern
  * @param {unknown} value - `{lane: points}` as a snapshot spells it, or `null`
  * @returns {void}
  */
 function setPatternMotion(pattern, value) {
   const motion = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const lanes = new Y.Map();
+  const wanted = new Set();
   for (const lane of Object.keys(motion)) {
     if (!Array.isArray(motion[lane])) continue;
-    lanes.set(lane, cloneJson(motion[lane]));
+    wanted.add(lane);
+    pattern.set(MOTION_FIELD_PREFIX + lane, cloneJson(motion[lane]));
   }
-  // The container is always there, even empty: a pattern without one would let
-  // two writers create the key at once, and one of the two lanes would be lost.
-  pattern.set("motion", lanes);
+  for (const key of [...pattern.keys()]) {
+    if (typeof key !== "string" || !key.startsWith(MOTION_FIELD_PREFIX)) continue;
+    if (wanted.has(key.slice(MOTION_FIELD_PREFIX.length))) continue;
+    pattern.delete(key);
+  }
 }
 
 /** Which sub-map of the arrangement each arrangement object kind lives in. */
@@ -2607,9 +2626,9 @@ function writeArrangementObject(doc, kind, id, field, value) {
 /**
  * Write one motion lane of one pattern, or (with `null`) take it away.
  *
- * A lane is one KEY of its pattern's `motion` map (`patternMotionMap`), so this
- * touches that one key and nothing else: another lane, written by this page or
- * by someone else at the same moment, is never overwritten. The pattern itself
+ * A lane is one KEY of its pattern's own map (`setMotionLane`), so this touches
+ * that one key and nothing else: another lane, written by this page or by
+ * someone else at the same moment, is never overwritten. The pattern itself
  * must be there — motion belongs to a pattern, and removing the pattern removes
  * every lane of it in the same step.
  * @param {Y.Doc} doc
@@ -2629,8 +2648,7 @@ function writeMotionLane(doc, id, field, value) {
     if (value === ABSENT) return;
     throw new Error(`Studio: there is no pattern "${parts.patternId}" on clip "${parts.clipId}" to write motion to`);
   }
-  // Taking a lane away that is not there writes nothing at all — not even the
-  // empty map an upgrade would make.
+  // Taking a lane away that is not there writes nothing at all.
   if (value === ABSENT) setMotionLane(pattern, parts.lane, null);
   else setMotionLane(pattern, parts.lane, value);
 }
@@ -2832,7 +2850,7 @@ function normalizePattern(id, value) {
     clip_id: typeof plain.clip_id === "string" ? plain.clip_id : "",
     name: typeof plain.name === "string" ? plain.name : "",
     order: integerOr(plain.order, 0),
-    motion: normalizeMotion(plain.motion),
+    motion: normalizeMotion(motionOf(value)),
   };
 }
 
