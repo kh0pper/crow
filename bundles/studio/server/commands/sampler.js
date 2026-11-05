@@ -86,6 +86,7 @@ import {
   motionLane,
   motionLaneParts,
   motionOf,
+  newPatternMap,
   newSamplerBank,
   objectMap,
   objectRef,
@@ -96,6 +97,7 @@ import {
   patternMap,
   patternsForClip,
   sampleMap,
+  setMotionLane,
   sliceEntries,
   sliceKey,
   sliceMap,
@@ -1009,8 +1011,11 @@ defineCommand({
       clip_id: args.clip_id,
       name: args.name ?? letterAt(existing.length),
       order: existing.length,
+      // A pattern carries its motion container from the start, empty: see
+      // `newPatternMap` in doc.js.
+      motion: {},
     };
-    patternMap(doc).set(patternKey(args.clip_id, pattern.id), objectMap(pattern));
+    patternMap(doc).set(patternKey(args.clip_id, pattern.id), newPatternMap(pattern));
     const ref = patternRef(args.clip_id, pattern.id);
     return { before: { [fieldKey(ref, "*")]: ABSENT }, after: { [fieldKey(ref, "*")]: cloneJson(pattern) } };
   },
@@ -1193,8 +1198,8 @@ defineCommand({
  * one pattern, recording each changed lane under its own field.
  *
  * A lane the cut empties goes away with it, so a lane never lingers with no
- * points to play. The pattern's `motion` object is written back once, with only
- * the affected lanes changed.
+ * points to play. Each changed lane is written as its own key of the pattern's
+ * motion map, with only the affected lanes changed.
  * @param {string} clipId
  * @param {import("yjs").Map<any>} pattern - the live pattern
  * @param {number} lengthSteps - the loop's new length in step positions
@@ -1205,7 +1210,6 @@ defineCommand({
 function trimMotion(clipId, pattern, lengthSteps, before, after) {
   const motion = motionOf(pattern);
   const lanes = Object.keys(motion);
-  let changed = false;
   for (const lane of lanes) {
     const points = Array.isArray(motion[lane]) ? motion[lane] : [];
     const kept = points.filter((point) => Number(point.step_frac) < lengthSteps);
@@ -1213,11 +1217,10 @@ function trimMotion(clipId, pattern, lengthSteps, before, after) {
     const field = fieldKey(motionRef(clipId, pattern.get("id"), lane), "*");
     before[field] = cloneJson(points);
     after[field] = kept.length > 0 ? cloneJson(kept) : ABSENT;
-    if (kept.length > 0) motion[lane] = kept;
-    else delete motion[lane];
-    changed = true;
+    // One lane is one key of the pattern's motion map: the cut writes that key
+    // and leaves every other lane (and every other writer's lane) alone.
+    setMotionLane(pattern, lane, kept.length > 0 ? kept : null);
   }
-  if (changed) pattern.set("motion", cloneJson(motion) ?? {});
 }
 
 /** @returns {Array<{id: string, step: object}>} every step of one clip, plain. */
@@ -1622,9 +1625,9 @@ defineCommand({
     const was = present ? cloneJson(motion[lane]) : ABSENT;
     if (JSON.stringify(was) === JSON.stringify(points)) return { before: {}, after: {} };
 
-    if (points.length > 0) motion[lane] = points;
-    else delete motion[lane];
-    pattern.set("motion", cloneJson(motion) ?? {});
+    // One lane is one key of the pattern's motion map, so the write never
+    // touches a lane someone else is moving at the same moment.
+    setMotionLane(pattern, lane, points.length > 0 ? points : null);
     return {
       before: { [field]: was },
       after: { [field]: points.length > 0 ? cloneJson(points) : ABSENT },
@@ -1683,9 +1686,10 @@ defineCommand({
     for (const lane of lanes) {
       before[fieldKey(motionRef(args.clip_id, args.pattern_id, lane), "*")] = cloneJson(motion[lane]);
       after[fieldKey(motionRef(args.clip_id, args.pattern_id, lane), "*")] = ABSENT;
-      delete motion[lane];
+      // Each lane is its own key: clearing two lanes of one pad is two key
+      // deletions and never a rewrite of the whole curve set.
+      setMotionLane(pattern, lane, null);
     }
-    pattern.set("motion", cloneJson(motion) ?? {});
     return { before, after };
   },
 });
@@ -1822,8 +1826,8 @@ defineCommand({
     // The first pattern's id is fixed to "a": the clip's ref prefixes it, so it
     // still names one pattern for good, and a reader that only knows the clip
     // can name its first pattern without a lookup.
-    const pattern = { id: "a", clip_id: clip.id, name: "A", order: 0 };
-    patternMap(doc).set(patternKey(clip.id, pattern.id), objectMap(pattern));
+    const pattern = { id: "a", clip_id: clip.id, name: "A", order: 0, motion: {} };
+    patternMap(doc).set(patternKey(clip.id, pattern.id), newPatternMap(pattern));
     return {
       before: {
         [fieldKey(clipRef(clip.id), "*")]: ABSENT,

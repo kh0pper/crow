@@ -2773,6 +2773,138 @@ test("a motion lane is drawn under the steps and its Clear is one motion.clear",
   );
 });
 
+test("a knob turned in lock mode records no motion", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+  await ui.apply("step.toggle", stepArgs(bankId, 0));
+
+  // Motion armed, the transport playing, one step held: this is exactly the
+  // moment a knob move would be recorded — except that in lock mode the knob is
+  // that step's lock and nothing else.
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+  ui.playhead(1, 1, 1);
+  await ui.settle();
+  ui.holdStep(0);
+  await ui.settle();
+
+  const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  assert.ok(cutoff, "the pad's cutoff is a control");
+  cutoff.value = "900";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  // The lock is on: the strip appears once the pointer is up, and the control's
+  // change was that step's lock all the same.
+  ui.release();
+  await ui.settle();
+  assert.ok(ui.view().querySelector("[data-role=step-lock]"), "holding the step entered lock mode");
+
+  const locks = commands(ui, "step.set");
+  assert.equal(locks.length, 1, "the change is one step.set");
+  assert.deepEqual(locks[0].args.locks, { cutoff_hz: 900 }, "carrying the lock");
+  assert.equal(commands(ui, "pad.set").length, 0, "the pad itself did not move");
+
+  // A whole pass later there is still no take: a lock is the value its voice
+  // keeps, so it is never a motion point.
+  ui.playhead(2, 1, 1);
+  await ui.settle();
+  assert.equal(commands(ui, "motion.write").length, 0, "lock mode records no motion at all");
+});
+
+test("motion records into the chain's playing pattern", async () => {
+  const ui = await bootSampler();
+  const bankId = await bankIdOf(ui.doc);
+  await ui.openSampler();
+
+  // The clip's chain becomes A → Fill, and the editor keeps showing A.
+  await ui.apply("pattern.add", { clip_id: CLIP, name: "Fill" });
+  const { snapshot } = await import("../bundles/studio/server/doc.js");
+  const fill = Object.values(snapshot(ui.doc).patterns).find(
+    (pattern) => pattern.clip_id === CLIP && pattern.name === "Fill",
+  );
+  assert.ok(fill, "the second pattern is in the song");
+  await ui.apply("chain.set", { clip_id: CLIP, chain: ["a", fill.id] });
+  assert.equal(ui.patternTabs().length, 2, "both patterns are offered");
+  assert.equal(ui.patternTabs()[0].getAttribute("aria-pressed"), "true", "the editor still shows pattern A");
+
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // One pattern loop is 16 sixteenths = 4 beats, so bar 2 beat 1 is the chain's
+  // SECOND slot: Fill is playing there, whatever the editor shows.
+  ui.playhead(2, 1, 1);
+  await ui.settle();
+  const cutoff = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+  cutoff.value = "1200";
+  cutoff.dispatchEvent(ui.event("input", { target: cutoff }));
+  cutoff.dispatchEvent(ui.event("change", { target: cutoff }));
+  await ui.settle();
+
+  // A whole pass of that pattern later the take is written — into Fill.
+  ui.playhead(3, 1, 1);
+  await ui.settle();
+  const written = commands(ui, "motion.write");
+  assert.equal(written.length, 1, `the pass has to be one motion.write, got ${written.length}`);
+  assert.equal(written[0].args.pattern_id, fill.id, "the lane belongs to the pattern the transport was playing");
+  assert.notEqual(written[0].args.pattern_id, "a", "and never to the pattern the editor happens to show");
+  assert.deepEqual(written[0].args.points, [{ step_frac: 0, value: 1200 }], "one point, where the knob was turned");
+  assert.deepEqual(
+    (await import("../bundles/studio/server/doc.js")).snapshot(ui.doc).patterns[`${CLIP}/${fill.id}`].motion,
+    {},
+    "the write is sent, not applied locally",
+  );
+});
+
+test("leaving the page mid-take keeps the motion", async () => {
+  const ui = await bootSampler();
+  await ui.openSampler();
+  ui.click("[data-act=motion-arm]");
+  await ui.settle();
+  ui.click("[data-act=play]");
+  await ui.settle(24);
+
+  // Two moves, no pass boundary yet: the take is still open.
+  const cutoff = () => {
+    const node = ui.view().querySelector("[data-pad-field=filter.cutoff_hz]");
+    assert.ok(node, "the pad's cutoff is a control");
+    return node;
+  };
+  for (const [sixteenth, value] of [[1, 3000], [2, 6000]]) {
+    ui.playhead(1, 1, sixteenth);
+    await ui.settle();
+    const node = cutoff();
+    node.value = String(value);
+    node.dispatchEvent(ui.event("input", { target: node }));
+    node.dispatchEvent(ui.event("change", { target: node }));
+    await ui.settle();
+  }
+  assert.equal(commands(ui, "motion.write").length, 0, "the take has not ended yet");
+
+  // The page is left (Turbo caches it): teardown writes what it recorded, like
+  // the knob's last value, before the wire goes away.
+  ui.document.dispatchEvent(new ui.domWindow.Event("turbo:before-cache"));
+  await ui.settle();
+  const written = commands(ui, "motion.write");
+  assert.equal(written.length, 1, `leaving the page has to write the take, got ${written.length}`);
+  assert.deepEqual(
+    written[0].args.points.map((point) => point.step_frac),
+    [0, 1],
+    "both points the take recorded are on the written lane",
+  );
+  assert.deepEqual(
+    written[0].args.points.map((point) => point.value),
+    [3000, 6000],
+    "with the values the control had there",
+  );
+});
+
 // ---- real input events, through the DevTools protocol -----------------------
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

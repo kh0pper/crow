@@ -16,6 +16,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+
+// The very module instance `server/doc.js` gets from `import * as Y from "yjs"`:
+// the package's ESM build, not the CommonJS one (`require` and `import` resolve
+// to different files, and two builds cannot share a document).
+import * as Y from "../bundles/studio/node_modules/yjs/dist/yjs.mjs";
 import {
   LIMITS,
   MOTION_PARAM_RANGES,
@@ -1019,6 +1024,85 @@ test("one motion lane undoes without touching another", (t) => {
   assert.deepEqual(checkInvariants(s.doc), []);
   s.undo(shortened.entry);
   assert.equal(snapshot(s.doc).patterns[patternKey(clip, "a")].motion[`${bankId}.0|cutoff_hz`].length, 2);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("two writers on different motion lanes both keep their lane", (t) => {
+  const s = studio(t);
+  const { trackId, bankId } = addKit(s.doc);
+  const scene = addScene(s.doc);
+  const clip = addPatternClip(s.doc, trackId, scene, { length_steps: 16 });
+
+  // A second writer's copy of the very same song, synced the way two instances
+  // are: one shared update, never a whole-document overwrite.
+  const other = new Y.Doc();
+  t.after(() => other.destroy());
+  const sync = () => {
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(s.doc, Y.encodeStateVector(other)));
+    Y.applyUpdate(s.doc, Y.encodeStateAsUpdate(other, Y.encodeStateVector(s.doc)));
+  };
+  sync();
+
+  const write = (doc, param, value) =>
+    doc.transact(() =>
+      runCommand(doc, "motion.write", {
+        clip_id: clip,
+        pattern_id: "a",
+        bank_id: bankId,
+        index: 0,
+        param,
+        points: [
+          { step_frac: 0, value },
+          { step_frac: 8, value },
+        ],
+      }),
+    );
+
+  // Both writers move a lane of the SAME pattern before either has seen the
+  // other: two keys of one map, so neither can overwrite the other.
+  write(s.doc, "cutoff_hz", 2000);
+  write(other, "gain_db", -6);
+  assert.deepEqual(
+    Object.keys(snapshot(s.doc).patterns[patternKey(clip, "a")].motion),
+    [`${bankId}.0|cutoff_hz`],
+    "each copy holds only the lane its own writer moved before the merge",
+  );
+  assert.deepEqual(Object.keys(snapshot(other).patterns[patternKey(clip, "a")].motion), [
+    `${bankId}.0|gain_db`,
+  ]);
+
+  sync();
+
+  for (const [name, doc] of [
+    ["the first writer", s.doc],
+    ["the second writer", other],
+  ]) {
+    const motion = snapshot(doc).patterns[patternKey(clip, "a")].motion;
+    assert.deepEqual(
+      Object.keys(motion).sort(),
+      [`${bankId}.0|cutoff_hz`, `${bankId}.0|gain_db`].sort(),
+      `${name} keeps both lanes after the merge`,
+    );
+    assert.deepEqual(motion[`${bankId}.0|cutoff_hz`], [
+      { step_frac: 0, value: 2000 },
+      { step_frac: 8, value: 2000 },
+    ]);
+    assert.deepEqual(motion[`${bankId}.0|gain_db`], [
+      { step_frac: 0, value: -6 },
+      { step_frac: 8, value: -6 },
+    ]);
+  }
+
+  // Each lane is still one undoable field of the pattern on both sides.
+  const lane = s.run("motion.write", {
+    clip_id: clip,
+    pattern_id: "a",
+    bank_id: bankId,
+    index: 0,
+    param: "pan",
+    points: [{ step_frac: 0, value: 0.5 }],
+  });
+  assert.deepEqual(Object.keys(lane.result.after), [`motion:${clip}/a/${bankId}.0|pan|*`]);
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 

@@ -195,9 +195,18 @@
  *
  * Every term of that comes from the song and the transport, never from the block
  * being built, so a value depends on the frame and nothing else — which is what
- * makes the same song render identically at any block size. The host interpolates
- * each lane linearly between its points at every frame, wrapping from the last
- * point round to the first across the loop (see `studio-processor.js`).
+ * makes the same song render identically at any block size. The host reads each
+ * lane linearly between its points, wrapping from the last point round to the
+ * first across the loop (see `studio-processor.js`).
+ *
+ * A descriptor describes a WINDOW, not the rest of the block: the slot's curve
+ * stands from the descriptor's own frame to the end of that slot at the latest,
+ * and a slot inside a segment that stops is cut at the segment's end, not at the
+ * block's. So when the segment a curve stands in ends inside the block, one more
+ * descriptor says the curve stops standing there (`lanes: null`) at that end
+ * frame — a host that turns the curve off at its own boundary never sweeps a
+ * voice past the segment, and never leaves one holding a stale value after a
+ * stop, a chain turn or a lane that was cleared.
  *
  * ## Launch reports
  *
@@ -2107,6 +2116,8 @@
       const swing = clip.swing;
       const gateFrames = Math.max(1, Math.round(stepBeats * framesPerBeat));
       const motion = clip.patternMotion;
+      /** Whether the last curve this segment put in the block still stands. */
+      let standing = false;
 
       for (let slot = first; slot <= last; slot += 1) {
         const slotStart = seg.startBeat + slot * clip.lengthBeats;
@@ -2127,6 +2138,7 @@
         const inBlock = slotEndFrame > frameStart && slotFrame < frameEnd;
         const hasLanes = lanes !== undefined && lanes.length > 0;
         if (inBlock && (hasLanes || slotFrame > frameStart)) {
+          standing = hasLanes;
           motions.push({
             frame: slotFrame > frameStart ? slotFrame - frameStart : 0,
             track_id: seg.track_id,
@@ -2170,6 +2182,24 @@
             gate_frames: gateFrames,
           });
         }
+      }
+
+      // A segment that stops inside this block ends its curve at its own end
+      // frame, not at the block's: the descriptor below says the curve stops
+      // standing there, so nothing is swept past the segment's end (see the
+      // header). A slot that already handed over `null` needs nothing.
+      if (standing && segEndFrame > frameStart && segEndFrame < frameEnd) {
+        motions.push({
+          frame: segEndFrame > frameStart ? segEndFrame - frameStart : 0,
+          track_id: seg.track_id,
+          pattern_id: "",
+          lanes: null,
+          origin_frame: originFrame === null ? 0 : originFrame,
+          frames_per_beat: framesPerBeat,
+          slot_start_beat: 0,
+          step_beats: stepBeats,
+          length_steps: clip.lengthSteps,
+        });
       }
     }
 
