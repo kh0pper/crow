@@ -30,7 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
-import { performBackup, createDbClient } from "../../db.js";
+import { performBackup, createDbClient, resolveDbPath } from "../../db.js";
 import {
   backupLabel, localBackupContext, backupFileName, backupStem, ownBackupRegex,
   listOwnBackups, readOwner, isForeignOwner, ownerPath, newestBackupOwnership,
@@ -61,6 +61,11 @@ function ensurePrivateDir(dir) {
     const st = fs.statSync(dir);
     if (typeof process.getuid !== "function" || st.uid === process.getuid()) chmodQuiet(dir, DIR_MODE);
   } catch { /* raced away */ }
+}
+
+/** Real path of a file, falling back to the absolute path when it is gone. */
+function realpathOrResolve(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
 }
 
 // Verify a freshly-written backup file is a structurally sound SQLite db, and
@@ -170,7 +175,7 @@ function requireToken(req, res, next) {
  * action (POST /dashboard/nest/backup). The localhost route below calls this
  * same function — behavior is identical from both callers.
  *
- * @returns {Promise<{ok: boolean, instance: string, path: string, size_bytes: number,
+ * @returns {Promise<{ok: boolean, instance: string, db_path: string, path: string, size_bytes: number,
  *   duration_ms: number, pages_copied: number|null, pruned_older_than_days: number,
  *   pruned_count: number}>}
  */
@@ -285,6 +290,11 @@ async function runBackupInner({ now = new Date() } = {}) {
     instance: label,
     instance_tag: tag,
     instance_id: me.instance_id,
+    // WHICH database this copy is of. A host can run several gateways (one per
+    // CROW_HOME) whose /health all answer: scripts/backup-db.mjs only accepts
+    // this copy when this path is its own crow.db, and refuses to fall back to
+    // opening the file while anything holds it.
+    db_path: realpathOrResolve(resolveDbPath()),
     path: dest,
     size_bytes: size,
     verified: true,

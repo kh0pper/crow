@@ -10,18 +10,28 @@
  * servers/db.js exist for exactly that failure, and `sqlite3` also never sees
  * the gateway's un-checkpointed pages). So:
  *
- *   1. If the gateway answers on 127.0.0.1:<gatewayListenPort()> it is asked
+ *   1. If a gateway answers on 127.0.0.1:<gatewayListenPort()> it is asked
  *      for the copy (POST /api/admin/backup, servers/gateway/routes/
  *      admin-backup.js). That copy is made in-process by better-sqlite3's
  *      online .backup(), is verified there, and lands under the name the
  *      dashboard, the Nest backup signal and pruneOwnBackups already know
  *      (servers/shared/backup-naming.js: <label>[-<tag>]-<date>.db plus its
- *      .owner.json sidecar). This script never opens the live database.
- *   2. With no gateway answering, nobody holds the DB: open it with
- *      better-sqlite3 and run .backup() into a temp file in the backup dir,
- *      verify it (quick_check, then wal_checkpoint(TRUNCATE) so the copy is
- *      one self-contained file), and rename it into place under the SAME
- *      name — with the same owner sidecar — the endpoint writes.
+ *      .owner.json sidecar). Its answer is only used when it names OUR
+ *      database (db_path) and a copy inside OUR backup dir: on a host running
+ *      two gateways, the port may well belong to the other instance. This
+ *      script never opens the live database on this path.
+ *   2. Otherwise the deciding question is who has the DATABASE open, not which
+ *      port answers (dbHolders() in scripts/restore-db.mjs — /proc/<pid>/fd,
+ *      else lsof). With no holders, open the database READ-ONLY and run
+ *      .backup() into a temp file in the backup dir, verify it (quick_check,
+ *      then wal_checkpoint(TRUNCATE) so the copy is one self-contained file),
+ *      and rename it into place under the SAME name — with the same owner
+ *      sidecar — the endpoint writes. With holders and no gateway of ours, or
+ *      when the holders cannot be determined, refuse: an external open of a
+ *      live WAL crow.db is what orphans the gateway's descriptors.
+ *   2b. A port that answers but does not answer like a gateway (5xx, reset,
+ *      garbage, timeout) also refuses: something there may well be holding the
+ *      database.
  *   3. The SQL dump is made from the VERIFIED COPY (never the live DB) and
  *      only when the sqlite3 CLI is installed. Without it the dump is
  *      skipped with one line: the binary copy is complete on its own.
@@ -44,6 +54,7 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 import { gatewayListenPort } from "../servers/gateway/listen-port.js";
+import { dbHolders, holdersText } from "./restore-db.mjs";
 import {
   localBackupContext, backupFileName, backupStem, ownerPath, readOwner, isForeignOwner,
   resolveBackupDir,
@@ -113,11 +124,29 @@ function writeReport(file, vars) {
 
 /* ------------------------------------------------------- the gateway probe */
 
+/** True when `err` (or its cause chain / aggregate members) is ECONNREFUSED. */
+function isConnectionRefused(err) {
+  const seen = new Set();
+  let e = err;
+  while (e && typeof e === "object" && !seen.has(e)) {
+    seen.add(e);
+    if (e.code === "ECONNREFUSED") return true;
+    if (Array.isArray(e.errors) && e.errors.some((x) => x && x.code === "ECONNREFUSED")) return true;
+    e = e.cause;
+  }
+  return false;
+}
+
 /**
- * Ask the gateway's /health on loopback. `up` = something answered on the
- * port (any HTTP response); `ok` = it answered 2xx, so it is the gateway and
- * may be asked for a backup. A request that times out still counts as up:
- * a port that accepts and hangs is not a port we may bypass.
+ * Ask the gateway's /health on loopback.
+ *
+ *   up   = something is listening on the port. ONLY a refused connection
+ *          counts as "nothing there": a reset, a timeout, a 5xx or a body that
+ *          is not an HTTP answer all mean a process we know nothing about may
+ *          be holding the live database, so backup and restore must refuse
+ *          rather than open it themselves.
+ *   ok   = it answered 2xx, so it is a gateway and may be asked for a backup.
+ *   status/error carry the reason for the refusal sentence.
  */
 export async function probeGateway(port, timeoutMs = 2000) {
   const ctrl = new AbortController();
@@ -125,14 +154,42 @@ export async function probeGateway(port, timeoutMs = 2000) {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: ctrl.signal });
     try { await res.arrayBuffer(); } catch { /* body is not needed */ }
-    return { up: true, ok: res.ok, timedOut: false };
-  } catch {
-    if (ctrl.signal.aborted) return { up: true, ok: false, timedOut: true };
-    // ECONNREFUSED / ENETUNREACH: nothing is listening.
-    return { up: false, ok: false, timedOut: false };
+    return { up: true, ok: res.ok, timedOut: false, status: res.status, refused: false };
+  } catch (err) {
+    if (ctrl.signal.aborted) return { up: true, ok: false, timedOut: true, refused: false };
+    if (isConnectionRefused(err)) {
+      return { up: false, ok: false, timedOut: false, refused: true };
+    }
+    // Reset/EPIPE/garbage answer: something is there, we just cannot talk to it.
+    return { up: true, ok: false, timedOut: false, refused: false, error: err?.message || String(err) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The sentence both scripts use when a port answers but not like a gateway
+ * (5xx, reset, garbage, timeout). Exported so restore-db.mjs says the same.
+ */
+export function listeningRefusal(port, probe) {
+  const why = probe.timedOut
+    ? "GET /health did not answer within 2 s"
+    : probe.status
+      ? `GET /health answered HTTP ${probe.status}`
+      : `GET /health failed (${probe.error || "no usable answer"})`;
+  return `something is listening on port ${port} but ${why} — refusing to open the database directly in case that is the gateway`;
+}
+
+/* ---------------------------------------------------- paths, ours or theirs */
+
+function realpathOrResolve(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+
+/** True when `file` (already real) is strictly inside directory `dir` (real). */
+function isInsideDir(file, dir) {
+  const rel = path.relative(dir, file);
+  return rel !== "" && rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel);
 }
 
 /* ------------------------------------------------------------ verification */
@@ -193,7 +250,13 @@ function assertNotForeign(dest, me) {
 
 /* ---------------------------------------------------------- the two copies */
 
-async function gatewayCopy(port) {
+/**
+ * Ask the gateway on `port` for a copy, and only accept it when it is OUR
+ * copy: `db_path` must be the realpath of our database and the returned `path`
+ * must be inside our backup dir. Otherwise `{foreign:true, reason}` is
+ * returned — the caller then decides by dbHolders() instead.
+ */
+async function gatewayCopy(port, { dbReal, dirReal }) {
   const token = process.env.CROW_BACKUP_TOKEN || "";
   const headers = token ? { authorization: `Bearer ${token}` } : {};
   let res;
@@ -210,21 +273,35 @@ async function gatewayCopy(port) {
   if (!res.ok || !body || body.ok !== true) {
     throw new Error(`the gateway refused the backup: ${body?.error || `HTTP ${res.status}`}`);
   }
-  if (typeof body.path !== "string" || !fs.existsSync(body.path)) {
-    throw new Error(`the gateway reported a copy at ${body.path}, but no such file exists`);
+
+  // A co-hosted gateway (another CROW_HOME, another crow.db) answers /health
+  // on its port too. Its copy is of ITS database, so taking it would either
+  // back up the wrong instance or file it under the wrong name.
+  const answerDb = typeof body.db_path === "string" ? realpathOrResolve(body.db_path) : null;
+  const answerPath = typeof body.path === "string" ? body.path : null;
+  const answerReal = answerPath ? realpathOrResolve(answerPath) : null;
+  const ours = answerDb !== null && answerDb === dbReal && answerReal !== null && isInsideDir(answerReal, dirReal);
+  if (!ours) {
+    const where = answerDb ? ` (it backed up ${answerDb})` : " (its answer names no db_path)";
+    const outside = answerReal && !isInsideDir(answerReal, dirReal) ? `, and its copy ${answerReal} is outside ${dirReal}` : "";
+    return { foreign: true, reason: `the gateway on port ${port} backs up another database${where}${outside} — ignoring it` };
   }
-  const size = fs.statSync(body.path).size;
-  if (size === 0) throw new Error(`the gateway wrote an empty copy at ${body.path}`);
-  return { file: body.path, size, pages: body.pages_copied ?? null };
+  if (!fs.existsSync(answerPath)) {
+    throw new Error(`the gateway reported a copy at ${answerPath}, but no such file exists`);
+  }
+  const size = fs.statSync(answerPath).size;
+  if (size === 0) throw new Error(`the gateway wrote an empty copy at ${answerPath}`);
+  return { file: answerPath, size, pages: body.pages_copied ?? null, instance: body.instance ?? null };
 }
 
 async function localCopy(dbPath, dir, name, me) {
   const dest = path.join(dir, name);
   const tmp = tmpBeside(dir, name);
   try {
-    // Nobody holds the DB (the gateway check said so), so a direct
-    // better-sqlite3 connection and its online .backup() are safe here.
-    const db = new Database(dbPath, { fileMustExist: true });
+    // Nobody holds the DB (dbHolders() said so), so a direct better-sqlite3
+    // connection and its online .backup() are safe here — read-only, because
+    // the live database is still not ours to write to.
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
       await db.backup(tmp);
     } finally {
@@ -314,26 +391,57 @@ async function make({ dbPath, reportFile, dryRun }) {
   ensurePrivateDir(dir);
 
   const port = gatewayListenPort();
+  const dbName = path.basename(dbPath);
   const probe = await probeGateway(port);
-  let copy;
-  let source;
+  const dbReal = realpathOrResolve(dbPath);
+  const dirReal = realpathOrResolve(dir);
+
+  let copy = null;
+  let source = null;
+
+  if (probe.up && !probe.ok) {
+    // A port that answers but not like a gateway is a port that may well hold
+    // the live database: refuse instead of opening the file ourselves.
+    throw new Error(listeningRefusal(port, probe));
+  }
+
   if (probe.ok) {
-    source = "gateway";
     console.log(`  Gateway answering on 127.0.0.1:${port} — asking it for the copy (the live database is not opened here).`);
-    copy = await gatewayCopy(port);
-  } else if (probe.up) {
-    // Refuse rather than open the file directly: a port that answers is a
-    // port that may well hold the live DB.
-    throw new Error(
-      probe.timedOut
-        ? `something is listening on port ${port} but GET /health did not answer within 2 s — ` +
-          `refusing to open ${dbPath} directly in case that is the gateway`
-        : `something is listening on port ${port} but GET /health did not answer OK — ` +
-          `refusing to open ${dbPath} directly in case that is the gateway`,
-    );
-  } else {
+    const answer = await gatewayCopy(port, { dbReal, dirReal });
+    if (answer.foreign) {
+      console.log(`  ${answer.reason}.`);
+    } else {
+      source = "gateway";
+      copy = answer;
+    }
+  }
+
+  if (!copy) {
+    // Nobody to ask, or the one we asked was not ours: the file handles decide.
+    const holders = dbHolders(dbPath);
+    if (holders && holders.length) {
+      const who = holdersText(holders);
+      throw new Error(
+        probe.ok
+          ? `${dbName} is open by: ${who} but no gateway for it answers on port ${port}; ` +
+            `set PORT/CROW_GATEWAY_PORT to its port, or stop those processes.`
+          : `${dbName} is open by: ${who}. Stop the gateway and any Crow server using this ` +
+            `database, then run the backup again (or set PORT/CROW_GATEWAY_PORT to the port of ` +
+            `the gateway that serves it).`,
+      );
+    }
+    if (holders === null) {
+      throw new Error(
+        `could not check whether another process holds ${dbPath} (no /proc/<pid>/fd and no lsof ` +
+        `on this host) — refusing to open it directly in case something does`,
+      );
+    }
     source = "local";
-    console.log(`  No gateway on 127.0.0.1:${port} — making the copy here with better-sqlite3.`);
+    if (probe.refused) {
+      console.log(`  No gateway on 127.0.0.1:${port} and nothing holds the database — making the copy here with better-sqlite3.`);
+    } else {
+      console.log(`  ${dbName} is not held by any other process — making the copy here with better-sqlite3.`);
+    }
     copy = await localCopy(dbPath, dir, name, ctx.me);
   }
 

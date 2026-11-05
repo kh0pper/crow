@@ -13,10 +13,13 @@
 # sitting in the old ~/.crow/backups directory are listed and can be restored
 # by name too.
 #
-# The gateway must be STOPPED before a restore: it holds the live database's
-# -wal/-shm and would keep writing through descriptors to a file we replace.
-# There is no --force; stop the gateway (systemctl --user stop crow-gateway)
-# and run the restore again.
+# A restore refuses while ANY process holds the database open — a live
+# gateway, a second instance's server, a bridge, an sqlite3 shell
+# (scripts/restore-db.mjs dbHolders: /proc/<pid>/fd, else lsof) — and while
+# something answers on the gateway port. A live gateway holds the live
+# database's -wal/-shm and would keep writing through descriptors to a file we
+# replace. There is no --force; stop the processes (systemctl --user stop
+# crow-gateway) and run the restore again.
 #
 # Node helpers (scripts/restore-db.mjs) do everything that used to need the
 # sqlite3 CLI: the whole pre-restore safety copy, the .db preview and the
@@ -181,19 +184,28 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-# --- Refuse while the gateway is running (no --force: this one has no override) ---
-
-GATEWAY_STATE="$("$NODE_BIN" "$RESTORE_HELPER" gateway-check 2>/dev/null || true)"
-if [[ -z "$GATEWAY_STATE" ]]; then
-  echo "Error: could not check whether the gateway is running (node/better-sqlite3 failed)."
-  echo "Refusing to replace $DB_PATH without that check."
+# --- Refuse while anything holds the database (no --force: this one has no override) ---
+# Who has crow.db / -wal / -shm open decides, not which port answers: a second
+# gateway started from another CROW_HOME, a pi-bots bridge or an sqlite3 shell
+# holds the file without answering on our port. The node helper scans
+# /proc/<pid>/fd (or lsof) and also probes the gateway port; when it cannot tell
+# who holds the file it says so and falls back to the probe.
+#   exit 0 = clear to restore (possibly with a warning on stdout)
+#   exit 3 = refused, the reason is on stdout
+#   other  = the check itself could not run
+set +e
+HOLD_CHECK="$("$NODE_BIN" "$RESTORE_HELPER" precheck "$DB_PATH" 2>&1)"
+HOLD_STATUS=$?
+set -e
+if [[ -n "$HOLD_CHECK" ]]; then
+  echo "$HOLD_CHECK"
+fi
+if [[ "$HOLD_STATUS" -eq 3 ]]; then
   exit 1
 fi
-GATEWAY_PORT="${GATEWAY_STATE%% *}"
-GATEWAY_STATE="${GATEWAY_STATE##* }"
-if [[ "$GATEWAY_STATE" == "up" ]]; then
-  echo "Error: The gateway is running on port $GATEWAY_PORT. Stop it first"
-  echo "(systemctl --user stop crow-gateway, or stop the process), then run the restore again."
+if [[ "$HOLD_STATUS" -ne 0 ]]; then
+  echo "Error: could not check whether anything holds $DB_PATH (node/better-sqlite3 failed)."
+  echo "Refusing to replace $DB_PATH without that check."
   exit 1
 fi
 

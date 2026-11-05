@@ -27,7 +27,9 @@ tools: []
    ```
    This writes a verified binary copy of the database into the backup directory — `~/backups/crow` by default, or `CROW_BACKUP_DIR`. When the `sqlite3` command-line tool is installed it also writes a SQL dump (text, diffable) named like the copy with `.sql`; without it the binary copy is complete on its own.
 
-   The live database is never opened with `sqlite3`: if the gateway is running it is asked for the copy, otherwise the script makes one with better-sqlite3. The files are named per instance (`<label>-<date>.db`; a second gateway with its own `CROW_HOME` gets `<label>-<home>-<hash>-<date>.db`) and come with an `.owner.json` sidecar, the same as the dashboard's "Run backup now".
+   The live database is never opened with `sqlite3`: if the gateway for THIS database is running it is asked for the copy (its answer names the database it backed up and the file it wrote, so a co-hosted gateway that serves another `CROW_HOME` is ignored), otherwise the script makes one itself — read-only — and only when no process has the database open. The files are named per instance (`<label>-<date>.db`; a second gateway with its own `CROW_HOME` gets `<label>-<home>-<hash>-<date>.db`) and come with an `.owner.json` sidecar, the same as the dashboard's "Run backup now".
+
+   Which process has `crow.db` (or its `-wal`/`-shm`) open is what decides, not which port answers: `/proc/<pid>/fd` on Linux, `lsof` elsewhere. If the port answers but not like a gateway (a 5xx, a reset, a timeout), or the database is open and no gateway of ours answers on the port, the backup refuses and says who holds it — set `PORT`/`CROW_GATEWAY_PORT` to that gateway's port, or stop those processes.
 
 2. For a preview without writing files:
    ```bash
@@ -65,7 +67,7 @@ crontab -e
    bash scripts/restore.sh <backup-file> --dry-run
    ```
 
-3. Restore from a backup (STOP THE GATEWAY FIRST — the script refuses while the gateway answers on its port, and there is no `--force`):
+3. Restore from a backup (NOTHING may hold the database first — the script refuses while any process has `crow.db`/`-wal`/`-shm` open, names its pid, and refuses while something answers on the gateway port; there is no `--force`):
    ```bash
    systemctl --user stop crow-gateway
    bash scripts/restore.sh <backup-file>
@@ -84,7 +86,8 @@ The script always saves the current database as `<db>.pre-restore-TIMESTAMP` bef
 - Before restoring: Always show the backup file details (size, date, contents preview via `--dry-run`) and warn that the current database will be overwritten
 - Before deleting backups: Confirm the number of files and date range being pruned
 - The restore script always saves the current database as `.pre-restore-TIMESTAMP` before overwriting
-- Never restore while the gateway is running: stop it first
+- Never restore while anything holds the database: stop the gateway (`systemctl --user stop crow-gateway`) and any other Crow server or bridge using it
+- Back up only through `scripts/backup.sh` (or the dashboard's "Run backup now"): it never opens a live WAL database from an external process
 
 ## Tips
 

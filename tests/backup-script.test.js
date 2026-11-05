@@ -6,13 +6,18 @@
  *
  *   - `npm run backup` must not open a live WAL crow.db with the sqlite3 CLI
  *     (an external open+close orphans the gateway's -wal/-shm descriptors).
- *     With a gateway answering it asks the endpoint for the copy; without one
- *     it makes the copy with better-sqlite3.
+ *     With a gateway for OUR database answering it asks the endpoint for the
+ *     copy; a gateway that backs up another database (a co-hosted instance) is
+ *     ignored; without one and with no holders it makes the copy with
+ *     better-sqlite3 (read-only).
  *   - one backup directory (resolveBackupDir), with the old ~/.crow/backups
  *     still listed and restorable.
  *   - 0700 dirs, 0600 files.
- *   - restore refuses while the gateway runs, keeps a whole pre-restore copy
- *     (WAL rows included) and drops the stale -wal/-shm of the replaced DB.
+ *   - backup and restore refuse while ANY process holds the database (file
+ *     handles, not port guesses) and while a port answers without answering
+ *     like a gateway.
+ *   - restore keeps a whole pre-restore copy (WAL rows included) and drops the
+ *     stale -wal/-shm of the replaced DB.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -42,6 +47,7 @@ after(() => {
   for (const c of ctxs) {
     try { c.db?.close(); } catch { /* already closed */ }
     try { c.server?.close(); } catch { /* already closed */ }
+    for (const child of c.children || []) { try { child.kill("SIGKILL"); } catch { /* gone */ } }
     rmScratch(c.root);
   }
 });
@@ -73,6 +79,7 @@ async function ctxNew() {
     port: await freePort(),
     db: null,
     server: null,
+    children: [],
   };
   mkdirSync(ctx.home, { recursive: true });
   mkdirSync(ctx.data, { recursive: true });
@@ -182,27 +189,49 @@ function pathWithoutSqlite3(ctx) {
 }
 
 /**
- * A stub gateway: /health answers 200 and POST /api/admin/backup records the
- * request and writes the copy it "made" (a real SQLite file, 0600) into the
- * backup dir, exactly like servers/gateway/routes/admin-backup.js does.
+ * A stub gateway. In the default "gateway" mode /health answers 200 and POST
+ * /api/admin/backup records the request and writes the copy it "made" (a real
+ * SQLite file, 0600) into `backupDir`, exactly like
+ * servers/gateway/routes/admin-backup.js — including the `db_path` that names
+ * WHICH database it backed up. Everything else is a 404.
+ *
+ * mode "reset": the socket is destroyed before any answer (a live process we
+ * cannot talk to — not ECONNREFUSED). mode "health-503": /health answers 503.
  */
-async function startStubGateway(ctx, { copyFrom }) {
+async function startStubGateway(ctx, {
+  copyFrom = null,
+  dbPath = join(ctx.data, "crow.db"),
+  backupDir = ctx.backupDir,
+  mode = "gateway",
+} = {}) {
   const requests = [];
   const server = createServer((req, res) => {
     requests.push({ method: req.method, url: req.url, auth: req.headers.authorization || "" });
+    if (mode === "reset") {
+      req.socket.destroy();
+      return;
+    }
     if (req.method === "GET" && req.url === "/health") {
+      if (mode === "health-503") {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "database unavailable" }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "ok", servers: [] }));
       return;
     }
-    if (req.method === "POST" && req.url === "/api/admin/backup") {
-      mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 });
-      const dest = join(ctx.backupDir, `primary-${today()}.db`);
+    if (mode === "gateway" && req.method === "POST" && req.url === "/api/admin/backup") {
+      mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+      const dest = join(backupDir, `primary-${today()}.db`);
       copyFileSync(copyFrom, dest);
       chmodSync(dest, 0o600);
       const size = statSync(dest).size;
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, path: dest, size_bytes: size, pages_copied: 12, verified: true, instance: "primary" }));
+      res.end(JSON.stringify({
+        ok: true, path: dest, db_path: dbPath, size_bytes: size, pages_copied: 12,
+        verified: true, instance: "primary", instance_tag: null,
+      }));
       return;
     }
     res.writeHead(404, { "content-type": "application/json" });
@@ -212,6 +241,60 @@ async function startStubGateway(ctx, { copyFrom }) {
   ctx.server = server;
   ctx.port = server.address().port;
   return requests;
+}
+
+/**
+ * A child process that opens the database and keeps it open — what a gateway,
+ * a second instance's server, a bridge or an sqlite3 shell looks like to the
+ * file-handle check. Resolves once its handle is open.
+ * @returns {Promise<{child: import("node:child_process").ChildProcess, pid: number}>}
+ */
+async function startHolder(ctx, dbPath) {
+  const src = `
+const Database = require("better-sqlite3");
+const db = new Database(process.argv[1]);
+db.pragma("journal_mode = WAL");
+db.prepare("SELECT COUNT(*) AS n FROM memories").get();
+process.stdout.write("ready\\n");
+setInterval(() => {}, 60000);
+`;
+  const child = spawn(process.execPath, ["-e", src, dbPath], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+  ctx.children.push(child);
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (d) => { out += d; });
+  child.stderr.on("data", (d) => { err += d; });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (out.includes("ready")) return { child, pid: child.pid };
+    if (child.exitCode !== null) throw new Error(`holder exited (${child.exitCode}): ${err || out}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`holder did not open ${dbPath}: ${err || out}`);
+}
+
+/**
+ * A WAL database whose rows live ONLY in the -wal, with no process holding it:
+ * a child writes and is SIGKILLed, so it never checkpoints on close (a killed
+ * gateway leaves exactly this behind).
+ */
+async function killedWriterDb(file, rows) {
+  const src = `
+const Database = require("better-sqlite3");
+const db = new Database(process.argv[1]);
+db.pragma("journal_mode = WAL");
+db.exec("CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT)");
+const ins = db.prepare("INSERT INTO memories (content) VALUES (?)");
+for (const r of ${JSON.stringify(rows)}) ins.run(r);
+process.kill(process.pid, "SIGKILL");
+`;
+  const child = spawn(process.execPath, ["-e", src, file], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (d) => { err += d; });
+  await new Promise((done) => child.on("exit", done));
+  assert.equal(existsSync(file), true, `expected a database at ${file}: ${err}`);
+  assert.equal(existsSync(file + "-wal"), true, `expected a -wal beside ${file}: ${err}`);
+  assert.ok(statSync(file + "-wal").size > 0, "the WAL holds the un-checkpointed rows");
 }
 
 /* ------------------------------------------------------------------- tests */
@@ -292,19 +375,13 @@ test("backup with a running gateway asks the gateway for the copy", async () => 
 test("restore refuses while the gateway runs", async () => {
   const ctx = await ctxNew();
   const live = join(ctx.data, "crow.db");
-  ctx.db = makeDb(live, ["keep me"]);
-  ctx.db.close();
-  ctx.db = null;
+  makeDb(live, ["keep me"]).close();
 
   const backup = join(ctx.root, "backup.db");
   makeDb(backup, ["from the backup"]).close();
 
-  ctx.server = createServer((req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "ok" }));
-  });
-  await new Promise((done) => ctx.server.listen(0, "127.0.0.1", done));
-  ctx.port = ctx.server.address().port;
+  // A gateway answers: GET /health is 200, everything else is not its business.
+  await startStubGateway(ctx, { copyFrom: backup });
 
   const r = await run(RESTORE_SH, [backup], envFor(ctx));
   assert.notEqual(r.status, 0, "a restore must not run while the gateway is up");
@@ -318,14 +395,110 @@ test("restore refuses while the gateway runs", async () => {
   assert.deepEqual(names(ctx.data), ["crow.db"]);
 });
 
+// Only ECONNREFUSED means "no gateway". A 5xx or a connection that is reset
+// proves a process is there that we know nothing about: it may well hold the
+// database, so a restore must refuse instead of proceeding.
+test("restore refuses when the port answers without answering like a gateway", async () => {
+  const base = await ctxNew();
+  const backup = join(base.root, "backup.db");
+  makeDb(backup, ["from the backup"]).close();
+
+  for (const mode of ["health-503", "reset"]) {
+    const ctx = await ctxNew();
+    const live = join(ctx.data, "crow.db");
+    makeDb(live, ["keep me"]).close();
+    await startStubGateway(ctx, { copyFrom: backup, mode });
+
+    const r = await run(RESTORE_SH, [backup], envFor(ctx));
+    assert.notEqual(r.status, 0, `${mode}: a restore must not run`);
+    assert.match(r.out, new RegExp(`something is listening on port ${ctx.port}`), r.out);
+    assert.doesNotMatch(r.out, /--force/);
+    assert.deepEqual(memoriesIn(live), ["keep me"], `${mode}: the database is untouched`);
+    assert.deepEqual(names(ctx.data), ["crow.db"], `${mode}: no safety copy was made`);
+  }
+});
+
+// The question is who has the DATABASE open, not which port answers: this
+// child holds crow.db the way a second gateway, a bridge or an sqlite3 shell
+// would, and answers nothing on the gateway port.
+test("restore refuses while another process holds the database", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["keep me"]).close();
+
+  const backup = join(ctx.root, "backup.db");
+  makeDb(backup, ["from the backup"]).close();
+
+  const holder = await startHolder(ctx, live);
+
+  const r = await run(RESTORE_SH, [backup], envFor(ctx));
+  assert.notEqual(r.status, 0, "a restore must not run while something holds the database");
+  assert.match(r.out, new RegExp(`crow\\.db is open by: .*\\b${holder.pid} \\(`), r.out);
+  assert.match(r.out, /Stop the gateway and any Crow server using this database, then run the restore again/);
+  assert.doesNotMatch(r.out, /--force/);
+
+  // The database is untouched and no safety copy was made.
+  assert.deepEqual(memoriesIn(live), ["keep me"]);
+  assert.deepEqual(names(ctx.data).filter((n) => n.includes("pre-restore")), []);
+});
+
+test("backup ignores a gateway that backs up another database", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["ours"]).close();        // nothing holds the database
+  const other = join(ctx.root, "other.db");
+  makeDb(other, ["another instance"]).close();
+
+  // A co-hosted gateway: /health 200, but its copy is of ITS crow.db and lands
+  // in ITS backup dir. No sidecar of ours, so nothing may come from it.
+  const foreignDir = join(ctx.root, "other-backups");
+  const requests = await startStubGateway(ctx, { copyFrom: other, dbPath: other, backupDir: foreignDir });
+
+  const r = await run(BACKUP_SH, [], envFor(ctx));
+  assert.equal(r.status, 0, r.out);
+  assert.ok(requests.some((q) => q.method === "POST" && q.url === "/api/admin/backup"), "the gateway was asked");
+  assert.match(r.out, new RegExp(`the gateway on port ${ctx.port} backs up another database`), r.out);
+
+  // The copy that landed is the one made here, from OUR database.
+  const name = `primary-${today()}.db`;
+  const copy = join(ctx.backupDir, name);
+  assert.deepEqual(names(ctx.backupDir).filter((n) => n.endsWith(".db")), [name], r.out);
+  assert.equal(existsSync(`${copy}.owner.json`), true, "it carries this instance's sidecar");
+  assert.deepEqual(memoriesIn(copy), ["ours"]);
+  // ...and the other instance's copy was never used (it is not even ours).
+  assert.deepEqual(memoriesIn(join(foreignDir, name)), ["another instance"]);
+});
+
+test("backup refuses when the database is open but its gateway is not found", async () => {
+  const ctx = await ctxNew();
+  const live = join(ctx.data, "crow.db");
+  makeDb(live, ["held"]).close();
+  const other = join(ctx.root, "other.db");
+  makeDb(other, ["another instance"]).close();
+
+  // The port answers, but with ANOTHER instance's gateway: nothing may be used
+  // from it, and OUR database is open — so neither copy path is safe.
+  await startStubGateway(ctx, { copyFrom: other, dbPath: other, backupDir: join(ctx.root, "other-backups") });
+  const holder = await startHolder(ctx, live);
+
+  const r = await run(BACKUP_SH, [], envFor(ctx));
+  assert.notEqual(r.status, 0, "a backup must not run");
+  assert.match(r.out, new RegExp(`the gateway on port ${ctx.port} backs up another database`), r.out);
+  assert.match(r.out, new RegExp(`crow\\.db is open by: .*\\b${holder.pid} \\(`), r.out);
+  assert.match(r.out, /set PORT\/CROW_GATEWAY_PORT to its port, or stop those processes/);
+
+  assert.deepEqual(names(ctx.backupDir).filter((n) => n.endsWith(".db")), [], "no copy was written");
+});
+
 test("restore removes stale wal and shm and keeps a whole safety copy", async () => {
   const ctx = await ctxNew();
   const live = join(ctx.data, "crow.db");
   // WAL mode with un-checkpointed rows: the rows live in crow.db-wal only, so
-  // a `cp crow.db` safety copy would have lost them.
-  ctx.db = makeDb(live, ["live 1", "live 2", "live 3", "live 4", "live 5"], { wal: true });
+  // a `cp crow.db` safety copy would have lost them. Written by a child that is
+  // SIGKILLed, so the -wal survives while nothing holds the database (exactly
+  // what a killed gateway leaves behind).
+  await killedWriterDb(live, ["live 1", "live 2", "live 3", "live 4", "live 5"]);
   const wal = join(ctx.data, "crow.db-wal");
-  assert.ok(existsSync(wal) && statSync(wal).size > 0, "the WAL holds the un-checkpointed rows");
   assert.deepEqual(memoriesIn(live).length, 5);
 
   const backup = join(ctx.root, "backup.db");
