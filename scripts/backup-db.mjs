@@ -176,12 +176,13 @@ function isConnectionRefused(err) {
  */
 function othersCanOpen(dbPath) {
   const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+  const real = realpathOrResolve(dbPath);
+  for (const file of [real, `${real}-wal`, `${real}-shm`]) {
     let st;
     try {
       st = fs.statSync(file);
     } catch (err) {
-      if (err && err.code === "ENOENT" && file !== dbPath) continue;
+      if (err && err.code === "ENOENT" && file !== real) continue;
       return true;
     }
     if (uid !== null && st.uid !== uid) return true;
