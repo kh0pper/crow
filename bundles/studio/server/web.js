@@ -143,6 +143,9 @@ const LIBRARY_FAILED_TEXT = "Studio could not download that instrument.";
 const AGENT_DOWNLOAD_REFUSED_TEXT =
   "Downloading instruments is for the person at the Studio page; an agent cannot download one.";
 
+/** How often the instrument housekeeping pass runs once Studio is up. */
+export const LIBRARY_GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 /** The Content-Type one library kind is served with. */
 const CONTENT_TYPE_BY_KIND = Object.freeze({
   font: "application/octet-stream",
@@ -608,11 +611,18 @@ function refuse(socket, status, text) {
  *   instead of reading every song; without it the hub's song list is filtered
  *   here, which is the same answer at the cost of the whole list.
  * @param {{entries: Function, entry: Function, download: Function,
- *          fileFor: Function, fileForHash: Function, gc: Function}|null}
+ *          fileFor: Function, fileForHash: Function, holds: Function,
+ *          gc: Function}|null}
  *   [options.libraryStore] the instrument catalog and its stored copies
  *   (`createLibraryStore`). Without it this module builds one over `crowHome`
  *   and the bundle's own `library/catalog.json`; a caller with neither gets
  *   the 503 the library routes answer.
+ * @param {((projectId: number) => Promise<void>)|null} [options.assertCanWrite]
+ *   asserts the caller may write in one project (`write_files` in the project
+ *   ACL), by throwing its refusal. The download route asks this BEFORE it
+ *   fetches anything, so a read-only member never reaches the network. Injected
+ *   because this module owns no database; without it a download is refused,
+ *   because this Crow cannot prove the caller may write.
  * @returns {{router: Function, attachUpgrade: Function, broadcast: Function}}
  *   `router(dashboardAuth)` builds the Express router, `attachUpgrade(server)`
  *   installs the `/api/studio/ws` handler, and `broadcast(song_id, payload)`
@@ -632,6 +642,7 @@ export function createStudioWeb({
   rawBody = null,
   songRowOf = null,
   libraryStore = null,
+  assertCanWrite = null,
 } = {}) {
   if (!hub || typeof hub.openSong !== "function" || typeof hub.runCommand !== "function") {
     throw new TypeError("Studio web: the session hub is required");
@@ -667,6 +678,10 @@ export function createStudioWeb({
   // Crow home means no place to keep an instrument, and the library routes say
   // so with one fixed sentence rather than failing on a path.
   const library = libraryStore ?? (crowHome ? createLibraryStore({ crowHome }) : null);
+
+  // The project's write capability, checked before a download fetches anything.
+  // Absent it, no download runs: this Crow cannot prove the caller may write.
+  const canWrite = typeof assertCanWrite === "function" ? assertCanWrite : null;
 
   /**
    * The row of one song: through the store's single-row lookup when one is
@@ -1655,8 +1670,10 @@ export function createStudioWeb({
     //
     // The download is a PERSON's action (Global Constraints: "Downloads are
     // people-only"): it is behind the dashboard session and the CSRF header,
-    // and it refuses a caller that presents the Studio agent token. A `GET` of
-    // the stored bytes follows the sample route's rules — the song's own ACL
+    // and it refuses a caller that presents the Studio agent token. It also
+    // needs `write_files` in the song's project, asserted BEFORE anything is
+    // fetched, so a member who may only read a song cannot start one. A `GET`
+    // of the stored bytes follows the sample route's rules — the song's own ACL
     // read, the entry's own hash or exact storage key, and the storage errors.
 
     /** One in-flight download per (song, catalog entry), so a double click
@@ -1675,25 +1692,39 @@ export function createStudioWeb({
 
     r.post("/api/studio/library/download", dashboardAuth, requireCsrf, libraryHandled(async (req, res) => {
       if (agentCaller(req)) return res.status(403).json({ error: AGENT_DOWNLOAD_REFUSED_TEXT });
+      if (!canWrite) return res.status(503).json({ error: LIBRARY_UNAVAILABLE_TEXT });
       const songId = String(req.body?.song_id ?? "");
       const catalogId = String(req.body?.catalog_id ?? "");
       if (songId === "" || catalogId === "") {
         return res.status(400).json({ error: "A download needs a song and a catalog entry." });
       }
 
-      // The song has to exist and be visible to this caller before anything is
-      // fetched; the write capability is checked by the `library.add` command
-      // below, on the hub's own queue, as the person at the page.
+      // The song has to exist, and this caller has to be able to write in its
+      // project, before anything is fetched: a read-only member is refused here
+      // (its ACL refusal becomes a 403) with nothing over the network.
       const row = await readSongRow(songId);
       if (!row) return res.status(404).json({ error: `There is no song "${songId}".` });
+      await canWrite(Number(row.project_id));
       const opened = await hub.openSong(songId);
+
+      // The song may already hold this catalog file. Whether that answers the
+      // ask is a question about THIS Crow's disk, not about the song: a stored
+      // file that is gone, or whose bytes no longer hash to the entry, is
+      // fetched again and the song keeps the entry it already has — no second
+      // `library.add`.
       const existing = catalogEntryIn(opened?.snapshot, catalogId);
-      if (existing) return res.json({ entry: existing, downloaded: false });
 
       const key = `${songId}:${catalogId}`;
       const running = downloads.get(key);
       if (running) return res.json(await running);
       const work = (async () => {
+        if (existing) {
+          if (await library.holds(String(existing.sha256 ?? ""))) {
+            return { entry: existing, downloaded: false };
+          }
+          const refetched = await library.download(catalogId);
+          return { entry: existing, downloaded: refetched.fetched };
+        }
         const downloaded = await library.download(catalogId);
         const entry = {
           // `lib-` plus a uuid: 40 characters, the library id rule's exact limit.
@@ -1710,9 +1741,12 @@ export function createStudioWeb({
         };
         // Studio's own command (`internal: true`), issuing as the person at the
         // page: only the route knows which file was stored and what its hash is.
+        // The new entry's own id is part of the `cmd_id`, so a download that
+        // follows a remove inside the hub's de-duplication window is a new step
+        // rather than a replay of the add that was undone.
         const applied = await hub.runCommand({
           song_id: songId,
-          cmd_id: `library-download:${key}`,
+          cmd_id: `library-download:${key}:${entry.id}`,
           command: "library.add",
           args: { entry },
           author: HUMAN_AUTHOR,
@@ -1942,4 +1976,62 @@ export function createStudioWeb({
   }
 
   return { router, attachUpgrade, broadcast };
+}
+
+/**
+ * Sweep the instrument library on Studio's start and then every 24 hours.
+ *
+ * One pass is `libraryGc` (`library-store.js`) with `inUse` the sha256 of every
+ * library entry of every song in THIS instance's studio database, read from the
+ * hub (`libraryHashes()`, which loads each song's document the same way the
+ * song list and `openSong` read it). When a song's document cannot be read that
+ * read throws and the pass is SKIPPED, deleting nothing: a pass that saw only
+ * part of the instance could collect a file a song it could not read still
+ * names.
+ *
+ * A failure is logged and never thrown — housekeeping must not take Studio
+ * down — and a caller without both halves (no hub read, no store) simply gets
+ * no pass.
+ * @param {{hub: object, library: object, intervalMs?: number,
+ *          log?: {warn: Function, log: Function}}} options
+ * @returns {{run: () => Promise<object|null>, ready: Promise<object|null>,
+ *            stop: () => void}} one pass on demand (null when it was skipped),
+ *   the first pass's promise, and a stop for the daily timer
+ */
+export function startLibraryGc({ hub, library, intervalMs = LIBRARY_GC_INTERVAL_MS, log = console } = {}) {
+  const canRun = Boolean(
+    hub && typeof hub.libraryHashes === "function" && library && typeof library.gc === "function",
+  );
+  let inFlight = null;
+
+  /** @returns {Promise<object|null>} the pass's result, or null when it was skipped */
+  function run() {
+    if (!canRun) return Promise.resolve(null);
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      try {
+        const inUse = await hub.libraryHashes();
+        const result = await library.gc({ inUse });
+        if (Array.isArray(result?.removed) && result.removed.length > 0) {
+          log.log(`[studio] library housekeeping removed ${result.removed.length} unused file(s)`);
+        }
+        return result;
+      } catch (err) {
+        // A song whose document could not be read, or a disk that failed:
+        // NOTHING was deleted this pass (see `libraryGc`).
+        log.warn("[studio] library housekeeping skipped:", err?.message || err);
+        return null;
+      } finally {
+        inFlight = null;
+      }
+    })();
+    return inFlight;
+  }
+
+  const ready = run();
+  const timer = setInterval(() => {
+    run();
+  }, intervalMs);
+  timer.unref?.();
+  return { run, ready, stop: () => clearInterval(timer) };
 }

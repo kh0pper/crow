@@ -1,5 +1,5 @@
 {
-  "_comment": "Studio's vetted instrument catalog, read by server/library-store.js. Each entry is one file with pinned sha256, bytes and size; the download route verifies the bytes against them before anything is stored. Optional extras exist only as SFZ upstream, so they wait for SFZ support (ruled 2026-11-05) and are not listed here.",
+  "_comment": "Studio's vetted instrument catalog, read by server/library-store.js. Each entry is one file with pinned sha256, bytes and size; the download route verifies the bytes against them before anything is stored. An entry carries one `urls` list - the sources its size and hash were verified against, tried in order - and an optional `mirrors` list, empty until a second copy has been checked against the same pin (see the store's header). Optional extras exist only as SFZ upstream, so they wait for SFZ support (ruled 2026-11-05) and are not listed here.",
   "version": 1,
   "entries": [
     {
@@ -9,6 +9,7 @@
       "urls": [
         "https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf3"
       ],
+      "mirrors": [],
       "sha256": "5b85b6c2c61d10b2b91cddd41efcce7b25cd31c8271d511c73afafbef20b6fa3",
       "bytes": 39900972,
       "licence": "MIT",

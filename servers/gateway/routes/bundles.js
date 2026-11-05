@@ -26,7 +26,7 @@ import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { withoutCredentialKeys } from "../../shared/credentials-env.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, readlinkSync, renameSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -395,20 +395,78 @@ function isValidPathSegment(seg) {
 }
 
 /**
+ * Replace one file at `dst` with a copy of `src` WITHOUT ever writing into the
+ * existing file.
+ *
+ * A refresh can land while a process is running from the installed copy: a
+ * shared library under `vendor/` (Studio's `sunvox.so`) is mapped by a live
+ * engine, and truncating that inode under it would fault the process. So the
+ * bytes go to a temporary file beside the destination, its mode is copied from
+ * the source, and a rename puts it in place — the path gets a new inode and
+ * whoever holds the old one keeps the old bytes. The temporary file joins the
+ * `.<name>.refresh-*` family and is removed on failure.
+ * @param {string} src
+ * @param {string} dst
+ * @returns {void}
+ */
+function replaceFileAtomic(src, dst) {
+  mkdirSync(dirname(dst), { recursive: true });
+  const temp = join(dirname(dst), `.${basename(dst)}.refresh-${randomBytes(6).toString("hex")}`);
+  try {
+    copyFileSync(src, temp);
+    // copyFileSync gives the temp file the source's permissions on Linux; set
+    // them explicitly anyway so an executable/read-only source keeps its bits.
+    chmodSync(temp, statSync(src).mode & 0o777);
+    renameSync(temp, dst);
+  } catch (err) {
+    try { unlinkSync(temp); } catch {}
+    throw err;
+  }
+}
+
+/**
+ * Copy a directory tree the way cpSync recursive does, but every file is
+ * replaced atomically (see replaceFileAtomic) and symlinks are recreated rather
+ * than followed. Files the destination has and the source does not are left
+ * alone, exactly as cpSync leaves them.
+ * @param {string} src
+ * @param {string} dst
+ * @returns {void}
+ */
+function replaceTreeAtomic(src, dst) {
+  mkdirSync(dst, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name);
+    const to = join(dst, entry.name);
+    if (entry.isSymbolicLink()) {
+      const target = readlinkSync(from);
+      rmSync(to, { force: true });
+      mkdirSync(dirname(to), { recursive: true });
+      symlinkSync(target, to);
+    } else if (entry.isDirectory()) {
+      replaceTreeAtomic(from, to);
+    } else if (entry.isFile()) {
+      replaceFileAtomic(from, to);
+    }
+  }
+}
+
+/**
  * Copy one explicit-include item (a top-level file or a directory) from a
  * bundle's repo source into its installed dest dir. No-op (returns false) if
- * the item doesn't exist in the repo source. cpSync is additive: dest-only
- * files not present in the source survive.
+ * the item doesn't exist in the repo source. Additive: dest-only files not
+ * present in the source survive. Never rewrites a destination file in place —
+ * a temp file beside each is renamed into place, so a library under `vendor/`
+ * that a running process has mapped keeps its old inode and bytes.
  */
 function copyBundleRefreshItem(appSrc, destDir, item) {
   const src = join(appSrc, item);
   if (!existsSync(src)) return false;
   const dst = join(destDir, item);
   if (statSync(src).isDirectory()) {
-    cpSync(src, dst, { recursive: true });
+    replaceTreeAtomic(src, dst);
   } else {
-    mkdirSync(dirname(dst), { recursive: true });
-    copyFileSync(src, dst);
+    replaceFileAtomic(src, dst);
   }
   return true;
 }

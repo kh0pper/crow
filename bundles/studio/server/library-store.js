@@ -33,14 +33,41 @@
  * A second call for a file that is already stored hashes the stored copy and
  * returns it without touching the network (or, if the stored copy does not
  * match — a disk that lost bytes — replaces it with a fresh download).
+ * `holdsFile` is that same question asked by a caller that already has an
+ * entry: does this Crow really hold the file with this hash?
+ *
+ * A transfer has two deadlines, enforced through one AbortController: the whole
+ * download must finish within ten minutes, and no chunk may take longer than
+ * thirty seconds to arrive. A stalled transfer is abandoned — its temporary
+ * file removed, the row's next URL tried — and when nothing arrives the caller
+ * gets a 504 saying the download timed out.
+ *
+ * Redirects are followed by hand (`redirect: "manual"`), at most three, and
+ * only to an https URL whose host the catalog row itself names. Anything else
+ * is refused before a byte is kept.
  *
  * ## Cleanup
  *
  * `libraryGc` removes stored files no song uses whose mtime is older than 30
  * days (and a temporary file an interrupted download left behind, after a day).
- * The gateway's housekeeping pass calls it with the sha256s the instance's
- * songs name; the file's mtime is refreshed whenever a download returns it, so
- * a bank that is in use is never "old".
+ * What "no song uses" means is the caller's `inUse` set: this module owns no
+ * database. In the gateway the caller is `startLibraryGc` (`server/web.js`),
+ * which runs one pass when Studio starts and then every 24 hours, with `inUse`
+ * the sha256 of every library entry of every song in THIS instance's studio
+ * database — the hub's `libraryHashes()`, a read-only walk that loads a song's
+ * document the same way the song list and `openSong` read it. A song whose
+ * document cannot be read makes that walk throw, and a pass that could not see
+ * every song deletes NOTHING: the GC never decides on partial knowledge. The
+ * file's mtime is refreshed whenever a download returns it, so a bank that is
+ * in use is never "old".
+ *
+ * ## Mirrors are optional
+ *
+ * A catalog row carries one `urls` list — the sources its size and sha256 were
+ * verified against, tried in order — and an optional `mirrors` field that is
+ * empty today and read by nothing here. A mirror joins `urls` only once its
+ * bytes have been checked against the same pin; until then it is not a source
+ * this module would trust.
  *
  * ## No app modules
  *
@@ -50,7 +77,8 @@
  *
  * A refusal carries `error.status` for the route: 400 for an invalid request,
  * 404 for an unknown catalog id, 413 for a body past its size, 502 when the
- * bytes do not match the catalog, 503 when the network or the disk failed.
+ * bytes do not match the catalog, 503 when the network or the disk failed, and
+ * 504 when the download timed out.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -83,6 +111,27 @@ export const GC_AGE_DAYS = 30;
  * long enough that a slow 40 MB download is never mistaken for rubbish.
  */
 const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long one catalog file's whole download may take before it is abandoned.
+ * 40 MB over a slow line is minutes, not tens of minutes.
+ */
+export const DOWNLOAD_DEADLINE_MS = 10 * 60 * 1000;
+
+/**
+ * How long a transfer may go without delivering a chunk before it counts as
+ * stalled: a server that accepted the connection and then stopped talking.
+ */
+export const DOWNLOAD_IDLE_MS = 30 * 1000;
+
+/** What a caller is told when a download ran out of time. */
+export const DOWNLOAD_TIMEOUT_TEXT = "The download timed out; try again later.";
+
+/** How many redirects one download follows before it is refused. */
+const MAX_REDIRECTS = 3;
+
+/** The statuses that are a redirect to follow (304 is not one). */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /** Every stored file's name is `<sha256>.<ext>`; nothing else is Studio's. */
 const STORED_NAME = /^([0-9a-f]{64})\.([a-z0-9]{2,4})$/;
@@ -151,6 +200,10 @@ function validateEntry(row, index) {
       throw badCatalog(`Catalog entry "${id}" has a URL that is not http(s): ${String(url)}`);
     }
   }
+  // `mirrors` is optional and read by nothing here: a row's `urls` are the
+  // sources its size and sha256 were verified against, tried in order. Mirrors
+  // stay empty until a second copy's bytes have been checked against the same
+  // pin — that is when such a copy would join `urls` and be tried here.
   const sha256 = typeof row.sha256 === "string" ? row.sha256.toLowerCase() : "";
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
     throw badCatalog(`Catalog entry "${id}" needs a sha256 of 64 hexadecimal characters.`);
@@ -294,82 +347,209 @@ export async function storedFileByHash(sha256, { crowHome } = {}) {
 }
 
 /**
+ * The stored copy of one hash, whatever extension it carries, when its bytes
+ * still hash to that name.
+ *
+ * A route that already has a library entry asks this about the entry's own
+ * sha256: a Crow that lost the file (a pruned cache, a restored home) or holds
+ * bytes that no longer hash to the name must download it again, and an entry
+ * whose file is really here is answered without the network.
+ * @param {string} sha256
+ * @param {{crowHome: string}} options
+ * @returns {Promise<boolean>}
+ */
+export async function holdsFile(sha256, { crowHome } = {}) {
+  const hash = String(sha256 ?? "").toLowerCase();
+  const path = await storedFileByHash(hash, { crowHome });
+  if (!path) return false;
+  const info = await hashFile(path);
+  return Boolean(info && info.sha256 === hash);
+}
+
+/** @returns {LibraryError} a 504 refusal saying the transfer ran out of time. */
+function timedOut() {
+  return new LibraryError("timeout", DOWNLOAD_TIMEOUT_TEXT, 504);
+}
+
+/** @returns {LibraryError} a refusal of a redirect the catalog does not allow. */
+function refusedRedirect(why) {
+  return new LibraryError("redirect", `The download redirected ${why}; nothing was kept.`, 502);
+}
+
+/**
+ * The hosts a catalog row may redirect to: its own URLs' hosts and ports, and
+ * nothing else. A catalog row is the contract, so a redirect may move between
+ * the hosts the row itself names but never to one it does not.
+ * @param {object} entry
+ * @returns {Set<string>}
+ */
+function redirectHosts(entry) {
+  const hosts = new Set();
+  for (const url of entry.urls) {
+    try {
+      hosts.add(new URL(url).host.toLowerCase());
+    } catch {
+      // Already validated by `validateEntry`; a row that got here has valid URLs.
+    }
+  }
+  return hosts;
+}
+
+/**
+ * Fetch one URL, following its redirects by hand.
+ *
+ * `redirect: "manual"` keeps the decision here instead of inside `fetch`: a
+ * redirect is followed only when it is https and points at a host the catalog
+ * row itself names, at most `MAX_REDIRECTS` times. Anything else is refused
+ * before a byte is written.
+ * @param {string} url
+ * @param {object} entry the catalog row, for the hosts it is allowed to reach
+ * @param {Function} fetchImpl
+ * @param {AbortSignal} signal
+ * @returns {Promise<object>} the final (non-redirect) response
+ */
+async function fetchFollowing(url, entry, fetchImpl, signal) {
+  const hosts = redirectHosts(entry);
+  let current = url;
+  for (let hop = 0; ; hop += 1) {
+    const response = await fetchImpl(current, { redirect: "manual", signal });
+    if (!REDIRECT_STATUSES.has(Number(response?.status))) return response;
+    await response.body?.cancel?.().catch(() => {});
+    if (hop >= MAX_REDIRECTS) throw refusedRedirect("too many times");
+    const location = response.headers?.get?.("location");
+    if (!location) throw refusedRedirect("nowhere");
+    let next;
+    try {
+      next = new URL(String(location), current);
+    } catch {
+      throw refusedRedirect("nowhere");
+    }
+    if (next.protocol !== "https:" || !hosts.has(next.host.toLowerCase())) {
+      throw refusedRedirect("somewhere the catalog does not name");
+    }
+    current = next.href;
+  }
+}
+
+/**
  * Stream one URL into `destination` (a temporary file), hashing as it goes.
+ *
+ * Two deadlines ride on one AbortController: the whole transfer must finish
+ * within `deadlineMs`, and no chunk may take longer than `idleMs` to arrive. A
+ * timeout refuses with code "timeout" and status 504, which the caller treats
+ * like a network failure — the temporary file goes and the row's next URL is
+ * tried.
  * @param {string} url
  * @param {object} entry the catalog row, for the size and the expected hash
  * @param {string} destination
  * @param {Function} fetchImpl
+ * @param {{deadlineMs?: number, idleMs?: number}} [limits]
  * @returns {Promise<void>}
  */
-async function fetchInto(url, entry, destination, fetchImpl) {
-  let response;
+async function fetchInto(url, entry, destination, fetchImpl, limits = {}) {
+  const deadlineMs = Number(limits.deadlineMs ?? DOWNLOAD_DEADLINE_MS);
+  const idleMs = Number(limits.idleMs ?? DOWNLOAD_IDLE_MS);
+  const controller = new AbortController();
+  // One timer for the whole transfer: it aborts the request as well as the body
+  // read, so a server that never answers a header is abandoned too.
+  const deadline = Number.isFinite(deadlineMs) && deadlineMs > 0
+    ? setTimeout(() => controller.abort(timedOut()), deadlineMs)
+    : null;
+  deadline?.unref?.();
   try {
-    response = await fetchImpl(url, { redirect: "follow" });
-  } catch (error) {
-    throw new LibraryError("network", `The download failed: ${error?.message || error}`, 502);
-  }
-  if (!response || !response.ok) {
-    const status = Number(response?.status);
-    // A 404 from a mirror means "try the next URL"; 5xx too. Everything else is
-    // the same answer for this row.
-    const error = new LibraryError(
-      "network",
-      `The download failed (${Number.isFinite(status) ? status : "no response"}).`,
-      502,
-    );
-    error.retryable = true;
-    throw error;
-  }
-  // A Content-Length past the catalog's size is refused before a byte is
-  // written. A server that lies is caught by the running count below.
-  const announced = Number(response.headers?.get?.("content-length"));
-  if (Number.isFinite(announced) && announced > entry.bytes) {
-    await response.body?.cancel?.().catch(() => {});
-    throw new LibraryError(
-      "limit",
-      `That download is larger than the catalog says (${announced} bytes, expected ${entry.bytes}).`,
-      413,
-    );
-  }
-
-  const handle = await open(destination, "wx", 0o600);
-  const hash = createHash("sha256");
-  let written = 0;
-  try {
-    const body = response.body;
-    if (!body) throw new LibraryError("network", "The download returned no body.", 502);
-    for await (const chunk of body) {
-      const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-      written += bytes.byteLength;
-      if (written > entry.bytes) {
-        throw new LibraryError(
-          "limit",
-          `That download is larger than the catalog says (over ${entry.bytes} bytes).`,
-          413,
-        );
-      }
-      hash.update(bytes);
-      await handle.write(bytes);
+    let response;
+    try {
+      response = await fetchFollowing(url, entry, fetchImpl, controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) throw timedOut();
+      if (error instanceof LibraryError) throw error;
+      throw new LibraryError("network", `The download failed: ${error?.message || error}`, 502);
     }
-  } catch (error) {
-    await handle.close().catch(() => {});
-    throw error;
-  }
-  await handle.close();
-  const sha256 = hash.digest("hex");
-  if (written !== entry.bytes) {
-    throw new LibraryError(
-      "invalid",
-      `That download does not match the catalog (${written} bytes, expected ${entry.bytes}); nothing was kept.`,
-      502,
-    );
-  }
-  if (sha256 !== entry.sha256) {
-    throw new LibraryError(
-      "invalid",
-      `That download does not match the catalog's sha256; nothing was kept.`,
-      502,
-    );
+    if (!response || !response.ok) {
+      const status = Number(response?.status);
+      // A 404 from a mirror means "try the next URL"; 5xx too. Everything else is
+      // the same answer for this row.
+      const error = new LibraryError(
+        "network",
+        `The download failed (${Number.isFinite(status) ? status : "no response"}).`,
+        502,
+      );
+      error.retryable = true;
+      await response?.body?.cancel?.().catch(() => {});
+      throw error;
+    }
+    // A Content-Length past the catalog's size is refused before a byte is
+    // written. A server that lies is caught by the running count below.
+    const announced = Number(response.headers?.get?.("content-length"));
+    if (Number.isFinite(announced) && announced > entry.bytes) {
+      await response.body?.cancel?.().catch(() => {});
+      throw new LibraryError(
+        "limit",
+        `That download is larger than the catalog says (${announced} bytes, expected ${entry.bytes}).`,
+        413,
+      );
+    }
+
+    const handle = await open(destination, "wx", 0o600);
+    const hash = createHash("sha256");
+    let written = 0;
+    try {
+      const body = response.body;
+      if (!body) throw new LibraryError("network", "The download returned no body.", 502);
+      // Read the body by hand: each chunk gets its own idle deadline, and the
+      // overall deadline above stays armed for the whole transfer.
+      const iterator = body[Symbol.asyncIterator]();
+      for (;;) {
+        let step;
+        const idle = Number.isFinite(idleMs) && idleMs > 0
+          ? setTimeout(() => controller.abort(timedOut()), idleMs)
+          : null;
+        idle?.unref?.();
+        try {
+          step = await iterator.next();
+        } catch (error) {
+          if (controller.signal.aborted) throw timedOut();
+          if (error instanceof LibraryError) throw error;
+          throw new LibraryError("network", `The download failed: ${error?.message || error}`, 502);
+        } finally {
+          if (idle) clearTimeout(idle);
+        }
+        if (step.done) break;
+        const chunk = step.value;
+        const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        written += bytes.byteLength;
+        if (written > entry.bytes) {
+          throw new LibraryError(
+            "limit",
+            `That download is larger than the catalog says (over ${entry.bytes} bytes).`,
+            413,
+          );
+        }
+        hash.update(bytes);
+        await handle.write(bytes);
+      }
+    } catch (error) {
+      await handle.close().catch(() => {});
+      throw error;
+    }
+    await handle.close();
+    const sha256 = hash.digest("hex");
+    if (written !== entry.bytes) {
+      throw new LibraryError(
+        "invalid",
+        `That download does not match the catalog (${written} bytes, expected ${entry.bytes}); nothing was kept.`,
+        502,
+      );
+    }
+    if (sha256 !== entry.sha256) {
+      throw new LibraryError(
+        "invalid",
+        `That download does not match the catalog's sha256; nothing was kept.`,
+        502,
+      );
+    }
+  } finally {
+    if (deadline) clearTimeout(deadline);
   }
 }
 
@@ -379,22 +559,24 @@ async function fetchInto(url, entry, destination, fetchImpl) {
  * @param {object} entry
  * @param {string} temporary
  * @param {Function} fetchImpl
+ * @param {{deadlineMs?: number, idleMs?: number}} [limits]
  * @returns {Promise<void>}
  */
-async function fetchVerified(entry, temporary, fetchImpl) {
+async function fetchVerified(entry, temporary, fetchImpl, limits = {}) {
   let lastError = null;
   for (const url of entry.urls) {
     try {
-      await fetchInto(url, entry, temporary, fetchImpl);
+      await fetchInto(url, entry, temporary, fetchImpl, limits);
       return;
     } catch (error) {
       lastError = error;
       await unlink(temporary).catch(() => {});
       // A wrong size or hash from one mirror is not something a second URL
       // fixes for the same catalog row? It may be: mirrors do go stale. Only a
-      // network answer moves on to the next URL; a verification refusal is
-      // final, because the catalog is the contract.
-      if (error?.code !== "network") throw error;
+      // network answer (and a transfer that ran out of time) moves on to the
+      // next URL; every other refusal is final, because the catalog is the
+      // contract.
+      if (error?.code !== "network" && error?.code !== "timeout") throw error;
     }
   }
   throw lastError ?? new LibraryError("network", "The download failed.", 502);
@@ -410,13 +592,15 @@ async function fetchVerified(entry, temporary, fetchImpl) {
  *
  * @param {string} catalogId
  * @param {{crowHome: string, fetchImpl?: Function, catalogPath?: string,
- *          now?: () => number}} options
+ *          now?: () => number, deadlineMs?: number, idleMs?: number}} options
+ *   `deadlineMs` and `idleMs` override the transfer's ten-minute total and
+ *   thirty-second per-chunk deadlines (a test that stalls a stub uses them).
  * @returns {Promise<{entry: object, path: string, sha256: string, bytes: number,
  *                    fetched: boolean}>} `fetched` is false when the stored copy
  *   was already there and matched, and nothing went over the network
  */
 export async function downloadCatalogEntry(catalogId, options = {}) {
-  const { crowHome, fetchImpl = globalThis.fetch, catalogPath, now } = options;
+  const { crowHome, fetchImpl = globalThis.fetch, catalogPath, now, deadlineMs, idleMs } = options;
   if (!crowHome) throw noHome();
   if (typeof fetchImpl !== "function") {
     throw new LibraryError("network", "This instance cannot download instruments.", 503);
@@ -445,7 +629,7 @@ export async function downloadCatalogEntry(catalogId, options = {}) {
   // so a download in flight is never collected.
   const temporary = join(dir, `.part-${randomBytes(8).toString("hex")}-${entry.sha256}`);
   try {
-    await fetchVerified(entry, temporary, fetchImpl);
+    await fetchVerified(entry, temporary, fetchImpl, { deadlineMs, idleMs });
     await chmod(temporary, 0o600).catch(() => {});
     // An atomic rename: a reader sees no file or the verified one.
     await rename(temporary, path);
@@ -509,11 +693,11 @@ export async function libraryGc({ crowHome, inUse, olderThanDays = GC_AGE_DAYS, 
  * A library store bound to one instance: the gateway builds one per process and
  * the routes call it without repeating `crowHome` and the catalog path.
  * @param {{crowHome: string, catalogPath?: string, fetchImpl?: Function,
- *          now?: () => number}} options
+ *          now?: () => number, deadlineMs?: number, idleMs?: number}} options
  * @returns {object} the bound calls the web layer uses
  */
-export function createLibraryStore({ crowHome, catalogPath, fetchImpl, now } = {}) {
-  const base = { crowHome, catalogPath, fetchImpl, now };
+export function createLibraryStore({ crowHome, catalogPath, fetchImpl, now, deadlineMs, idleMs } = {}) {
+  const base = { crowHome, catalogPath, fetchImpl, now, deadlineMs, idleMs };
   return {
     crowHome,
     catalogPath: catalogPath ?? DEFAULT_CATALOG_PATH,
@@ -536,6 +720,10 @@ export function createLibraryStore({ crowHome, catalogPath, fetchImpl, now } = {
     /** @param {string} sha256 @returns {Promise<string|null>} the stored copy, by hash */
     async fileForHash(sha256) {
       return storedFileByHash(sha256, base);
+    },
+    /** @param {string} sha256 @returns {Promise<boolean>} whether its verified copy is here */
+    async holds(sha256) {
+      return holdsFile(sha256, base);
     },
     /** @param {object} options see libraryGc */
     async gc(options = {}) {

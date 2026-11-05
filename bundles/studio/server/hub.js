@@ -1076,7 +1076,7 @@ function entryFromRow(row) {
  * transport in front of it.
  *
  * @returns {object} the hub: openSong, createSong, runCommand, undo, redo,
- *   setFocus, clientGone, presence, listSongs, history
+ *   setFocus, clientGone, presence, listSongs, history, libraryHashes
  */
 export function createHub({
   db,
@@ -2279,6 +2279,38 @@ export function createHub({
   }
 
   /**
+   * Every sha256 any library entry of any song on this instance names.
+   *
+   * This is the set the instrument housekeeping pass (`libraryGc`,
+   * `library-store.js`) takes as "in use", so a stored file a song names is
+   * never collected. It is a read on the hub's own store and asks no ACL: the
+   * caller is the instance itself, not a person or a bot.
+   *
+   * A song that is already open answers from its live document; every other
+   * song is read the way `openSong` reads it — its snapshot plus its newer
+   * updates — and is not kept in memory. A song whose document cannot be read
+   * throws, and the caller must then SKIP its pass entirely: a GC that saw only
+   * part of the instance could delete a file a song it did not read names.
+   * @returns {Promise<Set<string>>} the sha256 of every library entry in use
+   */
+  async function libraryHashes() {
+    await ensureTables();
+    const hashes = new Set();
+    for (const song of await listSongRows(db, {})) {
+      const song_id = String(song.id);
+      const cached = songs.get(song_id);
+      const doc = cached ? cached.doc : (await buildDoc(song_id, await readRow(song_id))).doc;
+      const entries = snapshot(doc)?.library;
+      if (!entries || typeof entries !== "object") continue;
+      for (const entry of Object.values(entries)) {
+        const sha256 = typeof entry?.sha256 === "string" ? entry.sha256.toLowerCase() : "";
+        if (/^[0-9a-f]{64}$/.test(sha256)) hashes.add(sha256);
+      }
+    }
+    return hashes;
+  }
+
+  /**
    * A song's shared history, newest first.
    *
    * A read: an archived project still lists what happened in its songs.
@@ -2320,5 +2352,6 @@ export function createHub({
     presence,
     listSongs,
     history,
+    libraryHashes,
   };
 }

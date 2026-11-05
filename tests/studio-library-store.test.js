@@ -17,7 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,11 +27,13 @@ import express from "express";
 import { WebSocketServer } from "ws";
 import {
   DEFAULT_CATALOG_PATH,
+  DOWNLOAD_TIMEOUT_TEXT,
+  createLibraryStore,
   downloadCatalogEntry,
   libraryDir,
   libraryGc,
 } from "../bundles/studio/server/library-store.js";
-import { createStudioWeb } from "../bundles/studio/server/web.js";
+import { createStudioWeb, startLibraryGc } from "../bundles/studio/server/web.js";
 import { isAllowedNetwork } from "../servers/gateway/dashboard/auth.js";
 
 // A test server is reached over loopback, which the real gate refuses on its
@@ -94,18 +96,32 @@ function fakeBank() {
  * A local HTTP stub serving one file, counting requests. `chunked` sends the
  * body in two pieces with no Content-Length, so the "larger than the catalog
  * says" check is the running count rather than the announced header.
+ * `location` answers a 302 to that URL instead of a body; `stall` sends half
+ * the body and then never finishes, so a transfer's idle deadline is what ends
+ * it.
  * @param {import("node:test").TestContext} t
  * @param {Buffer} bytes
- * @param {{chunked?: boolean, status?: number}} [options]
+ * @param {{chunked?: boolean, status?: number, location?: string, stall?: boolean}} [options]
  * @returns {Promise<{base: string, requests: string[]}>}
  */
-async function stubServer(t, bytes, { chunked = false, status = 200 } = {}) {
+async function stubServer(t, bytes, { chunked = false, status = 200, location = null, stall = false } = {}) {
   const requests = [];
   const server = createServer((req, res) => {
     requests.push(String(req.url));
+    if (location) {
+      res.writeHead(302, { Location: location });
+      res.end();
+      return;
+    }
     if (status !== 200) {
       res.writeHead(status, { "Content-Type": "text/plain" });
       res.end("no");
+      return;
+    }
+    if (stall) {
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": String(bytes.length) });
+      res.write(bytes.subarray(0, Math.floor(bytes.length / 2)));
+      // ... and never end it: the client's idle deadline has to give up.
       return;
     }
     if (chunked) {
@@ -118,7 +134,14 @@ async function stubServer(t, bytes, { chunked = false, status = 200 } = {}) {
     res.end(bytes);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        // A stalled response holds its socket open; the stub is still ours to close.
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
+  );
   return { base: `http://127.0.0.1:${server.address().port}`, requests };
 }
 
@@ -226,9 +249,9 @@ function dashboardAuth(req, res, next) {
  * and one catalog override, the real web router, and the fakes above.
  * @param {import("node:test").TestContext} t
  * @param {{catalog: object, library?: object, otherLibrary?: object,
- *          storage?: object|null}} options
+ *          storage?: object|null, canWrite?: Function|null}} options
  */
-async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, storage = null }) {
+async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, storage = null, canWrite = null }) {
   const hub = fakeHub();
   hub.state[SONG].library = songLibrary;
   hub.state[OTHER_SONG].library = otherLibrary;
@@ -250,6 +273,9 @@ async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, 
     bundleDir: BUNDLE_DIR,
     takeStorage: storage,
     songRowOf: (songId) => hub.songRow(songId),
+    // The download route's write check: permissive unless a test says a
+    // project's member may only read.
+    assertCanWrite: canWrite ?? (async () => {}),
     libraryStore: (await import("../bundles/studio/server/library-store.js")).createLibraryStore({
       crowHome,
       catalogPath,
@@ -328,6 +354,9 @@ test("the shipped catalog pins MuseScore General with its hash, size, licence an
   assert.deepEqual(row.urls, [
     "https://ftp.osuosl.org/pub/musescore/soundfont/MuseScore_General/MuseScore_General.sf3",
   ]);
+  // One url, and no mirror: a second source is only listed once its bytes have
+  // been checked against the same pin (see the store's header).
+  assert.deepEqual(row.mirrors, []);
   assert.equal(row.sha256, "5b85b6c2c61d10b2b91cddd41efcce7b25cd31c8271d511c73afafbef20b6fa3");
   assert.equal(row.bytes, 39900972);
   assert.equal(row.licence, "MIT");
@@ -642,4 +671,210 @@ test("an uploaded library file streams from its own exact storage key", async (t
   assert.equal(answer.status, 200);
   assert.deepEqual(answer.bytes, bytes);
   assert.deepEqual(requested, [{ key: upload.storage_key, bucket: "crow-files" }]);
+});
+
+test("get this instrument fetches a file this Crow lost", async (t) => {
+  const bytes = fakeBank();
+  const sha = sha256Of(bytes);
+  const { base, requests } = await stubServer(t, bytes);
+  const lost = {
+    id: "lib-lost",
+    kind: "font",
+    name: "Test Bank",
+    source: "catalog",
+    catalog_id: "test-bank",
+    sha256: sha,
+    bytes: bytes.length,
+    licence: "MIT",
+    credit: "Test Bank by the test suite",
+    author_label: "You",
+  };
+  const { base: gateway, hub, crowHome } = await boot(t, {
+    catalog: catalogRow(base, bytes),
+    library: { [lost.id]: lost },
+  });
+
+  // The song names the file and this Crow does not hold it: the panel's file
+  // route asks for a download, and says so with "get this instrument".
+  const missing = await call(gateway, `/api/studio/songs/${SONG}/library/${lost.id}/file`);
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error, MISSING_INSTRUMENT);
+
+  const ask = { method: "POST", body: { song_id: SONG, catalog_id: "test-bank" } };
+  const again = await call(gateway, "/api/studio/library/download", ask);
+  assert.equal(again.status, 200, again.bytes.toString());
+  assert.equal(again.body.downloaded, true, "the file was fetched again");
+  assert.equal(again.body.entry.id, lost.id, "the song keeps the entry it already has");
+  assert.equal(hub.commands.length, 0, "nothing was added to the song a second time");
+  assert.equal(requests.length, 1);
+  assert.deepEqual(storedNames(crowHome), [`${sha}.sf3`]);
+
+  const served = await call(gateway, `/api/studio/songs/${SONG}/library/${lost.id}/file`);
+  assert.equal(served.status, 200);
+  assert.deepEqual(served.bytes, bytes);
+
+  // Bytes that no longer hash to the entry's sha256 are the same case: the file
+  // is not what its name says, so it is fetched again instead of served.
+  writeFileSync(join(libraryDir(crowHome), `${sha}.sf3`), Buffer.from("RIFFgone-sfbk", "ascii"));
+  const repaired = await call(gateway, "/api/studio/library/download", ask);
+  assert.equal(repaired.status, 200, repaired.bytes.toString());
+  assert.equal(repaired.body.downloaded, true);
+  assert.equal(repaired.body.entry.id, lost.id);
+  assert.equal(hub.commands.length, 0, "still no second library entry");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(readFileSync(join(libraryDir(crowHome), `${sha}.sf3`)), bytes);
+});
+
+test("the library gc keeps every file a song uses and skips a run it cannot fully see", async (t) => {
+  const used = fakeBank();
+  const usedSha = sha256Of(used);
+  const unused = Buffer.from("RIFFunused-bank-sfbk", "ascii");
+  const unusedSha = sha256Of(unused);
+  const crowHome = homeFor(t);
+  storeFile(crowHome, usedSha, used);
+  storeFile(crowHome, unusedSha, unused);
+
+  // The store's clock is 31 days ahead, so every file here is older than the
+  // GC's 30-day limit and only the song's set can keep one alive.
+  const store = createLibraryStore({ crowHome, now: () => Date.now() + 31 * 24 * 60 * 60 * 1000 });
+  const hub = {
+    async libraryHashes() {
+      return new Set([usedSha]);
+    },
+  };
+  const quiet = { log() {}, warn() {} };
+  const gc = startLibraryGc({ hub, library: store, log: quiet });
+
+  const first = await gc.ready;
+  assert.deepEqual(first.removed, [`${unusedSha}.sf3`], "a file no song names, and old, is collected");
+  assert.deepEqual(storedNames(crowHome), [`${usedSha}.sf3`], "the file a song uses is kept");
+
+  // Put the unused file back, aged well past the limit: a pass that ran would
+  // collect it. A song whose document cannot be read makes the pass skip whole.
+  storeFile(crowHome, unusedSha, unused);
+  const old = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+  utimesSync(join(libraryDir(crowHome), `${unusedSha}.sf3`), old, old);
+  hub.libraryHashes = async () => {
+    throw new Error(`the song "song-9" could not be read`);
+  };
+
+  const skipped = await gc.run();
+  assert.equal(skipped, null, "the run is skipped, not half-done");
+  assert.deepEqual(
+    storedNames(crowHome).sort(),
+    [`${usedSha}.sf3`, `${unusedSha}.sf3`].sort(),
+    "nothing is deleted when the run could not see every song",
+  );
+  gc.stop();
+});
+
+test("removing and downloading again right away works", async (t) => {
+  const bytes = fakeBank();
+  const { base } = await stubServer(t, bytes);
+  const { base: gateway, hub } = await boot(t, { catalog: catalogRow(base, bytes) });
+  const ask = { method: "POST", body: { song_id: SONG, catalog_id: "test-bank" } };
+
+  const first = await call(gateway, "/api/studio/library/download", ask);
+  assert.equal(first.status, 200, first.bytes.toString());
+
+  // The operator removes the instrument (the song no longer names it) and asks
+  // for it again immediately — inside the hub's de-duplication window.
+  for (const id of Object.keys(hub.state[SONG].library)) delete hub.state[SONG].library[id];
+  const second = await call(gateway, "/api/studio/library/download", ask);
+  assert.equal(second.status, 200, second.bytes.toString());
+  assert.equal(hub.commands.length, 2, "the second add is its own step, not a replay");
+  assert.notEqual(hub.commands[0].cmd_id, hub.commands[1].cmd_id);
+  // The idempotency key carries the new entry's own id.
+  assert.equal(
+    hub.commands[1].cmd_id,
+    `library-download:${SONG}:test-bank:${second.body.entry.id}`,
+  );
+});
+
+test("a reader cannot start a download", async (t) => {
+  const bytes = fakeBank();
+  const { base, requests } = await stubServer(t, bytes);
+  const denied = Object.assign(
+    new Error(`reader role on project #${PROJECT} lacks capability 'write_files'`),
+    { name: "AclError", code: "missing_capability" },
+  );
+  const { base: gateway, hub, crowHome } = await boot(t, {
+    catalog: catalogRow(base, bytes),
+    canWrite: async (projectId) => {
+      if (projectId === PROJECT) throw denied;
+    },
+  });
+
+  const answer = await call(gateway, "/api/studio/library/download", {
+    method: "POST",
+    body: { song_id: SONG, catalog_id: "test-bank" },
+  });
+  assert.equal(answer.status, 403);
+  assert.match(answer.body.error, /lacks capability 'write_files'/);
+  assert.equal(requests.length, 0, "a refused caller fetches nothing");
+  assert.equal(hub.commands.length, 0, "and nothing reaches the song");
+  assert.deepEqual(storedNames(crowHome), []);
+});
+
+test("a stalled download is abandoned, and a download that never finishes answers 504", async (t) => {
+  const bytes = fakeBank();
+  const stalled = await stubServer(t, bytes, { stall: true });
+  const serving = await stubServer(t, bytes);
+  const crowHome = homeFor(t);
+  // Two urls: the first stalls, the second serves the same bytes.
+  const catalogPath = catalogAt(
+    crowHome,
+    catalogRow(serving.base, bytes, {
+      urls: [`${stalled.base}/Test_Bank.sf3`, `${serving.base}/Test_Bank.sf3`],
+    }),
+  );
+
+  const stored = await downloadCatalogEntry("test-bank", {
+    crowHome,
+    catalogPath,
+    idleMs: 120,
+    deadlineMs: 5000,
+  });
+  assert.equal(stored.fetched, true);
+  assert.equal(stalled.requests.length, 1, "the stalled url was tried");
+  assert.equal(serving.requests.length, 1, "and the next one finished the download");
+  assert.deepEqual(readFileSync(stored.path), bytes, "no partial file survived the stall");
+  assert.deepEqual(storedNames(crowHome), [`${sha256Of(bytes)}.sf3`]);
+
+  // Only a stalling url: the transfer runs out of time and says so, in 504.
+  const only = homeFor(t);
+  const onlyCatalog = catalogAt(only, catalogRow(stalled.base, bytes));
+  const before = stalled.requests.length;
+  await assert.rejects(
+    () => downloadCatalogEntry("test-bank", { crowHome: only, catalogPath: onlyCatalog, idleMs: 120, deadlineMs: 5000 }),
+    (err) => err.status === 504 && err.message === DOWNLOAD_TIMEOUT_TEXT,
+  );
+  assert.ok(stalled.requests.length > before, "the row's only url was tried");
+  assert.deepEqual(storedNames(only), [], "a timed-out download keeps nothing, temporary or final");
+});
+
+test("a redirect to another host is refused", async (t) => {
+  const bytes = fakeBank();
+  const elsewhere = await stubServer(t, bytes);
+
+  // A redirect to another host (and not https): refused, and that host is never
+  // asked for anything.
+  const crossHost = await stubServer(t, bytes, { location: `${elsewhere.base}/Test_Bank.sf3` });
+  const crowHome = homeFor(t);
+  await assert.rejects(
+    () => downloadCatalogEntry("test-bank", { crowHome, catalogPath: catalogAt(crowHome, catalogRow(crossHost.base, bytes)) }),
+    (err) => err.status === 502 && /redirected/.test(err.message),
+  );
+  assert.equal(elsewhere.requests.length, 0, "the other host was never fetched");
+  assert.deepEqual(storedNames(crowHome), []);
+
+  // An https redirect is still refused when the host is not one the catalog row
+  // names, so the scheme alone is not what decides.
+  const httpsAway = await stubServer(t, bytes, { location: "https://elsewhere.invalid/Test_Bank.sf3" });
+  const second = homeFor(t);
+  await assert.rejects(
+    () => downloadCatalogEntry("test-bank", { crowHome: second, catalogPath: catalogAt(second, catalogRow(httpsAway.base, bytes)) }),
+    (err) => err.status === 502 && /redirected/.test(err.message),
+  );
+  assert.deepEqual(storedNames(second), []);
 });

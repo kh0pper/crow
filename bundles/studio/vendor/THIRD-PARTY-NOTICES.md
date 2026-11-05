@@ -21,9 +21,9 @@ bundles these three packages, each at the version its banner names:
 
 | Package | Version | Licence | Licence text |
 |---|---|---|---|
-| `spessasynth_core` | 4.4.x | Apache-2.0 | `vendor/spessasynth/LICENSE-spessasynth_core.txt` |
-| `fflate` | 0.8.x | MIT | `vendor/spessasynth/LICENSE-fflate.txt` |
-| `stb-vorbis` | 0.0.x | Apache-2.0 | `vendor/spessasynth/LICENSE-stb-vorbis.txt` |
+| `spessasynth_core` | 4.4.7 | Apache-2.0 | `vendor/spessasynth/LICENSE-spessasynth_core.txt` |
+| `fflate` | 0.8.3 | MIT | `vendor/spessasynth/LICENSE-fflate.txt` |
+| `stb-vorbis` | 0.0.7 | Apache-2.0 | `vendor/spessasynth/LICENSE-stb-vorbis.txt` |
 
 `spessasynth_core` — a MIDI and SoundFont2/SoundFont3 (SF2/SF3) library — is
 Copyright (c) spessasus and contributors, licensed under the Apache License,
