@@ -127,7 +127,7 @@ sudo tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-
 Verifica que el Crow's Nest **no** sea accesible públicamente:
 
 ```bash
-curl -I https://<hostname>.<tailnet>.ts.net/dashboard   # cualquier cosa que no sea 200 significa que el dashboard es público
+curl -I https://<hostname>.<tailnet>.ts.net/dashboard   # espera 403 o 404; un 200 (o una redirección a una página de inicio de sesión) significa que el dashboard está expuesto
 curl -I https://<hostname>.<tailnet>.ts.net/blog        # se espera 200
 ```
 

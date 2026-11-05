@@ -127,7 +127,7 @@ sudo tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-
 Verify the Crow's Nest is **not** publicly reachable:
 
 ```bash
-curl -I https://<hostname>.<tailnet>.ts.net/dashboard   # anything but 200 means the dashboard is public
+curl -I https://<hostname>.<tailnet>.ts.net/dashboard   # expect 403 or 404; a 200 (or a redirect to a login page) means the dashboard is exposed
 curl -I https://<hostname>.<tailnet>.ts.net/blog        # expect 200
 ```
 
