@@ -75,6 +75,13 @@ writeFileSync(new URL("./init-db-ran.sentinel", import.meta.url), "1");
 process.exit(0);
 `;
 
+/** A pulled gateway that LOADS: it records that the child ran (the sentinel) and
+ *  then answers the seam with the token, so the import check passes. */
+const PASSING_SEAM = `import { writeFileSync } from "node:fs";
+writeFileSync(new URL("./import-ran.sentinel", import.meta.url), "1");
+if (process.env.${IMPORT_CHECK_ENV} === "1") { process.stdout.write("${IMPORT_CHECK_TOKEN}\\n"); process.exit(0); }
+`;
+
 /**
  * A bare origin plus a clone sitting one commit behind it.
  *
@@ -125,8 +132,11 @@ function fixture({ bIndex, bFiles = {}, changeA = false, changePkg = false } = {
 
 function stubDb() {
   const settings = new Map();
+  const notifications = [];
   return {
     settings,
+    // Bells: createNotification's INSERT is recorded so a test can count them.
+    notifications,
     async execute({ sql, args = [] } = {}) {
       if (/^\s*SELECT value FROM dashboard_settings WHERE key = \?/.test(sql || "")) {
         return { rows: settings.has(args[0]) ? [{ value: settings.get(args[0]) }] : [] };
@@ -134,7 +144,17 @@ function stubDb() {
       if (/SELECT key, value FROM dashboard_settings WHERE key IN \(\?, \?\)/.test(sql || "")) {
         return { rows: args.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) })) };
       }
-      if (/INSERT INTO dashboard_settings/.test(sql || "")) settings.set(args[0], args[1]);
+      if (/INSERT INTO dashboard_settings/.test(sql || "")) {
+        settings.set(args[0], args[1]);
+        return { rows: [], lastInsertRowid: 0 };
+      }
+      if (/INSERT INTO notifications/.test(sql || "")) {
+        notifications.push({
+          type: args[0], source: args[1], title: args[2], body: args[3],
+          priority: args[4], action_url: args[5], metadata: args[6],
+        });
+        return { rows: [], lastInsertRowid: notifications.length };
+      }
       return { rows: [] };
     },
   };
@@ -386,29 +406,175 @@ exit 0
   }
 });
 
-test("a failed npm install records the transient deps-failed reason, not the commit's fault", async () => {
-  // S4: a registry outage makes the import check fail on a missing module. That
-  // says nothing about the commit, so it must expire (6 h) instead of pausing
-  // updates until main moves.
-  const f = fixture({ bIndex: SEAM_THROWS, bFiles: { "servers/gateway/boom.js": BOOM }, changePkg: true });
+/* ---------------------------------------------- N1c-4: a failed npm install */
+
+/** A local npm for the PATH shim: the FIRST call fails (and prints a
+ *  path-shaped stderr), every later call succeeds. Each call appends the sha the
+ *  checkout holds at that moment, so a test can see WHEN the reinstall ran. */
+function npmShim(shimDir, npmLog, marker) {
+  mkdirSync(shimDir, { recursive: true });
+  writeFileSync(join(shimDir, "npm"), `#!/bin/sh
+git -C "$PWD" rev-parse HEAD >> '${npmLog}'
+if [ ! -f '${marker}' ]; then
+  : > '${marker}'
+  echo 'npm ERR! /home/example/.crow/app/node_modules/broken postinstall failed' >&2
+  exit 1
+fi
+exit 0
+`, { mode: 0o755 });
+}
+
+test("a failed npm install aborts the update: rolled back before the import check and init-db", async () => {
+  // N1c-4. On the old code the failing install only set a flag: the tick went on
+  // to the import check (which passes here, so the half-installed node_modules
+  // were never noticed), then to init-db, and recorded `Updated …` — a sha whose
+  // dependencies never installed was left checked out for the next restart.
+  const f = fixture({ bIndex: PASSING_SEAM, changePkg: true });
   const db = stubDb();
   const shimDir = join(f.root, "bin");
+  const npmLog = join(f.root, "npm-calls.log");
+  const failMarker = join(f.root, "npm-failed.once");
   const prevPath = process.env.PATH;
   try {
     install(f, db);
-    mkdirSync(shimDir, { recursive: true });
-    writeFileSync(join(shimDir, "npm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    npmShim(shimDir, npmLog, failMarker);
     process.env.PATH = `${shimDir}:${prevPath}`;
 
     const r = await checkForUpdates();
     process.env.PATH = prevPath;
 
+    // The update stopped here: previous sha, still attached to main.
     assert.equal(r.rolledBack, true, JSON.stringify(r));
-    assert.match(db.settings.get("auto_update_last_result"), /fails to load \(deps-failed\)/);
+    assert.equal(r.converge, false, "nothing may restart into a tree it just abandoned");
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev);
+    assert.equal(g(f.work, "symbolic-ref", "HEAD"), "refs/heads/main");
+
+    // Neither later step ran: no import-check child, no init-db.
+    assert.ok(!existsSync(join(f.work, "servers", "gateway", "import-ran.sentinel")),
+      "the import check must not run against half-installed node_modules");
+    assert.ok(!existsSync(join(f.work, "scripts", "init-db-ran.sentinel")),
+      "init-db must not migrate for a sha whose deps never installed");
+
+    // The marker: the sha, the machine-side reason, and its 6 h TTL.
     const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.equal(marker.sha, f.bad);
+    assert.equal(marker.previous, f.prev);
     assert.equal(marker.reason, "deps-failed");
     const ttl = Date.parse(marker.expires_at) - Date.parse(marker.at);
-    assert.ok(Math.abs(ttl - 6 * 60 * 60 * 1000) < 2000, `a machine-side reason expires (got ${ttl} ms)`);
+    assert.ok(Math.abs(ttl - 6 * 60 * 60 * 1000) < 2000, `expected a 6 h TTL, got ${ttl} ms`);
+
+    // The result: our own sentence, naming the cause and the retry.
+    const result = db.settings.get("auto_update_last_result");
+    assert.match(result, /^Rolled back: /);
+    assert.equal(result,
+      `Rolled back: ${f.bad.slice(0, 9)} — npm install failed; running ${f.prev.slice(0, 9)}; retried after 6 h or when main moves`);
+
+    // One event, one bell — and npm's stderr (which names paths) never reaches it.
+    assert.equal(db.notifications.length, 1, `one bell, saw ${JSON.stringify(db.notifications)}`);
+    const n = db.notifications[0];
+    assert.equal(n.source, "auto-update");
+    assert.equal(JSON.parse(n.metadata).code, "update-rolled-back");
+    assert.match(n.body, /npm install failed/i, "the bell names the cause");
+    assert.ok(!/node_modules|\/home\/example|npm ERR!/.test(`${n.title} ${n.body}`),
+      `npm's stderr must stay in the log: ${n.title} | ${n.body}`);
+    assert.equal(spooledCodes(f.alerts).length, 0, "the DB is healthy here: no spool file");
+
+    // The second install (the rollback's) ran on the PREVIOUS sha, not the pulled one.
+    const calls = readFileSync(npmLog, "utf8").trim().split("\n");
+    assert.equal(calls.length, 2, `expected npm before and after the rollback, saw ${JSON.stringify(calls)}`);
+    assert.equal(calls[0], f.bad, "the first install is for the pulled sha");
+    assert.equal(calls[1], f.prev, "the reinstall happens after the reset, on the previous sha");
+  } finally {
+    process.env.PATH = prevPath;
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("a failed npm install whose rollback is refused reports the blocked result and keeps the marker", async () => {
+  // N1c-4 + B3: the same wording family as the import-check path, from the same
+  // factored branch. On the old code nothing was rolled back at all, so there was
+  // no refusal to report and the result read `Updated …`.
+  const f = fixture({ bIndex: PASSING_SEAM, changePkg: true, changeA: true });
+  const db = stubDb();
+  const shimDir = join(f.root, "bin");
+  const npmLog = join(f.root, "npm-calls.log");
+  const failMarker = join(f.root, "npm-failed.once");
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { stdio: "pipe" }).toString().trim();
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db);
+    npmShim(shimDir, npmLog, failMarker);
+    // The git shim dirties a file the pulled commit changed at the moment of the
+    // reset: local work that overlaps the rollback, exactly what --keep refuses
+    // to destroy.
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "reset" ]; then printf 'local edit\\n' > '${join(f.work, "a.txt")}'; fi
+done
+exec ${realGit} "$@"
+`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.blocked, true, JSON.stringify(r));
+    assert.equal(r.converge, false);
+    assert.equal(db.settings.get("auto_update_last_result"),
+      `Update rollback blocked: ${f.bad.slice(0, 9)} — npm install failed and the checkout could not be reset to ${f.prev.slice(0, 9)} — local changes overlap it; restart withheld`);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.bad, "nothing was reset");
+    assert.equal(readFileSync(join(f.work, "a.txt"), "utf8"), "local edit\n", "the local edit survived");
+
+    // The marker is written FIRST, so it stays whatever the checkout does.
+    const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.equal(marker.sha, f.bad, "the sha is quarantined whatever the checkout does");
+    assert.equal(marker.reason, "deps-failed");
+
+    assert.ok(!existsSync(join(f.work, "servers", "gateway", "import-ran.sentinel")));
+    assert.ok(!existsSync(join(f.work, "scripts", "init-db-ran.sentinel")));
+    assert.equal(db.notifications.length, 1, `one bell, saw ${JSON.stringify(db.notifications)}`);
+    assert.equal(JSON.parse(db.notifications[0].metadata).code, "update-rollback-blocked");
+    // The reinstall never runs when the reset refused: node_modules still hold
+    // the pulled sha's tree, frozen until the operator repairs the checkout.
+    assert.equal(readFileSync(npmLog, "utf8").trim().split("\n").length, 1);
+  } finally {
+    process.env.PATH = prevPath;
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("no dependency change: npm never runs and the update completes as before", async () => {
+  // The abort lives INSIDE the deps-changed path, so an update that touched no
+  // package file must not pay for a dependency install — or a reinstall.
+  const f = fixture({ bIndex: PASSING_SEAM });
+  const db = stubDb();
+  const shimDir = join(f.root, "bin");
+  const npmLog = join(f.root, "npm-calls.log");
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db);
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(join(shimDir, "npm"), `#!/bin/sh
+echo called >> '${npmLog}'
+exit 1
+`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.updated, true, JSON.stringify(r));
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.bad);
+    assert.ok(!existsSync(npmLog), "no package file changed, so npm was never invoked");
+    assert.ok(existsSync(join(f.work, "servers", "gateway", "import-ran.sentinel")));
+    assert.ok(existsSync(join(f.work, "scripts", "init-db-ran.sentinel")), "the update completed normally");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "nothing was quarantined");
+    assert.match(db.settings.get("auto_update_last_result"), /^Updated /);
+    assert.equal(db.notifications.length, 0, "a successful update never rings");
   } finally {
     process.env.PATH = prevPath;
     _setAppRootForTest(REAL_APP_ROOT);

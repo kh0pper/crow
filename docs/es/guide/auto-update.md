@@ -17,11 +17,15 @@ El actualizador automático se ejecuta como una tarea en segundo plano dentro de
    esos checks no se ven afectados. Se desactiva con `CROW_UPDATE_CI_GATE=0`.
 3. **Comprobación de cuarentena** — si este host ya revirtió un commit y ese commit
    sigue siendo la cabeza de `main`, la actualización se omite (ver
-   [Reversión automática](#reversion-automatica))
+   [Reversión automática](#reversion-automatica); una reversión tomada por una razón
+   de la máquina caduca a las 6 horas, así que se reintenta aunque `main` no avance)
 4. **Pull** — ejecuta `git pull --ff-only origin main` (solo fast-forward, sin commits de merge).
    Los cambios locales **no** se guardan en un stash: `git pull` solo se niega cuando el
    diff entrante se solapa con un archivo que modificaste, y deja intactos los demás.
-5. **Dependencias** — ejecuta `npm install` si `package.json` o `package-lock.json` cambiaron
+5. **Dependencias** — ejecuta `npm install` si `package.json` o `package-lock.json` cambiaron.
+   Si la instalación falla, la actualización se detiene ahí y se revierte: sin
+   comprobación de importación, sin migración y sin reinicio (ver
+   [Reversión automática](#reversion-automatica))
 6. **Comprobación de importación** — carga todo el grafo de importaciones del gateway
    descargado en un proceso hijo de corta duración. Si no carga, la actualización se
    revierte antes de arrancar nunca ese código (ver [Reversión automática](#reversion-automatica))
@@ -68,21 +72,30 @@ reinicia un gateway que falla cada pocos segundos, así que el arreglo en `main`
 nunca llega a descargarse. Por eso Crow comprueba el código descargado **antes**
 de comprometerse con él.
 
-**Capa 0 (esta versión).** Después del pull y de `npm install`, y *antes* de que se
-ejecute `init-db`, el actualizador lanza el `servers/gateway/index.js` descargado en
-un proceso hijo con `CROW_GATEWAY_IMPORT_CHECK=1`, usando el entorno que la unidad
-configura de verdad. Ese archivo responde con un token de una línea y código de salida
-0 como su primerísima instrucción, lo que prueba que todo el grafo estático de
-importaciones cargó. Ante una salida distinta de cero, un timeout (60 s) o un token
-ausente, el actualizador:
+**Capa 0 (esta versión).** Después del pull, el actualizador instala primero las
+dependencias: si `npm install` sale con un código distinto de cero, la actualización
+se abandona ahí — sin comprobación de importación, sin `init-db`, sin reinicio —
+porque las comprobaciones siguientes estarían juzgando un árbol cuyas dependencias
+nadie instaló, y la migración correría para un commit que puede que nunca arranque.
+Los pasos de reversión de abajo valen también para ese caso, con `deps-failed` como
+razón registrada.
+
+Después, y *antes* de que se ejecute `init-db`, el actualizador lanza el
+`servers/gateway/index.js` descargado en un proceso hijo con
+`CROW_GATEWAY_IMPORT_CHECK=1`, usando el entorno que la unidad configura de verdad.
+Ese archivo responde con un token de una línea y código de salida 0 como su
+primerísima instrucción, lo que prueba que todo el grafo estático de importaciones
+cargó. Ante una salida distinta de cero, un timeout (60 s) o un token ausente, el
+actualizador:
 
 1. escribe `<git-dir>/crow-update-quarantine.json` nombrando el commit — así ninguna
    instancia de este checkout lo vuelve a descargar;
 2. mueve el checkout atrás con `git reset --keep <anterior>`, que se niega en lugar
    de destruir cambios locales que se solapen;
 3. reinstala las dependencias si cambiaron, y
-4. registra `Rolled back: <sha> fails to load (…)` en Settings > Updates y hace sonar
-   la campana de notificaciones.
+4. registra `Rolled back: …` en Settings > Updates — `… fails to load (…)` para un
+   commit que no carga, `… — npm install failed` para uno cuyas dependencias no se
+   pudieron instalar — y hace sonar la campana de notificaciones.
 
 Nada se reinicia dentro del commit malo. Un commit cuyo código no carga queda en
 cuarentena hasta que `main` avance más allá; una reversión tomada por una razón
@@ -165,7 +178,9 @@ en `main`, un checkout de solo lectura, un `index.lock`) pueden desaparecer solo
 así que se revisan otra vez en el siguiente arranque.
 
 **Recuperarse de un rechazo.** El aviso y `~/.crow/boot-guard/STATUS` llevan los
-pasos exactos para el caso que se disparó. En general:
+pasos exactos para el caso que se disparó. En general (`CROW_APP` es tu checkout:
+`~/.crow/app` en una instalación con el instalador, o donde hayas clonado el
+repositorio):
 
 ```bash
 # 1. Detén el bucle.
@@ -178,7 +193,8 @@ ls ~/backups/crow            # o donde esté tu directorio de copias
 
 # 3. Mueve main atrás a un commit que sepas que arranca, conservando cambios
 #    locales no relacionados.
-cd ~/crow
+CROW_APP="${CROW_APP:-$HOME/.crow/app}"
+cd "$CROW_APP"
 git log --oneline -5
 git reset --keep <ese-commit>
 
@@ -225,24 +241,40 @@ Esto evita el típico error `EADDRINUSE`, donde el proceso nuevo arranca antes d
 
 ## Actualización manual
 
-Si prefieres actualizar manualmente:
+Si prefieres actualizar manualmente (`CROW_APP` es tu checkout: `~/.crow/app` en
+una instalación con el instalador, o donde hayas clonado el repositorio):
 
 ```bash
-cd ~/crow
-git pull origin main
+CROW_APP="${CROW_APP:-$HOME/.crow/app}"
+cd "$CROW_APP"
+git pull --ff-only origin main
 npm install
-npm run init-db
+node scripts/guarded-init-db.mjs   # migración con guarda: copia previa, restauración si hay pérdida
 sudo systemctl restart crow-gateway
 ```
+
+`node scripts/guarded-init-db.mjs` es el punto de entrada de migraciones que usa
+también el actualizador: hace una copia de seguridad antes de migrar, clasifica el
+resultado por si hubo pérdida de datos y restaura la copia si la migración dañó el
+almacén. `npm run init-db` sigue existiendo, pero es la ejecución desnuda, sin
+ninguna guarda y sin copia: úsala solo en una base de datos de pruebas, nunca en
+una que te importe.
+
+`bash ~/.crow/app/scripts/crow-update.sh` hace la misma secuencia en un solo paso
+y va más allá: comprueba que el código nuevo responde de verdad en `/health` y
+revierte con `git reset --keep` si no lo hace.
 
 O dispara una comprobación única desde la página de Settings sin habilitar las comprobaciones automáticas.
 
 ## Reversión {#reversion}
 
-Si una actualización causa problemas, revierte **sobre `main`**:
+Si una actualización causa problemas, revierte **sobre `main`** (`CROW_APP` es tu
+checkout: `~/.crow/app` en una instalación con el instalador, o donde hayas
+clonado el repositorio):
 
 ```bash
-cd ~/crow
+CROW_APP="${CROW_APP:-$HOME/.crow/app}"
+cd "$CROW_APP"
 git log --oneline -5             # Encontrar el commit anterior
 git reset --keep <commit-hash>   # Mover main atrás, conservando cambios locales ajenos
 sudo systemctl restart crow-gateway
@@ -281,13 +313,21 @@ La actividad de actualización se registra en el stdout del gateway (visible con
 [auto-update] import check unavailable in 1a2b3c4d5 (no CROW_GATEWAY_IMPORT_CHECK seam) — relying on the boot guard
 [auto-update] Running database migrations...
 [auto-update] Updated: c29e19c → 9d18049
-[auto-update] Restarting gateway via systemd...
+[auto-update] Restarting to run 9d18049...
 ```
 
 Una reversión se lee así:
 
 ```
 [auto-update] Rolled back: 9d18049 fails to load (import-check); running c29e19c; updates resume when main moves past it
+[auto-update] Rolled back: 9d18049 — npm install failed; running c29e19c; retried after 6 h or when main moves
+```
+
+Un `npm install` fallido registra su código de salida y el final de la salida de
+npm (por eso se queda en el log y nunca llega a la notificación):
+
+```
+[auto-update] npm install failed (exit 1): npm ERR! …
 ```
 
 Los resultados de las actualizaciones también se guardan en la base de datos y son visibles en Settings > Updates.

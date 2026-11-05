@@ -33,9 +33,10 @@ export const UPDATE_QUARANTINE_MAX_BYTES = 64 * 1024;
 /** Transient reasons: how long a rollback for one of them holds before main is
  *  retried with no new commit. Anything not listed waits for main to move.
  *
- *  `deps-failed`: the import check failed while node_modules were known-broken
- *  (a registry outage made `npm install` exit non-zero), so the verdict says
- *  nothing about the commit itself. */
+ *  `deps-failed`: `npm install` itself exited non-zero during the update, so the
+ *  pulled sha never got as far as its import check or its init-db. That says
+ *  nothing about the commit (a registry outage is not a bad sha), so it expires
+ *  and main is retried with no new commit. */
 export const TRANSIENT_QUARANTINE_MS = Object.freeze({
   "import-timeout": 6 * 60 * 60 * 1000,
   "init-db-failed": 6 * 60 * 60 * 1000,

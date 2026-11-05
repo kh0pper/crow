@@ -4,7 +4,9 @@
  * Enabled by default. Users can toggle via Settings panel or CROW_AUTO_UPDATE env var.
  * Stores state in dashboard_settings DB table.
  *
- * On update: git pull → npm install → import check → init-db → restart (if supervised)
+ * On update: git pull → npm install → import check → init-db → restart (if supervised).
+ * A failed npm install ends the tick there: rollback, no import check, no init-db,
+ * no restart (N1c-4).
  */
 
 import { execFile } from "node:child_process";
@@ -216,7 +218,10 @@ const UPDATE_FAILURE_TEXT = Object.freeze({
   "update-error": ["Crow updates stopped: update error", "The updater hit an unexpected error. See Settings → Updates and the gateway log for the exact result, then run Check for updates now."],
   "migration-failed": ["Crow updates stopped: migration failed", "The database migration after the pull failed, so the restart was withheld and the previous code is still running. Read the log, then run node scripts/guarded-init-db.mjs."],
   "init-db-failed": ["Crow updates stopped: init-db failed", "Database setup after the pull failed, so the restart was withheld and the previous code is still running. Read the log, then run node scripts/guarded-init-db.mjs."],
-  "update-rolled-back": ["Crow rolled back an update that would not start", "The pulled commit was rolled back automatically because its code fails to load, so the previous version is still running. The bad commit is quarantined: updates resume by themselves when main moves past it."],
+  // Cause-neutral: the same code covers a commit whose code does not load and
+  // one whose dependencies could not be installed. The recorded result quoted
+  // above it names which of the two happened.
+  "update-rolled-back": ["Crow rolled back an update that would not start", "The pulled commit was rolled back automatically because it could not be used — its code does not load, or its dependencies could not be installed — so the previous version is still running. The commit is quarantined: updates resume by themselves when main moves past it, and a machine-side cause (a failed install) also retries after a few hours."],
   "update-quarantined": ["Crow updates paused: a commit is quarantined", "The newest commit on main was rolled back because it would not start, so it is skipped. Fix forward on main and the next check deploys it; a rollback taken for a machine-side reason retries after a few hours."],
   // Never "was rolled back" here: a blocked rollback means the bad commit is
   // STILL checked out, and the next restart boots it.
@@ -743,6 +748,63 @@ async function quarantineAndRollBack({ gitDir, sha, previous, reason, depsChange
 }
 
 /**
+ * The Layer 0 rollback, shared by both "the pulled tree cannot be used" paths
+ * (the import check and a failed `npm install`): quarantine the sha, move the
+ * checkout back, and turn the outcome into this tick's result, bell and return
+ * value, so the two paths cannot drift into different wording or a different
+ * blocked-result shape.
+ *
+ * `cause` completes one clause of OUR own sentence ("fails to load
+ * (import-check)", "— npm install failed"), never command output, so the
+ * recorded result stays quotable in the bell. `next(rolled)` says what happens
+ * to the sha afterwards (the marker's own TTL is part of it); `bell` is the
+ * sentence for the notification.
+ *
+ * @returns {Promise<{updated:false, error:string, converge:false,
+ *   rolledBack?:true, blocked?:true, sha:string}>}
+ */
+async function rollBackUnusableUpdate({
+  gitDir, sha, previous, reason, cause, next, bell, depsChanged = false, log = () => {},
+}) {
+  const bad = String(sha).slice(0, 9);
+  const good = FULL_SHA_RE.test(String(previous || "")) ? String(previous).slice(0, 9) : "the previous commit";
+  const rolled = await quarantineAndRollBack({ gitDir, sha, previous, reason, depsChanged, log });
+  if (!rolled.ok) {
+    // `reset --keep` refused (local changes overlap the rollback), or the
+    // previous sha could not be resolved: nothing was reset. The marker stays
+    // (the sha is bad whatever the checkout does), the restart is withheld,
+    // and the operator is told which of the two happened (B3).
+    const because = rolled.blockedBy === "no-previous"
+      ? `${good} could not be determined, so nothing was reset`
+      : "local changes overlap it";
+    const msg = `Update rollback blocked: ${bad} ${cause} and the checkout could not be reset to ${good} — ${because}; restart withheld`;
+    log(msg);
+    // One event, one bell: the result write below rings notifyUpdateFailure,
+    // and the DB is healthy on this path, so no spool file (see fireUpdateAlert).
+    await fireUpdateAlert({
+      code: "update-rollback-blocked",
+      title: "Crow updates paused: a commit that will not start is still checked out",
+      body: `The update to ${bad} ${cause} and the checkout could not be reset to ${good} because ${because} (${String(rolled.detail).slice(0, 200)}). It is quarantined, so it is not pulled again, but it is still checked out — the next restart boots it. Move main back in the checkout, then run Check for updates now.`,
+    }, { spool: false });
+    await saveSetting("auto_update_last_check", new Date().toISOString());
+    await saveSetting("auto_update_last_result", msg);
+    return { updated: false, error: msg, converge: false, blocked: true, sha };
+  }
+  // The previous code is back on disk and in node_modules. init-db NEVER ran,
+  // so the schema question does not arise; the marker stops a re-pull.
+  const msg = `Rolled back: ${bad} ${cause}; running ${good}; ${next(rolled)}`;
+  log(msg);
+  await fireUpdateAlert({
+    code: "update-rolled-back",
+    title: "Crow rolled back an update that would not start",
+    body: bell,
+  }, { spool: false });
+  await saveSetting("auto_update_last_check", new Date().toISOString());
+  await saveSetting("auto_update_last_result", msg);
+  return { updated: false, error: msg, converge: false, rolledBack: true, sha };
+}
+
+/**
  * Are `scripts/init-db.js` byte-identical between two commits? Compared as blob
  * shas (`git rev-parse <sha>:path`), never by running anything from either tree.
  *
@@ -1020,16 +1082,20 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   const changedFiles = await run("git", ["diff", "--name-only", `${currentVersion}..HEAD`]);
   const depsChanged =
     changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json");
-  // A failed install breaks the import check's verdict without saying anything
-  // about the commit (a registry outage is not a bad sha), so its quarantine
-  // reason is transient (S4).
-  let depsFailed = false;
+  // A failed install leaves node_modules half-written and says nothing about the
+  // commit (a registry outage is not a bad sha), but the update cannot continue:
+  // the import check would judge a tree whose dependencies nobody installed, and
+  // init-db would migrate for a sha that may never boot. The satellite updater
+  // aborts on the same signal (servers/satellite/update.js).
+  let npmFailed = false;
   if (depsChanged) {
     log("Dependencies changed — running npm install...");
     const npmResult = await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
     if (npmResult.code !== 0) {
-      depsFailed = true;
-      log(`npm install warning: ${npmResult.stderr}`);
+      npmFailed = true;
+      // npm's stderr names paths, so it goes to the log (clipped) and never into
+      // the recorded result or the bell.
+      log(`npm install failed (exit ${npmResult.code}): ${String(npmResult.stderr || "").slice(0, 400)}`);
     }
   }
 
@@ -1037,6 +1103,17 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // must not run its new-schema pass for a sha that will never boot, and the
   // rollback must happen while the deps still match the tree it resets to.
   const pulledSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+  if (npmFailed) {
+    // `deps-failed` is a machine-side reason, so its marker carries the 6 h TTL:
+    // main is retried even if it never moves (S4). No import check, no init-db,
+    // no restart — the tree is unusable until npm succeeds.
+    return await rollBackUnusableUpdate({
+      gitDir, sha: pulledSha, previous: currentFullSha, reason: "deps-failed", depsChanged, log,
+      cause: "— npm install failed",
+      next: () => "retried after 6 h or when main moves",
+      bell: `The dependencies for the update to ${pulledSha.slice(0, 9)} could not be installed (npm install failed), so the update was abandoned before the import check and before init-db ran; npm's own output is in the gateway log. ${currentFullSha.slice(0, 9)} is still running with its own dependencies reinstalled, and ${pulledSha.slice(0, 9)} is quarantined — updates are retried after 6 hours or when main moves past it.`,
+    });
+  }
   const importCheck = await pulledTreeImportCheck();
   if (importCheck.skipped === "no-seam") {
     // S2: a sha from before the seam existed cannot answer the check, and
@@ -1044,49 +1121,13 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     // (the boot guard) is the backstop for it.
     log(`import check unavailable in ${pulledSha.slice(0, 9)} (no ${IMPORT_CHECK_ENV} seam) — relying on the boot guard`);
   } else if (importCheck.ok !== true) {
-    // A failed install is the machine's fault, not the commit's: record the
-    // transient reason so main is retried after the 6 h TTL (S4).
-    const reason = depsFailed ? "deps-failed" : (importCheck.reason || "import-check");
-    const previousLabel = FULL_SHA_RE.test(String(currentFullSha || ""))
-      ? currentFullSha.slice(0, 9)
-      : "the previous commit";
-    const rolled = await quarantineAndRollBack({
+    const reason = importCheck.reason || "import-check";
+    return await rollBackUnusableUpdate({
       gitDir, sha: pulledSha, previous: currentFullSha, reason, depsChanged, log,
+      cause: `fails to load (${reason})`,
+      next: (rolled) => `updates resume when main moves past it${rolled.marker?.expires_at ? "; the quarantine also expires in 6h" : ""}`,
+      bell: `The update to ${pulledSha.slice(0, 9)} was rolled back before it was ever restarted into: its gateway code fails to load (${reason}). ${currentFullSha.slice(0, 9)} is still running, and ${pulledSha.slice(0, 9)} is quarantined — updates resume by themselves when main moves past it.`,
     });
-    if (!rolled.ok) {
-      // `reset --keep` refused (local changes overlap the rollback), or the
-      // previous sha could not be resolved: nothing was reset. The marker stays
-      // (the sha is bad whatever the checkout does), the restart is withheld,
-      // and the operator is told which of the two happened (B3).
-      const because = rolled.blockedBy === "no-previous"
-        ? `${previousLabel} could not be determined, so nothing was reset`
-        : "local changes overlap it";
-      const msg = `Update rollback blocked: ${pulledSha.slice(0, 9)} fails to load (${reason}) and the checkout could not be reset to ${previousLabel} — ${because}; restart withheld`;
-      log(msg);
-      // One event, one bell: the result write below rings notifyUpdateFailure,
-      // and the DB is healthy on this path, so no spool file (see fireUpdateAlert).
-      await fireUpdateAlert({
-        code: "update-rollback-blocked",
-        title: "Crow updates paused: a commit that will not start is still checked out",
-        body: `The update to ${pulledSha.slice(0, 9)} fails to load (${reason}) and the checkout could not be reset to ${previousLabel} because ${because} (${String(rolled.detail).slice(0, 200)}). It is quarantined, so it is not pulled again, but it is still checked out — the next restart boots it. Move main back in the checkout, then run Check for updates now.`,
-      }, { spool: false });
-      await saveSetting("auto_update_last_check", new Date().toISOString());
-      await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg, converge: false, blocked: true, sha: pulledSha };
-    }
-    // The previous code is back on disk and in node_modules. init-db NEVER ran,
-    // so the schema question does not arise; the marker stops a re-pull.
-    const expires = rolled.marker?.expires_at ? "; the quarantine also expires in 6h" : "";
-    const msg = `Rolled back: ${pulledSha.slice(0, 9)} fails to load (${reason}); running ${currentFullSha.slice(0, 9)}; updates resume when main moves past it${expires}`;
-    log(msg);
-    await fireUpdateAlert({
-      code: "update-rolled-back",
-      title: "Crow rolled back an update that would not start",
-      body: `The update to ${pulledSha.slice(0, 9)} was rolled back before it was ever restarted into: its gateway code fails to load (${reason}). ${currentFullSha.slice(0, 9)} is still running, and ${pulledSha.slice(0, 9)} is quarantined — updates resume by themselves when main moves past it.`,
-    }, { spool: false });
-    await saveSetting("auto_update_last_check", new Date().toISOString());
-    await saveSetting("auto_update_last_result", msg);
-    return { updated: false, error: msg, converge: false, rolledBack: true, sha: pulledSha };
   }
 
   // Run init-db for any schema changes — guarded (A3) when the run carries
