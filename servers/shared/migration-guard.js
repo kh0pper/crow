@@ -409,13 +409,20 @@ async function loadAlertChannels() {
  * notification once its DB is up. ntfy/email are unconfigured on a default
  * install, so without the spool a quarantined migration was silent (audit
  * N1c-2). The file is written FIRST: a channel that throws must not lose it.
+ *
+ * `spool:false` is for callers whose DB is healthy and which already ring the
+ * in-app bell another way (the auto-update rollback paths): one event must not
+ * raise two bells. Keep the spool wherever the DB itself may be broken, because
+ * then nothing else can record the alert.
  */
-export async function fireMigrationAlert({ title, body, code = null }) {
-  try {
-    const { writeAlertFile } = await import("./alert-spool.js");
-    writeAlertFile({ code: code || title, title, body });
-  } catch (err) {
-    console.warn(`[migration-guard] alert spool write failed: ${err?.message}`);
+export async function fireMigrationAlert({ title, body, code = null, spool = true }) {
+  if (spool) {
+    try {
+      const { writeAlertFile } = await import("./alert-spool.js");
+      writeAlertFile({ code: code || title, title, body });
+    } catch (err) {
+      console.warn(`[migration-guard] alert spool write failed: ${err?.message}`);
+    }
   }
   try {
     const ch = await loadAlertChannels();

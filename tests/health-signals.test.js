@@ -726,6 +726,12 @@ test("updates: a rollback or a quarantined commit reads as a failure, never ok",
     classifyUpdateResult("Update rollback blocked: 9d18049 fails to load (import-check) and the checkout could not be reset to c29e19c — local changes overlap it; restart withheld"),
     { kind: "failure", code: "update-rollback-blocked" },
   );
+  // S5: a BLOCKED rollback leaves the bad sha checked out, and the next restart
+  // boots it — still the blocked code, never a "waiting for a newer commit".
+  assert.deepEqual(
+    classifyUpdateResult("Update rollback blocked: 9d18049 is still checked out; the next restart will boot it"),
+    { kind: "failure", code: "update-rollback-blocked" },
+  );
 });
 
 // ─── Privacy: bind + host firewall + Funnel (audit N1c-16) ──────────────────

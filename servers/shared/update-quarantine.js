@@ -20,19 +20,26 @@
  *
  * Nothing here throws: this runs inside a tick that must still record a result.
  */
-import { closeSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 export const UPDATE_QUARANTINE_FILE = "crow-update-quarantine.json";
 export const UPDATE_QUARANTINE_FORMAT = 1;
 /** Full shas only — see the header. */
 export const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+/** The reader's ceiling: the real record is a few hundred bytes. */
+export const UPDATE_QUARANTINE_MAX_BYTES = 64 * 1024;
 
 /** Transient reasons: how long a rollback for one of them holds before main is
- *  retried with no new commit. Anything not listed waits for main to move. */
+ *  retried with no new commit. Anything not listed waits for main to move.
+ *
+ *  `deps-failed`: the import check failed while node_modules were known-broken
+ *  (a registry outage made `npm install` exit non-zero), so the verdict says
+ *  nothing about the commit itself. */
 export const TRANSIENT_QUARANTINE_MS = Object.freeze({
   "import-timeout": 6 * 60 * 60 * 1000,
   "init-db-failed": 6 * 60 * 60 * 1000,
+  "deps-failed": 6 * 60 * 60 * 1000,
 });
 
 export function quarantinePath(gitDir) {
@@ -71,10 +78,19 @@ function writeAtomic(path, record) {
  * @returns {null|{v:number, sha:string, previous:string|null, reason:string,
  *   at:string, by:string, expires_at?:string}}
  */
-export function readUpdateQuarantine({ gitDir, readFile = readFileSync } = {}) {
+export function readUpdateQuarantine({ gitDir, readFile = readFileSync, lstat = lstatSync } = {}) {
   if (!gitDir) return null;
+  const path = quarantinePath(gitDir);
+  // lstat, never stat: a symlink planted at the marker path must not be
+  // followed (PR 2's boot guard reads the same file with the same rule), and
+  // neither must a fifo, a device or a directory. Size-capped so a huge file
+  // cannot be parsed into memory.
+  try {
+    const st = lstat(path);
+    if (!st || st.isSymbolicLink() || !st.isFile() || st.size > UPDATE_QUARANTINE_MAX_BYTES) return null;
+  } catch { return null; }
   let raw;
-  try { raw = readFile(quarantinePath(gitDir), "utf8"); } catch { return null; }
+  try { raw = readFile(path, "utf8"); } catch { return null; }
   let m;
   try { m = JSON.parse(raw); } catch { return null; }
   if (!m || typeof m !== "object") return null;

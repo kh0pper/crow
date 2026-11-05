@@ -36,9 +36,11 @@ import { addColumnIfMissing } from "./0006-bot-sessions-archived.mjs";
 
 export const id = "0020-session-summaries";
 
-// rollbackSafe: additive bot_sessions/memories columns plus two indexes; older
-// code ignores them and never reads summary sources.
-export const rollbackSafe = true;
+// rollbackSafe: FALSE until review confirms older sync code cannot insert a
+// second `session-summary:` row on a peer that already holds one: the unique
+// partial index on the core `memories` table fails the INSERT instead of
+// accepting it (operator ruling 3: true only after that review).
+export const rollbackSafe = false;
 
 export const COLUMNS = Object.freeze([
   ["bot_sessions", "summary", "TEXT"],

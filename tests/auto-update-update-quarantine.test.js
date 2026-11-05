@@ -7,7 +7,7 @@
  * and clears itself when main moves past the bad commit.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -70,8 +70,10 @@ function pushToOrigin(fx, name, content) {
 
 function stubDb() {
   const settings = new Map();
+  const notifications = [];
   return {
     settings,
+    notifications,
     async execute({ sql, args = [] } = {}) {
       if (/^\s*SELECT value FROM dashboard_settings WHERE key = \?/.test(sql || "")) {
         return { rows: settings.has(args[0]) ? [{ value: settings.get(args[0]) }] : [] };
@@ -79,7 +81,17 @@ function stubDb() {
       if (/SELECT key, value FROM dashboard_settings WHERE key IN \(\?, \?\)/.test(sql || "")) {
         return { rows: args.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) })) };
       }
-      if (/INSERT INTO dashboard_settings/.test(sql || "")) settings.set(args[0], args[1]);
+      if (/INSERT INTO dashboard_settings/.test(sql || "")) {
+        settings.set(args[0], args[1]);
+        return { rows: [], lastInsertRowid: 0 };
+      }
+      if (/INSERT INTO notifications/.test(sql || "")) {
+        notifications.push({
+          type: args[0], source: args[1], title: args[2], body: args[3],
+          priority: args[4], action_url: args[5], metadata: args[6],
+        });
+        return { rows: [], lastInsertRowid: notifications.length };
+      }
       return { rows: [] };
     },
   };
@@ -194,12 +206,89 @@ test("a malformed marker file is ignored, not obeyed", () => {
   } finally { f.cleanup(); }
 });
 
-test("Check-now goes through the same under-lock path", () => {
-  // The Settings button must consult the marker too; it does only because it
-  // calls checkForUpdates(), which lands in runLockedUpdate.
-  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway",
-    "dashboard", "settings", "sections", "updates.js"), "utf8");
-  assert.match(src, /check_updates_now[\s\S]*?checkForUpdates\(\)/);
-  const au = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "auto-update.js"), "utf8");
-  assert.match(au, /evaluateUpdateQuarantine\(\{ gitDir, originHeadSha \}\)/);
+test("a blocked rollback says the bad commit is still checked out (S5)", async () => {
+  // After a blocked rollback HEAD is still the bad sha, so the next tick used to
+  // report "waiting for a newer commit" and the bell said the update "was rolled
+  // back" — while the next restart or reboot boots exactly that commit.
+  const f = fixture();
+  const db = stubDb();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    g(f.work, "pull", "--ff-only", "origin", "main"); // the checkout HOLDS the bad sha
+    writeUpdateQuarantine({ gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "import-check" });
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+
+    const r = await checkForUpdates();
+
+    assert.equal(r.skipped, "update-rollback-blocked", JSON.stringify(r));
+    assert.equal(db.settings.get("auto_update_last_result"),
+      `Update rollback blocked: ${bad.slice(0, 9)} is still checked out; the next restart will boot it`);
+    assert.equal(db.notifications.length, 1, `one bell: ${JSON.stringify(db.notifications)}`);
+    const n = db.notifications[0];
+    assert.equal(JSON.parse(n.metadata).code, "update-rollback-blocked");
+    assert.match(n.body, /still checked out/);
+    assert.ok(!/was rolled back/.test(`${n.title} ${n.body}`),
+      `the bell must not claim a rollback that never happened: ${n.title} | ${n.body}`);
+  } finally { cleanup(); }
+});
+
+test("the marker reader refuses a symlink, a directory and an oversized file", () => {
+  // The writer is atomic and never follows a planted file; the reader must be
+  // just as strict, because PR 2's boot guard trusts the same record.
+  const f = fixture();
+  const path = quarantinePath(f.gitDir);
+  const valid = JSON.stringify({
+    v: 1, sha: f.prev, reason: "import-check", at: new Date().toISOString(), by: "test",
+  });
+  try {
+    const real = join(f.root, "real-marker.json");
+    writeFileSync(real, valid);
+    symlinkSync(real, path);
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "a symlinked marker is never followed");
+
+    rmSync(path, { force: true });
+    mkdirSync(path);
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "a directory is not a marker");
+    rmSync(path, { recursive: true, force: true });
+
+    const huge = JSON.parse(valid);
+    huge.pad = "x".repeat(70 * 1024);
+    writeFileSync(path, JSON.stringify(huge));
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }), null, "above the 64 KiB cap nothing is read");
+
+    writeFileSync(path, valid);
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).sha, f.prev, "a plain, small, regular file still reads");
+  } finally { f.cleanup(); }
+});
+
+test("Check-now goes through the same under-lock path", async () => {
+  // The Settings button must consult the marker too. Drive the REAL handler
+  // (settings.post "check_updates_now"), not a pattern match on its source: the
+  // handler imports auto-update.js, so the same module instance and the same
+  // _setAppRootForTest fixture apply.
+  const f = fixture();
+  const db = stubDb();
+  try {
+    const bad = pushToOrigin(f, "b.txt", "two\n");
+    writeUpdateQuarantine({ gitDir: f.gitDir, sha: bad, previous: f.prev, reason: "import-check" });
+    _setAppRootForTest(f.work);
+    _setDbForTest(db);
+    const section = (await import(
+      "../servers/gateway/dashboard/settings/sections/updates.js"
+    )).default;
+    let payload = null;
+    const handled = await section.handleAction({
+      req: { body: {} },
+      res: { json: (o) => { payload = o; } },
+      db: null,
+      action: "check_updates_now",
+    });
+
+    assert.equal(handled, true, "the handler recognised the action");
+    assert.equal(payload.skipped, "update-quarantined", JSON.stringify(payload));
+    assert.match(payload.message, /^Skipped: update quarantined \(/);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.prev, "Check-now never pulls the quarantined sha");
+    assert.ok(!existsSync(join(f.work, "b.txt")));
+  } finally { cleanup(); }
 });

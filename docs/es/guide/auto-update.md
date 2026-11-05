@@ -86,10 +86,18 @@ ausente, el actualizador:
 
 Nada se reinicia dentro del commit malo. Un commit cuyo código no carga queda en
 cuarentena hasta que `main` avance más allá; una reversión tomada por una razón
-de la máquina (un timeout, un `init-db` fallido que no cambió nada) caduca además
-a las 6 horas. Si `git reset --keep` se niega porque hay cambios locales que se
-solapan, la cuarentena se mantiene, el reinicio se retiene, y el resultado dice
-`Update rollback blocked` con la limpieza necesaria.
+de la máquina (un timeout, un `npm install` fallido, un `init-db` fallido que no
+cambió nada) caduca además a las 6 horas. Si `git reset --keep` se niega porque
+hay cambios locales que se solapan, la cuarentena se mantiene, el reinicio se
+retiene, y el resultado dice `Update rollback blocked` — incluido el caso en que
+el checkout todavía contiene el commit malo, así que el próximo reinicio o
+rearranque lo arrancaría.
+
+Un `init-db` fallido tras un pull solo se revierte cuando nada del código nuevo
+puede haber llegado a la base de datos: el pull no debe cruzar una generación de
+esquema, `scripts/init-db.js` debe ser idéntico byte a byte en ambos commits, la
+base de datos debe seguir siendo legible y `user_version` no debe haber avanzado.
+En caso contrario el árbol se deja como está y el aviso lo dice.
 
 Toda instancia co-alojada que comparte el checkout respeta el mismo marcador:
 ninguna migra ni se reinicia dentro de un commit en cuarentena, y cada una
@@ -152,8 +160,12 @@ que ninguna instancia lo vuelva a descargar:
 
 ```bash
 printf '{"v":1,"sha":"<sha-malo>","previous":"<sha-bueno>","reason":"manual","at":"%s","by":"operator"}\n' \
-  "$(date -Iseconds)" > .git/crow-update-quarantine.json
+  "$(date -Iseconds)" > "$(git rev-parse --absolute-git-dir)/crow-update-quarantine.json"
 ```
+
+El marcador vive en el git dir, no en `.git/` por nombre: en un worktree enlazado
+el git dir está en otra ruta, y `git rev-parse --absolute-git-dir` es la ruta que
+usa el propio actualizador.
 
 ## Registros
 

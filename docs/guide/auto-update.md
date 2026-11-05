@@ -84,10 +84,17 @@ a clean non-zero exit, a timeout (60 s), or a missing token, the updater:
 
 Nothing restarts into the bad commit. A commit whose code does not load stays
 quarantined until `main` moves past it; a rollback taken for a machine-side
-reason (a timeout, a failed `init-db` that changed nothing) also expires after
-6 hours. If `git reset --keep` refuses because local changes overlap, the
-quarantine stays, the restart is withheld, and the result says
-`Update rollback blocked` with the cleanup needed.
+reason (a timeout, a failed `npm install`, a failed `init-db` that changed
+nothing) also expires after 6 hours. If `git reset --keep` refuses because local
+changes overlap, the quarantine stays, the restart is withheld, and the result
+says `Update rollback blocked` — including the case where the checkout is still
+holding the bad commit, so the next restart or reboot would boot it.
+
+`init-db` failing after a pull is only rolled back when nothing about the new
+code can have reached the database: the pull must not cross a schema generation,
+`scripts/init-db.js` must be byte-identical in both commits, the database must
+still be readable, and `user_version` must not have advanced. Otherwise the
+tree is left where it is and the alert says so.
 
 Every co-hosted instance sharing the checkout honors the same marker: none of
 them migrates or restarts into a quarantined commit, and each one separately
@@ -148,10 +155,13 @@ If you rolled back because a commit did not start, also write the quarantine so
 no instance re-pulls it:
 
 ```bash
-git rev-parse HEAD~0 >/dev/null   # the sha you moved away from
 printf '{"v":1,"sha":"<bad-sha>","previous":"<good-sha>","reason":"manual","at":"%s","by":"operator"}\n' \
-  "$(date -Iseconds)" > .git/crow-update-quarantine.json
+  "$(date -Iseconds)" > "$(git rev-parse --absolute-git-dir)/crow-update-quarantine.json"
 ```
+
+The marker lives in the git dir, not in `.git/` by name: in a linked worktree the
+git dir is elsewhere, and `git rev-parse --absolute-git-dir` is the path the
+updater itself uses.
 
 ## Logs
 

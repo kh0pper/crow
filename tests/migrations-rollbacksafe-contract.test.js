@@ -15,9 +15,12 @@ const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 const files = readdirSync(DIR).filter((f) => /^\d{4}-[a-z0-9-]+\.mjs$/.test(f)).sort();
 
 /** Reviewed once, in the PR that added the flag: these cannot be undone by
- *  running older code against the new shape. */
+ *  running older code against the new shape.
+ *  0020: its unique partial index on the core `memories` table has NOT been
+ *  confirmed safe for older instance-sync code (operator ruling: `true` only
+ *  after review confirms), so it is false for now. */
 const MUST_BE_FALSE = ["0002-board-defs", "0003-tracker-convergence", "0004-track1-card-model",
-  "0009-schedule-runs", "0010-shell-items", "0022-archived-name-cleanup"];
+  "0009-schedule-runs", "0010-shell-items", "0020-session-summaries", "0022-archived-name-cleanup"];
 
 /** Statements that make a migration irreversible for older code. */
 const DESTRUCTIVE = /\bDROP\s+(?:TABLE|COLUMN|INDEX|TRIGGER|VIEW)\b|\bRENAME\s+TO\b|\bDELETE\s+FROM\b/;

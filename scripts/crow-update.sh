@@ -64,10 +64,22 @@ wait_for_health() {
 
 # Hooks disabled: on an install whose core.hooksPath points INTO the tree, the
 # pulled sha's own hooks would otherwise run here.
+#
+# Never lets a refusal end the script: under `set -e` an unguarded `git reset`
+# or `npm` here would exit mid-rollback, leaving the crash-looping new commit
+# running and nothing restarted or logged. A refusal is logged, flagged, and the
+# caller still restarts the service and exits non-zero.
+ROLLBACK_OK=1
 rollback() {
   log "Rolling back to ${PREV_REF:0:8}..."
-  git -c core.hooksPath=/dev/null reset --keep "$PREV_REF"
-  npm install 2>&1 | tail -3 | tee -a "$LOG_FILE"
+  if ! git -c core.hooksPath=/dev/null reset --keep "$PREV_REF" 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
+    log "ERROR: rollback refused — git reset --keep ${PREV_REF:0:8} failed (local changes overlap it?). The checkout is unchanged at $(git rev-parse --short HEAD 2>/dev/null || echo unknown)."
+    ROLLBACK_OK=0
+  fi
+  if ! npm install 2>&1 | tail -3 | tee -a "$LOG_FILE"; then
+    log "ERROR: npm install failed during the rollback — the checkout holds ${PREV_REF:0:8} but its dependencies may not match."
+    ROLLBACK_OK=0
+  fi
 }
 
 log "Starting Crow update..."
@@ -96,9 +108,15 @@ node scripts/guarded-init-db.mjs 2>&1 | tee -a "$LOG_FILE"
 
 # Restart gateway if running as systemd service
 if systemctl is-active --quiet crow-gateway 2>/dev/null; then
-  BEFORE_NRESTARTS=$(nrestarts)
   log "Restarting crow-gateway service..."
   sudo systemctl restart crow-gateway
+  # Read the counter AFTER the restart returns: a MANUAL restart may reset
+  # NRestarts to 0 (systemd does, from v236 on). A baseline read before the
+  # restart therefore disagrees with every healthy unit that had already
+  # restarted on its own (planned restarts exit 1 under Restart=on-failure), and
+  # the script would roll back a good update. Read here, and the remaining
+  # count is exactly the unsupervised restarts that followed this one.
+  BEFORE_NRESTARTS=$(nrestarts)
 
   if wait_for_health && [ "$(nrestarts)" = "$BEFORE_NRESTARTS" ]; then
     log "Gateway restarted successfully (health 200, no supervised restart)."
@@ -106,11 +124,16 @@ if systemctl is-active --quiet crow-gateway 2>/dev/null; then
     log "ERROR: the gateway did not come up on the new code (health 200 within ${HEALTH_TIMEOUT_SECS}s, NRestarts unchanged: failed). Rolling back..."
     rollback
     sudo systemctl restart crow-gateway
+    if [ "$ROLLBACK_OK" != "1" ]; then
+      log "ERROR: the rollback did not complete cleanly (see above); the service was restarted anyway. Fix the checkout by hand, then run the update again."
+    fi
     if wait_for_health; then
       log "Rolled back to ${PREV_REF:0:8} — gateway healthy."
     else
       log "ERROR: the gateway is still not healthy after the rollback. See the gateway log; the automatic rollback guard will act on the next start."
     fi
+    # Non-zero whenever the update failed, whether the rollback worked or was
+    # refused: a script that exits 0 here would report a silent stop.
     exit 1
   fi
 else

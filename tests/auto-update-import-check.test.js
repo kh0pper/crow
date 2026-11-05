@@ -171,6 +171,20 @@ test("a tree whose gateway graph throws at import fails the check", () => {
   });
 });
 
+test("a tree whose index.js only MENTIONS the seam in a comment has no seam", () => {
+  // S3: `includes("CROW_GATEWAY_IMPORT_CHECK")` is true for a comment, so a
+  // future sha that keeps the comment but moves the statement would be run as a
+  // full gateway (with the live DB) until the deadline kills it.
+  const f = fixture({
+    bIndex: `// The ${IMPORT_CHECK_ENV} seam was moved below this line.\n` +
+      `import { writeFileSync } from "node:fs";\n` +
+      `writeFileSync(new URL("./import-ran.sentinel", import.meta.url), "1");\n` +
+      `process.exit(0);\n`,
+  });
+  g(f.work, "checkout", f.bad);
+  assert.equal(hasImportCheckSeam(f.work), false, "a comment is not a seam");
+});
+
 test("a hanging graph is a timeout, not a pass", async () => {
   const root = mkdtempSync(join(tmpdir(), "ic-plain-"));
   try {
@@ -192,6 +206,43 @@ test("exit 0 without the token is a failure", async () => {
     assert.equal(r.exitCode, 0);
     assert.equal(r.token, false);
     assert.equal(r.ok, false, "an early exit proves nothing about the graph");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+/** A shell for "is this pid still running?" that does not count a zombie. */
+function processAlive(pid) {
+  try { process.kill(pid, 0); } catch { return false; }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+    return state !== "Z"; // it exited; only the table entry is left
+  } catch { return true; } // no /proc: trust the signal check
+}
+
+test("a grandchild holding stdout is a clean timeout, and nothing survives it", async () => {
+  // The child loads, prints the token and exits 0, but leaves a grandchild that
+  // inherited stdout. The parent's pipe only closes with the last holder, so a
+  // direct-child kill alone would (a) report this healthy tree as a timeout AND
+  // (b) leak the grandchild. The deadline must take the whole process group.
+  const root = mkdtempSync(join(tmpdir(), "ic-grandchild-"));
+  const pidFile = join(root, "servers", "gateway", "grandchild.pid");
+  try {
+    mkdirSync(join(root, "servers", "gateway"), { recursive: true });
+    writeFileSync(join(root, "servers", "gateway", "index.js"), `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const kid = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: ["ignore", "inherit", "ignore"] });
+writeFileSync(new URL("./grandchild.pid", import.meta.url), String(kid.pid));
+if (process.env.${IMPORT_CHECK_ENV} === "1") { process.stdout.write("${IMPORT_CHECK_TOKEN}\\n"); process.exit(0); }
+`);
+    const r = await Promise.race([
+      runImportCheck({ appRoot: root, timeoutMs: 1500 }),
+      new Promise((_res, rej) => setTimeout(() => rej(new Error("the import check never returned")), 10000)),
+    ]);
+    assert.equal(r.ok, false);
+    assert.equal(r.timedOut, true, "the pipe stayed open past the deadline — that is a timeout, not a pass");
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    assert.ok(Number.isInteger(pid) && pid > 0, "the fixture recorded its grandchild's pid");
+    assert.equal(processAlive(pid), false, "the whole process group was killed, not just the direct child");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -233,7 +284,8 @@ test("a pulled sha whose gateway graph throws at import is rolled back before in
     assert.equal(marker.expires_at, undefined);
     assert.ok(marker.previous.length === 40 && marker.sha.length === 40, "full 40-hex shas only");
 
-    assert.ok(spooledCodes(f.alerts).includes("update-rolled-back"), "the operator is alerted");
+    assert.ok(spooledCodes(f.alerts).length === 0,
+      `one bell per rollback: the spool write is dropped, the classified result already rings it (saw ${JSON.stringify(spooledCodes(f.alerts))})`);
   } finally {
     _setAppRootForTest(REAL_APP_ROOT);
     _setDbForTest(null);
@@ -291,7 +343,8 @@ exec ${realGit} "$@"
     assert.equal(readFileSync(join(f.work, "a.txt"), "utf8"), "local edit\n", "the local edit survived");
     const marker = readUpdateQuarantine({ gitDir: f.gitDir });
     assert.equal(marker.sha, f.bad, "the sha is quarantined whatever the checkout does");
-    assert.ok(spooledCodes(f.alerts).includes("update-rollback-blocked"), "the operator is alerted");
+    assert.ok(spooledCodes(f.alerts).length === 0,
+      `one bell per rollback: no spool file on the blocked path either (saw ${JSON.stringify(spooledCodes(f.alerts))})`);
   } finally {
     process.env.PATH = prevPath;
     _setAppRootForTest(REAL_APP_ROOT);
@@ -331,6 +384,113 @@ exit 0
     _setDbForTest(null);
     _setAlertsRootForTest(null);
   }
+});
+
+test("a failed npm install records the transient deps-failed reason, not the commit's fault", async () => {
+  // S4: a registry outage makes the import check fail on a missing module. That
+  // says nothing about the commit, so it must expire (6 h) instead of pausing
+  // updates until main moves.
+  const f = fixture({ bIndex: SEAM_THROWS, bFiles: { "servers/gateway/boom.js": BOOM }, changePkg: true });
+  const db = stubDb();
+  const shimDir = join(f.root, "bin");
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db);
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(join(shimDir, "npm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.rolledBack, true, JSON.stringify(r));
+    assert.match(db.settings.get("auto_update_last_result"), /fails to load \(deps-failed\)/);
+    const marker = readUpdateQuarantine({ gitDir: f.gitDir });
+    assert.equal(marker.reason, "deps-failed");
+    const ttl = Date.parse(marker.expires_at) - Date.parse(marker.at);
+    assert.ok(Math.abs(ttl - 6 * 60 * 60 * 1000) < 2000, `a machine-side reason expires (got ${ttl} ms)`);
+  } finally {
+    process.env.PATH = prevPath;
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("an unresolvable previous sha is a distinct blocked reason, never a bogus reset", async () => {
+  // `reset --keep ""` fails with git's overlap message, which would blame local
+  // changes for a checkout whose own HEAD could not be read.
+  const f = fixture({ bIndex: SEAM_THROWS, bFiles: { "servers/gateway/boom.js": BOOM } });
+  const db = stubDb();
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { stdio: "pipe" }).toString().trim();
+  const shimDir = join(f.root, "bin");
+  const argvLog = join(f.root, "git-argv.log");
+  const prevPath = process.env.PATH;
+  try {
+    install(f, db);
+    mkdirSync(shimDir, { recursive: true });
+    // `rev-parse HEAD` (the FULL-sha read, not `--short`) prints nothing while the
+    // checkout still sits on the previous sha: the pre-pull read is unresolvable.
+    writeFileSync(join(shimDir, "git"), `#!/bin/sh
+printf '%s\\n' "$*" >> '${argvLog}'
+if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ] && [ "$(${realGit} rev-parse HEAD)" = '${f.prev}' ]; then exit 0; fi
+exec ${realGit} "$@"
+`, { mode: 0o755 });
+    process.env.PATH = `${shimDir}:${prevPath}`;
+
+    const r = await checkForUpdates();
+    process.env.PATH = prevPath;
+
+    assert.equal(r.blocked, true, JSON.stringify(r));
+    assert.match(db.settings.get("auto_update_last_result"),
+      new RegExp(`^Update rollback blocked: ${f.bad.slice(0, 9)} fails to load \\(import-check\\) and the checkout could not be reset to the previous commit — the previous commit could not be determined`));
+    const calls = readFileSync(argvLog, "utf8");
+    assert.ok(!/reset --keep/.test(calls), `no reset was attempted: ${calls}`);
+    assert.equal(g(f.work, "rev-parse", "HEAD"), f.bad, "nothing was reset");
+    assert.equal(readUpdateQuarantine({ gitDir: f.gitDir }).sha, f.bad, "the sha is still quarantined");
+  } finally {
+    process.env.PATH = prevPath;
+    _setAppRootForTest(REAL_APP_ROOT);
+    _setDbForTest(null);
+    _setAlertsRootForTest(null);
+  }
+});
+
+test("originalEnv() is the PRE-gate environment: a real gate run leaves it untouched", async () => {
+  // S6: the snapshot test above proves the object is frozen, not that it is the
+  // environment the unit configured. This spawns a real process whose first
+  // import is the real instance-paths gate, so the checkout .env really does pin
+  // CROW_DATA_DIR in process.env — and originalEnv() must still be clean.
+  const scratchHome = mkdtempSync(join(tmpdir(), "ic-env-"));
+  const entry = join(scratchHome, "entry.mjs");
+  const outFile = join(scratchHome, "out.json");
+  const dataDir = join(scratchHome, "inst", "data");
+  const envPath = join(scratchHome, "gateway.env");
+  try {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(envPath, `CROW_DATA_DIR=${dataDir}\n`);
+    writeFileSync(entry, `import ${JSON.stringify(pathToFileURL(join(REAL_APP_ROOT, "servers", "gateway", "boot", "run-instance-paths-gate.js")).href)};
+import { writeFileSync } from "node:fs";
+import { originalEnv } from ${JSON.stringify(pathToFileURL(join(REAL_APP_ROOT, "servers", "gateway", "boot", "import-check.js")).href)};
+writeFileSync(${JSON.stringify(outFile)}, JSON.stringify({
+  live: process.env.CROW_DATA_DIR ?? null,
+  original: originalEnv().CROW_DATA_DIR ?? null,
+}));
+`);
+    const childEnv = { ...process.env };
+    for (const k of ["CROW_DATA_DIR", "CROW_DB_PATH", "CROW_TASKS_DB_PATH", "CROW_ALLOW_SHARED_DATA_DIR"]) delete childEnv[k];
+    Object.assign(childEnv, {
+      HOME: scratchHome,
+      CROW_HOME: join(scratchHome, ".crow"),
+      CROW_APP_ENV_PATH: envPath,
+      CROW_ISOLATION_CHECK: "0",
+    });
+    execFileSync(process.execPath, [entry], { env: childEnv, stdio: "pipe", timeout: 30000 });
+
+    const seen = JSON.parse(readFileSync(outFile, "utf8"));
+    assert.equal(seen.live, dataDir, "the gate pinned CROW_DATA_DIR in process.env, as it does in the gateway");
+    assert.equal(seen.original, null, "the child's env must come from BEFORE the gate (S1)");
+  } finally { rmSync(scratchHome, { recursive: true, force: true }); }
 });
 
 test("a tree without the seam: the check is skipped, no child is spawned, the update goes through", async () => {
