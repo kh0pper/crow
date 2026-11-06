@@ -204,18 +204,29 @@ check_ports_free() { # 0 when every CROW_INSTALL_PORTS entry is free or Crow's
 # on anything but 22 would drop the operator's own session at that moment, and
 # they could not get back in. Three probes, all best-effort — 22 is always
 # allowed as well, so the worst case is exactly the old behaviour:
-#   1. `sudo ss -ltnHp` filtered to listeners whose process is sshd: the ports
-#      sshd REALLY listens on. This is the only probe that sees a
-#      socket-activated sshd (Ubuntu 22.10+ ships ssh.socket, where a custom
-#      port lives in a ListenStream= drop-in and no `Port` line exists at all).
-#      The users: column needs root — see the no-prompt note below.
-#   2. SSH_CONNECTION's 4th field: the port THIS session arrived on.
-#   3. sshd_config's own Port lines, world-readable on Debian/Ubuntu (the drop-in
-#      directory is where distro packages and cloud images put them).
-# Probe 1 cannot ask for a password: every sudo'd line above it already has.
+#   A. SSH_CONNECTION's 4th field: the port THIS session arrived on.
+#   B. `sshd -T`'s effective config: the authority. It applies the config file,
+#      every Include'd drop-in and the compiled-in defaults, and it is the only
+#      probe that cannot be fooled by what a file merely says. When it cannot
+#      answer (no binary, a config error) the config-file probe below takes over.
+#   C. systemd's socket activation (`ssh.socket` on Ubuntu 22.10+, `sshd.socket`
+#      elsewhere): there a custom port lives in a ListenStream= drop-in and no
+#      `Port` line exists at all. Loopback-only and non-Stream entries are not
+#      reachable by an operator, so they are not candidates.
+# A port is only ever a candidate: each one is range-checked, normalised to its
+# decimal value and de-duplicated before it is printed, and every candidate
+# lives in an array — two probes are never concatenated into one string (an `ss`
+# row's `22` glued to SSH_CONNECTION's `22` once became the bogus port 2222).
+# Probe B cannot ask for a password: every sudo'd line above it already has.
 # The install body's first privileged call is `sudo apt update` (Step 1) and the
 # ufw `default`/`allow 22` lines sit directly above the probe, so by then sudo is
 # obtained — a box that re-prompts every time would have prompted there instead.
+#
+# CROW_SSHD / CROW_SYSTEMCTL are the same kind of test seam as CROW_SUDO below:
+# the suite points them at shims, so no test can reach the real sshd or systemd.
+CROW_SSHD="${CROW_SSHD:-sshd}"
+CROW_SYSTEMCTL="${CROW_SYSTEMCTL:-systemctl}"
+
 port_in_range() { # <port> — 0 when it is a usable TCP port (1-65535)
   local p="${1:-}"
   case "$p" in ''|*[!0-9]*) return 1 ;; esac
@@ -224,29 +235,26 @@ port_in_range() { # <port> — 0 when it is a usable TCP port (1-65535)
   [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
 }
 
-sshd_ss_ports() { # — the ports sshd is really listening on, one per line
-  # `-p` names the owning process, but only root gets that column: without it no
-  # line matches, nothing is printed, and the other two probes answer instead.
-  local out="" line addr port
-  out="$(sudo_cmd ss -ltnHp 2>/dev/null || true)"
-  [ -n "$out" ] || return 0
+sshd_effective_ports() { # — `sshd -T`'s `port` lines, one per line; non-zero when it cannot answer
+  # `-T` prints sshd's EFFECTIVE configuration: the Include'd files are already
+  # resolved, defaults are filled in, and a config error makes it fail (nothing on
+  # stdout), which is exactly the cue to fall back to the config file.
+  local out="" line got=0
+  out="$(sudo_cmd "$CROW_SSHD" -T 2>/dev/null)" || return 1
+  [ -n "$out" ] || return 1
   while IFS= read -r line; do
-    case "$line" in *sshd*) ;; *) continue ;; esac
-    # Columns: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port Users:…
-    read -r _ _ _ addr _ <<< "$line" || true
-    port="${addr##*:}"              # 0.0.0.0:2222 · [::]:2222 · *:2222 → 2222
-    printf '%s\n' "$port"
+    [[ "$line" =~ ^port\ ([0-9]+)$ ]] || continue
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    got=1
   done <<< "$out"
+  [ "$got" -eq 1 ]
 }
 
-# shellcheck disable=SC2120  # the config-file params are test-only seams; the prod call passes none
-ssh_ports() { # [config_file…] — every port found once, one per line
-  local p cfgs=() raw="" port seen=" "
-  raw="$(sshd_ss_ports)"
-  if [ -n "${SSH_CONNECTION:-}" ]; then
-    read -r _ _ _ p <<< "$SSH_CONNECTION" || true
-    raw="${raw}${p:-}"$'\n'
-  fi
+sshd_config_ports() { # [config_file…] — the Port lines in sshd_config and its drop-ins
+  # Fallback only (probe B could not answer). The files are world-readable on
+  # Debian/Ubuntu, and the drop-in directory is where distro packages and cloud
+  # images put them.
+  local p cfgs=()
   if [ "$#" -gt 0 ]; then
     cfgs=("$@")
   else
@@ -260,15 +268,63 @@ ssh_ports() { # [config_file…] — every port found once, one per line
       # Keywords are case-insensitive, and `q` on the first Match line stops the
       # read there: a Port inside a Match block is invalid for sshd, so honouring
       # it would only open a port nothing listens on.
-      raw="${raw}$(sed -n '/^[[:space:]]*[Mm][Aa][Tt][Cc][Hh]/q;s/^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]][[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$p" 2>/dev/null || true)"$'\n'
+      sed -n '/^[[:space:]]*[Mm][Aa][Tt][Cc][Hh]/q;s/^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]][[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$p" 2>/dev/null || true
     fi
   done
+}
+
+sshd_socket_ports() { # — the Stream Listen ports of ssh.socket / sshd.socket, one per line
+  # `systemctl show -p Listen --value` prints one address per line, e.g.
+  # `[::]:22 (Stream)` or `0.0.0.0:2222 (Stream)`. A unit that does not exist
+  # prints nothing and exits non-zero — with or without socket activation.
+  local unit="" out="" line addr host port
+  for unit in ssh.socket sshd.socket; do
+    out="$("$CROW_SYSTEMCTL" show -p Listen --value "$unit" 2>/dev/null || true)"
+    [ -n "$out" ] || continue
+    while IFS= read -r line; do
+      addr="${line% (Stream)}"
+      [ "$addr" != "$line" ] || continue        # Datagram/Sequential not serving SSH
+      case "$addr" in *:*) ;; *) continue ;; esac
+      host="${addr%:*}"                         # 0.0.0.0:2222 · [::]:22 · [::1]:2201
+      port="${addr##*:}"
+      # A loopback-only listener is not a way back in for a remote operator.
+      case "$host" in 127.*|'[::1]'|localhost) continue ;; esac
+      printf '%s\n' "$port"
+    done <<< "$out"
+  done
+}
+
+# shellcheck disable=SC2120  # the config-file params are test-only seams; the prod call passes none
+ssh_ports() { # [config_file…] — every port found once, one per line
+  local -a candidates=()
+  local p port num seen=" "
+  # A. The port this very session arrived on — the one ufw must not close.
+  if [ -n "${SSH_CONNECTION:-}" ]; then
+    read -r _ _ _ p <<< "$SSH_CONNECTION" || true
+    candidates+=("${p:-}")
+  fi
+  # B. sshd's effective config, or the files when sshd cannot tell us.
+  if p="$(sshd_effective_ports)"; then
+    while IFS= read -r port; do
+      if [ -n "$port" ]; then candidates+=("$port"); fi
+    done <<< "$p"
+  else
+    while IFS= read -r port; do
+      if [ -n "$port" ]; then candidates+=("$port"); fi
+    done < <(sshd_config_ports "$@")
+  fi
+  # C. Socket activation (a ListenStream= port has no `Port` line anywhere).
   while IFS= read -r port; do
+    if [ -n "$port" ]; then candidates+=("$port"); fi
+  done < <(sshd_socket_ports)
+  [ "${#candidates[@]}" -gt 0 ] || return 0
+  for port in "${candidates[@]}"; do
     port_in_range "$port" || continue
-    case "$seen" in *" $port "*) continue ;; esac
-    seen="${seen}${port} "
-    printf '%s\n' "$port"
-  done <<< "$raw"
+    num=$((10#$port))         # 0022 is 22 — decimal, never octal
+    case "$seen" in *" $num "*) continue ;; esac
+    seen="${seen}${num} "
+    printf '%s\n' "$num"
+  done
 }
 
 # ─── Failure tracking + gateway verification (audit N1c-15) ──

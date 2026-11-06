@@ -781,16 +781,37 @@ test("N1c-15: the port precheck runs before Step 1 — nothing is installed or s
 });
 
 /** A scratch PATH for ssh_ports: `sudo` runs its argument (exactly what the
- *  script's own helper does, and it can never ask for a password), `ss` prints
- *  exactly the socket table this test pretends to see. Nothing here can reach
- *  the real socket table or /etc/ssh. */
-function sshScratch(ssOutput = "") {
+ *  script's own helper does, and it can never ask for a password), `sshd` is the
+ *  CROW_SSHD seam and `systemctl` the CROW_SYSTEMCTL seam. Both seams point at
+ *  the shims by absolute path and `ss` is shimmed too, so nothing here can reach
+ *  the real sshd, systemd, socket table or /etc/ssh. */
+function sshScratch({ sshdT = "", sshdFails = false, sockets = {}, ssRows = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "crow-sshports-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
   shim(bin, "sudo", 'exec "$@"');
-  writeFileSync(join(bin, "ss"), `#!/bin/sh\ncat <<'SSEOF'\n${ssOutput}\nSSEOF\n`, { mode: 0o755 });
-  return { dir, bin, env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir } };
+  // `sshd -T`: exactly the effective config this test pretends to see, or a
+  // clean failure (no binary / a config error) — the cue for the fallback.
+  shim(bin, "sshd", sshdFails ? "exit 1" : `cat <<'SSHD'\n${sshdT}\nSSHD`);
+  // The ss listener probe is gone. Where a test hands it rows they are the kind
+  // the old probe read (an sshd row, or a session process holding a forwarded
+  // port): the new code must ignore them, and a regression must never read the
+  // real socket table.
+  shim(bin, "ss", ssRows.length ? `cat <<'SS'\n${ssRows.join("\n")}\nSS` : "exit 1");
+  const units = Object.keys(sockets).map(
+    (unit) => `    *${unit}*)\n      cat <<'LISTEN'\n${sockets[unit].join("\n")}\nLISTEN\n      exit 0 ;;`,
+  );
+  shim(bin, "systemctl", `case "$*" in\n${units.join("\n")}\n    *) exit 1 ;;\nesac`);
+  return {
+    dir,
+    bin,
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: dir,
+      CROW_SSHD: join(bin, "sshd"),
+      CROW_SYSTEMCTL: join(bin, "systemctl"),
+    },
+  };
 }
 
 /** An sshd_config fixture — the config-path seam means /etc/ssh is never read. */
@@ -801,15 +822,10 @@ function sshdConfigFixture(lines) {
   return p;
 }
 
-/** One `ss -ltnHp` row: <local address:port> owned by <process>. */
-function ssRow(addr, proc) {
-  return `LISTEN 0 4096 ${addr} ${addr} users:(("${proc}",pid=812,fd=3))`;
-}
-
-test("N1c-15: ssh_ports falls through a silent ss to SSH_CONNECTION and sshd's Port lines", () => {
-  // `ss` prints nothing here (a box where the users: column is unavailable), so
-  // the two root-free probes must still answer.
-  const scratch = sshScratch("");
+test("N1c-15: when sshd -T cannot answer, ssh_ports falls back to the config-file Port lines", () => {
+  // `sshd -T` fails here (no binary, or a config error): the world-readable
+  // files must still answer, exactly as they did before the sshd -T probe existed.
+  const scratch = sshScratch({ sshdFails: true });
   // Commented `#Port 22` must stay out (Debian/Ubuntu ship the default that way).
   const cfg = sshdConfigFixture("#Port 22\nPort 2222\n  Port 2200\nPubkeyAuthentication yes\n");
   const viaConf = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
@@ -829,46 +845,119 @@ test("N1c-15: ssh_ports falls through a silent ss to SSH_CONNECTION and sshd's P
   assert.equal(none.stdout.trim(), "");
 });
 
-test("N1c-15: ssh_ports takes the listeners sshd really has — the socket-activated port with no Port line", () => {
-  // Ubuntu 22.10+ activates sshd from ssh.socket, so a custom port lives in a
-  // ListenStream= drop-in: no `Port` line exists anywhere and the config file is
-  // silent. Only the real socket table has it. Every local-address shape has to
-  // yield the port from the address column, and the dual-stack pair comes out once.
-  const scratch = sshScratch([
-    ssRow("0.0.0.0:2222", "sshd"),
-    ssRow("[::]:2222", "sshd"),
-    ssRow("*:2200", "sshd"),
-  ].join("\n"));
+test("N1c-15: ssh_ports takes sshd -T's effective Port — the drop-in host with no Port line", () => {
+  // The socket-activated host (Ubuntu 22.10+) keeps its port in a ListenStream=
+  // drop-in: `sshd -T` is the only probe that resolves that into a `port` line.
+  // The session arrived on the same port, and it still comes out once.
+  const scratch = sshScratch({ sshdT: "port 2222\nlistenaddress 0.0.0.0" });
   const cfg = sshdConfigFixture("#Port 22\nListenAddress 0.0.0.0\n");
-  const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 2222",
+  });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(r.stdout.trim().split("\n"), ["2222", "2200"]);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["2222"]);
 });
 
-test("N1c-15: ssh_ports only takes listeners whose process is sshd", () => {
-  const cfg = sshdConfigFixture("");
-  // A non-sshd listener alone yields nothing from that probe. (This is the
-  // filter's own guard: without the sshd match every listener — Caddy, Docker's
-  // proxy — would become an "SSH port".)
-  const onlyForeign = sshScratch(ssRow("0.0.0.0:8443", "docker-proxy"));
-  const a = runWithHelpers(`ssh_ports "${cfg}"`, { ...onlyForeign.env, SSH_CONNECTION: "" });
-  assert.equal(a.status, 0, a.stderr);
-  assert.equal(a.stdout.trim(), "", "a non-sshd listener is not an SSH port");
+test("N1c-15: two probes agreeing on 22 stay 22 — never the glued 2222", () => {
+  // The glue bug: command substitution stripped the trailing newline of the
+  // first probe, so ss's `22` and SSH_CONNECTION's `22` became `2222`. The
+  // firewall then opened a port nothing listens on and left 22 unopened. The ss
+  // row is the one the old probe read; today's code never looks at it.
+  const scratch = sshScratch({
+    sshdT: "port 22\npermitrootlogin without-password",
+    ssRows: ['LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=812,fd=3))'],
+  });
+  const cfg = sshdConfigFixture("#Port 22\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 22",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["22"]);
+  assert.doesNotMatch(r.stdout, /2222/);
+});
 
-  // Mixed table: the foreign rows stay out, the sshd row comes in. This half is
-  // what the pre-change script fails — it had no ss probe at all, so it printed
-  // nothing for a host whose sshd port is only visible in the socket table.
-  const mixed = sshScratch([
-    ssRow("0.0.0.0:8443", "docker-proxy"),
-    ssRow("[::]:2222", "sshd"),
-  ].join("\n"));
-  const b = runWithHelpers(`ssh_ports "${cfg}"`, { ...mixed.env, SSH_CONNECTION: "" });
+test("N1c-15: ssh_ports takes a socket-activated ListenStream= port ([::]:2200)", () => {
+  // ssh.socket's Listen value, as `systemctl show -p Listen --value` prints it.
+  const scratch = sshScratch({
+    sshdT: "port 22",
+    sockets: { "ssh.socket": ["[::]:2200 (Stream)", "0.0.0.0:2200 (Stream)"] },
+  });
+  const cfg = sshdConfigFixture("#Port 22\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["22", "2200"]);
+});
+
+test("N1c-15: a loopback-only socket listener is never an SSH candidate", () => {
+  // 127.0.0.0/8 and [::1] are not a way back in for a remote operator, so a
+  // firewall rule for one is pointless (and hides the real port's absence).
+  for (const listen of ["127.0.0.1:2201 (Stream)", "[::1]:2201 (Stream)", "localhost:2201 (Stream)"]) {
+    const scratch = sshScratch({ sshdFails: true, sockets: { "ssh.socket": [listen] } });
+    const cfg = sshdConfigFixture("#Port 22\n");
+    const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), "", `${listen} must not become an SSH candidate`);
+  }
+  // A Datagram entry on the same unit is not SSH either.
+  const dgram = sshScratch({ sshdFails: true, sockets: { "ssh.socket": ["[::]:2202 (Datagram)"] } });
+  const rd = runWithHelpers(`ssh_ports "${sshdConfigFixture("")}"`, { ...dgram.env, SSH_CONNECTION: "" });
+  assert.equal(rd.status, 0, rd.stderr);
+  assert.equal(rd.stdout.trim(), "");
+});
+
+test("N1c-15: a padded port is normalised to decimal and de-duplicated (0022 is 22)", () => {
+  // `$((10#0022))` is 22; a bare `$((0022))` would be octal (and `0029` an error).
+  const cfg = sshdConfigFixture("Port 0022\n");
+  // The effective config's `port 0022` and the live session's `22` are one port.
+  const effective = sshScratch({ sshdT: "port 0022" });
+  const a = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...effective.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 22",
+  });
+  assert.equal(a.status, 0, a.stderr);
+  assert.deepEqual(a.stdout.trim().split("\n"), ["22"]);
+  // …and the config-file fallback normalises too: it printed 0022 AND 22 before.
+  const fallback = sshScratch({ sshdFails: true });
+  const b = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...fallback.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 22",
+  });
   assert.equal(b.status, 0, b.stderr);
-  assert.deepEqual(b.stdout.trim().split("\n"), ["2222"]);
+  assert.deepEqual(b.stdout.trim().split("\n"), ["22"]);
+});
+
+test("N1c-15: no candidate comes from a session process or the socket table — the ss probe is gone", () => {
+  // Round 2: `ss -ltnHp` + a `*sshd*` process match also caught sshd's own
+  // per-session children, whose `ssh -R` forwards would then be opened. That is
+  // what an sshd-session row below looks like: it must never reach the firewall.
+  const scratch = sshScratch({
+    sshdT: "port 22",
+    ssRows: [
+      'LISTEN 0 4096 127.0.0.1:8443 0.0.0.0:* users:(("sshd-session",pid=913,fd=7))',
+    ],
+  });
+  const r = runWithHelpers(`ssh_ports "${sshdConfigFixture("#Port 22\n")}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["22"], "a forwarded port is not an SSH port");
+  // …and the probe itself is gone from the source, not merely unreachable.
+  const s = src();
+  assert.doesNotMatch(s, /ss -ltnHp/, "the ss listener probe must be gone");
+  assert.doesNotMatch(s, /sshd_ss_ports/, "…and so must its helper");
+  assert.doesNotMatch(s, /\*sshd\*/, "…and the process-name substring match that also took ssh -R forwards");
+  assert.match(s, /sudo_cmd "\$CROW_SSHD" -T/, "the effective-config probe goes through the script's sudo seam");
+  assert.match(s, /"\$CROW_SYSTEMCTL" show -p Listen --value/, "socket activation is read from systemd");
+  assert.match(s, /SSH_CONNECTION/, "the live session stays a probe");
+  assert.match(s, /^CROW_SSHD="\$\{CROW_SSHD:-sshd\}"$/m, "CROW_SSHD is a test seam");
+  assert.match(s, /^CROW_SYSTEMCTL="\$\{CROW_SYSTEMCTL:-systemctl\}"$/m, "CROW_SYSTEMCTL is a test seam");
 });
 
 test("N1c-15: ssh_ports matches the Port keyword case-insensitively (sshd keywords are)", () => {
-  const scratch = sshScratch("");
+  const scratch = sshScratch({ sshdFails: true });
   const cfg = sshdConfigFixture("PORT 2200\nPubkeyAuthentication yes\n");
   const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
   assert.equal(r.status, 0, r.stderr);
@@ -876,7 +965,7 @@ test("N1c-15: ssh_ports matches the Port keyword case-insensitively (sshd keywor
 });
 
 test("N1c-15: ssh_ports stops at the first Match line — a Port there is invalid for sshd", () => {
-  const scratch = sshScratch("");
+  const scratch = sshScratch({ sshdFails: true });
   const cfg = sshdConfigFixture("Port 2222\nMatch Address 100.64.20.0/24\n  Port 2299\n");
   const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
   assert.equal(r.status, 0, r.stderr);
@@ -884,7 +973,7 @@ test("N1c-15: ssh_ports stops at the first Match line — a Port there is invali
 });
 
 test("N1c-15: ssh_ports drops ports outside 1-65535 (ufw allow 99999/tcp would fail under set -e)", () => {
-  const scratch = sshScratch(ssRow("0.0.0.0:99999", "sshd"));
+  const scratch = sshScratch({ sshdT: "port 99999\nport 0\nport 65536\nport 2222\nport 65535" });
   const cfg = sshdConfigFixture("Port 99999\nPort 0\nPort 65536\nPort 2222\nPORT 65535\n");
   const r = runWithHelpers(`ssh_ports "${cfg}"`, {
     ...scratch.env,
@@ -894,11 +983,11 @@ test("N1c-15: ssh_ports drops ports outside 1-65535 (ufw allow 99999/tcp would f
   assert.deepEqual(r.stdout.trim().split("\n"), ["2222", "65535"]);
 });
 
-test("N1c-15: ssh_ports prints each port once (SSH_CONNECTION, ss and the config agree)", () => {
-  const scratch = sshScratch([
-    ssRow("0.0.0.0:2222", "sshd"),
-    ssRow("[::]:2222", "sshd"),
-  ].join("\n"));
+test("N1c-15: ssh_ports prints each port once (SSH_CONNECTION, sshd -T and ssh.socket agree)", () => {
+  const scratch = sshScratch({
+    sshdT: "port 2222\nport 22",
+    sockets: { "ssh.socket": ["[::]:2222 (Stream)"] },
+  });
   const cfg = sshdConfigFixture("Port 2222\nPort 22\n");
   const r = runWithHelpers(`ssh_ports "${cfg}"`, {
     ...scratch.env,
@@ -908,9 +997,9 @@ test("N1c-15: ssh_ports prints each port once (SSH_CONNECTION, ss and the config
   assert.deepEqual(r.stdout.trim().split("\n"), ["2222", "22"]);
 });
 
-test("N1c-15: the sshd listener probe uses the script's sudo helper, never a fresh prompt", () => {
+test("N1c-15: the sshd -T probe uses the script's sudo helper, never a fresh prompt", () => {
   const s = src();
-  assert.ok(s.includes("sudo_cmd ss -ltnHp"), "the ss probe must go through sudo_cmd (the script's own seam)");
+  assert.ok(s.includes('sudo_cmd "$CROW_SSHD" -T'), "sshd -T must go through sudo_cmd (the script's own seam)");
   // sudo is already obtained by then: Step 1's first privileged call, and the
   // plain `sudo ufw` rules directly above the call site, keep the timestamp fresh.
   const callSite = s.indexOf('SSH_EXTRA_PORTS="$(ssh_ports)"');
