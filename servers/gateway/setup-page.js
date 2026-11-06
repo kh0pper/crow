@@ -74,7 +74,11 @@ export async function setupPageHandler(req, res) {
   const t = translations[lang] || translations.en;
 
   // First-run gate (setup-token.js): with no password set, only direct loopback
-  // or a request carrying the matching one-time token sees the password form.
+  // to a loopback name (isLoopbackHost: localhost / *.localhost / 127.0.0.0/8 /
+  // [::1], or the host of a configured own origin) or a request carrying the
+  // matching one-time token sees the password form. A DNS-rebinding page's
+  // loopback socket carries its own domain as the Host, so it is refused here
+  // like any other visitor without the token.
   const gate = allowFirstRun(req, { from: "query" });
   const { token: setupToken, allowed: tokenAllowed } = gate;
   const tokenBlocked = !tokenAllowed;

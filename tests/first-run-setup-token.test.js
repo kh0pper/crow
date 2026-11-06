@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, statSync, existsSync, readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -46,6 +47,8 @@ const {
   bootSetupToken,
   setupTokenPath,
 } = await import("../servers/gateway/dashboard/setup-token.js");
+const { isSameOriginRequest, configuredOwnOrigins, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } =
+  await import("../servers/gateway/dashboard/same-origin.js");
 
 const db = createDbClient();
 const LAN = "192.0.2.7";
@@ -377,4 +380,326 @@ test("MINOR 3: two concurrent getSetupToken calls return the same value (first w
   assert.match(onDisk, /^[A-Za-z0-9_-]{40,}$/, "one token on disk");
   assert.equal(a.stdout.trim(), onDisk, "the first caller reports what is on disk");
   assert.equal(b.stdout.trim(), onDisk, "so does the racing caller");
+});
+
+// ---------------------------------------------------------------------------
+// N1a-2: a web page must not be able to set the owner's first password.
+//
+// POST /dashboard/login is handled BEFORE csrfMiddleware (a first-run request
+// carries no crow_session cookie, and csrf.js deliberately skips those) and
+// allowFirstRun() exempts bare loopback, so on the code before same-origin.js
+// every browser-shaped POST below answered 303 with the password set. Any page
+// open in the owner's browser could auto-submit a form to
+// http://localhost:3001/dashboard/login during first run and own the instance.
+// A browser writes Origin / Sec-Fetch-Site itself and page script can neither
+// read nor forge them, so those two headers now decide; a request with neither
+// (curl on the box, the installer) keeps working through the setup-token gate.
+// ---------------------------------------------------------------------------
+
+const FOREIGN_ORIGIN = "https://evil.example";
+/** The refusal is a plain sentence, not a page. */
+const isRefusal = (r, body) => r.status === 403 && /^text\/plain/.test(r.headers.get("content-type") || "") && body === FIRST_RUN_CROSS_ORIGIN_MESSAGE;
+
+// Current code: 303 and isPasswordSet() === true — this is the hole itself.
+test("N1a-2: a cross-site Origin cannot set the first password (403, nothing set)", async () => {
+  await resetFirstRun();
+  const foreign = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { origin: FOREIGN_ORIGIN } });
+  assert.ok(isRefusal(foreign, await foreign.text()), `expected the plain 403, got ${foreign.status}`);
+  assert.equal(await isPasswordSet(), false, "no password was set");
+
+  // An opaque Origin (a sandboxed frame, a file: page) and another port on this
+  // host are not this gateway either.
+  const opaque = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { origin: "null" } });
+  assert.equal(opaque.status, 403, "an opaque origin is not same-origin");
+  const otherPort = await post("/dashboard/login", { password: PW, confirm: PW }, {
+    peer: null,
+    headers: { origin: `http://127.0.0.1:${Number(server.address().port) + 1}` },
+  });
+  assert.equal(otherPort.status, 403, "another port is another origin");
+  assert.equal(await isPasswordSet(), false, "still no password");
+});
+
+// Current code: 303 and isPasswordSet() === true for both values.
+test("N1a-2: Sec-Fetch-Site cross-site — and same-site from another port — is refused", async () => {
+  await resetFirstRun();
+  for (const site of ["cross-site", "same-site"]) {
+    const r = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { "sec-fetch-site": site } });
+    assert.ok(isRefusal(r, await r.text()), `${site}: expected the plain 403, got ${r.status}`);
+    assert.equal(await isPasswordSet(), false, `no password after ${site}`);
+  }
+  // A page cannot talk its way out by also naming this origin: cross-site wins.
+  const both = await post("/dashboard/login", { password: PW, confirm: PW }, {
+    peer: null,
+    headers: { "sec-fetch-site": "cross-site", origin: base },
+  });
+  assert.equal(both.status, 403, "Sec-Fetch-Site alone decides");
+  assert.equal(await isPasswordSet(), false);
+});
+
+// Current code: 303 and isPasswordSet() === true in every case, so these pass
+// already — they are here to pin that the fix refuses only foreign pages.
+test("N1a-2: the setup page's own Origin, a typed URL (Sec-Fetch-Site: none) and no headers at all still set it", async () => {
+  await resetFirstRun();
+  const own = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { origin: base, "sec-fetch-site": "same-origin" } });
+  assert.equal(own.status, 303, (await own.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true, "the setup page's own form still works");
+  assert.equal(existsSync(TOKEN_FILE), false, "and the one-time token is still cleared");
+
+  await resetFirstRun();
+  const bare = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null });
+  assert.equal(bare.status, 303, "curl / the installer on the box carries neither header");
+  assert.equal(await isPasswordSet(), true);
+
+  await resetFirstRun();
+  const typed = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { "sec-fetch-site": "none" } });
+  assert.equal(typed.status, 303, "Sec-Fetch-Site: none is a typed URL or a bookmark");
+  assert.equal(await isPasswordSet(), true);
+});
+
+// Current code: the foreign-Origin request is a 303 with the password set (the
+// setup token does not help — the page posting it is the attacker's page).
+test("N1a-2: the setup-token path gets the same Origin rule (foreign refused, own Origin still sets it)", async () => {
+  const token = await resetFirstRun();
+  const foreign = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: token }, { headers: { origin: FOREIGN_ORIGIN } });
+  assert.ok(isRefusal(foreign, await foreign.text()), `expected the plain 403, got ${foreign.status}`);
+  assert.equal(await isPasswordSet(), false, "a token-bearing page from another site is refused");
+  assert.ok(existsSync(TOKEN_FILE), "and the one-time token was not spent");
+
+  const own = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: token }, { headers: { origin: base, "sec-fetch-site": "same-origin" } });
+  assert.equal(own.status, 303, (await own.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true, "the setup link opened on this machine still works");
+  assert.equal(existsSync(TOKEN_FILE), false, "the token is cleared");
+});
+
+// Current code: unchanged (no first-run gate once a password exists) — pinned so
+// the fix cannot spread into the ordinary login.
+test("N1a-2: after first run nothing changes — a cross-site Origin is still an ordinary login", async () => {
+  await resetFirstRun();
+  const set = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null });
+  assert.equal(set.status, 303, "first-run setup from the box");
+  assert.equal(await isPasswordSet(), true);
+
+  const signedIn = await post("/dashboard/login", { password: PW }, { peer: null, headers: { origin: FOREIGN_ORIGIN, "sec-fetch-site": "cross-site" } });
+  assert.equal(signedIn.status, 303, `a normal login is not gated (got ${signedIn.status})`);
+  const wrong = await post("/dashboard/login", { password: "not-the-password" }, { peer: null, headers: { origin: FOREIGN_ORIGIN } });
+  assert.equal(wrong.status, 200, "the ordinary login error page");
+  assert.equal((await wrong.text()).includes(FIRST_RUN_CROSS_ORIGIN_MESSAGE), false, "not the first-run refusal");
+});
+
+// The rule itself, without a database: which origins count as this gateway's.
+test("N1a-2: the origin rule — Host, a proxy's X-Forwarded-Host, a configured public URL, and what is refused", () => {
+  const req = (headers, protocol = "http") => ({ headers, protocol });
+  const HOST = { host: "127.0.0.1:3001" };
+  const none = { env: {} };
+
+  assert.equal(isSameOriginRequest(req(HOST), none), true, "neither header: a script on the box");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "http://127.0.0.1:3001" }), none), true, "the Host the request reached");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "http://127.0.0.1:3002" }), none), false, "another port is another origin");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://127.0.0.1:3001" }), none), false, "and another scheme is another origin");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://evil.example" }), none), false);
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "null" }), none), false, "an opaque origin");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "file://127.0.0.1:3001" }), none), false, "a non-web scheme");
+  assert.equal(isSameOriginRequest(req({ ...HOST, "sec-fetch-site": "same-origin" }), none), true);
+  assert.equal(isSameOriginRequest(req({ ...HOST, "sec-fetch-site": "none" }), none), true, "a typed URL");
+  assert.equal(isSameOriginRequest(req({ ...HOST, "sec-fetch-site": "cross-site", origin: "http://127.0.0.1:3001" }), none), false, "cross-site beats a matching Origin");
+
+  // Behind Serve or the installer's Caddy: the page's origin is the forwarded
+  // host, and the scheme is the proxy's (which need not forward a proto).
+  const proxied = { host: "127.0.0.1:3001", "x-forwarded-host": "crow.example.ts.net:8444" };
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "https://crow.example.ts.net:8444" }), none), true);
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "http://crow.example.ts.net:8444" }), none), true);
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "https://crow.example.ts.net:8445" }), none), false, "another port behind the proxy too");
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "https://evil.example" }), none), false);
+
+  // A configured public origin is the gateway's own (hosted installs sign in there).
+  const env = { CROW_GATEWAY_URL: "https://crow.example.ts.net" };
+  assert.deepEqual([...configuredOwnOrigins(env)], ["https://crow.example.ts.net"]);
+  assert.deepEqual([...configuredOwnOrigins({})], [], "nothing configured, nothing allowed");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://crow.example.ts.net" }), { env }), true);
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://evil.example" }), { env }), false);
+  // CROW_OAUTH_ISSUER_URL wins over it, exactly as issuer-url.js resolves it.
+  const issuer = { CROW_GATEWAY_URL: "https://public.example", CROW_OAUTH_ISSUER_URL: "https://crow.example.ts.net:8444" };
+  assert.deepEqual([...configuredOwnOrigins(issuer)], ["https://crow.example.ts.net:8444"]);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — DNS rebinding. The gateway's "own origin" is READ from the
+// request (Host), so a page that re-points its own domain at 127.0.0.1 sends
+// Host and Origin that agree, from a loopback socket with no forwarding header:
+// Sec-Fetch-Site and Origin both pass, and the bare-loopback exemption needed no
+// token. The exemption now also demands that the Host name this machine —
+// localhost / *.localhost / 127.0.0.0/8 / [::1], or a configured own origin.
+// ---------------------------------------------------------------------------
+
+/**
+ * One HTTP request whose Host header is NOT the URL's host — `fetch` always
+ * sends the URL's, and rebinding is exactly a Host the URL does not name. The
+ * socket is the loopback test connection (the `peer: null` shape), and no
+ * forwarding header is set, so the request is "direct loopback" as far as
+ * setup-token.js can tell.
+ *
+ * `agent: false` + `connection: close`: the default global agent keeps the
+ * socket alive, and a lingering handle stops this test file's process from
+ * exiting (node --test then never prints its summary).
+ */
+function rawRequest(path, { method = "GET", host, headers = {}, body } = {}) {
+  const payload = body == null ? null : String(body);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: "127.0.0.1",
+      port: server.address().port,
+      path,
+      method,
+      agent: false,
+      setHost: false, // the Host below is the test subject, not the URL's
+      headers: {
+        connection: "close",
+        host,
+        ...(payload ? { "content-type": "application/x-www-form-urlencoded", "content-length": Buffer.byteLength(payload) } : {}),
+        ...headers,
+      },
+    }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => resolve({
+        status: res.statusCode,
+        headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
+        text: async () => text,
+      }));
+    });
+    req.on("error", reject);
+    // A response that never comes must fail the test, not keep the process (and
+    // therefore node --test's summary) alive.
+    req.setTimeout(5_000, () => req.destroy(new Error(`no response to ${method} ${path} within 5s`)));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+const REBIND_HOST = "evil.example:3001";
+
+// Fails on the current code: the route answered 303 with the first password set
+// (Host and Origin agreed, Sec-Fetch-Site was same-origin, and allowFirstRun()
+// exempted any bare loopback socket).
+test("Fix round 1: a rebinding Host (Host = Origin = its own domain, loopback socket) cannot set the first password", { timeout: 20_000 }, async () => {
+  await resetFirstRun();
+  const r = await rawRequest("/dashboard/login", {
+    method: "POST",
+    host: REBIND_HOST,
+    headers: { origin: `http://${REBIND_HOST}`, "sec-fetch-site": "same-origin" },
+    body: new URLSearchParams({ password: PW, confirm: PW }).toString(),
+  });
+  assert.ok(isRefusal(r, await r.text()), `expected the plain 403, got ${r.status}`);
+  assert.equal(await isPasswordSet(), false, "no password was stored");
+  assert.ok(existsSync(TOKEN_FILE), "and the one-time token was not spent");
+});
+
+// Passes on the current code too (the token path is unchanged): pinned so the
+// Host rule cannot swallow the setup link.
+test("Fix round 1: the same rebinding Host with the setup token still sets the first password", { timeout: 20_000 }, async () => {
+  const token = await resetFirstRun();
+  const r = await rawRequest("/dashboard/login", {
+    method: "POST",
+    host: REBIND_HOST,
+    headers: { origin: `http://${REBIND_HOST}`, "sec-fetch-site": "same-origin" },
+    body: new URLSearchParams({ password: PW, confirm: PW, setup_token: token }).toString(),
+  });
+  assert.equal(r.status, 303, (await r.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true, "the token path is not the loopback exemption");
+  assert.equal(existsSync(TOKEN_FILE), false, "the one-time token is cleared");
+});
+
+// Passes on the current code (today's behaviour): pinned so the Host rule is not
+// so tight that the owner on the box is locked out of his own first run.
+test("Fix round 1: every loopback spelling still sets the first password (localhost, 127.0.0.1, [::1], crow.localhost)", { timeout: 20_000 }, async () => {
+  const port = server.address().port;
+  for (const host of [`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`, `crow.localhost:${port}`]) {
+    await resetFirstRun();
+    const r = await rawRequest("/dashboard/login", {
+      method: "POST",
+      host,
+      headers: { origin: `http://${host}`, "sec-fetch-site": "same-origin" },
+      body: new URLSearchParams({ password: PW, confirm: PW }).toString(),
+    });
+    assert.equal(r.status, 303, `${host}: ${(await r.text()).slice(0, 200)}`);
+    assert.equal(await isPasswordSet(), true, `${host} may set the first password`);
+  }
+});
+
+// Passes on the current code (today's behaviour): pinned so a hosted install
+// that reaches its own public name on a loopback socket is not locked out.
+test("Fix round 1: a Host that is the configured public origin's host still sets the first password", { timeout: 20_000 }, async () => {
+  const previous = process.env.CROW_GATEWAY_URL;
+  process.env.CROW_GATEWAY_URL = "https://crow.example.ts.net";
+  try {
+    await resetFirstRun();
+    const r = await rawRequest("/dashboard/login", {
+      method: "POST",
+      host: "crow.example.ts.net:3001",
+      headers: { origin: "http://crow.example.ts.net:3001", "sec-fetch-site": "same-origin" },
+      body: new URLSearchParams({ password: PW, confirm: PW }).toString(),
+    });
+    assert.equal(r.status, 303, (await r.text()).slice(0, 200));
+    assert.equal(await isPasswordSet(), true, "the configured origin is the gateway's own");
+  } finally {
+    if (previous === undefined) delete process.env.CROW_GATEWAY_URL;
+    else process.env.CROW_GATEWAY_URL = previous;
+  }
+});
+
+// Fails on the current code: both pages served the password form to any bare
+// loopback socket, whatever Host it carried (the login page even handed the
+// setup token back in the form).
+test("Fix round 1: GET /dashboard/login and /setup withhold the bare-loopback exemption from a rebinding Host (the token still opens both)", { timeout: 20_000 }, async () => {
+  const token = await resetFirstRun();
+
+  const login = await rawRequest("/dashboard/login", { host: REBIND_HOST, headers: { origin: `http://${REBIND_HOST}` } });
+  const loginHtml = await login.text();
+  assert.equal(login.status, 200);
+  assert.ok(isGated(loginHtml), "gated, exactly as a LAN visitor's page is");
+  assert.equal(/name="setup_token"/.test(loginHtml), false, "and no setup token is handed to it");
+
+  const setup = await rawRequest("/setup", { host: REBIND_HOST });
+  const setupHtml = await setup.text();
+  assert.ok(/Use the link you were sent/.test(setupHtml), "/setup: the blocked message");
+  assert.equal(hasPasswordForm(setupHtml), false, "/setup: no password form");
+
+  // The rule is about the exemption, not about the pages: the setup link works.
+  const loginWithToken = await rawRequest(`/dashboard/login?token=${encodeURIComponent(token)}`, { host: REBIND_HOST });
+  assert.ok(isServedWithToken(await loginWithToken.text()), "the login page with the token");
+  const setupWithToken = await rawRequest(`/setup?token=${encodeURIComponent(token)}`, { host: REBIND_HOST });
+  assert.ok(hasPasswordForm(await setupWithToken.text()), "/setup with the token");
+});
+
+// Cannot fail on the current code — isLoopbackHost() does not exist there. It
+// pins the rule every other test in this section leans on.
+test("Fix round 1: isLoopbackHost — loopback names, loopback literals, a configured own origin, and nothing else", () => {
+  const req = (host) => (host === undefined ? { headers: {} } : { headers: { host } });
+  const none = { env: {} };
+
+  for (const host of [
+    "localhost:3001", "localhost", "LOCALHOST:3001", "crow.localhost:3001", "a.b.localhost:3001",
+    "127.0.0.1:3001", "127.5.6.7:3001", "127.0.0.1",
+    "[::1]:3001", "[::1]",
+  ]) {
+    assert.equal(isLoopbackHost(req(host), none), true, host);
+  }
+  for (const host of [
+    "evil.example:3001", "localhost.evil.example", "crow.localhost.evil.example",
+    "127.999.1.1:3001", // not an IPv4 literal: the resolver answers this name
+    "127.evil.example", "[::2]:3001", "0.0.0.0:3001", "192.0.2.7:3001", "", "not a host", "[::1",
+  ]) {
+    assert.equal(isLoopbackHost(req(host), none), false, host);
+  }
+  assert.equal(isLoopbackHost(req(undefined), none), false, "no Host header at all");
+  assert.equal(isLoopbackHost({}, none), false, "no headers at all");
+
+  // A configured own origin counts by HOSTNAME: the configured public URL may
+  // name no port (or another one) and another scheme than the local hop.
+  const env = { CROW_GATEWAY_URL: "https://crow.example.ts.net" };
+  assert.equal(isLoopbackHost(req("crow.example.ts.net:3001"), { env }), true);
+  assert.equal(isLoopbackHost(req("crow.example.ts.net"), { env }), true);
+  assert.equal(isLoopbackHost(req("crow.example.ts.net:3001"), none), false, "unconfigured: just a stranger's name");
+  assert.equal(isLoopbackHost(req("evil.example:3001"), { env }), false);
 });
