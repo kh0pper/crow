@@ -544,6 +544,51 @@ bwrap_profile_exists() {
   return 1
 }
 
+# stage_trap_restore — put the traps back that stage_bwrap_profile found before
+# it installed its own. Bash has no function-local traps, so the step snapshots
+# the caller's INT/TERM/EXIT handlers with `trap -p` and calls this before EVERY
+# return. An empty snapshot means that signal had no trap, so it is cleared here
+# (a leftover `rm -rf $tmpdir` handler must not outlive the temp dir).
+stage_trap_restore() { # <saved-int> <saved-term> <saved-exit>
+  trap - INT
+  trap - TERM
+  trap - EXIT
+  [ -z "${1:-}" ] || eval "$1"
+  [ -z "${2:-}" ] || eval "$2"
+  [ -z "${3:-}" ] || eval "$3"
+}
+
+# stage_trap_cleanup — the cleanup trap that runs WHILE stage_bwrap_profile owns
+# its temp dir (a body like `rm -rf $tmpdir; exit 130` beats an explicit return
+# on every path, because a signal can arrive anywhere). The first argument is the
+# status to exit with for INT/TERM and empty for EXIT.
+#   EXIT      — remove the dir, then RUN the exit trap that was installed before
+#               this step took the signal over: re-installing it here would be
+#               too late, the shell is already on its way out.
+#   INT/TERM  — remove the dir, restore all three traps, then exit through them,
+#               so a previous EXIT trap still runs (chaining, not clobbering).
+stage_trap_cleanup() { # <status-or-empty> <tmpdir> <saved-int> <saved-term> <saved-exit>
+  local status="${1:-}" tmpdir="$2" saved_int="${3:-}" saved_term="${4:-}" saved_exit="${5:-}"
+  rm -rf "$tmpdir"
+  trap - INT
+  trap - TERM
+  trap - EXIT
+  [ -z "$saved_int" ] || eval "$saved_int"
+  [ -z "$saved_term" ] || eval "$saved_term"
+  if [ -n "$status" ]; then
+    [ -z "$saved_exit" ] || eval "$saved_exit"
+    exit "$status"
+  fi
+  # `trap -p EXIT` prints `trap -- '<command>' EXIT`; strip the wrapper and run
+  # the command itself (evaluating a single shell-quoted word runs it).
+  case "$saved_exit" in
+    "trap -- "*" EXIT")
+      saved_exit="${saved_exit#trap -- }"
+      eval "${saved_exit% EXIT}"
+      ;;
+  esac
+}
+
 # stage_bwrap_profile — put Ubuntu's bwrap-userns-restrict bytes into <dest>.
 # Preferred source: the file already on this host (the operator installed
 # apparmor-profiles themselves, or the distro ships it in extra-profiles).
@@ -562,16 +607,33 @@ stage_bwrap_profile() { # <dest-file>
     return 1
   fi
 
-  local tmpdir deb f src
+  local tmpdir deb f src prev_int prev_term prev_exit trap_args
   if ! tmpdir="$(mktemp -d)"; then
     warn "Could not create a temp directory to fetch apparmor-profiles — bubblewrap has no rule, so bots run without the sandbox"
     return 1
   fi
+  # The temp dir gets a cleanup trap that also fires on INT/TERM: an interrupted
+  # re-run (or a Ctrl-C during a slow download) must not leave a .deb tree in
+  # $TMPDIR. It is process-wide the moment it is set, so the caller's handlers
+  # are snapshotted first and stage_trap_restore() runs before every return
+  # below; `printf %q` freezes the values into the handler text, and an empty
+  # snapshot becomes '' so that signal is left cleared.
+  prev_int="$(trap -p INT)"
+  prev_term="$(trap -p TERM)"
+  prev_exit="$(trap -p EXIT)"
+  trap_args="$(printf '%q' "$tmpdir") $(printf '%q' "$prev_int") $(printf '%q' "$prev_term") $(printf '%q' "$prev_exit")"
+  # shellcheck disable=SC2064  # expanded now on purpose: the trap outlives these locals
+  trap "stage_trap_cleanup 130 $trap_args" INT
+  # shellcheck disable=SC2064
+  trap "stage_trap_cleanup 143 $trap_args" TERM
+  # shellcheck disable=SC2064
+  trap "stage_trap_cleanup '' $trap_args" EXIT
   # apt-get download writes the .deb into the CWD and needs no root, so it runs
   # as the invoking user (never through sudo).
   # shellcheck disable=SC2086  # the seam may carry flags too
   if ! ( cd "$tmpdir" && $CROW_APT_GET download apparmor-profiles ); then
     rm -rf "$tmpdir"
+    stage_trap_restore "$prev_int" "$prev_term" "$prev_exit"
     warn "Could not download apparmor-profiles — bubblewrap has no rule, so bots run without the sandbox"
     return 1
   fi
@@ -584,26 +646,31 @@ stage_bwrap_profile() { # <dest-file>
   done
   if [ -z "$deb" ]; then
     rm -rf "$tmpdir"
+    stage_trap_restore "$prev_int" "$prev_term" "$prev_exit"
     warn "Downloading apparmor-profiles produced no .deb — bubblewrap has no rule, so bots run without the sandbox"
     return 1
   fi
   if ! "$CROW_DPKG_DEB" -x "$deb" "$tmpdir/x"; then
     rm -rf "$tmpdir"
+    stage_trap_restore "$prev_int" "$prev_term" "$prev_exit"
     warn "Could not unpack apparmor-profiles with dpkg-deb — bubblewrap has no rule, so bots run without the sandbox"
     return 1
   fi
   src="$tmpdir/x/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
   if [ ! -r "$src" ]; then
     rm -rf "$tmpdir"
+    stage_trap_restore "$prev_int" "$prev_term" "$prev_exit"
     warn "apparmor-profiles did not provide bwrap-userns-restrict — bubblewrap has no rule, so bots run without the sandbox"
     return 1
   fi
   if ! cp "$src" "$dest" 2>/dev/null; then
     rm -rf "$tmpdir"
+    stage_trap_restore "$prev_int" "$prev_term" "$prev_exit"
     warn "Could not read bwrap-userns-restrict out of the downloaded package — bubblewrap has no rule, so bots run without the sandbox"
     return 1
   fi
   rm -rf "$tmpdir"
+  stage_trap_restore "$prev_int" "$prev_term" "$prev_exit"
   return 0
 }
 
@@ -631,6 +698,18 @@ bwrap_profile_sane() { # <file>
     return 1
   fi
   return 0
+}
+
+# bwrap_profile_installed — our own copy is in place and is the profile we
+# expect: a REGULAR file (not a symlink somebody pointed elsewhere) carrying the
+# shape bwrap_profile_sane accepts. Re-runs key the "nothing to do" fast path on
+# this, so a host that is already set up never reaches for the package again.
+bwrap_profile_installed() {
+  [ -f "$CROW_BWRAP_PROFILE" ] || return 1
+  if [ -L "$CROW_BWRAP_PROFILE" ]; then
+    return 1
+  fi
+  bwrap_profile_sane "$CROW_BWRAP_PROFILE"
 }
 
 # install_bwrap_apparmor — install Ubuntu's own bwrap-userns-restrict profile
@@ -675,6 +754,22 @@ install_bwrap_apparmor() {
   # next reboot and leave it alone. Removing it would silently overrule them.
   if [ -e "$APPARMOR_DIR/disable/bwrap-userns-restrict" ]; then
     warn "$APPARMOR_DIR/disable/bwrap-userns-restrict is present, so AppArmor disables the bubblewrap profile at boot: the rule below loads now, but bots lose the sandbox after a reboot. Remove that link to keep it"
+  fi
+
+  # Re-run fast path: our installed copy is already there and intact, so there
+  # is nothing to fetch — a re-run on an offline host must not warn "could not
+  # download" for a file that is already correct. Both the download AND the
+  # extract are skipped, and nothing is reloaded: the copy was loaded when it
+  # was installed, or AppArmor loads it at boot from $APPARMOR_DIR.
+  # A source copy that differs (the operator's own apparmor-profiles was
+  # updated) still wins: it falls through to the normal copy path below, which
+  # needs no download either. A missing, insane or symlinked install does what it
+  # always did.
+  if bwrap_profile_installed; then
+    if [ ! -e "$CROW_BWRAP_SOURCE" ] || cmp -s "$CROW_BWRAP_SOURCE" "$CROW_BWRAP_PROFILE"; then
+      log "AppArmor rule for bubblewrap already in place ($CROW_BWRAP_PROFILE unchanged)"
+      return 0
+    fi
   fi
 
   # Copied outside /etc first, so a partial write never lands in the profile dir.

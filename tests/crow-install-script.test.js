@@ -1145,6 +1145,7 @@ function apparmorScratch({
   installOk = true,
   downloadOk = true,
   extractOk = true,
+  dpkgKillsParent = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "crow-bwrap-"));
   const apparmorDir = join(dir, "apparmor.d");
@@ -1191,6 +1192,12 @@ function apparmorScratch({
     extractOk ? "" : "exit 1",
     'mkdir -p "$3/usr/share/apparmor/extra-profiles"',
     packageSource === null ? "" : `cp ${JSON.stringify(debFixture)} "$3/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"`,
+    // The only signal this harness can deliver safely: the shim TERMs the
+    // installer shell that is waiting for it (its own parent). Deliberately the
+    // LAST thing it does — bash runs the trap as soon as the signal arrives, so
+    // anything the fake unpack did afterwards would recreate the temp dir that
+    // the trap just removed and make the assertion meaningless.
+    dpkgKillsParent ? 'kill -TERM "$PPID"' : "",
     "",
   ].join("\n"), { mode: 0o755 });
   const installLog = join(dir, "install.log");
@@ -1671,4 +1678,130 @@ test("N1b-2: Ubuntu 24.04's own spelling of the stacking rule is accepted", () =
   assert.equal(r.status, 0, r.stderr);
   assert.ok(existsSync(s.profile), "the 24.04 spelling is installed");
   assert.equal(readFileSync(s.profile, "utf8"), ubuntu, "byte for byte");
+});
+
+// ─── Lane A's Ubuntu 24.04 follow-ups ───────────────────────────────────────
+// Two things the VM runs turned up. (1) Every re-run downloaded
+// apparmor-profiles again, so an offline re-run warned "Could not download" for
+// a file that was already correct on disk. (2) The fetch's temp dir was only
+// removed on the explicit `rm -rf` lines, so an interrupt (Ctrl-C, SIGTERM)
+// during the download or the extract left the .deb tree in $TMPDIR.
+
+test("follow-up 1: a re-run with a sane installed profile never downloads — it logs 'already in place'", () => {
+  // Lane A's case: the profile is installed, this host has no extra-profiles
+  // copy, and there is no network. Before the fast path, stage_bwrap_profile
+  // still ran `apt-get download apparmor-profiles` here, which fails offline and
+  // warns for nothing. Now the shim is never called at all.
+  const s = apparmorScratch({ extraSource: null });
+  writeFileSync(s.profile, BWRAP_PROFILE_FIXTURE);
+  const before = statSync(s.profile);
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(aptGetCalls(s), [], "no download for a host that is already set up");
+  assert.deepEqual(dpkgCalls(s), [], "and nothing is extracted either");
+  assert.match(r.stdout, /AppArmor rule for bubblewrap already in place/);
+  const after = statSync(s.profile);
+  assert.equal(after.ino, before.ino, "the installed copy is not rewritten");
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE);
+  // It was loaded when it was installed (or AppArmor loads it at boot), so the
+  // fast path must not reload it.
+  assert.deepEqual(parserCalls(s), [], "never reloaded on a re-run");
+});
+
+test("follow-up 1: a re-run whose installed copy fails the shape check goes through the download path", () => {
+  // The one case the fast path must NOT take: the file on disk is not the
+  // profile we expect (here its flags list would lift Ubuntu's restriction), so
+  // it is fetched and replaced exactly as before.
+  const insane = BWRAP_PROFILE_FIXTURE.replace(
+    "profile bwrap /usr/bin/bwrap flags=(attach_disconnected)",
+    "profile bwrap /usr/bin/bwrap flags=(unconfined)");
+  assert.notEqual(insane, BWRAP_PROFILE_FIXTURE, "the installed fixture really changed");
+  const s = apparmorScratch({ extraSource: null });
+  writeFileSync(s.profile, insane);
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(aptGetCalls(s).length, 1, "the package is downloaded again");
+  assert.equal(dpkgCalls(s).length, 1, "and unpacked again");
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "the sane copy replaces it");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`], "and is loaded");
+  assert.match(r.stdout, /AppArmor rule installed/);
+});
+
+test("follow-up 1: a differing copy in APPARMOR_EXTRA_DIR is copied over, with no download", () => {
+  // The operator's own apparmor-profiles was updated: the extra-profiles copy is
+  // sane but differs from what is installed. The fast path must not swallow that
+  // — the installed copy is refreshed through the existing copy path, and no
+  // download is involved (which is the point: it works offline too).
+  const older = BWRAP_PROFILE_FIXTURE.replace(
+    "  allow pix /** -> &bwrap//&unpriv_bwrap,\n",
+    "  allow px /** -> bwrap//&unpriv_bwrap,\n"); // 24.04's spelling: sane, different bytes
+  assert.notEqual(older, BWRAP_PROFILE_FIXTURE, "the installed fixture really changed");
+  const s = apparmorScratch();
+  writeFileSync(s.profile, older);
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(aptGetCalls(s), [], "the host's own copy is used, never a download");
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "refreshed to the newer copy");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`], "the new bytes are loaded");
+  assert.match(r.stdout, /AppArmor rule installed/);
+});
+
+test("follow-up 2: an interrupt during the extract removes the temp dir (INT/TERM/EXIT trap)", () => {
+  // Before the trap the only removal was the explicit `rm -rf` on each path, so
+  // a signal arriving while dpkg-deb was unpacking left the whole tree in
+  // $TMPDIR. The dpkg-deb shim TERMs the installer shell itself (its parent) —
+  // the one signal this harness can deliver safely — and the trap must remove
+  // the dir before the shell goes, with the .deb already inside it.
+  const s = apparmorScratch({ extraSource: null, dpkgKillsParent: true });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 143, `the TERM handler exits 143 (stderr: ${r.stderr})`);
+  // The temp DIR is what the interrupt must not leave behind: the downloaded
+  // .deb and the tree dpkg-deb was unpacking. install_bwrap_apparmor's own small
+  // staging FILE (a `mktemp` in $TMPDIR) may survive — the signal exits the
+  // shell from inside the fetch, exactly as a real Ctrl-C would, so that
+  // function never reaches its `rm -f`; the trap this task asks for is the one
+  // around the temp dir.
+  const dirs = readdirSync(s.tmpDir).filter((n) => statSync(join(s.tmpDir, n)).isDirectory());
+  assert.deepEqual(dirs, [], "the mktemp -d tree (the .deb and the extracted package) is gone");
+  // Nothing was installed from a half-unpacked package.
+  assert.equal(existsSync(s.profile), false);
+  assert.deepEqual(parserCalls(s), []);
+});
+
+test("follow-up 2: an EXIT trap installed before the fetch is still set (and still runs) after it returns", () => {
+  // Bash has no function-local traps, so the step's cleanup traps are
+  // process-wide for as long as it runs: the caller's must be put back before
+  // every return. Both halves are asserted — the outer trap is queryable again
+  // after the function returned, and it still runs when the shell exits.
+  const s = apparmorScratch({ extraSource: null });
+  const r = runApparmorStep(s,
+    `trap 'echo OUTER_EXIT_RAN' EXIT; stage_bwrap_profile "$APPARMOR_DIR/probe-profile"; trap -p EXIT`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /trap -- 'echo OUTER_EXIT_RAN' EXIT/, "the outer EXIT trap is back in place");
+  assert.match(r.stdout, /OUTER_EXIT_RAN/, "and it still runs at shell exit");
+  assert.equal(readFileSync(join(s.apparmorDir, "probe-profile"), "utf-8"), BWRAP_PROFILE_FIXTURE,
+    "the fetch itself did its job");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "the temp dir is removed on the normal path too");
+});
+
+test("follow-up 2: the fetch sets its cleanup traps right after mktemp -d and restores them on every exit", () => {
+  // The static half of the trap contract (the dynamic test above can only deliver
+  // TERM): the traps go in immediately after the temp dir exists, and every
+  // `rm -rf "$tmpdir"` is followed by the restore — so no path returns with the
+  // step's handlers still installed.
+  const fn = src().slice(src().indexOf("stage_bwrap_profile() {"), src().indexOf("# bwrap_profile_sane"));
+  const mktempIdx = fn.indexOf("mktemp -d");
+  const trapIdx = fn.indexOf('trap "stage_trap_cleanup');
+  assert.ok(mktempIdx > -1 && trapIdx > mktempIdx, "the trap is installed right after mktemp -d");
+  for (const sig of ["INT", "TERM", "EXIT"]) {
+    assert.match(fn.slice(trapIdx), new RegExp(`trap \\"stage_trap_cleanup [^\\n]*\\" ${sig}$`, "m"),
+      `a cleanup trap is installed for ${sig}`);
+  }
+  // `rm -rf "$tmpdir"` appears at two indentation levels (inside an `if` and at
+  // the end of the function), so match any leading whitespace.
+  const removals = (fn.match(/^\s*rm -rf "\$tmpdir"$/gm) || []).length;
+  const restores = (fn.match(/^\s*stage_trap_restore /gm) || []).length;
+  assert.ok(removals >= 6, `expected every exit path of the fetch, found ${removals} removals`);
+  assert.equal(restores, removals, "every path removes the dir and then restores the caller's traps");
 });
