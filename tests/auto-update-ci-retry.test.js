@@ -17,7 +17,8 @@
  * EVERY test that arms the scheduler stops it in a `finally`: `startAutoUpdate`
  * leaves a ref'd five-minute first-check timer behind, and a leaked one fires
  * later, arms the real multi-hour interval and keeps the whole file's process
- * alive forever.
+ * alive forever (fix round 2: `startAutoUpdate` itself now calls
+ * `stopAutoUpdate` first, so a second arm cannot stack timers).
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -26,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appRoot, startAutoUpdate, stopAutoUpdate, CI_RETRY_DELAY_MS,
-  _setAppRootForTest, _setDbForTest, _setCiRetryDelayForTest,
+  _setAppRootForTest, _setDbForTest, _setCiRetryDelayForTest, _setRetryIntervalForTest,
   _setScheduledCheckForTest, _runScheduledTickForTest, _retryPendingForTest,
 } from "../servers/gateway/auto-update.js";
 
@@ -48,6 +49,7 @@ after(() => {
   stopAutoUpdate();
   _setScheduledCheckForTest(null);
   _setCiRetryDelayForTest(null);
+  _setRetryIntervalForTest(null);
   _setDbForTest(null);
   _setAppRootForTest(savedRoot);
   if (savedAutoUpdateEnv !== undefined) process.env.CROW_AUTO_UPDATE = savedAutoUpdateEnv;
@@ -100,6 +102,39 @@ async function arm({ intervalHours = "6", retryDelayMs = RETRY_MS, enabled = "tr
   });
   await startAutoUpdate(database, {});
   return { database, calls };
+}
+
+/**
+ * Arm the scheduler with its first-check timer CAPTURED instead of armed. Its
+ * delay is five minutes plus jitter, so no test can wait for it; the fake handle
+ * records a `clearTimeout()` on itself, which is how a re-arm is observed.
+ *
+ * Only the first-check timer is captured: `git rev-parse` runs through
+ * `execFile`, whose own 120 s watchdog must stay a real timer, so any timeout
+ * under five minutes is passed through untouched.
+ */
+async function armCapturingFirstCheck(database) {
+  const FIRST_CHECK_MIN_MS = 5 * 60 * 1000;
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let captured = null;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    if (captured || !(ms >= FIRST_CHECK_MIN_MS)) return realSetTimeout(fn, ms, ...args);
+    captured = { __captured: true, fn, ms, cleared: false };
+    return captured;
+  };
+  globalThis.clearTimeout = (handle) => {
+    if (handle && handle.__captured) { handle.cleared = true; return; }
+    realClearTimeout(handle);
+  };
+  try {
+    await startAutoUpdate(database, {});
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+  assert.ok(captured, "startAutoUpdate must arm a first-check timer");
+  return captured;
 }
 
 function captureConsole() {
@@ -168,10 +203,17 @@ test("only a CI run still in progress retries: ci-pending, never a verdict", asy
     });
     try {
       await _runScheduledTickForTest("regular");
-      // Long enough for a retry to have run several times over if one was armed.
-      await sleep(6 * RETRY_MS);
-      assert.equal(calls.length, expectRetry ? 2 : 1,
-        `${code} must ${expectRetry ? "" : "NOT "}schedule a retry (calls=${calls.length})`);
+      if (expectRetry) {
+        // The positive case waits for the retry instead of racing a fixed sleep:
+        // on a loaded runner the first timer callback can land well after the
+        // injected delay.
+        await waitFor(() => calls.length === 2, `${code} must schedule a retry`);
+      } else {
+        // Long enough for a retry to have run several times over if one was armed.
+        await sleep(6 * RETRY_MS);
+        assert.equal(calls.length, 1,
+          `${code} must NOT schedule a retry (calls=${calls.length})`);
+      }
     } finally {
       stopAutoUpdate();
     }
@@ -330,5 +372,136 @@ test("the disabled guard still applies to a retry", async () => {
   } finally {
     stopAutoUpdate();
     out.restore();
+  }
+});
+
+test("scheduled ticks never overlap: a tick still running makes the next one skip", async () => {
+  const out = captureConsole();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const calls = [];
+  try {
+    _setCiRetryDelayForTest(RETRY_MS);
+    _setScheduledCheckForTest(async () => { calls.push(1); await gate; return success; });
+    await startAutoUpdate(settingsDb({ intervalHours: "6" }), {});
+
+    const inFlight = _runScheduledTickForTest("regular");
+    await waitFor(() => calls.length === 1, "the first tick to reach the check");
+
+    // The interval (or a retry) fires while the slow tick is still in npm
+    // install: it must skip instead of running a second checkForUpdates().
+    const skipped = await _runScheduledTickForTest("regular");
+    assert.equal(skipped, null, "the overlapping tick returns without a result");
+    assert.equal(calls.length, 1, "the check ran exactly once");
+    assert.ok(out.lines.some((l) => l.includes("a check is already running; skipping this one")),
+      "the skipped tick logs one line");
+
+    release();
+    await inFlight;
+    // The flag is cleared in a finally, so the scheduler keeps working after.
+    await _runScheduledTickForTest("regular");
+    assert.equal(calls.length, 2, "a later tick runs once the slow one has finished");
+  } finally {
+    release();
+    stopAutoUpdate();
+    out.restore();
+  }
+});
+
+test("a second startAutoUpdate re-arms instead of stacking a timer or a retry", async () => {
+  _setCiRetryDelayForTest(60);
+  _setScheduledCheckForTest(async () => pending);
+  try {
+    const firstTimer = await armCapturingFirstCheck(settingsDb({ intervalHours: "6" }));
+    await _runScheduledTickForTest("regular");
+    assert.equal(_retryPendingForTest(), true, "the first arm left a retry pending");
+    assert.equal(firstTimer.cleared, false,
+      "nothing has cleared the first arm's first-check timer yet");
+
+    const secondTimer = await armCapturingFirstCheck(settingsDb({ intervalHours: "6" }));
+    assert.equal(firstTimer.cleared, true,
+      "the second start must clear the first arm's first-check timer");
+    assert.notEqual(secondTimer, firstTimer, "the second start arms its own timer");
+    assert.equal(_retryPendingForTest(), false,
+      "the second start must clear the first arm's retry timer too");
+
+    // The interval is armed by the first check, not by startAutoUpdate: fire the
+    // second arm's captured first check and count the intervals it creates.
+    const armedIntervals = [];
+    const realSetInterval = globalThis.setInterval;
+    globalThis.setInterval = (fn, ms, ...args) => {
+      const handle = realSetInterval(fn, ms, ...args);
+      armedIntervals.push(ms);
+      return handle;
+    };
+    try {
+      await secondTimer.fn();
+    } finally {
+      globalThis.setInterval = realSetInterval;
+    }
+    assert.deepEqual(armedIntervals, [6 * 60 * 60 * 1000],
+      "exactly ONE interval, for the configured 6 h — no orphan from the first arm");
+  } finally {
+    stopAutoUpdate();
+    _setScheduledCheckForTest(null);
+  }
+});
+
+test("the wall-clock bound stops a chain at the interval edge", async () => {
+  // elapsed + delay >= intervalMs. A 1 h interval cannot show this: its budget
+  // is 1, so the budget bound fires first, and a delay near the interval would
+  // arm a real hour-long timer. The interval seam narrows the edge instead,
+  // leaving the 6 h budget (11 retries) well out of the way.
+  const INTERVAL_MS = 3000;
+  for (const [delayMs, expectRetry] of [[1000, true], [INTERVAL_MS, false]]) {
+    const out = captureConsole();
+    try {
+      _setRetryIntervalForTest(INTERVAL_MS);
+      const { calls } = await arm({
+        intervalHours: "6",
+        retryDelayMs: delayMs,
+        results: [pending, success],
+      });
+      await _runScheduledTickForTest("regular");
+      if (expectRetry) {
+        // Control: the same narrowed interval does allow a shorter delay.
+        await waitFor(() => calls.length === 2, "the retry inside the interval");
+      } else {
+        assert.equal(_retryPendingForTest(), false,
+          "a retry whose delay reaches the interval edge must not be armed");
+        assert.equal(calls.length, 1, "no extra check ran");
+        assert.equal(out.retries().length, 0, "and no retry line was logged");
+      }
+    } finally {
+      stopAutoUpdate();
+      _setRetryIntervalForTest(null);
+      out.restore();
+    }
+  }
+});
+
+test("a regular tick resets a partly spent retry budget, so a new chain gets the full one", async () => {
+  // A 1 h interval allows exactly one retry. Spend it, watch the chain stay
+  // exhausted, then show the next regular tick starts a fresh chain: `used` and
+  // `startedAt` restart with the interval instead of carrying over.
+  const { calls } = await arm({ intervalHours: "1", retryDelayMs: 2, results: [pending] });
+  try {
+    await _runScheduledTickForTest("regular");
+    await waitFor(() => calls.length === 2, "the one retry of the first budget");
+    await sleep(40);
+    assert.equal(calls.length, 2, "the 1 h budget is spent after one retry");
+    assert.equal(_retryPendingForTest(), false, "an exhausted chain stays unarmed");
+
+    await _runScheduledTickForTest("regular");
+    assert.equal(_retryPendingForTest(), true,
+      "the new regular tick re-arms a retry, so `used` was reset");
+    await waitFor(() => calls.length === 4, "the retry of the second chain");
+    await sleep(40);
+    assert.equal(calls.length, 4, "the new chain got a full budget again (one more retry)");
+
+    await _runScheduledTickForTest("regular");
+    assert.equal(_retryPendingForTest(), true, "and again on the next interval, not just once");
+  } finally {
+    stopAutoUpdate();
   }
 });

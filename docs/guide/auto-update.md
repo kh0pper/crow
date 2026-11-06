@@ -12,8 +12,9 @@ The auto-updater runs as a background task inside the gateway process:
 
 1. **Fetch** — runs `git fetch origin main` to check for new commits
 2. **CI gate** — checks the target commit's required CI results on GitHub
-   (`suite`, `static-checks`, `audit`). A red or still-running build skips the
-   update until the next check; an origin that is not GitHub has no CI to ask
+   (`suite`, `static-checks`, `audit`). A red build skips the update until the
+   next regular check, and a still-running one is re-asked sooner; an origin that
+   is not GitHub has no CI to ask
    and updates as before; a GitHub answer that cannot be read also skips it
    (see [The CI gate](#the-ci-gate)). Disable with `CROW_UPDATE_CI_GATE=0`.
 3. **Quarantine check** — if this host already rolled a commit back, and that
@@ -62,10 +63,10 @@ When GitHub answers, the answer decides:
 | Answer | What happens |
 |---|---|
 | all three green | the update proceeds |
-| any of them red | skipped, retried on the next check |
+| any of them red | skipped, retried on the next regular check — only a *still-running* CI run is re-asked sooner (see below) |
 | any of them still running | skipped, but re-checked about 30 minutes later instead of waiting the whole interval |
 | some of the three missing, nothing still running | skipped as **no CI** (see below): the missing checks will never report on this origin — **green needs all three**, so a sha where only `audit` ran is never deployed and never reads "still running" |
-| no run for our three checks | skipped as **no CI**: an unverified commit is never deployed. A push that raced the check answers on the next tick; a fork that strips those checks keeps being skipped instead |
+| no run for our three checks | skipped as **no CI**: an unverified commit is never deployed. A push that raced the check answers on the next regular check — not a 30-minute retry, which only a still-running run earns; a fork that strips those checks keeps being skipped instead |
 
 **No CI.** GitHub answered, but without all three required checks — typically a
 fork that does not carry this repo's CI, or a push whose workflows have not
@@ -141,8 +142,9 @@ config file) needs no special handling:
    which refuses only when the incoming diff overlaps a file you modified.
 2. Every other local edit survives the update untouched.
 3. A refused pull is reported in Settings > Updates (`Pull failed …`) and retried
-   on the next check. Commit, revert or stash the overlapping file to let the
-   update through.
+   on the next regular check — the ~30-minute re-check is only for a CI run that
+   is still in progress (see [The CI gate](#the-ci-gate)). Commit, revert or stash
+   the overlapping file to let the update through.
 
 There is no stash/pop cycle any more: a stash that failed to reapply used to
 leave the checkout clean but the operator's work parked in `git stash list`.

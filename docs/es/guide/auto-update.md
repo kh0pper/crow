@@ -12,9 +12,10 @@ El actualizador automático se ejecuta como una tarea en segundo plano dentro de
 
 1. **Fetch** — ejecuta `git fetch origin main` para buscar nuevos commits
 2. **Puerta de CI** — consulta en GitHub los resultados de CI requeridos del commit
-   destino (`suite`, `static-checks`, `audit`). Una compilación en rojo o aún en
-   ejecución pospone la actualización hasta la próxima comprobación; un origen que
-   no es GitHub no tiene CI que consultar y se actualiza como siempre; una respuesta
+   destino (`suite`, `static-checks`, `audit`). Una compilación en rojo pospone la
+   actualización hasta la siguiente comprobación normal, y una que sigue en ejecución
+   se repregunta antes; un origen que no es GitHub no tiene CI que consultar y se
+   actualiza como siempre; una respuesta
    de GitHub que no se puede leer también la pospone (ver
    [La puerta de CI](#la-puerta-de-ci)). Se desactiva con `CROW_UPDATE_CI_GATE=0`.
 3. **Comprobación de cuarentena** — si este host ya revirtió un commit y ese commit
@@ -64,10 +65,10 @@ Cuando GitHub responde, la respuesta decide:
 | Respuesta | Qué pasa |
 |---|---|
 | los tres en verde | la actualización continúa |
-| alguno en rojo | se pospone y se reintenta en la próxima comprobación |
+| alguno en rojo | se pospone y se reintenta en la siguiente comprobación normal — solo una CI *en ejecución* se repregunta antes (ver abajo) |
 | alguno en ejecución | se pospone, pero se vuelve a comprobar unos 30 minutos después en vez de esperar el intervalo completo |
 | falta alguno de los tres y nada sigue en ejecución | se pospone como **sin CI** (ver abajo): los checks que faltan nunca informarán en este origen — **verde exige los tres**, así que un sha en el que solo `audit` ha terminado nunca se despliega ni se queda como "en ejecución" |
-| ningún check-run de nuestros tres | se pospone como **sin CI**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
+| ningún check-run de nuestros tres | se pospone como **sin CI**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación normal — no en un reintento de 30 minutos, que solo se gana una ejecución en curso; un fork que quita esos checks sigue posponiéndose |
 
 **Sin CI.** GitHub respondió, pero sin los tres checks requeridos —
 típicamente un fork que no lleva la CI de este repositorio, o un push cuyos
@@ -149,8 +150,10 @@ de configuración editado a mano) no necesita ningún trato especial:
    que solo se niega cuando el diff entrante se solapa con un archivo que modificaste.
 2. Cualquier otra edición local sobrevive la actualización intacta.
 3. Un pull rechazado se informa en Settings > Updates (`Pull failed …`) y se
-   reintenta en la próxima comprobación. Haz commit, revierte o guarda en stash el
-   archivo en conflicto para dejar pasar la actualización.
+   reintenta en la siguiente comprobación normal — la repregunta de ~30 minutos
+   solo es para una CI que sigue en ejecución (ver [La puerta de CI](#la-puerta-de-ci)).
+   Haz commit, revierte o guarda en stash el archivo en conflicto para dejar pasar
+   la actualización.
 
 Ya no hay ciclo de stash/pop: un stash que no se podía reaplicar dejaba el
 checkout limpio pero el trabajo del operador aparcado en `git stash list`.

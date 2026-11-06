@@ -169,6 +169,10 @@ let retryTimer = null;
 /** Set by startAutoUpdate() while the scheduler runs: the retry delay/budget
  *  plan for the CURRENT interval. Null when auto-update is not armed. */
 let retryPlan = null;
+/** True while a scheduled tick (regular or retry) is in flight. A retry tick can
+ *  spend minutes in `npm install` and the restart; without this the interval
+ *  firing meanwhile would run a second checkForUpdates() alongside it. */
+let scheduledTickRunning = false;
 let db = null;
 
 /**
@@ -269,6 +273,17 @@ export function _retryPendingForTest() {
   return retryTimer !== null;
 }
 
+/**
+ * Test-only: the interval the retry chain is bounded by (`null` restores the
+ * real one). The 1 h minimum (MIN_INTERVAL_HOURS) makes the wall-clock edge
+ * unreachable with an injected sub-second delay, so a test narrows the interval
+ * instead of waiting an hour. Inert unless set.
+ */
+let _retryIntervalOverride = null;
+export function _setRetryIntervalForTest(ms) {
+  _retryIntervalOverride = ms;
+}
+
 function retryDelayMs() {
   if (_ciRetryDelayOverride !== null) return _ciRetryDelayOverride;
   const jitter = instanceJitterMs(retryPlan?.jitterKey ?? "") % CI_RETRY_JITTER_MS;
@@ -299,8 +314,9 @@ function skipCode(result) {
 function scheduleCiRetry() {
   if (!retryPlan) return;
   const delay = retryDelayMs();
+  const intervalMs = _retryIntervalOverride ?? retryPlan.intervalMs;
   if (retryPlan.used >= retryPlan.budget) return;
-  if (Date.now() - retryPlan.startedAt + delay >= retryPlan.intervalMs) return;
+  if (Date.now() - retryPlan.startedAt + delay >= intervalMs) return;
   retryPlan.used += 1;
   clearRetryTimer();
   console.log(`[auto-update] CI result not known yet; checking again in ${Math.round(delay / 60000)} min`);
@@ -322,17 +338,30 @@ function scheduleCiRetry() {
  * install-set guards still apply to it.
  */
 async function scheduledTick(kind) {
-  if (kind === "regular") {
-    // A regular tick supersedes a pending retry and restarts the retry budget.
-    clearRetryTimer();
-    if (retryPlan) {
-      retryPlan.used = 0;
-      retryPlan.startedAt = Date.now();
-    }
+  // Scheduler ticks never stack: a slow tick (npm install, restart) must not be
+  // overlapped by the interval — or by a retry — firing meanwhile. The manual
+  // Check-now path calls checkForUpdates() directly and is deliberately NOT
+  // gated by this flag.
+  if (scheduledTickRunning) {
+    console.log("[auto-update] a check is already running; skipping this one");
+    return null;
   }
-  const result = _scheduledCheckForTest ? await tickCheck(_scheduledCheckForTest) : await tickCheck();
-  if (CI_RETRY_SKIPS.includes(skipCode(result))) scheduleCiRetry();
-  return result;
+  scheduledTickRunning = true;
+  try {
+    if (kind === "regular") {
+      // A regular tick supersedes a pending retry and restarts the retry budget.
+      clearRetryTimer();
+      if (retryPlan) {
+        retryPlan.used = 0;
+        retryPlan.startedAt = Date.now();
+      }
+    }
+    const result = _scheduledCheckForTest ? await tickCheck(_scheduledCheckForTest) : await tickCheck();
+    if (CI_RETRY_SKIPS.includes(skipCode(result))) scheduleCiRetry();
+    return result;
+  } finally {
+    scheduledTickRunning = false;
+  }
 }
 
 /**
@@ -1811,6 +1840,10 @@ export function shouldStartAutoUpdate({ env = {}, noAuth = false } = {}) {
  * Start the auto-update timer
  */
 export async function startAutoUpdate(database, { noAuth = false } = {}) {
+  // Re-arm safety: a second call must never leave the previous interval or
+  // retry timer running next to the new ones (a doubled updater pulls the same
+  // checkout twice a tick).
+  stopAutoUpdate();
   db = database;
 
   if (!shouldStartAutoUpdate({ env: process.env, noAuth })) {
