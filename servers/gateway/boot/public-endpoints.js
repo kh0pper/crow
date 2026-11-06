@@ -14,6 +14,13 @@ import { setupPageHandler } from "../setup-page.js";
 import { generateCrowContext } from "../../memory/crow-context.js";
 import { createDbClient } from "../../db.js";
 import { getProxyStatus } from "../proxy.js";
+import { sessionFromRequest } from "../dashboard/auth.js";
+// The signed bot-actor headers (per-boot in-memory HMAC key; verifies both the
+// id AND the signature, so naming a bot is not enough). Same verifier /phone
+// and /board use to attribute a bot's call.
+import { verifyActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
+// Rooms created by POST /api/rooms (light module: node:crypto only).
+import { lookupCallRoom } from "../routes/calls-rooms.js";
 
 // --- Identity page size (used by .well-known handlers) ---
 const IDENTITY_PAGE_SIZE = 256;
@@ -21,6 +28,74 @@ const identityLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeader
 
 // --- TURN credential limiter ---
 const turnCredLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true });
+
+/**
+ * Security audit N1a-9: /api/turn-credentials is NOT public. It used to hand
+ * working TURN relay credentials to anyone who could reach the gateway; it now
+ * requires ONE of three credentials, each checked by the verifier of the
+ * surface the caller already authenticates with:
+ *
+ *  1. a live dashboard session — sessionFromRequest(), the dashboard's own
+ *     session check (network rule first, which also refuses Tailscale Funnel,
+ *     then the crow_session cookie). This is what a browser on the gateway
+ *     origin already sends (same-origin fetches carry cookies by default),
+ *     i.e. the operator's dashboard, the /calls page opened by the operator,
+ *     and the companion proxied at /companion/;
+ *  2. a verified bot actor — the X-Crow-Actor-{Kind,Id,Thread,Gateway,Sig}
+ *     headers a bot's turn already carries, verified with the same
+ *     verifyActorSig() /phone/mcp and /board/mcp use. The MAC key is per-boot
+ *     and lives only in this process's memory, so a named bot without its
+ *     signature (or with another kind's signature) is refused;
+ *  3. a room credential — the `?room=&token=` pair the call page and the
+ *     companion page present on their OTHER endpoints (/calls?room&token,
+ *     /api/rooms/:code?token, the /calls/ws and /companion/client-ws
+ *     handshakes). Companion rooms go through deps.validateRoomToken
+ *     (the sharing server's store); rooms created by POST /api/rooms go
+ *     through lookupCallRoom. This is the only credential a REMOTE guest on
+ *     an invited call holds: they have no session on this gateway.
+ *
+ * Anything else gets 401 with no credential material in the body. The path
+ * stays out of PUBLIC_FUNNEL_PREFIXES, so a funneled request is refused before
+ * it reaches here (servers/gateway/funnel.js).
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function turnCredentialAllowed(req, deps = {}) {
+  // 1. dashboard session (also refuses Funnel traffic + off-network callers)
+  try {
+    if (await sessionFromRequest(req)) return true;
+  } catch { /* a session-store error authenticates nobody */ }
+
+  // 2. verified bot actor
+  const h = req.headers || {};
+  const actorKind = h["x-crow-actor-kind"];
+  if ((actorKind === undefined || actorKind === "bot")
+      && typeof h["x-crow-actor-sig"] === "string"
+      && typeof h["x-crow-actor-id"] === "string"
+      && verifyActorSig({
+        kind: "bot",
+        botId: h["x-crow-actor-id"],
+        threadId: h["x-crow-actor-thread"],
+        gatewayType: h["x-crow-actor-gateway"],
+        sig: h["x-crow-actor-sig"],
+      })) {
+    return true;
+  }
+
+  // 3. room credential (call page / companion page)
+  const room = typeof req.query?.room === "string" ? req.query.room.trim() : "";
+  const token = typeof req.query?.token === "string" ? req.query.token.trim() : "";
+  if (room && token) {
+    try {
+      if (typeof deps.validateRoomToken === "function" && deps.validateRoomToken(room, token)) return true;
+    } catch { /* a sharing-layer error authenticates nobody */ }
+    try {
+      if (lookupCallRoom(room, token)) return true;
+    } catch { /* fall through to the 401 */ }
+  }
+
+  return false;
+}
 
 export async function mountPublicEndpoints(app, deps) {
   const { relayDb } = deps;
@@ -52,7 +127,17 @@ export async function mountPublicEndpoints(app, deps) {
   });
 
   // --- TURN Credentials (time-limited, HMAC-based for coturn use-auth-secret) ---
-  app.get("/api/turn-credentials", turnCredLimiter, (req, res) => {
+  // AUTHENTICATED (security audit N1a-9): see turnCredentialAllowed() above.
+  // Anonymous callers get 401 and no credential material.
+  app.get("/api/turn-credentials", turnCredLimiter, async (req, res) => {
+    let allowed = false;
+    try {
+      allowed = await turnCredentialAllowed(req, deps);
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) return res.status(401).json({ error: "unauthorized" });
+
     const secret = process.env.TURN_SECRET;
     const turnUrl = process.env.TURN_URL || process.env.WEBRTC_TURN_URL;
     if (!secret || !turnUrl) {

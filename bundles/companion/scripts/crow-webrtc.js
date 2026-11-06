@@ -12,10 +12,30 @@
   var _lastMembers = [];
 
   // ─── TURN credential fetching ───
+  // The gateway authenticates /api/turn-credentials (security audit N1a-9).
+  // Present the credential this page already holds on its other gateway
+  // endpoints: the room token it was opened with (?room=&token= — the same
+  // pair the /client-ws handshake and /api/room/validate use). The dashboard
+  // session cookie rides along by itself when the page is served through the
+  // /companion proxy (same origin) — hence credentials:"include". With neither,
+  // the request 401s and we fall back to STUN, exactly as before.
+  function turnCredsUrl(cfg) {
+    var url = cfg.gatewayUrl + "/api/turn-credentials";
+    try {
+      var params = new URLSearchParams(window.location.search || "");
+      var room = params.get("room");
+      var token = params.get("token");
+      if (room && token) {
+        url += "?room=" + encodeURIComponent(room) + "&token=" + encodeURIComponent(token);
+      }
+    } catch (e) {}
+    return url;
+  }
+
   function fetchTurnCreds() {
     var cfg = window.CrowWebRTC || {};
     if (!cfg.gatewayUrl) return Promise.resolve(ICE_SERVERS);
-    return fetch(cfg.gatewayUrl + "/api/turn-credentials")
+    return fetch(turnCredsUrl(cfg), { credentials: "include" })
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(d) {
         if (!d || !d.urls) return ICE_SERVERS;

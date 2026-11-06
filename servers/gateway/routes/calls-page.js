@@ -11,13 +11,16 @@
  */
 
 import { Router } from "express";
-import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import express from "express";
 import { validateRoomToken } from "../../sharing/server.js";
 import { getRoomInfo } from "./calls-signaling.js";
 import { resolveCrowHome } from "../../shared/crow-home.js";
+// The room store itself lives in calls-rooms.js (node:crypto only) so
+// boot/public-endpoints.js can validate a call page's room credential for
+// /api/turn-credentials without importing this router's graph.
+import { createCallRoom, lookupCallRoom } from "./calls-rooms.js";
 
 // Resolve calls bundle scripts directory
 const BUNDLES_DIR = process.env.CROW_BUNDLES_DIR ||
@@ -37,56 +40,10 @@ function getScriptsDir() {
 }
 
 /**
- * In-memory room store for rooms created via REST API.
- * These are separate from the sharing server's _activeRooms but use the
- * same token format and validation pattern. Rooms created here are also
- * registered in the sharing server's store so validateRoomToken works.
- */
-
-// We import the _activeRooms setter from the sharing server indirectly.
-// Since sendRoomInvite registers rooms, and validateRoomToken reads them,
-// we need to register our rooms there too. We'll do this by importing
-// a registration helper, or we'll create rooms that the signaling relay
-// validates independently.
-
-// For simplicity: rooms created via POST /api/rooms are registered in
-// a local map AND the calls signaling relay accepts them. The signaling
-// relay validates via validateRoomToken OR accepts if the room was created here.
-const _callsRooms = new Map();
-
-/**
- * Create a room for calls.
- * Returns { roomCode, token, callUrl }
- */
-function createCallRoom(hostName) {
-  const roomCode = randomBytes(6).toString("hex");
-  const token = randomBytes(16).toString("hex");
-
-  const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
-  const callUrl = gatewayUrl
-    ? `${gatewayUrl}/calls?room=${roomCode}&token=${token}`
-    : `/calls?room=${roomCode}&token=${token}`;
-
-  _callsRooms.set(roomCode, {
-    token,
-    hostName: hostName || "Host",
-    createdAt: Date.now(),
-    callUrl,
-  });
-
-  // Clean up expired rooms (24h TTL)
-  for (const [code, room] of _callsRooms) {
-    if (Date.now() - room.createdAt > 24 * 60 * 60 * 1000) {
-      _callsRooms.delete(code);
-    }
-  }
-
-  return { roomCode, token, callUrl };
-}
-
-/**
  * Validate a call room token. Checks both the sharing server's rooms
- * (for companion-created rooms) and our own rooms.
+ * (for companion-created rooms) and the rooms created via POST /api/rooms
+ * (the calls-rooms map — deliberately NOT in the sharing server's store,
+ * which only sendRoomInvite writes).
  */
 export function validateCallRoomToken(roomCode, token) {
   // Check sharing server's rooms first (companion-created rooms)
@@ -94,14 +51,7 @@ export function validateCallRoomToken(roomCode, token) {
   if (sharingResult) return sharingResult;
 
   // Check calls-created rooms
-  const room = _callsRooms.get(roomCode);
-  if (!room) return null;
-  if (room.token !== token) return null;
-  if (Date.now() - room.createdAt > 24 * 60 * 60 * 1000) {
-    _callsRooms.delete(roomCode);
-    return null;
-  }
-  return { roomCode, hostName: room.hostName };
+  return lookupCallRoom(roomCode, token);
 }
 
 /**
