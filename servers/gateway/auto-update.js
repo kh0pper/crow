@@ -24,6 +24,11 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let APP_ROOT = dirname(dirname(__dirname));
 
+/** The tree every git/npm call below runs in (the checkout auto-update pulls into). */
+export function appRoot() {
+  return APP_ROOT;
+}
+
 /** Test-only: retarget git/npm/lock operations at a fixture repo. */
 export function _setAppRootForTest(dir) {
   APP_ROOT = dir;
@@ -432,7 +437,9 @@ async function stampResultSince(nextValue) {
 }
 
 /**
- * Run a command and return { stdout, stderr, code }
+ * Run a command and return { stdout, stderr, code }. The 120 s default suits the
+ * updater's own git/npm work; a read-only caller passes its own (shorter)
+ * timeout, and the npm installs below need minutes rather than two.
  */
 function run(cmd, args, options = {}) {
   return new Promise((resolve) => {
@@ -456,7 +463,13 @@ const LOCK_STALE_MS = 30 * 60 * 1000;
  */
 const GIT_HOOKS_OFF = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
-function git(args, options = {}) {
+/**
+ * Run git in this checkout with hooks and fsmonitor off. Exported for the Nest's
+ * Integrity card, which reads the SAME tree the updater pulls into — a plain
+ * `git` would run a live install's own hooks, which is the thing GIT_HOOKS_OFF
+ * exists to prevent.
+ */
+export function git(args, options = {}) {
   return run("git", [...GIT_HOOKS_OFF, ...args], options);
 }
 /** acquireCheckoutLock's return for a read-only tree: observed free, not held. */

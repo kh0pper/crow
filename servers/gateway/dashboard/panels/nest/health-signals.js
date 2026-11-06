@@ -87,6 +87,19 @@
  *               a Docker that is not installed is stated, not counted as a
  *               failed check. Any check that could not run → at most info,
  *               naming it, never ok. No apt (non-Debian, or a container) → no card.
+ *   integrity — audit N1c-18: (a) the Crow home, its data dir and crow.db (plus
+ *               the WAL/SHM beside it) must be owner-only — boot's
+ *               tightenCrowHomePermissions has already fixed what it could, so
+ *               one still group/other readable OR writable is what it could NOT
+ *               fix (another owner, a symlink) → WARN naming the path's ROLE,
+ *               never the path; (b) for a git checkout only, the state
+ *               auto-update pulls into: off main or a detached HEAD → INFO (the
+ *               Updates card owns that warn — it only fires while the updater
+ *               is on), tracked local edits → INFO with a count and no file
+ *               names (untracked files are ignored — they never block a pull).
+ *               No checkout at all (a container, a tarball install, no git on
+ *               the box) → part (b) does not apply. A check that could not run
+ *               is INFO "unknown", never ok. Part (a) does not run on Windows.
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -101,7 +114,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { t, fill } from "../../shared/i18n.js";
@@ -110,7 +123,8 @@ import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
 import { gatewayListenHost } from "../../../listen-host.js";
-import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate } from "../../../auto-update.js";
+import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate, git as autoUpdateGit, appRoot as autoUpdateAppRoot } from "../../../auto-update.js";
+import { homePermissionTargets } from "../../../boot/tighten-home-permissions.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import { botSandboxProbe, botSandboxStatus } from "../../shared/bot-sandbox-status.js";
@@ -2320,6 +2334,252 @@ async function systemUpdatesSignal(lang, nowFn) {
   return [{ ...card, cardOnly: true }, ...entries.map((e) => ({ ...e, issueOnly: true }))];
 }
 
+// ─── Integrity (security audit N1c-18) ──────────────────────────────────────
+//
+// Two questions about THIS instance's own files and its own code:
+//
+//   (a) Modes. The Crow home, its data dir and crow.db (with the WAL/SHM SQLite
+//       keeps beside it) hold the bundle .env secrets, the keychain key, peer
+//       tokens and every memory. Boot's tightenCrowHomePermissions has already
+//       chmod'ed every one of those it COULD, so what is still group/other
+//       readable OR writable is exactly what it had to leave alone — another
+//       owner's path, or one reached through a symlink. A writable one is the
+//       worse of the two: another local user can rewrite the DB or plant a file
+//       in the home. Unlike boot, this check follows a symlink: the target's
+//       mode is what other users actually get, and it is the thing the owner can
+//       fix. The card names the ROLE, never the path. Owner-only mode bits are a
+//       POSIX concept, so this part does not run on Windows.
+//
+//   (b) The checkout auto-update pulls into — for a git checkout only (a
+//       container or a tarball install has none, so there the whole of (b) does
+//       not apply). Off main and on a detached HEAD are INFO, not WARN; tracked
+//       local edits are information only too, counted, never listed (untracked
+//       files are ignored: they never block a pull). The questions are asked
+//       with auto-update's own git helper — hooks off, a short timeout of its
+//       own — so the card describes the same tree the updater acts on, without
+//       taking the index lock or holding up the Nest render.
+//
+// Off main and detached are INFO, never WARN: the Updates card already warns on
+// "Skipped: not on main" (auto-update.js's classifyUpdateResult), and that warn
+// only exists while the updater is running. Integrity fires just as well with
+// auto-update switched off, where "updates are skipped" is simply wrong — a dev
+// box on a branch on purpose is not a fault.
+//
+// A check that could not run is INFO "unknown", never ok: the card must not
+// claim privacy or freshness it did not verify.
+const INTEGRITY_ROLE_KEYS = {
+  home: "signals.integrity.roleHome",
+  data: "signals.integrity.roleData",
+  db: "signals.integrity.roleDb",
+  "db-wal": "signals.integrity.roleDbWal",
+  "db-shm": "signals.integrity.roleDbShm",
+};
+
+// Test seams, the same shape as _setTailscaleReader / _setSystemUpdateReaders:
+// null restores the real lstat, auto-update's real git and the real app root.
+let _integrityStat = null;
+let _integrityGit = null;
+let _integrityAppRoot = null;
+/** Test seam: replace the lstat/git readers (and the root they act on). */
+export function _setIntegrityReaders({ stat, git, appRoot } = {}) {
+  _integrityStat = stat || null;
+  _integrityGit = git || null;
+  _integrityAppRoot = appRoot || null;
+}
+
+/** The mode an lstat/fake-stat gives us, as the permission bits only. */
+const modeBits = (st) => Number(st?.mode ?? 0) & 0o777;
+
+function integrityStat(target) {
+  const st = (_integrityStat || lstatSync)(target.path);
+  // Boot never chmods through a symlink; the card still has to say what other
+  // users can read, so it looks at the target once the link is followed.
+  return st && typeof st.isSymbolicLink === "function" && st.isSymbolicLink() ? statSync(target.path) : st;
+}
+
+/**
+ * Tracked changes in `git status --porcelain` output. Untracked entries (`??`)
+ * are not changes to the checkout and never block a pull, so they do not count.
+ * The probe already passes `--untracked-files=no`; the filter stays, because a
+ * caller that pastes in whatever porcelain it has must not inflate the count.
+ */
+export function countTrackedChanges(porcelain) {
+  return String(porcelain || "")
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !line.startsWith("??"))
+    .length;
+}
+
+// Both probes are bounded the way the df probe is: they run inside a Nest
+// render, so a hung git must cost seconds, never the updater's 120 s timeout.
+const GIT_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Read the checkout's state with auto-update's git helper (core.hooksPath off,
+ * the app root as cwd, a short timeout of its own).
+ *
+ * `git status` is asked with `--no-optional-locks`: a plain status refreshes the
+ * index and briefly takes `index.lock` in the LIVE checkout, which is exactly
+ * what makes a concurrent auto-update pull fail. `--untracked-files=no` is how
+ * the question is meant anyway — untracked files never block a pull.
+ *
+ * @returns {Promise<{applicable: boolean, branch?: string|null, detached?: boolean,
+ *                    edits?: number|null, unknown?: string[]}>}
+ *   applicable:false → not a git checkout at all (a container, a tarball
+ *   install, git missing): no part (b).
+ */
+async function readCheckoutState() {
+  const root = _integrityAppRoot || autoUpdateAppRoot();
+  // Decided from the filesystem first: no `.git`, no checkout. Asking git and
+  // matching its English "not a git repository" stderr breaks under any other
+  // locale, and `git` may not be installed at all.
+  if (!existsSync(join(root, ".git"))) return { applicable: false };
+
+  const git = _integrityGit || ((args, options) => autoUpdateGit(args, options));
+  const head = await git(["rev-parse", "--abbrev-ref", "HEAD"], { timeout: GIT_PROBE_TIMEOUT_MS });
+  if (head.code !== 0) {
+    // git not installed: run() reports a spawn failure with the errno as its
+    // code ("ENOENT"), which is a box with no checkout to describe.
+    if (String(head.code) === "ENOENT" || /\bENOENT\b/.test(String(head.stderr || ""))) {
+      return { applicable: false };
+    }
+    // Fallback for the same container case when `.git` exists but git refuses.
+    if (/not a git repo/i.test(String(head.stderr || ""))) return { applicable: false };
+    // Anything else (a broken/shallow checkout, a real error) is a check that
+    // did not run: report it as unknown rather than as a finding.
+    return { applicable: true, unknown: ["checkout"] };
+  }
+  const ref = String(head.stdout || "").trim();
+  const state = {
+    applicable: true,
+    branch: ref === "HEAD" ? null : ref,
+    detached: ref === "HEAD",
+    edits: null,
+    unknown: [],
+  };
+  const status = await git(
+    ["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"],
+    { timeout: GIT_PROBE_TIMEOUT_MS },
+  );
+  if (status.code !== 0) state.unknown.push("edits");
+  else state.edits = countTrackedChanges(status.stdout);
+  return state;
+}
+
+async function integritySignal(lang = "en") {
+  const label = t("signals.integrity.label", lang);
+  const issues = [];
+  const unknown = [];
+
+  // (a) Modes of the paths boot tried to tighten. Owner-only bits are a POSIX
+  // idea: on Windows (where boot skips the same step) there is nothing to read.
+  let permsChecked = true;
+  for (const target of process.platform === "win32" ? [] : homePermissionTargets(process.env)) {
+    let st;
+    try {
+      st = integrityStat(target);
+    } catch (err) {
+      // Nothing there yet is not a fault (boot hardening creates nothing).
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) continue;
+      permsChecked = false;
+      continue;
+    }
+    // Group or other READ or WRITE bit: any local user can open it — or rewrite
+    // it, which for the home and the database is the worse half.
+    if ((modeBits(st) & 0o066) === 0) continue;
+    issues.push({
+      id: `integrity:mode:${target.id}`,
+      severity: "warn",
+      state: "warn",
+      issueOnly: true,
+      label,
+      issueLabel: fill(t("signals.integrity.modeIssue", lang), {
+        role: t(INTEGRITY_ROLE_KEYS[target.id] || INTEGRITY_ROLE_KEYS.home, lang),
+      }),
+    });
+  }
+  if (!permsChecked) unknown.push(t("signals.integrity.checkPermissions", lang));
+
+  // (b) The checkout auto-update pulls into — only when this IS a checkout.
+  let checkout;
+  try {
+    checkout = await readCheckoutState();
+  } catch {
+    checkout = { applicable: true, unknown: ["checkout"] };
+  }
+  if (checkout?.applicable) {
+    const unknownParts = checkout.unknown || [];
+    if (unknownParts.includes("checkout")) {
+      unknown.push(t("signals.integrity.checkCheckout", lang));
+    } else if (checkout.detached) {
+      // Info, not warn: the Updates card already warns ("Skipped: not on main")
+      // while the updater is on. Here it is a fact about the tree, stated once.
+      issues.push({
+        id: "integrity:checkout-detached",
+        severity: "info",
+        state: "info",
+        issueOnly: true,
+        label,
+        issueLabel: t("signals.integrity.detached", lang),
+      });
+    } else if (checkout.branch !== "main") {
+      issues.push({
+        id: "integrity:checkout-off-main",
+        severity: "info",
+        state: "info",
+        issueOnly: true,
+        label,
+        issueLabel: fill(t("signals.integrity.offMain", lang), { branch: String(checkout.branch ?? "?") }),
+      });
+    }
+    if (unknownParts.includes("edits")) {
+      unknown.push(t("signals.integrity.checkEdits", lang));
+    } else if (Number(checkout.edits) > 0) {
+      // A count only: the file names are the operator's business, and this is an
+      // info issue — it stays on the strip and is never pushed.
+      issues.push({
+        id: "integrity:checkout-edits",
+        severity: "info",
+        state: "info",
+        issueOnly: true,
+        label,
+        issueLabel: fill(t("signals.integrity.localEdits", lang), { n: Number(checkout.edits) }),
+      });
+    }
+  }
+
+  if (unknown.length > 0) {
+    issues.push({
+      id: "integrity:check",
+      severity: "info",
+      state: "info",
+      issueOnly: true,
+      label,
+      issueLabel: fill(t("signals.integrity.unknownIssue", lang), { list: [...new Set(unknown)].join(", ") }),
+    });
+  }
+
+  const warns = issues.filter((i) => i.severity === "warn");
+  const infos = issues.filter((i) => i.severity === "info");
+  const state = warns.length > 0 ? "warn" : infos.length > 0 ? "info" : "ok";
+  const value = state === "ok"
+    ? t("signals.integrity.ok", lang)
+    : state === "warn"
+      ? t("signals.integrity.warnValue", lang)
+      : unknown.length > 0
+        ? t("signals.integrity.unknownValue", lang)
+        : infos[0].issueLabel;
+
+  const card = {
+    id: "integrity",
+    severity: state === "ok" ? null : state,
+    state,
+    label,
+    value,
+  };
+  return issues.length > 0 ? [{ ...card, cardOnly: true }, ...issues] : card;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -2372,6 +2632,7 @@ export async function collectHealthSignals(db, opts = {}) {
     Promise.resolve().then(() => publishedPortsSignal(db, lang, nowFn, opts.publishedPorts || {})),
     Promise.resolve().then(() => bundleImagesSignal(lang, nowFn)),
     Promise.resolve().then(() => systemUpdatesSignal(lang, nowFn)),
+    Promise.resolve().then(() => integritySignal(lang)),
     artifactNodeSignal(lang),
     import("../../../satellites/nest-signals.js").then((m) => m.satellitesSignal(db, lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({

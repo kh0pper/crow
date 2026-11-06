@@ -28,6 +28,7 @@ import {
   _setContainerReader,
   _setBundleImageReaders,
   _setSystemUpdateReaders,
+  _setIntegrityReaders,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import { BUNDLE_IMAGE_STALE_DAYS } from "../servers/gateway/dashboard/panels/nest/bundle-images.js";
 import { resolveCrowHome } from "../servers/shared/crow-home.js";
@@ -49,6 +50,14 @@ _setContainerReader(() => false);
 // daemon: a host that owes a reboot warns, and `result.ok` would go false here.
 // No apt = no card, on any host.
 _setSystemUpdateReaders({ aptPresent: () => false });
+// integritySignal stats this instance's real CROW_HOME/data dir (the suite's
+// scratch dirs, whose modes follow the umask of whoever ran the suite) and asks
+// the real checkout for its branch: this suite runs on a feature branch, which
+// is a warn. Pin it so `result.ok` below is about bundleImages only.
+_setIntegrityReaders({
+  stat: () => ({ mode: 0o600, isSymbolicLink: () => false, isFile: () => true, isDirectory: () => false }),
+  git: async () => ({ stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git", code: 128 }),
+});
 
 const NOW = Date.parse("2026-11-05T12:00:00Z");
 const DAY = 86_400_000;

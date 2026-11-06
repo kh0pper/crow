@@ -112,6 +112,23 @@ export async function ensureVoiceBotAtBoot({ noAuth, dbFactory = createDbClient 
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
+  // Boot hardening (audit N1c-18): this instance's home, its data dir and
+  // crow.db (+ the WAL/SHM SQLite keeps beside it) must be owner-only — they
+  // hold the bundle .env secrets, the keychain key, peer tokens and every
+  // memory this Crow has. An install made under a permissive umask left them
+  // 0755/0644. Same shape as the boot repairs for an existing instances.json
+  // (tightenInstancesJsonPermissions) and for installed bundle .env files
+  // (repairInstalledBundleAssets) — but one level up, and it NEVER throws.
+  // Whatever it cannot fix (another owner, a symlink) is reported by the Nest's
+  // Integrity card, which shares this list. Runs before the DB-touching work
+  // below so a WAL created from now on inherits the tightened DB's mode.
+  try {
+    const { tightenCrowHomePermissions } = await import("./tighten-home-permissions.js");
+    tightenCrowHomePermissions();
+  } catch (err) {
+    console.warn("[boot] tightening the Crow home permissions skipped:", err?.message || err);
+  }
+
   // PT-1 peer-trust sweeper: the boot reconcile of peer-tokens.json (the
   // one-time pre-PT-1 snapshot, then delete revoked peers' keys minted before
   // their revoke), then every 10 s and on every crow_instances row change:
