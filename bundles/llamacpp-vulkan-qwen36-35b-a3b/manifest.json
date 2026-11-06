@@ -15,6 +15,7 @@
   "host_grants": {"gpu": true, "shm_size": "16g", "env_files": ["rocm.env"], "path_env": ["LLM_CACHE"]},
   "env_vars": [],
   "port": 8003,
+  "refreshFiles": ["docker-compose.yml"],
   "inference": true,
   "providers": [
     {

@@ -12,12 +12,23 @@
  *     `${VAR:-}` (empty default) does the same.
  *
  * So every ports entry must name one specific host address: a literal, or a
- * variable with a NON-EMPTY default (`${VAR:-127.0.0.1}`), or a REQUIRED
- * variable (`${VAR:?message}`), which Compose refuses to start without. The
+ * variable with a NON-EMPTY `:-` default (`${VAR:-127.0.0.1}`), or a REQUIRED
+ * `:?` variable (`${VAR:?message}`), which Compose refuses to start without.
+ * The colon matters: `${VAR-127.0.0.1}` / `${VAR?message}` only apply when the
+ * variable is UNSET, so a variable set to "" still opens every interface. The
  * only exceptions are the deliberate public ports listed in
  * `scripts/port-bind-allowlist.txt` (`path port  # reason`) — today just the
  * reverse proxy's 80/443, which exist to answer the internet. An allowlist
  * entry that no longer matches a real publish is stale and fails this suite.
+ *
+ * A ports entry that publishes no host port is NOT container-only: Compose
+ * publishes a RANDOM host port on 0.0.0.0 (`- "80"`, `- target: 80`), so those
+ * are findings too — only `expose:` is container-only. A `ports:` value the
+ * checker cannot read at all (`ports: *anchor`, an inline scalar, a short form
+ * with four colon parts) is reported as `unreadable` and can never be
+ * allowlisted, so a human has to read it. A tag on the key
+ * (`ports: !override`) only modifies the list that follows, which is read
+ * normally.
  *
  * Every compose file in the repo is walked (root, bundles/**, servers/**),
  * `node_modules`/`.git`/.pi-brief excluded, plus the checkout's own `data/`
@@ -28,7 +39,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,11 +60,19 @@ const WILDCARD_ADDRESSES = new Set(["0.0.0.0", "::", "[::]", "*", "0::0"]);
 
 const VAR_NAME = "[A-Za-z_][A-Za-z0-9_]*";
 
-/** `${VAR:-default}` / `${VAR-default}` / `$VAR:-default` — the default is what a fresh host publishes. */
+/**
+ * `${VAR:-default}` / `${VAR-default}` / `$VAR:-default` — the default is what
+ * a fresh host publishes. The separator is captured because only `:-` also
+ * substitutes for a variable that is SET BUT EMPTY.
+ */
 const VAR_WITH_DEFAULT_RE = new RegExp(`^\\$(?:\\{(${VAR_NAME})(:?-)([\\s\\S]*)\\}|(${VAR_NAME})(:?-)([\\s\\S]*))$`);
 
-/** `${VAR:?message}` / `${VAR?message}` — Compose refuses to start when unset, so it is always one address. */
-const VAR_REQUIRED_RE = new RegExp(`^\\$(?:\\{${VAR_NAME}:?\\?[^}]*\\}|${VAR_NAME}:?\\?.*)$`);
+/**
+ * `${VAR:?message}` — Compose refuses to start when the variable is unset, so
+ * the publish is always one address. The plain `${VAR?message}` form does not:
+ * it accepts an empty value, which is a wildcard.
+ */
+const VAR_REQUIRED_RE = new RegExp(`^\\$(?:\\{${VAR_NAME}:\\?[^}]*\\}|${VAR_NAME}:\\?.*)$`);
 
 /** Every compose file under `dir`, as repo-relative POSIX paths, sorted. */
 export function findComposeFiles(dir = ROOT) {
@@ -124,13 +143,19 @@ export function classifyHostAddress(raw) {
 
   const withDefault = VAR_WITH_DEFAULT_RE.exec(ip);
   if (withDefault) {
+    const sep = String(withDefault[2] ?? withDefault[5] ?? "");
     const def = String(withDefault[3] ?? withDefault[6] ?? "").trim();
     if (def === "") return { code: "empty-default", address: ip };
+    // Only `:-` covers a variable that is SET BUT EMPTY; `${VAR-x}` yields an
+    // empty host IP there, which is 0.0.0.0 again.
+    if (sep !== ":-") return { code: "no-default", address: ip };
     // A default may itself be a variable (`${A:-${B:-127.0.0.1}}`): resolve it,
     // and never let an unresolved one pass as literal.
     const inner = classifyHostAddress(def);
     return inner.code === "literal" ? { code: "literal", address: inner.address } : inner;
   }
+  // `${VAR?msg}` (no colon) only refuses to start when UNSET, so it does not
+  // pin the address; only `:?` does.
   if (VAR_REQUIRED_RE.test(ip)) return { code: "required", address: ip };
   return { code: "no-default", address: ip };
 }
@@ -138,10 +163,20 @@ export function classifyHostAddress(raw) {
 /** Is this finding the kind an allowlist entry may excuse? */
 export const ALLOWLISTABLE = new Set(["no-host-ip", "wildcard"]);
 
+/** A `ports:` value whose publish shape cannot be read — never allowlistable. */
+function unreadable(spec, reason) {
+  return { unreadable: true, entry: spec, reason: reason || "unreadable ports entry" };
+}
+
 /**
- * One published host port from a `ports:` entry.
- * `{ skip: true }` for a mapping that publishes nothing on a fixed host port
- * (container-only `- "80"`, ephemeral `127.0.0.1::80`, no `published:`).
+ * One short-syntax `ports:` entry -> a mapping, or `{ skip: true }` when there
+ * is no value at all, or `{ unreadable: true }` when the shape cannot be read.
+ *
+ * A single part (`- "80"`) is NOT container-only: Docker picks a RANDOM host
+ * port on 0.0.0.0, so it comes back as a mapping with an empty host port (and
+ * therefore an empty host IP, unless one was named). Only `expose:` is
+ * container-only. `"127.0.0.1::80"` stays safe: a specific address with a
+ * random port cannot be reached from another interface.
  */
 function shortMapping(rawSpec) {
   const spec = unquote(rawSpec);
@@ -155,19 +190,21 @@ function shortMapping(rawSpec) {
   if (body.startsWith("[")) {
     // Bracketed IPv6: [::1]:8000:80
     const close = body.indexOf("]");
-    if (close < 0 || body[close + 1] !== ":") return { skip: true };
+    if (close < 0 || body[close + 1] !== ":") return unreadable(spec);
     ip = body.slice(1, close);
     rest = body.slice(close + 2).split(":");
-    if (rest.length !== 2) return { skip: true };
+    if (rest.length > 2) return unreadable(spec);
+    if (rest.length === 1) rest = ["", rest[0]]; // [::1]:80 — random host port on ::1
   } else {
     const parts = splitOutsideVars(body);
-    if (parts.length === 1) return { skip: true }; // container-only: "80"
-    if (parts.length === 2) { ip = ""; rest = parts; } // no host IP at all: "8000:8000"
-    else if (parts.length === 3) { ip = parts[0]; rest = parts.slice(1); }
-    else return { skip: true };
+    // Four or more parts is not a mapping we can read; guessing would hide a
+    // wide-open publish, so report it instead of skipping it.
+    if (parts.length > 3) return unreadable(spec);
+    if (parts.length === 1) { ip = ""; rest = ["", parts[0]]; } // container port only: "80". Docker picks a random host port on 0.0.0.0
+    else if (parts.length === 2) { ip = ""; rest = parts; } // no host IP at all: "8000:8000"
+    else { ip = parts[0]; rest = parts.slice(1); }
   }
   const host = rest[0].trim();
-  if (host === "") return { skip: true }; // ephemeral host port: "127.0.0.1::80"
   return { ip, host, container: rest[1].trim(), proto };
 }
 
@@ -213,33 +250,44 @@ function flowFields(text) {
   return fields;
 }
 
-/** One long-syntax entry -> a mapping, or `{ skip: true }`. */
+/** One long-syntax entry -> a mapping, or `{ skip: true }` for an empty one. */
 function longMapping(fields) {
-  if (fields.published === undefined) return { skip: true }; // container port only
-  const published = unquote(fields.published);
-  if (published === "") return { skip: true };
+  const published = fields.published === undefined ? "" : unquote(fields.published);
+  const target = fields.target === undefined ? "" : unquote(String(fields.target));
+  // No `published:` is a RANDOM host port on 0.0.0.0 (or on host_ip, if one is
+  // given), exactly like the short `- "80"` form — not container-only.
+  if (published === "" && target === "") return { skip: true };
   const protoMatch = /\/(tcp|udp|sctp)$/i.exec(published);
   const proto = protoMatch ? protoMatch[1].toLowerCase() : "tcp";
   const host = protoMatch ? published.slice(0, protoMatch.index) : published;
   const ipRaw = fields.host_ip === undefined ? "" : unquote(fields.host_ip);
-  const target = fields.target === undefined ? "" : unquote(String(fields.target));
   return { ip: ipRaw, host: host.trim(), container: target, proto };
 }
 
 /**
- * Every published host port in one compose file's `ports:` sections.
- * @returns {Array<{line: number, ip: string, host: string, proto: string}>}
+ * Every published host port in one compose file's `ports:` sections, plus one
+ * `{ line, unreadable: true, entry, reason }` item per `ports:` value that
+ * cannot be read (so it is a finding, never a silent skip).
+ * @returns {Array<{line: number, ip?: string, host?: string, proto?: string, unreadable?: boolean, entry?: string}>}
  */
 export function findPublishedPorts(text) {
   const lines = String(text ?? "").split("\n");
   const out = [];
-  const push = (line, mapping) => { if (mapping && !mapping.skip) out.push({ line, ...mapping }); };
+  const push = (line, mapping) => {
+    if (!mapping || mapping.skip) return;
+    if (mapping.unreadable) { out.push({ line, unreadable: true, entry: mapping.entry, reason: mapping.reason }); return; }
+    out.push({ line, ...mapping });
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const head = /^(\s*)ports:\s*(.*)$/.exec(lines[i]);
     if (!head) continue;
     const keyIndent = head[1].length;
-    const inline = stripComment(head[2]).trim();
+    const inlineRaw = stripComment(head[2]).trim();
+    // A tag on the key (`ports: !override`, `ports: !reset`) only modifies the
+    // list that follows: strip it and read what remains as usual.
+    const tag = /^![\w.-]+\s*([\s\S]*)$/.exec(inlineRaw);
+    const inline = tag ? tag[1].trim() : inlineRaw;
 
     // Flow style on the key line: `ports: ["127.0.0.1:8080:80"]`
     if (inline.startsWith("[")) {
@@ -250,7 +298,12 @@ export function findPublishedPorts(text) {
       }
       continue;
     }
-    if (inline !== "") continue; // not a ports block we can read (never used in this repo)
+    if (inline !== "") {
+      // `ports: *anchor`, `ports: ${PORTS}`, any other scalar: the publish shape
+      // cannot be read, and skipping it would silently hide a 0.0.0.0 bind.
+      push(i + 1, unreadable(inline, "value after `ports:` that cannot be read"));
+      continue;
+    }
 
     let current = null; // long-syntax entry being accumulated
     let itemIndent = -1;
@@ -296,19 +349,31 @@ export function findPublishedPorts(text) {
  */
 export function checkComposePortBinds(text, { file = "(inline)", allowlist = [] } = {}) {
   const findings = [];
-  for (const { line, ip, host, container, proto } of findPublishedPorts(text)) {
+  for (const pub of findPublishedPorts(text)) {
+    if (pub.unreadable) {
+      // No allowlist entry can excuse a shape the checker cannot read: a human
+      // has to look at it.
+      findings.push({ file, line: pub.line, entry: pub.entry, address: "", port: "", proto: "tcp", code: "unreadable", allowlisted: false });
+      continue;
+    }
+    const { line, ip, host, container, proto } = pub;
     const verdict = classifyHostAddress(ip);
     if (verdict.code === "literal" || verdict.code === "required") continue;
-    const port = proto === "tcp" ? host : `${host}/${proto}`;
+    // A random host port has no port number to pin or allowlist, so it can
+    // never be excused — only a specific IP with a random port is safe.
+    const port = host === "" ? "" : proto === "tcp" ? host : `${host}/${proto}`;
+    const entry = host === ""
+      ? (ip === "" ? `${container || "?"} (container port only, random host port)` : `${ip}::${container || "?"}`)
+      : ip === "" ? `${host}:${container || "?"}` : `${ip}:${host}:${container || "?"}`;
     findings.push({
       file,
       line,
-      entry: ip === "" ? `${host}:${container || "?"}` : `${ip}:${host}:${container || "?"}`,
+      entry,
       address: verdict.address,
       port,
       proto,
       code: verdict.code,
-      allowlisted: ALLOWLISTABLE.has(verdict.code) && allowlist.some((e) => e.path === file && e.port === port),
+      allowlisted: host !== "" && ALLOWLISTABLE.has(verdict.code) && allowlist.some((e) => e.path === file && e.port === port),
     });
   }
   return findings;
@@ -318,10 +383,12 @@ export function checkComposePortBinds(text, { file = "(inline)", allowlist = [] 
 export function collectPortBindKeys(files = findComposeFiles(), dir = ROOT) {
   const keys = new Set();
   for (const file of files) {
-    for (const { ip, host, proto } of findPublishedPorts(readFileSync(join(dir, file), "utf8"))) {
-      const verdict = classifyHostAddress(ip);
+    for (const pub of findPublishedPorts(readFileSync(join(dir, file), "utf8"))) {
+      // Unreadable entries, and a random host port, can never be allowlisted.
+      if (pub.unreadable || pub.host === "") continue;
+      const verdict = classifyHostAddress(pub.ip);
       if (!ALLOWLISTABLE.has(verdict.code)) continue;
-      keys.add(portBindKey(file, proto === "tcp" ? host : `${host}/${proto}`));
+      keys.add(portBindKey(file, pub.proto === "tcp" ? pub.host : `${pub.host}/${pub.proto}`));
     }
   }
   return keys;
@@ -378,8 +445,11 @@ test("the seven audited model/STT/TTS mappings fall back to loopback", () => {
   const problems = [];
   for (const [file, hostPort] of audited) {
     const text = readFileSync(join(ROOT, file), "utf8");
-    const entry = findPublishedPorts(text).find((p) => p.host === hostPort);
-    if (!entry) { problems.push(`${file}: no mapping for host port ${hostPort}`); continue; }
+    // Select the host-IP VARIABLE line, not a literal loopback line for the same
+    // port: kokoro's overlay has both, and a revert of the variable line is
+    // exactly what this test exists to catch.
+    const entry = findPublishedPorts(text).find((p) => p.host === hostPort && String(p.ip ?? "").startsWith("$"));
+    if (!entry) { problems.push(`${file}: no host-IP-variable mapping for host port ${hostPort}`); continue; }
     const verdict = classifyHostAddress(entry.ip);
     if (verdict.code !== "literal") problems.push(`${file}:${entry.line} ${entry.ip} -> ${verdict.code}`);
     if (verdict.address !== "127.0.0.1") problems.push(`${file}:${entry.line} falls back to ${verdict.address}, not loopback`);
@@ -421,6 +491,18 @@ test("red: a variable with an empty default is as wide open as no default", () =
   );
 });
 
+test("red: a colon-less default or required-check still leaves a set-but-empty variable wide open", () => {
+  // `${VAR-x}` only substitutes when the variable is UNSET, and `${VAR?msg}`
+  // only refuses to start when it is UNSET. A variable set to "" gives an empty
+  // host IP (0.0.0.0) in both cases, so only `:-` and `:?` count as safe.
+  assert.equal(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${TAILSCALE_IP-127.0.0.1}:8000:8000"\n')[0].code, "no-default");
+  assert.equal(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${TAILSCALE_IP?Set TAILSCALE_IP}:8000:8000"\n')[0].code, "no-default");
+  assert.equal(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${TAILSCALE_IP-}:8000:8000"\n')[0].code, "empty-default");
+  // The colon forms are the safe ones (pinned in the green case too).
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${TAILSCALE_IP:-127.0.0.1}:8000:8000"\n'), []);
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${TAILSCALE_IP:?Set TAILSCALE_IP}:8000:8000"\n'), []);
+});
+
 test("red: long syntax and an explicit wildcard are caught too", () => {
   const long = [
     "services:",
@@ -445,6 +527,66 @@ test("red: long syntax and an explicit wildcard are caught too", () => {
   assert.equal(checkComposePortBinds('services:\n  app:\n    ports:\n      - "0.0.0.0:443:443/udp"   # HTTP/3\n')[0].port, "443/udp");
 });
 
+test("red: a container-port-only entry publishes a random host port on 0.0.0.0", () => {
+  // `- "80"` is NOT container-only: Docker picks a random host port on every
+  // interface. Only `expose:` is container-only.
+  for (const spec of ['- "80"', "- 80", '- "80/udp"']) {
+    assert.deepEqual(
+      checkComposePortBinds(`services:\n  app:\n    ports:\n      ${spec}\n`).map((f) => [f.line, f.code, f.allowlisted]),
+      [[4, "no-host-ip", false]],
+      spec,
+    );
+  }
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    expose:\n      - "80"\n'), [], "expose: is the container-only form");
+  // …and no allowlist entry can excuse a port the host OS picks.
+  const allowlisted = parsePortBindAllowlist("bundles/x/docker-compose.yml  80  # nope\n");
+  assert.equal(
+    checkComposePortBinds('services:\n  app:\n    ports:\n      - "80"\n', { file: "bundles/x/docker-compose.yml", allowlist: allowlisted })[0].allowlisted,
+    false,
+  );
+
+  // A random host port on an EMPTY or variable IP is the same every-interface publish.
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "::80"\n').map((f) => [f.line, f.code]), [[4, "no-host-ip"]]);
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${TAILSCALE_IP}::80"\n').map((f) => [f.line, f.code]), [[4, "no-default"]]);
+  // A SPECIFIC address with a random port stays safe (loopback, or a set IP).
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "127.0.0.1::80"\n'), []);
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "[::1]::80"\n'), []);
+
+  // Long syntax with no `published:` is the same random host port.
+  assert.deepEqual(checkComposePortBinds("services:\n  app:\n    ports:\n      - target: 9000\n").map((f) => [f.line, f.code]), [[4, "no-host-ip"]]);
+  assert.deepEqual(checkComposePortBinds("services:\n  app:\n    ports:\n      - { target: 9000 }\n").map((f) => [f.line, f.code]), [[4, "no-host-ip"]]);
+  // …unless it names a specific address.
+  assert.deepEqual(checkComposePortBinds("services:\n  app:\n    ports:\n      - target: 9000\n        host_ip: 127.0.0.1\n"), []);
+});
+
+test("red: a ports: shape the checker cannot read is a finding, never a skip", () => {
+  const find = (text) => checkComposePortBinds(text).map((f) => [f.line, f.code, f.allowlisted]);
+  // `ports: *anchor` publishes whatever the anchor holds: unreadable.
+  assert.deepEqual(find("services:\n  app:\n    ports: *shared-ports\n"), [[3, "unreadable", false]]);
+  // Any other inline scalar after `ports:` is not a shape we can read.
+  assert.deepEqual(find("services:\n  app:\n    ports: ${APP_PORTS}\n"), [[3, "unreadable", false]]);
+  // A short form with four colon-separated parts is not a mapping we can read.
+  assert.deepEqual(
+    checkComposePortBinds('services:\n  app:\n    ports:\n      - "1:2:3:4"\n').map((f) => [f.line, f.code]),
+    [[4, "unreadable"]],
+  );
+  // …and an allowlist entry can never excuse an unreadable shape.
+  const allowlisted = parsePortBindAllowlist("bundles/x/docker-compose.yml  80  # nope\n");
+  assert.equal(
+    checkComposePortBinds("services:\n  app:\n    ports: *shared-ports\n", { file: "bundles/x/docker-compose.yml", allowlist: allowlisted })[0].allowlisted,
+    false,
+  );
+  // `ports: !override` is a Compose 2.24+ tag on the KEY: the list after it is
+  // the real one and must still be read.
+  assert.deepEqual(
+    checkComposePortBinds('services:\n  app:\n    ports: !override\n      - "0.0.0.0:80:80"\n').map((f) => [f.line, f.code]),
+    [[4, "wildcard"]],
+  );
+  assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports: !override\n      - "127.0.0.1:80:80"\n'), []);
+  // Tagged flow form: an empty list publishes nothing.
+  assert.deepEqual(checkComposePortBinds("services:\n  app:\n    ports: !reset []\n"), []);
+});
+
 test("green: loopback literals, non-empty defaults, required variables and CN-only ports pass", () => {
   const text = [
     "services:",
@@ -458,8 +600,8 @@ test("green: loopback literals, non-empty defaults, required variables and CN-on
     '      - "${A:-${B:-127.0.0.1}}:8009:8009"',
     '      - "[::1]:8099:99"',
     '      - "127.0.0.1:8555:8555/udp"',
-    '      - "80"',
     '      - "127.0.0.1::80"',
+    '      - "${TAILSCALE_IP:-127.0.0.1}::8001"',
     "    volumes:",
     '      - "${DATA:-./data}:/data"',
     "    environment:",
@@ -476,6 +618,7 @@ test("green: loopback literals, non-empty defaults, required variables and CN-on
     "        host_ip: 127.0.0.1",
     '      - { target: 443, published: "8443", host_ip: "127.0.0.1" }',
     "      - target: 9000",
+    "        host_ip: 127.0.0.1",
   ].join("\n");
   assert.deepEqual(checkComposePortBinds(long), []);
 });
@@ -518,4 +661,47 @@ test("green: a defaulted host-IP variable needs no allowlist entry (an entry for
   // defaulted variable is simply safe, so listing it would be a stale entry.
   assert.deepEqual(checkComposePortBinds('services:\n  app:\n    ports:\n      - "${BIND:-127.0.0.1}:80:80"\n'), []);
   assert.equal(ALLOWLIST.some((e) => e.port === "80" && e.path !== "bundles/caddy/docker-compose.yml"), false);
+});
+
+// ── the fix reaches installed copies ────────────────────────────────────────
+
+/**
+ * A version bump alone does NOT re-copy a docker bundle's compose file:
+ * `refreshVersionedBundle` copies one only when the manifest opts in through
+ * `refreshFiles` (servers/gateway/routes/bundles.js — a plain relative path
+ * inside the bundle is accepted; `.env*`, `data`, `node_modules`, `.git` and
+ * read-write bind mounts are not). Without this list the loopback defaults
+ * would reach no installed copy until a reinstall.
+ */
+const COMPOSE_REFRESH = new Map([
+  ["kokoro-tts", ["docker-compose.yml", "docker-compose.tailnet.yml"]],
+  ["faster-whisper-server", ["docker-compose.yml", "docker-compose.tailnet.yml"]],
+  ["llamacpp-vulkan-qwen36-35b-a3b", ["docker-compose.yml"]],
+  ["vllm-cuda-embed", ["docker-compose.yml"]],
+  ["vllm-cuda-vision", ["docker-compose.yml"]],
+  ["vllm-cuda-rerank", ["docker-compose.yml"]],
+  ["vllm-rocm-qwen35-4b", ["docker-compose.yml"]],
+]);
+
+test("the seven audited bundles refresh their compose file(s) on a version bump", () => {
+  const problems = [];
+  const registry = JSON.parse(readFileSync(join(ROOT, "registry", "add-ons.json"), "utf8"));
+  const entries = registry["add-ons"] || [];
+  for (const [id, files] of COMPOSE_REFRESH) {
+    const manifest = JSON.parse(readFileSync(join(ROOT, "bundles", id, "manifest.json"), "utf8"));
+    const listed = Array.isArray(manifest.refreshFiles) ? manifest.refreshFiles : [];
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) problems.push(`registry/add-ons.json: no entry for ${id}`);
+    for (const file of files) {
+      if (!listed.includes(file)) problems.push(`bundles/${id}/manifest.json: refreshFiles is missing ${file}`);
+      // A refresh of a file the bundle does not ship is a silent no-op.
+      if (!existsSync(join(ROOT, "bundles", id, file))) problems.push(`bundles/${id}/${file}: declared in refreshFiles but not shipped`);
+      // The committed registry mirrors every manifest field (build-registry
+      // spreads the manifest through), so it must carry this list too.
+      if (entry && !(Array.isArray(entry.refreshFiles) ? entry.refreshFiles : []).includes(file)) {
+        problems.push(`registry/add-ons.json: ${id} is missing ${file} in refreshFiles`);
+      }
+    }
+  }
+  assert.deepEqual(problems, [], problems.join("\n"));
 });

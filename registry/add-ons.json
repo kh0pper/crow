@@ -1416,6 +1416,10 @@
         }
       ],
       "port": 8004,
+      "refreshFiles": [
+        "docker-compose.yml",
+        "docker-compose.tailnet.yml"
+      ],
       "no_auto_provider": "Not an LLM chat endpoint -- speech-to-text is wired via sttProfileSeed below, which seeds a dedicated STT profile (provider: fasterwhisper) pointing at this container's OpenAI-compatible /v1/audio/transcriptions endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
       "sttProfileSeed": {
         "name": "Faster-Whisper (local)",
@@ -2849,6 +2853,10 @@
       },
       "env_vars": [],
       "port": 8880,
+      "refreshFiles": [
+        "docker-compose.yml",
+        "docker-compose.tailnet.yml"
+      ],
       "no_auto_provider": "Not an LLM chat endpoint -- text-to-speech is wired via ttsProfileSeed below, which seeds a dedicated TTS profile (provider: kokoro) pointing at this container's OpenAI-compatible /v1/audio/speech endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
       "ttsProfileSeed": {
         "name": "Kokoro (local)",
@@ -3287,6 +3295,9 @@
       },
       "env_vars": [],
       "port": 8003,
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "inference": true,
       "providers": [
         {
@@ -7217,6 +7228,9 @@
       },
       "env_vars": [],
       "port": 9100,
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "inference": true,
       "providers": [
         {
@@ -7271,6 +7285,9 @@
       },
       "env_vars": [],
       "port": 9101,
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "inference": true,
       "providers": [
         {
@@ -7318,6 +7335,9 @@
       },
       "env_vars": [],
       "port": 9102,
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "inference": true,
       "providers": [
         {
@@ -7366,6 +7386,9 @@
       },
       "env_vars": [],
       "port": 8011,
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "inference": true,
       "providers": [
         {
