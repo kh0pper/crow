@@ -26,6 +26,12 @@
  *     would fail anyway);
  *   - a path that does not exist is skipped: boot hardening never creates state
  *     (init-db does that);
+ *   - a home or data dir that resolves to the operator's whole home directory or
+ *     to `/` is REFUSED: those are not this instance's files, and 0700 on a home
+ *     directory would lock out everything else that reads it. One log line, no
+ *     chmod;
+ *   - on Windows there are no owner-only mode bits to set, so the whole step is
+ *     skipped;
  *   - NEVER throws. A boot repair must not be able to block boot — EPERM, a
  *     race with a restart, a read-only home: all of them are just "not fixed".
  *
@@ -39,7 +45,21 @@
  */
 import { chmodSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { resolveCrowHome, resolveInstanceDataDir } from "../../shared/crow-home.js";
+
+/**
+ * Directories boot must never chmod, even when the environment points an
+ * instance at one of them: the filesystem root, and the operator's whole home
+ * directory. CROW_HOME unset-and-inherited from `$HOME` is an easy mistake, and
+ * chmod'ing `$HOME` to 0700 breaks every other service and shell that reads it.
+ * The Nest's Integrity card shares this list, so it stays quiet about them too.
+ */
+function refusedDirectories() {
+  const out = new Set([resolve("/")]);
+  try { out.add(resolve(homedir())); } catch {}
+  return out;
+}
 
 /**
  * The paths of this instance that must be owner-only, in the order they are
@@ -54,10 +74,15 @@ import { resolveCrowHome, resolveInstanceDataDir } from "../../shared/crow-home.
  * dir is derived, but an operator may point CROW_DATA_DIR (or CROW_DB_PATH's
  * directory) at the home itself.
  *
+ * Returns nothing on Windows, and nothing for a home/data dir that resolves to
+ * the operator's home directory or `/` (one line on `log` says which and why).
+ *
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {{log?: (m: string) => void}} [opts]
  * @returns {{id:string, role:string, kind:"dir"|"file", mode:number, path:string}[]}
  */
-export function homePermissionTargets(env = process.env) {
+export function homePermissionTargets(env = process.env, { log = () => {} } = {}) {
+  if (process.platform === "win32") return [];
   const home = resolve(resolveCrowHome(env));
   const dataDir = resolveInstanceDataDir(env);
   const dbPath = env.CROW_DB_PATH ? resolve(env.CROW_DB_PATH) : join(dataDir, "crow.db");
@@ -68,10 +93,16 @@ export function homePermissionTargets(env = process.env) {
     { id: "db-wal", role: "crow.db-wal", kind: "file", mode: 0o600, path: `${dbPath}-wal` },
     { id: "db-shm", role: "crow.db-shm", kind: "file", mode: 0o600, path: `${dbPath}-shm` },
   ];
+  const refused = refusedDirectories();
   const seen = new Set();
   return targets.filter((target) => {
     if (seen.has(target.path)) return false;
     seen.add(target.path);
+    if (target.kind === "dir" && refused.has(target.path)) {
+      const why = "it is the home directory or the filesystem root, not this instance's own folder";
+      log(`[boot] not tightening ${target.role} ${target.path}: ${why}`);
+      return false;
+    }
     return true;
   });
 }
@@ -87,8 +118,10 @@ export function homePermissionTargets(env = process.env) {
  *          the paths it changed (empty on the steady state)
  */
 export function tightenCrowHomePermissions({ env = process.env, uid = process.getuid?.() ?? null, log = (m) => console.log(m) } = {}) {
+  // Windows has no owner-only mode bits: nothing to tighten, nothing to log.
+  if (process.platform === "win32") return [];
   const tightened = [];
-  for (const target of homePermissionTargets(env)) {
+  for (const target of homePermissionTargets(env, { log })) {
     try {
       const st = lstatSync(target.path);
       const rightKind = target.kind === "dir" ? st.isDirectory() : st.isFile();

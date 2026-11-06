@@ -12,6 +12,8 @@
  *   - a path is chmod'ed only when it is the RIGHT kind (lstat — a symlink is
  *     never followed, so its target outside the instance is never changed),
  *     owned by THIS uid, and carries group/other bits;
+ *   - a home or data dir that IS the operator's home directory (or `/`) is
+ *     refused with one log line — never chmod'ed;
  *   - one log line per path actually changed, none for a no-op;
  *   - it never throws and never creates state (a missing path is a skip).
  */
@@ -19,9 +21,9 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   mkdtempSync, mkdirSync, writeFileSync, chmodSync, statSync, lstatSync,
-  symlinkSync, unlinkSync, existsSync, rmSync,
+  symlinkSync, unlinkSync, existsSync, rmSync, readFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { rmScratch } from "./helpers/safe-rm.js";
 
@@ -153,4 +155,53 @@ test("homePermissionTargets lists each path once, even when the data dir is the 
     [["home", 0o700], ["db", 0o600], ["db-wal", 0o600], ["db-shm", 0o600]],
     "a home that is also the data dir is checked once, as a directory",
   );
+});
+
+test(
+  "a home that IS the operator's home directory is refused, with one log line",
+  { skip: process.platform === "win32" },
+  () => {
+    // Safe to drive for real: os.homedir() follows $HOME, so the "homedir" this
+    // test refuses is a scratch directory, not the machine's real one.
+    const fakeHome = join(ROOT, "operator-home");
+    mkdirSync(fakeHome, { recursive: true });
+    chmodSync(fakeHome, 0o755);
+    const saved = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      assert.equal(homedir(), fakeHome, "precondition: homedir() is the scratch one");
+      const lines = [];
+      const tightened = tightenCrowHomePermissions({
+        env: { CROW_HOME: fakeHome, CROW_DATA_DIR: fakeHome },
+        log: (m) => lines.push(m),
+      });
+
+      assert.equal(mode(fakeHome), 0o755, "chmod 0700 on a home dir locks out everything else — never do it");
+      assert.deepEqual(tightened, [], "nothing was touched");
+      assert.equal(lines.length, 1, "exactly one line says it was refused (the deduped data dir is silent)");
+      assert.match(lines[0], /not tightening Crow home/);
+      assert.match(lines[0], /home directory or the filesystem root/);
+      const ids = homePermissionTargets({ CROW_HOME: fakeHome, CROW_DATA_DIR: fakeHome }).map((t) => t.id);
+      assert.ok(!ids.includes("home") && !ids.includes("data"),
+        "and the Integrity card, which shares the list, does not report it either");
+    } finally {
+      process.env.HOME = saved;
+    }
+  },
+);
+
+test("the gateway boot actually calls the tightening step", () => {
+  // Driving runPostListenSetup is impractical here — it opens the DB and starts
+  // the scheduler, the health monitor, the peer-trust sweeper and more. So this
+  // is a static source check: it fails the moment the boot step stops importing
+  // or calling tightenCrowHomePermissions, which is the regression that matters
+  // (a repair that exists but never runs is worth nothing).
+  const src = readFileSync(new URL("../servers/gateway/boot/post-listen.js", import.meta.url), "utf8");
+  const start = src.indexOf("export async function runPostListenSetup(");
+  assert.ok(start > -1, "runPostListenSetup is still exported from boot/post-listen.js");
+  const rest = src.slice(start);
+  const end = rest.indexOf("\n}\n");
+  const body = end > -1 ? rest.slice(0, end) : rest;
+  assert.match(body, /import\("\.\/tighten-home-permissions\.js"\)/, "boot imports the hardening module");
+  assert.match(body, /tightenCrowHomePermissions\(\)/, "and calls it");
 });
