@@ -1633,13 +1633,13 @@ test("N1b-2: bubblewrap is installed from apt before the auto-update timer turns
   assert.ok(idx < s.indexOf('header "Step 5/10: Automatic Security Updates"'),
     "before the timer that can hold the dpkg lock (so no lock timeout is needed)");
   assert.ok(idx > s.indexOf('header "Step 2/10: Node.js'), "in the Node variable step, before any use of a bot");
-  assert.ok(idx < s.indexOf('header "Step 8/10: System Services"'), "before the gateway starts");
+  assert.ok(idx < s.search(/header "Step \d+\/10: System Services"/), "before the gateway starts");
   // Defined above the source-only seam (so tests can drive it) and CALLED below it.
   const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
   assert.ok(s.indexOf("install_bwrap_apparmor()") > -1 && s.indexOf("install_bwrap_apparmor()") < seamIdx);
   const callIdx = s.indexOf("\ninstall_bwrap_apparmor\n");
   assert.ok(callIdx > seamIdx, "the install body really calls it");
-  assert.ok(callIdx < s.indexOf('header "Step 8/10'), "and does so before the gateway starts");
+  assert.ok(callIdx < s.search(/header "Step \d+\/10: System Services"/), "and does so before the gateway starts");
   // Ubuntu's profile package is fetched by the same step, before the timer. A
   // plain `apt-get download` needs no dpkg lock, so no lock timeout is needed
   // either — and the package is never installed (see the static test above).
