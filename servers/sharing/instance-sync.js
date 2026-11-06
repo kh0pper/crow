@@ -31,6 +31,7 @@ import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../shared/self-dial-address.js";
 import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
+import { noticeProviderKeyNeeded } from "../shared/provider-key-need.js";
 
 /** How long the re-pair fence waits to learn a peer feed's remote length (PT-1). */
 const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
@@ -102,6 +103,8 @@ export const SYNCED_TABLES = [
   "crow_instances",
   // Phase 5-full: LLM provider registry. Operator-editable on any instance;
   // changes propagate to peers so model swaps/additions are one-and-done.
+  // The row syncs; its api_key NEVER does (LOCAL_ONLY_COLUMNS below — operator
+  // ruling 2026-11-05). A peer that needs a key is told once, by name.
   // Toggle off by removing this line if you want per-instance divergence.
   "providers",
   // Scoped-settings replication (2026-04-14): only rows with instance_id IS NULL
@@ -194,17 +197,53 @@ export const DELETE_KEY_POLICY = Object.freeze({
   relay_config: null,
 });
 
+/**
+ * Columns that belong to the instance that WROTE them and never cross the wire
+ * in either direction (operator ruling 2026-11-05: an API key never leaves the
+ * instance where it was entered, and an inbound row never writes or overwrites
+ * a local key). Per table, and the single source of truth for all four doors:
+ *
+ *   - outbound emit   — EXCLUDED_COLUMNS below AND OUTBOUND_TRANSFORMS.providers;
+ *   - the stdio outbox (sync-emit.js emitOrQueue) — stripLocalOnlyColumns;
+ *   - inbound apply   — INBOUND_DROPPED_COLUMNS below (after the signature
+ *                       check, before _checkConflict, so an old peer's key can
+ *                       neither be written nor manufacture a conflict row);
+ *   - the equivalence/conflict judgement — rowsEquivalent ignores them.
+ *
+ * A future local-only column goes here FIRST; every door reads this map.
+ */
+export const LOCAL_ONLY_COLUMNS = Object.freeze({
+  providers: Object.freeze(["api_key"]),
+});
+
+/** Every local-only column name, whatever table it belongs to (rowsEquivalent). */
+const LOCAL_ONLY_COLUMN_NAMES = Object.freeze([...new Set(Object.values(LOCAL_ONLY_COLUMNS).flat())]);
+
+/**
+ * Pure: a copy of `row` with `table`'s local-only columns removed (the same
+ * object back when the table has none, so callers can pass it through
+ * unconditionally). Never mutates the input.
+ */
+export function stripLocalOnlyColumns(table, row) {
+  const cols = LOCAL_ONLY_COLUMNS[table];
+  if (!cols || !row || typeof row !== "object") return row;
+  const out = { ...row };
+  for (const col of cols) delete out[col];
+  return out;
+}
+
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
 export const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
-  // apiKey can be sensitive for some deployments; keep in sync by default for
-  // local-lab scenarios but flag here as the place to exclude if paranoid.
-  // created_at/updated_at are per-instance bookkeeping that ride the wire
-  // TODAY via disableProvider's SELECT * spread and manufacture the same
-  // spurious conflicts as contacts.created_at below. lamport_ts is sync
-  // metadata carried in the entry envelope, not the row (prior art:
-  // messages/contact_groups).
-  providers: ["created_at", "updated_at", "lamport_ts"],
+  // providers.api_key is LOCAL-ONLY (LOCAL_ONLY_COLUMNS above): the operator's
+  // ruling is that a provider row syncs (name/id, base_url, models,
+  // description, type, host, gpu_policy) but its key never does — a peer never
+  // receives it and can never write one back. created_at/updated_at are
+  // per-instance bookkeeping that ride the wire TODAY via disableProvider's
+  // SELECT * spread and manufacture the same spurious conflicts as
+  // contacts.created_at below. lamport_ts is sync metadata carried in the
+  // entry envelope, not the row (prior art: messages/contact_groups).
+  providers: [...LOCAL_ONLY_COLUMNS.providers, "created_at", "updated_at", "lamport_ts"],
   // Phase 3 (contacts follow the user): `verified` is a per-device attestation
   // ("I compared the safety number on THIS device") — never assert it on a
   // device that didn't check. `last_seen` is bumped on every inbound DM
@@ -273,10 +312,16 @@ export const EXCLUDED_COLUMNS = {
 // memories.project_id is a local FK too (project_spaces ids are per-instance): an un-upgraded
 // peer still sends its own id, which would file the memory under an unrelated local project.
 // The receiver derives project_id from project_uuid instead (mapInboundMemoryProject).
+// providers.api_key: an old (or hostile) peer still SENDS one, so it is dropped
+// here — after the signature check, before dispatch and before _checkConflict —
+// which leaves _applyInsert writing NULL for a new row and _applyUpdate
+// (which only touches the keys present on the wire) leaving the local key
+// untouched. A missing api_key key on the wire therefore never nulls it.
 export const INBOUND_DROPPED_COLUMNS = {
   memories: ["project_id"],
   research_notes: ["provenance", "quote_found", "locator", "source_id",
     "created_by", "withdrawn_at", "withdrawn_by", "withdrawn_reason"],
+  providers: [...LOCAL_ONLY_COLUMNS.providers],
 };
 
 // A wire-row key may only reach SQL as an identifier if it matches this AND is
@@ -396,18 +441,25 @@ const OUTBOUND_TRANSFORMS = {
   },
   // source_id is a local FK too (research_sources rows are not synced).
   research_notes: (row) => ({ ...row, project_id: null, source_id: null }),
-  // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
-  // wire nulls verbatim and would null a peer's locally-set policy, while the
-  // local write path already treats null as "keep" (COALESCE,
-  // providers-db.js:198). Drop the key when null; pass through otherwise.
+  // providers: the local-only key never rides the wire, in EITHER direction of
+  // this transform's two uses (emitChange's outbound row and _checkConflict's
+  // LOCAL comparison row) — so a peer holding a different key can never look
+  // divergent. api_key is also in EXCLUDED_COLUMNS/INBOUND_DROPPED_COLUMNS;
+  // stripping it here keeps the comparison like-for-like even for a caller that
+  // reaches this transform alone.
+  // Also: a null gpu_policy must not ride the wire — _applyUpdate writes wire
+  // nulls verbatim and would null a peer's locally-set policy, while the local
+  // write path already treats null as "keep" (COALESCE, providers-db.js:198).
+  // Drop the key when null; pass through otherwise.
   // NOTE: transforms are applied in emitChange AND to the local row in
   // _checkConflict — must be pure (never mutate the input).
   providers: (row) => {
-    if (row.gpu_policy == null) {
-      const { gpu_policy, ...rest } = row;
-      return rest;
+    const rest = stripLocalOnlyColumns("providers", row);
+    if (rest.gpu_policy == null) {
+      const { gpu_policy, ...out } = rest;
+      return out;
     }
-    return { ...row };
+    return { ...rest };
   },
 };
 
@@ -417,7 +469,10 @@ const OUTBOUND_TRANSFORMS = {
  *
  * Per-key rules: both null/undefined → equal; exactly one nullish → NOT equal
  * (never alias null with ""); otherwise String(a) === String(b).
- * lamport_ts and instance_id are ignored — sync metadata, not content.
+ * lamport_ts and instance_id are ignored — sync metadata, not content — and so
+ * is every LOCAL_ONLY_COLUMNS entry (api_key): two instances that hold
+ * different keys for the same provider are converged, not divergent, or they
+ * would re-send each other's rows forever.
  *
  * "a" is the LOCAL row (already passed through OUTBOUND_TRANSFORMS at the call
  * site). "b" is the INCOMING (wire) row. Only keys in "b" are checked: wire
@@ -430,7 +485,7 @@ const OUTBOUND_TRANSFORMS = {
  */
 export function rowsEquivalent(a, b) {
   if (!a || !b) return false;
-  const IGNORE = new Set(["lamport_ts", "instance_id"]);
+  const IGNORE = new Set(["lamport_ts", "instance_id", ...LOCAL_ONLY_COLUMN_NAMES]);
   for (const k of Object.keys(b)) {
     if (IGNORE.has(k)) continue;
     const av = a[k] ?? null;
@@ -3052,8 +3107,29 @@ export class InstanceSyncManager {
           await this._applyDelete(table, row);
           break;
       }
+      // Operator ruling (2026-11-05): a synced provider that needs a key and
+      // holds none HERE is surfaced once, by name. Only an inbound apply can
+      // reach this (a locally-created provider never passes through _applyEntry),
+      // and the check reads the LOCAL row, so it never fires while a key is set.
+      if (table === "providers" && op !== "delete" && typeof applyRow?.id === "string") {
+        await this._noticeProviderNeedsKey(applyRow);
+      }
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
+    }
+  }
+
+  /**
+   * Raise (at most once) the "needs an API key on this device" notice for a
+   * provider row that just arrived from a peer. provider-key-need.js owns the
+   * predicate (a keyless llama.cpp on the LAN is not nagged), the by-name text
+   * and the per-id dedupe; never throws into the apply loop.
+   */
+  async _noticeProviderNeedsKey(row) {
+    try {
+      await noticeProviderKeyNeeded(this.db, row?.id);
+    } catch (err) {
+      console.warn(`[instance-sync] provider key notice failed for ${String(row?.id).slice(0, 64)}:`, err.message);
     }
   }
 

@@ -53,6 +53,7 @@ import {
 } from "../../../../../shared/cloud-consent.js";
 import { readLocalMarks, markLocal, unmarkLocal, isMarkableRow, isMarkCurrent, localMarkTokenFor, ownBoxMarkTokenFor } from "../../../../../shared/provider-local-marks.js";
 import { readOwnBoxMarks, markOwnBox, unmarkOwnBox, isOwnBoxMarkableRow, isOwnBoxMarkCurrent } from "../../../../../shared/provider-local-marks.js";
+import { providerNeedsKey } from "../../../../../shared/provider-key-need.js";
 
 const BACK = "?section=llm&tab=providers";
 
@@ -200,6 +201,23 @@ export function localMarkSwitch(p, { localMarks, salt, ownAddrs, lang = "en" }) 
             <input type="hidden" name="id" value="${escapeHtml(p.id)}">${token}
             <button type="submit" role="checkbox" aria-checked="${on ? "true" : "false"}"><span class="llm-local-box" aria-hidden="true"></span>${label}</button>
           </form>`;
+}
+
+/**
+ * "Needs an API key on this device." for a row that arrived from a paired
+ * device and holds no key here; "" otherwise (operator ruling 2026-11-05).
+ * Keys are never shared, so a synced row lands keyless — and this is the only
+ * place the operator is told, beside the row it applies to. Not for a row this
+ * instance wrote itself (it cannot be keyless by accident), not for a keyless
+ * provider (a llama.cpp on the LAN, provider-key-need.js), and not while a key
+ * is set here.
+ */
+export function needsKeyLine(p, { ownInstanceId, lang = "en" } = {}) {
+  if (!p || p.disabled || !ownInstanceId) return "";
+  if (p.instance_id == null || p.instance_id === ownInstanceId) return "";
+  if (!providerNeedsKey(p)) return "";
+  if (typeof p.apiKey === "string" && p.apiKey.trim() !== "") return "";
+  return `<div class="llm-needs-key" role="status">${escapeHtml(t("settings.providers.needsKeyHere", lang))}</div>`;
 }
 
 /** markLocal refusals with their own line (?local=<reason>). */
@@ -360,7 +378,7 @@ export default {
       return `<tr class="${p.disabled ? "llm-row-disabled" : ""}"${dupAttr}>
         <td class="llm-cell-status">${statusDot(p, { external, lang })}</td>
         <td class="llm-cell-id">${idEsc}${dupBadge}</td>
-        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}${localMarkSwitch(p, localCtx)}${ownBoxSwitch(p, ownBoxCtx)}</td>
+        <td class="llm-cell-host">${hostBadge(p, hostCtx)}${engineBadge(p, lang)}${botsSwitch(p, consentCtx)}${localMarkSwitch(p, localCtx)}${ownBoxSwitch(p, ownBoxCtx)}${needsKeyLine(p, { ownInstanceId: hostCtx.ownInstanceId, lang })}</td>
         <td class="llm-cell-endpoint" data-label="${escapeHtml(t("settings.providers.endpoint", lang))}">${escapeHtml(p.baseUrl || "—")}</td>
         <td class="llm-cell-models" data-label="${escapeHtml(t("settings.providers.models", lang))}" title="${escapeHtml(models)}">${models}</td>
         ${usedByCell(p, usedCtx)}
@@ -428,6 +446,8 @@ export default {
         .llm-cell-id .llm-pill { margin-top:2px; }
       }
       .llm-bots-switch { margin-top:6px; }
+      .llm-needs-key { margin-top:6px; font-size:0.75rem; color:var(--crow-warning, #e0a000); }
+      .llm-key-note { font-size:0.72rem; color:var(--crow-text-muted); margin-top:4px; }
       .llm-bots-changed { margin:0 0 0.85rem; padding:0.6rem 0.8rem; border-left:3px solid var(--crow-error); background:var(--crow-bg-elevated); border-radius:4px; font-size:0.85rem; }
       .llm-bots-switch button {
         display:inline-flex; align-items:center; gap:8px; min-height:44px; padding:0 4px;
@@ -519,9 +539,6 @@ export default {
       <summary class="llm-details-summary">Add cloud provider</summary>
       <form method="post" class="llm-add-form">
         <input type="hidden" name="action" value="llm_provider_add">
-        <div style="font-size:0.78rem;color:var(--crow-text-muted);margin-bottom:0.85rem;padding:0.55rem 0.75rem;background:var(--crow-bg-surface);border-left:3px solid var(--crow-brand-gold);border-radius:4px">
-          <strong style="color:var(--crow-text-secondary)">Note:</strong> this API key will sync to your paired Crow instances (local-lab threat model). A per-row local-only toggle is planned for v2.
-        </div>
         <div class="llm-field">
           <label>Provider ID <span style="color:var(--crow-text-muted);font-weight:normal">— lowercase, used in dropdowns</span></label>
           <input type="text" name="id" required pattern="[a-z][a-z0-9-]*" placeholder="cloud-openai-main" style="font-family:'JetBrains Mono',monospace">
@@ -539,6 +556,7 @@ export default {
         <div class="llm-field">
           <label>API key</label>
           <input type="password" name="api_key" autocomplete="off" placeholder="sk-…">
+          <div class="llm-key-note">${escapeHtml(t("settings.providers.keyStaysLocal", lang))}</div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 2fr;gap:0.75rem">
           <div class="llm-field">

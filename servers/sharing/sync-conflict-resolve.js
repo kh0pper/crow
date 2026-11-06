@@ -22,7 +22,7 @@
  *     on failure the conflict row stays unresolved (spec round-2 C2 / round-3 C2).
  */
 
-import { SYNCED_TABLES, rowsEquivalent, DELETE_KEY_POLICY } from "./instance-sync.js";
+import { SYNCED_TABLES, rowsEquivalent, DELETE_KEY_POLICY, stripLocalOnlyColumns } from "./instance-sync.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 
 // ── Natural-key restore refusals (2c C7 / 2c-F3) ─────────────────────────────
@@ -290,6 +290,14 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
         "This version can't be restored automatically — its data is missing or corrupt.",
     };
   }
+
+  // A losing version came from the WIRE, and a table's local-only columns are
+  // never the sender's to write back: providers.api_key belongs to this
+  // instance alone (operator ruling 2026-11-05; instance-sync.js
+  // LOCAL_ONLY_COLUMNS). An old, pre-upgrade conflict row can still carry one,
+  // so it is stripped before the restore touches SQL — and before the restore
+  // is emitted.
+  losingData = stripLocalOnlyColumns(table, losingData);
 
   // ── 4. Intersect losing_data keys with live PRAGMA columns, exclude id ───
 
