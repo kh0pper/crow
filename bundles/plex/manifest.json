@@ -1,7 +1,7 @@
 {
   "id": "plex",
   "name": "Plex",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "privileged": true,
   "install_consent_messages": {
     "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -30,5 +30,9 @@
   ],
   "ports": [32400],
   "webUI": { "port": 32400, "path": "/web", "label": "Plex Web", "proxyMode": "direct" },
+  "firstAdmin": {
+    "mode": "finish-setup",
+    "note": "Until it is claimed, the first Plex account that reaches this server can claim it. Set a claim token at install (plex.tv/claim) to avoid this."
+  },
   "notes": "Connects to an existing Plex Media Server. Optionally self-host via Docker (set PLEX_MEDIA_PATH + PLEX_CLAIM_TOKEN). Plex Web is a SPA and cannot be proxied behind a subpath."
 }

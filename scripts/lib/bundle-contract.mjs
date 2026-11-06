@@ -121,6 +121,152 @@ function fileExists(bundleDir, rel) {
   return existsSync(p);
 }
 
+/**
+ * `firstAdmin` — how the bundle's OWN first admin account comes to exist
+ * (security audit N3-4). A freshly installed web app's first-run setup page is
+ * reachable over loopback by anything else on the machine, so every bundle
+ * with a web UI must say which of the five modes it is:
+ *
+ *   crow           Crow creates the admin at install (a generated password in
+ *                  the keychain, or a postInstall hook) — nothing to claim.
+ *   finish-setup   the app has its own first-run admin page; the operator must
+ *                  finish it now (Crow shows the notice).
+ *   default-login  the app ships a documented default login (user + password).
+ *   external       it connects to an app the operator already runs; its login
+ *                  is that app's (Immich, Kodi) — nothing of ours to claim.
+ *   none           no login of its own (public/anonymous UI, or a viewer whose
+ *                  gate Crow already applies).
+ *
+ * The last rule is the load-bearing one: a webUI without a firstAdmin is an
+ * undeclared claim surface, so `build-registry --check` fails it (at runtime
+ * the same manifest is treated as `finish-setup` — the warning shows rather
+ * than disappearing).
+ */
+export const FIRST_ADMIN_MODES = Object.freeze(["crow", "finish-setup", "default-login", "external", "none"]);
+
+/** A bundle file's text, or null when it is missing/unreadable. */
+function readBundleFile(bundleDir, rel) {
+  if (typeof rel !== "string" || !rel) return null;
+  const p = isAbsolute(rel) ? rel : join(bundleDir, rel);
+  try {
+    return existsSync(p) ? readFileSync(p, "utf8") : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateFirstAdmin(manifest, bundleDir) {
+  const errors = [];
+  const fa = manifest ? manifest.firstAdmin : undefined;
+  const hasWebUI = !!(manifest && manifest.webUI && typeof manifest.webUI === "object");
+  if (fa === undefined || fa === null) {
+    if (hasWebUI) {
+      errors.push(
+        `firstAdmin: a bundle with a webUI must declare firstAdmin (mode ${FIRST_ADMIN_MODES.map((m) => `"${m}"`).join(", ")}) — ` +
+          `say how its own first admin is created, or who has to finish its setup`,
+      );
+    }
+    return errors;
+  }
+  if (typeof fa !== "object" || Array.isArray(fa)) {
+    errors.push("firstAdmin must be an object");
+    return errors;
+  }
+  const mode = fa.mode;
+  if (!FIRST_ADMIN_MODES.includes(mode)) {
+    errors.push(`firstAdmin.mode must be one of ${FIRST_ADMIN_MODES.join(", ")}`);
+    return errors; // every mode-specific rule below would only add noise
+  }
+  if (fa.path !== undefined && (typeof fa.path !== "string" || !fa.path.startsWith("/"))) {
+    errors.push(`firstAdmin.path must be an app path starting with "/"`);
+  }
+  if (fa.note !== undefined && typeof fa.note !== "string") errors.push("firstAdmin.note must be a string");
+  if (fa.user !== undefined && mode !== "default-login") {
+    errors.push(`firstAdmin.user is only allowed with mode "default-login"`);
+  }
+  if (mode === "default-login" && (typeof fa.user !== "string" || fa.user.trim() === "")) {
+    errors.push(`firstAdmin: mode "default-login" needs user (the documented default username)`);
+  }
+  for (const field of ["via", "secretEnv", "userEnv"]) {
+    if (fa[field] !== undefined && mode !== "crow") {
+      errors.push(`firstAdmin.${field} is only allowed with mode "crow"`);
+    }
+  }
+  if (mode === "crow") errors.push(...validateCrowFirstAdmin(manifest, bundleDir, fa));
+  return errors;
+}
+
+/**
+ * `mode: "crow"` must name the mechanism that really creates the admin — and
+ * that mechanism must be wired to THIS app (review round 1, S2). Two shapes:
+ *
+ *   { "via": "env", "secretEnv": "<NAME>", "userEnv": "<NAME>"? }
+ *     `secretEnv` names an env_vars entry with generate: "secret" AND
+ *     keychain: true, and the bundle's compose file must reference it
+ *     (`${<NAME>...`) — otherwise the generated password never reaches the app
+ *     (a Vaultwarden-style ADMIN_TOKEN sitting in .env is not an admin login).
+ *     `userEnv`, when given, names a declared env var.
+ *
+ *   { "via": "postInstall" }
+ *     requires a postInstall script, and that script must name at least one
+ *     generate:"secret" + keychain:true env var (a text check: the hook is what
+ *     turns the generated value into the app's admin).
+ */
+function validateCrowFirstAdmin(manifest, bundleDir, fa) {
+  const errors = [];
+  const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
+  const keychainSecrets = envVars.filter((v) => v && v.generate === "secret" && v.keychain === true);
+  if (fa.via !== "env" && fa.via !== "postInstall") {
+    errors.push(
+      `firstAdmin: mode "crow" needs via "env" (a \${secretEnv} the compose file uses) or "postInstall" ` +
+        `(a script that sets the admin) — otherwise declare "finish-setup"`,
+    );
+    return errors;
+  }
+  if (fa.via === "env") {
+    const name = fa.secretEnv;
+    if (typeof name !== "string" || name === "") {
+      errors.push(`firstAdmin: mode "crow" via "env" needs secretEnv (the env_vars entry Crow generates and saves in the keychain)`);
+    } else if (!keychainSecrets.some((v) => v.name === name)) {
+      errors.push(`firstAdmin: secretEnv "${name}" must name an env_vars entry with generate: "secret" and keychain: true`);
+    } else {
+      const compose = readBundleFile(bundleDir, manifest?.docker?.composefile);
+      if (compose === null) {
+        errors.push(`firstAdmin: secretEnv "${name}" cannot be confirmed — docker.composefile is missing or unreadable`);
+      } else if (!compose.includes(`\${${name}`)) {
+        errors.push(
+          `firstAdmin: secretEnv "${name}" is never used by the compose file (expected \${${name}…}) — ` +
+            `Crow generating a password the app never reads does not create its admin`,
+        );
+      }
+    }
+    if (fa.userEnv !== undefined) {
+      const declared = typeof fa.userEnv === "string" && envVars.some((v) => v && v.name === fa.userEnv);
+      if (!declared) errors.push(`firstAdmin: userEnv must name a declared env_vars entry`);
+    }
+  } else {
+    if (!manifest.postInstall) {
+      errors.push(`firstAdmin: mode "crow" via "postInstall" needs a postInstall script`);
+    } else {
+      const script = readBundleFile(bundleDir, manifest.postInstall.script);
+      if (script === null) {
+        errors.push(`firstAdmin: postInstall.script "${manifest.postInstall.script}" is missing or unreadable`);
+      } else if (keychainSecrets.length === 0) {
+        errors.push(
+          `firstAdmin: mode "crow" via "postInstall" needs an env_vars entry with generate: "secret" and keychain: true ` +
+            `for the script to set`,
+        );
+      } else if (!keychainSecrets.some((v) => typeof v.name === "string" && v.name !== "" && script.includes(v.name))) {
+        errors.push(
+          `firstAdmin: postInstall.script "${manifest.postInstall.script}" never names a generate: "secret" + keychain: true env var — ` +
+            `the hook must set the admin from one of those`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
 /** Referential checks for the `connect` block (the ajv shape already passed). */
 function validateConnect(manifest) {
   const errors = [];
@@ -283,6 +429,9 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
     }
   }
+
+  // 3b. firstAdmin (security audit N3-4): how the bundle's own first admin is created.
+  if (manifest && typeof manifest === "object") errors.push(...validateFirstAdmin(manifest, bundleDir));
 
   // connect block (project services): referential checks the shape cannot express.
   if (manifest && manifest.connect) errors.push(...validateConnect(manifest));

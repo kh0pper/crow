@@ -492,7 +492,7 @@ test("a refused publish (403) is reported, not swallowed; unconfigured → skipp
 test("the ntfy bundle declares autowire, runs with a user database, and no longer propagates a topic", () => {
   const m = JSON.parse(readFileSync(new URL("../bundles/ntfy/manifest.json", import.meta.url), "utf8"));
   assert.equal(m.autowire, "ntfy-push");
-  assert.equal(m.version, "1.1.0");
+  assert.equal(m.version, "1.1.1");
   assert.deepEqual(m.env_vars.map((v) => v.name), ["NTFY_PORT"]);
   const compose = readFileSync(new URL("../bundles/ntfy/docker-compose.yml", import.meta.url), "utf8");
   assert.match(compose, /NTFY_AUTH_FILE: \/var\/lib\/ntfy\/auth\.db/);

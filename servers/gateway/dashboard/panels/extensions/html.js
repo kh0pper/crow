@@ -7,6 +7,7 @@
 
 import { escapeHtml, badge, formatDate } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
+import { firstAdminBody, firstAdminTitle } from "../../shared/first-admin.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
@@ -181,6 +182,11 @@ export function buildExtensionsHTML({
   legacyAccounts = {},
   dockerOk = true,
   keychainPending = [],
+  // Security audit N3-4: installed web apps that do NOT create their own first
+  // admin, whose setup the operator has not said is finished. Computed in
+  // panels/extensions.js (fs + db + live proxy routes, see
+  // servers/gateway/bundle-first-admin.js); html.js stays pure.
+  firstAdminPending = [],
   vaultSecure = false,
   localModels = null,
   searchQuery = "",
@@ -299,6 +305,32 @@ export function buildExtensionsHTML({
           <a href="/dashboard/settings?section=passwords">${t("keychain.openPasswords", lang)}</a>
         </div>
       </div>`).join("");
+  // ─── Finish-an-app's-setup cards (security audit N3-4) ───
+  // One card per installed web app that does NOT create its own first admin and
+  // whose setup the operator has not marked done. Sits right beside the keychain
+  // first-view banner: both are "an install asked something of you" notices.
+  // The link is built by the Nest tile's own rule (shared/app-link.js), and a
+  // subpath UI whose /proxy route this process has not mounted yet says so
+  // instead of handing over a dead link. When the proxy router itself failed to
+  // mount, no restart will produce that route: the card says the link is
+  // unavailable instead of promising one (review round 1, N5).
+  const firstAdminHtml = (firstAdminPending || []).map((e) => {
+    const title = firstAdminTitle(e.name, lang);
+    const body = firstAdminBody({ mode: e.mode, user: e.user, note: e.note }, e.name, lang) || "";
+    const open = e.linkUnavailable
+      ? `<span class="ext-firstadmin__unavailable" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.linkUnavailable", lang))}</span>`
+      : e.restartPending
+        ? `<span class="ext-firstadmin__restart" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.restartFirst", lang))}</span>`
+        : `<a class="btn btn-sm btn-primary ext-firstadmin-open" href="${escapeHtml(e.link.href)}" target="_blank" rel="noopener"${e.link.onclick || ""}>${escapeHtml(t("bundles.firstAdmin.open", lang))}</a>`;
+    return `<div class="callout callout-warning ext-firstadmin" data-addon-id="${escapeHtml(e.id)}" role="status">
+        <strong>${escapeHtml(title)}</strong>
+        <p style="margin:0.25rem 0 0.5rem">${escapeHtml(body)}</p>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+          ${open}
+          <button type="button" class="btn btn-sm btn-secondary ext-firstadmin-done" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.done", lang))}</button>
+        </div>
+      </div>`;
+  }).join("");
   // ─── Crow's off-site backup line (SAT-8, spec §12.3) ───
   // One sentence in the Servers view: the vault lives on a paired server, so this is where an
   // owner looks when asking "is my database copied somewhere off this machine?".
@@ -509,7 +541,7 @@ export function buildExtensionsHTML({
       ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
     </div>`;
 
-  const viewsHtml = `${keychainConfigHtml}${firstViewHtml}${dockerBannerHtml}${viewTabsHtml}
+  const viewsHtml = `${keychainConfigHtml}${firstViewHtml}${firstAdminHtml}${dockerBannerHtml}${viewTabsHtml}
     <div class="ext-view" id="ext-view-browse" role="tabpanel">
       ${searchHtml}
       ${collectionsHtml}

@@ -1,7 +1,7 @@
 {
   "id": "miniflux",
   "name": "Miniflux",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "refreshFiles": ["docker-compose.yml"],
   "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
   "type": "bundle",
@@ -24,5 +24,6 @@
   ],
   "ports": [8085],
   "webUI": { "port": 8085, "path": "/", "label": "Miniflux" },
+  "firstAdmin": { "mode": "crow", "via": "env", "secretEnv": "MINIFLUX_ADMIN_PASSWORD", "userEnv": "MINIFLUX_ADMIN_USER" },
   "notes": "Self-host via Docker (Crow generates the admin password and saves it in Settings → Passwords) or connect to an existing server (set MINIFLUX_URL + MINIFLUX_API_KEY). Either way, create an API key in Miniflux (Settings → API Keys) and paste it into MINIFLUX_API_KEY."
 }

@@ -70,6 +70,13 @@ export async function mountLateRoutes(app, deps) {
     app.use(router);
     extensionProxyWsSetup = setupWebSocket;
   } catch (err) {
+    // The Extensions page must not promise a restart that cannot mount this
+    // router (review round 1, N5): record the failure so its app cards say the
+    // link is unavailable instead of "restart Crow first".
+    try {
+      const { recordProxyMountFailure } = await import("../routes/extension-proxy.js");
+      recordProxyMountFailure(err);
+    } catch { /* the module itself is unavailable: the page has no card to word */ }
     if (err.code !== "ERR_MODULE_NOT_FOUND") {
       console.warn("[extension-proxy] Failed to mount:", err.message);
     }

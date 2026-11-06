@@ -167,6 +167,10 @@ export const INSTANCE_SCOPE_KEYS = {
   provider_own_box_marks:      "Provider rows marked as the operator's other box, pinned to hostname (per install)",
   provider_local_marks_seeded: "One-time local-marks upgrade done (per install)",
   provider_local_notice_shown: "Not-proven-local notice sent or dismissed (per install)",
+  // "Finish this app's setup now" markers (security audit N3-4): the operator's
+  // Done press and the per-install bell marker for each bundle. Both describe
+  // THIS box's installs (a paired instance has its own), so they never sync.
+  "first_admin_*":            "Per-install 'finish this app's setup' acknowledgements and bell markers (per install)",
 };
 
 /**

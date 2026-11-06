@@ -113,6 +113,7 @@ Here is a more complete example (a bundle with Docker, an MCP server, a panel, a
 | `env_vars` | No | Detailed env var definitions (name, description, required, secret, default) |
 | `ports` | No | Ports used by the add-on |
 | `webUI` | No | Web interface config (see below), or `null` for headless add-ons |
+| `firstAdmin` | **Yes when there is a `webUI`** | How the app's own first admin is created (see below) — `build-registry` refuses a web UI without it |
 | `notes` | No | Additional notes shown on the Extensions page |
 | `featured` | No | `true` surfaces the add-on in the Extensions page's Featured section (Browse view) |
 
@@ -141,6 +142,50 @@ Set `webUI` to `null` for headless add-ons (no web interface). The Crow's Nest h
 1. If the bundle has a **panel**, the tile links to the panel (`/dashboard/<id>`)
 2. If the bundle has **webUI but no panel**, the tile opens the web interface
 3. If the bundle has **neither**, the tile links to the Extensions page
+
+### `firstAdmin` Field
+
+An app with a web UI has an admin account, and until it exists the app's own
+first-run page belongs to whoever reaches it first — anything else on this
+machine can answer that page on `127.0.0.1` before you do. So a manifest with a
+`webUI` **must** say how the account comes to exist:
+
+```json
+"webUI": { "port": 8085, "path": "/", "label": "Miniflux" },
+"firstAdmin": { "mode": "crow", "via": "env", "secretEnv": "MINIFLUX_ADMIN_PASSWORD", "userEnv": "MINIFLUX_ADMIN_USER" }
+```
+
+| `mode` | When | What Crow does |
+|---|---|---|
+| `crow` | Crow can create the admin at install | the password is generated and saved in the keychain |
+| `finish-setup` | the app has its own first-run admin page | shows "Finish <app>'s setup now" (with a link) until the operator presses Done, and rings the bell once |
+| `default-login` | the app ships a documented default login | the same notice, naming the default user |
+| `external` | it connects to an app you already run | nothing: the login is that app's |
+| `none` | no login of its own | nothing |
+
+| Field | Required | Description |
+|---|---|---|
+| `mode` | Yes | one of the five above |
+| `path` | No | the app page to open (starts with `/`): the setup or login page, when it is not the root |
+| `user` | Only with `default-login` | the documented default username |
+| `note` | No | one short plain sentence added to the notice, e.g. where the app prints its first password |
+| `via` | With `crow` | `"env"` (the app reads it from its environment) or `"postInstall"` (a hook sets it) |
+| `secretEnv` | With `crow` + `via: "env"` | the `env_vars` entry Crow generates and keeps in the keychain |
+| `userEnv` | No, with `crow` + `via: "env"` | the `env_vars` entry holding the admin username |
+
+- `crow` must name a mechanism that really creates the admin, wired to this app:
+  - `via: "env"`: `secretEnv` names an `env_vars` entry with `generate: "secret"` and `keychain: true`, **and** the compose file interpolates it (`${THAT_NAME…}`). A generated secret the app never reads does not create its admin.
+  - `via: "postInstall"`: a `postInstall` script must exist and name at least one `generate: "secret"` + `keychain: true` env var — that is what the hook sets.
+  - Without either, the build refuses it — declare `finish-setup` instead.
+- `default-login` needs `user`, and `user` is only allowed with that mode.
+- `via`, `secretEnv` and `userEnv` are only allowed with `crow`.
+- Prefer `crow`: it is the only mode where nothing can claim the account between the install and the operator's first visit.
+
+A web UI bundle that declares nothing is not silently ignored: at runtime it is
+treated as `finish-setup`, so the operator still sees the card and gets the
+bell. Only an explicit `crow`, `external` or `none` is silent.
+
+`docs/developers/bundles.md` has the same rules in more detail.
 
 ### `panel` Field
 

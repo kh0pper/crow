@@ -191,6 +191,15 @@ export const translations = {
   // (servers/gateway/bundle-pull-alert.js). Fixed text, no command output.
   "bundles.imagePullFailed.title": { en: "Couldn't download the images for {name}", es: "No se pudieron descargar las imágenes de {name}" },
   "bundles.imagePullFailed.body": { en: "The install carried on, but the extension's containers may be running an older image or none at all. Start it again from Extensions to retry the download.", es: "La instalación continuó, pero los contenedores de la extensión pueden estar usando una imagen anterior o ninguna. Iníciala de nuevo desde Extensiones para reintentar la descarga." },
+  // N3-4: a web app that does NOT create its own first admin leaves a setup page
+  // anything on this machine can claim. One card + one bell, same words.
+  "bundles.firstAdmin.title": { en: "Finish {name}'s setup now", es: "Termina de configurar {name} ahora" },
+  "bundles.firstAdmin.finishSetupBody": { en: "Until you do, anyone or anything on this machine can claim {name}'s admin account.", es: "Hasta que lo hagas, cualquier persona o cosa en esta máquina puede reclamar la cuenta de administrador de {name}." },
+  "bundles.firstAdmin.defaultLoginBody": { en: "{name} starts with a known login (user {user}). Change the password now.", es: "{name} empieza con un inicio de sesión conocido (usuario {user}). Cambia la contraseña ahora." },
+  "bundles.firstAdmin.restartFirst": { en: "Restart Crow first, then open it", es: "Reinicia Crow primero y luego ábrelo" },
+  "bundles.firstAdmin.linkUnavailable": { en: "The app link is unavailable; check the gateway log.", es: "El enlace de la aplicación no está disponible; revisa el registro del gateway." },
+  "bundles.firstAdmin.open": { en: "Open the app", es: "Abrir la aplicación" },
+  "bundles.firstAdmin.done": { en: "Done", es: "Listo" },
   // ─── PT-3 N-5: items from someone not in your contacts (begin) ───
   "notif.notContactLabel": { en: "Not in your contacts", es: "No está en tus contactos" },
   "notif.notContactCallWarning": { en: "Someone who is not in your contacts says they are calling. Open the link only if you expected this call.", es: "Alguien que no está en tus contactos dice que te está llamando. Abre el enlace solo si esperabas esta llamada." },
@@ -5309,6 +5318,10 @@ export function tJs(key, lang = "en") {
  * $$ and $<n> specially, so a bot id or device name containing "$&" would
  * render mangled. split/join inserts the value verbatim.
  *
+ * ONE pass: every {placeholder} in the template is looked up once, so a value
+ * that itself contains brace text (an app named "App {user}") is inserted
+ * verbatim instead of being expanded by a later replacement.
+ *
  * Values are NOT HTML-escaped here — callers escape per context (some sites
  * deliberately interpolate pre-built HTML such as <code> lists).
  *
@@ -5317,9 +5330,8 @@ export function tJs(key, lang = "en") {
  * @returns {string}
  */
 export function fill(str, params) {
-  let out = String(str);
-  for (const [k, v] of Object.entries(params || {})) {
-    out = out.split(`{${k}}`).join(String(v));
-  }
-  return out;
+  const values = params || {};
+  return String(str).replace(/\{([^{}]*)\}/g, (whole, key) => (
+    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : whole
+  ));
 }

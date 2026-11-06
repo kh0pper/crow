@@ -1,7 +1,7 @@
 {
   "id": "homepage",
   "name": "Homepage",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Static startpage / dashboard — YAML-configured launcher for self-hosted services",
   "type": "bundle",
   "author": "Crow",
@@ -19,5 +19,6 @@
   ],
   "ports": [3030],
   "webUI": { "port": 3030, "path": "/", "label": "Homepage" },
+  "firstAdmin": { "mode": "none" },
   "notes": "Panel-only bundle (no MCP server — Homepage has no public API). Edit YAML files in HOMEPAGE_CONFIG_DIR to configure services, widgets, and bookmarks. Seed config is written on first run if the directory is empty."
 }

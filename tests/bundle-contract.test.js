@@ -93,7 +93,10 @@ test("server: null is tolerated", () => {
 test("webUI may be null (no web UI) or an object; a non-object fails", () => {
   const { dir } = tmpBundle("demo");
   assert.equal(validateManifest({ ...VALID, webUI: null }, dir).ok, true);
-  assert.equal(validateManifest({ ...VALID, webUI: { port: 8096 } }, dir).ok, true);
+  // A web UI now also has to say how its first admin is created (N3-4), so the
+  // object form carries a firstAdmin declaration; a missing one is its own test
+  // (tests/bundle-first-admin-contract.test.js).
+  assert.equal(validateManifest({ ...VALID, webUI: { port: 8096 }, firstAdmin: { mode: "none" } }, dir).ok, true);
   assert.equal(validateManifest({ ...VALID, webUI: "nope" }, dir).ok, false);
 });
 

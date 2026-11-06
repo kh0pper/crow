@@ -105,6 +105,74 @@ An add-on whose tools an assistant may use by voice can say which words mean "th
 
 Each entry is a plain phrase of one to four words (letters and digits; accents and case are ignored), at most 40 per language, in `en` and `es`. Matching is by whole words, so list the singular and the plural. A voice display offers the add-on's tools to its quick model only on a turn that contains one of these phrases, or on the turn right after one that used them. An add-on with no list is used only on turns sent to the larger model, and the display's Diagnostics list shows it as not offered. Patterns are not accepted: anything that is not a short plain phrase is ignored.
 
+## First admin: every web UI must say how its admin is created
+
+A freshly installed app that has a first-run admin page of its own — "create the
+administrator account" — is claimable by ANYONE or anything else on the machine
+while it waits: those pages answer on `127.0.0.1`, and nothing about them knows
+who the owner is. (A security audit's VM run showed another account reaching
+uptime-kuma's setup page before the owner did.)
+
+So **a bundle that declares a `webUI` must also declare `firstAdmin`**, and
+`npm run build-registry -- --check` fails the build when it does not:
+
+```json
+"firstAdmin": { "mode": "finish-setup" }
+```
+
+| `mode` | Meaning | What Crow does |
+|---|---|---|
+| `crow` | Crow creates the app's first admin at install | the generated password is in the keychain (Settings → Passwords) |
+| `finish-setup` | The app has its own first-run admin/setup page | shows "Finish <app>'s setup now", with a direct link, until the operator presses Done |
+| `default-login` | The app ships a documented default login | same notice, naming the default user |
+| `external` | It connects to an app you already run, whose login is that app's (Immich, Kodi) | nothing — there is no account of ours to claim |
+| `none` | The app has no login of its own (a public/anonymous UI, or a viewer whose gate Crow already applies) | nothing |
+
+Optional fields:
+
+| Field | Rule |
+|---|---|
+| `path` | the app page to open, starting with `/` (a setup or login page when it is not the root) |
+| `user` | the documented default username — **only** with `default-login` |
+| `note` | one short plain sentence added to the notice (e.g. where the app prints its first password) |
+| `via` | **with `crow` only**: `"env"` or `"postInstall"` — how Crow creates the admin |
+| `secretEnv` | with `crow`/`via: "env"`: the `env_vars` entry Crow generates and keeps in the keychain |
+| `userEnv` | with `crow`/`via: "env"`, optional: the `env_vars` entry holding the admin's username |
+
+Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`):
+
+- `crow` must name the mechanism, and that mechanism must be wired to **this** app:
+  - `{ "mode": "crow", "via": "env", "secretEnv": "MINIFLUX_ADMIN_PASSWORD" }` —
+    `secretEnv` must name an `env_vars` entry with `generate: "secret"` **and**
+    `keychain: true`, and the bundle's compose file must interpolate it
+    (`${MINIFLUX_ADMIN_PASSWORD…}`). A generated secret the app never reads does
+    not create its admin (a Vaultwarden-style `ADMIN_TOKEN` is not a login).
+  - `{ "mode": "crow", "via": "postInstall" }` — requires `postInstall`, and
+    the script must name at least one `generate: "secret"` + `keychain: true`
+    env var: the hook is what turns the generated value into the admin.
+  - Saying `crow` with nothing behind it (or a mechanism that only lives in
+    `.env`) is refused.
+- `default-login` requires `user`, and `user` is only allowed with that mode.
+- `via`/`secretEnv`/`userEnv` are only allowed with `crow`.
+- Every manifest with a `webUI` must declare `firstAdmin`.
+
+At runtime the declaration is **fail-safe the other way**: a web UI bundle with
+no usable declaration (a community-store manifest written before this field, or
+a typo'd mode) is treated as `finish-setup`, so the card and the bell still
+appear. Silence has to be an explicit `crow`, `external` or `none`.
+
+**Prefer `crow` whenever the app can take its admin from the environment or a CLI**
+(Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator
+bootstrapping, a `postInstall` script that drives the app's own admin command).
+That is the only mode where nothing on the machine can claim the account between
+install and the operator's first visit. Use `finish-setup` when the app only has
+a first-run page, and add a `note` when the app prints or documents the first
+password (Peertube and Frigate print it in their logs; Plex's server is claimed
+by the first Plex account that reaches it unless a claim token was set).
+
+Like every other bundle change, a new or edited `firstAdmin` needs a `version`
+bump: the installed copy refreshes only when the version differs.
+
 ## Draft / unpublished
 
 - `"draft": true` excludes a bundle from the generated registry.

@@ -1,7 +1,7 @@
 {
   "id": "calibre-web",
   "name": "Calibre-Web",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Web-based ebook reader and library manager for Calibre",
   "type": "bundle",
   "author": "Crow",
@@ -22,5 +22,6 @@
   ],
   "ports": [8083],
   "webUI": { "port": 8083, "path": "/", "label": "Calibre-Web" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys)."
 }

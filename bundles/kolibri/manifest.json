@@ -1,7 +1,7 @@
 {
   "id": "kolibri",
   "name": "Kolibri",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Offline-first learning platform from Learning Equality — self-hosted STEM and literacy content for ages 5-18. Classroom-capable, LAN-sync built in, thousands of free educational channels curated by the global learning community.",
   "type": "bundle",
   "author": "Crow",
@@ -26,6 +26,7 @@
   ],
   "ports": [8041],
   "webUI": { "port": 8041, "path": "/", "label": "Kolibri" },
+  "firstAdmin": { "mode": "finish-setup" },
   "sibling_of": ["maker-lab"],
   "notes": "First-run setup (admin account + facility) is completed in the Kolibri web UI at http://<host>:<KOLIBRI_HTTP_PORT>/. Once configured, channels can be imported from Kolibri Studio or from a LAN peer. Sized for a Raspberry Pi 4 (512 MB floor); a full primary-grade STEM bundle typically imports 5-10 GB of channels. Kolibri has LAN-sync built in — two instances on the same network auto-discover each other for offline classrooms."
 }

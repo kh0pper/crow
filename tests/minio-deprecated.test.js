@@ -30,7 +30,7 @@ test("manifest: deprecated since 2026-10-27, superseded by garage, tagged, versi
   const m = manifest();
   assert.deepEqual(m.deprecated, { since: "2026-10-27", superseded_by: "garage" });
   assert.ok(m.tags.includes("deprecated"));
-  assert.equal(m.version, "1.0.3");
+  assert.equal(m.version, "1.0.4");
   const reg = registry()["add-ons"].find((a) => a.id === "minio");
   assert.deepEqual(reg.deprecated, m.deprecated, "the registry carries the deprecation");
   assert.ok(registry()["add-ons"].find((a) => a.id === "garage"), "its successor is in the registry");
@@ -112,7 +112,7 @@ before(async () => {
 });
 after(() => { for (const d of [CROW_HOME, APP]) if (d) rmScratch(d); });
 
-test("refresh 1.0.2 → 1.0.3 copies the manifest only: the installed compose, .env and image stay as they are", async () => {
+test("refresh 1.0.2 → the current version copies the manifest only: the installed compose, .env and image stay as they are", async () => {
   cpSync(DIR, join(APP, "minio"), { recursive: true });
   const dest = join(CROW_HOME, "bundles", "minio");
   mkdirSync(dest, { recursive: true });
@@ -122,7 +122,7 @@ test("refresh 1.0.2 → 1.0.3 copies the manifest only: the installed compose, .
   writeFileSync(join(dest, ".env"), "MINIO_BIND_ADDR=100.64.20.5\n", { mode: 0o600 });
   writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([{ id: "minio" }]));
   const out = await B.repairInstalledBundleAssets({ appBundles: APP, run: async () => ({ stdout: "", stderr: "" }), skillMode: "off", log: () => {} });
-  assert.ok(out.repaired.some((r) => r.startsWith("minio: refreshed 1.0.2 -> 1.0.3")), JSON.stringify(out));
+  assert.ok(out.repaired.some((r) => r.startsWith(`minio: refreshed 1.0.2 -> ${manifest().version}`)), JSON.stringify(out));
   assert.equal(readFileSync(join(dest, "docker-compose.yml"), "utf8"), oldCompose);
   assert.equal(readFileSync(join(dest, ".env"), "utf8"), "MINIO_BIND_ADDR=100.64.20.5\n");
   assert.equal(JSON.parse(readFileSync(join(dest, "manifest.json"), "utf8")).deprecated.superseded_by, "garage");

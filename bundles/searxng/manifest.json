@@ -1,7 +1,7 @@
 {
   "id": "searxng",
   "name": "SearXNG",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "refreshFiles": ["docker-compose.yml"],
   "description": "Privacy-respecting metasearch engine — aggregates results from 70+ sources (Google, Bing, DuckDuckGo, Wikipedia, GitHub, arXiv, more) without tracking",
   "type": "bundle",
@@ -22,5 +22,6 @@
   ],
   "ports": [8098],
   "webUI": { "port": 8098, "path": "/", "label": "SearXNG" },
+  "firstAdmin": { "mode": "none" },
   "notes": "Config lives in ~/.crow/searxng/ (settings.yml, uwsgi.ini). On first boot the container seeds a default settings.yml and generates a random SECRET_KEY if the env var is empty. JSON API is enabled for MCP use — the crow skill documents how to extend it with more engines."
 }

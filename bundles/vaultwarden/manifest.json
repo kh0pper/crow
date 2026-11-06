@@ -1,7 +1,7 @@
 {
   "id": "vaultwarden",
   "name": "Vaultwarden",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Bitwarden-compatible password manager — self-hosted vault for passwords, notes, and 2FA, used with the Bitwarden browser and mobile apps",
   "type": "bundle",
   "author": "Crow",
@@ -29,5 +29,6 @@
   ],
   "ports": [8097],
   "webUI": { "port": 8097, "path": "/", "label": "Vaultwarden" },
+  "firstAdmin": { "mode": "finish-setup", "note": "User signups stay open until you create your account and turn them off." },
   "notes": "Password managers need careful handling. See the skill for the recommended setup order (create account → disable signups → back up data dir). The MCP tools are deliberately minimal: status, user_count, backup_info. They do NOT read vault contents — use the Bitwarden browser extension or mobile app for day-to-day password access."
 }

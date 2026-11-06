@@ -73,6 +73,24 @@ export default {
       needsRepin = addonsNeedingRepin(Object.keys(localInstalled));
     } catch { needsRepin = {}; }
 
+    // Security audit N3-4: installed apps whose OWN first-admin setup the operator
+    // has not said is finished. Read here (fs + db) so html.js stays pure.
+    let firstAdminPending = [];
+    try {
+      const { getManifest, getLiveProxyIds, getProxyMountFailure } = await import("../../routes/extension-proxy.js");
+      const { pendingFirstAdminNotices, firstAdminDoneValues } = await import("../../bundle-first-admin.js");
+      const manifests = {};
+      for (const id of Object.keys(localInstalled)) manifests[id] = getManifest(id);
+      firstAdminPending = pendingFirstAdminNotices({
+        installed: localInstalled,
+        manifests,
+        done: await firstAdminDoneValues(db),
+        liveProxyIds: getLiveProxyIds(),
+        // A router that failed to mount is not a pending restart (N5).
+        proxyMountFailed: !!getProxyMountFailure(),
+      });
+    } catch { /* no card rather than no page */ }
+
     // The Local models card's counts come from the lifecycle listing
     // (provider rows), computed here so html.js stays pure.
     let localModels = { registered: 0, resident: 0 };
@@ -84,6 +102,7 @@ export default {
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
       installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, legacyAccounts, dockerOk, keychainPending, vaultSecure, localModels, lang,
+      firstAdminPending,
       satellites, satelliteEligibleIds, offsite,
       // A skill's "Go to <extension>" arrives as ?q=<id>: the search box starts filled in.
       searchQuery: typeof req.query?.q === "string" ? req.query.q.slice(0, 100) : "",

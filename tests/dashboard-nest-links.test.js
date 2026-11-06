@@ -143,6 +143,50 @@ test("the federation audit warning opens the classic Nest", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4. the app tile's link: unchanged from before this branch (reviews B1)
+// ---------------------------------------------------------------------------
+
+/** The bundle tile's <a …> tag (the bundle grid is the only place it appears). */
+function bundleTile(html) {
+  return /<a href="([^"]*)" class="nest-app nest-app--bundle"[^>]*>/.exec(html);
+}
+
+test("a subpath app tile keeps the pre-branch link: a new tab, Turbo untouched", async () => {
+  const { buildNestHTML } = await import("../servers/gateway/dashboard/panels/nest/html.js");
+  const html = buildNestHTML({
+    pinnedItems: [],
+    bundles: [{ id: "kuma", name: "Uptime Kuma", webUI: { port: 3007, path: "/", label: "Uptime Kuma" }, hasContainer: true, isRunning: true }],
+    ssoEnabled: false,
+  }, "en");
+  const tag = bundleTile(html);
+  assert.ok(tag, "the bundle tile is rendered");
+  // Exactly what nest/html.js emitted before app-link.js existed: /proxy/<id><path>
+  // in a NEW TAB, and `return false` so Turbo Drive never takes the navigation.
+  assert.equal(tag[1], "/proxy/kuma/", "the href is the proxied app, unchanged");
+  assert.equal(
+    /onclick="([^"]*)"/.exec(tag[0])?.[1],
+    "window.open('/proxy/kuma/','_blank');return false",
+    "the tile still opens the app in a new tab",
+  );
+});
+
+test("a direct-mode app tile opens its own https origin in a new tab, as before", async () => {
+  const { buildNestHTML } = await import("../servers/gateway/dashboard/panels/nest/html.js");
+  const html = buildNestHTML({
+    pinnedItems: [],
+    bundles: [{ id: "stash", name: "Unsloth Studio", webUI: { port: 3075, path: "/", label: "Studio", proxyMode: "direct" }, hasContainer: true, isRunning: true }],
+    ssoEnabled: false,
+  }, "en");
+  const tag = bundleTile(html);
+  assert.ok(tag);
+  assert.equal(tag[1], "/dashboard/extensions", "the no-JS fallback stays on the dashboard");
+  const onclick = /onclick="([^"]*)"/.exec(tag[0])?.[1] || "";
+  assert.match(onclick, /location\.hostname/, "the host is only known in the browser");
+  assert.match(onclick, /3075/);
+  assert.match(onclick, /_blank/);
+});
+
+// ---------------------------------------------------------------------------
 // 3. the "needs you" alert of a bot parked on the browser
 // ---------------------------------------------------------------------------
 

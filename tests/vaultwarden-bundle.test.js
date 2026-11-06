@@ -13,7 +13,7 @@ const manifest = JSON.parse(readFileSync(join(DIR, "manifest.json"), "utf8"));
 const token = manifest.env_vars.find((v) => v.name === "VAULTWARDEN_ADMIN_TOKEN");
 
 test("the admin token is generated, kept in the keychain, and stored as an Argon2id hash", () => {
-  assert.equal(manifest.version, "1.1.0");
+  assert.equal(manifest.version, "1.1.1");
   assert.equal(token.generate, "secret");
   assert.equal(token.keychain, true);
   assert.equal(token.store_as, "argon2id");

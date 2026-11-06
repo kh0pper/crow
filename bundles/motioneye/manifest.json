@@ -1,7 +1,7 @@
 {
   "id": "motioneye",
   "name": "motionEye",
-  "version": "0.44.0",
+  "version": "0.44.1",
   "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
   "type": "bundle",
   "author": "Crow",
@@ -21,5 +21,6 @@
   ],
   "ports": [8765],
   "webUI": { "port": 8765, "path": "/", "label": "motionEye" },
+  "firstAdmin": { "mode": "default-login", "user": "admin", "note": "It starts with an empty password; set one now." },
   "notes": "Default admin login on first start: username 'admin', password empty. Rotate immediately via Settings → General. No MCP tools — iframe-only bundle. Use the Frigate bundle if you need MCP-callable camera/event tools or AI object detection."
 }

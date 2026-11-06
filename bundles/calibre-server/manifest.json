@@ -1,7 +1,7 @@
 {
   "id": "calibre-server",
   "name": "Calibre Server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
   "type": "bundle",
   "author": "Crow",
@@ -22,5 +22,6 @@
   ],
   "ports": [8081],
   "webUI": { "port": 8081, "path": "/", "label": "Calibre" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to existing Calibre content server (set CALIBRE_URL)."
 }
