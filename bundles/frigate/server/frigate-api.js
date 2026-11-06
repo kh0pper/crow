@@ -19,6 +19,9 @@
  * default), so several concurrent tools starting cold produced one login each and a
  * pile of 429s reported as bad credentials. One in-flight login is shared by every
  * caller, and a 429 is retried after a short pause.
+ *
+ * A failed login is remembered for five seconds: a wrong password must cost one request,
+ * not one per tool call. Inside that window the same error is replayed.
  */
 
 const FRIGATE_URL = () => (process.env.FRIGATE_URL || "http://localhost:8971").replace(/\/+$/, "");
@@ -31,10 +34,14 @@ const RATE_LIMIT_MESSAGE = "Frigate is rate-limiting logins; try again in a mome
 /** Frigate allows one login per second; wait past that window before trying again. */
 const LOGIN_RETRY_MS = 1100;
 const LOGIN_MAX_RETRIES = 3;
+/** How long a failed login is replayed instead of asking Frigate again. */
+const LOGIN_FAILURE_HOLD_MS = 5000;
 
 let authToken = null;
 /** The login every waiting caller shares, cleared as soon as it settles. */
 let loginInFlight = null;
+/** { error, until }: the last failed login, replayed within LOGIN_FAILURE_HOLD_MS. */
+let loginFailure = null;
 const cache = new Map(); // key → { data, expires }
 
 function sleep(ms) {
@@ -86,18 +93,29 @@ async function login() {
 
 /**
  * Authenticate with Frigate and obtain a JWT. Cached in-memory; concurrent callers
- * share one in-flight login instead of racing into Frigate's login rate limit.
+ * share one in-flight login instead of racing into Frigate's login rate limit, and a
+ * login that just failed is replayed for five seconds rather than repeated.
  * Returns null if no credentials are configured (auth.enabled=false mode).
  */
 async function getToken() {
   if (authToken) return authToken;
   if (!FRIGATE_USER() || !FRIGATE_PASSWORD()) return null;
 
+  if (loginFailure) {
+    if (loginFailure.until > Date.now()) throw loginFailure.error;
+    loginFailure = null;
+  }
+
   if (!loginInFlight) {
     loginInFlight = login()
       .then((token) => {
         authToken = token;
+        loginFailure = null;
         return token;
+      })
+      .catch((err) => {
+        loginFailure = { error: err, until: Date.now() + LOGIN_FAILURE_HOLD_MS };
+        throw err;
       })
       .finally(() => {
         loginInFlight = null;

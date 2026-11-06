@@ -21,7 +21,10 @@
  *
  * Client-side JS uses DOM construction (createElement + textContent + appendChild) so
  * there is no innerHTML assignment with dynamic content. It is emitted inside a
- * template literal — never put a backtick in it.
+ * template literal — never put a backtick in it. Turbo Drive re-runs this script on
+ * every visit, so each instance adopts one window slot (window.__fgStills), stops the
+ * previous instance and drops its listeners: one still timer per page, not one per visit.
+ * The slot also stops the timer when Turbo caches the page or starts a visit.
  */
 
 /** How long the Overview waits for Frigate's camera list before drawing the empty shell. */
@@ -209,7 +212,9 @@ function renderOverview(cameras, escapeHtml) {
 /**
  * The Web UI tab. Frigate's UI lives on a loopback address only the server can reach, so
  * this page never embeds it and never prints that address: with FRIGATE_UI_URL set, it
- * offers a link to the address the browser uses, and otherwise says how to set one.
+ * offers a link to the address the browser uses, and otherwise says how to set one. The
+ * link carries the whole stored URL; the visible text is only its origin, so credentials
+ * or a path in that setting are never echoed onto the page.
  */
 function renderWebUI(uiUrl, escapeHtml) {
   const heading = `<h3>Frigate's own web UI</h3>`;
@@ -227,9 +232,21 @@ function renderWebUI(uiUrl, escapeHtml) {
       ${heading}
       <p>Frigate's full interface (recordings, clips, zones, detector settings) opens in a new tab.</p>
       <a class="fg-webui-link" href="${escapeHtml(uiUrl)}" target="_blank" rel="noopener">Open Frigate</a>
-      <p class="fg-camera-meta">${escapeHtml(uiUrl)}</p>
+      <p class="fg-camera-meta">${escapeHtml(publicOrigin(uiUrl))}</p>
     </div>
   `;
+}
+
+/**
+ * The only part of FRIGATE_UI_URL the page prints: scheme and host. A stored value may carry
+ * credentials or a path, and neither belongs on a page the owner reads over a shoulder.
+ */
+function publicOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
 }
 
 function frigateStyles() {
@@ -273,7 +290,27 @@ function frigateScript() {
   return `
     (function () {
       var STILL_REFRESH_MS = 2000;
+
+      // Turbo re-runs this script on every visit, so a second visit must not stack a second
+      // timer and a second listener: the previous instance in the window slot is stopped and
+      // its listeners are dropped before this one installs.
+      var previous = window.__fgStills;
+      if (previous && typeof previous.stop === "function") {
+        previous.stop();
+        if (previous.onVisibility) document.removeEventListener("visibilitychange", previous.onVisibility);
+        if (previous.onPageLeave) {
+          document.removeEventListener("turbo:before-cache", previous.onPageLeave);
+          document.removeEventListener("turbo:before-visit", previous.onPageLeave);
+        }
+      }
+
       var stillTimer = null;
+      // Camera name to a load still in flight: a tick skips that camera until it settles.
+      var stillBusy = {};
+
+      // This instance's slot on window; the next visit reads it to stop this one.
+      var state = { stop: stopStills, onVisibility: onVisibilityChange, onPageLeave: onPageLeave };
+      window.__fgStills = state;
 
       function clearKids(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
       function span(cls, text) { var s = document.createElement("span"); s.className = cls; s.textContent = text; return s; }
@@ -316,11 +353,15 @@ function frigateScript() {
       function refreshStill(img) {
         var name = img.getAttribute("data-cam");
         if (!name) return;
+        if (stillBusy[name]) return;  // the previous still for this camera has not settled
+        stillBusy[name] = true;
         var next = new Image();
         next.onload = function () {
           img.style.display = "";
           img.src = next.src;
+          stillBusy[name] = false;
         };
+        next.onerror = function () { stillBusy[name] = false; };
         next.src = stillSrc(name) + "?t=" + Date.now();
       }
 
@@ -343,6 +384,13 @@ function frigateScript() {
         clearInterval(stillTimer);
         stillTimer = null;
       }
+
+      function onVisibilityChange() {
+        if (document.hidden) stopStills(); else startStills(true);
+      }
+
+      // Turbo is caching this page or navigating away: stop asking Frigate for stills.
+      function onPageLeave() { stopStills(); }
 
       function renderCameras(cams) {
         var host = document.getElementById("fg-cameras");
@@ -446,15 +494,15 @@ function frigateScript() {
         });
       }
 
-      if (document.getElementById("fg-cameras")) {
-        document.addEventListener("visibilitychange", function () {
-          if (document.hidden) stopStills(); else startStills(true);
-        });
-        startStills(false);
-        loadCameras();
-        loadEvents();
-        loadStats();
-      }
+      if (!document.getElementById("fg-cameras")) return;
+
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      document.addEventListener("turbo:before-cache", onPageLeave);
+      document.addEventListener("turbo:before-visit", onPageLeave);
+      startStills(false);
+      loadCameras();
+      loadEvents();
+      loadStats();
     })();
   `;
 }

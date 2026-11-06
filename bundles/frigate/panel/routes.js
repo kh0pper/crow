@@ -16,6 +16,10 @@
  * default), so a page view that fires several proxied reads at once produced one
  * login per read and a pile of 429s reported as bad credentials. One in-flight
  * login is shared by every caller, and a 429 is retried after a short pause.
+ *
+ * A failed login is remembered for five seconds: with wrong credentials every card,
+ * event and still on the page would otherwise start its own login and hammer Frigate's
+ * login endpoint. Inside that window the same error is reported without a request.
  */
 
 import { Router } from "express";
@@ -29,10 +33,14 @@ const RATE_LIMIT_MESSAGE = "Frigate is rate-limiting logins; try again in a mome
 /** Frigate allows one login per second; wait past that window before trying again. */
 const LOGIN_RETRY_MS = 1100;
 const LOGIN_MAX_RETRIES = 3;
+/** How long a failed login is replayed instead of asking Frigate again. */
+const LOGIN_FAILURE_HOLD_MS = 5000;
 
 let authToken = null;
 /** The login every waiting caller shares, cleared as soon as it settles. */
 let loginInFlight = null;
+/** { error, until }: the last failed login, replayed within LOGIN_FAILURE_HOLD_MS. */
+let loginFailure = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,11 +85,23 @@ async function getToken() {
   if (authToken) return authToken;
   if (!FRIGATE_USER() || !FRIGATE_PASSWORD()) return null;
 
+  // A login that just failed is replayed, not repeated: wrong credentials must cost one
+  // request, not one per card on the page.
+  if (loginFailure) {
+    if (loginFailure.until > Date.now()) throw loginFailure.error;
+    loginFailure = null;
+  }
+
   if (!loginInFlight) {
     loginInFlight = login()
       .then((token) => {
         authToken = token;
+        loginFailure = null;
         return token;
+      })
+      .catch((err) => {
+        loginFailure = { error: err, until: Date.now() + LOGIN_FAILURE_HOLD_MS };
+        throw err;
       })
       .finally(() => {
         loginInFlight = null;
@@ -110,10 +130,13 @@ async function frFetch(path, opts = {}) {
 }
 
 /**
- * Stream bytes from Frigate to the client (for snapshots + clips).
+ * Stream bytes from Frigate to the client (for stills, snapshots + clips).
  * Preserves Content-Type and Content-Length when present.
+ *
+ * Cache-Control is the caller's call: a still is replaced every couple of seconds, so it
+ * must never be stored; an event thumbnail or snapshot is immutable and may be.
  */
-async function streamFromFrigate(req, res, path) {
+async function streamFromFrigate(req, res, path, cacheControl = "private, max-age=300") {
   try {
     const upstream = await frFetch(path);
     res.status(upstream.status);
@@ -121,7 +144,7 @@ async function streamFromFrigate(req, res, path) {
     if (ct) res.set("content-type", ct);
     const cl = upstream.headers.get("content-length");
     if (cl) res.set("content-length", cl);
-    res.set("cache-control", "private, max-age=300");
+    res.set("cache-control", cacheControl);
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.end(buf);
   } catch (err) {
@@ -198,7 +221,7 @@ export default function frigateRouter(authMiddleware) {
     streamFromFrigate(req, res, `/api/events/${encodeURIComponent(req.params.id)}/snapshot.jpg`),
   );
   router.get("/api/frigate/:camera/latest.jpg", authMiddleware, (req, res) =>
-    streamFromFrigate(req, res, `/api/${encodeURIComponent(req.params.camera)}/latest.jpg`),
+    streamFromFrigate(req, res, `/api/${encodeURIComponent(req.params.camera)}/latest.jpg`, "no-store"),
   );
 
   return router;

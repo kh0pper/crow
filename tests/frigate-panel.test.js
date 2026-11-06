@@ -86,6 +86,109 @@ async function renderPanel(query = {}) {
 
 const page = (html) => parseHTML(`<!doctype html><html><body>${html}</body></html>`).document;
 
+/** The page's inline client script, exactly as the browser receives it. */
+async function clientScript() {
+  const stub = stubFetch((url) => {
+    if (url.endsWith("/api/config")) return jsonResponse({ cameras: { front: {} } });
+    throw new Error(`unexpected read: ${url}`);
+  });
+  let html;
+  try {
+    html = await renderPanel();
+  } finally {
+    stub.restore();
+  }
+  const script = /<script>([\s\S]*?)<\/script>/.exec(html);
+  assert.ok(script, "the page carries its client script");
+  return script[1];
+}
+
+/**
+ * Just enough of a browser to run the panel's client script: a document that records its
+ * listeners, a setInterval whose callbacks the test fires by hand, and an Image whose load
+ * the test settles itself. `fetch` never resolves, so the script's three background reads
+ * cannot touch the DOM mid-test.
+ */
+function stubBrowser(cameraNames = []) {
+  const listeners = new Map(); // event type → handlers
+  const liveIntervals = new Set();
+  const loads = [];
+
+  function element(tag) {
+    const node = {
+      tagName: String(tag).toUpperCase(),
+      style: {},
+      attrs: {},
+      children: [],
+      className: "",
+      textContent: "",
+      setAttribute(name, value) { node.attrs[name] = String(value); },
+      getAttribute(name) { return Object.hasOwn(node.attrs, name) ? node.attrs[name] : null; },
+      appendChild(child) { node.children.push(child); return child; },
+      removeChild(child) { node.children = node.children.filter((c) => c !== child); return child; },
+      querySelectorAll() { return []; },
+    };
+    Object.defineProperty(node, "firstChild", { get: () => node.children[0] || null });
+    return node;
+  }
+
+  const host = element("div");
+  const stills = cameraNames.map((name) => {
+    const img = element("img");
+    img.setAttribute("data-cam", name);
+    return img;
+  });
+  host.querySelectorAll = (selector) => (String(selector).includes("fg-cam-img") ? stills : []);
+
+  const document = {
+    hidden: false,
+    getElementById: (id) => (id === "fg-cameras" ? host : null),
+    createElement: (tag) => element(tag),
+    createTextNode: (text) => ({ textContent: String(text) }),
+    addEventListener(type, handler) {
+      const list = listeners.get(type) || [];
+      if (!list.includes(handler)) list.push(handler);
+      listeners.set(type, list);
+    },
+    removeEventListener(type, handler) {
+      const list = listeners.get(type) || [];
+      const at = list.indexOf(handler);
+      if (at >= 0) list.splice(at, 1);
+    },
+  };
+
+  const window = {};
+
+  function Image() {
+    const load = { src: "", onload: null, onerror: null };
+    loads.push(load);
+    return load;
+  }
+
+  return {
+    window,
+    document,
+    stills,
+    /** Run the page's client script, the way Turbo re-runs it on a visit. */
+    run(src) {
+      new Function("window", "document", "Image", "setInterval", "clearInterval", "fetch", src)(
+        window,
+        document,
+        Image,
+        (fn, ms) => { const handle = { fn, ms }; liveIntervals.add(handle); return handle; },
+        (handle) => { liveIntervals.delete(handle); },
+        () => new Promise(() => {}),
+      );
+    },
+    /** Fire whatever the script installed with setInterval. */
+    tick() { for (const handle of [...liveIntervals]) handle.fn(); },
+    intervals: () => [...liveIntervals],
+    images: () => loads,
+    listenerCount: (type) => (listeners.get(type) || []).length,
+    fire(type) { for (const handler of [...(listeners.get(type) || [])]) handler({ type }); },
+  };
+}
+
 // ─── the Overview: a still on every camera card ───────────────────────────
 
 // Order note: this bundle's client caches one successful /api/config for 30s, and the panel
@@ -188,6 +291,57 @@ test("the Overview never names the loopback address Frigate is reached on", asyn
   assert.ok(!html.includes("frigate.invalid"), "and not rendered in any other form either");
 });
 
+// ─── the client script: one instance per page, whatever Turbo does ─────────
+
+// Turbo Drive re-runs the inline script on every visit, so a second visit used to leave a
+// second interval running — n visits, n timers, all asking Frigate for stills.
+
+test("two Turbo visits leave ONE interval and ONE listener", async () => {
+  const src = await clientScript();
+  const browser = stubBrowser(["front"]);
+
+  browser.run(src);
+  assert.equal(browser.intervals().length, 1, "the first visit starts one interval");
+  assert.equal(browser.listenerCount("visibilitychange"), 1, "and one visibility handler");
+
+  browser.run(src); // Turbo Drive re-runs the script for the new page
+  assert.equal(browser.intervals().length, 1, "the previous visit's interval was cleared, not left running");
+  assert.equal(browser.listenerCount("visibilitychange"), 1, "and its listener was removed");
+  assert.equal(browser.listenerCount("turbo:before-cache"), 1, "the page-leave hooks are installed once too");
+  assert.equal(browser.listenerCount("turbo:before-visit"), 1);
+
+  browser.fire("visibilitychange");
+  assert.equal(browser.images().length, 1, "only one handler ran: the page asked for one still, not two");
+
+  browser.fire("turbo:before-cache");
+  assert.equal(browser.intervals().length, 0, "Turbo caching the page stops the timer");
+
+  browser.run(src);
+  assert.equal(browser.intervals().length, 1, "the next visit starts again");
+  browser.fire("turbo:before-visit");
+  assert.equal(browser.intervals().length, 0, "and leaving the page stops it");
+});
+
+test("a still still in flight is not asked for again on the next tick", async () => {
+  const src = await clientScript();
+  const browser = stubBrowser(["front"]);
+  browser.run(src);
+
+  browser.tick();
+  assert.equal(browser.images().length, 1, "the first tick refreshes the camera");
+
+  browser.tick();
+  assert.equal(browser.images().length, 1, "its load has not settled: no second request for that camera");
+
+  browser.images()[0].onload();
+  browser.tick();
+  assert.equal(browser.images().length, 2, "once it has arrived the next tick refreshes again");
+
+  browser.images()[1].onerror();
+  browser.tick();
+  assert.equal(browser.images().length, 3, "a failed still frees the camera too");
+});
+
 // ─── the Web UI tab: a link in a new tab, never a frame ────────────────────
 
 test("Web UI with FRIGATE_UI_URL set: a new-tab link, and no frame at all", async () => {
@@ -208,6 +362,26 @@ test("Web UI with FRIGATE_UI_URL set: a new-tab link, and no frame at all", asyn
   assert.equal(link.getAttribute("rel"), "noopener");
   assert.match(document.body.textContent, /FRIGATE_UI_URL|new tab/);
   assert.ok(!html.includes("localhost:8971"));
+});
+
+test("Web UI prints only the origin: credentials and a path never reach the page", async () => {
+  process.env.FRIGATE_UI_URL = "https://user:s3cret@frigate.example.ts.net/recordings?cam=front";
+  let html;
+  try {
+    html = await renderPanel({ tab: "webui" });
+  } finally {
+    delete process.env.FRIGATE_UI_URL;
+  }
+
+  const document = page(html);
+  const link = document.querySelector(".fg-webui-link");
+  assert.ok(link, "the tab still offers the link");
+  assert.equal(link.getAttribute("href"), "https://user:s3cret@frigate.example.ts.net/recordings?cam=front",
+    "the link keeps the full address the owner set");
+  assert.equal(document.querySelector(".fg-camera-meta").textContent, "https://frigate.example.ts.net",
+    "the printed text is the origin only");
+  assert.ok(!document.body.textContent.includes("s3cret"), "no credential is echoed back");
+  assert.ok(!document.body.textContent.includes("/recordings"), "and no path either");
 });
 
 test("Web UI without FRIGATE_UI_URL: no link, no frame, and it says how to set one", async () => {
@@ -235,24 +409,32 @@ test("Web UI ignores an address that is not http(s): no javascript: link on the 
 
 // ─── the login rail: one login, and a 429 is not a wrong password ──────────
 
-/** The handler behind GET /api/frigate/cameras, straight off the router the gateway mounts. */
-function camerasHandler(router) {
-  const layer = router.stack.find((l) => l.route && l.route.path === "/api/frigate/cameras");
-  assert.ok(layer, "the router serves /api/frigate/cameras");
+/** One handler off the router the gateway mounts, by its route path. */
+function routeHandler(router, path) {
+  const layer = router.stack.find((l) => l.route && l.route.path === path);
+  assert.ok(layer, `the router serves ${path}`);
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
 
+/** The handler behind GET /api/frigate/cameras, straight off the router the gateway mounts. */
+function camerasHandler(router) {
+  return routeHandler(router, "/api/frigate/cameras");
+}
+
 /** Calls a route handler with a recording res, and returns what it answered with. */
-async function callRoute(handler) {
+async function callRoute(handler, req = {}) {
   const res = {
     statusCode: 200,
     body: null,
+    headers: {},
+    headersSent: false,
     status(code) { this.statusCode = code; return this; },
-    set() { return this; },
+    set(name, value) { this.headers[String(name).toLowerCase()] = String(value); return this; },
     json(body) { this.body = body; return this; },
-    end() { return this; },
+    send(body) { this.body = body; return this; },
+    end(body) { this.body = body; return this; },
   };
-  await handler({ query: {}, params: {}, headers: {} }, res);
+  await handler({ query: {}, params: {}, headers: {}, ...req }, res);
   return res;
 }
 
@@ -415,7 +597,109 @@ test("401 and 403 are still reported as bad credentials", { timeout: 20_000 }, a
   }
 });
 
+// Every still on the page is refreshed every two seconds, so a cacheable one would freeze the
+// picture. A thumbnail or snapshot of a finished event never changes, so those may be cached.
+test("the still route says no-store; event thumbnails and snapshots keep max-age=300", async () => {
+  process.env.FRIGATE_USER = "user";
+  process.env.FRIGATE_PASSWORD = "pw";
+  const { default: frigateRouter } = await freshImport("../bundles/frigate/panel/routes.js");
+  const router = frigateRouter((req, res, next) => next());
+
+  const stub = stubFetch((url) => {
+    if (url.endsWith("/api/login")) return TOKEN_OK();
+    return jsonResponse({}, { headers: { "content-type": "image/jpeg", "content-length": "0" } });
+  });
+  try {
+    const still = await callRoute(routeHandler(router, "/api/frigate/:camera/latest.jpg"), { params: { camera: "front" } });
+    assert.equal(still.statusCode, 200);
+    assert.equal(still.headers["content-type"], "image/jpeg");
+    assert.equal(still.headers["cache-control"], "no-store", "a still is replaced every two seconds");
+
+    const thumb = await callRoute(routeHandler(router, "/api/frigate/events/:id/thumbnail.jpg"), { params: { id: "1700000000.1" } });
+    assert.equal(thumb.headers["cache-control"], "private, max-age=300", "a thumbnail never changes");
+
+    const snap = await callRoute(routeHandler(router, "/api/frigate/events/:id/snapshot.jpg"), { params: { id: "1700000000.1" } });
+    assert.equal(snap.headers["cache-control"], "private, max-age=300", "and neither does a snapshot");
+  } finally {
+    stub.restore();
+    delete process.env.FRIGATE_USER;
+    delete process.env.FRIGATE_PASSWORD;
+  }
+});
+
+// Wrong credentials used to mean one login attempt per card, event and still on the page.
+// The failure is remembered for five seconds, so Frigate's login endpoint sees one request.
+test("a failed login is replayed for five seconds, then tried again", { timeout: 20_000 }, async (t) => {
+  process.env.FRIGATE_USER = "user";
+  process.env.FRIGATE_PASSWORD = "pw";
+
+  const cases = [
+    {
+      name: "panel routes",
+      load: async () => {
+        const { default: frigateRouter } = await freshImport("../bundles/frigate/panel/routes.js");
+        const handler = routeHandler(frigateRouter((req, res, next) => next()), "/api/frigate/cameras");
+        return () => callRoute(handler).then((r) => r.body);
+      },
+    },
+    {
+      name: "server client",
+      load: async () => {
+        const api = await freshImport("../bundles/frigate/server/frigate-api.js");
+        return () => api.frigateFetch("/api/config").then(() => ({}), (err) => ({ error: err.message }));
+      },
+    },
+  ];
+
+  // Mocked Date so the five-second window passes without the suite waiting for it.
+  t.mock.timers.enable({ apis: ["Date"] });
+
+  try {
+    for (const c of cases) {
+      const T0 = 1_000_000;
+      t.mock.timers.setTime(T0);
+      const run = await c.load();
+
+      let logins = 0;
+      const stub = stubFetch((url) => {
+        if (url.endsWith("/api/login")) { logins++; return jsonResponse({ detail: "no" }, { status: 401 }); }
+        throw new Error(`unexpected read: ${url}`);
+      });
+      try {
+        const first = await run();
+        assert.equal(logins, 1, `${c.name}: the first call asks Frigate to log in`);
+        assert.match(first.error, /check FRIGATE_USER \/ FRIGATE_PASSWORD/, c.name);
+
+        const second = await run();
+        assert.equal(logins, 1, `${c.name}: a call straight after replays the failure, no second login`);
+        assert.equal(second.error, first.error, `${c.name}: the same error, word for word`);
+
+        t.mock.timers.setTime(T0 + 4_999);
+        const third = await run();
+        assert.equal(logins, 1, `${c.name}: still inside the five seconds`);
+        assert.equal(third.error, first.error, c.name);
+
+        t.mock.timers.setTime(T0 + 5_001);
+        const fourth = await run();
+        assert.equal(logins, 2, `${c.name}: past the hold, the login is tried again`);
+        assert.match(fourth.error, /check FRIGATE_USER \/ FRIGATE_PASSWORD/, c.name);
+      } finally {
+        stub.restore();
+      }
+    }
+  } finally {
+    delete process.env.FRIGATE_USER;
+    delete process.env.FRIGATE_PASSWORD;
+  }
+});
+
 // ─── manifest and example config ──────────────────────────────────────────
+
+test("the panel file ends with exactly one newline", () => {
+  const text = readFileSync(join(BUNDLE, "panel", "frigate.js"), "utf8");
+  assert.ok(text.endsWith("\n"), "a trailing newline, as the rest of the repo has");
+  assert.ok(!text.endsWith("\n\n"), "and only one");
+});
 
 test("the manifest is 1.2.0 and declares FRIGATE_UI_URL", () => {
   assert.equal(MANIFEST.version, "1.2.0");
