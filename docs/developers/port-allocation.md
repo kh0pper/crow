@@ -122,6 +122,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8098 | 127.0.0.1 | searxng | MVP PR 5 |
 | 8456 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3070 (Workspace; never Funnel) | W1 2026-10 |
 | 8457 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:3071 (Workspace editor; never Funnel). Plus one Serve PATH on the same port, no new port: `/crow-live` → `http://127.0.0.1:<gateway port>/api/workspace/live` (W2 K5 live-edit plugin; set up by the operator from Office › For the admin) | W1 2026-10, W2 path |
+| 8458 | tailnet (Serve) | Tailscale Serve HTTPS → 127.0.0.1:8971 (Frigate's own web UI, opened by the Frigate panel's Web UI link via FRIGATE_UI_URL; never Funnel) | 2026-11 |
 | 8010 | 100.64.20.1 (tailscale) | llamacpp-vulkan-qwen36-27b-copilot — co-resident critic refute/probe model, 65536 ctx, text-only (crow-addons) | existing (2026-07-06) |
 | 8600 | 127.0.0.1 | funkwhale (nginx, `FUNKWHALE_NGINX_BIND_PORT`; bind address `FUNKWHALE_NGINX_BIND_ADDR`) | existing |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |

@@ -11,9 +11,9 @@ Self-hosted camera system with AI object detection. Frigate processes RTSP/ONVIF
 - Local AI object detection (person, car, dog, package, etc.)
 - Motion-triggered recording with configurable retention
 - JWT-authenticated REST API on :8971
-- Crow's Nest "Cameras" panel: camera list, recent events with thumbnails, system stats
+- Crow's Nest "Cameras" panel: camera cards with a still that refreshes every couple of seconds, recent events with thumbnails, system stats
 - MCP tools for cameras, events, snapshots, clips, and detect toggle
-- Frigate's own Web UI embedded as a tab in the Nest panel
+- A link to Frigate's own web UI, in a new tab (set `FRIGATE_UI_URL` to the address your browser uses)
 
 ## When to Use vs MotionEye
 
@@ -58,6 +58,10 @@ Set these in `~/.crow/bundles/frigate/.env`:
 FRIGATE_URL=http://localhost:8971
 FRIGATE_USER=admin
 FRIGATE_PASSWORD=<password from logs>
+# The address YOUR browser uses for Frigate's own web UI (the panel's Web UI tab links
+# to it in a new tab). FRIGATE_URL is a loopback address only the server can reach, so a
+# phone cannot use it. Example: https://frigate.example.ts.net — blank hides the link.
+# FRIGATE_UI_URL=
 ```
 
 Then restart the bundle so the MCP server can authenticate:
@@ -81,6 +85,7 @@ cameras:
             - detect
             - record
     detect:
+      enabled: true
       width: 1280
       height: 720
       fps: 5
@@ -169,8 +174,8 @@ The bundle is installed to `~/.crow/bundles/frigate/` but `panels.json` / panel 
 
 and verify `~/.crow/panels/frigate.js` exists. Then restart the gateway.
 
-**Can't reach Web UI tab in the Nest panel**
-Frigate's JWT cookie is first-party to `:8971`. The iframe must be loaded from the same host where Frigate is published. If the panel iframe shows a blank page, confirm `FRIGATE_URL` points to a browser-reachable URL.
+**Can't reach the Web UI tab in the Nest panel**
+Frigate's UI runs on `:8971`, which is bound to loopback: only the Crow server can open that address, and a phone that opens `localhost:8971` reaches itself. Set `FRIGATE_UI_URL` to an address your browser can reach — a Tailscale Serve HTTPS URL is the usual answer — and the Web UI tab will link to it. Left blank, the tab explains this instead of showing a link.
 
 ## Future Work
 

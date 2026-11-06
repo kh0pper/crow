@@ -60,6 +60,8 @@ cameras:
             - detect
             - record
     detect:
+      # Frigate 0.18 needs this, or detection stays off for the camera.
+      enabled: true
       width: 1280
       height: 720
       fps: 5

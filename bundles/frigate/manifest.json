@@ -1,7 +1,7 @@
 {
   "id": "frigate",
   "name": "Frigate NVR",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
   "type": "bundle",
   "author": "Crow",
@@ -19,6 +19,7 @@
   "requires": { "env": [], "min_ram_mb": 2048, "recommended_ram_mb": 4096, "min_disk_mb": 10000, "recommended_disk_mb": 50000 },
   "env_vars": [
     { "name": "FRIGATE_URL", "description": "Frigate base URL (authenticated UI+API on :8971). Use http:// when config.yml has tls.enabled=false (recommended on loopback).", "default": "http://localhost:8971", "required": true },
+    { "name": "FRIGATE_UI_URL", "description": "Address your browser uses to open Frigate's own web UI, e.g. a Tailscale Serve HTTPS URL. Leave blank to hide the Web UI link.", "required": false },
     { "name": "FRIGATE_USER", "description": "Admin user for JWT login (POST /api/login). Omit with FRIGATE_PASSWORD if auth.enabled=false in config.yml.", "required": false },
     { "name": "FRIGATE_PASSWORD", "description": "Password for FRIGATE_USER.", "required": false, "secret": true },
     { "name": "FRIGATE_CONFIG_PATH", "description": "Host path for Frigate config directory.", "default": "~/.crow/data/frigate/config", "required": false },

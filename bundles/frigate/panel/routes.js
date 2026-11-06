@@ -11,6 +11,15 @@
  * TLS: we assume Frigate is configured with `tls.enabled: false` (our
  * config.yml.example default). See server/frigate-api.js for the
  * re-enable-TLS caveat.
+ *
+ * Logins are serialised: Frigate rate-limits `POST /api/login` (one per second by
+ * default), so a page view that fires several proxied reads at once produced one
+ * login per read and a pile of 429s reported as bad credentials. One in-flight
+ * login is shared by every caller, and a 429 is retried after a short pause.
+ *
+ * A failed login is remembered for five seconds: with wrong credentials every card,
+ * event and still on the page would otherwise start its own login and hammer Frigate's
+ * login endpoint. Inside that window the same error is reported without a request.
  */
 
 import { Router } from "express";
@@ -19,34 +28,86 @@ const FRIGATE_URL = () => (process.env.FRIGATE_URL || "http://localhost:8971").r
 const FRIGATE_USER = () => process.env.FRIGATE_USER || "";
 const FRIGATE_PASSWORD = () => process.env.FRIGATE_PASSWORD || "";
 
+const BAD_CREDENTIALS_MESSAGE = "Frigate login failed — check FRIGATE_USER / FRIGATE_PASSWORD";
+const RATE_LIMIT_MESSAGE = "Frigate is rate-limiting logins; try again in a moment";
+/** Frigate allows one login per second; wait past that window before trying again. */
+const LOGIN_RETRY_MS = 1100;
+const LOGIN_MAX_RETRIES = 3;
+/** How long a failed login is replayed instead of asking Frigate again. */
+const LOGIN_FAILURE_HOLD_MS = 5000;
+
 let authToken = null;
+/** The login every waiting caller shares, cleared as soon as it settles. */
+let loginInFlight = null;
+/** { error, until }: the last failed login, replayed within LOGIN_FAILURE_HOLD_MS. */
+let loginFailure = null;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** POST /api/login once, retrying a 429 a few times before giving up. */
+async function login() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${FRIGATE_URL()}/api/login`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: FRIGATE_USER(), password: FRIGATE_PASSWORD() }),
+      });
+      if (res.status === 429) {
+        if (attempt >= LOGIN_MAX_RETRIES) throw new Error(RATE_LIMIT_MESSAGE);
+        await sleep(LOGIN_RETRY_MS);
+        continue;
+      }
+      if (res.status === 401 || res.status === 403) throw new Error(BAD_CREDENTIALS_MESSAGE);
+      if (!res.ok) throw new Error(`Frigate login failed: HTTP ${res.status}`);
+
+      const data = await res.json().catch(() => ({}));
+      let token = data.access_token || data.token || null;
+      if (!token) {
+        const setCookie = res.headers.get("set-cookie") || "";
+        const match = setCookie.match(/frigate_token=([^;]+)/);
+        if (match) token = match[1];
+      }
+      if (!token) throw new Error("Frigate /api/login returned no token");
+      return token;
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function getToken() {
   if (authToken) return authToken;
   if (!FRIGATE_USER() || !FRIGATE_PASSWORD()) return null;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
-  try {
-    const res = await fetch(`${FRIGATE_URL()}/api/login`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: FRIGATE_USER(), password: FRIGATE_PASSWORD() }),
-    });
-    if (!res.ok) throw new Error("Frigate login failed — check FRIGATE_USER / FRIGATE_PASSWORD");
-    const data = await res.json().catch(() => ({}));
-    authToken = data.access_token || data.token || null;
-    if (!authToken) {
-      const setCookie = res.headers.get("set-cookie") || "";
-      const match = setCookie.match(/frigate_token=([^;]+)/);
-      if (match) authToken = match[1];
-    }
-    if (!authToken) throw new Error("Frigate /api/login returned no token");
-    return authToken;
-  } finally {
-    clearTimeout(timeout);
+  // A login that just failed is replayed, not repeated: wrong credentials must cost one
+  // request, not one per card on the page.
+  if (loginFailure) {
+    if (loginFailure.until > Date.now()) throw loginFailure.error;
+    loginFailure = null;
   }
+
+  if (!loginInFlight) {
+    loginInFlight = login()
+      .then((token) => {
+        authToken = token;
+        loginFailure = null;
+        return token;
+      })
+      .catch((err) => {
+        loginFailure = { error: err, until: Date.now() + LOGIN_FAILURE_HOLD_MS };
+        throw err;
+      })
+      .finally(() => {
+        loginInFlight = null;
+      });
+  }
+  return loginInFlight;
 }
 
 async function frFetch(path, opts = {}) {
@@ -69,10 +130,13 @@ async function frFetch(path, opts = {}) {
 }
 
 /**
- * Stream bytes from Frigate to the client (for snapshots + clips).
+ * Stream bytes from Frigate to the client (for stills, snapshots + clips).
  * Preserves Content-Type and Content-Length when present.
+ *
+ * Cache-Control is the caller's call: a still is replaced every couple of seconds, so it
+ * must never be stored; an event thumbnail or snapshot is immutable and may be.
  */
-async function streamFromFrigate(req, res, path) {
+async function streamFromFrigate(req, res, path, cacheControl = "private, max-age=300") {
   try {
     const upstream = await frFetch(path);
     res.status(upstream.status);
@@ -80,7 +144,7 @@ async function streamFromFrigate(req, res, path) {
     if (ct) res.set("content-type", ct);
     const cl = upstream.headers.get("content-length");
     if (cl) res.set("content-length", cl);
-    res.set("cache-control", "private, max-age=300");
+    res.set("cache-control", cacheControl);
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.end(buf);
   } catch (err) {
@@ -157,7 +221,7 @@ export default function frigateRouter(authMiddleware) {
     streamFromFrigate(req, res, `/api/events/${encodeURIComponent(req.params.id)}/snapshot.jpg`),
   );
   router.get("/api/frigate/:camera/latest.jpg", authMiddleware, (req, res) =>
-    streamFromFrigate(req, res, `/api/${encodeURIComponent(req.params.camera)}/latest.jpg`),
+    streamFromFrigate(req, res, `/api/${encodeURIComponent(req.params.camera)}/latest.jpg`, "no-store"),
   );
 
   return router;

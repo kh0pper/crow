@@ -14,6 +14,14 @@
  *
  * Also provides a 30s response cache on GET requests so chatty AI chat polling
  * (e.g. list_events every question) can't drive Frigate to 100% CPU.
+ *
+ * Logins are serialised: Frigate rate-limits `POST /api/login` (one per second by
+ * default), so several concurrent tools starting cold produced one login each and a
+ * pile of 429s reported as bad credentials. One in-flight login is shared by every
+ * caller, and a 429 is retried after a short pause.
+ *
+ * A failed login is remembered for five seconds: a wrong password must cost one request,
+ * not one per tool call. Inside that window the same error is replayed.
  */
 
 const FRIGATE_URL = () => (process.env.FRIGATE_URL || "http://localhost:8971").replace(/\/+$/, "");
@@ -21,39 +29,57 @@ const FRIGATE_USER = () => process.env.FRIGATE_USER || "";
 const FRIGATE_PASSWORD = () => process.env.FRIGATE_PASSWORD || "";
 
 const CACHE_TTL_MS = 30_000;
+const BAD_CREDENTIALS_MESSAGE = "Frigate login failed — check FRIGATE_USER / FRIGATE_PASSWORD";
+const RATE_LIMIT_MESSAGE = "Frigate is rate-limiting logins; try again in a moment";
+/** Frigate allows one login per second; wait past that window before trying again. */
+const LOGIN_RETRY_MS = 1100;
+const LOGIN_MAX_RETRIES = 3;
+/** How long a failed login is replayed instead of asking Frigate again. */
+const LOGIN_FAILURE_HOLD_MS = 5000;
 
 let authToken = null;
+/** The login every waiting caller shares, cleared as soon as it settles. */
+let loginInFlight = null;
+/** { error, until }: the last failed login, replayed within LOGIN_FAILURE_HOLD_MS. */
+let loginFailure = null;
 const cache = new Map(); // key → { data, expires }
 
-/**
- * Authenticate with Frigate and obtain a JWT. Cached in-memory.
- * Returns null if no credentials are configured (auth.enabled=false mode).
- */
-async function getToken() {
-  if (authToken) return authToken;
-  if (!FRIGATE_USER() || !FRIGATE_PASSWORD()) return null;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+/** POST /api/login once, retrying a 429 a few times before giving up. */
+async function login() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch(`${FRIGATE_URL()}/api/login`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: FRIGATE_USER(), password: FRIGATE_PASSWORD() }),
-    });
-    if (!res.ok) throw new Error("Frigate login failed — check FRIGATE_USER / FRIGATE_PASSWORD");
-    // Frigate returns JWT in JSON body AND as cookie; read JSON for the Bearer path.
-    const data = await res.json().catch(() => ({}));
-    authToken = data.access_token || data.token || null;
-    // Some builds only set cookie — fall back to cookie-only mode by stashing a sentinel.
-    if (!authToken) {
-      const setCookie = res.headers.get("set-cookie") || "";
-      const match = setCookie.match(/frigate_token=([^;]+)/);
-      if (match) authToken = match[1];
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${FRIGATE_URL()}/api/login`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: FRIGATE_USER(), password: FRIGATE_PASSWORD() }),
+      });
+      if (res.status === 429) {
+        if (attempt >= LOGIN_MAX_RETRIES) throw new Error(RATE_LIMIT_MESSAGE);
+        await sleep(LOGIN_RETRY_MS);
+        continue;
+      }
+      if (res.status === 401 || res.status === 403) throw new Error(BAD_CREDENTIALS_MESSAGE);
+      if (!res.ok) throw new Error(`Frigate login failed: HTTP ${res.status}`);
+
+      // Frigate returns JWT in JSON body AND as cookie; read JSON for the Bearer path.
+      const data = await res.json().catch(() => ({}));
+      let token = data.access_token || data.token || null;
+      // Some builds only set cookie — fall back to cookie-only mode by stashing a sentinel.
+      if (!token) {
+        const setCookie = res.headers.get("set-cookie") || "";
+        const match = setCookie.match(/frigate_token=([^;]+)/);
+        if (match) token = match[1];
+      }
+      if (!token) throw new Error("Frigate /api/login returned no token");
+      return token;
     }
-    if (!authToken) throw new Error("Frigate /api/login returned no token");
-    return authToken;
   } catch (err) {
     if (err.name === "AbortError") throw new Error("Frigate login timed out");
     if (err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED")) {
@@ -63,6 +89,39 @@ async function getToken() {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Authenticate with Frigate and obtain a JWT. Cached in-memory; concurrent callers
+ * share one in-flight login instead of racing into Frigate's login rate limit, and a
+ * login that just failed is replayed for five seconds rather than repeated.
+ * Returns null if no credentials are configured (auth.enabled=false mode).
+ */
+async function getToken() {
+  if (authToken) return authToken;
+  if (!FRIGATE_USER() || !FRIGATE_PASSWORD()) return null;
+
+  if (loginFailure) {
+    if (loginFailure.until > Date.now()) throw loginFailure.error;
+    loginFailure = null;
+  }
+
+  if (!loginInFlight) {
+    loginInFlight = login()
+      .then((token) => {
+        authToken = token;
+        loginFailure = null;
+        return token;
+      })
+      .catch((err) => {
+        loginFailure = { error: err, until: Date.now() + LOGIN_FAILURE_HOLD_MS };
+        throw err;
+      })
+      .finally(() => {
+        loginInFlight = null;
+      });
+  }
+  return loginInFlight;
 }
 
 /**

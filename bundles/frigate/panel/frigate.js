@@ -1,17 +1,34 @@
 /**
- * Crow's Nest Panel — Frigate: cameras, recent events with thumbnails, system stats, Web UI iframe.
+ * Crow's Nest Panel — Frigate: cameras with live stills, recent events, system stats,
+ * and a link to Frigate's own web UI.
  *
  * Bundle-compatible version: uses dynamic imports with appRoot instead of
  * static ESM imports, so this panel works both from the repo and when
  * installed to ~/.crow/panels/.
  *
  * Overview tab: REST-driven via /api/frigate/* routes (bundles/frigate/panel/routes.js).
- * Web UI tab: iframe Frigate's own UI. Frigate sets its own JWT cookie inside the
- * iframe from the :8971 origin — same first-party pattern as the Jellyfin panel.
+ * The camera list is read once here, server-side, so every card carries a still in the
+ * first paint; the browser then refreshes each still every two seconds through the same
+ * gateway route, so Frigate's JWT never leaves the gateway process. The gateway's still
+ * route builds its upstream path itself and forwards no query parameters, so a
+ * downscale hint such as ?h=360 would be dropped — the panel asks for the still as-is
+ * and appends only a cache-busting `t`.
  *
- * Client-side JS uses DOM construction (createElement + textContent + appendChild)
- * so there is no innerHTML assignment with dynamic content.
+ * Web UI tab: a link to FRIGATE_UI_URL that opens in a new tab. Frigate's own UI is not
+ * embedded: its address is a loopback one only this server can reach (a phone resolves
+ * "localhost" to itself), and a cross-origin frame is also blocked by the dashboard's
+ * frame-ancestors policy.
+ *
+ * Client-side JS uses DOM construction (createElement + textContent + appendChild) so
+ * there is no innerHTML assignment with dynamic content. It is emitted inside a
+ * template literal — never put a backtick in it. Turbo Drive re-runs this script on
+ * every visit, so each instance adopts one window slot (window.__fgStills), stops the
+ * previous instance and drops its listeners: one still timer per page, not one per visit.
+ * The slot also stops the timer when Turbo caches the page or starts a visit.
  */
+
+/** How long the Overview waits for Frigate's camera list before drawing the empty shell. */
+const CAMERA_LIST_BUDGET_MS = 2000;
 
 export default {
   id: "frigate",
@@ -41,14 +58,9 @@ export default {
 
     let body = "";
     if (tab === "webui") {
-      const frigateUrl = process.env.FRIGATE_URL || "http://localhost:8971";
-      body = `
-        <div class="fg-webui">
-          <iframe id="frigate-iframe" data-turbo-permanent src="${escapeHtml(frigateUrl)}" class="fg-iframe" allow="autoplay; fullscreen"></iframe>
-        </div>
-      `;
+      body = renderWebUI(browserUiUrl(), escapeHtml);
     } else {
-      body = renderOverview();
+      body = renderOverview(await readCameras(appRoot), escapeHtml);
     }
 
     const content = `
@@ -65,13 +77,122 @@ export default {
   },
 };
 
-function renderOverview() {
+/**
+ * The address this browser uses for Frigate's own UI (manifest env var FRIGATE_UI_URL).
+ * Only http(s) is accepted: a link is rendered from it, and any other scheme would let a
+ * stored value run script in the dashboard. A blank or unusable value hides the link.
+ */
+function browserUiUrl() {
+  const raw = String(process.env.FRIGATE_UI_URL || "").trim();
+  if (!raw) return null;
+  try {
+    const scheme = new URL(raw).protocol;
+    if (scheme !== "http:" && scheme !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return raw;
+}
+
+/** The gateway's still route for one camera (panel/routes.js). The name is URL-encoded. */
+function stillSrc(name) {
+  return `/api/frigate/${encodeURIComponent(String(name == null ? "" : name))}/latest.jpg`;
+}
+
+/**
+ * This bundle's own Frigate client. A panel file runs from <CROW_HOME>/panels/<id>.js when
+ * installed and from bundles/<id>/panel/ in a checkout, so its own code is loaded by path:
+ * this instance's installed copy first, then the app's own copy.
+ */
+async function loadBundleClient(appRoot) {
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const { pathToFileURL } = await import("node:url");
+
+  const home = process.env.CROW_HOME || join(homedir(), ".crow");
+  const candidates = [join(home, "bundles", "frigate", "server", "frigate-api.js")];
+  if (appRoot) candidates.push(join(appRoot, "bundles", "frigate", "server", "frigate-api.js"));
+
+  for (const path of candidates) {
+    try {
+      return await import(pathToFileURL(path).href);
+    } catch {
+      // try the next copy
+    }
+  }
+  return null;
+}
+
+/** Frigate's /api/config camera map, mapped the way panel/routes.js maps it. */
+function camerasFromConfig(config) {
+  const map = config && typeof config === "object" ? config.cameras : null;
+  if (!map || typeof map !== "object") return [];
+  return Object.entries(map).map(([name, cam]) => ({
+    name,
+    enabled: !cam || cam.enabled !== false,
+    detect_enabled: !cam || cam.detect?.enabled !== false,
+    width: cam?.detect?.width || null,
+    height: cam?.detect?.height || null,
+    tracked_objects: Array.isArray(cam?.objects?.track) ? cam.objects.track : [],
+  }));
+}
+
+/**
+ * The camera list for the first paint. Returns null when it could not be read inside the
+ * budget (Frigate down, no credentials yet): the browser then fills the grid from
+ * /api/frigate/cameras, which reports the real error on the page.
+ */
+async function readCameras(appRoot) {
+  const client = await loadBundleClient(appRoot);
+  if (!client || typeof client.frigateFetch !== "function") return null;
+  let timer = null;
+  try {
+    const config = await Promise.race([
+      Promise.resolve().then(() => client.frigateFetch("/api/config")),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("camera list timed out")), CAMERA_LIST_BUDGET_MS);
+        try { timer?.unref?.(); } catch { /* a test's timer need not support unref */ }
+      }),
+    ]);
+    return camerasFromConfig(config);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** One card per camera: the current still, its name, and what Frigate is detecting on it. */
+function cameraCards(cameras, escapeHtml) {
+  if (!cameras || cameras.length === 0) {
+    return `<div class="fg-empty">No cameras configured. Edit config.yml to add RTSP sources.</div>`;
+  }
+  return cameras.map((camera) => {
+    const name = String(camera.name == null ? "" : camera.name);
+    const resolution = camera.width && camera.height ? `${camera.width}×${camera.height}` : "?";
+    const tracked = (camera.tracked_objects || []).join(", ") || "none";
+    const detect = camera.detect_enabled ? "detect" : "detect off";
+    return `
+      <div class="fg-camera">
+        <img class="fg-cam-img" data-cam="${escapeHtml(name)}" src="${escapeHtml(stillSrc(name))}" alt="${escapeHtml(name)}" loading="lazy">
+        <div class="fg-camera-name">${escapeHtml(name)}</div>
+        <div class="fg-camera-meta"><span class="fg-badge ${camera.detect_enabled ? "on" : "off"}">${detect}</span> ${escapeHtml(resolution)}</div>
+        <div class="fg-camera-meta">tracking: ${escapeHtml(tracked)}</div>
+      </div>`;
+  }).join("");
+}
+
+function renderOverview(cameras, escapeHtml) {
+  const cards = cameras === null
+    ? `<div class="fg-loading">Loading cameras…</div>`
+    : cameraCards(cameras, escapeHtml);
+
   return `
     <div class="fg-overview">
       <div class="fg-section">
         <h3>Cameras</h3>
         <div id="fg-cameras" class="fg-cameras">
-          <div class="fg-loading">Loading cameras…</div>
+          ${cards}
         </div>
       </div>
       <div class="fg-section">
@@ -88,6 +209,46 @@ function renderOverview() {
   `;
 }
 
+/**
+ * The Web UI tab. Frigate's UI lives on a loopback address only the server can reach, so
+ * this page never embeds it and never prints that address: with FRIGATE_UI_URL set, it
+ * offers a link to the address the browser uses, and otherwise says how to set one. The
+ * link carries the whole stored URL; the visible text is only its origin, so credentials
+ * or a path in that setting are never echoed onto the page.
+ */
+function renderWebUI(uiUrl, escapeHtml) {
+  const heading = `<h3>Frigate's own web UI</h3>`;
+  if (!uiUrl) {
+    return `
+      <div class="fg-webui">
+        ${heading}
+        <p>Frigate's full interface (recordings, clips, zones, detector settings) runs on this server's own loopback address, which your browser cannot open.</p>
+        <p>To reach it from your phone or another device, set <code>FRIGATE_UI_URL</code> in this extension's settings to the address your browser uses for Frigate — for example a Tailscale Serve HTTPS URL — then reload this page.</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="fg-webui">
+      ${heading}
+      <p>Frigate's full interface (recordings, clips, zones, detector settings) opens in a new tab.</p>
+      <a class="fg-webui-link" href="${escapeHtml(uiUrl)}" target="_blank" rel="noopener">Open Frigate</a>
+      <p class="fg-camera-meta">${escapeHtml(publicOrigin(uiUrl))}</p>
+    </div>
+  `;
+}
+
+/**
+ * The only part of FRIGATE_UI_URL the page prints: scheme and host. A stored value may carry
+ * credentials or a path, and neither belongs on a page the owner reads over a shoulder.
+ */
+function publicOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
 function frigateStyles() {
   return `
     .fg-panel { max-width: 1100px; margin: 0 auto; padding: 1rem; }
@@ -98,6 +259,7 @@ function frigateStyles() {
     .fg-section h3 { margin: 0 0 0.5rem; font-size: 1rem; color: var(--muted, #888); text-transform: uppercase; letter-spacing: 0.05em; }
     .fg-cameras { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0.75rem; }
     .fg-camera { padding: 0.75rem; background: var(--panel, #1a1a1a); border: 1px solid var(--border, #333); border-radius: 6px; }
+    .fg-cam-img { width: 100%; aspect-ratio: 16/9; object-fit: cover; background: #000; border-radius: 4px; display: block; margin-bottom: 0.5rem; }
     .fg-camera-name { font-weight: 600; margin-bottom: 0.25rem; }
     .fg-camera-meta { font-size: 0.85rem; color: var(--muted, #888); }
     .fg-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem; margin-right: 0.25rem; }
@@ -116,14 +278,40 @@ function frigateStyles() {
     .fg-loading { color: var(--muted, #888); font-style: italic; grid-column: 1 / -1; }
     .fg-empty { color: var(--muted, #888); font-style: italic; grid-column: 1 / -1; }
     .fg-error { color: #f43f5e; grid-column: 1 / -1; }
-    .fg-webui { height: calc(100vh - 220px); }
-    .fg-iframe { width: 100%; height: 100%; border: 0; border-radius: 6px; }
+    .fg-webui { max-width: 40rem; }
+    .fg-webui h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+    .fg-webui p { color: var(--muted, #888); line-height: 1.5; }
+    .fg-webui code { font-family: monospace; }
+    .fg-webui-link { display: inline-block; margin: 0.5rem 0; padding: 0.5rem 1rem; border-radius: 6px; background: var(--accent, #d9a521); color: #111; font-weight: 600; text-decoration: none; }
   `;
 }
 
 function frigateScript() {
   return `
     (function () {
+      var STILL_REFRESH_MS = 2000;
+
+      // Turbo re-runs this script on every visit, so a second visit must not stack a second
+      // timer and a second listener: the previous instance in the window slot is stopped and
+      // its listeners are dropped before this one installs.
+      var previous = window.__fgStills;
+      if (previous && typeof previous.stop === "function") {
+        previous.stop();
+        if (previous.onVisibility) document.removeEventListener("visibilitychange", previous.onVisibility);
+        if (previous.onPageLeave) {
+          document.removeEventListener("turbo:before-cache", previous.onPageLeave);
+          document.removeEventListener("turbo:before-visit", previous.onPageLeave);
+        }
+      }
+
+      var stillTimer = null;
+      // Camera name to a load still in flight: a tick skips that camera until it settles.
+      var stillBusy = {};
+
+      // This instance's slot on window; the next visit reads it to stop this one.
+      var state = { stop: stopStills, onVisibility: onVisibilityChange, onPageLeave: onPageLeave };
+      window.__fgStills = state;
+
       function clearKids(el) { while (el && el.firstChild) el.removeChild(el.firstChild); }
       function span(cls, text) { var s = document.createElement("span"); s.className = cls; s.textContent = text; return s; }
       function div(cls, text) { var d = document.createElement("div"); d.className = cls; if (text != null) d.textContent = text; return d; }
@@ -144,6 +332,66 @@ function frigateScript() {
         return "fg-badge on";
       }
 
+      // The gateway's still route, with the camera name URL-encoded.
+      function stillSrc(name) {
+        return "/api/frigate/" + encodeURIComponent(name) + "/latest.jpg";
+      }
+
+      function cameraStill(name) {
+        var img = document.createElement("img");
+        img.className = "fg-cam-img";
+        img.loading = "lazy";
+        img.alt = name;
+        img.setAttribute("data-cam", name);
+        img.onerror = function () { this.style.display = "none"; };
+        img.src = stillSrc(name);
+        return img;
+      }
+
+      // Fetch the next still off-screen and swap it in only once it has loaded, so the
+      // card never flashes while it refreshes.
+      function refreshStill(img) {
+        var name = img.getAttribute("data-cam");
+        if (!name) return;
+        if (stillBusy[name]) return;  // the previous still for this camera has not settled
+        stillBusy[name] = true;
+        var next = new Image();
+        next.onload = function () {
+          img.style.display = "";
+          img.src = next.src;
+          stillBusy[name] = false;
+        };
+        next.onerror = function () { stillBusy[name] = false; };
+        next.src = stillSrc(name) + "?t=" + Date.now();
+      }
+
+      function refreshStills() {
+        var host = document.getElementById("fg-cameras");
+        if (!host) { stopStills(); return; }  // the page moved on (Turbo Drive)
+        var imgs = host.querySelectorAll(".fg-cam-img");
+        for (var i = 0; i < imgs.length; i++) refreshStill(imgs[i]);
+      }
+
+      // Only while the page is visible: a hidden tab asks Frigate for nothing.
+      function startStills(refreshNow) {
+        if (document.hidden) return;
+        if (refreshNow) refreshStills();
+        if (!stillTimer) stillTimer = setInterval(refreshStills, STILL_REFRESH_MS);
+      }
+
+      function stopStills() {
+        if (!stillTimer) return;
+        clearInterval(stillTimer);
+        stillTimer = null;
+      }
+
+      function onVisibilityChange() {
+        if (document.hidden) stopStills(); else startStills(true);
+      }
+
+      // Turbo is caching this page or navigating away: stop asking Frigate for stills.
+      function onPageLeave() { stopStills(); }
+
       function renderCameras(cams) {
         var host = document.getElementById("fg-cameras");
         if (!host) return;
@@ -154,6 +402,7 @@ function frigateScript() {
         }
         cams.forEach(function (c) {
           var card = div("fg-camera");
+          card.appendChild(cameraStill(c.name));
           card.appendChild(div("fg-camera-name", c.name));
           var meta = div("fg-camera-meta");
           meta.appendChild(span(c.detect_enabled ? "fg-badge on" : "fg-badge off", c.detect_enabled ? "detect" : "detect off"));
@@ -245,11 +494,15 @@ function frigateScript() {
         });
       }
 
-      if (document.getElementById("fg-cameras")) {
-        loadCameras();
-        loadEvents();
-        loadStats();
-      }
+      if (!document.getElementById("fg-cameras")) return;
+
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      document.addEventListener("turbo:before-cache", onPageLeave);
+      document.addEventListener("turbo:before-visit", onPageLeave);
+      startStills(false);
+      loadCameras();
+      loadEvents();
+      loadStats();
     })();
   `;
 }
