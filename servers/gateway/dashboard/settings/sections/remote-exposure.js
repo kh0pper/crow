@@ -62,7 +62,7 @@ async function renderPeerGrants(db) {
     let state;
     if (e.grant.expiresAt == null) state = "until you remove it";
     else if (grantIsActive(e.grant, now)) state = `expires ${escapeHtml(formatWhen(e.grant.expiresAt))}`;
-    else state = `<strong style="color:var(--crow-danger,#d33)">expired</strong> ${escapeHtml(formatWhen(e.grant.expiresAt))}`;
+    else state = `<strong style="color:var(--crow-error)">expired</strong> ${escapeHtml(formatWhen(e.grant.expiresAt))}`;
     return { ...e, label, state };
   }));
 
