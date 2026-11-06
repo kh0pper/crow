@@ -7,6 +7,9 @@
 # already publishes ${CROW_TAILSCALE_IP}:8004, so a host running both could not
 # bring this override up on :8004. Paired instances reach STT at <ts-ip>:8005.
 #
+# CROW_TAILSCALE_IP defaults to 127.0.0.1: a forgotten variable falls back to
+# loopback, it never publishes STT on every interface.
+#
 # Apply (requires CROW_TAILSCALE_IP set to this host's Tailscale IPv4):
 #   CROW_TAILSCALE_IP=<ts-ip> docker compose \
 #     -f docker-compose.yml -f docker-compose.tailnet.yml up -d
@@ -14,4 +17,4 @@ services:
   faster-whisper-server:
     ports:
       - "127.0.0.1:8004:8000"
-      - "${CROW_TAILSCALE_IP}:8005:8000"
+      - "${CROW_TAILSCALE_IP:-127.0.0.1}:8005:8000"

@@ -48,9 +48,17 @@ function compose(id, file = "docker-compose.yml") {
   return readFileSync(join(BUNDLES_ROOT, id, file), "utf8");
 }
 
-/** Extract the HOST port from a `ports:` mapping line like `"${VAR}:8003:8000"`. */
+/**
+ * Extract the HOST port from the first mapping in a `ports:` section, e.g.
+ * `- "${CROW_TAILSCALE_IP:-127.0.0.1}:8003:8000"`.
+ *
+ * The host IP is matched as "anything up to the last `:HOST:CONTAINER`" rather
+ * than "no colon": a `${VAR:-127.0.0.1}` default carries a colon of its own
+ * (security audit K3 made every model bundle default to loopback), and a
+ * comment line may sit between `ports:` and its items.
+ */
 function composeHostPort(composeText) {
-  const m = composeText.match(/ports:\s*\n\s*-\s*"[^:"]*:(\d+):\d+"/);
+  const m = composeText.match(/ports:\s*\n(?:\s*#[^\n]*\n)*\s*-\s*"(?:[^"]*):(\d+):\d+/);
   return m ? Number(m[1]) : null;
 }
 

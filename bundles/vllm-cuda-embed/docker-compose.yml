@@ -11,8 +11,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
     volumes:
       - ${GRACKLE_HF_CACHE}:/models
+    # GRACKLE_TAILSCALE_IP defaults to 127.0.0.1, so an unset variable can
+    # never publish the embeddings API on every interface.
     ports:
-      - "${GRACKLE_TAILSCALE_IP}:9100:8000"
+      - "${GRACKLE_TAILSCALE_IP:-127.0.0.1}:9100:8000"
     # vLLM embedding task — OpenAI-compatible /v1/embeddings
     command:
       - --model=Qwen/Qwen3-Embedding-0.6B

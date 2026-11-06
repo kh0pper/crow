@@ -9,6 +9,9 @@
 # is kept here too so the local companion's localhost path is unaffected
 # regardless of how Compose merges the ports list.
 #
+# CROW_TAILSCALE_IP defaults to 127.0.0.1: a forgotten variable falls back to
+# loopback, it never publishes TTS on every interface.
+#
 # Apply (requires CROW_TAILSCALE_IP set to this host's Tailscale IPv4):
 #   CROW_TAILSCALE_IP=<ts-ip> docker compose \
 #     -f docker-compose.yml -f docker-compose.tailnet.yml up -d
@@ -16,4 +19,4 @@ services:
   kokoro-tts:
     ports:
       - "127.0.0.1:8880:8880"
-      - "${CROW_TAILSCALE_IP}:8880:8880"
+      - "${CROW_TAILSCALE_IP:-127.0.0.1}:8880:8880"

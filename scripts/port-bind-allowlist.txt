@@ -1,0 +1,23 @@
+# Ports a compose file may publish on EVERY interface on purpose.
+#
+# Read by tests/compose-port-bind-defaults.test.js (security audit K3). Format,
+# one entry per line:  <repo-relative compose path> <host port>  # reason
+# Blank lines and full-line comments are skipped; a # after whitespace starts
+# the reason. `<host port>` is the host side of the mapping, with `/udp` when
+# the mapping is UDP (443 and 443/udp are two entries).
+#
+# Rules the test enforces around this file:
+#   - every publish with no host IP, or with a wildcard host IP (0.0.0.0, ::,
+#     *, 0::0), must be listed here, keyed by file AND host port;
+#   - a host IP written as a variable must carry a non-empty default — or be a
+#     REQUIRED variable (${VAR:?message}), which Compose refuses to start
+#     without. A bare ${VAR} / $VAR / ${VAR:-} is never allowed, here or
+#     anywhere else: unset, it publishes on every interface;
+#   - an entry that no longer matches a real publish is STALE and fails the
+#     suite, so this list cannot rot into a blanket exemption.
+#
+# There is deliberately one justified public port set: the reverse proxy.
+
+bundles/caddy/docker-compose.yml  80       # public reverse proxy: ACME HTTP-01 challenge answers on 80 from the internet
+bundles/caddy/docker-compose.yml  443      # public reverse proxy: HTTPS (and TLS-ALPN-01) for the public site, /blog and federated bundles
+bundles/caddy/docker-compose.yml  443/udp  # HTTP/3 (QUIC) rides the same public 443

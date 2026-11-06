@@ -1,6 +1,6 @@
 {
   "id": "vllm-cuda-embed",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "bundle",
   "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
   "category": "ai",
@@ -15,6 +15,7 @@
   "host_grants": {"gpu": true, "shm_size": "2g", "env_files": ["cuda.env"], "path_env": ["GRACKLE_HF_CACHE"]},
   "env_vars": [],
   "port": 9100,
+  "refreshFiles": ["docker-compose.yml"],
   "inference": true,
   "providers": [
     {
