@@ -1,20 +1,96 @@
 /**
  * Settings Section: Remote Tool Exposure (Multi-Instance group) — F4a Layer 2a.
  *
- * Per-instance, LOCAL-ONLY (never synced) allowlist of capabilities this
- * instance lets trusted peer instances invoke. Default = nothing exposed
- * (deny-all). The authoritative enforcement is server-side in
- * peer-exposure.js; this UI only edits the `remote_exposed_tools` setting.
+ * Per-instance, LOCAL-ONLY (never synced) exposure controls, in two shapes:
+ *   1. the all-trusted-peers allowlist (`remote_exposed_tools`) — the checkbox
+ *      list below, an explicit "share with all my Crows" statement;
+ *   2. per-device allowances (`remote_exposed_tools_by_peer`, N1b-8) — what a
+ *      Fix-it "Allow" card grants to the ONE peer that asked, with an expiry.
+ *      Listed here with the peer and the expiry, and renewable or removable.
+ * Default = nothing exposed (deny-all). The authoritative enforcement is
+ * server-side in peer-exposure.js; this UI only edits the exposure settings.
  *
- * `remote_exposed_tools` is deliberately ABSENT from sync-allowlist.js, so
- * writeSetting downgrades it to local scope automatically — each instance is
- * sovereign over what it exposes.
+ * Both keys are deliberately ABSENT from sync-allowlist.js, so writeSetting
+ * downgrades them to local scope automatically — each instance is sovereign
+ * over what it exposes.
  */
 import { writeSetting } from "../registry.js";
+import {
+  getPeerExposures,
+  grantIsActive,
+  renewPeerGrant,
+  removePeerGrant,
+} from "../../../peer-exposure-store.js";
+import { normalizePeerId } from "../../../../shared/peer-id.js";
 import { getLocalCatalog } from "../../../capability-registry.js";
-import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
+import { getOrCreateLocalInstanceId, getInstance } from "../../../instance-registry.js";
 import { escapeHtml } from "../../shared/components.js";
 import { resolveFriendlyName } from "../../../fix-it/friendly-names.js";
+
+const SECTION_URL = "/dashboard/settings?section=remote-exposure";
+
+/** Format an ISO timestamp for display; "" when unparseable. */
+function formatWhen(iso) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return "";
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+/** Best-effort display label for a peer: its stored name, else a short id. */
+async function peerLabel(db, peerId) {
+  let name = null;
+  try { name = (await getInstance(db, peerId))?.name || null; } catch { name = null; }
+  return name && String(name).trim() ? String(name).trim() : `${peerId.slice(0, 8)}…`;
+}
+
+/**
+ * The "Per-device allowances" block: one row per (peer, capability) grant, with
+ * its state — active with an expiry, expired (still listed so it can be renewed
+ * or removed), or "until you remove it".
+ */
+async function renderPeerGrants(db) {
+  const grants = await getPeerExposures(db);
+  const now = Date.now();
+  const entries = [];
+  for (const [peerId, caps] of grants) {
+    for (const [capability, grant] of caps) entries.push({ peerId, capability, grant });
+  }
+  entries.sort((a, b) => `${a.peerId}:${a.capability}`.localeCompare(`${b.peerId}:${b.capability}`));
+
+  const states = await Promise.all(entries.map(async (e) => {
+    const label = await peerLabel(db, e.peerId);
+    let state;
+    if (e.grant.expiresAt == null) state = "until you remove it";
+    else if (grantIsActive(e.grant, now)) state = `expires ${escapeHtml(formatWhen(e.grant.expiresAt))}`;
+    else state = `<strong style="color:var(--crow-danger,#d33)">expired</strong> ${escapeHtml(formatWhen(e.grant.expiresAt))}`;
+    return { ...e, label, state };
+  }));
+
+  const rows = states.map((e) => {
+    const friendly = resolveFriendlyName(e.capability);
+    const actionForm = (action, buttonText) => `<form method="POST" style="display:inline">
+        <input type="hidden" name="action" value="${action}">
+        <input type="hidden" name="peer" value="${escapeHtml(e.peerId)}">
+        <input type="hidden" name="cap" value="${escapeHtml(e.capability)}">
+        <button type="submit" class="btn btn-text" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;padding:0 0.25rem">${buttonText}</button>
+      </form>`;
+    return `<div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;padding:0.5rem 0;border-bottom:1px solid var(--crow-border,#2222)">
+      <span style="flex:1 1 16rem">${escapeHtml(e.label)} <span style="color:var(--crow-text-muted);font-size:0.85rem">(${escapeHtml(e.peerId)})</span>
+        <br><span style="font-size:0.85rem;color:var(--crow-text-muted)">${escapeHtml(friendly)} — ${e.state}</span></span>
+      ${actionForm("renew_peer_exposure", "Renew 30 days")}
+      ${actionForm("remove_peer_exposure", "Remove")}
+    </div>`;
+  }).join("");
+
+  const body = rows || `<p style="color:var(--crow-text-muted);padding:0.8rem 0;margin:0">No one-device allowances yet. An “Allow” card on the Nest creates one, for the device that asked only.</p>`;
+  return `<h4 style="font-size:0.95rem;margin:1.75rem 0 0.4rem">Per-device allowances</h4>
+    <div style="color:var(--crow-text-secondary);font-size:0.9rem;line-height:1.5;margin-bottom:0.5rem">
+      Capabilities allowed for a single device, usually from an “Allow” card on the Nest. An expired allowance
+      stops working on its own and can be renewed or removed here. Nothing here is listed above, so it is never
+      shared with your other devices.
+    </div>
+    <div style="border:1px solid var(--crow-border,#2222);border-radius:8px;padding:0 0.8rem">${body}</div>`;
+}
 
 export default {
   id: "remote-exposure",
@@ -69,10 +145,25 @@ export default {
       <div style="margin-top:1.5rem">
         <button type="submit" class="btn btn-secondary">Save exposure</button>
       </div>
-    </form>`;
+    </form>
+    ${await renderPeerGrants(db)}`;
   },
 
   async handleAction({ req, res, db, action }) {
+    const body = req.body || {};
+    // N1b-8: one-device allowances — renew (+30 days from now) or remove.
+    if (action === "renew_peer_exposure" || action === "remove_peer_exposure") {
+      const peerId = normalizePeerId(body.peer);
+      const capability = typeof body.cap === "string" ? body.cap.trim() : "";
+      if (!peerId || !capability) {
+        res.redirectAfterPost(SECTION_URL);
+        return true;
+      }
+      if (action === "remove_peer_exposure") await removePeerGrant(db, { peerId, capability });
+      else await renewPeerGrant(db, { peerId, capability, days: 30 });
+      res.redirectAfterPost(SECTION_URL);
+      return true;
+    }
     if (action !== "set_remote_exposure") return false;
     // Checkboxes: req.body.cap is a string (one) or array (many) or undefined (none).
     let selected = req.body.cap;
@@ -81,7 +172,7 @@ export default {
     const clean = [...new Set(selected.filter((x) => typeof x === "string" && x.length > 0))];
     // Local scope (not in sync-allowlist → writeSetting downgrades anyway; be explicit).
     await writeSetting(db, "remote_exposed_tools", JSON.stringify(clean), { scope: "local" });
-    res.redirectAfterPost("/dashboard/settings?section=remote-exposure");
+    res.redirectAfterPost(SECTION_URL);
     return true;
   },
 };

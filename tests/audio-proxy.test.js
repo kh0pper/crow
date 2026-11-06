@@ -6,12 +6,14 @@ import audioProxyRouter, { validateAudioParams } from "../servers/gateway/routes
 // Spin up a throwaway express app with the audio-proxy router mounted, plus a
 // header-driven req.instanceAuth shim (mirrors instanceAuthMiddleware). All deps
 // injected → fully offline, no prod services booted.
-async function withApp({ exposed = new Set(["funkwhale"]), fw = { url: "http://fw", token: "T" }, fetchImpl } = {}, run) {
+async function withApp({ exposed = new Set(["funkwhale"]), peerGrants = new Set(), fw = { url: "http://fw", token: "T" }, fetchImpl } = {}, run) {
   const app = express();
   app.use((req, _res, next) => { if (req.headers["x-peer"]) req.instanceAuth = { instance: { id: req.headers["x-peer"] } }; next(); });
   app.use(audioProxyRouter({
     createDbClient: () => ({ close() {} }),
     getExposed: async () => exposed,
+    // N1b-8: a peer-scoped grant (from a Fix-it Allow card) must reach audio too.
+    isExposedToPeer: async (_db, capability, peerId) => capability === "funkwhale" && peerGrants.has(peerId),
     fwEnv: () => fw,
     fetchImpl: fetchImpl || (async () => ({ ok: true, status: 200, body: null, headers: new Map() })),
   }));
@@ -40,6 +42,19 @@ test("GET /audio/stream: 400 on bad params (with peer auth)", async () => {
 test("GET /audio/stream: 403 when funkwhale not exposed", async () => {
   await withApp({ exposed: new Set() }, async ({ get }) => {
     assert.equal((await get(OK_QS, { "x-peer": "p1" })).status, 403);
+  });
+});
+
+test("GET /audio/stream: a per-peer grant lets THAT peer stream and nobody else (N1b-8)", async () => {
+  const bytes = Buffer.from("AUDIODATA");
+  const fetchImpl = async () => ({
+    ok: true, status: 200,
+    headers: new Map([["content-type", "audio/ogg"], ["content-length", String(bytes.length)]]),
+    body: { getReader() { let done = false; return { read: async () => done ? { done: true } : (done = true, { value: bytes, done: false }), cancel() {} }; } },
+  });
+  await withApp({ exposed: new Set(), peerGrants: new Set(["p1"]), fetchImpl }, async ({ get }) => {
+    assert.equal((await get(OK_QS, { "x-peer": "p1" })).status, 200, "the granted peer streams");
+    assert.equal((await get(OK_QS, { "x-peer": "p2" })).status, 403, "a second peer is still refused");
   });
 });
 

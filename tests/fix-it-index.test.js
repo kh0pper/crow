@@ -47,13 +47,16 @@ test("handleFixItAction runs the remedy and resolves the card", async () => {
   await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-x" });
   const item = (await store.listPending(db))[0];
   let redirected = null;
-  const req = { body: { action: "remedy", item_id: String(item.id), action_id: "expose-capability" } };
+  const req = { body: { action: "remedy", item_id: String(item.id), action_id: "expose-capability-30d" } };
   const res = { redirectAfterPost: (u) => { redirected = u; } };
   await idx.handleFixItAction(req, res, { db });
   assert.match(redirected, /flash=/);
   assert.equal((await store.getItem(db, item.id)).status, "resolved");
-  const { getExposedCapabilities } = await import("../servers/gateway/peer-exposure.js");
-  assert.ok((await getExposedCapabilities(db)).has("funkwhale"));
+  // N1b-8: the click grants the capability to the peer ON THE CARD, and does
+  // not add it to the all-trusted-peers allowlist.
+  const { getExposedCapabilities, getPeerGrantedCapabilities } = await import("../servers/gateway/peer-exposure.js");
+  assert.ok((await getPeerGrantedCapabilities(db, "peer-x")).has("funkwhale"));
+  assert.ok(!(await getExposedCapabilities(db)).has("funkwhale"));
 });
 
 test("handleFixItAction dismiss suppresses the card", async () => {

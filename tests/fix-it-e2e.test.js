@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { enforcePeerExposure, getExposedCapabilities } from "../servers/gateway/peer-exposure.js";
+import { enforcePeerExposure, getExposedCapabilities, getPeerGrantedCapabilities } from "../servers/gateway/peer-exposure.js";
 import * as store from "../servers/shared/fix-it/store.js";
 
 let dir, db, idx;
@@ -42,7 +42,7 @@ async function waitForPending(predicate, deadlineMs = 2000) {
   }
 }
 
-test("denied call → card appears → remedy → next check allowed", async () => {
+test("denied call → card appears → remedy → next check allowed for THAT peer only", async () => {
   const connected = new Map([["funkwhale", { status: "connected", tools: [{ name: "fw_play" }] }]]);
   const req = { instanceAuth: { instance: { id: "peer-9" } }, body: { method: "tools/call", params: { name: "fw_play" }, id: 1 } };
 
@@ -53,14 +53,25 @@ test("denied call → card appears → remedy → next check allowed", async () 
   // 2. The emit is fire-and-forget; poll deterministically until the card lands.
   const pending = await waitForPending((p) => p.length === 1);
   assert.equal(pending[0].context.capability, "funkwhale");
+  assert.equal(pending[0].context.requestingInstance, "peer-9", "the card is scoped to the verified peer");
 
   // 3. Run the remedy via the action handler.
   const res2 = { redirectAfterPost: () => {} };
-  await idx.handleFixItAction({ body: { action: "remedy", item_id: String(pending[0].id), action_id: "expose-capability" } }, res2, { db });
-  assert.ok((await getExposedCapabilities(db)).has("funkwhale"));
+  await idx.handleFixItAction({ body: { action: "remedy", item_id: String(pending[0].id), action_id: "expose-capability-30d" } }, res2, { db });
+  // N1b-8: the grant is per-peer, NOT an all-peer exposure.
+  assert.ok((await getPeerGrantedCapabilities(db, "peer-9")).has("funkwhale"));
+  assert.ok(!(await getExposedCapabilities(db)).has("funkwhale"), "one peer's Allow must not expose it to every peer");
   assert.equal((await store.listPending(db)).length, 0); // card cleared
 
-  // 4. The next enforcement check for the same capability is now allowed.
+  // 4. The next enforcement check for the same capability is now allowed — for
+  //    the peer that asked…
   const allowed = await enforcePeerExposure({ prefix: "tools", req, res: mkRes(), db, connectedServers: connected, auditFn: async () => {} });
   assert.equal(allowed, true);
+
+  // …and still refused for a different peer.
+  const other = { instanceAuth: { instance: { id: "peer-10" } }, body: req.body };
+  const otherRes = mkRes();
+  const refused = await enforcePeerExposure({ prefix: "tools", req: other, res: otherRes, db, connectedServers: connected, auditFn: async () => {}, emitFn: async () => {} });
+  assert.equal(refused, false);
+  assert.equal(otherRes._status, 403);
 });
