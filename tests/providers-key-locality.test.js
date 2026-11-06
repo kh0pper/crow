@@ -14,6 +14,10 @@
  *   4. A synced provider that needs a key and has none here is surfaced once,
  *      by name; never for a keyless one (a llama.cpp on the LAN); never again
  *      once a key is entered here.
+ *   5. Fix round 1 (operator ruling 2026-11-06): an inbound change that MOVES a
+ *      provider's endpoint while the key lives HERE is held as a proposed
+ *      change (one sync_conflicts row, one named bell item) until the operator
+ *      accepts it on this device; a keyless row still updates freely.
  *
  * Harness: real instance DBs (scripts/init-db.js per dir, like paired Crow
  * boxes), real InstanceSyncManagers over stub Hypercore feeds that carry the
@@ -35,6 +39,7 @@ import {
   providerNeedsKey, providerKeyNoticeSource, noticeProviderKeyNeeded,
 } from "../servers/shared/provider-key-need.js";
 import { sign } from "../servers/sharing/identity.js";
+import { endpointHoldNoticeSource } from "../servers/shared/provider-endpoint.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 import { trustRemotesOnApply } from "./fixtures/trusted-apply.mjs";
 
@@ -449,6 +454,331 @@ test("providers tab: the key line by the key field, and 'needs a key' on a peer 
   assert.notEqual(t("settings.providers.needsKeyHere", "es"), t("settings.providers.needsKeyHere", "en"));
 });
 
+
+/* ═════════ 5b. a peer may not repoint a provider that holds a key here ═══════ */
+
+const HOLD_ID = "prov-hold";
+const URL_OLD = CLOUD.baseUrl;                      // https://api.openai.com/v1
+const URL_NEW = "https://openai.peer.example/v1";   // where the peer points it
+const URL_NEWER = "https://openai.peer2.example/v1";
+
+/** The held/conflict rows this device recorded for one providers row id. */
+async function providerConflicts(db, rowId = HOLD_ID) {
+  const { rows } = await db.execute({
+    sql: `SELECT * FROM sync_conflicts WHERE table_name = 'providers' AND row_id = ? ORDER BY id`,
+    args: [rowId],
+  });
+  return rows;
+}
+
+const holdNoticeRows = async (db, id = HOLD_ID) => {
+  const { rows } = await db.execute({
+    sql: "SELECT id, title, body, action_url, is_read FROM notifications WHERE source = ? ORDER BY id",
+    args: [endpointHoldNoticeSource(id)],
+  });
+  return rows;
+};
+
+/**
+ * A and B share one cloud provider id. A's copy has NO key; B applies it, then
+ * enters its OWN key — the state under test: the key lives HERE, and A is about
+ * to want the address moved.
+ */
+async function keyedProviderOnBoth(label) {
+  const a = freshInstance(`${label}-a`, A_ID);
+  const b = freshInstance(`${label}-b`, B_ID);
+  const feedAtoB = a.peerFeed(B_ID);
+  const feedBtoA = b.peerFeed(A_ID);
+
+  setProviderSyncManager(a.mgr);
+  await upsertProvider(a.db, { id: HOLD_ID, ...CLOUD, models: MODELS_1 });
+  await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+  setProviderSyncManager(b.mgr);
+  const bPanel = (await listProvidersAll(b.db)).find((p) => p.id === HOLD_ID);
+  await upsertProvider(b.db, { ...bPanel, apiKey: KEY_B });
+  await a.mgr._processNewEntries(B_ID, feedBtoA);
+  return { a, b, feedAtoB };
+}
+
+/** A repoints the provider — a plain local edit on A, which emits to B. */
+async function repointOnA(a, url) {
+  setProviderSyncManager(a.mgr);
+  const panel = (await listProvidersAll(a.db)).find((p) => p.id === HOLD_ID);
+  await upsertProvider(a.db, { ...panel, baseUrl: url });
+}
+
+test("endpoint hold: a peer's address change is held when the key lives here — one conflict, one bell, by name", async () => {
+  const { a, b, feedAtoB } = await keyedProviderOnBoth("hold-one");
+  try {
+    assert.equal((await b.row(HOLD_ID)).base_url, URL_OLD, "both boxes start on the same address");
+    assert.equal((await b.row(HOLD_ID)).api_key, KEY_B, "B holds the key on this device");
+
+    await repointOnA(a, URL_NEW);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    const live = await b.row(HOLD_ID);
+    assert.equal(live.base_url, URL_OLD, "B's row is NOT repointed — the change is held");
+    assert.equal(live.api_key, KEY_B, "and the key stays where it was entered");
+
+    const conflicts = await providerConflicts(b.db);
+    assert.equal(conflicts.length, 1, "exactly one conflict records the held change");
+    assert.equal(Number(conflicts[0].resolved), 0, "it is unresolved: it waits for the operator");
+    assert.equal(conflicts[0].op, "update", "it reads as a proposed update (Restore is available)");
+    const losing = JSON.parse(conflicts[0].losing_data);
+    assert.equal(losing.base_url, URL_NEW, "the held version carries the peer's new address");
+    assert.equal(Object.hasOwn(losing, "api_key"), false, "never a key in the held snapshot");
+    const winning = JSON.parse(conflicts[0].winning_data);
+    assert.equal(winning.base_url, URL_OLD, "the kept version is this device's row");
+    // The conflict row is shown on the sync-conflicts page and returned by
+    // crow_list_sync_conflicts: this device's key must not be stored in it.
+    assert.equal(Object.hasOwn(winning, "api_key"), false, "never this device's key in the kept snapshot");
+    assert.equal(conflicts[0].winning_data.includes(KEY_B), false, "the key appears nowhere in the stored row");
+
+    const notices = await holdNoticeRows(b.db);
+    assert.equal(notices.length, 1, "one bell item, not one per entry");
+    assert.match(notices[0].title, /OpenAI: another device wants to change its address/,
+      "the notice names the provider");
+    assert.equal(notices[0].action_url, "/dashboard/settings?section=sync-conflicts",
+      "it links to the conflict review");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: a newer address from the same peer REPLACES the held one — still one conflict", async () => {
+  const { a, b, feedAtoB } = await keyedProviderOnBoth("hold-replace");
+  try {
+    await repointOnA(a, URL_NEW);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+    await repointOnA(a, URL_NEWER);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    assert.equal((await b.row(HOLD_ID)).base_url, URL_OLD, "B's row is still untouched");
+    const conflicts = await providerConflicts(b.db);
+    assert.equal(conflicts.length, 1, "a second edit replaces the held version, it does not pile up");
+    assert.equal(Number(conflicts[0].resolved), 0);
+    assert.equal(JSON.parse(conflicts[0].losing_data).base_url, URL_NEWER,
+      "the held version is the NEWEST address");
+    assert.equal((await holdNoticeRows(b.db)).length, 1, "and the bell was not rung again");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: accepting applies the address AND keeps this device's key", async () => {
+  const { a, b, feedAtoB } = await keyedProviderOnBoth("hold-accept");
+  try {
+    await repointOnA(a, URL_NEW);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+    const [conflict] = await providerConflicts(b.db);
+
+    const { restoreConflict } = await import("../servers/sharing/sync-conflict-resolve.js");
+    const outcome = await restoreConflict(b.db, conflict.id, { instanceSync: b.mgr });
+    assert.equal(outcome.status, "applied", "the held version can be applied from the review page");
+
+    const live = await b.row(HOLD_ID);
+    assert.equal(live.base_url, URL_NEW, "the accepted address is now used here");
+    assert.equal(live.api_key, KEY_B, "and it is B's own key that now goes there — the operator's informed choice");
+    assert.equal(Number((await providerConflicts(b.db))[0].resolved), 1, "the conflict is closed");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: dismissing keeps the address, and a re-delivery of the same entry raises nothing", async () => {
+  const { a, b, feedAtoB } = await keyedProviderOnBoth("hold-dismiss");
+  try {
+    await repointOnA(a, URL_NEW);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+    const [conflict] = await providerConflicts(b.db);
+
+    const { resolveConflict } = await import("../servers/sharing/sync-conflict-resolve.js");
+    await resolveConflict(b.db, conflict.id);
+    assert.equal((await b.row(HOLD_ID)).base_url, URL_OLD, "keeping the current version keeps the address");
+
+    // Re-deliver the SAME feed entry (fresh checkpoints, real apply path).
+    await b.mgr._setLastAppliedSeq(A_ID, 0, null);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    assert.equal((await b.row(HOLD_ID)).base_url, URL_OLD, "still the local address");
+    const after = await providerConflicts(b.db);
+    assert.equal(after.length, 1, "a re-delivery does not stack a second conflict on top of the dismissed one");
+    assert.equal(Number(after[0].resolved), 1, "the dismissal stands");
+    assert.equal((await holdNoticeRows(b.db)).length, 1, "and the bell does not ring again");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: the same address change to a row with NO local key applies directly, with no conflict", async () => {
+  const a = freshInstance("hold-keyless-a", A_ID);
+  const b = freshInstance("hold-keyless-b", B_ID);
+  const feedAtoB = a.peerFeed(B_ID);
+  b.peerFeed(A_ID);
+  try {
+    // A LAN llama.cpp: no key on either side (the ruling's keyless case).
+    setProviderSyncManager(a.mgr);
+    await upsertProvider(a.db, {
+      id: "prov-lan", baseUrl: "http://10.0.0.9:8080/v1", host: "cloud",
+      providerType: "openai-compat", models: [{ id: "qwen3-4b" }],
+    });
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    const panel = (await listProvidersAll(a.db)).find((p) => p.id === "prov-lan");
+    await upsertProvider(a.db, { ...panel, baseUrl: "http://10.0.0.10:8080/v1" });
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    assert.equal((await b.row("prov-lan")).base_url, "http://10.0.0.10:8080/v1",
+      "a keyless row updates freely — the hold protects a key, and there is none here");
+    assert.equal((await providerConflicts(b.db, "prov-lan")).length, 0, "and it records no conflict");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: a models-only change to a keyed row applies directly, as before", async () => {
+  const { a, b, feedAtoB } = await keyedProviderOnBoth("hold-models");
+  try {
+    setProviderSyncManager(a.mgr);
+    const panel = (await listProvidersAll(a.db)).find((p) => p.id === HOLD_ID);
+    await upsertProvider(a.db, { ...panel, models: MODELS_2 });
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    const live = await b.row(HOLD_ID);
+    assert.deepEqual(JSON.parse(live.models), MODELS_2, "the models edit still propagates");
+    assert.equal(live.base_url, URL_OLD);
+    assert.equal(live.api_key, KEY_B);
+    assert.equal((await providerConflicts(b.db)).length, 0, "no endpoint moved, so nothing is held");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: a trailing-slash-only difference is not an endpoint change", async () => {
+  const { a, b, feedAtoB } = await keyedProviderOnBoth("hold-slash");
+  try {
+    await repointOnA(a, `${URL_OLD}/`);
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    const live = await b.row(HOLD_ID);
+    assert.equal(live.base_url, `${URL_OLD}/`, "the row applies as any non-endpoint edit would");
+    assert.equal(live.api_key, KEY_B);
+    assert.equal((await providerConflicts(b.db)).length, 0,
+      "`…/v1` and `…/v1/` are the same endpoint — nothing to hold");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("endpoint hold: an INSERT that collides with a keyed local row and carries another URL is held", async () => {
+  const b = freshInstance("hold-insert", B_ID);
+  try {
+    await b.db.execute({
+      sql: "INSERT INTO providers (id, base_url, models, provider_type, api_key, lamport_ts, instance_id) VALUES (?, ?, ?, ?, ?, 100, ?)",
+      args: [HOLD_ID, URL_OLD, JSON.stringify(MODELS_1), "openai", KEY_B, B_ID],
+    });
+    // A peer that never saw this row sends its own copy as an insert (the
+    // new-pairing backfill does exactly this) — at a URL of its choosing.
+    const entry = signedEntry({
+      op: "insert",
+      lamport_ts: 900,
+      instance_id: A_ID,
+      row: {
+        id: HOLD_ID, base_url: URL_NEW, models: JSON.stringify(MODELS_1),
+        provider_type: "openai", instance_id: A_ID,
+      },
+    });
+    await b.mgr._processNewEntries(A_ID, stubFeed([entry]));
+
+    const live = await b.row(HOLD_ID);
+    assert.equal(live.base_url, URL_OLD, "the colliding insert is held, not applied");
+    assert.equal(live.api_key, KEY_B);
+    const conflicts = await providerConflicts(b.db);
+    assert.equal(conflicts.length, 1, "the held insert is recorded");
+    assert.equal(conflicts[0].op, "update", "recorded as a proposed update so it CAN be accepted");
+    assert.equal(JSON.parse(conflicts[0].losing_data).base_url, URL_NEW);
+    assert.equal((await holdNoticeRows(b.db)).length, 1, "one bell item, by name");
+  } finally {
+    await b.close();
+  }
+});
+
+test("sync-conflicts page: a held providers conflict shows the address change, escaped", async () => {
+  const inst = freshInstance("hold-ui", B_ID);
+  try {
+    const winning = JSON.stringify({ id: HOLD_ID, base_url: URL_OLD, api_key: KEY_B });
+    // A value that is not a URL at all: rendered as written, so the line MUST escape it.
+    const hostile = 'evil<scr';
+    const losing = JSON.stringify({ id: HOLD_ID, base_url: hostile });
+    await inst.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, resolved, op)
+            VALUES ('providers', ?, ?, ?, 2, 3, ?, ?, 0, 'update')`,
+      args: [HOLD_ID, B_ID, A_ID, winning, losing],
+    });
+    // A providers conflict that did NOT move the address, and a memories conflict:
+    // neither may grow an address-change line.
+    await inst.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, resolved, op)
+            VALUES ('providers', 'prov-models-only', ?, ?, 2, 3, ?, ?, 0, 'update')`,
+      args: [B_ID, A_ID,
+        JSON.stringify({ id: "prov-models-only", base_url: URL_OLD, models: "[]" }),
+        JSON.stringify({ id: "prov-models-only", base_url: URL_OLD, models: "[1]" })],
+    });
+    await inst.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, resolved, op)
+            VALUES ('memories', '7', ?, ?, 2, 3, ?, ?, 0, 'update')`,
+      args: [B_ID, A_ID,
+        JSON.stringify({ id: 7, content: "a" }), JSON.stringify({ id: 7, content: "b" })],
+    });
+    // A PATH-only move counts as an endpoint change (spec) and must still read
+    // honestly: both origins are the same host, so the line shows the addresses.
+    await inst.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, resolved, op)
+            VALUES ('providers', 'prov-path-only', ?, ?, 2, 3, ?, ?, 0, 'update')`,
+      args: [B_ID, A_ID,
+        JSON.stringify({ id: "prov-path-only", base_url: "https://api.openai.com/v1" }),
+        JSON.stringify({ id: "prov-path-only", base_url: "https://api.openai.com/v2" })],
+    });
+
+    const { default: section } = await import("../servers/gateway/dashboard/settings/sections/sync-conflicts.js");
+    const html = await section.render({ req: { csrfToken: "t", query: {} }, db: inst.db, lang: "en" });
+
+    assert.equal((html.match(/Address change:/g) || []).length, 2,
+      "exactly the two moved-address rows carry the line");
+    assert.match(html, /Address change: https:\/\/api\.openai\.com → evil&lt;scr\./,
+      "old origin → new origin, with the new value escaped");
+    assert.ok(!html.includes("evil<scr"), "nothing unescaped reaches the page");
+    assert.match(html, /Address change: https:\/\/api\.openai\.com\/v1 → https:\/\/api\.openai\.com\/v2\./,
+      "a path-only move shows the addresses, never `https://x → https://x`");
+    assert.match(html, /Accepting sends this device's API key to the new address\./,
+      "and it says plainly what accepting does with the key");
+  } finally {
+    await inst.close();
+  }
+});
 
 /* ═══════════════════════════ 5. "needs a key on this device" ═════════════════ */
 

@@ -32,6 +32,7 @@ import { SYNC_PB_KEY_PREFIX, SYNC_PB_CLEARED_PREFIX } from "../shared/self-dial-
 import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incomingLosesLww } from "../shared/sync-stamp.js";
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
 import { noticeProviderKeyNeeded } from "../shared/provider-key-need.js";
+import { providerEndpointChanged, noticeProviderEndpointHeld } from "../shared/provider-endpoint.js";
 
 /** How long the re-pair fence waits to learn a peer feed's remote length (PT-1). */
 const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
@@ -3088,6 +3089,17 @@ export class InstanceSyncManager {
       if (conflict === "skip") return; // Local version wins
     }
 
+    // Operator ruling (2026-11-06): an inbound change that MOVES a provider's
+    // endpoint, on a row whose key lives on THIS device, is held as a proposed
+    // change until the operator accepts it here. Placed AFTER the LWW conflict
+    // gate on purpose: an entry the local version already wins is an ordinary
+    // conflict (or noise), not a held proposal. An `insert` whose id collides
+    // with an existing local row reaches here too (the gate above is
+    // update/delete only) — that is the other way a peer moves an address.
+    if (table === "providers" && (op === "insert" || op === "update")) {
+      if (await this._holdProviderEndpointChange(row, lamport_ts, instance_id)) return;
+    }
+
     // A peer edit to a note's text can break this instance's quote check: read the local note
     // first so the change (not a re-delivery) is what invalidates it.
     const notePrior = table === "research_notes" && op === "update" && row.id !== undefined
@@ -3116,6 +3128,110 @@ export class InstanceSyncManager {
       }
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
+    }
+  }
+
+  /**
+   * Hold an inbound provider change that moves the endpoint while this device
+   * holds the key (operator ruling 2026-11-06, security audit N1b-7 item 2).
+   *
+   * Without this, a compromised peer repoints "openai" at its own server and
+   * this device sends its key there. With it the change becomes a PROPOSED
+   * change: recorded in sync_conflicts (the local row as winning_data, the
+   * incoming row as losing_data) exactly as _checkConflict records one, so the
+   * existing Settings review + "restore the other version" flow applies it —
+   * restoreConflict strips local-only columns, so the key stays here and only
+   * now follows the address the operator explicitly accepted.
+   *
+   * Held too: everything else in that entry (models, description). Splitting one
+   * peer update into "hold the address, apply the rest" would leave this device
+   * reporting a model list for an endpoint it does not use.
+   *
+   * Dedupe (two separate questions):
+   *   - the SAME entry re-delivered (same peer, same losing lamport) raises
+   *     nothing, whether its conflict is open or was dismissed — a dismissal is
+   *     the operator's answer, and re-raising it on every replay of the same
+   *     feed entry would nag forever;
+   *   - a NEWER held change from that peer REPLACES the open row's losing_data
+   *     and lamports instead of piling up one conflict per edit (the lookup is
+   *     this table's own "unresolved for this row" query — _insertConflictRow
+   *     only dedupes an identical (win, lose) pair and excludes resolved rows).
+   *
+   * Keyless rows (a llama.cpp on the LAN, a row nothing here has a key for),
+   * rows this device does not have yet, and address-preserving edits all update
+   * exactly as before.
+   *
+   * Fails CLOSED: if the hold cannot be recorded, the entry is not applied —
+   * the key must never follow an address this device could not vet.
+   *
+   * @param {object} row — the inbound wire row (api_key already dropped)
+   * @param {number} lamportTs
+   * @param {string} instanceId — the entry's origin
+   * @returns {Promise<boolean>} true when the entry must NOT be applied
+   */
+  async _holdProviderEndpointChange(row, lamportTs, instanceId) {
+    const rowId = row?.id;
+    if (typeof rowId !== "string" || rowId === "") return false;
+    try {
+      const { rows: localRows } = await this.db.execute({
+        sql: "SELECT * FROM providers WHERE id = ?",
+        args: [rowId],
+      });
+      const localRow = localRows[0];
+      if (!localRow) return false; // no local row: nothing here holds a key for it
+      const localKey = typeof localRow.api_key === "string" ? localRow.api_key.trim() : "";
+      if (localKey === "") return false; // keyless here (a LAN llama.cpp): update freely
+      if (!providerEndpointChanged(localRow.base_url, row.base_url)) return false;
+
+      const { rows: prior } = await this.db.execute({
+        sql: `SELECT id, losing_lamport_ts, resolved FROM sync_conflicts
+               WHERE table_name = 'providers' AND row_id = ? AND losing_instance_id = ?
+               ORDER BY id DESC`,
+        args: [rowId, String(instanceId)],
+      });
+      if (prior.some((c) => Number(c.losing_lamport_ts) === Number(lamportTs))) {
+        return true; // this exact entry was already raised — silence, not a new row
+      }
+
+      // The conflict row is shown on the sync-conflicts page and returned by
+      // crow_list_sync_conflicts, so the local key must never be stored in it.
+      const winningData = JSON.stringify(stripLocalOnlyColumns("providers", localRow));
+      const losingData = JSON.stringify(row);
+      const winningTs = Number(localRow.lamport_ts) || 0;
+      const openRow = prior.find((c) => Number(c.resolved) === 0);
+      if (openRow) {
+        await this.db.execute({
+          sql: `UPDATE sync_conflicts
+                   SET winning_lamport_ts = ?, losing_lamport_ts = ?,
+                       winning_data = ?, losing_data = ?
+                 WHERE id = ?`,
+          args: [winningTs, lamportTs, winningData, losingData, openRow.id],
+        });
+        return true;
+      }
+
+      // op 'update' even for an inbound INSERT collision: the review page and
+      // restoreConflict() treat op='insert' as unrestorable (D7), and accepting
+      // a held address IS the point — the rows are keyed by the same portable
+      // id, so applying the held version is an UPDATE either way.
+      const inserted = await this._insertConflictRow(
+        "providers", rowId,
+        localRow.instance_id || this.localInstanceId, instanceId,
+        winningTs, lamportTs,
+        winningData, losingData,
+        "update",
+      );
+      if (inserted) {
+        try {
+          await noticeProviderEndpointHeld(this.db, localRow);
+        } catch (err) {
+          console.warn(`[instance-sync] provider endpoint notice failed for ${rowId.slice(0, 64)}:`, err.message);
+        }
+      }
+      return true;
+    } catch (err) {
+      console.warn(`[instance-sync] could not hold an inbound provider endpoint change for ${String(rowId).slice(0, 64)} — entry NOT applied:`, err.message);
+      return true;
     }
   }
 
