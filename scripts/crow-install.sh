@@ -840,6 +840,95 @@ install_bwrap_apparmor() {
   return 0
 }
 
+# ─── ufw-docker, pinned to a commit and a checksum (security audit K7) ──
+# Docker writes its own iptables rules for a published container port, so that
+# port is reachable from outside even while ufw says deny. ufw-docker closes the
+# mismatch — and it is a shell script fetched from GitHub that is then RUN AS
+# ROOT, so the download is pinned to one commit and verified against a sha256:
+# a moving branch would let upstream (or a hijacked network) decide what runs as
+# root on the operator's machine.
+#
+# Bump BOTH values together — a new commit is a new file, so a stale sha256
+# refuses it instead of installing bytes nobody has reviewed:
+#   1. latest commit: https://github.com/chaifeng/ufw-docker/commits/master
+#   2. set UFW_DOCKER_COMMIT to that sha (UFW_DOCKER_URL is built from it)
+#   3. set UFW_DOCKER_SHA256 to `curl -fsSL "$UFW_DOCKER_URL" | sha256sum`
+#   4. change both lines in the same edit.
+UFW_DOCKER_COMMIT="020a8699f95592561f254d8d4ad1bb40d401dfc7"
+UFW_DOCKER_URL="https://raw.githubusercontent.com/chaifeng/ufw-docker/${UFW_DOCKER_COMMIT}/ufw-docker"
+# The downloader and the destination are test seams of the same kind as
+# CROW_SUDO: the suite points them at a scratch dir and shims, so no test can
+# download anything or write into /usr/local/bin.
+CROW_CURL="${CROW_CURL:-curl}"
+UFW_DOCKER_DEST="${UFW_DOCKER_DEST:-/usr/local/bin/ufw-docker}"
+# Overridable only so the suite can pin its own fixture; production keeps the
+# documented value above, which is the default here.
+UFW_DOCKER_SHA256="${UFW_DOCKER_SHA256:-643e56b080567c567b4aa28650196849b2a2da5dd0473fd3e5216b0886035ab0}"
+
+file_sha256() { # <file> — lowercase hex sha256; empty when it cannot be read
+  local out=""
+  out="$(sha256sum "$1" 2>/dev/null || true)"
+  printf '%s' "${out%% *}"
+}
+
+# install_ufw_docker — install the pinned ufw-docker and wire it into ufw.
+# The file is fetched by the INVOKING USER into a temp file, so nothing off the
+# network is ever written into /usr/local/bin as root and root never downloads.
+# Fails CLOSED: without ufw-docker a container's published port bypasses the
+# firewall, so a download that cannot be verified ends the install (exit 1)
+# instead of leaving a silently open box.
+install_ufw_docker() {
+  local tmp="" actual=""
+
+  # An existing binary is never trusted blindly: it may be an older (or newer)
+  # copy from the branch that used to move, and it runs as root.
+  if [ -f "$UFW_DOCKER_DEST" ]; then
+    actual="$(file_sha256 "$UFW_DOCKER_DEST")"
+    if [ "$actual" = "$UFW_DOCKER_SHA256" ]; then
+      log "ufw-docker already installed ($UFW_DOCKER_DEST matches the pinned checksum)"
+      return 0
+    fi
+    warn "$UFW_DOCKER_DEST is not the pinned ufw-docker (sha256 ${actual:-unreadable}, expected $UFW_DOCKER_SHA256) — replacing it with the pinned copy"
+  fi
+
+  if ! tmp="$(mktemp)"; then
+    error "Could not create a temp file to download ufw-docker, so it was not installed; Docker-published ports would bypass the firewall. Check your network, then run the installer again"
+    exit 1
+  fi
+  if ! "$CROW_CURL" -fsSL "$UFW_DOCKER_URL" -o "$tmp"; then
+    rm -f "$tmp"
+    error "Could not download ufw-docker from the pinned commit $UFW_DOCKER_COMMIT, so it was not installed; Docker-published ports would bypass the firewall. Check your network, then run the installer again"
+    exit 1
+  fi
+  actual="$(file_sha256 "$tmp")"
+  if [ "$actual" != "$UFW_DOCKER_SHA256" ]; then
+    rm -f "$tmp"
+    error "ufw-docker download did not match the pinned checksum, so it was not installed; Docker-published ports would bypass the firewall. Check your network, then run the installer again"
+    error "(got sha256 ${actual:-nothing}, the pinned commit $UFW_DOCKER_COMMIT is $UFW_DOCKER_SHA256)"
+    exit 1
+  fi
+  sudo_cmd install -m 755 "$tmp" "$UFW_DOCKER_DEST"
+  rm -f "$tmp"
+  sudo_cmd "$UFW_DOCKER_DEST" install
+  log "ufw-docker installed (Docker/UFW conflict resolved)"
+}
+
+# ─── The `crow` command on PATH (install re-run N4-1) ─────
+# ONE exact line, compared whole. The old guard grepped for "crow/scripts",
+# which the line it writes never contains ($CROW_APP is ~/.crow/app), so every
+# re-run appended another copy of the same export.
+CROW_PATH_LINE="export PATH=\"\$PATH:$CROW_APP/scripts\""
+
+# add_crow_to_path — add that line once; anything else in the file is left
+# exactly as the operator has it.
+add_crow_to_path() {
+  if [ -f "$HOME/.bashrc" ] && grep -qxF -- "$CROW_PATH_LINE" "$HOME/.bashrc"; then
+    return 0
+  fi
+  printf '%s\n' "$CROW_PATH_LINE" >> "$HOME/.bashrc"
+  log "Added 'crow' command to PATH (restart shell or run: source ~/.bashrc)"
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
@@ -1123,15 +1212,11 @@ fi
 sudo ufw --force enable
 log "Firewall enabled"
 
-# Install ufw-docker to fix Docker/UFW conflict
-if [ ! -f /usr/local/bin/ufw-docker ]; then
-  sudo curl -fsSL https://github.com/chaifeng/ufw-docker/raw/master/ufw-docker -o /usr/local/bin/ufw-docker
-  sudo chmod +x /usr/local/bin/ufw-docker
-  sudo ufw-docker install
-  log "ufw-docker installed (Docker/UFW conflict resolved)"
-else
-  log "ufw-docker already installed"
-fi
+# Install ufw-docker to fix Docker/UFW conflict. Pinned to a commit and verified
+# against a sha256 in a temp file BEFORE it is installed, because the file runs as
+# root — and without it a published container port bypasses the firewall, so a
+# download that cannot be verified ends the install (install_ufw_docker, above).
+install_ufw_docker
 
 # Fail2ban
 if command -v fail2ban-client >/dev/null 2>&1; then
@@ -1434,8 +1519,5 @@ echo "  Everything else happens there — the setup wizard walks you through"
 echo "  passwords, your AI model, and connecting devices."
 echo ""
 
-# Add crow CLI to PATH if not already there
-if ! grep -q "crow/scripts" "$HOME/.bashrc" 2>/dev/null; then
-  echo "export PATH=\"\$PATH:$CROW_APP/scripts\"" >> "$HOME/.bashrc"
-  log "Added 'crow' command to PATH (restart shell or run: source ~/.bashrc)"
-fi
+# Add crow CLI to PATH if not already there (one exact line, added once)
+add_crow_to_path
