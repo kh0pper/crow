@@ -28,7 +28,7 @@ CREATE TABLE crow_instances (
 );
 ```
 
-Las instancias también se registran en `~/.crow/instances.json` para que la CLI y los scripts de arranque puedan usarlas antes de que la base de datos esté disponible.
+Las instancias también se registran en `~/.crow/instances.json` para que la CLI y los scripts de arranque puedan usarlas antes de que la base de datos esté disponible. El archivo se escribe de forma atómica y se crea con permisos `0600` (contiene el directorio y la URL del gateway de cada instancia de la misma máquina); al arrancar, el gateway ajusta a `0600` un archivo existente que tenga algún bit de grupo u otros, y nunca sigue un enlace simbólico para hacerlo.
 
 ### Flujo de registro
 
