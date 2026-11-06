@@ -97,6 +97,17 @@
       "additionalProperties": true,
       "properties": { "port": { "type": "integer", "minimum": 1, "maximum": 65535 } }
     },
+    "firstAdmin": {
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["crow", "finish-setup", "default-login", "none"] },
+        "path": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^/" },
+        "user": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "note": { "type": "string", "minLength": 1, "maxLength": 300 }
+      }
+    },
     "requires": {
       "type": "object",
       "additionalProperties": true,

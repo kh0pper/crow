@@ -1,7 +1,7 @@
 {
   "id": "audiobookshelf",
   "name": "Audiobookshelf",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
   "type": "bundle",
   "author": "Crow",
@@ -22,5 +22,6 @@
   ],
   "ports": [13378],
   "webUI": { "port": 13378, "path": "/", "label": "Audiobookshelf" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY)."
 }

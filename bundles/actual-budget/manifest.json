@@ -1,7 +1,7 @@
 {
   "id": "actual-budget",
   "name": "Actual Budget",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
   "type": "bundle",
   "author": "Crow",
@@ -23,5 +23,6 @@
   ],
   "ports": [5006],
   "webUI": { "port": 5006, "path": "/", "label": "Actual Budget" },
+  "firstAdmin": { "mode": "crow" },
   "notes": "Privacy-first budgeting. Data stays local. Crow sets a generated password on the Actual server it installs (Settings → Passwords). To use an Actual server you already run, set ACTUAL_URL and ACTUAL_PASSWORD instead."
 }

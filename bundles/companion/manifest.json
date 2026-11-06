@@ -1,7 +1,7 @@
 {
   "id": "companion",
   "name": "AI Companion",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "draft": true,
   "privileged": true,
   "install_consent_messages": {
@@ -25,6 +25,7 @@
     "label": "AI Companion",
     "proxyMode": "direct"
   },
+  "firstAdmin": { "mode": "none" },
   "skills": ["skills/companion.md"],
   "companion": {
     "pet_mode": true

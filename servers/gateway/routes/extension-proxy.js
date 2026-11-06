@@ -85,6 +85,28 @@ export function readInstalled(home = CROW_HOME) {
   }
 }
 
+/**
+ * The ids whose /proxy/<id> route is LIVE in this process.
+ *
+ * The route table is built once, at factory-construction time (see
+ * boot/late-mounts.js), so a bundle installed into a running gateway has a
+ * manifest, an install record and NO route until the process comes back. This
+ * is how the Extensions page knows to say "restart Crow first" instead of
+ * handing the operator a dead link. Direct-mode UIs never get a route (they are
+ * their own origin) and are therefore not listed.
+ */
+let liveProxyIds = new Set();
+
+/** @returns {Set<string>} ids with a mounted /proxy route (a copy; never the live set). */
+export function getLiveProxyIds() {
+  return new Set(liveProxyIds);
+}
+
+/** Test seam: pretend this process mounted these routes (null clears). */
+export function _setLiveProxyIdsForTest(ids) {
+  liveProxyIds = new Set(Array.isArray(ids) ? ids : ids ? [...ids] : []);
+}
+
 export function getProxiedExtensions(home = CROW_HOME) {
   try {
     const installed = readInstalled(home);
@@ -258,6 +280,9 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
   const router = Router();
   const extensions = getProxiedExtensions();
   const proxyInstances = [];
+  // What this process will actually serve (exposed for the Extensions page's
+  // "restart Crow first" wording — see getLiveProxyIds).
+  liveProxyIds = new Set(extensions.filter((ext) => ext.proxyMode !== "direct").map((ext) => ext.id));
 
   for (const ext of extensions) {
     // Skip direct-mode extensions (SPA apps that can't work behind a subpath proxy)

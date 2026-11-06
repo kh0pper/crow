@@ -1,7 +1,7 @@
 {
   "id": "browser",
   "name": "Browser Automation",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
   "type": "bundle",
   "author": "Crow",
@@ -78,5 +78,6 @@
   ],
   "ports": [6080],
   "webUI": { "port": 6080, "portEnv": "CROW_BROWSER_VNC_PORT", "path": "/vnc.html", "label": "VNC Viewer", "wsHostTokenEnv": "CROW_BROWSER_VNC_TOKEN" },
+  "firstAdmin": { "mode": "none" },
   "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. Since 1.5.0 Chromium runs on a pipe (--remote-debugging-pipe) and opens no port: a small relay inside the container serves 127.0.0.1:9222 to clients that send CROW_BROWSER_CDP_TOKEN as a bearer token, and refuses everything else. noVNC binds 127.0.0.1 only and RFB is a unix socket inside the container; the viewer has no password prompt and is reached through the signed-in Crow dashboard (/proxy/browser/), which adds the per-instance noVNC token server-side. The CDP gate keeps out other uids, other containers and web pages; it does not keep out a program that can read this bundle's .env (where the token lives)."
 }

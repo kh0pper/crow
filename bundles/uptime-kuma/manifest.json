@@ -1,7 +1,7 @@
 {
   "id": "uptime-kuma",
   "name": "Uptime Kuma",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Service monitoring and uptime tracking with response-time graphs and status pages",
   "type": "bundle",
   "author": "Crow",
@@ -21,5 +21,6 @@
   ],
   "ports": [3007],
   "webUI": { "port": 3007, "path": "/", "label": "Uptime Kuma" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. On first launch, open the web UI to create the admin account. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions."
 }

@@ -1,7 +1,7 @@
 {
   "id": "frigate",
   "name": "Frigate NVR",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
   "type": "bundle",
   "author": "Crow",
@@ -27,5 +27,6 @@
   ],
   "ports": [8971, 8554, 8555],
   "webUI": { "port": 8971, "path": "/", "label": "Frigate" },
+  "firstAdmin": { "mode": "finish-setup", "note": "The first admin password is printed in the app's logs." },
   "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed."
 }

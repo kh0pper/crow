@@ -1,7 +1,7 @@
 {
   "id": "paperless",
   "name": "Paperless-ngx",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Document management with OCR — scan, search, tag, and organize paper documents digitally",
   "type": "bundle",
   "author": "Crow",
@@ -24,5 +24,6 @@
   ],
   "ports": [8000],
   "webUI": { "port": 8000, "path": "/", "label": "Paperless-ngx" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (multi-container: app + postgres + redis) or connect to existing (set PAPERLESS_URL + PAPERLESS_API_TOKEN)."
 }

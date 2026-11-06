@@ -1,7 +1,7 @@
 {
   "id": "jellyfin",
   "name": "Jellyfin",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
   "type": "bundle",
   "author": "Crow",
@@ -24,5 +24,6 @@
   ],
   "ports": [8096],
   "webUI": { "port": 8096, "path": "/", "label": "Jellyfin" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY)."
 }

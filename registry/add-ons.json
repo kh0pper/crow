@@ -4,7 +4,7 @@
     {
       "id": "actual-budget",
       "name": "Actual Budget",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
       "type": "bundle",
       "author": "Crow",
@@ -81,13 +81,16 @@
         "path": "/",
         "label": "Actual Budget"
       },
+      "firstAdmin": {
+        "mode": "crow"
+      },
       "notes": "Privacy-first budgeting. Data stays local. Crow sets a generated password on the Actual server it installs (Settings → Passwords). To use an Actual server you already run, set ACTUAL_URL and ACTUAL_PASSWORD instead.",
       "official": true
     },
     {
       "id": "adguard-home",
       "name": "AdGuard Home",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Network-wide ads and tracker blocking DNS server. Filters queries with user-configurable blocklists and serves the admin UI in the browser.",
       "type": "bundle",
       "author": "Crow",
@@ -155,6 +158,9 @@
         "port": 3020,
         "path": "/",
         "label": "AdGuard Home"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "First-boot: open http://localhost:3020 and complete the setup wizard. Bind admin to port 3000 (container), DNS to port 53, and set admin credentials — then copy them into .env. DNS port exposed on 127.0.0.1:5335 to avoid conflicting with systemd-resolved on host. To serve DNS to your LAN, edit the compose to bind 0.0.0.0:53 (significant — plan the host firewall and upstream DNS redirect first).",
       "official": true
@@ -241,7 +247,7 @@
     {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
       "type": "bundle",
       "author": "Crow",
@@ -311,13 +317,16 @@
         "path": "/",
         "label": "Audiobookshelf"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY).",
       "official": true
     },
     {
       "id": "bookstack",
       "name": "BookStack",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
       "type": "bundle",
       "author": "Crow",
@@ -389,6 +398,9 @@
         "port": 6875,
         "path": "/",
         "label": "BookStack"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Self-host via Docker (includes MariaDB) or connect to existing (set BOOKSTACK_URL + API tokens). Create tokens in BookStack under Settings > API Tokens.",
       "official": true
@@ -479,7 +491,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -596,6 +608,9 @@
         "label": "VNC Viewer",
         "wsHostTokenEnv": "CROW_BROWSER_VNC_TOKEN"
       },
+      "firstAdmin": {
+        "mode": "none"
+      },
       "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. Since 1.5.0 Chromium runs on a pipe (--remote-debugging-pipe) and opens no port: a small relay inside the container serves 127.0.0.1:9222 to clients that send CROW_BROWSER_CDP_TOKEN as a bearer token, and refuses everything else. noVNC binds 127.0.0.1 only and RFB is a unix socket inside the container; the viewer has no password prompt and is reached through the signed-in Crow dashboard (/proxy/browser/), which adds the per-instance noVNC token server-side. The CDP gate keeps out other uids, other containers and web pages; it does not keep out a program that can read this bundle's .env (where the token lives).",
       "official": true
     },
@@ -681,7 +696,7 @@
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
       "type": "bundle",
       "author": "Crow",
@@ -752,13 +767,16 @@
         "path": "/",
         "label": "Calibre"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to existing Calibre content server (set CALIBRE_URL).",
       "official": true
     },
     {
       "id": "calibre-web",
       "name": "Calibre-Web",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Web-based ebook reader and library manager for Calibre",
       "type": "bundle",
       "author": "Crow",
@@ -830,6 +848,9 @@
         "port": 8083,
         "path": "/",
         "label": "Calibre-Web"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys).",
       "official": true
@@ -993,7 +1014,7 @@
     {
       "id": "changedetection",
       "name": "Change Detection",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Watch any webpage for changes — get notified when prices drop, stock appears, or content updates",
       "type": "bundle",
       "author": "Crow",
@@ -1052,6 +1073,9 @@
         "port": 5010,
         "path": "/",
         "label": "Change Detection"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management.",
       "official": true
@@ -1337,7 +1361,7 @@
     {
       "id": "dozzle",
       "name": "Dozzle",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Real-time Docker container log viewer in the browser. Tail, search, and filter logs across every container on this host.",
       "type": "bundle",
       "author": "Crow",
@@ -1392,6 +1416,9 @@
         "path": "/",
         "label": "Dozzle"
       },
+      "firstAdmin": {
+        "mode": "none"
+      },
       "notes": "Log viewer is primarily a UI; MCP exposes a lightweight status + link tool. For automated log analysis, use Netdata's log collection or shell into the target container directly. Docker socket mounted read-only.",
       "official": true
     },
@@ -1433,7 +1460,7 @@
     {
       "id": "forgejo",
       "name": "Forgejo",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Community-driven soft-fork of Gitea — self-hosted git with an independent governance model and ActivityPub federation roadmap",
       "type": "bundle",
       "author": "Crow",
@@ -1495,13 +1522,16 @@
         "path": "/",
         "label": "Forgejo"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). First-run: open http://localhost:3050 to complete the setup wizard, then generate a personal access token under Settings > Applications. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide.",
       "official": true
     },
     {
       "id": "frigate",
       "name": "Frigate NVR",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
       "type": "bundle",
       "author": "Crow",
@@ -1607,6 +1637,10 @@
         "port": 8971,
         "path": "/",
         "label": "Frigate"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup",
+        "note": "The first admin password is printed in the app's logs."
       },
       "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed.",
       "official": true
@@ -1997,7 +2031,7 @@
     {
       "id": "gitea",
       "name": "Gitea",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted git service — repos, issues, pull requests, and built-in SSH server for git over SSH",
       "type": "bundle",
       "author": "Crow",
@@ -2057,6 +2091,9 @@
         "port": 3040,
         "path": "/",
         "label": "Gitea"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "First-run: open http://localhost:3040 to complete the setup wizard (database is preconfigured to SQLite). Then create the first admin user, log in, and generate a personal access token under Settings > Applications. Git over SSH uses port 2223: clone with ssh://git@host:2223/user/repo.git (the scp-style git@host:user/repo silently hits port 22 and will not reach this bundle).",
       "official": true
@@ -2320,7 +2357,7 @@
     {
       "id": "homepage",
       "name": "Homepage",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Static startpage / dashboard — YAML-configured launcher for self-hosted services",
       "type": "bundle",
       "author": "Crow",
@@ -2373,13 +2410,16 @@
         "path": "/",
         "label": "Homepage"
       },
+      "firstAdmin": {
+        "mode": "none"
+      },
       "notes": "Panel-only bundle (no MCP server — Homepage has no public API). Edit YAML files in HOMEPAGE_CONFIG_DIR to configure services, widgets, and bookmarks. Seed config is written on first run if the directory is empty.",
       "official": true
     },
     {
       "id": "immich",
       "name": "Immich Photos",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Search photos, browse albums, and manage your Immich photo library",
       "type": "bundle",
       "author": "Crow",
@@ -2431,6 +2471,9 @@
         "port": 2283,
         "path": "/",
         "label": "Immich"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "notes": "Connects to an existing Immich instance. Does not run Immich itself — install Immich separately. Limited ARM64 support.",
       "official": true
@@ -2489,7 +2532,7 @@
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "author": "Crow",
@@ -2568,13 +2611,16 @@
         "path": "/",
         "label": "Jellyfin"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY).",
       "official": true
     },
     {
       "id": "kavita",
       "name": "Kavita",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
       "type": "bundle",
       "author": "Crow",
@@ -2645,6 +2691,9 @@
         "port": 5000,
         "path": "/",
         "label": "Kavita"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed.",
       "official": true
@@ -2778,7 +2827,7 @@
     {
       "id": "kodi",
       "name": "Kodi",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Remote control for Kodi — browse library, control playback, queue media via JSON-RPC",
       "type": "mcp-server",
       "author": "Crow",
@@ -2837,6 +2886,9 @@
         "label": "Kodi Web",
         "proxyMode": "direct"
       },
+      "firstAdmin": {
+        "mode": "none"
+      },
       "notes": "Connects to an existing Kodi instance. Enable 'Allow remote control via HTTP' in Kodi Settings > Services > Web server.",
       "official": true
     },
@@ -2869,7 +2921,7 @@
     {
       "id": "kolibri",
       "name": "Kolibri",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Offline-first learning platform from Learning Equality — self-hosted STEM and literacy content for ages 5-18. Classroom-capable, LAN-sync built in, thousands of free educational channels curated by the global learning community.",
       "type": "bundle",
       "author": "Crow",
@@ -2930,6 +2982,9 @@
         "port": 8041,
         "path": "/",
         "label": "Kolibri"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "sibling_of": [
         "maker-lab"
@@ -3051,7 +3106,7 @@
     {
       "id": "linkding",
       "name": "Linkding",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
       "type": "bundle",
       "author": "Crow",
@@ -3109,6 +3164,9 @@
         "port": 9090,
         "path": "/",
         "label": "Linkding"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Self-host via Docker or connect to an existing Linkding instance. Generate an API token in Linkding Settings > Integrations.",
       "official": true
@@ -3320,7 +3378,7 @@
     {
       "id": "localai",
       "name": "LocalAI",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Run local AI models with an OpenAI-compatible API. Supports chat, embeddings, and text-to-speech.",
       "type": "bundle",
       "author": "Crow",
@@ -3369,6 +3427,9 @@
       "webUI": {
         "port": 8080,
         "path": "/"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "no_auto_provider": "LocalAI's OpenAI-compatible endpoint (http://{host}:8080/v1) is live once the container starts, but -- same shape as ollama -- its model catalog is populated post-install: either on first API request (auto-download) or via `docker compose exec localai local-ai models install <name>`, not at install-time, so there is no served model id to write into a static providers[] entry. After a model is installed, add the provider manually via Settings -> LLM -> Providers, base URL http://<host>:8080/v1, with the model id you installed/downloaded (see `local-ai models list` inside the container, or the model gallery name used for the first-use download).",
       "notes": "LocalAI is OpenAI-compatible. Configure AI_PROVIDER=openai and AI_BASE_URL=http://localhost:8080/v1 in .env to use with Crow's AI Chat.",
@@ -4151,7 +4212,7 @@
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -4238,13 +4299,16 @@
         "path": "/",
         "label": "Miniflux"
       },
+      "firstAdmin": {
+        "mode": "crow"
+      },
       "notes": "Self-host via Docker (Crow generates the admin password and saves it in Settings → Passwords) or connect to an existing server (set MINIFLUX_URL + MINIFLUX_API_KEY). Either way, create an API key in Miniflux (Settings → API Keys) and paste it into MINIFLUX_API_KEY.",
       "official": true
     },
     {
       "id": "minio",
       "name": "File Storage (MinIO)",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Deprecated: MinIO is no longer maintained upstream and its image can no longer be downloaded. Existing installs keep running; new installs use File Storage (Garage).",
       "type": "bundle",
       "author": "Crow",
@@ -4325,13 +4389,16 @@
         "label": "Console",
         "proxyMode": "direct"
       },
+      "firstAdmin": {
+        "mode": "crow"
+      },
       "notes": "After installation, Crow's storage tools (upload, list, delete files) will be available automatically. The MinIO console is accessible at http://localhost:9001.",
       "official": true
     },
     {
       "id": "motioneye",
       "name": "motionEye",
-      "version": "0.44.0",
+      "version": "0.44.1",
       "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
       "type": "bundle",
       "author": "Crow",
@@ -4400,6 +4467,11 @@
         "path": "/",
         "label": "motionEye"
       },
+      "firstAdmin": {
+        "mode": "default-login",
+        "user": "admin",
+        "note": "It starts with an empty password; set one now."
+      },
       "notes": "Default admin login on first start: username 'admin', password empty. Rotate immediately via Settings → General. No MCP tools — iframe-only bundle. Use the Frigate bundle if you need MCP-callable camera/event tools or AI object detection.",
       "official": true
     },
@@ -4424,7 +4496,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -4498,12 +4570,15 @@
         "path": "/",
         "label": "Navidrome"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "official": true
     },
     {
       "id": "netdata",
       "name": "Netdata",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Real-time infrastructure and container monitoring — CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
       "type": "bundle",
       "author": "Crow",
@@ -4558,6 +4633,9 @@
         "port": 19999,
         "path": "/",
         "label": "Netdata"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "notes": "Runs without SYS_PTRACE / pid:host for MVP — per-process stats are unavailable but system + container metrics work. Docker socket mounted read-only. /etc not mounted (hostname/OS shown as 'unknown' in netdata UI; acceptable trade-off).",
       "official": true
@@ -4744,7 +4822,7 @@
     {
       "id": "ntfy",
       "name": "Push Notifications (ntfy)",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Self-hosted push notifications via ntfy. Instant delivery to any device with the ntfy app.",
       "type": "bundle",
       "author": "Crow",
@@ -4781,6 +4859,10 @@
         "path": "/",
         "label": "ntfy",
         "proxyMode": "direct"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup",
+        "note": "Crow creates its own login for phone alerts right after install; set your own login on the web page now."
       },
       "notes": "Crow sets itself up automatically: after install it creates its own login on this server, picks a private topic, and hands a read-only key to the Crow Android app (Settings › Notifications shows the status, the phone address, and a test button). Each Crow instance on this computer gets its own topic. The server runs with deny-all default access, so topics are private.",
       "official": true
@@ -4907,7 +4989,7 @@
     {
       "id": "paperless",
       "name": "Paperless-ngx",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Document management with OCR — scan, search, tag, and organize paper documents digitally",
       "type": "bundle",
       "author": "Crow",
@@ -4984,6 +5066,9 @@
         "port": 8000,
         "path": "/",
         "label": "Paperless-ngx"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Self-host via Docker (multi-container: app + postgres + redis) or connect to existing (set PAPERLESS_URL + PAPERLESS_API_TOKEN).",
       "official": true
@@ -5314,7 +5399,7 @@
     {
       "id": "plex",
       "name": "Plex",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "privileged": true,
       "install_consent_messages": {
         "en": "Crow does not start a Plex server at install: it runs only if you start it from Extensions. If you do, the self-hosted Plex server uses host networking (Plex's own recommendation) so devices on your local network can discover it. It listens on every network interface of this machine (port 32400 and Plex's discovery ports) and mounts your media folder read-write. Until you claim it with your Plex account (PLEX_CLAIM_TOKEN), the first person who opens it can claim it.",
@@ -5411,6 +5496,9 @@
         "path": "/web",
         "label": "Plex Web",
         "proxyMode": "direct"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "notes": "Connects to an existing Plex Media Server. Optionally self-host via Docker (set PLEX_MEDIA_PATH + PLEX_CLAIM_TOKEN). Plex Web is a SPA and cannot be proxied behind a subpath.",
       "official": true
@@ -5856,7 +5944,7 @@
       "id": "romm",
       "name": "RoMM",
       "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "type": "bundle",
       "author": "Crow",
       "category": "gaming",
@@ -5924,6 +6012,9 @@
         "path": "/",
         "label": "RoMM",
         "proxyMode": "direct"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Organize ROM files into system subdirectories (e.g., roms/gba/, roms/snes/, roms/n64/). IGDB credentials enable automatic cover art and metadata. Get them free at https://api-docs.igdb.com/",
       "official": true
@@ -6039,7 +6130,7 @@
     {
       "id": "scratch-offline",
       "name": "Offline Block Coding (Scratch-compatible)",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Self-hosted block-based coding environment for ages 8+ using the MIT-licensed scratch-gui source code. Independent deployment — not affiliated with or endorsed by the Scratch Foundation. Built from source on first install and served locally; no Scratch.mit.edu dependency, no telemetry. Complements Maker Lab for older learners stepping up from Blockly.",
       "type": "bundle",
       "author": "Crow",
@@ -6090,6 +6181,9 @@
         "port": 8087,
         "path": "/",
         "label": "Offline Block Coding"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "sibling_of": [
         "maker-lab"
@@ -6167,7 +6261,7 @@
     {
       "id": "searxng",
       "name": "SearXNG",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "refreshFiles": [
         "docker-compose.yml"
       ],
@@ -6227,13 +6321,16 @@
         "path": "/",
         "label": "SearXNG"
       },
+      "firstAdmin": {
+        "mode": "none"
+      },
       "notes": "Config lives in ~/.crow/searxng/ (settings.yml, uwsgi.ini). On first boot the container seeds a default settings.yml and generates a random SECRET_KEY if the env var is empty. JSON API is enabled for MCP use — the crow skill documents how to extend it with more engines.",
       "official": true
     },
     {
       "id": "shiori",
       "name": "Shiori",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Simple bookmark manager — save web pages with cached content for offline reading",
       "type": "bundle",
       "author": "Crow",
@@ -6300,6 +6397,11 @@
         "path": "/",
         "label": "Shiori"
       },
+      "firstAdmin": {
+        "mode": "default-login",
+        "user": "shiori",
+        "note": "The default password is in this app's documentation; change it now."
+      },
       "notes": "Self-host via Docker or connect to an existing Shiori instance. Default credentials are shiori/gopher — change them after first login.",
       "official": true
     },
@@ -6336,7 +6438,7 @@
     {
       "id": "stirling-pdf",
       "name": "Stirling PDF",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
       "type": "bundle",
       "author": "Crow",
@@ -6385,6 +6487,9 @@
         "port": 8092,
         "path": "/",
         "label": "Stirling PDF"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Stirling PDF has no public API suitable for MCP. This bundle ships a panel with an iframe to the web UI and a tiny MCP server with a status check. Stirling 2.x includes a login form by default; create the admin account on first visit. Bound to 127.0.0.1 only.",
       "official": true
@@ -6714,7 +6819,7 @@
     {
       "id": "trilium",
       "name": "TriliumNext",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
       "type": "bundle",
       "author": "Crow",
@@ -6779,13 +6884,16 @@
         "path": "/",
         "label": "TriliumNext"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Self-host via Docker or connect to existing TriliumNext (set TRILIUM_URL + TRILIUM_ETAPI_TOKEN). Get your ETAPI token from Options > ETAPI in the TriliumNext UI.",
       "official": true
     },
     {
       "id": "unsloth",
       "name": "Unsloth Studio (AMD ROCm)",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Fine-tune and chat with open models on an AMD GPU: Unsloth's ROCm image with the Unsloth Studio web UI and JupyterLab notebooks. AMD ROCm hosts only.",
       "type": "bundle",
       "author": "Crow",
@@ -6873,6 +6981,9 @@
         "label": "Unsloth Studio",
         "proxyMode": "direct"
       },
+      "firstAdmin": {
+        "mode": "crow"
+      },
       "no_auto_provider": "Not a model endpoint Crow routes to: Unsloth Studio is a training and chat workbench with its own login, and its GGUF chat is internal to Studio. A model fine-tuned here is exported as files (GGUF or safetensors) and served through the Model Catalog like any other model.",
       "notes": "Image: unsloth/unsloth-rocm, the ROCm build of Unsloth, pinned to a release tag and digest (the plain unsloth/unsloth image is CUDA-only and is not used). Works on AMD RDNA2 and newer and CDNA GPUs, except the Steam Deck (gfx1033), which the image refuses. Upstream measured LoRA training and diffusion on a Strix Halo (gfx1151) with these generic ROCm wheels; AMD's per-architecture wheels fix a gfx1151 grouped-GEMM crash, so if a mixture-of-experts run crashes there, rebuild the image with ROCM_GFX=gfx1151 as the Unsloth docs describe. GGUF chat inside Studio runs on the CPU in this release. Licences: the Unsloth library is Apache-2.0 and its unsloth-zoo helper LGPL-3.0-or-later; Unsloth Studio (the web UI) is AGPL-3.0 with AGPL section 7(b) attribution notices. Crow runs the unmodified upstream image as a separate container and links none of its code, so Crow's own licence is unaffected. Offering Studio to other people over a network (a hosted Crow) triggers AGPL section 13 only if the image is modified; either way its Unsloth notices must stay visible. 'Unsloth' is a trademark of the Unsloth team. Crow's installer opens the manifest ports (3075, 3076) to the tailnet in ufw, as for every bundle; both stay bound to 127.0.0.1, and only 3075 gets a Tailscale Serve route.",
       "host_grants": {
@@ -6884,7 +6995,7 @@
     {
       "id": "uptime-kuma",
       "name": "Uptime Kuma",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Service monitoring and uptime tracking with response-time graphs and status pages",
       "type": "bundle",
       "author": "Crow",
@@ -6948,13 +7059,16 @@
         "path": "/",
         "label": "Uptime Kuma"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. On first launch, open the web UI to create the admin account. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions.",
       "official": true
     },
     {
       "id": "vaultwarden",
       "name": "Vaultwarden",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "description": "Bitwarden-compatible password manager — self-hosted vault for passwords, notes, and 2FA, used with the Bitwarden browser and mobile apps",
       "type": "bundle",
       "author": "Crow",
@@ -7038,13 +7152,17 @@
         "path": "/",
         "label": "Vaultwarden"
       },
+      "firstAdmin": {
+        "mode": "finish-setup",
+        "note": "User signups stay open until you create your account and turn them off."
+      },
       "notes": "Password managers need careful handling. See the skill for the recommended setup order (create account → disable signups → back up data dir). The MCP tools are deliberately minimal: status, user_count, backup_info. They do NOT read vault contents — use the Bitwarden browser extension or mobile app for day-to-day password access.",
       "official": true
     },
     {
       "id": "vikunja",
       "name": "Vikunja",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
       "type": "bundle",
       "author": "Crow",
@@ -7104,13 +7222,16 @@
         "path": "/",
         "label": "Vikunja"
       },
+      "firstAdmin": {
+        "mode": "finish-setup"
+      },
       "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create tokens in Vikunja under Settings > API Tokens.",
       "official": true
     },
     {
       "id": "vllm",
       "name": "vLLM",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
       "type": "bundle",
       "author": "Crow",
@@ -7195,6 +7316,9 @@
         "port": 8044,
         "path": "/docs",
         "label": "vLLM API docs"
+      },
+      "firstAdmin": {
+        "mode": "none"
       },
       "no_auto_provider": "VLLM_MODEL is a required install-time env var with no default (docker-compose.yml: `--model=${VLLM_MODEL:?Set VLLM_MODEL}`) -- the served model is whatever HuggingFace id the installer types in, so there is no fixed model id this manifest can register at build time. Manifest providers[] has no mechanism to read a resolved env var into a model id (registerProviderFromManifest only substitutes {host_ip}/{port}). After install, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:${VLLM_HTTP_PORT:-8044}/v1 with the same value used for VLLM_MODEL as the model id (vLLM serves it under --served-model-name=${VLLM_MODEL}).",
       "notes": "Linux x86_64 + NVIDIA GPU required. Recommended classroom shape: Qwen2.5-3B-Instruct at VLLM_MAX_NUM_SEQS=16 on a 16 GB consumer GPU (tested in the Maker Lab Phase 0 benchmark, see bundles/maker-lab/PHASE-0-REPORT.md Spike 5). vLLM's OpenAI-compatible endpoint drops into Maker Lab's MAKER_LAB_LLM_ENDPOINT as-is.",
@@ -7411,7 +7535,7 @@
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
       "type": "bundle",
       "author": "Crow",
@@ -7499,6 +7623,9 @@
         "port": 8084,
         "path": "/",
         "label": "Wallabag"
+      },
+      "firstAdmin": {
+        "mode": "finish-setup"
       },
       "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Create an API client in Wallabag under Developer > Create a new client.",
       "official": true

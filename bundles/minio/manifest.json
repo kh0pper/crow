@@ -1,7 +1,7 @@
 {
   "id": "minio",
   "name": "File Storage (MinIO)",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Deprecated: MinIO is no longer maintained upstream and its image can no longer be downloaded. Existing installs keep running; new installs use File Storage (Garage).",
   "type": "bundle",
   "author": "Crow",
@@ -62,5 +62,6 @@
   ],
   "ports": [9000, 9001],
   "webUI": { "port": 9001, "path": "/", "label": "Console", "proxyMode": "direct" },
+  "firstAdmin": { "mode": "crow" },
   "notes": "After installation, Crow's storage tools (upload, list, delete files) will be available automatically. The MinIO console is accessible at http://localhost:9001."
 }

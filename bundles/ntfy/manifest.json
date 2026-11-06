@@ -1,7 +1,7 @@
 {
   "id": "ntfy",
   "name": "Push Notifications (ntfy)",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Self-hosted push notifications via ntfy. Instant delivery to any device with the ntfy app.",
   "type": "bundle",
   "author": "Crow",
@@ -38,6 +38,10 @@
     "path": "/",
     "label": "ntfy",
     "proxyMode": "direct"
+  },
+  "firstAdmin": {
+    "mode": "finish-setup",
+    "note": "Crow creates its own login for phone alerts right after install; set your own login on the web page now."
   },
   "notes": "Crow sets itself up automatically: after install it creates its own login on this server, picks a private topic, and hands a read-only key to the Crow Android app (Settings › Notifications shows the status, the phone address, and a test button). Each Crow instance on this computer gets its own topic. The server runs with deny-all default access, so topics are private."
 }

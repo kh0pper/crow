@@ -12,6 +12,7 @@ import { CROW_HERO_SVG } from "../../shared/crow-hero.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { isSafeDestPath } from "../../../../shared/sso-ticket.js";
 import { appIconSvg } from "../../shared/app-icons.js";
+import { appTileLink } from "../../shared/app-link.js";
 
 // ─── Icons ───
 // One shared stroke set (shared/app-icons.js). Icon strings from manifests and
@@ -263,17 +264,12 @@ export function buildNestHTML(data, lang) {
     const logo = getAddonLogo(b.id, 32);
     const iconHtml = logo || `<div class="nest-bundle-glyph">${appIconSvg(b.icon) || PACKAGE_ICON}</div>`;
     const statusDot = b.hasContainer ? statusDotHtml(b.isRunning, lang) : "";
-    const isDirect = b.webUI.proxyMode === "direct";
-    const path = b.webUI.path || "/";
-    // Direct-mode: use HTTPS + hostname + port (Tailscale serve provides TLS)
-    // Subpath proxy: use /proxy/<id>/ through the gateway (inherits TLS)
-    const directUrl = `'https://'+location.hostname+':${b.webUI.port}${path}'`;
-    const proxyUrl = `'/proxy/${b.id}${path}'`;
-    // Direct mode needs JS (the host comes from location); its no-JS fallback is Extensions.
-    const href = isDirect ? "/dashboard/extensions" : `/proxy/${b.id}${path}`;
-    const onclick = ` onclick="window.open(${isDirect ? directUrl : proxyUrl},'_blank');return false"`;
+    // /proxy/<id><path> for a subpath UI, or the app's own https origin for a
+    // direct-mode one (shared/app-link.js — the same rule the Extensions
+    // "finish setup" card uses).
+    const link = appTileLink(b.id, b.webUI);
     const delay = tileIndex++ * 40;
-    return `<a href="${escapeHtml(href)}" class="nest-app nest-app--bundle" style="animation-delay:${delay}ms"${onclick}>
+    return `<a href="${escapeHtml(link.href)}" class="nest-app nest-app--bundle" style="animation-delay:${delay}ms"${link.onclick}>
       <div class="nest-app-icon">${statusDot}${iconHtml}</div>
       <div class="nest-app-label">${escapeHtml(b.name)}</div>
     </a>`;

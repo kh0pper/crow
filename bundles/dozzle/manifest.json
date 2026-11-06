@@ -1,7 +1,7 @@
 {
   "id": "dozzle",
   "name": "Dozzle",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Real-time Docker container log viewer in the browser. Tail, search, and filter logs across every container on this host.",
   "type": "bundle",
   "author": "Crow",
@@ -24,5 +24,6 @@
   ],
   "ports": [8095],
   "webUI": { "port": 8095, "path": "/", "label": "Dozzle" },
+  "firstAdmin": { "mode": "none" },
   "notes": "Log viewer is primarily a UI; MCP exposes a lightweight status + link tool. For automated log analysis, use Netdata's log collection or shell into the target container directly. Docker socket mounted read-only."
 }

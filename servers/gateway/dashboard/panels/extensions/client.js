@@ -1992,6 +1992,29 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
           });
           copyBtn.addEventListener("click", function() { copyText(code.textContent, copyBtn); });
         });
+
+        // --- "Finish this app's setup now": the operator's Done (N3-4) ---
+        // Nothing can detect that an app's own first-run setup is finished, so the
+        // operator says so. The server remembers it per install and locally (never
+        // synced); the card goes away without a reload.
+        document.querySelectorAll(".ext-firstadmin-done").forEach(function(doneBtn) {
+          doneBtn.addEventListener("click", function() {
+            var id = doneBtn.getAttribute("data-id");
+            var card = doneBtn.closest ? doneBtn.closest(".ext-firstadmin") : null;
+            doneBtn.disabled = true;
+            apiCall("first-admin-done", { bundle_id: id }).then(function(res) {
+              if (res.ok && res.data && res.data.ok) {
+                if (card && card.parentNode) card.parentNode.removeChild(card);
+                return;
+              }
+              doneBtn.disabled = false;
+              doneBtn.textContent = '${tJs("extensions.failed", lang)}';
+            }).catch(function() {
+              doneBtn.disabled = false;
+              doneBtn.textContent = '${tJs("extensions.networkError", lang)}';
+            });
+          });
+        });
       })();
     <\/script>`;
 }

@@ -121,6 +121,74 @@ function fileExists(bundleDir, rel) {
   return existsSync(p);
 }
 
+/**
+ * `firstAdmin` — how the bundle's OWN first admin account comes to exist
+ * (security audit N3-4). A freshly installed web app's first-run setup page is
+ * reachable over loopback by anything else on the machine, so every bundle
+ * with a web UI must say which of the four modes it is:
+ *
+ *   crow           Crow creates the admin at install (a generated password in
+ *                  the keychain, or a postInstall hook) — nothing to claim.
+ *   finish-setup   the app has its own first-run admin page; the operator must
+ *                  finish it now (Crow shows the notice).
+ *   default-login  the app ships a documented default login (user + password).
+ *   none           no login of its own (public/anonymous UI, or a viewer whose
+ *                  gate Crow already applies).
+ *
+ * The fourth rule is the load-bearing one: a webUI without a firstAdmin is an
+ * undeclared claim surface, so `build-registry --check` fails it.
+ */
+export const FIRST_ADMIN_MODES = Object.freeze(["crow", "finish-setup", "default-login", "none"]);
+
+function validateFirstAdmin(manifest) {
+  const errors = [];
+  const fa = manifest ? manifest.firstAdmin : undefined;
+  const hasWebUI = !!(manifest && manifest.webUI && typeof manifest.webUI === "object");
+  if (fa === undefined || fa === null) {
+    if (hasWebUI) {
+      errors.push(
+        `firstAdmin: a bundle with a webUI must declare firstAdmin (mode ${FIRST_ADMIN_MODES.map((m) => `"${m}"`).join(", ")}) — ` +
+          `say how its own first admin is created, or who has to finish its setup`,
+      );
+    }
+    return errors;
+  }
+  if (typeof fa !== "object" || Array.isArray(fa)) {
+    errors.push("firstAdmin must be an object");
+    return errors;
+  }
+  const mode = fa.mode;
+  if (!FIRST_ADMIN_MODES.includes(mode)) {
+    errors.push(`firstAdmin.mode must be one of ${FIRST_ADMIN_MODES.join(", ")}`);
+    return errors; // every mode-specific rule below would only add noise
+  }
+  if (fa.path !== undefined && (typeof fa.path !== "string" || !fa.path.startsWith("/"))) {
+    errors.push(`firstAdmin.path must be an app path starting with "/"`);
+  }
+  if (fa.note !== undefined && typeof fa.note !== "string") errors.push("firstAdmin.note must be a string");
+  if (fa.user !== undefined && mode !== "default-login") {
+    errors.push(`firstAdmin.user is only allowed with mode "default-login"`);
+  }
+  if (mode === "default-login" && (typeof fa.user !== "string" || fa.user.trim() === "")) {
+    errors.push(`firstAdmin: mode "default-login" needs user (the documented default username)`);
+  }
+  if (mode === "crow") {
+    // "Crow creates the admin" has to be something the installer really does: a
+    // generated secret it saves to the keychain before the container starts, or
+    // a post-install hook that drives the app's own admin CLI/API.
+    const keychainSecret = (Array.isArray(manifest.env_vars) ? manifest.env_vars : []).some(
+      (v) => v && v.generate === "secret" && v.keychain === true,
+    );
+    if (!keychainSecret && !manifest.postInstall) {
+      errors.push(
+        `firstAdmin: mode "crow" needs an env_vars entry with generate: "secret" and keychain: true, or a postInstall script — ` +
+          `Crow must really create the admin; otherwise declare "finish-setup"`,
+      );
+    }
+  }
+  return errors;
+}
+
 /** Referential checks for the `connect` block (the ajv shape already passed). */
 function validateConnect(manifest) {
   const errors = [];
@@ -283,6 +351,9 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
       if (v.propagate !== false) errors.push(`env_vars ${v.name}: generatable needs propagate: false (a human password must not be copied into the gateway .env)`);
     }
   }
+
+  // 3b. firstAdmin (security audit N3-4): how the bundle's own first admin is created.
+  if (manifest && typeof manifest === "object") errors.push(...validateFirstAdmin(manifest));
 
   // connect block (project services): referential checks the shape cannot express.
   if (manifest && manifest.connect) errors.push(...validateConnect(manifest));

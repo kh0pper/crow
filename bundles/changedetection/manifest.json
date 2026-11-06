@@ -1,7 +1,7 @@
 {
   "id": "changedetection",
   "name": "Change Detection",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Watch any webpage for changes — get notified when prices drop, stock appears, or content updates",
   "type": "bundle",
   "author": "Crow",
@@ -20,5 +20,6 @@
   ],
   "ports": [5010],
   "webUI": { "port": 5010, "path": "/", "label": "Change Detection" },
+  "firstAdmin": { "mode": "none" },
   "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management."
 }

@@ -1,7 +1,7 @@
 {
   "id": "vikunja",
   "name": "Vikunja",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
   "type": "bundle",
   "author": "Crow",
@@ -20,5 +20,6 @@
   ],
   "ports": [3456],
   "webUI": { "port": 3456, "path": "/", "label": "Vikunja" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create tokens in Vikunja under Settings > API Tokens."
 }

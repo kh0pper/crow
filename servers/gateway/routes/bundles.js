@@ -22,6 +22,7 @@ import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
+import { markFirstAdminDone, reportFirstAdminNotice } from "../bundle-first-admin.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
@@ -3041,18 +3042,24 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
     // 6. Track installation (a compose-up failure already recorded the id;
     // installedSnapshot predates that write, so dedupe against it here).
+    // The stamp is also this install's identity for the first-admin notice below:
+    // a reinstall gets a new one, which is what makes that notice (and the
+    // Extensions card's Done state) per-install rather than forever.
+    const installedStamp = new Date().toISOString();
     if (!installedSnapshot.find((i) => i.id === bundleId)) installedSnapshot.push({
       id: bundleId,
       type: addonType,
       version: manifest?.version || "1.0.0",
-      installedAt: new Date().toISOString(),
+      installedAt: installedStamp,
       ...consentRecord(manifest, consentVerified),
     });
     // Written from a FRESH read (SAT-5 review M3): the snapshot is as of validation, and anything
     // recorded since (a satellite install, another bundle) must survive. Only this bundle's own
     // entry comes from the snapshot, at its current position when it already has one.
+    let recordedInstallAt = installedStamp;
     {
       const own = installedSnapshot.find((i) => i.id === bundleId);
+      if (own && typeof own.installedAt === "string") recordedInstallAt = own.installedAt;
       const current = getInstalled();
       const at = current.findIndex((i) => i?.id === bundleId);
       if (at >= 0) current[at] = own; else current.push(own);
@@ -3178,6 +3185,21 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       appendLog(job, `Installed and running, but setup is incomplete (${hookFailure.slice(0, 400)})`);
       return { ok: false, reason: hookFailure, needsRestart };
     }
+
+    // Security audit N3-4: a bundle that does NOT create its own first admin
+    // leaves an app setup page anyone on this machine can claim. One bell, once
+    // per install, pointing at the Extensions card that says what to do. Silent
+    // for `crow` and `none` manifests; never in the job log (the owner reads the
+    // bell, and the log line would be a second, easier-to-miss copy).
+    await reportFirstAdminNotice({
+      bundleId,
+      manifest,
+      bundleName: manifest?.name || bundleId,
+      // The stamp installed.json actually holds: an in-place reinstall keeps its
+      // entry (and does not re-ring), and only a reinstall after an uninstall —
+      // a new record — asks again.
+      installId: recordedInstallAt,
+    });
     return { ok: true, needsRestart };
   } catch (err) {
     const reason = err?.message || String(err);
@@ -3291,7 +3313,7 @@ export default function bundlesRouter() {
   // (which never saves to the keychain for a peer, and whose result Start re-checks
   // without consent), never install, mint consent, uninstall or re-apply storage here:
   // a peer-minted consent token would let it apply a privileged bundle the owner never saw.
-  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin"]);
+  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin", "/bundles/api/first-admin-done"]);
   router.use((req, res, next) => {
     if (!req.crossHostAuth) return next();
     // Express matches routes case-insensitively and ignores a trailing slash: compare
@@ -3340,6 +3362,26 @@ export default function bundlesRouter() {
     }
 
     res.json({ bundles: results });
+  });
+
+  // POST /bundles/api/first-admin-done — the operator says this app's setup is
+  // finished (security audit N3-4). Nothing can detect that from the outside, so
+  // the operator's word is the signal; it is remembered per install and locally
+  // (never synced to a paired instance). Owner action: a peer has its own box.
+  router.post("/bundles/api/first-admin-done", async (req, res) => {
+    const bundleId = req.body && req.body.bundle_id;
+    if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
+    const entry = getInstalled().find((i) => i && i.id === bundleId);
+    if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    const db = createDbClient();
+    try {
+      const stamp = await markFirstAdminDone(db, bundleId, entry.installedAt || entry.installed_at || null);
+      res.json({ ok: true, bundle_id: bundleId, install: stamp });
+    } catch (err) {
+      res.status(500).json({ error: String((err && err.message) || err) });
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
   });
 
   // GET /bundles/api/engine-blast — Uninstall blast-radius for the bot engine

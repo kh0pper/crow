@@ -1,7 +1,7 @@
 {
   "id": "kavita",
   "name": "Kavita",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
   "type": "bundle",
   "author": "Crow",
@@ -22,5 +22,6 @@
   ],
   "ports": [5000],
   "webUI": { "port": 5000, "path": "/", "label": "Kavita" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed."
 }

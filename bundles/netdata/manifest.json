@@ -1,7 +1,7 @@
 {
   "id": "netdata",
   "name": "Netdata",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Real-time infrastructure and container monitoring — CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
   "type": "bundle",
   "author": "Crow",
@@ -24,5 +24,6 @@
   ],
   "ports": [19999],
   "webUI": { "port": 19999, "path": "/", "label": "Netdata" },
+  "firstAdmin": { "mode": "none" },
   "notes": "Runs without SYS_PTRACE / pid:host for MVP — per-process stats are unavailable but system + container metrics work. Docker socket mounted read-only. /etc not mounted (hostname/OS shown as 'unknown' in netdata UI; acceptable trade-off)."
 }

@@ -1,7 +1,7 @@
 {
   "id": "bookstack",
   "name": "BookStack",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
   "type": "bundle",
   "author": "Crow",
@@ -22,5 +22,6 @@
   ],
   "ports": [6875],
   "webUI": { "port": 6875, "path": "/", "label": "BookStack" },
+  "firstAdmin": { "mode": "finish-setup" },
   "notes": "Self-host via Docker (includes MariaDB) or connect to existing (set BOOKSTACK_URL + API tokens). Create tokens in BookStack under Settings > API Tokens."
 }
