@@ -92,3 +92,34 @@ test("detector counts an unknown capability in one bucket and raises no card", a
     "every unknown name lands in the one bucket, never under the peer's string");
   assert.ok(s.suppressed.every((i) => i.reason === "unknown_capability"));
 });
+
+// SF1 (review round 2): the policy finds the existing card under EITHER key
+// shape, but the detector used to ignore a `dedupe` decision and fall through to
+// `upsertItem` — which writes the NEW key and therefore inserted a SECOND open
+// card for the same (capability, peer).
+test("SF1: a repeat denial for a card opened under the OLD key bumps THAT card instead of inserting a duplicate", async () => {
+  const legacy = {
+    id: 7, dedupKey: legacyDedupKeyFor("peer-1", "funkwhale"), status: "pending", count: 1,
+    context: { capability: "funkwhale", requestingInstance: "peer-1" },
+    createdAt: "2026-01-01 00:00:00", updatedAt: "2026-01-01 00:00:00",
+  };
+  const s = fakeStore([legacy]);
+  await detector.onEvent("peer-exposure:denied",
+    { capability: "funkwhale", requestingInstance: "peer-1", toolName: "fw_play" }, s);
+  assert.equal(s.created.length, 0, "no upsert at all: an upsert here writes the new key and inserts a second card");
+  assert.deepEqual(s.dupes, [7], "the repeat is recorded on the card that already exists");
+  assert.deepEqual(s.suppressed, [], "a deduped request is not a suppressed one");
+});
+
+test("SF1: a repeat denial for a card under the NEW key is also deduped onto that card", async () => {
+  const current = {
+    id: 11, dedupKey: dedupKeyFor("peer-1", "funkwhale"), status: "pending", count: 2,
+    context: { capability: "funkwhale", requestingInstance: "peer-1" },
+    createdAt: "2026-01-01 00:00:00", updatedAt: "2026-01-01 00:00:00",
+  };
+  const s = fakeStore([current]);
+  await detector.onEvent("peer-exposure:denied",
+    { capability: "funkwhale", requestingInstance: "peer-1" }, s);
+  assert.equal(s.created.length, 0);
+  assert.deepEqual(s.dupes, [11]);
+});

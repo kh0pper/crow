@@ -28,7 +28,22 @@ before(async () => {
 
 after(() => { try { db.close(); } catch {} try { rmSync(dir, { recursive: true, force: true }); } catch {} });
 
+/**
+ * A card's peer must still be a trusted peer for the Allow remedy (review round
+ * 2, N-a); in production only a peer that authenticated raises a card, so the
+ * tests that expect a grant give it a row.
+ */
+async function trustPeer(...ids) {
+  for (const id of ids) {
+    await db.execute({
+      sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
+      args: [id, `Peer ${id}`, "crow-test"],
+    });
+  }
+}
+
 test("expose-capability grants the capability to the requesting peer ONLY (idempotent), marks resolved", async () => {
+  await trustPeer("peer-a");
   const r1 = await remedy({ capability: "funkwhale", requestingInstance: "peer-a", days: 30 }, { db });
   assert.equal(r1.resolved, true);
   const granted = await getPeerGrantedCapabilities(db, "peer-a");
@@ -54,9 +69,21 @@ test("no verified requesting peer → refused, and NOTHING is exposed to every p
   assert.ok(!after.has("crow-memory"), "fail closed: never widened to all peers");
 });
 
-test("blank capability → not resolved", async () => {
-  const r = await remedy({ capability: "", requestingInstance: "peer-a" }, { db });
-  assert.equal(r.resolved, false);
+test("a blank capability or a peer that is not trusted here → refused, nothing written", async () => {
+  const blank = await remedy({ capability: "", requestingInstance: "peer-a" }, { db });
+  assert.equal(blank.resolved, false);
+
+  // Review round 2 (N-a): a peer whose row fails the one trust predicate
+  // (`trusted = 1 AND status IN ('active','offline')`) is refused, with a reason.
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'revoked', 1)",
+    args: ["peer-revoked", "Revoked Peer", "crow-test"],
+  });
+  const revoked = await remedy({ capability: "crow-memory", requestingInstance: "peer-revoked", days: 30 }, { db });
+  assert.equal(revoked.resolved, false);
+  assert.match(revoked.message, /trusted peer/);
+  assert.equal(await isCapabilityExposedToPeer(db, "crow-memory", "peer-revoked"), false);
+  assert.equal((await getPeerExposures(db)).has("peer-revoked"), false);
 });
 
 test("a federation peer's proxy key (instance-<id>) is never exposed (queue item 38)", async () => {
@@ -67,6 +94,7 @@ test("a federation peer's proxy key (instance-<id>) is never exposed (queue item
 });
 
 test("duration: 7 days expires, untilRemoved never does; the grant records expires_at", async () => {
+  await trustPeer("peer-7");
   const now = Date.now();
   await remedy({ capability: "crow-blog", requestingInstance: "peer-7", days: 7 }, { db });
   const grant = (await getPeerExposures(db)).get("peer-7").get("crow-blog");

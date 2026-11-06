@@ -21,6 +21,13 @@
  *     this instance's own catalog) earns no card and ONE counter bucket per
  *     peer, never a key built from the peer's own string.
  *
+ * Review round 2:
+ *   - SF1: a `dedupe` decision acts on the EXISTING card, whatever key shape it
+ *     was written with — it never falls through to an upsert that would insert
+ *     a second open card under the new key;
+ *   - N-b: that per-peer queue is bounded (peer-card-lock.js), so a flood is
+ *     dropped and counted in memory instead of queued without limit.
+ *
  * DB-free: it composes strings from the (already name-enriched) payload and the
  * pure friendly-name map, then calls the db-bound store it's handed.
  */
@@ -44,6 +51,18 @@ async function decideAndStore({ capability, peerId, peerName, toolName, store, n
   } catch { items = []; }
 
   const decision = decidePeerExposureCard({ items, peerId, capability, now });
+
+  // SF1 (review round 2): `dedupe` means this (capability, peer) pair already
+  // owns a card — possibly one written under the PRE-round-1 key shape
+  // (`expose:<cap>:<peer>`). Act on THAT row: upserting here would write the
+  // NEW key and insert a SECOND open card for the same request.
+  if (decision.action === "dedupe") {
+    try {
+      if (store?.recordDuplicate) await store.recordDuplicate(decision.itemId);
+    } catch { /* best-effort: this runs on the peer-exposure request path */ }
+    return;
+  }
+
   if (decision.action === "drop" || decision.action === "count") {
     // Recorded, but no card (or no NEW card). Never let bookkeeping break the
     // request path — the caller is the peer-exposure gate.

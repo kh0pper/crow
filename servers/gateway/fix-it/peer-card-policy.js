@@ -40,12 +40,13 @@ export const CARD_ACTION_IDS = Object.freeze(CARD_DURATIONS.map((d) => d.actionI
  *
  * The old key was `expose:<capability>:<peerId>`, but BOTH parts may contain a
  * colon — peer ids are `[A-Za-z0-9._:-]{1,128}` (servers/shared/peer-id.js), and
- * a capability id is an addon id / manifest category (`[A-Za-z0-9._-]`, see
- * capability-ids.js) — so `expose:a:b:c` was ambiguous. `|` can appear in
- * neither: the peer-id regex excludes it, and capability ids come from this
- * instance's own catalog (manifest keys and installed-extension ids, both
- * slug-shaped). Cards written before this change are still found by
- * legacyDedupKeyFor().
+ * a capability id may be an installed-extension id (an `mcp-addons.json` key) —
+ * so `expose:a:b:c` was ambiguous. `|` cannot appear in a peer id (the regex
+ * excludes it). Nothing checks the SHAPE of a capability id — capability-ids.js
+ * only requires provenance: the id is either `crow-<manifest category>` or a key
+ * of this instance's own addon file, never a string a peer chose (round 2, N-e —
+ * in round 1 the peer's tool name could reach this key). Cards written before
+ * this change are still found by legacyDedupKeyFor().
  */
 const DEDUP_SEP = "|";
 

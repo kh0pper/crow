@@ -32,8 +32,8 @@ export function canonicalForCategory(category) {
  * `crow-memory` (so it is one capability, not an unknown one — and it lands on
  * the same card and the same dedupe key). Anything whose tail is not a plain
  * identifier (`crow_../etc`, `crow_`, a 4 KB name, `crow_store_memory` →
- * `crow-store-memory`) canonicalises to an id that no catalog contains, and is
- * therefore unknown.
+ * `crow-store_memory` — the tail keeps its underscore) canonicalises to an id
+ * that no catalog contains, and is therefore unknown.
  *
  * Note this is only a PROPOSAL: the caller must still require the returned id
  * to be in `getLocalCapabilityIds()`.

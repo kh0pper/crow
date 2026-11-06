@@ -17,7 +17,9 @@
  *      trust sweeper then deletes it (servers/gateway/peer-trust-sweeper.js).
  *   2b. N1b-8 (review round 1, S3): drop every per-device allowance the peer
  *      held (`remote_exposed_tools_by_peer`), so a revoke→re-pair with the same
- *      id starts with no grants.
+ *      id starts with no grants. Review round 2 (N-a): the peer's open
+ *      peer-exposure "Allow" cards are answered at the same time — a card for a
+ *      peer that is gone is not a question any more.
  *   3. PT-1: end the SSO sessions the peer minted (scopes
  *      'dashboard sso src:<id>') and any untagged legacy SSO sessions.
  *   4. instanceSyncManager.teardownRevokedPeer(): close the peer's feeds and
@@ -37,6 +39,7 @@
 
 import { getInstance, revokeInstance } from "../gateway/instance-registry.js";
 import { removePeerExposures } from "../gateway/peer-exposure-store.js";
+import * as fixItStore from "../shared/fix-it/store.js";
 import { createNotification } from "../shared/notifications.js";
 import { deletePeerCreds, getPeerCreds, peerTokensPath } from "../shared/peer-credentials.js";
 import { resolveInstanceDataDir, resolveCrowHome, sameDbLocation, isWithin } from "../shared/crow-home.js";
@@ -99,6 +102,52 @@ async function dropPeerExposureGrants(db, id) {
   }
 }
 
+/**
+ * The Fix-it source of the peer-exposure "Allow" card. A literal on purpose:
+ * this module must not pull in the gateway's Fix-it wiring, and the N1b-8 test
+ * asserts it equals the detector's own `source`.
+ */
+export const PEER_EXPOSURE_CARD_SOURCE = "remote-exposure";
+
+/**
+ * N1b-8 review round 2 (N-a): a revoked peer's open "Allow" cards are ANSWERED
+ * by the revoke. Otherwise a card raised by the peer that asked stays in the
+ * Nest, and after a revoke→re-pair (which reuses the instance id) a click on it
+ * would grant the re-paired peer without a fresh request.
+ *
+ * `resolved`, not `dismissed`: `store.dismiss` writes a suppression window,
+ * which would also hide a legitimate NEW request from that id after a re-pair.
+ * Resolved says the question is answered; the store's upsert reopens exactly
+ * this card if the same id is denied again later.
+ *
+ * Best-effort, like the grant drop: the row revoke is authoritative and must not
+ * be undone by a fix_it_items write.
+ *
+ * @returns {Promise<{resolved: number}>}
+ */
+async function resolvePeerExposureCards(db, id) {
+  if (!id) return { resolved: 0 };
+  let resolved = 0;
+  try {
+    // listBySource returns every OPEN card (any age) plus anything touched in
+    // the last two days; only the open ones for THIS peer are ours.
+    const items = await fixItStore.listBySource(db, PEER_EXPOSURE_CARD_SOURCE);
+    for (const item of items) {
+      if (!item || item.status !== "pending") continue;
+      if (item.context?.requestingInstance !== id) continue;
+      await fixItStore.markResolved(db, item.id);
+      resolved += 1;
+    }
+  } catch (err) {
+    console.warn(`[revoke-peer] could not answer the peer-exposure card(s) for ${String(id).slice(0, 12)}: ${err.message}`);
+    return { resolved: 0 };
+  }
+  if (resolved > 0) {
+    console.log(`[revoke-peer] answered ${resolved} open peer-exposure card(s) for ${String(id).slice(0, 12)}`);
+  }
+  return { resolved };
+}
+
 async function defaultManager() {
   if (_mgrResolverForTest) return _mgrResolverForTest();
   try {
@@ -124,6 +173,7 @@ export async function revokePeer(db, id, { instanceSyncManager, localInstanceId 
     if (id && (!localInstanceId || id !== localInstanceId) && getPeerCreds(id)) {
       const creds = deleteCredsGuarded(id);
       await dropPeerExposureGrants(db, id);
+      await resolvePeerExposureCards(db, id);
       return { ok: creds.creds_deleted === true, orphan: true, ...creds, ...(creds.creds_deleted ? {} : { reason: creds.reason }) };
     }
     return { ok: false, reason: "not_found" };
@@ -137,8 +187,10 @@ export async function revokePeer(db, id, { instanceSyncManager, localInstanceId 
   // 2. The signing key.
   const creds = deleteCredsGuarded(id);
 
-  // 2b. N1b-8 (S3): every one-device allowance for this peer goes with it.
+  // 2b. N1b-8 (S3): every one-device allowance for this peer goes with it, and
+  // (round 2, N-a) so does its open "Allow" card.
   await dropPeerExposureGrants(db, id);
+  await resolvePeerExposureCards(db, id);
 
   // 3. SSO sessions the peer minted, plus legacy untagged ones (≤24 h).
   try {

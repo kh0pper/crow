@@ -43,6 +43,13 @@ async function waitForPending(predicate, deadlineMs = 2000) {
 }
 
 test("denied call → card appears → remedy → next check allowed for THAT peer only", async () => {
+  // Review round 2 (N-a): a card can only be allowed for a peer that is
+  // currently trusted here, and in production the card exists because that peer
+  // authenticated — so the fixture gives it a trusted row.
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
+    args: ["peer-9", "Peer peer-9", "crow-test"],
+  });
   const connected = new Map([["funkwhale", { status: "connected", tools: [{ name: "fw_play" }] }]]);
   const req = { instanceAuth: { instance: { id: "peer-9" } }, body: { method: "tools/call", params: { name: "fw_play" }, id: 1 } };
 

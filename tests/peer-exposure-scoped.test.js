@@ -95,6 +95,22 @@ const peerReq = (peerId, body = CALL, extra = {}) => ({
   body,
 });
 
+/**
+ * Give `ids` a crow_instances row that passes the one trust predicate
+ * (`trusted = 1 AND status IN ('active','offline')`). Review round 2 (N-a): the
+ * Allow remedy refuses a peer that is not trusted HERE, and in production a card
+ * can only be raised by a peer that authenticated — i.e. one that has such a
+ * row. Tests that expect a click to grant must say so.
+ */
+async function trustPeer(...ids) {
+  for (const id of ids) {
+    await db.execute({
+      sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
+      args: [id, `Peer ${id}`, "crow-test"],
+    });
+  }
+}
+
 /** Run the real gate (no exposure overrides) for one peer. */
 async function gate(peerId, { now, body = CALL, emit = false } = {}) {
   const res = mkRes();
@@ -167,6 +183,7 @@ async function clickAllow(card, actionId = "expose-capability-30d") {
 // ---------------------------------------------------------------------------
 
 test("Allow grants only the requesting peer: a second peer is still refused", async () => {
+  await trustPeer("peer-a");
   // peer-a is denied, a card is raised for it.
   assert.equal((await gate("peer-a")).ok, false);
   await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-a", toolName: "fw_play" });
@@ -203,6 +220,7 @@ test("per-peer grants are read at check time: revoking one peer's grant re-denie
 
 test("an expired grant is refused at check time; a live one still works (time injected)", async () => {
   const t0 = Date.now();
+  await trustPeer("peer-e");
   await remedy({ capability: "funkwhale", requestingInstance: "peer-e", days: 30 }, { db });
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-e", { now: t0 + 29 * DAY }), true);
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-e", { now: t0 + 31 * DAY }), false);
@@ -214,6 +232,7 @@ test("an expired grant is refused at check time; a live one still works (time in
 
 test('"until I remove it" never expires', async () => {
   const t0 = Date.now();
+  await trustPeer("peer-f");
   await remedy({ capability: "funkwhale", requestingInstance: "peer-f", untilRemoved: true }, { db });
   assert.equal((await getPeerExposures(db)).get("peer-f").get("funkwhale").expiresAt, null);
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-f", { now: t0 + 3650 * DAY }), true);
@@ -222,6 +241,7 @@ test('"until I remove it" never expires', async () => {
 
 test("an expired grant is still stored (Settings can renew or remove it) and a malformed expiry fails closed", async () => {
   const t0 = Date.now();
+  await trustPeer("peer-g");
   await remedy({ capability: "funkwhale", requestingInstance: "peer-g", days: 7 }, { db });
   assert.ok((await getPeerExposures(db)).get("peer-g").get("funkwhale"), "expired grants are kept, not pruned");
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-g", { now: t0 + 8 * DAY }), false);
@@ -239,6 +259,7 @@ test("an expired grant is still stored (Settings can renew or remove it) and a m
 
 test("Settings lists each one-device allowance with its peer and expiry, and renews/removes it", async () => {
   const t0 = Date.now();
+  await trustPeer("peer-abc123");
   await remedy({ capability: "funkwhale", requestingInstance: "peer-abc123", days: 1 }, { db });
   // Age the grant past its expiry to prove the expired state is shown.
   const stored = (await getPeerExposures(db)).get("peer-abc123").get("funkwhale");
@@ -288,6 +309,7 @@ test("an existing all-trusted-peers exposure still allows EVERY peer (not narrow
 });
 
 test("a card Allow leaves the all-peer list byte-for-byte unchanged", async () => {
+  await trustPeer("peer-z");
   await writeSetting(db, "remote_exposed_tools", JSON.stringify(["crow-memory", "crow-blog"]), { scope: "local" });
   const before = (await db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = 'remote_exposed_tools'", args: [] })).rows[0].value;
 
@@ -380,6 +402,7 @@ test("the 24 h window is measured with the clock the caller injects (policy is p
 // ---------------------------------------------------------------------------
 
 test("the card is keyed by the verified peer id, not by anything the request body claims", async () => {
+  await trustPeer("verified-peer");
   const spoof = {
     jsonrpc: "2.0", id: 9, method: "tools/call",
     params: { name: "fw_play", _meta: { requestingInstance: "victim-id", peerName: "Victim Device", requestedBy: "Victim Device" } },
@@ -417,6 +440,7 @@ test("the card is keyed by the verified peer id, not by anything the request bod
 });
 
 test("each card button grants its own duration (30 days / 7 days / until removed)", async () => {
+  await trustPeer("peer-b7");
   await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-b7" });
   let card = (await store.listPending(db))[0];
   assert.deepEqual(card.remedies.map((r) => r.actionId),
@@ -468,12 +492,13 @@ const TWENTY_CAPABILITIES = [
 ];
 
 test("B1: 20 concurrent denials for ONE peer make exactly 3 cards; the rest are counted", async () => {
-  const { _peerLockSize } = await import("../servers/gateway/fix-it/peer-card-lock.js");
+  const lock = await import("../servers/gateway/fix-it/peer-card-lock.js");
   assert.equal(TWENTY_CAPABILITIES.length, 20, "20 distinct capabilities");
   assert.ok(MAX_OPEN_CARDS_PER_PEER < 20);
 
   // All 20 fire-and-forget events are in flight together — the exact shape that
   // used to let every one of them see "no open cards yet" and create a card.
+  const droppedBefore = lock._peerLockOverflow();
   await Promise.all(TWENTY_CAPABILITIES.map((capability) => idx.emitFixIt(db, "peer-exposure:denied", {
     capability, capabilityKnown: true, requestingInstance: "peer-burst",
   })));
@@ -484,10 +509,63 @@ test("B1: 20 concurrent denials for ONE peer make exactly 3 cards; the rest are 
 
   const counted = await getSuppressedRequests(db);
   const total = [...counted.values()].reduce((n, v) => n + v.count, 0);
-  assert.equal(total, TWENTY_CAPABILITIES.length - MAX_OPEN_CARDS_PER_PEER, "every refused request is counted");
-  assert.ok([...counted.values()].every((v) => v.reason === "open_card_cap"));
-  assert.equal(counted.size, TWENTY_CAPABILITIES.length - MAX_OPEN_CARDS_PER_PEER, "one entry per refused capability");
-  assert.equal(_peerLockSize(), 0, "the per-peer chain is dropped once its tail settles");
+  // Round 2 (N-b): the per-peer queue is bounded, so an event that arrives with
+  // the queue full is dropped before it touches the db (no card, no counter) and
+  // counted in memory. Every event is still accounted for:
+  // cards + db-counted + dropped === 20.
+  const dropped = lock._peerLockOverflow() - droppedBefore;
+  assert.equal(pending.length + total + dropped, TWENTY_CAPABILITIES.length,
+    `3 cards + ${total} counted + ${dropped} dropped must be the 20 events`);
+  assert.ok([...counted.values()].every((v) => v.reason === "open_card_cap" && v.count === 1));
+  assert.equal(counted.size, total, "one entry per refused capability");
+  assert.equal(lock._peerLockSize(), 0, "the per-peer chain is dropped once its tail settles");
+});
+
+// --- Review round 2, N-b: the per-peer queue is bounded ---------------------
+
+test("N-b: 100 concurrent events from one peer never have more than the cap waiting, and the overflow is counted", async () => {
+  const lock = await import("../servers/gateway/fix-it/peer-card-lock.js");
+  assert.ok(Number.isInteger(lock.MAX_QUEUED_TASKS_PER_KEY) && lock.MAX_QUEUED_TASKS_PER_KEY > 0,
+    "the per-key queue has a named cap");
+
+  // (1) The lock itself. One task holds the key while 100 more arrive: the ones
+  // beyond the cap are refused AT ARRIVAL (never queued, never run).
+  lock._resetPeerLockForTest();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let started = 0;
+  const runs = [lock.withPeerLock("peer-queue", async () => { started += 1; await gate; })];
+  for (let i = 0; i < 100; i++) {
+    runs.push(lock.withPeerLock("peer-queue", async () => { started += 1; }));
+  }
+  await new Promise((r) => setTimeout(r, 5)); // let the blocker take the key
+  assert.equal(started, 1, "one task at a time per peer, as before");
+  const droppedAtArrival = lock._peerLockOverflow();
+  release();
+  await Promise.all(runs);
+  assert.equal(started, lock.MAX_QUEUED_TASKS_PER_KEY,
+    `at most ${lock.MAX_QUEUED_TASKS_PER_KEY} tasks ever wait/run for one peer (1 ran + 15 queued)`);
+  assert.equal(droppedAtArrival, 101 - lock.MAX_QUEUED_TASKS_PER_KEY,
+    "the 85 events that arrived while the queue was full were dropped and counted in memory");
+  assert.equal(lock._peerLockOverflow(), 101 - lock.MAX_QUEUED_TASKS_PER_KEY);
+  assert.equal(lock._peerLockSize(), 0, "the key is dropped once its tail settles");
+
+  // (2) Through the real event path: 100 distinct capabilities from one peer.
+  // A drop costs NO db work, so the cards AND the counters stay bounded.
+  const HUNDRED = Array.from({ length: 100 }, (_, i) => `cap-${i}`);
+  const droppedBefore = lock._peerLockOverflow();
+  await Promise.all(HUNDRED.map((capability) => idx.emitFixIt(db, "peer-exposure:denied", {
+    capability, capabilityKnown: true, requestingInstance: "peer-hundred",
+  })));
+  const dropped = lock._peerLockOverflow() - droppedBefore;
+  const pending = await store.listPending(db);
+  const counted = await getSuppressedRequests(db);
+  const total = [...counted.values()].reduce((n, v) => n + v.count, 0);
+  assert.equal(pending.length, MAX_OPEN_CARDS_PER_PEER, "the open-card cap still holds");
+  assert.ok(dropped > 0, "the flood did overflow the per-peer queue (100 events, cap 16)");
+  assert.equal(pending.length + total + dropped, HUNDRED.length,
+    `3 cards + ${total} counted + ${dropped} dropped must be the 100 events`);
+  assert.equal(lock._peerLockSize(), 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -518,6 +596,9 @@ test("B2: 200 junk tool names raise no card and leave ONE counter entry for the 
 test("B2: crow_Memory and crow_memory are ONE capability (the case variant is not unknown)", async () => {
   assert.equal(resolveCalledCanonicalId("router", { method: "tools/call", params: { name: "crow_Memory" } }), "crow-memory");
   assert.equal(resolveCalledCanonicalId("router", { method: "tools/call", params: { name: "crow_memory" } }), "crow-memory");
+  // The tail keeps its underscores (review round 2, N-f: the comment in
+  // capability-ids.js said `crow-store-memory`, which is not what it returns).
+  assert.equal(resolveCalledCanonicalId("router", { method: "tools/call", params: { name: "crow_store_memory" } }), "crow-store_memory");
 
   const emits = emitCollector();
   await Promise.all([
@@ -561,6 +642,7 @@ test("B2: the suppressed-counter map is capped and pruned", async () => {
 
 test("S1: an old-shape Allow card grants only its STORED peer, for 30 days", async () => {
   const peer = "peer-old";
+  await trustPeer(peer);
   // Exactly what the pre-scoping detector wrote: one button, no duration, the
   // capability in the remedy args and the peer only in the card CONTEXT.
   await store.upsertItem(db, {
@@ -665,4 +747,111 @@ test("S3: a revoke written by ANOTHER process (row only) also drops the grants o
   assert.equal((await getPeerExposures(db)).has("peer-elsewhere"), false, "the sweep drops the revoked peer's allowances");
   await db.execute({ sql: "UPDATE crow_instances SET status = 'active', trusted = 1 WHERE id = ?", args: ["peer-elsewhere"] });
   assert.equal((await gate("peer-elsewhere")).ok, false, "re-paired, but no allowance came back");
+});
+
+// ---------------------------------------------------------------------------
+// 11. Review round 2 — SF1: an old-key card must not gain a duplicate
+// ---------------------------------------------------------------------------
+
+// The policy already matched the pre-round-1 key (`expose:<cap>:<peer>`), but the
+// DETECTOR ignored the `dedupe` verdict and fell through to `upsertItem` under
+// the NEW key — which inserted a second open card for the same request. Policy
+// tests alone could not see that; this one goes through the real event path.
+test("SF1: a repeat denial for a pre-round-1 card bumps THAT card and leaves exactly one open card", async () => {
+  const peer = "peer-sf1";
+  await trustPeer(peer);
+  await store.upsertItem(db, {
+    source: "remote-exposure",
+    dedupKey: legacyDedupKeyFor(peer, "funkwhale"),
+    title: "Another device tried to use Music",
+    why: "Allow it?",
+    severity: "warn",
+    remedies: [{ label: "Allow", actionId: "expose-capability", kind: "instant", args: { capability: "funkwhale" } }],
+    context: { capability: "funkwhale", requestingInstance: peer, toolName: "fw_play" },
+  });
+  const seeded = (await store.listPending(db))[0];
+  assert.equal(seeded.dedupKey, legacyDedupKeyFor(peer, "funkwhale"));
+
+  // The same peer asks again, through the real event path.
+  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", capabilityKnown: true, requestingInstance: peer, toolName: "fw_play" });
+
+  const pending = await store.listPending(db);
+  assert.equal(pending.length, 1, "ONE open card — the repeat must not insert a second row under the new key");
+  assert.equal(pending[0].id, seeded.id, "the card that was already open is the one that was bumped");
+  assert.equal(pending[0].dedupKey, legacyDedupKeyFor(peer, "funkwhale"), "its old key shape is preserved");
+  assert.equal(pending[0].count, seeded.count + 1, "and its count records the repeat");
+  const rows = await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM fix_it_items WHERE source = ? AND status = 'pending'",
+    args: ["remote-exposure"],
+  });
+  assert.equal(Number(rows.rows[0].n), 1, "exactly one pending row in the table, not just in the pending view");
+});
+
+// ---------------------------------------------------------------------------
+// 12. Review round 2 — N-a: a revoke answers the peer's cards, and a card for
+//     a peer that is no longer trusted cannot grant anything
+// ---------------------------------------------------------------------------
+
+test("N-a: revoke answers the peer's open card; re-pairing the same id does not make that card clickable again", async () => {
+  const { revokePeer, PEER_EXPOSURE_CARD_SOURCE } = await import("../servers/sharing/revoke-peer.js");
+  // The revoke module keeps the detector's source as a literal; if either moves,
+  // the cards stop being answered and this test says so.
+  const detector = (await import("../servers/gateway/fix-it/detectors/remote-exposure.js")).default;
+  assert.equal(PEER_EXPOSURE_CARD_SOURCE, detector.source);
+
+  const peer = "peer-na";
+  await trustPeer(peer);
+  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: peer, toolName: "fw_play" });
+  const card = (await store.listPending(db))[0];
+  assert.equal(card.context.requestingInstance, peer);
+
+  const r = await revokePeer(db, peer, { instanceSyncManager: null });
+  assert.equal(r.ok, true);
+  assert.equal((await store.getItem(db, card.id)).status, "resolved", "the revoke answers the card it left behind");
+  assert.equal((await store.listPending(db)).length, 0, "nothing is left asking for a peer that is gone");
+
+  // Re-pair under the SAME id (a revoke→re-pair reuses it): the row is trusted
+  // again, so the remedy's trust check would pass — the answered card must not.
+  await db.execute({
+    sql: "UPDATE crow_instances SET status = 'active', auth_token_hash = 'reissued', trusted = 1 WHERE id = ?",
+    args: [peer],
+  });
+  const redirected = await clickAllow(card);
+  assert.match(redirected, /flash=fixit_not_pending/, "the stale card refuses");
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).size, 0, "and grants nothing");
+  assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written at all");
+});
+
+test("N-a: the Allow remedy refuses for a peer that is not a currently trusted peer", async () => {
+  const peer = "peer-na-row";
+  await trustPeer(peer);
+  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: peer });
+  const card = (await store.listPending(db))[0];
+  assert.ok(card, "the card exists while the peer is trusted");
+
+  // A revoke written by ANOTHER process lands on the row only: the card is still
+  // pending here, so the remedy itself must refuse.
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'revoked' WHERE id = ?", args: [peer] });
+  const revoked = await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db, item: card });
+  assert.equal(revoked.resolved, false, "a revoked peer is refused");
+  assert.match(revoked.message, /trusted peer/, "and the refusal says why");
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).size, 0, "nothing granted");
+  assert.equal((await getPeerExposures(db)).size, 0);
+
+  // Paused (an owner's reversible sync hold) and untrusted rows are not trusted
+  // either, and neither is an id with no row at all.
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'paused', trusted = 1 WHERE id = ?", args: [peer] });
+  assert.equal((await remedy({ capability: "funkwhale", requestingInstance: peer }, { db })).resolved, false, "paused refused");
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'active', trusted = 0 WHERE id = ?", args: [peer] });
+  assert.equal((await remedy({ capability: "funkwhale", requestingInstance: peer }, { db })).resolved, false, "untrusted refused");
+  const neverPaired = await remedy({ capability: "funkwhale", requestingInstance: "peer-never-paired" }, { db });
+  assert.equal(neverPaired.resolved, false, "a peer with no row is not a trusted peer");
+  assert.match(neverPaired.message, /trusted peer/);
+  assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written by any of them");
+
+  // The same card still works once the peer is trusted again (the remedy reads
+  // the row at click time, it does not cache the card's verdict).
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'active', trusted = 1 WHERE id = ?", args: [peer] });
+  assert.equal((await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db })).resolved, true);
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).has("funkwhale"), true);
 });
