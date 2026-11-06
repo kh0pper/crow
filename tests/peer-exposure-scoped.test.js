@@ -35,10 +35,18 @@ import * as store from "../servers/shared/fix-it/store.js";
 import {
   decidePeerExposureCard,
   dedupKeyFor,
+  legacyDedupKeyFor,
   MAX_OPEN_CARDS_PER_PEER,
   NEW_CARD_WINDOW_MS,
 } from "../servers/gateway/fix-it/peer-card-policy.js";
-import { getSuppressedRequests } from "../servers/gateway/fix-it/peer-card-counters.js";
+import {
+  getSuppressedRequests,
+  recordSuppressedRequest,
+  SUPPRESSED_COUNTER_MAX_ENTRIES,
+  SUPPRESSED_COUNTER_WINDOW_MS,
+} from "../servers/gateway/fix-it/peer-card-counters.js";
+import { resolveCalledCanonicalId } from "../servers/gateway/peer-exposure.js";
+import { getLocalCapabilityIds } from "../servers/gateway/capability-ids.js";
 
 let dir, db, idx, remedy, section;
 
@@ -101,6 +109,35 @@ async function gate(peerId, { now, body = CALL, emit = false } = {}) {
     emitFn: emit ? undefined : async () => {},
   });
   return { ok, res };
+}
+
+/**
+ * Run the real gate on the `/router` mount for a PEER-CHOSEN tool name — the
+ * attack surface of B2. `emitFn` lets a test collect the (fire-and-forget)
+ * emit promises so it can await the detector rather than sleep.
+ */
+async function gateRouter(peerId, toolName, { emitFn } = {}) {
+  const res = mkRes();
+  const ok = await enforcePeerExposure({
+    prefix: "router",
+    req: peerReq(peerId, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName } }),
+    res, db, connectedServers: CONNECTED,
+    auditFn: async () => {},
+    emitFn: emitFn || (async () => {}),
+  });
+  return { ok, res };
+}
+
+/** Collect the real emitFixIt promises the gate fires without awaiting. */
+function emitCollector() {
+  const pending = [];
+  pending.fn = (d, ev, payload) => {
+    const p = idx.emitFixIt(d, ev, payload);
+    pending.push(p);
+    return p;
+  };
+  pending.settle = () => Promise.all(pending);
+  return pending;
 }
 
 async function waitForPending(predicate, deadlineMs = 2000) {
@@ -367,7 +404,7 @@ test("the card is keyed by the verified peer id, not by anything the request bod
   const card = pending[0];
 
   assert.equal(card.context.requestingInstance, "verified-peer");
-  assert.equal(card.dedupKey, "expose:funkwhale:verified-peer");
+  assert.equal(card.dedupKey, dedupKeyFor("verified-peer", "funkwhale"));
   assert.ok(card.remedies.every((r) => r.args.requestingInstance === "verified-peer"));
   assert.doesNotMatch(JSON.stringify(card), /Victim Device/);
   assert.doesNotMatch(JSON.stringify(card), /victim-id/);
@@ -415,4 +452,217 @@ test("a remedy whose card carries no verified peer id refuses instead of widenin
   assert.equal(r.resolved, false);
   assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false);
   assert.equal((await getPeerExposures(db)).size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 6. Review round 1 — B1: the decide-then-upsert step is serialised per peer
+// ---------------------------------------------------------------------------
+
+// The six core capabilities of any instance, plus addon-shaped ids a box with
+// addons would have. Every one of them is an id the gate would have matched
+// against the catalog before the event reached the detector.
+const TWENTY_CAPABILITIES = [
+  ...getLocalCapabilityIds(),
+  "funkwhale", "trello", "notion", "slack", "canvas", "weather", "calendar",
+  "contacts", "gallery", "podcast", "rss", "maps", "translate", "recipes",
+];
+
+test("B1: 20 concurrent denials for ONE peer make exactly 3 cards; the rest are counted", async () => {
+  const { _peerLockSize } = await import("../servers/gateway/fix-it/peer-card-lock.js");
+  assert.equal(TWENTY_CAPABILITIES.length, 20, "20 distinct capabilities");
+  assert.ok(MAX_OPEN_CARDS_PER_PEER < 20);
+
+  // All 20 fire-and-forget events are in flight together — the exact shape that
+  // used to let every one of them see "no open cards yet" and create a card.
+  await Promise.all(TWENTY_CAPABILITIES.map((capability) => idx.emitFixIt(db, "peer-exposure:denied", {
+    capability, capabilityKnown: true, requestingInstance: "peer-burst",
+  })));
+
+  const pending = await store.listPending(db);
+  assert.equal(pending.length, MAX_OPEN_CARDS_PER_PEER, `expected ${MAX_OPEN_CARDS_PER_PEER} pending cards`);
+  assert.equal(new Set(pending.map((p) => p.context.capability)).size, MAX_OPEN_CARDS_PER_PEER, "all different capabilities");
+
+  const counted = await getSuppressedRequests(db);
+  const total = [...counted.values()].reduce((n, v) => n + v.count, 0);
+  assert.equal(total, TWENTY_CAPABILITIES.length - MAX_OPEN_CARDS_PER_PEER, "every refused request is counted");
+  assert.ok([...counted.values()].every((v) => v.reason === "open_card_cap"));
+  assert.equal(counted.size, TWENTY_CAPABILITIES.length - MAX_OPEN_CARDS_PER_PEER, "one entry per refused capability");
+  assert.equal(_peerLockSize(), 0, "the per-peer chain is dropped once its tail settles");
+});
+
+// ---------------------------------------------------------------------------
+// 7. Review round 1 — B2: the peer does not choose the capability id
+// ---------------------------------------------------------------------------
+
+test("B2: 200 junk tool names raise no card and leave ONE counter entry for the peer", async () => {
+  const emits = emitCollector();
+  const calls = [];
+  for (let i = 0; i < 200; i++) calls.push(gateRouter("peer-junk", `crow_junk${i}`, { emitFn: emits.fn }));
+  // …plus two names that are not even id-shaped (no tail, absurdly long).
+  calls.push(gateRouter("peer-junk", `crow_${"a".repeat(300)}`, { emitFn: emits.fn }));
+  calls.push(gateRouter("peer-junk", "crow_", { emitFn: emits.fn }));
+
+  const results = await Promise.all(calls);
+  assert.equal(results.length, 202);
+  assert.ok(results.every((r) => r.ok === false), "every junk name is refused");
+  await emits.settle();
+
+  assert.equal((await store.listPending(db)).length, 0, "no card for a capability this instance does not have");
+  const counted = await getSuppressedRequests(db);
+  assert.equal(counted.size, 1, "one bucket, not one entry per junk name");
+  assert.equal(counted.get("peer-junk|unknown")?.count, 202);
+  assert.equal(counted.get("peer-junk|unknown")?.reason, "unknown_capability");
+  assert.deepEqual((await getPeerExposures(db)).size, 0);
+});
+
+test("B2: crow_Memory and crow_memory are ONE capability (the case variant is not unknown)", async () => {
+  assert.equal(resolveCalledCanonicalId("router", { method: "tools/call", params: { name: "crow_Memory" } }), "crow-memory");
+  assert.equal(resolveCalledCanonicalId("router", { method: "tools/call", params: { name: "crow_memory" } }), "crow-memory");
+
+  const emits = emitCollector();
+  await Promise.all([
+    gateRouter("peer-case", "crow_Memory", { emitFn: emits.fn }),
+    gateRouter("peer-case", "crow_memory", { emitFn: emits.fn }),
+  ]);
+  await emits.settle();
+
+  const pending = await store.listPending(db);
+  assert.equal(pending.length, 1, "both spellings land on the same card");
+  assert.equal(pending[0].context.capability, "crow-memory");
+  assert.equal(pending[0].count, 2, "the second spelling was deduped, not carded again");
+  assert.equal((await getSuppressedRequests(db)).size, 0, "nothing was counted as unknown");
+});
+
+test("B2: the suppressed-counter map is capped and pruned", async () => {
+  const now = Date.now();
+  const seeded = Object.create(null);
+  for (let i = 0; i < SUPPRESSED_COUNTER_MAX_ENTRIES + 120; i++) {
+    seeded[`peer-seed${i}|crow-memory`] = { count: 1, last_at: new Date(now - 1000).toISOString(), reason: "open_card_cap" };
+  }
+  await writeSetting(db, "peer_exposure_card_suppressed", JSON.stringify(seeded), { scope: "local" });
+  await recordSuppressedRequest(db, { peerId: "peer-fresh", capability: "crow-blog", reason: "open_card_cap", now });
+  const after = await getSuppressedRequests(db);
+  assert.equal(after.size, SUPPRESSED_COUNTER_MAX_ENTRIES, "the map never exceeds the cap");
+  assert.ok(after.has("peer-fresh|crow-blog"), "the newest entry survives; the oldest are evicted");
+
+  // An entry whose window has passed is pruned on the next write.
+  const stale = Object.create(null);
+  stale["peer-stale|crow-memory"] = {
+    count: 5, last_at: new Date(now - SUPPRESSED_COUNTER_WINDOW_MS - 1000).toISOString(), reason: "open_card_cap",
+  };
+  await writeSetting(db, "peer_exposure_card_suppressed", JSON.stringify(stale), { scope: "local" });
+  await recordSuppressedRequest(db, { peerId: "peer-fresh", capability: "crow-blog", reason: "open_card_cap", now });
+  assert.equal((await getSuppressedRequests(db)).has("peer-stale|crow-memory"), false, "an expired window is pruned");
+});
+
+// ---------------------------------------------------------------------------
+// 8. Review round 1 — S1: a card written by the OLD detector
+// ---------------------------------------------------------------------------
+
+test("S1: an old-shape Allow card grants only its STORED peer, for 30 days", async () => {
+  const peer = "peer-old";
+  // Exactly what the pre-scoping detector wrote: one button, no duration, the
+  // capability in the remedy args and the peer only in the card CONTEXT.
+  await store.upsertItem(db, {
+    source: "remote-exposure",
+    dedupKey: legacyDedupKeyFor(peer, "funkwhale"),
+    title: "Another device tried to use Music",
+    why: "Allow it?",
+    severity: "warn",
+    remedies: [{ label: "Allow", actionId: "expose-capability", kind: "instant", args: { capability: "funkwhale" } }],
+    context: { capability: "funkwhale", requestingInstance: peer, toolName: "fw_play" },
+  });
+  const card = (await store.listPending(db))[0];
+  assert.equal(card.remedies[0].actionId, "expose-capability");
+
+  const before = Date.now();
+  const redirected = await clickAllow(card, "expose-capability");
+  assert.match(redirected, /flash=fixit_fixed/);
+
+  const grant = (await getPeerExposures(db)).get(peer).get("funkwhale");
+  const days = (Date.parse(grant.expiresAt) - before) / DAY;
+  assert.ok(days > 29.9 && days <= 30.1, `the legacy button means the 30-day default, got ${days}`);
+  assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false, "still never the all-peer list");
+  assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-other"), false, "no other peer is granted");
+  assert.equal((await gate(peer, { now: before + 29 * DAY })).ok, true);
+  assert.equal((await gate(peer, { now: before + 31 * DAY })).ok, false, "and it expires");
+
+  // The answered legacy card still occupies its rate-limit slot: the same
+  // request is counted, not re-carded (old-format dedupe keys are still read).
+  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", capabilityKnown: true, requestingInstance: peer });
+  assert.equal((await store.listPending(db)).length, 0, "no duplicate card for the same (capability, peer)");
+  assert.equal((await getSuppressedRequests(db)).get(`${peer}|funkwhale`)?.reason, "same_capability_within_24h");
+});
+
+// ---------------------------------------------------------------------------
+// 9. Review round 1 — N1: the dedupe key is unambiguous and old keys still read
+// ---------------------------------------------------------------------------
+
+test("N1: the dedupe key separator cannot appear in either part, and old keys still dedupe", () => {
+  // Peer ids are [A-Za-z0-9._:-] (so they CAN contain ':'), which is what made
+  // `expose:<capability>:<peer>` ambiguous.
+  assert.notEqual(dedupKeyFor("peer:c", "crow-memory"), legacyDedupKeyFor("peer:c", "crow-memory"));
+  assert.equal(dedupKeyFor("peer:c", "crow-memory"), "expose|crow-memory|peer:c");
+
+  // A card opened with the old key shape is still recognised as the same
+  // (capability, peer) — the fallback looks at the key, not only the context.
+  const items = [{
+    id: 3, dedupKey: legacyDedupKeyFor("peer-c", "funkwhale"), status: "pending", count: 1,
+    context: { requestingInstance: "peer-c" },
+    createdAt: "2026-01-01 00:00:00", updatedAt: "2026-01-01 00:00:00",
+  }];
+  assert.deepEqual(
+    decidePeerExposureCard({ items, peerId: "peer-c", capability: "funkwhale" }),
+    { action: "dedupe", itemId: 3 },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 10. Review round 1 — S3: revoking a peer drops its one-device allowances
+// ---------------------------------------------------------------------------
+
+test("S3: revoking a peer removes its grants; re-pairing the same id starts clean", async () => {
+  const { revokePeer } = await import("../servers/sharing/revoke-peer.js");
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, ?, ?)",
+    args: ["peer-revoked", "Peer To Revoke", "crow-other", "active", 1],
+  });
+  await grantPeerCapability(db, { peerId: "peer-revoked", capability: "funkwhale", expiresAt: null });
+  await grantPeerCapability(db, { peerId: "peer-revoked", capability: "crow-blog", expiresAt: null });
+  await grantPeerCapability(db, { peerId: "peer-bystander", capability: "funkwhale", expiresAt: null });
+  assert.equal((await gate("peer-revoked")).ok, true);
+
+  const r = await revokePeer(db, "peer-revoked", { instanceSyncManager: null });
+  assert.equal(r.ok, true);
+
+  assert.equal((await getPeerExposures(db)).has("peer-revoked"), false, "every grant for the revoked peer is gone");
+  assert.deepEqual([...((await getPeerExposures(db)).keys())], ["peer-bystander"], "another peer's grant is untouched");
+  assert.equal((await gate("peer-revoked")).ok, false, "and the revoked peer is refused");
+
+  // Re-pair with the same id (a revoke→re-pair reuses it): the row comes back,
+  // the allowances do not.
+  await db.execute({
+    sql: "UPDATE crow_instances SET status = 'active', auth_token_hash = 'reissued', trusted = 1 WHERE id = ?",
+    args: ["peer-revoked"],
+  });
+  assert.equal((await getPeerGrantedCapabilities(db, "peer-revoked")).size, 0, "no grant survives the re-pair");
+  assert.equal((await gate("peer-revoked")).ok, false, "the re-paired peer must be allowed again from scratch");
+});
+
+test("S3: a revoke written by ANOTHER process (row only) also drops the grants on the next sweep", async () => {
+  const { reconcilePeerCreds } = await import("../servers/gateway/peer-trust-sweeper.js");
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, ?, ?)",
+    args: ["peer-elsewhere", "Peer Revoked Elsewhere", "crow-third", "active", 1],
+  });
+  await grantPeerCapability(db, { peerId: "peer-elsewhere", capability: "funkwhale", expiresAt: null });
+  assert.equal((await gate("peer-elsewhere")).ok, true);
+
+  // The stdio MCP door flips the row and the gateway only sees the row change.
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'revoked' WHERE id = ?", args: ["peer-elsewhere"] });
+  await reconcilePeerCreds(db);
+
+  assert.equal((await getPeerExposures(db)).has("peer-elsewhere"), false, "the sweep drops the revoked peer's allowances");
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'active', trusted = 1 WHERE id = ?", args: ["peer-elsewhere"] });
+  assert.equal((await gate("peer-elsewhere")).ok, false, "re-paired, but no allowance came back");
 });

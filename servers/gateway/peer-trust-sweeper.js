@@ -30,6 +30,7 @@
 
 import { existsSync, writeFileSync, copyFileSync, chmodSync } from "node:fs";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
+import { getPeerExposures, removePeerExposures } from "./peer-exposure-store.js";
 import { updatePeerCreds, entryMintMs, loadPeerCreds, peerTokensPath, migratePeerCredsStore } from "../shared/peer-credentials.js";
 import { setUntrustedWithCreds, setOrphanKeys } from "../shared/peer-trust-health.js";
 import { closeSessionsOwnedByEverywhere, countSessionsOwnedByEverywhere, peerSessionOwner } from "./session-manager.js";
@@ -75,6 +76,19 @@ export async function reconcilePeerCreds(db, { localInstanceId = null } = {}) {
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
   const revoked = rows.filter((r) => r.status === "revoked");
+
+  // N1b-8 (review round 1, S3): a revoked peer keeps no one-device allowances.
+  // The revoke DOOR drops them (servers/sharing/revoke-peer.js); this covers a
+  // revoke written by ANOTHER process, which lands on the row only. Read first,
+  // write only when that peer actually holds a grant.
+  if (revoked.length) {
+    try {
+      const grants = await getPeerExposures(db);
+      for (const r of revoked) {
+        if (grants.has(r.id)) await removePeerExposures(db, { peerId: r.id });
+      }
+    } catch { /* the row gate already refuses the peer */ }
+  }
 
   const deleted = [];
   const keptSameSecond = [];

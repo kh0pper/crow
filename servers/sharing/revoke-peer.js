@@ -15,6 +15,9 @@
  *      Skipped, and reported as `store_mismatch`, when the resolved store and
  *      the open DB do not belong to the same instance; the owning gateway's
  *      trust sweeper then deletes it (servers/gateway/peer-trust-sweeper.js).
+ *   2b. N1b-8 (review round 1, S3): drop every per-device allowance the peer
+ *      held (`remote_exposed_tools_by_peer`), so a revoke→re-pair with the same
+ *      id starts with no grants.
  *   3. PT-1: end the SSO sessions the peer minted (scopes
  *      'dashboard sso src:<id>') and any untagged legacy SSO sessions.
  *   4. instanceSyncManager.teardownRevokedPeer(): close the peer's feeds and
@@ -33,6 +36,7 @@
  */
 
 import { getInstance, revokeInstance } from "../gateway/instance-registry.js";
+import { removePeerExposures } from "../gateway/peer-exposure-store.js";
 import { createNotification } from "../shared/notifications.js";
 import { deletePeerCreds, getPeerCreds, peerTokensPath } from "../shared/peer-credentials.js";
 import { resolveInstanceDataDir, resolveCrowHome, sameDbLocation, isWithin } from "../shared/crow-home.js";
@@ -73,6 +77,28 @@ let _mgrResolverForTest = null;
 /** Test seam: resolve the sync manager for revokePeer calls that pass none. */
 export function _setSyncManagerResolverForTest(fn) { _mgrResolverForTest = fn; }
 
+/**
+ * N1b-8 review round 1 (S3): a revoked id must never come back with allowances
+ * attached — a revoke→re-pair reuses the instance id, so a grant left behind
+ * would silently re-open the capability to the re-paired peer.
+ *
+ * Best-effort: the row revoke is authoritative and must not be undone by a
+ * settings write, so a failure here is logged, never thrown.
+ */
+async function dropPeerExposureGrants(db, id) {
+  if (!id) return { removed: 0 };
+  try {
+    const r = await removePeerExposures(db, { peerId: id });
+    if (r && r.removed > 0) {
+      console.log(`[revoke-peer] dropped ${r.removed} one-device allowance(s) for ${String(id).slice(0, 12)}`);
+    }
+    return r || { removed: 0 };
+  } catch (err) {
+    console.warn(`[revoke-peer] could not drop one-device allowances for ${String(id).slice(0, 12)}: ${err.message}`);
+    return { removed: 0 };
+  }
+}
+
 async function defaultManager() {
   if (_mgrResolverForTest) return _mgrResolverForTest();
   try {
@@ -97,6 +123,7 @@ export async function revokePeer(db, id, { instanceSyncManager, localInstanceId 
     // A key with no row cannot be revoked through the row; purge the key.
     if (id && (!localInstanceId || id !== localInstanceId) && getPeerCreds(id)) {
       const creds = deleteCredsGuarded(id);
+      await dropPeerExposureGrants(db, id);
       return { ok: creds.creds_deleted === true, orphan: true, ...creds, ...(creds.creds_deleted ? {} : { reason: creds.reason }) };
     }
     return { ok: false, reason: "not_found" };
@@ -109,6 +136,9 @@ export async function revokePeer(db, id, { instanceSyncManager, localInstanceId 
 
   // 2. The signing key.
   const creds = deleteCredsGuarded(id);
+
+  // 2b. N1b-8 (S3): every one-device allowance for this peer goes with it.
+  await dropPeerExposureGrants(db, id);
 
   // 3. SSO sessions the peer minted, plus legacy untagged ones (≤24 h).
   try {

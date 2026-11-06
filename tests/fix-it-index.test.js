@@ -66,3 +66,36 @@ test("handleFixItAction dismiss suppresses the card", async () => {
   await idx.handleFixItAction({ body: { action: "dismiss", item_id: String(item.id) } }, res, { db });
   assert.equal((await store.listPending(db)).length, 0);
 });
+
+// N1b-8 review round 1 (N2): a remedy must not run for a card that is no longer
+// pending. Before this guard the handler trusted the POST: a stale page, a
+// double submit or a replayed form re-ran the remedy (re-granting an allowance
+// the operator had already answered, or granting one for a card they dismissed).
+test("handleFixItAction refuses a remedy on a card that is no longer pending", async () => {
+  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-stale" });
+  const item = (await store.listPending(db))[0];
+  const req = { body: { action: "remedy", item_id: String(item.id), action_id: "expose-capability-30d" } };
+
+  // 1. Already resolved (someone clicked it, or the fix landed elsewhere).
+  await store.markResolved(db, item.id);
+  let redirected = null;
+  await idx.handleFixItAction(req, { redirectAfterPost: (u) => { redirected = u; } }, { db });
+  assert.match(redirected, /flash=fixit_not_pending/, "the refusal says the card is not open");
+  assert.equal((await store.getItem(db, item.id)).status, "resolved", "the card state is unchanged");
+
+  const { getPeerGrantedCapabilities, getExposedCapabilities } = await import("../servers/gateway/peer-exposure.js");
+  assert.equal((await getPeerGrantedCapabilities(db, "peer-stale")).size, 0, "nothing was granted");
+  assert.ok(!(await getExposedCapabilities(db)).has("funkwhale"));
+
+  // 2. Dismissed is not pending either.
+  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "crow-blog", capabilityKnown: true, requestingInstance: "peer-stale-2" });
+  const dismissed = (await store.listPending(db))[0];
+  await store.dismiss(db, dismissed.id, 7);
+  redirected = null;
+  await idx.handleFixItAction(
+    { body: { action: "remedy", item_id: String(dismissed.id), action_id: "expose-capability-30d" } },
+    { redirectAfterPost: (u) => { redirected = u; } }, { db },
+  );
+  assert.match(redirected, /flash=fixit_not_pending/);
+  assert.equal((await getPeerGrantedCapabilities(db, "peer-stale-2")).size, 0, "a dismissed card grants nothing");
+});

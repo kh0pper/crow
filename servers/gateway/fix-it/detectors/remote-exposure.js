@@ -13,11 +13,21 @@
  *     card per peer per capability per 24 h (peer-card-policy.js);
  *   - requests that earn no card are COUNTED, not dropped silently.
  *
+ * Review round 1:
+ *   - B1: the decide-then-upsert step runs under a per-peer lock
+ *     (peer-card-lock.js), so concurrent denials cannot all see "no cards" and
+ *     each create one;
+ *   - B2: `capabilityKnown === false` (the gate could not match the id against
+ *     this instance's own catalog) earns no card and ONE counter bucket per
+ *     peer, never a key built from the peer's own string.
+ *
  * DB-free: it composes strings from the (already name-enriched) payload and the
  * pure friendly-name map, then calls the db-bound store it's handed.
  */
 import { resolveFriendlyName } from "../friendly-names.js";
 import { normalizePeerId } from "../../../shared/peer-id.js";
+import { UNKNOWN_CAPABILITY_BUCKET } from "../peer-card-counters.js";
+import { withPeerLock } from "../peer-card-lock.js";
 import {
   cardRemedies,
   decidePeerExposureCard,
@@ -26,12 +36,49 @@ import {
 
 const SOURCE = "remote-exposure";
 
+/** The decide-then-upsert body, run under the per-peer lock. */
+async function decideAndStore({ capability, peerId, peerName, toolName, store, now }) {
+  let items = [];
+  try {
+    items = typeof store?.listBySource === "function" ? await store.listBySource(SOURCE) : [];
+  } catch { items = []; }
+
+  const decision = decidePeerExposureCard({ items, peerId, capability, now });
+  if (decision.action === "drop" || decision.action === "count") {
+    // Recorded, but no card (or no NEW card). Never let bookkeeping break the
+    // request path — the caller is the peer-exposure gate.
+    try {
+      if (decision.action === "count" && store?.recordDuplicate) {
+        await store.recordDuplicate(decision.itemId);
+      }
+      if (store?.recordSuppressed) {
+        await store.recordSuppressed({ peerId, capability, reason: decision.reason || decision.action, now });
+      }
+    } catch { /* best-effort bookkeeping */ }
+    return; // no card, no NEW card
+  }
+
+  const friendly = resolveFriendlyName(capability);
+  // `requestingInstanceName` is the peer's label as THIS instance stored it
+  // (fix-it/index.js resolves it from the instance registry by the verified
+  // id) — display text only; identity stays `peerId`.
+  const peer = peerName || "another device";
+  await store.upsertItem({
+    source: SOURCE,
+    dedupKey: dedupKeyFor(peerId, capability),
+    title: `Your ${peer} tried to use ${friendly}, but it isn't shared with this device yet`,
+    why: `Allow it for ${peer} only — your other Crows stay unchanged, and the allowance can expire or be removed in Settings.`,
+    severity: "warn",
+    remedies: cardRemedies(capability, peerId),
+    context: { capability, requestingInstance: peerId, toolName: toolName || null },
+  });
+}
+
 export default {
   source: SOURCE,
   events: ["peer-exposure:denied"],
   async onEvent(_eventName, payload, store) {
-    const { capability, requestingInstance, requestingInstanceName, toolName } = payload || {};
-    if (!capability) return; // only real, resolvable capabilities become cards
+    const { capability, requestingInstance, requestingInstanceName, toolName, capabilityKnown } = payload || {};
 
     // The identity is the id the request was VERIFIED with. Anything else (a
     // display name, a missing id, a non-id string) earns no card at all: a card
@@ -41,39 +88,29 @@ export default {
 
     const now = typeof store?.now === "function" ? store.now() : Date.now();
 
-    let items = [];
-    try {
-      items = typeof store?.listBySource === "function" ? await store.listBySource(SOURCE) : [];
-    } catch { items = []; }
-
-    const decision = decidePeerExposureCard({ items, peerId, capability, now });
-    if (decision.action === "drop" || decision.action === "count") {
-      // Recorded, but no card (or no NEW card). Never let bookkeeping break the
-      // request path — the caller is the peer-exposure gate.
+    // B2: the peer named a tool the gate could not match to a capability of
+    // this instance (it may not even be id-shaped, hence the check before the
+    // `!capability` guard). It is refused — the gate already did that — and
+    // counted in one bounded bucket: no card, and no counter key the peer chose.
+    if (capabilityKnown === false) {
       try {
-        if (decision.action === "count" && store?.recordDuplicate) {
-          await store.recordDuplicate(decision.itemId);
-        }
         if (store?.recordSuppressed) {
-          await store.recordSuppressed({ peerId, capability, reason: decision.reason || decision.action, now });
+          await store.recordSuppressed({
+            peerId,
+            capability: UNKNOWN_CAPABILITY_BUCKET,
+            reason: "unknown_capability",
+            now,
+          });
         }
       } catch { /* best-effort bookkeeping */ }
-      return; // no card, no NEW card
+      return;
     }
 
-    const friendly = resolveFriendlyName(capability);
-    // `requestingInstanceName` is the peer's label as THIS instance stored it
-    // (fix-it/index.js resolves it from the instance registry by the verified
-    // id) — display text only; identity stays `peerId`.
-    const peer = requestingInstanceName || "another device";
-    await store.upsertItem({
-      source: SOURCE,
-      dedupKey: dedupKeyFor(peerId, capability),
-      title: `Your ${peer} tried to use ${friendly}, but it isn't shared with this device yet`,
-      why: `Allow it for ${peer} only — your other Crows stay unchanged, and the allowance can expire or be removed in Settings.`,
-      severity: "warn",
-      remedies: cardRemedies(capability, peerId),
-      context: { capability, requestingInstance: peerId, toolName: toolName || null },
-    });
+    if (!capability) return; // only real, resolvable capabilities become cards
+
+    // B1: serialise the read-decide-write per peer.
+    await withPeerLock(peerId, () => decideAndStore({
+      capability, peerId, peerName: requestingInstanceName, toolName, store, now,
+    }));
   },
 };

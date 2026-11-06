@@ -179,6 +179,13 @@ export async function handleFixItAction(req, res, { db }) {
     if (action === "remedy") {
       const item = await store.getItem(db, itemId);
       if (!item) return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
+      // N1b-8 review round 1 (N2): only a card that is still open may run its
+      // remedy. A stale page, a double submit or a replayed POST would
+      // otherwise re-apply a fix the operator already answered (re-granting an
+      // allowance, or granting one for a card they dismissed).
+      if (item.status !== "pending") {
+        return res.redirectAfterPost("/dashboard/nest?flash=fixit_not_pending");
+      }
       const entry = (item.remedies || []).find((r) => r.actionId === body.action_id);
       if (!entry) return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
       if (entry.kind && entry.kind !== "instant") {

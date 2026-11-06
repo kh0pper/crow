@@ -142,6 +142,26 @@ export async function isCapabilityExposedToPeer(db, capability, peerId, { now = 
   return (await getPeerGrantedCapabilities(db, peerId, { now })).has(capability);
 }
 
+/**
+ * What ONE peer may invoke right now: the all-trusted-peers allowlist UNION that
+ * peer's own active grants. Used where the catalog is served to a verified peer
+ * (S2) — its Bot Builder must see a one-device allowance as exposed without
+ * ever seeing anybody else's.
+ *
+ * Never throws. An ill-shaped peer id yields the all-peer set only.
+ *
+ * @param {object} db
+ * @param {string} peerId verified peer instance id
+ * @param {{now?: number}} [opts] injected clock (tests)
+ * @returns {Promise<Set<string>>}
+ */
+export async function getExposureForPeer(db, peerId, { now = Date.now() } = {}) {
+  const out = new Set();
+  try { for (const cap of await getExposedCapabilities(db)) out.add(cap); } catch { /* deny-all for this half */ }
+  try { for (const cap of await getPeerGrantedCapabilities(db, peerId, { now })) out.add(cap); } catch { /* deny-all for this half */ }
+  return out;
+}
+
 // --- mutations -------------------------------------------------------------
 // Read-modify-write on ONE settings key, serialized per process so two
 // concurrent fixes cannot clobber each other's grant.
@@ -229,4 +249,28 @@ export async function removePeerGrant(db, { peerId, capability } = {}) {
     return all;
   });
   return found ? { ok: true, peerId: id, capability: cap } : { ok: false, error: "not_granted" };
+}
+
+/**
+ * Drop EVERY grant for one peer. Called when the peer is revoked or removed:
+ * a revoked id must not come back with allowances attached if it is paired
+ * again (a revoke→re-pair reuses the id). Goes through the same serialised
+ * writer as every other mutation, and writes nothing when the peer has no
+ * grants.
+ *
+ * @param {object} db
+ * @param {{peerId: string}} args
+ * @returns {Promise<{ok: boolean, peerId?: string, removed?: number, error?: string}>}
+ */
+export async function removePeerExposures(db, { peerId } = {}) {
+  const id = normalizePeerId(peerId);
+  if (!id) return { ok: false, error: "unknown_peer", removed: 0 };
+  return withStoreLock(async () => {
+    const current = await getPeerExposures(db);
+    const caps = current.get(id);
+    if (!caps) return { ok: true, peerId: id, removed: 0 };
+    current.delete(id);
+    await writeSetting(db, PEER_EXPOSURE_SETTING_KEY, serializePeerExposures(current), { scope: "local" });
+    return { ok: true, peerId: id, removed: caps.size };
+  });
 }

@@ -45,6 +45,57 @@ test("catalog reflects the exposure set on tool entries", async () => {
   assert.ok(others.every((t) => t.exposed === false), "non-exposed tools are exposed:false");
 });
 
+// N1b-8 review round 1 (S2): `exposed` used to come from the all-peer list
+// only, so a requesting peer's Bot Builder showed a granted tool as NOT
+// exposed. Served to a verified peer, the catalog must mark a capability
+// exposed when it is in the all-peer list OR that peer holds an active grant —
+// and never show another peer's allowance.
+test("catalog served to a verified peer marks its OWN grant exposed, and nobody else's", async () => {
+  const now = Date.now();
+  const prior = new Date(now - 120_000).toISOString();
+  const grants = {
+    "peer-a": {
+      "crow-blog": { expires_at: null, granted_at: prior },                                    // active, until removed
+      "crow-projects": { expires_at: new Date(now - 60_000).toISOString(), granted_at: prior }, // expired
+    },
+    "peer-b": { "crow-storage": { expires_at: null, granted_at: prior } },
+  };
+  const stub = {
+    async execute({ sql, args }) {
+      const key = args?.[0];
+      if (/dashboard_settings_overrides/.test(sql)) {
+        if (key === "remote_exposed_tools_by_peer") return { rows: [{ value: JSON.stringify(grants) }] };
+        return { rows: [] };
+      }
+      if (/FROM dashboard_settings\b/.test(sql)) {
+        if (key === "remote_exposed_tools") return { rows: [{ value: JSON.stringify(["crow-memory"]) }] };
+        return { rows: [] };
+      }
+      return { rows: [] }; // pi_bot_defs
+    },
+  };
+  const exposedFor = async (peerId) => {
+    const cat = await getLocalCatalog(stub, { crowHome: "/tmp/nonexistent-crowhome", instanceId: "self", peerId });
+    return Object.fromEntries(cat.tools.map((t) => [t.canonicalId, t.exposed]));
+  };
+
+  const a = await exposedFor("peer-a");
+  assert.equal(a["crow-memory"], true, "the all-peer list applies to every peer");
+  assert.equal(a["crow-blog"], true, "peer-a's own one-device grant is exposed to peer-a");
+  assert.equal(a["crow-projects"], false, "an expired grant is not exposed");
+  assert.equal(a["crow-storage"], false, "peer-b's grant is invisible to peer-a");
+
+  const b = await exposedFor("peer-b");
+  assert.equal(b["crow-memory"], true);
+  assert.equal(b["crow-storage"], true, "peer-b sees its own grant");
+  assert.equal(b["crow-blog"], false, "peer-a's grant is invisible to peer-b");
+
+  // No verified peer (the local/settings view): the all-peer list only.
+  const local = await getLocalCatalog(stub, { crowHome: "/tmp/nonexistent-crowhome", instanceId: "self" });
+  const exposedIds = local.tools.filter((t) => t.exposed).map((t) => t.canonicalId);
+  assert.deepEqual(exposedIds, ["crow-memory"], "no peer's grants leak into a peerless catalog");
+});
+
 // Skills panel option C, PR 2: peers are not advertised a skill this Crow
 // switched off (it would not load).
 test("catalog skills leave out a skill switched off on this instance", async () => {

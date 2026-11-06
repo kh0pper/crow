@@ -35,8 +35,27 @@ export const CARD_DURATIONS = Object.freeze([
 /** Every actionId this card can post; the gateway registers all of them. */
 export const CARD_ACTION_IDS = Object.freeze(CARD_DURATIONS.map((d) => d.actionId));
 
+/**
+ * Field separator for the dedupe key (N1, review round 1).
+ *
+ * The old key was `expose:<capability>:<peerId>`, but BOTH parts may contain a
+ * colon — peer ids are `[A-Za-z0-9._:-]{1,128}` (servers/shared/peer-id.js), and
+ * a capability id is an addon id / manifest category (`[A-Za-z0-9._-]`, see
+ * capability-ids.js) — so `expose:a:b:c` was ambiguous. `|` can appear in
+ * neither: the peer-id regex excludes it, and capability ids come from this
+ * instance's own catalog (manifest keys and installed-extension ids, both
+ * slug-shaped). Cards written before this change are still found by
+ * legacyDedupKeyFor().
+ */
+const DEDUP_SEP = "|";
+
 /** Stable dedupe key: one card per (capability, peer). */
 export function dedupKeyFor(peerId, capability) {
+  return `expose${DEDUP_SEP}${capability}${DEDUP_SEP}${peerId}`;
+}
+
+/** The pre-round-1 key shape, still read so an open card keeps its dedupe. */
+export function legacyDedupKeyFor(peerId, capability) {
   return `expose:${capability}:${peerId}`;
 }
 
@@ -78,8 +97,12 @@ export function parseDbTime(value) {
  */
 export function decidePeerExposureCard({ items = [], peerId, capability, now = Date.now() } = {}) {
   const key = dedupKeyFor(peerId, capability);
+  const legacyKey = legacyDedupKeyFor(peerId, capability);
   const mine = (items || []).filter((i) => i && i.context && i.context.requestingInstance === peerId);
-  const existing = mine.find((i) => i.dedupKey === key) || mine.find((i) => i.context?.capability === capability);
+  // Both key shapes (a card opened before round 1 still owns its dedupe slot),
+  // else the stored capability — which is what the rate limit really means.
+  const existing = mine.find((i) => i.dedupKey === key || i.dedupKey === legacyKey)
+    || mine.find((i) => i.context?.capability === capability);
 
   if (existing) {
     // Same request again while the card is open → the store's upsert bumps its

@@ -12,13 +12,15 @@ import { normalizeSkillName } from "../../scripts/pi-bots/skill_proposals.mjs";
 import { readdirSync } from "node:fs";
 import { offSkills } from "../shared/skill-state.js";
 import { getExposedCapabilities } from "./peer-exposure.js";
+import { getExposureForPeer } from "./peer-exposure-store.js";
+import { canonicalForCategory } from "./capability-ids.js";
 import { getPeerManagedBots } from "./bot-management-exposure.js";
 import { CROW_VOICE_BOT_ID } from "../shared/voice-bot.js";
 
-/** Canonical server id for a core manifest category (crow-memory, etc.). */
-export function canonicalForCategory(category) {
-  return `crow-${category}`;
-}
+// Canonical id shape lives in capability-ids.js (a leaf, so the peer-exposure
+// gate can use it without a cycle); re-exported here because callers expect it
+// from the catalog module.
+export { canonicalForCategory };
 
 // ---- public-safe projectors (security boundary) ----
 
@@ -109,9 +111,20 @@ async function localBots(db) {
 
 /**
  * The local, vocab-normalized catalog with everything projected public-safe.
+ *
+ * N1b-8 review round 1 (S2): when the catalog is served to a VERIFIED peer,
+ * pass `peerId` — a capability is then marked `exposed` if it is in the
+ * all-trusted-peers allowlist OR that peer holds an active one-device grant.
+ * Only THAT peer's grants are merged: another peer's allowance is never
+ * visible here (the per-peer store is read for one id, never in bulk).
+ *
+ * @param {object} db
+ * @param {{crowHome?: string, instanceId?: string|null, instanceName?: string|null, peerId?: string|null}} [opts]
  */
-export async function getLocalCatalog(db, { crowHome = resolveCrowHome(), instanceId = null, instanceName = null } = {}) {
-  const exposedSet = await getExposedCapabilities(db);
+export async function getLocalCatalog(db, { crowHome = resolveCrowHome(), instanceId = null, instanceName = null, peerId = null } = {}) {
+  const exposedSet = peerId
+    ? await getExposureForPeer(db, peerId)
+    : await getExposedCapabilities(db);
   const managedSet = await getPeerManagedBots(db);
   const tools = [...coreTools(), ...addonTools(crowHome)].map((e) => toPublicTool(e, exposedSet));
   const skills = localSkills(crowHome).map(toPublicSkill);

@@ -22,16 +22,19 @@
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { auditCrossHostCall } from "../shared/cross-host-auth.js";
 import { emitFixIt } from "./fix-it/index.js";
+import { canonicalizePeerCapabilityTool, getLocalCapabilityIds } from "./capability-ids.js";
 import {
   EXPOSURE_SETTING_KEY,
   PEER_EXPOSURE_SETTING_KEY,
   getExposedCapabilities,
   getPeerExposures,
   getPeerGrantedCapabilities,
+  getExposureForPeer,
   isCapabilityExposedToPeer,
   grantPeerCapability,
   renewPeerGrant,
   removePeerGrant,
+  removePeerExposures,
   grantIsActive,
 } from "./peer-exposure-store.js";
 
@@ -44,10 +47,12 @@ export {
   getExposedCapabilities,
   getPeerExposures,
   getPeerGrantedCapabilities,
+  getExposureForPeer,
   isCapabilityExposedToPeer,
   grantPeerCapability,
   renewPeerGrant,
   removePeerGrant,
+  removePeerExposures,
   grantIsActive,
 };
 
@@ -96,14 +101,19 @@ function resolveProxyTool(toolName, connectedServers) {
 }
 
 /**
- * Resolve the canonical capability id a peer call targets.
- * @returns {string|null|"__allow__"} canonicalId to check; null = deny (fail
- *   closed); "__allow__" = ungated (discovery / non-tools-call method).
+ * Resolve the canonical capability id a peer call targets, and where the id
+ * came from: `peerChosen` is true only when the PEER named it (a `/router`
+ * `crow_<something>` tool), which is the one case where the id must be matched
+ * against this instance's own catalog before it may raise a card.
+ *
+ * @returns {{id: string|null|"__allow__", peerChosen: boolean}}
  */
-export function resolveCalledCanonicalId(prefix, body, connectedServers) {
+export function resolveCalledCapability(prefix, body, connectedServers) {
   // A batch (array) or a non-object body names no single method: never allow.
-  if (Array.isArray(body) || (body !== undefined && (body === null || typeof body !== "object"))) return null;
-  if (!body || body.method !== "tools/call") return "__allow__";
+  if (Array.isArray(body) || (body !== undefined && (body === null || typeof body !== "object"))) {
+    return { id: null, peerChosen: false };
+  }
+  if (!body || body.method !== "tools/call") return { id: "__allow__", peerChosen: false };
   const toolName = body.params?.name;
   const p = String(prefix || "").replace(/^\/+/, "");
 
@@ -111,26 +121,56 @@ export function resolveCalledCanonicalId(prefix, body, connectedServers) {
   // consulted: the whole mount maps to exactly one capability, and the
   // underlying MCP server validates the tool name downstream — so an
   // un-exposed tool cannot ride in on a single-capability mount.
-  if (Object.prototype.hasOwnProperty.call(PREFIX_CANON, p)) return PREFIX_CANON[p];
+  if (Object.prototype.hasOwnProperty.call(PREFIX_CANON, p)) {
+    return { id: PREFIX_CANON[p], peerChosen: false };
+  }
 
   if (p === "router") {
-    if (toolName === "crow_discover") return "__allow__";
+    if (toolName === "crow_discover") return { id: "__allow__", peerChosen: false };
     if (toolName === "crow_tools") {
       const args = body.params?.arguments || {};
-      if (args.instance_id) return null; // onward relay to a third instance — deny this hop
-      return resolveProxyTool(args.action, connectedServers);
+      if (args.instance_id) return { id: null, peerChosen: false }; // onward relay to a third instance — deny this hop
+      return { id: resolveProxyTool(args.action, connectedServers), peerChosen: false };
     }
     if (typeof toolName === "string" && toolName.startsWith("crow_")) {
-      return `crow-${toolName.slice("crow_".length)}`;
+      // N1b-8 review round 1 (B2): the PEER picked this string. Canonicalise it
+      // (`crow_Memory` → `crow-memory`, junk → an id no catalog holds) and let
+      // the gate require it to be a capability of this instance before a card
+      // or a counter may mention it.
+      return { id: canonicalizePeerCapabilityTool(toolName), peerChosen: true };
     }
-    return null;
+    return { id: null, peerChosen: false };
   }
 
   if (p === "tools" || p.startsWith("tools-")) {
-    return resolveProxyTool(toolName, connectedServers);
+    return { id: resolveProxyTool(toolName, connectedServers), peerChosen: false };
   }
 
-  return null; // unknown prefix — fail closed
+  return { id: null, peerChosen: false }; // unknown prefix — fail closed
+}
+
+/**
+ * Resolve the canonical capability id a peer call targets.
+ * @returns {string|null|"__allow__"} canonicalId to check; null = deny (fail
+ *   closed); "__allow__" = ungated (discovery / non-tools-call method).
+ */
+export function resolveCalledCanonicalId(prefix, body, connectedServers) {
+  return resolveCalledCapability(prefix, body, connectedServers).id;
+}
+
+/**
+ * Is `id` a capability THIS instance has? A peer-named id must be in the local
+ * catalog. An id the instance itself resolved (a mount's canonical id, or an
+ * addon found in the live server map) is known by construction. Never throws —
+ * an unknown answer fails closed (the capability stays unknown, so it gets no
+ * card).
+ */
+function isKnownCapability(id, peerChosen, connectedServers) {
+  try {
+    if (getLocalCapabilityIds().has(id)) return true;
+    if (peerChosen) return false;
+    return connectedServers instanceof Map && connectedServers.has(id);
+  } catch { return false; }
 }
 
 const DENY_CODE = -32001;
@@ -197,7 +237,8 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
     }
     return false;
   }
-  const canonicalId = resolveCalledCanonicalId(prefix, body, connectedServers);
+  const resolved = resolveCalledCapability(prefix, body, connectedServers);
+  const canonicalId = resolved.id;
   if (canonicalId === "__allow__") return true; // discovery / non-tools-call
 
   const sourceId = req.instanceAuth.instance.id;
@@ -236,17 +277,31 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
   if (allowed) return true;
 
   // Fix-it: a resolvable capability was denied → surface a one-click "Allow"
-  // card. Fire-and-forget; must never block or break the gate. Only real,
-  // resolvable capabilities (string canonicalId) become cards — a null-canonical
-  // (malformed) deny is skipped.
+  // card. Fire-and-forget; must never block or break the gate. A deny that
+  // resolved to nothing this instance could name emits nothing at all (see the
+  // `emitCapability` note below).
   //
   // N1b-8: the payload carries ONLY the verified peer id (`sourceId`) — that is
   // what scopes the all-peer card to this one peer. No name, id or header the
   // peer wrote into its request body ever reaches this payload.
-  if (typeof canonicalId === "string") {
+  //
+  // N1b-8 review round 1 (B2): `capabilityKnown` says whether the id matched a
+  // capability of THIS instance's catalog. When it did not (a peer picked
+  // `crow_junk99` on /router, or a name that is not even id-shaped), the
+  // detector records ONE bounded "unknown" bucket for that peer instead of a
+  // card and a counter keyed by junk. An id THIS instance resolved that came
+  // out empty (an unknown /tools tool name) emits nothing at all, as before.
+  const emitCapability = typeof canonicalId === "string"
+    ? canonicalId
+    : (resolved.peerChosen ? null : undefined);
+  if (emitCapability !== undefined) {
+    const capabilityKnown = typeof canonicalId === "string"
+      ? isKnownCapability(canonicalId, resolved.peerChosen, connectedServers)
+      : false;
     try {
       Promise.resolve(emitFn(db, "peer-exposure:denied", {
-        capability: canonicalId,
+        capability: emitCapability,
+        capabilityKnown,
         requestingInstance: sourceId,
         toolName,
       })).catch(() => {});

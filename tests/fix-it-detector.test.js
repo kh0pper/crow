@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveFriendlyName } from "../servers/gateway/fix-it/friendly-names.js";
 import detector from "../servers/gateway/fix-it/detectors/remote-exposure.js";
+import { dedupKeyFor, legacyDedupKeyFor } from "../servers/gateway/fix-it/peer-card-policy.js";
 
 test("friendly-name map: known id, addon fallback, raw fallback", () => {
   assert.equal(resolveFriendlyName("funkwhale"), "Music");
@@ -32,7 +33,11 @@ test("detector creates one card scoped to the requesting peer, with the three du
   assert.equal(s.created.length, 1);
   const it = s.created[0];
   assert.equal(it.source, "remote-exposure");
-  assert.equal(it.dedupKey, "expose:funkwhale:peer-1");
+  // N1 (review round 1): the separator is `|`, not `:` — both the capability and
+  // the peer id may legitimately contain a colon (peer ids: [A-Za-z0-9._:-]).
+  assert.equal(it.dedupKey, dedupKeyFor("peer-1", "funkwhale"));
+  assert.equal(it.dedupKey, "expose|funkwhale|peer-1");
+  assert.notEqual(it.dedupKey, legacyDedupKeyFor("peer-1", "funkwhale"));
   assert.match(it.title, /Glasses/);
   assert.match(it.title, /Music/);
   assert.equal(it.severity, "warn");
@@ -72,4 +77,18 @@ test("detector refuses a card for an identity that is not a verified peer id", a
     await detector.onEvent("peer-exposure:denied", { capability: "funkwhale", requestingInstance }, s);
     assert.equal(s.created.length, 0, `no card for ${JSON.stringify(requestingInstance)}`);
   }
+});
+
+// B2 (review round 1): the gate could not match the peer's tool name to a
+// capability of this instance. No card, and ONE bounded counter bucket.
+test("detector counts an unknown capability in one bucket and raises no card", async () => {
+  const s = fakeStore();
+  const p = { requestingInstance: "peer-junk", capabilityKnown: false, toolName: "crow_junk1" };
+  await detector.onEvent("peer-exposure:denied", { ...p, capability: "crow-junk1" }, s);
+  await detector.onEvent("peer-exposure:denied", { ...p, capability: "crow-junk2" }, s);
+  await detector.onEvent("peer-exposure:denied", { ...p, capability: null }, s);
+  assert.equal(s.created.length, 0, "an unknown capability never makes a card");
+  assert.deepEqual(s.suppressed.map((i) => i.capability), ["unknown", "unknown", "unknown"],
+    "every unknown name lands in the one bucket, never under the peer's string");
+  assert.ok(s.suppressed.every((i) => i.reason === "unknown_capability"));
 });
