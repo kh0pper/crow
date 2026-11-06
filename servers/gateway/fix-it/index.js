@@ -59,6 +59,9 @@ function boundStore(db) {
     listBySource: (s) => store.listBySource(db, s),
     recordDuplicate: (id) => store.recordDuplicate(db, id),
     recordSuppressed: (info) => recordSuppressedRequest(db, info),
+    // Fix round 3: a pending card raised under another pairing is stale (the
+    // remedy refuses it), so the detector answers it before creating the new one.
+    markResolved: (id) => store.markResolved(db, id),
   };
 }
 

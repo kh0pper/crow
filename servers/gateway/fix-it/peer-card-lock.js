@@ -42,7 +42,7 @@ export const MAX_QUEUED_TASKS_PER_KEY = 16;
 /** @type {Map<string, {tail: Promise<void>, queued: number}>} one live state per key */
 const chains = new Map();
 
-/** Task count at which events for this key are dropped (memory only). */
+/** How many events were DROPPED because their key's queue was full (memory only). */
 let overflow = 0;
 
 /**

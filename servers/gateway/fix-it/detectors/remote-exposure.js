@@ -28,11 +28,20 @@
  *   - N-b: that per-peer queue is bounded (peer-card-lock.js), so a flood is
  *     dropped and counted in memory instead of queued without limit.
  *
+ * Fix round 3: the card records `context.pairingTag` — the tag of the pairing
+ * the denial was verified under (the gate sends it; see
+ * servers/gateway/peer-exposure.js). The remedy refuses a card whose tag does
+ * not match the peer's CURRENT `auth_token_hash`, which is what stops an old
+ * card from granting the peer after a revoke→re-pair under the same id. A
+ * pending card carrying another pairing's tag is stale: the policy names it and
+ * this detector resolves it before deciding again (a new card must never dedupe
+ * onto a card that can never be allowed).
+ *
  * DB-free: it composes strings from the (already name-enriched) payload and the
  * pure friendly-name map, then calls the db-bound store it's handed.
  */
 import { resolveFriendlyName } from "../friendly-names.js";
-import { normalizePeerId } from "../../../shared/peer-id.js";
+import { normalizePeerId, normalizePairingTag } from "../../../shared/peer-id.js";
 import { UNKNOWN_CAPABILITY_BUCKET } from "../peer-card-counters.js";
 import { withPeerLock } from "../peer-card-lock.js";
 import {
@@ -44,13 +53,23 @@ import {
 const SOURCE = "remote-exposure";
 
 /** The decide-then-upsert body, run under the per-peer lock. */
-async function decideAndStore({ capability, peerId, peerName, toolName, store, now }) {
+async function decideAndStore({ capability, peerId, peerName, toolName, tag, store, now }) {
   let items = [];
   try {
     items = typeof store?.listBySource === "function" ? await store.listBySource(SOURCE) : [];
   } catch { items = []; }
 
-  const decision = decidePeerExposureCard({ items, peerId, capability, now });
+  const decision = decidePeerExposureCard({ items, peerId, capability, pairingTag: tag, now });
+
+  // Fix round 3: a pending card raised under another pairing can never be
+  // allowed (the remedy compares tags), so it must not answer this request.
+  // Resolve it first, then carry on with the decision, which was already made
+  // as if it did not exist. Best-effort, like the rest of this path.
+  for (const staleId of decision.staleItemIds || []) {
+    try {
+      if (store?.markResolved) await store.markResolved(staleId);
+    } catch { /* best-effort: this runs on the peer-exposure request path */ }
+  }
 
   // SF1 (review round 2): `dedupe` means this (capability, peer) pair already
   // owns a card — possibly one written under the PRE-round-1 key shape
@@ -84,12 +103,12 @@ async function decideAndStore({ capability, peerId, peerName, toolName, store, n
   const peer = peerName || "another device";
   await store.upsertItem({
     source: SOURCE,
-    dedupKey: dedupKeyFor(peerId, capability),
+    dedupKey: dedupKeyFor(peerId, capability, tag),
     title: `Your ${peer} tried to use ${friendly}, but it isn't shared with this device yet`,
     why: `Allow it for ${peer} only — your other Crows stay unchanged, and the allowance can expire or be removed in Settings.`,
     severity: "warn",
     remedies: cardRemedies(capability, peerId),
-    context: { capability, requestingInstance: peerId, toolName: toolName || null },
+    context: { capability, requestingInstance: peerId, toolName: toolName || null, pairingTag: normalizePairingTag(tag) },
   });
 }
 
@@ -97,7 +116,7 @@ export default {
   source: SOURCE,
   events: ["peer-exposure:denied"],
   async onEvent(_eventName, payload, store) {
-    const { capability, requestingInstance, requestingInstanceName, toolName, capabilityKnown } = payload || {};
+    const { capability, requestingInstance, requestingInstanceName, toolName, capabilityKnown, pairingTag } = payload || {};
 
     // The identity is the id the request was VERIFIED with. Anything else (a
     // display name, a missing id, a non-id string) earns no card at all: a card
@@ -129,7 +148,7 @@ export default {
 
     // B1: serialise the read-decide-write per peer.
     await withPeerLock(peerId, () => decideAndStore({
-      capability, peerId, peerName: requestingInstanceName, toolName, store, now,
+      capability, peerId, peerName: requestingInstanceName, toolName, tag: pairingTag, store, now,
     }));
   },
 };

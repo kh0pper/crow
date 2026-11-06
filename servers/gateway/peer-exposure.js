@@ -19,7 +19,8 @@
  * VERIFIED one (`req.instanceAuth.instance.id`, from the bearer token hash) and
  * nothing else — a request body cannot assert it.
  */
-import { getOrCreateLocalInstanceId } from "./instance-registry.js";
+import { getOrCreateLocalInstanceId, getInstance } from "./instance-registry.js";
+import { pairingTag } from "../shared/peer-id.js";
 import { auditCrossHostCall } from "../shared/cross-host-auth.js";
 import { emitFixIt } from "./fix-it/index.js";
 import { canonicalizePeerCapabilityTool, getLocalCapabilityIds } from "./capability-ids.js";
@@ -175,6 +176,28 @@ function isKnownCapability(id, peerChosen, connectedServers) {
 
 const DENY_CODE = -32001;
 const INVALID_REQUEST = -32600;
+
+/**
+ * N1b-8 fix round 3: the tag of the PAIRING this request was verified under, so
+ * a card can be bound to it and a later re-pair (same id, new hash) refuses it.
+ *
+ * `instanceAuthMiddleware` resolves the caller through `validateInstanceToken`,
+ * which returns the whole `crow_instances` row (`SELECT *`), so the hash is
+ * normally already in `req.instanceAuth.instance`. A caller that built the row
+ * itself (a test, a future auth path) may not carry it: read it by the verified
+ * id then. Unreadable → null, and a card raised with no tag can never be
+ * allowed (the remedy refuses it) — the safe direction.
+ */
+async function pairingTagForVerified(db, instance, sourceId) {
+  const direct = instance?.auth_token_hash;
+  if (typeof direct === "string" && direct) return pairingTag(direct);
+  try {
+    const row = await getInstance(db, sourceId);
+    return pairingTag(row?.auth_token_hash);
+  } catch {
+    return null;
+  }
+}
 // Verbs that carry no JSON-RPC body on an MCP mount (open the session stream,
 // close the session). Every other peer request must be ONE plain object.
 const BODYLESS = new Set(["GET", "HEAD", "DELETE"]);
@@ -285,6 +308,11 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
   // what scopes the all-peer card to this one peer. No name, id or header the
   // peer wrote into its request body ever reaches this payload.
   //
+  // Fix round 3: the payload also carries `pairingTag`, a one-way tag of the
+  // verified row's `auth_token_hash`. It binds the card to THIS pairing, so a
+  // revoke→re-pair (same id, new hash) refuses the old card instead of granting
+  // the re-paired peer. The raw hash never leaves this process.
+  //
   // N1b-8 review round 1 (B2): `capabilityKnown` says whether the id matched a
   // capability of THIS instance's catalog. When it did not (a peer picked
   // `crow_junk99` on /router, or a name that is not even id-shaped), the
@@ -298,12 +326,15 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
     const capabilityKnown = typeof canonicalId === "string"
       ? isKnownCapability(canonicalId, resolved.peerChosen, connectedServers)
       : false;
+    // The pairing the request was verified under (see pairingTagForVerified).
+    const tag = await pairingTagForVerified(db, req.instanceAuth.instance, sourceId);
     try {
       Promise.resolve(emitFn(db, "peer-exposure:denied", {
         capability: emitCapability,
         capabilityKnown,
         requestingInstance: sourceId,
         toolName,
+        pairingTag: tag,
       })).catch(() => {});
     } catch { /* never breaks the gate */ }
   }

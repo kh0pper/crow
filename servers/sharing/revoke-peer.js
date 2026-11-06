@@ -117,15 +117,23 @@ export const PEER_EXPOSURE_CARD_SOURCE = "remote-exposure";
  *
  * `resolved`, not `dismissed`: `store.dismiss` writes a suppression window,
  * which would also hide a legitimate NEW request from that id after a re-pair.
- * Resolved says the question is answered; the store's upsert reopens exactly
- * this card if the same id is denied again later.
+ * Resolved says the question is answered. It is NOT silently reopened: a later
+ * denial from the same id inside the 24 h window is only COUNTED on this row
+ * (peer-card-policy.js returns `count`), so there is no card for up to a day;
+ * past the window the same (capability, peer) earns a fresh card. (The round-2
+ * comment here said the upsert reopens it on a later denial — false: inside the
+ * window no upsert happens at all.)
+ *
+ * Fix round 3: exported so the trust sweeper can answer the cards of a peer
+ * revoked in ANOTHER process (servers/gateway/peer-trust-sweeper.js), the same
+ * way it already drops that peer's grants.
  *
  * Best-effort, like the grant drop: the row revoke is authoritative and must not
  * be undone by a fix_it_items write.
  *
  * @returns {Promise<{resolved: number}>}
  */
-async function resolvePeerExposureCards(db, id) {
+export async function resolvePeerExposureCards(db, id) {
   if (!id) return { resolved: 0 };
   let resolved = 0;
   try {

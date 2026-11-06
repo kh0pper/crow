@@ -47,6 +47,7 @@ import {
 } from "../servers/gateway/fix-it/peer-card-counters.js";
 import { resolveCalledCanonicalId } from "../servers/gateway/peer-exposure.js";
 import { getLocalCapabilityIds } from "../servers/gateway/capability-ids.js";
+import { pairingTag } from "../servers/shared/peer-id.js";
 
 let dir, db, idx, remedy, section;
 
@@ -95,20 +96,47 @@ const peerReq = (peerId, body = CALL, extra = {}) => ({
   body,
 });
 
+/** The bearer hash this instance would have stored for `id` (any stable string). */
+const tokenHashFor = (id) => `test-token-hash-${id}`;
+
+/** The pairing tag the gate computes from that row's hash. */
+const tagFor = (id) => pairingTag(tokenHashFor(id));
+
+/** The stored card a denial from `id` under its current pairing produces. */
+const cardFor = (id) => ({ context: { requestingInstance: id, pairingTag: tagFor(id) } });
+
 /**
  * Give `ids` a crow_instances row that passes the one trust predicate
  * (`trusted = 1 AND status IN ('active','offline')`). Review round 2 (N-a): the
  * Allow remedy refuses a peer that is not trusted HERE, and in production a card
  * can only be raised by a peer that authenticated — i.e. one that has such a
  * row. Tests that expect a click to grant must say so.
+ *
+ * Fix round 3: the row carries the bearer HASH too, because a card is bound to
+ * the pairing it was raised under (`context.pairingTag`). In production that
+ * hash is what `validateInstanceToken` matched the request against; here it is
+ * a deterministic stand-in, and `emitDenied` publishes its tag the way the gate
+ * does.
  */
 async function trustPeer(...ids) {
   for (const id of ids) {
     await db.execute({
-      sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
-      args: [id, `Peer ${id}`, "crow-test"],
+      sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted, auth_token_hash) VALUES (?, ?, ?, 'active', 1, ?)",
+      args: [id, `Peer ${id}`, "crow-test", tokenHashFor(id)],
     });
   }
+}
+
+/**
+ * Publish a denial exactly as the gate does — the verified id AND the tag of the
+ * pairing it was verified under. A card raised without a tag can never be
+ * allowed (fix round 3), which is why every click-the-card fixture goes through
+ * here.
+ */
+async function emitDenied(peerId, capability, extra = {}) {
+  await idx.emitFixIt(db, "peer-exposure:denied", {
+    capability, requestingInstance: peerId, pairingTag: tagFor(peerId), ...extra,
+  });
 }
 
 /** Run the real gate (no exposure overrides) for one peer. */
@@ -186,7 +214,7 @@ test("Allow grants only the requesting peer: a second peer is still refused", as
   await trustPeer("peer-a");
   // peer-a is denied, a card is raised for it.
   assert.equal((await gate("peer-a")).ok, false);
-  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-a", toolName: "fw_play" });
+  await emitDenied("peer-a", "funkwhale", { toolName: "fw_play" });
   const card = (await store.listPending(db))[0];
   assert.equal(card.context.requestingInstance, "peer-a");
 
@@ -221,7 +249,7 @@ test("per-peer grants are read at check time: revoking one peer's grant re-denie
 test("an expired grant is refused at check time; a live one still works (time injected)", async () => {
   const t0 = Date.now();
   await trustPeer("peer-e");
-  await remedy({ capability: "funkwhale", requestingInstance: "peer-e", days: 30 }, { db });
+  await remedy({ capability: "funkwhale", requestingInstance: "peer-e", days: 30 }, { db, item: cardFor("peer-e") });
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-e", { now: t0 + 29 * DAY }), true);
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-e", { now: t0 + 31 * DAY }), false);
 
@@ -233,7 +261,7 @@ test("an expired grant is refused at check time; a live one still works (time in
 test('"until I remove it" never expires', async () => {
   const t0 = Date.now();
   await trustPeer("peer-f");
-  await remedy({ capability: "funkwhale", requestingInstance: "peer-f", untilRemoved: true }, { db });
+  await remedy({ capability: "funkwhale", requestingInstance: "peer-f", untilRemoved: true }, { db, item: cardFor("peer-f") });
   assert.equal((await getPeerExposures(db)).get("peer-f").get("funkwhale").expiresAt, null);
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-f", { now: t0 + 3650 * DAY }), true);
   assert.equal((await gate("peer-f", { now: t0 + 3650 * DAY })).ok, true);
@@ -242,7 +270,7 @@ test('"until I remove it" never expires', async () => {
 test("an expired grant is still stored (Settings can renew or remove it) and a malformed expiry fails closed", async () => {
   const t0 = Date.now();
   await trustPeer("peer-g");
-  await remedy({ capability: "funkwhale", requestingInstance: "peer-g", days: 7 }, { db });
+  await remedy({ capability: "funkwhale", requestingInstance: "peer-g", days: 7 }, { db, item: cardFor("peer-g") });
   assert.ok((await getPeerExposures(db)).get("peer-g").get("funkwhale"), "expired grants are kept, not pruned");
   assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-g", { now: t0 + 8 * DAY }), false);
 
@@ -260,7 +288,7 @@ test("an expired grant is still stored (Settings can renew or remove it) and a m
 test("Settings lists each one-device allowance with its peer and expiry, and renews/removes it", async () => {
   const t0 = Date.now();
   await trustPeer("peer-abc123");
-  await remedy({ capability: "funkwhale", requestingInstance: "peer-abc123", days: 1 }, { db });
+  await remedy({ capability: "funkwhale", requestingInstance: "peer-abc123", days: 1 }, { db, item: cardFor("peer-abc123") });
   // Age the grant past its expiry to prove the expired state is shown.
   const stored = (await getPeerExposures(db)).get("peer-abc123").get("funkwhale");
   const past = new Date(t0 - DAY).toISOString();
@@ -313,9 +341,8 @@ test("a card Allow leaves the all-peer list byte-for-byte unchanged", async () =
   await writeSetting(db, "remote_exposed_tools", JSON.stringify(["crow-memory", "crow-blog"]), { scope: "local" });
   const before = (await db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = 'remote_exposed_tools'", args: [] })).rows[0].value;
 
-  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-z" });
+  await emitDenied("peer-z", "funkwhale");
   await clickAllow((await store.listPending(db))[0]);
-
   const after = (await db.execute({ sql: "SELECT value FROM dashboard_settings_overrides WHERE key = 'remote_exposed_tools'", args: [] })).rows[0].value;
   assert.equal(after, before, "the all-peer setting is not written by a card");
   assert.deepEqual([...((await getExposedCapabilities(db)))].sort(), ["crow-blog", "crow-memory"]);
@@ -427,7 +454,7 @@ test("the card is keyed by the verified peer id, not by anything the request bod
   const card = pending[0];
 
   assert.equal(card.context.requestingInstance, "verified-peer");
-  assert.equal(card.dedupKey, dedupKeyFor("verified-peer", "funkwhale"));
+  assert.equal(card.dedupKey, dedupKeyFor("verified-peer", "funkwhale", tagFor("verified-peer")));
   assert.ok(card.remedies.every((r) => r.args.requestingInstance === "verified-peer"));
   assert.doesNotMatch(JSON.stringify(card), /Victim Device/);
   assert.doesNotMatch(JSON.stringify(card), /victim-id/);
@@ -441,7 +468,7 @@ test("the card is keyed by the verified peer id, not by anything the request bod
 
 test("each card button grants its own duration (30 days / 7 days / until removed)", async () => {
   await trustPeer("peer-b7");
-  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-b7" });
+  await emitDenied("peer-b7", "funkwhale");
   let card = (await store.listPending(db))[0];
   assert.deepEqual(card.remedies.map((r) => r.actionId),
     ["expose-capability-30d", "expose-capability-7d", "expose-capability-forever"]);
@@ -451,7 +478,7 @@ test("each card button grants its own duration (30 days / 7 days / until removed
   const days = (Date.parse(seven.expiresAt) - Date.now()) / DAY;
   assert.ok(days > 6.9 && days < 7.1, `7-day button grants 7 days, got ${days}`);
 
-  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "crow-memory", requestingInstance: "peer-b7" });
+  await emitDenied("peer-b7", "crow-memory");
   card = (await store.listPending(db)).find((p) => p.context.capability === "crow-memory");
   await clickAllow(card, "expose-capability-forever");
   assert.equal((await getPeerExposures(db)).get("peer-b7").get("crow-memory").expiresAt, null);
@@ -640,11 +667,12 @@ test("B2: the suppressed-counter map is capped and pruned", async () => {
 // 8. Review round 1 — S1: a card written by the OLD detector
 // ---------------------------------------------------------------------------
 
-test("S1: an old-shape Allow card grants only its STORED peer, for 30 days", async () => {
+test("S1 (fix round 3): an old-shape Allow card with NO pairing tag refuses instead of granting", async () => {
   const peer = "peer-old";
   await trustPeer(peer);
   // Exactly what the pre-scoping detector wrote: one button, no duration, the
-  // capability in the remedy args and the peer only in the card CONTEXT.
+  // capability in the remedy args and the peer only in the card CONTEXT. It also
+  // predates the pairing tag, so nothing in it says WHICH pairing asked.
   await store.upsertItem(db, {
     source: "remote-exposure",
     dedupKey: legacyDedupKeyFor(peer, "funkwhale"),
@@ -656,24 +684,25 @@ test("S1: an old-shape Allow card grants only its STORED peer, for 30 days", asy
   });
   const card = (await store.listPending(db))[0];
   assert.equal(card.remedies[0].actionId, "expose-capability");
+  assert.equal(card.context.pairingTag, undefined, "the legacy card predates the tag");
 
-  const before = Date.now();
-  const redirected = await clickAllow(card, "expose-capability");
-  assert.match(redirected, /flash=fixit_fixed/);
+  // Fix round 3 changed this from a grant to a refusal: without a tag there is
+  // no way to tell the pairing that asked from a re-pair under the same id, and
+  // a refusal is the safe default.
+  const refused = await remedy({ capability: "funkwhale", days: 30 }, { db, item: card });
+  assert.equal(refused.resolved, false, "a card with no pairing tag grants nothing");
+  assert.match(refused.message, /paired again/);
+  assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written, for this peer or any other");
+  assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false, "and never the all-peer list");
+  assert.equal((await gate(peer)).ok, false, "the peer that (once) asked is still refused");
 
-  const grant = (await getPeerExposures(db)).get(peer).get("funkwhale");
-  const days = (Date.parse(grant.expiresAt) - before) / DAY;
-  assert.ok(days > 29.9 && days <= 30.1, `the legacy button means the 30-day default, got ${days}`);
-  assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false, "still never the all-peer list");
-  assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-other"), false, "no other peer is granted");
-  assert.equal((await gate(peer, { now: before + 29 * DAY })).ok, true);
-  assert.equal((await gate(peer, { now: before + 31 * DAY })).ok, false, "and it expires");
-
-  // The answered legacy card still occupies its rate-limit slot: the same
-  // request is counted, not re-carded (old-format dedupe keys are still read).
+  // The card still occupies its rate-limit slot while it is pending: the same
+  // request bumps THAT card (a pending card is deduped, never re-carded), so it
+  // never multiplies in the Nest.
   await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", capabilityKnown: true, requestingInstance: peer });
-  assert.equal((await store.listPending(db)).length, 0, "no duplicate card for the same (capability, peer)");
-  assert.equal((await getSuppressedRequests(db)).get(`${peer}|funkwhale`)?.reason, "same_capability_within_24h");
+  const after = await store.listPending(db);
+  assert.equal(after.length, 1, "still exactly one card for the same (capability, peer)");
+  assert.equal(after[0].id, card.id, "the card that was already open is the one that was bumped");
 });
 
 // ---------------------------------------------------------------------------
@@ -849,9 +878,160 @@ test("N-a: the Allow remedy refuses for a peer that is not a currently trusted p
   assert.match(neverPaired.message, /trusted peer/);
   assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written by any of them");
 
-  // The same card still works once the peer is trusted again (the remedy reads
-  // the row at click time, it does not cache the card's verdict).
-  await db.execute({ sql: "UPDATE crow_instances SET status = 'active', trusted = 1 WHERE id = ?", args: [peer] });
-  assert.equal((await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db })).resolved, true);
+  // Fix round 3: the peer's row is made trusted again — exactly what a revoke→
+  // re-pair under the SAME id does — so the trust check alone cannot save us.
+  // This card was raised by a pairing that is gone (it carries no tag, which is
+  // what every card written before this round carries), so the remedy refuses.
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'active', trusted = 1, auth_token_hash = ? WHERE id = ?", args: ["reissued", peer] });
+  const repaired = await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db, item: card });
+  assert.equal(repaired.resolved, false, "a card from the old pairing is refused after a re-pair");
+  assert.match(repaired.message, /paired again/);
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).size, 0, "nothing granted");
+  assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written by the re-paired id either");
+});
+
+// ---------------------------------------------------------------------------
+// 13. Fix round 3 — the card is bound to the PAIRING it was raised under
+// ---------------------------------------------------------------------------
+
+// `auth_token_hash` changes on every re-pair (NULL on revoke, a new hash on
+// enroll/repair) and on every rotation, but the instance ID does NOT: a
+// revoke→re-pair reuses it, and `peerTrust` passes for the re-paired row. An ID
+// alone therefore cannot tell "the device that asked" from "a later device
+// wearing the same id". The card records `context.pairingTag` (a one-way tag of
+// the hash that verified the request) and the remedy compares it with the tag of
+// the peer's CURRENT hash.
+
+test("the card stores a 16-hex pairing tag and never the peer's bearer hash", async () => {
+  const peer = "peer-tag";
+  await trustPeer(peer);
+  await emitDenied(peer, "funkwhale", { toolName: "fw_play" });
+  const card = (await store.listPending(db))[0];
+
+  assert.equal(card.context.pairingTag, tagFor(peer), "the tag of the pairing that asked");
+  assert.match(card.context.pairingTag, /^[0-9a-f]{16}$/);
+  // The stored hash is a live credential: the card carries a one-way tag only.
+  assert.equal(card.context.auth_token_hash, undefined, "no raw hash field on the card");
+  assert.ok(!JSON.stringify(card.context).includes(tokenHashFor(peer)), "no raw hash anywhere in the card context");
+
+  // The helper itself: no hash → no tag (never a fixed/empty-string tag), and
+  // two pairings never share one.
+  assert.equal(pairingTag(null), null);
+  assert.equal(pairingTag(undefined), null);
+  assert.equal(pairingTag(""), null);
+  assert.notEqual(pairingTag("hash-a"), pairingTag("hash-b"));
+  assert.equal(pairingTag("hash-a"), pairingTag("hash-a"), "stable for the same pairing");
+});
+
+test("same pairing: a card raised under the current pairing still grants, exactly as before", async () => {
+  const peer = "peer-same";
+  await trustPeer(peer);
+  await emitDenied(peer, "funkwhale");
+  const card = (await store.listPending(db))[0];
+
+  assert.equal((await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db, item: card })).resolved, true);
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).has("funkwhale"), true);
+  assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false, "still never the all-peer list");
+});
+
+test("a denial queued when a revoke sweeps is carded afterwards, and cannot grant the re-paired id", async () => {
+  const { revokePeer } = await import("../servers/sharing/revoke-peer.js");
+  const lock = await import("../servers/gateway/fix-it/peer-card-lock.js");
+  const peer = "peer-race";
+  await trustPeer(peer); // pairing H1
+
+  // Hold the per-peer queue so the denial is decided AFTER the revoke's card
+  // sweep — which does not take this lock, so it cannot see the card either.
+  let release;
+  const heldOpen = new Promise((r) => { release = r; });
+  const blocker = lock.withPeerLock(peer, async () => { await heldOpen; });
+  const queued = emitDenied(peer, "funkwhale"); // tag(H1), as the gate would send
+  await new Promise((r) => setTimeout(r, 25)); // let it reach the lock
+
+  assert.equal((await revokePeer(db, peer, { instanceSyncManager: null })).ok, true);
+  assert.equal((await store.listPending(db)).length, 0, "no card existed when the revoke swept");
+
+  // Re-pair under the SAME id with a NEW bearer hash: a different pairing.
+  await db.execute({
+    sql: "UPDATE crow_instances SET status = 'active', trusted = 1, auth_token_hash = ? WHERE id = ?",
+    args: ["repaired-token-hash", peer],
+  });
+
+  release();
+  await blocker;
+  await queued;
+
+  const pending = await store.listPending(db);
+  assert.equal(pending.length, 1, "the queued denial creates its card after the sweep, as before");
+  assert.equal(pending[0].context.pairingTag, tagFor(peer), "tagged with the OLD pairing it was raised under");
+
+  // `peerTrust` passes now (the row is active/trusted again) — the pairing tag is
+  // what refuses the click.
+  const outcome = await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db, item: pending[0] });
+  assert.equal(outcome.resolved, false, "the old pairing's card grants nothing after the re-pair");
+  assert.match(outcome.message, /paired again/);
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).size, 0, "no grant for the re-paired id");
+  assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written at all");
+});
+
+test("a row-only revoke is answered by the next sweep, like the grant drop", async () => {
+  const { reconcilePeerCreds } = await import("../servers/gateway/peer-trust-sweeper.js");
+  const peer = "peer-rowonly-card";
+  await trustPeer(peer);
+  await emitDenied(peer, "funkwhale");
+  const card = (await store.listPending(db))[0];
+  assert.equal(card.status, "pending");
+
+  // The stdio MCP door flips the row; this gateway only sees the row change.
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'revoked' WHERE id = ?", args: [peer] });
+  await reconcilePeerCreds(db);
+
+  assert.equal((await store.getItem(db, card.id)).status, "resolved", "the sweep answers the peer's open card");
+  assert.equal((await store.listPending(db)).length, 0, "nothing is left asking for a peer that is gone");
+});
+
+test("row-only revoke, then a re-pair with a new hash: the old pending card is refused", async () => {
+  const peer = "peer-rowonly-repair";
+  await trustPeer(peer);
+  await emitDenied(peer, "funkwhale");
+  const card = (await store.listPending(db))[0];
+
+  // Revoked elsewhere, and the sweeper has not run: the card is still pending
+  // when the same id pairs again with a new hash.
+  await db.execute({ sql: "UPDATE crow_instances SET status = 'revoked' WHERE id = ?", args: [peer] });
+  await db.execute({
+    sql: "UPDATE crow_instances SET status = 'active', trusted = 1, auth_token_hash = ? WHERE id = ?",
+    args: ["repaired-token-hash-2", peer],
+  });
+
+  const outcome = await remedy({ capability: "funkwhale", requestingInstance: peer, days: 30 }, { db, item: card });
+  assert.equal(outcome.resolved, false, "the card that outlived the revoke cannot grant the re-paired id");
+  assert.match(outcome.message, /paired again/);
+  assert.equal((await getPeerGrantedCapabilities(db, peer)).size, 0, "nothing granted");
+  assert.equal((await getPeerExposures(db)).size, 0, "no allowance was written");
+});
+
+test("a pending card from an old pairing does not swallow the new pairing's request", async () => {
+  const peer = "peer-stale-tag";
+  await trustPeer(peer); // pairing H1
+  await emitDenied(peer, "funkwhale");
+  const old = (await store.listPending(db))[0];
+  assert.equal(old.context.pairingTag, tagFor(peer));
+
+  // Re-pair: a new hash, so a new pairing tag on the next denial.
+  const newHash = "repaired-token-hash-3";
+  await db.execute({ sql: "UPDATE crow_instances SET auth_token_hash = ? WHERE id = ?", args: [newHash, peer] });
+  await idx.emitFixIt(db, "peer-exposure:denied", {
+    capability: "funkwhale", requestingInstance: peer, pairingTag: pairingTag(newHash),
+  });
+
+  assert.equal((await store.getItem(db, old.id)).status, "resolved", "the stale card is answered, not reused");
+  const pending = await store.listPending(db);
+  assert.equal(pending.length, 1, "exactly one card is open");
+  assert.notEqual(pending[0].id, old.id, "and it is a NEW card, not the old one");
+  assert.equal(pending[0].context.pairingTag, pairingTag(newHash), "tagged with the current pairing");
+
+  // The new card is a real, clickable request.
+  await clickAllow(pending[0]);
   assert.equal((await getPeerGrantedCapabilities(db, peer)).has("funkwhale"), true);
 });

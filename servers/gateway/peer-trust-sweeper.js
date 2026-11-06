@@ -31,6 +31,11 @@
 import { existsSync, writeFileSync, copyFileSync, chmodSync } from "node:fs";
 import { TRUSTED_PEER_SQL } from "../shared/peer-trust.js";
 import { getPeerExposures, removePeerExposures } from "./peer-exposure-store.js";
+// Fix round 3: a row-only revoke (written by ANOTHER process) must answer the
+// peer's open peer-exposure cards as well as drop its grants, exactly like the
+// revoke DOOR does. The card sweep lives in revoke-peer.js, next to the revoke
+// that needs it; reusing it keeps the two doors identical.
+import { resolvePeerExposureCards } from "../sharing/revoke-peer.js";
 import { updatePeerCreds, entryMintMs, loadPeerCreds, peerTokensPath, migratePeerCredsStore } from "../shared/peer-credentials.js";
 import { setUntrustedWithCreds, setOrphanKeys } from "../shared/peer-trust-health.js";
 import { closeSessionsOwnedByEverywhere, countSessionsOwnedByEverywhere, peerSessionOwner } from "./session-manager.js";
@@ -88,6 +93,16 @@ export async function reconcilePeerCreds(db, { localInstanceId = null } = {}) {
         if (grants.has(r.id)) await removePeerExposures(db, { peerId: r.id });
       }
     } catch { /* the row gate already refuses the peer */ }
+    // Fix round 3: and its open "Allow" card(s) are answered too. Otherwise a
+    // revoke→re-pair (same id, new hash) leaves a card in the Nest whose click
+    // would grant the re-paired peer without a fresh request. Read first, write
+    // only for a peer that actually has a pending card; best-effort, since the
+    // row revoke is what refuses the peer.
+    for (const r of revoked) {
+      try {
+        await resolvePeerExposureCards(db, r.id);
+      } catch { /* the row gate already refuses the peer */ }
+    }
   }
 
   const deleted = [];

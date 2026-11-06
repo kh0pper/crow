@@ -14,6 +14,13 @@
  *     row is gone) refuses too (review round 2, N-a): a revoke→re-pair reuses
  *     the instance id, so a grant left behind for an untrusted id would come
  *     alive the moment that id pairs again;
+ *   - Fix round 3 (N1b-8): the peer's row can be trusted again because it
+ *     RE-PAIRED under the same id — a different device (or the same one with a
+ *     new token) that never asked. The card therefore carries
+ *     `context.pairingTag`, a tag of the `auth_token_hash` that verified the
+ *     request; the remedy refuses unless it equals the tag of the peer's
+ *     CURRENT hash. A card with no tag (written before this round) refuses as
+ *     well — fail closed, on a mismatch and on an unreadable row alike;
  *   - the grant carries `expires_at` (`days` from now, default 30) or is
  *     permanent ("until I remove it": `untilRemoved` / `days: null`).
  *
@@ -21,11 +28,18 @@
  * never synced.
  */
 import { grantPeerCapability } from "../../peer-exposure-store.js";
-import { normalizePeerId } from "../../../shared/peer-id.js";
+import { normalizePeerId, normalizePairingTag, pairingTag } from "../../../shared/peer-id.js";
 import { peerTrust } from "../../../shared/peer-trust.js";
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 3650;
+
+/**
+ * The refusal for a card raised by a pairing that is gone (re-pair, token
+ * rotation, or a card written before cards carried a pairing at all).
+ */
+export const PAIRED_AGAIN_MESSAGE =
+  "That device has been paired again since it asked, so nothing was shared. If it still needs this, it will ask again.";
 
 /** Resolve the grant duration from the card's remedy args. */
 export function resolveDuration(args) {
@@ -64,6 +78,19 @@ export default async function exposeCapability(args, ctx) {
       ? "Crow couldn't confirm that device is still paired, so nothing was shared."
       : "That device isn't a trusted peer of this Crow any more, so nothing was shared. Pair it again and it can ask afresh.";
     return { resolved: false, message: why };
+  }
+
+  // Fix round 3 (N1b-8): the row being trusted again is NOT enough — a
+  // revoke→re-pair reuses the instance id, so `peerTrust` passes for a device
+  // that never made this request. `peerTrust` read the peer's row (`SELECT *
+  // FROM crow_instances`) a moment ago, so its `auth_token_hash` is the CURRENT
+  // pairing: the card must carry the tag of that same hash. A card with no tag
+  // (written before this round) cannot be matched either, so it refuses too.
+  // Fail closed: a missing/unreadable hash is a refusal, never a grant.
+  const cardTag = normalizePairingTag(ctx?.item?.context?.pairingTag);
+  const currentTag = pairingTag(trust.row?.auth_token_hash);
+  if (!cardTag || !currentTag || cardTag !== currentTag) {
+    return { resolved: false, message: PAIRED_AGAIN_MESSAGE };
   }
 
   const { untilRemoved, days } = resolveDuration(args);

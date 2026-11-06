@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import * as store from "../servers/shared/fix-it/store.js";
+import { pairingTag } from "../servers/shared/peer-id.js";
 
 let dir, db, idx;
 
@@ -25,13 +26,19 @@ beforeEach(async () => { await db.execute("DELETE FROM fix_it_items"); });
  * Give `id` a crow_instances row that passes the peer-trust predicate. Review
  * round 2 (N-a): the Allow remedy refuses a peer that is not trusted here, and in
  * production only a peer that authenticated (i.e. has such a row) can raise a card.
+ *
+ * Fix round 3: the row carries the bearer hash, and a card is bound to the tag of
+ * the pairing that raised it — so the emit below publishes the tag the gate would.
  */
 async function trustPeer(id) {
   await db.execute({
-    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'active', 1)",
-    args: [id, `Peer ${id}`, "crow-test"],
+    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted, auth_token_hash) VALUES (?, ?, ?, 'active', 1, ?)",
+    args: [id, `Peer ${id}`, "crow-test", `test-token-hash-${id}`],
   });
 }
+
+/** The pairing tag the gate computes for a peer trusted by `trustPeer`. */
+const tagFor = (id) => pairingTag(`test-token-hash-${id}`);
 
 test("emitFixIt turns a denial into one pending card (never throws)", async () => {
   await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-x", toolName: "fw_play" });
@@ -57,7 +64,9 @@ test("renderFixItCards renders a card with a CSRF field, or empty when none", as
 
 test("handleFixItAction runs the remedy and resolves the card", async () => {
   await trustPeer("peer-x");
-  await idx.emitFixIt(db, "peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-x" });
+  await idx.emitFixIt(db, "peer-exposure:denied", {
+    capability: "funkwhale", requestingInstance: "peer-x", pairingTag: tagFor("peer-x"),
+  });
   const item = (await store.listPending(db))[0];
   let redirected = null;
   const req = { body: { action: "remedy", item_id: String(item.id), action_id: "expose-capability-30d" } };
