@@ -20,7 +20,7 @@ import {
   LEVEL_CONTAINED, LEVEL_PARTLY, LEVEL_NOT,
   OPEN_DATA_DBS, OPEN_BROWSER, OPEN_SECRETS_SWAP, OPEN_UNCONTAINED, OPEN_NO_BWRAP, OPEN_UNOBSERVED,
 } from "../../../../../scripts/pi-bots/containment-status.mjs";
-import { probePiSandbox } from "../../../../../scripts/pi-bots/pi_sandbox.mjs";
+import { botSandboxProbe, renderBotSandboxStatus, spawnsOutsideThisProcess } from "../../shared/bot-sandbox-status.js";
 import { secretsAncestorsReport } from "../../../../../servers/shared/secrets-ancestors.js";
 import { secretsDir } from "../../../../../servers/shared/secret-values.js";
 
@@ -62,12 +62,25 @@ const WHY_KEY = {
   "cannot stat": "settings.containment.whyCannotStat",
 };
 
-/** Test seam: whether this host can start the contain tier at all. */
+/** Test seam: whether this host can start the contain tier at all. A function
+ *  may also return a full probe object (ok/reason/setpriv), which then also
+ *  drives the sandbox status line. */
 let hostBwrapProbe = null;
 export function _setHostBwrapProbeForTest(fn) { hostBwrapProbe = typeof fn === "function" ? fn : null; }
-function hostHasBwrap() {
-  if (hostBwrapProbe) { try { return hostBwrapProbe() === true; } catch { return false; } }
-  try { return probePiSandbox().ok === true; } catch { return false; }
+
+/** One probe for both the containment level and the sandbox status line, so the
+ *  two can never contradict each other. Never throws. */
+function currentProbe() {
+  if (hostBwrapProbe) {
+    try {
+      const v = hostBwrapProbe();
+      if (v && typeof v === "object") return v;
+      return { ok: v === true, pidns: v === true, setpriv: null, reason: v === true ? null : "no bwrap (test seam)" };
+    } catch {
+      return { ok: false, pidns: false, setpriv: null, reason: "no bwrap (test seam)" };
+    }
+  }
+  return botSandboxProbe();
 }
 
 /**
@@ -122,17 +135,15 @@ export function renderContainmentStatus({ bots = [], host = {}, ancestors = null
 }
 
 /**
- * True when the spawns of this instance's bots happen somewhere this process
- * cannot see. PIBOT_SUPERVISOR=external hands every channel bot to the host's
- * own units, with an env this gateway never reads; the supervised Discord child
- * is a separate process too, so a record made here covers at most the Perch
- * spawns and never the channel turns.
+ * Enabled pi bots, with the facts the status needs. Never throws.
+ *
+ * `spawnsOutsideThisProcess()` (shared/bot-sandbox-status.js) is true when the
+ * spawns happen somewhere this process cannot see: PIBOT_SUPERVISOR=external
+ * hands every channel bot to the host's own units, with an env this gateway
+ * never reads, and the supervised Discord child is a separate process too, so a
+ * record made here covers at most the Perch spawns and never the channel turns.
+ * The same helper drives the sandbox status line, so both surfaces agree.
  */
-function spawnsOutsideThisProcess() {
-  return String(process.env.PIBOT_SUPERVISOR || "").trim() === "external";
-}
-
-/** Enabled pi bots, with the facts the status needs. Never throws. */
 async function containmentBots(db) {
   let rows = [];
   try {
@@ -194,8 +205,10 @@ export default {
       ? ""
       : `<div style="margin-top:0.5rem;color:var(--crow-text-muted);font-size:0.8rem">${escapeHtml(t(on ? "settings.botRuntimeDefaultOn" : "settings.botRuntimeDefaultOff", lang))}</div>`;
     const bots = await containmentBots(db);
-    const containment = renderContainmentStatus({ bots, host: { bwrap: hostHasBwrap() }, ancestors: secretsAncestorsStatus(), lang });
-    return `${containment}<form method="POST">
+    const probe = currentProbe();
+    const sandboxStatus = renderBotSandboxStatus({ probe, lang });
+    const containment = renderContainmentStatus({ bots, host: { bwrap: probe.ok === true }, ancestors: secretsAncestorsStatus(), lang });
+    return `${sandboxStatus}${containment}<form method="POST">
       <input type="hidden" name="action" value="set_bot_runtime">
       <input type="hidden" name="was" value="${on ? "on" : "off"}">
       <div style="margin-bottom:1rem;color:var(--crow-text-secondary);font-size:0.9rem;line-height:1.5">

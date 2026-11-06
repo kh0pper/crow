@@ -23,6 +23,17 @@ function runWithHelpers(snippet, env = {}, scriptArgs = []) {
       if (!env[key]) throw new Error(`${key} is required to run the auto-updates step in a test`);
     }
   }
+  // Same rail for the bubblewrap AppArmor step (audit N1b-2): it reads a kernel
+  // switch, installs a package, writes under APPARMOR_DIR and loads through
+  // CROW_SUDO, so a scratch root with shims is mandatory — a regression here
+  // must never reach the real /proc, /etc/apparmor.d or /usr/share of the
+  // machine running the suite.
+  if (/install_bwrap_apparmor|stage_bwrap_profile|bwrap_profile_sane|bwrap_profile_exists|userns_restricted|apparmor_parser_bin/.test(snippet)) {
+    for (const key of ["APPARMOR_DIR", "APPARMOR_EXTRA_DIR", "USERNS_SYSCTL_PATH", "CROW_APPARMOR_PARSER",
+      "CROW_APPARMOR_PARSER_DIRS", "CROW_SUDO", "CROW_APT", "CROW_APT_GET", "CROW_DPKG_DEB"]) {
+      if (!env[key]) throw new Error(`${key} is required to run the bubblewrap AppArmor step in a test`);
+    }
+  }
   const args = scriptArgs.map((a) => ` ${a}`).join("");
   return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"${args}; ${snippet}`], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -1084,4 +1095,580 @@ test("N1c-15: the install body exits 1 on a failed health check, and the banner 
   // also blocks the banner — and that second gate is above it too.
   const gateIdx = s.search(/^if install_failed; then$/m);
   assert.ok(gateIdx > -1 && gateIdx < bannerIdx, "install_failed must gate the banner as well");
+});
+
+// ─── Audit N1b-2: bubblewrap + Ubuntu's own AppArmor userns profile ─────────
+// Ubuntu 24.04+ ships kernel.apparmor_restrict_unprivileged_userns=1, so
+// bubblewrap cannot make the user namespace the bot sandbox needs. The installer
+// never lifts that restriction and writes no profile of its own: it copies the
+// distro's `bwrap-userns-restrict` into place (bwrap may build its namespaces;
+// everything bwrap starts is stacked into `unpriv_bwrap`, which has `audit deny
+// capability`). It must NOT install apparmor-profiles — that drops 19 other
+// profiles (samba, avahi, dnsmasq, ping, php-fpm, syslog…) into /etc/apparmor.d
+// in enforce mode — so it downloads the .deb and extracts that one file.
+// Everything below runs against a scratch apparmor.d, a fake kernel switch and
+// shims, so a regression can never touch the suite machine's /proc,
+// /etc/apparmor.d or the network.
+
+/**
+ * Ubuntu's own profile, as the apparmor-profiles package ships it: bwrap may
+ * build its namespaces, and everything it starts is stacked into `unpriv_bwrap`
+ * with `audit deny capability`. The installer must copy this file unchanged —
+ * it never writes a profile of its own.
+ */
+const BWRAP_PROFILE_FIXTURE = `abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(attach_disconnected) {
+  allow capability,
+  allow userns,
+  allow mount,
+  allow pivot_root,
+  allow pix /** -> &bwrap//&unpriv_bwrap,
+}
+
+profile unpriv_bwrap flags=(attach_disconnected) {
+  audit deny capability,
+  allow pix /** -> &unpriv_bwrap,
+}
+`;
+
+/** A scratch root: apparmor.d, Ubuntu's extra-profiles dir, the kernel switch,
+ *  parser/sudo/apt/apt-get/dpkg-deb shims and a private TMPDIR (so a leftover
+ *  temp dir or temp file shows). `extraSource` is the file an operator may
+ *  already have on disk; `packageSource` is what the fake .deb contains. */
+function apparmorScratch({
+  restricted = "1",
+  parserOk = true,
+  extraSource = BWRAP_PROFILE_FIXTURE,
+  packageSource = BWRAP_PROFILE_FIXTURE,
+  installOk = true,
+  downloadOk = true,
+  extractOk = true,
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-bwrap-"));
+  const apparmorDir = join(dir, "apparmor.d");
+  mkdirSync(apparmorDir);
+  const extraDir = join(dir, "extra-profiles");
+  mkdirSync(extraDir);
+  if (extraSource !== null) writeFileSync(join(extraDir, "bwrap-userns-restrict"), extraSource);
+  const tmpDir = join(dir, "tmp");
+  mkdirSync(tmpDir);
+  const sysctl = join(dir, "apparmor_restrict_unprivileged_userns");
+  if (restricted !== null) writeFileSync(sysctl, restricted + "\n");
+  const parserLog = join(dir, "parser.log");
+  const parserScript = `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(parserLog)}\n${parserOk ? "" : "exit 1\n"}`;
+  const parser = join(dir, "apparmor_parser-shim");
+  writeFileSync(parser, parserScript, { mode: 0o755 });
+  // Stands in for /usr/sbin: this parser is NOT on PATH, only in here.
+  const sbin = join(dir, "sbin");
+  mkdirSync(sbin);
+  writeFileSync(join(sbin, "crow-fixture-apparmor_parser"), parserScript, { mode: 0o755 });
+  const emptySbin = join(dir, "empty-sbin");
+  mkdirSync(emptySbin);
+  const aptLog = join(dir, "apt.log");
+  const apt = join(dir, "apt-shim");
+  writeFileSync(apt, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(aptLog)}\n`, { mode: 0o755 });
+  // `apt-get download` writes the .deb into the CWD and needs no root; the shim
+  // logs the call AND the working directory so the test can prove both.
+  const aptGetLog = join(dir, "apt-get.log");
+  const aptGet = join(dir, "apt-get-shim");
+  writeFileSync(aptGet, [
+    "#!/bin/sh",
+    `printf '%s in %s\\n' "$*" "$PWD" >> ${JSON.stringify(aptGetLog)}`,
+    downloadOk ? "" : "exit 1",
+    ': > "$PWD/apparmor-profiles_24.04_all.deb"',
+    "",
+  ].join("\n"), { mode: 0o755 });
+  // dpkg-deb -x <deb> <dir>: lays out the one file the installer may take.
+  const debFixture = join(dir, "deb-fixture");
+  writeFileSync(debFixture, packageSource ?? "");
+  const dpkgLog = join(dir, "dpkg-deb.log");
+  const dpkgDeb = join(dir, "dpkg-deb-shim");
+  writeFileSync(dpkgDeb, [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> ${JSON.stringify(dpkgLog)}`,
+    extractOk ? "" : "exit 1",
+    'mkdir -p "$3/usr/share/apparmor/extra-profiles"',
+    packageSource === null ? "" : `cp ${JSON.stringify(debFixture)} "$3/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  const installLog = join(dir, "install.log");
+  const sudo = join(dir, "sudo-shim");
+  writeFileSync(sudo, [
+    "#!/bin/sh",
+    `case "$1" in install) printf '%s\\n' "$*" >> ${JSON.stringify(installLog)} ;; esac`,
+    installOk ? "" : 'case "$1" in install) exit 1 ;; esac',
+    'exec "$@"',
+    "",
+  ].join("\n"), { mode: 0o755 });
+  return {
+    dir, apparmorDir, profile: join(apparmorDir, "bwrap-userns-restrict"),
+    oldProfile: join(apparmorDir, "crow-bwrap"), disableLink: join(apparmorDir, "disable", "bwrap-userns-restrict"),
+    extraDir, sourcePath: join(extraDir, "bwrap-userns-restrict"), sysctl, parser, parserLog,
+    sbin, emptySbin, apt, aptLog, aptGet, aptGetLog, dpkgDeb, dpkgLog, installLog, sudo, tmpDir,
+  };
+}
+
+function runApparmorStep(scratch, snippet = "install_bwrap_apparmor", env = {}) {
+  return runWithHelpers(snippet, {
+    APPARMOR_DIR: scratch.apparmorDir,
+    APPARMOR_EXTRA_DIR: scratch.extraDir,
+    USERNS_SYSCTL_PATH: scratch.sysctl,
+    CROW_APPARMOR_PARSER: scratch.parser,
+    CROW_APPARMOR_PARSER_DIRS: scratch.emptySbin,
+    CROW_SUDO: scratch.sudo,
+    CROW_APT: scratch.apt,
+    CROW_APT_GET: scratch.aptGet,
+    CROW_DPKG_DEB: scratch.dpkgDeb,
+    TMPDIR: scratch.tmpDir,
+    ...env,
+  });
+}
+
+const parserCalls = (s) => (existsSync(s.parserLog)
+  ? readFileSync(s.parserLog, "utf-8").trim().split("\n").filter(Boolean)
+  : []);
+const logLines = (path) => (existsSync(path)
+  ? readFileSync(path, "utf-8").trim().split("\n").filter(Boolean)
+  : []);
+const aptCalls = (s) => logLines(s.aptLog);
+const aptGetCalls = (s) => logLines(s.aptGetLog);
+const dpkgCalls = (s) => logLines(s.dpkgLog);
+
+test("N1b-2: downloads apparmor-profiles without installing it, and takes only the profile", () => {
+  // Nothing pre-installed: the only way to get the file is the package itself.
+  const s = apparmorScratch({ extraSource: null });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  // The blocker review 2 found: installing the package drops 19 enforcing
+  // profiles (samba, avahi, dnsmasq, ping, php-fpm, syslog…) onto the machine.
+  assert.deepEqual(aptCalls(s), [], "the package is never installed");
+  const downloads = aptGetCalls(s);
+  assert.equal(downloads.length, 1, "one download, as the invoking user (not through sudo)");
+  const [what, ...where] = downloads[0].split(" in ");
+  assert.equal(what, "download apparmor-profiles");
+  const cwd = where.join(" in ");
+  assert.ok(cwd.startsWith(s.tmpDir), `the download runs in a temp dir (${cwd})`);
+  assert.equal(existsSync(cwd), false, "and that temp dir is removed afterwards");
+  assert.equal(dpkgCalls(s).length, 1, "the .deb is unpacked with dpkg-deb -x");
+  assert.match(dpkgCalls(s)[0], /^-x \S+\.deb \S+$/);
+  // Byte for byte, the one file — nothing else out of the package.
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "byte for byte");
+  const installed = readFileSync(s.profile, "utf-8");
+  assert.ok(installed.includes("audit deny capability"), "the capability denial survives the copy");
+  assert.ok(installed.includes("&bwrap//&unpriv_bwrap"), "and the stacking rule does too");
+  assert.equal(statSync(s.profile).mode & 0o777, 0o644, "installed with mode 644");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`], "loaded with apparmor_parser -r");
+  assert.match(r.stdout, /AppArmor rule installed/);
+  assert.match(r.stdout, /every capability use denied/, "the message says what the profile really does: a child keeps its capability set, but every use is denied");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file or temp dir is left behind");
+});
+
+test("N1b-2: installs Ubuntu's own profile file unchanged and leaves the package alone", () => {
+  const s = apparmorScratch();
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(aptCalls(s), [], "apparmor-profiles is never installed");
+  assert.deepEqual(aptGetCalls(s), [], "and never downloaded when the file is already here");
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "byte for byte");
+  assert.equal(statSync(s.profile).mode & 0o777, 0o644, "installed with mode 644");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`], "loaded with apparmor_parser -r");
+  assert.match(r.stdout, /AppArmor rule installed/);
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is left behind");
+});
+
+test("N1b-2: no profile when the kernel does not restrict user namespaces (reads 0, or missing)", () => {
+  for (const restricted of ["0", null]) {
+    const s = apparmorScratch({ restricted });
+    const r = runApparmorStep(s);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.profile), false, `nothing is written (restricted=${restricted})`);
+    assert.deepEqual(parserCalls(s), [], "the parser never runs");
+    assert.deepEqual(aptCalls(s), [], "and no package is installed");
+    assert.deepEqual(aptGetCalls(s), [], "nor downloaded");
+    assert.match(r.stdout, /No AppArmor rule needed/);
+  }
+});
+
+test("N1b-2: an existing third-party bwrap profile is left alone; a comment about bwrap is not a profile", () => {
+  const distro = apparmorScratch();
+  writeFileSync(join(distro.apparmorDir, "bwrap"), "profile bwrap /usr/bin/bwrap flags=(attach_disconnected) {\n  allow userns,\n}\n");
+  const r1 = runApparmorStep(distro);
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.equal(existsSync(distro.profile), false);
+  assert.deepEqual(parserCalls(distro), []);
+  assert.match(r1.stdout, /already exists — left as it is/);
+
+  const other = apparmorScratch();
+  writeFileSync(join(other.apparmorDir, "some-local-file"), "abi <abi/4.0>,\nprofile other /usr/bin/bwrap {\n}\n");
+  assert.equal(runApparmorStep(other).status, 0);
+  assert.equal(existsSync(other.profile), false, "a profile line for bwrap anywhere counts");
+  assert.deepEqual(parserCalls(other), []);
+
+  // A comment is not a profile: the step must still install Ubuntu's file.
+  const commentOnly = apparmorScratch();
+  writeFileSync(join(commentOnly.apparmorDir, "notes"),
+    "# /usr/bin/bwrap is handled by the distro\n# profile other /usr/bin/bwrap {\n# }\n");
+  const r3 = runApparmorStep(commentOnly);
+  assert.equal(r3.status, 0, r3.stderr);
+  assert.equal(readFileSync(commentOnly.profile, "utf-8"), BWRAP_PROFILE_FIXTURE,
+    "a comment mentioning the path never counts as a profile");
+});
+
+test("N1b-2: a package that does not provide the file warns and writes nothing", () => {
+  const s = apparmorScratch({ extraSource: null, packageSource: null });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /did not provide .*bwrap-userns-restrict/, "the warning names the missing file");
+  assert.match(r.stdout, /without the sandbox/);
+  assert.equal(existsSync(s.profile), false, "no other profile is ever written");
+  assert.deepEqual(parserCalls(s), [], "nothing is loaded");
+  assert.deepEqual(aptCalls(s), [], "the package is not installed either");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file or temp dir is left behind");
+});
+
+test("N1b-2: a download failure warns, writes nothing and leaves no temp dir", () => {
+  const s = apparmorScratch({ extraSource: null, downloadOk: false });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Could not download apparmor-profiles/);
+  assert.match(r.stdout, /without the sandbox/);
+  assert.doesNotMatch(r.stdout, /✗/, "warn(), not error()");
+  assert.equal(existsSync(s.profile), false);
+  assert.deepEqual(parserCalls(s), [], "nothing is loaded");
+  assert.deepEqual(dpkgCalls(s), [], "nothing is unpacked");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "the temp dir and temp file are removed");
+});
+
+test("N1b-2: an extract failure warns, writes nothing and leaves no temp dir", () => {
+  const s = apparmorScratch({ extraSource: null, extractOk: false });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Could not unpack apparmor-profiles/);
+  assert.match(r.stdout, /without the sandbox/);
+  assert.doesNotMatch(r.stdout, /✗/, "warn(), not error()");
+  assert.equal(existsSync(s.profile), false);
+  assert.deepEqual(parserCalls(s), [], "nothing is loaded");
+  assert.deepEqual(aptCalls(s), [], "the package is still not installed");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "the temp dir and temp file are removed");
+});
+
+test("N1b-2: a source that is not the expected profile is refused", () => {
+  // A future apparmor-profiles could change shape. Both of these would lift (or
+  // fail to keep) Ubuntu's restriction, so neither may be installed.
+  const cases = {
+    "no unpriv_bwrap child": BWRAP_PROFILE_FIXTURE.replace("profile unpriv_bwrap", "profile other_bwrap"),
+    "flags=(unconfined)": BWRAP_PROFILE_FIXTURE.replace(
+      "profile bwrap /usr/bin/bwrap flags=(attach_disconnected)",
+      "profile bwrap /usr/bin/bwrap flags=(unconfined)"),
+    "no capability denial": BWRAP_PROFILE_FIXTURE.replace("audit deny capability", "allow capability"),
+  };
+  for (const [label, source] of Object.entries(cases)) {
+    assert.notEqual(source, BWRAP_PROFILE_FIXTURE, `the fixture really changed (${label})`);
+    // Both the on-disk copy and the downloaded package are checked.
+    for (const opts of [{ extraSource: source }, { extraSource: null, packageSource: source }]) {
+      const s = apparmorScratch(opts);
+      const r = runApparmorStep(s);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(existsSync(s.profile), false, `nothing is written (${label})`);
+      assert.deepEqual(parserCalls(s), [], `nothing is loaded (${label})`);
+      assert.deepEqual(aptCalls(s), [], `the package is never installed (${label})`);
+      assert.match(r.stdout, /does not have the expected shape/, `the warning says why (${label})`);
+      assert.match(r.stdout, /without the sandbox/);
+      assert.deepEqual(readdirSync(s.tmpDir), [], `no temp file or temp dir is left behind (${label})`);
+    }
+  }
+});
+
+test("N1b-2: a source without the '-> &bwrap//&unpriv_bwrap' stacking rule is refused", () => {
+  // The child profile can exist and still be useless: unless bwrap's children
+  // are moved into it with the stacking rule, nothing bwrap runs is under
+  // `audit deny capability`. Must be refused, not installed.
+  const noStack = BWRAP_PROFILE_FIXTURE.replace("  allow pix /** -> &bwrap//&unpriv_bwrap,\n", "");
+  assert.notEqual(noStack, BWRAP_PROFILE_FIXTURE, "the fixture really changed");
+  assert.ok(!noStack.includes("&bwrap//&unpriv_bwrap"), "the stacking rule is gone");
+  for (const opts of [{ extraSource: noStack }, { extraSource: null, packageSource: noStack }]) {
+    const s = apparmorScratch(opts);
+    const r = runApparmorStep(s);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.profile), false, "nothing is written");
+    assert.deepEqual(parserCalls(s), [], "nothing is loaded");
+    assert.deepEqual(aptCalls(s), [], "the package is never installed");
+    assert.match(r.stdout, /does not have the expected shape/, "the warning says why");
+    assert.match(r.stdout, /without the sandbox/);
+    assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file or temp dir is left behind");
+  }
+  // Ubuntu's own file, which does carry the rule, still installs unchanged.
+  const ok = apparmorScratch();
+  assert.equal(runApparmorStep(ok).status, 0);
+  assert.equal(readFileSync(ok.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "byte for byte");
+});
+
+test("N1b-2: a source with flags=(attach_disconnected,unconfined) is refused", () => {
+  // `unconfined` does not have to be the only entry in the list to lift the
+  // restriction, so an exact-string check on `flags=(unconfined)` is not enough.
+  const source = BWRAP_PROFILE_FIXTURE.replace(
+    "profile bwrap /usr/bin/bwrap flags=(attach_disconnected)",
+    "profile bwrap /usr/bin/bwrap flags=(attach_disconnected,unconfined)");
+  assert.notEqual(source, BWRAP_PROFILE_FIXTURE, "the fixture really changed");
+  for (const opts of [{ extraSource: source }, { extraSource: null, packageSource: source }]) {
+    const s = apparmorScratch(opts);
+    const r = runApparmorStep(s);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.profile), false, "nothing is written");
+    assert.deepEqual(parserCalls(s), [], "nothing is loaded");
+    assert.deepEqual(aptCalls(s), [], "the package is never installed");
+    assert.match(r.stdout, /does not have the expected shape/, "the warning says why");
+    assert.match(r.stdout, /without the sandbox/);
+    assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file or temp dir is left behind");
+  }
+});
+
+test("N1b-2: a source with flags=(complain) is refused", () => {
+  // A complaining profile enforces nothing at all: it must be refused too, not
+  // treated as equivalent to the enforcing attach_disconnected list.
+  const source = BWRAP_PROFILE_FIXTURE.replace(
+    "profile bwrap /usr/bin/bwrap flags=(attach_disconnected)",
+    "profile bwrap /usr/bin/bwrap flags=(complain)");
+  assert.notEqual(source, BWRAP_PROFILE_FIXTURE, "the fixture really changed");
+  assert.ok(source.includes("flags=(complain)"), "the flag is in the source");
+  for (const opts of [{ extraSource: source }, { extraSource: null, packageSource: source }]) {
+    const s = apparmorScratch(opts);
+    const r = runApparmorStep(s);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.profile), false, "nothing is written");
+    assert.deepEqual(parserCalls(s), [], "nothing is loaded");
+    assert.deepEqual(aptCalls(s), [], "the package is never installed");
+    assert.match(r.stdout, /does not have the expected shape/, "the warning says why");
+    assert.match(r.stdout, /without the sandbox/);
+    assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file or temp dir is left behind");
+  }
+});
+
+test("N1b-2: our own earlier crow-bwrap profile is removed and unloaded before the new one", () => {
+  const s = apparmorScratch();
+  writeFileSync(s.oldProfile, "abi <abi/4.0>,\nprofile crow-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n");
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(s.oldProfile), false, "the too-wide file is gone");
+  assert.deepEqual(parserCalls(s), [`-R ${s.oldProfile}`, `-r ${s.profile}`],
+    "unloaded by name first, then Ubuntu's profile is loaded");
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE);
+  assert.match(r.stdout, /Removed the earlier crow-bwrap/);
+});
+
+test("N1b-2: our own earlier crow-bwrap profile is removed even when the rule is not needed", () => {
+  // Should-fix 2 from review 2: the unsafe profile must not survive a run that
+  // then decides it has nothing to do (switch reads 0, or parser missing).
+  for (const restricted of ["0", null]) {
+    const s = apparmorScratch({ restricted });
+    writeFileSync(s.oldProfile, "abi <abi/4.0>,\nprofile crow-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n");
+    const r = runApparmorStep(s);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.oldProfile), false, `the too-wide file is gone (restricted=${restricted})`);
+    assert.deepEqual(parserCalls(s), [`-R ${s.oldProfile}`], "unloaded by name");
+    assert.match(r.stdout, /Removed the earlier crow-bwrap/);
+    assert.match(r.stdout, /No AppArmor rule needed/);
+    assert.equal(existsSync(s.profile), false, "no new profile is written");
+  }
+
+  // Same when no parser can be found: the file still goes.
+  const noParser = apparmorScratch();
+  writeFileSync(noParser.oldProfile, "profile crow-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n");
+  const r2 = runApparmorStep(noParser, "install_bwrap_apparmor", {
+    CROW_APPARMOR_PARSER: "crow-fixture-no-such-parser",
+    CROW_APPARMOR_PARSER_DIRS: noParser.emptySbin,
+  });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(existsSync(noParser.oldProfile), false, "removed without a parser too");
+  assert.deepEqual(parserCalls(noParser), [], "nothing could be unloaded");
+  assert.match(r2.stdout, /apparmor_parser is not available/);
+});
+
+test("N1b-2: a disable link is reported, never removed", () => {
+  const s = apparmorScratch();
+  mkdirSync(join(s.apparmorDir, "disable"));
+  writeFileSync(s.disableLink, "");
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /disable\/bwrap-userns-restrict is present/);
+  assert.match(r.stdout, /disables the bubblewrap profile at boot/);
+  assert.equal(existsSync(s.disableLink), true, "the operator's choice is left in place");
+  // The rule still goes in: it applies now, the warning covers the next reboot.
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE);
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`]);
+});
+
+test("N1b-2: an install failure warns and continues, leaving no temp file", () => {
+  const s = apparmorScratch({ installOk: false });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Could not install the AppArmor profile/);
+  assert.match(r.stdout, /without the sandbox/);
+  assert.doesNotMatch(r.stdout, /✗/, "warn(), not error()");
+  assert.equal(existsSync(s.profile), false);
+  assert.deepEqual(parserCalls(s), [], "a half-installed profile is never loaded");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "the temp copy is removed");
+});
+
+test("N1b-2: a failed load puts the previous copy back", () => {
+  const previous = "# distro profile installed earlier\nabi <abi/4.0>,\nprofile bwrap /usr/bin/bwrap flags=(attach_disconnected) {\n  allow userns,\n}\n";
+  const s = apparmorScratch({ parserOk: false });
+  writeFileSync(s.profile, previous);
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(s.profile, "utf-8"), previous, "the previous file is back in place");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`], "the new profile really was attempted");
+  assert.match(r.stdout, /previous one is back in place/);
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is left behind");
+});
+
+test("N1b-2: a failed load with no previous copy leaves nothing behind", () => {
+  const s = apparmorScratch({ parserOk: false });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(s.profile), false, "no broken profile stays behind");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`, `-R ${s.profile}`],
+    "the load was attempted, then unloaded by name");
+  assert.match(r.stdout, /Could not load the AppArmor profile/);
+  assert.match(r.stdout, /without the sandbox/, "the warning says what the operator loses");
+  assert.doesNotMatch(r.stdout, /✗/, "warn(), not error()");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is left behind");
+});
+
+test("N1b-2: idempotent — identical content means no rewrite and no reload", () => {
+  const s = apparmorScratch();
+  assert.equal(runApparmorStep(s).status, 0);
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "Ubuntu's file, not one of ours");
+  const before = statSync(s.profile);
+  const second = runApparmorStep(s);
+  assert.equal(second.status, 0, second.stderr);
+  const after = statSync(s.profile);
+  assert.equal(after.ino, before.ino, "the file is not rewritten");
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal(parserCalls(s).length, 1, "the second run must not reload the profile");
+  assert.match(second.stdout, /unchanged/);
+});
+
+test("N1b-2: the step can only run in tests with the scratch seams set", () => {
+  assert.throws(
+    () => runWithHelpers("install_bwrap_apparmor"),
+    /APPARMOR_DIR is required/,
+  );
+  // Every seam the step touches is mandatory: a partial set would reach the
+  // suite machine's real apt, /usr/share/apparmor or /usr/sbin.
+  assert.throws(
+    () => runWithHelpers("install_bwrap_apparmor", { APPARMOR_DIR: "/tmp/__crow_bwrap_never__" }),
+    /APPARMOR_EXTRA_DIR is required/,
+  );
+  assert.throws(
+    () => runWithHelpers("apparmor_parser_bin", {
+      APPARMOR_DIR: "/tmp/__crow_bwrap_never__", APPARMOR_EXTRA_DIR: "/tmp/__crow_bwrap_never__",
+      USERNS_SYSCTL_PATH: "/tmp/__crow_bwrap_never__", CROW_APPARMOR_PARSER: "apparmor_parser",
+    }),
+    /CROW_APPARMOR_PARSER_DIRS is required/,
+  );
+});
+
+test("N1b-2: the parser is found in the sbin dirs when it is not on PATH", () => {
+  const s = apparmorScratch();
+  const r = runApparmorStep(s, "install_bwrap_apparmor", {
+    CROW_APPARMOR_PARSER: "crow-fixture-apparmor_parser",
+    CROW_APPARMOR_PARSER_DIRS: s.sbin,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(s.profile, "utf-8"), BWRAP_PROFILE_FIXTURE, "the profile is installed");
+  assert.deepEqual(parserCalls(s), [`-r ${s.profile}`], "and loaded through the parser found there");
+  assert.match(r.stdout, /AppArmor rule installed/);
+});
+
+test("N1b-2: the installer never writes a kernel setting, and never writes a profile of its own", () => {
+  const s = src();
+  assert.doesNotMatch(s, /\bsysctl\b/, "no sysctl invocation anywhere in the installer");
+  assert.doesNotMatch(s, /apparmor_restrict_unprivileged_userns\s*=\s*0/, "the restriction is never set to 0");
+  assert.doesNotMatch(s, /apparmor_restrict_unprivileged_userns"?\s*>\s*\S/, "the proc file is only ever read");
+  // Review 1's blocker: an unconfined profile would let anyone who can run bwrap
+  // lift Ubuntu's restriction for the whole host, which is exactly what upstream
+  // and Ubuntu's own bwrap-userns-restrict profile avoid. The installer may only
+  // GREP for that flag (it refuses such a source); it must never write one.
+  assert.doesNotMatch(s, /^\s*profile\s+\S+[^\n]*flags=\(unconfined\)/m, "no profile with flags=(unconfined) may be written");
+  // The shape check refuses the whole family: either word anywhere in a flags
+  // list (an exact-string check would miss `flags=(attach_disconnected,unconfined)`),
+  // and it also demands the stacking rule that puts bwrap's children under the denial.
+  // The two shape checks themselves are asserted with includes() in
+  // "the shape check refuses a flags list carrying unconfined or complain" below
+  // (their shell text carries backslashes that are unreadable as JS regexes).
+  // The earlier escaped-regex form, kept for reference:
+  // assert.match(s, /grep -Eq 'flags=\\\(\[^\)\]\*\(unconfined\|complain\)'/, "a source carrying either word in a flags list is refused instead");
+  // assert.match(s, /grep -qF '-> &bwrap\/\/&unpriv_bwrap'/, "and a source without the stacking rule is refused too");
+  assert.doesNotMatch(s, /^\s*profile\s+\S+\s+\/usr\/bin\/bwrap/m, "the installer writes no profile at all");
+  // It copies the distro's own file instead.
+  assert.match(s, /APPARMOR_EXTRA_DIR:-\/usr\/share\/apparmor\/extra-profiles/);
+});
+
+test("N1b-2: the installer never installs apparmor-profiles — it downloads and extracts it", () => {
+  // Review 2's blocker: installing the package adds 19 other profiles (samba,
+  // avahi, dnsmasq, nscd, ping, traceroute, php-fpm, syslog…) in enforce mode.
+  const s = src();
+  assert.doesNotMatch(s, /^\s*apt_install\b[^\n]*apparmor-profiles/m, "no apt_install of the package");
+  assert.doesNotMatch(s, /apt(-get)?\s+install[^\n]*apparmor-profiles/, "no `apt install apparmor-profiles` either");
+  assert.doesNotMatch(s, /^\s*sudo[^\n]*apparmor-profiles/m, "never with sudo, it needs no root");
+  // The one file is taken out of the .deb in a temp dir instead.
+  assert.match(s, /CROW_APT_GET="\$\{CROW_APT_GET:-apt-get\}"/);
+  assert.match(s, /CROW_DPKG_DEB="\$\{CROW_DPKG_DEB:-dpkg-deb\}"/);
+  assert.match(s, /\$CROW_APT_GET download apparmor-profiles/);
+  assert.match(s, /"\$CROW_DPKG_DEB" -x "\$deb" "\$tmpdir\/x"/);
+  assert.match(s, /tmpdir\/x\/usr\/share\/apparmor\/extra-profiles\/bwrap-userns-restrict/);
+  // And the temp dir is removed on every path out of the fetch.
+  const fetch = s.slice(s.indexOf("stage_bwrap_profile() {"), s.indexOf("bwrap_profile_sane() {"));
+  assert.match(fetch, /rm -rf "\$tmpdir"/, "the temp dir is removed, not left behind");
+});
+
+test("N1b-2: bubblewrap is installed from apt before the auto-update timer turns on, and the rule is applied from the install body", () => {
+  const s = src();
+  const line = s.match(/^sudo apt install -y bubblewrap$/m);
+  assert.ok(line, "an apt install line for bubblewrap must exist");
+  const idx = s.indexOf(line[0]);
+  assert.ok(idx < s.indexOf('header "Step 5/10: Automatic Security Updates"'),
+    "before the timer that can hold the dpkg lock (so no lock timeout is needed)");
+  assert.ok(idx > s.indexOf('header "Step 2/10: Node.js'), "in the Node variable step, before any use of a bot");
+  assert.ok(idx < s.search(/header "Step \d+\/10: System Services"/), "before the gateway starts");
+  // Defined above the source-only seam (so tests can drive it) and CALLED below it.
+  const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  assert.ok(s.indexOf("install_bwrap_apparmor()") > -1 && s.indexOf("install_bwrap_apparmor()") < seamIdx);
+  const callIdx = s.indexOf("\ninstall_bwrap_apparmor\n");
+  assert.ok(callIdx > seamIdx, "the install body really calls it");
+  assert.ok(callIdx < s.search(/header "Step \d+\/10: System Services"/), "and does so before the gateway starts");
+  // Ubuntu's profile package is fetched by the same step, before the timer. A
+  // plain `apt-get download` needs no dpkg lock, so no lock timeout is needed
+  // either — and the package is never installed (see the static test above).
+  const download = s.indexOf("$CROW_APT_GET download apparmor-profiles");
+  assert.ok(download > s.indexOf("stage_bwrap_profile()"), "the step fetches the package itself");
+  assert.ok(download < s.indexOf('header "Step 5/10: Automatic Security Updates"'),
+    "…and that runs before the auto-update timer can hold the dpkg lock");
+});
+
+test("N1b-2: the shape check refuses a flags list carrying unconfined or complain, and a missing stacking rule", () => {
+  const s = src();
+  // Asserted against the shape check itself, so a later edit to that function
+  // cannot quietly drop one of the two requirements it gained.
+  const shape = s.slice(s.indexOf("bwrap_profile_sane() {"), s.indexOf("install_bwrap_apparmor() {"));
+  assert.ok(shape.includes("grep -Eq 'flags="), "the flags list is checked with a pattern, not an exact string");
+  assert.ok(shape.includes("(unconfined|complain)"), "…and either word, anywhere in the list, is refused");
+  assert.ok(shape.includes("grep -Eq -- '-> &?bwrap//&unpriv_bwrap'"),
+    "the stacking rule is required (both spellings), and its leading '-' needs the '--' terminator");
+});
+
+test("N1b-2: Ubuntu 24.04's own spelling of the stacking rule is accepted", () => {
+  // apparmor-profiles 4.0.1 on 24.04 writes `allow px /** -> bwrap//&unpriv_bwrap,`
+  // (px, no leading &); upstream writes `allow pix /** -> &bwrap//&unpriv_bwrap,`.
+  // A check that knew only the upstream spelling would refuse the real 24.04 file.
+  const ubuntu = BWRAP_PROFILE_FIXTURE.replace("  allow pix /** -> &bwrap//&unpriv_bwrap,\n", "  allow px /** -> bwrap//&unpriv_bwrap,\n");
+  assert.notEqual(ubuntu, BWRAP_PROFILE_FIXTURE, "the fixture really changed");
+  const s = apparmorScratch({ extraSource: ubuntu });
+  const r = runApparmorStep(s);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(s.profile), "the 24.04 spelling is installed");
+  assert.equal(readFileSync(s.profile, "utf8"), ubuntu, "byte for byte");
 });

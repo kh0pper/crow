@@ -10,6 +10,13 @@
  *   disk      — df-based free % (<10% → warn)
  *   storage   — file storage availability (not configured → info/off; unreachable → warn)
  *   agents    — pi_bot_defs enabled count (always ok, count display)
+ *   botSandbox — audit N1b-2: whether pi children really get the bubblewrap
+ *               sandbox, from the spawner's own probe (pi_sandbox.mjs, no pi is
+ *               spawned). WARN while bots would run WITHOUT it, with the plain
+ *               reason and one next step; ok when they are sandboxed. No card
+ *               when the bot runtime is not in use here (runtime flag off, or
+ *               no enabled pi bot), and none when CROW_PI_SANDBOX=off — that is
+ *               a setting the operator chose, not a fault.
  *   peerTrust — PT-1: a trust lookup that failed closed (warn), a paired but
  *               untrusted row holding a bearer/key, an orphan credential (info)
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
@@ -105,6 +112,8 @@ import { gatewayListenPort } from "../../../listen-port.js";
 import { gatewayListenHost } from "../../../listen-host.js";
 import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate } from "../../../auto-update.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
+import { botRuntimeActive } from "../bot-runtime-flag.js";
+import { botSandboxProbe, botSandboxStatus } from "../../shared/bot-sandbox-status.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
 import { getPeerProbeHealth } from "../../../peer-probe-health.js";
@@ -344,6 +353,60 @@ async function agentsSignal(db) {
     state: "ok",
     label: "Active agents",
     value: String(count),
+  };
+}
+
+/**
+ * The bot sandbox (audit N1b-2). A host without bubblewrap — or on Ubuntu 24.04+
+ * without the installer's AppArmor profile — used to say nothing beyond one
+ * console.error while pi children ran with this user's docker group and sudo.
+ * The probe is the spawner's own (pi_sandbox.mjs, cached 5 min); no pi runs here.
+ *
+ * No card when the bot runtime is not in use: the runtime flag resolved the way
+ * the runner resolves it, plus at least one enabled pi bot. No card either when
+ * CROW_PI_SANDBOX=off — that is an operator setting, not a broken sandbox.
+ * With PIBOT_SUPERVISOR=external the spawns happen in another unit, so the card
+ * is info ("not observed here"), never ok: this process cannot claim a sandbox
+ * it never started.
+ */
+async function botSandboxSignal(db, lang) {
+  let runtimeOn = false;
+  try { runtimeOn = await botRuntimeActive(db); } catch { runtimeOn = false; }
+  if (!runtimeOn) return null;
+  let bots = 0;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT COUNT(*) AS c FROM pi_bot_defs WHERE enabled=1", args: [] });
+    bots = Number(rows[0]?.c ?? 0);
+  } catch { bots = 0; }
+  if (bots === 0) return null;
+
+  const status = botSandboxStatus({ probe: botSandboxProbe(), lang });
+  if (status.sandboxed) {
+    return { id: "botSandbox", severity: null, state: "ok", label: t("signals.botSandbox.label", lang), value: t("signals.botSandbox.ok", lang) };
+  }
+  if (status.code === "disabled") return null;
+  if (status.code === "unobserved") {
+    // Info, not ok: an external supervisor starts the bots, and this gateway
+    // has no probe of its own to report. Info issues stay strip-only (never
+    // pushed by the health monitor).
+    return {
+      id: "botSandbox",
+      severity: "info",
+      state: "info",
+      label: t("signals.botSandbox.label", lang),
+      value: t("signals.botSandbox.unobserved", lang),
+      issueLabel: status.sentence,
+    };
+  }
+  return {
+    id: "botSandbox",
+    severity: "warn",
+    state: "warn",
+    label: t("signals.botSandbox.label", lang),
+    value: t("signals.botSandbox.notSandboxed", lang),
+    issueLabel: fill(t("signals.botSandbox.issue", lang), { sentence: status.sentence, next: status.nextStep }),
+    actionLabel: t("signals.botSandbox.action", lang),
+    actionHref: "/dashboard/settings?section=bot-runtime",
   };
 }
 
@@ -2287,6 +2350,7 @@ export async function collectHealthSignals(db, opts = {}) {
     diskSignal(),
     storageSignal(),
     agentsSignal(db),
+    botSandboxSignal(db, lang),
     peersSignal(db, lang, nowFn),
     syncDialSignal(db, lang, nowFn),
     Promise.resolve().then(() => peerTrustSignal(lang, nowFn)),

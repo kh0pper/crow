@@ -451,6 +451,300 @@ install_auto_updates() {
   write_auto_upgrades_conf
 }
 
+# ─── Bot sandbox: bubblewrap + Ubuntu's own AppArmor profile ─────────────
+# The bot sandbox (scripts/pi-bots/pi_sandbox.mjs) wraps every pi child in
+# bubblewrap; without it bots keep this user's groups (docker) and sudo. Ubuntu
+# 24.04+ ships kernel.apparmor_restrict_unprivileged_userns=1, so bubblewrap
+# cannot make the user namespace it needs. The answer is Ubuntu's OWN
+# `bwrap-userns-restrict` profile, shipped in the apparmor-profiles package: it
+# lets bwrap build its namespaces, and every program bwrap starts is stacked
+# into its `unpriv_bwrap` child, which has `audit deny capability`. So bubblewrap
+# may create a user namespace, everything bwrap runs has every capability use denied, and
+# no other caller gains a way around the restriction. The installer never writes
+# a profile of its own and nothing here writes a kernel setting.
+#
+# The package itself is NEVER installed: it drops 19 other profiles into
+# /etc/apparmor.d in ENFORCE mode (samba, avahi, dnsmasq, nscd, ping, traceroute,
+# php-fpm, syslogd…), which would confine services on the operator's machine.
+# Only `bwrap-userns-restrict` is taken: from the file an operator already has,
+# or by DOWNLOADING the .deb and extracting that one file into a temp dir.
+#
+# Every path and the parser are test seams, so the suite runs this step against
+# a scratch root and can never touch the real /proc or /etc/apparmor.d.
+APPARMOR_DIR="${APPARMOR_DIR:-/etc/apparmor.d}"
+APPARMOR_EXTRA_DIR="${APPARMOR_EXTRA_DIR:-/usr/share/apparmor/extra-profiles}"
+USERNS_SYSCTL_PATH="${USERNS_SYSCTL_PATH:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+CROW_APPARMOR_PARSER="${CROW_APPARMOR_PARSER:-apparmor_parser}"
+# Debian's default USER PATH has neither /usr/sbin nor /sbin, so the parser is
+# looked up there as well (it is a space-separated directory list).
+CROW_APPARMOR_PARSER_DIRS="${CROW_APPARMOR_PARSER_DIRS:-/usr/sbin /sbin}"
+# apt-get download needs no root and dpkg-deb -x unpacks as this user; both are
+# seams so the suite never touches the network or the real dpkg.
+CROW_APT_GET="${CROW_APT_GET:-apt-get}"
+CROW_DPKG_DEB="${CROW_DPKG_DEB:-dpkg-deb}"
+CROW_BWRAP_PROFILE="$APPARMOR_DIR/bwrap-userns-restrict"
+# The profile where an operator already has the package installed by hand (or a
+# distro that ships it in extra-profiles). Preferred over a download.
+CROW_BWRAP_SOURCE="$APPARMOR_EXTRA_DIR/bwrap-userns-restrict"
+# The first shape this branch shipped: an unconfined profile that let ANY local
+# caller (or a compromised bot) run bwrap with a full-capability user namespace,
+# undoing Ubuntu's restriction for everyone. Removed, never reinstalled.
+CROW_OLD_BWRAP_PROFILE="$APPARMOR_DIR/crow-bwrap"
+
+# userns_restricted — 0 when this kernel restricts unprivileged user namespaces
+# (the proc file exists and reads 1). A missing file means an older kernel or
+# AppArmor that allows them: then there is nothing to do.
+userns_restricted() {
+  local v
+  [ -r "$USERNS_SYSCTL_PATH" ] || return 1
+  v="$(cat "$USERNS_SYSCTL_PATH" 2>/dev/null || true)"
+  v="${v//[[:space:]]/}"
+  [ "$v" = "1" ]
+}
+
+# apparmor_parser_bin — print the parser to run, or nothing when this host has
+# none. `command -v` alone is not enough: Debian's default user PATH has no
+# /usr/sbin or /sbin, where the apparmor package installs it.
+apparmor_parser_bin() {
+  local d p
+  if command -v "$CROW_APPARMOR_PARSER" >/dev/null 2>&1; then
+    command -v "$CROW_APPARMOR_PARSER"
+    return 0
+  fi
+  # shellcheck disable=SC2086  # a space-separated directory list on purpose
+  for d in $CROW_APPARMOR_PARSER_DIRS; do
+    p="$d/${CROW_APPARMOR_PARSER##*/}"
+    if [ -x "$p" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# bwrap_profile_exists — 0 when some OTHER file already attaches /usr/bin/bwrap
+# (the distro file, an operator's local one). Only a real profile line counts, so
+# a comment mentioning the path never does; our own target file is not "somebody
+# else", and our previous crow-bwrap file is removed before this is asked.
+bwrap_profile_exists() {
+  [ -d "$APPARMOR_DIR" ] || return 1
+  # /etc/apparmor.d/bwrap is the distro's own name for this; never add a second
+  # attachment next to it.
+  [ -e "$APPARMOR_DIR/bwrap" ] && return 0
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ "$f" = "$CROW_BWRAP_PROFILE" ]; then
+      continue
+    fi
+    if grep -Eqs '^[[:space:]]*profile[[:space:]]+[^[:space:]]+[[:space:]]+/usr/bin/bwrap' "$f"; then
+      return 0
+    fi
+  done < <(grep -rlsF -- '/usr/bin/bwrap' "$APPARMOR_DIR" 2>/dev/null || true)
+  return 1
+}
+
+# stage_bwrap_profile — put Ubuntu's bwrap-userns-restrict bytes into <dest>.
+# Preferred source: the file already on this host (the operator installed
+# apparmor-profiles themselves, or the distro ships it in extra-profiles).
+# Otherwise the package is DOWNLOADED, never installed, and unpacked into a temp
+# dir: installing it would put 19 other profiles (samba, avahi, dnsmasq, nscd,
+# ping, traceroute, php-fpm, syslog…) into /etc/apparmor.d in enforce mode. Only
+# this one file is taken out of it. Every failure is a WARN plus a non-zero
+# return; nothing here may abort the installer (set -e skips `if ! …` bodies).
+stage_bwrap_profile() { # <dest-file>
+  local dest="$1"
+  if [ -r "$CROW_BWRAP_SOURCE" ]; then
+    if cp "$CROW_BWRAP_SOURCE" "$dest" 2>/dev/null; then
+      return 0
+    fi
+    warn "Could not read $CROW_BWRAP_SOURCE — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+
+  local tmpdir deb f src
+  if ! tmpdir="$(mktemp -d)"; then
+    warn "Could not create a temp directory to fetch apparmor-profiles — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+  # apt-get download writes the .deb into the CWD and needs no root, so it runs
+  # as the invoking user (never through sudo).
+  # shellcheck disable=SC2086  # the seam may carry flags too
+  if ! ( cd "$tmpdir" && $CROW_APT_GET download apparmor-profiles ); then
+    rm -rf "$tmpdir"
+    warn "Could not download apparmor-profiles — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+  deb=""
+  for f in "$tmpdir"/*.deb; do
+    if [ -f "$f" ]; then
+      deb="$f"
+      break
+    fi
+  done
+  if [ -z "$deb" ]; then
+    rm -rf "$tmpdir"
+    warn "Downloading apparmor-profiles produced no .deb — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+  if ! "$CROW_DPKG_DEB" -x "$deb" "$tmpdir/x"; then
+    rm -rf "$tmpdir"
+    warn "Could not unpack apparmor-profiles with dpkg-deb — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+  src="$tmpdir/x/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"
+  if [ ! -r "$src" ]; then
+    rm -rf "$tmpdir"
+    warn "apparmor-profiles did not provide bwrap-userns-restrict — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+  if ! cp "$src" "$dest" 2>/dev/null; then
+    rm -rf "$tmpdir"
+    warn "Could not read bwrap-userns-restrict out of the downloaded package — bubblewrap has no rule, so bots run without the sandbox"
+    return 1
+  fi
+  rm -rf "$tmpdir"
+  return 0
+}
+
+# bwrap_profile_sane — the bytes really are the profile we expect: a bwrap
+# attachment, the unpriv_bwrap child that carries the capability denial, the
+# stacking rule that actually moves bwrap's children into that child
+# (`-> &bwrap//&unpriv_bwrap`), and no profile whose flags list carries
+# `unconfined` or `complain` — in any position, not just on its own. Guards
+# against a future package shipping a shape that would lift Ubuntu's
+# restriction for everyone, or one that would leave bots outside the denial.
+bwrap_profile_sane() { # <file>
+  local f="$1"
+  grep -qF 'profile bwrap /usr/bin/bwrap' "$f" || return 1
+  grep -qF 'profile unpriv_bwrap' "$f" || return 1
+  grep -qF 'audit deny capability' "$f" || return 1
+  # Without this rule the child profile exists but nothing is ever stacked into
+  # it, so what bwrap runs keeps its capabilities. Two spellings are in use:
+  # Ubuntu 24.04's apparmor-profiles writes `allow px /** -> bwrap//&unpriv_bwrap,`
+  # and upstream writes `allow pix /** -> &bwrap//&unpriv_bwrap,`; both stack the
+  # child under unpriv_bwrap. The pattern starts with `-`, so `--` is required.
+  grep -Eq -- '-> &?bwrap//&unpriv_bwrap' "$f" || return 1
+  # A flags list may carry either word anywhere (`flags=(complain)`,
+  # `flags=(attach_disconnected,unconfined)`) and would lift the restriction.
+  if grep -Eq 'flags=\([^)]*(unconfined|complain)' "$f"; then
+    return 1
+  fi
+  return 0
+}
+
+# install_bwrap_apparmor — install Ubuntu's own bwrap-userns-restrict profile
+# where the kernel restricts user namespaces, and only there. The file is copied
+# byte for byte out of the apparmor-profiles package (a distro-maintained file,
+# not text this repo writes): bwrap may create its user namespace and everything
+# it starts has every capability use denied. Idempotent: identical bytes mean no
+# rewrite, no reload and no mtime change. Every failure is a WARN, never an
+# error — bots fall back exactly as they did before, and the Bot Runtime settings
+# page plus the Crow's Nest health card say so in plain words.
+install_bwrap_apparmor() {
+  local unload_parser parser tmp backup=""
+  local had_previous=0
+
+  # The too-wide profile this branch shipped first is removed BEFORE any gate:
+  # on a host whose switch now reads 0, or with no parser, it would otherwise
+  # stay loaded — and it lifted Ubuntu's restriction for anyone who could run
+  # bwrap. Unloaded by name when a parser is at hand, then removed.
+  if [ -e "$CROW_OLD_BWRAP_PROFILE" ]; then
+    unload_parser="$(apparmor_parser_bin || true)"
+    if [ -n "$unload_parser" ]; then
+      sudo_cmd "$unload_parser" -R "$CROW_OLD_BWRAP_PROFILE" >/dev/null 2>&1 || true
+    fi
+    sudo_cmd rm -f "$CROW_OLD_BWRAP_PROFILE" || true
+    log "Removed the earlier crow-bwrap AppArmor profile (it lifted the user-namespace restriction for every bwrap caller)"
+  fi
+
+  if ! userns_restricted; then
+    log "No AppArmor rule needed for bubblewrap (unprivileged user namespaces are not restricted here)"
+    return 0
+  fi
+  if [ ! -d "$APPARMOR_DIR" ]; then
+    warn "AppArmor is not installed — bubblewrap has no rule, so bots run without the sandbox"
+    return 0
+  fi
+  if ! parser="$(apparmor_parser_bin)"; then
+    warn "apparmor_parser is not available — bubblewrap has no rule, so bots run without the sandbox"
+    return 0
+  fi
+
+  # A disable link is the operator's own choice: say what it means after the
+  # next reboot and leave it alone. Removing it would silently overrule them.
+  if [ -e "$APPARMOR_DIR/disable/bwrap-userns-restrict" ]; then
+    warn "$APPARMOR_DIR/disable/bwrap-userns-restrict is present, so AppArmor disables the bubblewrap profile at boot: the rule below loads now, but bots lose the sandbox after a reboot. Remove that link to keep it"
+  fi
+
+  # Copied outside /etc first, so a partial write never lands in the profile dir.
+  if ! tmp="$(mktemp)"; then
+    warn "Could not create a temp file for the bubblewrap AppArmor profile — bots run without the sandbox"
+    return 0
+  fi
+  if ! stage_bwrap_profile "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  if ! bwrap_profile_sane "$tmp"; then
+    rm -f "$tmp"
+    warn "The bwrap-userns-restrict profile in apparmor-profiles does not have the expected shape (a /usr/bin/bwrap profile, the unpriv_bwrap child with 'audit deny capability', a '-> &bwrap//&unpriv_bwrap' stacking rule, and no flags list carrying unconfined or complain) — nothing was written, so bots run without the sandbox"
+    return 0
+  fi
+  if [ -e "$CROW_BWRAP_PROFILE" ] && cmp -s "$tmp" "$CROW_BWRAP_PROFILE"; then
+    rm -f "$tmp"
+    log "AppArmor rule for bubblewrap already installed ($CROW_BWRAP_PROFILE unchanged)"
+    return 0
+  fi
+  # Somebody else already attached bwrap: never fight over an operator's (or a
+  # package's) profile file.
+  if bwrap_profile_exists; then
+    rm -f "$tmp"
+    log "An AppArmor profile for /usr/bin/bwrap already exists — left as it is"
+    return 0
+  fi
+  # Keep the previous copy so a failed load restores it instead of leaving a
+  # half-applied state (or no file at all).
+  if [ -e "$CROW_BWRAP_PROFILE" ]; then
+    if ! backup="$(mktemp)"; then
+      backup=""
+    elif cp "$CROW_BWRAP_PROFILE" "$backup" 2>/dev/null; then
+      had_previous=1
+    else
+      rm -f "$backup"
+      backup=""
+    fi
+  fi
+  if ! sudo_cmd install -m 644 "$tmp" "$CROW_BWRAP_PROFILE"; then
+    rm -f "$tmp"
+    [ -z "$backup" ] || rm -f "$backup"
+    warn "Could not install the AppArmor profile for bubblewrap — bots run without the sandbox (the Crow's Nest says so)"
+    return 0
+  fi
+  rm -f "$tmp"
+  if sudo_cmd "$parser" -r "$CROW_BWRAP_PROFILE"; then
+    [ -z "$backup" ] || rm -f "$backup"
+    log "AppArmor rule installed: bubblewrap may create a user namespace, and everything it runs has every capability use denied ($CROW_BWRAP_PROFILE)"
+    return 0
+  fi
+  # The load failed. If a previous copy was there, put it back (the kernel still
+  # holds whatever was loaded from it); otherwise leave nothing behind.
+  if [ "$had_previous" = "1" ]; then
+    if sudo_cmd install -m 644 "$backup" "$CROW_BWRAP_PROFILE"; then
+      rm -f "$backup"
+      warn "Could not load the new AppArmor profile for bubblewrap — the previous one is back in place, so this host is as it was"
+    else
+      rm -f "$backup"
+      warn "Could not load the new AppArmor profile for bubblewrap, nor put the previous one back ($CROW_BWRAP_PROFILE) — check that file by hand"
+    fi
+    return 0
+  fi
+  sudo_cmd "$parser" -R "$CROW_BWRAP_PROFILE" >/dev/null 2>&1 || true
+  sudo_cmd rm -f "$CROW_BWRAP_PROFILE" || true
+  warn "Could not load the AppArmor profile for bubblewrap — bots run without the sandbox (the Crow's Nest says so)"
+  return 0
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
@@ -489,6 +783,7 @@ echo "  Requires a Debian/Ubuntu family system (installs via apt)."
 echo ""
 echo "  This script will install:"
 echo "    - Node.js ${NODE_MAJOR}"
+echo "    - bubblewrap (the bots' sandbox)"
 echo "    - Docker + Docker Compose"
 echo "    - Caddy (reverse proxy)"
 echo "    - Crow"
@@ -544,6 +839,19 @@ fi
 # hyperswarm); minimal server and cloud images do not ship it. Installed here,
 # on both Node paths, before any dependency install runs.
 sudo apt install -y libatomic1
+
+# bubblewrap is what wraps every bot's pi child (scripts/pi-bots/pi_sandbox.mjs:
+# its own user/PID namespace, docker sockets masked, no_new_privs). Without it a
+# bot runs with this user's groups and sudo. Installed here for both Node paths,
+# and BEFORE Step 5 turns on the auto-update timer — a later apt call would have
+# to wait for the dpkg lock. Ubuntu's own bwrap-userns-restrict AppArmor profile,
+# right after it, is what makes bwrap work on Ubuntu 24.04+, where unprivileged
+# user namespaces are restricted: bwrap may create the namespace, and everything
+# it runs has every capability use denied. That step only DOWNLOADS apparmor-profiles and
+# takes the one file — it never installs the package (its 19 other profiles would
+# confine samba, avahi and friends on this machine).
+sudo apt install -y bubblewrap
+install_bwrap_apparmor
 
 # ─── Step 3: Install Docker ──────────────────────────────
 

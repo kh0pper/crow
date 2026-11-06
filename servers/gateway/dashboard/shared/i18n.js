@@ -261,6 +261,19 @@ export const translations = {
   "signals.satellites.toolsChanged": { en: "Server {name}: the {bundle} tools changed and are off until you approve them", es: "Servidor {name}: las herramientas de {bundle} cambiaron y están desactivadas hasta que las apruebes" },
   "signals.peers.dialFailing": { en: "Instance sync can't connect to peer {name}: every dial has failed for {minutes} min (last error: {error}). Changes for it are queuing. Check its address, port and firewall on the Paired instances page.", es: "La sincronización de instancias no puede conectar con el par {name}: todos los intentos fallan desde hace {minutes} min (último error: {error}). Los cambios para él se están acumulando. Revisa su dirección, puerto y cortafuegos en la página de instancias emparejadas." },
   "signals.peers.noDialAddress": { en: "Instance sync can't reach peer {name}: it has no usable dial address ({missing}). Changes for it are queuing. Add its tailscale_ip or a tailnet gateway URL on the Paired instances page.", es: "La sincronización de instancias no puede llegar al par {name}: no tiene una dirección utilizable ({missing}). Los cambios para él se están acumulando. Añade su tailscale_ip o una URL de gateway del tailnet en la página de instancias emparejadas." },
+  // Bot sandbox (audit N1b-2): the same sentence the Bot Runtime settings show.
+  "signals.botSandbox.label": { en: "Bot sandbox", es: "Entorno aislado de los bots" },
+  "signals.botSandbox.ok": { en: "bots run inside bubblewrap", es: "los bots se ejecutan dentro de bubblewrap" },
+  "signals.botSandbox.notSandboxed": { en: "bots run without bubblewrap", es: "los bots se ejecutan sin bubblewrap" },
+  "signals.botSandbox.unobserved": {
+    en: "started by an external supervisor — not observed here",
+    es: "arrancados por un supervisor externo — no se observan desde aquí",
+  },
+  "signals.botSandbox.issue": {
+    en: "{sentence} Next step: {next}",
+    es: "{sentence} Siguiente paso: {next}",
+  },
+  "signals.botSandbox.action": { en: "Bot Runtime settings", es: "Ajustes de ejecución de bots" },
   "signals.logins.label": { en: "Sign-ins", es: "Inicios de sesión" },
   "signals.logins.none": { en: "no failed attempts", es: "sin intentos fallidos" },
   "signals.logins.count": { en: "{n} failed in 24h", es: "{n} fallidos en 24h" },
@@ -3033,6 +3046,78 @@ export const translations = {
   // The open lines are the policy's exact English sentences; the level words are
   // the policy's exact words (contained / partly contained / not contained).
   "settings.containment.title": { en: "Containment", es: "Contención" },
+  // Bot sandbox status line (audit N1b-2). The two failure sentences mirror
+  // pi_sandbox.mjs's console line: with setpriv sudo is blocked and docker is
+  // not; without it the bot keeps the operator's groups and sudo works (mode
+  // off is always the plain case — pi spawns unwrapped then).
+  "settings.sandboxStatus.sandboxed": {
+    en: "Bots run inside the bubblewrap sandbox.",
+    es: "Los bots se ejecutan dentro del entorno aislado bubblewrap.",
+  },
+  "settings.sandboxStatus.unsandboxed": {
+    en: "Bots run WITHOUT the bubblewrap sandbox: {reason}. {exposure}",
+    es: "Los bots se ejecutan SIN el entorno aislado bubblewrap: {reason}. {exposure}",
+  },
+  "settings.sandboxStatus.unobserved": {
+    en: "This gateway can't see how bots are started here: an external supervisor (PIBOT_SUPERVISOR=external) starts them, outside this process.",
+    es: "Este gateway no puede ver cómo se arrancan los bots aquí: los arranca un supervisor externo (PIBOT_SUPERVISOR=external), fuera de este proceso.",
+  },
+  "settings.sandboxStatus.reasonNoBwrap": {
+    en: "bubblewrap isn't installed",
+    es: "bubblewrap no está instalado",
+  },
+  "settings.sandboxStatus.reasonUserns": {
+    en: "this machine blocks the user namespace bubblewrap needs (Ubuntu 24.04 and later do this by default)",
+    es: "esta máquina bloquea el espacio de nombres de usuario que bubblewrap necesita (Ubuntu 24.04 y posteriores lo hacen por defecto)",
+  },
+  "settings.sandboxStatus.reasonUsernsGeneric": {
+    en: "user namespaces are blocked on this host",
+    es: "esta máquina bloquea los espacios de nombres de usuario",
+  },
+  "settings.sandboxStatus.reasonUsernsProfile": {
+    en: "this machine restricts unprivileged user namespaces and the AppArmor profile for bubblewrap is installed, but bwrap still can't create one",
+    es: "esta máquina restringe los espacios de nombres de usuario sin privilegios y el perfil AppArmor de bubblewrap está instalado, pero bwrap sigue sin poder crear uno",
+  },
+  "settings.sandboxStatus.reasonUnobserved": {
+    en: "the bots are started outside this process",
+    es: "los bots se arrancan fuera de este proceso",
+  },
+  "settings.sandboxStatus.reasonDisabled": {
+    en: "the sandbox is switched off (CROW_PI_SANDBOX=off)",
+    es: "el entorno aislado está desactivado (CROW_PI_SANDBOX=off)",
+  },
+  "settings.sandboxStatus.exposureSetpriv": {
+    en: "They can use this machine's docker (if present), but not sudo.",
+    es: "Pueden usar el docker de esta máquina (si lo hay), pero no sudo.",
+  },
+  "settings.sandboxStatus.exposurePlain": {
+    en: "They can use this machine's docker (if present), and sudo.",
+    es: "Pueden usar el docker de esta máquina (si lo hay) y sudo.",
+  },
+  "settings.sandboxStatus.nextNoBwrap": {
+    en: "Install bubblewrap: sudo apt install bubblewrap",
+    es: "Instala bubblewrap: sudo apt install bubblewrap",
+  },
+  "settings.sandboxStatus.nextUserns": {
+    en: "Ubuntu 24.04 blocks it: re-run the Crow installer, which installs Ubuntu's own AppArmor profile for bubblewrap",
+    es: "Ubuntu 24.04 lo bloquea: vuelve a ejecutar el instalador de Crow, que instala el perfil AppArmor de Ubuntu para bubblewrap",
+  },
+  "settings.sandboxStatus.nextUsernsGeneric": {
+    en: "user namespaces are blocked on this host (a container, Debian's unprivileged_userns_clone=0, or a service restriction such as RestrictNamespaces=)",
+    es: "esta máquina bloquea los espacios de nombres de usuario (un contenedor, unprivileged_userns_clone=0 en Debian, o una restricción del servicio como RestrictNamespaces=)",
+  },
+  "settings.sandboxStatus.nextUsernsProfile": {
+    en: "The AppArmor profile is installed, so look at what else blocks namespaces here: a container, or a RestrictNamespaces= setting on the service that starts the bots",
+    es: "El perfil AppArmor está instalado, así que revisa qué más bloquea los espacios de nombres aquí: un contenedor, o un ajuste RestrictNamespaces= en el servicio que arranca los bots",
+  },
+  "settings.sandboxStatus.nextUnobserved": {
+    en: "Check the sandbox where those bots run: the supervisor's own log shows whether bwrap started each one",
+    es: "Comprueba el entorno aislado donde se ejecutan esos bots: el registro del supervisor muestra si bwrap arrancó cada uno",
+  },
+  "settings.sandboxStatus.nextDisabled": {
+    en: "Turn the sandbox back on: remove CROW_PI_SANDBOX=off from the gateway's environment",
+    es: "Vuelve a activar el entorno aislado: quita CROW_PI_SANDBOX=off del entorno del gateway",
+  },
   "settings.botRuntimeContainmentLevel": { en: "Bots: {level}", es: "Contención de los bots: {level}" },
   "settings.containment.levelContained": { en: "contained", es: "contenido" },
   "settings.containment.levelPartly": { en: "partly contained", es: "parcialmente contenido" },

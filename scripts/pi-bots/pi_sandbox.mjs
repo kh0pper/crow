@@ -239,6 +239,32 @@ export function probePiSandbox(opts = {}) {
   return probeCache;
 }
 
+/**
+ * Why bots run WITHOUT the bubblewrap sandbox, as one code a status surface can
+ * turn into a plain sentence plus one next step — or null when they ARE
+ * sandboxed. Audit N1b-2: the only other signal for a host without bubblewrap
+ * was one console.error, and the bots' settings page and the Nest said nothing.
+ *  - "disabled"       CROW_PI_SANDBOX=off: a deliberate setting, not a fault.
+ *  - "no-bwrap"       bubblewrap is not installed (one apt install away).
+ *  - "userns-blocked" bwrap is there but cannot create a user namespace; on
+ *                     Ubuntu 24.04+ that is often the AppArmor userns restriction,
+ *                     which the installer answers with Ubuntu's own
+ *                     bwrap-userns-restrict profile (bwrap may build the
+ *                     namespace; everything it starts gets no capabilities).
+ *                     It is not the only cause (a container, Debian's
+ *                     unprivileged_userns_clone=0, a RestrictNamespaces= unit),
+ *                     so the status surface checks the kernel switch before it
+ *                     names Ubuntu.
+ * The probe records exactly these two failure reasons, so the split is total.
+ */
+export function piSandboxReasonCode(probe, mode = piSandboxMode(process.env)) {
+  if (mode === "off") return "disabled";
+  const p = probe || {};
+  if (p.ok) return null;
+  if (/^bubblewrap \(bwrap\) is not installed/.test(String(p.reason || ""))) return "no-bwrap";
+  return "userns-blocked";
+}
+
 /** Current state for status surfaces: "active" (tier pidns) | "active-no-pidns"
  *  (tier userns) | "nnp-only: ..." | "off" | "fallback: ...". */
 export function piSandboxStatus() {
