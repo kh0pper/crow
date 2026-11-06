@@ -63,7 +63,7 @@ When GitHub answers, the answer decides:
 |---|---|
 | all three green | the update proceeds |
 | any of them red | skipped, retried on the next check |
-| any of them still running | skipped, retried on the next check |
+| any of them still running | skipped, but re-checked about 30 minutes later instead of waiting the whole interval |
 | some of the three missing, nothing still running | skipped as **no CI** (see below): the missing checks will never report on this origin — **green needs all three**, so a sha where only `audit` ran is never deployed and never reads "still running" |
 | no run for our three checks | skipped as **no CI**: an unverified commit is never deployed. A push that raced the check answers on the next tick; a fork that strips those checks keeps being skipped instead |
 
@@ -80,6 +80,17 @@ Skipped: origin/main has only some of the required CI checks (1a2b3c4d5; missing
 It is recorded as a transient result, so it never rings the bell; if it repeats
 past two check intervals the Nest's Updates card warns that the required checks
 didn't all run on main. `CROW_UPDATE_CI_GATE=0` is the way out.
+
+**A verdict that is not known yet is not a verdict.** While GitHub reports a
+required check as still running, the updater asks again about 30 minutes later
+(plus a small per-machine offset), and keeps asking while CI is still running. It
+stops after `ceil(interval / 30 min) - 1` retries, so a retry can never run past
+the next regular check, and it stops immediately when any other answer arrives.
+Only a *running* CI run earns that retry: a red result, a commit without the
+required checks, and GitHub being unreachable all wait for the regular interval.
+An outage must not be re-asked every 30 minutes — each unreadable tick counts
+toward the 3-in-a-row bell below, so a fast retry would ring it after about an
+hour instead of after three regular checks.
 
 Two outcomes are *not* a CI result:
 
@@ -99,9 +110,9 @@ that pulled.
 
 **Unavailable.** The origin *is* GitHub and no answer could be read: a network
 failure, a timeout, a `403`/`429` rate limit, any other non-200 response, or a
-body that is not valid JSON. The commit is unverified, so this tick is **skipped
-exactly like a running build** — nothing is pulled, so the code on disk keeps
-running and the next check retries:
+body that is not valid JSON. The commit is unverified, so this tick is **skipped**
+just like a running build — nothing is pulled, so the code on disk keeps running —
+but it waits for the next regular check instead of earning a 30-minute retry:
 
 ```
 Skipped: CI status could not be read for origin/main (1a2b3c4d5) — will retry next tick

@@ -60,6 +60,39 @@ export const DEFAULT_INTERVAL_HOURS = 6;
 export const MIN_INTERVAL_HOURS = 1;
 
 /**
+ * N4-3: how long after a tick whose CI is still RUNNING — the only missing
+ * answer that earns a retry — the next check runs. On a day of frequent merges
+ * every regular tick could land mid-CI, and a box sat on an old sha for a whole
+ * day (two ticks in a row skipped on a real paired box). A red verdict, a no-ci
+ * origin, an unreadable GitHub answer, a quarantine or any other skip is a
+ * verdict, not a missing answer — those still wait for the regular tick.
+ */
+export const CI_RETRY_DELAY_MS = 30 * 60 * 1000;
+
+/**
+ * Per-instance offset added to a retry (instanceJitterMs, narrowed) so
+ * co-hosted gateways do not all re-ask GitHub on the same second, while the
+ * whole chain still fits inside the regular interval.
+ */
+export const CI_RETRY_JITTER_MS = 60 * 1000;
+
+/**
+ * The ONLY skip that means "ask again shortly": a CI run still in progress
+ * (`ci-pending`) — the one case where waiting for the regular tick can leave a
+ * box on an old sha for a whole day.
+ *
+ * `ci-unavailable` is deliberately absent. Every such skip increments
+ * `auto_update_ci_unavailable_count`, and the third in a row rings the "updates
+ * paused" bell (CI_UNAVAILABLE_FAILURE_TICKS). Retrying at 30 minutes would
+ * turn that bell into "GitHub was unreachable for about an hour" instead of
+ * "unreadable for three regular ticks" — a change to alert behaviour this item
+ * must not make. `ci-gate-unavailable` is absent for the same reason: it IS the
+ * third failed read, already a failure that rings the bell, and a retry would
+ * only repeat it.
+ */
+export const CI_RETRY_SKIPS = Object.freeze(["ci-pending"]);
+
+/**
  * Every string this module writes to `auto_update_last_result`, classified ONCE
  * so the Nest's Updates card reads this table instead of matching the free text
  * in a second place (audit N1c-1). First matching prefix wins.
@@ -132,6 +165,10 @@ export function classifyUpdateResult(result) {
 }
 
 let updateTimer = null;
+let retryTimer = null;
+/** Set by startAutoUpdate() while the scheduler runs: the retry delay/budget
+ *  plan for the CURRENT interval. Null when auto-update is not armed. */
+let retryPlan = null;
 let db = null;
 
 /**
@@ -196,6 +233,106 @@ export async function tickCheck(check = checkForUpdates) {
 /** Test-only: inject the module-level db handle without starting timers. */
 export function _setDbForTest(database) {
   db = database;
+}
+
+/**
+ * Test-only: the CI-retry delay (`null` restores the default). Also pins the
+ * jitter to zero, so a suite asserts the retry COUNT and ordering instead of
+ * clock arithmetic, and never waits real minutes.
+ */
+let _ciRetryDelayOverride = null;
+export function _setCiRetryDelayForTest(ms) {
+  _ciRetryDelayOverride = ms;
+}
+
+/**
+ * Test-only: run one scheduled tick exactly as the timers do, so a suite can
+ * drive the retry chain without waiting five minutes for the first check.
+ * `kind` is "regular" (first check / interval) or "retry".
+ */
+export function _runScheduledTickForTest(kind = "regular") {
+  return scheduledTick(kind);
+}
+
+/**
+ * Test-only: the check a SCHEDULED tick runs (production uses checkForUpdates,
+ * which pulls, installs and restarts). tickCheck()'s own parameter stays for
+ * direct callers.
+ */
+let _scheduledCheckForTest = null;
+export function _setScheduledCheckForTest(fn) {
+  _scheduledCheckForTest = fn;
+}
+
+/** Test-only: whether a retry timer is pending right now. */
+export function _retryPendingForTest() {
+  return retryTimer !== null;
+}
+
+function retryDelayMs() {
+  if (_ciRetryDelayOverride !== null) return _ciRetryDelayOverride;
+  const jitter = instanceJitterMs(retryPlan?.jitterKey ?? "") % CI_RETRY_JITTER_MS;
+  return CI_RETRY_DELAY_MS + jitter;
+}
+
+function clearRetryTimer() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+/** The skip a tick reported, read from the RESULT (never from message text —
+ *  those messages interpolate a sha and are classified elsewhere). */
+function skipCode(result) {
+  return result && typeof result === "object" && typeof result.skipped === "string"
+    ? result.skipped
+    : null;
+}
+
+/**
+ * Arm ONE extra check ~30 min out after a tick whose CI is still running. Bounded
+ * to ceil(interval / 30 min) - 1 retries, so the chain always ends before the
+ * next regular tick; the wall-clock check repeats that bound with the jitter
+ * included. At most one retry timer is ever pending.
+ */
+function scheduleCiRetry() {
+  if (!retryPlan) return;
+  const delay = retryDelayMs();
+  if (retryPlan.used >= retryPlan.budget) return;
+  if (Date.now() - retryPlan.startedAt + delay >= retryPlan.intervalMs) return;
+  retryPlan.used += 1;
+  clearRetryTimer();
+  console.log(`[auto-update] CI result not known yet; checking again in ${Math.round(delay / 60000)} min`);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    // tickCheck reaches runMigrations, which CAN reject; an unhandled rejection
+    // in this timer would take the gateway down (same reason as the first-check
+    // timer). A rejected retry simply does not schedule another one — the
+    // regular interval still runs.
+    scheduledTick("retry").catch((e) => console.error("[auto-update] retry tick failed:", e.message));
+  }, delay);
+  // A pending retry must never be the only thing keeping the process alive.
+  retryTimer.unref?.();
+}
+
+/**
+ * The body of EVERY scheduled check: the first-delay timer, the interval, and
+ * each CI retry. A retry goes through tickCheck(), so the disabled and
+ * install-set guards still apply to it.
+ */
+async function scheduledTick(kind) {
+  if (kind === "regular") {
+    // A regular tick supersedes a pending retry and restarts the retry budget.
+    clearRetryTimer();
+    if (retryPlan) {
+      retryPlan.used = 0;
+      retryPlan.startedAt = Date.now();
+    }
+  }
+  const result = _scheduledCheckForTest ? await tickCheck(_scheduledCheckForTest) : await tickCheck();
+  if (CI_RETRY_SKIPS.includes(skipCode(result))) scheduleCiRetry();
+  return result;
 }
 
 /**
@@ -1706,16 +1843,27 @@ export async function startAutoUpdate(database, { noAuth = false } = {}) {
   const intervalMs = hours * 60 * 60 * 1000;
 
   const { resolveDataDir } = await import("../db.js");
-  const firstDelay = 5 * 60 * 1000 + instanceJitterMs(resolveDataDir());
+  const dataDir = resolveDataDir();
+  const firstDelay = 5 * 60 * 1000 + instanceJitterMs(dataDir);
   console.log(`[auto-update] Enabled — checking every ${hours}h (first check in ${Math.round(firstDelay / 1000)}s)`);
+
+  // N4-3: a "verdict not known yet" tick gets extra checks between two regular
+  // ticks. Bounded so retries can never run into the next one.
+  retryPlan = {
+    intervalMs,
+    budget: Math.max(0, Math.ceil(intervalMs / CI_RETRY_DELAY_MS) - 1),
+    used: 0,
+    startedAt: Date.now(),
+    jitterKey: dataDir,
+  };
 
   // First check after ~5 minutes plus a per-instance offset (let the gateway
   // fully start, and keep co-hosted instances off the same millisecond).
   updateTimer = setTimeout(async () => {
     // tickCheck now reaches runMigrations, which CAN reject; an unhandled
     // rejection in this timer would take the gateway down.
-    await tickCheck().catch((e) => console.error("[auto-update] tick failed:", e.message));
-    updateTimer = setInterval(() => { tickCheck().catch(() => {}); }, intervalMs);
+    await scheduledTick("regular").catch((e) => console.error("[auto-update] tick failed:", e.message));
+    updateTimer = setInterval(() => { scheduledTick("regular").catch(() => {}); }, intervalMs);
   }, firstDelay);
 }
 
@@ -1728,6 +1876,8 @@ export function stopAutoUpdate() {
     clearInterval(updateTimer);
     updateTimer = null;
   }
+  clearRetryTimer();
+  retryPlan = null;
 }
 
 /**

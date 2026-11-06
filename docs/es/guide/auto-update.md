@@ -65,7 +65,7 @@ Cuando GitHub responde, la respuesta decide:
 |---|---|
 | los tres en verde | la actualización continúa |
 | alguno en rojo | se pospone y se reintenta en la próxima comprobación |
-| alguno aún en ejecución | se pospone y se reintenta en la próxima comprobación |
+| alguno en ejecución | se pospone, pero se vuelve a comprobar unos 30 minutos después en vez de esperar el intervalo completo |
 | falta alguno de los tres y nada sigue en ejecución | se pospone como **sin CI** (ver abajo): los checks que faltan nunca informarán en este origen — **verde exige los tres**, así que un sha en el que solo `audit` ha terminado nunca se despliega ni se queda como "en ejecución" |
 | ningún check-run de nuestros tres | se pospone como **sin CI**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
 
@@ -83,6 +83,18 @@ Se registra como resultado transitorio, así que nunca hace sonar la campana; si
 se repite más de dos intervalos de comprobación, la tarjeta de Actualizaciones
 del Nest avisa de que los checks requeridos no se ejecutaron todos en main.
 `CROW_UPDATE_CI_GATE=0` es la salida.
+
+**Un veredicto que aún no se conoce no es un veredicto.** Mientras GitHub diga que
+un check requerido sigue en ejecución, el actualizador vuelve a preguntar unos 30
+minutos después (más un pequeño desfase por máquina), y sigue preguntando mientras
+la CI siga en ejecución. Se detiene tras `ceil(interval / 30 min) - 1` reintentos,
+así que un reintento nunca puede pasarse de la siguiente comprobación normal, y se
+detiene en cuanto llega cualquier otra respuesta. Solo una CI *en ejecución* se
+gana ese reintento: un resultado en rojo, un commit sin los checks requeridos y que
+GitHub no se pueda alcanzar esperan al intervalo normal. Una caída no debe
+repreguntarse cada 30 minutos — cada comprobación ilegible cuenta para la campana
+de 3 seguidas de abajo, así que un reintento rápido la haría sonar tras
+aproximadamente una hora en vez de tras tres comprobaciones normales.
 
 Dos resultados *no* son un resultado de CI:
 
@@ -104,9 +116,10 @@ comprobación que descargó algo.
 **No disponible.** El origen *sí* es GitHub y no se pudo leer ninguna respuesta:
 un fallo de red, un tiempo de espera agotado, un límite de peticiones `403`/`429`,
 cualquier otra respuesta que no sea 200, o un cuerpo que no es JSON válido. El
-commit queda sin verificar, así que esta comprobación se **pospone exactamente
-igual que una compilación en ejecución** — no se descarga nada, el código en
-disco sigue corriendo y la próxima comprobación lo reintenta:
+commit queda sin verificar, así que esta comprobación se **pospone** igual que una
+compilación en ejecución — no se descarga nada y el código en disco sigue
+corriendo — pero espera a la próxima comprobación normal en vez de ganarse un
+reintento de 30 minutos:
 
 ```
 Skipped: CI status could not be read for origin/main (1a2b3c4d5) — will retry next tick
