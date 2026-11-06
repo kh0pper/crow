@@ -82,7 +82,8 @@
         "label": "Actual Budget"
       },
       "firstAdmin": {
-        "mode": "crow"
+        "mode": "crow",
+        "via": "postInstall"
       },
       "notes": "Privacy-first budgeting. Data stays local. Crow sets a generated password on the Actual server it installs (Settings → Passwords). To use an Actual server you already run, set ACTUAL_URL and ACTUAL_PASSWORD instead.",
       "official": true
@@ -1075,7 +1076,8 @@
         "label": "Change Detection"
       },
       "firstAdmin": {
-        "mode": "none"
+        "mode": "finish-setup",
+        "note": "It has no password by default; set one in its settings so nobody else on this machine can lock you out."
       },
       "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management.",
       "official": true
@@ -2473,7 +2475,7 @@
         "label": "Immich"
       },
       "firstAdmin": {
-        "mode": "none"
+        "mode": "external"
       },
       "notes": "Connects to an existing Immich instance. Does not run Immich itself — install Immich separately. Limited ARM64 support.",
       "official": true
@@ -2887,7 +2889,7 @@
         "proxyMode": "direct"
       },
       "firstAdmin": {
-        "mode": "none"
+        "mode": "external"
       },
       "notes": "Connects to an existing Kodi instance. Enable 'Allow remote control via HTTP' in Kodi Settings > Services > Web server.",
       "official": true
@@ -4300,7 +4302,10 @@
         "label": "Miniflux"
       },
       "firstAdmin": {
-        "mode": "crow"
+        "mode": "crow",
+        "via": "env",
+        "secretEnv": "MINIFLUX_ADMIN_PASSWORD",
+        "userEnv": "MINIFLUX_ADMIN_USER"
       },
       "notes": "Self-host via Docker (Crow generates the admin password and saves it in Settings → Passwords) or connect to an existing server (set MINIFLUX_URL + MINIFLUX_API_KEY). Either way, create an API key in Miniflux (Settings → API Keys) and paste it into MINIFLUX_API_KEY.",
       "official": true
@@ -4390,7 +4395,10 @@
         "proxyMode": "direct"
       },
       "firstAdmin": {
-        "mode": "crow"
+        "mode": "crow",
+        "via": "env",
+        "secretEnv": "MINIO_ROOT_PASSWORD",
+        "userEnv": "MINIO_ROOT_USER"
       },
       "notes": "After installation, Crow's storage tools (upload, list, delete files) will be available automatically. The MinIO console is accessible at http://localhost:9001.",
       "official": true
@@ -4861,8 +4869,8 @@
         "proxyMode": "direct"
       },
       "firstAdmin": {
-        "mode": "finish-setup",
-        "note": "Crow creates its own login for phone alerts right after install; set your own login on the web page now."
+        "mode": "none",
+        "note": "Crow creates its login for phone alerts; nobody can sign up."
       },
       "notes": "Crow sets itself up automatically: after install it creates its own login on this server, picks a private topic, and hands a read-only key to the Crow Android app (Settings › Notifications shows the status, the phone address, and a test button). Each Crow instance on this computer gets its own topic. The server runs with deny-all default access, so topics are private.",
       "official": true
@@ -5498,7 +5506,8 @@
         "proxyMode": "direct"
       },
       "firstAdmin": {
-        "mode": "none"
+        "mode": "finish-setup",
+        "note": "Until it is claimed, the first Plex account that reaches this server can claim it. Set a claim token at install (plex.tv/claim) to avoid this."
       },
       "notes": "Connects to an existing Plex Media Server. Optionally self-host via Docker (set PLEX_MEDIA_PATH + PLEX_CLAIM_TOKEN). Plex Web is a SPA and cannot be proxied behind a subpath.",
       "official": true
@@ -6982,7 +6991,9 @@
         "proxyMode": "direct"
       },
       "firstAdmin": {
-        "mode": "crow"
+        "mode": "crow",
+        "via": "env",
+        "secretEnv": "UNSLOTH_STUDIO_PASSWORD"
       },
       "no_auto_provider": "Not a model endpoint Crow routes to: Unsloth Studio is a training and chat workbench with its own login, and its GGUF chat is internal to Studio. A model fine-tuned here is exported as files (GGUF or safetensors) and served through the Model Catalog like any other model.",
       "notes": "Image: unsloth/unsloth-rocm, the ROCm build of Unsloth, pinned to a release tag and digest (the plain unsloth/unsloth image is CUDA-only and is not used). Works on AMD RDNA2 and newer and CDNA GPUs, except the Steam Deck (gfx1033), which the image refuses. Upstream measured LoRA training and diffusion on a Strix Halo (gfx1151) with these generic ROCm wheels; AMD's per-architecture wheels fix a gfx1151 grouped-GEMM crash, so if a mixture-of-experts run crashes there, rebuild the image with ROCM_GFX=gfx1151 as the Unsloth docs describe. GGUF chat inside Studio runs on the CPU in this release. Licences: the Unsloth library is Apache-2.0 and its unsloth-zoo helper LGPL-3.0-or-later; Unsloth Studio (the web UI) is AGPL-3.0 with AGPL section 7(b) attribution notices. Crow runs the unmodified upstream image as a separate container and links none of its code, so Crow's own licence is unaffected. Offering Studio to other people over a network (a hosted Crow) triggers AGPL section 13 only if the image is modified; either way its Unsloth notices must stay visible. 'Unsloth' is a trademark of the Unsloth team. Crow's installer opens the manifest ports (3075, 3076) to the tailnet in ufw, as for every bundle; both stay bound to 127.0.0.1, and only 3075 gets a Tailscale Serve route.",

@@ -97,6 +97,30 @@ export function readInstalled(home = CROW_HOME) {
  */
 let liveProxyIds = new Set();
 
+/**
+ * Why the proxy router is missing at all, when it is: boot/late-mounts.js calls
+ * this if `extensionProxyRouter()` throws (a bad module, a port-route failure).
+ * A restart cannot fix that, so the Extensions card must not promise one — it
+ * says the app link is unavailable instead (review round 1, N5). The message
+ * stays in the log; only its existence is read here.
+ */
+let proxyMountFailure = null;
+
+/** Record that the proxy router could not be mounted this boot. */
+export function recordProxyMountFailure(err) {
+  proxyMountFailure = String((err && err.message) || err || "unknown error");
+}
+
+/** The mount failure's message, or null when the router mounted (or was never tried). */
+export function getProxyMountFailure() {
+  return proxyMountFailure;
+}
+
+/** Test seam: pretend the router failed (dummy message) or mounted (null). */
+export function _setProxyMountFailureForTest(err) {
+  proxyMountFailure = err ? String((err && err.message) || err) : null;
+}
+
 /** @returns {Set<string>} ids with a mounted /proxy route (a copy; never the live set). */
 export function getLiveProxyIds() {
   return new Set(liveProxyIds);
@@ -283,6 +307,7 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
   // What this process will actually serve (exposed for the Extensions page's
   // "restart Crow first" wording — see getLiveProxyIds).
   liveProxyIds = new Set(extensions.filter((ext) => ext.proxyMode !== "direct").map((ext) => ext.id));
+  proxyMountFailure = null; // the router is mounted: no "unavailable" wording
 
   for (const ext of extensions) {
     // Skip direct-mode extensions (SPA apps that can't work behind a subpath proxy)

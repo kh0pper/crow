@@ -28,7 +28,7 @@
   ],
   "ports": [8043],
   "webUI": { "port": 8043, "path": "/", "label": "JupyterHub" },
-  "firstAdmin": { "mode": "crow" },
+  "firstAdmin": { "mode": "crow", "via": "env", "secretEnv": "MLA_ADMIN_PASSWORD", "userEnv": "MLA_ADMIN_USER" },
   "sibling_of": ["maker-lab"],
   "age_gate": { "min_age": 9 },
   "notes": "v1 single-admin classroom shape: NativeAuthenticator + SimpleLocalProcessSpawner, shared container runtime, loopback-bound on :8043. Kid-safe kernel config blocks shell-escape patterns and chroots file writes to the user's home. True multi-host / GitHub-OAuth / sandboxed-per-user deploys are future work. Hard dep on the maker-lab bundle: the pair-programmer skill reuses maker-lab's hint pipeline and persona prompts at a higher reading level."

@@ -20,6 +20,9 @@
   ],
   "ports": [5010],
   "webUI": { "port": 5010, "path": "/", "label": "Change Detection" },
-  "firstAdmin": { "mode": "none" },
+  "firstAdmin": {
+    "mode": "finish-setup",
+    "note": "It has no password by default; set one in its settings so nobody else on this machine can lock you out."
+  },
   "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management."
 }

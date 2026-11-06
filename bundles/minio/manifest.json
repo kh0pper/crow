@@ -62,6 +62,6 @@
   ],
   "ports": [9000, 9001],
   "webUI": { "port": 9001, "path": "/", "label": "Console", "proxyMode": "direct" },
-  "firstAdmin": { "mode": "crow" },
+  "firstAdmin": { "mode": "crow", "via": "env", "secretEnv": "MINIO_ROOT_PASSWORD", "userEnv": "MINIO_ROOT_USER" },
   "notes": "After installation, Crow's storage tools (upload, list, delete files) will be available automatically. The MinIO console is accessible at http://localhost:9001."
 }

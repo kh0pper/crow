@@ -3176,6 +3176,26 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       appendLog(job, `Profile seed skipped: ${err.message}`);
     }
 
+    // Security audit N3-4: a bundle that does NOT create its own first admin
+    // leaves an app setup page anyone on this machine can claim. One bell, once
+    // per install, pointing at the Extensions card that says what to do. Silent
+    // for `crow`, `external` and `none` manifests; never in the job log (the
+    // owner reads the bell, and the log line would be a second, easier-to-miss
+    // copy).
+    //
+    // BEFORE the half-failure returns below: a compose/hook failure still leaves
+    // an app that can start (the owner fixes Configure + Start), so its setup
+    // page is just as claimable — the notice must not be skipped (review S3).
+    await reportFirstAdminNotice({
+      bundleId,
+      manifest,
+      bundleName: manifest?.name || bundleId,
+      // The stamp installed.json actually holds: an in-place reinstall keeps its
+      // entry (and does not re-ring), and only a reinstall after an uninstall —
+      // a new record — asks again.
+      installId: recordedInstallAt,
+    });
+
     if (composeFailure) {
       // Last log line = what the client shows on a failed job: keep the cause in it.
       appendLog(job, `Installed, but the containers did not start (${composeFailure.slice(0, 400)}) — fix the configuration with Configure, then press Start`);
@@ -3186,20 +3206,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason: hookFailure, needsRestart };
     }
 
-    // Security audit N3-4: a bundle that does NOT create its own first admin
-    // leaves an app setup page anyone on this machine can claim. One bell, once
-    // per install, pointing at the Extensions card that says what to do. Silent
-    // for `crow` and `none` manifests; never in the job log (the owner reads the
-    // bell, and the log line would be a second, easier-to-miss copy).
-    await reportFirstAdminNotice({
-      bundleId,
-      manifest,
-      bundleName: manifest?.name || bundleId,
-      // The stamp installed.json actually holds: an in-place reinstall keeps its
-      // entry (and does not re-ring), and only a reinstall after an uninstall —
-      // a new record — asks again.
-      installId: recordedInstallAt,
-    });
     return { ok: true, needsRestart };
   } catch (err) {
     const reason = err?.message || String(err);
@@ -3378,7 +3384,10 @@ export default function bundlesRouter() {
       const stamp = await markFirstAdminDone(db, bundleId, entry.installedAt || entry.installed_at || null);
       res.json({ ok: true, bundle_id: bundleId, install: stamp });
     } catch (err) {
-      res.status(500).json({ error: String((err && err.message) || err) });
+      // Never the raw message (it can carry a path or a DB URL): a fixed sentence
+      // for the page, the cause in the gateway log (review round 1, N6).
+      console.warn(`[bundles] POST /bundles/api/first-admin-done failed: ${err?.message || err}`);
+      res.status(500).json({ error: "Could not record that. Try again." });
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }

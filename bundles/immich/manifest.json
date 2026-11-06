@@ -34,6 +34,6 @@
   ],
   "ports": [],
   "webUI": { "port": 2283, "path": "/", "label": "Immich" },
-  "firstAdmin": { "mode": "none" },
+  "firstAdmin": { "mode": "external" },
   "notes": "Connects to an existing Immich instance. Does not run Immich itself — install Immich separately. Limited ARM64 support."
 }

@@ -5,8 +5,8 @@
  * The finding: a freshly installed app's own first-run admin page is reachable
  * over loopback by anyone or anything else on the machine, and an audit VM run
  * showed another account claiming uptime-kuma's setup page before the owner
- * did. Two answers, and every web app bundle now declares which one applies
- * (manifest `firstAdmin.mode`):
+ * did. Every web app bundle declares which answer applies (manifest
+ * `firstAdmin.mode`):
  *
  *   crow           Crow creates the admin at install — a generated password in
  *                  the keychain, or a postInstall hook. Nothing to claim, and
@@ -15,7 +15,12 @@
  *                  told, plainly, to finish it NOW, with a direct link.
  *   default-login  the app ships a documented default login (user + password).
  *                  Same notice, different first sentence.
+ *   external       it connects to an app you already run; its login is that
+ *                  app's. Nothing of ours to claim, so no notice.
  *   none           no login of its own. No notice.
+ *
+ * A web UI bundle that says nothing (a community-store manifest written before
+ * the field existed) falls back to `finish-setup` — see firstAdminOf.
  *
  * This module owns the two operator-facing pieces of that:
  *   - the card on Extensions (pendingFirstAdminNotices(). `done` is the
@@ -43,7 +48,7 @@ import {
   firstAdminBody,
 } from "./dashboard/shared/first-admin.js";
 
-// The manifest-shape half (modes, the four rules, the link rule) is pure and
+// The manifest-shape half (modes, the contract rules, the link rule) is pure and
 // shared with the Extensions renderer: dashboard/shared/first-admin.js.
 export {
   FIRST_ADMIN_MODES,
@@ -126,9 +131,9 @@ async function readLanguage(db) {
 /**
  * Ring the bell ONCE per bundle install.
  *
- * Silent for `crow`/`none`, silent when this install's bell already rang, and
- * silent when the manifest declares nothing (an old install of a bundle whose
- * manifest predates the field).
+ * Silent for `crow`/`external`/`none`, silent when this install's bell already
+ * rang. A web UI bundle that declares nothing falls back to `finish-setup`
+ * (firstAdminOf), so an undeclared third-party install still rings once.
  *
  * @param {object} o
  * @param {object} o.db                   libsql-shaped client
@@ -168,14 +173,15 @@ export async function notifyFirstAdmin({
 
     const name = bundleName || (manifest && manifest.name) || bundleId;
     const language = lang || await readLanguage(db);
+    const fa = firstAdminOf(manifest);
     const row = await notify(db, {
       title: firstAdminTitle(name, language),
-      body: firstAdminBody(firstAdminOf(manifest), name, language),
+      body: firstAdminBody(fa, name, language),
       type: "system",
       source: "bundle-installer",
       priority: "normal",
       action_url: bundlePageUrl(bundleId),
-      metadata: { kind: "bundle-first-admin", bundle: bundleId, mode: firstAdminOf(manifest).mode },
+      metadata: { kind: "bundle-first-admin", bundle: bundleId, mode: fa.mode },
     });
     // Stamped even when the type is switched off (createNotification returns
     // null): the owner's preference is a choice, and a reinstall is a new notice.

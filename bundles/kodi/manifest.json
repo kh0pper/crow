@@ -19,6 +19,6 @@
     { "name": "KODI_PASSWORD", "description": "Kodi web interface password", "required": false, "secret": true }
   ],
   "webUI": { "port": 8080, "path": "/", "label": "Kodi Web", "proxyMode": "direct" },
-  "firstAdmin": { "mode": "none" },
+  "firstAdmin": { "mode": "external" },
   "notes": "Connects to an existing Kodi instance. Enable 'Allow remote control via HTTP' in Kodi Settings > Services > Web server."
 }

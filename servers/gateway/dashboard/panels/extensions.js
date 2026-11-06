@@ -77,7 +77,7 @@ export default {
     // has not said is finished. Read here (fs + db) so html.js stays pure.
     let firstAdminPending = [];
     try {
-      const { getManifest, getLiveProxyIds } = await import("../../routes/extension-proxy.js");
+      const { getManifest, getLiveProxyIds, getProxyMountFailure } = await import("../../routes/extension-proxy.js");
       const { pendingFirstAdminNotices, firstAdminDoneValues } = await import("../../bundle-first-admin.js");
       const manifests = {};
       for (const id of Object.keys(localInstalled)) manifests[id] = getManifest(id);
@@ -86,6 +86,8 @@ export default {
         manifests,
         done: await firstAdminDoneValues(db),
         liveProxyIds: getLiveProxyIds(),
+        // A router that failed to mount is not a pending restart (N5).
+        proxyMountFailed: !!getProxyMountFailure(),
       });
     } catch { /* no card rather than no page */ }
 

@@ -40,13 +40,14 @@ const MANIFESTS = {
 };
 
 /** Render the page with these installed bundles; `live` = proxy routes this process mounted. */
-function render({ ids = Object.keys(MANIFESTS), done = {}, live = ["kuma", "eye", "flux", "dx", "stash"], lang = "en" } = {}) {
+function render({ ids = Object.keys(MANIFESTS), done = {}, live = ["kuma", "eye", "flux", "dx", "stash"], lang = "en", manifests = MANIFESTS, proxyMountFailed = false } = {}) {
   const installed = Object.fromEntries(ids.map((id) => [id, { version: "1.0.0", installedAt: INSTALL }]));
   const firstAdminPending = pendingFirstAdminNotices({
     installed,
-    manifests: Object.fromEntries(ids.map((id) => [id, MANIFESTS[id]])),
+    manifests: Object.fromEntries(ids.map((id) => [id, manifests[id]])),
     done,
     liveProxyIds: live,
+    proxyMountFailed,
   });
   return buildExtensionsHTML({
     installed, available: AVAILABLE, collections: [], needsConfig: {}, keychainPending: [],
@@ -128,6 +129,45 @@ test("a direct-mode app needs no proxy route, so it links out immediately", () =
   assert.equal(open.getAttribute("href"), "/dashboard/extensions", "no-JS fallback, as the Nest tile");
   assert.match(open.getAttribute("onclick") || "", /location\.hostname/, "the host is filled in by the browser");
   assert.match(open.getAttribute("onclick") || "", /3075/);
+});
+
+test("the Open button is a new tab for a subpath app too, as the Nest tile was", () => {
+  const { document } = boot(render({ ids: ["kuma"] }));
+  const open = document.querySelector('.ext-firstadmin[data-addon-id="kuma"] .ext-firstadmin-open');
+  assert.equal(open.getAttribute("target"), "_blank");
+  assert.match(open.getAttribute("onclick") || "", /window\.open\('\/proxy\/kuma\/','_blank'\);return false/);
+});
+
+test("a proxy router that failed to mount says the link is unavailable, never 'restart Crow first'", () => {
+  // N5: a restart cannot mount a router that failed to mount.
+  const { document } = boot(render({ ids: ["kuma"], live: [], proxyMountFailed: true }));
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="kuma"]');
+  assert.ok(card);
+  assert.match(card.textContent, /The app link is unavailable; check the gateway log\./);
+  assert.doesNotMatch(card.textContent, /Restart Crow first/);
+  assert.equal(card.querySelector(".ext-firstadmin-open"), null, "no dead link");
+});
+
+test("the boot code records a proxy mount failure, and the Extensions page reads it", async () => {
+  const proxy = await import("../servers/gateway/routes/extension-proxy.js");
+  try {
+    assert.equal(proxy.getProxyMountFailure(), null, "a mounted router records nothing");
+    proxy.recordProxyMountFailure(new Error("cannot find module"));
+    assert.equal(proxy.getProxyMountFailure(), "cannot find module", "the panel words its cards from this");
+  } finally {
+    proxy._setProxyMountFailureForTest(null);
+  }
+  assert.equal(proxy.getProxyMountFailure(), null);
+});
+
+test("a third-party bundle that declares nothing still gets the card", () => {
+  // S4: a community-store manifest written before `firstAdmin` existed cannot
+  // silence the warning by saying nothing.
+  const shop = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
+  const { document } = boot(render({ ids: ["shop"], live: ["shop"], manifests: { shop } }));
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="shop"]');
+  assert.ok(card, "the card is rendered for an undeclared web UI");
+  assert.match(card.textContent, /Finish Shop App's setup now/);
 });
 
 test("Done clears the card and records it for this bundle", async () => {

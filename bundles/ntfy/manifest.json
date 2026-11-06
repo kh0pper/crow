@@ -40,8 +40,8 @@
     "proxyMode": "direct"
   },
   "firstAdmin": {
-    "mode": "finish-setup",
-    "note": "Crow creates its own login for phone alerts right after install; set your own login on the web page now."
+    "mode": "none",
+    "note": "Crow creates its login for phone alerts; nobody can sign up."
   },
   "notes": "Crow sets itself up automatically: after install it creates its own login on this server, picks a private topic, and hands a read-only key to the Crow Android app (Settings › Notifications shows the status, the phone address, and a test button). Each Crow instance on this computer gets its own topic. The server runs with deny-all default access, so topics are private."
 }

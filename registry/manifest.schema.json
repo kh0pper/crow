@@ -102,10 +102,13 @@
       "required": ["mode"],
       "additionalProperties": false,
       "properties": {
-        "mode": { "type": "string", "enum": ["crow", "finish-setup", "default-login", "none"] },
+        "mode": { "type": "string", "enum": ["crow", "finish-setup", "default-login", "external", "none"] },
         "path": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^/" },
         "user": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "note": { "type": "string", "minLength": 1, "maxLength": 300 }
+        "note": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "via": { "type": "string", "enum": ["env", "postInstall"] },
+        "secretEnv": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "userEnv": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z_][A-Z0-9_]*$" }
       }
     },
     "requires": {

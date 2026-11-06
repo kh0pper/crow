@@ -36,10 +36,11 @@ const DEFAULT_LOGIN = {
 };
 const CROW = {
   id: "flux", name: "Miniflux", webUI: { port: 8085, path: "/", label: "Miniflux" },
-  firstAdmin: { mode: "crow" },
+  firstAdmin: { mode: "crow", via: "env", secretEnv: "MINIFLUX_ADMIN_PASSWORD" },
   env_vars: [{ name: "MINIFLUX_ADMIN_PASSWORD", generate: "secret", keychain: true, secret: true }],
 };
 const NO_LOGIN = { id: "dx", name: "Dozzle", webUI: { port: 8095, path: "/", label: "Dozzle" }, firstAdmin: { mode: "none" } };
+const EXTERNAL = { id: "kodi", name: "Kodi", webUI: { port: 8080, path: "/", label: "Kodi" }, firstAdmin: { mode: "external" } };
 const DIRECT = {
   id: "stash", name: "Unsloth Studio",
   webUI: { port: 3075, path: "/", label: "Unsloth Studio", proxyMode: "direct" },
@@ -61,7 +62,25 @@ test("only finish-setup and default-login need the operator", () => {
   assert.equal(firstAdminNeedsOperator(DEFAULT_LOGIN), true);
   assert.equal(firstAdminNeedsOperator(CROW), false, "Crow already made the admin");
   assert.equal(firstAdminNeedsOperator(NO_LOGIN), false);
+  assert.equal(firstAdminNeedsOperator(EXTERNAL), false, "connects to the app you already run");
   assert.equal(firstAdminNeedsOperator({}), false);
+});
+
+test("a web UI manifest that declares nothing is treated as finish-setup, so it still warns", () => {
+  // A community-store manifest written before the field existed (or a typo'd
+  // mode) cannot silence the warning by saying nothing (review round 1, S4).
+  const undeclared = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
+  assert.deepEqual(firstAdminOf(undeclared), { mode: "finish-setup", path: null, user: null, note: null });
+  assert.equal(firstAdminNeedsOperator(undeclared), true);
+  assert.deepEqual(firstAdminOf({ ...undeclared, firstAdmin: { mode: "nope" } }), { mode: "finish-setup", path: null, user: null, note: null });
+  const cards = pendingFirstAdminNotices({
+    installed: { shop: { installedAt: INSTALL_A } },
+    manifests: { shop: undeclared },
+    liveProxyIds: ["shop"],
+  });
+  assert.deepEqual(cards.map((c) => `${c.id}:${c.mode}`), ["shop:finish-setup"]);
+  // No manifest at all is still no card: there is nothing to link or name.
+  assert.equal(firstAdminOf(null), null);
 });
 
 test("the link is the Nest tile's: /proxy/<id><path>, or the app's own https origin when direct", () => {
@@ -89,6 +108,15 @@ test("title and body are the operator's words, in en and es, note appended", () 
   assert.equal(firstAdminBody(firstAdminOf(CROW), "Miniflux", "en"), null);
 });
 
+test("a placeholder inside the app's own name is not substituted twice", () => {
+  // One pass only: the name is inserted verbatim, so an app called "App {user}"
+  // does not become "App admin" (review round 1, N6).
+  assert.equal(
+    firstAdminBody(firstAdminOf({ firstAdmin: { mode: "default-login", user: "admin" } }), "App {user}", "en"),
+    "App {user} starts with a known login (user admin). Change the password now.",
+  );
+});
+
 // ── the card list: shown / hidden, and the restart wording ──
 
 test("a finish-setup and a default-login install each get a card; crow and none get none", () => {
@@ -111,9 +139,23 @@ test("a subpath UI with no live /proxy route says 'restart Crow first'; a direct
   const manifests = { kuma: FINISH, stash: DIRECT };
   const cards = pendingFirstAdminNotices({ installed, manifests, liveProxyIds: [] });
   assert.deepEqual(cards.map((c) => c.restartPending), [true, false]);
+  assert.deepEqual(cards.map((c) => c.linkUnavailable), [false, false]);
   // The sentence itself, in both languages.
   assert.equal(t("bundles.firstAdmin.restartFirst", "en"), "Restart Crow first, then open it");
   assert.notEqual(t("bundles.firstAdmin.restartFirst", "es"), t("bundles.firstAdmin.restartFirst", "en"));
+});
+
+test("a proxy router that failed to mount is not a restart: the card says the link is unavailable", () => {
+  const cards = pendingFirstAdminNotices({
+    installed: { kuma: { installedAt: INSTALL_A } },
+    manifests: { kuma: FINISH },
+    liveProxyIds: [],
+    proxyMountFailed: true,
+  });
+  assert.equal(cards[0].restartPending, false, "a restart cannot mount a router that failed to mount");
+  assert.equal(cards[0].linkUnavailable, true);
+  assert.equal(t("bundles.firstAdmin.linkUnavailable", "en"), "The app link is unavailable; check the gateway log.");
+  assert.notEqual(t("bundles.firstAdmin.linkUnavailable", "es"), t("bundles.firstAdmin.linkUnavailable", "en"));
 });
 
 test("Done hides the card for THAT install only; a reinstall asks again", () => {
@@ -185,13 +227,24 @@ test("one bell per install: same text as the card, links the Extensions detail, 
   assert.deepEqual(n.metadata, { kind: "bundle-first-admin", bundle: "kuma", mode: "finish-setup" });
 });
 
-test("the bell is silent for crow and none", async () => {
+test("the bell is silent for crow, external and none", async () => {
   const { db } = makeDb();
   const { calls, notify } = makeNotify();
   await notifyFirstAdmin({ db, bundleId: "flux", manifest: CROW, installId: INSTALL_A, notify });
   await notifyFirstAdmin({ db, bundleId: "dx", manifest: NO_LOGIN, installId: INSTALL_A, notify });
+  await notifyFirstAdmin({ db, bundleId: "kodi", manifest: EXTERNAL, installId: INSTALL_A, notify });
   await notifyFirstAdmin({ db, bundleId: "old", manifest: {}, installId: INSTALL_A, notify });
   assert.equal(calls.length, 0);
+});
+
+test("an undeclared web UI install rings once (the third-party fallback)", async () => {
+  const { db } = makeDb();
+  const { calls, notify } = makeNotify();
+  const undeclared = { id: "shop", name: "Shop App", webUI: { port: 9000, path: "/", label: "Shop App" } };
+  await notifyFirstAdmin({ db, bundleId: "shop", manifest: undeclared, installId: INSTALL_A, notify });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].title, "Finish Shop App's setup now");
+  assert.deepEqual(calls[0].metadata, { kind: "bundle-first-admin", bundle: "shop", mode: "finish-setup" });
 });
 
 test("a second install of the same bundle rings again; the same install never rings twice", async () => {

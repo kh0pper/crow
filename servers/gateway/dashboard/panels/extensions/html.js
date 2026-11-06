@@ -311,13 +311,17 @@ export function buildExtensionsHTML({
   // first-view banner: both are "an install asked something of you" notices.
   // The link is built by the Nest tile's own rule (shared/app-link.js), and a
   // subpath UI whose /proxy route this process has not mounted yet says so
-  // instead of handing over a dead link.
+  // instead of handing over a dead link. When the proxy router itself failed to
+  // mount, no restart will produce that route: the card says the link is
+  // unavailable instead of promising one (review round 1, N5).
   const firstAdminHtml = (firstAdminPending || []).map((e) => {
     const title = firstAdminTitle(e.name, lang);
     const body = firstAdminBody({ mode: e.mode, user: e.user, note: e.note }, e.name, lang) || "";
-    const open = e.restartPending
-      ? `<span class="ext-firstadmin__restart" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.restartFirst", lang))}</span>`
-      : `<a class="btn btn-sm btn-primary ext-firstadmin-open" href="${escapeHtml(e.link.href)}"${e.link.onclick || " target=\"_blank\" rel=\"noopener\""}>${escapeHtml(t("bundles.firstAdmin.open", lang))}</a>`;
+    const open = e.linkUnavailable
+      ? `<span class="ext-firstadmin__unavailable" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.linkUnavailable", lang))}</span>`
+      : e.restartPending
+        ? `<span class="ext-firstadmin__restart" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.restartFirst", lang))}</span>`
+        : `<a class="btn btn-sm btn-primary ext-firstadmin-open" href="${escapeHtml(e.link.href)}" target="_blank" rel="noopener"${e.link.onclick || ""}>${escapeHtml(t("bundles.firstAdmin.open", lang))}</a>`;
     return `<div class="callout callout-warning ext-firstadmin" data-addon-id="${escapeHtml(e.id)}" role="status">
         <strong>${escapeHtml(title)}</strong>
         <p style="margin:0.25rem 0 0.5rem">${escapeHtml(body)}</p>
