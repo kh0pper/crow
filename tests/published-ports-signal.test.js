@@ -50,6 +50,7 @@ import {
   _setFirewallReader,
   _setContainerReader,
   _setSystemUpdateReaders,
+  _setIntegrityReaders,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import { t, translations } from "../servers/gateway/dashboard/shared/i18n.js";
 import {
@@ -81,6 +82,15 @@ _setContainerReader(() => false);
 // daemon: a host that owes a reboot warns, and `result.ok` would go false here.
 // No apt = no card, on any host.
 _setSystemUpdateReaders({ aptPresent: () => false });
+// integritySignal stats this instance's real CROW_HOME/data dir (the suite's
+// scratch dirs, whose modes follow the umask of whoever ran the suite) and asks
+// the real checkout for its branch: this suite runs on a feature branch, which
+// is a warn, and `result.ok` below is asserted true. Pin it to owner-only modes
+// and "not a git repository" so it adds nothing, on any host.
+_setIntegrityReaders({
+  stat: () => ({ mode: 0o600, isSymbolicLink: () => false, isFile: () => true, isDirectory: () => false }),
+  git: async () => ({ stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git", code: 128 }),
+});
 delete process.env.MINIO_ENDPOINT;
 delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;

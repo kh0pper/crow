@@ -87,6 +87,18 @@
  *               a Docker that is not installed is stated, not counted as a
  *               failed check. Any check that could not run → at most info,
  *               naming it, never ok. No apt (non-Debian, or a container) → no card.
+ *   integrity — audit N1c-18: (a) the Crow home, its data dir and crow.db (plus
+ *               the WAL/SHM beside it) must be owner-only — boot's
+ *               tightenCrowHomePermissions has already fixed what it could, so
+ *               one still readable by group/others is what it could NOT fix
+ *               (another owner, a symlink) → WARN naming the path's ROLE, never
+ *               the path; (b) for a git checkout only, the state auto-update
+ *               pulls into: not on main → WARN "updates are skipped while the
+ *               checkout is off main", a detached HEAD → WARN, tracked local
+ *               edits → INFO with a count and no file names (untracked files are
+ *               ignored — they never block a pull). A container has no checkout,
+ *               so part (b) does not apply there. A check that could not run is
+ *               INFO "unknown", never ok.
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -101,7 +113,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { t, fill } from "../../shared/i18n.js";
@@ -110,7 +122,8 @@ import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
 import { gatewayListenHost } from "../../../listen-host.js";
-import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate } from "../../../auto-update.js";
+import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate, git as autoUpdateGit } from "../../../auto-update.js";
+import { homePermissionTargets } from "../../../boot/tighten-home-permissions.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import { botSandboxProbe, botSandboxStatus } from "../../shared/bot-sandbox-status.js";
@@ -2320,6 +2333,210 @@ async function systemUpdatesSignal(lang, nowFn) {
   return [{ ...card, cardOnly: true }, ...entries.map((e) => ({ ...e, issueOnly: true }))];
 }
 
+// ─── Integrity (security audit N1c-18) ──────────────────────────────────────
+//
+// Two questions about THIS instance's own files and its own code:
+//
+//   (a) Modes. The Crow home, its data dir and crow.db (with the WAL/SHM SQLite
+//       keeps beside it) hold the bundle .env secrets, the keychain key, peer
+//       tokens and every memory. Boot's tightenCrowHomePermissions has already
+//       chmod'ed every one of those it COULD, so what is still group/other
+//       readable is exactly what it had to leave alone — another owner's path, or
+//       one reached through a symlink. Unlike boot, this check follows a symlink:
+//       the target's mode is what other users actually get, and it is the thing
+//       the owner can fix. The card names the ROLE, never the path.
+//
+//   (b) The checkout auto-update pulls into — for a git checkout only (a
+//       container has none, so there the whole of (b) does not apply). Off main
+//       or on a detached HEAD, updates are skipped; tracked local edits are
+//       information only, counted, never listed (untracked files are ignored:
+//       they never block a pull). The questions are asked with auto-update's own
+//       git helper — hooks off, its timeout — so the card describes the same tree
+//       the updater acts on.
+//
+// A check that could not run is INFO "unknown", never ok: the card must not
+// claim privacy or freshness it did not verify.
+const INTEGRITY_ROLE_KEYS = {
+  home: "signals.integrity.roleHome",
+  data: "signals.integrity.roleData",
+  db: "signals.integrity.roleDb",
+  "db-wal": "signals.integrity.roleDbWal",
+  "db-shm": "signals.integrity.roleDbShm",
+};
+
+// Test seams, the same shape as _setTailscaleReader / _setSystemUpdateReaders:
+// null restores the real lstat and auto-update's real git.
+let _integrityStat = null;
+let _integrityGit = null;
+/** Test seam: replace the lstat/git readers the Integrity card uses. */
+export function _setIntegrityReaders({ stat, git } = {}) {
+  _integrityStat = stat || null;
+  _integrityGit = git || null;
+}
+
+/** The mode an lstat/fake-stat gives us, as the permission bits only. */
+const modeBits = (st) => Number(st?.mode ?? 0) & 0o777;
+
+function integrityStat(target) {
+  const st = (_integrityStat || lstatSync)(target.path);
+  // Boot never chmods through a symlink; the card still has to say what other
+  // users can read, so it looks at the target once the link is followed.
+  return st && typeof st.isSymbolicLink === "function" && st.isSymbolicLink() ? statSync(target.path) : st;
+}
+
+/**
+ * Tracked changes in `git status --porcelain` output. Untracked entries (`??`)
+ * are not changes to the checkout and never block a pull, so they do not count.
+ */
+export function countTrackedChanges(porcelain) {
+  return String(porcelain || "")
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !line.startsWith("??"))
+    .length;
+}
+
+/**
+ * Read the checkout's state with auto-update's git helper (core.hooksPath off,
+ * its timeout, the app root as cwd).
+ *
+ * @returns {Promise<{applicable: boolean, branch?: string|null, detached?: boolean,
+ *                    edits?: number|null, unknown?: string[]}>}
+ *   applicable:false → not a git checkout at all (a container): no part (b).
+ */
+async function readCheckoutState() {
+  const git = _integrityGit || ((args) => autoUpdateGit(args));
+  const head = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (head.code !== 0) {
+    // "not a git repository" is the container case — no checkout, no card part.
+    if (/not a git repo/i.test(String(head.stderr || ""))) return { applicable: false };
+    // Anything else (git missing, a broken/shallow checkout, a real error) is a
+    // check that did not run: report it as unknown rather than as a finding.
+    return { applicable: true, unknown: ["checkout"] };
+  }
+  const ref = String(head.stdout || "").trim();
+  const state = {
+    applicable: true,
+    branch: ref === "HEAD" ? null : ref,
+    detached: ref === "HEAD",
+    edits: null,
+    unknown: [],
+  };
+  const status = await git(["status", "--porcelain"]);
+  if (status.code !== 0) state.unknown.push("edits");
+  else state.edits = countTrackedChanges(status.stdout);
+  return state;
+}
+
+async function integritySignal(lang = "en") {
+  const label = t("signals.integrity.label", lang);
+  const issues = [];
+  const unknown = [];
+
+  // (a) Modes of the paths boot tried to tighten.
+  let permsChecked = true;
+  for (const target of homePermissionTargets(process.env)) {
+    let st;
+    try {
+      st = integrityStat(target);
+    } catch (err) {
+      // Nothing there yet is not a fault (boot hardening creates nothing).
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) continue;
+      permsChecked = false;
+      continue;
+    }
+    // Group or other READ bit: any local user can open it.
+    if ((modeBits(st) & 0o044) === 0) continue;
+    issues.push({
+      id: `integrity:mode:${target.id}`,
+      severity: "warn",
+      state: "warn",
+      issueOnly: true,
+      label,
+      issueLabel: fill(t("signals.integrity.modeIssue", lang), {
+        role: t(INTEGRITY_ROLE_KEYS[target.id] || INTEGRITY_ROLE_KEYS.home, lang),
+      }),
+    });
+  }
+  if (!permsChecked) unknown.push(t("signals.integrity.checkPermissions", lang));
+
+  // (b) The checkout auto-update pulls into — only when this IS a checkout.
+  let checkout;
+  try {
+    checkout = await readCheckoutState();
+  } catch {
+    checkout = { applicable: true, unknown: ["checkout"] };
+  }
+  if (checkout?.applicable) {
+    const unknownParts = checkout.unknown || [];
+    if (unknownParts.includes("checkout")) {
+      unknown.push(t("signals.integrity.checkCheckout", lang));
+    } else if (checkout.detached) {
+      issues.push({
+        id: "integrity:checkout-detached",
+        severity: "warn",
+        state: "warn",
+        issueOnly: true,
+        label,
+        issueLabel: t("signals.integrity.detached", lang),
+      });
+    } else if (checkout.branch !== "main") {
+      issues.push({
+        id: "integrity:checkout-off-main",
+        severity: "warn",
+        state: "warn",
+        issueOnly: true,
+        label,
+        issueLabel: fill(t("signals.integrity.offMain", lang), { branch: String(checkout.branch ?? "?") }),
+      });
+    }
+    if (unknownParts.includes("edits")) {
+      unknown.push(t("signals.integrity.checkEdits", lang));
+    } else if (Number(checkout.edits) > 0) {
+      // A count only: the file names are the operator's business, and this
+      // issue is pushed to the notification feed.
+      issues.push({
+        id: "integrity:checkout-edits",
+        severity: "info",
+        state: "info",
+        issueOnly: true,
+        label,
+        issueLabel: fill(t("signals.integrity.localEdits", lang), { n: Number(checkout.edits) }),
+      });
+    }
+  }
+
+  if (unknown.length > 0) {
+    issues.push({
+      id: "integrity:check",
+      severity: "info",
+      state: "info",
+      issueOnly: true,
+      label,
+      issueLabel: fill(t("signals.integrity.unknownIssue", lang), { list: [...new Set(unknown)].join(", ") }),
+    });
+  }
+
+  const warns = issues.filter((i) => i.severity === "warn");
+  const infos = issues.filter((i) => i.severity === "info");
+  const state = warns.length > 0 ? "warn" : infos.length > 0 ? "info" : "ok";
+  const value = state === "ok"
+    ? t("signals.integrity.ok", lang)
+    : state === "warn"
+      ? t("signals.integrity.warnValue", lang)
+      : unknown.length > 0
+        ? t("signals.integrity.unknownValue", lang)
+        : infos[0].issueLabel;
+
+  const card = {
+    id: "integrity",
+    severity: state === "ok" ? null : state,
+    state,
+    label,
+    value,
+  };
+  return issues.length > 0 ? [{ ...card, cardOnly: true }, ...issues] : card;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -2372,6 +2589,7 @@ export async function collectHealthSignals(db, opts = {}) {
     Promise.resolve().then(() => publishedPortsSignal(db, lang, nowFn, opts.publishedPorts || {})),
     Promise.resolve().then(() => bundleImagesSignal(lang, nowFn)),
     Promise.resolve().then(() => systemUpdatesSignal(lang, nowFn)),
+    Promise.resolve().then(() => integritySignal(lang)),
     artifactNodeSignal(lang),
     import("../../../satellites/nest-signals.js").then((m) => m.satellitesSignal(db, lang, nowFn)),
   ].map(p => Promise.resolve(p).catch(err => ({

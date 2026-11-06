@@ -432,11 +432,19 @@ async function stampResultSince(nextValue) {
 }
 
 /**
+ * The timeout every command this module runs gets unless the caller overrides
+ * it (the npm installs below need minutes, not two). Exported with `git` so a
+ * read-only caller — the Nest's Integrity card — asks the checkout exactly the
+ * way the updater does, timeout included.
+ */
+export const GIT_TIMEOUT_MS = 120000;
+
+/**
  * Run a command and return { stdout, stderr, code }
  */
 function run(cmd, args, options = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd: APP_ROOT, timeout: 120000, ...options }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd: APP_ROOT, timeout: GIT_TIMEOUT_MS, ...options }, (err, stdout, stderr) => {
       resolve({
         stdout: (stdout || "").trim(),
         stderr: (stderr || "").trim(),
@@ -445,6 +453,7 @@ function run(cmd, args, options = {}) {
     });
   });
 }
+
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
 /**
@@ -456,7 +465,13 @@ const LOCK_STALE_MS = 30 * 60 * 1000;
  */
 const GIT_HOOKS_OFF = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
 
-function git(args, options = {}) {
+/**
+ * Run git in this checkout with hooks and fsmonitor off. Exported so a read-only
+ * caller (the Nest's Integrity card, the boot import check's siblings) reads the
+ * SAME tree the updater pulls into — a plain `git` would run a live install's
+ * own hooks, which is the thing GIT_HOOKS_OFF exists to prevent.
+ */
+export function git(args, options = {}) {
   return run("git", [...GIT_HOOKS_OFF, ...args], options);
 }
 /** acquireCheckoutLock's return for a read-only tree: observed free, not held. */

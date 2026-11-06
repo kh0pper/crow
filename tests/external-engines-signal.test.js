@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import {
   collectHealthSignals, invalidateHealthCache, _setTailscaleReader, _setDiskReader,
   _setDockerPortsReader, _setFirewallReader, _setContainerReader,
-  _setSystemUpdateReaders,
+  _setSystemUpdateReaders, _setIntegrityReaders,
 } from "../servers/gateway/dashboard/panels/nest/health-signals.js";
 import {
   setResidencyInitialized, recordResidency, recordExternal, _resetProviderHealth,
@@ -44,6 +44,15 @@ _setDiskReader(() => "Avail Size\n500000M 1000000M\n");
 // daemon: a host that owes a reboot would warn and drive `all.ok` false. No apt
 // = no card, on any host.
 _setSystemUpdateReaders({ aptPresent: () => false });
+// integritySignal stats the instance's real CROW_HOME/data dir (the suite's
+// scratch dirs, whose modes depend on the umask of whoever ran the suite) and
+// asks the real checkout for its branch — this suite runs on a feature branch
+// with local edits, which is a warn. Pin it: owner-only modes, and "not a git
+// repository" so no part (b) is added, on any host.
+_setIntegrityReaders({
+  stat: () => ({ mode: 0o600, isSymbolicLink: () => false, isFile: () => true, isDirectory: () => false }),
+  git: async () => ({ stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git", code: 128 }),
+});
 delete process.env.MINIO_ENDPOINT;
 delete process.env.CROW_DASHBOARD_PUBLIC;
 delete process.env.CROW_CSRF_STRICT;
