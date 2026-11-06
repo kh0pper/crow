@@ -202,20 +202,50 @@ check_ports_free() { # 0 when every CROW_INSTALL_PORTS entry is free or Crow's
 # ─── SSH port detection (security audit N1c-15) ──────────
 # `ufw --force enable` opens the firewall instantly: a host whose sshd listens
 # on anything but 22 would drop the operator's own session at that moment, and
-# they could not get back in. Two probes, both needing no root: SSH_CONNECTION's
-# 4th field is the port THIS session arrived on, and sshd_config's own Port lines
-# are world-readable on Debian/Ubuntu (the drop-in directory is where distro
-# packages and cloud images put them). Best-effort only — 22 is always allowed
-# as well, and OpenSSH's default is what remains when neither probe answers.
+# they could not get back in. Three probes, all best-effort — 22 is always
+# allowed as well, so the worst case is exactly the old behaviour:
+#   1. `sudo ss -ltnHp` filtered to listeners whose process is sshd: the ports
+#      sshd REALLY listens on. This is the only probe that sees a
+#      socket-activated sshd (Ubuntu 22.10+ ships ssh.socket, where a custom
+#      port lives in a ListenStream= drop-in and no `Port` line exists at all).
+#      The users: column needs root — see the no-prompt note below.
+#   2. SSH_CONNECTION's 4th field: the port THIS session arrived on.
+#   3. sshd_config's own Port lines, world-readable on Debian/Ubuntu (the drop-in
+#      directory is where distro packages and cloud images put them).
+# Probe 1 cannot ask for a password: every sudo'd line above it already has.
+# The install body's first privileged call is `sudo apt update` (Step 1) and the
+# ufw `default`/`allow 22` lines sit directly above the probe, so by then sudo is
+# obtained — a box that re-prompts every time would have prompted there instead.
+port_in_range() { # <port> — 0 when it is a usable TCP port (1-65535)
+  local p="${1:-}"
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  p="${p#"${p%%[!0]*}"}"          # drop leading zeros (082 is 82, not octal)
+  [ -n "$p" ] || return 1           # all zeros is not a port
+  [ "$p" -ge 1 ] && [ "$p" -le 65535 ]
+}
+
+sshd_ss_ports() { # — the ports sshd is really listening on, one per line
+  # `-p` names the owning process, but only root gets that column: without it no
+  # line matches, nothing is printed, and the other two probes answer instead.
+  local out="" line addr port
+  out="$(sudo_cmd ss -ltnHp 2>/dev/null || true)"
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in *sshd*) ;; *) continue ;; esac
+    # Columns: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port Users:…
+    read -r _ _ _ addr _ <<< "$line" || true
+    port="${addr##*:}"              # 0.0.0.0:2222 · [::]:2222 · *:2222 → 2222
+    printf '%s\n' "$port"
+  done <<< "$out"
+}
+
 # shellcheck disable=SC2120  # the config-file params are test-only seams; the prod call passes none
-ssh_ports() { # [config_file…] — every port found, one per line
-  local p cfgs=()
+ssh_ports() { # [config_file…] — every port found once, one per line
+  local p cfgs=() raw="" port seen=" "
+  raw="$(sshd_ss_ports)"
   if [ -n "${SSH_CONNECTION:-}" ]; then
     read -r _ _ _ p <<< "$SSH_CONNECTION" || true
-    case "${p:-}" in
-      ''|*[!0-9]*) ;;
-      *) printf '%s\n' "$p" ;;
-    esac
+    raw="${raw}${p:-}"$'\n'
   fi
   if [ "$#" -gt 0 ]; then
     cfgs=("$@")
@@ -227,9 +257,18 @@ ssh_ports() { # [config_file…] — every port found, one per line
   fi
   for p in "${cfgs[@]}"; do
     if [ -r "$p" ]; then
-      sed -n 's/^[[:space:]]*[Pp]ort[[:space:]][[:space:]]*\([0-9]\{1,5\}\).*/\1/p' "$p" 2>/dev/null || true
+      # Keywords are case-insensitive, and `q` on the first Match line stops the
+      # read there: a Port inside a Match block is invalid for sshd, so honouring
+      # it would only open a port nothing listens on.
+      raw="${raw}$(sed -n '/^[[:space:]]*[Mm][Aa][Tt][Cc][Hh]/q;s/^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]][[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$p" 2>/dev/null || true)"$'\n'
     fi
   done
+  while IFS= read -r port; do
+    port_in_range "$port" || continue
+    case "$seen" in *" $port "*) continue ;; esac
+    seen="${seen}${port} "
+    printf '%s\n' "$port"
+  done <<< "$raw"
 }
 
 # ─── Failure tracking + gateway verification (audit N1c-15) ──
@@ -576,6 +615,8 @@ fi
 # audit N1c-15): a half-finished install — or the seconds between starting the
 # gateway and closing its port — must never be reachable. Nothing here needs
 # Crow running; ufw-docker only needs Docker (Step 3).
+# Scope: "nothing listens before the firewall" is a claim about Crow's own units;
+# `apt install caddy` (Step 4) starts Caddy's default site on :80/:443 itself.
 
 header "Step 8/10: Security"
 
