@@ -202,14 +202,34 @@ async function open(path, { width = 390, height = 844, dark = false, textSize = 
     await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: keyCode, modifiers: mods });
   };
   const center = async (sel) => ev(`(function(){ var e=document.querySelector(${JSON.stringify(sel)}); if(!e) return null; if(e.closest('dialog[open]')&&e.scrollIntoView) e.scrollIntoView({block:'nearest'}); var b=e.getBoundingClientRect(); return {x:b.left+b.width/2,y:b.top+b.height/2}; })()`);
+  // A click lands where the target was measured, so wait for that point to stop moving and to be the
+  // element actually there: the merged sheet refills its notification list from a fetch on every open,
+  // and its content growing after OPEN_SHEET pushes the rows under the pointer.
+  const hitSelf = (sel, pt) => `(function(){ var e=document.querySelector(${JSON.stringify(sel)}); if(!e) return false;
+    var h=document.elementFromPoint(${JSON.stringify(pt.x)}, ${JSON.stringify(pt.y)});
+    return !!h && (h === e || e.contains(h)); })()`;
+  const stable = async (sel, ms = 3000) => {
+    const end = Date.now() + ms;
+    let prev = null, last = null;
+    for (;;) {
+      const a = await center(sel);
+      await ev(TWO_FRAMES);
+      const b = await center(sel);
+      if (a && b && Math.abs(a.x - b.x) <= 0.5 && Math.abs(a.y - b.y) <= 0.5 && (await ev(hitSelf(sel, b)))) return b;
+      prev = a; last = b;
+      if (Date.now() > end) {
+        const fmt = (q) => (q ? "{x:" + q.x.toFixed(1) + ",y:" + q.y.toFixed(1) + "}" : "absent");
+        throw new Error("target never settled at a hittable point: " + sel + " (centres " + fmt(prev) + " -> " + fmt(last) + ")");
+      }
+      await sleep(50);
+    }
+  };
   const click = async (sel) => {
-    const p = await center(sel);
-    assert.ok(p, "no element " + sel);
+    const p = await stable(sel);
     for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: p.x, y: p.y, button: "left", clickCount: 1 });
   };
   const hold = async (sel, ms) => {
-    const p = await center(sel);
-    assert.ok(p, "no element " + sel);
+    const p = await stable(sel);
     await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button: "left", clickCount: 1 });
     await sleep(ms);
     await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button: "left", clickCount: 1 });
@@ -758,6 +778,7 @@ test("the mascot opens ONE sheet: notifications first, then Settings, What Crow 
           // The tray's Talk row closes the sheet before the overlay opens over the page.
           await p.click("#crow-bird-btn");
           await p.until(OPEN_SHEET("shell-avatar"), "the sheet again");
+          await p.until("!!document.getElementById('notif-list') && document.getElementById('notif-list').textContent.trim() !== '' ", "the notifications list again");
           await p.click("#shell-avatar #crow-talk-row");
           await p.until("document.getElementById('crow-talk-overlay').classList.contains('active') && !document.getElementById('shell-avatar').open", "the talk overlay, the sheet closed");
           await p.ev("window.closeCrowTalk(); 1");
