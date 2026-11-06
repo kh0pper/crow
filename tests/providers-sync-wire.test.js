@@ -202,10 +202,13 @@ test("local_only marker: also gates a LOOPBACK-shaped row (belt and braces, not 
 
 // ── D3: excluded bookkeeping columns ─────────────────────────────────────────
 
-test("D3: EXCLUDED_COLUMNS.providers is exactly created_at/updated_at/lamport_ts", () => {
+test("D3: EXCLUDED_COLUMNS.providers is exactly api_key + created_at/updated_at/lamport_ts", () => {
+  // api_key joined this list in security audit N1b-7 (operator ruling
+  // 2026-11-05): a providers row syncs, its API key never leaves the instance
+  // where it was entered.
   assert.deepEqual(
     [...EXCLUDED_COLUMNS.providers].sort(),
-    ["created_at", "lamport_ts", "updated_at"],
+    ["api_key", "created_at", "lamport_ts", "updated_at"],
   );
 });
 

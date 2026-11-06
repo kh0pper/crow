@@ -35,6 +35,7 @@ import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
 import { localizeNativeRow } from "./native-locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
 import { emitOrQueue } from "./sync-emit.js";
+import { clearProviderKeyNeededNotice } from "./provider-key-need.js";
 import { providerRowToObject } from "./provider-row.js";
 import { inferHost, repairHostDecision } from "./provider-host.js";
 import { isExternalEngine, engineShapeError, externalEngineConflict } from "./provider-engine.js";
@@ -380,6 +381,8 @@ export async function upsertProvider(db, provider) {
 
   const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
 
+  const storedKey = provider.apiKey ?? provider.api_key ?? null;
+
   await db.execute({
     sql: `INSERT INTO providers
           (id, base_url, api_key, host, bundle_id, description, models, disabled, lamport_ts, instance_id, provider_type, gpu_policy, updated_at)
@@ -400,7 +403,7 @@ export async function upsertProvider(db, provider) {
     args: [
       provider.id,
       provider.baseUrl || provider.base_url || "",
-      provider.apiKey ?? provider.api_key ?? null,
+      storedKey,
       host,
       provider.bundleId ?? provider.bundle_id ?? null,
       provider.description ?? null,
@@ -413,10 +416,21 @@ export async function upsertProvider(db, provider) {
     ],
   });
 
+  // A key is now set HERE, so the "needs an API key on this device" notice a
+  // paired peer's keyless row raised (provider-key-need.js) is answered.
+  // Best-effort: a notification-table problem must never fail the write.
+  if (typeof storedKey === "string" && storedKey.trim() !== "") {
+    try { await clearProviderKeyNeededNotice(db, provider.id); }
+    catch (err) { console.warn(`[providers] key-needed notice clear failed for ${provider.id}: ${err.message}`); }
+  }
+
   await emitSync(db, existed ? "update" : "insert", {
     id: provider.id,
     base_url: provider.baseUrl || provider.base_url || "",
-    api_key: provider.apiKey ?? provider.api_key ?? null,
+    // api_key is deliberately ABSENT: it never leaves this instance
+    // (operator ruling 2026-11-05; instance-sync.js LOCAL_ONLY_COLUMNS strips
+    // it at every emit door anyway — not putting it here keeps that obvious
+    // at the call site that has the secret in hand).
     host,
     bundle_id: provider.bundleId ?? provider.bundle_id ?? null,
     description: provider.description ?? null,
@@ -447,6 +461,9 @@ export async function disableProvider(db, id) {
     sql: "UPDATE providers SET disabled = 1, lamport_ts = ?, instance_id = ?, updated_at = datetime('now') WHERE id = ?",
     args: [newTs, instanceId, id],
   });
+  // The SELECT * spread carries the row's api_key into this call — the emit
+  // doors (emitChange's EXCLUDED_COLUMNS / emitOrQueue's strip) drop it, so a
+  // soft-delete never ships the key even though the caller had the whole row.
   await emitSync(db, "update", { ...rows[0], disabled: 1, lamport_ts: newTs, instance_id: instanceId });
   return { ok: true, lamport_ts: newTs };
 }

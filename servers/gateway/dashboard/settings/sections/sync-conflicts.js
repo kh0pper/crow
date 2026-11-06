@@ -24,12 +24,20 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { fill, t } from "../../shared/i18n.js";
+import {
+  providerEndpointChanged,
+  providerEndpointKey,
+  providerOrigin,
+  clearProviderEndpointHeldNotice,
+  clearAllProviderEndpointHeldNotices,
+} from "../../../../shared/provider-endpoint.js";
 import {
   resolveConflict,
   restoreConflict,
   NATURAL_KEY_RESTORE_TABLES,
 } from "../../../../sharing/sync-conflict-resolve.js";
+import { stripConflictSnapshot } from "../../../../sharing/instance-sync.js";
 import { getInstanceSyncManager } from "../../../../sharing/server.js";
 import {
   EXPIRE_DAYS_DEFAULT,
@@ -68,12 +76,71 @@ function opBadge(op) {
   return `<span style="font-size:0.7rem;padding:2px 6px;background:${color}22;color:${color};border-radius:3px;font-family:'JetBrains Mono',monospace">${escapeHtml(op || "update")}</span>`;
 }
 
-function prettyJson(raw) {
-  if (!raw) return "(none)";
+/**
+ * A held providers conflict is one this device refused to apply because the
+ * peer's row MOVES the endpoint while the API key lives here (operator ruling
+ * 2026-11-06; instance-sync.js _holdProviderEndpointChange). Show the operator
+ * the one fact that matters before they press Restore. Every part is escaped.
+ *
+ * Only unresolved rows render it: a resolved row already had the decision made.
+ */
+function addressChangeLine(r, lang) {
+  let win;
+  let lose;
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
+    win = JSON.parse(stripConflictSnapshot(r.table_name, r.winning_data));
+    lose = JSON.parse(stripConflictSnapshot(r.table_name, r.losing_data));
   } catch {
-    return String(raw);
+    return "";
+  }
+  const before = win?.base_url;
+  const after = lose?.base_url;
+  if (!providerEndpointChanged(before, after)) return "";
+  // The origin is what an operator recognises… except for a PATH-only move,
+  // where both origins read the same; then show the address itself so the line
+  // never says "https://x → https://x".
+  const beforeOrigin = providerOrigin(before);
+  const afterOrigin = providerOrigin(after);
+  const from = beforeOrigin === afterOrigin
+    ? (providerEndpointKey(before) || String(before ?? "")) : beforeOrigin;
+  const to = beforeOrigin === afterOrigin
+    ? (providerEndpointKey(after) || String(after ?? "")) : afterOrigin;
+  return `<div style="margin:0 0 0.4rem;padding:0.4rem 0.6rem;background:var(--crow-bg-deep);border-left:3px solid #ff9800;border-radius:3px;font-size:0.78rem;max-width:32rem">
+    ${escapeHtml(fill(t("syncConflicts.addressChange", lang), { from, to }))}
+  </div>`;
+}
+
+/** Quiet the "another device wants to change its address" bell item once the
+ *  operator has decided this conflict (kept the local address, or accepted it). */
+async function clearHoldNotice(db, conflictId) {
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT row_id FROM sync_conflicts WHERE id = ?`,
+      args: [String(conflictId)],
+    });
+    if (rows[0]) await clearProviderEndpointHeldNotice(db, String(rows[0].row_id));
+  } catch {
+    // Best effort: the notice is a bell item, never a reason to fail the action.
+  }
+}
+
+/**
+ * A stored snapshot as pretty JSON for the page, with `table`'s local-only
+ * columns stripped FIRST (instance-sync.js LOCAL_ONLY_COLUMNS): a pre-fix
+ * providers conflict row still holds this device's `api_key`, and this page is
+ * the only place it would be shown in full. A JSON null snapshot (`'null'`, an
+ * old row whose side was gone) and a blob we cannot parse render as "(none)" —
+ * an unreadable snapshot is exactly the one we cannot certify as redacted.
+ */
+function prettyJson(table, raw) {
+  if (!raw) return "(none)";
+  const stripped = stripConflictSnapshot(table, raw);
+  try {
+    const parsed = typeof stripped === "string" ? JSON.parse(stripped) : stripped;
+    if (!parsed || typeof parsed !== "object") return "(none)";
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return "(none)";
   }
 }
 
@@ -133,8 +200,8 @@ function renderConflictRow(r, lang, csrfToken) {
   const isNaturalKey = NATURAL_KEY_RESTORE_TABLES.has(r.table_name);
   const resolved = !!r.resolved;
 
-  const winJson = prettyJson(r.winning_data);
-  const loseJson = prettyJson(r.losing_data);
+  const winJson = prettyJson(r.table_name, r.winning_data);
+  const loseJson = prettyJson(r.table_name, r.losing_data);
 
   // Restore button is disabled for op='insert' conflicts per spec §6
   // (precedence FIRST — matches the backend's refusal order), then for
@@ -197,6 +264,7 @@ function renderConflictRow(r, lang, csrfToken) {
       <td style="padding:8px;font-size:0.78rem;color:var(--crow-text-muted)">${escapeHtml(when)}</td>
       <td style="padding:8px">${opBadge(r.op)}</td>
       <td style="padding:8px">
+        ${r.table_name === "providers" ? addressChangeLine(r, lang) : ""}
         <details class="sc-details" data-conflict-id="${escapeHtml(String(r.id))}">
           <summary style="cursor:pointer;font-size:0.78rem;color:var(--crow-accent)">
             ${escapeHtml(t("syncConflicts.showData", lang))}
@@ -459,6 +527,7 @@ export default {
       }
       await resolveConflict(db, String(conflictId));
       await markResolvedVia(db, conflictId, "operator");
+      await clearHoldNotice(db, conflictId);
       res.redirectAfterPost(conflictPage);
       return true;
     }
@@ -469,7 +538,10 @@ export default {
         return true;
       }
       const outcome = await restoreConflict(db, String(conflictId), { instanceSync });
-      if (outcome.status === "applied") await markResolvedVia(db, conflictId, "operator");
+      if (outcome.status === "applied") {
+        await markResolvedVia(db, conflictId, "operator");
+        await clearHoldNotice(db, conflictId);
+      }
       // Pass only the status enum; render() maps it to an i18n'd flash.
       const status = ["applied", "stale", "refused"].includes(outcome.status)
         ? outcome.status
@@ -485,6 +557,7 @@ export default {
         sql: `UPDATE sync_conflicts SET resolved = 1, resolved_at = datetime('now')${via} WHERE resolved = 0`,
         args: [],
       });
+      await clearAllProviderEndpointHeldNotices(db);
       res.redirectAfterPost(conflictPage);
       return true;
     }

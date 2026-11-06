@@ -9,6 +9,34 @@
 
 import { z } from "zod";
 import { createNotification } from "../../shared/notifications.js";
+import { stripConflictSnapshot } from "../instance-sync.js";
+
+/**
+ * A short, SAFE preview of one stored conflict snapshot, for the tool's text
+ * output. The snapshot is stripped of the table's local-only columns FIRST
+ * (instance-sync.js LOCAL_ONLY_COLUMNS) because this tool is another reading
+ * door onto `sync_conflicts`: a row saved before the fix can still hold an
+ * `api_key`, and this is the only redaction a stdio-only install ever gets.
+ *
+ * Returns "" ("show nothing") for a JSON null snapshot — an old row whose side
+ * was gone, `'null'` — which used to throw here by reading `.content` off null —
+ * and for a blob we cannot parse, which we must not print raw.
+ */
+function snapshotPreview(table, raw) {
+  if (raw == null) return "";
+  const stripped = stripConflictSnapshot(table, raw);
+  let parsed;
+  try {
+    parsed = typeof stripped === "string" ? JSON.parse(stripped) : stripped;
+  } catch {
+    return "";
+  }
+  if (!parsed || typeof parsed !== "object") return "";
+  const text = typeof parsed.content === "string"
+    ? parsed.content
+    : JSON.stringify(parsed);
+  return text.substring(0, 80);
+}
 
 export function registerInstancesTools(server, ctx) {
   const { db, identity, nostrManager, instanceSyncManager } = ctx;
@@ -345,15 +373,13 @@ export function registerInstancesTools(server, ctx) {
       }
 
       const formatted = rows.map((r) => {
-        const winning = JSON.parse(r.winning_data);
-        const losing = JSON.parse(r.losing_data);
-        const winPreview = typeof winning.content === "string" ? winning.content.substring(0, 80) : JSON.stringify(winning).substring(0, 80);
-        const losePreview = typeof losing.content === "string" ? losing.content.substring(0, 80) : JSON.stringify(losing).substring(0, 80);
+        const winPreview = snapshotPreview(r.table_name, r.winning_data);
+        const losePreview = snapshotPreview(r.table_name, r.losing_data);
         return `Conflict #${r.id} (${r.table_name}, row: ${r.row_id}, ${r.resolved ? "resolved" : "unresolved"})
   Winner: instance ${r.winning_instance_id} (ts: ${r.winning_lamport_ts})
-    ${winPreview}...
+    ${winPreview || "(none)"}
   Loser:  instance ${r.losing_instance_id} (ts: ${r.losing_lamport_ts})
-    ${losePreview}...
+    ${losePreview || "(none)"}
   Created: ${r.created_at}`;
       }).join("\n\n");
 

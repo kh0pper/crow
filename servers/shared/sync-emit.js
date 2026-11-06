@@ -15,7 +15,7 @@
 
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
-import { SYNCED_TABLES, shouldSyncRow, shouldInitInstanceSync } from "../sharing/instance-sync.js";
+import { SYNCED_TABLES, shouldSyncRow, shouldInitInstanceSync, stripLocalOnlyColumns } from "../sharing/instance-sync.js";
 import {
   ensureSyncTables,
   seedCounterSql,
@@ -202,6 +202,11 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     // wedges claimed/reclaimed forever and eventually cap-evicts real rows).
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null;
+    // Local-only columns never enter the queue: the outbox row IS the emitted
+    // payload (`row_json`, replayed verbatim by the drain's emitChange), and a
+    // providers row's api_key belongs to this instance alone — the same strip
+    // emitChange applies on its way out (instance-sync.js LOCAL_ONLY_COLUMNS).
+    row = stripLocalOnlyColumns(table, row);
 
     const eligible = await isDeploymentEligible(db);
     if (!eligible) return null;

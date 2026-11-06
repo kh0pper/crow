@@ -2598,6 +2598,11 @@ export const translations = {
   "settings.providers.introTail": { en: "Bundle providers auto-appear on install. Instance-sync replicates this table across paired Crow instances.", es: "Los proveedores de paquetes aparecen solos al instalar. La sincronización entre instancias replica esta tabla en las instancias Crow emparejadas." },
   "settings.providers.noneEnabled": { en: "No enabled providers", es: "Ningún proveedor activado" },
   "settings.providers.noneRegistered": { en: "No providers registered.", es: "No hay proveedores registrados." },
+  // Security audit N1b-7 (operator ruling 2026-11-05): provider rows sync, their
+  // API keys never do — said where the key is typed, and on a row that arrived
+  // from a paired device without one.
+  "settings.providers.keyStaysLocal": { en: "Keys stay on this device; they are not shared with paired devices.", es: "Las claves se quedan en este dispositivo; no se comparten con los dispositivos emparejados." },
+  "settings.providers.needsKeyHere": { en: "Needs an API key on this device.", es: "Necesita una clave API en este dispositivo." },
   "settings.roles.coordinator": { en: "Orchestrator", es: "Orquestador" },
   "settings.roles.quick": { en: "Scout", es: "Explorador" },
   "settings.roles.deep": { en: "Planner", es: "Planificador" },
@@ -2736,6 +2741,15 @@ export const translations = {
   "providers.ownBoxRefused.known_cloud": { en: "This address belongs to a known cloud provider, so it isn't your other box.", es: "Esta dirección pertenece a un proveedor en la nube conocido, así que no es tu otro equipo." },
   "providers.ownBoxRefused.here": { en: "This address is this box, so it can't be your other box.", es: "Esta dirección es este equipo, así que no puede ser tu otro equipo." },
   "providers.localNotice": { en: "These providers are no longer treated as local for voice and phone calls until you mark them \"This is local\": {names}", es: "Estos proveedores ya no se consideran locales para la voz y las llamadas hasta que los marques como \"Esto es local\": {names}" },
+  // Raised ONCE per provider id when a paired device's keyless provider row
+  // lands here (provider-key-need.js). Keys never sync, so it must be entered here.
+  "providers.needsKeyTitle": { en: "{name} needs an API key on this device", es: "{name} necesita una clave API en este dispositivo" },
+  "providers.needsKeyBody": { en: "This provider came from a paired device, and API keys are never shared. Enter a key here to use it.", es: "Este proveedor vino de un dispositivo emparejado y las claves API nunca se comparten. Introduce una clave aquí para usarlo." },
+  // Raised ONCE per provider id when a paired device moves a provider's ENDPOINT
+  // while this device holds that provider's key: the change is held for review
+  // (provider-endpoint.js + instance-sync.js _holdProviderEndpointChange).
+  "providers.endpointHoldTitle": { en: "{name}: another device wants to change its address", es: "{name}: otro dispositivo quiere cambiar su dirección" },
+  "providers.endpointHoldBody": { en: "Review it before your key is sent there — accepting sends this device's API key to the new address.", es: "Revísalo antes de que se envíe tu clave allí — aceptar envía la clave API de este dispositivo a la nueva dirección." },
   "models.add.botsFailed": { en: "Bots can't use it yet. To allow them, open Models, then Advanced, then Providers, and turn on \"Let bots use this provider\".", es: "Los bots aún no pueden usarlo. Para permitirlo, abre Modelos, luego Avanzado, luego Proveedores, y activa \"Permitir que los bots usen este proveedor\"." },
   "models.add.test.ok": { en: "That key works. {n} models available.", es: "Esa clave funciona. {n} modelos disponibles." },
   "models.add.test.key_rejected": { en: "{provider} did not accept that key. Check that you copied all of it.", es: "{provider} no aceptó esa clave. Comprueba que la copiaste completa." },
@@ -3453,6 +3467,12 @@ export const translations = {
   "syncConflicts.msgStale": { en: "This item has changed since the conflict was recorded — please review the current version and confirm again.", es: "Este elemento ha cambiado desde que se registró el conflicto — revisa la versión actual y confirma de nuevo." },
   "syncConflicts.msgRefused": { en: "This version can't be restored automatically; its data remains visible below.", es: "Esta versión no se puede restaurar automáticamente; sus datos siguen visibles abajo." },
   "syncConflicts.msgFailed": { en: "Restore failed — the conflict stays open and its data remains visible below.", es: "La restauración falló — el conflicto sigue abierto y sus datos siguen visibles abajo." },
+  // A held providers conflict: the peer moved the endpoint and this device holds
+  // the API key (operator ruling 2026-11-06), so it waited for this decision.
+  "syncConflicts.addressChange": {
+    en: "Address change: {from} → {to}. Accepting sends this device's API key to the new address.",
+    es: "Cambio de dirección: {from} → {to}. Aceptar envía la clave API de este dispositivo a la nueva dirección.",
+  },
 
   // ─── Nav Groups Settings ───
   "navGroups.description": { en: "Organize your sidebar by creating groups and moving panels between them.", es: "Organiza tu barra lateral creando grupos y moviendo paneles entre ellos." },
