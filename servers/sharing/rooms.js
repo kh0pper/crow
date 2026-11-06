@@ -6,6 +6,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { tokensEqual } from "../shared/token-compare.js";
 import { createNotification } from "../shared/notifications.js";
 import { getManagersOrNull } from "./managers.js";
 
@@ -21,7 +22,8 @@ export const _activeRooms = new Map();
 export function validateRoomToken(roomCode, token) {
   const room = _activeRooms.get(roomCode);
   if (!room) return null;
-  if (room.token !== token) return null;
+  // Constant time, and a missing/non-string token never matches.
+  if (!tokensEqual(room.token, token)) return null;
   // Rooms expire after 24 hours
   if (Date.now() - room.createdAt > 24 * 60 * 60 * 1000) {
     _activeRooms.delete(roomCode);

@@ -229,9 +229,20 @@
   }
 
   // ─── TURN credential fetching ───
+  // The gateway authenticates /api/turn-credentials (security audit N1a-9).
+  // The call page is served at /calls?room=&token= and every other endpoint it
+  // uses (/api/rooms/:code, /calls/ws) authenticates with exactly that room
+  // credential — so present the same pair here. An operator opening the call
+  // page on the gateway origin also carries the dashboard session cookie
+  // (credentials:"include"), which is the other accepted credential.
   function fetchTurnCreds() {
     if (!_config || !_config.gatewayUrl) return Promise.resolve(ICE_SERVERS);
-    return fetch(_config.gatewayUrl + "/api/turn-credentials")
+    var url = _config.gatewayUrl + "/api/turn-credentials";
+    if (_config.roomCode && _config.token) {
+      url += "?room=" + encodeURIComponent(_config.roomCode) +
+        "&token=" + encodeURIComponent(_config.token);
+    }
+    return fetch(url, { credentials: "include" })
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(d) {
         if (!d || !d.urls) return ICE_SERVERS;
