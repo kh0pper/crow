@@ -46,6 +46,8 @@ const {
   bootSetupToken,
   setupTokenPath,
 } = await import("../servers/gateway/dashboard/setup-token.js");
+const { isSameOriginRequest, configuredOwnOrigins, FIRST_RUN_CROSS_ORIGIN_MESSAGE } =
+  await import("../servers/gateway/dashboard/same-origin.js");
 
 const db = createDbClient();
 const LAN = "192.0.2.7";
@@ -377,4 +379,144 @@ test("MINOR 3: two concurrent getSetupToken calls return the same value (first w
   assert.match(onDisk, /^[A-Za-z0-9_-]{40,}$/, "one token on disk");
   assert.equal(a.stdout.trim(), onDisk, "the first caller reports what is on disk");
   assert.equal(b.stdout.trim(), onDisk, "so does the racing caller");
+});
+
+// ---------------------------------------------------------------------------
+// N1a-2: a web page must not be able to set the owner's first password.
+//
+// POST /dashboard/login is handled BEFORE csrfMiddleware (a first-run request
+// carries no crow_session cookie, and csrf.js deliberately skips those) and
+// allowFirstRun() exempts bare loopback, so on the code before same-origin.js
+// every browser-shaped POST below answered 303 with the password set. Any page
+// open in the owner's browser could auto-submit a form to
+// http://localhost:3001/dashboard/login during first run and own the instance.
+// A browser writes Origin / Sec-Fetch-Site itself and page script can neither
+// read nor forge them, so those two headers now decide; a request with neither
+// (curl on the box, the installer) keeps working through the setup-token gate.
+// ---------------------------------------------------------------------------
+
+const FOREIGN_ORIGIN = "https://evil.example";
+/** The refusal is a plain sentence, not a page. */
+const isRefusal = (r, body) => r.status === 403 && /^text\/plain/.test(r.headers.get("content-type") || "") && body === FIRST_RUN_CROSS_ORIGIN_MESSAGE;
+
+// Current code: 303 and isPasswordSet() === true — this is the hole itself.
+test("N1a-2: a cross-site Origin cannot set the first password (403, nothing set)", async () => {
+  await resetFirstRun();
+  const foreign = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { origin: FOREIGN_ORIGIN } });
+  assert.ok(isRefusal(foreign, await foreign.text()), `expected the plain 403, got ${foreign.status}`);
+  assert.equal(await isPasswordSet(), false, "no password was set");
+
+  // An opaque Origin (a sandboxed frame, a file: page) and another port on this
+  // host are not this gateway either.
+  const opaque = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { origin: "null" } });
+  assert.equal(opaque.status, 403, "an opaque origin is not same-origin");
+  const otherPort = await post("/dashboard/login", { password: PW, confirm: PW }, {
+    peer: null,
+    headers: { origin: `http://127.0.0.1:${Number(server.address().port) + 1}` },
+  });
+  assert.equal(otherPort.status, 403, "another port is another origin");
+  assert.equal(await isPasswordSet(), false, "still no password");
+});
+
+// Current code: 303 and isPasswordSet() === true for both values.
+test("N1a-2: Sec-Fetch-Site cross-site — and same-site from another port — is refused", async () => {
+  await resetFirstRun();
+  for (const site of ["cross-site", "same-site"]) {
+    const r = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { "sec-fetch-site": site } });
+    assert.ok(isRefusal(r, await r.text()), `${site}: expected the plain 403, got ${r.status}`);
+    assert.equal(await isPasswordSet(), false, `no password after ${site}`);
+  }
+  // A page cannot talk its way out by also naming this origin: cross-site wins.
+  const both = await post("/dashboard/login", { password: PW, confirm: PW }, {
+    peer: null,
+    headers: { "sec-fetch-site": "cross-site", origin: base },
+  });
+  assert.equal(both.status, 403, "Sec-Fetch-Site alone decides");
+  assert.equal(await isPasswordSet(), false);
+});
+
+// Current code: 303 and isPasswordSet() === true in every case, so these pass
+// already — they are here to pin that the fix refuses only foreign pages.
+test("N1a-2: the setup page's own Origin, a typed URL (Sec-Fetch-Site: none) and no headers at all still set it", async () => {
+  await resetFirstRun();
+  const own = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { origin: base, "sec-fetch-site": "same-origin" } });
+  assert.equal(own.status, 303, (await own.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true, "the setup page's own form still works");
+  assert.equal(existsSync(TOKEN_FILE), false, "and the one-time token is still cleared");
+
+  await resetFirstRun();
+  const bare = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null });
+  assert.equal(bare.status, 303, "curl / the installer on the box carries neither header");
+  assert.equal(await isPasswordSet(), true);
+
+  await resetFirstRun();
+  const typed = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null, headers: { "sec-fetch-site": "none" } });
+  assert.equal(typed.status, 303, "Sec-Fetch-Site: none is a typed URL or a bookmark");
+  assert.equal(await isPasswordSet(), true);
+});
+
+// Current code: the foreign-Origin request is a 303 with the password set (the
+// setup token does not help — the page posting it is the attacker's page).
+test("N1a-2: the setup-token path gets the same Origin rule (foreign refused, own Origin still sets it)", async () => {
+  const token = await resetFirstRun();
+  const foreign = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: token }, { headers: { origin: FOREIGN_ORIGIN } });
+  assert.ok(isRefusal(foreign, await foreign.text()), `expected the plain 403, got ${foreign.status}`);
+  assert.equal(await isPasswordSet(), false, "a token-bearing page from another site is refused");
+  assert.ok(existsSync(TOKEN_FILE), "and the one-time token was not spent");
+
+  const own = await post("/dashboard/login", { password: PW, confirm: PW, setup_token: token }, { headers: { origin: base, "sec-fetch-site": "same-origin" } });
+  assert.equal(own.status, 303, (await own.text()).slice(0, 200));
+  assert.equal(await isPasswordSet(), true, "the setup link opened on this machine still works");
+  assert.equal(existsSync(TOKEN_FILE), false, "the token is cleared");
+});
+
+// Current code: unchanged (no first-run gate once a password exists) — pinned so
+// the fix cannot spread into the ordinary login.
+test("N1a-2: after first run nothing changes — a cross-site Origin is still an ordinary login", async () => {
+  await resetFirstRun();
+  const set = await post("/dashboard/login", { password: PW, confirm: PW }, { peer: null });
+  assert.equal(set.status, 303, "first-run setup from the box");
+  assert.equal(await isPasswordSet(), true);
+
+  const signedIn = await post("/dashboard/login", { password: PW }, { peer: null, headers: { origin: FOREIGN_ORIGIN, "sec-fetch-site": "cross-site" } });
+  assert.equal(signedIn.status, 303, `a normal login is not gated (got ${signedIn.status})`);
+  const wrong = await post("/dashboard/login", { password: "not-the-password" }, { peer: null, headers: { origin: FOREIGN_ORIGIN } });
+  assert.equal(wrong.status, 200, "the ordinary login error page");
+  assert.equal((await wrong.text()).includes(FIRST_RUN_CROSS_ORIGIN_MESSAGE), false, "not the first-run refusal");
+});
+
+// The rule itself, without a database: which origins count as this gateway's.
+test("N1a-2: the origin rule — Host, a proxy's X-Forwarded-Host, a configured public URL, and what is refused", () => {
+  const req = (headers, protocol = "http") => ({ headers, protocol });
+  const HOST = { host: "127.0.0.1:3001" };
+  const none = { env: {} };
+
+  assert.equal(isSameOriginRequest(req(HOST), none), true, "neither header: a script on the box");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "http://127.0.0.1:3001" }), none), true, "the Host the request reached");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "http://127.0.0.1:3002" }), none), false, "another port is another origin");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://127.0.0.1:3001" }), none), false, "and another scheme is another origin");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://evil.example" }), none), false);
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "null" }), none), false, "an opaque origin");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "file://127.0.0.1:3001" }), none), false, "a non-web scheme");
+  assert.equal(isSameOriginRequest(req({ ...HOST, "sec-fetch-site": "same-origin" }), none), true);
+  assert.equal(isSameOriginRequest(req({ ...HOST, "sec-fetch-site": "none" }), none), true, "a typed URL");
+  assert.equal(isSameOriginRequest(req({ ...HOST, "sec-fetch-site": "cross-site", origin: "http://127.0.0.1:3001" }), none), false, "cross-site beats a matching Origin");
+
+  // Behind Serve or the installer's Caddy: the page's origin is the forwarded
+  // host, and the scheme is the proxy's (which need not forward a proto).
+  const proxied = { host: "127.0.0.1:3001", "x-forwarded-host": "crow.example.ts.net:8444" };
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "https://crow.example.ts.net:8444" }), none), true);
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "http://crow.example.ts.net:8444" }), none), true);
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "https://crow.example.ts.net:8445" }), none), false, "another port behind the proxy too");
+  assert.equal(isSameOriginRequest(req({ ...proxied, origin: "https://evil.example" }), none), false);
+
+  // A configured public origin is the gateway's own (hosted installs sign in there).
+  const env = { CROW_GATEWAY_URL: "https://crow.example.ts.net" };
+  assert.deepEqual([...configuredOwnOrigins(env)], ["https://crow.example.ts.net"]);
+  assert.deepEqual([...configuredOwnOrigins({})], [], "nothing configured, nothing allowed");
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://crow.example.ts.net" }), { env }), true);
+  assert.equal(isSameOriginRequest(req({ ...HOST, origin: "https://evil.example" }), { env }), false);
+  // CROW_OAUTH_ISSUER_URL wins over it, exactly as issuer-url.js resolves it.
+  const issuer = { CROW_GATEWAY_URL: "https://public.example", CROW_OAUTH_ISSUER_URL: "https://crow.example.ts.net:8444" };
+  assert.deepEqual([...configuredOwnOrigins(issuer)], ["https://crow.example.ts.net:8444"]);
 });

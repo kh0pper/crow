@@ -47,6 +47,7 @@ import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { allowFirstRun, clearSetupToken } from "./setup-token.js";
+import { isSameOriginRequest, FIRST_RUN_CROSS_ORIGIN_MESSAGE } from "./same-origin.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -211,6 +212,16 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
     const wasFirstSetup = !hasPassword; // capture before setPassword() runs below
 
     if (!hasPassword) {
+      // N1a-2: the first password is only accepted from this gateway's own page.
+      // This POST runs BEFORE csrfMiddleware (an anonymous first-run request has
+      // no session cookie, and csrf.js skips those) and bare loopback needs no
+      // setup token, so without this a web page open in the owner's browser could
+      // auto-submit a form to http://localhost:3001/dashboard/login and pick the
+      // password. A browser cannot forge Origin / Sec-Fetch-Site; a request with
+      // neither header is a script on the box and is left to the token gate.
+      if (!isSameOriginRequest(req)) {
+        return res.status(403).type("text/plain").send(FIRST_RUN_CROSS_ORIGIN_MESSAGE);
+      }
       // First-time setup. The setup token comes first: while no password exists,
       // only direct loopback (the owner on this machine or through an SSH
       // tunnel) may set it, or a request carrying the matching one-time token.
