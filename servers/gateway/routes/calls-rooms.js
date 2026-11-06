@@ -4,7 +4,8 @@
  * Extracted from calls-page.js so boot/public-endpoints.js can validate a call
  * page's room credential before handing out TURN credentials (security audit
  * N1a-9) WITHOUT importing the express router, express.static and the whole
- * sharing-server graph: this module depends on node:crypto only.
+ * sharing-server graph: this module depends on node:crypto, plus the
+ * node:crypto-only token-compare helper (servers/shared/token-compare.js).
  *
  * Two verifiers read this store, both through calls-page.js's
  * validateCallRoomToken(): the /calls page (and its /api/rooms/:code lookup),
@@ -16,6 +17,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { tokensEqual } from "../../shared/token-compare.js";
 
 /** Room token lifetime. Same 24h window the calls page documents. */
 export const CALL_ROOM_TTL_MS = 24 * 60 * 60 * 1000;
@@ -66,7 +68,8 @@ export function lookupCallRoom(roomCode, token) {
   if (!roomCode || !token) return null;
   const room = _callsRooms.get(String(roomCode));
   if (!room) return null;
-  if (room.token !== String(token)) return null;
+  // Constant time, and a missing/non-string token never matches.
+  if (!tokensEqual(room.token, typeof token === "string" ? token : String(token))) return null;
   if (Date.now() - room.createdAt > CALL_ROOM_TTL_MS) {
     _callsRooms.delete(String(roomCode));
     return null;

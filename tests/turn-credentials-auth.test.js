@@ -10,13 +10,16 @@
  * verifiers — only the relay db (the .well-known handlers' table) is stubbed,
  * and those routes are not exercised here.
  *
- * Request budget: the route keeps its 10/min rate limiter, so this file makes
- * 9 requests to it. Every request here comes from one loopback address, which
- * is one bucket.
+ * Rate limiter: the route keeps its 10/min limiter, whose keyGenerator is
+ * express-rate-limit's default — `req.ip`. For a same-box caller that is the
+ * socket's SOURCE address, so every request below leaves from its own
+ * 127.0.0.x (see turn()), i.e. its own bucket: no test can spend another
+ * test's budget, and the file's request count is not capped by one window.
  */
-import { test, before, after } from "node:test";
+import { test, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,7 +46,7 @@ const { hashToken } = await import("../servers/gateway/dashboard/auth.js");
 // companion's /client-ws handshake validates against) and the calls rooms
 // created by POST /api/rooms.
 const { _activeRooms, validateRoomToken } = await import("../servers/sharing/rooms.js");
-const { createCallRoom } = await import("../servers/gateway/routes/calls-rooms.js");
+const { createCallRoom, CALL_ROOM_TTL_MS } = await import("../servers/gateway/routes/calls-rooms.js");
 const { initGatewayActorKey, signActor, signBoardActor } = await import("../scripts/pi-bots/actor-sig.mjs");
 
 const PATH = "/api/turn-credentials";
@@ -57,7 +60,7 @@ const SERVE = serveHeaders("tester@example.invalid", "100.64.20.5");
 actAsServe();
 
 let server = null;
-let base = "";
+let port = 0;
 let companionRoom = null;
 let callsRoom = null;
 
@@ -95,7 +98,7 @@ before(async () => {
     validateRoomToken,
   });
   await new Promise((resolve) => { server = app.listen(0, "127.0.0.1", resolve); });
-  base = "http://127.0.0.1:" + server.address().port;
+  port = server.address().port;
 });
 
 after(() => {
@@ -104,14 +107,38 @@ after(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** A TURN request. `serve` sends Tailscale Serve's headers (an operator's browser). */
-async function turn({ headers = {}, serve = false, query = "" } = {}) {
+/**
+ * One client address per request, so one limiter bucket per request: 127.0.0.2,
+ * 127.0.0.3, … (the whole 127.0.0.0/8 is loopback). The limiter keys on
+ * `req.ip`, and Express's `trust proxy` is left off here exactly as the real
+ * gateway leaves it, so req.ip is the socket's source address, not any header.
+ */
+let nextClientAddr = 2;
+
+function get(ip, path, headers) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET", headers, localAddress: ip }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => resolve({ status: res.statusCode, text }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/**
+ * A TURN request. `serve` sends Tailscale Serve's headers (an operator's
+ * browser). `ip` overrides the per-request client address (unused today: the
+ * running counter already isolates every request).
+ */
+async function turn({ headers = {}, serve = false, query = "", ip = "127.0.0." + nextClientAddr++ } = {}) {
   const h = serve ? { ...SERVE, ...headers } : { ...headers };
-  const r = await fetch(base + PATH + query, { headers: h });
-  const text = await r.text();
+  const { status, text } = await get(ip, PATH + query, h);
   let body = null;
   try { body = JSON.parse(text); } catch { body = null; }
-  return { status: r.status, body, text };
+  return { status, body, text };
 }
 
 const CREDENTIAL_KEYS = ["urls", "username", "credential", "ttl"];
@@ -185,6 +212,67 @@ test("a calls room created by POST /api/rooms (?room=&token=) → 200", async ()
     await turn({ query: "?room=" + encodeURIComponent(callsRoom.roomCode) + "&token=" + encodeURIComponent(callsRoom.token) }),
     "calls room",
   );
+});
+
+// --- 6b. the 24 h room TTL is enforced, not just the token compare ---------
+test("a companion room past its 24 h TTL → 401, and the store drops it", async () => {
+  // The sharing store reads exactly one field for expiry — room.createdAt — so
+  // an expired room is a room written with a createdAt older than the TTL.
+  // Placed in _activeRooms, the map validateRoomToken() itself reads.
+  const room = "room-expired-1";
+  const token = "expired-token-1";
+  _activeRooms.set(room, {
+    token,
+    hostCrowId: "crow:host-example",
+    hostName: "host",
+    companionUrl: "/companion/?room=" + room + "&token=" + token,
+    createdAt: Date.now() - CALL_ROOM_TTL_MS - 1000,
+    participants: new Set(),
+  });
+  try {
+    assertNoCredentials(
+      await turn({ query: "?room=" + encodeURIComponent(room) + "&token=" + encodeURIComponent(token) }),
+      "expired companion room",
+    );
+    assert.equal(_activeRooms.has(room), false, "the verifier deletes the expired room it was handed");
+  } finally {
+    _activeRooms.delete(room);
+  }
+});
+
+test("a calls room past its 24 h TTL → 401", async () => {
+  const room = createCallRoom("host");
+  // The calls store reads Date.now() and cannot be handed a clock, so step the
+  // clock past the TTL for the duration of the request (Date only — no timers).
+  mock.timers.enable({ apis: ["Date"], now: Date.now() + CALL_ROOM_TTL_MS + 60_000 });
+  try {
+    assertNoCredentials(
+      await turn({ query: "?room=" + encodeURIComponent(room.roomCode) + "&token=" + encodeURIComponent(room.token) }),
+      "expired calls room",
+    );
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// --- 6c. the compare itself: a missing or non-string token never matches ----
+test("the room token compare is constant time and refuses a missing/non-string token", async () => {
+  const { tokensEqual } = await import("../servers/shared/token-compare.js");
+  assert.equal(tokensEqual("abc", "abc"), true);
+  assert.equal(tokensEqual("", ""), true);
+  assert.equal(tokensEqual("abc", "abd"), false);
+  assert.equal(tokensEqual("abc", "abc "), false, "length is not a shortcut, but it is still a difference");
+  assert.equal(tokensEqual("abc", undefined), false);
+  assert.equal(tokensEqual(undefined, "abc"), false);
+  assert.equal(tokensEqual(null, null), false);
+  assert.equal(tokensEqual(42, 42), false);
+  assert.equal(tokensEqual(Buffer.from("abc"), Buffer.from("abc")), false);
+
+  // And through the sharing verifier itself (the calls-room one is exercised
+  // over HTTP above; it is the same helper).
+  assert.equal(validateRoomToken(companionRoom.room, undefined), null);
+  assert.equal(validateRoomToken(companionRoom.room, 42), null);
+  assert.equal(validateRoomToken(companionRoom.room, companionRoom.token)?.roomCode, companionRoom.room);
 });
 
 // --- 7. Funnel ------------------------------------------------------------
