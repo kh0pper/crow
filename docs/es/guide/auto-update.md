@@ -12,9 +12,10 @@ El actualizador automático se ejecuta como una tarea en segundo plano dentro de
 
 1. **Fetch** — ejecuta `git fetch origin main` para buscar nuevos commits
 2. **Puerta de CI** — consulta en GitHub los resultados de CI requeridos del commit
-   destino (`suite`, `static-checks`, `audit`). Una compilación en rojo o aún en
-   ejecución pospone la actualización hasta la próxima comprobación; un origen que
-   no es GitHub no tiene CI que consultar y se actualiza como siempre; una respuesta
+   destino (`suite`, `static-checks`, `audit`). Una compilación en rojo pospone la
+   actualización hasta la siguiente comprobación normal, y una que sigue en ejecución
+   se repregunta antes; un origen que no es GitHub no tiene CI que consultar y se
+   actualiza como siempre; una respuesta
    de GitHub que no se puede leer también la pospone (ver
    [La puerta de CI](#la-puerta-de-ci)). Se desactiva con `CROW_UPDATE_CI_GATE=0`.
 3. **Comprobación de cuarentena** — si este host ya revirtió un commit y ese commit
@@ -64,10 +65,10 @@ Cuando GitHub responde, la respuesta decide:
 | Respuesta | Qué pasa |
 |---|---|
 | los tres en verde | la actualización continúa |
-| alguno en rojo | se pospone y se reintenta en la próxima comprobación |
-| alguno aún en ejecución | se pospone y se reintenta en la próxima comprobación |
+| alguno en rojo | se pospone y se reintenta en la siguiente comprobación normal — solo una CI *en ejecución* se repregunta antes (ver abajo) |
+| alguno en ejecución | se pospone, pero se vuelve a comprobar unos 30 minutos después en vez de esperar el intervalo completo |
 | falta alguno de los tres y nada sigue en ejecución | se pospone como **sin CI** (ver abajo): los checks que faltan nunca informarán en este origen — **verde exige los tres**, así que un sha en el que solo `audit` ha terminado nunca se despliega ni se queda como "en ejecución" |
-| ningún check-run de nuestros tres | se pospone como **sin CI**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación; un fork que quita esos checks sigue posponiéndose |
+| ningún check-run de nuestros tres | se pospone como **sin CI**: un commit sin verificar nunca se despliega. Un push que se adelantó a los checks se resuelve en la siguiente comprobación normal — no en un reintento de 30 minutos, que solo se gana una ejecución en curso; un fork que quita esos checks sigue posponiéndose |
 
 **Sin CI.** GitHub respondió, pero sin los tres checks requeridos —
 típicamente un fork que no lleva la CI de este repositorio, o un push cuyos
@@ -83,6 +84,18 @@ Se registra como resultado transitorio, así que nunca hace sonar la campana; si
 se repite más de dos intervalos de comprobación, la tarjeta de Actualizaciones
 del Nest avisa de que los checks requeridos no se ejecutaron todos en main.
 `CROW_UPDATE_CI_GATE=0` es la salida.
+
+**Un veredicto que aún no se conoce no es un veredicto.** Mientras GitHub diga que
+un check requerido sigue en ejecución, el actualizador vuelve a preguntar unos 30
+minutos después (más un pequeño desfase por máquina), y sigue preguntando mientras
+la CI siga en ejecución. Se detiene tras `ceil(interval / 30 min) - 1` reintentos,
+así que un reintento nunca puede pasarse de la siguiente comprobación normal, y se
+detiene en cuanto llega cualquier otra respuesta. Solo una CI *en ejecución* se
+gana ese reintento: un resultado en rojo, un commit sin los checks requeridos y que
+GitHub no se pueda alcanzar esperan al intervalo normal. Una caída no debe
+repreguntarse cada 30 minutos — cada comprobación ilegible cuenta para la campana
+de 3 seguidas de abajo, así que un reintento rápido la haría sonar tras
+aproximadamente una hora en vez de tras tres comprobaciones normales.
 
 Dos resultados *no* son un resultado de CI:
 
@@ -104,9 +117,10 @@ comprobación que descargó algo.
 **No disponible.** El origen *sí* es GitHub y no se pudo leer ninguna respuesta:
 un fallo de red, un tiempo de espera agotado, un límite de peticiones `403`/`429`,
 cualquier otra respuesta que no sea 200, o un cuerpo que no es JSON válido. El
-commit queda sin verificar, así que esta comprobación se **pospone exactamente
-igual que una compilación en ejecución** — no se descarga nada, el código en
-disco sigue corriendo y la próxima comprobación lo reintenta:
+commit queda sin verificar, así que esta comprobación se **pospone** igual que una
+compilación en ejecución — no se descarga nada y el código en disco sigue
+corriendo — pero espera a la próxima comprobación normal en vez de ganarse un
+reintento de 30 minutos:
 
 ```
 Skipped: CI status could not be read for origin/main (1a2b3c4d5) — will retry next tick
@@ -136,8 +150,10 @@ de configuración editado a mano) no necesita ningún trato especial:
    que solo se niega cuando el diff entrante se solapa con un archivo que modificaste.
 2. Cualquier otra edición local sobrevive la actualización intacta.
 3. Un pull rechazado se informa en Settings > Updates (`Pull failed …`) y se
-   reintenta en la próxima comprobación. Haz commit, revierte o guarda en stash el
-   archivo en conflicto para dejar pasar la actualización.
+   reintenta en la siguiente comprobación normal — la repregunta de ~30 minutos
+   solo es para una CI que sigue en ejecución (ver [La puerta de CI](#la-puerta-de-ci)).
+   Haz commit, revierte o guarda en stash el archivo en conflicto para dejar pasar
+   la actualización.
 
 Ya no hay ciclo de stash/pop: un stash que no se podía reaplicar dejaba el
 checkout limpio pero el trabajo del operador aparcado en `git stash list`.
