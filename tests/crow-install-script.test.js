@@ -696,3 +696,392 @@ test("K6: the step never restarts a service and never reboots", () => {
   // …and apt never runs non-interactively in a way that takes a reboot itself.
   assert.doesNotMatch(autoUpdatesHelpers(s), /Needrestart|needrestart -r/);
 });
+
+// ─── Security audit N1c-15: firewall first, port precheck, honest ending ─────
+// The audit saw three things on one half-finished install (INSTALL_EXIT=0):
+// the gateway and Caddy enabled/restarted BEFORE ufw came up, no check that
+// 3001/80/443 were free, and "Crow is ready!" printed right after
+// "Gateway did not respond …". Everything below either reads the script or
+// runs a helper against a SCRATCH PATH/HOME (a fake ss/systemctl/curl/sleep),
+// so no test can see the real socket table, service manager or Crow install.
+
+/** Write an executable shim called `name` into `dir`. */
+function shim(dir, name, body) {
+  writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return join(dir, name);
+}
+
+/** A scratch PATH dir + HOME for the precheck helpers: `ss` reports ONLY the
+ *  ports this test pretends are busy, `systemctl` knows ONLY the units this
+ *  test pretends are active, and `rerun` creates $HOME/.crow/app so the script
+ *  takes its "Crow is already cloned" path. */
+function portScratch({ busy = [], active = [], rerun = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ports-"));
+  const bin = join(dir, "bin");
+  const home = join(dir, "home");
+  mkdirSync(bin);
+  mkdirSync(home);
+  const ssCases = busy.map((p) => `    *:${p}*) echo "LISTEN 0 4096 0.0.0.0:${p} 0.0.0.0:*" ;;`).join("\n");
+  shim(bin, "ss", `case "$*" in\n${ssCases}\n  *) : ;;\nesac\nexit 0`);
+  const unitCases = active.map((u) => `    *${u}*) exit 0 ;;`).join("\n");
+  shim(bin, "systemctl", `case "$*" in\n${unitCases}\n  *) : ;;\nesac\nexit 1`);
+  if (rerun) mkdirSync(join(home, ".crow", "app"), { recursive: true });
+  return { dir, bin, home, env: { PATH: `${bin}:${process.env.PATH}`, HOME: home } };
+}
+
+test("N1c-15: the firewall is up BEFORE crow-gateway and Caddy are enabled/started", () => {
+  const s = src();
+  const enable = s.search(/^sudo ufw --force enable$/m);
+  assert.ok(enable > -1, "the step must still enable ufw with --force, not a piped echo");
+  // Every rule the step needs must be in place BEFORE the firewall opens — a
+  // rule added afterwards is a window with the door open, and SSH in
+  // particular is the difference between a remote install and a lockout.
+  for (const rule of [
+    /^sudo ufw default deny incoming$/m,
+    /^sudo ufw default allow outgoing$/m,
+    /^sudo ufw allow 22\/tcp comment 'SSH'$/m,
+    /^  sudo ufw allow 443\/tcp comment 'HTTPS \(Caddy\)'$/m,
+  ]) {
+    const idx = s.search(rule);
+    assert.ok(idx > -1, `rule/step missing: ${rule}`);
+    assert.ok(idx < enable, `must sit above \`ufw --force enable\`: ${rule}`);
+  }
+  // ufw-docker closes the Docker/UFW hole (a container's published port bypasses
+  // ufw), so it belongs to the same "before anything listens" window.
+  const dockerFixIdx = s.search(/^  sudo ufw-docker install$/m);
+  assert.ok(dockerFixIdx > -1, "the ufw-docker step must still be there");
+  // The audit's finding: the units were enabled and restarted first, so a
+  // half-finished install listened on 3001/443 with no firewall in front of it.
+  for (const re of [
+    /^sudo systemctl enable crow-gateway$/m,
+    /^sudo systemctl restart crow-gateway\n/m,
+    /^sudo systemctl restart caddy$/m,
+  ]) {
+    const idx = s.search(re);
+    assert.ok(idx > -1, `expected to find ${re}`);
+    assert.ok(enable < idx, `the firewall must be enabled before: ${re}`);
+    assert.ok(dockerFixIdx < idx, `ufw-docker must be installed before: ${re}`);
+  }
+  // The gateway's socket unit belongs to the same activation sequence.
+  const socketIdx = s.indexOf("systemctl enable --now crow-gateway-proxy.socket");
+  assert.ok(socketIdx > -1 && enable < socketIdx, "the firewall must come up before the socket unit too");
+});
+
+test("N1c-15: the port precheck runs before Step 1 — nothing is installed or started first", () => {
+  const s = src();
+  const callIdx = s.search(/^if ! check_ports_free; then$/m);
+  assert.ok(callIdx > -1, "the install body must call check_ports_free");
+  const step1 = s.indexOf('header "Step 1/10: System Updates"');
+  assert.ok(step1 > -1 && callIdx < step1, "the precheck must sit above the first install step");
+  const firstApt = s.search(/^sudo apt update$/m);
+  assert.ok(firstApt > -1 && callIdx < firstApt, "…and above the first apt call");
+  // Below the source-only seam, i.e. this is the executed body, not the helper.
+  assert.ok(callIdx > s.indexOf("CROW_INSTALL_SOURCE_ONLY"), "the call must be in the install body");
+  assert.match(s.slice(callIdx, s.indexOf("\nfi\n", callIdx)), /exit 1/);
+});
+
+/** A scratch PATH for ssh_ports: `sudo` runs its argument (exactly what the
+ *  script's own helper does, and it can never ask for a password), `sshd` is the
+ *  CROW_SSHD seam and `systemctl` the CROW_SYSTEMCTL seam. Both seams point at
+ *  the shims by absolute path and `ss` is shimmed too, so nothing here can reach
+ *  the real sshd, systemd, socket table or /etc/ssh. */
+function sshScratch({ sshdT = "", sshdFails = false, sockets = {}, ssRows = [] } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-sshports-"));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  shim(bin, "sudo", 'exec "$@"');
+  // `sshd -T`: exactly the effective config this test pretends to see, or a
+  // clean failure (no binary / a config error) — the cue for the fallback.
+  shim(bin, "sshd", sshdFails ? "exit 1" : `cat <<'SSHD'\n${sshdT}\nSSHD`);
+  // The ss listener probe is gone. Where a test hands it rows they are the kind
+  // the old probe read (an sshd row, or a session process holding a forwarded
+  // port): the new code must ignore them, and a regression must never read the
+  // real socket table.
+  shim(bin, "ss", ssRows.length ? `cat <<'SS'\n${ssRows.join("\n")}\nSS` : "exit 1");
+  const units = Object.keys(sockets).map(
+    (unit) => `    *${unit}*)\n      cat <<'LISTEN'\n${sockets[unit].join("\n")}\nLISTEN\n      exit 0 ;;`,
+  );
+  shim(bin, "systemctl", `case "$*" in\n${units.join("\n")}\n    *) exit 1 ;;\nesac`);
+  return {
+    dir,
+    bin,
+    env: {
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: dir,
+      CROW_SSHD: join(bin, "sshd"),
+      CROW_SYSTEMCTL: join(bin, "systemctl"),
+    },
+  };
+}
+
+/** An sshd_config fixture — the config-path seam means /etc/ssh is never read. */
+function sshdConfigFixture(lines) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-sshconf-"));
+  const p = join(dir, "sshd_config");
+  writeFileSync(p, lines);
+  return p;
+}
+
+test("N1c-15: when sshd -T cannot answer, ssh_ports falls back to the config-file Port lines", () => {
+  // `sshd -T` fails here (no binary, or a config error): the world-readable
+  // files must still answer, exactly as they did before the sshd -T probe existed.
+  const scratch = sshScratch({ sshdFails: true });
+  // Commented `#Port 22` must stay out (Debian/Ubuntu ship the default that way).
+  const cfg = sshdConfigFixture("#Port 22\nPort 2222\n  Port 2200\nPubkeyAuthentication yes\n");
+  const viaConf = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+  assert.equal(viaConf.status, 0, viaConf.stderr);
+  assert.deepEqual(viaConf.stdout.trim().split("\n"), ["2222", "2200"]);
+  // SSH_CONNECTION's 4th field is the port this very session arrived on — the
+  // one the operator would be cut off from the moment ufw came up.
+  const viaEnv = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 2200",
+  });
+  assert.equal(viaEnv.status, 0, viaEnv.stderr);
+  assert.deepEqual(viaEnv.stdout.trim().split("\n").sort(), ["2200", "2222"]);
+  // A missing config file is not an error, and an unset SSH_CONNECTION prints nothing.
+  const none = runWithHelpers("ssh_ports /definitely/not/sshd_config", { ...scratch.env, SSH_CONNECTION: "" });
+  assert.equal(none.status, 0, none.stderr);
+  assert.equal(none.stdout.trim(), "");
+});
+
+test("N1c-15: ssh_ports takes sshd -T's effective Port — the drop-in host with no Port line", () => {
+  // The socket-activated host (Ubuntu 22.10+) keeps its port in a ListenStream=
+  // drop-in: `sshd -T` is the only probe that resolves that into a `port` line.
+  // The session arrived on the same port, and it still comes out once.
+  const scratch = sshScratch({ sshdT: "port 2222\nlistenaddress 0.0.0.0" });
+  const cfg = sshdConfigFixture("#Port 22\nListenAddress 0.0.0.0\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 2222",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["2222"]);
+});
+
+test("N1c-15: two probes agreeing on 22 stay 22 — never the glued 2222", () => {
+  // The glue bug: command substitution stripped the trailing newline of the
+  // first probe, so ss's `22` and SSH_CONNECTION's `22` became `2222`. The
+  // firewall then opened a port nothing listens on and left 22 unopened. The ss
+  // row is the one the old probe read; today's code never looks at it.
+  const scratch = sshScratch({
+    sshdT: "port 22\npermitrootlogin without-password",
+    ssRows: ['LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=812,fd=3))'],
+  });
+  const cfg = sshdConfigFixture("#Port 22\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 22",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["22"]);
+  assert.doesNotMatch(r.stdout, /2222/);
+});
+
+test("N1c-15: ssh_ports takes a socket-activated ListenStream= port ([::]:2200)", () => {
+  // ssh.socket's Listen value, as `systemctl show -p Listen --value` prints it.
+  const scratch = sshScratch({
+    sshdT: "port 22",
+    sockets: { "ssh.socket": ["[::]:2200 (Stream)", "0.0.0.0:2200 (Stream)"] },
+  });
+  const cfg = sshdConfigFixture("#Port 22\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["22", "2200"]);
+});
+
+test("N1c-15: a loopback-only socket listener is never an SSH candidate", () => {
+  // 127.0.0.0/8 and [::1] are not a way back in for a remote operator, so a
+  // firewall rule for one is pointless (and hides the real port's absence).
+  for (const listen of ["127.0.0.1:2201 (Stream)", "[::1]:2201 (Stream)", "localhost:2201 (Stream)"]) {
+    const scratch = sshScratch({ sshdFails: true, sockets: { "ssh.socket": [listen] } });
+    const cfg = sshdConfigFixture("#Port 22\n");
+    const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), "", `${listen} must not become an SSH candidate`);
+  }
+  // A Datagram entry on the same unit is not SSH either.
+  const dgram = sshScratch({ sshdFails: true, sockets: { "ssh.socket": ["[::]:2202 (Datagram)"] } });
+  const rd = runWithHelpers(`ssh_ports "${sshdConfigFixture("")}"`, { ...dgram.env, SSH_CONNECTION: "" });
+  assert.equal(rd.status, 0, rd.stderr);
+  assert.equal(rd.stdout.trim(), "");
+});
+
+test("N1c-15: a padded port is normalised to decimal and de-duplicated (0022 is 22)", () => {
+  // `$((10#0022))` is 22; a bare `$((0022))` would be octal (and `0029` an error).
+  const cfg = sshdConfigFixture("Port 0022\n");
+  // The effective config's `port 0022` and the live session's `22` are one port.
+  const effective = sshScratch({ sshdT: "port 0022" });
+  const a = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...effective.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 22",
+  });
+  assert.equal(a.status, 0, a.stderr);
+  assert.deepEqual(a.stdout.trim().split("\n"), ["22"]);
+  // …and the config-file fallback normalises too: it printed 0022 AND 22 before.
+  const fallback = sshScratch({ sshdFails: true });
+  const b = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...fallback.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 22",
+  });
+  assert.equal(b.status, 0, b.stderr);
+  assert.deepEqual(b.stdout.trim().split("\n"), ["22"]);
+});
+
+test("N1c-15: no candidate comes from a session process or the socket table — the ss probe is gone", () => {
+  // Round 2: `ss -ltnHp` + a `*sshd*` process match also caught sshd's own
+  // per-session children, whose `ssh -R` forwards would then be opened. That is
+  // what an sshd-session row below looks like: it must never reach the firewall.
+  const scratch = sshScratch({
+    sshdT: "port 22",
+    ssRows: [
+      'LISTEN 0 4096 127.0.0.1:8443 0.0.0.0:* users:(("sshd-session",pid=913,fd=7))',
+    ],
+  });
+  const r = runWithHelpers(`ssh_ports "${sshdConfigFixture("#Port 22\n")}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["22"], "a forwarded port is not an SSH port");
+  // …and the probe itself is gone from the source, not merely unreachable.
+  const s = src();
+  assert.doesNotMatch(s, /ss -ltnHp/, "the ss listener probe must be gone");
+  assert.doesNotMatch(s, /sshd_ss_ports/, "…and so must its helper");
+  assert.doesNotMatch(s, /\*sshd\*/, "…and the process-name substring match that also took ssh -R forwards");
+  assert.match(s, /sudo_cmd "\$CROW_SSHD" -T/, "the effective-config probe goes through the script's sudo seam");
+  assert.match(s, /"\$CROW_SYSTEMCTL" show -p Listen --value/, "socket activation is read from systemd");
+  assert.match(s, /SSH_CONNECTION/, "the live session stays a probe");
+  assert.match(s, /^CROW_SSHD="\$\{CROW_SSHD:-sshd\}"$/m, "CROW_SSHD is a test seam");
+  assert.match(s, /^CROW_SYSTEMCTL="\$\{CROW_SYSTEMCTL:-systemctl\}"$/m, "CROW_SYSTEMCTL is a test seam");
+});
+
+test("N1c-15: ssh_ports matches the Port keyword case-insensitively (sshd keywords are)", () => {
+  const scratch = sshScratch({ sshdFails: true });
+  const cfg = sshdConfigFixture("PORT 2200\nPubkeyAuthentication yes\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["2200"]);
+});
+
+test("N1c-15: ssh_ports stops at the first Match line — a Port there is invalid for sshd", () => {
+  const scratch = sshScratch({ sshdFails: true });
+  const cfg = sshdConfigFixture("Port 2222\nMatch Address 100.64.20.0/24\n  Port 2299\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, { ...scratch.env, SSH_CONNECTION: "" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["2222"]);
+});
+
+test("N1c-15: ssh_ports drops ports outside 1-65535 (ufw allow 99999/tcp would fail under set -e)", () => {
+  const scratch = sshScratch({ sshdT: "port 99999\nport 0\nport 65536\nport 2222\nport 65535" });
+  const cfg = sshdConfigFixture("Port 99999\nPort 0\nPort 65536\nPort 2222\nPORT 65535\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 99999",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["2222", "65535"]);
+});
+
+test("N1c-15: ssh_ports prints each port once (SSH_CONNECTION, sshd -T and ssh.socket agree)", () => {
+  const scratch = sshScratch({
+    sshdT: "port 2222\nport 22",
+    sockets: { "ssh.socket": ["[::]:2222 (Stream)"] },
+  });
+  const cfg = sshdConfigFixture("Port 2222\nPort 22\n");
+  const r = runWithHelpers(`ssh_ports "${cfg}"`, {
+    ...scratch.env,
+    SSH_CONNECTION: "100.64.20.5 51234 100.64.20.9 2222",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), ["2222", "22"]);
+});
+
+test("N1c-15: the sshd -T probe uses the script's sudo helper, never a fresh prompt", () => {
+  const s = src();
+  assert.ok(s.includes('sudo_cmd "$CROW_SSHD" -T'), "sshd -T must go through sudo_cmd (the script's own seam)");
+  // sudo is already obtained by then: Step 1's first privileged call, and the
+  // plain `sudo ufw` rules directly above the call site, keep the timestamp fresh.
+  const callSite = s.indexOf('SSH_EXTRA_PORTS="$(ssh_ports)"');
+  assert.ok(callSite > -1, "the firewall step must call ssh_ports");
+  const firstSudo = s.indexOf("sudo apt update");
+  assert.ok(firstSudo > -1 && firstSudo < callSite, "Step 1's `sudo apt update` runs first");
+  const sshAllow = s.search(/^sudo ufw allow 22\/tcp comment 'SSH'$/m);
+  assert.ok(sshAllow > -1 && sshAllow < callSite, "the unconditional SSH allow sits above the probe");
+});
+
+test("N1c-15 (behaviour): a foreign listener on :443 stops the install with plain words and exit 1", () => {
+  const scratch = portScratch({ busy: [443] });
+  const r = runWithHelpers("check_ports_free", scratch.env);
+  assert.equal(r.status, 1, `a busy port must be a non-zero exit:\n${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /Port 443 is already in use by another program/);
+  assert.match(r.stdout, /see: sudo ss -ltnp 'sport = :443'/);
+  assert.match(r.stdout, /Stop that program or free the port, then run the installer again\./);
+  // 3001 and 80 were free in this fixture: nothing else is reported.
+  assert.doesNotMatch(r.stdout, /Port 3001/);
+  assert.doesNotMatch(r.stdout, /Port 80 /);
+});
+
+test("N1c-15 (behaviour): free ports pass, and a re-run does not trip over Crow's own services", () => {
+  const free = portScratch({ busy: [] });
+  const clean = runWithHelpers("check_ports_free && echo PORTS_OK", free.env);
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+  assert.match(clean.stdout, /PORTS_OK/);
+
+  // A second run: the gateway (3001) and Caddy (80/443) the installer itself
+  // started are listening — re-installing must not call that "another program".
+  const rerun = portScratch({ busy: [3001, 80, 443], active: ["crow-gateway", "caddy"], rerun: true });
+  const again = runWithHelpers("check_ports_free && echo PORTS_OK", rerun.env);
+  assert.equal(again.status, 0, again.stdout + again.stderr);
+  assert.match(again.stdout, /PORTS_OK/);
+
+  // …but the same listener with NO Crow checkout on disk is a foreign program,
+  // even if a unit happens to share the name: only the re-run path is trusted.
+  const noCheckout = portScratch({ busy: [443], active: ["caddy"] });
+  const foreign = runWithHelpers("check_ports_free", noCheckout.env);
+  assert.equal(foreign.status, 1, foreign.stdout + foreign.stderr);
+  assert.match(foreign.stdout, /Port 443 is already in use/);
+});
+
+test("N1c-15 (behaviour): any `error` withholds the ready banner (install_failed)", () => {
+  const clean = runWithHelpers('if install_failed; then echo BANNER; else echo NO_BANNER; fi');
+  assert.equal(clean.status, 0, clean.stderr);
+  assert.equal(clean.stdout.trim(), "NO_BANNER", "a run without errors stays ready-able");
+  const failed = runWithHelpers('error "Gateway did not respond"; if install_failed; then echo NO_BANNER; else echo BANNER; fi; echo "ERRORS=${INSTALL_ERRORS}"');
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.match(failed.stdout, /NO_BANNER/);
+  assert.match(failed.stdout, /ERRORS=1/);
+});
+
+test("N1c-15 (behaviour): a failed health check names the next steps and returns non-zero", () => {
+  // Behavioural, not static: verify_gateway runs against shims — systemctl says
+  // inactive, curl never answers, sleep is a no-op — so there is no 20s wait
+  // and no contact with the real gateway.
+  const scratch = portScratch({ active: [] });
+  shim(scratch.bin, "curl", "exit 7");
+  shim(scratch.bin, "sleep", "exit 0");
+  const r = runWithHelpers('if verify_gateway; then echo READY_BANNER; else echo NO_BANNER; fi', scratch.env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /NO_BANNER/, "verify_gateway must fail when the health endpoint never answers");
+  assert.doesNotMatch(r.stdout, /READY_BANNER/);
+  assert.match(r.stdout, /Gateway did not respond at http:\/\/localhost:3001 after 10 attempts/);
+  assert.match(r.stdout, /sudo systemctl status crow-gateway/);
+  assert.match(r.stdout, /sudo journalctl -u crow-gateway -n 50/);
+  assert.match(r.stdout, /then run the installer again/);
+});
+
+test("N1c-15: the install body exits 1 on a failed health check, and the banner sits behind that gate", () => {
+  const s = src();
+  const guardIdx = s.search(/^if ! verify_gateway; then$/m);
+  assert.ok(guardIdx > -1, "the verification must be gated on verify_gateway");
+  const guard = s.slice(guardIdx, s.indexOf("\nfi\n", guardIdx));
+  assert.match(guard, /exit 1/, "a failed health check must end the install non-zero");
+  const bannerIdx = s.indexOf('header "Installation Complete"');
+  const readyIdx = s.indexOf('echo "  Crow is ready!"');
+  assert.ok(guardIdx < bannerIdx, "the guard must sit above the banner header");
+  assert.ok(guardIdx < readyIdx, "the guard must sit above the 'Crow is ready!' echo");
+  // Belt and braces: any other `error` (a dead unit that still answers, say)
+  // also blocks the banner — and that second gate is above it too.
+  const gateIdx = s.search(/^if install_failed; then$/m);
+  assert.ok(gateIdx > -1 && gateIdx < bannerIdx, "install_failed must gate the banner as well");
+});
