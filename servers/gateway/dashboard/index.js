@@ -46,8 +46,8 @@ import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
 import { isSelfOrigin, warnBridgeOverlap } from "../../shared/self-origin.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
-import { allowFirstRun, clearSetupToken } from "./setup-token.js";
-import { isSameOriginRequest, FIRST_RUN_CROSS_ORIGIN_MESSAGE } from "./same-origin.js";
+import { allowFirstRun, clearSetupToken, isDirectLoopback } from "./setup-token.js";
+import { isSameOriginRequest, isLoopbackHost, FIRST_RUN_CROSS_ORIGIN_MESSAGE } from "./same-origin.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -181,8 +181,11 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // --- Public routes (no auth) ---
 
   // Login page. First run only (no password yet): a request that is not direct
-  // loopback must carry the setup token, or it gets the gated message instead of
-  // the password form — a LAN neighbour cannot claim the instance (setup-token.js).
+  // loopback BY A NAME THAT CAN ONLY BE THIS MACHINE must carry the setup token,
+  // or it gets the gated message instead of the password form — a LAN neighbour
+  // cannot claim the instance (setup-token.js), and neither can a DNS-rebinding
+  // page whose loopback socket carries its own domain as the Host
+  // (isLoopbackHost, same-origin.js).
   router.get("/dashboard/login", async (req, res) => {
     const cookies = parseCookies(req);
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
@@ -224,10 +227,22 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
       }
       // First-time setup. The setup token comes first: while no password exists,
       // only direct loopback (the owner on this machine or through an SSH
-      // tunnel) may set it, or a request carrying the matching one-time token.
-      // CROW_SETUP_TOKEN (hosted) has no loopback exemption (setup-token.js).
+      // tunnel) BY A LOOPBACK HOST may set it, or a request carrying the matching
+      // one-time token. CROW_SETUP_TOKEN (hosted) has no loopback exemption
+      // (setup-token.js).
       const gate = allowFirstRun(req, { from: "body" });
       if (!gate.allowed) {
+        // N1a-2 fix round 1 — DNS rebinding. A loopback socket under a Host that
+        // names neither this machine nor a configured origin is the shape of a
+        // page that re-pointed its own domain at 127.0.0.1: Host and Origin then
+        // agree (so the check above passes) and no forwarding header exists (so
+        // the loopback socket looks like the owner's). Without the token that is
+        // the plain refusal a foreign page gets, not the gated login page a real
+        // LAN visitor sees; with the token, allowFirstRun() allowed it above and
+        // the setup link keeps working.
+        if (isDirectLoopback(req) && !isLoopbackHost(req)) {
+          return res.status(403).type("text/plain").send(FIRST_RUN_CROSS_ORIGIN_MESSAGE);
+        }
         return res.type("html").send(renderLogin({ isSetup: true, error: setupTokenMessage("login.setupTokenInvalid", lang), lang }));
       }
       // Every error render below carries the validated token back into the form:

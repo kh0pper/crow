@@ -8,7 +8,7 @@
  * box first on the same Wi-Fi owns it. The token closes that window: while no
  * password is set, every first-run path (GET /dashboard/login, POST
  * /dashboard/login, GET /setup) demands the token unless the request is direct
- * loopback.
+ * loopback BY A LOOPBACK NAME (isDirectLoopback and isLoopbackHost, beside).
  *
  * Where the token comes from:
  *   - CROW_SETUP_TOKEN, when set: today's hosted behaviour, unchanged. No file
@@ -31,6 +31,7 @@ import { chmodSync, linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync
 import { join } from "node:path";
 import { resolveCrowHome } from "../../shared/crow-home.js";
 import { isLocalPeer } from "../../shared/peer-class.js";
+import { isLoopbackHost } from "./same-origin.js";
 
 export const SETUP_TOKEN_FILENAME = "setup-token";
 
@@ -150,6 +151,10 @@ export function clearSetupToken({ crowHome = resolveCrowHome() } = {}) {
  * direct), and not a loopback address listed in CROW_TRUSTED_PROXIES (a
  * same-box reverse proxy relaying anyone). So the owner on the machine itself,
  * or through an SSH tunnel to 127.0.0.1, is exempt; a proxied visitor is not.
+ *
+ * Necessary but not sufficient: a DNS-rebinding page posts from a loopback
+ * socket with no forwarding header too, so allowFirstRun() also asks
+ * isLoopbackHost (same-origin.js) — the Host has to name this machine.
  */
 export function isDirectLoopback(req) {
   return isLocalPeer(req?.socket?.remoteAddress, req?.headers || {});
@@ -162,14 +167,23 @@ export function isDirectLoopback(req) {
  * CROW_SETUP_TOKEN (hosted) has no exemption: the env token is required from
  * every source, this machine included, exactly as before the file existed.
  *
+ * The loopback exemption needs BOTH halves: a loopback socket carrying no
+ * forwarding header (isDirectLoopback) AND a Host that can only be this machine
+ * or a configured own origin (isLoopbackHost, same-origin.js). The second half
+ * is what stops a DNS-rebinding page: it posts from a loopback socket with no
+ * forwarding header, but its Host is the attacker's domain re-pointed at
+ * 127.0.0.1, so it falls through to the token below — and, with no token, is
+ * refused exactly as a LAN peer is.
+ *
  * @param {object} req Express request (`req.query` for a GET, `req.body` for a POST)
- * @param {{ crowHome?: string, from?: "body"|"query", hasPassword?: boolean }} [opts]
+ * @param {{ crowHome?: string, from?: "body"|"query", hasPassword?: boolean, env?: object }} [opts]
+ *   `env` is the environment the configured own origin is read from (tests)
  * @returns {{ allowed: boolean, token: string|null }}
  *   `token` is the matched token when the request carried one (so the page can
  *   pass it on in the form), null on the direct-loopback exemption.
  */
-export function allowFirstRun(req, { crowHome = resolveCrowHome(), from = "body", hasPassword = false } = {}) {
-  if (!process.env.CROW_SETUP_TOKEN && isDirectLoopback(req)) return { allowed: true, token: null };
+export function allowFirstRun(req, { crowHome = resolveCrowHome(), from = "body", hasPassword = false, env = process.env } = {}) {
+  if (!process.env.CROW_SETUP_TOKEN && isDirectLoopback(req) && isLoopbackHost(req, { env })) return { allowed: true, token: null };
   const { token } = getSetupToken({ crowHome, hasPassword });
   const candidate = from === "query" ? req?.query?.token : req?.body?.setup_token;
   return tokenMatches(candidate, token) ? { allowed: true, token } : { allowed: false, token: null };
