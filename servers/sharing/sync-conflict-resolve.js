@@ -220,7 +220,13 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
     // When the row is gone, store the JSON string 'null' (not SQL NULL, which would
     // violate the winning_data NOT NULL constraint). The stale guard treats
     // JSON.parse('null') === null the same as storedWinningData === null below.
-    const newWinningData = liveSnapshot ? JSON.stringify(liveSnapshot) : "null";
+    // The re-snapshot is a raw local `SELECT *`: local-only columns
+    // (providers.api_key) belong to this instance alone and the conflict row is
+    // rendered in full on the settings page, so they never go into it
+    // (security audit N1b-7).
+    const newWinningData = liveSnapshot
+      ? JSON.stringify(stripLocalOnlyColumns(table, liveSnapshot))
+      : "null";
     await db.execute({
       sql: `UPDATE sync_conflicts SET winning_data = ? WHERE id = ?`,
       args: [newWinningData, conflictId],

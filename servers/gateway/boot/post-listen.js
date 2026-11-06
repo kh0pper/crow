@@ -343,6 +343,27 @@ export async function runPostListenSetup(server, app, deps) {
     });
   }
 
+  // Redact local-only columns out of stored conflict snapshots (security audit
+  // N1b-7, fix round 2). A providers conflict saved before snapshots were
+  // stripped holds this device's api_key in winning_data (and possibly an old
+  // peer's in losing_data), and the settings page renders both in full. One-time
+  // and idempotent: it rewrites only rows that still carry a local-only column.
+  // Runs on every gateway, --no-auth included: the secret is in the LOCAL db,
+  // whether or not this instance serves a dashboard. Own db client, closed here,
+  // never throws, one log line with the count.
+  setImmediate(async () => {
+    let db;
+    try {
+      const { redactConflictSnapshotsAtBoot } = await import("../../sharing/sync-conflict-redact.js");
+      db = createDbClient();
+      await redactConflictSnapshotsAtBoot(db);
+    } catch (err) {
+      console.warn("[sync-conflicts] key redaction skipped:", err?.message || err);
+    } finally {
+      try { db?.close?.(); } catch {}
+    }
+  });
+
   // Start auto-update checker
   startAutoUpdate(createDbClient(), { noAuth }).catch((err) => {
     console.error("[auto-update] Failed to start:", err.message);

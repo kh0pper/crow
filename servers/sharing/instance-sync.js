@@ -233,6 +233,34 @@ export function stripLocalOnlyColumns(table, row) {
   return out;
 }
 
+/**
+ * A CONFLICT SNAPSHOT as it may be stored: `raw` (the JSON string callers already
+ * built) with `table`'s local-only columns removed.
+ *
+ * Every snapshot written to sync_conflicts goes through this (see
+ * _insertConflictRow, which no caller can bypass). A conflict row is rendered in
+ * FULL on the settings page and a prefix of it is returned by
+ * crow_list_sync_conflicts, so a snapshot is a publication of this device's data:
+ * `winning_data` used to be a raw `SELECT *` of a local providers row — this
+ * device's key — and `losing_data` can be an old peer's wire row that still
+ * carried one (security audit N1b-7).
+ *
+ * Idempotent, and never throws: a table with no local-only columns comes back
+ * byte-identical, a JSON null (`'null'`, a row that was gone) and an
+ * unparseable blob come back as they went in — a snapshot we cannot read cannot
+ * be redacted here either, and losing the conflict trace would be worse.
+ */
+export function stripConflictSnapshot(table, raw) {
+  if (!LOCAL_ONLY_COLUMNS[table]) return raw;
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== "object") return raw;
+    return JSON.stringify(stripLocalOnlyColumns(table, parsed));
+  } catch {
+    return raw;
+  }
+}
+
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
 export const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
@@ -3194,9 +3222,10 @@ export class InstanceSyncManager {
       }
 
       // The conflict row is shown on the sync-conflicts page and returned by
-      // crow_list_sync_conflicts, so the local key must never be stored in it.
+      // crow_list_sync_conflicts, so neither snapshot may carry a key — not this
+      // device's (winning) and not an old peer's (losing).
       const winningData = JSON.stringify(stripLocalOnlyColumns("providers", localRow));
-      const losingData = JSON.stringify(row);
+      const losingData = JSON.stringify(stripLocalOnlyColumns("providers", row));
       const winningTs = Number(localRow.lamport_ts) || 0;
       const openRow = prior.find((c) => Number(c.resolved) === 0);
       if (openRow) {
@@ -3222,8 +3251,23 @@ export class InstanceSyncManager {
         "update",
       );
       if (inserted) {
+        // The notice is per OPEN held conflict, so it is stamped with the
+        // conflict row's id: a re-delivery of THIS held change stays silent
+        // (read or dismissed), while a new held conflict formed after this one
+        // was resolved rings again (provider-endpoint.js).
+        let heldConflictId = null;
         try {
-          await noticeProviderEndpointHeld(this.db, localRow);
+          const { rows: created } = await this.db.execute({
+            sql: `SELECT id FROM sync_conflicts
+                   WHERE table_name = 'providers' AND row_id = ? AND losing_instance_id = ?
+                     AND losing_lamport_ts = ? AND resolved = 0
+                   ORDER BY id DESC LIMIT 1`,
+            args: [rowId, String(instanceId), lamportTs],
+          });
+          heldConflictId = created[0]?.id ?? null;
+        } catch { /* no id: the notice falls back to its per-provider dedupe */ }
+        try {
+          await noticeProviderEndpointHeld(this.db, localRow, heldConflictId);
         } catch (err) {
           console.warn(`[instance-sync] provider endpoint notice failed for ${rowId.slice(0, 64)}:`, err.message);
         }
@@ -4202,12 +4246,18 @@ export class InstanceSyncManager {
       // The verdict is already determined here (local is newer and the data
       // differs) — a failure to LOG must not flip it to "apply" and overwrite
       // newer local data, so logging gets its own guard and we skip regardless.
+      // Both snapshots are stripped of local-only columns: the local row here is
+      // a raw `SELECT *`, i.e. this device's providers.api_key, and the conflict
+      // row is shown in full on the settings page (security audit N1b-7).
+      // _insertConflictRow strips again — this call-site strip keeps the shape
+      // obvious where the raw row is in hand.
       try {
         const inserted = await this._insertConflictRow(
           table, String(rowId),
           localRow.instance_id || this.localInstanceId, incomingInstanceId,
           localTs, incomingTs,
-          JSON.stringify(localRow), JSON.stringify(loggedRow),
+          JSON.stringify(stripLocalOnlyColumns(table, localRow)),
+          JSON.stringify(stripLocalOnlyColumns(table, loggedRow)),
           op || "update",
         );
         if (inserted) await this._notifyConflict();
@@ -4238,6 +4288,12 @@ export class InstanceSyncManager {
    * origin is INCLUDED (per-instance counters collide across peers; spec §3 C5).
    */
   async _insertConflictRow(tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData, conflictOp) {
+    // THE one place every conflict snapshot is stored, so the one place that
+    // must not be possible to forget: local-only columns (providers.api_key) are
+    // stripped here whatever the caller passed. Call sites strip too (the local
+    // raw row they hold), and a double strip is a no-op.
+    winData = stripConflictSnapshot(tableName, winData);
+    loseData = stripConflictSnapshot(tableName, loseData);
     const dedupeArgs = [tableName, rowId, winTs, loseTs, loseInst];
     try {
       const { rows } = await this.db.execute({

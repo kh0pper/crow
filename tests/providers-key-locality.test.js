@@ -17,7 +17,14 @@
  *   5. Fix round 1 (operator ruling 2026-11-06): an inbound change that MOVES a
  *      provider's endpoint while the key lives HERE is held as a proposed
  *      change (one sync_conflicts row, one named bell item) until the operator
- *      accepts it on this device; a keyless row still updates freely.
+ *      accepts it on this device; a keyless row still updates freely. Held in
+ *      BOTH directions (whoever holds the key).
+ *   6. Fix round 2: NO conflict snapshot ever holds a key — not an ordinary
+ *      Lamport conflict, not the endpoint hold, not the restore's stale
+ *      re-snapshot — and old rows are redacted once at boot.
+ *   7. Fix round 2: "needs a key on this device" rings once per provider id
+ *      (a read or a dismissed notice is an answer too), and the held-address
+ *      bell rings once per OPEN held conflict.
  *
  * Harness: real instance DBs (scripts/init-db.js per dir, like paired Crow
  * boxes), real InstanceSyncManagers over stub Hypercore feeds that carry the
@@ -418,7 +425,7 @@ test("providers tab: the key line by the key field, and 'needs a key' on a peer 
     { id: "mine-own", base_url: CLOUD.baseUrl, api_key: null, host: "cloud", bundle_id: null,
       provider_type: "openai", description: null, models: JSON.stringify(MODELS_1), disabled: 0,
       instance_id: ownId },
-    { id: "lan-llama", base_url: "http://10.0.0.9:8080/v1", api_key: null, host: "cloud", bundle_id: null,
+    { id: "lan-llama", base_url: "http://100.64.20.9:8080/v1", api_key: null, host: "cloud", bundle_id: null,
       provider_type: "openai-compat", description: null, models: JSON.stringify([{ id: "qwen3-4b" }]), disabled: 0,
       instance_id: "peer-instance-id" },
     { id: "peer-with-key", base_url: "https://api.anthropic.com", api_key: "sk-not-rendered", host: "cloud", bundle_id: null,
@@ -444,8 +451,8 @@ test("providers tab: the key line by the key field, and 'needs a key' on a peer 
     /Needs an API key on this device\./);
   assert.equal(needsKeyLine({ id: "x", baseUrl: CLOUD.baseUrl, apiKey: null, instance_id: ownId }, { ownInstanceId: ownId }), "",
     "a locally created provider is never told to enter a key");
-  assert.equal(needsKeyLine({ id: "x", baseUrl: "http://10.0.0.9:8080/v1", apiKey: null, instance_id: "peer-instance-id" }, { ownInstanceId: ownId }), "",
-    "a keyless provider (llama.cpp on the LAN) is not told to enter a key");
+  assert.equal(needsKeyLine({ id: "x", baseUrl: "http://100.64.20.9:8080/v1", apiKey: null, instance_id: "peer-instance-id" }, { ownInstanceId: ownId }), "",
+    "a keyless provider (a llama.cpp on the tailnet) is not told to enter a key");
   assert.equal(needsKeyLine({ id: "x", baseUrl: CLOUD.baseUrl, apiKey: "sk-here", instance_id: "peer-instance-id" }, { ownInstanceId: ownId }), "",
     "nothing to say once a key is here");
   // The Spanish line exists (i18n parity is enforced by tests/i18n-global-parity.test.js).
@@ -625,19 +632,20 @@ test("endpoint hold: the same address change to a row with NO local key applies 
   const feedAtoB = a.peerFeed(B_ID);
   b.peerFeed(A_ID);
   try {
-    // A LAN llama.cpp: no key on either side (the ruling's keyless case).
+    // A llama.cpp on the tailnet (100.64.0.0/10, keyless like a LAN box): no key
+    // on either side (the ruling's keyless case).
     setProviderSyncManager(a.mgr);
     await upsertProvider(a.db, {
-      id: "prov-lan", baseUrl: "http://10.0.0.9:8080/v1", host: "cloud",
+      id: "prov-lan", baseUrl: "http://100.64.20.9:8080/v1", host: "cloud",
       providerType: "openai-compat", models: [{ id: "qwen3-4b" }],
     });
     await b.mgr._processNewEntries(A_ID, feedAtoB);
 
     const panel = (await listProvidersAll(a.db)).find((p) => p.id === "prov-lan");
-    await upsertProvider(a.db, { ...panel, baseUrl: "http://10.0.0.10:8080/v1" });
+    await upsertProvider(a.db, { ...panel, baseUrl: "http://100.64.20.10:8080/v1" });
     await b.mgr._processNewEntries(A_ID, feedAtoB);
 
-    assert.equal((await b.row("prov-lan")).base_url, "http://10.0.0.10:8080/v1",
+    assert.equal((await b.row("prov-lan")).base_url, "http://100.64.20.10:8080/v1",
       "a keyless row updates freely — the hold protects a key, and there is none here");
     assert.equal((await providerConflicts(b.db, "prov-lan")).length, 0, "and it records no conflict");
   } finally {
@@ -795,10 +803,13 @@ test("providerNeedsKey: a keyed cloud type/preset needs one; a LAN llama.cpp and
   assert.equal(providerNeedsKey({ base_url: "https://api.openai.com/v1", provider_type: null }), true);
   assert.equal(providerNeedsKey({ base_url: "https://api.anthropic.com", provider_type: "anthropic" }), true);
   assert.equal(providerNeedsKey({ base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" }), true);
-  // Cloud SDK types on an unknown public host.
+  // Cloud SDK types on an unknown public host: nothing local to reach, so a key.
   assert.equal(providerNeedsKey({ base_url: "https://llm.example.com/v1", provider_type: "openai" }), true);
-  // Keyless: a llama.cpp on the LAN, a tailnet box, a loopback sidecar, a bare name.
-  assert.equal(providerNeedsKey({ base_url: "http://10.0.0.9:8080/v1", provider_type: "openai-compat" }), false);
+  // Keyless: a tailnet/CGNAT box (100.64.0.0/10 — the repo's placeholder range),
+  // a loopback sidecar, a bare name, a LAN-ish name.
+  assert.equal(providerNeedsKey({ base_url: "http://100.64.20.9:8080/v1", provider_type: "openai-compat" }), false);
+  assert.equal(providerNeedsKey({ base_url: "http://100.64.20.9:8080/v1", provider_type: "openai" }), false,
+    "a tailnet address is keyless whatever the adapter type says");
   assert.equal(providerNeedsKey({ base_url: "http://100.64.20.1:8003/v1" }), false);
   assert.equal(providerNeedsKey({ base_url: "http://127.0.0.1:8011/v1", provider_type: "openai" }), false);
   assert.equal(providerNeedsKey({ base_url: "http://ollama:11434/v1" }), false);
@@ -819,7 +830,7 @@ test("'needs a key' notice: raised ONCE by name for a keyed row, not for a keyle
     setProviderSyncManager(a.mgr);
     await upsertProvider(a.db, { id: "prov-keyed", ...CLOUD, models: MODELS_1, apiKey: KEY_A });
     await upsertProvider(a.db, {
-      id: "prov-lan-llama", baseUrl: "http://10.0.0.9:8080/v1", host: "cloud",
+      id: "prov-lan-llama", baseUrl: "http://100.64.20.9:8080/v1", host: "cloud",
       providerType: "openai-compat", models: [{ id: "qwen3-4b" }],
     });
     assert.equal(feedAtoB.entries.length, 2, "both rows sync — the keyless one included");
@@ -871,6 +882,367 @@ test("'needs a key' notice: raised ONCE by name for a keyed row, not for a keyle
   } finally {
     setProviderSyncManager(null);
     await a.close();
+    await b.close();
+  }
+});
+
+/* ═══════════ 6. fix round 2 — no conflict snapshot ever holds a key ══════════ */
+
+/** Every stored snapshot of one providers row, parsed. */
+async function conflictSnapshots(db, rowId) {
+  const rows = await providerConflicts(db, rowId);
+  return rows.map((r) => ({
+    ...r,
+    winning: r.winning_data ? JSON.parse(r.winning_data) : null,
+    losing: r.losing_data ? JSON.parse(r.losing_data) : null,
+  }));
+}
+
+test("conflict snapshot: an ordinary Lamport conflict on a keyed provider stores NO key in winning_data or losing_data", async () => {
+  const b = freshInstance("lamport-conflict", B_ID);
+  try {
+    await b.db.execute({
+      sql: "INSERT INTO providers (id, base_url, models, provider_type, api_key, lamport_ts, instance_id) VALUES (?, ?, ?, ?, ?, 900, ?)",
+      args: ["prov-lamport", CLOUD.baseUrl, JSON.stringify(MODELS_2), "openai", KEY_B, B_ID],
+    });
+    // Same address (so the endpoint hold is not what is under test), an OLDER
+    // lamport and different content: the ordinary LWW conflict path — the local
+    // row wins and both versions are recorded for review. The peer's row is one
+    // an OLD peer would send (it still carries its own key).
+    const entry = signedEntry({
+      op: "update",
+      lamport_ts: 500,
+      instance_id: A_ID,
+      row: {
+        id: "prov-lamport", base_url: CLOUD.baseUrl, models: JSON.stringify(MODELS_1),
+        provider_type: "openai", api_key: "sk-leaked-by-old-peer",
+      },
+    });
+    await b.mgr._processNewEntries(A_ID, stubFeed([entry]));
+
+    const live = await b.row("prov-lamport");
+    assert.equal(live.api_key, KEY_B, "the local version wins, key untouched");
+    assert.deepEqual(JSON.parse(live.models), MODELS_2);
+
+    const [conflict, ...rest] = await conflictSnapshots(b.db, "prov-lamport");
+    assert.equal(rest.length, 0);
+    assert.ok(conflict, "the stale edit is recorded for review");
+    for (const side of ["winning", "losing"]) {
+      const snapshot = conflict[side];
+      assert.equal(Object.hasOwn(snapshot, "api_key"), false,
+        `${side}_data must not carry an api_key column`);
+      assert.equal(conflict[`${side}_data`].includes(KEY_B), false,
+        `${side}_data holds no key from this device`);
+      assert.equal(conflict[`${side}_data`].includes("sk-leaked-by-old-peer"), false,
+        `${side}_data holds no key from the peer`);
+    }
+    assert.deepEqual(conflict.losing.models, JSON.stringify(MODELS_1),
+      "the losing content is still recorded in full — only the key is gone");
+    assert.equal(conflict.winning.base_url, CLOUD.baseUrl);
+  } finally {
+    await b.close();
+  }
+});
+
+test("conflict restore: the stale re-snapshot writes winning_data with no key either", async () => {
+  const b = freshInstance("stale-resnapshot", B_ID);
+  try {
+    await b.db.execute({
+      sql: "INSERT INTO providers (id, base_url, models, provider_type, api_key, lamport_ts, instance_id) VALUES (?, ?, ?, ?, ?, 100, ?)",
+      args: ["prov-stale", CLOUD.baseUrl, JSON.stringify(MODELS_2), "openai", KEY_B, B_ID],
+    });
+    const live = await b.row("prov-stale");
+    // A conflict recorded when the local row still had MODELS_1 (key included, as
+    // the pre-fix code did). The live row has moved on, so the restore's stale
+    // guard fires and RE-SNAPSHOTS winning_data from the live row.
+    await b.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+            VALUES ('providers', 'prov-stale', ?, ?, 100, 90, ?, ?, 'update')`,
+      args: [B_ID, A_ID,
+        JSON.stringify({ ...live, models: JSON.stringify(MODELS_1) }),
+        JSON.stringify({ id: "prov-stale", base_url: CLOUD.baseUrl, models: JSON.stringify(MODELS_2) })],
+    });
+    const { rows } = await b.db.execute("SELECT id FROM sync_conflicts WHERE row_id = 'prov-stale'");
+    const { restoreConflict } = await import("../servers/sharing/sync-conflict-resolve.js");
+    const outcome = await restoreConflict(b.db, rows[0].id, { instanceSync: null });
+    assert.equal(outcome.status, "stale", "the guard fired: the snapshot was refreshed, nothing applied");
+
+    const { rows: after } = await b.db.execute({
+      sql: "SELECT winning_data FROM sync_conflicts WHERE id = ?",
+      args: [rows[0].id],
+    });
+    const resnapshot = JSON.parse(after[0].winning_data);
+    assert.deepEqual(resnapshot.models, JSON.stringify(MODELS_2), "winning_data is the current live row");
+    assert.equal(Object.hasOwn(resnapshot, "api_key"), false,
+      "the re-snapshot is a raw SELECT * — the key must not be stored in it");
+    assert.equal(after[0].winning_data.includes(KEY_B), false, "the key appears nowhere in the row");
+  } finally {
+    await b.close();
+  }
+});
+
+test("boot redaction: old conflict rows lose their keys, is idempotent, and leaves non-provider rows untouched", async () => {
+  const b = freshInstance("redact", B_ID);
+  try {
+    // A pre-fix providers conflict: winning_data holds THIS device's key,
+    // losing_data an old peer's. Plus a memories conflict, which must not move.
+    const winning = JSON.stringify({
+      id: "prov-old", base_url: CLOUD.baseUrl, models: JSON.stringify(MODELS_1),
+      provider_type: "openai", api_key: KEY_B, lamport_ts: 100, instance_id: B_ID,
+    });
+    const losing = JSON.stringify({
+      id: "prov-old", base_url: URL_NEW, models: JSON.stringify(MODELS_2),
+      provider_type: "openai", api_key: "sk-leaked-by-old-peer",
+    });
+    await b.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+            VALUES ('providers', 'prov-old', ?, ?, 100, 90, ?, ?, 'update')`,
+      args: [B_ID, A_ID, winning, losing],
+    });
+    const memoriesWinning = JSON.stringify({ id: 7, content: "a", api_key: "not-a-providers-row" });
+    const memoriesLosing = JSON.stringify({ id: 7, content: "b" });
+    await b.db.execute({
+      sql: `INSERT INTO sync_conflicts
+              (table_name, row_id, winning_instance_id, losing_instance_id,
+               winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+            VALUES ('memories', '7', ?, ?, 2, 3, ?, ?, 'update')`,
+      args: [B_ID, A_ID, memoriesWinning, memoriesLosing],
+    });
+
+    const { redactConflictSnapshots, redactConflictSnapshotsAtBoot } =
+      await import("../servers/sharing/sync-conflict-redact.js");
+    const lines = [];
+    assert.equal(await redactConflictSnapshotsAtBoot(b.db, { log: (m) => lines.push(m) }), 1,
+      "exactly one providers row needed redacting");
+    assert.equal(lines.length, 1, "one log line");
+    assert.match(lines[0], /1 stored conflict snapshot row\(s\) rewritten/);
+
+    const [redacted] = await conflictSnapshots(b.db, "prov-old");
+    assert.equal(Object.hasOwn(redacted.winning, "api_key"), false);
+    assert.equal(Object.hasOwn(redacted.losing, "api_key"), false);
+    assert.equal(redacted.winning_data.includes(KEY_B), false, "this device's key is gone");
+    assert.equal(redacted.losing_data.includes("sk-leaked-by-old-peer"), false, "the peer's key is gone");
+    assert.equal(redacted.winning.base_url, CLOUD.baseUrl, "everything else is preserved");
+    assert.equal(redacted.losing.base_url, URL_NEW);
+    assert.equal(Number(redacted.resolved), 0, "the row is not resolved, not deleted: the operator still reviews it");
+
+    const { rows: memoriesAfter } = await b.db.execute(
+      "SELECT winning_data, losing_data FROM sync_conflicts WHERE table_name = 'memories'");
+    assert.equal(memoriesAfter.length, 1, "the non-provider conflict row is still there");
+    assert.equal(memoriesAfter[0].winning_data, memoriesWinning, "byte-identical: other tables are not rewritten");
+    assert.equal(memoriesAfter[0].losing_data, memoriesLosing, "byte-identical");
+
+    // Second run: nothing left to do, nothing re-written.
+    assert.equal(await redactConflictSnapshots(b.db), 0, "idempotent");
+    const [again] = await conflictSnapshots(b.db, "prov-old");
+    assert.equal(again.winning_data, redacted.winning_data, "the snapshot is untouched by a second run");
+    assert.equal(again.losing_data, redacted.losing_data);
+  } finally {
+    await b.close();
+  }
+});
+
+/* ═════════ 7. fix round 2 — "needs a key" rings once, not once per state ════ */
+
+test("'needs a key' notice: a read or a dismissed notice is still an answer — a re-delivery does not ring again", async () => {
+  const a = freshInstance("notice-once-a", A_ID);
+  const b = freshInstance("notice-once-b", B_ID);
+  const feedAtoB = a.peerFeed(B_ID);
+  try {
+    setProviderSyncManager(a.mgr);
+    await upsertProvider(a.db, { id: "prov-read", ...CLOUD, models: MODELS_1, apiKey: KEY_A });
+    await upsertProvider(a.db, { id: "prov-dismissed", ...CLOUD, models: MODELS_1, apiKey: KEY_A });
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+    assert.equal((await noticeRows(b.db, "prov-read")).length, 1);
+    assert.equal((await noticeRows(b.db, "prov-dismissed")).length, 1);
+
+    // The operator reads one and dismisses the other. Both are answers to the
+    // only question the notice asks.
+    await b.db.execute({
+      sql: "UPDATE notifications SET is_read = 1 WHERE source = ?",
+      args: [providerKeyNoticeSource("prov-read")],
+    });
+    await b.db.execute({
+      sql: "UPDATE notifications SET is_dismissed = 1 WHERE source = ?",
+      args: [providerKeyNoticeSource("prov-dismissed")],
+    });
+
+    // A re-delivery (A edits the models on both rows) must not ring again.
+    setProviderSyncManager(a.mgr);
+    for (const id of ["prov-read", "prov-dismissed"]) {
+      const panel = (await listProvidersAll(a.db)).find((p) => p.id === id);
+      await upsertProvider(a.db, { ...panel, models: MODELS_2 });
+    }
+    await b.mgr._processNewEntries(A_ID, feedAtoB);
+
+    assert.equal((await noticeRows(b.db, "prov-read")).length, 1, "still ONE notice after a read");
+    assert.equal((await noticeRows(b.db, "prov-dismissed")).length, 1, "still ONE after a dismissal");
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-read"), "already");
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-dismissed"), "already");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+test("'needs a key' notice: it re-arms only after the operator enters a key and that key is later removed", async () => {
+  const b = freshInstance("notice-rearm", B_ID);
+  try {
+    await b.db.execute({
+      sql: "INSERT INTO providers (id, base_url, models, provider_type, api_key, lamport_ts, instance_id) VALUES (?, ?, ?, ?, NULL, 10, ?)",
+      args: ["prov-rearm", CLOUD.baseUrl, JSON.stringify(MODELS_1), "openai", A_ID],
+    });
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-rearm"), "raised");
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-rearm"), "already");
+
+    // The operator enters a key HERE (the local write path clears the notice).
+    setProviderSyncManager(b.mgr);
+    const panel = (await listProvidersAll(b.db)).find((p) => p.id === "prov-rearm");
+    await upsertProvider(b.db, { ...panel, apiKey: KEY_B });
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-rearm"), "has-key");
+
+    // …and that key is later removed on this box.
+    await b.db.execute({ sql: "UPDATE providers SET api_key = NULL WHERE id = ?", args: ["prov-rearm"] });
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-rearm"), "raised",
+      "a later loss of the key may ring once more");
+    assert.equal(await noticeProviderKeyNeeded(b.db, "prov-rearm"), "already", "…and only once");
+    assert.equal((await noticeRows(b.db, "prov-rearm")).length, 2, "one notice per key episode, never more");
+  } finally {
+    setProviderSyncManager(null);
+    await b.close();
+  }
+});
+
+/* ═══════ 8. fix round 2 — the endpoint hold, reverse direction (B → A) ═══════ */
+
+/** B repoints the provider — the reverse of repointOnA. */
+async function repointOnB(b, url) {
+  setProviderSyncManager(b.mgr);
+  const panel = (await listProvidersAll(b.db)).find((p) => p.id === HOLD_ID);
+  await upsertProvider(b.db, { ...panel, baseUrl: url });
+}
+
+/**
+ * The mirror of keyedProviderOnBoth: B creates the provider (keyless), A applies
+ * it, then A enters its OWN key — the key lives on A, and B is about to want the
+ * address moved.
+ */
+async function keyedProviderOnA(label) {
+  const a = freshInstance(`${label}-a`, A_ID);
+  const b = freshInstance(`${label}-b`, B_ID);
+  const feedAtoB = a.peerFeed(B_ID);
+  const feedBtoA = b.peerFeed(A_ID);
+
+  setProviderSyncManager(b.mgr);
+  await upsertProvider(b.db, { id: HOLD_ID, ...CLOUD, models: MODELS_1 });
+  await a.mgr._processNewEntries(B_ID, feedBtoA);
+
+  setProviderSyncManager(a.mgr);
+  const aPanel = (await listProvidersAll(a.db)).find((p) => p.id === HOLD_ID);
+  await upsertProvider(a.db, { ...aPanel, apiKey: KEY_A });
+  await b.mgr._processNewEntries(A_ID, feedAtoB);
+  return { a, b, feedBtoA };
+}
+
+test("endpoint hold, reverse: B moves the address while A holds the key — held on A, no key in either snapshot", async () => {
+  const { a, b, feedBtoA } = await keyedProviderOnA("hold-reverse");
+  try {
+    assert.equal((await a.row(HOLD_ID)).base_url, URL_OLD, "both boxes start on the same address");
+    assert.equal((await a.row(HOLD_ID)).api_key, KEY_A, "A holds the key on this device");
+
+    await repointOnB(b, URL_NEW);
+    await a.mgr._processNewEntries(B_ID, feedBtoA);
+
+    const live = await a.row(HOLD_ID);
+    assert.equal(live.base_url, URL_OLD, "A's row is NOT repointed — B's change is held");
+    assert.equal(live.api_key, KEY_A, "and the key stays where it was entered");
+
+    const conflicts = await providerConflicts(a.db);
+    assert.equal(conflicts.length, 1, "exactly one conflict records the held change");
+    assert.equal(Number(conflicts[0].resolved), 0, "it is unresolved: it waits for the operator");
+    assert.equal(conflicts[0].op, "update", "it reads as a proposed update (Restore is available)");
+    const losing = JSON.parse(conflicts[0].losing_data);
+    assert.equal(losing.base_url, URL_NEW, "the held version carries the peer's new address");
+    assert.equal(Object.hasOwn(losing, "api_key"), false, "never a key in the held snapshot");
+    const winning = JSON.parse(conflicts[0].winning_data);
+    assert.equal(winning.base_url, URL_OLD, "the kept version is this device's row");
+    assert.equal(Object.hasOwn(winning, "api_key"), false, "never this device's key in the kept snapshot");
+    assert.equal(conflicts[0].winning_data.includes(KEY_A), false, "the key appears nowhere in the stored row");
+
+    const notices = await holdNoticeRows(a.db);
+    assert.equal(notices.length, 1, "one bell item, not one per entry");
+    assert.match(notices[0].title, /OpenAI: another device wants to change its address/,
+      "the notice names the provider");
+    assert.equal(notices[0].action_url, "/dashboard/settings?section=sync-conflicts",
+      "it links to the conflict review");
+  } finally {
+    setProviderSyncManager(null);
+    await a.close();
+    await b.close();
+  }
+});
+
+/* ═══ 9. fix round 2 — the held-address bell is per held CONFLICT, not per state ══ */
+
+test("endpoint hold notice: one per OPEN held conflict — read or dismissed is not re-raised, a NEW conflict is", async () => {
+  const b = freshInstance("hold-notice-once", B_ID);
+  try {
+    await b.db.execute({
+      sql: "INSERT INTO providers (id, base_url, models, provider_type, api_key, lamport_ts, instance_id) VALUES (?, ?, ?, ?, ?, 100, ?)",
+      args: [HOLD_ID, URL_OLD, JSON.stringify(MODELS_1), "openai", KEY_B, B_ID],
+    });
+    const live = await b.row(HOLD_ID);
+    const { noticeProviderEndpointHeld, clearProviderEndpointHeldNotice } =
+      await import("../servers/shared/provider-endpoint.js");
+    const insertConflict = async (winTs, loseTs) => {
+      await b.db.execute({
+        sql: `INSERT INTO sync_conflicts
+                (table_name, row_id, winning_instance_id, losing_instance_id,
+                 winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+              VALUES ('providers', ?, ?, ?, ?, ?, ?, ?, 'update')`,
+        args: [HOLD_ID, B_ID, A_ID, winTs, loseTs,
+          JSON.stringify({ id: HOLD_ID, base_url: URL_OLD }),
+          JSON.stringify({ id: HOLD_ID, base_url: URL_NEW })],
+      });
+      const { rows } = await b.db.execute("SELECT id FROM sync_conflicts ORDER BY id DESC LIMIT 1");
+      return rows[0].id;
+    };
+
+    const first = await insertConflict(100, 90);
+    assert.equal(await noticeProviderEndpointHeld(b.db, live, first), "raised");
+    assert.equal(await noticeProviderEndpointHeld(b.db, live, first), "already",
+      "the same open conflict never rings twice");
+
+    // Read, then dismissed: either way the operator has SEEN this conflict, and a
+    // newer held edit replacing it (same conflict row) must not ring again.
+    await b.db.execute({
+      sql: "UPDATE notifications SET is_read = 1 WHERE source = ?",
+      args: [endpointHoldNoticeSource(HOLD_ID)],
+    });
+    assert.equal(await noticeProviderEndpointHeld(b.db, live, first), "already",
+      "a read notice still answered THIS conflict");
+    await b.db.execute({
+      sql: "UPDATE notifications SET is_read = 0, is_dismissed = 1 WHERE source = ?",
+      args: [endpointHoldNoticeSource(HOLD_ID)],
+    });
+    assert.equal(await noticeProviderEndpointHeld(b.db, live, first), "already",
+      "a dismissed notice still answered THIS conflict");
+    assert.equal((await holdNoticeRows(b.db)).length, 1, "still exactly one bell item");
+
+    // The conflict is decided, and a NEW held change makes a NEW conflict row:
+    // that one may ring again.
+    await b.db.execute({ sql: "UPDATE sync_conflicts SET resolved = 1 WHERE id = ?", args: [first] });
+    await clearProviderEndpointHeldNotice(b.db, HOLD_ID);
+    const second = await insertConflict(200, 150);
+    assert.equal(await noticeProviderEndpointHeld(b.db, live, second), "raised",
+      "a new held conflict rings once more");
+    assert.equal((await holdNoticeRows(b.db)).length, 2, "one per held conflict, not one per provider id");
+  } finally {
     await b.close();
   }
 });

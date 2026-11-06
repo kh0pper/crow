@@ -14,7 +14,8 @@
  *   3. noticeProviderKeyNeeded(db, id) — raise it ONCE per provider id, as an
  *      in-app notification linking to the providers settings; and
  *      clearProviderKeyNeededNotice(db, id) — quiet it again when the operator
- *      enters a key (providers-db.js's local write path calls this).
+ *      enters a key (providers-db.js's local write path calls this), which is
+ *      also the only thing that re-arms it for a later loss of that key.
  *
  * Everything is per-DEVICE by construction: the checks read this instance's own
  * `providers` row, and neither the marker nor the notice is ever emitted to a
@@ -113,6 +114,26 @@ export function providerKeyNoticeSource(id) {
   return `providers:key-needed:${String(id)}`;
 }
 
+/**
+ * The notice metadata flag that says "the operator entered a key after this
+ * notice was raised" — i.e. the question this notice asked has been ANSWERED, so
+ * a later loss of that key may ring once more. Any notice without it (an open
+ * one, one the operator read, one they dismissed) is still the answer to the
+ * only question there is, and keeps the bell quiet (fix round 2: "needs a key"
+ * used to ring again after a read or a dismissal).
+ */
+export const KEY_ENTERED_METADATA_KEY = "keyEnteredAfterNotice";
+
+/** Was this notice's question already answered by the operator entering a key? Pure. */
+function noticeWasAnswered(metadataJson) {
+  if (!metadataJson) return false;
+  try {
+    return JSON.parse(metadataJson)?.[KEY_ENTERED_METADATA_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
 async function readLang(db) {
   try {
     const { rows } = await db.execute({
@@ -126,10 +147,12 @@ async function readLang(db) {
 }
 
 /**
- * Raise the notice for provider `id`, if it is owed. ONCE per provider id: an
- * open (unread, undismissed) notice for that id means it was already raised, so
- * a re-delivered sync entry never rings again — and a dismissed one is the
- * operator's answer, so it is not re-raised either.
+ * Raise the notice for provider `id`, if it is owed. ONCE per provider id: ANY
+ * existing notice for that id — open, read or dismissed — means it was already
+ * raised, so neither a re-delivered sync entry nor a dismissal can ring it
+ * again. It re-arms only through `clearProviderKeyNeededNotice` (the operator
+ * entered a key), so a later removal of that key may ring once more
+ * (fix round 2).
  *
  * Only fires for a row this instance HOLDS, that is enabled, that needs a key
  * (providerNeedsKey) and that has none here.
@@ -150,11 +173,14 @@ export async function noticeProviderKeyNeeded(db, id) {
   if (key !== "") return "has-key";
 
   const source = providerKeyNoticeSource(id);
-  const { rows: open } = await db.execute({
-    sql: "SELECT id FROM notifications WHERE source = ? AND is_read = 0 AND is_dismissed = 0 LIMIT 1",
+  // Any notice for this id counts, whatever the operator did with it: re-raising
+  // on a read or a dismissal is exactly the nag fix round 2 removed. Only a
+  // notice the operator ANSWERED with a key is spent (see clearProviderKeyNeededNotice).
+  const { rows: prior } = await db.execute({
+    sql: "SELECT id, metadata FROM notifications WHERE source = ?",
     args: [source],
   });
-  if (open.length > 0) return "already";
+  if (prior.some((n) => !noticeWasAnswered(n.metadata))) return "already";
 
   // Loaded lazily: notifications.js and the i18n table are gateway-facing, and
   // this runs from the sync manager (which the stdio memory server also hosts).
@@ -177,15 +203,17 @@ export async function noticeProviderKeyNeeded(db, id) {
 /**
  * Quiet the notice for provider `id` because a key is now set here. Called by
  * the local write path (providers-db.js) whenever it stores a non-empty key.
- * Marks it read rather than deleting it, so it stays in the bell's history.
+ * Marks it read rather than deleting it, so it stays in the bell's history, and
+ * stamps it as ANSWERED (KEY_ENTERED_METADATA_KEY): if the operator later removes
+ * that key, the next sync entry that leaves this row keyless may ring once more.
  * @returns {Promise<number>} rows touched
  */
 export async function clearProviderKeyNeededNotice(db, id) {
   if (typeof id !== "string" || id === "") return 0;
   const r = await db.execute({
-    sql: `UPDATE notifications SET is_read = 1, updated_at = datetime('now')
-          WHERE source = ? AND is_read = 0`,
-    args: [providerKeyNoticeSource(id)],
+    sql: `UPDATE notifications SET is_read = 1, updated_at = datetime('now'), metadata = ?
+          WHERE source = ?`,
+    args: [JSON.stringify({ [KEY_ENTERED_METADATA_KEY]: true }), providerKeyNoticeSource(id)],
   });
   return Number(r.rowsAffected ?? 0);
 }

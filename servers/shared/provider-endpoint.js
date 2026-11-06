@@ -14,9 +14,10 @@
  *      scheme, host, port and path, with a trailing slash ignored. Pure.
  *   2. providerEndpointChanged(before, after) — did the wire row move it? Pure.
  *   3. providerOrigin(url) — the scheme://host:port shown to the operator.
- *   4. noticeProviderEndpointHeld(db, row) — one bell item, by name, linking to
- *      the conflict review; and clearProviderEndpointHeldNotice(db, id) — quiet
- *      it once the operator has decided.
+ *   4. noticeProviderEndpointHeld(db, row, heldConflictId) — one bell item per
+ *      OPEN held conflict, by name, linking to the conflict review; and
+ *      clearProviderEndpointHeldNotice(db, id) — quiet it once the operator has
+ *      decided.
  *
  * Everything is per-DEVICE: the key never syncs (instance-sync.js's
  * LOCAL_ONLY_COLUMNS), so "this device holds a key" is a local question, and
@@ -91,6 +92,25 @@ export function endpointHoldNoticeSource(id) {
   return `providers:endpoint-held:${String(id)}`;
 }
 
+/**
+ * The notice metadata key holding the id of the held conflict it announced. The
+ * bell is owed once per OPEN held conflict (fix round 2): a re-delivery of the
+ * same held change — read or dismissed — is silent, while a NEW held conflict
+ * formed after the previous one was resolved may ring again.
+ */
+export const HELD_CONFLICT_METADATA_KEY = "heldConflictId";
+
+/** The held conflict id a notice was raised for, or null (pre-upgrade notice). Pure. */
+function heldConflictOf(metadataJson) {
+  if (!metadataJson) return null;
+  try {
+    const id = JSON.parse(metadataJson)?.[HELD_CONFLICT_METADATA_KEY];
+    return Number.isFinite(Number(id)) ? Number(id) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readLang(db) {
   try {
     const { rows } = await db.execute({
@@ -104,24 +124,37 @@ async function readLang(db) {
 }
 
 /**
- * Ring the bell ONCE per provider id: "another device wants to change its
- * address". A newer held change for the same provider REPLACES the open
- * conflict rather than adding one (instance-sync.js), so it must not ring
- * again either — an open notice for this id means it was already raised.
+ * Ring the bell ONCE per OPEN held conflict: "another device wants to change its
+ * address". A newer held change for the same provider REPLACES the open conflict
+ * rather than adding one (instance-sync.js), so the same conflict id is in hand
+ * and it must not ring again — even after the operator read or dismissed the
+ * notice. Only a NEW held conflict (a new sync_conflicts row, made after the
+ * previous one was resolved) rings again.
  *
  * @param {object} db
  * @param {object} row — this device's providers row
+ * @param {number|null} [heldConflictId] — the open sync_conflicts row this hold
+ *   created; without it the notice falls back to the coarser per-provider dedupe
+ *   (one open notice at a time).
  * @returns {Promise<"raised"|"already"|"filtered">}
  */
-export async function noticeProviderEndpointHeld(db, row) {
+export async function noticeProviderEndpointHeld(db, row, heldConflictId = null) {
   const id = row?.id;
   if (typeof id !== "string" || id === "") return "already";
   const source = endpointHoldNoticeSource(id);
-  const { rows: open } = await db.execute({
-    sql: "SELECT id FROM notifications WHERE source = ? AND is_read = 0 AND is_dismissed = 0 LIMIT 1",
+  const conflictId = Number.isFinite(Number(heldConflictId)) ? Number(heldConflictId) : null;
+  const { rows: prior } = await db.execute({
+    sql: "SELECT id, metadata, is_read, is_dismissed FROM notifications WHERE source = ?",
     args: [source],
   });
-  if (open.length > 0) return "already";
+  const alreadyRang = prior.some((n) => {
+    const recorded = heldConflictOf(n.metadata);
+    // A notice raised before this round carries no conflict id: it can only be
+    // attributed to the held change it named while it is still open.
+    if (recorded === null) return Number(n.is_read) === 0 && Number(n.is_dismissed) === 0;
+    return conflictId !== null && recorded === conflictId;
+  });
+  if (alreadyRang) return "already";
 
   // Loaded lazily: notifications.js and the i18n table are gateway-facing, and
   // this runs from the sync manager (which the stdio memory server also hosts).
@@ -137,6 +170,7 @@ export async function noticeProviderEndpointHeld(db, row) {
     title: fill(t("providers.endpointHoldTitle", lang), { name: providerDisplayName(row) }),
     body: t("providers.endpointHoldBody", lang),
     action_url: SYNC_CONFLICTS_URL,
+    metadata: conflictId === null ? null : { [HELD_CONFLICT_METADATA_KEY]: conflictId },
   });
   return created ? "raised" : "filtered";
 }
