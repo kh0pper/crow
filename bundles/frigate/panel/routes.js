@@ -11,6 +11,11 @@
  * TLS: we assume Frigate is configured with `tls.enabled: false` (our
  * config.yml.example default). See server/frigate-api.js for the
  * re-enable-TLS caveat.
+ *
+ * Logins are serialised: Frigate rate-limits `POST /api/login` (one per second by
+ * default), so a page view that fires several proxied reads at once produced one
+ * login per read and a pile of 429s reported as bad credentials. One in-flight
+ * login is shared by every caller, and a 429 is retried after a short pause.
  */
 
 import { Router } from "express";
@@ -19,34 +24,70 @@ const FRIGATE_URL = () => (process.env.FRIGATE_URL || "http://localhost:8971").r
 const FRIGATE_USER = () => process.env.FRIGATE_USER || "";
 const FRIGATE_PASSWORD = () => process.env.FRIGATE_PASSWORD || "";
 
+const BAD_CREDENTIALS_MESSAGE = "Frigate login failed — check FRIGATE_USER / FRIGATE_PASSWORD";
+const RATE_LIMIT_MESSAGE = "Frigate is rate-limiting logins; try again in a moment";
+/** Frigate allows one login per second; wait past that window before trying again. */
+const LOGIN_RETRY_MS = 1100;
+const LOGIN_MAX_RETRIES = 3;
+
 let authToken = null;
+/** The login every waiting caller shares, cleared as soon as it settles. */
+let loginInFlight = null;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** POST /api/login once, retrying a 429 a few times before giving up. */
+async function login() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(`${FRIGATE_URL()}/api/login`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: FRIGATE_USER(), password: FRIGATE_PASSWORD() }),
+      });
+      if (res.status === 429) {
+        if (attempt >= LOGIN_MAX_RETRIES) throw new Error(RATE_LIMIT_MESSAGE);
+        await sleep(LOGIN_RETRY_MS);
+        continue;
+      }
+      if (res.status === 401 || res.status === 403) throw new Error(BAD_CREDENTIALS_MESSAGE);
+      if (!res.ok) throw new Error(`Frigate login failed: HTTP ${res.status}`);
+
+      const data = await res.json().catch(() => ({}));
+      let token = data.access_token || data.token || null;
+      if (!token) {
+        const setCookie = res.headers.get("set-cookie") || "";
+        const match = setCookie.match(/frigate_token=([^;]+)/);
+        if (match) token = match[1];
+      }
+      if (!token) throw new Error("Frigate /api/login returned no token");
+      return token;
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function getToken() {
   if (authToken) return authToken;
   if (!FRIGATE_USER() || !FRIGATE_PASSWORD()) return null;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
-  try {
-    const res = await fetch(`${FRIGATE_URL()}/api/login`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: FRIGATE_USER(), password: FRIGATE_PASSWORD() }),
-    });
-    if (!res.ok) throw new Error("Frigate login failed — check FRIGATE_USER / FRIGATE_PASSWORD");
-    const data = await res.json().catch(() => ({}));
-    authToken = data.access_token || data.token || null;
-    if (!authToken) {
-      const setCookie = res.headers.get("set-cookie") || "";
-      const match = setCookie.match(/frigate_token=([^;]+)/);
-      if (match) authToken = match[1];
-    }
-    if (!authToken) throw new Error("Frigate /api/login returned no token");
-    return authToken;
-  } finally {
-    clearTimeout(timeout);
+  if (!loginInFlight) {
+    loginInFlight = login()
+      .then((token) => {
+        authToken = token;
+        return token;
+      })
+      .finally(() => {
+        loginInFlight = null;
+      });
   }
+  return loginInFlight;
 }
 
 async function frFetch(path, opts = {}) {

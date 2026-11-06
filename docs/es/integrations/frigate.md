@@ -11,9 +11,9 @@ Sistema de cámaras autoalojado con detección de objetos por IA. Frigate proces
 - Detección local de objetos por IA (persona, auto, perro, paquete, etc.)
 - Grabación activada por movimiento con retención configurable
 - API REST autenticada con JWT en el puerto :8971
-- Panel "Cameras" en el Crow's Nest: lista de cámaras, eventos recientes con miniaturas, estadísticas del sistema
+- Panel "Cameras" en el Crow's Nest: tarjetas de cámara con una imagen que se refresca cada dos segundos, eventos recientes con miniaturas, estadísticas del sistema
 - Herramientas MCP para cámaras, eventos, snapshots, clips y activación/desactivación de la detección
-- La interfaz web propia de Frigate integrada como pestaña en el panel del Nest
+- Un enlace a la interfaz web propia de Frigate, en una pestaña nueva (configura `FRIGATE_UI_URL` con la dirección que usa tu navegador)
 
 ## Cuándo usarlo vs MotionEye
 
@@ -58,6 +58,11 @@ Configura esto en `~/.crow/bundles/frigate/.env`:
 FRIGATE_URL=http://localhost:8971
 FRIGATE_USER=admin
 FRIGATE_PASSWORD=<contraseña de los logs>
+# La dirección que usa TU navegador para la interfaz web propia de Frigate (la pestaña
+# Web UI del panel enlaza ahí, en una pestaña nueva). FRIGATE_URL es una dirección de
+# loopback que solo alcanza el servidor, así que un teléfono no puede usarla.
+# Ejemplo: https://frigate.example.ts.net — en blanco oculta el enlace.
+# FRIGATE_UI_URL=
 ```
 
 Luego reinicia el bundle para que el servidor MCP pueda autenticarse:
@@ -81,6 +86,7 @@ cameras:
             - detect
             - record
     detect:
+      enabled: true
       width: 1280
       height: 720
       fps: 5
@@ -170,7 +176,7 @@ El bundle está instalado en `~/.crow/bundles/frigate/` pero faltan `panels.json
 y verifica que `~/.crow/panels/frigate.js` exista. Luego reinicia el gateway.
 
 **No se puede acceder a la pestaña de la interfaz web en el panel del Nest**
-La cookie JWT de Frigate es de primera parte para `:8971`. El iframe debe cargarse desde el mismo host donde Frigate está publicado. Si el iframe del panel muestra una página en blanco, confirma que `FRIGATE_URL` apunte a una URL accesible desde el navegador.
+La interfaz de Frigate corre en `:8971`, vinculado a loopback: solo el servidor de Crow puede abrir esa dirección, y un teléfono que abre `localhost:8971` se alcanza a sí mismo. Configura `FRIGATE_UI_URL` con una dirección que tu navegador sí alcance — una URL HTTPS de Tailscale Serve suele ser la respuesta — y la pestaña Web UI enlazará ahí. Si queda en blanco, la pestaña lo explica en lugar de mostrar un enlace.
 
 ## Trabajo futuro
 
