@@ -35,7 +35,9 @@ import { getPeerExposures, removePeerExposures } from "./peer-exposure-store.js"
 // peer's open peer-exposure cards as well as drop its grants, exactly like the
 // revoke DOOR does. The card sweep lives in revoke-peer.js, next to the revoke
 // that needs it; reusing it keeps the two doors identical.
-import { resolvePeerExposureCards } from "../sharing/revoke-peer.js";
+// Fix round 4: the cards are listed ONCE per sweep (revoked rows are never
+// deleted, so listing per revoked row was N reads every 10 s).
+import { listPeerExposureCards, resolvePeerExposureCards } from "../sharing/revoke-peer.js";
 import { updatePeerCreds, entryMintMs, loadPeerCreds, peerTokensPath, migratePeerCredsStore } from "../shared/peer-credentials.js";
 import { setUntrustedWithCreds, setOrphanKeys } from "../shared/peer-trust-health.js";
 import { closeSessionsOwnedByEverywhere, countSessionsOwnedByEverywhere, peerSessionOwner } from "./session-manager.js";
@@ -71,9 +73,15 @@ export function snapshotStoreOnce({ now = () => Date.now() } = {}) {
 
 /**
  * Reconcile the credential store against crow_instances. Idempotent.
+ *
+ * @param {object} db
+ * @param {object} [opts]
+ * @param {string|null} [opts.localInstanceId]
+ * @param {object|null} [opts.fixItStore]  test seam: the Fix-it store the card
+ *   sweep reads/writes (defaults to the real one, servers/shared/fix-it/store.js)
  * @returns {Promise<{deleted: string[], keptSameSecond: string[], orphans: string[], untrusted: string[]}>}
  */
-export async function reconcilePeerCreds(db, { localInstanceId = null } = {}) {
+export async function reconcilePeerCreds(db, { localInstanceId = null, fixItStore = null } = {}) {
   // Rows first (async), then the synchronous store lock.
   const { rows } = await db.execute({
     sql: `SELECT id, name, status, updated_at, auth_token_hash, (${TRUSTED_PEER_SQL}) AS ok FROM crow_instances`,
@@ -95,14 +103,26 @@ export async function reconcilePeerCreds(db, { localInstanceId = null } = {}) {
     } catch { /* the row gate already refuses the peer */ }
     // Fix round 3: and its open "Allow" card(s) are answered too. Otherwise a
     // revoke→re-pair (same id, new hash) leaves a card in the Nest whose click
-    // would grant the re-paired peer without a fresh request. Read first, write
-    // only for a peer that actually has a pending card; best-effort, since the
+    // would grant the re-paired peer without a fresh request. Fix round 4: the
+    // card table is read ONCE for the whole sweep (a revoked row is never
+    // deleted, so a per-row read would grow with every revoke), and only a
+    // peer that actually has a pending card is resolved. Best-effort, since the
     // row revoke is what refuses the peer.
-    for (const r of revoked) {
-      try {
-        await resolvePeerExposureCards(db, r.id);
-      } catch { /* the row gate already refuses the peer */ }
-    }
+    try {
+      const cardStore = fixItStore || undefined;
+      const pending = await listPeerExposureCards(db, { store: cardStore });
+      if (pending.length) {
+        const revokedIds = new Set(revoked.map((r) => r.id));
+        const ids = new Set();
+        for (const item of pending) {
+          const peerId = item.context?.requestingInstance;
+          if (revokedIds.has(peerId)) ids.add(peerId);
+        }
+        for (const id of ids) {
+          await resolvePeerExposureCards(db, id, { items: pending, store: cardStore });
+        }
+      }
+    } catch { /* the row gate already refuses the peer */ }
   }
 
   const deleted = [];

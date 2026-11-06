@@ -39,7 +39,7 @@ const MAX_DAYS = 3650;
  * rotation, or a card written before cards carried a pairing at all).
  */
 export const PAIRED_AGAIN_MESSAGE =
-  "That device has been paired again since it asked, so nothing was shared. If it still needs this, it will ask again.";
+  "That device's pairing has changed since it asked, so nothing was shared. If it still needs this, it will ask again.";
 
 /** Resolve the grant duration from the card's remedy args. */
 export function resolveDuration(args) {

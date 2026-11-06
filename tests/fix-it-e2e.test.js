@@ -47,14 +47,19 @@ test("denied call → card appears → remedy → next check allowed for THAT pe
   // Review round 2 (N-a): a card can only be allowed for a peer that is
   // currently trusted here, and in production the card exists because that peer
   // authenticated — so the fixture gives it a trusted row. Fix round 3: the row
-  // carries the bearer hash, and the card is bound to the tag of that pairing
-  // (the gate reads the hash off the verified row).
+  // carries the bearer hash, and the card is bound to the tag of that pairing.
+  // Fix round 4: `instanceAuth.instance` carries that same hash, because that is
+  // what `validateInstanceToken` returns (it matched the bearer on the hash) and
+  // it is where the gate reads the pairing tag from — never a second row read.
   await db.execute({
     sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted, auth_token_hash) VALUES (?, ?, ?, 'active', 1, ?)",
     args: ["peer-9", "Peer peer-9", "crow-test", "test-token-hash-peer-9"],
   });
   const connected = new Map([["funkwhale", { status: "connected", tools: [{ name: "fw_play" }] }]]);
-  const req = { instanceAuth: { instance: { id: "peer-9" } }, body: { method: "tools/call", params: { name: "fw_play" }, id: 1 } };
+  const req = {
+    instanceAuth: { instance: { id: "peer-9", auth_token_hash: "test-token-hash-peer-9" } },
+    body: { method: "tools/call", params: { name: "fw_play" }, id: 1 },
+  };
 
   // 1. Denied (nothing exposed) — uses the real emitFixIt (default emitFn).
   const denied = await enforcePeerExposure({ prefix: "tools", req, res: mkRes(), db, connectedServers: connected, auditFn: async () => {} });
@@ -81,7 +86,7 @@ test("denied call → card appears → remedy → next check allowed for THAT pe
   assert.equal(allowed, true);
 
   // …and still refused for a different peer.
-  const other = { instanceAuth: { instance: { id: "peer-10" } }, body: req.body };
+  const other = { instanceAuth: { instance: { id: "peer-10", auth_token_hash: "test-token-hash-peer-10" } }, body: req.body };
   const otherRes = mkRes();
   const refused = await enforcePeerExposure({ prefix: "tools", req: other, res: otherRes, db, connectedServers: connected, auditFn: async () => {}, emitFn: async () => {} });
   assert.equal(refused, false);

@@ -19,7 +19,7 @@
  * VERIFIED one (`req.instanceAuth.instance.id`, from the bearer token hash) and
  * nothing else — a request body cannot assert it.
  */
-import { getOrCreateLocalInstanceId, getInstance } from "./instance-registry.js";
+import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { pairingTag } from "../shared/peer-id.js";
 import { auditCrossHostCall } from "../shared/cross-host-auth.js";
 import { emitFixIt } from "./fix-it/index.js";
@@ -178,25 +178,20 @@ const DENY_CODE = -32001;
 const INVALID_REQUEST = -32600;
 
 /**
- * N1b-8 fix round 3: the tag of the PAIRING this request was verified under, so
- * a card can be bound to it and a later re-pair (same id, new hash) refuses it.
+ * N1b-8 fix round 3/4: the tag of the PAIRING this request was verified under,
+ * so a card can be bound to it and a later re-pair (same id, new hash) refuses
+ * it.
  *
  * `instanceAuthMiddleware` resolves the caller through `validateInstanceToken`,
- * which returns the whole `crow_instances` row (`SELECT *`), so the hash is
- * normally already in `req.instanceAuth.instance`. A caller that built the row
- * itself (a test, a future auth path) may not carry it: read it by the verified
- * id then. Unreadable → null, and a card raised with no tag can never be
- * allowed (the remedy refuses it) — the safe direction.
+ * which matched the presented bearer against `auth_token_hash` and returns the
+ * whole `crow_instances` row (`SELECT *`), so the verified instance ALWAYS
+ * carries the hash here. The tag is taken from that row and nowhere else: a
+ * re-read of the row by id could tag an old pairing's request with a NEW
+ * pairing's hash after a re-pair. No hash → no tag (fix round 4: fail closed),
+ * and a card raised with no tag can never be allowed (the remedy refuses it).
  */
-async function pairingTagForVerified(db, instance, sourceId) {
-  const direct = instance?.auth_token_hash;
-  if (typeof direct === "string" && direct) return pairingTag(direct);
-  try {
-    const row = await getInstance(db, sourceId);
-    return pairingTag(row?.auth_token_hash);
-  } catch {
-    return null;
-  }
+function pairingTagForVerified(instance) {
+  return pairingTag(instance?.auth_token_hash);
 }
 // Verbs that carry no JSON-RPC body on an MCP mount (open the session stream,
 // close the session). Every other peer request must be ONE plain object.
@@ -327,7 +322,7 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
       ? isKnownCapability(canonicalId, resolved.peerChosen, connectedServers)
       : false;
     // The pairing the request was verified under (see pairingTagForVerified).
-    const tag = await pairingTagForVerified(db, req.instanceAuth.instance, sourceId);
+    const tag = pairingTagForVerified(req.instanceAuth.instance);
     try {
       Promise.resolve(emitFn(db, "peer-exposure:denied", {
         capability: emitCapability,

@@ -110,6 +110,27 @@ async function dropPeerExposureGrants(db, id) {
 export const PEER_EXPOSURE_CARD_SOURCE = "remote-exposure";
 
 /**
+ * Read the peer-exposure cards a revoke/sweep needs to answer: the OPEN ones
+ * only (the read itself is `listBySource`, the detector's own window).
+ *
+ * Fix round 4: exported separately so the trust sweeper can list ONCE per sweep
+ * and hand the result to `resolvePeerExposureCards` for every revoked id,
+ * instead of re-reading the same cards once per revoked row (revoked rows are
+ * never deleted, so that was N reads every 10 s).
+ *
+ * @returns {Promise<object[]>} pending items (never throws: [] on a read error)
+ */
+export async function listPeerExposureCards(db, { store = fixItStore } = {}) {
+  try {
+    const items = await store.listBySource(db, PEER_EXPOSURE_CARD_SOURCE);
+    return items.filter((item) => item && item.status === "pending");
+  } catch (err) {
+    console.warn(`[revoke-peer] could not read the open peer-exposure card(s): ${err.message}`);
+    return [];
+  }
+}
+
+/**
  * N1b-8 review round 2 (N-a): a revoked peer's open "Allow" cards are ANSWERED
  * by the revoke. Otherwise a card raised by the peer that asked stays in the
  * Nest, and after a revoke→re-pair (which reuses the instance id) a click on it
@@ -128,22 +149,28 @@ export const PEER_EXPOSURE_CARD_SOURCE = "remote-exposure";
  * revoked in ANOTHER process (servers/gateway/peer-trust-sweeper.js), the same
  * way it already drops that peer's grants.
  *
+ * Fix round 4: `opts.items` lets a caller that already listed the cards (the
+ * sweeper, once per sweep) reuse that read instead of repeating it per id.
+ *
  * Best-effort, like the grant drop: the row revoke is authoritative and must not
  * be undone by a fix_it_items write.
  *
+ * @param {object} db
+ * @param {string} id  the peer whose cards are answered
+ * @param {{items?: object[]|null, store?: object}} [opts]
  * @returns {Promise<{resolved: number}>}
  */
-export async function resolvePeerExposureCards(db, id) {
+export async function resolvePeerExposureCards(db, id, { items = null, store = fixItStore } = {}) {
   if (!id) return { resolved: 0 };
   let resolved = 0;
   try {
     // listBySource returns every OPEN card (any age) plus anything touched in
     // the last two days; only the open ones for THIS peer are ours.
-    const items = await fixItStore.listBySource(db, PEER_EXPOSURE_CARD_SOURCE);
-    for (const item of items) {
+    const cards = items || await store.listBySource(db, PEER_EXPOSURE_CARD_SOURCE);
+    for (const item of cards) {
       if (!item || item.status !== "pending") continue;
       if (item.context?.requestingInstance !== id) continue;
-      await fixItStore.markResolved(db, item.id);
+      await store.markResolved(db, item.id);
       resolved += 1;
     }
   } catch (err) {

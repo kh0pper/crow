@@ -126,15 +126,15 @@ test("a card from another pairing (or with no tag at all) refuses, and grants no
   const other = { context: { requestingInstance: "peer-tag", pairingTag: pairingTag("some-other-pairing") } };
   const mismatched = await remedy({ capability: "funkwhale", requestingInstance: "peer-tag", days: 30 }, { db, item: other });
   assert.equal(mismatched.resolved, false, "a card from a previous pairing is refused");
-  assert.match(mismatched.message, /paired again/);
+  assert.match(mismatched.message, /pairing has changed/);
 
   const untagged = await remedy({ capability: "funkwhale", requestingInstance: "peer-tag", days: 30 }, { db, item: { context: { requestingInstance: "peer-tag" } } });
   assert.equal(untagged.resolved, false, "a card written before tags existed is refused");
-  assert.match(untagged.message, /paired again/);
+  assert.match(untagged.message, /pairing has changed/);
 
   const noCard = await remedy({ capability: "funkwhale", requestingInstance: "peer-tag", days: 30 }, { db });
   assert.equal(noCard.resolved, false, "no card context at all is refused too");
-  assert.match(noCard.message, /paired again/);
+  assert.match(noCard.message, /pairing has changed/);
 
   assert.equal((await getPeerGrantedCapabilities(db, "peer-tag")).size, 0, "none of the refusals wrote an allowance");
   assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false, "and none widened it to every peer");

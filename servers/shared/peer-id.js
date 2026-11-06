@@ -41,8 +41,8 @@ export function normalizePeerId(raw) {
  * can: it changes on every re-pair (NULL on revoke, a new hash on enroll/repair)
  * and on every rotation. The card stores only this 16-hex tag — never the raw
  * hash, which is a live credential — and the remedy compares it with the tag of
- * the peer's CURRENT hash. A mismatch is a refusal (the message says the device
- * was paired again).
+ * the peer's CURRENT hash. A mismatch is a refusal (the message says the
+ * device's pairing has changed).
  *
  * Rotation also changes the hash, so rotating a peer's token invalidates the
  * cards it left open. That fails closed: the peer asks again.
