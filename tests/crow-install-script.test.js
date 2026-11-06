@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,6 +33,15 @@ function runWithHelpers(snippet, env = {}, scriptArgs = []) {
     for (const key of ["APPARMOR_DIR", "APPARMOR_EXTRA_DIR", "USERNS_SYSCTL_PATH", "CROW_APPARMOR_PARSER",
       "CROW_APPARMOR_PARSER_DIRS", "CROW_SUDO", "CROW_APT", "CROW_APT_GET", "CROW_DPKG_DEB"]) {
       if (!env[key]) throw new Error(`${key} is required to run the bubblewrap AppArmor step in a test`);
+    }
+  }
+  // Same rail for the pinned ufw-docker step (audit K7): it downloads a script
+  // and installs it as root into UFW_DOCKER_DEST, so a scratch destination plus
+  // a curl shim and a sudo shim are mandatory — a regression there must never
+  // reach the network or /usr/local/bin of the machine running the suite.
+  if (/install_ufw_docker/.test(snippet)) {
+    for (const key of ["UFW_DOCKER_DEST", "CROW_CURL", "CROW_SUDO", "UFW_DOCKER_SHA256"]) {
+      if (!env[key]) throw new Error(`${key} is required to run the ufw-docker step in a test`);
     }
   }
   const args = scriptArgs.map((a) => ` ${a}`).join("");
@@ -758,9 +768,11 @@ test("N1c-15: the firewall is up BEFORE crow-gateway and Caddy are enabled/start
     assert.ok(idx < enable, `must sit above \`ufw --force enable\`: ${rule}`);
   }
   // ufw-docker closes the Docker/UFW hole (a container's published port bypasses
-  // ufw), so it belongs to the same "before anything listens" window.
-  const dockerFixIdx = s.search(/^  sudo ufw-docker install$/m);
-  assert.ok(dockerFixIdx > -1, "the ufw-docker step must still be there");
+  // ufw), so it belongs to the same "before anything listens" window. Its helper
+  // (defined above the source-only seam) does the work; the call in the body has
+  // to sit above every unit start.
+  const dockerFixIdx = s.indexOf("\ninstall_ufw_docker\n");
+  assert.ok(dockerFixIdx > s.indexOf("CROW_INSTALL_SOURCE_ONLY"), "the ufw-docker step must still be CALLED in the install body");
   // The audit's finding: the units were enabled and restarted first, so a
   // half-finished install listened on 3001/443 with no firewall in front of it.
   for (const re of [
@@ -1804,4 +1816,302 @@ test("follow-up 2: the fetch sets its cleanup traps right after mktemp -d and re
   const restores = (fn.match(/^\s*stage_trap_restore /gm) || []).length;
   assert.ok(removals >= 6, `expected every exit path of the fetch, found ${removals} removals`);
   assert.equal(restores, removals, "every path removes the dir and then restores the caller's traps");
+});
+
+// ─── Security audit K7 (part): ufw-docker is pinned, never fetched from master ─
+// The step used to `sudo curl …/chaifeng/ufw-docker/raw/master/ufw-docker -o
+// /usr/local/bin/ufw-docker` and then run it as root: whatever that moving
+// branch held at that second was what ran on the operator's machine. It is now
+// pinned to one commit and one sha256, downloaded by the invoking user into a
+// temp file, verified, and only then installed. Everything below points
+// CROW_CURL, CROW_SUDO and UFW_DOCKER_DEST at a scratch dir, so no test can
+// download anything, run anything as root, or touch /usr/local/bin.
+
+const sha256Hex = (body) => createHash("sha256").update(body).digest("hex");
+
+/** A scratch dir holding: a curl shim that "serves" a fixture body (no
+ *  network), a sudo shim that runs its argument, a private TMPDIR (so a
+ *  leftover temp file shows) and a UFW_DOCKER_DEST inside the scratch dir.
+ *  `pinBody` is what the test declares as the pinned checksum, `body` is what
+ *  the "network" actually delivers, so a mismatch is expressible. */
+function ufwDockerScratch({ body = null, pinBody = null, existing = null, downloadOk = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-ufwdocker-"));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const tmpDir = join(dir, "tmp");
+  mkdirSync(tmpDir);
+  const dest = join(dir, "usr-local-bin", "ufw-docker");
+  mkdirSync(join(dir, "usr-local-bin"));
+  if (existing !== null) writeFileSync(dest, existing, { mode: 0o755 });
+
+  const fixtureLog = join(dir, "fixture.log");
+  const fixtureBody = [
+    "#!/bin/sh",
+    "# fixture standing in for chaifeng/ufw-docker (never the real file)",
+    `printf '%s\\n' "$*" >> ${JSON.stringify(fixtureLog)}`,
+    "exit 0",
+    "",
+  ].join("\n");
+  const downloaded = body ?? fixtureBody;
+  // What the shimmed `curl` serves: a file on disk it copies to curl's -o target.
+  const served = join(dir, "served");
+  writeFileSync(served, downloaded);
+
+  const curlLog = join(dir, "curl.log");
+  const curl = shim(bin, "curl", [
+    `printf '%s\\n' "$*" >> ${JSON.stringify(curlLog)}`,
+    ...(downloadOk ? [] : ["exit 22"]),
+    'out=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    -o) out="$2"; shift 2 ;;',
+    "    *) shift ;;",
+    "  esac",
+    "done",
+    '[ -n "$out" ] || exit 2',
+    `cp ${JSON.stringify(served)} "$out"`,
+  ].join("\n"));
+
+  const sudoLog = join(dir, "sudo.log");
+  const sudo = shim(bin, "sudo", [
+    `printf '%s\\n' "$*" >> ${JSON.stringify(sudoLog)}`,
+    'exec "$@"',
+  ].join("\n"));
+  // `sudo_cmd ufw reload` needs a ufw to run once the sudo shim has exec'd it;
+  // it only has to succeed. Its own calls are read from the sudo log above.
+  shim(bin, "ufw", "exit 0");
+
+  return {
+    dir, bin, tmpDir, dest, served, fixtureLog, curlLog, sudoLog, curl, sudo,
+    env: {
+      UFW_DOCKER_DEST: dest,
+      CROW_CURL: curl,
+      CROW_SUDO: sudo,
+      UFW_DOCKER_SHA256: sha256Hex(pinBody ?? downloaded),
+      TMPDIR: tmpDir,
+      PATH: `${bin}:${process.env.PATH}`,
+    },
+  };
+}
+
+function runUfwDocker(scratch, snippet = "install_ufw_docker", env = {}) {
+  return runWithHelpers(snippet, { ...scratch.env, ...env });
+}
+
+test("K7: a matching download is verified in a temp file, then installed and wired into ufw", () => {
+  const s = ufwDockerScratch();
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  // Byte for byte the verified bytes, mode 755, at the scratch destination.
+  assert.equal(readFileSync(s.dest, "utf-8"), readFileSync(s.served, "utf-8"));
+  assert.equal(statSync(s.dest).mode & 0o777, 0o755, "installed with mode 755");
+  // The download went to the PINNED commit URL, into a temp file.
+  const curlCalls = logLines(s.curlLog);
+  assert.equal(curlCalls.length, 1, "one download");
+  assert.match(curlCalls[0], /-fsSL/);
+  assert.match(curlCalls[0], /raw\.githubusercontent\.com\/chaifeng\/ufw-docker\/020a8699f95592561f254d8d4ad1bb40d401dfc7\/ufw-docker/);
+  assert.ok(curlCalls[0].includes(s.tmpDir), `the -o target is a temp file, not /usr/local/bin (${curlCalls[0]})`);
+  // The FRESH install path's whole privileged sequence, in order: the file goes
+  // in with `install -T` (so a destination that is not a file can never be
+  // filled), the installed file wires the rules, and ufw is reloaded last —
+  // ufw was enabled above, before after.rules was rewritten, so without the
+  // reload a published container port keeps bypassing the firewall.
+  const sudoCalls = logLines(s.sudoLog);
+  assert.equal(sudoCalls.length, 3, `expected exactly three privileged calls, got ${JSON.stringify(sudoCalls)}`);
+  assert.match(sudoCalls[0], /^install -T -m 755 \S+ \S+$/);
+  assert.equal(sudoCalls[1], `${s.dest} install`);
+  assert.equal(sudoCalls[2], "ufw reload");
+  assert.equal(readFileSync(s.fixtureLog, "utf-8").trim(), "install", "ufw-docker install ran from the installed file");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is left behind");
+  assert.match(r.stdout, /ufw-docker installed/);
+  assert.match(r.stdout, /ufw reloaded/);
+});
+
+test("K7: a download that does not match the pinned checksum fails closed — nothing installed, nothing run as root", () => {
+  // The pin is the hash of one body; the shim delivers a different one.
+  const s = ufwDockerScratch({ pinBody: "the reviewed file\n", body: "#!/bin/sh\n# something else\nexit 0\n" });
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 1, `a bad checksum must end the install:\n${r.stdout}${r.stderr}`);
+  assert.match(r.stdout,
+    /ufw-docker download did not match the pinned checksum, so it was not installed; Docker-published ports would bypass the firewall\. The file upstream may have changed or been tampered with, or your network altered it: do not install it by hand\. Run the installer again later, or report it\./);
+  assert.match(r.stdout, /do not install it by hand/);
+  // The second line still shows both hashes.
+  assert.match(r.stdout, /\(got sha256 \S+, the pinned commit 020a8699f95592561f254d8d4ad1bb40d401dfc7 is \S+\)/);
+  assert.equal(existsSync(s.dest), false, "nothing is installed");
+  assert.deepEqual(logLines(s.sudoLog), [], "nothing runs as root");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "the temp file is removed");
+});
+
+test("K7: a failed download fails closed too — nothing installed, nothing run as root", () => {
+  const s = ufwDockerScratch({ downloadOk: false });
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 1, `a failed download must end the install:\n${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /Could not download ufw-docker from the pinned commit 020a8699f95592561f254d8d4ad1bb40d401dfc7/);
+  assert.match(r.stdout, /Docker-published ports would bypass the firewall/);
+  assert.equal(existsSync(s.dest), false, "nothing is installed");
+  assert.deepEqual(logLines(s.sudoLog), [], "nothing runs as root");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "the temp file is removed");
+});
+
+test("K7: an existing ufw-docker that matches the pin is not downloaded again, but its rules are still wired", () => {
+  const s = ufwDockerScratch();
+  const pinned = readFileSync(s.served, "utf-8");
+  writeFileSync(s.dest, pinned, { mode: 0o755 });
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(logLines(s.curlLog), [], "the curl shim is never called");
+  // A matching FILE says nothing about the RULES: a first run interrupted
+  // between installing the file and running its own `install` leaves the file
+  // with no after.rules entries, and no later run would ever write them.
+  // Upstream's `install` is idempotent, so it runs here too — and ufw is
+  // reloaded, so the rules are live without waiting for a reboot.
+  assert.deepEqual(logLines(s.sudoLog), [`${s.dest} install`, "ufw reload"],
+    "the matching-copy path wires the rules and reloads ufw");
+  assert.equal(readFileSync(s.fixtureLog, "utf-8").trim(), "install", "ufw-docker install ran from the existing file");
+  assert.equal(readFileSync(s.dest, "utf-8"), pinned, "the file is left as it is");
+  assert.match(r.stdout, /already installed .*matches the pinned checksum/);
+});
+
+test("K7: a destination that is not a regular file fails closed — no download, nothing run as root", () => {
+  // [ -f ] is FALSE for a directory, so the old code fell straight through to
+  // the download and would have left the file inside the directory.
+  const s = ufwDockerScratch();
+  mkdirSync(s.dest);
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 1, `a directory at the destination must end the install:\n${r.stdout}${r.stderr}`);
+  // An `error` line (the ✗ is followed by the colour reset, hence `.*`).
+  assert.match(r.stdout, /✗.*exists but is not a regular file/);
+  assert.match(r.stdout, /Docker-published ports would bypass the firewall/);
+  assert.deepEqual(logLines(s.curlLog), [], "nothing is downloaded");
+  assert.deepEqual(logLines(s.sudoLog), [], "nothing runs as root");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is created");
+  assert.equal(statSync(s.dest).isDirectory(), true, "the directory is untouched");
+});
+
+test("K7: an existing, different ufw-docker is reported and replaced through the verified path", () => {
+  // What the old installer left behind — any copy of the moving branch.
+  const older = "#!/bin/sh\n# an older copy from the branch that used to move\nexit 0\n";
+  const s = ufwDockerScratch({ existing: older });
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /is not the pinned ufw-docker/);
+  assert.match(r.stdout, /replacing it with the pinned copy/);
+  assert.equal(logLines(s.curlLog).length, 1, "the verified path really ran");
+  assert.equal(readFileSync(s.dest, "utf-8"), readFileSync(s.served, "utf-8"), "replaced with the pinned bytes");
+  const sudoCalls = logLines(s.sudoLog);
+  assert.match(sudoCalls[0], /^install -T -m 755 \S+ \S+$/);
+  assert.equal(sudoCalls[1], `${s.dest} install`);
+  assert.equal(sudoCalls[2], "ufw reload", "the replaced copy's rules are reloaded too");
+});
+
+test("K7: the installer pins ufw-docker to a commit AND a sha256, and raw/master is gone", () => {
+  const s = src();
+  assert.doesNotMatch(s, /raw\/master\/ufw-docker/, "the moving master URL must not come back");
+  assert.doesNotMatch(s, /chaifeng\/ufw-docker\/raw\//, "nor any other branch-relative URL");
+  assert.match(s, /^UFW_DOCKER_COMMIT="020a8699f95592561f254d8d4ad1bb40d401dfc7"$/m);
+  assert.match(s, /^UFW_DOCKER_URL="https:\/\/raw\.githubusercontent\.com\/chaifeng\/ufw-docker\/\$\{UFW_DOCKER_COMMIT\}\/ufw-docker"$/m);
+  assert.match(s, /^UFW_DOCKER_SHA256="\$\{UFW_DOCKER_SHA256:-643e56b080567c567b4aa28650196849b2a2da5dd0473fd3e5216b0886035ab0\}"$/m);
+
+  const block = s.slice(s.indexOf("# ─── ufw-docker, pinned"), s.indexOf("# Test seam: tests source the helpers"));
+  assert.ok(block.includes("UFW_DOCKER_COMMIT"), "the step must be defined above the source-only seam");
+  // The bump instructions name the commit and the checksum TOGETHER.
+  assert.match(block, /Bump BOTH values together/);
+  assert.match(block, /chaifeng\/ufw-docker\/commits\/master/);
+  // Downloaded as the invoking user (the CROW_CURL seam) into a temp file …
+  assert.match(block, /"\$CROW_CURL" -fsSL "\$UFW_DOCKER_URL" -o "\$tmp"/);
+  assert.doesNotMatch(block, /sudo[^\n]*curl/, "root never downloads");
+  assert.doesNotMatch(block, /-o "\$UFW_DOCKER_DEST"/, "never straight into the destination");
+  // …verified …
+  assert.match(block, /sha256sum "\$1"/);
+  assert.match(block, /"\$actual" != "\$UFW_DOCKER_SHA256"/);
+  // …and only then installed, through the script's own sudo seam. -T keeps
+  // `install` from ever treating a directory as a place to put the file.
+  assert.match(block, /sudo_cmd install -T -m 755 "\$tmp" "\$UFW_DOCKER_DEST"/);
+  assert.match(block, /sudo_cmd "\$UFW_DOCKER_DEST" install/);
+  // A destination that exists but is no regular file is refused up front:
+  // [ -f ] is false for it, so without this guard the download would run.
+  assert.match(block, /if \[ -e "\$UFW_DOCKER_DEST" \] && \[ ! -f "\$UFW_DOCKER_DEST" \]; then/);
+  // Both paths that wire the rules reload ufw afterwards (ufw came up first).
+  assert.equal((block.match(/sudo_cmd ufw reload/g) || []).length, 2, "one reload per ufw-docker install");
+  // The checksum branch removes the temp file and exits 1 — before the install.
+  const failClosed = block.slice(block.indexOf('if [ "$actual" != "$UFW_DOCKER_SHA256" ]'), block.indexOf("sudo_cmd install -T -m 755"));
+  assert.match(failClosed, /rm -f "\$tmp"/);
+  assert.match(failClosed, /exit 1/);
+  // The seams are the script's usual kind.
+  assert.match(s, /^CROW_CURL="\$\{CROW_CURL:-curl\}"$/m);
+  assert.match(s, /^UFW_DOCKER_DEST="\$\{UFW_DOCKER_DEST:-\/usr\/local\/bin\/ufw-docker\}"$/m);
+});
+
+test("K7: the ufw-docker step can only run in tests with the scratch seams set", () => {
+  assert.throws(() => runWithHelpers("install_ufw_docker"), /UFW_DOCKER_DEST is required/);
+});
+
+// ─── Install re-run N4-1: one PATH line, not one per run ─
+// The guard used to grep for "crow/scripts", which the line it writes never
+// contains ($CROW_APP is ~/.crow/app), so every re-run appended another copy.
+
+/** A scratch HOME; CROW_APP (and so the written line) follows it. */
+function pathScratch() {
+  const home = mkdtempSync(join(tmpdir(), "crow-pathline-"));
+  return { home, rc: join(home, ".bashrc"), env: { HOME: home } };
+}
+
+const crowPathLine = (home) => `export PATH="$PATH:${join(home, ".crow", "app", "scripts")}"`;
+
+test("N4-1: running the PATH step twice appends the one line exactly once", () => {
+  const s = pathScratch();
+  const first = runWithHelpers("add_crow_to_path", s.env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(readFileSync(s.rc, "utf-8"), crowPathLine(s.home) + "\n");
+
+  const second = runWithHelpers("add_crow_to_path", s.env);
+  assert.equal(second.status, 0, second.stderr);
+  const body = readFileSync(s.rc, "utf-8");
+  assert.equal(body, crowPathLine(s.home) + "\n", "a re-run must append nothing");
+  assert.equal(body.split("\n").filter((l) => l === crowPathLine(s.home)).length, 1);
+  assert.doesNotMatch(second.stdout, /Added 'crow' command/, "and must not claim to have added it");
+});
+
+test("N4-1: a pre-existing, different PATH line is left alone and the crow line joins it once", () => {
+  const s = pathScratch();
+  // A SECOND install location, as an operator who moved the checkout has it.
+  const other = 'export PATH="$PATH:$HOME/bin"';
+  writeFileSync(s.rc, other + "\n");
+  for (let i = 0; i < 2; i += 1) {
+    const r = runWithHelpers("add_crow_to_path", s.env);
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const lines = readFileSync(s.rc, "utf-8").split("\n").filter(Boolean);
+  assert.equal(lines[0], other, "the operator's own line is untouched");
+  assert.deepEqual(lines.slice(1), [crowPathLine(s.home)], "exactly one crow line, however often it runs");
+});
+
+test("N4-1: a .bashrc with no trailing newline keeps its last line whole and gets the export on its own line", () => {
+  const s = pathScratch();
+  // What a hand-edited .bashrc often looks like: the last line has no newline.
+  // An unconditional `printf … >>` would GLUE the export onto it, so the
+  // operator's last line becomes `alias …export PATH=…` and neither line works.
+  writeFileSync(s.rc, 'alias g="git status"');
+  const r = runWithHelpers("add_crow_to_path", s.env);
+  assert.equal(r.status, 0, r.stderr);
+  const body = readFileSync(s.rc, "utf-8");
+  assert.equal(body, `alias g="git status"\n${crowPathLine(s.home)}\n`,
+    "the last line survives whole, and a newline was written before the export");
+  assert.deepEqual(body.split("\n").slice(0, 2), ['alias g="git status"', crowPathLine(s.home)]);
+  // A re-run adds neither another newline nor a second export line.
+  const again = runWithHelpers("add_crow_to_path", s.env);
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(readFileSync(s.rc, "utf-8"), body);
+});
+
+test("N4-1: the old substring guard and the inline append are gone; the helper is above the seam and called below it", () => {
+  const s = src();
+  assert.doesNotMatch(s, /grep -q "crow\/scripts"/, "the guard that never matched the line it wrote");
+  assert.doesNotMatch(s, /echo "export PATH=/, "the inline append is gone too");
+  assert.match(s, /grep -qxF -- "\$CROW_PATH_LINE" "\$HOME\/\.bashrc"/, "the guard compares the exact line");
+  const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  const defIdx = s.indexOf("add_crow_to_path() {");
+  const callIdx = s.indexOf("\nadd_crow_to_path\n");
+  assert.ok(defIdx > -1 && defIdx < seamIdx, "defined above the seam so tests can source it");
+  assert.ok(callIdx > seamIdx, "and called in the install body");
 });
