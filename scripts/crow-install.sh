@@ -880,12 +880,29 @@ file_sha256() { # <file> — lowercase hex sha256; empty when it cannot be read
 install_ufw_docker() {
   local tmp="" actual=""
 
+  # A path that exists but is no regular file (a directory, a device) can never
+  # be the binary: `install` would either fail halfway or — without -T — fill
+  # the directory. Refuse before anything is downloaded.
+  if [ -e "$UFW_DOCKER_DEST" ] && [ ! -f "$UFW_DOCKER_DEST" ]; then
+    error "$UFW_DOCKER_DEST exists but is not a regular file (a directory?), so ufw-docker was not installed; Docker-published ports would bypass the firewall. Remove it, then run the installer again"
+    exit 1
+  fi
+
   # An existing binary is never trusted blindly: it may be an older (or newer)
   # copy from the branch that used to move, and it runs as root.
   if [ -f "$UFW_DOCKER_DEST" ]; then
     actual="$(file_sha256 "$UFW_DOCKER_DEST")"
     if [ "$actual" = "$UFW_DOCKER_SHA256" ]; then
       log "ufw-docker already installed ($UFW_DOCKER_DEST matches the pinned checksum)"
+      # The FILE being right says nothing about the RULES: a first run that was
+      # interrupted between installing the file and running its own `install`
+      # leaves exactly that, and no later run would ever write the rules.
+      # Upstream's `install` is idempotent — it rewrites /etc/ufw/after.rules
+      # only when its own check fails — so it is safe on every re-run. The curl
+      # shim is still never called on this path.
+      sudo_cmd "$UFW_DOCKER_DEST" install
+      sudo_cmd ufw reload
+      log "ufw reloaded — the ufw-docker rules are live"
       return 0
     fi
     warn "$UFW_DOCKER_DEST is not the pinned ufw-docker (sha256 ${actual:-unreadable}, expected $UFW_DOCKER_SHA256) — replacing it with the pinned copy"
@@ -903,13 +920,20 @@ install_ufw_docker() {
   actual="$(file_sha256 "$tmp")"
   if [ "$actual" != "$UFW_DOCKER_SHA256" ]; then
     rm -f "$tmp"
-    error "ufw-docker download did not match the pinned checksum, so it was not installed; Docker-published ports would bypass the firewall. Check your network, then run the installer again"
+    error "ufw-docker download did not match the pinned checksum, so it was not installed; Docker-published ports would bypass the firewall. The file upstream may have changed or been tampered with, or your network altered it: do not install it by hand. Run the installer again later, or report it."
     error "(got sha256 ${actual:-nothing}, the pinned commit $UFW_DOCKER_COMMIT is $UFW_DOCKER_SHA256)"
     exit 1
   fi
-  sudo_cmd install -m 755 "$tmp" "$UFW_DOCKER_DEST"
+  # -T: the destination is treated as a FILE even when it is a directory or a
+  # symlink to one, so a stray directory there is never filled with the file.
+  sudo_cmd install -T -m 755 "$tmp" "$UFW_DOCKER_DEST"
   rm -f "$tmp"
   sudo_cmd "$UFW_DOCKER_DEST" install
+  # ufw was enabled ABOVE, before ufw-docker rewrote /etc/ufw/after.rules, so
+  # without this reload a published container port keeps bypassing the
+  # firewall until the next reboot.
+  sudo_cmd ufw reload
+  log "ufw reloaded — the ufw-docker rules are live"
   log "ufw-docker installed (Docker/UFW conflict resolved)"
 }
 
@@ -924,6 +948,13 @@ CROW_PATH_LINE="export PATH=\"\$PATH:$CROW_APP/scripts\""
 add_crow_to_path() {
   if [ -f "$HOME/.bashrc" ] && grep -qxF -- "$CROW_PATH_LINE" "$HOME/.bashrc"; then
     return 0
+  fi
+  # A .bashrc whose last line carries no trailing newline would otherwise have
+  # the export glued onto it: that changes the operator's own last line (and
+  # breaks ours). `tail -c 1` prints nothing when the last byte IS a newline
+  # (the substitution strips it), so a non-empty output means "add one" first.
+  if [ -s "$HOME/.bashrc" ] && [ "$(tail -c 1 "$HOME/.bashrc")" != "" ]; then
+    printf '\n' >> "$HOME/.bashrc"
   fi
   printf '%s\n' "$CROW_PATH_LINE" >> "$HOME/.bashrc"
   log "Added 'crow' command to PATH (restart shell or run: source ~/.bashrc)"

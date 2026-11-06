@@ -1877,6 +1877,9 @@ function ufwDockerScratch({ body = null, pinBody = null, existing = null, downlo
     `printf '%s\\n' "$*" >> ${JSON.stringify(sudoLog)}`,
     'exec "$@"',
   ].join("\n"));
+  // `sudo_cmd ufw reload` needs a ufw to run once the sudo shim has exec'd it;
+  // it only has to succeed. Its own calls are read from the sudo log above.
+  shim(bin, "ufw", "exit 0");
 
   return {
     dir, bin, tmpDir, dest, served, fixtureLog, curlLog, sudoLog, curl, sudo,
@@ -1886,6 +1889,7 @@ function ufwDockerScratch({ body = null, pinBody = null, existing = null, downlo
       CROW_SUDO: sudo,
       UFW_DOCKER_SHA256: sha256Hex(pinBody ?? downloaded),
       TMPDIR: tmpDir,
+      PATH: `${bin}:${process.env.PATH}`,
     },
   };
 }
@@ -1907,14 +1911,20 @@ test("K7: a matching download is verified in a temp file, then installed and wir
   assert.match(curlCalls[0], /-fsSL/);
   assert.match(curlCalls[0], /raw\.githubusercontent\.com\/chaifeng\/ufw-docker\/020a8699f95592561f254d8d4ad1bb40d401dfc7\/ufw-docker/);
   assert.ok(curlCalls[0].includes(s.tmpDir), `the -o target is a temp file, not /usr/local/bin (${curlCalls[0]})`);
-  // Installed through the script's own sudo seam (never a curl under sudo),
-  // and the installed file is what runs `ufw-docker install`.
+  // The FRESH install path's whole privileged sequence, in order: the file goes
+  // in with `install -T` (so a destination that is not a file can never be
+  // filled), the installed file wires the rules, and ufw is reloaded last —
+  // ufw was enabled above, before after.rules was rewritten, so without the
+  // reload a published container port keeps bypassing the firewall.
   const sudoCalls = logLines(s.sudoLog);
-  assert.match(sudoCalls[0], /^install -m 755 \S+ \S+$/);
+  assert.equal(sudoCalls.length, 3, `expected exactly three privileged calls, got ${JSON.stringify(sudoCalls)}`);
+  assert.match(sudoCalls[0], /^install -T -m 755 \S+ \S+$/);
   assert.equal(sudoCalls[1], `${s.dest} install`);
+  assert.equal(sudoCalls[2], "ufw reload");
   assert.equal(readFileSync(s.fixtureLog, "utf-8").trim(), "install", "ufw-docker install ran from the installed file");
   assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is left behind");
   assert.match(r.stdout, /ufw-docker installed/);
+  assert.match(r.stdout, /ufw reloaded/);
 });
 
 test("K7: a download that does not match the pinned checksum fails closed — nothing installed, nothing run as root", () => {
@@ -1923,7 +1933,10 @@ test("K7: a download that does not match the pinned checksum fails closed — no
   const r = runUfwDocker(s);
   assert.equal(r.status, 1, `a bad checksum must end the install:\n${r.stdout}${r.stderr}`);
   assert.match(r.stdout,
-    /ufw-docker download did not match the pinned checksum, so it was not installed; Docker-published ports would bypass the firewall\. Check your network, then run the installer again/);
+    /ufw-docker download did not match the pinned checksum, so it was not installed; Docker-published ports would bypass the firewall\. The file upstream may have changed or been tampered with, or your network altered it: do not install it by hand\. Run the installer again later, or report it\./);
+  assert.match(r.stdout, /do not install it by hand/);
+  // The second line still shows both hashes.
+  assert.match(r.stdout, /\(got sha256 \S+, the pinned commit 020a8699f95592561f254d8d4ad1bb40d401dfc7 is \S+\)/);
   assert.equal(existsSync(s.dest), false, "nothing is installed");
   assert.deepEqual(logLines(s.sudoLog), [], "nothing runs as root");
   assert.deepEqual(readdirSync(s.tmpDir), [], "the temp file is removed");
@@ -1940,16 +1953,39 @@ test("K7: a failed download fails closed too — nothing installed, nothing run 
   assert.deepEqual(readdirSync(s.tmpDir), [], "the temp file is removed");
 });
 
-test("K7: an existing ufw-docker that matches the pin is not downloaded again", () => {
+test("K7: an existing ufw-docker that matches the pin is not downloaded again, but its rules are still wired", () => {
   const s = ufwDockerScratch();
   const pinned = readFileSync(s.served, "utf-8");
   writeFileSync(s.dest, pinned, { mode: 0o755 });
   const r = runUfwDocker(s);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(logLines(s.curlLog), [], "the curl shim is never called");
-  assert.deepEqual(logLines(s.sudoLog), [], "and nothing runs as root");
+  // A matching FILE says nothing about the RULES: a first run interrupted
+  // between installing the file and running its own `install` leaves the file
+  // with no after.rules entries, and no later run would ever write them.
+  // Upstream's `install` is idempotent, so it runs here too — and ufw is
+  // reloaded, so the rules are live without waiting for a reboot.
+  assert.deepEqual(logLines(s.sudoLog), [`${s.dest} install`, "ufw reload"],
+    "the matching-copy path wires the rules and reloads ufw");
+  assert.equal(readFileSync(s.fixtureLog, "utf-8").trim(), "install", "ufw-docker install ran from the existing file");
   assert.equal(readFileSync(s.dest, "utf-8"), pinned, "the file is left as it is");
   assert.match(r.stdout, /already installed .*matches the pinned checksum/);
+});
+
+test("K7: a destination that is not a regular file fails closed — no download, nothing run as root", () => {
+  // [ -f ] is FALSE for a directory, so the old code fell straight through to
+  // the download and would have left the file inside the directory.
+  const s = ufwDockerScratch();
+  mkdirSync(s.dest);
+  const r = runUfwDocker(s);
+  assert.equal(r.status, 1, `a directory at the destination must end the install:\n${r.stdout}${r.stderr}`);
+  // An `error` line (the ✗ is followed by the colour reset, hence `.*`).
+  assert.match(r.stdout, /✗.*exists but is not a regular file/);
+  assert.match(r.stdout, /Docker-published ports would bypass the firewall/);
+  assert.deepEqual(logLines(s.curlLog), [], "nothing is downloaded");
+  assert.deepEqual(logLines(s.sudoLog), [], "nothing runs as root");
+  assert.deepEqual(readdirSync(s.tmpDir), [], "no temp file is created");
+  assert.equal(statSync(s.dest).isDirectory(), true, "the directory is untouched");
 });
 
 test("K7: an existing, different ufw-docker is reported and replaced through the verified path", () => {
@@ -1962,7 +1998,10 @@ test("K7: an existing, different ufw-docker is reported and replaced through the
   assert.match(r.stdout, /replacing it with the pinned copy/);
   assert.equal(logLines(s.curlLog).length, 1, "the verified path really ran");
   assert.equal(readFileSync(s.dest, "utf-8"), readFileSync(s.served, "utf-8"), "replaced with the pinned bytes");
-  assert.equal(logLines(s.sudoLog)[1], `${s.dest} install`);
+  const sudoCalls = logLines(s.sudoLog);
+  assert.match(sudoCalls[0], /^install -T -m 755 \S+ \S+$/);
+  assert.equal(sudoCalls[1], `${s.dest} install`);
+  assert.equal(sudoCalls[2], "ufw reload", "the replaced copy's rules are reloaded too");
 });
 
 test("K7: the installer pins ufw-docker to a commit AND a sha256, and raw/master is gone", () => {
@@ -1985,11 +2024,17 @@ test("K7: the installer pins ufw-docker to a commit AND a sha256, and raw/master
   // …verified …
   assert.match(block, /sha256sum "\$1"/);
   assert.match(block, /"\$actual" != "\$UFW_DOCKER_SHA256"/);
-  // …and only then installed, through the script's own sudo seam.
-  assert.match(block, /sudo_cmd install -m 755 "\$tmp" "\$UFW_DOCKER_DEST"/);
+  // …and only then installed, through the script's own sudo seam. -T keeps
+  // `install` from ever treating a directory as a place to put the file.
+  assert.match(block, /sudo_cmd install -T -m 755 "\$tmp" "\$UFW_DOCKER_DEST"/);
   assert.match(block, /sudo_cmd "\$UFW_DOCKER_DEST" install/);
+  // A destination that exists but is no regular file is refused up front:
+  // [ -f ] is false for it, so without this guard the download would run.
+  assert.match(block, /if \[ -e "\$UFW_DOCKER_DEST" \] && \[ ! -f "\$UFW_DOCKER_DEST" \]; then/);
+  // Both paths that wire the rules reload ufw afterwards (ufw came up first).
+  assert.equal((block.match(/sudo_cmd ufw reload/g) || []).length, 2, "one reload per ufw-docker install");
   // The checksum branch removes the temp file and exits 1 — before the install.
-  const failClosed = block.slice(block.indexOf('if [ "$actual" != "$UFW_DOCKER_SHA256" ]'), block.indexOf("sudo_cmd install -m 755"));
+  const failClosed = block.slice(block.indexOf('if [ "$actual" != "$UFW_DOCKER_SHA256" ]'), block.indexOf("sudo_cmd install -T -m 755"));
   assert.match(failClosed, /rm -f "\$tmp"/);
   assert.match(failClosed, /exit 1/);
   // The seams are the script's usual kind.
@@ -2039,6 +2084,24 @@ test("N4-1: a pre-existing, different PATH line is left alone and the crow line 
   const lines = readFileSync(s.rc, "utf-8").split("\n").filter(Boolean);
   assert.equal(lines[0], other, "the operator's own line is untouched");
   assert.deepEqual(lines.slice(1), [crowPathLine(s.home)], "exactly one crow line, however often it runs");
+});
+
+test("N4-1: a .bashrc with no trailing newline keeps its last line whole and gets the export on its own line", () => {
+  const s = pathScratch();
+  // What a hand-edited .bashrc often looks like: the last line has no newline.
+  // An unconditional `printf … >>` would GLUE the export onto it, so the
+  // operator's last line becomes `alias …export PATH=…` and neither line works.
+  writeFileSync(s.rc, 'alias g="git status"');
+  const r = runWithHelpers("add_crow_to_path", s.env);
+  assert.equal(r.status, 0, r.stderr);
+  const body = readFileSync(s.rc, "utf-8");
+  assert.equal(body, `alias g="git status"\n${crowPathLine(s.home)}\n`,
+    "the last line survives whole, and a newline was written before the export");
+  assert.deepEqual(body.split("\n").slice(0, 2), ['alias g="git status"', crowPathLine(s.home)]);
+  // A re-run adds neither another newline nor a second export line.
+  const again = runWithHelpers("add_crow_to_path", s.env);
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(readFileSync(s.rc, "utf-8"), body);
 });
 
 test("N4-1: the old substring guard and the inline append are gone; the helper is above the seam and called below it", () => {
