@@ -753,7 +753,7 @@ install_bwrap_apparmor() {
   # A disable link is the operator's own choice: say what it means after the
   # next reboot and leave it alone. Removing it would silently overrule them.
   if [ -e "$APPARMOR_DIR/disable/bwrap-userns-restrict" ]; then
-    warn "$APPARMOR_DIR/disable/bwrap-userns-restrict is present, so AppArmor disables the bubblewrap profile at boot: the rule below loads now, but bots lose the sandbox after a reboot. Remove that link to keep it"
+    warn "$APPARMOR_DIR/disable/bwrap-userns-restrict is present, so AppArmor disables the bubblewrap profile at boot: bots lose the sandbox after a reboot. Remove that link to keep it"
   fi
 
   # Re-run fast path: our installed copy is already there and intact, so there
