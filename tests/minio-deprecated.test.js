@@ -30,7 +30,7 @@ test("manifest: deprecated since 2026-10-27, superseded by garage, tagged, versi
   const m = manifest();
   assert.deepEqual(m.deprecated, { since: "2026-10-27", superseded_by: "garage" });
   assert.ok(m.tags.includes("deprecated"));
-  assert.equal(m.version, "1.0.3");
+  assert.equal(m.version, "1.0.4");
   const reg = registry()["add-ons"].find((a) => a.id === "minio");
   assert.deepEqual(reg.deprecated, m.deprecated, "the registry carries the deprecation");
   assert.ok(registry()["add-ons"].find((a) => a.id === "garage"), "its successor is in the registry");
