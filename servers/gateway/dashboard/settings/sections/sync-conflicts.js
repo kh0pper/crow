@@ -37,6 +37,7 @@ import {
   restoreConflict,
   NATURAL_KEY_RESTORE_TABLES,
 } from "../../../../sharing/sync-conflict-resolve.js";
+import { stripConflictSnapshot } from "../../../../sharing/instance-sync.js";
 import { getInstanceSyncManager } from "../../../../sharing/server.js";
 import {
   EXPIRE_DAYS_DEFAULT,
@@ -87,8 +88,8 @@ function addressChangeLine(r, lang) {
   let win;
   let lose;
   try {
-    win = JSON.parse(r.winning_data);
-    lose = JSON.parse(r.losing_data);
+    win = JSON.parse(stripConflictSnapshot(r.table_name, r.winning_data));
+    lose = JSON.parse(stripConflictSnapshot(r.table_name, r.losing_data));
   } catch {
     return "";
   }
@@ -123,12 +124,23 @@ async function clearHoldNotice(db, conflictId) {
   }
 }
 
-function prettyJson(raw) {
+/**
+ * A stored snapshot as pretty JSON for the page, with `table`'s local-only
+ * columns stripped FIRST (instance-sync.js LOCAL_ONLY_COLUMNS): a pre-fix
+ * providers conflict row still holds this device's `api_key`, and this page is
+ * the only place it would be shown in full. A JSON null snapshot (`'null'`, an
+ * old row whose side was gone) and a blob we cannot parse render as "(none)" —
+ * an unreadable snapshot is exactly the one we cannot certify as redacted.
+ */
+function prettyJson(table, raw) {
   if (!raw) return "(none)";
+  const stripped = stripConflictSnapshot(table, raw);
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
+    const parsed = typeof stripped === "string" ? JSON.parse(stripped) : stripped;
+    if (!parsed || typeof parsed !== "object") return "(none)";
+    return JSON.stringify(parsed, null, 2);
   } catch {
-    return String(raw);
+    return "(none)";
   }
 }
 
@@ -188,8 +200,8 @@ function renderConflictRow(r, lang, csrfToken) {
   const isNaturalKey = NATURAL_KEY_RESTORE_TABLES.has(r.table_name);
   const resolved = !!r.resolved;
 
-  const winJson = prettyJson(r.winning_data);
-  const loseJson = prettyJson(r.losing_data);
+  const winJson = prettyJson(r.table_name, r.winning_data);
+  const loseJson = prettyJson(r.table_name, r.losing_data);
 
   // Restore button is disabled for op='insert' conflicts per spec §6
   // (precedence FIRST — matches the backend's refusal order), then for

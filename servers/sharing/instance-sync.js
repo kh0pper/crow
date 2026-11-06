@@ -245,16 +245,21 @@ export function stripLocalOnlyColumns(table, row) {
  * device's key — and `losing_data` can be an old peer's wire row that still
  * carried one (security audit N1b-7).
  *
- * Idempotent, and never throws: a table with no local-only columns comes back
- * byte-identical, a JSON null (`'null'`, a row that was gone) and an
- * unparseable blob come back as they went in — a snapshot we cannot read cannot
- * be redacted here either, and losing the conflict trace would be worse.
+ * Idempotent, and never throws: a table with no local-only columns, a snapshot
+ * that holds no local-only column, a JSON null (`'null'`, a row that was gone)
+ * and an unparseable blob all come back as the SAME STRING that went in — a
+ * snapshot we cannot read cannot be redacted here either, and losing the
+ * conflict trace would be worse. Returning the caller's own string (not a
+ * re-serialization of an unchanged object) is what makes the boot repair's
+ * "write only when something changed" strictly true.
  */
 export function stripConflictSnapshot(table, raw) {
-  if (!LOCAL_ONLY_COLUMNS[table]) return raw;
+  const cols = LOCAL_ONLY_COLUMNS[table];
+  if (!cols) return raw;
   try {
     const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!parsed || typeof parsed !== "object") return raw;
+    if (!cols.some((col) => Object.hasOwn(parsed, col))) return raw; // nothing to redact
     return JSON.stringify(stripLocalOnlyColumns(table, parsed));
   } catch {
     return raw;

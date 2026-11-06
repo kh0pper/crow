@@ -25,6 +25,12 @@
  *   7. Fix round 2: "needs a key on this device" rings once per provider id
  *      (a read or a dismissed notice is an answer too), and the held-address
  *      bell rings once per OPEN held conflict.
+ *   8. Fix round 3: the READ doors strip old rows too — `crow_list_sync_conflicts`
+ *      (a stdio-only install never runs the boot repair) and the sync-conflicts
+ *      page — and neither throws on a `'null'` snapshot;
+ *      the boot repair's write is conditional on the values it read, its SELECT
+ *      reads only rows that mention a local-only column, and the snapshot strip
+ *      returns the caller's own string when there is nothing to remove.
  *
  * Harness: real instance DBs (scripts/init-db.js per dir, like paired Crow
  * boxes), real InstanceSyncManagers over stub Hypercore feeds that carry the
@@ -38,7 +44,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { InstanceSyncManager, rowsEquivalent } from "../servers/sharing/instance-sync.js";
+import { InstanceSyncManager, rowsEquivalent, stripConflictSnapshot } from "../servers/sharing/instance-sync.js";
 import { upsertProvider, listProvidersAll, disableProvider, setProviderSyncManager } from "../servers/shared/providers-db.js";
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { drainOnce } from "../servers/sharing/sync-outbox-drain.js";
@@ -1242,6 +1248,191 @@ test("endpoint hold notice: one per OPEN held conflict — read or dismissed is 
     assert.equal(await noticeProviderEndpointHeld(b.db, live, second), "raised",
       "a new held conflict rings once more");
     assert.equal((await holdNoticeRows(b.db)).length, 2, "one per held conflict, not one per provider id");
+  } finally {
+    await b.close();
+  }
+});
+
+/* ══ 10. fix round 3 — the READ doors strip old rows, and the repair's write ══ */
+
+const OLD_KEY_WIN = "sk-still-in-an-old-row";
+const OLD_KEY_LOSE = "sk-leaked-by-old-peer";
+const OLD_ID = "prov-legacy";
+
+/** Seed a pre-fix providers conflict: BOTH snapshots still carry an api_key. */
+async function seedOldProviderConflict(db, { rowId = OLD_ID, winning, losing, resolved = 0 } = {}) {
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, resolved, op)
+          VALUES ('providers', ?, ?, ?, 100, 90, ?, ?, ?, 'update')`,
+    args: [rowId, B_ID, A_ID,
+      winning ?? JSON.stringify({
+        id: rowId, base_url: CLOUD.baseUrl, models: JSON.stringify(MODELS_1), api_key: OLD_KEY_WIN,
+      }),
+      losing ?? JSON.stringify({
+        id: rowId, base_url: URL_NEW, models: JSON.stringify(MODELS_2), api_key: OLD_KEY_LOSE,
+      }),
+      resolved],
+  });
+  const { rows } = await db.execute({
+    sql: "SELECT * FROM sync_conflicts WHERE row_id = ? ORDER BY id DESC LIMIT 1",
+    args: [rowId],
+  });
+  return rows[0];
+}
+
+/** The registered crow_list_sync_conflicts handler, without spinning an MCP server. */
+async function listConflictsHandler(db) {
+  const handlers = {};
+  const { registerInstancesTools } = await import("../servers/sharing/tools/instances.js");
+  registerInstancesTools({ tool: (name, _desc, _schema, fn) => { handlers[name] = fn; } }, { db });
+  return handlers["crow_list_sync_conflicts"];
+}
+
+const conflictPageHtml = async (db) => {
+  const section = (await import(
+    "../servers/gateway/dashboard/settings/sections/sync-conflicts.js"
+  )).default;
+  return section.render({ req: { csrfToken: "test-csrf", query: {} }, db, lang: "en" });
+};
+
+test("read door: crow_list_sync_conflicts strips an old providers row's key — a stdio-only install never runs the boot repair", async () => {
+  const b = freshInstance("read-tool", B_ID);
+  try {
+    await seedOldProviderConflict(b.db);
+    const list = await listConflictsHandler(b.db);
+    // Called directly, so zod's defaults are not applied — pass them.
+    const res = await list({ unresolved_only: false, limit: 20 });
+    const text = res.content.map((c) => c.text).join("\n");
+    assert.match(text, /providers/, "the conflict is still listed");
+    assert.match(text, /api\.openai\.com/, "and the rest of the snapshot is still shown");
+    for (const key of [OLD_KEY_WIN, OLD_KEY_LOSE]) {
+      assert.equal(text.includes(key), false, `the key is not returned: ${key}`);
+    }
+    assert.equal(text.includes("api_key"), false, "the field is gone, not just the value");
+  } finally {
+    await b.close();
+  }
+});
+
+test("read door: the sync-conflicts page shows no key from an old providers row", async () => {
+  const b = freshInstance("read-page", B_ID);
+  try {
+    await seedOldProviderConflict(b.db);
+    const html = await conflictPageHtml(b.db);
+    assert.match(html, /api\.openai\.com/, "the conflict is still rendered in full otherwise");
+    for (const key of [OLD_KEY_WIN, OLD_KEY_LOSE]) {
+      assert.equal(html.includes(key), false, `the page must not print the key: ${key}`);
+    }
+    assert.equal(html.includes("api_key"), false, "the field is gone, not just the value");
+  } finally {
+    await b.close();
+  }
+});
+
+test("read doors: a 'null' snapshot shows nothing and never throws", async () => {
+  const b = freshInstance("read-null", B_ID);
+  try {
+    await seedOldProviderConflict(b.db, {
+      rowId: "prov-null-win",
+      winning: "null",
+      losing: JSON.stringify({ id: "prov-null-win", base_url: URL_NEW }),
+    });
+    await seedOldProviderConflict(b.db, {
+      rowId: "prov-null-lose",
+      winning: JSON.stringify({ id: "prov-null-lose", base_url: CLOUD.baseUrl }),
+      losing: "null",
+    });
+
+    const list = await listConflictsHandler(b.db);
+    const res = await list({ unresolved_only: false, limit: 20 });
+    assert.equal(res.isError, undefined, "no throw on a 'null' snapshot");
+    const text = res.content.map((c) => c.text).join("\n");
+    assert.match(text, /prov-null-win/, "the row is still listed");
+    assert.match(text, /\(none\)/, "the null side shows nothing");
+
+    const html = await conflictPageHtml(b.db);
+    assert.match(html, /prov-null-win/, "the row still renders on the page");
+    assert.match(html, /\(none\)/, "and the null side renders as (none)");
+  } finally {
+    await b.close();
+  }
+});
+
+test("boot redaction: a snapshot that changed after the read is never overwritten by the stale redaction", async () => {
+  const b = freshInstance("redact-race", B_ID);
+  try {
+    const read = await seedOldProviderConflict(b.db, { rowId: "prov-race" });
+    // Between the repair's read and its write, a newer snapshot lands on the row
+    // (a peer's entry applied, a restore's re-snapshot): keyless, new address.
+    const newer = JSON.stringify({ id: "prov-race", base_url: URL_NEWER, models: JSON.stringify(MODELS_2) });
+    await b.db.execute({
+      sql: "UPDATE sync_conflicts SET winning_data = ? WHERE id = ?",
+      args: [newer, read.id],
+    });
+
+    const { writeBackRedacted, redactConflictSnapshots } =
+      await import("../servers/sharing/sync-conflict-redact.js");
+    const wrote = await writeBackRedacted(b.db, read.id, {
+      winning: stripConflictSnapshot("providers", read.winning_data),
+      losing: stripConflictSnapshot("providers", read.losing_data),
+      expectedWinning: read.winning_data,
+      expectedLosing: read.losing_data,
+    });
+    assert.equal(wrote, false, "the conditional UPDATE matched no row, so nothing was written");
+
+    const { rows: after } = await b.db.execute({
+      sql: "SELECT winning_data, losing_data FROM sync_conflicts WHERE id = ?",
+      args: [read.id],
+    });
+    assert.equal(after[0].winning_data, newer, "the newer snapshot survives");
+    assert.equal(after[0].losing_data, read.losing_data, "the side that did not move is unchanged too");
+
+    // The full repair still redacts what is left on the NEXT run — the guard
+    // skipped a stale write, it did not give up on the row.
+    assert.equal(await redactConflictSnapshots(b.db), 1, "the remaining snapshot is redacted next run");
+    const { rows: done } = await b.db.execute({
+      sql: "SELECT winning_data, losing_data FROM sync_conflicts WHERE id = ?",
+      args: [read.id],
+    });
+    assert.equal(done[0].winning_data, newer, "the newer snapshot is byte-identical");
+    assert.equal(done[0].losing_data.includes(OLD_KEY_LOSE), false, "the old side did lose its key");
+  } finally {
+    await b.close();
+  }
+});
+
+test("snapshot strip: the identical string comes back when there is nothing to remove", async () => {
+  const spaced = '{ "id": "prov-plain", "base_url": "https://api.openai.com/v1" }';
+  assert.equal(stripConflictSnapshot("providers", spaced), spaced,
+    "byte-identical, not a re-serialization: 'writes only on change' stays strictly true");
+  assert.equal(stripConflictSnapshot("providers", "null"), "null", "a JSON null comes back as it went in");
+  assert.equal(stripConflictSnapshot("providers", "not json"), "not json", "an unreadable blob is left alone");
+  assert.equal(stripConflictSnapshot("memories", spaced), spaced, "a table with no local-only columns is untouched");
+  assert.equal(
+    stripConflictSnapshot("providers", JSON.stringify({ id: "prov-plain", api_key: "sk-x" })),
+    JSON.stringify({ id: "prov-plain" }),
+    "and a key IS removed when one is present",
+  );
+});
+
+test("boot redaction: a keyless providers row is left byte-identical (the SELECT reads only rows that can hold a key)", async () => {
+  const b = freshInstance("redact-bound", B_ID);
+  try {
+    const spaced = '{ "id": "prov-plain", "base_url": "https://api.openai.com/v1", "models": "[]" }';
+    await seedOldProviderConflict(b.db, {
+      rowId: "prov-plain",
+      winning: spaced,
+      losing: JSON.stringify({ id: "prov-plain", base_url: URL_NEW }),
+    });
+    const { redactConflictSnapshots } = await import("../servers/sharing/sync-conflict-redact.js");
+    assert.equal(await redactConflictSnapshots(b.db), 0, "nothing to redact");
+    const { rows } = await b.db.execute({
+      sql: "SELECT winning_data FROM sync_conflicts WHERE row_id = ?",
+      args: ["prov-plain"],
+    });
+    assert.equal(rows[0].winning_data, spaced, "byte-identical: the row was never rewritten");
   } finally {
     await b.close();
   }

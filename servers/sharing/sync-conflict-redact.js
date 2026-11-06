@@ -16,6 +16,14 @@
  * finds nothing to do. A row is never deleted and `resolved` is never touched —
  * the operator's review history survives, minus the secret.
  *
+ * Two bounds keep the one-time repair honest:
+ *   - the SELECT only reads rows that still mention a local-only column (a boot
+ *     on a clean DB reads nothing at all);
+ *   - the UPDATE is conditional on the snapshots it read (`winning_data IS ?`),
+ *     so a row that changed between the read and the write — a peer's entry
+ *     applied concurrently, a restore's re-snapshot — is never overwritten with
+ *     a stale redaction (the newer value is simply re-examined next boot).
+ *
  * No schema change: this rewrites two TEXT columns in place.
  *
  * Never throws: a caller on the boot path must not be taken down by a corrupt
@@ -40,8 +48,11 @@ export async function redactConflictSnapshots(db, { tables = TABLES } = {}) {
   if (wanted.length === 0) return 0;
   const placeholders = wanted.map(() => "?").join(", ");
   const { rows } = await db.execute({
+    // `"api_key"` is the only local-only column today (LOCAL_ONLY_COLUMNS):
+    // extend this LIKE when a second one is added, or those rows go unread.
     sql: `SELECT id, table_name, winning_data, losing_data FROM sync_conflicts
-           WHERE table_name IN (${placeholders})`,
+           WHERE table_name IN (${placeholders})
+             AND (winning_data LIKE '%"api_key"%' OR losing_data LIKE '%"api_key"%')`,
     args: wanted,
   });
 
@@ -50,13 +61,39 @@ export async function redactConflictSnapshots(db, { tables = TABLES } = {}) {
     const win = stripConflictSnapshot(row.table_name, row.winning_data);
     const lose = stripConflictSnapshot(row.table_name, row.losing_data);
     if (win === row.winning_data && lose === row.losing_data) continue; // nothing to redact
-    await db.execute({
-      sql: "UPDATE sync_conflicts SET winning_data = ?, losing_data = ? WHERE id = ?",
-      args: [win, lose, row.id],
+    const written = await writeBackRedacted(db, row.id, {
+      winning: win,
+      losing: lose,
+      expectedWinning: row.winning_data,
+      expectedLosing: row.losing_data,
     });
-    changed += 1;
+    if (written) changed += 1;
   }
   return changed;
+}
+
+/**
+ * Write a redacted snapshot pair back, but ONLY if the row still holds the two
+ * values that were read (`IS ?` is null-safe, and this is a plain equality). The
+ * boot repair runs while sync may be live, so a snapshot rewritten between the
+ * read and this UPDATE (a peer's entry applied, the restore path's re-snapshot)
+ * must survive untouched: the conditional matches no row and nothing is written.
+ *
+ * Exported as the seam the tests drive stale values through directly.
+ *
+ * @returns {Promise<boolean>} whether the row was actually written
+ */
+export async function writeBackRedacted(
+  db,
+  id,
+  { winning, losing, expectedWinning, expectedLosing },
+) {
+  const { rowsAffected } = await db.execute({
+    sql: `UPDATE sync_conflicts SET winning_data = ?, losing_data = ?
+           WHERE id = ? AND winning_data IS ? AND losing_data IS ?`,
+    args: [winning, losing, id, expectedWinning, expectedLosing],
+  });
+  return Number(rowsAffected) > 0;
 }
 
 /**
