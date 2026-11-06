@@ -127,6 +127,8 @@ function buildHealthStrip(health, lang, flash) {
     flashHtml = `<div class="nest-flash nest-flash--success">Dismissed for now.</div>`;
   } else if (flash === "fixit_error") {
     flashHtml = `<div class="nest-flash nest-flash--error">Couldn't apply that fix.</div>`;
+  } else if (flash === "fixit_not_pending") {
+    flashHtml = `<div class="nest-flash nest-flash--error">That card isn't open any more — nothing was changed.</div>`;
   }
 
   if (!health) return flashHtml;

@@ -5,9 +5,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { getExposedCapabilities } from "../servers/gateway/peer-exposure.js";
+import {
+  getExposedCapabilities,
+  getPeerGrantedCapabilities,
+  getPeerExposures,
+  isCapabilityExposedToPeer,
+} from "../servers/gateway/peer-exposure.js";
+import { pairingTag } from "../servers/shared/peer-id.js";
 
 let dir, db, remedy;
+
+const DAY = 24 * 60 * 60 * 1000;
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), "fixit-remedy-"));
@@ -21,24 +29,113 @@ before(async () => {
 
 after(() => { try { db.close(); } catch {} try { rmSync(dir, { recursive: true, force: true }); } catch {} });
 
-test("expose-capability adds the capability (idempotent), marks resolved", async () => {
-  const r1 = await remedy({ capability: "funkwhale" }, { db });
+/**
+ * A card's peer must still be a trusted peer for the Allow remedy (review round
+ * 2, N-a); in production only a peer that authenticated raises a card, so the
+ * tests that expect a grant give it a row.
+ *
+ * Fix round 3: the row also carries the bearer hash the card is bound to (the
+ * remedy compares `context.pairingTag` with the tag of the peer's CURRENT hash),
+ * and `cardFor` builds the card context the detector writes.
+ */
+async function trustPeer(...ids) {
+  for (const id of ids) {
+    await db.execute({
+      sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted, auth_token_hash) VALUES (?, ?, ?, 'active', 1, ?)",
+      args: [id, `Peer ${id}`, "crow-test", tokenHashFor(id)],
+    });
+  }
+}
+
+const tokenHashFor = (id) => `test-token-hash-${id}`;
+
+/** The stored card a denial from `id` under its current pairing produces. */
+const cardFor = (id) => ({ context: { requestingInstance: id, pairingTag: pairingTag(tokenHashFor(id)) } });
+
+test("expose-capability grants the capability to the requesting peer ONLY (idempotent), marks resolved", async () => {
+  await trustPeer("peer-a");
+  const r1 = await remedy({ capability: "funkwhale", requestingInstance: "peer-a", days: 30 }, { db, item: cardFor("peer-a") });
   assert.equal(r1.resolved, true);
-  let exposed = await getExposedCapabilities(db);
-  assert.ok(exposed.has("funkwhale"));
-  const r2 = await remedy({ capability: "funkwhale" }, { db }); // idempotent
+  const granted = await getPeerGrantedCapabilities(db, "peer-a");
+  assert.ok(granted.has("funkwhale"));
+  // Idempotent: a second identical click re-grants, it does not duplicate.
+  const r2 = await remedy({ capability: "funkwhale", requestingInstance: "peer-a", days: 30 }, { db, item: cardFor("peer-a") });
   assert.equal(r2.resolved, true);
-  exposed = await getExposedCapabilities(db);
-  assert.equal([...exposed].filter((x) => x === "funkwhale").length, 1);
+  assert.deepEqual([...((await getPeerExposures(db)).get("peer-a").keys())], ["funkwhale"]);
+  // N1b-8: the all-trusted-peers allowlist is never touched by a card.
+  assert.ok(!(await getExposedCapabilities(db)).has("funkwhale"), "a card must not expose the capability to every peer");
+  // …and no other peer is granted by it.
+  assert.equal(await isCapabilityExposedToPeer(db, "funkwhale", "peer-b"), false);
 });
 
-test("blank capability → not resolved", async () => {
-  const r = await remedy({ capability: "" }, { db });
-  assert.equal(r.resolved, false);
+test("no verified requesting peer → refused, and NOTHING is exposed to every peer", async () => {
+  const before = await getExposedCapabilities(db);
+  for (const requestingInstance of [undefined, null, "", "Some Device", { id: "peer-a" }]) {
+    const r = await remedy({ capability: "crow-memory", requestingInstance }, { db });
+    assert.equal(r.resolved, false, `refused for ${JSON.stringify(requestingInstance)}`);
+  }
+  const after = await getExposedCapabilities(db);
+  assert.deepEqual([...after].sort(), [...before].sort(), "the all-peer allowlist is unchanged");
+  assert.ok(!after.has("crow-memory"), "fail closed: never widened to all peers");
+});
+
+test("a blank capability or a peer that is not trusted here → refused, nothing written", async () => {
+  const blank = await remedy({ capability: "", requestingInstance: "peer-a" }, { db });
+  assert.equal(blank.resolved, false);
+
+  // Review round 2 (N-a): a peer whose row fails the one trust predicate
+  // (`trusted = 1 AND status IN ('active','offline')`) is refused, with a reason.
+  await db.execute({
+    sql: "INSERT OR REPLACE INTO crow_instances (id, name, crow_id, status, trusted) VALUES (?, ?, ?, 'revoked', 1)",
+    args: ["peer-revoked", "Revoked Peer", "crow-test"],
+  });
+  const revoked = await remedy({ capability: "crow-memory", requestingInstance: "peer-revoked", days: 30 }, { db });
+  assert.equal(revoked.resolved, false);
+  assert.match(revoked.message, /trusted peer/);
+  assert.equal(await isCapabilityExposedToPeer(db, "crow-memory", "peer-revoked"), false);
+  assert.equal((await getPeerExposures(db)).has("peer-revoked"), false);
 });
 
 test("a federation peer's proxy key (instance-<id>) is never exposed (queue item 38)", async () => {
-  const r = await remedy({ capability: "instance-p2" }, { db });
+  const r = await remedy({ capability: "instance-p2", requestingInstance: "peer-a" }, { db });
   assert.equal(r.resolved, false);
   assert.ok(!(await getExposedCapabilities(db)).has("instance-p2"));
+  assert.equal(await isCapabilityExposedToPeer(db, "instance-p2", "peer-a"), false);
+});
+
+test("duration: 7 days expires, untilRemoved never does; the grant records expires_at", async () => {
+  await trustPeer("peer-7");
+  const now = Date.now();
+  await remedy({ capability: "crow-blog", requestingInstance: "peer-7", days: 7 }, { db, item: cardFor("peer-7") });
+  const grant = (await getPeerExposures(db)).get("peer-7").get("crow-blog");
+  assert.ok(grant.expiresAt && Date.parse(grant.expiresAt) > now + 6 * DAY);
+  assert.equal(await isCapabilityExposedToPeer(db, "crow-blog", "peer-7", { now: now + 6 * DAY }), true);
+  assert.equal(await isCapabilityExposedToPeer(db, "crow-blog", "peer-7", { now: now + 8 * DAY }), false);
+
+  await remedy({ capability: "crow-storage", requestingInstance: "peer-7", untilRemoved: true }, { db, item: cardFor("peer-7") });
+  const forever = (await getPeerExposures(db)).get("peer-7").get("crow-storage");
+  assert.equal(forever.expiresAt, null, "until I remove it stores no expiry");
+  assert.equal(await isCapabilityExposedToPeer(db, "crow-storage", "peer-7", { now: now + 3650 * DAY }), true);
+});
+
+// Fix round 3: a card is bound to the PAIRING that raised it. A card with no tag
+// (written before this round) or one from a different pairing refuses, and a
+// refusal never widens: these all used to grant the peer.
+test("a card from another pairing (or with no tag at all) refuses, and grants nothing", async () => {
+  await trustPeer("peer-tag");
+  const other = { context: { requestingInstance: "peer-tag", pairingTag: pairingTag("some-other-pairing") } };
+  const mismatched = await remedy({ capability: "funkwhale", requestingInstance: "peer-tag", days: 30 }, { db, item: other });
+  assert.equal(mismatched.resolved, false, "a card from a previous pairing is refused");
+  assert.match(mismatched.message, /pairing has changed/);
+
+  const untagged = await remedy({ capability: "funkwhale", requestingInstance: "peer-tag", days: 30 }, { db, item: { context: { requestingInstance: "peer-tag" } } });
+  assert.equal(untagged.resolved, false, "a card written before tags existed is refused");
+  assert.match(untagged.message, /pairing has changed/);
+
+  const noCard = await remedy({ capability: "funkwhale", requestingInstance: "peer-tag", days: 30 }, { db });
+  assert.equal(noCard.resolved, false, "no card context at all is refused too");
+  assert.match(noCard.message, /pairing has changed/);
+
+  assert.equal((await getPeerGrantedCapabilities(db, "peer-tag")).size, 0, "none of the refusals wrote an allowance");
+  assert.equal((await getExposedCapabilities(db)).has("funkwhale"), false, "and none widened it to every peer");
 });

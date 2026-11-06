@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveFriendlyName } from "../servers/gateway/fix-it/friendly-names.js";
 import detector from "../servers/gateway/fix-it/detectors/remote-exposure.js";
+import { dedupKeyFor, legacyDedupKeyFor } from "../servers/gateway/fix-it/peer-card-policy.js";
+import { pairingTag } from "../servers/shared/peer-id.js";
 
 test("friendly-name map: known id, addon fallback, raw fallback", () => {
   assert.equal(resolveFriendlyName("funkwhale"), "Music");
@@ -11,34 +13,153 @@ test("friendly-name map: known id, addon fallback, raw fallback", () => {
   assert.equal(resolveFriendlyName(null), "this feature");
 });
 
-function fakeStore() {
-  const items = [];
-  return { items, upsertItem: async (i) => { items.push(i); return { id: items.length, notify: true }; }, resolveByKey: async () => {} };
+function fakeStore(items = []) {
+  const created = [];
+  const dupes = [];
+  const suppressed = [];
+  const resolved = [];
+  return {
+    items, created, dupes, suppressed, resolved,
+    listBySource: async () => items,
+    upsertItem: async (i) => { created.push(i); return { id: created.length, notify: true }; },
+    recordDuplicate: async (id) => { dupes.push(id); },
+    recordSuppressed: async (info) => { suppressed.push(info); },
+    resolveByKey: async () => {},
+    markResolved: async (id) => { resolved.push(id); },
+  };
 }
 
-test("detector creates one card with friendly title + Allow remedy", async () => {
+test("detector creates one card scoped to the requesting peer, with the three durations", async () => {
   const s = fakeStore();
   await detector.onEvent("peer-exposure:denied",
     { capability: "funkwhale", requestingInstance: "peer-1", requestingInstanceName: "Glasses", toolName: "fw_play" }, s);
-  assert.equal(s.items.length, 1);
-  const it = s.items[0];
+  assert.equal(s.created.length, 1);
+  const it = s.created[0];
   assert.equal(it.source, "remote-exposure");
-  assert.equal(it.dedupKey, "expose:funkwhale:peer-1");
+  // N1 (review round 1): the separator is `|`, not `:` — both the capability and
+  // the peer id may legitimately contain a colon (peer ids: [A-Za-z0-9._:-]).
+  assert.equal(it.dedupKey, dedupKeyFor("peer-1", "funkwhale"));
+  assert.equal(it.dedupKey, "expose|funkwhale|peer-1");
+  assert.notEqual(it.dedupKey, legacyDedupKeyFor("peer-1", "funkwhale"));
   assert.match(it.title, /Glasses/);
   assert.match(it.title, /Music/);
   assert.equal(it.severity, "warn");
-  assert.deepEqual(it.remedies, [{ label: "Allow", actionId: "expose-capability", args: { capability: "funkwhale" }, kind: "instant" }]);
+  // N1b-8: no more one-click "expose to everyone". Every remedy names the ONE
+  // peer (its verified id) and a duration; 30 days is the default (first), and
+  // each duration has its own actionId so the button the operator clicks is the
+  // duration that is granted (the POST carries only action_id).
+  assert.deepEqual(it.remedies.map((r) => r.label), [
+    "Allow for 30 days", "Allow for 7 days", "Allow until I remove it",
+  ]);
+  assert.deepEqual(it.remedies.map((r) => r.actionId), [
+    "expose-capability-30d", "expose-capability-7d", "expose-capability-forever",
+  ]);
+  assert.ok(it.remedies.every((r) => r.kind === "instant"));
+  assert.ok(it.remedies.every((r) => r.args.capability === "funkwhale" && r.args.requestingInstance === "peer-1"));
+  assert.deepEqual(it.remedies.map((r) => r.args.days), [30, 7, undefined]);
+  assert.equal(it.remedies[2].args.untilRemoved, true);
   assert.equal(it.context.toolName, "fw_play");
+  assert.equal(it.context.requestingInstance, "peer-1");
+  assert.equal(it.context.pairingTag, null, "no tag from the gate (here, none was supplied) is stored as null, never invented");
+});
+
+// Fix round 3: the card carries the tag of the pairing the denial was verified
+// under, and a pending card from ANOTHER pairing is stale — it can never be
+// allowed (the remedy compares tags), so it must be answered instead of
+// swallowing the new request.
+test("a card records the gate's pairing tag; a malformed one is stored as null", async () => {
+  const tag = pairingTag("token-hash-a");
+  let s = fakeStore();
+  await detector.onEvent("peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-1", pairingTag: tag }, s);
+  assert.equal(s.created[0].context.pairingTag, tag);
+  assert.match(s.created[0].context.pairingTag, /^[0-9a-f]{16}$/);
+  assert.doesNotMatch(JSON.stringify(s.created[0].context), /token-hash-a/, "never the raw hash");
+
+  for (const bad of ["", "not-a-tag", "ABCDEF0123456789", 42, { tag }]) {
+    s = fakeStore();
+    await detector.onEvent("peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-1", pairingTag: bad }, s);
+    assert.equal(s.created[0].context.pairingTag, null, `bad tag ${JSON.stringify(bad)} is not stored`);
+  }
+});
+
+test("a pending card from another pairing is resolved, and the request creates a new card", async () => {
+  const stale = {
+    id: 21, dedupKey: dedupKeyFor("peer-1", "funkwhale"), status: "pending", count: 1,
+    context: { capability: "funkwhale", requestingInstance: "peer-1", pairingTag: pairingTag("old-token-hash") },
+    createdAt: "2026-01-01 00:00:00", updatedAt: "2026-01-01 00:00:00",
+  };
+  const s = fakeStore([stale]);
+  const fresh = pairingTag("new-token-hash");
+  await detector.onEvent("peer-exposure:denied",
+    { capability: "funkwhale", requestingInstance: "peer-1", pairingTag: fresh }, s);
+
+  assert.deepEqual(s.resolved, [21], "the stale card is answered, not bumped");
+  assert.deepEqual(s.dupes, [], "and the request is not deduped onto it");
+  assert.equal(s.created.length, 1, "a new card is created for the current pairing");
+  assert.equal(s.created[0].context.pairingTag, fresh);
 });
 
 test("detector ignores a null-capability denial", async () => {
   const s = fakeStore();
   await detector.onEvent("peer-exposure:denied", { capability: null, requestingInstance: "peer-1" }, s);
-  assert.equal(s.items.length, 0);
+  assert.equal(s.created.length, 0);
 });
 
 test("detector falls back to 'another device' when peer name absent", async () => {
   const s = fakeStore();
   await detector.onEvent("peer-exposure:denied", { capability: "funkwhale", requestingInstance: "peer-1" }, s);
-  assert.match(s.items[0].title, /another device/);
+  assert.match(s.created[0].title, /another device/);
+});
+
+test("detector refuses a card for an identity that is not a verified peer id", async () => {
+  for (const requestingInstance of [undefined, null, "", "My Glasses", "../../etc", "a b", { id: "peer-1" }, 42]) {
+    const s = fakeStore();
+    await detector.onEvent("peer-exposure:denied", { capability: "funkwhale", requestingInstance }, s);
+    assert.equal(s.created.length, 0, `no card for ${JSON.stringify(requestingInstance)}`);
+  }
+});
+
+// B2 (review round 1): the gate could not match the peer's tool name to a
+// capability of this instance. No card, and ONE bounded counter bucket.
+test("detector counts an unknown capability in one bucket and raises no card", async () => {
+  const s = fakeStore();
+  const p = { requestingInstance: "peer-junk", capabilityKnown: false, toolName: "crow_junk1" };
+  await detector.onEvent("peer-exposure:denied", { ...p, capability: "crow-junk1" }, s);
+  await detector.onEvent("peer-exposure:denied", { ...p, capability: "crow-junk2" }, s);
+  await detector.onEvent("peer-exposure:denied", { ...p, capability: null }, s);
+  assert.equal(s.created.length, 0, "an unknown capability never makes a card");
+  assert.deepEqual(s.suppressed.map((i) => i.capability), ["unknown", "unknown", "unknown"],
+    "every unknown name lands in the one bucket, never under the peer's string");
+  assert.ok(s.suppressed.every((i) => i.reason === "unknown_capability"));
+});
+
+// SF1 (review round 2): the policy finds the existing card under EITHER key
+// shape, but the detector used to ignore a `dedupe` decision and fall through to
+// `upsertItem` — which writes the NEW key and therefore inserted a SECOND open
+// card for the same (capability, peer).
+test("SF1: a repeat denial for a card opened under the OLD key bumps THAT card instead of inserting a duplicate", async () => {
+  const legacy = {
+    id: 7, dedupKey: legacyDedupKeyFor("peer-1", "funkwhale"), status: "pending", count: 1,
+    context: { capability: "funkwhale", requestingInstance: "peer-1" },
+    createdAt: "2026-01-01 00:00:00", updatedAt: "2026-01-01 00:00:00",
+  };
+  const s = fakeStore([legacy]);
+  await detector.onEvent("peer-exposure:denied",
+    { capability: "funkwhale", requestingInstance: "peer-1", toolName: "fw_play" }, s);
+  assert.equal(s.created.length, 0, "no upsert at all: an upsert here writes the new key and inserts a second card");
+  assert.deepEqual(s.dupes, [7], "the repeat is recorded on the card that already exists");
+  assert.deepEqual(s.suppressed, [], "a deduped request is not a suppressed one");
+});
+
+test("SF1: a repeat denial for a card under the NEW key is also deduped onto that card", async () => {
+  const current = {
+    id: 11, dedupKey: dedupKeyFor("peer-1", "funkwhale"), status: "pending", count: 2,
+    context: { capability: "funkwhale", requestingInstance: "peer-1" },
+    createdAt: "2026-01-01 00:00:00", updatedAt: "2026-01-01 00:00:00",
+  };
+  const s = fakeStore([current]);
+  await detector.onEvent("peer-exposure:denied",
+    { capability: "funkwhale", requestingInstance: "peer-1" }, s);
+  assert.equal(s.created.length, 0);
+  assert.deepEqual(s.dupes, [11]);
 });

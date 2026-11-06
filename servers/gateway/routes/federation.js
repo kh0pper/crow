@@ -242,7 +242,12 @@ export default function federationRouter({ createDbClient }) {
     try {
       const localId = getOrCreateLocalInstanceId();
       const inst = await getInstance(db, localId);
-      const catalog = await getLocalCatalog(db, { instanceId: localId, instanceName: inst?.name || null });
+      // N1b-8 review round 1 (S2): the caller is a VERIFIED peer (HMAC + bearer
+      // above), so mark a capability exposed when it is in the all-peer
+      // allowlist OR that peer holds an active one-device grant. Only this
+      // peer's grants are merged — another peer's allowance stays invisible.
+      const peerId = req.crossHostAuth?.sourceInstanceId || null;
+      const catalog = await getLocalCatalog(db, { instanceId: localId, instanceName: inst?.name || null, peerId });
       res.type("application/json").send(JSON.stringify({
         instance: { id: localId, name: inst?.name || null },
         capabilities: { tools: catalog.tools, skills: catalog.skills, bots: catalog.bots },

@@ -80,6 +80,38 @@ export async function upsertItem(db, item) {
   return { id, notify };
 }
 
+/**
+ * The items of one detector's source that the peer-exposure card's rate limits
+ * (N1b-8) need: every OPEN card (any age — the per-peer open-card cap counts
+ * them) plus anything touched in the last two days (the "one new card per peer
+ * per capability per 24 h" window). Older, answered cards cannot affect either
+ * decision, so they are not read — the scan stays bounded however long this
+ * instance runs.
+ */
+export async function listBySource(db, source) {
+  const { rows } = await db.execute({
+    sql: `SELECT * FROM fix_it_items
+          WHERE source = ?
+            AND (status = 'pending' OR updated_at >= datetime('now', '-2 days'))
+          ORDER BY updated_at DESC, id DESC`,
+    args: [source],
+  });
+  return rows.map(rowToItem);
+}
+
+/**
+ * Record one more request on an EXISTING card without reopening it: bump `count`
+ * only. `updated_at` is deliberately left alone — the 24 h "one new card per peer
+ * per capability" window is measured from when the card was last created or
+ * answered, so a peer retrying in a loop cannot keep pushing its own window out.
+ */
+export async function recordDuplicate(db, id) {
+  await db.execute({
+    sql: `UPDATE fix_it_items SET count = count + 1 WHERE id = ?`,
+    args: [id],
+  });
+}
+
 export async function resolveByKey(db, source, dedupKey) {
   await db.execute({
     sql: "UPDATE fix_it_items SET status = 'resolved', updated_at = datetime('now') WHERE source = ? AND dedup_key = ?",

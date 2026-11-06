@@ -10,6 +10,8 @@ import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
+import { recordSuppressedRequest } from "./peer-card-counters.js";
+import { CARD_ACTION_IDS } from "./peer-card-policy.js";
 import { createNotification } from "../../shared/notifications.js";
 import { getInstance } from "../instance-registry.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
@@ -22,6 +24,10 @@ export function wireFixIt() {
   registry.registerDetector(caddyProxySocketDetector);
   registry.registerDetector(bootGuardDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
+  // N1b-8: the peer-scoped card offers three durations, and each button needs
+  // its own actionId (the POST carries only action_id). All three run the same
+  // one-device grant; the duration rides in the stored args.
+  for (const actionId of CARD_ACTION_IDS) registry.registerRemedy(actionId, exposeCapabilityRemedy);
   wired = true;
 }
 
@@ -48,6 +54,14 @@ function boundStore(db) {
       return r;
     },
     resolveByKey: (s, k) => store.resolveByKey(db, s, k),
+    // N1b-8 rate limits: a detector needs the peer's existing cards to decide
+    // whether a denial earns a card, and somewhere to count the ones that don't.
+    listBySource: (s) => store.listBySource(db, s),
+    recordDuplicate: (id) => store.recordDuplicate(db, id),
+    recordSuppressed: (info) => recordSuppressedRequest(db, info),
+    // Fix round 3: a pending card raised under another pairing is stale (the
+    // remedy refuses it), so the detector answers it before creating the new one.
+    markResolved: (id) => store.markResolved(db, id),
   };
 }
 
@@ -55,12 +69,21 @@ function boundStore(db) {
  * Fire a Fix-it event. Fire-and-forget — never throws, never blocks the caller
  * (it runs on the peer-exposure request path). Enriches the payload with the
  * requesting peer's display name (generic: any payload with `requestingInstance`).
+ *
+ * N1b-8: for the peer-exposure card the name is ALWAYS resolved here, from this
+ * instance's own registry row for the verified id — a payload-supplied name is
+ * overwritten. The name is display text only; the card's identity (and the id an
+ * "Allow" is scoped to) is `requestingInstance`, which the gate takes from
+ * `req.instanceAuth.instance.id`.
  */
 export async function emitFixIt(db, eventName, payload) {
   try {
     wireFixIt();
     const p = { ...(payload || {}) };
-    if (p.requestingInstance && !p.requestingInstanceName) {
+    if (p.requestingInstance && (!p.requestingInstanceName || eventName === "peer-exposure:denied")) {
+      // Resolution may yield nothing (an unknown id): drop whatever the payload
+      // claimed rather than display it.
+      p.requestingInstanceName = null;
       try {
         const inst = await getInstance(db, p.requestingInstance);
         if (inst && inst.name) p.requestingInstanceName = inst.name;
@@ -159,6 +182,13 @@ export async function handleFixItAction(req, res, { db }) {
     if (action === "remedy") {
       const item = await store.getItem(db, itemId);
       if (!item) return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
+      // N1b-8 review round 1 (N2): only a card that is still open may run its
+      // remedy. A stale page, a double submit or a replayed POST would
+      // otherwise re-apply a fix the operator already answered (re-granting an
+      // allowance, or granting one for a card they dismissed).
+      if (item.status !== "pending") {
+        return res.redirectAfterPost("/dashboard/nest?flash=fixit_not_pending");
+      }
       const entry = (item.remedies || []).find((r) => r.actionId === body.action_id);
       if (!entry) return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
       if (entry.kind && entry.kind !== "instant") {

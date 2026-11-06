@@ -15,6 +15,11 @@
  *      Skipped, and reported as `store_mismatch`, when the resolved store and
  *      the open DB do not belong to the same instance; the owning gateway's
  *      trust sweeper then deletes it (servers/gateway/peer-trust-sweeper.js).
+ *   2b. N1b-8 (review round 1, S3): drop every per-device allowance the peer
+ *      held (`remote_exposed_tools_by_peer`), so a revoke→re-pair with the same
+ *      id starts with no grants. Review round 2 (N-a): the peer's open
+ *      peer-exposure "Allow" cards are answered at the same time — a card for a
+ *      peer that is gone is not a question any more.
  *   3. PT-1: end the SSO sessions the peer minted (scopes
  *      'dashboard sso src:<id>') and any untagged legacy SSO sessions.
  *   4. instanceSyncManager.teardownRevokedPeer(): close the peer's feeds and
@@ -33,6 +38,8 @@
  */
 
 import { getInstance, revokeInstance } from "../gateway/instance-registry.js";
+import { removePeerExposures } from "../gateway/peer-exposure-store.js";
+import * as fixItStore from "../shared/fix-it/store.js";
 import { createNotification } from "../shared/notifications.js";
 import { deletePeerCreds, getPeerCreds, peerTokensPath } from "../shared/peer-credentials.js";
 import { resolveInstanceDataDir, resolveCrowHome, sameDbLocation, isWithin } from "../shared/crow-home.js";
@@ -73,6 +80,109 @@ let _mgrResolverForTest = null;
 /** Test seam: resolve the sync manager for revokePeer calls that pass none. */
 export function _setSyncManagerResolverForTest(fn) { _mgrResolverForTest = fn; }
 
+/**
+ * N1b-8 review round 1 (S3): a revoked id must never come back with allowances
+ * attached — a revoke→re-pair reuses the instance id, so a grant left behind
+ * would silently re-open the capability to the re-paired peer.
+ *
+ * Best-effort: the row revoke is authoritative and must not be undone by a
+ * settings write, so a failure here is logged, never thrown.
+ */
+async function dropPeerExposureGrants(db, id) {
+  if (!id) return { removed: 0 };
+  try {
+    const r = await removePeerExposures(db, { peerId: id });
+    if (r && r.removed > 0) {
+      console.log(`[revoke-peer] dropped ${r.removed} one-device allowance(s) for ${String(id).slice(0, 12)}`);
+    }
+    return r || { removed: 0 };
+  } catch (err) {
+    console.warn(`[revoke-peer] could not drop one-device allowances for ${String(id).slice(0, 12)}: ${err.message}`);
+    return { removed: 0 };
+  }
+}
+
+/**
+ * The Fix-it source of the peer-exposure "Allow" card. A literal on purpose:
+ * this module must not pull in the gateway's Fix-it wiring, and the N1b-8 test
+ * asserts it equals the detector's own `source`.
+ */
+export const PEER_EXPOSURE_CARD_SOURCE = "remote-exposure";
+
+/**
+ * Read the peer-exposure cards a revoke/sweep needs to answer: the OPEN ones
+ * only (the read itself is `listBySource`, the detector's own window).
+ *
+ * Fix round 4: exported separately so the trust sweeper can list ONCE per sweep
+ * and hand the result to `resolvePeerExposureCards` for every revoked id,
+ * instead of re-reading the same cards once per revoked row (revoked rows are
+ * never deleted, so that was N reads every 10 s).
+ *
+ * @returns {Promise<object[]>} pending items (never throws: [] on a read error)
+ */
+export async function listPeerExposureCards(db, { store = fixItStore } = {}) {
+  try {
+    const items = await store.listBySource(db, PEER_EXPOSURE_CARD_SOURCE);
+    return items.filter((item) => item && item.status === "pending");
+  } catch (err) {
+    console.warn(`[revoke-peer] could not read the open peer-exposure card(s): ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * N1b-8 review round 2 (N-a): a revoked peer's open "Allow" cards are ANSWERED
+ * by the revoke. Otherwise a card raised by the peer that asked stays in the
+ * Nest, and after a revoke→re-pair (which reuses the instance id) a click on it
+ * would grant the re-paired peer without a fresh request.
+ *
+ * `resolved`, not `dismissed`: `store.dismiss` writes a suppression window,
+ * which would also hide a legitimate NEW request from that id after a re-pair.
+ * Resolved says the question is answered. It is NOT silently reopened: a later
+ * denial from the same id inside the 24 h window is only COUNTED on this row
+ * (peer-card-policy.js returns `count`), so there is no card for up to a day;
+ * past the window the same (capability, peer) earns a fresh card. (The round-2
+ * comment here said the upsert reopens it on a later denial — false: inside the
+ * window no upsert happens at all.)
+ *
+ * Fix round 3: exported so the trust sweeper can answer the cards of a peer
+ * revoked in ANOTHER process (servers/gateway/peer-trust-sweeper.js), the same
+ * way it already drops that peer's grants.
+ *
+ * Fix round 4: `opts.items` lets a caller that already listed the cards (the
+ * sweeper, once per sweep) reuse that read instead of repeating it per id.
+ *
+ * Best-effort, like the grant drop: the row revoke is authoritative and must not
+ * be undone by a fix_it_items write.
+ *
+ * @param {object} db
+ * @param {string} id  the peer whose cards are answered
+ * @param {{items?: object[]|null, store?: object}} [opts]
+ * @returns {Promise<{resolved: number}>}
+ */
+export async function resolvePeerExposureCards(db, id, { items = null, store = fixItStore } = {}) {
+  if (!id) return { resolved: 0 };
+  let resolved = 0;
+  try {
+    // listBySource returns every OPEN card (any age) plus anything touched in
+    // the last two days; only the open ones for THIS peer are ours.
+    const cards = items || await store.listBySource(db, PEER_EXPOSURE_CARD_SOURCE);
+    for (const item of cards) {
+      if (!item || item.status !== "pending") continue;
+      if (item.context?.requestingInstance !== id) continue;
+      await store.markResolved(db, item.id);
+      resolved += 1;
+    }
+  } catch (err) {
+    console.warn(`[revoke-peer] could not answer the peer-exposure card(s) for ${String(id).slice(0, 12)}: ${err.message}`);
+    return { resolved: 0 };
+  }
+  if (resolved > 0) {
+    console.log(`[revoke-peer] answered ${resolved} open peer-exposure card(s) for ${String(id).slice(0, 12)}`);
+  }
+  return { resolved };
+}
+
 async function defaultManager() {
   if (_mgrResolverForTest) return _mgrResolverForTest();
   try {
@@ -97,6 +207,8 @@ export async function revokePeer(db, id, { instanceSyncManager, localInstanceId 
     // A key with no row cannot be revoked through the row; purge the key.
     if (id && (!localInstanceId || id !== localInstanceId) && getPeerCreds(id)) {
       const creds = deleteCredsGuarded(id);
+      await dropPeerExposureGrants(db, id);
+      await resolvePeerExposureCards(db, id);
       return { ok: creds.creds_deleted === true, orphan: true, ...creds, ...(creds.creds_deleted ? {} : { reason: creds.reason }) };
     }
     return { ok: false, reason: "not_found" };
@@ -109,6 +221,11 @@ export async function revokePeer(db, id, { instanceSyncManager, localInstanceId 
 
   // 2. The signing key.
   const creds = deleteCredsGuarded(id);
+
+  // 2b. N1b-8 (S3): every one-device allowance for this peer goes with it, and
+  // (round 2, N-a) so does its open "Allow" card.
+  await dropPeerExposureGrants(db, id);
+  await resolvePeerExposureCards(db, id);
 
   // 3. SSO sessions the peer minted, plus legacy untagged ones (≤24 h).
   try {

@@ -7,14 +7,15 @@
  * Funkwhale addon env (never from caller input — no SSRF), fetch it with OUR
  * token, follow the storage redirect (dropping the bearer), and stream the bytes
  * back to the peer. The peer authenticates with its instance bearer
- * (instanceAuthMiddleware) and the funkwhale capability must be exposed to peers.
+ * (instanceAuthMiddleware) and the funkwhale capability must be exposed to THAT
+ * peer (the all-trusted-peers allowlist, or its own per-device grant — N1b-8).
  *
  * Mounted under /audio → outside PUBLIC_FUNNEL_PREFIXES → Funnel-blocked.
  */
 import { Router } from "express";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getExposedCapabilities } from "../peer-exposure.js";
+import { getExposedCapabilities, isCapabilityExposedToPeer } from "../peer-exposure.js";
 import { resolveCrowHome } from "../proxy.js";
 
 const ID_RE = /^[0-9a-fA-F-]{8,64}$/;
@@ -40,7 +41,7 @@ export function readFunkwhaleEnv(crowHome = resolveCrowHome()) {
   return null;
 }
 
-export default function audioProxyRouter({ createDbClient, fetchImpl = fetch, fwEnv = readFunkwhaleEnv, getExposed = getExposedCapabilities } = {}) {
+export default function audioProxyRouter({ createDbClient, fetchImpl = fetch, fwEnv = readFunkwhaleEnv, getExposed = getExposedCapabilities, isExposedToPeer = isCapabilityExposedToPeer, now = () => Date.now() } = {}) {
   const router = Router();
 
   router.get("/audio/stream", async (req, res) => {
@@ -51,8 +52,15 @@ export default function audioProxyRouter({ createDbClient, fetchImpl = fetch, fw
 
     const db = createDbClient();
     try {
+      // Exposure is per-caller: the all-trusted-peers allowlist OR a grant made
+      // to THIS peer (N1b-8 — a peer-scoped Allow must work for audio too).
       const exposed = await getExposed(db);
-      if (!exposed.has("funkwhale")) return res.status(403).json({ error: "not_exposed" });
+      let allowed = exposed.has("funkwhale");
+      if (!allowed) {
+        try { allowed = await isExposedToPeer(db, "funkwhale", req.instanceAuth.instance.id, { now: now() }); }
+        catch { allowed = false; } // fail closed
+      }
+      if (!allowed) return res.status(403).json({ error: "not_exposed" });
     } finally { try { db.close(); } catch {} }
 
     const fw = fwEnv();
