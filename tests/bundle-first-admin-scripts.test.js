@@ -70,7 +70,7 @@ const FAKE_DOCKER = [
   "",
   'case "${1:-}" in',
   '  inspect) next RUNNING true; printf "%s\\n" "$NEXT"; exit 0 ;;',
-  "  restart) exit 0 ;;",
+  '  restart) next RESTART_RC 0; exit "$NEXT" ;;',
   "  exec) ;;",
   '  *) printf "fake docker: unsupported: %s\\n" "$*" >&2; exit 99 ;;',
   "esac",
@@ -295,6 +295,19 @@ test("motioneye: a fresh install gets the password, then the container is restar
   assert.equal(ran(r, "8765/login"), true, "the new login is proved");
 });
 
+test("motioneye: a restart that fails after the password was written keeps it (exit 5)", () => {
+  const r = run("motioneye", { env: { FAKE_RESTART_RC_0: "1" } });
+  assert.equal(r.status, 5, r.stderr);
+  assert.equal(ran(r, "set_admin_password"), true);
+  assertPasswordStayedOutOfSight(r);
+});
+
+test("motioneye: an admin username that is not a plain account name is refused before anything runs", () => {
+  const r = run("motioneye", { env: { CROW_FIRST_ADMIN_USER: 'ad"min' } });
+  assert.equal(r.status, 1);
+  assert.equal(r.calls.length, 0);
+});
+
 test("motioneye: an install that already has a password is left alone (exit 3)", () => {
   const r = run("motioneye", { env: { FAKE_MOTIONEYE_STATE_0: "admin\tset" } });
   assert.equal(r.status, 3);
@@ -404,21 +417,32 @@ test("wallabag: the candidate password reaches curl on stdin, never a file in th
   assert.match(snippet, /trap 'rm -f "\$J"' EXIT/, "the cookie jar is cleaned up on the way out");
 });
 
+const TABLES_37 = " ------- \\n  n\\n -------\\n  37\\n -------";
+
 test("wallabag: an install whose extension connection uses its own account is left alone (exit 3)", () => {
   const dir = envDir("wallabag-own-account", ["WALLABAG_URL=http://localhost:8084", "WALLABAG_USERNAME=alex", "WALLABAG_PASSWORD=Env-Pass-9"]);
-  const r = run("wallabag", { dir });
+  const r = run("wallabag", { dir, env: { FAKE_WALLABAG_TABLES_0: TABLES_37 } });
   assert.equal(r.status, 3, r.stderr);
   assert.match(r.stderr, /already uses its own account \(alex\); Crow left it alone/);
-  assert.equal(r.calls.length, 0, "nothing is touched, not even the container");
+  assert.equal(ran(r, "wallabag:install"), false, "no install over existing tables");
+  assert.equal(ran(r, "fos:user:change-password"), false, "nothing is changed");
   assert.equal(`${r.stdout}${r.stderr}`.includes("Env-Pass-9"), false, "no password from .env is read out");
+});
+
+test("wallabag: on a brand-new database a username typed at install does not stop the setup", () => {
+  const dir = envDir("wallabag-new-typed", ["WALLABAG_USERNAME=alex"]);
+  const r = run("wallabag", { dir });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(ran(r, "wallabag:install"), true, "the empty database is installed");
+  assert.equal(ran(r, "fos:user:change-password"), true);
 });
 
 test("wallabag: a quoted .env username is read too, and the shipped name is not a hijack", () => {
   const quoted = envDir("wallabag-quoted", ['WALLABAG_USERNAME="alex"']);
-  const other = run("wallabag", { dir: quoted });
+  const other = run("wallabag", { dir: quoted, env: { FAKE_WALLABAG_TABLES_0: TABLES_37 } });
   assert.equal(other.status, 3, other.stderr);
   assert.match(other.stderr, /its own account \(alex\)/);
-  assert.equal(other.calls.length, 0);
+  assert.equal(ran(other, "fos:user:change-password"), false);
 
   const own = envDir("wallabag-shipped", ["WALLABAG_USERNAME=wallabag"]);
   const normal = run("wallabag", { dir: own });

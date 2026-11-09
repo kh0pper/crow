@@ -31,9 +31,10 @@ die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
 
 # The login check is a sibling of this script, in Crow's own copy of the bundle (the cwd
 # is the INSTALLED bundle dir, so $0 — not `.` — is what locates it).
-case "$0" in
-  */*) SCRIPT_DIR="${0%/*}" ;;
-  *) SCRIPT_DIR="." ;;
+# Without a directory part there is no way to tell Crow's copy from the cwd: refuse.
+case "${BASH_SOURCE[0]}" in
+  */*) SCRIPT_DIR="${BASH_SOURCE[0]%/*}" ;;
+  *) die "Run this script by its path (Crow does); nothing was changed." ;;
 esac
 LOGIN_CHECK_FILE="$SCRIPT_DIR/lib-login-check.sh"
 [ -r "$LOGIN_CHECK_FILE" ] ||
@@ -64,9 +65,6 @@ env_value() {
   printf '%s' "$line"
 }
 connection_user="$(env_value WALLABAG_USERNAME)"
-if [ -n "$connection_user" ] && [ "$connection_user" != "$ADMIN_USER" ]; then
-  die "Wallabag's connection already uses its own account ($connection_user); Crow left it alone." 3
-fi
 
 # ── docker, and the container ───────────────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || die "docker is not available here, so the Wallabag container cannot be reached; nothing was changed." 4
@@ -106,6 +104,11 @@ if [ "$count" = "0" ]; then
   console 'wallabag:install -n' < /dev/null >/dev/null 2>&1 || die "Wallabag's database could not be installed; nothing was changed."
 else
   say "Wallabag's database already has its tables."
+  # Only an install that already has accounts can have the connection pointed at one of
+  # them; on a brand-new database the account Crow sets up becomes the connection's own.
+  if [ -n "$connection_user" ] && [ "$connection_user" != "$ADMIN_USER" ]; then
+    die "Wallabag's connection already uses its own account ($connection_user); Crow left it alone." 3
+  fi
 fi
 
 # ── is the shipped default login still working? ────────────────────────────────────

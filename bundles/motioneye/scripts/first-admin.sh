@@ -22,6 +22,8 @@ set -euo pipefail
 CONTAINER="${CROW_FA_CONTAINER:-crow-motioneye}"
 # motionEye has exactly one admin account, and it is normally called `admin`.
 ADMIN_USER="${CROW_FIRST_ADMIN_USER:-admin}"
+# It goes into a JSON body built with printf, so only a plain account name is accepted.
+[[ "$ADMIN_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { printf '%s\n' "The admin username is not a plain account name; motionEye was not touched." >&2; exit 1; }
 
 say() { printf '%s\n' "$1"; }
 die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
@@ -65,7 +67,8 @@ esac
 printf '%s\n' "$PW" | docker exec -i "$CONTAINER" python3 -c 'import sys; from motioneye import config; config.set_admin_password(sys.stdin.readline().rstrip("\n"))' ||
   die "motionEye refused the new password; the empty login is unchanged."
 say "Set the admin password; restarting motionEye so it takes effect."
-docker restart "$CONTAINER" >/dev/null 2>&1 || die "motionEye's container could not be restarted; the new password may not be active yet."
+# From here on motion.conf already holds the new password: a failure keeps it (exit 5).
+docker restart "$CONTAINER" >/dev/null 2>&1 || die "motionEye's container could not be restarted; Crow keeps the new password, which takes effect when motionEye next starts." 5
 
 up=""
 for _ in $(seq 1 30); do
@@ -75,7 +78,7 @@ for _ in $(seq 1 30); do
   fi
   sleep 2
 done
-[ -n "$up" ] || die "motionEye did not answer after the restart; the new password may not be active yet."
+[ -n "$up" ] || die "motionEye did not answer after the restart; Crow keeps the new password, which is already in its configuration." 5
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 attempt=1
