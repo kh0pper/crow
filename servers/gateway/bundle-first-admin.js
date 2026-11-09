@@ -9,8 +9,9 @@
  * `firstAdmin.mode`):
  *
  *   crow           Crow creates the admin at install — a generated password in
- *                  the keychain, or a postInstall hook. Nothing to claim, and
- *                  nothing to show the operator.
+ *                  the keychain, a postInstall hook, or (via "setup") a script
+ *                  the installer runs with the password on stdin. Nothing to
+ *                  claim, and nothing to show the operator once it worked.
  *   finish-setup   the app has its own first-run admin page. The operator is
  *                  told, plainly, to finish it NOW, with a direct link.
  *   default-login  the app ships a documented default login (user + password).
@@ -22,28 +23,35 @@
  * A web UI bundle that says nothing (a community-store manifest written before
  * the field existed) falls back to `finish-setup` — see firstAdminOf.
  *
- * This module owns the two operator-facing pieces of that:
+ * This module owns the operator-facing pieces of that:
  *   - the card on Extensions (pendingFirstAdminNotices(). `done` is the
  *     operator's own word — nothing can detect that an app's setup is finished,
- *     so the card has a Done button and a local-only setting remembers it),
+ *     so the card has a Done button and a local-only setting remembers it; the
+ *     keychain holding the app's admin login hides it too),
  *   - one bell per bundle INSTALL (notifyFirstAdmin / reportFirstAdminNotice),
  *     deduped on the install's own timestamp so a reinstall after an uninstall
- *     rings again.
+ *     rings again,
+ *   - what Crow's own setup run did for this install (writeFirstAdminAutoResult,
+ *     runFirstAdminSetup in bundle-first-admin-setup.js), which decides whether
+ *     a `crow`/`via: "setup"` bundle still owes the operator a card and a bell.
  *
- * Both markers are `dashboard_settings` rows written with plain SQL, like
+ * Every marker is a `dashboard_settings` row written with plain SQL, like
  * bundle-pull-alert's cooldown: they are per-install state, they must never
  * sync to a paired instance, and they must not need a settings-registry entry.
  * `first_admin_*` is also listed in INSTANCE_SCOPE_KEYS for that reason.
  *
- * Never throws into the install path, and never logs a secret: the only value
- * either marker holds is a timestamp.
+ * Never throws into the install path, and never logs a secret: the only values
+ * the markers hold are a timestamp and a result word.
  */
 import { createDbClient } from "../db.js";
 import { createNotification } from "../shared/notifications.js";
 import { bundlePageUrl } from "./bundle-pull-alert.js";
 import {
+  FIRST_ADMIN_SAVED_KEY,
   firstAdminOf,
-  firstAdminNeedsOperator,
+  firstAdminNeedsNotice,
+  firstAdminSavedKey,
+  firstAdminVia,
   firstAdminTitle,
   firstAdminBody,
 } from "./dashboard/shared/first-admin.js";
@@ -56,8 +64,14 @@ export {
   FIRST_ADMIN_TITLE_KEY,
   FIRST_ADMIN_FINISH_BODY_KEY,
   FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY,
+  FIRST_ADMIN_SETUP_BODY_KEY,
+  FIRST_ADMIN_KEPT_BODY_KEY,
+  FIRST_ADMIN_SAVED_KEY,
   firstAdminOf,
   firstAdminNeedsOperator,
+  firstAdminNeedsNotice,
+  firstAdminSavedKey,
+  firstAdminVia,
   firstAdminLink,
   firstAdminTitle,
   firstAdminBody,
@@ -66,11 +80,15 @@ export {
 
 export const FIRST_ADMIN_DONE_PREFIX = "first_admin_done:";
 export const FIRST_ADMIN_NOTICE_PREFIX = "first_admin_notice:";
+/** What Crow's own setup run did for this bundle, at this install (`firstAdmin.via: "setup"`). */
+export const FIRST_ADMIN_AUTO_PREFIX = "first_admin_auto:";
 
 /** The operator pressed Done for this bundle at this install (`<installedAt>`). */
 export const firstAdminDoneKey = (bundleId) => `${FIRST_ADMIN_DONE_PREFIX}${bundleId}`;
 /** The install (`<installedAt>`) whose bell already rang. */
 export const firstAdminNoticeKey = (bundleId) => `${FIRST_ADMIN_NOTICE_PREFIX}${bundleId}`;
+/** This bundle's most recent automatic setup outcome (`{install, result}`). */
+export const firstAdminAutoKey = (bundleId) => `${FIRST_ADMIN_AUTO_PREFIX}${bundleId}`;
 
 /**
  * Every `first_admin_done:<id>` marker, as id → install timestamp. One query;
@@ -105,6 +123,82 @@ async function writeMarker(db, key, value) {
 }
 
 /**
+ * Every `first_admin_auto:<id>` marker, as id → {install, result}. One query; an
+ * unreadable value is skipped (the card shows, which is the safe direction).
+ */
+export async function firstAdminAutoResults(db) {
+  const out = {};
+  if (!db || typeof db.execute !== "function") return out;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT key, value FROM dashboard_settings WHERE key LIKE ?",
+      args: [`${FIRST_ADMIN_AUTO_PREFIX}%`],
+    });
+    for (const row of rows || []) {
+      const key = String(row?.key || "");
+      if (!key.startsWith(FIRST_ADMIN_AUTO_PREFIX)) continue;
+      const id = key.slice(FIRST_ADMIN_AUTO_PREFIX.length);
+      if (!id) continue;
+      try {
+        const v = JSON.parse(String(row?.value ?? ""));
+        if (v && typeof v === "object") out[id] = { install: typeof v.install === "string" ? v.install : null, result: typeof v.result === "string" ? v.result : null };
+      } catch { /* an unreadable marker is not a result */ }
+    }
+  } catch {
+    /* no marker read: show the cards rather than hide them */
+  }
+  return out;
+}
+
+/**
+ * Record what the automatic first-admin run did: `{install, result}`, plain SQL like
+ * the Done marker (per install, local only — `first_admin_*` is in INSTANCE_SCOPE_KEYS).
+ */
+export async function writeFirstAdminAutoResult(db, bundleId, { install = null, result } = {}) {
+  if (!db || typeof bundleId !== "string" || !bundleId) return false;
+  try {
+    await writeMarker(db, firstAdminAutoKey(bundleId), JSON.stringify({ install: install || null, result: result || null }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Installed bundles whose keychain holds an ACTIVE extension entry named by that
+ * bundle's own admin key (FIRST_ADMIN_SAVED_KEY when the manifest declares none).
+ * Metadata only — nothing is decrypted, no keychain key is needed. ONE query; an
+ * unreadable table yields an empty set, which shows the cards (the safe direction).
+ *
+ * @returns {Promise<Set<string>>}
+ */
+export async function firstAdminSavedBundleIds(db, manifests = {}) {
+  const out = new Set();
+  if (!db || typeof db.execute !== "function") return out;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT bundle_id, env_key FROM crow_keychain WHERE kind = 'extension' AND status = 'active'",
+      args: [],
+    });
+    const byBundle = new Map();
+    for (const row of rows || []) {
+      const id = String(row?.bundle_id || "");
+      const key = String(row?.env_key || "");
+      if (!id || !key) continue;
+      if (!byBundle.has(id)) byBundle.set(id, new Set());
+      byBundle.get(id).add(key);
+    }
+    for (const [id, keys] of byBundle) {
+      const manifest = manifests ? manifests[id] : null;
+      if (keys.has(firstAdminSavedKey(manifest))) out.add(id);
+    }
+  } catch {
+    return new Set();
+  }
+  return out;
+}
+
+/**
  * The operator says this app's setup is finished. Stamped with the CURRENT
  * install, so the card stays away until this bundle is installed again.
  *
@@ -131,9 +225,12 @@ async function readLanguage(db) {
 /**
  * Ring the bell ONCE per bundle install.
  *
- * Silent for `crow`/`external`/`none`, silent when this install's bell already
- * rang. A web UI bundle that declares nothing falls back to `finish-setup`
- * (firstAdminOf), so an undeclared third-party install still rings once.
+ * Silent for `crow` (via env/postInstall), `external` and `none`, silent when this
+ * install's bell already rang. A `crow`/`via: "setup"` bundle is owed the bell unless
+ * ITS OWN automatic run for this install returned "ok" (autoResult): a script that
+ * failed, found the app not answering, or found an admin already in place is exactly
+ * what the operator must hear about. A web UI bundle that declares nothing falls back
+ * to `finish-setup` (firstAdminOf), so an undeclared third-party install still rings.
  *
  * @param {object} o
  * @param {object} o.db                   libsql-shaped client
@@ -141,6 +238,7 @@ async function readLanguage(db) {
  * @param {object} o.manifest             the installed manifest
  * @param {string} [o.bundleName]         display name (else the manifest's, else the id)
  * @param {string} [o.installId]          installed.json's installedAt for this install
+ * @param {string} [o.autoResult]         runFirstAdminSetup's result for THIS install
  * @param {number} [o.nowMs]              clock seam
  * @param {Function} [o.notify]           createNotification-shaped seam (tests)
  * @param {string} [o.lang]               force a language (else the dashboard setting)
@@ -153,12 +251,13 @@ export async function notifyFirstAdmin({
   manifest,
   bundleName = null,
   installId = null,
+  autoResult = null,
   nowMs = Date.now(),
   notify = createNotification,
   lang = null,
   log = console,
 }) {
-  if (!db || !bundleId || !firstAdminNeedsOperator(manifest)) return null;
+  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult })) return null;
   const key = firstAdminNoticeKey(bundleId);
   const stamp = typeof installId === "string" && installId ? installId : new Date(nowMs).toISOString();
   try {
@@ -174,9 +273,10 @@ export async function notifyFirstAdmin({
     const name = bundleName || (manifest && manifest.name) || bundleId;
     const language = lang || await readLanguage(db);
     const fa = firstAdminOf(manifest);
+    const setup = firstAdminVia(manifest) === "setup";
     const row = await notify(db, {
       title: firstAdminTitle(name, language),
-      body: firstAdminBody(fa, name, language),
+      body: firstAdminBody({ ...fa, via: setup ? "setup" : null, kept: autoResult === "kept" }, name, language),
       type: "system",
       source: "bundle-installer",
       priority: "normal",
@@ -202,15 +302,16 @@ export async function reportFirstAdminNotice({
   manifest,
   bundleName = null,
   installId = null,
+  autoResult = null,
   dbFactory = createDbClient,
   log = console,
   ...rest
 } = {}) {
   let db = null;
   try {
-    if (!firstAdminNeedsOperator(manifest)) return null;
+    if (!firstAdminNeedsNotice(manifest, { autoResult })) return null;
     db = dbFactory();
-    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, log, ...rest });
+    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, log, ...rest });
   } catch (err) {
     try { log.warn(`[bundles] first-admin notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
     return null;

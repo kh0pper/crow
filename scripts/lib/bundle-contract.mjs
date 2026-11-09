@@ -127,8 +127,9 @@ function fileExists(bundleDir, rel) {
  * reachable over loopback by anything else on the machine, so every bundle
  * with a web UI must say which of the five modes it is:
  *
- *   crow           Crow creates the admin at install (a generated password in
- *                  the keychain, or a postInstall hook) — nothing to claim.
+ *   crow           Crow creates the admin at install — from the environment, a
+ *                  postInstall hook, or (via "setup") a script it runs with the
+ *                  password on stdin. Nothing to claim.
  *   finish-setup   the app has its own first-run admin page; the operator must
  *                  finish it now (Crow shows the notice).
  *   default-login  the app ships a documented default login (user + password).
@@ -181,11 +182,17 @@ function validateFirstAdmin(manifest, bundleDir) {
     errors.push(`firstAdmin.path must be an app path starting with "/"`);
   }
   if (fa.note !== undefined && typeof fa.note !== "string") errors.push("firstAdmin.note must be a string");
-  if (fa.user !== undefined && mode !== "default-login") {
-    errors.push(`firstAdmin.user is only allowed with mode "default-login"`);
+  // `user` is the documented default username, or — via "setup" — the admin
+  // username Crow itself creates, so the protocol has something to create.
+  const setupUser = mode === "crow" && fa.via === "setup";
+  if (fa.user !== undefined && mode !== "default-login" && !setupUser) {
+    errors.push(`firstAdmin.user is only allowed with mode "default-login" or with mode "crow" via "setup"`);
   }
   if (mode === "default-login" && (typeof fa.user !== "string" || fa.user.trim() === "")) {
     errors.push(`firstAdmin: mode "default-login" needs user (the documented default username)`);
+  }
+  if (fa.setup !== undefined && !(mode === "crow" && fa.via === "setup")) {
+    errors.push(`firstAdmin.setup is only allowed with mode "crow" via "setup"`);
   }
   for (const field of ["via", "secretEnv", "userEnv"]) {
     if (fa[field] !== undefined && mode !== "crow") {
@@ -198,7 +205,7 @@ function validateFirstAdmin(manifest, bundleDir) {
 
 /**
  * `mode: "crow"` must name the mechanism that really creates the admin — and
- * that mechanism must be wired to THIS app (review round 1, S2). Two shapes:
+ * that mechanism must be wired to THIS app (review round 1, S2). Three shapes:
  *
  *   { "via": "env", "secretEnv": "<NAME>", "userEnv": "<NAME>"? }
  *     `secretEnv` names an env_vars entry with generate: "secret" AND
@@ -211,18 +218,29 @@ function validateFirstAdmin(manifest, bundleDir) {
  *     requires a postInstall script, and that script must name at least one
  *     generate:"secret" + keychain:true env var (a text check: the hook is what
  *     turns the generated value into the app's admin).
+ *
+ *   { "via": "setup", "setup": { "script": "…/first-admin.sh", "timeout_s"? },
+ *     "user": "admin", "secretEnv": "<NAME>", "userEnv": "<NAME>"? }
+ *     the installer runs that script once, with a password Crow generates on its
+ *     stdin (the protocol is in docs/developers/bundles.md). `secretEnv` is the
+ *     keychain entry name for that password — it does NOT have to be a generated
+ *     env_vars entry, because Crow generates the value itself; when an env_vars
+ *     entry of that name exists, the value is also written into the bundle's .env.
+ *     `user` is required: it is the username the script must create.
  */
 function validateCrowFirstAdmin(manifest, bundleDir, fa) {
   const errors = [];
   const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
   const keychainSecrets = envVars.filter((v) => v && v.generate === "secret" && v.keychain === true);
-  if (fa.via !== "env" && fa.via !== "postInstall") {
+  if (fa.via !== "env" && fa.via !== "postInstall" && fa.via !== "setup") {
     errors.push(
-      `firstAdmin: mode "crow" needs via "env" (a \${secretEnv} the compose file uses) or "postInstall" ` +
-        `(a script that sets the admin) — otherwise declare "finish-setup"`,
+      `firstAdmin: mode "crow" needs via "env" (a \${secretEnv} the compose file uses), or "postInstall" ` +
+        `(a script that sets the admin), or "setup" (a script Crow runs with the password on stdin) — ` +
+        `otherwise declare "finish-setup"`,
     );
     return errors;
   }
+  if (fa.via === "setup") return [...errors, ...validateSetupFirstAdmin(manifest, bundleDir, fa)];
   if (fa.via === "env") {
     const name = fa.secretEnv;
     if (typeof name !== "string" || name === "") {
@@ -263,6 +281,43 @@ function validateCrowFirstAdmin(manifest, bundleDir, fa) {
         );
       }
     }
+  }
+  return errors;
+}
+
+/**
+ * `via: "setup"`: the installer runs a script that gives the app its admin account.
+ * It must name a `.sh` file that really ships in the bundle, the username the script
+ * has to create, and the keychain entry name its password is kept under. The script
+ * itself is not text-checked: what it does to the app is the app's business (its exit
+ * codes are the protocol — see docs/developers/bundles.md).
+ */
+function validateSetupFirstAdmin(manifest, bundleDir, fa) {
+  const errors = [];
+  const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
+  if (typeof fa.user !== "string" || fa.user.trim() === "") {
+    errors.push(`firstAdmin: mode "crow" via "setup" needs user (the admin username the script creates)`);
+  }
+  if (typeof fa.secretEnv !== "string" || fa.secretEnv === "") {
+    errors.push(`firstAdmin: mode "crow" via "setup" needs secretEnv (the keychain entry name for the admin password)`);
+  }
+  const setup = fa.setup && typeof fa.setup === "object" ? fa.setup : null;
+  if (!setup) {
+    errors.push(`firstAdmin: mode "crow" via "setup" needs setup.script (a .sh file inside the bundle)`);
+  } else {
+    const script = setup.script;
+    if (typeof script !== "string" || script === "" || isAbsolute(script) || script.split(/[\\/]/).includes("..") || !script.endsWith(".sh")) {
+      errors.push(`firstAdmin: setup.script "${script}" must be a relative .sh path inside the bundle`);
+    } else if (!fileExists(bundleDir, script)) {
+      errors.push(`firstAdmin: setup.script "${script}" not found`);
+    }
+    if (setup.timeout_s !== undefined && (!Number.isInteger(setup.timeout_s) || setup.timeout_s < 1 || setup.timeout_s > 600)) {
+      errors.push(`firstAdmin: setup.timeout_s must be an integer between 1 and 600`);
+    }
+  }
+  if (fa.userEnv !== undefined) {
+    const declared = typeof fa.userEnv === "string" && envVars.some((v) => v && v.name === fa.userEnv);
+    if (!declared) errors.push(`firstAdmin: userEnv must name a declared env_vars entry`);
   }
   return errors;
 }

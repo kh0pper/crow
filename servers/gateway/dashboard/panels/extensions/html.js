@@ -307,28 +307,43 @@ export function buildExtensionsHTML({
       </div>`).join("");
   // ─── Finish-an-app's-setup cards (security audit N3-4) ───
   // One card per installed web app that does NOT create its own first admin and
-  // whose setup the operator has not marked done. Sits right beside the keychain
-  // first-view banner: both are "an install asked something of you" notices.
+  // whose setup the operator has not marked done (and whose admin login the keychain
+  // does not already hold). Sits right beside the keychain first-view banner: both are
+  // "an install asked something of you" notices.
   // The link is built by the Nest tile's own rule (shared/app-link.js), and a
   // subpath UI whose /proxy route this process has not mounted yet says so
   // instead of handing over a dead link. When the proxy router itself failed to
   // mount, no restart will produce that route: the card says the link is
   // unavailable instead of promising one (review round 1, N5).
+  // A `crow`/`via: "setup"` app gets "Set it up for me" (Crow runs the bundle's own
+  // script, generates the password and keeps it in the keychain, so nothing is shown
+  // here); every card offers the operator's own login as an inline form.
   const firstAdminHtml = (firstAdminPending || []).map((e) => {
     const title = firstAdminTitle(e.name, lang);
-    const body = firstAdminBody({ mode: e.mode, user: e.user, note: e.note }, e.name, lang) || "";
+    const body = firstAdminBody({ mode: e.mode, via: e.via, user: e.user, note: e.note, kept: e.kept }, e.name, lang) || "";
     const open = e.linkUnavailable
       ? `<span class="ext-firstadmin__unavailable" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.linkUnavailable", lang))}</span>`
       : e.restartPending
         ? `<span class="ext-firstadmin__restart" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.restartFirst", lang))}</span>`
         : `<a class="btn btn-sm btn-primary ext-firstadmin-open" href="${escapeHtml(e.link.href)}" target="_blank" rel="noopener"${e.link.onclick || ""}>${escapeHtml(t("bundles.firstAdmin.open", lang))}</a>`;
+    const auto = e.canAuto
+      ? `<button type="button" class="btn btn-sm btn-secondary ext-firstadmin-auto" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.setItUp", lang))}</button>`
+      : "";
+    const save = e.canSave === false ? "" : `<form class="ext-firstadmin-save" data-id="${escapeHtml(e.id)}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-top:0.5rem">
+            <input class="ext-firstadmin-save-user" type="text" autocomplete="off" maxlength="200" aria-label="${escapeHtml(t("bundles.firstAdmin.username", lang))}" placeholder="${escapeHtml(t("bundles.firstAdmin.username", lang))}" value="${escapeHtml(e.user || "")}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:12rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">
+            <input class="ext-firstadmin-save-pass" type="password" autocomplete="off" maxlength="1024" required aria-label="${escapeHtml(t("bundles.firstAdmin.passwordLabel", lang))}" placeholder="${escapeHtml(t("bundles.firstAdmin.passwordLabel", lang))}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:12rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">
+            <button type="submit" class="btn btn-sm btn-secondary ext-firstadmin-save-btn">${escapeHtml(t("bundles.firstAdmin.saveLogin", lang))}</button>
+          </form>`;
     return `<div class="callout callout-warning ext-firstadmin" data-addon-id="${escapeHtml(e.id)}" role="status">
         <strong>${escapeHtml(title)}</strong>
         <p style="margin:0.25rem 0 0.5rem">${escapeHtml(body)}</p>
+        <p class="ext-firstadmin__msg" style="margin:0.25rem 0 0.5rem;font-size:0.9rem" hidden></p>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
           ${open}
+          ${auto}
           <button type="button" class="btn btn-sm btn-secondary ext-firstadmin-done" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.done", lang))}</button>
         </div>
+        ${save}
       </div>`;
   }).join("");
   // ─── Crow's off-site backup line (SAT-8, spec §12.3) ───

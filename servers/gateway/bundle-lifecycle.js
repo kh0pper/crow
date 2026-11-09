@@ -68,10 +68,24 @@ export function hookEnv(destDir, crowHome, base = process.env) {
   return env;
 }
 
-/** execFile-like, but in its own process group: a timeout kills the whole group. */
-export function spawnGroup(cmd, args, { cwd, env, timeout, maxBuffer = 4 * 1024 * 1024 } = {}) {
+/**
+ * execFile-like, but in its own process group: a timeout kills the whole group.
+ *
+ * `input` (a string) is written to the child's stdin and stdin is then closed, so a
+ * script that reads one line gets it and a script that reads nothing cannot block on an
+ * open pipe; without `input` stdin is /dev/null, exactly as before. A non-zero exit
+ * rejects with the exit code in `exitCode` and `timedOut` set on a timeout, so a caller
+ * can map a script's own exit codes (the first-admin setup protocol).
+ */
+export function spawnGroup(cmd, args, { cwd, env, timeout, input, maxBuffer = 4 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const wantsInput = typeof input === "string";
+    const child = spawn(cmd, args, { cwd, env, detached: true, stdio: [wantsInput ? "pipe" : "ignore", "pipe", "pipe"] });
+    if (wantsInput) {
+      // EPIPE if the script exits without reading: that is the child's business, not a crash here.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
     let stdout = ""; let stderr = ""; let timedOut = false; let killTimer = null;
     const cap = (s, d) => (s.length > maxBuffer ? s : s + d);
     child.stdout.on("data", (d) => { stdout = cap(stdout, d); });
@@ -89,12 +103,13 @@ export function spawnGroup(cmd, args, { cwd, env, timeout, maxBuffer = 4 * 1024 
       if (killTimer) { clearTimeout(killTimer); killGroup("SIGKILL"); }
       if (code === 0 && !timedOut) return resolve({ stdout, stderr });
       const why = timedOut ? `timed out after ${Math.round(timeout / 1000)}s` : `exit ${code ?? signal}`;
-      reject(Object.assign(new Error(why), { stdout, stderr: `${stderr}\n${why}` }));
+      reject(Object.assign(new Error(why), { stdout, stderr: `${stderr}\n${why}`, exitCode: code, signal: signal ?? null, timedOut }));
     });
   });
 }
 
-function tailLines(text, n) {
+/** The last `n` non-blank lines of a script's output, right-trimmed. */
+export function tailLines(text, n) {
   return String(text || "").split("\n").map((l) => l.trimEnd()).filter(Boolean).slice(-n);
 }
 

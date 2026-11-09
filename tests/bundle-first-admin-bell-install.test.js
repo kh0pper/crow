@@ -45,6 +45,7 @@ const {
   _setComposeRunnerForTest,
   _setDockerRunnerForTest,
   _setHookRunnerForTest,
+  _setFirstAdminSetupDepsForTest,
 } = await import("../servers/gateway/routes/bundles.js");
 
 _setAppBundlesForTest(TMP_BUNDLES);
@@ -55,6 +56,7 @@ after(() => {
   _setComposeRunnerForTest(null);
   _setDockerRunnerForTest(null);
   _setHookRunnerForTest(null);
+  _setFirstAdminSetupDepsForTest(null);
   for (const d of [TMP_HOME, TMP_BUNDLES]) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
 });
 
@@ -209,4 +211,81 @@ test("a post-install hook failure still rings the bell once", async () => {
   const bells = (await firstAdminBells()).filter((b) => b.metadata.bundle === "fx-half-hook");
   assert.equal(bells.length, 1, "installed and running, setup incomplete: still one bell");
   assert.equal(bells[0].metadata.mode, "finish-setup");
+});
+
+// ── phase 2a: Crow creates the admin itself (`firstAdmin.via: "setup"`) ──
+// The install path runs the bundle's own script AFTER compose up succeeded, and the
+// outcome decides whether the bell rings: silent when Crow created the login, one bell
+// otherwise (the operator has to finish it, or save the login they already use).
+
+/** A crow/setup bundle that ships its script, so the installer really runs one. */
+function setupManifest(id) {
+  const manifest = composeManifest(id, {
+    firstAdmin: {
+      mode: "crow",
+      via: "setup",
+      setup: { script: "scripts/first-admin.sh", timeout_s: 30 },
+      user: "admin",
+      secretEnv: "FX_ADMIN_PASSWORD",
+    },
+    env_vars: [{ name: "FX_ADMIN_PASSWORD", secret: true }],
+  });
+  mkdirSync(join(TMP_BUNDLES, id, "scripts"), { recursive: true });
+  writeFileSync(join(TMP_BUNDLES, id, "scripts", "first-admin.sh"), "#!/bin/sh\nexit 0\n");
+  return manifest;
+}
+
+test("a crow/setup install whose script succeeds rings no bell and logs the plain sentence", async () => {
+  const id = "fx-fa-ok";
+  const manifest = setupManifest(id);
+  stubDocker({});
+  _setFirstAdminSetupDepsForTest({
+    runScript: async () => ({ stdout: "created the admin\n", stderr: "" }),
+    save: async () => ({ id: 1 }),
+    writeEnv: () => {},
+  });
+  try {
+    const job = _createJobForTest(id, "install");
+    const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    _finishJobForTest(job, "complete");
+    assert.equal(out.ok, true, out.reason);
+    const log = job.log.join("\n");
+    assert.match(log, /created the admin/, "the script's own output reaches the install log");
+    assert.match(log, new RegExp(`Crow created ${id} app's admin login \\(admin\\) and saved it in Settings → Passwords\\.`));
+  } finally {
+    _setFirstAdminSetupDepsForTest(null);
+    unstubDocker();
+  }
+  assert.equal((await firstAdminBells()).filter((b) => b.metadata.bundle === id).length, 0, "Crow made the account: nothing to claim");
+});
+
+test("a crow/setup install whose script fails rings ONE bell, and the marker says failed", async () => {
+  const id = "fx-fa-fail";
+  const manifest = setupManifest(id);
+  stubDocker({});
+  _setFirstAdminSetupDepsForTest({
+    runScript: async () => { throw Object.assign(new Error("exit 4"), { exitCode: 4, stdout: "", stderr: "nothing is listening\nexit 4" }); },
+  });
+  try {
+    const job = _createJobForTest(id, "install");
+    const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    _finishJobForTest(job, "complete");
+    assert.equal(out.ok, true, "the install itself is fine; the app's admin is what is missing");
+    assert.match(job.log.join("\n"), /could not set up fx-fa-fail app's admin login/);
+  } finally {
+    _setFirstAdminSetupDepsForTest(null);
+    unstubDocker();
+  }
+  const bells = (await firstAdminBells()).filter((b) => b.metadata.bundle === id);
+  assert.equal(bells.length, 1, "the app is running without the admin Crow meant to create");
+  assert.equal(bells[0].title, `Finish ${id} app's setup now`);
+  assert.match(bells[0].body, /Crow can create/);
+  const { createDbClient } = await import("../servers/db.js");
+  const db = createDbClient();
+  try {
+    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [`first_admin_auto:${id}`] });
+    assert.equal(JSON.parse(rows[0].value).result, "not-running", "the card reads this word");
+  } finally {
+    db.close();
+  }
 });

@@ -10,8 +10,9 @@
  * Every web app bundle therefore declares one of:
  *
  *   crow           Crow creates the admin at install — a generated password in
- *                  the keychain, or a postInstall hook. Nothing to claim, and
- *                  nothing to show the operator.
+ *                  the keychain, a postInstall hook, or (via "setup") a script
+ *                  the installer runs with the password on stdin. Nothing to
+ *                  claim, and nothing to show the operator.
  *   finish-setup   the app has its own first-run admin page. The operator is
  *                  told, plainly, to finish it NOW, with a direct link.
  *   default-login  the app ships a documented default login (user + password):
@@ -40,6 +41,15 @@ export const OPERATOR_FIRST_ADMIN_MODES = Object.freeze(["finish-setup", "defaul
 export const FIRST_ADMIN_TITLE_KEY = "bundles.firstAdmin.title";
 export const FIRST_ADMIN_FINISH_BODY_KEY = "bundles.firstAdmin.finishSetupBody";
 export const FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY = "bundles.firstAdmin.defaultLoginBody";
+export const FIRST_ADMIN_SETUP_BODY_KEY = "bundles.firstAdmin.setupBody";
+export const FIRST_ADMIN_KEPT_BODY_KEY = "bundles.firstAdmin.keptBody";
+
+/**
+ * The keychain entry name a bundle's admin login is saved under when its
+ * manifest does not declare `firstAdmin.secretEnv` (the Extensions card's own
+ * "save the login I made" form uses the same key, so the card can find it).
+ */
+export const FIRST_ADMIN_SAVED_KEY = "APP_ADMIN_PASSWORD";
 
 /**
  * The manifest's firstAdmin block, normalized. A web UI with no usable
@@ -67,10 +77,48 @@ export function firstAdminOf(manifest) {
   };
 }
 
+/**
+ * The mechanism a `crow` manifest names — "env", "postInstall" or "setup" — or
+ * null. Anything else (another mode, a typo) is not a mechanism.
+ */
+export function firstAdminVia(manifest) {
+  const fa = manifest && typeof manifest === "object" ? manifest.firstAdmin : null;
+  if (!fa || typeof fa !== "object" || fa.mode !== "crow") return null;
+  return fa.via === "env" || fa.via === "postInstall" || fa.via === "setup" ? fa.via : null;
+}
+
+/**
+ * The keychain entry name holding this bundle's admin login: the manifest's
+ * `firstAdmin.secretEnv` when it declares one, else FIRST_ADMIN_SAVED_KEY. For a
+ * `crow`/`via: "setup"` bundle it is the entry Crow itself writes.
+ */
+export function firstAdminSavedKey(manifest) {
+  const fa = manifest && typeof manifest === "object" ? manifest.firstAdmin : null;
+  const declared = fa && typeof fa.secretEnv === "string" ? fa.secretEnv.trim() : "";
+  return declared || FIRST_ADMIN_SAVED_KEY;
+}
+
 /** Does this bundle's install leave an admin account someone else could claim? */
 export function firstAdminNeedsOperator(manifest) {
   const fa = firstAdminOf(manifest);
   return !!fa && OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode);
+}
+
+/**
+ * Does this manifest owe the operator a notice (a card, a bell)?
+ *
+ * `crow`/`via: "setup"` is owed one UNLESS Crow's own setup run for this install
+ * returned "ok" — a script that failed, found the app not answering, or left an
+ * admin the app already had must not disappear silently.
+ *
+ * @param {object|null} manifest
+ * @param {{autoResult?: string|null}} [o] the setup run's result for this install
+ */
+export function firstAdminNeedsNotice(manifest, { autoResult = null } = {}) {
+  const fa = firstAdminOf(manifest);
+  if (!fa) return false;
+  if (firstAdminVia(manifest) === "setup") return autoResult !== "ok";
+  return OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode);
 }
 
 /**
@@ -100,7 +148,14 @@ export function firstAdminTitle(name, lang = "en") {
  * @param {string} name the app's display name
  */
 export function firstAdminBody(fa, name, lang = "en") {
-  if (!fa || !OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode)) return null;
+  if (!fa) return null;
+  if (fa.mode === "crow" && fa.via === "setup") {
+    // `kept`: the setup script found an admin the app already had, so there is no
+    // new login for Crow to keep — but the one the operator uses is still worth saving.
+    const body = fill(t(fa.kept ? FIRST_ADMIN_KEPT_BODY_KEY : FIRST_ADMIN_SETUP_BODY_KEY, lang), { name });
+    return fa.note ? `${body} ${fa.note}` : body;
+  }
+  if (!OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode)) return null;
   const body = fa.mode === "default-login"
     ? fill(t(FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY, lang), { name, user: fa.user || "" })
     : fill(t(FIRST_ADMIN_FINISH_BODY_KEY, lang), { name });
@@ -109,8 +164,8 @@ export function firstAdminBody(fa, name, lang = "en") {
 
 /**
  * The cards the Extensions page shows, in `Object.keys(installed)` order.
- * PURE: no fs, no db — `manifests` and `done` are handed in (panels/extensions.js
- * reads them), which keeps html.js's purity rule.
+ * PURE: no fs, no db — `manifests`, `done`, `adminSaved` and `autoResults` are
+ * handed in (panels/extensions.js reads them), which keeps html.js's purity rule.
  *
  * @param {object} o
  * @param {Record<string, {installedAt?: string, installed_at?: string, mode?: string}>} o.installed
@@ -118,19 +173,50 @@ export function firstAdminBody(fa, name, lang = "en") {
  * @param {Record<string, string>} [o.done]             id → the install a Done press covered
  * @param {Set<string>|string[]} [o.liveProxyIds]       ids with a live /proxy route THIS process
  * @param {boolean} [o.proxyMountFailed]                the proxy router failed to mount at boot
- * @returns {Array<{id:string,name:string,mode:string,user:string|null,note:string|null,link:object,installId:string|null,restartPending:boolean,linkUnavailable:boolean}>}
+ * @param {Set<string>|string[]} [o.adminSaved]         ids whose keychain holds that bundle's admin login
+ * @param {Record<string, {install?: string|null, result?: string}>} [o.autoResults]
+ *        id → the `first_admin_auto:<id>` marker (what Crow's own setup run did)
+ * @returns {Array<{id:string,name:string,mode:string,via:string|null,user:string|null,note:string|null,link:object,installId:string|null,restartPending:boolean,linkUnavailable:boolean,kept:boolean,canAuto:boolean,canSave:boolean}>}
  */
-export function pendingFirstAdminNotices({ installed = {}, manifests = {}, done = {}, liveProxyIds = [], proxyMountFailed = false } = {}) {
+export function pendingFirstAdminNotices({
+  installed = {},
+  manifests = {},
+  done = {},
+  liveProxyIds = [],
+  proxyMountFailed = false,
+  adminSaved = [],
+  autoResults = {},
+} = {}) {
   const live = liveProxyIds instanceof Set ? liveProxyIds : new Set(liveProxyIds || []);
+  const saved = adminSaved instanceof Set ? adminSaved : new Set(adminSaved || []);
+  const auto = autoResults && typeof autoResults === "object" ? autoResults : {};
   const out = [];
   for (const id of Object.keys(installed || {})) {
     const entry = installed[id] || {};
     if (entry.mode === "satellite") continue; // hosted elsewhere: its own box's setup, not this one's
     const manifest = manifests ? manifests[id] : null;
     const fa = firstAdminOf(manifest);
-    if (!fa || !OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode)) continue;
+    if (!fa) continue;
     const installId = typeof entry.installedAt === "string" ? entry.installedAt
       : typeof entry.installed_at === "string" ? entry.installed_at : null;
+    // The keychain holds this app's admin login: there is nothing left to ask the
+    // operator for, whatever the mode (Crow's own generated login, or one they saved).
+    if (saved.has(id)) continue;
+    const setup = firstAdminVia(manifest) === "setup";
+    let kept = false;
+    let canAuto = false;
+    if (setup) {
+      const record = auto[id];
+      const thisInstall = record && typeof record === "object" && installId && record.install === installId ? record : null;
+      // Crow already created this install's admin and saved it: silence.
+      if (thisInstall && thisInstall.result === "ok") continue;
+      // "kept": the app has its own admin, so there is nothing to create. The card
+      // only asks the operator to save the login they use.
+      kept = !!(thisInstall && thisInstall.result === "kept");
+      canAuto = !kept;
+    } else if (!OPERATOR_FIRST_ADMIN_MODES.includes(fa.mode)) {
+      continue; // crow via env/postInstall, external, none: nothing to claim
+    }
     // Done is per install: a reinstall (a new installedAt) asks again, because
     // its own first-run page is back to being claimable.
     if (installId && done && done[id] === installId) continue;
@@ -141,6 +227,7 @@ export function pendingFirstAdminNotices({ installed = {}, manifests = {}, done 
       id,
       name: (manifest && typeof manifest.name === "string" && manifest.name) || id,
       mode: fa.mode,
+      via: setup ? "setup" : null,
       user: fa.user,
       note: fa.note,
       link,
@@ -152,6 +239,9 @@ export function pendingFirstAdminNotices({ installed = {}, manifests = {}, done 
       // the link is unavailable instead of promising a restart that cannot help.
       restartPending: subpath && !proxyMountFailed && !live.has(id),
       linkUnavailable: subpath && !!proxyMountFailed,
+      kept,
+      canAuto,
+      canSave: true,
     });
   }
   return out;

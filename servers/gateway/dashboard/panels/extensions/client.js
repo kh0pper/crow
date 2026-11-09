@@ -2015,6 +2015,78 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
             });
           });
         });
+
+        // --- "Set it up for me": Crow runs the app's own setup script (N3-4 phase 2a) ---
+        // The password Crow generates never comes back to this page: there is nothing to
+        // show and nothing to copy. On ok the card is replaced by where it was saved; any
+        // other result (kept, not running, failed) shows the server's plain sentence, which
+        // never carries the password either.
+        function showFirstAdminMessage(card, text) {
+          var note = card ? card.querySelector(".ext-firstadmin__msg") : null;
+          if (!note) return;
+          note.textContent = text;
+          note.hidden = false;
+        }
+        document.querySelectorAll(".ext-firstadmin-auto").forEach(function(autoBtn) {
+          autoBtn.addEventListener("click", function() {
+            var id = autoBtn.getAttribute("data-id");
+            var card = autoBtn.closest ? autoBtn.closest(".ext-firstadmin") : null;
+            autoBtn.disabled = true;
+            autoBtn.textContent = '${tJs("bundles.firstAdmin.settingUp", lang)}';
+            apiCall("first-admin-auto", { bundle_id: id }).then(function(res) {
+              var d = res.data || {};
+              if (res.ok && d.ok && d.result === "ok") {
+                if (card) {
+                  while (card.firstChild) card.removeChild(card.firstChild);
+                  var line = document.createElement("p");
+                  line.className = "ext-firstadmin__saved";
+                  line.style.margin = "0";
+                  line.textContent = '${tJs("bundles.firstAdmin.savedInPasswords", lang)}';
+                  card.appendChild(line);
+                }
+                return;
+              }
+              autoBtn.disabled = false;
+              autoBtn.textContent = '${tJs("bundles.firstAdmin.setItUp", lang)}';
+              showFirstAdminMessage(card, d.message || d.error || '${tJs("extensions.failed", lang)}');
+            }).catch(function() {
+              autoBtn.disabled = false;
+              autoBtn.textContent = '${tJs("bundles.firstAdmin.setItUp", lang)}';
+              showFirstAdminMessage(card, '${tJs("extensions.networkError", lang)}');
+            });
+          });
+        });
+
+        // --- "Save the login you made": the operator's own admin username + password ---
+        // On ok the keychain holds this app's admin login, so the card has nothing left to say.
+        document.querySelectorAll(".ext-firstadmin-save").forEach(function(form) {
+          form.addEventListener("submit", function(ev) {
+            if (ev && ev.preventDefault) ev.preventDefault();
+            var id = form.getAttribute("data-id");
+            var card = form.closest ? form.closest(".ext-firstadmin") : null;
+            var userEl = form.querySelector(".ext-firstadmin-save-user");
+            var passEl = form.querySelector(".ext-firstadmin-save-pass");
+            var btn = form.querySelector("button[type=submit]");
+            var password = passEl ? passEl.value : "";
+            if (!password) {
+              showFirstAdminMessage(card, '${tJs("bundles.firstAdmin.passwordRequired", lang)}');
+              if (passEl) passEl.focus();
+              return;
+            }
+            if (btn) btn.disabled = true;
+            apiCall("first-admin-save", { bundle_id: id, username: userEl ? userEl.value : "", password: password }).then(function(res) {
+              if (res.ok && res.data && res.data.ok) {
+                if (card && card.parentNode) card.parentNode.removeChild(card);
+                return;
+              }
+              if (btn) btn.disabled = false;
+              showFirstAdminMessage(card, (res.data && res.data.error) || '${tJs("extensions.failed", lang)}');
+            }).catch(function() {
+              if (btn) btn.disabled = false;
+              showFirstAdminMessage(card, '${tJs("extensions.networkError", lang)}');
+            });
+          });
+        });
       })();
     <\/script>`;
 }

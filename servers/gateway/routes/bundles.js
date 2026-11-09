@@ -22,7 +22,8 @@ import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
-import { markFirstAdminDone, reportFirstAdminNotice } from "../bundle-first-admin.js";
+import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia } from "../bundle-first-admin.js";
+import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage } from "../bundle-first-admin-setup.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
@@ -1302,6 +1303,10 @@ export function composeEnv(base = process.env) {
 let _hookRunnerForTest = null;
 export function _setHookRunnerForTest(fn) { _hookRunnerForTest = fn || null; }
 
+// Test-only: seams for the first-admin setup run (script runner, keychain, .env writer).
+let _firstAdminSetupDepsForTest = null;
+export function _setFirstAdminSetupDepsForTest(d) { _firstAdminSetupDepsForTest = d || null; }
+
 /**
  * Ownership of this bundle's compose project. refusal: another Crow install of the SAME
  * bundle on this host owns it (callers refuse). warning: containers from a legacy path
@@ -1599,6 +1604,11 @@ function startConsent(bundleId, { crossHost = false } = {}) {
 }
 
 export { startConsent as _startConsentForTest, consentRecord as _consentRecordForTest };
+
+// One automatic first-admin setup per bundle at a time (the route answers 409 while a
+// run is in flight): two scripts racing to create the same account is how an app ends
+// up with a login nobody has. Module-level, like the owner-check seam below it.
+const FIRST_ADMIN_AUTO_RUNNING = new Set();
 
 // Follow-up B: who may allow a folder outside Crow's home (the owner at this machine's own
 // dashboard), and the folders each check may admit.
@@ -3086,6 +3096,31 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
+    // Security audit N3-4 phase 2a: a `crow`/`via: "setup"` bundle gets its admin
+    // account from a script Crow runs itself, with a password it generates. Only when
+    // the app is actually up (the same condition as the post-install hook): a script
+    // that talks to a stopped app can only fail. Its outcome is remembered per install
+    // (the Extensions card reads it) and decides whether the bell rings below.
+    let firstAdminAuto = null;
+    if (!composeFailure && firstAdminVia(manifest) === "setup") {
+      const auto = await runFirstAdminSetup({
+        bundleId,
+        manifest,
+        destDir: join(BUNDLES_DIR, bundleId),
+        installId: recordedInstallAt,
+        crowHome: CROW_HOME,
+        deps: _firstAdminSetupDepsForTest || {},
+      });
+      firstAdminAuto = auto.result;
+      for (const line of auto.log || []) appendLog(job, `  ${line}`);
+      appendLog(job, firstAdminResultMessage({
+        result: auto.result,
+        name: manifest?.name || bundleId,
+        user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
+        reason: auto.reason || null,
+      }));
+    }
+
     // ntfy autowire (spec 2026-10-03): Crow creates its own login + private topic on the
     // server it just started. Non-fatal — Settings › Notifications can re-run it.
     if (manifest?.autowire === AUTOWIRE_KIND && !composeFailure) {
@@ -3179,9 +3214,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // Security audit N3-4: a bundle that does NOT create its own first admin
     // leaves an app setup page anyone on this machine can claim. One bell, once
     // per install, pointing at the Extensions card that says what to do. Silent
-    // for `crow`, `external` and `none` manifests; never in the job log (the
-    // owner reads the bell, and the log line would be a second, easier-to-miss
-    // copy).
+    // for `crow` via env/postInstall, `external` and `none` manifests, and for a
+    // `crow`/via-"setup" bundle whose own setup run returned "ok"; never in the
+    // job log (the owner reads the bell, and the log line would be a second,
+    // easier-to-miss copy).
     //
     // BEFORE the half-failure returns below: a compose/hook failure still leaves
     // an app that can start (the owner fixes Configure + Start), so its setup
@@ -3194,6 +3230,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // entry (and does not re-ring), and only a reinstall after an uninstall —
       // a new record — asks again.
       installId: recordedInstallAt,
+      // What Crow's own setup run did for THIS install (null when it did not run):
+      // an "ok" stays silent, everything else asks the operator to look.
+      autoResult: firstAdminAuto,
     });
 
     if (composeFailure) {
@@ -3319,7 +3358,7 @@ export default function bundlesRouter() {
   // (which never saves to the keychain for a peer, and whose result Start re-checks
   // without consent), never install, mint consent, uninstall or re-apply storage here:
   // a peer-minted consent token would let it apply a privileged bundle the owner never saw.
-  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin", "/bundles/api/first-admin-done"]);
+  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin", "/bundles/api/first-admin-done", "/bundles/api/first-admin-auto", "/bundles/api/first-admin-save"]);
   router.use((req, res, next) => {
     if (!req.crossHostAuth) return next();
     // Express matches routes case-insensitively and ignores a trailing slash: compare
@@ -3391,6 +3430,89 @@ export default function bundlesRouter() {
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
+  });
+
+  // POST /bundles/api/first-admin-auto — "Set it up for me" (N3-4 phase 2a): Crow runs
+  // the bundle's own setup script, generates the admin password itself and keeps it in
+  // its keychain. Owner action at this machine's dashboard only: an app's admin login
+  // is not something a peer instance or a session made elsewhere may set.
+  router.post("/bundles/api/first-admin-auto", async (req, res) => {
+    if (!(await isLocalOwner(req))) {
+      return res.status(403).json({ error: "Only the owner at this machine's dashboard can set up an app's admin login", code: "owner_only" });
+    }
+    const bundleId = req.body && req.body.bundle_id;
+    if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
+    const entry = getInstalled().find((i) => i && i.id === bundleId);
+    if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    // The INSTALLED copy's manifest: that is the version whose script is on disk.
+    const manifest = getInstalledFirstManifest(bundleId);
+    const plan = firstAdminSetupPlan(manifest);
+    if (!plan) return res.status(400).json({ error: "This app can't be set up automatically; finish it in the app." });
+    if (plan.refused) {
+      return res.status(400).json({ error: `Crow can't set up this app's admin login: ${plan.refused}`, code: "first_admin_unavailable" });
+    }
+    // One run per bundle at a time: two scripts racing to create the same account is
+    // exactly how an app ends up with a login nobody knows.
+    if (FIRST_ADMIN_AUTO_RUNNING.has(bundleId)) {
+      return res.status(409).json({ error: "Crow is already setting up this app's admin login. Wait for it to finish." });
+    }
+    FIRST_ADMIN_AUTO_RUNNING.add(bundleId);
+    try {
+      const out = await runFirstAdminSetup({
+        bundleId,
+        manifest,
+        destDir: join(BUNDLES_DIR, bundleId),
+        installId: entry.installedAt || entry.installed_at || null,
+        crowHome: CROW_HOME,
+        deps: _firstAdminSetupDepsForTest || {},
+      });
+      // The card shows this sentence as-is; it never carries the password.
+      res.json({
+        ok: out.result === "ok",
+        result: out.result,
+        message: firstAdminResultMessage({
+          result: out.result,
+          name: manifest?.name || bundleId,
+          user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
+          reason: out.reason || null,
+        }),
+        log: out.log || [],
+      });
+    } finally {
+      FIRST_ADMIN_AUTO_RUNNING.delete(bundleId);
+    }
+  });
+
+  // POST /bundles/api/first-admin-save — "Save the login you made": the operator's own
+  // admin username + password for this app, into Crow's keychain under the bundle's
+  // admin key. Owner action only, as above.
+  router.post("/bundles/api/first-admin-save", async (req, res) => {
+    if (!(await isLocalOwner(req))) {
+      return res.status(403).json({ error: "Only the owner at this machine's dashboard can save an app's admin login", code: "owner_only" });
+    }
+    const bundleId = req.body && req.body.bundle_id;
+    if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
+    const entry = getInstalled().find((i) => i && i.id === bundleId);
+    if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    const rawUser = req.body.username;
+    if (rawUser !== undefined && rawUser !== null && typeof rawUser !== "string") {
+      return res.status(400).json({ error: "username must be text" });
+    }
+    const username = typeof rawUser === "string" ? rawUser.slice(0, 200) : "";
+    const password = req.body.password;
+    if (typeof password !== "string" || password === "" || password.length > 1024) {
+      return res.status(400).json({ error: "Enter the password you use for this app." });
+    }
+    const saved = await saveFirstAdminLogin({
+      bundleId,
+      manifest: getInstalledFirstManifest(bundleId),
+      username,
+      password,
+      crowHome: CROW_HOME,
+      deps: _firstAdminSetupDepsForTest || {},
+    });
+    if (!saved) return res.status(500).json({ error: "Could not save the password. Try again." });
+    res.json({ ok: true });
   });
 
   // GET /bundles/api/engine-blast — Uninstall blast-radius for the bot engine
