@@ -307,6 +307,13 @@
  * pick, and `library.remove` is the panel's own way to tidy an entry no track
  * plays. `library.add` is not here for the reason `sample.add` is not: only the
  * gateway's library routes add a file, as Studio's own step.
+ *
+ * The mixer commands follow (plan 1d, Task 6): `insert.add`, `insert.remove`,
+ * `insert.move`, `insert.set` and `insert.bypass` are one step each in the
+ * effect chain, `return.add`, `return.set` and `return.remove` are the returns,
+ * `send.set` is one track's send to one return, and `master.set` is the master
+ * strip. Each is one field write of one object, which is what makes a control
+ * move one undoable step (Task 10).
  * @type {readonly string[]}
  */
 export const COMMANDS = Object.freeze([
@@ -373,6 +380,16 @@ export const COMMANDS = Object.freeze([
   "midi.remove",
   "midi.propose_profile",
   "library.remove",
+  "insert.add",
+  "insert.remove",
+  "insert.move",
+  "insert.set",
+  "insert.bypass",
+  "return.add",
+  "return.set",
+  "return.remove",
+  "send.set",
+  "master.set",
 ]);
 
 /** The `var COMMANDS = [...]` declaration, built from the one list above. */

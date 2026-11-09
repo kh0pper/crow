@@ -82,6 +82,10 @@ import "./commands/midi.js";
 // is played with: which font, and which preset of it.
 import "./commands/library.js";
 import "./commands/instruments.js";
+// The 1d mixer commands: the effects of a chain, the sends, the returns and the
+// master. An agent may run every one of them (plan 1d, Global Constraints): a
+// mix step is an undoable step, never a sound leaving the song.
+import "./commands/mixer.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
 import { libraryUsers } from "./doc.js";
 // The vetted instrument catalog: what `studio_library` says this Crow could

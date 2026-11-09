@@ -105,6 +105,36 @@
  * `storage_key` (or the entry's sha256, for a catalog file stored once per
  * instance) says where it lives.
  *
+ * A song's mixer (plan 1d) is three containers and a single map, so one effect,
+ * one send and one return are each one small object to edit, and two writers
+ * touching two of them never overwrite each other:
+ *
+ *   inserts  Y.Map of insert id → Y.Map {id, owner, order, kind, bypass,
+ *                     params: Y.Map (one field per parameter)}
+ *   sends    Y.Map of "<track_id>/<return_id>" → Y.Map {track_id, return_id,
+ *                     level_db, pre}
+ *   returns  Y.Map of return id → Y.Map {id, name, gain_db, pan, mute}
+ *   master   Y.Map {gain_db, target {lufs, true_peak_db}} — one per song
+ *
+ * An insert's `owner` is the ref of the chain it sits in — `"track:<id>"`,
+ * `"return:<id>"` or `"master"` — and its `order` is a fractional place in that
+ * chain, so putting an effect between two others rewrites one field and moves
+ * nothing else (see `byInsertOrder`). Its `params` is a Y.Map of its own, one
+ * field per parameter, so two peers editing two parameters of one insert both
+ * win and one parameter is one undoable field. The parameters and their ranges
+ * are the `EFFECT_PARAMS` table below, which the engine and the panel read too.
+ *
+ * Returns are NOT tracks: they live in `returns`, no track reader sees them,
+ * and `LIMITS.tracks` never counts them. A send is keyed by the pair it joins,
+ * so a track has at most one send to one return, and each send is its own
+ * object.
+ *
+ * A song written before the mixer existed has none of the four containers: it
+ * reads as empty chains, no sends, no returns and the default master (see
+ * `snapshot`), and the first write makes the container it needs. A new song
+ * makes all four up front, so two peers' first mixer edits merge into one
+ * container instead of racing to create it.
+ *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
  * JSON, so `snapshot()` is a round trip away from the wire, storage or a
@@ -136,7 +166,9 @@ import * as Y from "yjs";
  *         patternsPerClip: number, chainLength: number, locksPerStep: number,
  *         motionPointsPerLane: number, motionLanesPerPattern: number,
  *         midiMaps: number, fontsPerSong: number,
- *         libraryEntriesPerSong: number}}
+ *         libraryEntriesPerSong: number, insertsPerChain: number,
+ *         returnsPerSong: number, sendsPerTrack: number,
+ *         ampInsertsPerSong: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -185,6 +217,14 @@ export const LIMITS = Object.freeze({
   // song may hold, because each parsed font costs memory in the page.
   fontsPerSong: 32,
   libraryEntriesPerSong: 256,
+  // The mixer (plan 1d, Limits): the effects of one chain, the returns of one
+  // song and the sends of one track. `ampInsertsPerSong` is the one cap the
+  // document does not enforce yet: an amp insert arrives with PR C, and until
+  // then `insert.add` refuses the kind, so nothing can reach it.
+  insertsPerChain: 8,
+  returnsPerSong: 8,
+  sendsPerTrack: 8,
+  ampInsertsPerSong: 16,
 });
 
 /**
@@ -235,6 +275,170 @@ export const LIBRARY_KINDS = Object.freeze(["font", "nam", "ir"]);
 
 /** Where a library entry came from: the catalog, an upload, or the bundle. */
 export const LIBRARY_SOURCES = Object.freeze(["catalog", "upload", "bundled"]);
+
+/**
+ * Freeze a value and everything inside it, so a table a reader shares cannot be
+ * edited by one of them. Plain objects and arrays only.
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function deepFreeze(value) {
+  if (value === null || typeof value !== "object") return value;
+  for (const item of Object.values(value)) deepFreeze(item);
+  return Object.freeze(value);
+}
+
+/**
+ * Every effect a chain may hold (plan 1d, Task 6), with each one's parameters
+ * and the range each parameter runs over. The engine (Tasks 7 to 9) and the
+ * panel's insert editor (Task 10) read this one table, so a parameter's range
+ * exists in exactly one place.
+ *
+ * A numeric parameter is `{min, max, default, unit}`; a chooser is
+ * `{values, default}` and holds one of `values`. `unit` is the suffix a control
+ * shows ("Hz", "dB", "ms"), and "" for a plain number. `label` is the word a
+ * summary and a control use: "Added a compressor to Bass", "the reverb's mix".
+ *
+ * The table's key order is `EFFECT_KINDS`'s order, which is the order a menu
+ * lists the effects in. `amp` is deliberately absent: an amp insert arrives
+ * with plan 1d's PR C, and `insert.add` refuses that kind with its own sentence
+ * until then.
+ * @type {Readonly<Object<string, Readonly<{label: string, params: Readonly<Object<string, any>>}>>>}
+ */
+export const EFFECT_PARAMS = deepFreeze({
+  eq: {
+    label: "equalizer",
+    params: {
+      low_freq_hz: { min: 20, max: 500, default: 100, unit: "Hz" },
+      low_gain_db: { min: -18, max: 18, default: 0, unit: "dB" },
+      mid_freq_hz: { min: 100, max: 10000, default: 1000, unit: "Hz" },
+      mid_gain_db: { min: -18, max: 18, default: 0, unit: "dB" },
+      mid_q: { min: 0.1, max: 10, default: 0.7, unit: "" },
+      high_freq_hz: { min: 2000, max: 20000, default: 8000, unit: "Hz" },
+      high_gain_db: { min: -18, max: 18, default: 0, unit: "dB" },
+    },
+  },
+  filter: {
+    label: "filter",
+    params: {
+      mode: { values: ["lp", "hp", "bp"], default: "lp" },
+      cutoff_hz: { min: 20, max: 20000, default: 1000, unit: "Hz" },
+      resonance: { min: 0.1, max: 10, default: 0.7, unit: "" },
+    },
+  },
+  delay: {
+    label: "delay",
+    params: {
+      time_ms: { min: 1, max: 2000, default: 375, unit: "ms" },
+      feedback: { min: 0, max: 0.95, default: 0.35, unit: "" },
+      mix: { min: 0, max: 1, default: 0.3, unit: "" },
+      highcut_hz: { min: 1000, max: 20000, default: 8000, unit: "Hz" },
+    },
+  },
+  reverb: {
+    label: "reverb",
+    params: {
+      size: { min: 0, max: 1, default: 0.5, unit: "" },
+      damping: { min: 0, max: 1, default: 0.5, unit: "" },
+      predelay_ms: { min: 0, max: 200, default: 20, unit: "ms" },
+      mix: { min: 0, max: 1, default: 0.25, unit: "" },
+    },
+  },
+  chorus: {
+    label: "chorus",
+    params: {
+      rate_hz: { min: 0.05, max: 5, default: 0.8, unit: "Hz" },
+      depth: { min: 0, max: 1, default: 0.5, unit: "" },
+      mix: { min: 0, max: 1, default: 0.5, unit: "" },
+    },
+  },
+  phaser: {
+    label: "phaser",
+    params: {
+      rate_hz: { min: 0.05, max: 5, default: 0.5, unit: "Hz" },
+      depth: { min: 0, max: 1, default: 0.6, unit: "" },
+      feedback: { min: 0, max: 0.9, default: 0.4, unit: "" },
+      mix: { min: 0, max: 1, default: 0.5, unit: "" },
+    },
+  },
+  saturation: {
+    label: "saturation",
+    params: {
+      drive_db: { min: 0, max: 36, default: 6, unit: "dB" },
+      tone: { min: 0, max: 1, default: 0.5, unit: "" },
+      output_db: { min: -24, max: 6, default: 0, unit: "dB" },
+      mix: { min: 0, max: 1, default: 1, unit: "" },
+    },
+  },
+  compressor: {
+    label: "compressor",
+    params: {
+      detect: { values: ["peak", "rms"], default: "peak" },
+      threshold_db: { min: -60, max: 0, default: -18, unit: "dB" },
+      ratio: { min: 1, max: 20, default: 4, unit: "" },
+      knee_db: { min: 0, max: 12, default: 6, unit: "dB" },
+      attack_ms: { min: 0.1, max: 100, default: 10, unit: "ms" },
+      release_ms: { min: 5, max: 2000, default: 100, unit: "ms" },
+      makeup_db: { min: 0, max: 24, default: 0, unit: "dB" },
+      sidechain_hp_hz: { min: 0, max: 500, default: 0, unit: "Hz" },
+    },
+  },
+  limiter: {
+    label: "limiter",
+    params: {
+      ceiling_db: { min: -6, max: -0.1, default: -1, unit: "dB" },
+      release_ms: { min: 1, max: 1000, default: 50, unit: "ms" },
+    },
+  },
+  gate: {
+    label: "gate",
+    params: {
+      threshold_db: { min: -80, max: 0, default: -40, unit: "dB" },
+      hysteresis_db: { min: 0, max: 12, default: 3, unit: "dB" },
+      attack_ms: { min: 0.01, max: 50, default: 1, unit: "ms" },
+      hold_ms: { min: 0, max: 500, default: 20, unit: "ms" },
+      release_ms: { min: 5, max: 2000, default: 100, unit: "ms" },
+      range_db: { min: -80, max: 0, default: -80, unit: "dB" },
+    },
+  },
+  deesser: {
+    label: "de-esser",
+    params: {
+      freq_hz: { min: 4000, max: 10000, default: 6500, unit: "Hz" },
+      threshold_db: { min: -60, max: 0, default: -24, unit: "dB" },
+      ratio: { min: 1, max: 20, default: 4, unit: "" },
+    },
+  },
+});
+
+/** The effects a chain may hold, in the order a menu lists them (see `EFFECT_PARAMS`). */
+export const EFFECT_KINDS = Object.freeze(Object.keys(EFFECT_PARAMS));
+
+/**
+ * The ranges the mixer's own levels run over (plan 1d, Task 6): the master's
+ * gain in dB and its loudness target in LUFS with its true-peak ceiling in
+ * dBTP, a return's level and pan, and the level of one send.
+ * @type {Readonly<{master: {gain_db: number[], lufs: number[], true_peak_db: number[]},
+ *                  return: {gain_db: number[], pan: number[]},
+ *                  send: {level_db: number[]}}>}
+ */
+export const MIXER_RANGES = deepFreeze({
+  master: { gain_db: [-24, 12], lufs: [-30, -6], true_peak_db: [-6, -0.1] },
+  return: { gain_db: [-60, 12], pan: [-1, 1] },
+  send: { level_db: [-60, 6] },
+});
+
+/**
+ * The master a song starts with, and what every reader sees when a song has no
+ * master yet: no gain change, and the -14 LUFS streaming reference with a
+ * -1 dBTP ceiling.
+ * @type {Readonly<{gain_db: number, target: Readonly<{lufs: number, true_peak_db: number}>}>}
+ */
+export const DEFAULT_MASTER = deepFreeze({ gain_db: 0, target: { lufs: -14, true_peak_db: -1 } });
+
+/** The longest name a return may carry, in characters. */
+export const MAX_RETURN_NAME = 64;
 
 /** The step lengths a pattern may use, in beats (16ths, 8ths, 32nds, quarters). */
 export const STEP_BEATS_VALUES = Object.freeze([0.125, 0.25, 0.5, 1]);
@@ -333,6 +537,14 @@ const DEVICE_FIELD_PREFIX = "device.";
 const LOCK_FIELD_PREFIX = "locks.";
 
 /**
+ * Prefix of a field path that reaches one parameter inside an insert's `params`,
+ * e.g. `"params.mix"`. The parameter name is everything after the prefix, taken
+ * verbatim: `params` is a Y.Map of its own, so one parameter is one key of it and
+ * two peers editing two parameters of one insert both win.
+ */
+const PARAMS_FIELD_PREFIX = "params.";
+
+/**
  * Prefix of one motion lane's own key on its pattern's map, e.g.
  * `"motion|<bank_id>.<index>|<param>"`. The lane name is everything after the
  * prefix, taken verbatim: a lane is one key of the pattern it belongs to, so
@@ -353,8 +565,14 @@ const MOTION_FIELD_PREFIX = "motion|";
 export const STEP_GUARDS = Symbol("studio.step-guards");
 
 /**
+ * The ref of a song's one master: the only object a ref names without an id.
+ * @type {string}
+ */
+export const MASTER_REF = "master";
+
+/**
  * The ref a command, a lock or a history entry names one object by.
- * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"|"motion"} kind
+ * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"|"motion"|"library"|"insert"|"send"|"return"} kind
  * @param {string} id
  * @returns {string} e.g. `"clip:abc"`, `"take:abc"`, or `"song:meta"` for the song itself
  */
@@ -364,11 +582,16 @@ export function objectRef(kind, id) {
 
 /**
  * Split an object reference back into its kind and id.
+ *
+ * A song's master is the one object with no id of its own, so the bare ref
+ * `"master"` is the one ref without a colon; every other ref is
+ * `"<kind>:<id>"`.
  * @param {string} ref
  * @returns {{kind: string, id: string}|null} null when `ref` is not a ref
  */
 export function parseObjectRef(ref) {
   const text = String(ref ?? "");
+  if (text === MASTER_REF) return { kind: "master", id: "master" };
   const at = text.indexOf(":");
   if (at <= 0 || at === text.length - 1) return null;
   return { kind: text.slice(0, at), id: text.slice(at + 1) };
@@ -453,7 +676,10 @@ export function colorForIndex(index) {
  * Create an empty song document.
  *
  * A new song has no tracks, scenes or clips: `track.add`, `scene.add` and
- * `clip.write` fill it in.
+ * `clip.write` fill it in. Its mixer containers and its master exist from the
+ * start, empty, so two peers' first effects, sends or returns merge into the
+ * container they both already have (a song written before the mixer existed
+ * gets each container when it is first written to; see the header).
  * @param {{title?: string, bpm?: number, key?: string}} [meta]
  * @returns {Y.Doc}
  */
@@ -474,6 +700,10 @@ export function newSongDoc({ title = "Untitled song", bpm = 120, key = "C major"
         ["sections", new Y.Map()],
       ]),
     );
+    song.set("inserts", new Y.Map());
+    song.set("sends", new Y.Map());
+    song.set("returns", new Y.Map());
+    song.set("master", new Y.Map());
   }, "studio:new-song");
   return doc;
 }
@@ -997,6 +1227,256 @@ export function getLibraryFont(doc, id) {
   return entry && entry.get("kind") === LIBRARY_KINDS[0] ? entry : null;
 }
 
+// --- The mixer's containers --------------------------------------------------
+
+/**
+ * The inserts map, keyed by insert id. Writers use this; a song written before
+ * the mixer existed gets the container the first time an effect is added.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function insertMap(doc) {
+  return ensureContainer(doc, "inserts", () => new Y.Map());
+}
+
+/**
+ * Every insert in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, insert: Y.Map<any>}>}
+ */
+export function insertEntries(doc) {
+  return objectEntries(readContainer(doc, "inserts"), "insert");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live insert, or null
+ */
+export function getInsert(doc, id) {
+  return liveObject(readContainer(doc, "inserts"), id);
+}
+
+/**
+ * An insert's live params map — one key per parameter, created from what the
+ * insert holds when it has none (an insert restored by an older peer, say).
+ * Commands write one parameter by setting one key of it.
+ * @param {Y.Map<any>} insert - the live insert
+ * @returns {Y.Map<any>}
+ */
+export function insertParamsMap(insert) {
+  return paramsMapOf(insert);
+}
+
+/**
+ * The chain one owner's inserts make, in the order the engine runs them:
+ * ascending `order`, with the id breaking a tie (two midpoints can land on the
+ * same double after many moves). Read-only: it changes nothing.
+ * @param {Y.Doc} doc
+ * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+ * @returns {Array<{id: string, insert: Y.Map<any>}>}
+ */
+export function insertsForOwner(doc, owner) {
+  return insertEntries(doc)
+    .filter(({ insert }) => insert.get("owner") === owner)
+    .sort((a, b) => byInsertOrder(a.insert, b.insert));
+}
+
+/**
+ * The order two inserts of one chain stand in: by `order`, then by id.
+ *
+ * `order` is fractional, so an effect placed between two others takes the
+ * midpoint of their orders and nothing else in the chain moves. A tie can only
+ * come from two midpoints landing on the same double, and the id keeps the
+ * chain stable when it does.
+ * @param {Y.Map<any>|object} a
+ * @param {Y.Map<any>|object} b
+ * @returns {number}
+ */
+export function byInsertOrder(a, b) {
+  const orderA = readNumber(a, "order");
+  const orderB = readNumber(b, "order");
+  if (orderA !== orderB) return orderA - orderB;
+  const idA = readString(a, "id");
+  const idB = readString(b, "id");
+  return idA < idB ? -1 : idA > idB ? 1 : 0;
+}
+
+/**
+ * The owner an insert's `owner` field names, when it names one: a track's
+ * chain, a return's chain, or the master's.
+ * @param {unknown} owner - e.g. `"track:bass"`, `"return:a"` or `"master"`
+ * @returns {{kind: "track"|"return"|"master", id: string}|null}
+ */
+export function insertOwnerOf(owner) {
+  const target = parseObjectRef(owner);
+  if (!target) return null;
+  if (target.kind !== "track" && target.kind !== "return" && target.kind !== "master") return null;
+  return { kind: target.kind, id: target.id };
+}
+
+/**
+ * The key one send lives under in the song's `sends` map: the track and the
+ * return it joins. Two tracks' ids and two returns' ids never contain the
+ * separator, so one pair is one key.
+ * @param {string} trackId
+ * @param {string} returnId
+ * @returns {string}
+ */
+export function sendKey(trackId, returnId) {
+  return `${trackId}/${returnId}`;
+}
+
+/**
+ * Split a send's key back into the track and the return it joins.
+ * @param {string} key - `"<track_id>/<return_id>"`
+ * @returns {{trackId: string, returnId: string}|null}
+ */
+export function sendParts(key) {
+  const text = String(key ?? "");
+  const at = text.indexOf("/");
+  if (at <= 0 || at === text.length - 1) return null;
+  return { trackId: text.slice(0, at), returnId: text.slice(at + 1) };
+}
+
+/**
+ * The sends map, keyed by `"<track_id>/<return_id>"`. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function sendMap(doc) {
+  return ensureContainer(doc, "sends", () => new Y.Map());
+}
+
+/**
+ * Every send in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, send: Y.Map<any>}>}
+ */
+export function sendEntries(doc) {
+  return objectEntries(readContainer(doc, "sends"), "send");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @param {string} returnId
+ * @returns {Y.Map<any>|null} the live send between that track and that return, or null
+ */
+export function getSend(doc, trackId, returnId) {
+  return liveObject(readContainer(doc, "sends"), sendKey(trackId, returnId));
+}
+
+/**
+ * Every send one track feeds.
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @returns {Array<{id: string, send: Y.Map<any>}>}
+ */
+export function sendsForTrack(doc, trackId) {
+  return sendEntries(doc).filter(({ send }) => send.get("track_id") === trackId);
+}
+
+/**
+ * Every send that feeds one return.
+ * @param {Y.Doc} doc
+ * @param {string} returnId
+ * @returns {Array<{id: string, send: Y.Map<any>}>}
+ */
+export function sendsForReturn(doc, returnId) {
+  return sendEntries(doc).filter(({ send }) => send.get("return_id") === returnId);
+}
+
+/**
+ * The returns map, keyed by return id. Writers use this. A return is a mixer
+ * channel of its own, never a track.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function returnMap(doc) {
+  return ensureContainer(doc, "returns", () => new Y.Map());
+}
+
+/**
+ * Every return in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, return: Y.Map<any>}>}
+ */
+export function returnEntries(doc) {
+  return objectEntries(readContainer(doc, "returns"), "return");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live return, or null
+ */
+export function getReturn(doc, id) {
+  return liveObject(readContainer(doc, "returns"), id);
+}
+
+/**
+ * The song's one master map, created when the song has none. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<any>}
+ */
+export function masterMap(doc) {
+  return ensureContainer(doc, "master", () => new Y.Map());
+}
+
+/**
+ * The master as plain JSON with every default filled in. A song written before
+ * the mixer existed reads as `DEFAULT_MASTER` here without anything being
+ * written to its document.
+ * @param {Y.Doc} doc
+ * @returns {{gain_db: number, target: {lufs: number, true_peak_db: number}}}
+ */
+export function masterSettings(doc) {
+  const master = readContainer(doc, "master");
+  return normalizeMaster(master instanceof Y.Map ? master : null);
+}
+
+/**
+ * The parameters one effect starts with: every parameter of the kind at its
+ * default, as a fresh plain object a command can store.
+ * @param {string} kind - one of `EFFECT_KINDS`
+ * @returns {Object<string, number|string>} empty when the kind is not in the table
+ */
+export function defaultEffectParams(kind) {
+  const spec = EFFECT_PARAMS[kind];
+  if (!spec) return {};
+  const params = {};
+  for (const [name, field] of Object.entries(spec.params)) params[name] = field.default;
+  return params;
+}
+
+/**
+ * The word one effect kind goes by in a sentence: "compressor", "de-esser", or
+ * the kind itself when the table does not know it.
+ * @param {string} kind
+ * @returns {string}
+ */
+export function effectLabel(kind) {
+  return EFFECT_PARAMS[kind]?.label ?? String(kind ?? "");
+}
+
+/** @returns {any} one field of a live Y.Map or of a plain object. */
+function readValue(object, key) {
+  return object instanceof Y.Map ? object.get(key) : object?.[key];
+}
+
+/** @returns {number} one field as a finite number, else 0. */
+function readNumber(object, key) {
+  const value = readValue(object, key);
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** @returns {string} one field as a string, else "". */
+function readString(object, key) {
+  const value = readValue(object, key);
+  return typeof value === "string" ? value : "";
+}
+
 /**
  * The tracks that play one library entry — the question "is this entry in use?"
  * is asked on its effect: a font is in use exactly while a soundfont track's
@@ -1518,6 +1998,9 @@ export function sampleUsers(snap, sampleId) {
  *            patterns: Object<string, object>, steps: Object<string, object>,
  *            midi_maps: Object<string, object>,
  *            library: Object<string, object>,
+ *            inserts: Object<string, object>, sends: Object<string, object>,
+ *            returns: Object<string, object>,
+ *            master: {gain_db: number, target: {lufs: number, true_peak_db: number}},
  *            arrangement: {placements: Object<string, object>,
  *                          markers: Object<string, object>,
  *                          sections: Object<string, object>}}}
@@ -1536,6 +2019,11 @@ export function sampleUsers(snap, sampleId) {
  *   `library` is the song's instrument library, a plain object keyed by the
  *   entry's own id; a song written before the library existed reads it as an
  *   empty object, so every reader sees the same shape either way.
+ *   `inserts` is keyed by insert id, `sends` by "<track_id>/<return_id>" and
+ *   `returns` by return id, and an insert's nested `params` arrives as one plain
+ *   object of parameter name → value. `master` is always there — a song with no
+ *   master reads the defaults — so the engine, the panel and a render all see
+ *   the same shape.
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -1582,6 +2070,10 @@ export function snapshot(doc) {
     steps: snapshotContainer(doc, "steps", normalizeStep),
     midi_maps: snapshotContainer(doc, "midi_maps", normalizeMidiMapping),
     library: snapshotContainer(doc, "library", normalizeLibraryEntry),
+    inserts: snapshotContainer(doc, "inserts", normalizeInsert),
+    sends: snapshotContainer(doc, "sends", normalizeSend),
+    returns: snapshotContainer(doc, "returns", normalizeReturn),
+    master: masterSettings(doc),
     arrangement: snapshotArrangement(doc),
   };
 }
@@ -1680,7 +2172,13 @@ function snapshotArrangement(doc) {
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
  *     track and no two sections overlapping each other, and every placement
  *     still names a clip of its own track — the rules the arrangement
- *     commands enforce on their own edits.
+ *     commands enforce on their own edits;
+ *   - the mixer hangs together: every insert sits in a chain of a track, a
+ *     return or the master that the song still holds and is one of
+ *     `EFFECT_KINDS`, every send names a track and a return the song holds, the
+ *     master's gain and target are inside `MIXER_RANGES`, and no count outgrows
+ *     its limit (inserts per chain, returns per song, sends per track) — the
+ *     rules the mixer commands enforce on their own edits.
  *
  * The history dry-runs an undo's plan on a clone of the document and calls
  * this, so a plan that would leave the song in one of these states is refused
@@ -1756,8 +2254,144 @@ export function checkInvariants(doc) {
   reasons.push(...midiReasons(song));
   reasons.push(...libraryReasons(song, doc));
   reasons.push(...soundfontDeviceReasons(doc));
+  reasons.push(...mixerReasons(song));
 
   return reasons;
+}
+
+/**
+ * What is wrong with a song's mixer, in plain English.
+ *
+ * The rules one mixer edit can look after on its own, checked over the whole
+ * song at once: every insert sits in the chain of a track, a return or the
+ * master the song still holds and is one of `EFFECT_KINDS`; every send names a
+ * track and a return the song still holds; the master's gain and its loudness
+ * target stay inside `MIXER_RANGES`; and no count outgrows its limit — the
+ * effects of one chain, the returns of one song and the sends of one track.
+ *
+ * The history dry-runs an undo's plan on a clone and calls this, so a plan that
+ * would remove a track's chain without putting the track back, or leave a send
+ * pointing at a return that is gone, is refused whole instead of half-landing.
+ *
+ * The amp cap (`LIMITS.ampInsertsPerSong`) is not checked here: no effect of
+ * kind `amp` can enter the document until PR C, which adds the cap with the
+ * kind.
+ * @param {object} song - a snapshot
+ * @returns {string[]}
+ */
+function mixerReasons(song) {
+  const reasons = [];
+  const inserts = Object.values(song.inserts ?? {});
+  const sends = Object.values(song.sends ?? {});
+  const returns = Object.values(song.returns ?? {});
+  const trackIds = new Set(song.tracks.map((track) => track.id));
+  const returnIds = new Set(returns.map((item) => item.id));
+
+  if (returns.length > LIMITS.returnsPerSong) {
+    reasons.push(
+      `The song would hold ${returns.length} returns; a song can hold at most ${LIMITS.returnsPerSong} returns.`,
+    );
+  }
+  reasons.push(...duplicateIdReasons(returns, "return"));
+
+  const perChain = new Map();
+  for (const insert of inserts) {
+    const which = `The insert "${insert.id}"`;
+    const owner = insertOwnerOf(insert.owner);
+    if (!owner) {
+      reasons.push(
+        `${which} would sit in the chain "${insert.owner}", which is not a track, a return or the master.`,
+      );
+      continue;
+    }
+    if (owner.kind === "track" && !trackIds.has(owner.id)) {
+      reasons.push(`${which} would be left without its track: there is no track "${owner.id}" in the song.`);
+      continue;
+    }
+    if (owner.kind === "return" && !returnIds.has(owner.id)) {
+      reasons.push(`${which} would be left without its return: there is no return "${owner.id}" in the song.`);
+      continue;
+    }
+    if (!EFFECT_PARAMS[insert.kind]) {
+      reasons.push(
+        `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
+      );
+    }
+    perChain.set(insert.owner, (perChain.get(insert.owner) ?? 0) + 1);
+  }
+  for (const [owner, count] of perChain) {
+    if (count <= LIMITS.insertsPerChain) continue;
+    const where = chainWhere(song, owner);
+    reasons.push(
+      `The chain on ${where} would hold ${count} effects; a chain holds at most ${LIMITS.insertsPerChain} effects.`,
+    );
+  }
+
+  const perTrack = new Map();
+  for (const send of sends) {
+    if (!trackIds.has(send.track_id)) {
+      reasons.push(
+        `A send would be left without its track: there is no track "${send.track_id}" in the song.`,
+      );
+      continue;
+    }
+    if (!returnIds.has(send.return_id)) {
+      reasons.push(
+        `The send from "${send.track_id}" would be left without its return: there is no return "${send.return_id}" in the song.`,
+      );
+      continue;
+    }
+    perTrack.set(send.track_id, (perTrack.get(send.track_id) ?? 0) + 1);
+  }
+  for (const [trackId, count] of perTrack) {
+    if (count <= LIMITS.sendsPerTrack) continue;
+    const track = song.tracks.find((item) => item.id === trackId);
+    reasons.push(
+      `Track "${nameOrId(track?.name, trackId)}" would feed ${count} returns; a track sends to at most ${LIMITS.sendsPerTrack} returns.`,
+    );
+  }
+
+  const master = song.master ?? DEFAULT_MASTER;
+  const gain = master.gain_db;
+  if (!(gain >= MIXER_RANGES.master.gain_db[0] && gain <= MIXER_RANGES.master.gain_db[1])) {
+    reasons.push(
+      `The master's gain would be ${gain} dB; it runs from ${MIXER_RANGES.master.gain_db[0]} to ${MIXER_RANGES.master.gain_db[1]} dB.`,
+    );
+  }
+  const target = master.target ?? DEFAULT_MASTER.target;
+  const lufs = target.lufs;
+  const peak = target.true_peak_db;
+  if (!(lufs >= MIXER_RANGES.master.lufs[0] && lufs <= MIXER_RANGES.master.lufs[1])) {
+    reasons.push(
+      `The master's target would be ${lufs} LUFS; a target runs from ${MIXER_RANGES.master.lufs[0]} to ${MIXER_RANGES.master.lufs[1]} LUFS.`,
+    );
+  }
+  if (!(peak >= MIXER_RANGES.master.true_peak_db[0] && peak <= MIXER_RANGES.master.true_peak_db[1])) {
+    reasons.push(
+      `The master's true-peak ceiling would be ${peak} dBTP; it runs from ${MIXER_RANGES.master.true_peak_db[0]} to ${MIXER_RANGES.master.true_peak_db[1]} dBTP.`,
+    );
+  }
+
+  return reasons;
+}
+
+/**
+ * What a sentence calls the chain one owner's inserts sit in: `the master`, or
+ * the track's or return's name.
+ * @param {object} song - a snapshot
+ * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+ * @returns {string}
+ */
+function chainWhere(song, owner) {
+  const target = insertOwnerOf(owner);
+  if (!target) return `"${owner}"`;
+  if (target.kind === "master") return "the master";
+  if (target.kind === "track") {
+    const track = song.tracks.find((item) => item.id === target.id);
+    return `track "${nameOrId(track?.name, target.id)}"`;
+  }
+  const item = (song.returns ?? {})[target.id];
+  return `return "${nameOrId(item?.name, target.id)}"`;
 }
 
 /**
@@ -2442,6 +3076,18 @@ function barsText(bars) {
  *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
  *   - `"library:abc|*"` does the same for one library entry, and
  *     `"library:abc|credit"` (and its siblings) writes one field of one;
+ *   - `"insert:abc|*"` does the same for one insert, and
+ *     `"insert:abc|params.mix"` writes ONE parameter of one insert — a
+ *     parameter is its own field of the insert's `params` map, so it undoes
+ *     alone and two peers editing two parameters of one insert both win —
+ *     while `"insert:abc|order"` (and its siblings) writes one field;
+ *   - `"send:<track>/<return>|*"` does the same for one send, and a plain field
+ *     name (`"level_db"`, `"pre"`) writes one field of it;
+ *   - `"return:abc|*"` does the same for one return, and a plain field name
+ *     (`"name"`, `"gain_db"`, `"pan"`, `"mute"`) writes one field of one;
+ *   - `"master|gain_db"` and `"master|target"` write the master's two fields,
+ *     and `"master|*"` writes the master whole (a `null` writes the defaults
+ *     back rather than taking the master away: every song has one);
  *   - `"motion:<clip>/<pattern>/<bank>.<index>|<param>|*"` writes ONE motion
  *     lane of one pattern: an array of `{step_frac, value}` points, or `null`
  *     to take the lane away. A lane is one key of its pattern
@@ -2504,7 +3150,13 @@ export function applyBeforeAfter(doc, plan) {
       case "step":
       case "midi":
       case "library":
+      case "insert":
+      case "send":
+      case "return":
         writeContainerObject(doc, target.kind, target.id, split.field, value);
+        break;
+      case "master":
+        writeMaster(doc, split.field, value);
         break;
       case "motion":
         writeMotionLane(doc, target.id, split.field, value);
@@ -2559,6 +3211,17 @@ export function readField(doc, ref, field = "*") {
     if (!take) return ABSENT;
     if (field === "*") return toPlain(take);
     return readPath(take, fieldPath(field));
+  }
+
+  if (target.kind === "master") {
+    // Every song has a master: a song without one reads the defaults, exactly as
+    // the snapshot, the engine and the panel see it. So `master|gain_db` answers
+    // the value the song plays with, not "nothing" (see `masterSettings`).
+    const master = masterSettings(doc);
+    if (field === "*") return master;
+    if (field === "target") return cloneJson(master.target);
+    const value = master[field];
+    return value === undefined ? ABSENT : cloneJson(value);
   }
 
   if (OBJECT_MAP_OF[target.kind]) {
@@ -2623,6 +3286,11 @@ function fieldPath(field) {
   // then undo independently (a step carries at most eight of them).
   if (field.startsWith(LOCK_FIELD_PREFIX) && field.length > LOCK_FIELD_PREFIX.length) {
     return ["locks", field.slice(LOCK_FIELD_PREFIX.length)];
+  }
+  // One parameter inside an insert's `params`: one field of one effect, so a
+  // parameter undoes alone whatever its neighbours hold.
+  if (field.startsWith(PARAMS_FIELD_PREFIX) && field.length > PARAMS_FIELD_PREFIX.length) {
+    return ["params", field.slice(PARAMS_FIELD_PREFIX.length)];
   }
   // One field inside a track's device: a soundfont track's instrument is the
   // pair (font, preset), so setting the font and setting the program are two
@@ -2812,9 +3480,12 @@ const OBJECT_MAP_OF = Object.freeze({
   step: "steps",
   midi: "midi_maps",
   library: "library",
+  insert: "inserts",
+  send: "sends",
+  return: "returns",
 });
 
-/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern, step or MIDI mapping, or null. */
+/** @returns {Y.Map<any>|null} one live object of an id-keyed container (a sample, insert, send, return, …), or null. */
 function containerObject(doc, kind, id) {
   const key = OBJECT_MAP_OF[kind];
   if (!key) return null;
@@ -2822,18 +3493,21 @@ function containerObject(doc, kind, id) {
 }
 
 /**
- * Write one field of a sampler object or a MIDI mapping, or (re)create/delete
- * it whole.
+ * Write one field of a sampler object, a MIDI mapping, a library entry, an
+ * insert, a send or a return, or (re)create/delete it whole.
  *
  * A pad and a step carry no `id` of their own: their container key is their
  * identity (`<track>/<bank>/<index>` and `<clip>/<pattern>/<at>/<bank>.<index>`),
- * so nothing here invents one. A sample, slice, bank, pattern and MIDI mapping
- * do carry one, and it is the same value their key holds.
+ * so nothing here invents one. A send carries no id either: the pair it joins
+ * (`<track>/<return>`) is its identity. A sample, slice, bank, pattern, MIDI
+ * mapping, library entry, insert and return do carry one, and it is the same
+ * value their key holds.
  *
  * A pattern's motion is stored as one key per lane on the pattern's own map
  * (`setMotionLane`), and a whole-pattern restore (an undo of `pattern.remove`,
  * say) puts each lane back under its own key (`patternMapFrom`), so the pattern
- * it restores is still two writers' safe.
+ * it restores is still two writers' safe. An insert's `params` is handled the
+ * same way by `writeInsert`: it is a map of its own, one key per parameter.
  */
 function writeContainerObject(doc, kind, id, field, value) {
   const key = OBJECT_MAP_OF[kind];
@@ -2843,10 +3517,14 @@ function writeContainerObject(doc, kind, id, field, value) {
     return;
   }
   const map = ensureContainer(doc, key, () => new Y.Map());
+  if (kind === "insert") {
+    writeInsert(map, id, field, value);
+    return;
+  }
   if (field === "*") {
     const object = cloneJson(value) ?? {};
     delete object._index;
-    const hasOwnId = kind !== "pad" && kind !== "step";
+    const hasOwnId = kind !== "pad" && kind !== "step" && kind !== "send";
     const stored = hasOwnId ? { ...object, id: object.id ?? id } : object;
     map.set(id, kind === "pattern" ? patternMapFrom(stored) : objectMap(stored));
     return;
@@ -2858,6 +3536,113 @@ function writeContainerObject(doc, kind, id, field, value) {
     return;
   }
   writeField(object, field, value);
+}
+
+/**
+ * Write one field of an insert, or (re)create/delete it whole.
+ *
+ * `params` is the one nested container the song's objects have: it holds one key
+ * per parameter, so `insert.set` of one parameter is one field write that undoes
+ * alone, and two peers editing two parameters of one insert both keep their
+ * writes. Every way an insert is written — a creation, a whole-object restore —
+ * builds it as that same map, so a restored insert is still editable one
+ * parameter at a time.
+ * @param {Y.Map<any>} map - the live inserts map
+ * @param {string} id
+ * @param {string} field - `"*"`, `"params"`, `"params.<name>"` or a plain field
+ * @param {any} value
+ * @returns {void}
+ */
+function writeInsert(map, id, field, value) {
+  if (field === "*") {
+    const object = cloneJson(value) ?? {};
+    delete object._index;
+    const params = paramsObject(object.params);
+    delete object.params;
+    const stored = objectMap({ ...object, id: object.id ?? id });
+    stored.set("params", objectMap(params));
+    map.set(id, stored);
+    return;
+  }
+  const insert = map.get(id);
+  if (!(insert instanceof Y.Map)) throw new Error(`Studio: there is no insert "${id}" to write to`);
+  if (field === "params") {
+    replaceParams(insert, value);
+    return;
+  }
+  if (field.startsWith(PARAMS_FIELD_PREFIX)) {
+    const params = paramsMapOf(insert);
+    const name = field.slice(PARAMS_FIELD_PREFIX.length);
+    if (value === ABSENT) params.delete(name);
+    else params.set(name, cloneJson(value));
+    return;
+  }
+  writeField(insert, field, value);
+}
+
+/** @returns {Y.Map<any>} an insert's params map, made from what it holds when it has none. */
+function paramsMapOf(insert) {
+  const current = insert.get("params");
+  if (current instanceof Y.Map) return current;
+  const created = new Y.Map(Object.entries(paramsObject(current)));
+  insert.set("params", created);
+  return created;
+}
+
+/**
+ * Replace an insert's whole parameter set, keeping each parameter its own key:
+ * the named parameters are written and the ones the value does not name are
+ * taken away, so a parameter another instance moved is either kept whole or
+ * removed whole, never half-overwritten.
+ * @param {Y.Map<any>} insert - the live insert
+ * @param {any} value - a plain `{name: value}` object, or `null` for none
+ * @returns {void}
+ */
+function replaceParams(insert, value) {
+  const params = paramsMapOf(insert);
+  const wanted = paramsObject(value);
+  for (const [name, item] of Object.entries(wanted)) params.set(name, cloneJson(item));
+  for (const name of [...params.keys()]) {
+    if (Object.hasOwn(wanted, name)) continue;
+    params.delete(name);
+  }
+}
+
+/** @returns {Object<string, any>} a live or plain parameter map as a plain object. */
+function paramsObject(value) {
+  const plain = toPlain(value);
+  return plain && typeof plain === "object" && !Array.isArray(plain) ? plain : {};
+}
+
+/**
+ * Write the song's master: one of its two fields, or the whole of it.
+ *
+ * The master is the one object every song has, so a write of `null` puts the
+ * default back (gain 0, the -14 LUFS target with a -1 dBTP ceiling) rather than
+ * taking the map away: a reader never has to ask whether the master is there.
+ * `target` is one field, written whole, because that is how a command and the
+ * panel set it: one `master.set` is one or two field writes.
+ * @param {Y.Doc} doc
+ * @param {string} field - `"*"`, `"gain_db"` or `"target"`
+ * @param {any} value
+ * @returns {void}
+ */
+function writeMaster(doc, field, value) {
+  const master = masterMap(doc);
+  if (field === "*") {
+    const plain = value === ABSENT ? cloneJson(DEFAULT_MASTER) : cloneJson(value);
+    master.set("gain_db", numberOr(plain?.gain_db, DEFAULT_MASTER.gain_db));
+    master.set("target", normalizeMaster(plain).target);
+    return;
+  }
+  if (field !== "gain_db" && field !== "target") {
+    throw new Error(`Studio: the master has no field "${field}"; it has gain_db and target`);
+  }
+  if (value === ABSENT) {
+    master.set(field, cloneJson(DEFAULT_MASTER[field]));
+    return;
+  }
+  master.set(field, field === "target" ? normalizeMaster({ target: value }).target : cloneJson(value));
 }
 
 /**
@@ -3288,6 +4073,102 @@ function normalizeLibraryEntry(id, value) {
     licence: typeof plain.licence === "string" ? plain.licence : "",
     credit: typeof plain.credit === "string" ? plain.credit : "",
     author_label: typeof plain.author_label === "string" ? plain.author_label : "",
+  };
+}
+
+/**
+ * An insert as a snapshot carries it: every field present, nothing extra, and
+ * its parameters as one plain object.
+ *
+ * A parameter whose stored value is not the type the kind has, or is missing
+ * altogether, reads as its default — the way `normalizePad` reads a broken
+ * field. A number that IS a number is kept as it is, even out of range, which
+ * is what lets a hand-written or restored value be reported instead of quietly
+ * tidied into a valid one.
+ */
+function normalizeInsert(id, value) {
+  const plain = stripHints(value);
+  const kind = typeof plain.kind === "string" ? plain.kind : "";
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    owner: typeof plain.owner === "string" ? plain.owner : "",
+    order: numberOr(plain.order, 0),
+    kind,
+    bypass: plain.bypass === true,
+    params: normalizeEffectParams(kind, plain.params),
+  };
+}
+
+/**
+ * One effect's parameters as a snapshot carries them: every parameter the kind
+ * has, in the table's order, each at its stored value when that value has the
+ * right type and at its default otherwise.
+ * @param {string} kind
+ * @param {unknown} stored - the insert's `params`, live or plain
+ * @returns {Object<string, number|string>}
+ */
+function normalizeEffectParams(kind, stored) {
+  const params = plainParamsOf(stored);
+  const spec = EFFECT_PARAMS[kind];
+  if (!spec) return { ...params };
+  const out = {};
+  for (const [name, field] of Object.entries(spec.params)) {
+    const value = params[name];
+    if (field.values) out[name] = field.values.includes(value) ? value : field.default;
+    else out[name] = typeof value === "number" && Number.isFinite(value) ? value : field.default;
+  }
+  return out;
+}
+
+/** @returns {Object<string, any>} a live or plain parameter map as plain JSON. */
+function plainParamsOf(stored) {
+  if (!stored || typeof stored !== "object") return {};
+  const plain = toPlain(stored);
+  return plain && typeof plain === "object" ? plain : {};
+}
+
+/**
+ * A send as a snapshot carries it: every field present, nothing extra. The key
+ * it lives under says which track and return it joins, so a send whose own
+ * fields were damaged still reads as the pair it is.
+ */
+function normalizeSend(id, value) {
+  const plain = stripHints(value);
+  const parts = sendParts(id);
+  return {
+    track_id: typeof plain.track_id === "string" ? plain.track_id : parts?.trackId ?? "",
+    return_id: typeof plain.return_id === "string" ? plain.return_id : parts?.returnId ?? "",
+    level_db: numberOr(plain.level_db, 0),
+    pre: plain.pre === true,
+  };
+}
+
+/** A return as a snapshot carries it: every field present, nothing extra. */
+function normalizeReturn(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    name: typeof plain.name === "string" ? plain.name : "",
+    gain_db: numberOr(plain.gain_db, 0),
+    pan: numberOr(plain.pan, 0),
+    mute: plain.mute === true,
+  };
+}
+
+/**
+ * The master as a snapshot carries it: every field present, the fields a song
+ * does not hold filled in from `DEFAULT_MASTER`. Read-only — a song with no
+ * master is not written to by being read.
+ */
+function normalizeMaster(value) {
+  const plain = stripHints(value);
+  const target = plain.target && typeof plain.target === "object" ? plain.target : {};
+  return {
+    gain_db: numberOr(plain.gain_db, DEFAULT_MASTER.gain_db),
+    target: {
+      lufs: numberOr(target.lufs, DEFAULT_MASTER.target.lufs),
+      true_peak_db: numberOr(target.true_peak_db, DEFAULT_MASTER.target.true_peak_db),
+    },
   };
 }
 

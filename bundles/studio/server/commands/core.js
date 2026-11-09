@@ -17,7 +17,8 @@
  * which plays one preset of one font of the song's library. A soundfont track's
  * instrument is set with `track.set_font` and `track.set_program` (see
  * `instruments.js`), never by swapping its device. The take commands themselves
- * live in `takes.js`.
+ * live in `takes.js`, the sampler's in `sampler.js`, and the mixer's in
+ * `mixer.js` — whose chains and sends `track.remove` takes with the track.
  *
  * Every `apply` validates everything it needs before it writes anything, so a
  * refusal (a limit, an unknown object, a note past the clip's end) leaves the
@@ -49,6 +50,9 @@ import {
   getLibraryFont,
   getScene,
   getTrack,
+  insertEntries,
+  insertMap,
+  insertOwnerOf,
   isAudioClip,
   isAudioTrack,
   isPatternClip,
@@ -65,6 +69,9 @@ import {
   patternMap,
   placementEntries,
   placementMap,
+  sendEntries,
+  sendKey,
+  sendMap,
   songMap,
   stepEntries,
   stepKey,
@@ -502,6 +509,59 @@ function samplerRefsOfTrack(snap, trackId) {
 }
 
 /**
+ * Delete the mixer objects a track removal takes with it: the effects of that
+ * track's chain, and every send it feeds.
+ *
+ * A track's chain and its sends are the track's own mix, so they go in the same
+ * step and come back with it in one undo. A return's chain is not touched — a
+ * return is not a track — and neither is another track's.
+ * @param {Y.Doc} doc
+ * @param {{trackIds?: Set<string>}} doomed - the tracks being removed
+ * @param {Object<string, any>} before - the removal's before map, filled in
+ * @param {Object<string, any>} after - the removal's after map, filled in
+ * @returns {void}
+ */
+function removeMixerObjects(doc, { trackIds = new Set() }, before, after) {
+  if (trackIds.size === 0) return;
+  for (const { id, insert } of insertEntries(doc)) {
+    const owner = insertOwnerOf(insert.get("owner"));
+    if (!owner || owner.kind !== "track" || !trackIds.has(owner.id)) continue;
+    const field = fieldKey(objectRef("insert", id), "*");
+    before[field] = cloneJson(toPlain(insert));
+    after[field] = ABSENT;
+    insertMap(doc).delete(id);
+  }
+  for (const { id, send } of sendEntries(doc)) {
+    if (!trackIds.has(send.get("track_id"))) continue;
+    const field = fieldKey(objectRef("send", id), "*");
+    before[field] = cloneJson(toPlain(send));
+    after[field] = ABSENT;
+    sendMap(doc).delete(id);
+  }
+}
+
+/**
+ * A track's effects and the sends it feeds, as refs a lock/focus check has to
+ * see with the track.
+ * @param {object} snap
+ * @param {string} trackId
+ * @returns {string[]}
+ */
+function mixerRefsOfTrack(snap, trackId) {
+  const owner = objectRef("track", trackId);
+  const refs = [];
+  for (const insert of Object.values(snap.inserts ?? {})) {
+    if (insert.owner === owner) refs.push(objectRef("insert", insert.id));
+  }
+  for (const send of Object.values(snap.sends ?? {})) {
+    if (send.track_id === trackId) {
+      refs.push(objectRef("send", sendKey(send.track_id, send.return_id)));
+    }
+  }
+  return refs;
+}
+
+/**
  * Clamp an audio clip's comp to a (possibly shorter) clip: a segment that runs
  * past the new end is cut there, and one that starts past it goes away.
  * @param {Array<{take_id: string, from_beat: number, to_beat: number}>} segments
@@ -851,6 +911,9 @@ defineCommand({
     }
     // A sampler track's kit and its clips' patterns go with it.
     refs.push(...samplerRefsOfTrack(snap, args.track_id));
+    // So do the effects of the track's own chain and the sends it feeds: its
+    // mix is the track's, and one undo puts it all back.
+    refs.push(...mixerRefsOfTrack(snap, args.track_id));
     return refs;
   },
   apply(doc, args) {
@@ -883,6 +946,7 @@ defineCommand({
     removeTakes(doc, removedClips, before, after);
     removePlacements(doc, { clipIds: removedClips, trackIds: new Set([args.track_id]) }, before, after);
     removeSamplerObjects(doc, { clipIds: removedClips, trackIds: new Set([args.track_id]) }, before, after);
+    removeMixerObjects(doc, { trackIds: new Set([args.track_id]) }, before, after);
 
     const clipsMap = clipMap(doc);
     for (const { id } of clips) clipsMap.delete(id);
