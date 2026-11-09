@@ -1328,13 +1328,19 @@ export function byInsertOrder(a, b) {
 /**
  * The owner an insert's `owner` field names, when it names one: a track's
  * chain, a return's chain, or the master's.
+ *
+ * The master is exactly the bare ref `MASTER_REF`: it is the one object with no
+ * id of its own, so `"master:anything"` names nothing at all (a command refuses
+ * it and `checkInvariants` reports it) rather than quietly becoming the song's
+ * master.
  * @param {unknown} owner - e.g. `"track:bass"`, `"return:a"` or `"master"`
  * @returns {{kind: "track"|"return"|"master", id: string}|null}
  */
 export function insertOwnerOf(owner) {
+  if (owner === MASTER_REF) return { kind: "master", id: "master" };
   const target = parseObjectRef(owner);
   if (!target) return null;
-  if (target.kind !== "track" && target.kind !== "return" && target.kind !== "master") return null;
+  if (target.kind !== "track" && target.kind !== "return") return null;
   return { kind: target.kind, id: target.id };
 }
 
@@ -2292,9 +2298,19 @@ export function checkInvariants(doc) {
  * target stay inside `MIXER_RANGES`; and no count outgrows its limit — the
  * effects of one chain, the returns of one song and the sends of one track.
  *
+ * The values are checked as well as the structure, and against the same tables
+ * the commands check them with: every parameter an insert holds is a parameter
+ * its kind has, inside that parameter's own range or one of its values; a
+ * return's gain and pan and a send's level are inside `MIXER_RANGES`; and so are
+ * the master's three numbers. A `normalizeInsert` keeps a number that is out of
+ * range but not one that is the wrong type, so those are the values a
+ * hand-written or restored one can be off in — checked exactly the way a
+ * command checks them.
+ *
  * The history dry-runs an undo's plan on a clone and calls this, so a plan that
  * would remove a track's chain without putting the track back, or leave a send
  * pointing at a return that is gone, is refused whole instead of half-landing.
+ * Only a reason the plan *creates* blocks it (see `dryRun` in history.js).
  *
  * The amp cap (`LIMITS.ampInsertsPerSong`) is not checked here: no effect of
  * kind `amp` can enter the document until PR C, which adds the cap with the
@@ -2309,6 +2325,9 @@ function mixerReasons(song) {
   const returns = Object.values(song.returns ?? {});
   const trackIds = new Set(song.tracks.map((track) => track.id));
   const returnIds = new Set(returns.map((item) => item.id));
+  const [returnGainLow, returnGainHigh] = MIXER_RANGES.return.gain_db;
+  const [returnPanLow, returnPanHigh] = MIXER_RANGES.return.pan;
+  const [sendLow, sendHigh] = MIXER_RANGES.send.level_db;
 
   if (returns.length > LIMITS.returnsPerSong) {
     reasons.push(
@@ -2316,6 +2335,19 @@ function mixerReasons(song) {
     );
   }
   reasons.push(...duplicateIdReasons(returns, "return"));
+  for (const item of returns) {
+    const which = `The return "${nameOrId(item.name, item.id)}"`;
+    if (!(item.gain_db >= returnGainLow && item.gain_db <= returnGainHigh)) {
+      reasons.push(
+        `${which} would be at ${item.gain_db} dB; a return runs from ${returnGainLow} to ${returnGainHigh} dB.`,
+      );
+    }
+    if (!(item.pan >= returnPanLow && item.pan <= returnPanHigh)) {
+      reasons.push(
+        `${which} would be panned to ${item.pan}; a return's pan runs from ${returnPanLow} to ${returnPanHigh}.`,
+      );
+    }
+  }
 
   const perChain = new Map();
   for (const insert of inserts) {
@@ -2339,6 +2371,8 @@ function mixerReasons(song) {
       reasons.push(
         `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
       );
+    } else {
+      reasons.push(...insertParamReasons(which, insert.kind, insert.params));
     }
     perChain.set(insert.owner, (perChain.get(insert.owner) ?? 0) + 1);
   }
@@ -2363,6 +2397,11 @@ function mixerReasons(song) {
         `The send from "${send.track_id}" would be left without its return: there is no return "${send.return_id}" in the song.`,
       );
       continue;
+    }
+    if (!(send.level_db >= sendLow && send.level_db <= sendHigh)) {
+      reasons.push(
+        `The send from "${send.track_id}" would be at ${send.level_db} dB; a send runs from ${sendLow} to ${sendHigh} dB.`,
+      );
     }
     perTrack.set(send.track_id, (perTrack.get(send.track_id) ?? 0) + 1);
   }
@@ -2395,6 +2434,45 @@ function mixerReasons(song) {
     );
   }
 
+  return reasons;
+}
+
+/**
+ * What is wrong with the parameters one insert holds, in plain English: a
+ * parameter its kind does not have, a chooser set to a value that is not one of
+ * its own, a number outside the range the table gives it.
+ *
+ * These are the values a snapshot can carry off the table: `normalizeInsert`
+ * keeps a number that is out of range (the type is right) and drops one of the
+ * wrong type, and it keeps every parameter as it is when the kind itself is
+ * unknown (reported by the caller instead). Each message names the insert, the
+ * parameter and the range, the way a command's refusal does.
+ * @param {string} which - what the sentence calls the insert, e.g. `The insert "i1"`
+ * @param {string} kind - one of `EFFECT_KINDS`
+ * @param {Object<string, any>} params - the insert's parameters
+ * @returns {string[]}
+ */
+function insertParamReasons(which, kind, params) {
+  const reasons = [];
+  for (const [name, value] of Object.entries(params ?? {})) {
+    const field = effectParamSpec(kind, name);
+    if (!field) {
+      reasons.push(`${which} would hold a parameter "${name}", which the ${effectLabel(kind)} does not have.`);
+      continue;
+    }
+    if (field.values) {
+      if (!field.values.includes(value)) {
+        reasons.push(
+          `${which} would set "${name}" to ${typeof value === "string" ? `"${value}"` : String(value)}; it is one of ${field.values.join(", ")}.`,
+        );
+      }
+      continue;
+    }
+    if (value >= field.min && value <= field.max) continue;
+    reasons.push(
+      `${which} would set "${name}" to ${value}; it runs from ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}.`,
+    );
+  }
   return reasons;
 }
 

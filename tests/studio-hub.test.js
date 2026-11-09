@@ -17,10 +17,12 @@ import { createClient } from "@libsql/client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AclError } from "../servers/shared/project-acl.js";
+// The very module instance `server/doc.js` gets from `import * as Y from "yjs"`.
+import * as Y from "../bundles/studio/node_modules/yjs/dist/yjs.mjs";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
-import { appendHistory, getSongRow } from "../bundles/studio/server/store.js";
+import { appendHistory, createSongWithState, getSongRow } from "../bundles/studio/server/store.js";
 
 /** The project every song in these tests belongs to. */
 const PROJECT = 21;
@@ -763,6 +765,99 @@ test("reopen after restart reproduces the same snapshot", async (t) => {
   assert.equal(next.entry.author.kind, "human");
 });
 
+test("an old song loaded by the hub gets its mixer containers once", async (t) => {
+  const db = scratchDb(t);
+  await initStudioTables(db);
+  const acl = fakeAcl();
+  const hub = createHub({ db, acl });
+
+  // A song written before plan 1d: the containers 1a to 1c created, and neither
+  // the mixer's nor the library's. Its first update is the whole document.
+  const old = new Y.Doc();
+  old.transact(() => {
+    const song = old.getMap("song");
+    song.set("meta", { title: "An old song", bpm: 110, meter: [4, 4], key: "A minor" });
+    const tracks = new Y.Array();
+    tracks.push([
+      new Y.Map([
+        ["id", "bass"],
+        ["name", "Bass"],
+        ["color", "#E8C07A"],
+        ["device", { engine: "sunvox", type: "Analog generator", params: {} }],
+        ["mute", false],
+        ["solo", false],
+        ["gain_db", 0],
+        ["pan", 0],
+        ["locked", false],
+      ]),
+    ]);
+    song.set("tracks", tracks);
+    song.set("scenes", new Y.Array());
+    song.set("clips", new Y.Map());
+    song.set("takes", new Y.Map());
+  });
+  const update = Y.encodeStateAsUpdate(old);
+  old.destroy();
+  const { id: song_id } = await createSongWithState(db, {
+    project_id: PROJECT,
+    title: "An old song",
+    update,
+  });
+
+  // Loading it makes all five containers, empty and together, as a song created
+  // today has them.
+  const opened = await hub.openSong(song_id);
+  const song = opened.doc.getMap("song");
+  for (const key of ["inserts", "sends", "returns", "master", "library"]) {
+    assert.ok(song.get(key) instanceof Y.Map, `${key} was made when the song was loaded`);
+  }
+  assert.deepEqual(opened.snapshot.inserts, {});
+  assert.deepEqual(opened.snapshot.sends, {});
+  assert.deepEqual(opened.snapshot.returns, {});
+  assert.deepEqual(opened.snapshot.library, {});
+  assert.deepEqual(opened.snapshot.master, { gain_db: 0, target: { lufs: -14, true_peak_db: -1 } });
+
+  // Two first writes: each goes into the container made at load, so neither can
+  // make a container of its own and lose the other's.
+  const first = await hub.runCommand({
+    song_id,
+    cmd_id: "old-1",
+    command: "insert.add",
+    args: { id: "eq", owner: "track:bass", kind: "eq" },
+    author: HUMAN,
+  });
+  assert.equal(first.ok, true, `insert.add was refused: ${first.error}`);
+  const addedReturn = await hub.runCommand({
+    song_id,
+    cmd_id: "old-2",
+    command: "return.add",
+    args: { id: "plate" },
+    author: HUMAN,
+  });
+  assert.equal(addedReturn.ok, true, `return.add was refused: ${addedReturn.error}`);
+  const second = await hub.runCommand({
+    song_id,
+    cmd_id: "old-3",
+    command: "send.set",
+    args: { track_id: "bass", return_id: "plate", level_db: -6 },
+    author: HUMAN,
+  });
+  assert.equal(second.ok, true, `send.set was refused: ${second.error}`);
+  const snap = (await hub.openSong(song_id)).snapshot;
+  assert.deepEqual(Object.keys(snap.inserts), ["eq"]);
+  assert.deepEqual(Object.keys(snap.sends), ["bass/plate"]);
+  assert.deepEqual(Object.keys(snap.returns), ["plate"]);
+
+  // A restarted hub still finds them: the first step after the load carried the
+  // containers into the stored log with it, so the later writes are not stranded
+  // on a container the log never mentions.
+  const restarted = createHub({ db, acl });
+  const reopened = await restarted.openSong(song_id);
+  assert.deepEqual(Object.keys(reopened.snapshot.inserts), ["eq"]);
+  assert.deepEqual(Object.keys(reopened.snapshot.sends), ["bass/plate"]);
+  assert.deepEqual(Object.keys(reopened.snapshot.returns), ["plate"]);
+});
+
 test("resent cmd_id returns first result and applies once", async (t) => {
   const { hub, db } = await setup(t);
   const song_id = await seedSong(hub);
@@ -1413,6 +1508,180 @@ test("an agent cannot undo or redo motion on a locked track", async (t) => {
     null,
     "and the lane stays gone",
   );
+});
+
+test("an agent's undo of an effect change on a locked track is refused", async (t) => {
+  const { hub, db } = await setup(t);
+  const song_id = await seedSong(hub);
+
+  // The operator puts a reverb on Bass, moves its mix, then locks the track.
+  const added = await hub.runCommand({
+    song_id,
+    cmd_id: "mix-add",
+    command: "insert.add",
+    args: { id: "verb", owner: "track:bass", kind: "reverb" },
+    author: HUMAN,
+  });
+  assert.equal(added.ok, true, `insert.add was refused: ${added.error}`);
+  const mixed = await hub.runCommand({
+    song_id,
+    cmd_id: "mix-set",
+    command: "insert.set",
+    args: { id: "verb", params: { mix: 0.6 } },
+    author: HUMAN,
+  });
+  assert.equal(mixed.ok, true, `insert.set was refused: ${mixed.error}`);
+  const locked = await hub.runCommand({
+    song_id,
+    cmd_id: "mix-lock",
+    command: "track.lock",
+    args: { track_id: "bass" },
+    author: HUMAN,
+  });
+  assert.equal(locked.ok, true, `track.lock was refused: ${locked.error}`);
+
+  // An insert belongs to the track whose chain it sits in, so an agent's undo of
+  // the operator's parameter edit meets the same lock its own write would.
+  const before = await updateSeqs(db, song_id);
+  const refusedUndo = refuses(
+    await hub.undo({ song_id, cmd_id: "mix-undo", entry_id: mixed.entry.id, author: AGENT }),
+    "locked",
+  );
+  assert.equal(refusedUndo.error, 'Track "Bass" is locked by the operator.');
+  assert.deepEqual(await updateSeqs(db, song_id), before, "a refused undo writes nothing");
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.inserts.verb.params.mix,
+    0.6,
+    "the effect is untouched",
+  );
+
+  // The same holds for an effect the song no longer holds: undoing the
+  // operator's `insert.remove` would put the reverb back on the locked track, and
+  // it is the value the plan writes — the insert's own `owner` — that says so.
+  const removed = await hub.runCommand({
+    song_id,
+    cmd_id: "mix-remove",
+    command: "insert.remove",
+    args: { id: "verb" },
+    author: HUMAN,
+  });
+  assert.equal(removed.ok, true, `insert.remove was refused: ${removed.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.inserts.verb, undefined);
+  const beforeRestore = await updateSeqs(db, song_id);
+  refuses(
+    await hub.undo({ song_id, cmd_id: "mix-undo-remove", entry_id: removed.entry.id, author: AGENT }),
+    "locked",
+  );
+  assert.deepEqual(await updateSeqs(db, song_id), beforeRestore, "a refused restore writes nothing");
+  assert.equal(
+    (await hub.openSong(song_id)).snapshot.inserts.verb,
+    undefined,
+    "the effect stayed gone",
+  );
+
+  // The operator's own undo puts the chain back.
+  const restored = await hub.undo({
+    song_id,
+    cmd_id: "mix-undo-operator",
+    entry_id: removed.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(restored.ok, true, `the operator's undo was refused: ${restored.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.inserts.verb.params.mix, 0.6);
+});
+
+test("an agent's undo of a send change on a locked track is refused", async (t) => {
+  const { hub, db } = await setup(t);
+  const song_id = await seedSong(hub);
+  const addedReturn = await hub.runCommand({
+    song_id,
+    cmd_id: "send-return",
+    command: "return.add",
+    args: { id: "verb" },
+    author: HUMAN,
+  });
+  assert.equal(addedReturn.ok, true, `return.add was refused: ${addedReturn.error}`);
+  const sent = await hub.runCommand({
+    song_id,
+    cmd_id: "send-1",
+    command: "send.set",
+    args: { track_id: "bass", return_id: "verb", level_db: -12 },
+    author: HUMAN,
+  });
+  assert.equal(sent.ok, true, `send.set was refused: ${sent.error}`);
+  const locked = await hub.runCommand({
+    song_id,
+    cmd_id: "send-lock",
+    command: "track.lock",
+    args: { track_id: "bass" },
+    author: HUMAN,
+  });
+  assert.equal(locked.ok, true, `track.lock was refused: ${locked.error}`);
+
+  // A send belongs to the track it leaves from, so an agent's undo of the
+  // operator's send is refused the way every other locked-track write is.
+  const before = await updateSeqs(db, song_id);
+  const refusedUndo = refuses(
+    await hub.undo({ song_id, cmd_id: "send-undo", entry_id: sent.entry.id, author: AGENT }),
+    "locked",
+  );
+  assert.equal(refusedUndo.error, 'Track "Bass" is locked by the operator.');
+  assert.deepEqual(await updateSeqs(db, song_id), before, "a refused undo writes nothing");
+  assert.ok((await hub.openSong(song_id)).snapshot.sends["bass/verb"], "the send is still there");
+
+  // The operator takes their own send away, and the agent's redo of that undo —
+  // which would put the send back on the locked track — is refused too. The send
+  // is gone from the song then, so the key it lived under is what names the
+  // track.
+  const undone = await hub.undo({
+    song_id,
+    cmd_id: "send-undo-operator",
+    entry_id: sent.entry.id,
+    author: HUMAN,
+  });
+  assert.equal(undone.ok, true, `the operator's undo was refused: ${undone.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.sends["bass/verb"], undefined);
+  const beforeRedo = await updateSeqs(db, song_id);
+  refuses(
+    await hub.redo({ song_id, cmd_id: "send-redo", entry_id: undone.entry.id, author: AGENT }),
+    "locked",
+  );
+  assert.deepEqual(await updateSeqs(db, song_id), beforeRedo, "a refused redo writes nothing");
+  assert.equal((await hub.openSong(song_id)).snapshot.sends["bass/verb"], undefined);
+});
+
+test("a refusal names the effect, not the song", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedSong(hub);
+
+  const added = await hub.runCommand({
+    song_id,
+    cmd_id: "name-add",
+    command: "insert.add",
+    args: { id: "verb", owner: "track:bass", kind: "reverb" },
+    author: HUMAN,
+  });
+  assert.equal(added.ok, true, `insert.add was refused: ${added.error}`);
+  const mixed = await hub.runCommand({
+    song_id,
+    cmd_id: "name-set",
+    command: "insert.set",
+    args: { id: "verb", params: { mix: 0.6 } },
+    author: HUMAN,
+  });
+  assert.equal(mixed.ok, true, `insert.set was refused: ${mixed.error}`);
+
+  // The operator has the effect open: a mixer ref is labelled by what it is and
+  // where it sits, so the refusal names the reverb on Bass instead of falling
+  // back to "the song".
+  await hub.setFocus(song_id, "client-a", "insert:verb", HUMAN);
+  const refused = refuses(
+    await hub.undo({ song_id, cmd_id: "name-undo", entry_id: mixed.entry.id, author: AGENT }),
+    "focused",
+  );
+  assert.match(refused.error, /the reverb on Bass/);
+  assert.doesNotMatch(refused.error, /the song/);
+  assert.equal((await hub.openSong(song_id)).snapshot.inserts.verb.params.mix, 0.6);
 });
 
 test("a broken undo chain is refused for agents", async (t) => {

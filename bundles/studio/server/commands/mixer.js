@@ -23,10 +23,11 @@
  *   - an insert's `order` is fractional (like a pad's motion points): an effect
  *     placed between two others takes the midpoint of their orders, so a move
  *     rewrites one field and nothing else in the chain changes.
- *     `insert.add` with no `after` appends to the END of the chain — the common
- *     case is "one more effect on this track" — and `insert.move` with
- *     `after: null` puts the effect FIRST, which is what dragging a strip to
- *     the top of the chain means. Both are documented, and both are tested.
+ *     `insert.add` and `insert.move` read `after` the same way: `after: null`
+ *     puts the effect FIRST, which is what dragging a strip to the top of the
+ *     chain means, and leaving `after` out appends it to the END of the chain,
+ *     which is the common case of "one more effect on this track". Both are
+ *     documented, and both are tested.
  *   - an insert's parameters are the `EFFECT_PARAMS` table's, and every write
  *     is checked against it by name and by range: an unknown parameter lists
  *     the ones the effect has, and an out-of-range one names its own range.
@@ -383,7 +384,9 @@ defineCommand({
       after: idSchema
         .nullable()
         .optional()
-        .describe("the effect it goes after; with none, it goes to the end of the chain"),
+        .describe(
+          "the effect it goes after; null puts it first in the chain, and with none it goes to the end",
+        ),
       params: paramsSchema.optional().describe("the parameters that differ from their defaults"),
     })
     .strict(),
@@ -415,7 +418,12 @@ defineCommand({
     }
     const snap = snapshot(doc);
     let order = appendOrder(chain);
-    if (args.after !== null && args.after !== undefined) {
+    // `after: null` and no `after` mean different things, the same way they do
+    // in `insert.move`: null puts the effect first, and leaving it out appends
+    // it to the end of the chain.
+    if (args.after === null) {
+      order = frontOrder(chain);
+    } else if (args.after !== undefined) {
       const placed = orderBehind(chain, args.after);
       if (placed === null) {
         refuseInvalid(
@@ -473,14 +481,17 @@ defineCommand({
       after: idSchema
         .nullable()
         .optional()
-        .describe("the effect it goes after; null puts it first in the chain"),
+        .describe(
+          "the effect it goes after; null puts it first in the chain, and with none it goes to the end",
+        ),
     })
     .strict(),
   summary(args, snap) {
     const insert = snap.inserts?.[args.id];
     const label = effectLabel(insert?.kind ?? args.id);
     const owner = ownerLabel(snap, insert?.owner);
-    if (args.after === null || args.after === undefined) return `Moved the ${label} to the front of the chain on ${owner}`;
+    if (args.after === null) return `Moved the ${label} to the front of the chain on ${owner}`;
+    if (args.after === undefined) return `Moved the ${label} to the end of the chain on ${owner}`;
     return `Moved the ${label} after the ${effectLabel(snap.inserts?.[args.after]?.kind ?? args.after)} on ${owner}`;
   },
   touches(args, snap) {
@@ -498,8 +509,12 @@ defineCommand({
     // twice (and never places it relative to itself).
     const chain = insertsForOwner(doc, owner).filter((entry) => entry.id !== args.id);
     let order;
-    if (args.after === null || args.after === undefined) {
+    // `after: null` is the front, an `after` left out is the end: the same rule
+    // `insert.add` follows, so one argument means one place in both commands.
+    if (args.after === null) {
       order = frontOrder(chain);
+    } else if (args.after === undefined) {
+      order = appendOrder(chain);
     } else {
       const placed = orderBehind(chain, args.after);
       if (placed === null) {
@@ -767,14 +782,22 @@ defineCommand({
         .describe(
           `level in dB, ${MIXER_RANGES.send.level_db[0]} to ${MIXER_RANGES.send.level_db[1]}; null removes the send`,
         ),
-      pre: z.boolean().default(false).describe("true: before the track's fader; false: after it"),
+      pre: z
+        .boolean()
+        .optional()
+        .describe(
+          "true: before the track's fader; false: after it; left out, an update keeps the send's own setting and a new send is after the fader",
+        ),
     })
     .strict(),
   summary(args, snap) {
     const track = labelOfTrack(snap, args.track_id);
     const item = labelOfReturn(snap, args.return_id);
     if (args.level_db === null) return `Took ${track} off ${item}`;
-    return `Sent ${track} to ${item} at ${args.level_db} dB, ${args.pre ? "before" : "after"} the fader`;
+    // A level-only call leaves `pre` where it is, so the sentence says what the
+    // send is set to rather than what the call did not name.
+    const pre = args.pre ?? snap.sends?.[sendKey(args.track_id, args.return_id)]?.pre ?? false;
+    return `Sent ${track} to ${item} at ${args.level_db} dB, ${pre ? "before" : "after"} the fader`;
   },
   touches(args) {
     return [sendRef(args.track_id, args.return_id), trackRef(args.track_id), returnRef(args.return_id)];
@@ -811,13 +834,15 @@ defineCommand({
       };
     }
 
-    // A send is set whole (its level and its place relative to the fader), so a
-    // call that names only a level makes it a post-fader send, which is the
-    // schema's default and the mixer's usual case.
+    // Each field of a send is written on its own, so a call that names only a
+    // level keeps the send's `pre` where it is and undoes as one field. A new
+    // send is post-fader unless the call says otherwise, which is the mixer's
+    // usual case.
     const before = {};
     const after = {};
-    for (const field of ["level_db", "pre"]) {
-      const value = field === "level_db" ? args.level_db : args.pre === true;
+    const writes = [["level_db", args.level_db]];
+    if (args.pre !== undefined) writes.push(["pre", args.pre === true]);
+    for (const [field, value] of writes) {
       const current = existing.get(field);
       const currentValue = current === undefined ? ABSENT : cloneJson(current);
       if (currentValue === value) continue;

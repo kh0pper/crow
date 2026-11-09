@@ -33,6 +33,7 @@ import {
   getReturn,
   getSend,
   insertMap,
+  insertOwnerOf,
   masterMap,
   masterSettings,
   newSongDoc,
@@ -326,19 +327,57 @@ test("undoing one send keeps the others", (t) => {
     pre: false,
   });
 
-  // A level given no `pre` is a post-fader send: `send.set` sets the whole send,
-  // which is what the mixer's one control per send sends.
+  // A level given no `pre` is a one-field step: the send's own place relative
+  // to the fader is left exactly as it is.
   const update = s.run("send.set", { track_id: track, return_id: b, level_db: -9 });
-  assert.deepEqual(Object.keys(update.result.after).sort(), [
-    `send:${track}/${b}|level_db`,
-    `send:${track}/${b}|pre`,
-  ]);
-  assert.equal(snapshot(s.doc).sends[`${track}/${b}`].pre, false);
+  assert.deepEqual(Object.keys(update.result.after).sort(), [`send:${track}/${b}|level_db`]);
+  assert.equal(snapshot(s.doc).sends[`${track}/${b}`].pre, true, "the pre-fader setting stayed");
+  assert.equal(snapshot(s.doc).sends[`${track}/${b}`].level_db, -9);
 
   // `level_db: null` takes the send away, whole.
   const remove = s.run("send.set", { track_id: track, return_id: b, level_db: null });
   assert.equal(remove.result.summary, "Took Vocals off Return B");
   assert.equal(snapshot(s.doc).sends[`${track}/${b}`], undefined);
+  assert.deepEqual(checkInvariants(s.doc), []);
+});
+
+test("a level-only send change keeps pre-fader", (t) => {
+  const s = studio(t);
+  const track = addTrack(s.doc, "Vocals");
+  const ret = addReturn(s.doc);
+
+  // A new send with no `pre` is post-fader, the mixer's usual case.
+  const created = s.run("send.set", { track_id: track, return_id: ret, level_db: -12 });
+  assert.equal(snapshot(s.doc).sends[`${track}/${ret}`].pre, false);
+
+  // Turning it pre-fader is one field of one send, so it undoes on its own.
+  const switched = s.run("send.set", { track_id: track, return_id: ret, level_db: -12, pre: true });
+  assert.deepEqual(Object.keys(switched.result.after), [`send:${track}/${ret}|pre`]);
+  assert.deepEqual(switched.result.before, { [`send:${track}/${ret}|pre`]: false });
+  assert.equal(snapshot(s.doc).sends[`${track}/${ret}`].pre, true);
+
+  // A level-only change keeps it pre-fader: `pre` is not part of the step at
+  // all, and the summary says what the send is set to, not what was left out.
+  const level = s.run("send.set", { track_id: track, return_id: ret, level_db: -18 });
+  assert.deepEqual(Object.keys(level.result.after), [`send:${track}/${ret}|level_db`]);
+  assert.equal(level.result.summary, "Sent Vocals to Return A at -18 dB, before the fader");
+  assert.deepEqual(snapshot(s.doc).sends[`${track}/${ret}`], {
+    track_id: track,
+    return_id: ret,
+    level_db: -18,
+    pre: true,
+  });
+
+  // Undoing it puts the level back and leaves the send pre-fader.
+  const undone = s.undo(level.entry);
+  assert.deepEqual(undone.plan.conflicts, []);
+  assert.deepEqual([...undone.plan.apply.keys()], [`send:${track}/${ret}|level_db`]);
+  assert.deepEqual(snapshot(s.doc).sends[`${track}/${ret}`], {
+    track_id: track,
+    return_id: ret,
+    level_db: -12,
+    pre: true,
+  });
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
@@ -671,6 +710,25 @@ test("an effect joins the end of its chain and moves where it is told", (t) => {
   s.run("insert.move", { id: eq, after: delay });
   assert.deepEqual(chainOf(s.doc, trackOwner(track)), ["compressor", "delay", "eq"]);
 
+  // `insert.add` reads `after` exactly as `insert.move` does: `null` puts the
+  // effect FIRST, and leaving `after` out appends it to the END. The two mean
+  // different places in both commands.
+  const gate = addInsert(s.doc, trackOwner(track), "gate", { after: null }).args.id;
+  assert.deepEqual(chainOf(s.doc, trackOwner(track)), ["gate", "compressor", "delay", "eq"]);
+  const deesser = addInsert(s.doc, trackOwner(track), "deesser").args.id;
+  assert.deepEqual(chainOf(s.doc, trackOwner(track)), ["gate", "compressor", "delay", "eq", "deesser"]);
+
+  // A move with no `after` goes to the end, the same as an add with none.
+  const toEnd = s.run("insert.move", { id: gate });
+  assert.equal(toEnd.result.summary, "Moved the gate to the end of the chain on Bass");
+  assert.deepEqual(chainOf(s.doc, trackOwner(track)), ["compressor", "delay", "eq", "deesser", "gate"]);
+  assert.deepEqual(Object.keys(toEnd.result.after), [`insert:${gate}|order`]);
+
+  // …and a move with `after: null` goes to the front.
+  const toFront = s.run("insert.move", { id: deesser, after: null });
+  assert.equal(toFront.result.summary, "Moved the de-esser to the front of the chain on Bass");
+  assert.deepEqual(chainOf(s.doc, trackOwner(track)), ["deesser", "compressor", "delay", "eq", "gate"]);
+
   // An `after` that names no effect in this chain is refused by name, and an
   // effect cannot be moved after itself.
   const stranger = refuses(
@@ -741,6 +799,93 @@ test("an amp insert is refused until PR C", (t) => {
   const refused = refuses(() => addInsert(s.doc, trackOwner(track), "amp"), "invalid");
   assert.equal(refused.message, "Amp inserts arrive in a later Studio version.");
   assert.deepEqual(snapshot(s.doc).inserts, {});
+});
+
+test("a chain's owner is a bare master, a track or a return and nothing else", (t) => {
+  const s = studio(t);
+  const track = addTrack(s.doc, "Bass");
+  const ret = addReturn(s.doc);
+
+  // The master is the one object with no id of its own, so the bare ref is the
+  // master's chain and "master:anything" names no chain at all.
+  assert.deepEqual(insertOwnerOf("master"), { kind: "master", id: "master" });
+  assert.equal(insertOwnerOf("master:anything"), null);
+  assert.equal(insertOwnerOf("master:master"), null);
+  assert.deepEqual(insertOwnerOf(trackOwner(track)), { kind: "track", id: track });
+  assert.deepEqual(insertOwnerOf(returnOwner(ret)), { kind: "return", id: ret });
+  assert.equal(insertOwnerOf("scene:verse"), null);
+
+  // A command refuses it like any other owner that is not a chain.
+  refuses(() => addInsert(s.doc, "master:anything", "limiter"), "invalid");
+  assert.deepEqual(snapshot(s.doc).inserts, {});
+
+  // A hand-written insert in such a chain is reported by the invariants instead
+  // of quietly becoming the master's: the song has no chain it could play in.
+  insertMap(s.doc).set(
+    "bogus",
+    objectMap({
+      id: "bogus",
+      owner: "master:anything",
+      order: 0,
+      kind: "limiter",
+      bypass: false,
+      params: { ceiling_db: -1, release_ms: 50 },
+    }),
+  );
+  const reasons = checkInvariants(s.doc);
+  assert.equal(reasons.length, 1);
+  assert.match(
+    reasons[0],
+    /The insert "bogus" would sit in the chain "master:anything", which is not a track, a return or the master/,
+  );
+});
+
+test("the invariants report mixer values off their ranges", (t) => {
+  const s = studio(t);
+  const track = addTrack(s.doc, "Bass");
+  const insert = addInsert(s.doc, trackOwner(track), "compressor").args.id;
+  const ret = addReturn(s.doc);
+  s.run("send.set", { track_id: track, return_id: ret, level_db: -6 });
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // A value of the right type but off its range survives a snapshot — which is
+  // what lets a hand-written or restored one be reported instead of quietly
+  // tidied — so the mixer's own checks say so, by name and by range.
+  s.doc.transact(() => {
+    getInsert(s.doc, insert).get("params").set("ratio", 30);
+    returnMap(s.doc).get(ret).set("gain_db", -90);
+    sendMap(s.doc).get(`${track}/${ret}`).set("level_db", 20);
+  });
+  const reasons = checkInvariants(s.doc);
+  assert.equal(reasons.length, 3, reasons.join(" "));
+  const text = reasons.join(" ");
+  assert.match(text, new RegExp(`The insert "${insert}" would set "ratio" to 30; it runs from 1 to 20\\.`));
+  assert.match(text, /The return "Return A" would be at -90 dB; a return runs from -60 to 12 dB\./);
+  assert.match(text, new RegExp(`The send from "${track}" would be at 20 dB; a send runs from -60 to 6 dB\\.`));
+});
+
+test("a track removal takes a send whose track field was damaged", (t) => {
+  const s = studio(t);
+  const bass = addTrack(s.doc, "Bass");
+  const ret = addReturn(s.doc);
+  s.run("send.set", { track_id: bass, return_id: ret, level_db: -9 });
+  const key = `${bass}/${ret}`;
+
+  // A hand-written or restored send lost its own `track_id`: the key it lives
+  // under still says which track it leaves from, which is the same rule
+  // `normalizeSend` reads it by — so the track still takes it with it.
+  s.doc.transact(() => sendMap(s.doc).get(key).delete("track_id"));
+  assert.equal(snapshot(s.doc).sends[key].track_id, bass, "the key says which track it leaves from");
+
+  const removed = s.run("track.remove", { track_id: bass });
+  assert.equal(removed.result.after[`send:${key}|*`], null, "the damaged send went with its track");
+  assert.equal(snapshot(s.doc).sends[key], undefined);
+  assert.deepEqual(checkInvariants(s.doc), [], "no send is left without its track");
+
+  // And the removal's undo puts the send back on the track.
+  const undo = s.undo(removed.entry);
+  assert.deepEqual(undo.plan.blocked, []);
+  assert.equal(snapshot(s.doc).sends[key].track_id, bass);
 });
 
 test("the mixer commands are in the registry and the master map is one object", (t) => {

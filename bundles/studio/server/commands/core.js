@@ -72,6 +72,7 @@ import {
   sendEntries,
   sendKey,
   sendMap,
+  sendParts,
   songMap,
   stepEntries,
   stepKey,
@@ -532,7 +533,12 @@ function removeMixerObjects(doc, { trackIds = new Set() }, before, after) {
     insertMap(doc).delete(id);
   }
   for (const { id, send } of sendEntries(doc)) {
-    if (!trackIds.has(send.get("track_id"))) continue;
+    // The same rule `normalizeSend` reads a send by: the field says which track
+    // it leaves from, and the key it lives under says it when the field was
+    // damaged. A send whose field is missing is still that track's to take.
+    const named = send.get("track_id");
+    const trackId = typeof named === "string" && named !== "" ? named : sendParts(id)?.trackId;
+    if (!trackIds.has(trackId)) continue;
     const field = fieldKey(objectRef("send", id), "*");
     before[field] = cloneJson(toPlain(send));
     after[field] = ABSENT;

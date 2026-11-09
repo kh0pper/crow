@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeDocState } from "../bundles/studio/server/doc.js";
-import { newSongDoc, snapshot } from "../bundles/studio/server/doc.js";
+import { checkInvariants, newSongDoc, snapshot } from "../bundles/studio/server/doc.js";
 import { StudioError, runCommand } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/arrangement.js";
@@ -829,6 +829,71 @@ test("a blocked undo leaves the doc byte-identical", (t) => {
   assert.ok(plan.blocked.length > 0);
   s.doc.transact(() => applyPlan(s.doc, plan));
   assert.equal(docBytes(s.doc), before);
+  assert.deepEqual(trackNames(s.doc), ["Bass"]);
+});
+
+test("an unrelated undo is not blocked by a violation already in the song", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  const mixed = s.run("track.set_mix", { track_id: "bass", gain_db: -3 });
+
+  // A violation the song already holds and no undo put there — the shape two
+  // peers' writes merging can leave behind, here notes running past the end of
+  // the clip that carries them. It is reported, and it is not this undo's to
+  // answer for.
+  s.doc.transact(() => {
+    const clip = s.doc.getMap("song").get("clips").get("bass-verse");
+    clip.set("notes", [note(0, 8, 36, 100)]);
+  });
+  assert.match(checkInvariants(s.doc).join(" "), /past its/);
+
+  // The step is unrelated to it, so taking it back goes through: blocking it
+  // would leave every step in the song stuck behind a merge nobody can undo.
+  const plan = planUndo(s.doc, mixed.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual([...plan.apply.keys()], ["track:bass|gain_db"]);
+  assert.equal(plan.apply.get("track:bass|gain_db"), 0);
+
+  // Applying it leaves the song's own violation exactly where it was.
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.equal(snapshot(s.doc).tracks[0].gain_db, 0);
+  assert.match(checkInvariants(s.doc).join(" "), /past its/);
+});
+
+test("an undo that creates a violation is still blocked", (t) => {
+  const s = studio(t);
+  const added = s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  assert.deepEqual(checkInvariants(s.doc), [], "the song is clean before the undo");
+
+  // Only reasons the plan CREATES block it: this undo would leave the clip
+  // without its track, which the song did not hold before the plan.
+  const plan = planUndo(s.doc, added.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its track/);
+
+  // Nothing was written, and the song still holds no violation of its own.
+  assert.deepEqual(checkInvariants(s.doc), []);
   assert.deepEqual(trackNames(s.doc), ["Bass"]);
 });
 

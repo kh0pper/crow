@@ -81,13 +81,22 @@ import {
   SAMPLER_DEVICE,
   SOUNDFONT_DEVICE,
   bankKey,
+  effectLabel,
+  insertMap,
+  insertOwnerOf,
+  libraryMap,
   libraryUses,
   libraryUsers,
+  masterMap,
   motionParts,
   newSongDoc,
   parseObjectRef,
+  returnMap,
   sampleUsers,
+  sendMap,
+  sendParts,
   snapshot,
+  songMap,
   splitRefField,
 } from "./doc.js";
 import {
@@ -237,6 +246,13 @@ const SAMPLE_ADD_COMMAND = "sample.add";
 const SOUND_BEARING_KINDS = Object.freeze(["sample", "slice", "pad", "bank", "track", "library", "insert"]);
 
 /**
+ * The song containers a song written before plan 1d does not have: the mixer's
+ * four and the instrument library's one. The hub makes them, in one step, when
+ * it loads such a song (see `buildDoc`).
+ */
+const MIXER_CONTAINER_KEYS = Object.freeze(["inserts", "sends", "returns", "master", "library"]);
+
+/**
  * The commands that write only a track's own non-sound fields — its name, its
  * mix and its lock — and so cannot lose anything even though they name a track.
  *
@@ -383,6 +399,14 @@ function noteTrackEntry(found, snap, key, value) {
     return;
   }
   addTrackId(found.trackIds, value);
+  // A mixer object names its track too: an insert says which chain it sits in
+  // (`"track:<id>"`), and a send carries the track it leaves from in its own
+  // `track_id` (noted just above). Restoring a removed insert or send is how a
+  // locked track's mix would come back, so this is where that is caught.
+  if (isPlainObject(value)) {
+    const owner = insertOwnerOf(value.owner);
+    if (owner?.kind === "track") found.trackIds.add(owner.id);
+  }
   // A pattern or a step says which clip it belongs to, and the clip says which
   // track's kit plays it.
   const clipId = isPlainObject(value) && typeof value.clip_id === "string" ? value.clip_id : null;
@@ -896,6 +920,23 @@ function previewChanges(doc, prepared) {
 }
 
 /**
+ * The state vector a step's update is encoded from: the document as it was just
+ * before the step, so the update is exactly the step and nothing else.
+ *
+ * The one exception is the first step taken on a song the hub made containers
+ * for while loading it (see `buildDoc`). That creation is not in the stored log —
+ * it happened after the last update was applied — so the step starts one vector
+ * earlier and carries the creation along with itself. A container the log does
+ * not mention is one a later load cannot find, and the step's own write into it
+ * would be lost with it.
+ * @param {{doc: import("yjs").Doc, preloadVector?: Uint8Array|null}} state
+ * @returns {Uint8Array}
+ */
+function stepStateVector(state) {
+  return state.preloadVector ?? Y.encodeStateVector(state.doc);
+}
+
+/**
  * Normalise a caller's author to the three fields the history stores.
  *
  * A call without an author is treated as an agent: the strictest reading, so a
@@ -920,8 +961,10 @@ function normalizeAuthor(author) {
  * sample or a slice touches EVERY track that plays it — re-chopping or renaming
  * a sound is a write to every kit that has it on a pad, so a locked one among
  * them refuses
- * the step (see `sampleUsers`). Nothing here walks to a clip's track from a
- * *focused* ref — focus matches the ref exactly.
+ * the step (see `sampleUsers`). The mixer's objects name their track too: an
+ * insert sits in that track's chain and a send leaves from it (see below).
+ * Nothing here walks to a clip's track from a *focused* ref — focus matches the
+ * ref exactly.
  * @param {object} snap - a plain snapshot
  * @param {string} ref
  * @returns {string[]} the track ids, each once; empty when the ref names none
@@ -962,6 +1005,20 @@ function trackIdsForRef(snap, ref) {
   // A library entry is a sound every track that plays it holds, the way a
   // sample is a sound every kit that has it on a pad holds.
   if (target.kind === "library") return libraryUsers(snap, target.id);
+  // The mixer's objects belong to the track they mix: an insert sits in that
+  // track's chain, and a send leaves from that track. A return's chain, a return
+  // and the master belong to no track at all, so nothing but the operator's own
+  // lock rules apply to them.
+  if (target.kind === "insert") {
+    const owner = insertOwnerOf(snap.inserts?.[target.id]?.owner);
+    return owner?.kind === "track" ? [owner.id] : [];
+  }
+  if (target.kind === "send") {
+    // The send's own field says which track it leaves from; the key it lives
+    // under says it when a restore no longer has the object to read.
+    const send = snap.sends?.[target.id];
+    return idsOrNone(send?.track_id ?? sendParts(target.id)?.trackId);
+  }
   return [];
 }
 
@@ -973,6 +1030,23 @@ function idsOrNone(id) {
 /** @returns {string[]} the track one clip sits on, when the song still holds it. */
 function trackOfClip(snap, clipId) {
   return idsOrNone(snap.clips?.[clipId]?.track_id);
+}
+
+/**
+ * What a sentence calls the chain an insert sits in: the track's or return's
+ * name, or "the master".
+ * @param {object} snap - a plain snapshot
+ * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+ * @returns {string}
+ */
+function chainLabelFor(snap, owner) {
+  const target = insertOwnerOf(owner);
+  if (!target) return typeof owner === "string" && owner !== "" ? `"${owner}"` : "a chain the song has not got";
+  if (target.kind === "master") return "the master";
+  if (target.kind === "track") {
+    return snap.tracks?.find((track) => track.id === target.id)?.name ?? target.id;
+  }
+  return snap.returns?.[target.id]?.name ?? target.id;
 }
 
 /**
@@ -1018,6 +1092,22 @@ function labelForRef(snap, ref) {
     return slice ? `slice ${slice.id} of sample ${snap.samples?.[sampleId]?.name ?? sampleId}` : target.id;
   }
   if (target.kind === "library") return snap.library?.[target.id]?.name ?? target.id;
+  // The mixer's objects, so a refusal over one of them names the effect, the
+  // send or the return it is about instead of falling back to the song.
+  if (target.kind === "insert") {
+    const insert = snap.inserts?.[target.id];
+    const label = effectLabel(insert?.kind ?? "") || target.id;
+    return `the ${label} on ${chainLabelFor(snap, insert?.owner)}`;
+  }
+  if (target.kind === "send") {
+    const send = snap.sends?.[target.id];
+    const parts = send ? { trackId: send.track_id, returnId: send.return_id } : sendParts(target.id);
+    const track = snap.tracks?.find((item) => item.id === parts?.trackId)?.name ?? parts?.trackId ?? target.id;
+    const back = snap.returns?.[parts?.returnId]?.name ?? parts?.returnId ?? "";
+    return `the send from ${track} to ${back}`;
+  }
+  if (target.kind === "return") return snap.returns?.[target.id]?.name ?? target.id;
+  if (target.kind === "master") return "the master";
   if (target.kind === "midi") {
     const mapping = snap.midi_maps?.[target.id];
     if (!mapping) return target.id;
@@ -1217,9 +1307,19 @@ export function createHub({
 
   /**
    * Build a song's document from its snapshot and its newer updates.
+   *
+   * A song written before the mixer (or before the instrument library) has no
+   * container for it: the containers are made here, once, together, as a song
+   * created today has them. Two first writes then write two keys of one map
+   * instead of each making a map for the same key and losing the other's — and
+   * because the creation is not in the stored log yet, the state vector taken
+   * just before it is kept (`preloadVector`) so the first step saved after the
+   * load carries the creation along with itself (see `stepStateVector`). A song
+   * that already has all five is left alone.
    * @param {string} song_id
    * @param {object} row
-   * @returns {Promise<{doc: Y.Doc, seq: number, project_id: number}>}
+   * @returns {Promise<{doc: Y.Doc, seq: number, project_id: number,
+   *                    preloadVector: Uint8Array|null}>}
    */
   async function buildDoc(song_id, row) {
     const doc = new Y.Doc();
@@ -1231,7 +1331,20 @@ export function createHub({
       args: [song_id],
     });
     const seq = Math.max(Number(rows[0]?.seq ?? 0), Number(row.snapshot_seq ?? 0));
-    return { doc, seq, project_id: Number(row.project_id) };
+
+    let preloadVector = null;
+    const song = songMap(doc);
+    if (MIXER_CONTAINER_KEYS.some((key) => !(song.get(key) instanceof Y.Map))) {
+      preloadVector = Y.encodeStateVector(doc);
+      doc.transact(() => {
+        insertMap(doc);
+        sendMap(doc);
+        returnMap(doc);
+        masterMap(doc);
+        libraryMap(doc);
+      }, "studio:old-song");
+    }
+    return { doc, seq, project_id: Number(row.project_id), preloadVector };
   }
 
   /**
@@ -1239,7 +1352,8 @@ export function createHub({
    * race for it.
    * @param {string} song_id
    * @param {object} row
-   * @returns {Promise<{doc: Y.Doc, seq: number, project_id: number}>}
+   * @returns {Promise<{doc: Y.Doc, seq: number, project_id: number,
+   *                    preloadVector: Uint8Array|null}>}
    */
   async function ensureDoc(song_id, row) {
     const cached = songs.get(song_id);
@@ -1855,7 +1969,7 @@ export function createHub({
     // a client replays and the store keeps. A refusal inside applyCommand
     // leaves the document untouched (every command validates first), so the
     // catch below persists nothing.
-    const stateVector = Y.encodeStateVector(state.doc);
+    const stateVector = stepStateVector(state);
     let applied;
     try {
       state.doc.transact(() => {
@@ -1892,6 +2006,9 @@ export function createHub({
     }
     entry.seq = seq;
     state.seq = seq;
+    // The step's update carried any container the hub made while loading the
+    // song, so from here on a step is encoded from the document as it is.
+    state.preloadVector = null;
 
     const result = { ok: true, entry, snapshot_version: seq };
     // Remembered before the side effects finish, so a resend that arrives while
@@ -2116,7 +2233,7 @@ export function createHub({
       return refuse("human_only", TAKE_FLAG_BY_COMMAND_ONLY);
     }
 
-    const stateVector = Y.encodeStateVector(state.doc);
+    const stateVector = stepStateVector(state);
     try {
       state.doc.transact(() => {
         applyPlan(state.doc, plan);
@@ -2152,6 +2269,9 @@ export function createHub({
     entry.seq = seq;
     target.undone_by = entry.id;
     state.seq = seq;
+    // As in a command: the first step of a song loaded with containers made for
+    // it carried that creation, and no later step has to.
+    state.preloadVector = null;
 
     const result = { ok: true, entry, conflicts: plan.conflicts, snapshot_version: seq };
     remember(song_id, key, fingerprint, result);
