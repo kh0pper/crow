@@ -416,6 +416,29 @@ export const EFFECT_PARAMS = deepFreeze({
 export const EFFECT_KINDS = Object.freeze(Object.keys(EFFECT_PARAMS));
 
 /**
+ * One effect kind's entry in `EFFECT_PARAMS`, or null. An OWN-property lookup:
+ * a kind or parameter name comes from a peer or an agent, and "constructor" or
+ * "__proto__" must not resolve to something Object.prototype carries.
+ * @param {string} kind
+ * @returns {{label: string, params: Object}|null}
+ */
+export function effectSpec(kind) {
+  return typeof kind === "string" && Object.hasOwn(EFFECT_PARAMS, kind) ? EFFECT_PARAMS[kind] : null;
+}
+
+/**
+ * One parameter's range in one effect kind, or null (own properties only, as
+ * `effectSpec`).
+ * @param {string} kind
+ * @param {string} name
+ * @returns {Object|null}
+ */
+export function effectParamSpec(kind, name) {
+  const spec = effectSpec(kind);
+  return spec && typeof name === "string" && Object.hasOwn(spec.params, name) ? spec.params[name] : null;
+}
+
+/**
  * The ranges the mixer's own levels run over (plan 1d, Task 6): the master's
  * gain in dB and its loudness target in LUFS with its true-peak ceiling in
  * dBTP, a return's level and pan, and the level of one send.
@@ -1443,7 +1466,7 @@ export function masterSettings(doc) {
  * @returns {Object<string, number|string>} empty when the kind is not in the table
  */
 export function defaultEffectParams(kind) {
-  const spec = EFFECT_PARAMS[kind];
+  const spec = effectSpec(kind);
   if (!spec) return {};
   const params = {};
   for (const [name, field] of Object.entries(spec.params)) params[name] = field.default;
@@ -1457,7 +1480,7 @@ export function defaultEffectParams(kind) {
  * @returns {string}
  */
 export function effectLabel(kind) {
-  return EFFECT_PARAMS[kind]?.label ?? String(kind ?? "");
+  return effectSpec(kind)?.label ?? String(kind ?? "");
 }
 
 /** @returns {any} one field of a live Y.Map or of a plain object. */
@@ -2312,7 +2335,7 @@ function mixerReasons(song) {
       reasons.push(`${which} would be left without its return: there is no return "${owner.id}" in the song.`);
       continue;
     }
-    if (!EFFECT_PARAMS[insert.kind]) {
+    if (!effectSpec(insert.kind)) {
       reasons.push(
         `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
       );
@@ -4109,7 +4132,7 @@ function normalizeInsert(id, value) {
  */
 function normalizeEffectParams(kind, stored) {
   const params = plainParamsOf(stored);
-  const spec = EFFECT_PARAMS[kind];
+  const spec = effectSpec(kind);
   if (!spec) return { ...params };
   const out = {};
   for (const [name, field] of Object.entries(spec.params)) {

@@ -537,6 +537,23 @@ test("insert params out of range are refused by name", (t) => {
   assert.deepEqual(checkInvariants(s.doc), []);
 });
 
+test("names Object.prototype carries are not effects or parameters", (t) => {
+  const s = studio(t);
+  const track = addTrack(s.doc, "Bass");
+  const insert = addInsert(s.doc, trackOwner(track), "compressor").args.id;
+  const before = snapshot(s.doc);
+  for (const kind of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    refuses(() => addInsert(s.doc, trackOwner(track), kind), "invalid");
+  }
+  for (const name of ["constructor", "toString", "__proto__", "valueOf"]) {
+    const params = JSON.parse(`{"${name}": 1}`);
+    // Refused either by the schema ("__proto__" never survives parsing) or by name.
+    const err = refuses(() => s.run("insert.set", { id: insert, params }), "invalid");
+    assert.match(err.message, /has no parameter|needs at least one parameter/);
+  }
+  assert.deepEqual(snapshot(s.doc), before);
+});
+
 test("removing a track removes its inserts and sends in one undo", (t) => {
   const s = studio(t);
   const bass = addTrack(s.doc, "Bass");

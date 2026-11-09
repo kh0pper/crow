@@ -56,6 +56,8 @@ import {
   DEFAULT_MASTER,
   EFFECT_KINDS,
   EFFECT_PARAMS,
+  effectParamSpec,
+  effectSpec,
   LIMITS,
   MASTER_REF,
   MAX_RETURN_NAME,
@@ -191,7 +193,7 @@ function withArticle(word) {
 
 /** @returns {string} a parameter's value with its unit when it has one. */
 function valueText(kind, name, value) {
-  const unit = EFFECT_PARAMS[kind]?.params?.[name]?.unit;
+  const unit = effectParamSpec(kind, name)?.unit;
   return unit ? `${value} ${unit}` : String(value);
 }
 
@@ -234,10 +236,10 @@ function checkRange(what, value, range, unit = "") {
  * @throws {StudioError} code "invalid" on an unknown parameter or a value out of range
  */
 function checkParams(kind, params) {
-  const spec = EFFECT_PARAMS[kind];
+  const spec = effectSpec(kind);
   const checked = {};
   for (const [name, value] of Object.entries(params ?? {})) {
-    const field = spec.params[name];
+    const field = effectParamSpec(kind, name);
     if (!field) {
       refuseInvalid(
         `The ${spec.label} has no parameter "${name}"; it has ${Object.keys(spec.params).join(", ")}.`,
@@ -398,7 +400,7 @@ defineCommand({
     // An amp insert is PR C's: refusing it here, in its own words, keeps the
     // table honest instead of letting the kind in with no parameters.
     if (args.kind === "amp") refuseInvalid("Amp inserts arrive in a later Studio version.");
-    if (!EFFECT_PARAMS[args.kind]) {
+    if (!effectSpec(args.kind)) {
       refuseInvalid(
         `"${args.kind}" is not an effect a chain holds; the effects are ${EFFECT_KINDS.join(", ")}.`,
       );
@@ -547,7 +549,7 @@ defineCommand({
   apply(doc, args) {
     const insert = requireInsert(doc, args.id);
     const kind = String(insert.get("kind") ?? "");
-    if (!EFFECT_PARAMS[kind]) {
+    if (!effectSpec(kind)) {
       refuseInvalid(
         `The insert "${args.id}" holds a "${kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
       );
