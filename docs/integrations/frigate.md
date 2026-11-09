@@ -46,13 +46,15 @@ Port `5000` (Frigate's internal unauthenticated API) is **intentionally not publ
 
 ### First-run admin password
 
-Frigate generates an admin password on first start. Find it in the container logs:
+Crow replaces Frigate's first-start password while it installs the bundle: the admin is `admin` and the password it generated is in **Settings → Passwords** in the Crow's Nest (and in the bundle's `.env` as `FRIGATE_PASSWORD`).
+
+If the automatic setup could not run (Frigate was not up yet), Frigate keeps the password it printed in its log, and you set it yourself:
 
 ```bash
 docker logs crow-frigate 2>&1 | grep "Password:"
 ```
 
-Set these in `~/.crow/bundles/frigate/.env`:
+Then set these in `~/.crow/bundles/frigate/.env`:
 
 ```bash
 FRIGATE_URL=http://localhost:8971
@@ -64,11 +66,9 @@ FRIGATE_PASSWORD=<password from logs>
 # FRIGATE_UI_URL=
 ```
 
-Then restart the bundle so the MCP server can authenticate:
+And restart the bundle so the MCP server can authenticate:
 
 > "Crow, restart the Frigate bundle"
-
-You should also log in to the Web UI and rotate the password.
 
 ### Add a camera
 
@@ -160,7 +160,7 @@ cd ~/.crow/bundles/frigate && docker compose up -d
 ```
 
 **"Frigate authentication expired or invalid"**
-`FRIGATE_USER` / `FRIGATE_PASSWORD` in `.env` are wrong or missing. Re-check the container logs for the first-run password, or use a user you've created in the Web UI. Restart the bundle after editing `.env`.
+`FRIGATE_USER` / `FRIGATE_PASSWORD` in `.env` are wrong or missing. The generated pair is in **Settings → Passwords**; if Frigate was set up by hand instead, use that login, or the password in the container log from its first start. Restart the bundle after editing `.env`.
 
 **"Frigate endpoint not found"**
 Version skew. Our bundle targets `:stable` which currently resolves to Frigate 0.17. If a future version changes endpoint paths, open an issue.

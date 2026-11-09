@@ -1,7 +1,7 @@
 {
   "id": "wallabag",
   "name": "Wallabag",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
   "type": "bundle",
   "author": "Crow",
@@ -24,6 +24,12 @@
   ],
   "ports": [8084],
   "webUI": { "port": 8084, "path": "/", "label": "Wallabag" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Create an API client in Wallabag under Developer > Create a new client."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
+    "user": "wallabag",
+    "secretEnv": "WALLABAG_PASSWORD", "userEnv": "WALLABAG_USERNAME"
+  },
+  "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and saves the new password in Settings → Passwords. Create an API client in Wallabag under Developer > Create a new client, then put WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings so the MCP server can log in."
 }

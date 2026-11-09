@@ -205,6 +205,12 @@ The generated value is URL-safe, so it can start with `-`: hand it to another
 program only on a stdin pipe (`printf '%s' "$PASSWORD" | app …`), never as a bare
 argument — `app -x $PASSWORD` reads a leading-`-` value as an option.
 
+A script that reaches its app through `docker exec` names the container from the
+compose file's `container_name`, as `${CROW_FA_CONTAINER:-<that name>}`: the override
+exists for the script's tests only, and Crow never sets it. The password goes into the
+container on a pipe (`printf … | docker exec -i …`), never as a command argument — an
+argument is visible in the process list on both sides.
+
 The script reports what happened through its exit code:
 
 | exit | meaning | Crow then |
@@ -244,10 +250,11 @@ login Crow already keeps; changing one is done in Settings → Passwords.
 (Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator
 bootstrapping, a `postInstall` script that drives the app's own admin command).
 That is the only mode where nothing on the machine can claim the account between
-install and the operator's first visit. Use `finish-setup` when the app only has
-a first-run page, and add a `note` when the app prints or documents the first
-password (Peertube and Frigate print it in their logs; Plex's server is claimed
-by the first Plex account that reaches it unless a claim token was set).
+install and the operator's first visit. Use a `via: "setup"` script when the app has no
+environment variable for its admin but can be given one from inside its container, and
+`finish-setup` when the app only has a first-run page; add a `note` when the app prints
+or documents the first password (Peertube prints it in its logs; Plex's server is
+claimed by the first Plex account that reaches it unless a claim token was set).
 
 Like every other bundle change, a new or edited `firstAdmin` needs a `version`
 bump: the installed copy refreshes only when the version differs.
