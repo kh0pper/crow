@@ -45,13 +45,25 @@
  * - **limiter** — on the master, a brickwall: the audio is delayed by
  *   `latencyFrames`, the true peak of the UNDELAYED input is measured through
  *   the same 4× polyphase filter `server/loudness.js` measures it with, and the
- *   gain is the smallest one the whole lookahead window can survive (so the
- *   reduction is already in place when a peak reaches the output and it never
- *   passes the ceiling), released upward per `release_ms`. On a track it is the
- *   zero-latency version the plan asks for: a hard clip at the ceiling.
+ *   gain is the smallest one the whole lookahead window can survive, ramped
+ *   DOWN in a straight line across the lookahead (a step a millisecond before a
+ *   peak is audible; a ramp that is already there when the peak is output is
+ *   not), then released upward per `release_ms`. So the reduction is in place
+ *   when a peak reaches the output and no sample passes the ceiling.
+ *   "The ceiling" means the ceiling as that 4× estimator reads it: a 4×
+ *   oversampled true-peak meter reconstructs the waveform between samples only
+ *   up to its own oversampling, and under-reads audio whose energy sits very
+ *   close to Nyquist (well above a quarter of the sample rate). No sample-domain
+ *   limiter can promise more than its meter sees, and this one shares
+ *   `loudness.js`'s meter on purpose, so a render's measurement agrees with it.
+ *   On a track it is the zero-latency version the plan asks for: a hard clip at
+ *   the ceiling.
  * - **gate** — opens when the detector rises above the threshold, closes when
  *   it falls below `threshold − hysteresis`, and its gain follows an
- *   attack/hold/release envelope whose closed floor is `range_db`.
+ *   attack/hold/release envelope whose closed floor is `range_db`. The detector
+ *   is a peak envelope of the linked pair — instant attack, ~10 ms release —
+ *   not the raw sample, so a low tone does not chatter at its zero crossings
+ *   when `hold_ms` is 0.
  * - **de-esser** — a split-band compressor: a second-order band-pass at
  *   `freq_hz` drives the detector, and the reduction is applied to the band
  *   above `freq_hz × 0.7` only. The split is subtractive (the high band is
@@ -65,6 +77,14 @@
  * and plain doubles throughout, and every recursive state variable is flushed to
  * exactly 0 below 1e-30, the way `engine/perf-fx.js` flushes its own: a
  * decaying tail cannot cost a CPU spike on one machine and not another.
+ *
+ * A sample that is not a finite number reads as 0 before it touches anything.
+ * One NaN or ±Infinity in a biquad, in the RMS running sum or in the limiter's
+ * lookahead would stay in that state for good — the de-esser would hiss NaN
+ * forever, the compressor would never compress again — so every input sample,
+ * audio and sidechain, is sanitised at the top of its frame loop, and the
+ * master limiter's output clamp turns a non-finite frame into silence rather
+ * than passing it on.
  *
  * A parameter object may be partial and may be wrong: a number outside its range
  * is clamped, a name the kind does not have is ignored, and a value that is not
@@ -86,11 +106,36 @@
   /** The level a detector reads when it hears nothing. Never -Infinity, never NaN. */
   const MIN_LEVEL_DB = -240;
 
+  /**
+   * The level a detector reads at most. +120 dBFS is far above anything a
+   * Float32 buffer can carry without its squares overflowing, and holding the
+   * level finite keeps a huge-but-legal sample from turning a gain into NaN one
+   * frame later (`-Infinity + Infinity`).
+   */
+  const MAX_LEVEL_DB = 120;
+
   /** Below this amplitude a detector reads nothing at all. */
   const SILENCE_LEVEL = 1e-12;
 
   /** The master limiter's lookahead, in seconds: 1.5 ms, the plan's number. */
   const MASTER_LOOKAHEAD_SECONDS = 0.0015;
+
+  /**
+   * How much of that lookahead the master limiter's ramp finishes early, as a
+   * fraction of it. The gain is where a peak needs it a little BEFORE the peak
+   * is output, so the true peak the interpolation finds between the samples is
+   * inside the ceiling too, not only the sample that carries it.
+   */
+  const LIMITER_RAMP_LEAD_FRACTION = 1 / 8;
+
+  /**
+   * The gate's detector release, in seconds: a peak envelope that follows the
+   * waveform's peaks, not the waveform. Raw |sample| crosses zero twice per
+   * period, so with no hold a low tone would chatter; 10 ms of release is far
+   * shorter than any gap between the peaks of the tones a gate is used on and
+   * far longer than a zero crossing.
+   */
+  const GATE_DETECTOR_RELEASE_SECONDS = 0.01;
 
   /** The compressor's RMS window: 10 ms of the squared signal. */
   const RMS_WINDOW_SECONDS = 0.01;
@@ -211,14 +256,47 @@
     return value > -DENORMAL_FLOOR && value < DENORMAL_FLOOR ? 0 : value;
   }
 
+  /**
+   * A sample as the audio path may carry it. `v - v` is exactly 0 for every
+   * finite double (0 and -0 included) and NaN for a NaN or an infinity, so this
+   * is the cheapest finiteness test there is — and a non-finite sample has to
+   * become 0 before it reaches a recursive stage, where it would never leave.
+   * @param {number} value a sample as it arrived
+   * @returns {number} the sample, or 0 when it is not a finite number
+   */
+  function finiteSample(value) {
+    return value - value === 0 ? value : 0;
+  }
+
+  /**
+   * A sample held inside ±a ceiling, and never NaN: a value that is not a number
+   * (only a broken state could make one here) comes out as 0 rather than being
+   * handed to the next stage, where a recursive insert would keep it forever.
+   * @param {number} value the sample
+   * @param {number} ceiling the largest magnitude allowed, above zero
+   * @returns {number} the sample, clipped and finite
+   */
+  function clampCeiling(value, ceiling) {
+    if (!(value <= ceiling)) return value > ceiling ? ceiling : 0;
+    if (value < -ceiling) return -ceiling;
+    return value;
+  }
+
   /** @returns {number} a level in dB as a linear gain. */
   function dbToGain(db) {
     return Math.pow(10, db / 20);
   }
 
-  /** @returns {number} an amplitude as a level in dB, floored so it is never -Infinity. */
+  /**
+   * @param {number} amplitude a detector's reading
+   * @returns {number} its level in dB, held between `MIN_LEVEL_DB` and
+   *   `MAX_LEVEL_DB` so it is never -Infinity, never NaN and never big enough to
+   *   overflow the gain it is turned into
+   */
   function levelOf(amplitude) {
-    return amplitude > SILENCE_LEVEL ? 20 * Math.log10(amplitude) : MIN_LEVEL_DB;
+    if (!(amplitude > SILENCE_LEVEL)) return MIN_LEVEL_DB;
+    const db = 20 * Math.log10(amplitude);
+    return db < MAX_LEVEL_DB ? db : MAX_LEVEL_DB;
   }
 
   /**
@@ -341,8 +419,9 @@
     const detector = createTruePeakState();
     let peak = 0;
     for (let index = 0; index < count; index += 1) {
-      const leftValue = left ? left[index] : 0;
-      const rightValue = right && typeof right.length === "number" ? right[index] : leftValue;
+      const leftValue = finiteSample(left ? left[index] : 0);
+      const rightValue =
+        right && typeof right.length === "number" ? finiteSample(right[index]) : leftValue;
       const framePeak = truePeakStep(detector, leftValue, rightValue);
       if (framePeak > peak) peak = framePeak;
     }
@@ -517,6 +596,7 @@
       attackCoefficient: 0,
       releaseCoefficient: 0,
       sidechainHighPass: false,
+      highPassHz: 0,
       highPass: createBiquadState(),
       gainDb: 0,
       rmsRing: new Float64Array(Math.max(1, Math.round(sampleRate * RMS_WINDOW_SECONDS))),
@@ -537,7 +617,12 @@
       delayRight: new Float64Array(Math.max(1, lookaheadFrames)),
       delayIndex: 0,
       requiredRing: new Float64Array(lookaheadFrames + 1),
+      // The peak each of those frames carried, so a ceiling lowered mid-stream
+      // can be re-applied to the frames still on their way out.
+      peakRing: new Float64Array(lookaheadFrames + 1),
       requiredIndex: 0,
+      // How many frames before the frame a ramp is aimed at the ramp lands.
+      rampLead: Math.max(1, Math.round(lookaheadFrames * LIMITER_RAMP_LEAD_FRACTION)),
       gain: 1,
       detector: createTruePeakState(),
     };
@@ -551,6 +636,8 @@
       holdFrames: 0,
       holdCounter: 0,
       rangeGain: dbToGain(-80),
+      detectorCoefficient: 0,
+      envelope: 0,
       open: false,
       gain: 0,
     };
@@ -593,15 +680,47 @@
       compressor.attackCoefficient = onePoleCoefficient(values.attack_ms, sampleRate);
       compressor.releaseCoefficient = onePoleCoefficient(values.release_ms, sampleRate);
       compressor.sidechainHighPass = values.sidechain_hp_hz > 0;
-      if (compressor.sidechainHighPass) {
-        setHighPass(compressor.highPass, values.sidechain_hp_hz, BUTTERWORTH_Q, sampleRate);
+      const highPassHz = compressor.sidechainHighPass ? values.sidechain_hp_hz : 0;
+      if (highPassHz !== compressor.highPassHz) {
+        // A section that was not running (its corner was 0) — or that ran at
+        // another corner — starts from silence: its old history would ring a
+        // band nobody asked for, and a filter switched on mid-stream would
+        // otherwise crackle for a moment.
+        if (highPassHz > 0) setHighPass(compressor.highPass, highPassHz, BUTTERWORTH_Q, sampleRate);
+        clearBiquad(compressor.highPass);
+        compressor.highPassHz = highPassHz;
       }
+    }
+
+    /**
+     * The requirement each frame still in the lookahead window asks for, from the
+     * peak it carried, and the gain held at or below the smallest of them.
+     * @returns {void}
+     */
+    function recomputeLimiterRequirements() {
+      const ceiling = limiter.ceilingLinear;
+      const requested = limiter.requiredRing;
+      let lowest = 1;
+      for (let at = 0; at < requested.length; at += 1) {
+        const peak = limiter.peakRing[at];
+        const needed = peak > ceiling ? ceiling / peak : 1;
+        const value = needed > 0 && needed <= 1 ? needed : 1;
+        requested[at] = value;
+        if (value < lowest) lowest = value;
+      }
+      if (limiter.gain > lowest) limiter.gain = lowest;
     }
 
     /** Recompute what a parameter change means for the limiter. @returns {void} */
     function refreshLimiter() {
-      limiter.ceilingLinear = dbToGain(values.ceiling_db);
+      const ceiling = dbToGain(values.ceiling_db);
+      const ceilingChanged = ceiling !== limiter.ceilingLinear;
+      limiter.ceilingLinear = ceiling;
       limiter.releaseCoefficient = onePoleCoefficient(values.release_ms, sampleRate);
+      // A ceiling changed while the song plays has to hold AT ONCE, so the frames
+      // still on their way to the output are measured against the new one: each
+      // stored requirement is recomputed from the peak its frame carried.
+      if (ceilingChanged) recomputeLimiterRequirements();
     }
 
     /** Recompute what a parameter change means for the gate. @returns {void} */
@@ -612,6 +731,7 @@
       gate.releaseCoefficient = onePoleCoefficient(values.release_ms, sampleRate);
       gate.holdFrames = Math.max(0, Math.round((values.hold_ms / 1000) * sampleRate));
       gate.rangeGain = dbToGain(values.range_db);
+      gate.detectorCoefficient = onePoleCoefficient(GATE_DETECTOR_RELEASE_SECONDS * 1000, sampleRate);
     }
 
     /** Recompute what a parameter change means for the de-esser. @returns {void} */
@@ -673,6 +793,7 @@
         // One, not zero: an empty window asks for no reduction, and a window of
         // zeros would fade the first few frames of the output in from silence.
         limiter.requiredRing.fill(1);
+        limiter.peakRing.fill(0);
         limiter.requiredIndex = 0;
         limiter.gain = 1;
         limiter.detector.historyLeft.fill(0);
@@ -682,6 +803,7 @@
       }
       if (name === "gate") {
         gate.gain = gate.rangeGain;
+        gate.envelope = 0;
         gate.open = false;
         gate.holdCounter = 0;
         return;
@@ -732,8 +854,9 @@
         compressor.rmsSum += power;
         if (compressor.rmsFilled < size) compressor.rmsFilled += 1;
         compressor.rmsSum = flush(compressor.rmsSum);
-        const mean = compressor.rmsSum / compressor.rmsFilled;
-        levelDb = mean > SILENCE_LEVEL * SILENCE_LEVEL ? 10 * Math.log10(mean) : MIN_LEVEL_DB;
+        // The same floor and ceiling a peak reading gets: a mean power of 0 is
+        // MIN_LEVEL_DB, and a huge one cannot turn the gain into a NaN later.
+        levelDb = levelOf(Math.sqrt(compressor.rmsSum / compressor.rmsFilled));
       }
       // A broken detector reads as silence rather than poisoning the gain.
       if (!(levelDb > MIN_LEVEL_DB)) levelDb = MIN_LEVEL_DB;
@@ -775,24 +898,56 @@
       const peak = truePeakStep(limiter.detector, inLeft, inRight);
       const required = peak > limiter.ceilingLinear ? limiter.ceilingLinear / peak : 1;
 
+      // The window's rings run in lockstep with the delay line, so once the new
+      // frame is written the write pointer is the OLDEST slot — the frame being
+      // output on this one, and the samples it should have been scaled by.
       const requested = limiter.requiredRing;
-      requested[limiter.requiredIndex] = required > 0 && required <= 1 ? required : 1;
-      limiter.requiredIndex =
-        limiter.requiredIndex + 1 >= requested.length ? 0 : limiter.requiredIndex + 1;
+      const written = limiter.requiredIndex;
+      limiter.peakRing[written] = peak;
+      requested[written] = required > 0 && required <= 1 ? required : 1;
+      limiter.requiredIndex = written + 1 >= requested.length ? 0 : written + 1;
 
-      // The smallest gain anything in the lookahead window asks for. The audio
-      // this frame hands out was written `lookaheadFrames` frames ago, so the
-      // window covers it and everything that has arrived since: the reduction is
-      // already in place when a peak reaches the output, and it never lets go of
-      // one it has seen.
-      let target = requested[0];
-      for (let at = 1; at < requested.length; at += 1) {
-        if (requested[at] < target) target = requested[at];
+      // The smallest gain anything in the lookahead window asks for, and how many
+      // frames there are before the frame that asks for it is handed out. The
+      // window covers the frame being output and every frame still to come, which
+      // is why the reduction is already in place when a peak reaches the output.
+      const length = requested.length;
+      const nowRequired = requested[limiter.requiredIndex];
+      let target = nowRequired;
+      let targetIn = 0;
+      for (let ahead = 1; ahead < length; ahead += 1) {
+        const slot =
+          limiter.requiredIndex + ahead >= length
+            ? limiter.requiredIndex + ahead - length
+            : limiter.requiredIndex + ahead;
+        const value = requested[slot];
+        if (value < target) {
+          target = value;
+          targetIn = ahead;
+        }
       }
 
-      // Instant down (that is what the lookahead is for), a release pole up.
-      if (target < limiter.gain) limiter.gain = target;
-      else limiter.gain = flush(limiter.gain + limiter.releaseCoefficient * (target - limiter.gain));
+      if (target < limiter.gain) {
+        // Down in a straight line, not in a step. The ramp is aimed at the frame
+        // the window minimum belongs to, and finishes `rampLead` frames before
+        // that frame is output, so it is always there in time and never above
+        // what the peak needs when it reaches the output. Recomputing the slope
+        // every frame keeps the line straight as the window moves; a nearer or
+        // deeper peak arriving mid-ramp steepens it instead of being waited for.
+        const remaining = targetIn - limiter.rampLead;
+        const frames = remaining > 1 ? remaining : 1;
+        const next = limiter.gain - (limiter.gain - target) / frames;
+        limiter.gain = next > target ? next : target;
+      } else {
+        // Up per `release_ms`, which is slow enough to be a pole, not a step.
+        limiter.gain = flush(limiter.gain + limiter.releaseCoefficient * (target - limiter.gain));
+      }
+
+      // The gain the frame being output actually gets. The ramp gets there by
+      // itself in every ordinary case; this is the hard promise for a peak that
+      // arrives inside the lookahead of one already seen, so what leaves never
+      // needs a step at the ceiling either.
+      const gain = limiter.gain < nowRequired ? limiter.gain : nowRequired;
 
       // The delayed audio, out of the same slot the new frame goes into.
       const at = limiter.delayIndex;
@@ -802,18 +957,12 @@
       limiter.delayRight[at] = inRight;
       limiter.delayIndex = at + 1 >= limiter.delayLeft.length ? 0 : at + 1;
 
-      // A last clamp at the ceiling: the smoothing can only ever be at or below
-      // what the window asked for, so this is a belt to the guaranteed braces.
-      const ceiling = limiter.ceilingLinear;
-      let outLeft = delayedLeft * limiter.gain;
-      let outRight = delayedRight * limiter.gain;
-      if (outLeft > ceiling) outLeft = ceiling;
-      else if (outLeft < -ceiling) outLeft = -ceiling;
-      if (outRight > ceiling) outRight = ceiling;
-      else if (outRight < -ceiling) outRight = -ceiling;
-      frame.outLeft = outLeft;
-      frame.outRight = outRight;
-      frame.gain = limiter.gain;
+      // A last clamp at the ceiling: the ramp can only ever be at or below what
+      // the window asked for, so this is a belt to the guaranteed braces — and it
+      // is the one place a non-finite frame stops, rather than being played.
+      frame.outLeft = clampCeiling(delayedLeft * gain, limiter.ceilingLinear);
+      frame.outRight = clampCeiling(delayedRight * gain, limiter.ceilingLinear);
+      frame.gain = gain;
     }
 
     /**
@@ -825,9 +974,8 @@
      * @returns {void}
      */
     function limiterTrackFrame(inLeft, inRight) {
-      const ceiling = limiter.ceilingLinear;
-      frame.outLeft = inLeft > ceiling ? ceiling : inLeft < -ceiling ? -ceiling : inLeft;
-      frame.outRight = inRight > ceiling ? ceiling : inRight < -ceiling ? -ceiling : inRight;
+      frame.outLeft = clampCeiling(inLeft, limiter.ceilingLinear);
+      frame.outRight = clampCeiling(inRight, limiter.ceilingLinear);
     }
 
     /**
@@ -838,7 +986,15 @@
      * @returns {void}
      */
     function gateFrame(inLeft, inRight) {
-      const levelDb = levelOf(Math.max(Math.abs(inLeft), Math.abs(inRight)));
+      // The detector is the linked pair's peak ENVELOPE — instant attack, a 10 ms
+      // release — not the raw sample. Raw |sample| crosses zero twice a period,
+      // so on a low tone (or with hold at 0) the gate would chatter at every
+      // crossing; the envelope follows the waveform's peaks instead.
+      const magnitude = Math.max(Math.abs(inLeft), Math.abs(inRight));
+      if (magnitude > gate.envelope) gate.envelope = magnitude;
+      else gate.envelope = flush(gate.envelope + gate.detectorCoefficient * (magnitude - gate.envelope));
+
+      const levelDb = levelOf(gate.envelope);
       if (gate.open) {
         if (levelDb < gate.closeDb) {
           // Below the closing threshold: the hold counts down, and only then
@@ -889,6 +1045,11 @@
      * One run of frames through the insert, in place. The blocks are up to 128
      * frames (the processor's own), the sidechain pair is optional, and a
      * missing right channel is a mono run.
+     *
+     * Every sample is sanitised on the way in (audio and sidechain alike): a NaN
+     * or an infinity from a buffer someone forgot to clear would live in a
+     * filter's state or in an envelope for the rest of the session, so it reads
+     * as 0 instead — see `finiteSample`.
      * @param {Float32Array} left the left channel, read and written in place
      * @param {Float32Array|null} right the right channel, or null for mono
      * @param {number} frames how many frames this run holds
@@ -912,10 +1073,14 @@
         const hasSidechainRight = hasSidechain && Boolean(sidechainRight) && typeof sidechainRight.length === "number";
         const sidechainRightEnd = hasSidechainRight ? Math.min(sidechainRight.length, end) : 0;
         for (let index = 0; index < end; index += 1) {
-          const inLeft = left[index];
-          const inRight = hasRight && index < rightEnd ? right[index] : inLeft;
-          const detectLeft = hasSidechain && index < sidechainEnd ? sidechainLeft[index] : inLeft;
-          const detectRight = hasSidechainRight && index < sidechainRightEnd ? sidechainRight[index] : detectLeft;
+          const inLeft = finiteSample(left[index]);
+          const inRight = hasRight && index < rightEnd ? finiteSample(right[index]) : inLeft;
+          const detectLeft =
+            hasSidechain && index < sidechainEnd ? finiteSample(sidechainLeft[index]) : inLeft;
+          const detectRight =
+            hasSidechainRight && index < sidechainRightEnd
+              ? finiteSample(sidechainRight[index])
+              : detectLeft;
           compressorFrame(inLeft, inRight, detectLeft, detectRight);
           left[index] = frame.outLeft;
           if (hasRight && index < rightEnd) right[index] = frame.outRight;
@@ -926,8 +1091,8 @@
       if (name === "limiter") {
         const master = lookaheadFrames > 0;
         for (let index = 0; index < end; index += 1) {
-          const inLeft = left[index];
-          const inRight = hasRight && index < rightEnd ? right[index] : inLeft;
+          const inLeft = finiteSample(left[index]);
+          const inRight = hasRight && index < rightEnd ? finiteSample(right[index]) : inLeft;
           if (master) limiterMasterFrame(inLeft, inRight);
           else limiterTrackFrame(inLeft, inRight);
           left[index] = frame.outLeft;
@@ -938,8 +1103,8 @@
 
       if (name === "gate") {
         for (let index = 0; index < end; index += 1) {
-          const inLeft = left[index];
-          const inRight = hasRight && index < rightEnd ? right[index] : inLeft;
+          const inLeft = finiteSample(left[index]);
+          const inRight = hasRight && index < rightEnd ? finiteSample(right[index]) : inLeft;
           gateFrame(inLeft, inRight);
           left[index] = frame.outLeft;
           if (hasRight && index < rightEnd) right[index] = frame.outRight;
@@ -948,8 +1113,8 @@
       }
 
       for (let index = 0; index < end; index += 1) {
-        const inLeft = left[index];
-        const inRight = hasRight && index < rightEnd ? right[index] : inLeft;
+        const inLeft = finiteSample(left[index]);
+        const inRight = hasRight && index < rightEnd ? finiteSample(right[index]) : inLeft;
         deesserFrame(inLeft, inRight);
         left[index] = frame.outLeft;
         if (hasRight && index < rightEnd) right[index] = frame.outRight;
