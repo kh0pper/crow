@@ -65,7 +65,7 @@ const FAKE_DOCKER = [
   '  if [ -f "$cf" ]; then i=$(cat "$cf"); fi',
   '  printf "%s\\n" "$((i + 1))" > "$cf"',
   '  local var="FAKE_${key}_${i}"',
-  '  if [ -n "${!var:-}" ]; then NEXT="${!var}"; else NEXT="$dflt"; fi',
+  '  if [ -n "${!var+x}" ]; then NEXT="${!var}"; else NEXT="$dflt"; fi',
   "}",
   "",
   'case "${1:-}" in',
@@ -82,12 +82,13 @@ const FAKE_DOCKER = [
   '  */api/users/*) next FRIGATE_SET_BODY \'{"success": true}\'; body="$NEXT"; next FRIGATE_SET_RC 0; printf "%s" "$body"; exit "$NEXT" ;;',
   '  *api/login*) next FRIGATE_LOGIN 200; printf "%s\\n" "$NEXT"; exit 0 ;;',
   // motionEye: the config probe, the set, the readiness probe, the login proof.
-  '  *config.get_main*) next MOTIONEYE_STATE empty; printf "%s\\n" "$NEXT"; exit 0 ;;',
+  '  *config.get_main*) next MOTIONEYE_STATE "admin\tempty"; printf "%s\\n" "$NEXT"; exit 0 ;;',
   "  *set_admin_password*) exit 0 ;;",
   '  *HTTPConnection*) next MOTIONEYE_UP 0; exit "$NEXT" ;;',
   '  *8765/login*) next MOTIONEYE_LOGIN 200; printf "%s\\n" "$NEXT"; exit 0 ;;',
-  // Wallabag: the schema query, the install, the password change, the login checks.
-  '  *wallabag_user*) next WALLABAG_SCHEMA 0; exit "$NEXT" ;;',
+  // Wallabag: the table-count query (doctrine prints a table), the install, the password
+  // change, the login checks.
+  '  *information_schema.tables*) next WALLABAG_TABLES " ------- \\n  n\\n -------\\n  0\\n -------"; printf "%b\\n" "$NEXT"; next WALLABAG_TABLES_RC 0; exit "$NEXT" ;;',
   "  *wallabag:install*) exit 0 ;;",
   '  *fos:user:change-password*) next WALLABAG_CHANGE "Changed password for user wallabag"; printf "%s\\n" "$NEXT"; next WALLABAG_CHANGE_RC 0; exit "$NEXT" ;;',
   '  *login_check*) next WALLABAG_LOGIN 0; exit "$NEXT" ;;',
@@ -97,6 +98,50 @@ const FAKE_DOCKER = [
   "",
 ].join("\n");
 writeFileSync(join(BIN, "docker"), FAKE_DOCKER, { mode: 0o755 });
+
+/**
+ * Wallabag's login check runs INSIDE the container, so it is a file of its own
+ * (`scripts/lib-login-check.sh`) and this is a `curl` for the host running it: it answers
+ * the `_csrf_token` fetch with a token (`FAKE_CURL_CSRF`), and the login POST with the
+ * http code and redirect the test asked for (`FAKE_CURL_CODE`, `FAKE_CURL_LOC`), or with a
+ * connection failure (`FAKE_CURL_POST_RC`).
+ */
+const CURL_BIN = join(TMP, "curlbin");
+mkdirSync(CURL_BIN, { recursive: true });
+const FAKE_CURL = [
+  "#!/usr/bin/env bash",
+  "set -u",
+  'url=""',
+  'for a in "$@"; do case "$a" in http://*) url="$a" ;; esac; done',
+  'case "$url" in',
+  "  */login_check)",
+  "    cat >/dev/null",
+  '    if [ -n "${FAKE_CURL_POST_RC:-}" ]; then exit "$FAKE_CURL_POST_RC"; fi',
+  '    if [ -n "${FAKE_CURL_LOC+x}" ]; then loc="$FAKE_CURL_LOC"; else loc="http://localhost/"; fi',
+  '    printf "%s %s" "${FAKE_CURL_CODE:-302}" "$loc"',
+  "    exit 0 ;;",
+  "  *)",
+  '    if [ -n "${FAKE_CURL_CSRF+x}" ]; then csrf="$FAKE_CURL_CSRF"; else csrf=\'<input type="hidden" name="_csrf_token" value="tok-1" />\'; fi',
+  '    printf "%s" "$csrf"',
+  "    exit 0 ;;",
+  "esac",
+  "",
+].join("\n");
+writeFileSync(join(CURL_BIN, "curl"), FAKE_CURL, { mode: 0o755 });
+
+const SH = existsSync("/bin/sh") ? "/bin/sh" : "sh";
+const LOGIN_CHECK_FILE = join(B("wallabag"), "scripts", "lib-login-check.sh");
+
+/** Run Wallabag's login check on its own, with the candidate password on stdin. */
+function runLoginCheck(env = {}) {
+  const res = spawnSync(SH, [LOGIN_CHECK_FILE, "wallabag"], {
+    input: "candidate-Pass-1\n",
+    encoding: "utf8",
+    timeout: 30_000,
+    env: { PATH: `${CURL_BIN}:/usr/bin:/bin`, HOME: TMP, ...env },
+  });
+  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "" };
+}
 
 after(() => {
   try { rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -115,21 +160,31 @@ function readCalls(dir) {
 }
 
 /** Run a bundle's setup script with the password on stdin, as the installer does. */
-function run(bundle, { password = `${PASSWORD}\n`, env = {}, withDocker = true } = {}) {
-  const dir = mkdtempSync(join(TMP, "calls-"));
+function run(bundle, { password = `${PASSWORD}\n`, env = {}, withDocker = true, dir = null } = {}) {
+  const callsDir = mkdtempSync(join(TMP, "calls-"));
+  // cwd is the installed bundle dir: an empty temp dir unless the test seeds a `.env`.
+  const cwd = dir || mkdtempSync(join(TMP, "cwd-"));
   const res = spawnSync(BASH, [join(B(bundle), "scripts", "first-admin.sh")], {
     input: password,
     encoding: "utf8",
-    timeout: 60_000,
+    timeout: 120_000,
+    cwd,
     env: {
       PATH: withDocker ? `${BIN}:/usr/bin:/bin` : `${NO_DOCKER}`,
       HOME: TMP,
       CROW_FIRST_ADMIN_USER: bundle === "wallabag" ? "wallabag" : "admin",
-      FAKE_DOCKER_DIR: dir,
+      FAKE_DOCKER_DIR: callsDir,
       ...env,
     },
   });
-  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "", calls: readCalls(dir) };
+  return { status: res.status, stdout: res.stdout || "", stderr: res.stderr || "", calls: readCalls(callsDir) };
+}
+
+/** An installed-bundle dir whose `.env` carries these lines. */
+function envDir(name, lines) {
+  const dir = mkdtempSync(join(TMP, `env-${name}-`));
+  writeFileSync(join(dir, ".env"), `${lines.join("\n")}\n`);
+  return dir;
 }
 
 const argvText = (r) => r.calls.map((c) => c.argv).join("\n");
@@ -186,10 +241,36 @@ test("frigate: a password the protocol refuses never reaches docker", () => {
   }
 });
 
-test("frigate: a login that Frigate refuses is a failure, not a success", () => {
-  const r = run("frigate", { env: { FAKE_FRIGATE_LOGIN_0: "401" } });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /did not accept the new login/);
+test("frigate: a login that Frigate never accepts is unproven, not a failure (exit 5)", () => {
+  const r = run("frigate", {
+    env: { FAKE_FRIGATE_LOGIN_0: "401", FAKE_FRIGATE_LOGIN_1: "401", FAKE_FRIGATE_LOGIN_2: "401" },
+  });
+  assert.equal(r.status, 5, r.stderr);
+  assert.match(r.stderr, /accepted the new password, but logging in with it did not succeed/);
+  assert.equal(r.calls.filter((c) => c.argv.includes("api/login")).length, 3, "the proof is retried three times");
+  assert.equal(ran(r, "/api/users/"), true, "the password really was set before the proof");
+  assertPasswordStayedOutOfSight(r);
+});
+
+test("frigate: a password the extension's settings already carry, and that logs in, is left alone (exit 3)", () => {
+  const dir = envDir("frigate-working", ["FRIGATE_URL=http://localhost:8971", "FRIGATE_PASSWORD=Env-Pass-9"]);
+  const r = run("frigate", { dir });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /already has the password from this extension's settings; left alone/);
+  assert.equal(ran(r, "/api/users/"), false, "a login that works is never replaced");
+  assert.equal(ran(r, "password_changed_at"), false, "nothing else is probed once the login works");
+  assert.equal(argvText(r).includes("Env-Pass-9"), false, "the .env password is never an argument");
+  assert.equal(stdinText(r).includes("Env-Pass-9"), true, "it reaches the container on stdin");
+  assert.equal(`${r.stdout}${r.stderr}`.includes("Env-Pass-9"), false, "and is never printed");
+});
+
+test("frigate: a settings-file password Frigate refuses does not stop the setup", () => {
+  const dir = envDir("frigate-stale", ["FRIGATE_PASSWORD=Env-Pass-9"]);
+  const r = run("frigate", { dir, env: { FAKE_FRIGATE_LOGIN_0: "401" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(ran(r, "/api/users/"), true, "the stale value is replaced as usual");
+  assert.equal(argvText(r).includes("Env-Pass-9"), false);
+  assert.equal(stdinText(r).includes("Env-Pass-9"), true);
   assertPasswordStayedOutOfSight(r);
 });
 
@@ -215,10 +296,18 @@ test("motioneye: a fresh install gets the password, then the container is restar
 });
 
 test("motioneye: an install that already has a password is left alone (exit 3)", () => {
-  const r = run("motioneye", { env: { FAKE_MOTIONEYE_STATE_0: "set" } });
+  const r = run("motioneye", { env: { FAKE_MOTIONEYE_STATE_0: "admin\tset" } });
   assert.equal(r.status, 3);
   assert.equal(ran(r, "set_admin_password"), false);
   assert.equal(ran(r, "restart"), false, "nothing changed, so nothing to restart");
+});
+
+test("motioneye: an install whose admin account was renamed is left alone (exit 3)", () => {
+  const r = run("motioneye", { env: { FAKE_MOTIONEYE_STATE_0: "operator\tempty" } });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /admin account is called 'operator', not 'admin'/);
+  assert.equal(ran(r, "set_admin_password"), false, "Crow does not set a password on an account name it does not know");
+  assert.equal(ran(r, "restart"), false);
 });
 
 test("motioneye: a configuration that cannot be read is a failure (exit 1)", () => {
@@ -244,20 +333,26 @@ test("motioneye: a password the protocol refuses never reaches docker", () => {
   }
 });
 
-test("motioneye: a login that motionEye refuses is a failure", () => {
-  const r = run("motioneye", { env: { FAKE_MOTIONEYE_LOGIN_0: "401" } });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /did not accept the new login/);
+test("motioneye: a login it never accepts is unproven, not a failure (exit 5)", () => {
+  const r = run("motioneye", {
+    env: { FAKE_MOTIONEYE_LOGIN_0: "401", FAKE_MOTIONEYE_LOGIN_1: "401", FAKE_MOTIONEYE_LOGIN_2: "401" },
+  });
+  assert.equal(r.status, 5, r.stderr);
+  assert.match(r.stderr, /accepted the new password, but logging in with it did not succeed/);
+  assert.equal(r.calls.filter((c) => c.argv.includes("8765/login")).length, 3, "the proof is retried three times");
+  assert.equal(ran(r, "set_admin_password"), true, "the password really was set before the proof");
+  assert.equal(ran(r, "restart"), true, "and the restart really happened");
   assertPasswordStayedOutOfSight(r);
 });
 
 // ── Wallabag ───────────────────────────────────────────────────────────────────────
 
-test("wallabag: no schema is installed, then the shipped default login is replaced", () => {
-  const r = run("wallabag", { env: { FAKE_WALLABAG_SCHEMA_0: "255" } });
+test("wallabag: an empty database is installed, then the shipped default login is replaced", () => {
+  const r = run("wallabag");
   assert.equal(r.status, 0, r.stderr);
   assertPasswordStayedOutOfSight(r);
-  assert.equal(ran(r, "wallabag:install"), true, "a fresh install has no tables: the script installs them");
+  assert.equal(ran(r, "information_schema.tables"), true, "the database itself is asked how many tables it has");
+  assert.equal(ran(r, "wallabag:install"), true, "a count of 0 is a fresh install: the script installs the tables");
   const change = r.calls.find((c) => c.argv.includes("fos:user:change-password"));
   assert.ok(change, "the password is changed through Wallabag's console");
   assert.equal(change.stdin, `${PASSWORD}\n`, "the password goes to the prompt on stdin, never as an argument");
@@ -265,13 +360,70 @@ test("wallabag: no schema is installed, then the shipped default login is replac
   assert.equal(logins.length, 2, "the default login is checked, then the new one");
   assert.equal(logins[0].stdin, "wallabag\n", "the shipped default login: the account name as the password");
   assert.equal(logins[1].stdin, `${PASSWORD}\n`, "the proof gets the new password on stdin");
+  assert.equal(logins[0].argv.includes("_password@-"), true, "the run uses the check that keeps no password file");
 });
 
-test("wallabag: an existing schema is never installed again", () => {
-  const r = run("wallabag", { env: { FAKE_WALLABAG_SCHEMA_0: "0" } });
+test("wallabag: a database with tables is never installed again", () => {
+  const tables = " ------- \n  n\n -------\n  37\n -------";
+  const r = run("wallabag", { env: { FAKE_WALLABAG_TABLES_0: tables } });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(ran(r, "wallabag:install"), false, "the tables are already there");
+  assert.equal(ran(r, "wallabag:install"), false, "37 tables: the schema is there, whatever else the probe says");
   assert.equal(ran(r, "fos:user:change-password"), true);
+});
+
+test("wallabag: a table-count query that fails changes nothing (exit 4, no install)", () => {
+  const r = run("wallabag", { env: { FAKE_WALLABAG_TABLES_RC_0: "255" } });
+  assert.equal(r.status, 4, r.stderr);
+  assert.match(r.stderr, /database did not answer; nothing was changed/);
+  assert.equal(ran(r, "wallabag:install"), false, "a query that failed is never 'no schema'");
+  assert.equal(ran(r, "fos:user:change-password"), false);
+});
+
+test("wallabag: an answer with no number in it changes nothing (exit 4, no install)", () => {
+  for (const answer of ["could not find driver", "", "n\nsome warning"]) {
+    const r = run("wallabag", { env: { FAKE_WALLABAG_TABLES_0: answer } });
+    assert.equal(r.status, 4, `${JSON.stringify(answer)}: ${r.stderr}`);
+    assert.match(r.stderr, /database did not answer; nothing was changed/);
+    assert.equal(ran(r, "wallabag:install"), false, `${JSON.stringify(answer)}: no install`);
+  }
+});
+
+test("wallabag: the login check reads a broken page as 'cannot tell', never as a login", () => {
+  assert.equal(runLoginCheck().status, 0, "302 away from /login is a login");
+  assert.equal(runLoginCheck({ FAKE_CURL_LOC: "http://localhost/login" }).status, 1, "302 back to /login is a refusal");
+  assert.equal(runLoginCheck({ FAKE_CURL_LOC: "" }).status, 2, "an empty redirect (a 502, a timeout) is 'cannot tell'");
+  assert.equal(runLoginCheck({ FAKE_CURL_POST_RC: "7" }).status, 2, "a curl that could not connect is 'cannot tell'");
+  assert.equal(runLoginCheck({ FAKE_CURL_CODE: "200", FAKE_CURL_LOC: "" }).status, 2, "a 200 with no redirect is 'cannot tell'");
+  assert.equal(runLoginCheck({ FAKE_CURL_CSRF: "" }).status, 2, "no CSRF token: the login page was not really there");
+});
+
+test("wallabag: the candidate password reaches curl on stdin, never a file in the container", () => {
+  const snippet = readFileSync(LOGIN_CHECK_FILE, "utf8");
+  assert.match(snippet, /_password@-/);
+  assert.equal(/pw\.XXXXXX/.test(snippet), false, "no password file is created at all");
+  assert.match(snippet, /trap 'rm -f "\$J"' EXIT/, "the cookie jar is cleaned up on the way out");
+});
+
+test("wallabag: an install whose extension connection uses its own account is left alone (exit 3)", () => {
+  const dir = envDir("wallabag-own-account", ["WALLABAG_URL=http://localhost:8084", "WALLABAG_USERNAME=alex", "WALLABAG_PASSWORD=Env-Pass-9"]);
+  const r = run("wallabag", { dir });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /already uses its own account \(alex\); Crow left it alone/);
+  assert.equal(r.calls.length, 0, "nothing is touched, not even the container");
+  assert.equal(`${r.stdout}${r.stderr}`.includes("Env-Pass-9"), false, "no password from .env is read out");
+});
+
+test("wallabag: a quoted .env username is read too, and the shipped name is not a hijack", () => {
+  const quoted = envDir("wallabag-quoted", ['WALLABAG_USERNAME="alex"']);
+  const other = run("wallabag", { dir: quoted });
+  assert.equal(other.status, 3, other.stderr);
+  assert.match(other.stderr, /its own account \(alex\)/);
+  assert.equal(other.calls.length, 0);
+
+  const own = envDir("wallabag-shipped", ["WALLABAG_USERNAME=wallabag"]);
+  const normal = run("wallabag", { dir: own });
+  assert.equal(normal.status, 0, normal.stderr);
+  assert.equal(ran(normal, "fos:user:change-password"), true);
 });
 
 test("wallabag: an install whose default login no longer works is left alone (exit 3)", () => {
@@ -286,10 +438,15 @@ test("wallabag: a login page that cannot be checked is a failure, not a refusal"
   assert.equal(ran(r, "fos:user:change-password"), false);
 });
 
-test("wallabag: the new password failing the proof is a failure", () => {
-  const r = run("wallabag", { env: { FAKE_WALLABAG_LOGIN_0: "0", FAKE_WALLABAG_LOGIN_1: "1" } });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /did not accept the new login/);
+test("wallabag: a new password the proof cannot confirm is kept, not thrown away (exit 5)", () => {
+  const r = run("wallabag", {
+    env: { FAKE_WALLABAG_LOGIN_1: "1", FAKE_WALLABAG_LOGIN_2: "1", FAKE_WALLABAG_LOGIN_3: "1" },
+  });
+  assert.equal(r.status, 5, r.stderr);
+  assert.match(r.stderr, /accepted the new password, but logging in with it did not succeed/);
+  const logins = r.calls.filter((c) => c.argv.includes("login_check"));
+  assert.equal(logins.length, 4, "the default login once, then the proof three times");
+  assert.equal(ran(r, "fos:user:change-password"), true, "the console confirmed the change");
   assertPasswordStayedOutOfSight(r);
 });
 

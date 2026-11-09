@@ -57,6 +57,7 @@ const {
   endFirstAdminSetup,
   KEYCHAIN_UNOPENABLE,
   PASSWORD_NOT_KEPT,
+  FIRST_ADMIN_UNPROVEN,
 } = await import("../servers/gateway/bundle-first-admin-setup.js");
 const {
   pendingFirstAdminNotices,
@@ -377,6 +378,71 @@ test("any other exit and a timeout are failures, with the script's own words", a
   const slow = await runSetup(timedOut.deps);
   assert.equal(slow.out.result, "failed");
   assert.match(slow.out.reason, /timed out after 30s/);
+});
+
+test("exit 5: the app took the password, so it is saved like exit 0 and reported as unconfirmed", async () => {
+  const { calls, deps } = seams({
+    runScript: async () => {
+      throw Object.assign(new Error("exit 5"), { exitCode: 5, stdout: "set the password\n", stderr: "" });
+    },
+  });
+  const { out, dirs } = await runSetup(deps);
+  assert.equal(out.result, "ok", "an app that already holds the password must not lose it over a proof");
+  assert.equal(calls.save.length, 1, "the keychain keeps it, like exit 0");
+  assert.deepEqual(
+    { bundleId: calls.save[0].bundleId, envKey: calls.save[0].envKey, secret: calls.save[0].secret, origin: calls.save[0].origin, firstView: calls.save[0].firstView },
+    { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", secret: PASSPHRASE, origin: "generated", firstView: true },
+  );
+  assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
+  assert.equal(out.reason, FIRST_ADMIN_UNPROVEN);
+  assert.equal(out.reason, "Crow saved the new login, but could not log in with it to confirm");
+  assert.equal(out.log.includes(FIRST_ADMIN_UNPROVEN), true, "the install log carries the sentence too");
+  assert.equal(out.log.includes("set the password"), true, "and the script's own line, so the operator sees both");
+  assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
+  assert.equal(JSON.stringify(out).includes(PASSPHRASE), false, "redaction still applies");
+  assert.equal(JSON.stringify(calls.marker).includes(PASSPHRASE), false);
+  assert.equal(
+    firstAdminResultMessage({ result: out.result, name: "Frigate", user: "admin", reason: out.reason }),
+    "Crow created Frigate's admin login (admin) and saved it in Settings → Passwords. Crow saved the new login, but could not log in with it to confirm.",
+  );
+});
+
+test("exit 5 with a keychain that will not save still keeps the password in .env", async () => {
+  const { calls, deps } = seams({
+    runScript: async () => { throw Object.assign(new Error("exit 5"), { exitCode: 5, stdout: "", stderr: "" }); },
+    save: async () => { throw new Error("seal failed"); },
+  });
+  const { out } = await runSetup(deps);
+  assert.equal(out.result, "ok");
+  assert.equal(calls.writeEnv.length, 1);
+  assert.match(out.reason, /could not log in with it to confirm; saved in the extension's settings file only/);
+  assert.equal(JSON.stringify(out).includes(PASSPHRASE), false);
+});
+
+test("an exit-5 script that echoes the password gets its words back redacted", async () => {
+  const echo = [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    "IFS= read -r PW",
+    'printf "%s\\n" "$PW"',
+    "exit 5",
+    "",
+  ].join("\n");
+  const { newSecretValue } = await import("../servers/gateway/bundle-env-secrets.js");
+  const password = newSecretValue("secret");
+  const dirs = bundleDirs({ "scripts/first-admin.sh": echo });
+  const out = await runFirstAdminSetup({
+    bundleId: "frigate",
+    manifest: SETUP_MANIFEST,
+    scriptDir: dirs.repoDir,
+    destDir: dirs.destDir,
+    installId: INSTALL,
+    crowHome: TMP_HOME,
+    deps: { ...seams().deps, runScript: spawnGroup, newSecret: () => password },
+  });
+  assert.equal(out.result, "ok");
+  assert.deepEqual(out.log, ["[hidden]", FIRST_ADMIN_UNPROVEN], "the echoed password is replaced, not dropped");
+  assert.equal(JSON.stringify(out).includes(password), false);
 });
 
 test("an existing ACTIVE keychain entry wins: nothing runs, nothing is overwritten, no marker", async () => {
@@ -976,6 +1042,40 @@ test("the auto route runs the setup and the real keychain, marker and .env all c
   }
 });
 
+test("an unproven login comes back as ok with its sentence, and the keychain keeps it", async () => {
+  const unproven = { ...SETUP_MANIFEST, id: "frigate-unproven", name: "Frigate Unproven" };
+  seedInstalled(unproven);
+  B._setFirstAdminSetupDepsForTest({
+    runScript: async () => { throw Object.assign(new Error("exit 5"), { exitCode: 5, stdout: "set the password\n", stderr: "" }); },
+  });
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await post("/bundles/api/first-admin-auto", { bundle_id: "frigate-unproven" });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(r.body.ok, true, "the app holds the password, so the login is kept");
+      assert.equal(r.body.result, "ok");
+      assert.equal(r.body.reason, "Crow saved the new login, but could not log in with it to confirm");
+      assert.match(r.body.message, /^Crow created Frigate Unproven's admin login \(admin\) and saved it in Settings → Passwords\. Crow saved the new login, but could not log in with it to confirm\.$/);
+      assert.deepEqual(r.body.log, ["set the password", "Crow saved the new login, but could not log in with it to confirm"]);
+    });
+    const { createDbClient } = await import("../servers/db.js");
+    const { listEntries, openEntrySecret } = await import("../servers/gateway/keychain/store.js");
+    const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
+    const db = createDbClient();
+    try {
+      const key = loadKeychainKey({ crowHome: TMP_HOME });
+      const entry = (await listEntries(db, { keyId: key?.id ?? null })).find((e) => e.bundle_id === "frigate-unproven");
+      assert.ok(entry, "the password the app took is in the keychain");
+      assert.equal(entry.origin, "generated");
+      assert.match(await openEntrySecret(db, key, entry.id), /^[A-Za-z0-9_-]{43}$/);
+    } finally {
+      db.close();
+    }
+  } finally {
+    B._setFirstAdminSetupDepsForTest(null);
+  }
+});
+
 test("first-admin-save stores the operator's own login under the bundle's admin key", async () => {
   const saveManifest = { ...SETUP_MANIFEST, id: "frigate-save", name: "Frigate Save" };
   seedInstalled(saveManifest);
@@ -1145,6 +1245,20 @@ test("Set it up for me replaces the card with where it was saved, and shows no p
   const after = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
   assert.equal(after.textContent.trim(), t("bundles.firstAdmin.savedInPasswords", "en"));
   assert.equal(after.querySelector(".ext-firstadmin-save"), null, "the form is gone with the card's contents");
+});
+
+test("an ok run Crow could not confirm keeps that sentence on the cleared card", async () => {
+  const reason = "Crow saved the new login, but could not log in with it to confirm";
+  const message = `Crow created Frigate's admin login (admin) and saved it in Settings → Passwords. ${reason}.`;
+  const { document, settle, click } = boot(renderCards([CARD]), {
+    fetchImpl: () => ({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, result: "ok", reason, message, log: [] }) }),
+  });
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  click(card.querySelector(".ext-firstadmin-auto"));
+  await settle();
+  const after = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  assert.equal(after.querySelector(".ext-firstadmin__saved").textContent, t("bundles.firstAdmin.savedInPasswords", "en"));
+  assert.equal(after.querySelector(".ext-firstadmin__msg").textContent, reason, "a cleared card is never a false 'it works'");
 });
 
 test("a run that did not create the login shows the server's sentence and keeps the card", async () => {

@@ -8,13 +8,17 @@
 # It also finishes an install this compose file cannot finish itself: the image runs
 # `wallabag:install` only when the wallabag service carries MYSQL_ROOT_PASSWORD, and this
 # compose file sets that on the database service only — so a fresh install has no tables
-# at all. The schema check below tells the two cases apart, and an existing schema is
-# never re-installed.
+# at all. The schema check below tells the two cases apart: the install runs ONLY when the
+# database reports exactly zero tables. On a populated database `wallabag:install -n`
+# rewrites the operator's settings and recreates a default super-admin, so a query Crow
+# could not read is "did not answer" (exit 4), never "no schema".
 #
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin and is
 # passed on only through pipes — never in an argument or the environment, and this script
 # prints no secret. Exit 0 = the admin now has that password, 3 = someone already changed
-# the default login (left alone), 4 = not running / not answering, anything else = failed.
+# the default login (left alone), 4 = not running / not answering / database did not
+# answer, 5 = Wallabag took the new password but the login could not be proved,
+# anything else = failed.
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -25,11 +29,44 @@ ADMIN_USER="wallabag"
 say() { printf '%s\n' "$1"; }
 die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
 
+# The login check is a sibling of this script, in Crow's own copy of the bundle (the cwd
+# is the INSTALLED bundle dir, so $0 — not `.` — is what locates it).
+case "$0" in
+  */*) SCRIPT_DIR="${0%/*}" ;;
+  *) SCRIPT_DIR="." ;;
+esac
+LOGIN_CHECK_FILE="$SCRIPT_DIR/lib-login-check.sh"
+[ -r "$LOGIN_CHECK_FILE" ] ||
+  die "Crow's own login check is missing from the bundle; nothing was changed."
+
 # ── the password, from stdin only ───────────────────────────────────────────────────
 PW=""
 IFS= read -r PW || true
 [ -n "$PW" ] || die "No password arrived on stdin; Wallabag was not touched."
 [ "${#PW}" -ge 12 ] || die "The password on stdin is shorter than 12 characters; Wallabag was not touched."
+
+# ── the account this extension's own connection uses, from ./.env ───────────────────
+# The script runs in the installed bundle dir. When .env already names an account, the
+# MCP server logs in with THAT one — replacing the shipped default would break the
+# extension's connection, so this script leaves the whole install alone. Only the
+# username is read here; a password in .env is never read, printed or used.
+env_value() {
+  [ -f ./.env ] || return 0
+  local line
+  line="$(grep -E "^[[:space:]]*$1=" ./.env 2>/dev/null | tail -n 1 || true)"
+  [ -n "$line" ] || return 0
+  line="${line#*=}"
+  case "$line" in
+    \"*\") line="${line#\"}"; line="${line%\"}" ;;
+    \'*\') line="${line#\'}"; line="${line%\'}" ;;
+  esac
+  line="${line%$'\r'}"
+  printf '%s' "$line"
+}
+connection_user="$(env_value WALLABAG_USERNAME)"
+if [ -n "$connection_user" ] && [ "$connection_user" != "$ADMIN_USER" ]; then
+  die "Wallabag's connection already uses its own account ($connection_user); Crow left it alone." 3
+fi
 
 # ── docker, and the container ───────────────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || die "docker is not available here, so the Wallabag container cannot be reached; nothing was changed." 4
@@ -41,19 +78,11 @@ console() {
   docker exec -i "$CONTAINER" su -s /bin/sh nobody -c "cd /var/www/wallabag && php bin/console ${1:?a console command} --env=prod"
 }
 
-# The login check: it takes a candidate password on stdin, asks for the login page's
-# CSRF token, posts the login and reads where it was redirected. Exit 0 = logged in,
-# 1 = refused. The candidate is written to a file inside the container so it never sits
-# in curl's argument list, and the temporary files are removed afterwards.
-LOGIN_CHECK='
-IFS= read -r P
-F=$(mktemp /tmp/pw.XXXXXX); J=$(mktemp /tmp/cj.XXXXXX)
-printf "%s" "$P" > "$F"
-T=$(curl -s -c "$J" http://localhost/login | grep -o "name=\"_csrf_token\"[^>]*value=\"[^\"]*\"" | sed "s/.*value=\"//;s/\"//")
-LOC=$(curl -s -b "$J" -c "$J" -o /dev/null -w "%{redirect_url}" --data-urlencode "_username=$1" --data-urlencode "_csrf_token=$T" --data-urlencode "_password@$F" http://localhost/login_check)
-rm -f "$F" "$J"
-case "$LOC" in */login) exit 1;; *) exit 0;; esac
-'
+# The login check itself lives in lib-login-check.sh (it runs inside the container, and
+# it is a file of its own so it can be exercised on its own).
+login_check() {
+  docker exec -i "$CONTAINER" sh -c "$(cat "$LOGIN_CHECK_FILE")" sh "$ADMIN_USER"
+}
 
 # ── wait for the app to answer (the database may still be starting) ─────────────────
 up=""
@@ -66,21 +95,25 @@ for _ in $(seq 1 60); do
 done
 [ -n "$up" ] || die "Wallabag did not answer within two minutes; nothing was changed." 4
 
-# ── does the schema exist? install it only when it does not ─────────────────────────
-if console 'doctrine:query:sql "SELECT COUNT(*) FROM wallabag_user"' < /dev/null >/dev/null 2>&1; then
-  say "Wallabag's database already has its tables."
-else
+# ── is there a schema? ask the database, and install only on a definite "no tables" ──
+tables="$(console 'doctrine:query:sql "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE()"' < /dev/null 2>/dev/null)" ||
+  die "Wallabag's database did not answer; nothing was changed." 4
+# The answer is doctrine's table; the count is the one line that is only digits.
+count="$(printf '%s\n' "$tables" | tr -d ' \r' | grep -E '^[0-9]+$' | tail -n 1 || true)"
+[ -n "$count" ] || die "Wallabag's database did not answer; nothing was changed." 4
+if [ "$count" = "0" ]; then
   say "Wallabag's database has no tables yet; installing it."
   console 'wallabag:install -n' < /dev/null >/dev/null 2>&1 || die "Wallabag's database could not be installed; nothing was changed."
+else
+  say "Wallabag's database already has its tables."
 fi
 
 # ── is the shipped default login still working? ────────────────────────────────────
 # If it no longer answers, the operator (or an earlier run) set a password of their own,
 # and Crow must not overwrite a login it does not know. The install's default password is
-# the account name itself; the snippet takes that on stdin and the account name as $1.
-shipped_pw="$ADMIN_USER"
+# the account name itself; the check takes that on stdin.
 rc=0
-printf '%s\n' "$shipped_pw" | docker exec -i "$CONTAINER" sh -c "$LOGIN_CHECK" sh "$ADMIN_USER" || rc=$?
+printf '%s\n' "$ADMIN_USER" | login_check || rc=$?
 case "$rc" in
   0) ;;
   1) die "Wallabag's default login no longer works, so this install already has its own admin password; left alone." 3 ;;
@@ -94,9 +127,21 @@ answer="$(printf '%s\n' "$PW" | console "fos:user:change-password $ADMIN_USER" 2
 printf '%s' "$answer" | grep -q "Changed password" ||
   die "Wallabag did not confirm the new password; check Wallabag itself."
 
-# ── prove the new login works ───────────────────────────────────────────────────────
-rc=0
-printf '%s\n' "$PW" | docker exec -i "$CONTAINER" sh -c "$LOGIN_CHECK" sh "$ADMIN_USER" || rc=$?
-[ "$rc" = "0" ] || die "Wallabag did not accept the new login; open Wallabag's own UI and set its admin password there."
+# ── prove the new login works (three tries, a few seconds apart) ────────────────────
+# Wallabag's own caches and session handling can lag a moment behind the console change.
+attempt=1
+while :; do
+  rc=0
+  printf '%s\n' "$PW" | login_check || rc=$?
+  if [ "$rc" = "0" ]; then break; fi
+  if [ "$attempt" -ge 3 ]; then break; fi
+  attempt=$((attempt + 1))
+  sleep 3
+done
+if [ "$rc" != "0" ]; then
+  # The console already confirmed the change, so the new password IS the app's password:
+  # Crow keeps it and says it could not prove it (exit 5).
+  die "Wallabag accepted the new password, but logging in with it did not succeed; open Wallabag's own UI and set its admin password there." 5
+fi
 
 say "Wallabag's admin login for '$ADMIN_USER' now uses the password Crow generated."

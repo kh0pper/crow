@@ -2020,7 +2020,9 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
         // The password Crow generates never comes back to this page: there is nothing to
         // show and nothing to copy. On ok the card is replaced by where it was saved; any
         // other result (kept, not running, failed) shows the server's plain sentence, which
-        // never carries the password either.
+        // never carries the password either. An ok that still carries a reason (the app took
+        // the password but the login could not be proved) keeps that sentence under the
+        // saved line, so a cleared card is never a false "it works".
         function showFirstAdminMessage(card, text) {
           var note = card ? card.querySelector(".ext-firstadmin__msg") : null;
           if (!note) return;
@@ -2043,6 +2045,13 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                   line.style.margin = "0";
                   line.textContent = '${tJs("bundles.firstAdmin.savedInPasswords", lang)}';
                   card.appendChild(line);
+                  if (d.reason) {
+                    var why = document.createElement("p");
+                    why.className = "ext-firstadmin__msg";
+                    why.style.margin = "0";
+                    why.textContent = d.reason;
+                    card.appendChild(why);
+                  }
                 }
                 return;
               }

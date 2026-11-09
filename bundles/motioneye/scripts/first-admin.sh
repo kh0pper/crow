@@ -8,8 +8,9 @@
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin and is
 # passed on only through pipes — never in an argument or the environment, and this script
 # prints no secret. Exit 0 = the admin now has that password, 3 = motionEye already has a
-# password of its own (left alone), 4 = not running / not answering, anything else =
-# failed.
+# password of its own, or its admin account is called something else (left alone),
+# 4 = not running / not answering, 5 = motionEye took the new password but the login could
+# not be proved, anything else = failed.
 #
 # How: the password hash lives in /etc/motioneye/motion.conf, which only root can read,
 # so everything goes through `docker exec` into the container and uses motionEye's own
@@ -19,8 +20,8 @@
 set -euo pipefail
 
 CONTAINER="${CROW_FA_CONTAINER:-crow-motioneye}"
-# motionEye has exactly one admin account and it is always called `admin`.
-ADMIN_USER="admin"
+# motionEye has exactly one admin account, and it is normally called `admin`.
+ADMIN_USER="${CROW_FIRST_ADMIN_USER:-admin}"
 
 say() { printf '%s\n' "$1"; }
 die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
@@ -42,8 +43,19 @@ running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || tr
 [ "$running" = "true" ] || die "motionEye is not running; nothing was changed." 4
 
 # ── is there already a password? ────────────────────────────────────────────────────
-state="$(docker exec "$CONTAINER" python3 -c 'from motioneye import config; print("empty" if not (config.get_main().get("@admin_password") or "") else "set")' < /dev/null 2>/dev/null || true)"
-case "$state" in
+state="$(docker exec "$CONTAINER" python3 -c 'from motioneye import config; c = config.get_main(); print("%s\t%s" % (c.get("@admin_username") or "", "empty" if not (c.get("@admin_password") or "") else "set"))' < /dev/null 2>/dev/null || true)"
+# The probe prints `<username>\t<empty|set>`: an install whose admin account was renamed
+# has no password Crow may set, because `admin` is not the account the operator uses.
+state_user=""
+state_password=""
+IFS=$'\t' read -r state_user state_password <<< "$state" || true
+if [ -z "$state_user" ] || [ -z "$state_password" ]; then
+  die "motionEye's configuration could not be read; nothing was changed."
+fi
+if [ "$state_user" != "$ADMIN_USER" ]; then
+  die "motionEye's admin account is called '$state_user', not '$ADMIN_USER'; left alone." 3
+fi
+case "$state_password" in
   empty) ;;
   set) die "motionEye already has an admin password; left alone." 3 ;;
   *) die "motionEye's configuration could not be read; nothing was changed." ;;
@@ -66,7 +78,18 @@ done
 [ -n "$up" ] || die "motionEye did not answer after the restart; the new password may not be active yet."
 
 # ── prove the new login works ───────────────────────────────────────────────────────
-code="$(printf '{"username":"%s","password":"%s"}' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8765/login 2>/dev/null || true)"
-[ "$code" = "200" ] || die "motionEye did not accept the new login; open motionEye's own UI and set its admin password there."
+attempt=1
+while :; do
+  code="$(printf '{"username":"%s","password":"%s"}' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8765/login 2>/dev/null || true)"
+  if [ "$code" = "200" ]; then break; fi
+  if [ "$attempt" -ge 3 ]; then break; fi
+  attempt=$((attempt + 1))
+  sleep 3
+done
+if [ "$code" != "200" ]; then
+  # The configuration is already changed and the server restarted, so the new password IS
+  # motionEye's password: Crow keeps it and says it could not prove it (exit 5).
+  die "motionEye accepted the new password, but logging in with it did not succeed; open motionEye's own UI and set its admin password there." 5
+fi
 
 say "motionEye's admin login for '$ADMIN_USER' now uses the password Crow generated."

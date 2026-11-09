@@ -48,6 +48,8 @@ El puerto `5000` (la API interna no autenticada de Frigate) **intencionalmente n
 
 Crow reemplaza la contraseña del primer arranque de Frigate durante la instalación del bundle: el administrador es `admin` y la contraseña que generó está en **Ajustes → Contraseñas** del Crow's Nest (y en el `.env` del bundle como `FRIGATE_PASSWORD`).
 
+Una instalación que ya estaba funcionando antes de que este bundle pudiera definir la contraseña sola no se queda como está: pulsa **Set it up for me** en la tarjeta del bundle en Extensiones. Si esa instalación nunca cambió la contraseña de administrador, Crow toma la contraseña generada que Frigate imprimió en su log, la reemplaza y guarda la nueva en **Ajustes → Contraseñas**. Si ya hay una contraseña tuya, Crow deja ese login en paz y te pide guardarlo en la tarjeta. Lo mismo vale para una contraseña que ya esté escrita en el `.env` del bundle: Crow la prueba primero y no cambia nada si con ella se puede entrar.
+
 Si la configuración automática no pudo ejecutarse (Frigate aún no estaba arriba), Frigate conserva la contraseña que imprimió en su log, y la defines tú:
 
 ```bash

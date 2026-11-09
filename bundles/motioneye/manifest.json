@@ -1,7 +1,7 @@
 {
   "id": "motioneye",
   "name": "motionEye",
-  "version": "0.44.2",
+  "version": "0.44.3",
   "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
   "type": "bundle",
   "author": "Crow",

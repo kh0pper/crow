@@ -1533,7 +1533,7 @@
     {
       "id": "frigate",
       "name": "Frigate NVR",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
       "type": "bundle",
       "author": "Crow",
@@ -4418,7 +4418,7 @@
     {
       "id": "motioneye",
       "name": "motionEye",
-      "version": "0.44.2",
+      "version": "0.44.3",
       "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
       "type": "bundle",
       "author": "Crow",
@@ -7563,7 +7563,7 @@
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
       "type": "bundle",
       "author": "Crow",
@@ -7663,7 +7663,7 @@
         "secretEnv": "WALLABAG_PASSWORD",
         "userEnv": "WALLABAG_USERNAME"
       },
-      "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and saves the new password in Settings → Passwords. Create an API client in Wallabag under Developer > Create a new client, then put WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings so the MCP server can log in.",
+      "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and writes WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings itself, so the MCP server logs in with no extra step; the password is in Settings → Passwords. Create an API client in Wallabag under Developer > Create a new client, then put its id and secret into WALLABAG_CLIENT_ID/WALLABAG_CLIENT_SECRET. To keep an account of your own, set WALLABAG_USERNAME to it before installing: Crow then leaves that login alone.",
       "official": true
     },
     {

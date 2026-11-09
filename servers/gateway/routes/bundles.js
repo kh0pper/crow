@@ -3491,6 +3491,9 @@ export default function bundlesRouter() {
         user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
         reason: out.reason || null,
       }),
+      // An ok can carry a reason (the app took the password, but Crow could not log in with
+      // it to confirm): the card keeps that sentence under the "saved" line.
+      ...(out.reason ? { reason: out.reason } : {}),
       log: out.log || [],
     });
   });
