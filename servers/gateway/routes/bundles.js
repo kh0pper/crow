@@ -3517,7 +3517,10 @@ export default function bundlesRouter() {
     }
     const saved = await saveFirstAdminLogin({
       bundleId,
-      manifest: getInstalledFirstManifest(bundleId),
+      // The entry name comes from the reviewed copy, like the card and the auto route: the
+      // installed copy can be written from inside the bundle's container. No reviewed copy →
+      // the generic key (firstAdminSavedKey), and the name falls back to the bundle id.
+      manifest: getManifest(bundleId) || null,
       username,
       password,
       crowHome: CROW_HOME,

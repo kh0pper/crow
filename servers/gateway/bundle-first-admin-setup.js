@@ -166,6 +166,8 @@ export function firstAdminResultMessage({ result, name = null, user = null, reas
     return `Crow is already setting up ${app}'s admin login.`;
   }
   const why = reason && String(reason).trim() ? String(reason).trim() : "the setup script did not finish";
+  // A retry cannot help once the app's password changed (the script would answer "kept").
+  if (why === PASSWORD_NOT_KEPT) return `Crow could not set up ${app}'s admin login: ${why}, then save it on the Extensions card.`;
   return `Crow could not set up ${app}'s admin login: ${why}. Use 'Set it up for me' on the Extensions card.`;
 }
 

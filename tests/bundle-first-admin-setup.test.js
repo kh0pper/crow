@@ -1183,3 +1183,9 @@ test("the card escapes the app name and the username it comes with", () => {
   assert.equal(/<img src=x/.test(html), false, "the app name is escaped");
   assert.equal(html.includes('"><script>alert(2)'), false, "the prefilled username is escaped");
 });
+test("a password Crow could not keep says to reset it in the app, not to retry", async () => {
+  const { firstAdminResultMessage, PASSWORD_NOT_KEPT } = await import("../servers/gateway/bundle-first-admin-setup.js");
+  const msg = firstAdminResultMessage({ result: "failed", name: "Demo", reason: PASSWORD_NOT_KEPT });
+  assert.ok(msg.includes("reset it in the app"));
+  assert.ok(!msg.includes("Set it up for me"));
+});
