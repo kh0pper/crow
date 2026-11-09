@@ -11,7 +11,7 @@
  *   5. pendingFirstAdminNotices with `adminSaved` / `autoResults`,
  *   6. the bell for a crow/setup bundle (silent on ok, once on anything else),
  *   7. the two routes (owner-only, installed-only, 400 for a non-setup app, 409 while a
- *      run is in flight, and the real keychain write),
+ *      run is in flight — the install path's run included — and the real keychain write),
  *   8. the card: the Set-it-up button, the password field and the escaping.
  *
  * Scratch CROW_HOME/CROW_DATA_DIR before anything Crow-side is imported, so this file
@@ -19,7 +19,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +53,10 @@ const {
   firstAdminSetupPlan,
   firstAdminResultMessage,
   writeBundleEnv,
+  tryBeginFirstAdminSetup,
+  endFirstAdminSetup,
   KEYCHAIN_UNOPENABLE,
+  PASSWORD_NOT_KEPT,
 } = await import("../servers/gateway/bundle-first-admin-setup.js");
 const {
   pendingFirstAdminNotices,
@@ -116,9 +119,15 @@ function tmpBundle(id, files = {}) {
   return { root, dir };
 }
 
-/** An installed-bundle dir with the setup script in it. */
-function setupDir(files = {}) {
-  return tmpBundle("frigate", { "scripts/first-admin.sh": "#!/usr/bin/env bash\nexit 0\n", ...files }).dir;
+/**
+ * The two folders one setup run uses: Crow's own (reviewed) copy of the bundle, which
+ * holds the manifest and the script, and the installed copy, which is only the cwd,
+ * CROW_BUNDLE_DIR and the .env target.
+ */
+function bundleDirs(files = {}) {
+  const reviewed = tmpBundle("frigate", { "scripts/first-admin.sh": "#!/usr/bin/env bash\nexit 0\n", ...files });
+  const installed = tmpBundle("frigate");
+  return { repoDir: reviewed.dir, destDir: installed.dir };
 }
 
 const errs = (manifest, dir) => validateManifest(manifest, dir).errors || [];
@@ -174,6 +183,18 @@ test("contract: via setup needs user and secretEnv; user is not a free-floating 
   assert.match(errText(badUserEnv, dir), /userEnv must name a declared env_vars entry/);
 });
 
+test("contract: via setup refuses Compose's, Docker's and Crow's own env prefixes", () => {
+  const { dir } = tmpBundle("frigate", { "scripts/first-admin.sh": "#!/usr/bin/env bash\nexit 0\n" });
+  for (const [field, name, prefix] of [
+    ["secretEnv", "CROW_PASSWORD", "CROW_"],
+    ["secretEnv", "COMPOSE_PROJECT_NAME", "COMPOSE_"],
+    ["userEnv", "DOCKER_USER", "DOCKER_"],
+  ]) {
+    const m = { ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, [field]: name } };
+    assert.match(errText(m, dir), new RegExp(`firstAdmin\\.${field} "${name}" must not start with ${prefix}`), `${field}=${name}`);
+  }
+});
+
 test("contract: `setup` rides only with via setup, and setup is only a crow mechanism", () => {
   const { dir } = tmpBundle("frigate", { "scripts/first-admin.sh": "#!/usr/bin/env bash\nexit 0\n" });
   const withEnv = {
@@ -189,6 +210,18 @@ test("contract: a community bundle is refused at run time even if its manifest a
   const community = { ...SETUP_MANIFEST, origin: "community" };
   const plan = firstAdminSetupPlan(community);
   assert.match(plan.refused, /first-party bundles only/);
+});
+
+test("the plan refuses an env name the run would write into the bundle's .env", () => {
+  const withSecret = (secretEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, secretEnv } });
+  const withUser = (userEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, userEnv } });
+  for (const name of ["crow_password", "CROW_PASSWORD", "COMPOSE_PASSWORD", "DOCKER_PASSWORD", "has-dash", "1PASSWORD", ""]) {
+    assert.match(firstAdminSetupPlan(withSecret(name)).refused, /secretEnv/, String(name));
+  }
+  for (const name of ["crow_user", "CROW_USER", "COMPOSE_USER", "not a name"]) {
+    assert.match(firstAdminSetupPlan(withUser(name)).refused, /userEnv/, String(name));
+  }
+  assert.equal(firstAdminSetupPlan(withSecret("FRIGATE_PASSWORD")).refused, undefined, "a plain env name is fine");
 });
 
 test("the plan clamps the timeout and demands what the protocol cannot work without", () => {
@@ -224,6 +257,15 @@ test("spawnGroup delivers `input` on stdin and closes it; without input stdin st
   );
 });
 
+test("spawnGroup survives a large input to a script that never reads it", async () => {
+  // The child exits before draining the pipe: its stdin write fails with EPIPE, which is
+  // the child's business — the call still resolves instead of crashing the gateway.
+  const env = { PATH: process.env.PATH };
+  const got = await spawnGroup("bash", ["-c", "exit 0"], { env, timeout: 30_000, input: `${"x".repeat(1024 * 1024)}\n` });
+  assert.equal(got.stdout, "");
+  assert.equal(got.stderr, "");
+});
+
 // ── 3. runFirstAdminSetup, over the seams ───────────────────────────────────────────
 
 /** Every seam the setup run needs, with the calls recorded. */
@@ -245,26 +287,35 @@ function seams(over = {}) {
   return { calls, deps };
 }
 
-const runSetup = (deps, extra = {}) => runFirstAdminSetup({
-  bundleId: "frigate",
-  manifest: SETUP_MANIFEST,
-  destDir: setupDir(),
-  installId: INSTALL,
-  crowHome: TMP_HOME,
-  deps,
-  ...extra,
-});
+const runSetup = async (deps, extra = {}) => {
+  const { dirs: given, ...rest } = extra;
+  const dirs = given || bundleDirs();
+  return {
+    dirs,
+    out: await runFirstAdminSetup({
+      bundleId: "frigate",
+      manifest: SETUP_MANIFEST,
+      scriptDir: dirs.repoDir,
+      destDir: dirs.destDir,
+      installId: INSTALL,
+      crowHome: TMP_HOME,
+      deps,
+      ...rest,
+    }),
+  };
+};
 
 test("exit 0: the generated password is saved as a generated keychain entry, marked ok, and reaches .env", async () => {
   const { calls, deps } = seams();
-  const out = await runSetup(deps);
+  const { out, dirs } = await runSetup(deps);
   assert.equal(out.result, "ok");
   assert.deepEqual(out.log, ["step one", "step two"], "the script's stdout is the log");
   assert.equal(calls.runScript.length, 1);
   const run = calls.runScript[0];
   assert.equal(run.cmd, "bash");
-  assert.equal(run.args[0].endsWith(join("scripts", "first-admin.sh")), true);
-  assert.equal(run.opts.cwd, dirname(dirname(run.args[0])), "cwd is the bundle dir");
+  assert.equal(run.args[0], join(dirs.repoDir, "scripts", "first-admin.sh"), "the REVIEWED copy of the script runs");
+  assert.equal(run.opts.cwd, dirs.destDir, "cwd is the installed bundle dir");
+  assert.equal(run.opts.env.CROW_BUNDLE_DIR, dirs.destDir);
   assert.equal(run.opts.input, `${PASSPHRASE}\n`, "the password is one stdin line");
   assert.equal(run.opts.env.CROW_FIRST_ADMIN_USER, "admin");
   assert.equal(run.opts.env.CROW_HOME, TMP_HOME);
@@ -292,7 +343,7 @@ test("exit 0: the generated password is saved as a generated keychain entry, mar
       firstView: true,
     },
   );
-  assert.deepEqual(calls.writeEnv, [{ dir: dirname(dirname(calls.runScript[0].args[0])), values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
+  assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
   assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
 });
 
@@ -301,7 +352,7 @@ test("exit 3 (kept) and exit 4 (not running) save nothing and say what they are"
     const { calls, deps } = seams({
       runScript: async () => { throw Object.assign(new Error(`exit ${exitCode}`), { exitCode, stdout: "app said no\n", stderr: `boom\n\nexit ${exitCode}` }); },
     });
-    const out = await runSetup(deps);
+    const { out } = await runSetup(deps);
     assert.equal(out.result, expected);
     assert.equal(out.log.includes("app said no"), true);
     assert.equal(calls.save.length, 0, `${expected}: no password to save`);
@@ -315,26 +366,28 @@ test("any other exit and a timeout are failures, with the script's own words", a
     runScript: async () => { throw Object.assign(new Error("exit 1"), { exitCode: 1, stdout: "", stderr: "login API returned 500\nexit 1" }); },
   });
   const out = await runSetup(failed.deps);
-  assert.equal(out.result, "failed");
-  assert.match(out.reason, /login API returned 500/);
-  assert.doesNotMatch(out.reason, /^exit /);
+  assert.equal(out.out.result, "failed");
+  assert.match(out.out.reason, /login API returned 500/);
+  assert.doesNotMatch(out.out.reason, /^exit /);
   assert.deepEqual(failed.calls.marker, [{ id: "frigate", install: INSTALL, result: "failed" }]);
 
   const timedOut = seams({
     runScript: async () => { throw Object.assign(new Error("timed out after 30s"), { timedOut: true, stdout: "", stderr: "timed out after 30s" }); },
   });
   const slow = await runSetup(timedOut.deps);
-  assert.equal(slow.result, "failed");
-  assert.match(slow.reason, /timed out after 30s/);
+  assert.equal(slow.out.result, "failed");
+  assert.match(slow.out.reason, /timed out after 30s/);
 });
 
-test("an existing ACTIVE keychain entry wins: nothing runs, nothing is overwritten", async () => {
+test("an existing ACTIVE keychain entry wins: nothing runs, nothing is overwritten, no marker", async () => {
   const { calls, deps } = seams({ hasSaved: async (_db, id, key) => id === "frigate" && key === "FRIGATE_PASSWORD" });
-  const out = await runSetup(deps);
+  const { out } = await runSetup(deps);
   assert.equal(out.result, "ok");
   assert.equal(calls.runScript.length, 0, "the script must never run over a login Crow already has");
   assert.equal(calls.save.length, 0);
-  assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
+  // The keychain entry alone hides the card: a marker would keep it hidden after the
+  // operator deletes the entry, so nothing is written here.
+  assert.deepEqual(calls.marker, []);
 });
 
 test("a keychain that cannot be opened or written stops everything BEFORE the app is touched", async () => {
@@ -344,7 +397,7 @@ test("a keychain that cannot be opened or written stops everything BEFORE the ap
     { ensureWriteKey: async () => { throw new Error("key file damaged"); } },
   ]) {
     const { calls, deps } = seams(over);
-    const out = await runSetup(deps);
+    const { out } = await runSetup(deps);
     assert.equal(out.result, "failed");
     assert.equal(out.reason, KEYCHAIN_UNOPENABLE);
     assert.equal(calls.runScript.length, 0, "the app's login must not change when the password cannot be kept");
@@ -355,13 +408,24 @@ test("a keychain that cannot be opened or written stops everything BEFORE the ap
 test("a keychain save that fails AFTER the app changed still parks the password in .env, undeclared", async () => {
   const manifest = { ...SETUP_MANIFEST, env_vars: [] }; // neither name is a declared env var
   const { calls, deps } = seams({ save: async () => { throw new Error("seal failed"); } });
+  const dirs = bundleDirs();
   const out = await runFirstAdminSetup({
-    bundleId: "frigate", manifest, destDir: setupDir(), installId: INSTALL, crowHome: TMP_HOME, deps,
+    bundleId: "frigate", manifest, scriptDir: dirs.repoDir, destDir: dirs.destDir, installId: INSTALL, crowHome: TMP_HOME, deps,
   });
   assert.equal(out.result, "ok");
   assert.equal(out.reason, "saved in the extension's settings file only");
-  assert.deepEqual(calls.writeEnv, [{ dir: dirname(dirname(calls.runScript[0].args[0])), values: { FRIGATE_PASSWORD: PASSPHRASE } }]);
+  assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE } }]);
   assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
+});
+
+test("when BOTH copies fail, the run says the login has to be reset in the app", async () => {
+  const { calls, deps } = seams({ save: async () => { throw new Error("seal failed"); }, writeEnv: () => { throw new Error("disk full"); } });
+  const { out } = await runSetup(deps);
+  assert.equal(out.result, "failed", "a password that only the app holds is not an ok");
+  assert.equal(out.reason, PASSWORD_NOT_KEPT);
+  assert.equal(out.reason, "the app's admin password changed but Crow could not keep it; reset it in the app");
+  assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "failed" }], "the card and the bell stay");
+  assert.equal(calls.runScript.length, 1, "the app really was given the password");
 });
 
 test("the password never reaches a returned line, a log line or the console", async () => {
@@ -372,7 +436,7 @@ test("the password never reaches a returned line, a log line or the console", as
   console.log = (...a) => said.push(a.map(String).join(" "));
   try {
     const { calls, deps } = seams({ save: async () => { throw new Error("seal failed"); } });
-    const out = await runSetup(deps);
+    const { out } = await runSetup(deps);
     assert.equal(out.result, "ok");
     assert.equal(calls.warn.length, 0, "nothing to warn about: the .env kept it");
     assert.equal(JSON.stringify(out).includes(PASSPHRASE), false);
@@ -380,9 +444,9 @@ test("the password never reaches a returned line, a log line or the console", as
     assert.equal(said.join("\n").includes(PASSPHRASE), false);
 
     const broken = seams({ save: async () => { throw new Error("seal failed"); }, writeEnv: () => { throw new Error("disk full"); } });
-    const lost = await runSetup(broken.deps);
-    assert.equal(lost.result, "ok", "the app's password changed, whatever happened to the copy");
-    assert.equal(lost.reason, "the new password could not be saved");
+    const lost = (await runSetup(broken.deps)).out;
+    assert.equal(lost.result, "failed");
+    assert.equal(lost.reason, PASSWORD_NOT_KEPT);
     assert.equal(JSON.stringify(lost).includes(PASSPHRASE), false);
     assert.equal(said.join("\n").includes(PASSPHRASE), false, "the warning names nothing secret");
   } finally {
@@ -391,9 +455,39 @@ test("the password never reaches a returned line, a log line or the console", as
   }
 });
 
+test("a script that prints the password gets its words back redacted", async () => {
+  const echo = [
+    "#!/usr/bin/env bash",
+    "set -eu",
+    "IFS= read -r PW",
+    'printf "%s\\n" "$PW"',
+    'printf "%s\\n" "$PW" >&2',
+    "exit 1",
+    "",
+  ].join("\n");
+  const { newSecretValue } = await import("../servers/gateway/bundle-env-secrets.js");
+  const password = newSecretValue("secret");
+  const dirs = bundleDirs({ "scripts/first-admin.sh": echo });
+  const out = await runFirstAdminSetup({
+    bundleId: "frigate",
+    manifest: SETUP_MANIFEST,
+    scriptDir: dirs.repoDir,
+    destDir: dirs.destDir,
+    installId: INSTALL,
+    crowHome: TMP_HOME,
+    deps: { ...seams().deps, runScript: spawnGroup, newSecret: () => password },
+  });
+  assert.equal(out.result, "failed");
+  assert.ok(out.log.length > 0, "the script's own stdout line is still shown");
+  assert.deepEqual(out.log, ["[hidden]"], "the echoed password is replaced, not dropped");
+  assert.match(out.reason, /\[hidden\]/, "the stderr tail is kept, redacted");
+  assert.equal(JSON.stringify(out).includes(password), false);
+});
+
 test("a non-setup manifest is skipped without running anything", async () => {
   const { calls, deps } = seams();
-  const out = await runFirstAdminSetup({ bundleId: "frigate", manifest: { firstAdmin: { mode: "finish-setup" } }, destDir: setupDir(), deps });
+  const dirs = bundleDirs();
+  const out = await runFirstAdminSetup({ bundleId: "frigate", manifest: { firstAdmin: { mode: "finish-setup" } }, scriptDir: dirs.repoDir, destDir: dirs.destDir, deps });
   assert.equal(out.result, "skipped");
   assert.equal(calls.runScript.length, 0);
   assert.deepEqual(out.log, []);
@@ -401,12 +495,55 @@ test("a non-setup manifest is skipped without running anything", async () => {
 
 test("a refused plan (community) fails before the db or the script", async () => {
   const { calls, deps } = seams();
+  const dirs = bundleDirs();
   const out = await runFirstAdminSetup({
-    bundleId: "frigate", manifest: { ...SETUP_MANIFEST, origin: "community" }, destDir: setupDir(), deps,
+    bundleId: "frigate", manifest: { ...SETUP_MANIFEST, origin: "community" }, scriptDir: dirs.repoDir, destDir: dirs.destDir, deps,
   });
   assert.equal(out.result, "failed");
   assert.match(out.reason, /first-party bundles only/);
   assert.equal(calls.runScript.length, 0);
+});
+
+test("there is no script to run without Crow's own copy of the bundle", async () => {
+  const { calls, deps } = seams();
+  const dirs = bundleDirs();
+  for (const scriptDir of [null, "", join(dirs.destDir, "nope")]) {
+    const out = await runFirstAdminSetup({
+      bundleId: "frigate", manifest: SETUP_MANIFEST, scriptDir, destDir: dirs.destDir, installId: INSTALL, crowHome: TMP_HOME, deps,
+    });
+    assert.equal(out.result, "failed", String(scriptDir));
+    assert.match(out.reason, /missing from the bundle/, String(scriptDir));
+  }
+  assert.equal(calls.runScript.length, 0, "the installed copy is never used as the source");
+});
+
+test("a setup script that is a symlink out of the reviewed bundle is refused, not run", async () => {
+  const { calls, deps } = seams();
+  const outside = tmpBundle("elsewhere", { "first-admin.sh": "#!/usr/bin/env bash\nexit 0\n" });
+  const dirs = bundleDirs();
+  rmSync(join(dirs.repoDir, "scripts", "first-admin.sh"));
+  symlinkSync(join(outside.dir, "first-admin.sh"), join(dirs.repoDir, "scripts", "first-admin.sh"));
+  const out = await runFirstAdminSetup({
+    bundleId: "frigate", manifest: SETUP_MANIFEST, scriptDir: dirs.repoDir, destDir: dirs.destDir, installId: INSTALL, crowHome: TMP_HOME, deps,
+  });
+  assert.equal(out.result, "failed");
+  assert.match(out.reason, /outside Crow's own copy of the bundle/);
+  assert.equal(calls.runScript.length, 0, "nothing outside the reviewed tree is executed");
+  assert.equal(calls.save.length, 0);
+});
+
+test("one setup run per bundle at a time, whoever starts it", async () => {
+  const { calls, deps } = seams();
+  assert.equal(tryBeginFirstAdminSetup("frigate"), true, "the install path can take the lock");
+  const { out } = await runSetup(deps);
+  assert.equal(out.result, "busy");
+  assert.equal(calls.runScript.length, 0, "a run in flight is not raced");
+  endFirstAdminSetup("frigate");
+  // Released: the next call runs normally.
+  const again = await runSetup(seams().deps);
+  assert.equal(again.out.result, "ok");
+  assert.equal(tryBeginFirstAdminSetup("frigate"), true);
+  endFirstAdminSetup("frigate");
 });
 
 test("the result sentences are the operator's, and carry no password", () => {
@@ -422,6 +559,7 @@ test("the result sentences are the operator's, and carry no password", () => {
     firstAdminResultMessage({ result: "failed", name: "Frigate", reason: "the app is not answering" }),
     "Crow could not set up Frigate's admin login: the app is not answering. Use 'Set it up for me' on the Extensions card.",
   );
+  assert.equal(firstAdminResultMessage({ result: "busy", name: "Frigate" }), "Crow is already setting up Frigate's admin login.");
 });
 
 // ── 4. the same run against a REAL script (no docker) ───────────────────────────────
@@ -440,10 +578,16 @@ const REAL_SCRIPT = [
 ].join("\n");
 
 test("real script: it reads the password from stdin, sees the username, and the password is kept out of its env", async () => {
-  const dir = setupDir({ "scripts/first-admin.sh": REAL_SCRIPT });
+  const dirs = bundleDirs({ "scripts/first-admin.sh": REAL_SCRIPT });
+  const dir = dirs.destDir;
   const { newSecretValue } = await import("../servers/gateway/bundle-env-secrets.js");
   const { calls, deps } = seams({ runScript: spawnGroup, newSecret: () => newSecretValue("secret"), writeEnv: writeBundleEnv });
-  const out = await runFirstAdminSetup({ bundleId: "frigate", manifest: SETUP_MANIFEST, destDir: dir, installId: INSTALL, crowHome: TMP_HOME, deps });
+  // A distinct bundle id: this run really writes the keychain, and the route tests below
+  // must not find this login already there.
+  const out = await runFirstAdminSetup({
+    bundleId: "frigate-real", manifest: { ...SETUP_MANIFEST, id: "frigate-real" },
+    scriptDir: dirs.repoDir, destDir: dir, installId: INSTALL, crowHome: TMP_HOME, deps,
+  });
   assert.equal(out.result, "ok", out.reason);
   assert.deepEqual(out.log, ["created the admin"]);
 
@@ -451,7 +595,8 @@ test("real script: it reads the password from stdin, sees the username, and the 
   assert.match(password, /^[A-Za-z0-9_-]{43}$/, "newSecretValue gives a URL- and shell-safe value");
   assert.equal(readFileSync(join(dir, "stdin.txt"), "utf8"), password, "the stdin line is exactly the password");
   assert.equal(readFileSync(join(dir, "user.txt"), "utf8"), "admin", "CROW_FIRST_ADMIN_USER is in the environment");
-  assert.equal(readFileSync(join(dir, "cwd.txt"), "utf8").trim(), dir, "the script runs in the bundle dir");
+  assert.equal(readFileSync(join(dir, "cwd.txt"), "utf8").trim(), dir, "the script runs in the installed bundle dir");
+  assert.equal(existsSync(join(dirs.repoDir, "cwd.txt")), false, "and never in Crow's own copy");
   const envDump = readFileSync(join(dir, "env.txt"), "utf8");
   assert.equal(envDump.includes(password), false, "the password is on stdin only, never in the environment");
   assert.match(envDump, /CROW_FIRST_ADMIN_USER=admin/);
@@ -602,12 +747,22 @@ const NOT_SETUP_MANIFEST = { id: PLAIN_ID, name: "Uptime Kuma", type: "bundle", 
 
 /** Write the manifest into both the source root and the installed tree, and record the install. */
 function seedInstalled(manifest) {
-  const id = manifest.id;
-  for (const root of [TMP_BUNDLES, join(TMP_HOME, "bundles")]) {
+  return seedInstalledPair(manifest, manifest);
+}
+
+/**
+ * The two copies a first-admin run reads: the REPO manifest (what Crow reviews and runs)
+ * and the INSTALLED one (which must never decide anything). Each gets its own scripts
+ * folder holding both script names.
+ */
+function seedInstalledPair(repoManifest, installedManifest) {
+  const id = repoManifest.id;
+  for (const [root, manifest] of [[TMP_BUNDLES, repoManifest], [join(TMP_HOME, "bundles"), installedManifest]]) {
     const dir = join(root, id);
     mkdirSync(join(dir, "scripts"), { recursive: true });
     writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2));
     writeFileSync(join(dir, "scripts", "first-admin.sh"), "#!/usr/bin/env bash\nexit 0\n");
+    writeFileSync(join(dir, "scripts", "other-admin.sh"), "#!/usr/bin/env bash\nexit 0\n");
   }
   const installedPath = join(TMP_HOME, "installed.json");
   const current = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : [];
@@ -615,6 +770,14 @@ function seedInstalled(manifest) {
   rest.push({ id, type: "bundle", version: "1.0.0", installedAt: INSTALL });
   writeFileSync(installedPath, JSON.stringify(rest, null, 2));
   return join(TMP_HOME, "bundles", id);
+}
+
+/** Record an install whose bundle is present in the installed tree only. */
+function recordInstallOnly(id) {
+  const installedPath = join(TMP_HOME, "installed.json");
+  const current = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : [];
+  current.push({ id, type: "bundle", version: "1.0.0", installedAt: INSTALL });
+  writeFileSync(installedPath, JSON.stringify(current, null, 2));
 }
 
 async function withServer({ owner = true, crossHost = false } = {}, fn) {
@@ -652,7 +815,8 @@ test("both routes are owner-only: a non-owner session and a peer request get 403
     }
   });
   await withServer({ owner: true, crossHost: true }, async (post) => {
-    for (const path of ["/bundles/api/first-admin-auto", "/bundles/api/first-admin-save"]) {
+    // Case and a trailing slash too: Express matches both, so the deny list must.
+    for (const path of ["/bundles/api/first-admin-auto", "/bundles/api/first-admin-save", "/BUNDLES/API/FIRST-ADMIN-AUTO/"]) {
       const r = await post(path, { bundle_id: SETUP_ID, password: "Typed-Pass-1" });
       assert.equal(r.status, 403, `${path}: a peer may not set an app's admin login`);
     }
@@ -701,6 +865,78 @@ test("a second run while one is in flight is a 409, and the first still finishes
   }
 });
 
+test("the install path's run and the card's run are the same lock", async () => {
+  const gated = { ...SETUP_MANIFEST, id: "frigate-install-lock", name: "Frigate Lock" };
+  seedInstalled(gated);
+  // The install path holds the lock while its script runs (runFirstAdminSetup owns it).
+  assert.equal(tryBeginFirstAdminSetup("frigate-install-lock"), true);
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await post("/bundles/api/first-admin-auto", { bundle_id: "frigate-install-lock" });
+      assert.equal(r.status, 409, "a card run never races the install's");
+      assert.match(r.body.error, /already setting up/);
+    });
+  } finally {
+    endFirstAdminSetup("frigate-install-lock");
+  }
+});
+
+test("the route builds its plan from the REPO manifest, never from the installed copy", async () => {
+  const reviewed = { ...SETUP_MANIFEST, id: "frigate-reviewed", name: "Frigate Reviewed" };
+  const installedCopy = {
+    ...reviewed,
+    origin: "community",
+    firstAdmin: { ...reviewed.firstAdmin, setup: { script: "scripts/other-admin.sh", timeout_s: 30 }, user: "mallory" },
+  };
+  // The installed copy cannot even offer the reviewed script's name.
+  seedInstalledPair(reviewed, installedCopy);
+  const dir = join(TMP_HOME, "bundles", "frigate-reviewed");
+  rmSync(join(dir, "scripts", "first-admin.sh"));
+  const ran = [];
+  B._setFirstAdminSetupDepsForTest({
+    runScript: async (cmd, args, opts) => { ran.push({ cmd, args, opts }); return { stdout: "created\n", stderr: "" }; },
+    save: async () => ({ id: 1 }),
+    writeEnv: () => {},
+  });
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await post("/bundles/api/first-admin-auto", { bundle_id: "frigate-reviewed" });
+      // A community origin or a missing script would both refuse: only the repo copy works.
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(r.body.result, "ok");
+      assert.match(r.body.message, /\(admin\)/, "the repo manifest's user");
+    });
+  } finally {
+    B._setFirstAdminSetupDepsForTest(null);
+  }
+  assert.equal(ran.length, 1, "exactly one script ran");
+  assert.equal(ran[0].args[0], join(TMP_BUNDLES, "frigate-reviewed", "scripts", "first-admin.sh"), "the repo copy of the script");
+  assert.equal(ran[0].opts.cwd, dir, "cwd is the installed bundle dir");
+  assert.equal(ran[0].opts.env.CROW_BUNDLE_DIR, dir);
+  assert.equal(ran[0].opts.env.CROW_FIRST_ADMIN_USER, "admin");
+});
+
+test("no repo manifest means the route refuses and runs nothing", async () => {
+  const id = "frigate-installed-only";
+  const dir = join(TMP_HOME, "bundles", id);
+  mkdirSync(join(dir, "scripts"), { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ ...SETUP_MANIFEST, id, name: "Frigate Installed Only" }, null, 2));
+  writeFileSync(join(dir, "scripts", "first-admin.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  recordInstallOnly(id);
+  let ran = 0;
+  B._setFirstAdminSetupDepsForTest({ runScript: async () => { ran++; return { stdout: "", stderr: "" }; } });
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const r = await post("/bundles/api/first-admin-auto", { bundle_id: id });
+      assert.equal(r.status, 400);
+      assert.equal(r.body.error, "This app can't be set up automatically; finish it in the app.");
+    });
+  } finally {
+    B._setFirstAdminSetupDepsForTest(null);
+  }
+  assert.equal(ran, 0, "the installed copy's manifest and script are not a source");
+});
+
 test("the auto route runs the setup and the real keychain, marker and .env all come out right", async () => {
   const dir = seedInstalled(SETUP_MANIFEST);
   B._setFirstAdminSetupDepsForTest({ runScript: async () => ({ stdout: "created the admin\n", stderr: "" }) });
@@ -741,15 +977,16 @@ test("the auto route runs the setup and the real keychain, marker and .env all c
 });
 
 test("first-admin-save stores the operator's own login under the bundle's admin key", async () => {
-  seedInstalled(SETUP_MANIFEST);
+  const saveManifest = { ...SETUP_MANIFEST, id: "frigate-save", name: "Frigate Save" };
+  seedInstalled(saveManifest);
   await withServer({ owner: true }, async (post) => {
-    const bad = await post("/bundles/api/first-admin-save", { bundle_id: SETUP_ID, username: "admin", password: "" });
+    const bad = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-save", username: "admin", password: "" });
     assert.equal(bad.status, 400);
     assert.match(bad.body.error, /Enter the password/);
-    const notString = await post("/bundles/api/first-admin-save", { bundle_id: SETUP_ID, username: 42, password: "x" });
+    const notString = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-save", username: 42, password: "x" });
     assert.equal(notString.status, 400);
 
-    const r = await post("/bundles/api/first-admin-save", { bundle_id: SETUP_ID, username: "alex", password: "Typed-Pass-1" });
+    const r = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-save", username: "alex", password: "Typed-Pass-1" });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.deepEqual(r.body, { ok: true });
   });
@@ -759,7 +996,7 @@ test("first-admin-save stores the operator's own login under the bundle's admin 
   const db = createDbClient();
   try {
     const key = loadKeychainKey({ crowHome: TMP_HOME });
-    const entry = (await listEntries(db, { keyId: key?.id ?? null })).find((e) => e.bundle_id === SETUP_ID && e.env_key === "FRIGATE_PASSWORD");
+    const entry = (await listEntries(db, { keyId: key?.id ?? null })).find((e) => e.bundle_id === "frigate-save" && e.env_key === "FRIGATE_PASSWORD");
     assert.ok(entry, "the login is in the keychain");
     assert.equal(entry.origin, "typed");
     assert.equal(entry.username, "alex");
@@ -770,21 +1007,46 @@ test("first-admin-save stores the operator's own login under the bundle's admin 
   }
 });
 
+test("saving the login never overwrites one Crow already keeps", async () => {
+  const keepManifest = { ...SETUP_MANIFEST, id: "frigate-kept", name: "Frigate Kept" };
+  seedInstalled(keepManifest);
+  await withServer({ owner: true }, async (post) => {
+    const first = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-kept", username: "admin", password: "Typed-Pass-1" });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const second = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-kept", username: "admin", password: "Typed-Pass-2" });
+    assert.equal(second.status, 409, "the login Crow keeps is not replaced from this form");
+    assert.equal(second.body.error, "Crow already keeps a login for this app. Change it in Settings → Passwords.");
+  });
+  const { createDbClient } = await import("../servers/db.js");
+  const { listEntries, openEntrySecret } = await import("../servers/gateway/keychain/store.js");
+  const { loadKeychainKey } = await import("../servers/gateway/keychain/key.js");
+  const db = createDbClient();
+  try {
+    const key = loadKeychainKey({ crowHome: TMP_HOME });
+    const entry = (await listEntries(db, { keyId: key?.id ?? null })).find((e) => e.bundle_id === "frigate-kept" && e.env_key === "FRIGATE_PASSWORD");
+    assert.ok(entry);
+    assert.equal(await openEntrySecret(db, key, entry.id), "Typed-Pass-1", "nothing was saved over it");
+  } finally {
+    db.close();
+  }
+});
+
 test("saveFirstAdminLogin reports a keychain failure instead of throwing", async () => {
   const said = [];
-  const ok = await saveFirstAdminLogin({
+  const status = await saveFirstAdminLogin({
     bundleId: SETUP_ID,
     manifest: SETUP_MANIFEST,
     username: "admin",
     password: "Typed-Pass-2",
     deps: {
       openDb: () => ({ close() {} }),
+      hasSaved: async () => false,
       ensureWriteKey: async () => { throw new Error("key file damaged"); },
       save: async () => ({ id: 1 }),
       warn: (m) => said.push(String(m)),
     },
   });
-  assert.equal(ok, false);
+  assert.equal(status, "failed");
   assert.equal(said.join("\n").includes("Typed-Pass-2"), false, "the cause is logged, never the password");
 });
 

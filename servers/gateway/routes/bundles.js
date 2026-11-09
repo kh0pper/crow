@@ -23,7 +23,7 @@ import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia } from "../bundle-first-admin.js";
-import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage } from "../bundle-first-admin-setup.js";
+import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE } from "../bundle-first-admin-setup.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
@@ -1605,11 +1605,6 @@ function startConsent(bundleId, { crossHost = false } = {}) {
 
 export { startConsent as _startConsentForTest, consentRecord as _consentRecordForTest };
 
-// One automatic first-admin setup per bundle at a time (the route answers 409 while a
-// run is in flight): two scripts racing to create the same account is how an app ends
-// up with a login nobody has. Module-level, like the owner-check seam below it.
-const FIRST_ADMIN_AUTO_RUNNING = new Set();
-
 // Follow-up B: who may allow a folder outside Crow's home (the owner at this machine's own
 // dashboard), and the folders each check may admit.
 let _ownerCheckForTest = null;
@@ -3101,24 +3096,42 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // the app is actually up (the same condition as the post-install hook): a script
     // that talks to a stopped app can only fail. Its outcome is remembered per install
     // (the Extensions card reads it) and decides whether the bell rings below.
+    // The REVIEWED manifest and script decide what runs: the installed folder can be
+    // mounted into the bundle's own container, so it is not trusted (see startConsent).
     let firstAdminAuto = null;
     if (!composeFailure && firstAdminVia(manifest) === "setup") {
-      const auto = await runFirstAdminSetup({
-        bundleId,
-        manifest,
-        destDir: join(BUNDLES_DIR, bundleId),
-        installId: recordedInstallAt,
-        crowHome: CROW_HOME,
-        deps: _firstAdminSetupDepsForTest || {},
-      });
-      firstAdminAuto = auto.result;
-      for (const line of auto.log || []) appendLog(job, `  ${line}`);
-      appendLog(job, firstAdminResultMessage({
-        result: auto.result,
-        name: manifest?.name || bundleId,
-        user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
-        reason: auto.reason || null,
-      }));
+      const reviewed = getManifest(bundleId);
+      const plan = firstAdminSetupPlan(reviewed);
+      if (!plan) {
+        // No reviewed declaration to run a script from: say so and leave the app to the operator.
+        firstAdminAuto = "failed";
+        appendLog(job, SETUP_UNAVAILABLE);
+      } else if (plan.refused) {
+        firstAdminAuto = "failed";
+        appendLog(job, firstAdminResultMessage({
+          result: "failed",
+          name: reviewed?.name || bundleId,
+          reason: plan.refused,
+        }));
+      } else {
+        const auto = await runFirstAdminSetup({
+          bundleId,
+          manifest: reviewed,
+          scriptDir: join(APP_BUNDLES, bundleId),
+          destDir: join(BUNDLES_DIR, bundleId),
+          installId: recordedInstallAt,
+          crowHome: CROW_HOME,
+          deps: _firstAdminSetupDepsForTest || {},
+        });
+        firstAdminAuto = auto.result;
+        for (const line of auto.log || []) appendLog(job, `  ${line}`);
+        appendLog(job, firstAdminResultMessage({
+          result: auto.result,
+          name: reviewed?.name || bundleId,
+          user: typeof reviewed?.firstAdmin?.user === "string" ? reviewed.firstAdmin.user : null,
+          reason: auto.reason || null,
+        }));
+      }
     }
 
     // ntfy autowire (spec 2026-10-03): Crow creates its own login + private topic on the
@@ -3444,43 +3457,42 @@ export default function bundlesRouter() {
     if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
     const entry = getInstalled().find((i) => i && i.id === bundleId);
     if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
-    // The INSTALLED copy's manifest: that is the version whose script is on disk.
-    const manifest = getInstalledFirstManifest(bundleId);
+    // The REVIEWED manifest and script, never the installed copy: the installed folder
+    // can be mounted into the bundle's own container, so its manifest and scripts are
+    // not trusted to decide what Crow runs (the same rule as startConsent).
+    const manifest = getManifest(bundleId);
     const plan = firstAdminSetupPlan(manifest);
-    if (!plan) return res.status(400).json({ error: "This app can't be set up automatically; finish it in the app." });
+    if (!plan) return res.status(400).json({ error: SETUP_UNAVAILABLE });
     if (plan.refused) {
       return res.status(400).json({ error: `Crow can't set up this app's admin login: ${plan.refused}`, code: "first_admin_unavailable" });
     }
-    // One run per bundle at a time: two scripts racing to create the same account is
-    // exactly how an app ends up with a login nobody knows.
-    if (FIRST_ADMIN_AUTO_RUNNING.has(bundleId)) {
+    const out = await runFirstAdminSetup({
+      bundleId,
+      manifest,
+      scriptDir: join(APP_BUNDLES, bundleId),
+      destDir: join(BUNDLES_DIR, bundleId),
+      installId: entry.installedAt || entry.installed_at || null,
+      crowHome: CROW_HOME,
+      deps: _firstAdminSetupDepsForTest || {},
+    });
+    // One run per bundle at a time, the install path's included (runFirstAdminSetup owns
+    // the lock): two scripts racing to create the same account is exactly how an app ends
+    // up with a login nobody knows.
+    if (out.result === "busy") {
       return res.status(409).json({ error: "Crow is already setting up this app's admin login. Wait for it to finish." });
     }
-    FIRST_ADMIN_AUTO_RUNNING.add(bundleId);
-    try {
-      const out = await runFirstAdminSetup({
-        bundleId,
-        manifest,
-        destDir: join(BUNDLES_DIR, bundleId),
-        installId: entry.installedAt || entry.installed_at || null,
-        crowHome: CROW_HOME,
-        deps: _firstAdminSetupDepsForTest || {},
-      });
-      // The card shows this sentence as-is; it never carries the password.
-      res.json({
-        ok: out.result === "ok",
+    // The card shows this sentence as-is; it never carries the password.
+    res.json({
+      ok: out.result === "ok",
+      result: out.result,
+      message: firstAdminResultMessage({
         result: out.result,
-        message: firstAdminResultMessage({
-          result: out.result,
-          name: manifest?.name || bundleId,
-          user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
-          reason: out.reason || null,
-        }),
-        log: out.log || [],
-      });
-    } finally {
-      FIRST_ADMIN_AUTO_RUNNING.delete(bundleId);
-    }
+        name: manifest?.name || bundleId,
+        user: typeof manifest?.firstAdmin?.user === "string" ? manifest.firstAdmin.user : null,
+        reason: out.reason || null,
+      }),
+      log: out.log || [],
+    });
   });
 
   // POST /bundles/api/first-admin-save — "Save the login you made": the operator's own
@@ -3511,7 +3523,12 @@ export default function bundlesRouter() {
       crowHome: CROW_HOME,
       deps: _firstAdminSetupDepsForTest || {},
     });
-    if (!saved) return res.status(500).json({ error: "Could not save the password. Try again." });
+    // A login Crow already keeps is changed in Settings → Passwords, never here (this form
+    // is the way to give Crow one, not to overwrite the one it has).
+    if (saved === "already") {
+      return res.status(409).json({ error: "Crow already keeps a login for this app. Change it in Settings → Passwords." });
+    }
+    if (saved !== "saved") return res.status(500).json({ error: "Could not save the password. Try again." });
     res.json({ ok: true });
   });
 

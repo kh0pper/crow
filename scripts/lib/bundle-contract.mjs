@@ -295,6 +295,14 @@ function validateCrowFirstAdmin(manifest, bundleDir, fa) {
 function validateSetupFirstAdmin(manifest, bundleDir, fa) {
   const errors = [];
   const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
+  // The two names the run writes into the bundle's .env: Crow refuses to touch
+  // Compose's, Docker's or its own namespace from a manifest.
+  for (const field of ["secretEnv", "userEnv"]) {
+    const name = fa[field];
+    if (typeof name !== "string" || name === "") continue;
+    const prefix = ["COMPOSE_", "DOCKER_", "CROW_"].find((p) => name.startsWith(p));
+    if (prefix) errors.push(`firstAdmin.${field} "${name}" must not start with ${prefix} — that prefix is reserved`);
+  }
   if (typeof fa.user !== "string" || fa.user.trim() === "") {
     errors.push(`firstAdmin: mode "crow" via "setup" needs user (the admin username the script creates)`);
   }

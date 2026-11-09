@@ -47,6 +47,7 @@ const {
   _setHookRunnerForTest,
   _setFirstAdminSetupDepsForTest,
 } = await import("../servers/gateway/routes/bundles.js");
+const { tryBeginFirstAdminSetup, endFirstAdminSetup } = await import("../servers/gateway/bundle-first-admin-setup.js");
 
 _setAppBundlesForTest(TMP_BUNDLES);
 _setRestartHookForTest(() => {});
@@ -288,4 +289,48 @@ test("a crow/setup install whose script fails rings ONE bell, and the marker say
   } finally {
     db.close();
   }
+});
+
+test("a crow/setup install with no reviewed manifest runs nothing and logs the plain sentence", async () => {
+  const id = "fx-fa-norepo";
+  const manifest = setupManifest(id);
+  // The installer validated a manifest the repo copy no longer has: nothing reviewed to run.
+  rmSync(join(TMP_BUNDLES, id, "manifest.json"));
+  stubDocker({});
+  let ran = 0;
+  _setFirstAdminSetupDepsForTest({ runScript: async () => { ran++; return { stdout: "", stderr: "" }; } });
+  try {
+    const job = _createJobForTest(id, "install");
+    const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    _finishJobForTest(job, "complete");
+    assert.equal(out.ok, true, out.reason);
+    assert.match(job.log.join("\n"), /This app can't be set up automatically; finish it in the app\./);
+  } finally {
+    _setFirstAdminSetupDepsForTest(null);
+    unstubDocker();
+  }
+  assert.equal(ran, 0, "the installed copy's script is never a source");
+  const bells = (await firstAdminBells()).filter((b) => b.metadata.bundle === id);
+  assert.equal(bells.length, 1, "the operator hears about the admin that was not created");
+});
+
+test("an install never starts a setup script while the card's run is in flight", async () => {
+  const id = "fx-fa-busy";
+  const manifest = setupManifest(id);
+  stubDocker({});
+  let ran = 0;
+  _setFirstAdminSetupDepsForTest({ runScript: async () => { ran++; return { stdout: "", stderr: "" }; } });
+  assert.equal(tryBeginFirstAdminSetup(id), true, "the card's run holds the lock");
+  try {
+    const job = _createJobForTest(id, "install");
+    const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+    _finishJobForTest(job, "complete");
+    assert.equal(out.ok, true, out.reason);
+    assert.match(job.log.join("\n"), new RegExp(`Crow is already setting up ${id} app's admin login\\.`));
+  } finally {
+    endFirstAdminSetup(id);
+    _setFirstAdminSetupDepsForTest(null);
+    unstubDocker();
+  }
+  assert.equal(ran, 0, "the second script never started");
 });
