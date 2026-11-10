@@ -27,18 +27,21 @@ Instala Paperless-ngx como un bundle de Crow. Esto ejecuta Paperless-ngx en Dock
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Después de la instalación, configura la contraseña de la base de datos:
+Crow genera los dos secretos que necesita esta pila — la contraseña de PostgreSQL y la clave secreta de Django sin la cual la aplicación se niega a arrancar — y crea la cuenta de administrador de Paperless-ngx (`admin`) durante la instalación, guardando su contraseña en **Ajustes** > **Contraseñas** en el Crow's Nest. No hay ningún superusuario que crear en la interfaz web. Inicia sesión con esa cuenta y luego genera un token de API desde **Administración** > **Usuarios** > **Editar** > **Tokens de autenticación**.
+
+Si instalaste Paperless-ngx antes de esta versión, el primer arranque del gateway después de la actualización pone tu instalación al día: la clave secreta de Django se genera en el `.env` del bundle y el `docker-compose.yml` del bundle se reemplaza por el actual. Luego abre la página de Extensiones, pulsa **Reiniciar** en Paperless-ngx (el contenedor solo lee la clave secreta cuando se recrea) y pulsa **Configúralo por mí** en su tarjeta, que crea la cuenta ahora y guarda la contraseña de la misma forma. Una instalación cuyo archivo compose todavía apuntaba a `:latest` pasa a la imagen fijada 3.4.2 en ese reinicio. El archivo compose se reemplaza en cada actualización, así que pon los cambios locales (rutas, puertos, límites de memoria) en un `docker-compose.override.yml` junto a él: Compose combina ese archivo y Crow no lo toca.
+
+Para un `.env` escrito a mano (en lugar del instalador de bundles), hay que definir los dos secretos — la pila no arranca sin ellos:
 
 ```bash
 # En tu archivo .env
 PAPERLESS_DB_PASSWORD=tu-contrasena-segura
+PAPERLESS_SECRET_KEY=tu-clave-secreta-de-django
 ```
 
 Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de Paperless"
-
-Paperless-ngx estará disponible en `http://tu-servidor:8000` para la configuración inicial. Crea una cuenta de superusuario vía la interfaz web y luego genera un token de API desde **Administración** > **Usuarios** > **Editar** > **Tokens de autenticación**.
 
 ### Opción B: Conectar a Paperless-ngx existente
 
@@ -93,6 +96,7 @@ services:
     environment:
       PAPERLESS_DBHOST: paperless-db
       PAPERLESS_REDIS: redis://paperless-redis:6379
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
     depends_on:
       - paperless-db
       - paperless-redis

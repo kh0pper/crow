@@ -27,7 +27,9 @@ Instala Linkding como un bundle de Crow. Esto ejecuta Linkding en Docker junto a
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Linkding estará disponible en `http://tu-servidor:9090` para la configuración inicial. Crea una cuenta a través de la interfaz web y luego obtén tu token de API desde **Settings** > **Integrations**.
+Linkding estará disponible en `http://tu-servidor:9090`. Crow crea la cuenta de administrador de Linkding (`admin`) durante la instalación y guarda su contraseña en **Ajustes** > **Contraseñas** en el Crow's Nest, así que no queda ninguna página de primer arranque abierta para que otra cosa en la máquina la reclame. Inicia sesión con esa cuenta y luego obtén tu token de API desde **Settings** > **Integrations**.
+
+Si instalaste Linkding antes de esta versión, su tarjeta en la página de Extensiones ofrece **Configúralo por mí**, que crea la cuenta ahora y guarda la contraseña de la misma forma.
 
 ### Opción B: Conectar a Linkding existente
 
