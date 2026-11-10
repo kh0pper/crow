@@ -73,6 +73,7 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
+import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
 import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation, mintMissingFlaggedKeys } from "../bundle-env-secrets.js";
@@ -1411,16 +1412,59 @@ function generatedPlainForMcp(manifest, generated) {
   return Object.fromEntries(Object.entries(generated || {}).filter(([k]) => !hashed.has(k)));
 }
 
-export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null } = {}) {
+export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, edited = null, generatedKeys = [] } = {}) {
   const env = {};
-  for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
+  const fromRequest = new Set();
+  for (const key of manifest?.server?.envKeys || []) {
+    if (reqEnv && reqEnv[key]) { env[key] = reqEnv[key]; fromRequest.add(key); }
+  }
   for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
+  // Which values the OWNER entered (never a manifest default): the form's edited list,
+  // plus a requested value that differs from its manifest default (a generated key is
+  // minted by Crow, not typed). The wall's host/bind rules read only owner-set values.
+  const ownerSet = ownerSetFor({ env, fromRequest, edited, generatedKeys, manifest, priorEnv: null, bundleId: null });
   // A launcher outside the root-owned system dirs (a ./run.sh in the bundle)
   // is started only when pinned; the operator's install/update click is the
   // consent for in-bundle code, so the flow that writes the entry pins it.
   const pin = bundleDir ? launcherPin(manifest.server.command, bundleDir) : null;
   return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}),
-    ...(pin ? { command_sha256: pin } : {}) };
+    ...(pin ? { command_sha256: pin } : {}), ...(ownerSet.length > 0 ? { ownerSet } : {}) };
+}
+
+/**
+ * `registry/addon-past-defaults.json` `.defaults`, read lazily (a missing or unreadable
+ * file means "no past defaults"). It holds every `env_vars[].default` each manifest has
+ * ever shipped, which is how an entry written before `ownerSet` existed is judged.
+ */
+function pastDefaultsForEntry(bundleId) {
+  if (!bundleId) return {};
+  try {
+    const doc = JSON.parse(readFileSync(new URL("../../../registry/addon-past-defaults.json", import.meta.url), "utf8"));
+    const defaults = doc && typeof doc === "object" ? doc.defaults : null;
+    return defaults && typeof defaults === "object" ? defaults[bundleId] || {} : {};
+  } catch { return {}; }
+}
+
+/**
+ * The sorted, unique `ownerSet` for an entry being written.
+ *
+ * `fromRequest` holds the keys that came from the install request (never a manifest
+ * default). `priorEnv` seeds a LEGACY entry (one with no `ownerSet`): a value that equals
+ * no default the manifest has ever shipped was owner-entered.
+ */
+function ownerSetFor({ env, fromRequest = new Set(), edited = null, generatedKeys = [], manifest, priorEnv, bundleId }) {
+  const editedSet = new Set(Array.isArray(edited) ? edited : []);
+  const generatedSet = new Set(Array.isArray(generatedKeys) ? generatedKeys : []);
+  const defaults = new Map((manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+    .map((v) => [v.name, String(v.default)]));
+  const owner = new Set(priorEnv ? legacyOwnerKeys(priorEnv, manifest, pastDefaultsForEntry(bundleId)) : []);
+  for (const key of Object.keys(env || {})) {
+    if (editedSet.has(key)) { owner.add(key); continue; }
+    if (!fromRequest.has(key) || generatedSet.has(key)) continue;
+    if (!defaults.has(key) || String(env[key]) !== defaults.get(key)) owner.add(key);
+  }
+  return [...owner].sort();
 }
 
 /**
@@ -1446,20 +1490,38 @@ function mcpForwardableKeys(manifest) {
  *
  * @returns {boolean} true if the add-on registers an MCP server and the file was written
  */
-export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null) {
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null, { edited = null } = {}) {
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
   const allowed = mcpForwardableKeys(manifest);
+  const priorEnv = { ...(entry.env || {}) };
   const merged = { ...(entry.env || {}) };
   // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
   // so a blank here would SHADOW a working ambient value rather than clear it. The two
   // install-time writers of this file (see the mcp_server registration paths) guard the
   // same way. Clearing a value stays the .env file's job.
+  const written = [];
   for (const [k, v] of Object.entries(envVars || {})) {
-    if (v && (!allowed || allowed(k))) merged[k] = v;
+    if (v && (!allowed || allowed(k))) { merged[k] = v; written.push(k); }
   }
   entry.env = merged;
+  // Provenance for the wall's host/bind rules: the keys this save actually wrote that
+  // are not just the manifest default. A legacy entry is seeded from the past-defaults rule.
+  if (written.length > 0) {
+    const editedSet = new Set(Array.isArray(edited) ? edited : []);
+    const defaults = new Map((manifest?.env_vars || [])
+      .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+      .map((v) => [v.name, String(v.default)]));
+    const owner = new Set(Array.isArray(entry.ownerSet)
+      ? entry.ownerSet
+      : legacyOwnerKeys(priorEnv, manifest, pastDefaultsForEntry(bundleId)));
+    for (const k of written) {
+      if (manifest === null || editedSet.has(k) || !defaults.has(k) || String(merged[k]) !== defaults.get(k)) owner.add(k);
+    }
+    const sorted = [...owner].sort();
+    if (sorted.length > 0) entry.ownerSet = sorted;
+  }
   mcpAddons[bundleId] = entry;
   writeJsonSafe(path, mcpAddons);
   return true;
@@ -2880,7 +2942,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2917,7 +2979,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -4353,7 +4415,7 @@ export default function bundlesRouter() {
         : null;
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id));
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id), { edited: changedKeys });
 
       // And the gateway's own env, exactly as install does for docker bundles:
       // gateway-side panel routes read their config from process.env (the phone
