@@ -54,7 +54,8 @@ running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || tr
 
 # ── wait for the app (a first start creates and fills app.db first) ─────────────────
 # Bounded twice: a $SECONDS budget well inside the manifest's 120 s, and --max-time 5 on the
-# probe itself, so a single stuck curl cannot outlive the wait.up=""
+# probe itself, so a single stuck curl cannot outlive the wait.
+up=""
 wait_deadline=$((SECONDS + 60))
 while [ "$SECONDS" -lt "$wait_deadline" ]; do
   if docker exec "$CONTAINER" curl -fsS --max-time 5 -o /dev/null "$BASE_URL/" </dev/null >/dev/null 2>&1; then

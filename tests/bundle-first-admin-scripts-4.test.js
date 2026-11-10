@@ -88,9 +88,11 @@ mkdirSync(NO_CURL_BIN, { recursive: true });
 
 // ── the canned answers each app's own tool answers with ────────────────────────────
 
-/** Shiori's login answer: a token and the account it signed in as, then the status code. */
-const shioriLogin = (token = TOKEN, id = 1, user = "shiori") =>
-  `{"message":"Login success","token":"${token}","account":{"id":${id},"username":"${user}"}}\n200`;
+/** Shiori v1.8.0's login answer: only a token (in `message`), then the status code. */
+const shioriLogin = (token = TOKEN) => `{"ok":true,"message":{"expires":0,"token":"${token}"}}\n200`;
+/** GET /api/v1/auth/me: the signed-in account (Shiori puts it in `message`). */
+const shioriMe = (id = 1, user = "shiori") =>
+  `{"ok":true,"message":{"id":${id},"owner":true,"username":"${user}","config":{"ShowId":false}}}\n200`;
 /** Stirling's login answer: the access token inside a session object, then the code. */
 const stirlingLogin = (token = TOKEN) => `{"session":{"access_token":"${token}"}}\n200`;
 /** BookStack's login page: the CSRF token a form login has to send back. */
@@ -110,6 +112,7 @@ const DEFAULTS = {
   FAKE_SHIORI_DEFAULT: SHIORI_REFUSED,
   FAKE_SHIORI_NEWLOGIN: shioriLogin(),
   FAKE_SHIORI_PATCH: "200",
+  FAKE_SHIORI_ME: shioriMe(),
   FAKE_STIRLING_DEFAULT_0: stirlingLogin(),
   FAKE_STIRLING_DEFAULT: STIRLING_REFUSED,
   FAKE_STIRLING_NEWLOGIN: stirlingLogin(),
@@ -251,6 +254,7 @@ const FAKE_CURL = [
   '  *:8086/api/v1/auth/login*)',
   '    if grep -q gopher "$stdinf"; then next SHIORI_DEFAULT "$FAKE_SHIORI_DEFAULT"; else next SHIORI_NEWLOGIN "$FAKE_SHIORI_NEWLOGIN"; fi',
   "    emit ;;",
+  '  *:8086/api/v1/auth/me*) next SHIORI_ME "$FAKE_SHIORI_ME"; emit ;;',
   '  *:8086/api/v1/accounts/*) next SHIORI_PATCH "200"; emit ;;',
   '  *:8086/*) next SHIORI_UP "200"; emit ;;',
   '  *:8092/api/v1/auth/login*)',
@@ -510,21 +514,18 @@ test("shiori: the confirming login is retried up to three times before the run g
   assert.equal(hostLogins(r, PASSWORD).length, 4, "two refused confirms, the one that works, then the proof");
 });
 
-test("shiori: the PATCH goes to the account the login named, not to id 1", () => {
-  const r = run("shiori", { answers: { FAKE_SHIORI_DEFAULT_0: shioriLogin(TOKEN, 7) } });
+test("shiori: the PATCH goes to the account the signed-in session names (auth/me), not to id 1", () => {
+  const r = run("shiori", { answers: { FAKE_SHIORI_ME_0: shioriMe(7) } });
   assert.equal(r.status, 0, r.stderr);
+  assert.equal(hostCallTo(r, "/api/v1/auth/me").length, 1, "the account is asked for with the login's token");
+  assert.equal(configValue(hostCallTo(r, "/api/v1/auth/me")[0].stdin, "header"), `Authorization: Bearer ${TOKEN}`);
   assert.equal(hostCallTo(r, "/api/v1/accounts/7").length, 1, "the account that answered is the one changed");
   assert.equal(hostCallTo(r, "/api/v1/accounts/1").length, 0, "id 1 is never assumed");
-  const patch = hostCallTo(r, "/api/v1/accounts/7")[0];
-  assert.equal(configValue(patch.stdin, "header"), `Authorization: Bearer ${TOKEN}`, "with the token from that login");
 });
 
-test("shiori: a login answer naming another account changes nothing (exit 4)", () => {
-  // The account object is what says which login answered: another username, or no account at
-  // all, and the app is never written to.
-  const noAccount = `{"message":"Login success","token":"${TOKEN}"}\n200`;
-  for (const answer of [shioriLogin(TOKEN, 1, "someone-else"), noAccount]) {
-    const r = run("shiori", { answers: { FAKE_SHIORI_DEFAULT_0: answer } });
+test("shiori: an auth/me answer naming another account, or none, changes nothing (exit 4)", () => {
+  for (const answer of [shioriMe(1, "someone-else"), '{"ok":false,"message":"no"}\n401', '{"ok":true,"message":{"username":"shiori"}}\n200']) {
+    const r = run("shiori", { answers: { FAKE_SHIORI_ME_0: answer } });
     assert.equal(r.status, 4, `${answer}: ${r.stderr}`);
     assert.match(r.stderr, /nothing was changed/);
     assert.equal(hostCalls(r).filter((c) => c.stdin.includes("/api/v1/accounts/")).length, 0, `${answer}: no PATCH`);

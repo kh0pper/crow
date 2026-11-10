@@ -83,12 +83,6 @@ token_of() {
   printf '%s' "$t"
 }
 
-# account_obj BODY: the account object from Shiori's login answer, on one line, and nothing
-# when the answer does not carry one (a nested object inside it is not expected).
-account_obj() {
-  printf '%s\n' "$1" | tr -d '\n' | sed -n 's/.*"account"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p' | head -n 1 || true
-}
-
 # str_field OBJECT NAME / id_field OBJECT NAME: one value out of that object — the username
 # as a string, the id as digits — and nothing when it is not there. Neither prints the
 # object itself, so no secret can reach this script's output.
@@ -123,17 +117,21 @@ case "$code" in
 esac
 
 token="$(token_of "$(body_of "$resp")")"
-account="$(account_obj "$(body_of "$resp")")"
 resp=""
 case "$token" in
   "" | *[!A-Za-z0-9._~+/-]*) die "Shiori accepted the default login but handed back no usable token; nothing was changed." 4 ;;
 esac
 
 # ── which account answered the login? ──────────────────────────────────────────────
-# Shiori's answer carries the account it signed in as, and the PATCH below goes to THAT id —
-# never to a remembered one, because the shipped login is not proof that id 1 is the account
-# it opened. An answer without a usable id, or one naming another account, is refused before
-# the app is written to.
+# Shiori's login answer carries only the token, so the signed-in account is asked for
+# (GET /api/v1/auth/me with that token, whose `message` is the account), and the PATCH below
+# goes to THAT id — never to a remembered one, because the shipped login is not proof that
+# id 1 is the account it opened. No usable id, or another account, is refused before the app
+# is written to.
+me="$(http "$(printf 'url = "%s/api/v1/auth/me"\nmax-time = 10\nheader = "Authorization: Bearer %s"\n' "$BASE_URL" "$token")")"
+[ "$(code_of "$me")" = "200" ] || die "Shiori accepted the default login but would not say which account answered; nothing was changed." 4
+account="$(body_of "$me" | tr -d '\n')"
+me=""
 account_id="$(id_field "$account" id)"
 account_user="$(str_field "$account" username)"
 case "$account_id" in
