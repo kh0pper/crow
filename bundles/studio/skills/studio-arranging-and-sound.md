@@ -28,7 +28,7 @@ tools:
 
 Instrument choice, register, spacing and density decide whether parts are heard as separate lines or one thick blur. In Studio each is a number: a pitch, a semitone distance, notes per bar, a `gain_db`. Make the numbers testable and say what you changed.
 
-There are only four SunVox generators — plus the SoundFont banks of the song's library, which a soundfont track plays one preset of — no EQ, no reverb, no LFO and no module routing yet, so tone comes from the instrument's own controllers, the preset you pick, the register you write in, and track gain and pan. When a fix needs a filter you lack, use the register instead.
+There are only four SunVox generators — plus the SoundFont banks of the song's library, which a soundfont track plays one preset of — so timbre comes from the instrument's own controllers and the preset you pick, and the mixer's inserts (`eq`, `filter`, `saturation`, `compressor`, `limiter`, `gate`, `deesser`, `reverb`, `delay`, `chorus`, `phaser`) refine it afterwards. Write the part so it works without effects first: register, spacing and velocity are still what decides whether two lines are heard as two.
 
 ## Ranges (typical; varies by player)
 
@@ -80,7 +80,7 @@ Register assignment before notes: one owner of sub/bass, the melody highest, har
 - **Low-interval limits** (lowest note of each interval, approximate): m3 ≈ 51, M3 ≈ 46, P4 ≈ 45, P5 ≈ 34–36, octave unlimited. Arranging practice (Adler); sources vary by a few semitones, so audition near the boundary.
 - **Doubling:** octaves add weight, not harmony; two timbres in unison make a new colour. In four-voice writing double the root, never the leading tone or the chordal seventh (common practice; loops and power chords are exempt).
 - **One bass owner per section.** Test: at every downbeat exactly one track has a sounding note below 48. If two do, move one up 12 or delete its low notes — do not "fix" it with gain.
-- **Mud:** 250–500 Hz energy piled up. Test: at most two sustaining parts have fundamentals or second harmonics in that band at the same moment. For a pad that fails, write it at p 72+ rather than high-passing it — there is no EQ.
+- **Mud:** 250–500 Hz energy piled up. Test: at most two sustaining parts have fundamentals or second harmonics in that band at the same moment. For a pad that fails, write it at p 72+ before reaching for an `eq` insert (`mid_gain_db` −3 at `mid_freq_hz` 400, `mid_q` 1.2) — the arrangement fix costs nothing and survives any mix.
 - **Masking:** two sustained notes 1–2 semitones apart in the same octave hide each other. Move one by 12 (octave) or drop it. Never add a counter-line inside the lead's octave; put it 12 below or 12 above.
 - **Vocal space:** while a vocal note sounds, no other part holds a note within 3 semitones of it for a beat or more. Fill the gaps between phrases.
 

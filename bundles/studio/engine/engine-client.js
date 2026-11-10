@@ -7,7 +7,8 @@
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + spessasynth.js + font-voice.js + studio-processor.js
+ *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
+ *       + meter.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
@@ -17,7 +18,19 @@
  * the vendored SoundFont synth: one import-free classic script that defines
  * `globalThis.StudioSpessa` (see `vendor/spessasynth/`), which is the only shape
  * a worklet can load; `font-voice.js` is the host that drives it, one synth per
- * font with one MIDI channel per track (plan 1d).
+ * font with one MIDI channel per track (plan 1d). `dynamics.js` is Crow's own
+ * compressor, limiter, gate and de-esser, `faust-host.js` instantiates the
+ * compiled Faust effects (both plan 1d, Tasks 7 and 8) and `meter.js` is the
+ * master meter that reads the master after its inserts (Task 9); all three are
+ * classic scripts like the rest.
+ *
+ * The compiled Faust effects themselves arrive separately: their wasm and
+ * factory JSON are read here (fetched in a page, read from disk in Node) and
+ * POSTED to the processor as `{type:"faust-modules", modules}` — transferred,
+ * then compiled once per page on the processor's port handler, never in
+ * `process()`. A host that has no `vendor/faust/` output yet (a checkout that
+ * has not run `tools/build-faust.mjs`) starts without effects instead of
+ * failing: a chain that wants one finds it missing (see `faust-host.js`).
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -133,6 +146,10 @@
  *   instrument picker lists, and `onLibraryPresets(listener)` follows them for a
  *   bank that finished loading after its asker stopped waiting (a load that
  *   waited for Stop answers `deferred` first, and its presets arrive later).
+ * - `faust-modules` is posted once, by `create()`, after the engine comes up: one
+ *   entry per compiled Faust effect — `{<kind>: {wasm, json}}`, the wasm
+ *   transferred rather than copied — which the processor compiles once per page
+ *   and the chains then instantiate inserts from (plan 1d, Task 7).
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
@@ -155,6 +172,26 @@
  *   into a pad's sample. The looper's buffers are this page's (the audio thread
  *   allocates none): eight bars at the song's tempo are sent before the first
  *   record, and handed back and forth around a take.
+ * - `onMeter(listener)` follows the master meter: every 100 ms of audio while the
+ *   song plays, and once when it stops, the processor posts
+ *   `{type:"meter", momentary, short_term, integrated, true_peak_db, latency_ms}`
+ *   — BS.1770-4 momentary (400 ms), short-term (3 s) and integrated (gated,
+ *   reset on each Play) loudness in LUFS, the true peak since the last Play in
+ *   dBTP, and the delay the master chain puts on the master path in ms. It is
+ *   the same measurement `server/loudness.js` makes of a render, read after the
+ *   master inserts. `lastMeter()` hands back the latest reading (or null).
+ * - `onMasterLatency(listener)` follows `{type:"master_latency", ms}`, posted
+ *   once per master chain build: the master limiter's lookahead, which the
+ *   master strip shows as its own delay.
+ * - `onInsertFault(listener)` follows `{type:"insert_fault", insert_id,
+ *   message}`: an insert that produced a sample that is not a finite number. It
+ *   is bypassed in the ENGINE (the document is never touched), and this is said
+ *   once — the message names the effect and the track, return or master.
+ * - `onInsertLoading(listener)` follows `{type:"insert_loading", insert_id,
+ *   message}`: a Faust insert whose compiled module the page has not posted yet.
+ *   It passes audio through until the module lands, and this arrives once per
+ *   insert. It is not an error and never reaches `onError` or the console: it is
+ *   a load in progress, and the message names the effect and its chain.
  */
 (function () {
   "use strict";
@@ -172,6 +209,13 @@
     // The SoundFont hosts: one synth per font, one MIDI channel per track (see
     // font-voice.js). Before the processor that hosts them.
     "font-voice.js",
+    // Crow's own dynamics (plan 1d, Task 8), the host for the compiled Faust
+    // effects (Task 7) and the master meter that reads the master after its
+    // inserts (Task 9). All classic scripts, before the processor that drives
+    // them.
+    "dynamics.js",
+    "faust-host.js",
+    "meter.js",
     "studio-processor.js",
   ];
 
@@ -198,6 +242,22 @@
 
   /** The wasm binary, passed to the processor as `processorOptions.wasmBinary`. */
   const WASM_FILE = "sunvox.wasm";
+
+  /**
+   * The Faust effects whose compiled wasm and factory JSON the engine loads
+   * (`bundles/studio/vendor/faust/`, built by `tools/build-faust.mjs`). Their
+   * names are the bundle's effect kinds; each is posted to the processor once
+   * the engine is up, and compiled there (see `faust-host.js`).
+   */
+  const FAUST_KINDS = Object.freeze([
+    "eq",
+    "filter",
+    "delay",
+    "reverb",
+    "chorus",
+    "phaser",
+    "saturation",
+  ]);
 
   /** The processor name `studio-processor.js` registers. */
   const PROCESSOR_NAME = "studio-processor";
@@ -416,6 +476,119 @@
     const response = await fetch(joinUrl(options.assetBase, WASM_FILE));
     if (!response.ok) throw new Error(`StudioEngine: could not load ${WASM_FILE} (${response.status})`);
     return response.arrayBuffer();
+  }
+
+  /**
+   * The file one vendored asset sits at, in Node: a path built from this
+   * module's own directory, or null in a host with no filesystem (a browser or a
+   * worklet scope).
+   * @param {string[]} parts the path segments, relative to this directory
+   * @returns {string|null}
+   */
+  function localPathOf(parts) {
+    const req = nodeRequire();
+    if (!req || typeof __dirname !== "string" || __dirname === "") return null;
+    try {
+      return req("node:path").join(__dirname, ...parts);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One OPTIONAL asset's bytes: whatever the host has, or null. The Faust
+   * effects are optional in the sense that a checkout without the build output
+   * still starts an engine — it just has no Faust inserts (see the file header).
+   * @param {string} name the asset name (what `assetBytes` and `assetBase` use)
+   * @param {string[]} localParts where `build-faust.mjs` wrote it, from here
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<ArrayBuffer|null>}
+   */
+  async function readOptionalBytes(name, localParts, options) {
+    const supplied = options.assetBytes;
+    if (supplied && supplied[name] !== undefined) {
+      const bytes = bytesOf(supplied[name]);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
+    if (options.assetBase) {
+      try {
+        const response = await fetch(joinUrl(options.assetBase, name));
+        if (response.ok) return await response.arrayBuffer();
+      } catch {
+        /* no such asset on this host: the engine starts without it */
+      }
+      return null;
+    }
+    const file = localPathOf(localParts);
+    const req = nodeRequire();
+    if (!file || !req) return null;
+    try {
+      const fs = req("node:fs");
+      if (!fs.existsSync(file)) return null;
+      const bytes = new Uint8Array(fs.readFileSync(file));
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One OPTIONAL asset as text — the factory JSON that goes with a compiled
+   * effect.
+   * @param {string} name the asset name
+   * @param {string[]} localParts where `build-faust.mjs` wrote it, from here
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<string|null>}
+   */
+  async function readOptionalText(name, localParts, options) {
+    const supplied = options.assetBytes;
+    if (supplied && supplied[name] !== undefined) return textOf(supplied[name]);
+    if (options.assetBase) {
+      try {
+        const response = await fetch(joinUrl(options.assetBase, name));
+        if (response.ok) return await response.text();
+      } catch {
+        /* no such asset on this host */
+      }
+      return null;
+    }
+    const file = localPathOf(localParts);
+    const req = nodeRequire();
+    if (!file || !req) return null;
+    try {
+      const fs = req("node:fs");
+      if (!fs.existsSync(file)) return null;
+      return fs.readFileSync(file, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The compiled Faust effects this host can hand the processor: one entry per
+   * effect whose wasm AND factory JSON are both here. A checkout that has not run
+   * `tools/build-faust.mjs` has none, and the engine starts anyway.
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<Object<string, {wasm: ArrayBuffer, json: string}>>}
+   */
+  async function readFaustModules(options) {
+    const modules = {};
+    for (const kind of FAUST_KINDS) {
+      const wasm = await readOptionalBytes(
+        `faust-${kind}.wasm`,
+        ["..", "vendor", "faust", `${kind}.wasm`],
+        options,
+      );
+      if (!wasm) continue;
+      const json = await readOptionalText(
+        `faust-${kind}.json`,
+        ["..", "vendor", "faust", `${kind}.json`],
+        options,
+      );
+      if (!json) continue;
+      modules[kind] = { wasm: wasm, json: json };
+    }
+    return modules;
   }
 
   /** A counter so two engines in one Node process never share a temp path. */
@@ -740,6 +913,11 @@
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onTap: function(function): function,
+ *                    onMeter: function(function): function,
+ *                    lastMeter: function(): (object|null),
+ *                    onMasterLatency: function(function): function,
+ *                    onInsertFault: function(function): function,
+ *                    onInsertLoading: function(function): function,
   *                    loadLibrary: function(string, string, Uint8Array): Promise<{status: string, reason?: string}>,
  *                    unloadLibrary: function(string): void,
  *                    onLibraryNeeded: function(function): function,
@@ -1174,6 +1352,9 @@
       }
     }
     const wasmBinary = await readWasm(opts);
+    // The compiled Faust effects: optional, and posted (transferred) once the
+    // engine is up. See `readFaustModules`.
+    const faustModules = await readFaustModules(opts);
 
     // Claimed synchronously before the registration (and checked again, since
     // the reads above awaited), so two concurrent calls cannot both get as far
@@ -1217,6 +1398,16 @@
     const libraryNeededListeners = new Set();
     const libraryPresetsListeners = new Set();
     const tapListeners = new Set();
+    const meterListeners = new Set();
+    const masterLatencyListeners = new Set();
+    const insertFaultListeners = new Set();
+    const insertLoadingListeners = new Set();
+    /**
+     * The latest meter reading, kept so a panel that draws after the fact (or a
+     * test that asks once) can read it without waiting for the next 100 ms. A
+     * reused object: the listeners get their own copy of the numbers.
+     */
+    let lastMeter = null;
     /**
      * Hand one failure to the error listeners and the console: a fault after
      * start-up has no caller to throw to.
@@ -1310,6 +1501,27 @@
       }
       throw error;
     }
+
+    /**
+     * Hand the processor the compiled Faust effects, transferred rather than
+     * copied. The processor compiles each once, on its port handler: compiling
+     * is asynchronous, so it never happens inside `process()`. Nothing is posted
+     * when this host has no built effects, and a chain that asks for one then
+     * reports it missing.
+     * @returns {void}
+     */
+    const postFaustModules = () => {
+      const kinds = Object.keys(faustModules);
+      if (kinds.length === 0) return;
+      const modules = {};
+      const transfer = [];
+      for (const kind of kinds) {
+        modules[kind] = faustModules[kind];
+        transfer.push(faustModules[kind].wasm);
+      }
+      post({ type: "faust-modules", modules: modules }, transfer);
+    };
+    postFaustModules();
 
     node.port.onmessage = (event) => {
       const message = event && event.data;
@@ -1468,6 +1680,78 @@
             rate: Number.isFinite(rate) ? rate : context.sampleRate,
             bars: Number.isFinite(bars) ? bars : 0,
           });
+        }
+        return;
+      }
+      if (message.type === "meter") {
+        // The master meter (plan 1d, Task 9): BS.1770-4 momentary, short-term
+        // and integrated loudness, the true peak since the last Play, and the
+        // master chain's own latency. One reading every 100 ms of audio while
+        // the song plays, and one when it stops.
+        const reading = {
+          momentary: Number(message.momentary),
+          short_term: Number(message.short_term),
+          integrated: Number(message.integrated),
+          true_peak_db: Number(message.true_peak_db),
+          latency_ms: Number(message.latency_ms),
+        };
+        lastMeter = reading;
+        for (const listener of meterListeners) {
+          try {
+            listener(reading);
+          } catch {
+            /* one bad listener must not stop the meter for the others */
+          }
+        }
+        return;
+      }
+      if (message.type === "master_latency") {
+        // Once per master chain build: the delay the master chain (the limiter's
+        // lookahead) puts on the master path, which the master strip shows as
+        // its own delay.
+        const ms = Number(message.ms);
+        const latency = { ms: Number.isFinite(ms) ? ms : 0 };
+        for (const listener of masterLatencyListeners) {
+          try {
+            listener(latency);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "insert_fault") {
+        // An insert produced a sample that is not a finite number: the processor
+        // replaced that block with the insert's input and bypassed it in the
+        // ENGINE. The document is untouched, and this is said once.
+        const fault = {
+          insert_id: String(message.insert_id),
+          message: String(message.message),
+        };
+        for (const listener of insertFaultListeners) {
+          try {
+            listener(fault);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "insert_loading") {
+        // A Faust insert whose compiled module has not arrived: it passes audio
+        // through until the module lands, and this is said once. It is a load in
+        // progress, not an engine error, so it never reaches `onError` — the
+        // console — and the panel can show it as the insert warming up.
+        const loading = {
+          insert_id: String(message.insert_id),
+          message: String(message.message),
+        };
+        for (const listener of insertLoadingListeners) {
+          try {
+            listener(loading);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
         }
         return;
       }
@@ -2021,6 +2305,84 @@
       },
 
       /**
+       * Follow the master meter: `{momentary, short_term, integrated,
+       * true_peak_db, latency_ms}`, one reading every 100 ms of audio while the
+       * song plays and one when it stops. The loudness readings are BS.1770-4
+       * LUFS, measured after the master inserts on the very K-weighting and
+       * gating `server/loudness.js` measures a render with; `true_peak_db` is the
+       * true peak since the last `play()` (a hold), and `latency_ms` is the delay
+       * the master chain puts on the master path (the limiter's lookahead).
+       * @param {(reading: {momentary: number, short_term: number,
+       *                    integrated: number, true_peak_db: number,
+       *                    latency_ms: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onMeter(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        meterListeners.add(listener);
+        return function unsubscribe() {
+          meterListeners.delete(listener);
+        };
+      },
+
+      /**
+       * The latest meter reading, or null before the first one. A copy, so a
+       * caller cannot move the reading another listener sees.
+       * @returns {{momentary: number, short_term: number, integrated: number,
+       *            true_peak_db: number, latency_ms: number}|null}
+       */
+      lastMeter() {
+        return lastMeter === null ? null : { ...lastMeter };
+      },
+
+      /**
+       * Follow the master chain's own latency: `{ms}`, posted once per chain
+       * build. The master limiter's 1.5 ms lookahead is the whole of it — every
+       * track and return insert is zero-latency — and the master strip shows it
+       * as the delay it is.
+       * @param {(latency: {ms: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onMasterLatency(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        masterLatencyListeners.add(listener);
+        return function unsubscribe() {
+          masterLatencyListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow an insert that produced an invalid sample: `{insert_id, message}`.
+       * The processor replaced that block with the insert's input and bypassed the
+       * insert in the ENGINE — the song is never edited — and says so once.
+       * @param {(fault: {insert_id: string, message: string}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onInsertFault(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        insertFaultListeners.add(listener);
+        return function unsubscribe() {
+          insertFaultListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow an insert that is waiting for its compiled Faust module:
+       * `{insert_id, message}`. It passes audio through until the module lands and
+       * says so once — a load in progress, never an error. It never reaches
+       * `onError` or the console.
+       * @param {(loading: {insert_id: string, message: string}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onInsertLoading(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        insertLoadingListeners.add(listener);
+        return function unsubscribe() {
+          insertLoadingListeners.delete(listener);
+        };
+      },
+
+      /**
        * Follow the engine's failures (a device that could not be built, a song
        * the processor refused, a fault it survived). They are also logged.
        * @param {(text: string) => void} listener
@@ -2091,7 +2453,12 @@
         errorListeners.clear();
         sampleNeededListeners.clear();
         libraryNeededListeners.clear();
+        libraryPresetsListeners.clear();
         tapListeners.clear();
+        meterListeners.clear();
+        masterLatencyListeners.clear();
+        insertFaultListeners.clear();
+        insertLoadingListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
         pendingLibrary.clear();

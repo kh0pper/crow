@@ -1,0 +1,284 @@
+{
+  "chorus": [
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    },
+    {
+      "function": "oscillators.lib/lf_sawpos",
+      "licence": "LicenseRef-STK-4.3"
+    }
+  ],
+  "delay": [
+    {
+      "function": "filters.lib/_tanhalf",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/lowpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass0_highpass1",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    }
+  ],
+  "eq": [
+    {
+      "function": "analyzers.lib/analyzer_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/_tanhalf",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/filterbank_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/fir",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/high_shelf",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/highpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/highpass_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/highshelf",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/iir",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/low_shelf",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass0_highpass1",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/lowshelf",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/peak_eq",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/svf",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1s_df",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2s_df",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    }
+  ],
+  "filter": [
+    {
+      "function": "filters.lib/_tanhalf",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/resonbp",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/resonhp",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/resonlp",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    }
+  ],
+  "phaser": [
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    },
+    {
+      "function": "oscillators.lib/lf_sawpos",
+      "licence": "LicenseRef-STK-4.3"
+    }
+  ],
+  "reverb": [
+    {
+      "function": "analyzers.lib/analyzer_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/_tanhalf",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/filterbank_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/fir",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/highpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/highpass_plus_lowpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/highpass_plus_lowpass_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/highpass_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/iir",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass0_highpass1",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass_tpt_df",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/nlf2",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/svf",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1s_df",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf2s_df",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    },
+    {
+      "function": "reverbs.lib/jpverb",
+      "licence": "MIT"
+    }
+  ],
+  "saturation": [
+    {
+      "function": "filters.lib/_tanhalf",
+      "licence": "MIT"
+    },
+    {
+      "function": "filters.lib/lowpass",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/lowpass0_highpass1",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "filters.lib/tf1s",
+      "licence": "LicenseRef-STK-4.3"
+    },
+    {
+      "function": "maths.lib",
+      "licence": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception"
+    }
+  ]
+}

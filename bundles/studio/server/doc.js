@@ -105,6 +105,36 @@
  * `storage_key` (or the entry's sha256, for a catalog file stored once per
  * instance) says where it lives.
  *
+ * A song's mixer (plan 1d) is three containers and a single map, so one effect,
+ * one send and one return are each one small object to edit, and two writers
+ * touching two of them never overwrite each other:
+ *
+ *   inserts  Y.Map of insert id → Y.Map {id, owner, order, kind, bypass,
+ *                     params: Y.Map (one field per parameter)}
+ *   sends    Y.Map of "<track_id>/<return_id>" → Y.Map {track_id, return_id,
+ *                     level_db, pre}
+ *   returns  Y.Map of return id → Y.Map {id, name, gain_db, pan, mute}
+ *   master   Y.Map {gain_db, target {lufs, true_peak_db}} — one per song
+ *
+ * An insert's `owner` is the ref of the chain it sits in — `"track:<id>"`,
+ * `"return:<id>"` or `"master"` — and its `order` is a fractional place in that
+ * chain, so putting an effect between two others rewrites one field and moves
+ * nothing else (see `byInsertOrder`). Its `params` is a Y.Map of its own, one
+ * field per parameter, so two peers editing two parameters of one insert both
+ * win and one parameter is one undoable field. The parameters and their ranges
+ * are the `EFFECT_PARAMS` table below, which the engine and the panel read too.
+ *
+ * Returns are NOT tracks: they live in `returns`, no track reader sees them,
+ * and `LIMITS.tracks` never counts them. A send is keyed by the pair it joins,
+ * so a track has at most one send to one return, and each send is its own
+ * object.
+ *
+ * A song written before the mixer existed has none of the four containers: it
+ * reads as empty chains, no sends, no returns and the default master (see
+ * `snapshot`), and the first write makes the container it needs. A new song
+ * makes all four up front, so two peers' first mixer edits merge into one
+ * container instead of racing to create it.
+ *
  * A note is in beats: `t` its start, `d` its length, `p` a MIDI pitch (0-127)
  * and `v` a velocity (1-127). Everything except the three containers is plain
  * JSON, so `snapshot()` is a round trip away from the wire, storage or a
@@ -136,7 +166,9 @@ import * as Y from "yjs";
  *         patternsPerClip: number, chainLength: number, locksPerStep: number,
  *         motionPointsPerLane: number, motionLanesPerPattern: number,
  *         midiMaps: number, fontsPerSong: number,
- *         libraryEntriesPerSong: number}}
+ *         libraryEntriesPerSong: number, insertsPerChain: number,
+ *         returnsPerSong: number, sendsPerTrack: number,
+ *         ampInsertsPerSong: number}}
  */
 /**
  * The SunVox modules a Studio track may use as its instrument in 1a: the
@@ -185,6 +217,14 @@ export const LIMITS = Object.freeze({
   // song may hold, because each parsed font costs memory in the page.
   fontsPerSong: 32,
   libraryEntriesPerSong: 256,
+  // The mixer (plan 1d, Limits): the effects of one chain, the returns of one
+  // song and the sends of one track. `ampInsertsPerSong` is the one cap the
+  // document does not enforce yet: an amp insert arrives with PR C, and until
+  // then `insert.add` refuses the kind, so nothing can reach it.
+  insertsPerChain: 8,
+  returnsPerSong: 8,
+  sendsPerTrack: 8,
+  ampInsertsPerSong: 16,
 });
 
 /**
@@ -235,6 +275,193 @@ export const LIBRARY_KINDS = Object.freeze(["font", "nam", "ir"]);
 
 /** Where a library entry came from: the catalog, an upload, or the bundle. */
 export const LIBRARY_SOURCES = Object.freeze(["catalog", "upload", "bundled"]);
+
+/**
+ * Freeze a value and everything inside it, so a table a reader shares cannot be
+ * edited by one of them. Plain objects and arrays only.
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function deepFreeze(value) {
+  if (value === null || typeof value !== "object") return value;
+  for (const item of Object.values(value)) deepFreeze(item);
+  return Object.freeze(value);
+}
+
+/**
+ * Every effect a chain may hold (plan 1d, Task 6), with each one's parameters
+ * and the range each parameter runs over. The engine (Tasks 7 to 9) and the
+ * panel's insert editor (Task 10) read this one table, so a parameter's range
+ * exists in exactly one place.
+ *
+ * A numeric parameter is `{min, max, default, unit}`; a chooser is
+ * `{values, default}` and holds one of `values`. `unit` is the suffix a control
+ * shows ("Hz", "dB", "ms"), and "" for a plain number. `label` is the word a
+ * summary and a control use: "Added a compressor to Bass", "the reverb's mix".
+ *
+ * The table's key order is `EFFECT_KINDS`'s order, which is the order a menu
+ * lists the effects in. `amp` is deliberately absent: an amp insert arrives
+ * with plan 1d's PR C, and `insert.add` refuses that kind with its own sentence
+ * until then.
+ * @type {Readonly<Object<string, Readonly<{label: string, params: Readonly<Object<string, any>>}>>>}
+ */
+export const EFFECT_PARAMS = deepFreeze({
+  eq: {
+    label: "equalizer",
+    params: {
+      low_freq_hz: { min: 20, max: 500, default: 100, unit: "Hz" },
+      low_gain_db: { min: -18, max: 18, default: 0, unit: "dB" },
+      mid_freq_hz: { min: 100, max: 10000, default: 1000, unit: "Hz" },
+      mid_gain_db: { min: -18, max: 18, default: 0, unit: "dB" },
+      mid_q: { min: 0.1, max: 10, default: 0.7, unit: "" },
+      high_freq_hz: { min: 2000, max: 20000, default: 8000, unit: "Hz" },
+      high_gain_db: { min: -18, max: 18, default: 0, unit: "dB" },
+    },
+  },
+  filter: {
+    label: "filter",
+    params: {
+      mode: { values: ["lp", "hp", "bp"], default: "lp" },
+      cutoff_hz: { min: 20, max: 20000, default: 1000, unit: "Hz" },
+      resonance: { min: 0.1, max: 10, default: 0.7, unit: "" },
+    },
+  },
+  delay: {
+    label: "delay",
+    params: {
+      time_ms: { min: 1, max: 2000, default: 375, unit: "ms" },
+      feedback: { min: 0, max: 0.95, default: 0.35, unit: "" },
+      mix: { min: 0, max: 1, default: 0.3, unit: "" },
+      highcut_hz: { min: 1000, max: 20000, default: 8000, unit: "Hz" },
+    },
+  },
+  reverb: {
+    label: "reverb",
+    params: {
+      size: { min: 0, max: 1, default: 0.5, unit: "" },
+      damping: { min: 0, max: 1, default: 0.5, unit: "" },
+      predelay_ms: { min: 0, max: 200, default: 20, unit: "ms" },
+      mix: { min: 0, max: 1, default: 0.25, unit: "" },
+    },
+  },
+  chorus: {
+    label: "chorus",
+    params: {
+      rate_hz: { min: 0.05, max: 5, default: 0.8, unit: "Hz" },
+      depth: { min: 0, max: 1, default: 0.5, unit: "" },
+      mix: { min: 0, max: 1, default: 0.5, unit: "" },
+    },
+  },
+  phaser: {
+    label: "phaser",
+    params: {
+      rate_hz: { min: 0.05, max: 5, default: 0.5, unit: "Hz" },
+      depth: { min: 0, max: 1, default: 0.6, unit: "" },
+      feedback: { min: 0, max: 0.9, default: 0.4, unit: "" },
+      mix: { min: 0, max: 1, default: 0.5, unit: "" },
+    },
+  },
+  saturation: {
+    label: "saturation",
+    params: {
+      drive_db: { min: 0, max: 36, default: 6, unit: "dB" },
+      tone: { min: 0, max: 1, default: 0.5, unit: "" },
+      output_db: { min: -24, max: 6, default: 0, unit: "dB" },
+      mix: { min: 0, max: 1, default: 1, unit: "" },
+    },
+  },
+  compressor: {
+    label: "compressor",
+    params: {
+      detect: { values: ["peak", "rms"], default: "peak" },
+      threshold_db: { min: -60, max: 0, default: -18, unit: "dB" },
+      ratio: { min: 1, max: 20, default: 4, unit: "" },
+      knee_db: { min: 0, max: 12, default: 6, unit: "dB" },
+      attack_ms: { min: 0.1, max: 100, default: 10, unit: "ms" },
+      release_ms: { min: 5, max: 2000, default: 100, unit: "ms" },
+      makeup_db: { min: 0, max: 24, default: 0, unit: "dB" },
+      sidechain_hp_hz: { min: 0, max: 500, default: 0, unit: "Hz" },
+    },
+  },
+  limiter: {
+    label: "limiter",
+    params: {
+      ceiling_db: { min: -6, max: -0.1, default: -1, unit: "dB" },
+      release_ms: { min: 1, max: 1000, default: 50, unit: "ms" },
+    },
+  },
+  gate: {
+    label: "gate",
+    params: {
+      threshold_db: { min: -80, max: 0, default: -40, unit: "dB" },
+      hysteresis_db: { min: 0, max: 12, default: 3, unit: "dB" },
+      attack_ms: { min: 0.01, max: 50, default: 1, unit: "ms" },
+      hold_ms: { min: 0, max: 500, default: 20, unit: "ms" },
+      release_ms: { min: 5, max: 2000, default: 100, unit: "ms" },
+      range_db: { min: -80, max: 0, default: -80, unit: "dB" },
+    },
+  },
+  deesser: {
+    label: "de-esser",
+    params: {
+      freq_hz: { min: 4000, max: 10000, default: 6500, unit: "Hz" },
+      threshold_db: { min: -60, max: 0, default: -24, unit: "dB" },
+      ratio: { min: 1, max: 20, default: 4, unit: "" },
+    },
+  },
+});
+
+/** The effects a chain may hold, in the order a menu lists them (see `EFFECT_PARAMS`). */
+export const EFFECT_KINDS = Object.freeze(Object.keys(EFFECT_PARAMS));
+
+/**
+ * One effect kind's entry in `EFFECT_PARAMS`, or null. An OWN-property lookup:
+ * a kind or parameter name comes from a peer or an agent, and "constructor" or
+ * "__proto__" must not resolve to something Object.prototype carries.
+ * @param {string} kind
+ * @returns {{label: string, params: Object}|null}
+ */
+export function effectSpec(kind) {
+  return typeof kind === "string" && Object.hasOwn(EFFECT_PARAMS, kind) ? EFFECT_PARAMS[kind] : null;
+}
+
+/**
+ * One parameter's range in one effect kind, or null (own properties only, as
+ * `effectSpec`).
+ * @param {string} kind
+ * @param {string} name
+ * @returns {Object|null}
+ */
+export function effectParamSpec(kind, name) {
+  const spec = effectSpec(kind);
+  return spec && typeof name === "string" && Object.hasOwn(spec.params, name) ? spec.params[name] : null;
+}
+
+/**
+ * The ranges the mixer's own levels run over (plan 1d, Task 6): the master's
+ * gain in dB and its loudness target in LUFS with its true-peak ceiling in
+ * dBTP, a return's level and pan, and the level of one send.
+ * @type {Readonly<{master: {gain_db: number[], lufs: number[], true_peak_db: number[]},
+ *                  return: {gain_db: number[], pan: number[]},
+ *                  send: {level_db: number[]}}>}
+ */
+export const MIXER_RANGES = deepFreeze({
+  master: { gain_db: [-24, 12], lufs: [-30, -6], true_peak_db: [-6, -0.1] },
+  return: { gain_db: [-60, 12], pan: [-1, 1] },
+  send: { level_db: [-60, 6] },
+});
+
+/**
+ * The master a song starts with, and what every reader sees when a song has no
+ * master yet: no gain change, and the -14 LUFS streaming reference with a
+ * -1 dBTP ceiling.
+ * @type {Readonly<{gain_db: number, target: Readonly<{lufs: number, true_peak_db: number}>}>}
+ */
+export const DEFAULT_MASTER = deepFreeze({ gain_db: 0, target: { lufs: -14, true_peak_db: -1 } });
+
+/** The longest name a return may carry, in characters. */
+export const MAX_RETURN_NAME = 64;
 
 /** The step lengths a pattern may use, in beats (16ths, 8ths, 32nds, quarters). */
 export const STEP_BEATS_VALUES = Object.freeze([0.125, 0.25, 0.5, 1]);
@@ -333,6 +560,14 @@ const DEVICE_FIELD_PREFIX = "device.";
 const LOCK_FIELD_PREFIX = "locks.";
 
 /**
+ * Prefix of a field path that reaches one parameter inside an insert's `params`,
+ * e.g. `"params.mix"`. The parameter name is everything after the prefix, taken
+ * verbatim: `params` is a Y.Map of its own, so one parameter is one key of it and
+ * two peers editing two parameters of one insert both win.
+ */
+const PARAMS_FIELD_PREFIX = "params.";
+
+/**
  * Prefix of one motion lane's own key on its pattern's map, e.g.
  * `"motion|<bank_id>.<index>|<param>"`. The lane name is everything after the
  * prefix, taken verbatim: a lane is one key of the pattern it belongs to, so
@@ -353,8 +588,14 @@ const MOTION_FIELD_PREFIX = "motion|";
 export const STEP_GUARDS = Symbol("studio.step-guards");
 
 /**
+ * The ref of a song's one master: the only object a ref names without an id.
+ * @type {string}
+ */
+export const MASTER_REF = "master";
+
+/**
  * The ref a command, a lock or a history entry names one object by.
- * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"|"motion"} kind
+ * @param {"song"|"track"|"scene"|"clip"|"take"|"placement"|"marker"|"section"|"motion"|"library"|"insert"|"send"|"return"} kind
  * @param {string} id
  * @returns {string} e.g. `"clip:abc"`, `"take:abc"`, or `"song:meta"` for the song itself
  */
@@ -364,11 +605,16 @@ export function objectRef(kind, id) {
 
 /**
  * Split an object reference back into its kind and id.
+ *
+ * A song's master is the one object with no id of its own, so the bare ref
+ * `"master"` is the one ref without a colon; every other ref is
+ * `"<kind>:<id>"`.
  * @param {string} ref
  * @returns {{kind: string, id: string}|null} null when `ref` is not a ref
  */
 export function parseObjectRef(ref) {
   const text = String(ref ?? "");
+  if (text === MASTER_REF) return { kind: "master", id: "master" };
   const at = text.indexOf(":");
   if (at <= 0 || at === text.length - 1) return null;
   return { kind: text.slice(0, at), id: text.slice(at + 1) };
@@ -453,7 +699,10 @@ export function colorForIndex(index) {
  * Create an empty song document.
  *
  * A new song has no tracks, scenes or clips: `track.add`, `scene.add` and
- * `clip.write` fill it in.
+ * `clip.write` fill it in. Its mixer containers and its master exist from the
+ * start, empty, so two peers' first effects, sends or returns merge into the
+ * container they both already have (a song written before the mixer existed
+ * gets each container when it is first written to; see the header).
  * @param {{title?: string, bpm?: number, key?: string}} [meta]
  * @returns {Y.Doc}
  */
@@ -474,6 +723,10 @@ export function newSongDoc({ title = "Untitled song", bpm = 120, key = "C major"
         ["sections", new Y.Map()],
       ]),
     );
+    song.set("inserts", new Y.Map());
+    song.set("sends", new Y.Map());
+    song.set("returns", new Y.Map());
+    song.set("master", new Y.Map());
   }, "studio:new-song");
   return doc;
 }
@@ -997,6 +1250,262 @@ export function getLibraryFont(doc, id) {
   return entry && entry.get("kind") === LIBRARY_KINDS[0] ? entry : null;
 }
 
+// --- The mixer's containers --------------------------------------------------
+
+/**
+ * The inserts map, keyed by insert id. Writers use this; a song written before
+ * the mixer existed gets the container the first time an effect is added.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function insertMap(doc) {
+  return ensureContainer(doc, "inserts", () => new Y.Map());
+}
+
+/**
+ * Every insert in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, insert: Y.Map<any>}>}
+ */
+export function insertEntries(doc) {
+  return objectEntries(readContainer(doc, "inserts"), "insert");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live insert, or null
+ */
+export function getInsert(doc, id) {
+  return liveObject(readContainer(doc, "inserts"), id);
+}
+
+/**
+ * An insert's live params map — one key per parameter, created from what the
+ * insert holds when it has none (an insert restored by an older peer, say).
+ * Commands write one parameter by setting one key of it.
+ * @param {Y.Map<any>} insert - the live insert
+ * @returns {Y.Map<any>}
+ */
+export function insertParamsMap(insert) {
+  return paramsMapOf(insert);
+}
+
+/**
+ * The chain one owner's inserts make, in the order the engine runs them:
+ * ascending `order`, with the id breaking a tie (two midpoints can land on the
+ * same double after many moves). Read-only: it changes nothing.
+ * @param {Y.Doc} doc
+ * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+ * @returns {Array<{id: string, insert: Y.Map<any>}>}
+ */
+export function insertsForOwner(doc, owner) {
+  return insertEntries(doc)
+    .filter(({ insert }) => insert.get("owner") === owner)
+    .sort((a, b) => byInsertOrder(a.insert, b.insert));
+}
+
+/**
+ * The order two inserts of one chain stand in: by `order`, then by id.
+ *
+ * `order` is fractional, so an effect placed between two others takes the
+ * midpoint of their orders and nothing else in the chain moves. A tie can only
+ * come from two midpoints landing on the same double, and the id keeps the
+ * chain stable when it does.
+ * @param {Y.Map<any>|object} a
+ * @param {Y.Map<any>|object} b
+ * @returns {number}
+ */
+export function byInsertOrder(a, b) {
+  const orderA = readNumber(a, "order");
+  const orderB = readNumber(b, "order");
+  if (orderA !== orderB) return orderA - orderB;
+  const idA = readString(a, "id");
+  const idB = readString(b, "id");
+  return idA < idB ? -1 : idA > idB ? 1 : 0;
+}
+
+/**
+ * The owner an insert's `owner` field names, when it names one: a track's
+ * chain, a return's chain, or the master's.
+ *
+ * The master is exactly the bare ref `MASTER_REF`: it is the one object with no
+ * id of its own, so `"master:anything"` names nothing at all (a command refuses
+ * it and `checkInvariants` reports it) rather than quietly becoming the song's
+ * master.
+ * @param {unknown} owner - e.g. `"track:bass"`, `"return:a"` or `"master"`
+ * @returns {{kind: "track"|"return"|"master", id: string}|null}
+ */
+export function insertOwnerOf(owner) {
+  if (owner === MASTER_REF) return { kind: "master", id: "master" };
+  const target = parseObjectRef(owner);
+  if (!target) return null;
+  if (target.kind !== "track" && target.kind !== "return") return null;
+  return { kind: target.kind, id: target.id };
+}
+
+/**
+ * The key one send lives under in the song's `sends` map: the track and the
+ * return it joins. Two tracks' ids and two returns' ids never contain the
+ * separator, so one pair is one key.
+ * @param {string} trackId
+ * @param {string} returnId
+ * @returns {string}
+ */
+export function sendKey(trackId, returnId) {
+  return `${trackId}/${returnId}`;
+}
+
+/**
+ * Split a send's key back into the track and the return it joins.
+ * @param {string} key - `"<track_id>/<return_id>"`
+ * @returns {{trackId: string, returnId: string}|null}
+ */
+export function sendParts(key) {
+  const text = String(key ?? "");
+  const at = text.indexOf("/");
+  if (at <= 0 || at === text.length - 1) return null;
+  return { trackId: text.slice(0, at), returnId: text.slice(at + 1) };
+}
+
+/**
+ * The sends map, keyed by `"<track_id>/<return_id>"`. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function sendMap(doc) {
+  return ensureContainer(doc, "sends", () => new Y.Map());
+}
+
+/**
+ * Every send in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, send: Y.Map<any>}>}
+ */
+export function sendEntries(doc) {
+  return objectEntries(readContainer(doc, "sends"), "send");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @param {string} returnId
+ * @returns {Y.Map<any>|null} the live send between that track and that return, or null
+ */
+export function getSend(doc, trackId, returnId) {
+  return liveObject(readContainer(doc, "sends"), sendKey(trackId, returnId));
+}
+
+/**
+ * Every send one track feeds.
+ * @param {Y.Doc} doc
+ * @param {string} trackId
+ * @returns {Array<{id: string, send: Y.Map<any>}>}
+ */
+export function sendsForTrack(doc, trackId) {
+  return sendEntries(doc).filter(({ send }) => send.get("track_id") === trackId);
+}
+
+/**
+ * Every send that feeds one return.
+ * @param {Y.Doc} doc
+ * @param {string} returnId
+ * @returns {Array<{id: string, send: Y.Map<any>}>}
+ */
+export function sendsForReturn(doc, returnId) {
+  return sendEntries(doc).filter(({ send }) => send.get("return_id") === returnId);
+}
+
+/**
+ * The returns map, keyed by return id. Writers use this. A return is a mixer
+ * channel of its own, never a track.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<Y.Map<any>>}
+ */
+export function returnMap(doc) {
+  return ensureContainer(doc, "returns", () => new Y.Map());
+}
+
+/**
+ * Every return in the song, in the order the map holds them.
+ * @param {Y.Doc} doc
+ * @returns {Array<{id: string, return: Y.Map<any>}>}
+ */
+export function returnEntries(doc) {
+  return objectEntries(readContainer(doc, "returns"), "return");
+}
+
+/**
+ * @param {Y.Doc} doc
+ * @param {string} id
+ * @returns {Y.Map<any>|null} the live return, or null
+ */
+export function getReturn(doc, id) {
+  return liveObject(readContainer(doc, "returns"), id);
+}
+
+/**
+ * The song's one master map, created when the song has none. Writers use this.
+ * @param {Y.Doc} doc
+ * @returns {Y.Map<any>}
+ */
+export function masterMap(doc) {
+  return ensureContainer(doc, "master", () => new Y.Map());
+}
+
+/**
+ * The master as plain JSON with every default filled in. A song written before
+ * the mixer existed reads as `DEFAULT_MASTER` here without anything being
+ * written to its document.
+ * @param {Y.Doc} doc
+ * @returns {{gain_db: number, target: {lufs: number, true_peak_db: number}}}
+ */
+export function masterSettings(doc) {
+  const master = readContainer(doc, "master");
+  return normalizeMaster(master instanceof Y.Map ? master : null);
+}
+
+/**
+ * The parameters one effect starts with: every parameter of the kind at its
+ * default, as a fresh plain object a command can store.
+ * @param {string} kind - one of `EFFECT_KINDS`
+ * @returns {Object<string, number|string>} empty when the kind is not in the table
+ */
+export function defaultEffectParams(kind) {
+  const spec = effectSpec(kind);
+  if (!spec) return {};
+  const params = {};
+  for (const [name, field] of Object.entries(spec.params)) params[name] = field.default;
+  return params;
+}
+
+/**
+ * The word one effect kind goes by in a sentence: "compressor", "de-esser", or
+ * the kind itself when the table does not know it.
+ * @param {string} kind
+ * @returns {string}
+ */
+export function effectLabel(kind) {
+  return effectSpec(kind)?.label ?? String(kind ?? "");
+}
+
+/** @returns {any} one field of a live Y.Map or of a plain object. */
+function readValue(object, key) {
+  return object instanceof Y.Map ? object.get(key) : object?.[key];
+}
+
+/** @returns {number} one field as a finite number, else 0. */
+function readNumber(object, key) {
+  const value = readValue(object, key);
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** @returns {string} one field as a string, else "". */
+function readString(object, key) {
+  const value = readValue(object, key);
+  return typeof value === "string" ? value : "";
+}
+
 /**
  * The tracks that play one library entry — the question "is this entry in use?"
  * is asked on its effect: a font is in use exactly while a soundfont track's
@@ -1518,6 +2027,9 @@ export function sampleUsers(snap, sampleId) {
  *            patterns: Object<string, object>, steps: Object<string, object>,
  *            midi_maps: Object<string, object>,
  *            library: Object<string, object>,
+ *            inserts: Object<string, object>, sends: Object<string, object>,
+ *            returns: Object<string, object>,
+ *            master: {gain_db: number, target: {lufs: number, true_peak_db: number}},
  *            arrangement: {placements: Object<string, object>,
  *                          markers: Object<string, object>,
  *                          sections: Object<string, object>}}}
@@ -1536,6 +2048,11 @@ export function sampleUsers(snap, sampleId) {
  *   `library` is the song's instrument library, a plain object keyed by the
  *   entry's own id; a song written before the library existed reads it as an
  *   empty object, so every reader sees the same shape either way.
+ *   `inserts` is keyed by insert id, `sends` by "<track_id>/<return_id>" and
+ *   `returns` by return id, and an insert's nested `params` arrives as one plain
+ *   object of parameter name → value. `master` is always there — a song with no
+ *   master reads the defaults — so the engine, the panel and a render all see
+ *   the same shape.
  */
 export function snapshot(doc) {
   const song = songMap(doc);
@@ -1582,6 +2099,10 @@ export function snapshot(doc) {
     steps: snapshotContainer(doc, "steps", normalizeStep),
     midi_maps: snapshotContainer(doc, "midi_maps", normalizeMidiMapping),
     library: snapshotContainer(doc, "library", normalizeLibraryEntry),
+    inserts: snapshotContainer(doc, "inserts", normalizeInsert),
+    sends: snapshotContainer(doc, "sends", normalizeSend),
+    returns: snapshotContainer(doc, "returns", normalizeReturn),
+    master: masterSettings(doc),
     arrangement: snapshotArrangement(doc),
   };
 }
@@ -1680,30 +2201,103 @@ function snapshotArrangement(doc) {
  *     `LIMITS.arrangementBars`, has no two placements overlapping on one
  *     track and no two sections overlapping each other, and every placement
  *     still names a clip of its own track — the rules the arrangement
- *     commands enforce on their own edits.
+ *     commands enforce on their own edits;
+ *   - the mixer hangs together: every insert sits in a chain of a track, a
+ *     return or the master that the song still holds and is one of
+ *     `EFFECT_KINDS`, every send names a track and a return the song holds, the
+ *     master's gain and target are inside `MIXER_RANGES`, and no count outgrows
+ *     its limit (inserts per chain, returns per song, sends per track) — the
+ *     rules the mixer commands enforce on their own edits.
  *
  * The history dry-runs an undo's plan on a clone of the document and calls
- * this, so a plan that would leave the song in one of these states is refused
- * whole instead of leaving a clip pointing at a track that is gone.
+ * `invariantReasons`, so a plan that would leave the song in one of these
+ * states is refused whole instead of leaving a clip pointing at a track that is
+ * gone. Every reason carries the stable id of the check that raised it and of
+ * the object it is about, so the history can tell a violation the plan inherits
+ * from one it makes worse without comparing the sentences (see `dryRun` in
+ * history.js).
  * @param {Y.Doc} doc
  * @returns {string[]} one plain-English reason per problem; empty when the
  *   document is consistent
  */
 export function checkInvariants(doc) {
+  return invariantReasons(doc).map((item) => item.text);
+}
+
+/**
+ * One invariant reason: which check found something (`code`), on what
+ * (`subject`) and how much of it (`count`, for the checks that count).
+ *
+ * `subject` is the object's stable id and never a name — a track, clip, insert,
+ * return, take, sampler object or history-stable key such as a send's
+ * `<track>/<return>`, an insert parameter's `<insert>/<param>`, a motion lane's
+ * key, or a pair of ids in a fixed order (`"a|b"`) for a violation two objects
+ * make together — and `"song"`/`"master"` for the song's own numbers. Nothing
+ * in it is an array index, so a step that inserts or removes an object does not
+ * move every reason behind it. Two reasons share a subject when they are about
+ * the same object, which is how a plan that adds a second offender of one kind
+ * is told from one that leaves the first where it was.
+ * @param {string} code
+ * @param {string} subject
+ * @param {string} text
+ * @param {number} [count]
+ * @returns {{code: string, subject: string, text: string, count?: number}}
+ */
+function reason(code, subject, text, count) {
+  const item = { code, subject, text };
+  if (typeof count === "number") item.count = count;
+  return item;
+}
+
+/**
+ * The same checks as `checkInvariants`, one structured reason each.
+ *
+ * `code` is the check's stable kebab-case id, `subject` the stable id of the
+ * object it is about, and `text` exactly the sentence `checkInvariants`
+ * reports. A count-based check also carries `count`, the number it found, so a
+ * plan that makes the very same violation worse (one more note past a clip's
+ * end, one more effect in an over-full chain, a third object with an id the
+ * song already holds twice) is visible even when the sentence reads the same.
+ *
+ * There is at most one reason per object and check: a motion lane with two bad
+ * points is one sentence — the first bad point's first failing check — with
+ * both points counted on it.
+ *
+ * The history dry-runs an undo against these keyed by `code` + `subject` — not
+ * by the sentence: two orphan sends from one missing track read alike, and
+ * keying on the text would swallow the second one.
+ * @param {Y.Doc} doc
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
+ */
+export function invariantReasons(doc) {
   const song = snapshot(doc);
   const reasons = [];
 
   if (song.tracks.length > LIMITS.tracks) {
-    reasons.push(`The song would have ${song.tracks.length} tracks; a song can have at most ${LIMITS.tracks} tracks.`);
+    reasons.push(
+      reason(
+        "too-many-tracks",
+        "song",
+        `The song would have ${song.tracks.length} tracks; a song can have at most ${LIMITS.tracks} tracks.`,
+        song.tracks.length,
+      ),
+    );
   }
   if (song.scenes.length > LIMITS.scenes) {
-    reasons.push(`The song would have ${song.scenes.length} scenes; a song can have at most ${LIMITS.scenes} scenes.`);
+    reasons.push(
+      reason(
+        "too-many-scenes",
+        "song",
+        `The song would have ${song.scenes.length} scenes; a song can have at most ${LIMITS.scenes} scenes.`,
+        song.scenes.length,
+      ),
+    );
   }
 
-  reasons.push(...duplicateIdReasons(song.tracks, "track"));
-  reasons.push(...duplicateIdReasons(song.scenes, "scene"));
-  reasons.push(...duplicateIdReasons(Object.values(song.clips), "clip"));
-  reasons.push(...duplicateIdReasons(Object.values(song.takes), "take"));
+  reasons.push(...duplicateIdReasons(song.tracks, "track", "duplicate-track-id"));
+  reasons.push(...duplicateIdReasons(song.scenes, "scene", "duplicate-scene-id"));
+  reasons.push(...duplicateIdReasons(Object.values(song.clips), "clip", "duplicate-clip-id"));
+  reasons.push(...duplicateIdReasons(Object.values(song.takes), "take", "duplicate-take-id"));
 
   const trackIds = new Set(song.tracks.map((track) => track.id));
   const sceneIds = new Set(song.scenes.map((scene) => scene.id));
@@ -1715,39 +2309,80 @@ export function checkInvariants(doc) {
     takesPerClip.set(take.clip_id, (takesPerClip.get(take.clip_id) ?? 0) + 1);
     const owner = song.clips[take.clip_id];
     if (!owner) {
-      reasons.push(`The take "${take.id}" would be left without its clip: there is no clip "${take.clip_id}" in the song.`);
+      reasons.push(
+        reason(
+          "take-without-clip",
+          take.id,
+          `The take "${take.id}" would be left without its clip: there is no clip "${take.clip_id}" in the song.`,
+        ),
+      );
     } else if (owner.kind !== "audio") {
       const ownerLabel = owner.name === "" ? `clip "${owner.id}"` : `clip "${owner.name}"`;
-      reasons.push(`The take "${take.id}" would belong to the ${ownerLabel}, which holds notes rather than a recording.`);
+      reasons.push(
+        reason(
+          "take-on-notes-clip",
+          take.id,
+          `The take "${take.id}" would belong to the ${ownerLabel}, which holds notes rather than a recording.`,
+        ),
+      );
     }
   }
 
   for (const clip of Object.values(song.clips)) {
     const label = clip.name === "" ? `clip "${clip.id}"` : `clip "${clip.name}"`;
     if (!trackIds.has(clip.track_id)) {
-      reasons.push(`The ${label} would be left without its track: there is no track "${clip.track_id}" in the song.`);
+      reasons.push(
+        reason(
+          "clip-without-track",
+          clip.id,
+          `The ${label} would be left without its track: there is no track "${clip.track_id}" in the song.`,
+        ),
+      );
     }
     if (!sceneIds.has(clip.scene_id)) {
-      reasons.push(`The ${label} would be left without its scene: there is no scene "${clip.scene_id}" in the song.`);
+      reasons.push(
+        reason(
+          "clip-without-scene",
+          clip.id,
+          `The ${label} would be left without its scene: there is no scene "${clip.scene_id}" in the song.`,
+        ),
+      );
     }
     const limit = clip.length_bars * BEATS_PER_BAR;
     if (clip.kind === "audio") {
       const count = takesPerClip.get(clip.id) ?? 0;
       if (count > LIMITS.takesPerClip) {
         reasons.push(
-          `The ${label} would have ${count} takes; a clip can have at most ${LIMITS.takesPerClip} takes.`,
+          reason(
+            "too-many-takes",
+            clip.id,
+            `The ${label} would have ${count} takes; a clip can have at most ${LIMITS.takesPerClip} takes.`,
+            count,
+          ),
         );
       }
       reasons.push(...segmentReasons(clip, label, takesById, limit));
     }
+    // The clip's notes are checked for one sentence but counted whole: the
+    // first note past the end is what a reader wants to see, and how many there
+    // are is what tells a plan that adds another from one that leaves them be.
+    let late = 0;
+    let firstLate = null;
     for (let index = 0; index < clip.notes.length; index += 1) {
       const note = clip.notes[index];
-      if (note.t + note.d > limit) {
-        reasons.push(
-          `Note ${index + 1} in the ${label} would end at beat ${beatText(note.t + note.d)}, past its ${barsText(clip.length_bars)}.`,
-        );
-        break;
-      }
+      if (note.t + note.d <= limit) continue;
+      late += 1;
+      if (firstLate === null) firstLate = { index, end: note.t + note.d };
+    }
+    if (firstLate !== null) {
+      reasons.push(
+        reason(
+          "note-past-clip-end",
+          clip.id,
+          `Note ${firstLate.index + 1} in the ${label} would end at beat ${beatText(firstLate.end)}, past its ${barsText(clip.length_bars)}.`,
+          late,
+        ),
+      );
     }
   }
 
@@ -1756,8 +2391,305 @@ export function checkInvariants(doc) {
   reasons.push(...midiReasons(song));
   reasons.push(...libraryReasons(song, doc));
   reasons.push(...soundfontDeviceReasons(doc));
+  reasons.push(...mixerReasons(song));
 
   return reasons;
+}
+
+/**
+ * What is wrong with a song's mixer, in plain English.
+ *
+ * The rules one mixer edit can look after on its own, checked over the whole
+ * song at once: every insert sits in the chain of a track, a return or the
+ * master the song still holds and is one of `EFFECT_KINDS`; every send names a
+ * track and a return the song still holds; the master's gain and its loudness
+ * target stay inside `MIXER_RANGES`; and no count outgrows its limit — the
+ * effects of one chain, the returns of one song and the sends of one track.
+ *
+ * The values are checked as well as the structure, and against the same tables
+ * the commands check them with: every parameter an insert holds is a parameter
+ * its kind has, inside that parameter's own range or one of its values; a
+ * return's gain and pan and a send's level are inside `MIXER_RANGES`; and so are
+ * the master's three numbers. A `normalizeInsert` keeps a number that is out of
+ * range but not one that is the wrong type, so those are the values a
+ * hand-written or restored one can be off in — checked exactly the way a
+ * command checks them.
+ *
+ * The history dry-runs an undo's plan on a clone and calls this, so a plan that
+ * would remove a track's chain without putting the track back, or leave a send
+ * pointing at a return that is gone, is refused whole instead of half-landing.
+ * Only a reason the plan *creates* blocks it (see `dryRun` in history.js).
+ *
+ * The amp cap (`LIMITS.ampInsertsPerSong`) is not checked here: no effect of
+ * kind `amp` can enter the document until PR C, which adds the cap with the
+ * kind.
+ * @param {object} song - a snapshot
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
+ */
+function mixerReasons(song) {
+  const reasons = [];
+  const inserts = Object.values(song.inserts ?? {});
+  const sends = Object.values(song.sends ?? {});
+  const returns = Object.values(song.returns ?? {});
+  const trackIds = new Set(song.tracks.map((track) => track.id));
+  const returnIds = new Set(returns.map((item) => item.id));
+  const [returnGainLow, returnGainHigh] = MIXER_RANGES.return.gain_db;
+  const [returnPanLow, returnPanHigh] = MIXER_RANGES.return.pan;
+  const [sendLow, sendHigh] = MIXER_RANGES.send.level_db;
+
+  if (returns.length > LIMITS.returnsPerSong) {
+    reasons.push(
+      reason(
+        "too-many-returns",
+        "song",
+        `The song would hold ${returns.length} returns; a song can hold at most ${LIMITS.returnsPerSong} returns.`,
+        returns.length,
+      ),
+    );
+  }
+  reasons.push(...duplicateIdReasons(returns, "return", "duplicate-return-id"));
+  for (const item of returns) {
+    const which = `The return "${nameOrId(item.name, item.id)}"`;
+    if (!(item.gain_db >= returnGainLow && item.gain_db <= returnGainHigh)) {
+      reasons.push(
+        reason(
+          "return-gain-range",
+          item.id,
+          `${which} would be at ${item.gain_db} dB; a return runs from ${returnGainLow} to ${returnGainHigh} dB.`,
+        ),
+      );
+    }
+    if (!(item.pan >= returnPanLow && item.pan <= returnPanHigh)) {
+      reasons.push(
+        reason(
+          "return-pan-range",
+          item.id,
+          `${which} would be panned to ${item.pan}; a return's pan runs from ${returnPanLow} to ${returnPanHigh}.`,
+        ),
+      );
+    }
+  }
+
+  const perChain = new Map();
+  for (const insert of inserts) {
+    const which = `The insert "${insert.id}"`;
+    const owner = insertOwnerOf(insert.owner);
+    if (!owner) {
+      reasons.push(
+        reason(
+          "insert-owner-invalid",
+          insert.id,
+          `${which} would sit in the chain "${insert.owner}", which is not a track, a return or the master.`,
+        ),
+      );
+      continue;
+    }
+    if (owner.kind === "track" && !trackIds.has(owner.id)) {
+      reasons.push(
+        reason(
+          "insert-without-track",
+          insert.id,
+          `${which} would be left without its track: there is no track "${owner.id}" in the song.`,
+        ),
+      );
+      continue;
+    }
+    if (owner.kind === "return" && !returnIds.has(owner.id)) {
+      reasons.push(
+        reason(
+          "insert-without-return",
+          insert.id,
+          `${which} would be left without its return: there is no return "${owner.id}" in the song.`,
+        ),
+      );
+      continue;
+    }
+    if (!effectSpec(insert.kind)) {
+      reasons.push(
+        reason(
+          "insert-kind-unknown",
+          insert.id,
+          `${which} would be a "${insert.kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
+        ),
+      );
+    } else {
+      reasons.push(...insertParamReasons(which, insert, insert.kind, insert.params));
+    }
+    perChain.set(insert.owner, (perChain.get(insert.owner) ?? 0) + 1);
+  }
+  for (const [owner, count] of perChain) {
+    if (count <= LIMITS.insertsPerChain) continue;
+    const where = chainWhere(song, owner);
+    reasons.push(
+      reason(
+        "chain-over-limit",
+        owner,
+        `The chain on ${where} would hold ${count} effects; a chain holds at most ${LIMITS.insertsPerChain} effects.`,
+        count,
+      ),
+    );
+  }
+
+  const perTrack = new Map();
+  for (const send of sends) {
+    // One send is one object, so its reasons are about the pair it joins — not
+    // about its track, which two sends of one track share: a plan that fixes one
+    // of them and breaks another is then two different subjects, not one.
+    const key = sendKey(send.track_id, send.return_id);
+    if (!trackIds.has(send.track_id)) {
+      reasons.push(
+        reason(
+          "send-without-track",
+          key,
+          `A send would be left without its track: there is no track "${send.track_id}" in the song.`,
+        ),
+      );
+      continue;
+    }
+    if (!returnIds.has(send.return_id)) {
+      reasons.push(
+        reason(
+          "send-without-return",
+          key,
+          `The send from "${send.track_id}" would be left without its return: there is no return "${send.return_id}" in the song.`,
+        ),
+      );
+      continue;
+    }
+    if (!(send.level_db >= sendLow && send.level_db <= sendHigh)) {
+      reasons.push(
+        reason(
+          "send-level-range",
+          key,
+          `The send from "${send.track_id}" would be at ${send.level_db} dB; a send runs from ${sendLow} to ${sendHigh} dB.`,
+        ),
+      );
+    }
+    perTrack.set(send.track_id, (perTrack.get(send.track_id) ?? 0) + 1);
+  }
+  for (const [trackId, count] of perTrack) {
+    if (count <= LIMITS.sendsPerTrack) continue;
+    const track = song.tracks.find((item) => item.id === trackId);
+    reasons.push(
+      reason(
+        "too-many-sends",
+        trackId,
+        `Track "${nameOrId(track?.name, trackId)}" would feed ${count} returns; a track sends to at most ${LIMITS.sendsPerTrack} returns.`,
+        count,
+      ),
+    );
+  }
+
+  const master = song.master ?? DEFAULT_MASTER;
+  const gain = master.gain_db;
+  if (!(gain >= MIXER_RANGES.master.gain_db[0] && gain <= MIXER_RANGES.master.gain_db[1])) {
+    reasons.push(
+      reason(
+        "master-gain-range",
+        "master",
+        `The master's gain would be ${gain} dB; it runs from ${MIXER_RANGES.master.gain_db[0]} to ${MIXER_RANGES.master.gain_db[1]} dB.`,
+      ),
+    );
+  }
+  const target = master.target ?? DEFAULT_MASTER.target;
+  const lufs = target.lufs;
+  const peak = target.true_peak_db;
+  if (!(lufs >= MIXER_RANGES.master.lufs[0] && lufs <= MIXER_RANGES.master.lufs[1])) {
+    reasons.push(
+      reason(
+        "master-lufs-range",
+        "master",
+        `The master's target would be ${lufs} LUFS; a target runs from ${MIXER_RANGES.master.lufs[0]} to ${MIXER_RANGES.master.lufs[1]} LUFS.`,
+      ),
+    );
+  }
+  if (!(peak >= MIXER_RANGES.master.true_peak_db[0] && peak <= MIXER_RANGES.master.true_peak_db[1])) {
+    reasons.push(
+      reason(
+        "master-peak-range",
+        "master",
+        `The master's true-peak ceiling would be ${peak} dBTP; it runs from ${MIXER_RANGES.master.true_peak_db[0]} to ${MIXER_RANGES.master.true_peak_db[1]} dBTP.`,
+      ),
+    );
+  }
+
+  return reasons;
+}
+
+/**
+ * What is wrong with the parameters one insert holds, in plain English: a
+ * parameter its kind does not have, a chooser set to a value that is not one of
+ * its own, a number outside the range the table gives it.
+ *
+ * These are the values a snapshot can carry off the table: `normalizeInsert`
+ * keeps a number that is out of range (the type is right) and drops one of the
+ * wrong type, and it keeps every parameter as it is when the kind itself is
+ * unknown (reported by the caller instead). Each message names the insert, the
+ * parameter and the range, the way a command's refusal does.
+ * @param {string} which - what the sentence calls the insert, e.g. `The insert "i1"`
+ * @param {object} insert - the insert itself, for the subject its reasons carry
+ * @param {string} kind - one of `EFFECT_KINDS`
+ * @param {Object<string, any>} params - the insert's parameters
+ * @returns {Array<{code: string, subject: string, text: string}>}
+ */
+function insertParamReasons(which, insert, kind, params) {
+  const reasons = [];
+  for (const [name, value] of Object.entries(params ?? {})) {
+    const field = effectParamSpec(kind, name);
+    // One parameter is one subject, so a plan that brings one into range and
+    // pushes another out of it is not mistaken for leaving the insert alone.
+    const subject = `${insert.id}/${name}`;
+    if (!field) {
+      reasons.push(
+        reason(
+          "insert-param-unknown",
+          subject,
+          `${which} would hold a parameter "${name}", which the ${effectLabel(kind)} does not have.`,
+        ),
+      );
+      continue;
+    }
+    if (field.values) {
+      if (!field.values.includes(value)) {
+        reasons.push(
+          reason(
+            "insert-param-not-a-value",
+            subject,
+            `${which} would set "${name}" to ${typeof value === "string" ? `"${value}"` : String(value)}; it is one of ${field.values.join(", ")}.`,
+          ),
+        );
+      }
+      continue;
+    }
+    if (value >= field.min && value <= field.max) continue;
+    reasons.push(
+      reason(
+        "insert-param-range",
+        subject,
+        `${which} would set "${name}" to ${value}; it runs from ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}.`,
+      ),
+    );
+  }
+  return reasons;
+}
+
+/**
+ * What a sentence calls the chain one owner's inserts sit in: `the master`, or
+ * the track's or return's name.
+ * @param {object} song - a snapshot
+ * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+ * @returns {string}
+ */
+function chainWhere(song, owner) {
+  const target = insertOwnerOf(owner);
+  if (!target) return `"${owner}"`;
+  if (target.kind === "master") return "the master";
+  if (target.kind === "track") {
+    const track = song.tracks.find((item) => item.id === target.id);
+    return `track "${nameOrId(track?.name, target.id)}"`;
+  }
+  const item = (song.returns ?? {})[target.id];
+  return `return "${nameOrId(item?.name, target.id)}"`;
 }
 
 /**
@@ -1769,7 +2701,7 @@ export function checkInvariants(doc) {
  * are found by sorting each track's (or the sections') ranges by start, so a
  * full 2048-placement song is one pass, not a quadratic scan.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function arrangementReasons(song) {
   const arrangement = song.arrangement ?? { placements: {}, markers: {}, sections: {} };
@@ -1780,23 +2712,38 @@ function arrangementReasons(song) {
 
   if (placements.length > LIMITS.placements) {
     reasons.push(
-      `The arrangement would hold ${placements.length} placements; an arrangement can hold at most ${LIMITS.placements} placements.`,
+      reason(
+        "too-many-placements",
+        "arrangement",
+        `The arrangement would hold ${placements.length} placements; an arrangement can hold at most ${LIMITS.placements} placements.`,
+        placements.length,
+      ),
     );
   }
   if (markers.length > LIMITS.markers) {
     reasons.push(
-      `The song would hold ${markers.length} markers; a song can hold at most ${LIMITS.markers} markers.`,
+      reason(
+        "too-many-markers",
+        "song",
+        `The song would hold ${markers.length} markers; a song can hold at most ${LIMITS.markers} markers.`,
+        markers.length,
+      ),
     );
   }
   if (sections.length > LIMITS.sections) {
     reasons.push(
-      `The song would hold ${sections.length} sections; a song can hold at most ${LIMITS.sections} sections.`,
+      reason(
+        "too-many-sections",
+        "song",
+        `The song would hold ${sections.length} sections; a song can hold at most ${LIMITS.sections} sections.`,
+        sections.length,
+      ),
     );
   }
 
-  reasons.push(...duplicateIdReasons(placements, "placement"));
-  reasons.push(...duplicateIdReasons(markers, "marker"));
-  reasons.push(...duplicateIdReasons(sections, "section"));
+  reasons.push(...duplicateIdReasons(placements, "placement", "duplicate-placement-id"));
+  reasons.push(...duplicateIdReasons(markers, "marker", "duplicate-marker-id"));
+  reasons.push(...duplicateIdReasons(sections, "section", "duplicate-section-id"));
 
   const byTrack = new Map();
   for (const placement of placements) {
@@ -1804,28 +2751,56 @@ function arrangementReasons(song) {
     const track = song.tracks.find((item) => item.id === placement.track_id);
     const clip = song.clips[placement.clip_id];
     if (!track) {
-      reasons.push(`${which} would be left without its track: there is no track "${placement.track_id}" in the song.`);
+      reasons.push(
+        reason(
+          "placement-without-track",
+          placement.id,
+          `${which} would be left without its track: there is no track "${placement.track_id}" in the song.`,
+        ),
+      );
     }
     if (!clip) {
-      reasons.push(`${which} would be left without its clip: there is no clip "${placement.clip_id}" in the song.`);
+      reasons.push(
+        reason(
+          "placement-without-clip",
+          placement.id,
+          `${which} would be left without its clip: there is no clip "${placement.clip_id}" in the song.`,
+        ),
+      );
     } else if (clip.track_id !== placement.track_id) {
       reasons.push(
-        `${which} would play clip "${clip.id}", which sits on track "${clip.track_id}", not "${placement.track_id}".`,
+        reason(
+          "placement-clip-other-track",
+          placement.id,
+          `${which} would play clip "${clip.id}", which sits on track "${clip.track_id}", not "${placement.track_id}".`,
+        ),
       );
     }
     if (placement.start_bar + placement.bars > LIMITS.arrangementBars) {
       reasons.push(
-        `${which} would end at bar ${placement.start_bar + placement.bars}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        reason(
+          "placement-past-end",
+          placement.id,
+          `${which} would end at bar ${placement.start_bar + placement.bars}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        ),
       );
     }
     if (!onOffsetGrid(placement.offset_beats)) {
       reasons.push(
-        `${which} would start at an offset of ${placement.offset_beats} beats, which is off the sixteenth-of-a-beat grid.`,
+        reason(
+          "placement-offset-grid",
+          placement.id,
+          `${which} would start at an offset of ${placement.offset_beats} beats, which is off the sixteenth-of-a-beat grid.`,
+        ),
       );
     }
     if (placement.fade_in_beats + placement.fade_out_beats > placement.bars * BEATS_PER_BAR) {
       reasons.push(
-        `${which} would fade in over ${placement.fade_in_beats} and out over ${placement.fade_out_beats} beats, longer than its ${barsText(placement.bars)}.`,
+        reason(
+          "placement-fades-too-long",
+          placement.id,
+          `${which} would fade in over ${placement.fade_in_beats} and out over ${placement.fade_out_beats} beats, longer than its ${barsText(placement.bars)}.`,
+        ),
       );
     }
     const lane = byTrack.get(placement.track_id) ?? [];
@@ -1838,14 +2813,26 @@ function arrangementReasons(song) {
       const previous = lane[index - 1];
       const current = lane[index];
       if (current.start_bar >= previous.start_bar + previous.bars) continue;
-      reasons.push(`The placements "${previous.id}" and "${current.id}" would overlap on track "${trackId}".`);
+      // The pair is what overlaps, so the pair is the subject — in a fixed
+      // order, so which of the two the sort met second cannot matter.
+      reasons.push(
+        reason(
+          "placements-overlap",
+          pairKey(previous.id, current.id),
+          `The placements "${previous.id}" and "${current.id}" would overlap on track "${trackId}".`,
+        ),
+      );
     }
   }
 
   for (const marker of markers) {
     if (marker.bar > LIMITS.arrangementBars) {
       reasons.push(
-        `The marker "${marker.id}" would sit at bar ${marker.bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        reason(
+          "marker-past-end",
+          marker.id,
+          `The marker "${marker.id}" would sit at bar ${marker.bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        ),
       );
     }
   }
@@ -1853,10 +2840,22 @@ function arrangementReasons(song) {
   for (const section of sections) {
     const which = `The section "${section.id}"`;
     if (!(section.start_bar < section.end_bar)) {
-      reasons.push(`${which} would end at bar ${section.end_bar}, before it starts at bar ${section.start_bar}.`);
+      reasons.push(
+        reason(
+          "section-empty",
+          section.id,
+          `${which} would end at bar ${section.end_bar}, before it starts at bar ${section.start_bar}.`,
+        ),
+      );
     }
     if (section.end_bar > LIMITS.arrangementBars) {
-      reasons.push(`${which} would end at bar ${section.end_bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`);
+      reasons.push(
+        reason(
+          "section-past-end",
+          section.id,
+          `${which} would end at bar ${section.end_bar}, past the ${LIMITS.arrangementBars}-bar end of the arrangement.`,
+        ),
+      );
     }
   }
   const ordered = [...sections].sort((a, b) => a.start_bar - b.start_bar);
@@ -1864,7 +2863,13 @@ function arrangementReasons(song) {
     const previous = ordered[index - 1];
     const current = ordered[index];
     if (current.start_bar >= previous.end_bar) continue;
-    reasons.push(`The sections "${previous.id}" and "${current.id}" would overlap.`);
+    reasons.push(
+      reason(
+        "sections-overlap",
+        pairKey(previous.id, current.id),
+        `The sections "${previous.id}" and "${current.id}" would overlap.`,
+      ),
+    );
   }
 
   return reasons;
@@ -1895,7 +2900,7 @@ function arrangementReasons(song) {
  * would leave, say, a pad pointing at a slice a newer edit removed is refused
  * whole instead of half-landing.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function samplerReasons(song) {
   const reasons = [];
@@ -1913,7 +2918,12 @@ function samplerReasons(song) {
   // Samples: the rate an import may land at, and the 60-second cap.
   if (samples.length > LIMITS.samplesPerSong) {
     reasons.push(
-      `The song would hold ${samples.length} samples; a song can hold at most ${LIMITS.samplesPerSong} samples.`,
+      reason(
+        "too-many-samples",
+        "song",
+        `The song would hold ${samples.length} samples; a song can hold at most ${LIMITS.samplesPerSong} samples.`,
+        samples.length,
+      ),
     );
   }
   const samplesById = new Map();
@@ -1921,12 +2931,24 @@ function samplerReasons(song) {
     samplesById.set(sample.id, sample);
     const which = `The sample "${nameOrId(sample.name, sample.id)}"`;
     if (!SAMPLE_RATES.includes(sample.rate)) {
-      reasons.push(`${which} would have a rate of ${sample.rate} Hz; a sample's rate is one of ${SAMPLE_RATES.join(", ")}.`);
+      reasons.push(
+        reason(
+          "sample-rate",
+          sample.id,
+          `${which} would have a rate of ${sample.rate} Hz; a sample's rate is one of ${SAMPLE_RATES.join(", ")}.`,
+        ),
+      );
     }
-    if (!(sample.frames > 0)) reasons.push(`${which} would hold no frames.`);
+    if (!(sample.frames > 0)) {
+      reasons.push(reason("sample-empty", sample.id, `${which} would hold no frames.`));
+    }
     if (sample.frames * sample.channels > LIMITS.sampleSamples) {
       reasons.push(
-        `${which} would hold ${sample.frames * sample.channels} samples; a sample can hold at most ${LIMITS.sampleSamples} (frames × channels).`,
+        reason(
+          "sample-too-long",
+          sample.id,
+          `${which} would hold ${sample.frames * sample.channels} samples; a sample can hold at most ${LIMITS.sampleSamples} (frames × channels).`,
+        ),
       );
     }
   }
@@ -1936,16 +2958,27 @@ function samplerReasons(song) {
   const slicesPerSample = new Map();
   for (const slice of slices) {
     const which = `The slice "${slice.id}" of sample "${slice.sample_id}"`;
-    slicesByKey.set(sliceKey(slice.sample_id, slice.id), slice);
+    const key = sliceKey(slice.sample_id, slice.id);
+    slicesByKey.set(key, slice);
     slicesPerSample.set(slice.sample_id, (slicesPerSample.get(slice.sample_id) ?? 0) + 1);
     const sample = samplesById.get(slice.sample_id);
     if (!sample) {
-      reasons.push(`${which} would be left without its sample: there is no sample "${slice.sample_id}" in the song.`);
+      reasons.push(
+        reason(
+          "slice-without-sample",
+          key,
+          `${which} would be left without its sample: there is no sample "${slice.sample_id}" in the song.`,
+        ),
+      );
       continue;
     }
     if (!(slice.start_frame >= 0 && slice.start_frame < slice.end_frame && slice.end_frame <= sample.frames)) {
       reasons.push(
-        `${which} would run from frame ${slice.start_frame} to frame ${slice.end_frame}, outside the ${sample.frames} frames of that sample.`,
+        reason(
+          "slice-outside-sample",
+          key,
+          `${which} would run from frame ${slice.start_frame} to frame ${slice.end_frame}, outside the ${sample.frames} frames of that sample.`,
+        ),
       );
     }
   }
@@ -1953,7 +2986,12 @@ function samplerReasons(song) {
     if (count <= LIMITS.slicesPerSample) continue;
     const label = nameOrId(samplesById.get(sampleId)?.name, sampleId);
     reasons.push(
-      `The sample "${label}" would have ${count} slices; a sample can have at most ${LIMITS.slicesPerSample} slices.`,
+      reason(
+        "too-many-slices",
+        sampleId,
+        `The sample "${label}" would have ${count} slices; a sample can have at most ${LIMITS.slicesPerSample} slices.`,
+        count,
+      ),
     );
   }
 
@@ -1962,48 +3000,91 @@ function samplerReasons(song) {
   const bankKeys = new Set();
   const banksPerTrack = new Map();
   for (const bank of banks) {
-    bankKeys.add(bankKey(bank.track_id, bank.id));
+    const key = bankKey(bank.track_id, bank.id);
+    bankKeys.add(key);
     banksPerTrack.set(bank.track_id, (banksPerTrack.get(bank.track_id) ?? 0) + 1);
     const which = `The bank "${nameOrId(bank.name, bank.id)}"`;
     const track = tracksById.get(bank.track_id);
     if (!track) {
-      reasons.push(`${which} would be left without its track: there is no track "${bank.track_id}" in the song.`);
+      reasons.push(
+        reason(
+          "bank-without-track",
+          key,
+          `${which} would be left without its track: there is no track "${bank.track_id}" in the song.`,
+        ),
+      );
     } else if (track.device?.engine !== SAMPLER_DEVICE.engine) {
-      reasons.push(`${which} would sit on track "${nameOrId(track.name, track.id)}", which is not a sampler track.`);
+      reasons.push(
+        reason(
+          "bank-not-on-sampler-track",
+          key,
+          `${which} would sit on track "${nameOrId(track.name, track.id)}", which is not a sampler track.`,
+        ),
+      );
     }
   }
   for (const [trackId, count] of banksPerTrack) {
     if (count <= LIMITS.banksPerKit) continue;
     const label = nameOrId(tracksById.get(trackId)?.name, trackId);
-    reasons.push(`The kit of track "${label}" would have ${count} banks; a kit can have at most ${LIMITS.banksPerKit} banks.`);
+    reasons.push(
+      reason(
+        "too-many-banks",
+        trackId,
+        `The kit of track "${label}" would have ${count} banks; a kit can have at most ${LIMITS.banksPerKit} banks.`,
+        count,
+      ),
+    );
   }
 
   // Pads: a bank's own pad, playing a sample of the song and a slice of it.
   const padKeys = new Set();
   for (const pad of pads) {
-    padKeys.add(padKey(pad.track_id, pad.bank_id, pad.index));
+    const key = padKey(pad.track_id, pad.bank_id, pad.index);
+    padKeys.add(key);
     const which = `The pad ${Number(pad.index) + 1} of bank "${pad.bank_id}"`;
     if (!bankKeys.has(bankKey(pad.track_id, pad.bank_id))) {
-      reasons.push(`${which} would be left without its bank: track "${pad.track_id}" has no bank "${pad.bank_id}".`);
+      reasons.push(
+        reason(
+          "pad-without-bank",
+          key,
+          `${which} would be left without its bank: track "${pad.track_id}" has no bank "${pad.bank_id}".`,
+        ),
+      );
       continue;
     }
     if (!(Number.isInteger(pad.index) && pad.index >= 0 && pad.index < LIMITS.padsPerBank)) {
       reasons.push(
-        `${which} would sit at index ${pad.index}; a bank holds ${LIMITS.padsPerBank} pads, numbered 0 to ${LIMITS.padsPerBank - 1}.`,
+        reason(
+          "pad-index-range",
+          key,
+          `${which} would sit at index ${pad.index}; a bank holds ${LIMITS.padsPerBank} pads, numbered 0 to ${LIMITS.padsPerBank - 1}.`,
+        ),
       );
     }
     if (pad.sample_id === ABSENT) {
-      if (pad.slice_id !== ABSENT) reasons.push(`${which} would play a slice without a sample.`);
+      if (pad.slice_id !== ABSENT) {
+        reasons.push(reason("pad-slice-without-sample", key, `${which} would play a slice without a sample.`));
+      }
       continue;
     }
     if (!samplesById.has(pad.sample_id)) {
-      reasons.push(`${which} would play sample "${pad.sample_id}", which is not in the song.`);
+      reasons.push(
+        reason(
+          "pad-sample-missing",
+          key,
+          `${which} would play sample "${pad.sample_id}", which is not in the song.`,
+        ),
+      );
       continue;
     }
     if (pad.slice_id === ABSENT) continue;
     if (!slicesByKey.has(sliceKey(pad.sample_id, pad.slice_id))) {
       reasons.push(
-        `${which} would play slice "${pad.slice_id}", which is not a slice of sample "${pad.sample_id}".`,
+        reason(
+          "pad-slice-missing",
+          key,
+          `${which} would play slice "${pad.slice_id}", which is not a slice of sample "${pad.sample_id}".`,
+        ),
       );
     }
   }
@@ -2012,43 +3093,84 @@ function samplerReasons(song) {
   const patternKeys = new Set();
   const patternsPerClip = new Map();
   for (const pattern of patterns) {
-    patternKeys.add(patternKey(pattern.clip_id, pattern.id));
+    const key = patternKey(pattern.clip_id, pattern.id);
+    patternKeys.add(key);
     patternsPerClip.set(pattern.clip_id, (patternsPerClip.get(pattern.clip_id) ?? 0) + 1);
     const clip = song.clips[pattern.clip_id];
     const which = `The pattern "${nameOrId(pattern.name, pattern.id)}"`;
     if (!clip) {
-      reasons.push(`${which} would be left without its clip: there is no clip "${pattern.clip_id}" in the song.`);
+      reasons.push(
+        reason(
+          "pattern-without-clip",
+          key,
+          `${which} would be left without its clip: there is no clip "${pattern.clip_id}" in the song.`,
+        ),
+      );
     } else if (clip.kind !== "pattern") {
-      reasons.push(`${which} would sit on clip "${nameOrId(clip.name, clip.id)}", which holds notes rather than patterns.`);
+      reasons.push(
+        reason(
+          "pattern-on-notes-clip",
+          key,
+          `${which} would sit on clip "${nameOrId(clip.name, clip.id)}", which holds notes rather than patterns.`,
+        ),
+      );
     }
   }
   for (const [clipId, count] of patternsPerClip) {
     if (count <= LIMITS.patternsPerClip) continue;
     const clip = song.clips[clipId];
     const label = nameOrId(clip?.name, clipId);
-    reasons.push(`The clip "${label}" would hold ${count} patterns; a pattern clip can hold at most ${LIMITS.patternsPerClip} patterns.`);
+    reasons.push(
+      reason(
+        "too-many-patterns",
+        clipId,
+        `The clip "${label}" would hold ${count} patterns; a pattern clip can hold at most ${LIMITS.patternsPerClip} patterns.`,
+        count,
+      ),
+    );
   }
   for (const clip of Object.values(song.clips)) {
     if (clip.kind !== "pattern") continue;
     const which = `The clip "${nameOrId(clip.name, clip.id)}"`;
     const chain = Array.isArray(clip.chain) ? clip.chain : [];
     if (chain.length > LIMITS.chainLength) {
-      reasons.push(`${which} would chain ${chain.length} patterns; a chain is at most ${LIMITS.chainLength} long.`);
+      reasons.push(
+        reason(
+          "pattern-chain-too-long",
+          clip.id,
+          `${which} would chain ${chain.length} patterns; a chain is at most ${LIMITS.chainLength} long.`,
+          chain.length,
+        ),
+      );
     }
     for (const entry of chain) {
       if (patternKeys.has(patternKey(clip.id, entry))) continue;
-      reasons.push(`${which} would chain "${entry}", which is not a pattern of that clip.`);
+      reasons.push(
+        reason("chain-missing-pattern", clip.id, `${which} would chain "${entry}", which is not a pattern of that clip.`),
+      );
     }
     if (!(clip.length_steps >= 1 && clip.length_steps <= LIMITS.stepPositions)) {
       reasons.push(
-        `${which} would have ${clip.length_steps} step positions; a pattern holds 1 to ${LIMITS.stepPositions}.`,
+        reason(
+          "step-positions-range",
+          clip.id,
+          `${which} would have ${clip.length_steps} step positions; a pattern holds 1 to ${LIMITS.stepPositions}.`,
+        ),
       );
     }
     if (!STEP_BEATS_VALUES.includes(clip.step_beats)) {
-      reasons.push(`${which} would use a step of ${clip.step_beats} beats; a step is one of ${STEP_BEATS_VALUES.join(", ")}.`);
+      reasons.push(
+        reason(
+          "step-beats",
+          clip.id,
+          `${which} would use a step of ${clip.step_beats} beats; a step is one of ${STEP_BEATS_VALUES.join(", ")}.`,
+        ),
+      );
     }
     if (!(clip.swing >= 0 && clip.swing <= 0.75)) {
-      reasons.push(`${which} would swing ${clip.swing}; swing is between 0 and 0.75.`);
+      reasons.push(
+        reason("swing-range", clip.id, `${which} would swing ${clip.swing}; swing is between 0 and 0.75.`),
+      );
     }
   }
 
@@ -2057,10 +3179,15 @@ function samplerReasons(song) {
   for (const step of steps) {
     const key = patternKey(step.clip_id, step.pattern_id);
     const which = `The step at position ${step.at} of pattern "${step.pattern_id}"`;
+    const where = stepKey(step.clip_id, step.pattern_id, step.at, step.bank_id, step.index);
     stepsPerPattern.set(key, (stepsPerPattern.get(key) ?? 0) + 1);
     if (!patternKeys.has(key)) {
       reasons.push(
-        `${which} would be left without its pattern: clip "${step.clip_id}" has no pattern "${step.pattern_id}".`,
+        reason(
+          "step-without-pattern",
+          where,
+          `${which} would be left without its pattern: clip "${step.clip_id}" has no pattern "${step.pattern_id}".`,
+        ),
       );
       continue;
     }
@@ -2068,23 +3195,43 @@ function samplerReasons(song) {
     const positions = Number(clip?.length_steps) || 0;
     if (!(Number.isInteger(step.at) && step.at >= 0 && step.at < positions)) {
       reasons.push(
-        `${which} would sit outside the ${positions} step positions of clip "${nameOrId(clip?.name, step.clip_id)}".`,
+        reason(
+          "step-past-loop",
+          where,
+          `${which} would sit outside the ${positions} step positions of clip "${nameOrId(clip?.name, step.clip_id)}".`,
+        ),
       );
     }
     if (!padKeys.has(padKey(clip?.track_id ?? "", step.bank_id, step.index))) {
       reasons.push(
-        `${which} would name a pad that is not on the clip's track: there is no pad ${Number(step.index) + 1} in bank "${step.bank_id}".`,
+        reason(
+          "step-pad-missing",
+          where,
+          `${which} would name a pad that is not on the clip's track: there is no pad ${Number(step.index) + 1} in bank "${step.bank_id}".`,
+        ),
       );
     }
     const lockCount = Object.keys(step.locks ?? {}).length;
     if (lockCount > LIMITS.locksPerStep) {
-      reasons.push(`${which} would carry ${lockCount} locks; a step carries at most ${LIMITS.locksPerStep} locks.`);
+      reasons.push(
+        reason(
+          "too-many-locks",
+          where,
+          `${which} would carry ${lockCount} locks; a step carries at most ${LIMITS.locksPerStep} locks.`,
+          lockCount,
+        ),
+      );
     }
   }
   for (const [key, count] of stepsPerPattern) {
     if (count <= LIMITS.stepEntriesPerPattern) continue;
     reasons.push(
-      `A pattern would hold ${count} steps; a pattern can hold at most ${LIMITS.stepEntriesPerPattern} steps.`,
+      reason(
+        "too-many-steps",
+        key,
+        `A pattern would hold ${count} steps; a pattern can hold at most ${LIMITS.stepEntriesPerPattern} steps.`,
+        count,
+      ),
     );
   }
 
@@ -2102,47 +3249,87 @@ function samplerReasons(song) {
     const trackId = typeof clip?.track_id === "string" ? clip.track_id : "";
     for (const lane of lanes) {
       const laneParts = motionLaneParts(lane);
+      const where = motionKey(pattern.clip_id, pattern.id, lane);
       if (!laneParts) {
-        reasons.push(`${which} would hold the motion lane "${lane}", which names no pad and parameter.`);
+        reasons.push(
+          reason(
+            "motion-lane-invalid",
+            where,
+            `${which} would hold the motion lane "${lane}", which names no pad and parameter.`,
+          ),
+        );
         continue;
       }
       const range = MOTION_PARAM_RANGES[laneParts.param];
       if (!range) {
         reasons.push(
-          `${which} would sweep "${laneParts.param}" on pad ${laneParts.index + 1}, which is not one of a pad's numeric fields (${MOTION_PARAMS.join(", ")}).`,
+          reason(
+            "motion-param-unknown",
+            where,
+            `${which} would sweep "${laneParts.param}" on pad ${laneParts.index + 1}, which is not one of a pad's numeric fields (${MOTION_PARAMS.join(", ")}).`,
+          ),
         );
         continue;
       }
       if (trackId !== "" && !padKeys.has(padKey(trackId, laneParts.bankId, laneParts.index))) {
         reasons.push(
-          `${which} would sweep pad ${laneParts.index + 1} of bank "${laneParts.bankId}", which is not on the clip's track.`,
+          reason(
+            "motion-pad-missing",
+            where,
+            `${which} would sweep pad ${laneParts.index + 1} of bank "${laneParts.bankId}", which is not on the clip's track.`,
+          ),
         );
         continue;
       }
       const points = Array.isArray(motion[lane]) ? motion[lane] : [];
       if (points.length > LIMITS.motionPointsPerLane) {
         reasons.push(
-          `${which} would hold ${points.length} motion points on one lane; a lane holds at most ${LIMITS.motionPointsPerLane} motion points.`,
+          reason(
+            "too-many-motion-points",
+            where,
+            `${which} would hold ${points.length} motion points on one lane; a lane holds at most ${LIMITS.motionPointsPerLane} motion points.`,
+            points.length,
+          ),
         );
         continue;
       }
       if (!(positions > 0)) continue;
+      // One lane is one sentence — the one the check has always reported: the
+      // first bad point's first failing check. Every bad point of the lane is
+      // counted on it, so one more point off the loop is still visible even
+      // though the sentence does not change (two peers' writes can leave a lane
+      // with points neither of them wrote alone).
+      let bad = 0;
+      let firstBad = null;
       for (const point of points) {
         const stepFrac = Number(point.step_frac);
         const amount = Number(point.value);
-        if (!(stepFrac >= 0 && stepFrac < positions)) {
-          reasons.push(
-            `${which} would put a motion point at step ${beatText(stepFrac)}, outside its ${positions} step positions.`,
-          );
-          break;
-        }
-        if (!(amount >= range[0] && amount <= range[1])) {
-          reasons.push(
-            `${which} would sweep "${laneParts.param}" to ${amount} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
-          );
-          break;
-        }
+        const outside = !(stepFrac >= 0 && stepFrac < positions);
+        const offRange = !(amount >= range[0] && amount <= range[1]);
+        if (!outside && !offRange) continue;
+        bad += 1;
+        if (firstBad === null) firstBad = { outside, stepFrac, amount };
       }
+      if (firstBad === null) continue;
+      if (firstBad.outside) {
+        reasons.push(
+          reason(
+            "motion-point-past-loop",
+            where,
+            `${which} would put a motion point at step ${beatText(firstBad.stepFrac)}, outside its ${positions} step positions.`,
+            bad,
+          ),
+        );
+        continue;
+      }
+      reasons.push(
+        reason(
+          "motion-point-range",
+          where,
+          `${which} would sweep "${laneParts.param}" to ${firstBad.amount} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
+          bad,
+        ),
+      );
     }
   }
 
@@ -2157,14 +3344,19 @@ function samplerReasons(song) {
  * message on the same controller — one message has one live action, so the
  * router can never have to choose between two of them.
  * @param {object} song - a snapshot
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function midiReasons(song) {
   const mappings = Object.values(song.midi_maps ?? {});
   const reasons = [];
   if (mappings.length > LIMITS.midiMaps) {
     reasons.push(
-      `The song would hold ${mappings.length} MIDI mappings; a song can hold at most ${LIMITS.midiMaps} MIDI mappings.`,
+      reason(
+        "too-many-midi-maps",
+        "song",
+        `The song would hold ${mappings.length} MIDI mappings; a song can hold at most ${LIMITS.midiMaps} MIDI mappings.`,
+        mappings.length,
+      ),
     );
   }
 
@@ -2174,7 +3366,11 @@ function midiReasons(song) {
       if (live[index].device_name !== live[other].device_name) continue;
       if (!sameMessage(live[index].message, live[other].message)) continue;
       reasons.push(
-        `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
+        reason(
+          "midi-duplicate-message",
+          pairKey(live[index].id, live[other].id),
+          `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
+        ),
       );
     }
   }
@@ -2198,7 +3394,7 @@ function midiReasons(song) {
  * reported here and is not one of the three.
  * @param {object} song - a snapshot
  * @param {Y.Doc} doc - the live document, read as it stores what it stores
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string, count?: number}>}
  */
 function libraryReasons(song, doc) {
   const reasons = [];
@@ -2206,16 +3402,27 @@ function libraryReasons(song, doc) {
 
   if (entries.length > LIMITS.libraryEntriesPerSong) {
     reasons.push(
-      `The song's library would hold ${entries.length} entries; a song's library holds at most ${LIMITS.libraryEntriesPerSong} entries.`,
+      reason(
+        "too-many-library-entries",
+        "song",
+        `The song's library would hold ${entries.length} entries; a song's library holds at most ${LIMITS.libraryEntriesPerSong} entries.`,
+        entries.length,
+      ),
     );
   }
-  reasons.push(...duplicateIdReasons(entries, "library entry"));
+  reasons.push(...duplicateIdReasons(entries, "library entry", "duplicate-library-entry-id"));
 
   const fontIds = new Set();
   let fonts = 0;
   for (const [id, entry] of storedLibraryEntries(doc)) {
     if (!(entry instanceof Y.Map)) {
-      reasons.push(`The library entry "${id}" would not hold anything; a library entry is a font, a capture or a cabinet.`);
+      reasons.push(
+        reason(
+          "library-entry-empty",
+          id,
+          `The library entry "${id}" would not hold anything; a library entry is a font, a capture or a cabinet.`,
+        ),
+      );
       continue;
     }
     const kind = entry.get("kind");
@@ -2226,11 +3433,22 @@ function libraryReasons(song, doc) {
     }
     if (LIBRARY_KINDS.includes(kind)) continue;
     reasons.push(
-      `The library entry "${nameOrId(entry.get("name"), id)}" would have the kind ${describeValue(kind)}; a library entry is a font, a capture or a cabinet.`,
+      reason(
+        "library-entry-kind",
+        id,
+        `The library entry "${nameOrId(entry.get("name"), id)}" would have the kind ${describeValue(kind)}; a library entry is a font, a capture or a cabinet.`,
+      ),
     );
   }
   if (fonts > LIMITS.fontsPerSong) {
-    reasons.push(`The song's library would hold ${fonts} fonts; a song can hold at most ${LIMITS.fontsPerSong} fonts.`);
+    reasons.push(
+      reason(
+        "too-many-fonts",
+        "song",
+        `The song's library would hold ${fonts} fonts; a song can hold at most ${LIMITS.fontsPerSong} fonts.`,
+        fonts,
+      ),
+    );
   }
 
   for (const track of song.tracks ?? []) {
@@ -2238,7 +3456,13 @@ function libraryReasons(song, doc) {
     const which = `The track "${nameOrId(track.name, track.id)}"`;
     const fontId = track.device.font_id ?? ABSENT;
     if (fontId !== ABSENT && !fontIds.has(fontId)) {
-      reasons.push(`${which} would play the font "${fontId}", which is not in the song's library.`);
+      reasons.push(
+        reason(
+          "track-font-missing",
+          track.id,
+          `${which} would play the font "${fontId}", which is not in the song's library.`,
+        ),
+      );
     }
   }
   return reasons;
@@ -2261,7 +3485,7 @@ function libraryReasons(song, doc) {
  * direction: anything but nothing is an instrument the track plays (see
  * `trackHoldsSound` in hub.js).
  * @param {Y.Doc} doc
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string}>}
  */
 function soundfontDeviceReasons(doc) {
   const reasons = [];
@@ -2273,22 +3497,35 @@ function soundfontDeviceReasons(doc) {
     const plain = device && typeof device === "object" ? device : {};
     if (plain.engine !== SOUNDFONT_DEVICE.engine) continue;
     const which = `The track "${nameOrId(track.get("name"), track.get("id"))}"`;
+    const subject = String(track.get("id") ?? "");
     const fontId = plain.font_id;
     if (!(typeof fontId === "string" || fontId === ABSENT || fontId === undefined)) {
       reasons.push(
-        `${which} would name the font ${describeValue(fontId)}; a font id is a string, or nothing at all.`,
+        reason(
+          "font-id-type",
+          subject,
+          `${which} would name the font ${describeValue(fontId)}; a font id is a string, or nothing at all.`,
+        ),
       );
     }
     const bank = plain.bank;
     if (!(Number.isInteger(bank) && bank >= 0 && bank <= MAX_SOUNDFONT_BANK)) {
       reasons.push(
-        `${which} would play bank ${describeValue(bank)}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+        reason(
+          "font-bank-range",
+          subject,
+          `${which} would play bank ${describeValue(bank)}; a soundfont track plays banks 0 to ${MAX_SOUNDFONT_BANK - 1}, or ${GM_DRUM_BANK} for the drums.`,
+        ),
       );
     }
     const program = plain.program;
     if (!(Number.isInteger(program) && program >= 0 && program <= MAX_SOUNDFONT_PROGRAM)) {
       reasons.push(
-        `${which} would play program ${describeValue(program)}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
+        reason(
+          "font-program-range",
+          subject,
+          `${which} would play program ${describeValue(program)}; a soundfont track plays programs 0 to ${MAX_SOUNDFONT_PROGRAM}.`,
+        ),
       );
     }
   }
@@ -2345,7 +3582,7 @@ function nameOrId(name, id) {
  * @param {string} label - what the messages call the clip
  * @param {Map<string, object>} takesById - every take in the song
  * @param {number} limit - the clip's length in beats
- * @returns {string[]}
+ * @returns {Array<{code: string, subject: string, text: string}>}
  */
 function segmentReasons(clip, label, takesById, limit) {
   const reasons = [];
@@ -2354,57 +3591,110 @@ function segmentReasons(clip, label, takesById, limit) {
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     const which = `Segment ${index + 1} of the ${label}`;
+    // A segment's place in the comp is its sentence, never its identity: an
+    // earlier segment inserted by another step must not make this one look
+    // like a new offender. Its own id when it has one, else what it plays and
+    // where it starts.
+    const subject =
+      typeof segment.id === "string" && segment.id !== ""
+        ? `${clip.id}#${segment.id}`
+        : `${clip.id}#${segment.take_id}@${beatText(segment.from_beat)}`;
     if (!(segment.from_beat < segment.to_beat)) {
       reasons.push(
-        `${which} would end at beat ${beatText(segment.to_beat)}, before it starts at beat ${beatText(segment.from_beat)}.`,
+        reason(
+          "segment-empty",
+          subject,
+          `${which} would end at beat ${beatText(segment.to_beat)}, before it starts at beat ${beatText(segment.from_beat)}.`,
+        ),
       );
       continue;
     }
     if (segment.from_beat < 0 || segment.to_beat > limit) {
       reasons.push(
-        `${which} would run from beat ${beatText(segment.from_beat)} to beat ${beatText(segment.to_beat)}, outside the ${barsText(clip.length_bars)} of that clip.`,
+        reason(
+          "segment-outside-clip",
+          subject,
+          `${which} would run from beat ${beatText(segment.from_beat)} to beat ${beatText(segment.to_beat)}, outside the ${barsText(clip.length_bars)} of that clip.`,
+        ),
       );
       continue;
     }
     if (previous && segment.from_beat < previous.from_beat) {
       reasons.push(
-        `${which} would start at beat ${beatText(segment.from_beat)}, before the segment in front of it; segments go in beat order.`,
+        reason(
+          "segment-order",
+          subject,
+          `${which} would start at beat ${beatText(segment.from_beat)}, before the segment in front of it; segments go in beat order.`,
+        ),
       );
       continue;
     }
     if (previous && segment.from_beat < previous.to_beat) {
       reasons.push(
-        `${which} would start at beat ${beatText(segment.from_beat)}, inside the segment that ends at beat ${beatText(previous.to_beat)}.`,
+        reason(
+          "segment-overlap",
+          subject,
+          `${which} would start at beat ${beatText(segment.from_beat)}, inside the segment that ends at beat ${beatText(previous.to_beat)}.`,
+        ),
       );
       continue;
     }
     previous = segment;
     const take = takesById.get(segment.take_id);
     if (!take || take.clip_id !== clip.id) {
-      reasons.push(`${which} would play take "${segment.take_id}", which is not a take of that clip.`);
+      reasons.push(
+        reason(
+          "segment-take-missing",
+          subject,
+          `${which} would play take "${segment.take_id}", which is not a take of that clip.`,
+        ),
+      );
       continue;
     }
     if (take.discarded) {
-      reasons.push(`${which} would play take "${take.id}", which is discarded.`);
+      reasons.push(
+        reason("segment-take-discarded", subject, `${which} would play take "${take.id}", which is discarded.`),
+      );
     }
   }
   return reasons;
 }
 
-/** @returns {string[]} one reason per id that two objects of this list share. */
-function duplicateIdReasons(items, label) {
-  const seen = new Set();
-  const reported = new Set();
-  const reasons = [];
+/**
+ * One reason per id that two objects of this list share, carrying how many hold
+ * it: the sentence is the one it always was, and the count is what tells a third
+ * copy of the id from the second.
+ * @param {Array<object>} items
+ * @param {string} label - what the sentence calls the objects, e.g. `"clip"`
+ * @param {string} code - the check's stable id, e.g. `"duplicate-clip-id"`
+ * @returns {Array<{code: string, subject: string, text: string, count: number}>}
+ */
+function duplicateIdReasons(items, label, code) {
+  const counts = new Map();
   for (const item of items) {
     const id = typeof item?.id === "string" ? item.id : "";
-    if (seen.has(id) && !reported.has(id)) {
-      reported.add(id);
-      reasons.push(`The song would have two ${label}s with the id "${id}".`);
-    }
-    seen.add(id);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  const reasons = [];
+  for (const [id, count] of counts) {
+    if (count < 2) continue;
+    // The sentence stays the one it always was; the count is what tells a third
+    // copy of the id from the second the song already held.
+    reasons.push(reason(code, id, `The song would have two ${label}s with the id "${id}".`, count));
   }
   return reasons;
+}
+
+/**
+ * Two objects' ids as one subject, in a fixed order: the pair is the offender,
+ * so which of the two a scan happened to meet first cannot change what the
+ * reason is about.
+ * @param {string} left
+ * @param {string} right
+ * @returns {string}
+ */
+function pairKey(left, right) {
+  return left <= right ? `${left}|${right}` : `${right}|${left}`;
 }
 
 /** @returns {string} a beat position without float noise. */
@@ -2442,6 +3732,18 @@ function barsText(bars) {
  *     (`"proposed"`, `"accepted_action"`, `"action"`) writes one field of it;
  *   - `"library:abc|*"` does the same for one library entry, and
  *     `"library:abc|credit"` (and its siblings) writes one field of one;
+ *   - `"insert:abc|*"` does the same for one insert, and
+ *     `"insert:abc|params.mix"` writes ONE parameter of one insert — a
+ *     parameter is its own field of the insert's `params` map, so it undoes
+ *     alone and two peers editing two parameters of one insert both win —
+ *     while `"insert:abc|order"` (and its siblings) writes one field;
+ *   - `"send:<track>/<return>|*"` does the same for one send, and a plain field
+ *     name (`"level_db"`, `"pre"`) writes one field of it;
+ *   - `"return:abc|*"` does the same for one return, and a plain field name
+ *     (`"name"`, `"gain_db"`, `"pan"`, `"mute"`) writes one field of one;
+ *   - `"master|gain_db"` and `"master|target"` write the master's two fields,
+ *     and `"master|*"` writes the master whole (a `null` writes the defaults
+ *     back rather than taking the master away: every song has one);
  *   - `"motion:<clip>/<pattern>/<bank>.<index>|<param>|*"` writes ONE motion
  *     lane of one pattern: an array of `{step_frac, value}` points, or `null`
  *     to take the lane away. A lane is one key of its pattern
@@ -2504,7 +3806,13 @@ export function applyBeforeAfter(doc, plan) {
       case "step":
       case "midi":
       case "library":
+      case "insert":
+      case "send":
+      case "return":
         writeContainerObject(doc, target.kind, target.id, split.field, value);
+        break;
+      case "master":
+        writeMaster(doc, split.field, value);
         break;
       case "motion":
         writeMotionLane(doc, target.id, split.field, value);
@@ -2559,6 +3867,17 @@ export function readField(doc, ref, field = "*") {
     if (!take) return ABSENT;
     if (field === "*") return toPlain(take);
     return readPath(take, fieldPath(field));
+  }
+
+  if (target.kind === "master") {
+    // Every song has a master: a song without one reads the defaults, exactly as
+    // the snapshot, the engine and the panel see it. So `master|gain_db` answers
+    // the value the song plays with, not "nothing" (see `masterSettings`).
+    const master = masterSettings(doc);
+    if (field === "*") return master;
+    if (field === "target") return cloneJson(master.target);
+    const value = master[field];
+    return value === undefined ? ABSENT : cloneJson(value);
   }
 
   if (OBJECT_MAP_OF[target.kind]) {
@@ -2623,6 +3942,11 @@ function fieldPath(field) {
   // then undo independently (a step carries at most eight of them).
   if (field.startsWith(LOCK_FIELD_PREFIX) && field.length > LOCK_FIELD_PREFIX.length) {
     return ["locks", field.slice(LOCK_FIELD_PREFIX.length)];
+  }
+  // One parameter inside an insert's `params`: one field of one effect, so a
+  // parameter undoes alone whatever its neighbours hold.
+  if (field.startsWith(PARAMS_FIELD_PREFIX) && field.length > PARAMS_FIELD_PREFIX.length) {
+    return ["params", field.slice(PARAMS_FIELD_PREFIX.length)];
   }
   // One field inside a track's device: a soundfont track's instrument is the
   // pair (font, preset), so setting the font and setting the program are two
@@ -2812,9 +4136,12 @@ const OBJECT_MAP_OF = Object.freeze({
   step: "steps",
   midi: "midi_maps",
   library: "library",
+  insert: "inserts",
+  send: "sends",
+  return: "returns",
 });
 
-/** @returns {Y.Map<any>|null} one live sample, slice, bank, pad, pattern, step or MIDI mapping, or null. */
+/** @returns {Y.Map<any>|null} one live object of an id-keyed container (a sample, insert, send, return, …), or null. */
 function containerObject(doc, kind, id) {
   const key = OBJECT_MAP_OF[kind];
   if (!key) return null;
@@ -2822,18 +4149,21 @@ function containerObject(doc, kind, id) {
 }
 
 /**
- * Write one field of a sampler object or a MIDI mapping, or (re)create/delete
- * it whole.
+ * Write one field of a sampler object, a MIDI mapping, a library entry, an
+ * insert, a send or a return, or (re)create/delete it whole.
  *
  * A pad and a step carry no `id` of their own: their container key is their
  * identity (`<track>/<bank>/<index>` and `<clip>/<pattern>/<at>/<bank>.<index>`),
- * so nothing here invents one. A sample, slice, bank, pattern and MIDI mapping
- * do carry one, and it is the same value their key holds.
+ * so nothing here invents one. A send carries no id either: the pair it joins
+ * (`<track>/<return>`) is its identity. A sample, slice, bank, pattern, MIDI
+ * mapping, library entry, insert and return do carry one, and it is the same
+ * value their key holds.
  *
  * A pattern's motion is stored as one key per lane on the pattern's own map
  * (`setMotionLane`), and a whole-pattern restore (an undo of `pattern.remove`,
  * say) puts each lane back under its own key (`patternMapFrom`), so the pattern
- * it restores is still two writers' safe.
+ * it restores is still two writers' safe. An insert's `params` is handled the
+ * same way by `writeInsert`: it is a map of its own, one key per parameter.
  */
 function writeContainerObject(doc, kind, id, field, value) {
   const key = OBJECT_MAP_OF[kind];
@@ -2843,10 +4173,14 @@ function writeContainerObject(doc, kind, id, field, value) {
     return;
   }
   const map = ensureContainer(doc, key, () => new Y.Map());
+  if (kind === "insert") {
+    writeInsert(map, id, field, value);
+    return;
+  }
   if (field === "*") {
     const object = cloneJson(value) ?? {};
     delete object._index;
-    const hasOwnId = kind !== "pad" && kind !== "step";
+    const hasOwnId = kind !== "pad" && kind !== "step" && kind !== "send";
     const stored = hasOwnId ? { ...object, id: object.id ?? id } : object;
     map.set(id, kind === "pattern" ? patternMapFrom(stored) : objectMap(stored));
     return;
@@ -2858,6 +4192,113 @@ function writeContainerObject(doc, kind, id, field, value) {
     return;
   }
   writeField(object, field, value);
+}
+
+/**
+ * Write one field of an insert, or (re)create/delete it whole.
+ *
+ * `params` is the one nested container the song's objects have: it holds one key
+ * per parameter, so `insert.set` of one parameter is one field write that undoes
+ * alone, and two peers editing two parameters of one insert both keep their
+ * writes. Every way an insert is written — a creation, a whole-object restore —
+ * builds it as that same map, so a restored insert is still editable one
+ * parameter at a time.
+ * @param {Y.Map<any>} map - the live inserts map
+ * @param {string} id
+ * @param {string} field - `"*"`, `"params"`, `"params.<name>"` or a plain field
+ * @param {any} value
+ * @returns {void}
+ */
+function writeInsert(map, id, field, value) {
+  if (field === "*") {
+    const object = cloneJson(value) ?? {};
+    delete object._index;
+    const params = paramsObject(object.params);
+    delete object.params;
+    const stored = objectMap({ ...object, id: object.id ?? id });
+    stored.set("params", objectMap(params));
+    map.set(id, stored);
+    return;
+  }
+  const insert = map.get(id);
+  if (!(insert instanceof Y.Map)) throw new Error(`Studio: there is no insert "${id}" to write to`);
+  if (field === "params") {
+    replaceParams(insert, value);
+    return;
+  }
+  if (field.startsWith(PARAMS_FIELD_PREFIX)) {
+    const params = paramsMapOf(insert);
+    const name = field.slice(PARAMS_FIELD_PREFIX.length);
+    if (value === ABSENT) params.delete(name);
+    else params.set(name, cloneJson(value));
+    return;
+  }
+  writeField(insert, field, value);
+}
+
+/** @returns {Y.Map<any>} an insert's params map, made from what it holds when it has none. */
+function paramsMapOf(insert) {
+  const current = insert.get("params");
+  if (current instanceof Y.Map) return current;
+  const created = new Y.Map(Object.entries(paramsObject(current)));
+  insert.set("params", created);
+  return created;
+}
+
+/**
+ * Replace an insert's whole parameter set, keeping each parameter its own key:
+ * the named parameters are written and the ones the value does not name are
+ * taken away, so a parameter another instance moved is either kept whole or
+ * removed whole, never half-overwritten.
+ * @param {Y.Map<any>} insert - the live insert
+ * @param {any} value - a plain `{name: value}` object, or `null` for none
+ * @returns {void}
+ */
+function replaceParams(insert, value) {
+  const params = paramsMapOf(insert);
+  const wanted = paramsObject(value);
+  for (const [name, item] of Object.entries(wanted)) params.set(name, cloneJson(item));
+  for (const name of [...params.keys()]) {
+    if (Object.hasOwn(wanted, name)) continue;
+    params.delete(name);
+  }
+}
+
+/** @returns {Object<string, any>} a live or plain parameter map as a plain object. */
+function paramsObject(value) {
+  const plain = toPlain(value);
+  return plain && typeof plain === "object" && !Array.isArray(plain) ? plain : {};
+}
+
+/**
+ * Write the song's master: one of its two fields, or the whole of it.
+ *
+ * The master is the one object every song has, so a write of `null` puts the
+ * default back (gain 0, the -14 LUFS target with a -1 dBTP ceiling) rather than
+ * taking the map away: a reader never has to ask whether the master is there.
+ * `target` is one field, written whole, because that is how a command and the
+ * panel set it: one `master.set` is one or two field writes.
+ * @param {Y.Doc} doc
+ * @param {string} field - `"*"`, `"gain_db"` or `"target"`
+ * @param {any} value
+ * @returns {void}
+ */
+function writeMaster(doc, field, value) {
+  const master = masterMap(doc);
+  if (field === "*") {
+    const plain = value === ABSENT ? cloneJson(DEFAULT_MASTER) : cloneJson(value);
+    master.set("gain_db", numberOr(plain?.gain_db, DEFAULT_MASTER.gain_db));
+    master.set("target", normalizeMaster(plain).target);
+    return;
+  }
+  if (field !== "gain_db" && field !== "target") {
+    throw new Error(`Studio: the master has no field "${field}"; it has gain_db and target`);
+  }
+  if (value === ABSENT) {
+    master.set(field, cloneJson(DEFAULT_MASTER[field]));
+    return;
+  }
+  master.set(field, field === "target" ? normalizeMaster({ target: value }).target : cloneJson(value));
 }
 
 /**
@@ -3288,6 +4729,102 @@ function normalizeLibraryEntry(id, value) {
     licence: typeof plain.licence === "string" ? plain.licence : "",
     credit: typeof plain.credit === "string" ? plain.credit : "",
     author_label: typeof plain.author_label === "string" ? plain.author_label : "",
+  };
+}
+
+/**
+ * An insert as a snapshot carries it: every field present, nothing extra, and
+ * its parameters as one plain object.
+ *
+ * A parameter whose stored value is not the type the kind has, or is missing
+ * altogether, reads as its default — the way `normalizePad` reads a broken
+ * field. A number that IS a number is kept as it is, even out of range, which
+ * is what lets a hand-written or restored value be reported instead of quietly
+ * tidied into a valid one.
+ */
+function normalizeInsert(id, value) {
+  const plain = stripHints(value);
+  const kind = typeof plain.kind === "string" ? plain.kind : "";
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    owner: typeof plain.owner === "string" ? plain.owner : "",
+    order: numberOr(plain.order, 0),
+    kind,
+    bypass: plain.bypass === true,
+    params: normalizeEffectParams(kind, plain.params),
+  };
+}
+
+/**
+ * One effect's parameters as a snapshot carries them: every parameter the kind
+ * has, in the table's order, each at its stored value when that value has the
+ * right type and at its default otherwise.
+ * @param {string} kind
+ * @param {unknown} stored - the insert's `params`, live or plain
+ * @returns {Object<string, number|string>}
+ */
+function normalizeEffectParams(kind, stored) {
+  const params = plainParamsOf(stored);
+  const spec = effectSpec(kind);
+  if (!spec) return { ...params };
+  const out = {};
+  for (const [name, field] of Object.entries(spec.params)) {
+    const value = params[name];
+    if (field.values) out[name] = field.values.includes(value) ? value : field.default;
+    else out[name] = typeof value === "number" && Number.isFinite(value) ? value : field.default;
+  }
+  return out;
+}
+
+/** @returns {Object<string, any>} a live or plain parameter map as plain JSON. */
+function plainParamsOf(stored) {
+  if (!stored || typeof stored !== "object") return {};
+  const plain = toPlain(stored);
+  return plain && typeof plain === "object" ? plain : {};
+}
+
+/**
+ * A send as a snapshot carries it: every field present, nothing extra. The key
+ * it lives under says which track and return it joins, so a send whose own
+ * fields were damaged still reads as the pair it is.
+ */
+function normalizeSend(id, value) {
+  const plain = stripHints(value);
+  const parts = sendParts(id);
+  return {
+    track_id: typeof plain.track_id === "string" ? plain.track_id : parts?.trackId ?? "",
+    return_id: typeof plain.return_id === "string" ? plain.return_id : parts?.returnId ?? "",
+    level_db: numberOr(plain.level_db, 0),
+    pre: plain.pre === true,
+  };
+}
+
+/** A return as a snapshot carries it: every field present, nothing extra. */
+function normalizeReturn(id, value) {
+  const plain = stripHints(value);
+  return {
+    id: typeof plain.id === "string" ? plain.id : id,
+    name: typeof plain.name === "string" ? plain.name : "",
+    gain_db: numberOr(plain.gain_db, 0),
+    pan: numberOr(plain.pan, 0),
+    mute: plain.mute === true,
+  };
+}
+
+/**
+ * The master as a snapshot carries it: every field present, the fields a song
+ * does not hold filled in from `DEFAULT_MASTER`. Read-only — a song with no
+ * master is not written to by being read.
+ */
+function normalizeMaster(value) {
+  const plain = stripHints(value);
+  const target = plain.target && typeof plain.target === "object" ? plain.target : {};
+  return {
+    gain_db: numberOr(plain.gain_db, DEFAULT_MASTER.gain_db),
+    target: {
+      lufs: numberOr(target.lufs, DEFAULT_MASTER.target.lufs),
+      true_peak_db: numberOr(target.true_peak_db, DEFAULT_MASTER.target.true_peak_db),
+    },
   };
 }
 

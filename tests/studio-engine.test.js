@@ -34,14 +34,19 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 import { TINY_SF2_PRESETS, tinySf2 } from "./fixtures/tiny-sf2.mjs";
+// The Faust compiler, for the null test's one compiled effect. Build time only,
+// and only inside this test: the shipped effects are checked in.
+import { compileProgram } from "../bundles/studio/tools/build-faust.mjs";
 
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
+const BUNDLE_DIR = fileURLToPath(new URL("../bundles/studio/", import.meta.url));
 const VENDOR_DIR = fileURLToPath(new URL("../bundles/studio/vendor/sunvox/", import.meta.url));
 const SYMBOLS_FILE = fileURLToPath(
   new URL("../bundles/studio/node_modules/node-web-audio-api/js/lib/symbols.js", import.meta.url),
@@ -50,7 +55,7 @@ const SYMBOLS_FILE = fileURLToPath(
 // The bundle's own dependency, resolved from inside the bundle (that is where
 // package.json declares it).
 const bundleRequire = createRequire(join(ENGINE_DIR, "x.js"));
-const { OfflineAudioContext } = bundleRequire("node-web-audio-api");
+const { OfflineAudioContext, AudioWorkletNode } = bundleRequire("node-web-audio-api");
 const studioEngine = bundleRequire(join(ENGINE_DIR, "engine-client.js"));
 
 // `startRendering()` releases the worklet thread; a test that stops before it
@@ -70,6 +75,12 @@ const ASSETS = {
   // The SoundFont hosts ride in the same module (engine-client's SOURCE_FILES),
   // between the vendored synth and the processor that drives them.
   "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
+  // Crow's own dynamics and the compiled Faust effects' host (plan 1d,
+  // Tasks 7 and 8) are part of the worklet module too, and so is the master
+  // meter (Task 9).
+  "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
+  "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
+  "meter.js": readFileSync(join(ENGINE_DIR, "meter.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
 };
@@ -803,6 +814,60 @@ const PAGE = [
   '  for (var k = 0; k < digestBytes.length; k++) { hex += ("0" + digestBytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderFaust = async function (kind, params, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  await context.audioWorklet.addModule("/assets/faust-test-worklet.js");',
+  '  var node = new AudioWorkletNode(context, "studio-faust-test", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });',
+  "  var ready = new Promise(function (resolve, reject) {",
+  "    node.port.onmessage = function (event) {",
+  "      var message = event.data;",
+  "      if (!message || typeof message !== 'object') return;",
+  '      if (message.type === "ready") resolve();',
+  '      else if (message.type === "error") reject(new Error(message.error));',
+  "    };",
+  "  });",
+  '  node.port.postMessage({ type: "params", params: params });',
+  '  var wasm = await (await fetch("/assets/faust/" + kind + ".wasm")).arrayBuffer();',
+  '  var json = await (await fetch("/assets/faust/" + kind + ".json")).text();',
+  "  var modules = {};",
+  "  modules[kind] = { wasm: wasm, json: json };",
+  '  node.port.postMessage({ type: "faust-modules", modules: modules }, [wasm]);',
+  "  await ready;",
+  "  node.connect(context.destination);",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
+  "window.studioRenderMixer = async function (song, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  "  engine.setSong(song);",
+  "  engine.launchScene(song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -817,6 +882,9 @@ const SERVED = {
   "/assets/sunvox.js": ["text/javascript; charset=utf-8", () => ASSETS["sunvox.js"]],
   "/assets/spessasynth.js": ["text/javascript; charset=utf-8", () => ASSETS["spessasynth.js"]],
   "/assets/font-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["font-voice.js"]],
+  "/assets/dynamics.js": ["text/javascript; charset=utf-8", () => ASSETS["dynamics.js"]],
+  "/assets/faust-host.js": ["text/javascript; charset=utf-8", () => ASSETS["faust-host.js"]],
+  "/assets/meter.js": ["text/javascript; charset=utf-8", () => ASSETS["meter.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
 };
@@ -839,7 +907,170 @@ let chrome = null;
 let server = null;
 let origin = "";
 
+/**
+ * The tiny processor the Faust null test renders, with the host that runs the
+ * insert: NOT product code. It plays a deterministic integer ramp through one
+ * compiled effect so the same worklet source can be rendered in Chromium and in
+ * node-web-audio-api and hashed. The ramp is built from integer arithmetic
+ * only, so the source signal itself cannot differ between hosts.
+ */
+const FAUST_TEST_PROCESSOR = [
+  "class StudioFaustTestProcessor extends AudioWorkletProcessor {",
+  "  constructor() {",
+  "    super();",
+  "    this.insert = null;",
+  "    this.params = {};",
+  "    this.index = 0;",
+  "    this.left = new Float32Array(128);",
+  "    this.right = new Float32Array(128);",
+  "    this.port.onmessage = (event) => {",
+  "      const message = event && event.data;",
+  "      if (!message || typeof message !== 'object') return;",
+  "      if (message.type === 'params') {",
+  "        this.params = message.params;",
+  "        return;",
+  "      }",
+  "      if (message.type !== 'faust-modules') return;",
+  "      const modules = message.modules;",
+  "      const kind = Object.keys(modules)[0];",
+  "      StudioFaustHost.compileModules(modules).then(() => {",
+  "        this.insert = StudioFaustHost.create(kind, sampleRate);",
+  "        this.insert.setParams(this.params);",
+  "        this.port.postMessage({ type: 'ready' });",
+  "      }, (error) => {",
+  "        this.port.postMessage({ type: 'error', error: String((error && error.message) || error) });",
+  "      });",
+  "    };",
+  "  }",
+  "  process(inputs, outputs) {",
+  "    const output = outputs[0];",
+  "    if (!this.insert || !output || output.length < 2) return true;",
+  "    const left = this.left;",
+  "    const right = this.right;",
+  "    for (let at = 0; at < left.length; at += 1) {",
+  "      const frame = this.index + at;",
+  "      left[at] = (((frame % 1000) / 1000) * 2 - 1) * 0.3;",
+  "      right[at] = ((((frame + 500) % 997) / 997) * 2 - 1) * 0.25;",
+  "    }",
+  "    this.index += left.length;",
+  "    this.insert.process(left, right, left.length);",
+  "    output[0].set(left);",
+  "    output[1].set(right);",
+  "    return true;",
+  "  }",
+  "}",
+  "registerProcessor('studio-faust-test', StudioFaustTestProcessor);",
+].join("\n");
+
+/** The worklet module both hosts load: the host, then the tiny processor. */
+function faustTestModuleSource() {
+  return [readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"), FAUST_TEST_PROCESSOR].join("\n;\n");
+}
+
+/**
+ * One compiled effect for the null test, in a private temp directory. It is
+ * compiled HERE rather than read from `vendor/faust/`, so the test runs on a
+ * checkout whose build output is not committed yet.
+ * @type {{dir: string}|null}
+ */
+let faustFixture = null;
+
+/** @returns {Promise<{dir: string}>} */
+async function faustFixtureOnce() {
+  if (faustFixture) return faustFixture;
+  const dir = mkdtempSync(join(tmpdir(), "studio-faust-null-"));
+  const source = readFileSync(join(BUNDLE_DIR, "effects", "reverb.dsp"), "utf8");
+  const effect = await compileProgram("reverb", source);
+  writeFileSync(join(dir, "reverb.wasm"), effect.wasm);
+  writeFileSync(join(dir, "reverb.json"), effect.json, { encoding: "utf8" });
+  faustFixture = { dir };
+  return faustFixture;
+}
+
+/**
+ * Render one Faust insert through the tiny processor in Node.
+ * @param {{kind: string, params: object, seconds?: number, sampleRate?: number}} options
+ * @returns {Promise<{left: Float32Array, right: Float32Array}>}
+ */
+async function renderFaustInsert({ kind, params, seconds = 1, sampleRate = SAMPLE_RATE }) {
+  const fixture = await faustFixtureOnce();
+  const moduleDir = mkdtempSync(join(tmpdir(), "studio-faust-worklet-"));
+  const moduleFile = join(moduleDir, "worklet.mjs");
+  writeFileSync(moduleFile, faustTestModuleSource(), { encoding: "utf8", mode: 0o600 });
+  const context = new OfflineAudioContext({
+    numberOfChannels: 2,
+    length: Math.round(seconds * sampleRate),
+    sampleRate: sampleRate,
+  });
+  let rendered = false;
+  try {
+    await context.audioWorklet.addModule(moduleFile);
+    const node = new AudioWorkletNode(context, "studio-faust-test", {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+    const wasm = readFileSync(join(fixture.dir, `${kind}.wasm`));
+    const json = readFileSync(join(fixture.dir, `${kind}.json`), "utf8");
+    const bytes = new Uint8Array(wasm).buffer;
+    const ready = new Promise((resolve, reject) => {
+      node.port.onmessage = (event) => {
+        const message = event && event.data;
+        if (!message || typeof message !== "object") return;
+        if (message.type === "ready") resolve();
+        else if (message.type === "error") reject(new Error(message.error));
+      };
+    });
+    if (typeof node.port.start === "function") node.port.start();
+    node.port.postMessage({ type: "params", params: params });
+    const message = { type: "faust-modules", modules: { [kind]: { wasm: bytes, json: json } } };
+    try {
+      node.port.postMessage(message, [bytes]);
+    } catch {
+      node.port.postMessage(message);
+    }
+    await ready;
+    node.connect(context.destination);
+    const buffer = await context.startRendering();
+    rendered = true;
+    const left = new Float32Array(buffer.length);
+    const right = new Float32Array(buffer.length);
+    buffer.copyFromChannel(left, 0);
+    buffer.copyFromChannel(right, 1);
+    return { left, right };
+  } finally {
+    if (!rendered) await releaseWorklet(context);
+    rmSync(moduleDir, { recursive: true, force: true });
+  }
+}
+
 before(async () => {
+  // The compiled Faust effects, served under the flat names `engine-client.js`
+  // asks for (`faust-<kind>.wasm` / `.json`), so the browser engine holds the
+  // same effect modules a Node render reads from `vendor/faust/`. Without them a
+  // browser engine starts with no Faust inserts and the mixer null test would
+  // compare two different songs.
+  for (const kind of ["eq", "filter", "delay", "reverb", "chorus", "phaser", "saturation"]) {
+    SERVED[`/assets/faust-${kind}.wasm`] = [
+      "application/wasm",
+      () => readFileSync(join(BUNDLE_DIR, "vendor", "faust", `${kind}.wasm`)),
+    ];
+    SERVED[`/assets/faust-${kind}.json`] = [
+      "application/json; charset=utf-8",
+      () => readFileSync(join(BUNDLE_DIR, "vendor", "faust", `${kind}.json`), "utf8"),
+    ];
+  }
+  // The Faust null test's one effect, compiled before the page is served: its
+  // wasm and JSON are two more assets for the asset server below.
+  const fixture = await faustFixtureOnce();
+  SERVED["/assets/faust-test-worklet.js"] = ["text/javascript; charset=utf-8", () => faustTestModuleSource()];
+  for (const name of ["reverb.wasm", "reverb.json"]) {
+    SERVED[`/assets/faust/${name}`] = [
+      name.endsWith(".wasm") ? "application/wasm" : "application/json; charset=utf-8",
+      () => readFileSync(join(fixture.dir, name)),
+    ];
+  }
+
   chrome = await startHeadlessChrome();
   if (!chrome) return;
   server = createAssetServer();
@@ -850,6 +1081,10 @@ before(async () => {
 after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   if (chrome) await chrome.close();
+  if (faustFixture) {
+    rmSync(faustFixture.dir, { recursive: true, force: true });
+    faustFixture = null;
+  }
 });
 
 /**
@@ -2127,6 +2362,211 @@ test("soundfont song bit-identical in Chromium and Node", async (t) => {
       browser.hash,
       nodeHash,
       `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a soundfont song`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
+test("a Faust insert hosted in the processor is bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // One compiled Faust effect (the reverb: the largest, and the one that calls
+  // out to the host for `sin`, `cos`, `pow` and `tan`), driven through a minimal
+  // worklet that holds nothing but `faust-host.js` and the tiny processor above.
+  // Every parameter is off its default, so the factory JSON's parameter offsets
+  // are part of what is compared.
+  const kind = "reverb";
+  const params = { size: 0.8, damping: 0.7, predelay_ms: 37, mix: 0.9 };
+  const seconds = 1;
+
+  const node = await renderFaustInsert({ kind, params, seconds, sampleRate: SAMPLE_RATE });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.001, `the Node render of the Faust insert has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderFaust"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderFaust(${JSON.stringify(kind)}, ${JSON.stringify(params)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.001, `the Chromium render has to be audible too, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a Faust insert`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
+test("mixer song bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // The whole mixer in one song (plan 1d, Task 9): two tracks with their own
+  // chains (a Faust equalizer and Crow's own compressor on one, a Faust delay and
+  // saturation on the other), two returns with their own inserts, three sends
+  // (one pre fader, two post), a bypassed insert and a master with a gain and a
+  // limiter. Every one of those runs on the same sample in both hosts, so a
+  // different pan law, a different send tap or a different limiter ramp shows up
+  // in the hash.
+  const track = (index, gainDb, pan) => ({
+    id: `track-${index}`,
+    name: index === 1 ? "Low" : "High",
+    color: "#E8C07A",
+    device: { engine: "sunvox", type: "Analog generator", params: {} },
+    mute: false,
+    solo: false,
+    gain_db: gainDb,
+    pan: pan,
+    locked: false,
+  });
+  const insert = (id, owner, order, kind, params, bypass = false) => ({
+    id: id,
+    owner: owner,
+    order: order,
+    kind: kind,
+    bypass: bypass,
+    params: params,
+  });
+  const song = {
+    meta: { title: "Mixer parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [track(1, -6, -0.4), track(2, -3, 0.5)],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Low",
+        length_bars: 1,
+        notes: [
+          { t: 0, d: 1, p: 48, v: 110 },
+          { t: 1.5, d: 0.75, p: 55, v: 80 },
+          { t: 2.5, d: 1.5, p: 52, v: 120 },
+        ],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "High",
+        length_bars: 1,
+        notes: [
+          { t: 0.5, d: 1, p: 72, v: 90 },
+          { t: 2, d: 0.5, p: 67, v: 100 },
+          { t: 3, d: 1, p: 70, v: 70 },
+        ],
+      },
+    },
+    inserts: {
+      "ins-eq": insert("ins-eq", "track:track-1", 1, "eq", {
+        low_freq_hz: 120,
+        low_gain_db: 6,
+        mid_freq_hz: 900,
+        mid_gain_db: -4,
+        mid_q: 1.2,
+        high_freq_hz: 6000,
+        high_gain_db: 3,
+      }),
+      "ins-comp": insert("ins-comp", "track:track-1", 2, "compressor", {
+        detect: "rms",
+        threshold_db: -24,
+        ratio: 4,
+        knee_db: 6,
+        attack_ms: 10,
+        release_ms: 120,
+        makeup_db: 3,
+        sidechain_hp_hz: 80,
+      }),
+      "ins-delay": insert("ins-delay", "track:track-2", 1, "delay", {
+        time_ms: 240,
+        feedback: 0.4,
+        mix: 0.35,
+        highcut_hz: 6000,
+      }),
+      "ins-sat": insert("ins-sat", "track:track-2", 2, "saturation", {
+        drive_db: 9,
+        tone: 0.6,
+        output_db: -3,
+        mix: 0.8,
+      }),
+      "ins-reverb": insert("ins-reverb", "return:ret-1", 1, "reverb", {
+        size: 0.7,
+        damping: 0.6,
+        predelay_ms: 12,
+        mix: 0.4,
+      }),
+      "ins-echo": insert("ins-echo", "return:ret-2", 1, "delay", {
+        time_ms: 375,
+        feedback: 0.5,
+        mix: 0.5,
+        highcut_hz: 5000,
+      }),
+      // A bypassed insert: it is part of the chain and must never run.
+      "ins-bypassed": insert("ins-bypassed", "master", 0, "filter", { mode: "hp", cutoff_hz: 400, resonance: 2 }, true),
+      "ins-limiter": insert("ins-limiter", "master", 1, "limiter", { ceiling_db: -1.5, release_ms: 60 }),
+    },
+    sends: {
+      "track-1/ret-1": { track_id: "track-1", return_id: "ret-1", level_db: -12, pre: false },
+      "track-1/ret-2": { track_id: "track-1", return_id: "ret-2", level_db: -6, pre: true },
+      "track-2/ret-1": { track_id: "track-2", return_id: "ret-1", level_db: -9, pre: true },
+    },
+    returns: {
+      "ret-1": { id: "ret-1", name: "Hall", gain_db: -6, pan: 0.3, mute: false },
+      "ret-2": { id: "ret-2", name: "Echo", gain_db: -9, pan: -0.2, mute: false },
+    },
+    master: { gain_db: -2.5, target: { lufs: -14, true_peak_db: -1 } },
+  };
+
+  const seconds = 3;
+  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node mixer render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  // The mixer really is in the render: the same song with its inserts taken out
+  // (the sends and returns stay) has to sound different, or a chain that was
+  // silently dropped would pass the hash comparison below for the wrong reason.
+  const dry = await renderSong({ ...song, inserts: {} }, { seconds: seconds, sampleRate: SAMPLE_RATE });
+  assert.notEqual(
+    hashChannels(dry.left, dry.right),
+    nodeHash,
+    "the mixed render has to differ from the same song with no inserts",
+  );
+  let difference = 0;
+  for (let at = 0; at < node.left.length; at += 1) difference += Math.abs(node.left[at] - dry.left[at]);
+  difference /= Math.max(1, node.left.length);
+  assert.ok(
+    difference > 1e-4,
+    `the inserts have to change the mix: the mean |difference| was ${difference}`,
+  );
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderMixer"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderMixer(${JSON.stringify(song)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium mixer render has to be audible too, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a mixer song`,
     );
   } finally {
     tab.close();

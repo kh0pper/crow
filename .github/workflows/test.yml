@@ -153,6 +153,13 @@ jobs:
       # byte-compares, so a dependency bump nobody re-vendored fails here.
       - name: Studio vendor bundle check
         run: node bundles/studio/tools/build-vendor.mjs --check
+      # Studio's Faust effects are compiled to WebAssembly and licence-linted by
+      # tools/build-faust.mjs. --check recompiles to memory and byte-compares, so
+      # a Faust library or a .dsp that changed without a rebuild fails here — and
+      # the lint itself refuses any function whose licence Crow may not ship (the
+      # GPL-only `co.*` functions and the AGPL-only `ba.processArray` included).
+      - name: Studio Faust effects check (compile + licence lint)
+        run: node bundles/studio/tools/build-faust.mjs --check
       # Every shipped bundle skill's current text must be in the ledger the
       # boot-time skill sync reads (bundles/skill-history.json), and the
       # ledger must stay append-only against the base (the PR's base commit,

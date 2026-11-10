@@ -1820,3 +1820,298 @@ test("studio_library lists licences and credits", async (t) => {
     await client.close();
   }
 });
+
+// ---- the mixer over MCP ----------------------------------------------------
+
+test("studio_mix lists chains, sends, returns, the master target and the last render's loudness", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+
+  // Two tracks, a chain on one of them whose order is not the order it was
+  // built in, a return fed by a send, and the master.
+  await seed(hub, songId, "mix-track-bass", "track.add", { id: "bass", name: "Bass" });
+  await seed(hub, songId, "mix-track-pad", "track.add", { id: "pad", name: "Pad" });
+  await seed(hub, songId, "mix-eq", "insert.add", {
+    id: "eq-bass",
+    owner: "track:bass",
+    kind: "eq",
+    params: { low_freq_hz: 120, low_gain_db: 3 },
+  });
+  await seed(hub, songId, "mix-comp", "insert.add", {
+    id: "comp-bass",
+    owner: "track:bass",
+    kind: "compressor",
+    params: { ratio: 2.5, threshold_db: -24 },
+  });
+  // `after: null` puts the gate at the FRONT of the chain, so the order the read
+  // reports is the order the engine runs, not the order the steps were made in.
+  await seed(hub, songId, "mix-gate", "insert.add", { id: "gate-bass", owner: "track:bass", kind: "gate", after: null });
+  await seed(hub, songId, "mix-return", "return.add", { id: "verb", name: "Reverb" });
+  await seed(hub, songId, "mix-return-insert", "insert.add", {
+    id: "verb-reverb",
+    owner: "return:verb",
+    kind: "reverb",
+    params: { mix: 0.3, size: 0.7 },
+  });
+  await seed(hub, songId, "mix-send", "send.set", { track_id: "bass", return_id: "verb", level_db: -9 });
+  await seed(hub, songId, "mix-send-pre", "send.set", {
+    track_id: "pad",
+    return_id: "verb",
+    level_db: -12,
+    pre: true,
+  });
+  await seed(hub, songId, "mix-master", "master.set", { gain_db: -2, target: { lufs: -16, true_peak_db: -2 } });
+  await seed(hub, songId, "mix-limiter", "insert.add", {
+    id: "lim",
+    owner: "master",
+    kind: "limiter",
+    params: { ceiling_db: -2 },
+  });
+
+  // What the last render of this song measured (the renderer's own memory, in
+  // production: the figures a render just returned).
+  const figures = {
+    integrated_lufs: -15.4,
+    true_peak_db: -2.1,
+    short_term_max_lufs: -14.8,
+    target: { lufs: -16, true_peak_db: -2 },
+    meets_target: { lufs: true, true_peak: true },
+    seconds: 8,
+    storage_key: "projects/21/studio/song/render.wav",
+  };
+  const asked = [];
+  const renderer = {
+    async render() {
+      throw new Error("a mix read renders nothing");
+    },
+    lastRender(songIdAsked) {
+      asked.push(songIdAsked);
+      return figures;
+    },
+  };
+
+  const client = await connect({ hub: hubClientOf(hub, db), renderer });
+  try {
+    const tool = (await client.listTools()).tools.find((entry) => entry.name === "studio_mix");
+    assert.ok(tool, "studio_mix is a read tool the agent has");
+    assert.match(tool.description, /read-only/i);
+    for (const command of [
+      "studio_insert_add",
+      "studio_insert_set",
+      "studio_insert_move",
+      "studio_insert_bypass",
+      "studio_insert_remove",
+      "studio_send_set",
+      "studio_return_add",
+      "studio_return_set",
+      "studio_return_remove",
+      "studio_master_set",
+    ]) {
+      assert.ok(tool.description.includes(command), `the description points at ${command}`);
+    }
+    assert.match(tool.description, /undo/i, "it says each step is undoable");
+    assert.match(tool.description, /A\/B/i, "and that A/B is the person's");
+
+    const result = await client.callTool({ name: "studio_mix", arguments: { song_id: songId } });
+    assert.notEqual(result.isError, true, textOf(result));
+    const body = JSON.parse(textOf(result));
+
+    // The tracks, in the song's order, each with its own chain and sends.
+    assert.deepEqual(
+      body.tracks.map((strip) => strip.track_id),
+      ["bass", "pad"],
+      "one strip per track, in the song's order",
+    );
+    const bass = body.tracks[0];
+    assert.equal(bass.track, "Bass", "the strip is named the way the panel names it");
+    assert.deepEqual(
+      bass.inserts.map((insert) => [insert.id, insert.kind, insert.label, insert.bypass]),
+      [
+        ["gate-bass", "gate", "gate", false],
+        ["eq-bass", "eq", "equalizer", false],
+        ["comp-bass", "compressor", "compressor", false],
+      ],
+      "the chain in the order the engine runs it",
+    );
+    assert.equal(bass.inserts[1].params.low_gain_db, 3, "the settings it will hear, by name");
+    assert.equal(bass.inserts[1].params.mid_gain_db, 0, "every parameter, defaults included");
+    assert.equal(bass.inserts[2].params.ratio, 2.5);
+    assert.equal(bass.inserts[2].params.threshold_db, -24);
+    assert.deepEqual(bass.sends, [{ track_id: "bass", return_id: "verb", level_db: -9, pre: false }]);
+    assert.deepEqual(body.tracks[1].inserts, [], "a track with no effects says so");
+    assert.deepEqual(body.tracks[1].sends, [
+      { track_id: "pad", return_id: "verb", level_db: -12, pre: true },
+    ]);
+
+    // The returns, which are not tracks: their own level, pan and chain.
+    assert.equal(body.returns.length, 1);
+    const verb = body.returns[0];
+    assert.equal(verb.id, "verb");
+    assert.equal(verb.name, "Reverb");
+    assert.equal(verb.gain_db, 0);
+    assert.equal(verb.pan, 0);
+    assert.equal(verb.mute, false);
+    assert.deepEqual(verb.inserts.map((insert) => insert.id), ["verb-reverb"]);
+    assert.equal(verb.inserts[0].params.mix, 0.3);
+
+    // The master: its gain, its target and its chain (the limiter last).
+    assert.equal(body.master.gain_db, -2);
+    assert.deepEqual(body.master.target, { lufs: -16, true_peak_db: -2 });
+    assert.deepEqual(body.master.inserts.map((insert) => insert.id), ["lim"]);
+
+    // And the last render's figures, read from the renderer.
+    assert.deepEqual(asked, [songId], "the mixer asks the renderer about this song");
+    assert.deepEqual(body.last_render, {
+      integrated_lufs: -15.4,
+      true_peak_db: -2.1,
+      short_term_max_lufs: -14.8,
+      target: { lufs: -16, true_peak_db: -2 },
+      meets_target: { lufs: true, true_peak: true },
+      seconds: 8,
+    });
+
+    // A renderer that remembers nothing (a fresh process) answers null rather
+    // than inventing figures.
+    const forgetful = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+    try {
+      const again = JSON.parse(
+        textOf(await forgetful.callTool({ name: "studio_mix", arguments: { song_id: songId } })),
+      );
+      assert.equal(again.last_render, null, "a renderer with no memory says so");
+      assert.equal(again.tracks.length, 2, "the chains are still listed");
+    } finally {
+      await forgetful.close();
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test("agent mixes a song to its target with a master limiter and the render says so", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+
+  // The operator's half: a bank in the song's library and a track playing it,
+  // holding one long note so a short render has something to measure.
+  await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_TINY));
+  await seed(hub, songId, "mix-font-track", "track.add", {
+    id: "piano",
+    name: "Piano",
+    kind: "soundfont",
+    font_id: LIB_TINY,
+  });
+  await seed(hub, songId, "mix-font-scene", "scene.add", { id: "verse", name: "Verse" });
+  await seed(hub, songId, "mix-font-clip", "clip.write", {
+    clip_id: "hold",
+    track_id: "piano",
+    scene_id: "verse",
+    name: "Hold",
+    length_bars: 1,
+    notes: [{ t: 0, d: 4, p: 60, v: 100 }],
+  });
+
+  const storage = renderStorage();
+  storage.objects.set(makeLibraryEntry(songId, LIB_TINY).storage_key, TINY_FONT);
+  const renderer = createRenderer({ db: renderDbOf(db), storage, acl: renderAcl(), maxSeconds: 300 });
+  const client = await connect({ hub: hubClientOf(hub, db), renderer });
+  try {
+    /** Run one tool that must succeed, and hand back the sentence it answered with. */
+    const run = async (name, args) => {
+      const result = await client.callTool({ name, arguments: { song_id: songId, ...args } });
+      assert.notEqual(result.isError, true, `${name} was refused: ${textOf(result)}`);
+      return textOf(result);
+    };
+
+    /** Render the verse once and hand back what the agent was told. */
+    const render = async () => {
+      const result = await client.callTool({
+        name: "studio_render",
+        arguments: { song_id: songId, scene_id: "verse", seconds: 2 },
+      });
+      assert.notEqual(result.isError, true, textOf(result));
+      return JSON.parse(textOf(result));
+    };
+
+    // The agent's mix pass, one undoable step at a time: a compressor on the
+    // track, a reverb return with a send into it, a limiter on the master, and
+    // the master's target.
+    assert.match(
+      await run("studio_insert_add", {
+        id: "comp",
+        owner: "track:piano",
+        kind: "compressor",
+        params: { threshold_db: -24, ratio: 4, attack_ms: 10, release_ms: 100 },
+      }),
+      /Added a compressor to Piano/,
+    );
+    assert.match(await run("studio_return_add", { id: "verb", name: "Reverb" }), /Added the return "Reverb"/);
+    assert.match(
+      await run("studio_insert_add", {
+        id: "verb-reverb",
+        owner: "return:verb",
+        kind: "reverb",
+        params: { mix: 0.2, size: 0.6 },
+      }),
+      /Added a reverb to Reverb/,
+    );
+    assert.match(
+      await run("studio_send_set", { track_id: "piano", return_id: "verb", level_db: -12 }),
+      /Sent Piano to Reverb at -12 dB/,
+    );
+    assert.match(
+      await run("studio_insert_add", {
+        id: "lim",
+        owner: "master",
+        kind: "limiter",
+        params: { ceiling_db: -1, release_ms: 50 },
+      }),
+      /Added a limiter to the master/,
+    );
+    assert.match(await run("studio_master_set", { target: { true_peak_db: -1 } }), /target to -14 LUFS at -1 dBTP/);
+
+    // The first render tells the agent where the mix sits, against the song's
+    // target: the figures the mixer screen shows, through one WAV.
+    const first = await render();
+    assert.deepEqual(first.target, { lufs: -14, true_peak_db: -1 }, "the song's target comes back with the render");
+    assert.equal(first.effect_problems, undefined, "every chain ran: no insert had to be skipped");
+    assert.ok(Number.isFinite(first.lufs), `the render measured a loudness, got ${first.lufs}`);
+    assert.ok(Number.isFinite(first.short_term_max_lufs), "and the meter's short-term figure");
+
+    // The mix sits where it sits; the agent moves the master onto the streaming
+    // reference the panel offers, and mixes to that target.
+    const gainDb = Math.round((-14 - first.lufs) * 10) / 10;
+    assert.ok(gainDb >= -24 && gainDb <= 12, `the master can reach -14 LUFS from ${first.lufs}: ${gainDb} dB`);
+    await run("studio_master_set", { gain_db: gainDb, target: { lufs: -14, true_peak_db: -1 } });
+
+    const mixed = await render();
+    assert.deepEqual(mixed.target, { lufs: -14, true_peak_db: -1 });
+    assert.equal(mixed.meets_target.lufs, true, `a -14 LUFS target, measured ${mixed.lufs}`);
+    assert.ok(Math.abs(mixed.lufs - mixed.target.lufs) <= 1, `within 1 LU of the target: ${mixed.lufs}`);
+    assert.equal(mixed.meets_target.true_peak, true, `a -1 dBTP ceiling, measured ${mixed.true_peak_db}`);
+    assert.ok(mixed.true_peak_db <= mixed.target.true_peak_db, "the limiter holds the ceiling");
+
+    // The mixer read answers with the chain that made those figures, and with
+    // the render that measured them — the same numbers, one tool call.
+    const mix = JSON.parse(textOf(await client.callTool({ name: "studio_mix", arguments: { song_id: songId } })));
+    assert.equal(mix.master.target.lufs, -14);
+    assert.equal(mix.master.target.true_peak_db, -1);
+    assert.equal(mix.master.gain_db, gainDb);
+    assert.deepEqual(mix.master.inserts.map((insert) => insert.kind), ["limiter"]);
+    assert.deepEqual(mix.tracks[0].inserts.map((insert) => insert.kind), ["compressor"]);
+    assert.deepEqual(mix.tracks[0].sends, [{ track_id: "piano", return_id: "verb", level_db: -12, pre: false }]);
+    assert.deepEqual(mix.returns.map((item) => item.name), ["Reverb"]);
+    assert.equal(mix.last_render.integrated_lufs, mixed.lufs, "the mixer reports the render just made");
+    assert.equal(mix.last_render.short_term_max_lufs, mixed.short_term_max_lufs);
+    assert.deepEqual(mix.last_render.meets_target, mixed.meets_target);
+
+    // Every step of that pass is the agent's own, in the shared history, so the
+    // person can A/B the pass and undo it one step at a time.
+    const entries = await hub.history(songId, { limit: 20 });
+    for (const command of ["insert.add", "return.add", "send.set", "master.set"]) {
+      const entry = entries.find((row) => row.command === command);
+      assert.ok(entry, `${command} should be in the shared history`);
+      assert.equal(entry.author.kind, "agent", `${command} is the agent's step, never the person's`);
+      assert.equal(entry.author.id, "mcp");
+    }
+  } finally {
+    await client.close();
+  }
+});

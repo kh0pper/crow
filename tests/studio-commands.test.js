@@ -33,6 +33,8 @@ import "../bundles/studio/server/commands/midi.js";
 // with.
 import "../bundles/studio/server/commands/library.js";
 import "../bundles/studio/server/commands/instruments.js";
+// The 1d mixer: the effects of a chain, the sends, the returns and the master.
+import "../bundles/studio/server/commands/mixer.js";
 
 /** A take id, the way the recording client generates one. */
 const TAKE_ID = "6f1c1f7a-8f7e-4a4e-9a1d-2b3c4d5e6f70";
@@ -91,11 +93,17 @@ const COMMAND_IDS = [
   "clip.set_comp",
   "clip.set_length",
   "clip.write",
+  "insert.add",
+  "insert.bypass",
+  "insert.move",
+  "insert.remove",
+  "insert.set",
   "library.add",
   "library.remove",
   "marker.add",
   "marker.remove",
   "marker.rename",
+  "master.set",
   "midi.accept",
   "midi.map",
   "midi.propose_profile",
@@ -112,6 +120,9 @@ const COMMAND_IDS = [
   "pattern.set_length",
   "pattern.set_steps_beat",
   "pattern.set_swing",
+  "return.add",
+  "return.remove",
+  "return.set",
   "sample.add",
   "sample.rename",
   "scene.add",
@@ -120,6 +131,7 @@ const COMMAND_IDS = [
   "section.add",
   "section.remove",
   "section.set",
+  "send.set",
   "slice.set",
   "song.set_meta",
   "step.clear_locks",
@@ -244,6 +256,16 @@ const MINIMAL_ARGS = {
     },
   },
   "library.remove": { library_id: "the-font" },
+  "insert.add": { owner: "track:t1", kind: "eq" },
+  "insert.bypass": { id: "i1", bypass: true },
+  "insert.move": { id: "i1", after: null },
+  "insert.remove": { id: "i1" },
+  "insert.set": { id: "i1", params: { mix: 0.5 } },
+  "return.add": { name: "Return A" },
+  "return.remove": { id: "r1" },
+  "return.set": { id: "r1", gain_db: 0 },
+  "send.set": { track_id: "t1", return_id: "r1", level_db: -6 },
+  "master.set": { gain_db: -3 },
 };
 
 /** A song document that is destroyed when the test ends. */
@@ -881,6 +903,69 @@ test("apply returns before/after for every touched field", (t) => {
     { id: "clip.remove", args: { clip_id: clipId }, keys: [`${cl}|*`] },
     { id: "scene.remove", args: { scene_id: chorus }, keys: [`scene:${chorus}|*`] },
     { id: "track.remove", args: { track_id: "drums" }, keys: ["track:drums|*"] },
+    // The mixer (plan 1d, Task 6): a return, two effects on a track and one on
+    // the return, a parameter, a bypass, a move, a send and its removal, a
+    // return's own fields, the master, and the return removal that takes its
+    // chain with it. The master is the one object with no id of its own: its ref
+    // is the bare `"master"`, and its two fields undo on their own.
+    { id: "return.add", args: { id: "return-a" }, keys: ["return:return-a|*"] },
+    {
+      id: "insert.add",
+      args: { id: "insert-eq", owner: `track:${track}`, kind: "eq" },
+      keys: ["insert:insert-eq|*"],
+    },
+    {
+      id: "insert.set",
+      args: { id: "insert-eq", params: { low_gain_db: 3 } },
+      keys: ["insert:insert-eq|params.low_gain_db"],
+    },
+    {
+      id: "insert.bypass",
+      args: { id: "insert-eq", bypass: true },
+      keys: ["insert:insert-eq|bypass"],
+    },
+    {
+      id: "insert.add",
+      args: { id: "insert-comp", owner: `track:${track}`, kind: "compressor", after: "insert-eq" },
+      keys: ["insert:insert-comp|*"],
+    },
+    { id: "insert.move", args: { id: "insert-comp", after: null }, keys: ["insert:insert-comp|order"] },
+    { id: "insert.remove", args: { id: "insert-comp" }, keys: ["insert:insert-comp|*"] },
+    {
+      id: "send.set",
+      args: { track_id: track, return_id: "return-a", level_db: -12 },
+      keys: [`send:${track}/return-a|*`],
+    },
+    {
+      id: "send.set",
+      args: { track_id: track, return_id: "return-a", level_db: -6, pre: true },
+      keys: [`send:${track}/return-a|level_db`, `send:${track}/return-a|pre`],
+    },
+    {
+      id: "master.set",
+      args: { gain_db: -3, target: { lufs: -16 } },
+      keys: ["master|gain_db", "master|target"],
+    },
+    {
+      id: "return.set",
+      args: { id: "return-a", name: "Plate", gain_db: -2 },
+      keys: ["return:return-a|name", "return:return-a|gain_db"],
+    },
+    {
+      id: "insert.add",
+      args: { id: "insert-verb", owner: "return:return-a", kind: "reverb" },
+      keys: ["insert:insert-verb|*"],
+    },
+    {
+      id: "send.set",
+      args: { track_id: track, return_id: "return-a", level_db: null },
+      keys: [`send:${track}/return-a|*`],
+    },
+    {
+      id: "return.remove",
+      args: { id: "return-a" },
+      keys: ["return:return-a|*", "insert:insert-verb|*"],
+    },
   ];
 
   // The list covers the whole contract: a new command cannot slip in without

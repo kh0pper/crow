@@ -32,13 +32,16 @@
  * onto whatever now holds that id.
  *
  * A plan is dry-run before it is offered: its writes are applied to a clone of
- * the document and `checkInvariants()` (doc.js) is run on the clone. A plan
- * that would throw, or that would leave the song inconsistent — a clip without
- * its track or scene, notes past the clip's end, more tracks or scenes than a
- * song may hold, two objects sharing an id — comes back with an empty `apply`
- * and a `blocked` list of plain-English reasons instead of a half-applied
- * edit. Because the plan is known to be applicable, `applyPlan` on the real
- * document cannot fail half-way.
+ * the document and `invariantReasons()` (doc.js) is run on the clone. A plan
+ * that would throw, or that would leave the song with an inconsistency it did
+ * not already have — a clip without its track or scene, notes past the clip's
+ * end, more tracks or scenes than a song may hold, two objects sharing an id —
+ * comes back with an empty `apply` and a `blocked` list of plain-English reasons
+ * instead of a half-applied edit. A reason the song already held before the plan
+ * does not block it (a merge can leave one, and it must not stop every undo in
+ * the song); see `dryRun`, which compares the reasons by what they are about and
+ * not by how they read. Because the plan is known to be applicable,
+ * `applyPlan` on the real document cannot fail half-way.
  *
  * An entry may also carry `inverse.guards`: fields that must still hold what
  * they held when the step was recorded, compared like `after` keys but never
@@ -61,8 +64,8 @@ import * as Y from "yjs";
 import {
   STEP_GUARDS,
   applyBeforeAfter,
-  checkInvariants,
   cloneJson,
+  invariantReasons,
   objectRef,
   parseObjectRef,
   readField as readDocField,
@@ -460,8 +463,25 @@ export function planUndo(doc, entry) {
 
 /**
  * Apply a plan to a throwaway copy of the document and report what the song
- * would be left with: whatever `checkInvariants()` says about the clone, or one
- * reason when a write throws.
+ * would be left with that it did not have before: whatever `invariantReasons()`
+ * says about the clone, less what it already said about the song the plan is
+ * being run on, or one reason when a write throws.
+ *
+ * Only a reason the plan *creates* blocks it. A song can hold a violation that
+ * no undo put there — two peers' writes merging into one more lane or one more
+ * effect of a chain than a limit allows is a merge, not a fault (see
+ * `samplerReasons` in doc.js) — and refusing every step in the song because of
+ * it would leave the operator unable to take anything back. A reason already
+ * present is still reported by `checkInvariants`, and a plan that makes a
+ * violation worse is still refused whole: one in a new place, one more of a
+ * kind the song already had, or a count that grew (10 effects in a chain over
+ * its limit becoming 11).
+ *
+ * The comparison never reads the sentences. Two orphan sends from the same
+ * missing track, or two out-of-range sends from the same track, read exactly
+ * alike, so keying on the text would swallow the second one; the structured
+ * reasons are keyed by `code` + `subject` instead, and compared as multisets
+ * with their `count` alongside.
  *
  * The real document is never touched, which is what lets a GUI offer an undo
  * only when applying it can neither fail nor leave the song inconsistent.
@@ -473,13 +493,69 @@ function dryRun(doc, plan) {
   const clone = new Y.Doc();
   try {
     Y.applyUpdate(clone, Y.encodeStateAsUpdate(doc));
+    const before = tallyReasons(invariantReasons(clone));
     applyBeforeAfter(clone, plan);
-    return checkInvariants(clone);
+    return worsenedReasons(before, invariantReasons(clone));
   } catch (error) {
     return [`That step could not be applied to this song: ${error?.message ?? "the write was refused"}`];
   } finally {
     clone.destroy();
   }
+}
+
+/**
+ * The identity a reason is compared under: what is wrong, and about what.
+ * @param {{code: string, subject: string}} item
+ * @returns {string}
+ */
+function reasonKey(item) {
+  return `${item.code}\u0000${item.subject}`;
+}
+
+/**
+ * Count the reasons of one document by identity: how many of each the song
+ * holds, and the largest `count` one of them reports.
+ * @param {Array<{code: string, subject: string, count?: number}>} reasons
+ * @returns {Map<string, {multiplicity: number, count: number}>}
+ */
+function tallyReasons(reasons) {
+  const tally = new Map();
+  for (const item of reasons) {
+    const key = reasonKey(item);
+    const entry = tally.get(key) ?? { multiplicity: 0, count: 0 };
+    entry.multiplicity += 1;
+    if (typeof item.count === "number") entry.count = Math.max(entry.count, item.count);
+    tally.set(key, entry);
+  }
+  return tally;
+}
+
+/**
+ * The sentences for the reasons the plan made worse: an identity the song did
+ * not hold at all, one more of an identity it did hold, or the same identity
+ * with a bigger count. Each sentence is reported once, however many offenders
+ * it stands for.
+ * @param {Map<string, {multiplicity: number, count: number}>} before
+ * @param {Array<{code: string, subject: string, text: string, count?: number}>} after
+ * @returns {string[]}
+ */
+function worsenedReasons(before, after) {
+  const blocked = [];
+  const reported = new Set();
+  const seen = new Map();
+  for (const item of after) {
+    const key = reasonKey(item);
+    const occurrence = (seen.get(key) ?? 0) + 1;
+    seen.set(key, occurrence);
+    const was = before.get(key);
+    const worse = was
+      ? occurrence > was.multiplicity || (typeof item.count === "number" && item.count > was.count)
+      : true;
+    if (!worse || reported.has(item.text)) continue;
+    reported.add(item.text);
+    blocked.push(item.text);
+  }
+  return blocked;
 }
 
 /**

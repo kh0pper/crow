@@ -96,6 +96,45 @@
  * CC-BY item shows its credit in the picker, the library list and here (plan
  * 1d, Global Constraints).
  *
+ * ## The mixer
+ *
+ * A render runs the song's chains exactly as the page does, because it is the
+ * same processor (plan 1d, Task 9): the snapshot handed to `engine.setSong()`
+ * carries `inserts`, `sends`, `returns` and `master` like every other
+ * container, and the compiled Faust modules are posted by
+ * `engine-client.create()` before the song is set, so every insert of a kind
+ * this checkout has built is hosted from the first block. The signal order is
+ * the engine's own — a track's inserts, its fader and pan, its sends; a
+ * return's inserts and fader; the sum into the master; the master gain and the
+ * master's inserts (the limiter last) — so a render measures the mix the
+ * operator hears, not the raw parts.
+ *
+ * Two things about a render's chains are the render's own:
+ *
+ *   - **The figures are taken after the master chain.** `integratedLufs()` and
+ *     `truePeakDb()` are measured on the rendered buffer, which is the master
+ *     output: the master inserts, the clip stage and nothing else. A limiter on
+ *     the master therefore moves both numbers, which is what `meets_target`
+ *     answers about.
+ *   - **A chain that could not run is reported, never fatal.** A Faust effect
+ *     this render cannot host (a checkout that has not run
+ *     `tools/build-faust.mjs`, or a kind whose wasm is missing) and an insert
+ *     the engine had to bypass after it produced an invalid sample are both
+ *     named in `effect_problems: [{insert_id, message}]`. The render still
+ *     happens and the rest of the chain still plays.
+ *
+ * ## The short-term figure
+ *
+ * `short_term_max_lufs` is the highest 3 s short-term reading the engine's own
+ * master meter took during the render: the processor posts
+ * `{type:"meter", …}` every 100 ms of audio, and this file keeps the largest
+ * `short_term` of them (`engine.onMeter`). It is the same meter the master
+ * strip shows, so the two agree by construction, and a render shorter than one
+ * hop has no reading at all (`null`). A loudness RANGE (EBU R128's LRA) is NOT
+ * reported: `server/loudness.js` measures an integrated figure and a true peak
+ * and nothing else, and deriving an LRA from the engine's 100 ms readings would
+ * be a different measurement wearing its name.
+ *
  * ## The arrangement
  *
  * `{ mode: "arrangement", from_bar, seconds }` renders the song's timeline
@@ -119,7 +158,7 @@
  */
 
 import { createRequire } from "node:module";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -140,6 +179,55 @@ const BUNDLE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** The engine sources, in the names `engine-client.js` looks them up by. */
 const ENGINE_DIR = join(BUNDLE_DIR, "engine");
 const VENDOR_DIR = join(BUNDLE_DIR, "vendor", "sunvox");
+
+/** The compiled Faust effects (`tools/build-faust.mjs`): one wasm + JSON per kind. */
+const FAUST_DIR = join(BUNDLE_DIR, "vendor", "faust");
+
+/**
+ * The Faust effects the engine loads, in the order the build writes them: the
+ * names must match `engine-client.js`'s own list, which is what asks for
+ * `faust-<kind>.wasm` out of this asset map. Exported so a test can hold the two
+ * lists together — a render that quietly dropped one effect would be a silence
+ * nobody asked for.
+ */
+export const FAUST_KINDS = ["eq", "filter", "delay", "reverb", "chorus", "phaser", "saturation"];
+
+/**
+ * The word each Faust effect goes by in a sentence — the engine's own
+ * INSERT_LABELS (engine/studio-processor.js), so a render's "could not be
+ * built" names an effect exactly as the live page does. A test pins the two.
+ */
+export const FAUST_LABELS = Object.freeze({
+  eq: "equalizer",
+  filter: "filter",
+  delay: "delay",
+  reverb: "reverb",
+  chorus: "chorus",
+  phaser: "phaser",
+  saturation: "saturation",
+});
+
+/**
+ * The master a song without one is measured against: the streaming reference
+ * (plan 1d, `doc.js`'s `DEFAULT_MASTER`), spelled here so this file keeps
+ * importing no app module of the song document.
+ */
+const DEFAULT_MASTER_TARGET = Object.freeze({ lufs: -14, true_peak_db: -1 });
+
+/**
+ * How far an integrated figure may sit from the song's target and still count as
+ * meeting it, in LU. The plan's tolerance, and the one `meets_target` reports.
+ */
+const MEETS_TARGET_LU = 1;
+
+/** How much audio the master meter passes between one reading and the next, in seconds. */
+const METER_HOP_SECONDS = 0.1;
+
+/** How long a render listens after it is done for the meter's readings to arrive, in ms. */
+const METER_WAIT_MS = 1500;
+
+/** How quiet the meter's port has to go before the readings are taken as finished, in ms. */
+const METER_SETTLE_MS = 100;
 
 /** The engine client, loaded as the CommonJS classic script the bundle ships. */
 const studioEngine = require(join(ENGINE_DIR, "engine-client.js"));
@@ -252,6 +340,13 @@ const BYTES_PER_MB = 1024 * 1024;
 /** The asset map handed to `engine-client.create()`, read once per process. */
 let cachedAssets = null;
 
+/**
+ * How many songs one renderer remembers the last render of. The memory exists so
+ * `studio_mix` can report how the song measured the last time the agent heard
+ * it; it is per process, small, and drops the oldest song when it is full.
+ */
+const LAST_RENDER_SONGS = 128;
+
 /** The worklet-release symbol, once it has been looked up (null: unavailable). */
 let cachedReleaseSymbol;
 
@@ -309,11 +404,16 @@ let cachedReleaseSymbol;
  *                    seconds: number,
  *                    missing_samples: Array<{id: string, reason: string}>,
  *                    missing_library: Array<{id: string, reason: string}>,
- *                    credits: string[]}>}
+ *                    credits: string[], short_term_max_lufs: (number|null),
+ *                    effect_problems: Array<{insert_id: string, message: string}>}>}
  *   the rendered stereo channels, every sample the render could not load
  *   (empty when there was none, or the song plays no sampler track), every font
  *   it could not load (empty when it heard them all), and the credit lines of
- *   the library entries it heard
+ *   the library entries it heard — then the highest short-term LUFS the engine's
+ *   master meter took while the render played (null for a window shorter than
+ *   one meter hop, or a host whose engine has no meter), and every insert the
+ *   render could not run (a Faust effect this host cannot host, an insert the
+ *   engine bypassed after a bad sample), each named, never fatal
  * @throws {Error} when the window's samples or its font files need more than a
  *   render may hold
  */
@@ -360,17 +460,44 @@ export async function renderSong(snapshot, options = {}) {
   const baseFontCap = Number.isFinite(askedFontCap) && askedFontCap > 0 ? askedFontCap : RENDER_FONT_BUDGET_BYTES;
   const fontBytes = fontCapFor(fonts, baseFontCap);
 
+  // What this host can host: the compiled effects `bundles/studio/vendor/faust`
+  // really holds — the very directory `engine-client.js` reads a module from when
+  // the asset map does not carry it, so this answer is what the engine will have.
+  // A kind that is NOT hosted still runs as a pass-through, so the mixer's other
+  // inserts play; it is named in `effect_problems` instead of being dropped.
+  const assets = engineAssets();
+  const hosted = hostedFaustKinds(assets);
+  const unhostable = unhostableInserts(snapshot, hosted);
+
   const context = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: rate });
   let engine = null;
   let rendered = false;
+  // The master meter's readings, collected while the render plays: the highest
+  // short-term figure the song reached, and any insert the engine had to bypass.
+  const readings = [];
+  const faults = [];
   try {
     engine = await studioEngine.create(context, {
-      assetBytes: engineAssets(),
+      assetBytes: assets,
       maxSampleBytes: sampleCap,
       // Never below what this window's fonts take: a font the cap evicted could
       // not be loaded again, and the render has nowhere to ask.
       maxFontBytes: Math.max(baseFontCap, fontBytes),
     });
+    if (typeof engine.onMeter === "function") {
+      engine.onMeter((reading) => {
+        const value = shortTermOf(reading);
+        if (value !== null) readings.push(value);
+      });
+    }
+    if (typeof engine.onInsertFault === "function") {
+      engine.onInsertFault((fault) => {
+        const id = fault && typeof fault.insert_id === "string" ? fault.insert_id : "";
+        const message = fault && typeof fault.message === "string" ? fault.message : "";
+        if (id === "" || message === "") return;
+        faults.push({ insert_id: id, message: message });
+      });
+    }
     engine.setSong(snapshot);
     if (mode === "arrangement") {
       engine.setMode("arrangement");
@@ -391,6 +518,11 @@ export async function renderSong(snapshot, options = {}) {
     await engine.flush();
     const buffer = await context.startRendering();
     rendered = true;
+    // The meter's readings are posted as the render plays and delivered a moment
+    // after it resolves, so the render gives the port a chance to hand over the
+    // last of them before the figures are read. A window shorter than one hop has
+    // no reading to wait for.
+    if (length >= Math.round(rate * METER_HOP_SECONDS)) await settleMeter(readings);
     // copyFromChannel into JS-owned arrays, never getChannelData():
     // node-web-audio-api 2.2.0's getChannelData() hands JS a view of the
     // buffer's native memory (an external array with a no-op finalizer), and
@@ -413,6 +545,14 @@ export async function renderSong(snapshot, options = {}) {
       missing_library: library.missing,
       // Every instrument the render heard, credited the way its licence asks.
       credits: creditsOf(fonts, library.loaded),
+      // The highest 3 s figure the engine's master meter took during the render
+      // (plan 1d, Task 11): the same meter the master strip shows. Null when this
+      // host's engine has no meter, or the render was shorter than one hop.
+      short_term_max_lufs: readings.length === 0 ? null : Math.max(...readings),
+      // Every insert the render could not run: a Faust effect this host cannot
+      // host, or one the engine bypassed after an invalid sample. Named, never
+      // fatal — the rest of the chain still played.
+      effect_problems: [...unhostable, ...faultProblems(unhostable, faults)],
     };
   } finally {
     if (engine) engine.dispose();
@@ -451,9 +591,14 @@ export async function renderSong(snapshot, options = {}) {
  *   `renderSong`); tests and alternate hosts inject their own
  * @returns {{render: (request: object) => Promise<{storage_key: string, url: string,
  *            seconds: number, lufs: number, true_peak_db: number,
+ *            short_term_max_lufs: (number|null),
+ *            target: {lufs: number, true_peak_db: number},
+ *            meets_target: {lufs: boolean, true_peak: boolean},
  *            missing_samples: Array<{id: string, reason: string}>,
  *            missing_library: Array<{id: string, reason: string}>,
- *            credits: string[]}>}}
+ *            credits: string[],
+ *            effect_problems: Array<{insert_id: string, message: string}>}>,
+ *            lastRender: (songId: string) => (object|null)}}
  */
 export function createRenderer({
   db,
@@ -492,6 +637,13 @@ export function createRenderer({
   // never fight over the same worklet host or the same storage client.
   let running = 0;
   const waiters = [];
+
+  // The last render of each song this process made, newest last: what
+  // `studio_mix` reports beside the chains, so an agent can read a mix's figures
+  // with the mix instead of rendering again to remember them. Per process and
+  // bounded — a render is a measurement of a moment, not the song's state.
+  /** @type {Map<string, object>} */
+  const lastRenders = new Map();
 
   /** @returns {Promise<void>} resolves when this call may render */
   function acquire() {
@@ -538,12 +690,17 @@ export function createRenderer({
    *   who asked; a human author is audited as `local`, anything else as `bot`
    * @returns {Promise<{storage_key: string, url: string, seconds: number,
    *                    lufs: number, true_peak_db: number,
+   *                    short_term_max_lufs: (number|null),
+   *                    target: {lufs: number, true_peak_db: number},
+   *                    meets_target: {lufs: boolean, true_peak: boolean},
    *                    missing_samples: Array<{id: string, reason: string}>,
    *                    missing_library: Array<{id: string, reason: string}>,
-   *                    credits: string[]}>}
-   *   where the render landed, how it measures, every sample and every font it
-   *   could not load (each plays silence; these name them), and the credit lines
-   *   of the instruments it heard
+   *                    credits: string[],
+   *                    effect_problems: Array<{insert_id: string, message: string}>}>}
+   *   where the render landed, how it measures (after the master chain), whether
+   *   that meets the song's own target, every sample and every font it could not
+   *   load (each plays silence; these name them), every insert it could not run,
+   *   and the credit lines of the instruments it heard
    */
   async function render(request = {}) {
     const { song_id, project_id = null, snapshot, scene_id = null, clip_id = null, seconds, author = null } = request;
@@ -594,8 +751,27 @@ export function createRenderer({
       const credits = Array.isArray(audio.credits)
         ? audio.credits.filter((credit) => typeof credit === "string" && credit !== "")
         : [];
+      // The inserts the render could not run (a Faust module this host does not
+      // have, an insert the engine bypassed after a bad sample). Not fatal: the
+      // rest of the chain played, and the agent is told which one did not.
+      const effectProblems = Array.isArray(audio.effect_problems)
+        ? audio.effect_problems
+            .filter((problem) => problem && typeof problem === "object" && typeof problem.insert_id === "string")
+            .map((problem) => ({
+              insert_id: problem.insert_id,
+              message: typeof problem.message === "string" ? problem.message : "",
+            }))
+        : [];
+      // The highest 3 s figure the engine's meter took while the render played.
+      const shortTermMax = Number.isFinite(audio.short_term_max_lufs) || audio.short_term_max_lufs === -Infinity
+        ? audio.short_term_max_lufs
+        : null;
       const lufs = integratedLufs(audio.left, audio.right, rate);
       const truePeak = truePeakDb(audio.left, audio.right, rate);
+      // The song's own target, and whether the master chain's output meets it:
+      // the loudness within a LU of it and the true peak under its ceiling.
+      const target = masterTargetOf(snapshot);
+      const meets = meetsTarget({ lufs: lufs, true_peak_db: truePeak }, target);
       const wav = encodeWav24(audio.left, audio.right, rate);
       // Measured and quantised: the two float channels (~57 MB each for a
       // 300 s render) are never read again, so drop the last references to
@@ -638,29 +814,79 @@ export function createRenderer({
           storage_key: key,
           lufs,
           true_peak_db: truePeak,
+          short_term_max_lufs: shortTermMax,
+          target: target,
+          meets_target: meets,
           missing_samples: missingSamples,
           missing_library: missingLibrary,
           credits: credits,
+          effect_problems: effectProblems,
         },
       });
 
       const url = await storage.getPresignedUrl(key, { bucket, expiry: URL_EXPIRY_SECONDS });
-      return {
+      const result = {
         storage_key: key,
         url,
         seconds: renderedSeconds,
         lufs,
         true_peak_db: truePeak,
+        short_term_max_lufs: shortTermMax,
+        target: target,
+        meets_target: meets,
         missing_samples: missingSamples,
         missing_library: missingLibrary,
         credits: credits,
+        effect_problems: effectProblems,
       };
+      rememberLastRender(song_id, result);
+      return result;
     } finally {
       release();
     }
   }
 
-  return { render };
+  /**
+   * Keep this render as the song's last one, for `studio_mix` to report.
+   * @param {string} songId
+   * @param {object} result the render's own result
+   * @returns {void}
+   */
+  function rememberLastRender(songId, result) {
+    lastRenders.delete(songId);
+    lastRenders.set(songId, {
+      integrated_lufs: result.lufs,
+      true_peak_db: result.true_peak_db,
+      short_term_max_lufs: result.short_term_max_lufs,
+      target: { ...result.target },
+      meets_target: { ...result.meets_target },
+      seconds: result.seconds,
+      storage_key: result.storage_key,
+    });
+    while (lastRenders.size > LAST_RENDER_SONGS) {
+      const oldest = lastRenders.keys().next();
+      if (oldest.done) break;
+      lastRenders.delete(oldest.value);
+    }
+  }
+
+  /**
+   * The last render this process made of one song, or null when it has made
+   * none since it started: the figures `studio_mix` reads a mix beside.
+   * @param {string} songId
+   * @returns {object|null} a copy, so a caller cannot move another's figures
+   */
+  function lastRender(songId) {
+    const held = lastRenders.get(String(songId));
+    if (!held) return null;
+    return {
+      ...held,
+      target: { ...held.target },
+      meets_target: { ...held.meets_target },
+    };
+  }
+
+  return { render, lastRender };
 }
 
 /**
@@ -1067,6 +1293,181 @@ function creditsOf(fonts, loaded) {
     credits.push(credit);
   }
   return credits;
+}
+
+/**
+ * The Faust effects one render's engine can host: the kinds whose compiled wasm
+ * and factory JSON `bundles/studio/vendor/faust` holds (`tools/build-faust.mjs`'s
+ * output, read into the asset map).
+ *
+ * The same directory is where `engine-client.js` looks for a module the asset map
+ * does not carry, so this set is exactly what the engine will have to host — a
+ * checkout that has not run the build has none, and every Faust insert in its
+ * songs is named instead of run.
+ *
+ * @param {Object<string, string|Uint8Array>} assets the engine's asset map
+ * @returns {Set<string>} the kinds this render may host
+ */
+function hostedFaustKinds(assets) {
+  const hosted = new Set();
+  for (const kind of FAUST_KINDS) {
+    if (assets[`faust-${kind}.wasm`] && assets[`faust-${kind}.json`]) hosted.add(kind);
+  }
+  return hosted;
+}
+
+/**
+ * Every insert this render cannot run, named before it starts: a Faust effect
+ * whose compiled module this host does not have.
+ *
+ * A bypassed insert is not listed: the chain skips it, so nothing is missing
+ * from what the render hears. The message is the engine's own shape — "<effect>
+ * on <chain> could not be built: …" — so the agent reads one sentence whichever
+ * side of the port found it.
+ *
+ * Exported so a test can hold a host that really has no build output (the state
+ * of a fresh checkout) against the answer, without one having to exist.
+ *
+ * @param {object} snapshot the song as the hub's `snapshot()` returns it
+ * @param {Set<string>} hosted the Faust kinds this render may host
+ * @returns {Array<{insert_id: string, message: string}>}
+ */
+export function unhostableInserts(snapshot, hosted) {
+  const inserts = snapshot && snapshot.inserts && typeof snapshot.inserts === "object" ? Object.values(snapshot.inserts) : [];
+  const problems = [];
+  for (const insert of inserts) {
+    if (!insert || typeof insert !== "object") continue;
+    if (insert.bypass === true) continue;
+    const kind = typeof insert.kind === "string" ? insert.kind : "";
+    if (!FAUST_KINDS.includes(kind) || hosted.has(kind)) continue;
+    problems.push({
+      insert_id: String(insert.id ?? ""),
+      message: `${FAUST_LABELS[kind] || kind} on ${chainLabelOf(snapshot, insert.owner)} could not be built: this render has no compiled "${kind}" effect.`,
+    });
+  }
+  return problems;
+}
+
+/**
+ * What a sentence about one of a chain's inserts calls the chain: the track's
+ * name, the return's name, or "the master" — the words the engine's own insert
+ * messages use, so a problem reads the same wherever it was found.
+ *
+ * @param {object} snapshot the song
+ * @param {unknown} owner the insert's owner ref (`"track:<id>"`, `"return:<id>"`, `"master"`)
+ * @returns {string}
+ */
+function chainLabelOf(snapshot, owner) {
+  const ref = typeof owner === "string" ? owner : "";
+  if (ref === "master") return "the master";
+  const at = ref.indexOf(":");
+  if (at < 0) return ref === "" ? "a chain" : ref;
+  const kind = ref.slice(0, at);
+  const id = ref.slice(at + 1);
+  if (kind === "track") {
+    const tracks = snapshot && Array.isArray(snapshot.tracks) ? snapshot.tracks : [];
+    const track = tracks.find((item) => item && item.id === id);
+    const name = track && typeof track.name === "string" ? track.name.trim() : "";
+    return name === "" ? id : name;
+  }
+  if (kind === "return") {
+    const returns = snapshot && snapshot.returns && typeof snapshot.returns === "object" ? snapshot.returns : {};
+    const item = returns[id];
+    const name = item && typeof item.name === "string" ? item.name.trim() : "";
+    return name === "" ? id : name;
+  }
+  return id === "" ? ref : id;
+}
+
+/**
+ * One meter reading's short-term figure, or null when the reading carries none
+ * (`-Infinity` is a reading: a silent render measures silence).
+ * @param {unknown} reading
+ * @returns {number|null}
+ */
+function shortTermOf(reading) {
+  const value = reading && typeof reading === "object" ? Number(reading.short_term) : NaN;
+  if (Number.isFinite(value)) return value;
+  return value === -Infinity ? -Infinity : null;
+}
+
+/**
+ * The insert faults the engine reported that `unhostableInserts` did not already
+ * name, one entry per insert. A fault the render already explained (a kind it
+ * could not host) is not reported twice.
+ *
+ * @param {Array<{insert_id: string, message: string}>} known
+ * @param {Array<{insert_id: string, message: string}>} faults
+ * @returns {Array<{insert_id: string, message: string}>}
+ */
+function faultProblems(known, faults) {
+  const seen = new Set(known.map((problem) => problem.insert_id));
+  const problems = [];
+  for (const fault of faults) {
+    if (seen.has(fault.insert_id)) continue;
+    seen.add(fault.insert_id);
+    problems.push({ insert_id: fault.insert_id, message: fault.message });
+  }
+  return problems;
+}
+
+/**
+ * Give the meter's port a chance to deliver the readings the render's last
+ * blocks posted, and stop once they have stopped arriving.
+ *
+ * The processor posts one reading per 100 ms of audio, and the port hands them
+ * over a moment after `startRendering()` resolves (the page reads them the same
+ * way). The wait ends `METER_SETTLE_MS` after the last reading arrived, or after
+ * `METER_WAIT_MS` at the latest, so a host that posts none can never stall a
+ * render.
+ *
+ * @param {number[]} readings the short-term figures that have arrived so far
+ * @returns {Promise<void>}
+ */
+async function settleMeter(readings) {
+  const deadline = Date.now() + METER_WAIT_MS;
+  let seen = -1;
+  while (Date.now() < deadline) {
+    if (readings.length === seen && readings.length > 0) return;
+    seen = readings.length;
+    await new Promise((resolve) => setTimeout(resolve, METER_SETTLE_MS));
+  }
+}
+
+/**
+ * The loudness target a song is mixed to: its master's own, or the streaming
+ * reference a song without a master is measured against.
+ * @param {object} snapshot
+ * @returns {{lufs: number, true_peak_db: number}}
+ */
+function masterTargetOf(snapshot) {
+  const master = snapshot && snapshot.master && typeof snapshot.master === "object" ? snapshot.master : {};
+  const target = master.target && typeof master.target === "object" ? master.target : {};
+  const lufs = Number(target.lufs);
+  const peak = Number(target.true_peak_db);
+  return {
+    lufs: Number.isFinite(lufs) ? lufs : DEFAULT_MASTER_TARGET.lufs,
+    true_peak_db: Number.isFinite(peak) ? peak : DEFAULT_MASTER_TARGET.true_peak_db,
+  };
+}
+
+/**
+ * Whether a render meets its song's target: the integrated figure within
+ * `MEETS_TARGET_LU` of it, and the true peak at or under the ceiling.
+ *
+ * Both answers are given for a render that could not be measured too: silence
+ * reads `-Infinity` LUFS, so its loudness never meets a finite target, while its
+ * peak really is under any ceiling.
+ *
+ * @param {{lufs: number, true_peak_db: number}} measured
+ * @param {{lufs: number, true_peak_db: number}} target
+ * @returns {{lufs: boolean, true_peak: boolean}}
+ */
+function meetsTarget(measured, target) {
+  return {
+    lufs: Math.abs(measured.lufs - target.lufs) <= MEETS_TARGET_LU,
+    true_peak: measured.true_peak_db <= target.true_peak_db,
+  };
 }
 
 /**
@@ -1559,6 +1960,12 @@ function defaultCrowHome() {
 
 /**
  * The engine's sources and wasm binary, read once per process.
+ *
+ * The compiled Faust effects (plan 1d, Task 7) are read here too: each
+ * `<kind>.wasm` and its factory `<kind>.json`, under the flat asset names
+ * `engine-client.js` asks for. A checkout that has not run
+ * `tools/build-faust.mjs` has none, and the render starts anyway with no Faust
+ * inserts — which is what a page does too, so the two hosts still agree.
  * @returns {Object<string, string|Uint8Array>} name → text or bytes
  */
 function engineAssets() {
@@ -1574,9 +1981,23 @@ function engineAssets() {
     // The SoundFont hosts (one synth per font, one channel per track) ride in the
     // worklet module with the synth they drive.
     "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
+    // Crow's own dynamics, the compiled Faust effects' host and the master meter:
+    // all part of the worklet module (plan 1d, Tasks 7, 8 and 9).
+    "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
+    "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
+    "meter.js": readFileSync(join(ENGINE_DIR, "meter.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };
+  // The compiled effects: read as the pair `faust-<kind>.wasm` /
+  // `faust-<kind>.json` that engine-client.js posts to the processor.
+  for (const kind of FAUST_KINDS) {
+    const wasm = join(FAUST_DIR, `${kind}.wasm`);
+    const json = join(FAUST_DIR, `${kind}.json`);
+    if (!existsSync(wasm) || !existsSync(json)) continue;
+    cachedAssets[`faust-${kind}.wasm`] = readFileSync(wasm);
+    cachedAssets[`faust-${kind}.json`] = readFileSync(json, "utf8");
+  }
   return cachedAssets;
 }
 

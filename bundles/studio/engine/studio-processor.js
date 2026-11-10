@@ -5,14 +5,18 @@
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + spessasynth.js + font-voice.js + studio-processor.js
+ *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
+ *       + meter.js + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
  * declares the `SunVoxLib` factory), with the pure sequencer
  * (`StudioSequencer` on `globalThis`), with the sampler's voice DSP
  * (`StudioSamplerVoice`), with the performance-effects bus (`StudioPerfFx`) and
  * with the SoundFont hosts (`StudioFontVoice`, which drives the vendored
- * synth's `SpessaSynthProcessor`). Nothing here is imported: the same source
+ * synth's `SpessaSynthProcessor`), with Crow's own dynamics (`StudioDynamics`),
+ * with the compiled Faust effects' host (`StudioFaustHost`) and with the master
+ * meter (`StudioMeter`) (plan 1d, Tasks 7, 8 and 9). Nothing here is imported:
+ * the same source
  * runs in a browser's `AudioWorkletGlobalScope` and in node-web-audio-api's
  * worklet thread.
  *
@@ -231,6 +235,111 @@
  * sustain stage releases the voice: motion must not leave a voice sounding
  * silently for ever.
  *
+ * ## The mixer: chains, sends, returns and the master
+ *
+ * The song's `inserts`, `sends`, `returns` and `master` containers (see
+ * `server/doc.js`) are the mixer, and the order they run in is the signal path
+ * (plan 1d, Task 9, one final order):
+ *
+ *     track: source → inserts → fader/pan → sends (pre or post fader)
+ *     return: inserts → fader
+ *     tracks + returns → the master sum → looper → performance bus
+ *       → master gain → master inserts → clip → output
+ *
+ * **Sends.** A send's `pre` is tapped after the track's inserts and before its
+ * fader and pan; its `post` is tapped after them. `level_db` is a linear gain
+ * on that tap. A muted track's sends are silent either way, and so are the
+ * sends of a track that any track's solo silences: a soloed track's sends
+ * play, and the returns are never muted by solo. A return pans with the same
+ * constant-power law as a track.
+ *
+ * **Chains are built outside `process()`.** A chain is a list of insert runners,
+ * one object per insert (`StudioDynamics.create` or `StudioFaustHost.create`,
+ * with its parameters), and it is built and edited on the message path — never in
+ * a block.
+ *
+ * A snapshot is compared by SHAPE (each insert's id and kind, in order, with its
+ * bypass flag). A chain whose shape is unchanged only had parameters turned:
+ * every runner takes its own `setParams`, keeps its insert, its state and its
+ * fault, and nothing is rebuilt and nothing fades. Any other change is a chain
+ * edit, and it is applied insert by insert: an insert the edit did not touch
+ * keeps its object — a reverb's tail, a delay's line, a limiter's lookahead — and
+ * does not fade; an added insert fades in from the dry signal; a removed or
+ * bypassed one fades out where it stands and is dropped when the fade ends. Each
+ * fade is armed once and counts down frame by frame across runs and blocks (never
+ * per run: a motion curve splits a block into runs of no more than 32 frames),
+ * over 64 frames — or over the master chain's own latency when that moved with
+ * the edit (a limiter added or removed). A snapshot that lands mid-fade only
+ * re-targets the weights, which keep their value, so nothing restarts and nothing
+ * clicks.
+ *
+ * **A replaced segment runs its two sides in PARALLEL.** When an edit puts new
+ * inserts where the old ones were — an insert deleted and another added in its
+ * place, an id given another kind, the whole chain reordered — fading the two one
+ * after the other is wrong twice over: the arriving insert's weight brings its
+ * output in on top of what the leaving one still passes (both half in, so the
+ * level swells by +1 to +4 dB), and it runs on the leaving insert's OUTPUT, so a
+ * new delay replays the echoes of the effect it replaced. Those two sides are
+ * therefore one node of the chain that runs both paths on the SAME input and
+ * blends the two OUTPUTS by one weight (see `runBlend`). For a reorder the whole
+ * chain is that node (the old order against the new one); every insert is
+ * rebuilt, so the reorder costs their state, as it always did. The path that
+ * arrives is always run, even while the weight is still 0: that is what primes a
+ * limiter's lookahead, and the weight waits for the arriving path's own latency
+ * before it moves, so a rebuilt master limiter spends the whole crossfade
+ * limiting (the ceiling holds and the time base does not move). An insert an
+ * edit *added* has nothing to run against and still fades in by its own weight;
+ * an insert it *deleted* still fades out by its own weight.
+ *
+ * **A fade that moves latency is not time-aligned.** The dry side of an insert's
+ * own weight is the signal as it arrived; the wet side is that signal delayed by
+ * the insert's own latency. While a latency-bearing insert fades in or out — a
+ * master limiter added, removed or bypassed — the two sides are therefore up to
+ * `latencyFrames` apart in time and the mix combs over `max(64, L)` frames. That
+ * is deliberate: a crossfade is the only way to move a delay in or out of a path
+ * without a step, and a side that was delayed before the fade began would be a
+ * jump rather than a blend. The number the master reports follows the running
+ * delay (it switches at the fade's midpoint, see `runningLatencyOf`), so nothing
+ * downstream is told a delay the audio does not have.
+ *
+ * A Faust insert whose module has not been compiled yet passes audio through and
+ * says so once, as `{type:"insert_loading", insert_id, message}`:
+ * "<effect> on <track> is still loading." Only that case is retried (until the
+ * page posts its `faust-modules`); a kind that is missing after them, or one
+ * whose build throws, is a permanent pass-through reported once as an error.
+ *
+ * **The NaN guard.** After every insert the block is checked for a sample that
+ * is not a finite number. One bad sample replaces the whole block with the
+ * insert's own input, the insert is bypassed IN THE ENGINE (never in the
+ * document) and reported once: "<effect> on <track> produced an invalid sample;
+ * it is bypassed." Only that insert's OWN parameters (or its kind) moving arms it
+ * again — any other edit to the song leaves it bypassed — and arming it resets it
+ * and fades it back in from the dry signal, primed by its own latency, so an
+ * insert that comes back at another level is not a step in the master.
+ *
+ * **Latency.** Every track and return insert is zero-latency; only the master
+ * limiter has its 1.5 ms lookahead, applied after everything else. The master
+ * path is delayed by the master chain's total latency and nothing else, and the
+ * RUNNING delay — the one the audio being handed out really has, so a fade that
+ * moves the limiter in or out crosses it at its midpoint, and a limiter the NaN
+ * guard has bypassed does not count — is posted as `{type:"master_latency", ms}`
+ * whenever it changes (never twice for the same number) and repeated in every
+ * meter reading as `latency_ms`.
+ *
+ * ## The meter
+ *
+ * `meter.js` (`StudioMeter`) reads the master AFTER the master inserts: the
+ * momentary (400 ms), short-term (3 s) and integrated (gated, reset on each
+ * Play) loudness in LUFS, and the true peak since the last Play in dBTP, all on
+ * the very same BS.1770-4 K-weighting and gating `server/loudness.js` measures
+ * a render with. It is fed only while the playhead runs, and a reading is posted
+ * every 100 ms of audio (the hop subtracted from the counter, so readings land
+ * on the same frames at any block size) and once when the transport stops, as
+ * `{type:"meter", momentary, short_term, integrated, true_peak_db, latency_ms}`.
+ * The integrated measurement is a fixed histogram of gating-block powers, so its
+ * cost does not grow with the length of a Play. A module composed without
+ * `meter.js` (some engine tests build their own file list) simply posts none.
+ *
  * ## Taps
  *
  * `{type:"tap", target, on}` turns on a copy of the master ("master") or of
@@ -240,15 +349,23 @@
  * `nextBarFrame` report). Record-into-pad and resampling use it. A tap is off by
  * default, and off costs nothing at all.
  *
- * A master tap copies the master AFTER the performance bus and the clip, so
- * what it records is what the room hears.
+ * A track tap reads AFTER that track's inserts and its fader, so a resample of a
+ * track is what you hear from it. A master tap copies the master AFTER the
+ * performance bus, the master chain and the clip, so what it records is what
+ * the room hears; because the master chain delays the master by its own latency
+ * (the limiter's lookahead), a MASTER tap's `frame` is stamped that many frames
+ * back, so a resample of the master lines up with a resample of a track instead
+ * of leading it by 1.5 ms. (A tap armed on the very first block therefore starts
+ * at a negative context frame: those first samples are the master chain's
+ * pre-roll, and they belong where they will be heard.)
  *
  * ## The performance bus and the looper
  *
  * `perf-fx.js` (`StudioPerfFx`) sits on the master bus, and the order it is
  * called in is the signal path:
  *
- *     tracks → master mix → looper → performance bus → clip/limit → tap/output
+ *     tracks + returns → master sum → looper → performance bus → master gain
+ *       → master inserts → clip/limit → tap/output
  *
  * The looper therefore taps the mix BEFORE any effect and mixes its take back
  * in, so a held stutter or reverb is never baked into a loop; the clip and the
@@ -319,7 +436,7 @@
  * bytes}`, `{type:"library_unload", library_id}`, `{type:"live", track_id,
  * bank_id, index, v, on}`, `{type:"tap", target, on}`, `{type:"fx", name,
  * amount, on}`, `{type:"looper", action}`, `{type:"looper_buffers", left,
- * right}`, `{type:"looper_take", id}`
+ * right}`, `{type:"looper_take", id}`, `{type:"faust-modules", modules}`
  * processor → client: `{type:"ready"}`, `{type:"flushed", id}`, `{type:"error",
  * error}`, `{type:"position", bar, beat, sixteenth, patterns}` (at most every
  * 50 ms of audio; `patterns` maps each sampler track that was playing a pattern
@@ -341,7 +458,17 @@
  * render, once per font id), `{type:"tap_block", target, frame, channels}`
  * (while a tap is on, one per block), `{type:"looper_buffer", id, left, right,
  * frames, rate, bars}` (one answer per `looper_take`; the `left`/`right` buffers
- * are transferred, and the page hands them back with `looper_buffers`)
+ * are transferred, and the page hands them back with `looper_buffers`),
+ * `{type:"meter", momentary, short_term, integrated, true_peak_db, latency_ms}`
+ * (the master's loudness and true peak after the master inserts, every 100 ms of
+ * audio while the transport runs and once when it stops — see "The meter"),
+ * `{type:"master_latency", ms}` (once per master chain build that moves it: the
+ * delay the master chain — the limiter's lookahead — puts on the master path),
+ * `{type:"insert_fault", insert_id, message}` (an insert that produced a
+ * non-finite sample: it is bypassed in the engine and this is said once — see
+ * "The mixer"), `{type:"insert_loading", insert_id, message}` (a Faust insert
+ * whose compiled module the page has not posted yet: it passes audio through
+ * until then, and this is said once per insert — not an error)
  *
  * ## Frames the client can count on
  *
@@ -350,7 +477,8 @@
  * global every processor on one AudioContext shares, so a recorder built as a
  * second worklet on the same context arms on the very frame the engine's
  * launch took effect. A `tap_block` carries its own `frame` in the same clock —
- * the context frame of its first sample — so a resample can cut what it keeps
+ * the context frame of its first sample, moved back by the master chain's
+ * latency for a master tap (see "Taps") — so a resample can cut what it keeps
  * exactly on a bar line instead of counting blocks. `bar` is 0-based. The
  * translation from the sequencer's
  * own frames is measured once, at the first block (see `contextOffset()`).
@@ -576,6 +704,86 @@
 
   /** How long a comp-boundary crossfade runs, in frames. */
   const VOICE_FADE_FRAMES = 64;
+
+  /**
+   * How long a chain edit's crossfade runs, in frames (plan 1d: any chain edit
+   * while the song plays fades old → new over 64 frames). Counted in frames, so
+   * it is the same ramp whatever block size the host asks for.
+   */
+  const CHAIN_FADE_FRAMES = 64;
+
+  /**
+   * How many blends may be nested inside one another. A blend holds the chain an
+   * edit replaced, so an edit that lands while a blend is still fading builds one
+   * blend around another; the scratch pairs `runBlend` runs the arriving path in
+   * are preallocated to this depth, and a chain rewritten more often than this
+   * inside a few milliseconds settles by letting the arriving path take over (see
+   * `runBlend`).
+   */
+  const BLEND_DEPTH = 3;
+
+  /**
+   * The longest run of frames one insert is handed at a time: the block
+   * `engine/faust-host.js` lays its wasm buffers out for. A run longer than this
+   * (only a host with a bigger quantum than 128 makes one) is offered to each
+   * insert in pieces of this many frames.
+   */
+  const INSERT_BLOCK = 128;
+
+  /**
+   * The four inserts `engine/dynamics.js` builds in JavaScript (`KINDS` there).
+   * Every other kind of `EFFECT_PARAMS` is a compiled Faust effect. A worklet
+   * cannot import the dynamics module's list, so the names are duplicated here
+   * and a test holds the two together.
+   */
+  const DYNAMICS_KINDS = Object.freeze(["compressor", "limiter", "gate", "deesser"]);
+
+  /**
+   * What an insert's kind is called in a sentence, exactly as
+   * `server/doc.js`'s `EFFECT_PARAMS[kind].label` spells it ("equalizer",
+   * "de-esser", …). A worklet cannot import the document, so the labels are
+   * duplicated here and a test pins the two copies together: the message a
+   * bypassed insert is reported with has to name the effect the panel names.
+   */
+  const INSERT_LABELS = Object.freeze({
+    eq: "equalizer",
+    filter: "filter",
+    delay: "delay",
+    reverb: "reverb",
+    chorus: "chorus",
+    phaser: "phaser",
+    saturation: "saturation",
+    compressor: "compressor",
+    limiter: "limiter",
+    gate: "gate",
+    deesser: "de-esser",
+  });
+
+  /** The master's gain range, in dB: `MIXER_RANGES.master.gain_db` in `doc.js`. */
+  const LOWEST_MASTER_GAIN_DB = -24;
+  const HIGHEST_MASTER_GAIN_DB = 12;
+
+  /** A return's gain range, in dB: `MIXER_RANGES.return.gain_db` in `doc.js`. */
+  const LOWEST_RETURN_GAIN_DB = -60;
+  const HIGHEST_RETURN_GAIN_DB = 12;
+
+  /** A send's level range, in dB: `MIXER_RANGES.send.level_db` in `doc.js`. */
+  const LOWEST_SEND_DB = -60;
+  const HIGHEST_SEND_DB = 6;
+
+  /** How much audio between two `meter` messages, in seconds. */
+  const METER_INTERVAL_SECONDS = 0.1;
+
+  /** The mixer an engine with no song (or no mixer containers) runs: nothing. */
+  const NO_MIXER = Object.freeze({
+    chains: new Map(),
+    sendsByTrack: new Map(),
+    returns: Object.freeze([]),
+    masterGainDb: 0,
+  });
+
+  /** The chain an owner with no inserts in the document has. */
+  const NO_INSERTS = Object.freeze([]);
 
   /**
    * The frame grid motion is read on: a swept voice is rendered in runs that
@@ -952,7 +1160,284 @@
     voice.gain += voice.fadeStep;
   }
 
-  /** @returns {object} a track's device parameters as a plain object. */
+  /**
+   * A gain in dB as a linear factor, held inside the document's range. A
+   * missing or non-finite value is 0 dB.
+   * @param {unknown} value
+   * @param {number} low
+   * @param {number} high
+   * @returns {number}
+   */
+  function dbToGain(value, low, high) {
+    const db = Number(value);
+    return Math.pow(10, (Number.isFinite(db) ? clamp(db, low, high) : 0) / 20);
+  }
+
+  /**
+   * The constant-power pan pair a pan position makes, exactly as `applyMix` and
+   * the sampler's voices work it out.
+   * @param {unknown} value -1 (left) .. 1 (right); anything else is centre
+   * @param {number} gain the linear gain to pan
+   * @returns {{left: number, right: number}}
+   */
+  function panPair(value, gain) {
+    const pan = Number(value);
+    const theta = ((Number.isFinite(pan) ? clamp(pan, -1, 1) : 0) + 1) * Math.PI * 0.25;
+    return { left: gain * Math.cos(theta), right: gain * Math.sin(theta) };
+  }
+
+  /**
+   * The label a message names an insert's kind with, as the panel spells it
+   * (`EFFECT_PARAMS[kind].label` in `server/doc.js`). A kind this engine does
+   * not know is named as it came.
+   * @param {string} kind
+   * @returns {string}
+   */
+  function insertLabelOf(kind) {
+    const name = asId(kind);
+    return Object.hasOwn(INSERT_LABELS, name) ? INSERT_LABELS[name] : name === "" ? "effect" : name;
+  }
+
+  /**
+   * The inserts of ONE chain as the engine runs them: the song's `inserts`
+   * container read into plain specs, filtered to that owner and sorted by
+   * `order` then id — the same order `doc.js`'s `byInsertOrder` gives.
+   * @param {object} inserts the snapshot's `inserts` container
+   * @param {string} owner `"track:<id>"`, `"return:<id>"` or `"master"`
+   * @returns {Array<{id: string, kind: string, bypass: boolean, params: object}>}
+   */
+  function insertSpecsFor(inserts, owner) {
+    const specs = [];
+    if (!inserts || typeof inserts !== "object") return specs;
+    for (const key of Object.keys(inserts)) {
+      const insert = inserts[key];
+      if (!insert || typeof insert !== "object") continue;
+      if (asId(insert.owner) !== owner) continue;
+      const order = Number(insert.order);
+      specs.push({
+        id: asId(insert.id) === "" ? key : asId(insert.id),
+        kind: asId(insert.kind),
+        order: Number.isFinite(order) ? order : 0,
+        bypass: insert.bypass === true,
+        params: insert.params && typeof insert.params === "object" ? insert.params : {},
+      });
+    }
+    specs.sort((left, right) => {
+      if (left.order !== right.order) return left.order < right.order ? -1 : 1;
+      if (left.id === right.id) return 0;
+      return left.id < right.id ? -1 : 1;
+    });
+    return specs;
+  }
+
+  /**
+   * The song's whole mixer as the engine reads it: one sorted chain per owner,
+   * the sends sorted by the track they leave, the returns in the snapshot's own
+   * order and the master's gain. Read once per song, never inside a block.
+   * @param {object} snapshot the song as `server/doc.js`'s `snapshot()` returns it
+   * @returns {{chains: Map<string, object[]>, sendsByTrack: Map<string, object[]>,
+   *            returns: Array<{id: string, name: string, gain_db: number,
+   *                            pan: number, mute: boolean}>, masterGainDb: number}}
+   */
+  function mixerSpecOf(snapshot) {
+    const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+    const inserts = snap.inserts && typeof snap.inserts === "object" ? snap.inserts : {};
+    const tracks = Array.isArray(snap.tracks) ? snap.tracks : [];
+    const returnValues = snap.returns && typeof snap.returns === "object" ? snap.returns : {};
+    const sends = snap.sends && typeof snap.sends === "object" ? snap.sends : {};
+    const master = snap.master && typeof snap.master === "object" ? snap.master : {};
+
+    const chains = new Map();
+    chains.set("master", insertSpecsFor(inserts, "master"));
+    for (let index = 0; index < tracks.length; index += 1) {
+      const id = asId(tracks[index] && tracks[index].id);
+      if (id === "") continue;
+      chains.set(`track:${id}`, insertSpecsFor(inserts, `track:${id}`));
+    }
+
+    const returns = [];
+    for (const key of Object.keys(returnValues)) {
+      const entry = returnValues[key];
+      if (!entry || typeof entry !== "object") continue;
+      const id = asId(entry.id) === "" ? key : asId(entry.id);
+      const name = typeof entry.name === "string" && entry.name.trim() !== "" ? entry.name.trim() : id;
+      const gain = Number(entry.gain_db);
+      const pan = Number(entry.pan);
+      returns.push({
+        id: id,
+        name: name,
+        gain_db: Number.isFinite(gain) ? gain : 0,
+        pan: Number.isFinite(pan) ? pan : 0,
+        mute: entry.mute === true,
+      });
+      chains.set(`return:${id}`, insertSpecsFor(inserts, `return:${id}`));
+    }
+
+    // A send is keyed by the pair it joins; its own fields say the same pair, and
+    // the key is what a damaged one is read from (as `doc.js` reads it).
+    const sendsByTrack = new Map();
+    for (const key of Object.keys(sends)) {
+      const send = sends[key];
+      if (!send || typeof send !== "object") continue;
+      const parts = key.split("/");
+      const trackId = asId(send.track_id) === "" ? (parts.length === 2 ? parts[0] : "") : asId(send.track_id);
+      const returnId = asId(send.return_id) === "" ? (parts.length === 2 ? parts[1] : "") : asId(send.return_id);
+      if (trackId === "" || returnId === "") continue;
+      const level = Number(send.level_db);
+      const list = sendsByTrack.get(trackId);
+      const spec = {
+        return_id: returnId,
+        level_db: Number.isFinite(level) ? level : 0,
+        pre: send.pre === true,
+      };
+      if (list) list.push(spec);
+      else sendsByTrack.set(trackId, [spec]);
+    }
+
+    const gainDb = Number(master.gain_db);
+    return {
+      chains: chains,
+      sendsByTrack: sendsByTrack,
+      returns: returns,
+      masterGainDb: Number.isFinite(gainDb) ? gainDb : 0,
+    };
+  }
+
+  /**
+   * What makes two builds of one chain "the same chain": each insert's id, kind
+   * and bypass, in the order the chain runs them. A chain whose key is unchanged
+   * only had parameters turned, so it keeps its insert objects (and their state)
+   * and needs no crossfade. A different key — another kind, another order, an
+   * insert added, removed or bypassed — is a chain edit.
+   * @param {object[]} specs
+   * @returns {string}
+   */
+  function chainKeyOf(specs) {
+    let key = "";
+    for (let index = 0; index < specs.length; index += 1) {
+      const spec = specs[index];
+      key += `${index === 0 ? "" : "\u0001"}${spec.id}\u0000${spec.kind}\u0000${spec.bypass ? "1" : "0"}`;
+    }
+    return key;
+  }
+
+  /**
+   * The frames one chain puts on the path it feeds once an edit has settled: the
+   * sum of its inserts' own latency. Every track and return insert is
+   * zero-latency, so in practice this is the master chain's limiter (plan 1d:
+   * only the master limiter looks ahead).
+   *
+   * A runner an edit has retired does not count — the chain that stays is the one
+   * the number is about — and neither does one the NaN guard has bypassed: a
+   * faulted insert is a pass-through, so it delays nothing. A blend counts the
+   * path it is arriving at, which is the chain the fade ends on.
+   * @param {object[]} chain
+   * @returns {number}
+   */
+  function chainLatencyOf(chain) {
+    let frames = 0;
+    for (let index = 0; index < chain.length; index += 1) {
+      const node = chain[index];
+      if (!node) continue;
+      if (node.blend) {
+        frames += chainLatencyOf(node.fresh);
+        continue;
+      }
+      if (node.retired || node.bypass || node.faulted) continue;
+      const insert = node.insert;
+      if (insert && insert.latencyFrames > 0) frames += insert.latencyFrames;
+    }
+    return frames;
+  }
+
+  /**
+   * The frames a chain is delaying the path it feeds RIGHT NOW — the same sum as
+   * `chainLatencyOf`, taken from the weight each insert is at rather than from
+   * where it is headed. An insert counts once it is more than half in the path, a
+   * runner on its way out counts until it is less than half in, and a blend
+   * counts the path it is closer to, so the number switches at the fade's
+   * midpoint. That is the delay the audio really has, and so the number a master
+   * tap and every meter reading have to be stamped with (see
+   * `postMasterLatency`).
+   * @param {object[]} chain
+   * @returns {number}
+   */
+  function runningLatencyOf(chain) {
+    let frames = 0;
+    for (let index = 0; index < chain.length; index += 1) {
+      const node = chain[index];
+      if (!node) continue;
+      if (node.blend) {
+        frames += runningLatencyOf(node.weight >= 0.5 ? node.fresh : node.leaving);
+        continue;
+      }
+      const insert = node.insert;
+      if (!insert || node.faulted || !(node.wet >= 0.5)) continue;
+      if (insert.latencyFrames > 0) frames += insert.latencyFrames;
+    }
+    return frames;
+  }
+
+  /**
+   * The runners of a chain in the order it plays them, for a snapshot that only
+   * turned parameters: a blend contributes the path it is arriving at (what is
+   * leaving never takes parameters again) and a retired runner is left out.
+   * @param {object[]} chain
+   * @param {object[]} out collected into this list, in order
+   * @returns {void}
+   */
+  function collectRunnerOrder(chain, out) {
+    for (let index = 0; index < chain.length; index += 1) {
+      const node = chain[index];
+      if (!node) continue;
+      if (node.blend) {
+        collectRunnerOrder(node.fresh, out);
+        continue;
+      }
+      if (!node.retired) out.push(node);
+    }
+  }
+
+  /**
+   * One chain insert's parameters as a comparable key. Two snapshots that carry
+   * the same settings for one insert produce the same key, so a snapshot that
+   * turns nothing is not a rebuild — and, for an insert the NaN guard has
+   * bypassed, not a re-arm either.
+   * @param {object} params
+   * @returns {string|null} null when the object cannot be serialised
+   */
+  function paramsKeyOf(params) {
+    try {
+      return JSON.stringify(params && typeof params === "object" ? params : {});
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether one block of audio holds a sample that is not a finite number: the
+   * test the NaN guard makes at every insert's output. `v - v` is exactly 0 for
+   * every finite double and NaN for a NaN or an infinity.
+   * @param {Float32Array} left
+   * @param {Float32Array} right
+   * @param {number} frames
+   * @returns {boolean}
+   */
+  function hasInvalidSample(left, right, frames) {
+    for (let index = 0; index < frames; index += 1) {
+      const value = left[index];
+      if (value - value !== 0) return true;
+      const other = right[index];
+      if (other - other !== 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A track's device parameters as a plain object.
+   * @param {object} track
+   * @returns {object}
+   */
   function deviceParams(track) {
     const device = track && typeof track === "object" ? track.device : null;
     const params = device && typeof device.params === "object" && device.params ? device.params : null;
@@ -1398,6 +1883,77 @@
       this.tapLeft = null;
       this.tapRight = null;
 
+      /**
+       * The master meter (`meter.js`): momentary, short-term and integrated LUFS
+       * plus true peak, read after the master inserts. Null when this module was
+       * composed without `meter.js` (some engine tests build their own file
+       * list), in which case no `meter` message is ever posted.
+       */
+      this.meter = typeof StudioMeter === "object" && StudioMeter !== null ? StudioMeter.create(sampleRate) : null;
+
+      /** Frames since the last meter reading, and how many make one (100 ms). */
+      this.sinceMeter = 0;
+      this.meterEvery = Math.max(1, Math.round(sampleRate * METER_INTERVAL_SECONDS));
+
+      /** Whether the playhead ran at the last block, so a stop posts one last reading. */
+      this.meterWasPlaying = false;
+
+      /**
+       * The mixer the last song read (`mixerSpecOf`): one chain per owner, the
+       * sends, the returns and the master's gain. Plain data, read on the message
+       * path; the insert OBJECTS are built from it by `applyMixer()`.
+       */
+      this.mixer = NO_MIXER;
+
+      /** The song's returns, in snapshot order, as chain holders (see `renderReturn`). */
+      this.returns = [];
+      this.returnRecords = new Map();
+
+      /** The master's own chain holder, and its gain and chain latency. */
+      this.masterRecord = this.newChainOwner("master");
+      this.masterGain = 1;
+      this.masterLatencyMs = 0;
+      /** That latency in frames: what a master tap is moved back by (see `postTap`). */
+      this.masterLatencyFrames = 0;
+      /**
+       * One scratch pair per nesting level a blend may hold, made with the rest of
+       * the mixer's scratch (`ensureScratch`, once per block size).
+       */
+      this.blendLeft = null;
+      this.blendRight = null;
+
+      /**
+       * Whether the page's compiled Faust effects have been posted. Until they
+       * are, an insert of a Faust kind is "still loading" and is built again when
+       * a snapshot arrives; after them, a missing module never appears, so it is a
+       * permanent pass-through (reported once).
+       */
+      this.faustArrived = false;
+
+      /**
+       * Insert ids a message was already posted for: one "still loading" per
+       * Faust insert whose modules have not arrived, and one "could not be
+       * built" per insert that will not build at all.
+       */
+      this.loadingReported = new Set();
+      this.brokenReported = new Set();
+
+      /**
+       * The mixer's scratch, allocated once per block size and never inside a
+       * chain: the run's own copy of a track's source, the NaN guard's copy of an
+       * insert's input (which is also what a fading insert is blended against),
+       * the 128-frame pair a long run is handed to an insert through, and the
+       * right channel a host without one gets.
+       */
+      this.scratchFrames = 0;
+      this.mixLeft = null;
+      this.mixRight = null;
+      this.guardLeft = null;
+      this.guardRight = null;
+      this.insertLeft = null;
+      this.insertRight = null;
+      this.rightPad = null;
+
       /** Serialises the async slot work, so songs apply in arrival order. */
       this.queue = Promise.resolve();
 
@@ -1515,6 +2071,10 @@
         }
         case "play":
           this.sequencer.play();
+          // The integrated measurement and the true peak start again on every
+          // Play (plan 1d, Task 9), and the first reading is 100 ms away.
+          if (this.meter !== null) this.meter.reset();
+          this.sinceMeter = 0;
           break;
         case "stop":
           this.sequencer.stop();
@@ -1545,6 +2105,19 @@
           break;
         case "library_unload":
           this.unloadLibrary(message.library_id);
+          break;
+        case "faust-modules":
+          // The compiled Faust effects (plan 1d, Task 7). They are compiled once
+          // per page here, on the message queue — never inside `process()` — and
+          // then the chains are built again, because an insert that was waiting
+          // for its module can now be a real one (plan 1d, Task 9). From this
+          // point on a module that is missing is a permanent pass-through, not a
+          // load in progress (see `createInsert`).
+          this.enqueue(async () => {
+            await this.compileFaustModules(message.modules);
+            this.faustArrived = true;
+            this.applyMixer();
+          });
           break;
         case "live":
           this.live(message);
@@ -1586,6 +2159,19 @@
         default:
           break;
       }
+    }
+
+    /**
+     * Compile the Faust effects this page posted: their wasm, once per kind, so
+     * every insert of that kind instantiates from one module. A host whose build
+     * output is missing posts nothing, and this module was composed without
+     * `faust-host.js` in a test that predates it — both are no-ops.
+     * @param {Object<string, {wasm: ArrayBuffer, json: string}>} modules
+     * @returns {Promise<void>}
+     */
+    async compileFaustModules(modules) {
+      if (typeof StudioFaustHost === "undefined" || StudioFaustHost === null) return;
+      await StudioFaustHost.compileModules(modules);
     }
 
     /**
@@ -2093,6 +2679,10 @@
         throw new Error(`A song can have at most ${MAX_TRACKS} tracks.`);
       }
       this.readKit(snapshot);
+      // The mixer is plain data off the same snapshot: read here, so the chains
+      // are built in the same queued step as the tracks they hang on (see
+      // `syncSlots`), and so a send reaches a return that exists first.
+      this.mixer = mixerSpecOf(snapshot);
       this.bpm = bpmOf(snapshot);
       this.sequencer.setSong(snapshot);
       this.enqueue(() => this.syncSlots(tracks));
@@ -2185,6 +2775,19 @@
           else record = await this.buildSlot(index, id, type);
         }
         next.push(record);
+        // A track is a chain holder like the master and a return: its inserts,
+        // its sends and the fade between two builds of its chain live on the
+        // record, and a record reused across snapshots keeps them.
+        if (record.chain === undefined) {
+          record.chain = null;
+          record.chainKey = null;
+          record.chainLabel = id;
+          record.preSends = NO_INSERTS;
+          record.postSends = NO_INSERTS;
+          record.sendGate = 1;
+          record.muted = false;
+          record.label = id;
+        }
         // The font host assigns channels in snapshot order, so the song's own
         // track order is collected here, as the song arrived.
         if (font) fontTracks.push(fontSpecOf(track));
@@ -2203,6 +2806,10 @@
       this.trackSlots = trackSlots;
       this.fontTracks = fontTracks;
       this.bindFonts();
+      // The tracks exist and the returns are known: build the mixer's chains on
+      // them (one insert object per insert, outside `process()`), so the next
+      // block runs the song's effects, sends, returns and master.
+      this.applyMixer();
     }
 
     /**
@@ -2489,10 +3096,1207 @@
      */
     applyMix(record, track, anySolo) {
       const muted = track.mute === true || (anySolo && track.solo !== true);
+      record.muted = muted;
       const gain = muted ? 0 : Math.pow(10, gainDbOf(track) / 20);
       const theta = ((panOf(track) + 1) * Math.PI) / 4;
       record.left = gain * Math.cos(theta);
       record.right = gain * Math.sin(theta);
+      // A track's name is what an insert fault names it by ("reverb on Bass …"),
+      // and its sends are gated by the very same mute and solo rule as its fader.
+      record.sendGate = muted ? 0 : 1;
+      record.label = typeof track.name === "string" && track.name.trim() !== "" ? track.name.trim() : record.track_id;
+    }
+
+    /**
+     * One chain holder: the runners that make up this chain, in the order they
+     * run, and the name a message about one of them calls this chain. A track
+     * record is one of these (it carries the same fields), a return record is
+     * one, and the master is one.
+     * @param {"track"|"return"|"master"} kind
+     * @returns {object}
+     */
+    newChainOwner(kind) {
+      return {
+        kind: kind,
+        /**
+         * The chain's runners, in order (see `newRunner`). A chain edit is applied
+         * to this list in place, on the message path, so `process()` only ever
+         * walks a finished one.
+         */
+        chain: null,
+        /** What that chain is (`chainKeyOf`), or null before anything was built. */
+        chainKey: null,
+        /** The name a message about one of its inserts calls it. */
+        chainLabel: "",
+      };
+    }
+
+    /**
+     * Build the song's whole mixer from `this.mixer` and the tracks the last
+     * `syncSlots` left in `this.slots`. Called on the message queue — never from
+     * `process()` — so every insert object, its parameters and its wasm instance
+     * are made here, and the audio thread only ever walks finished runners.
+     *
+     * A chain whose shape did not change keeps every insert object (its state and
+     * all); an edit is applied insert by insert, so an insert the document did not
+     * touch is never rebuilt and never fades (`applyChain`).
+     * @returns {void}
+     */
+    applyMixer() {
+      const mixer = this.mixer && typeof this.mixer === "object" ? this.mixer : NO_MIXER;
+
+      // Returns first: a track's sends point at them.
+      const previous = this.returnRecords;
+      const next = new Map();
+      const returns = [];
+      // The returns' own send buffers are sized here, on the message path: a
+      // return that the song has just added gets its pair before it is ever run,
+      // so no block has to allocate one (see `ensureScratch`, which only grows
+      // them when the host asks for a bigger block than they were made for).
+      const scratchSize = Math.max(this.scratchFrames, INITIAL_QUANTUM);
+      for (let index = 0; index < mixer.returns.length; index += 1) {
+        const spec = mixer.returns[index];
+        let record = previous.get(spec.id);
+        if (!record) record = this.buildReturnRecord(spec.id);
+        if (record.mixLeft === null || record.mixLeft.length < scratchSize) {
+          record.mixLeft = new Float32Array(scratchSize);
+          record.mixRight = new Float32Array(scratchSize);
+        }
+        record.name = spec.name;
+        record.label = spec.name;
+        const gain = spec.mute === true ? 0 : dbToGain(spec.gain_db, LOWEST_RETURN_GAIN_DB, HIGHEST_RETURN_GAIN_DB);
+        const pan = panPair(spec.pan, gain);
+        record.left = pan.left;
+        record.right = pan.right;
+        next.set(spec.id, record);
+        returns.push(record);
+        this.applyChain(record, mixer.chains.get(`return:${spec.id}`) || NO_INSERTS, spec.name);
+      }
+      // A return the song dropped takes its chain with it; the records still held
+      // by a fading chain are dropped the next time the mixer is built.
+      this.returnRecords = next;
+      this.returns = returns;
+
+      // The tracks, in song order, with the sends they carry.
+      const slots = this.slots;
+      for (let index = 0; index < slots.length; index += 1) {
+        const record = slots[index];
+        if (!record) continue;
+        const trackId = asId(record.track_id);
+        this.applyChain(record, mixer.chains.get(`track:${trackId}`) || NO_INSERTS, record.label || trackId);
+        // The sends are read here, once per song: one gain per send, already
+        // gated by the track's own mute and solo, split by where it taps.
+        const preSends = [];
+        const postSends = [];
+        const sends = mixer.sendsByTrack.get(trackId);
+        if (sends) {
+          const gate = typeof record.sendGate === "number" ? record.sendGate : 0;
+          for (let at = 0; at < sends.length; at += 1) {
+            const send = sends[at];
+            const target = next.get(send.return_id);
+            if (!target) continue;
+            const gain = dbToGain(send.level_db, LOWEST_SEND_DB, HIGHEST_SEND_DB) * gate;
+            if (gain === 0) continue;
+            const entry = { target: target, gain: gain };
+            if (send.pre) preSends.push(entry);
+            else postSends.push(entry);
+          }
+        }
+        record.preSends = preSends;
+        record.postSends = postSends;
+      }
+
+      // The master: its gain, and its own chain last of all.
+      const master = this.masterRecord;
+      master.label = "the master";
+      this.masterGain = dbToGain(mixer.masterGainDb, LOWEST_MASTER_GAIN_DB, HIGHEST_MASTER_GAIN_DB);
+      this.applyChain(master, mixer.chains.get("master") || NO_INSERTS, "the master");
+    }
+
+    /**
+     * One return's record: its own chain holder plus the pair of buffers its
+     * sends accumulate into (`renderReturn`).
+     * @param {string} id
+     * @returns {object}
+     */
+    buildReturnRecord(id) {
+      const record = this.newChainOwner("return");
+      record.id = id;
+      record.name = id;
+      record.label = id;
+      record.left = 0;
+      record.right = 0;
+      record.mixLeft = null;
+      record.mixRight = null;
+      return record;
+    }
+
+    /**
+     * Give one chain the inserts the document says it has.
+     *
+     * A chain is compared by SHAPE: its inserts' ids and kinds, in order, with
+     * their bypass flags (`chainKeyOf`). A chain whose shape is unchanged only
+     * had parameters turned — and possibly a Faust module that has arrived since
+     * — so each runner takes its own `setParams` and keeps its insert, its state
+     * and its fault: nothing is rebuilt and nothing fades.
+     *
+     * Anything else is a chain edit, and it is applied insert by insert rather
+     * than by swapping one list of objects for another (see `buildChain`): an
+     * insert the edit did not touch keeps its object — a reverb's tail, a
+     * limiter's lookahead, a filter's state — and does not fade at all; an insert
+     * that was added fades in from the dry signal; one that was removed, given
+     * another kind or bypassed fades out where it stands. Every fade is armed
+     * ONCE, here, and counts down frame by frame across runs and blocks (a run is
+     * only a few dozen frames once a motion curve splits a block), so an edit can
+     * never be stranded half-way. A snapshot that lands while a fade is still
+     * running only re-targets the runners that are moving: each weight keeps the
+     * value it had, so nothing restarts and nothing clicks.
+     *
+     * All of it runs on the message queue — never in `process()` — so the audio
+     * thread only ever finds runner objects that are already built.
+     * @param {object} owner a chain holder (a track, a return or the master)
+     * @param {object[]} specs the chain's inserts, in the order they run
+     * @param {string} label what a message about one of them calls this owner
+     * @returns {void}
+     */
+    applyChain(owner, specs, label) {
+      owner.chainLabel = label;
+      if (owner.chain !== null) this.compactChain(owner);
+      const key = chainKeyOf(specs);
+      if (owner.chain === null) {
+        // The first chain a song has: there is nothing to fade from, so it is
+        // simply the chain that plays.
+        owner.chain = this.buildChain(owner, specs, label, false);
+        owner.chainKey = key;
+        if (owner.kind === "master") this.postMasterLatency(owner.chain);
+        return;
+      }
+      if (owner.chainKey === key) {
+        this.applyChainParams(owner, specs);
+        return;
+      }
+      const before = chainLatencyOf(owner.chain);
+      const chain = this.buildChain(owner, specs, label, true);
+      owner.chain = chain;
+      owner.chainKey = key;
+      // A chain whose total latency moved — the limiter added, removed or
+      // bypassed — fades over its own delay as well as the 64 frames: the two
+      // sides of the fade are that far apart in time (the dry side is not delayed
+      // by the insert's lookahead, the wet side is), so the ramp is long enough
+      // for the move to arrive spread over L frames instead of as a step. It is
+      // not a time-aligned blend, and the comb it leaves for those frames is the
+      // price of moving a delay in or out (see the file header). A REBUILT master
+      // limiter is the case that does come out aligned: the pair runs the old and
+      // the new chain in parallel and the old one holds the path while the new
+      // one's lookahead fills (see `buildChain`).
+      this.armFades(chain, Math.max(CHAIN_FADE_FRAMES, before, chainLatencyOf(chain)));
+      if (owner.kind === "master") this.postMasterLatency(chain);
+    }
+
+    /**
+     * Drop the runners an earlier edit retired once their fade has finished, and
+     * fold a blend whose fade has arrived into the path it arrived at. Called on
+     * the message path only, so `process()` never compacts a chain.
+     * @param {object} owner
+     * @returns {void}
+     */
+    compactChain(owner) {
+      const chain = owner.chain;
+      let dead = false;
+      for (let index = 0; index < chain.length; index += 1) {
+        const node = chain[index];
+        if (!node) continue;
+        if (node.blend ? node.weight === node.target : node.retired && node.wet === 0) {
+          dead = true;
+          break;
+        }
+      }
+      if (!dead) return;
+      const kept = [];
+      for (let index = 0; index < chain.length; index += 1) {
+        const node = chain[index];
+        if (!node) continue;
+        if (node.blend) {
+          // A blend that has arrived IS the path it arrived at; one still fading
+          // stays a node of the chain, with the path it is leaving inside it.
+          if (node.weight === node.target) {
+            for (let at = 0; at < node.fresh.length; at += 1) kept.push(node.fresh[at]);
+          } else kept.push(node);
+          continue;
+        }
+        if (node.retired && node.wet === 0) continue;
+        kept.push(node);
+      }
+      owner.chain = kept;
+    }
+
+    /**
+     * Take the parameters of a chain whose shape did not change — and give an
+     * insert that was waiting for a Faust module its chance to build now.
+     *
+     * Nothing is rebuilt and nothing fades: every insert keeps its state, so a
+     * knob turn (or a snapshot that changed anything else about the song) costs
+     * one `setParams` per insert whose own settings actually moved.
+     * @param {object} owner
+     * @param {object[]} specs
+     * @returns {void}
+     */
+    applyChainParams(owner, specs) {
+      // The runners the chain still plays, in the order it plays them: a blend
+      // node contributes the path it is arriving at (see `collectRunnerOrder`).
+      const chain = [];
+      collectRunnerOrder(owner.chain, chain);
+      let cursor = 0;
+      for (let index = 0; index < specs.length; index += 1) {
+        const spec = specs[index];
+        const id = asId(spec.id);
+        // The retired runners of an earlier edit are skipped: they are on their
+        // way out and never take parameters again.
+        while (cursor < chain.length && chain[cursor].id !== id) cursor += 1;
+        if (cursor >= chain.length) break;
+        const runner = chain[cursor];
+        cursor += 1;
+        if (runner.loading) {
+          this.retryLoading(runner, spec, owner);
+          continue;
+        }
+        this.applyRunnerParams(runner, spec);
+      }
+      // An insert that has just been built (a Faust module that arrived) or armed
+      // again can move the master chain's delay: a limiter that appears, or one
+      // the NaN guard bypassed that stops counting, is a latency the tap and the
+      // meter have to hear about at once.
+      if (owner.kind === "master") this.postMasterLatency(owner.chain);
+    }
+
+    /**
+     * One more try at an insert whose Faust module had not arrived: build it now
+     * if it has, and give up on it (as a permanent pass-through, reported once)
+     * once the page has posted its modules and this kind is not among them.
+     * @param {object} runner
+     * @param {object} spec
+     * @param {object} owner
+     * @returns {void}
+     */
+    retryLoading(runner, spec, owner) {
+      const host = typeof StudioFaustHost === "undefined" ? null : StudioFaustHost;
+      if (host && typeof host.has === "function" && host.has(runner.kind) === true) {
+        this.attachInsert(runner, spec, owner, this.sequencer.isPlaying());
+        return;
+      }
+      if (!this.faustArrived) return;
+      runner.loading = false;
+      runner.broken = true;
+      this.reportBrokenInsert(runner, owner, `no compiled "${spec.kind}" effect was posted`);
+    }
+
+    /**
+     * Give one runner its insert's parameters. A faulted insert is armed again
+     * ONLY when its own settings moved: any other edit to the song leaves it
+     * bypassed, with the state it produced the bad sample from still in it.
+     *
+     * Arming it again is a fresh start, so it comes back the way a newly built
+     * insert does: its state (the NaN is still in it) is thrown away, its own
+     * latency runs off first (a limiter's lookahead fills from the incoming
+     * signal) and then its weight fades in from the dry signal over the chain's
+     * own 64 frames. An insert that comes back at another level is therefore a
+     * short ramp and not a step in the master.
+     * @param {object} runner
+     * @param {object} spec
+     * @returns {void}
+     */
+    applyRunnerParams(runner, spec) {
+      const key = paramsKeyOf(spec.params);
+      if (key !== null && key === runner.paramsKey) return;
+      runner.paramsKey = key;
+      if (runner.insert === null) return;
+      runner.insert.setParams(spec.params);
+      if (!runner.faulted) return;
+      // Its own settings changed, so it gets another chance: its state (the NaN
+      // is still in it) is reset and the insert comes back the way a new one
+      // does — primed by its own latency, then faded in from the dry signal.
+      runner.faulted = false;
+      if (typeof runner.insert.reset === "function") runner.insert.reset();
+      this.startFadeIn(runner);
+    }
+
+    /**
+     * Put one runner back into the signal path: primed by its own latency (a
+     * limiter's lookahead is filled from the incoming signal, so its output never
+     * starts with the silence of an empty delay line) and then faded in from the
+     * dry signal over the chain's own 64 frames. A stopped transport has nothing
+     * to fade against, so there the insert simply plays.
+     * @param {object} runner
+     * @returns {void}
+     */
+    startFadeIn(runner) {
+      const insert = runner.insert;
+      const latency = insert && insert.latencyFrames > 0 ? insert.latencyFrames : 0;
+      runner.fadeFrames = CHAIN_FADE_FRAMES;
+      runner.fadeStep = 1 / CHAIN_FADE_FRAMES;
+      runner.prime = latency;
+      if (!this.sequencer.isPlaying()) {
+        runner.wet = 1;
+        runner.wetTarget = 1;
+        runner.prime = 0;
+        return;
+      }
+      runner.wet = 0;
+      runner.wetTarget = 1;
+    }
+
+    /**
+     * Build one chain from `specs`, reusing the runners the owner already holds.
+     *
+     * A runner is reused — the very same object, so its insert's tail, its delay
+     * line, its filter state and its parameters all survive — when its insert id
+     * kept its kind and the edit did not reorder the inserts around it. What comes
+     * out is the chain as it will run once the edit has faded through:
+     *
+     *   - a reused runner keeps its place and its state (only its bypass flag and
+     *     its parameters can have moved);
+     *   - an insert that was added fades in from the dry signal, after its own
+     *     latency has run off (a limiter's lookahead is filled from the incoming
+     *     signal before its output is mixed in, so it never starts by outputting
+     *     the silence of an empty delay line);
+     *   - a runner the edit dropped stays where it stands with 0 as its weight's
+     *     target, fades out, and is dropped by the next `applyChain`.
+     *
+     * Between two reused runners, though, an edit can leave a SEGMENT that is
+     * replaced rather than ended: an insert deleted and another added in its
+     * place, or one id given another kind. Fading those two one after the other
+     * is wrong twice over — the arriving insert's weight brings its output in on
+     * top of what the leaving one still passes (so the level swells while both
+     * are half in), and it runs on the leaving insert's output rather than on the
+     * signal that arrived (so a new delay replays the echoes of the effect it
+     * replaced). A segment like that is therefore ONE node of the chain that runs
+     * both paths on the same input and blends the two OUTPUTS (see `runBlend` and
+     * `placeSegment`).
+     *
+     * A reorder (the same inserts in another order) is the extreme of that: no
+     * insert can be reused at its place, so the whole chain is one such segment —
+     * the old order and the new one, both fed the chain's input, crossfaded in
+     * parallel. An edit that lands while a blend is still fading is treated the
+     * same way (the old chain, live blend and all, becomes the leaving path), so
+     * nothing has to re-fade a fade that is already running.
+     * @param {object} owner the chain holder (`owner.chain` is the chain this
+     *   edit replaces, or null for the first chain of a song)
+     * @param {object[]} specs
+     * @param {string} label
+     * @param {boolean} edit whether this replaces a live chain (so new inserts
+     *   fade in) rather than being the first one (which plays at once)
+     * @returns {object[]} the new chain, in the order it runs
+     */
+    buildChain(owner, specs, label, edit) {
+      const previous = owner.chain === null ? NO_INSERTS : owner.chain;
+      const fadeIn = edit && this.sequencer.isPlaying();
+      // Which spec each insert id names, and whether the inserts a spec still
+      // names come back in the order they were in.
+      const wanted = new Map();
+      for (let index = 0; index < specs.length; index += 1) wanted.set(asId(specs[index].id), index);
+      // A chain that holds a blend still fading cannot be taken apart position by
+      // position (the two paths of that blend are one place in the chain), and a
+      // reorder has no position to keep: both make the whole chain the segment.
+      let whole = false;
+      const reuse = new Map();
+      let last = -1;
+      let ordered = true;
+      for (let index = 0; index < previous.length; index += 1) {
+        const node = previous[index];
+        if (!node) continue;
+        if (node.blend) {
+          whole = true;
+          continue;
+        }
+        if (node.retired) continue;
+        const target = wanted.get(node.id);
+        if (target === undefined) continue;
+        if (target <= last) ordered = false;
+        else last = target;
+        if (specs[target].kind === node.kind) reuse.set(node.id, node);
+      }
+      if (!ordered) {
+        reuse.clear();
+        whole = true;
+      }
+      if (whole) return this.buildParallelChain(owner, specs, label, previous, fadeIn);
+
+      // The runners this edit keeps, by the spec index they come back at.
+      const kept = new Array(specs.length);
+      for (let index = 0; index < previous.length; index += 1) {
+        const node = previous[index];
+        if (!node || node.retired || node.blend) continue;
+        const target = wanted.get(node.id);
+        if (target === undefined || reuse.get(node.id) !== node) continue;
+        kept[target] = node;
+      }
+
+      const chain = [];
+      let oldAt = 0;
+      let specAt = 0;
+      for (let index = 0; index < specs.length; index += 1) {
+        const node = kept[index];
+        if (!node) continue;
+        // Everything between the last kept runner and this one is one segment:
+        // what the previous chain had there, and what the document has now.
+        let at = oldAt;
+        while (at < previous.length && previous[at] !== node) at += 1;
+        this.placeSegment(chain, previous.slice(oldAt, at), specs.slice(specAt, index), owner, label, fadeIn);
+        chain.push(node);
+        this.refreshRunner(node, specs[index], owner, fadeIn);
+        oldAt = at + 1;
+        specAt = index + 1;
+      }
+      this.placeSegment(chain, previous.slice(oldAt), specs.slice(specAt), owner, label, fadeIn);
+      return chain;
+    }
+
+    /**
+     * Build a chain as the arriving side of one chain-wide blend: every insert
+     * the document names is built fresh (a reorder reuses nothing, and the old
+     * objects stay in the leaving path with the state the fade plays out), and the
+     * whole previous chain is that leaving path.
+     * @param {object} owner
+     * @param {object[]} specs
+     * @param {string} label
+     * @param {object[]} previous the chain this edit replaces
+     * @param {boolean} fadeIn whether a fade can run (the transport is playing)
+     * @returns {object[]} the new chain
+     */
+    buildParallelChain(owner, specs, label, previous, fadeIn) {
+      const fresh = [];
+      for (let index = 0; index < specs.length; index += 1) {
+        fresh.push(this.newRunner(specs[index], label, owner, false));
+      }
+      if (!fadeIn) {
+        // Nothing plays, so nothing fades: the arriving chain is simply the one
+        // that plays, and what it replaced is let go where it stands.
+        for (let index = 0; index < previous.length; index += 1) {
+          const node = previous[index];
+          if (!node || node.blend) continue;
+          node.retired = true;
+          node.wet = 0;
+          node.wetTarget = 0;
+          node.prime = 0;
+        }
+        return fresh;
+      }
+      if (previous.length === 0) return fresh;
+      this.freezeNodes(previous);
+      return [this.newBlend(previous, fresh, true)];
+    }
+
+    /**
+     * Put one segment of a chain — the material between two runners the edit kept
+     * — into the chain being built.
+     *
+     * Three shapes, and only the last has to run anything twice:
+     *
+     *   - nothing leaves: the arriving inserts fade in one by one, each against
+     *     its own input, which cannot swell (an insert's weight only ever swaps
+     *     its own output for the signal it was given);
+     *   - nothing arrives: the leaving inserts fade out where they stand;
+     *   - both: one blend node runs the two paths on the SAME input and fades
+     *     between their outputs (see `buildChain`).
+     * @param {object[]} chain the chain being built (appended to)
+     * @param {object[]} leaving the previous chain's nodes in this segment
+     * @param {object[]} specs the document's inserts in this segment
+     * @param {object} owner
+     * @param {string} label
+     * @param {boolean} fadeIn whether a fade can run (the transport is playing)
+     * @returns {void}
+     */
+    placeSegment(chain, leaving, specs, owner, label, fadeIn) {
+      const dropped = [];
+      for (let index = 0; index < leaving.length; index += 1) {
+        const node = leaving[index];
+        if (node && !node.blend) dropped.push(node);
+      }
+      if (dropped.length === 0) {
+        for (let index = 0; index < specs.length; index += 1) {
+          chain.push(this.newRunner(specs[index], label, owner, fadeIn));
+        }
+        return;
+      }
+      if (!fadeIn) {
+        // Nothing plays, so nothing fades: what the document dropped just goes,
+        // and what it added plays at once.
+        for (let index = 0; index < dropped.length; index += 1) {
+          const node = dropped[index];
+          node.retired = true;
+          node.wet = 0;
+          node.wetTarget = 0;
+          node.prime = 0;
+        }
+        for (let index = 0; index < specs.length; index += 1) {
+          chain.push(this.newRunner(specs[index], label, owner, false));
+        }
+        return;
+      }
+      if (specs.length === 0) {
+        // Nothing arrives: each leaving insert fades out where it stands.
+        for (let index = 0; index < dropped.length; index += 1) {
+          const node = dropped[index];
+          node.retired = true;
+          node.wetTarget = 0;
+          node.prime = 0;
+          chain.push(node);
+        }
+        return;
+      }
+      // Both sides: the two paths run in parallel and one weight fades between
+      // their outputs, so nothing the old one made is fed to the new one and two
+      // half-in inserts cannot add up to more than the louder of them.
+      const fresh = [];
+      for (let index = 0; index < specs.length; index += 1) {
+        fresh.push(this.newRunner(specs[index], label, owner, false));
+      }
+      this.freezeNodes(dropped);
+      chain.push(this.newBlend(dropped, fresh, true));
+    }
+
+    /**
+     * Stop every runner in a list where its weight is. A path that goes into a
+     * blend does not fade any more itself — the blend owns the crossfade, and a
+     * path whose own weights kept moving would fade twice.
+     * @param {object[]} nodes
+     * @returns {void}
+     */
+    freezeNodes(nodes) {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index];
+        if (!node) continue;
+        if (node.blend) {
+          // A blend inside a path is frozen too: it keeps the share of the signal
+          // it has now, and the path it is leaving goes with the whole path.
+          node.target = node.weight;
+          node.prime = 0;
+          continue;
+        }
+        node.retired = true;
+        node.wetTarget = node.wet;
+        node.prime = 0;
+      }
+    }
+
+    /**
+     * One blend node: two paths of the chain, both fed the same input, with one
+     * weight fading between their outputs.
+     *
+     * The path being left runs while the path arriving PRIMES: a rebuilt master
+     * limiter needs its lookahead filled before its output means anything, and
+     * until then the old path is what the chain plays — so the ceiling holds, the
+     * time base does not move, and the weight starts from a path that is already
+     * at full strength instead of from silence.
+     * @param {object[]} leaving the path on its way out, frozen where it stands
+     * @param {object[]} fresh the path on its way in, at full weight
+     * @param {boolean} fadeIn whether the weight fades (the transport is playing)
+     * @returns {object} the node
+     */
+    newBlend(leaving, fresh, fadeIn) {
+      return {
+        blend: true,
+        /** The path on its way out, and the one on its way in. */
+        leaving: leaving,
+        fresh: fresh,
+        /** 0 is the leaving path alone, 1 the arriving one; it settles at 1. */
+        weight: fadeIn ? 0 : 1,
+        target: 1,
+        /** Frames the arriving path runs before the weight starts moving. */
+        prime: fadeIn ? chainLatencyOf(fresh) : 0,
+        /** The frames the fade spans, and the step one frame takes. */
+        fadeFrames: CHAIN_FADE_FRAMES,
+        fadeStep: 1 / CHAIN_FADE_FRAMES,
+      };
+    }
+
+    /**
+     * Point one reused runner at the spec the document now holds: its bypass flag
+     * and its parameters, and — when it has no insert to run (it was bypassed, or
+     * its Faust module was still on its way) — a new one, which fades in.
+     *
+     * A runner whose weight is 0 is a special case, and the reason bypass is a
+     * crossfade and not a switch: `runChainList` never ran it, so its insert's
+     * state is frozen where it was when the fade reached zero — a master
+     * limiter's 72-frame lookahead and its gain envelope, a delay's or a reverb's
+     * tail. Handing that back is not the effect the song has any more (it is the
+     * sound of the moment it was switched off), so an insert coming back from
+     * silence starts from silence: reset, primed by its own latency, then faded
+     * in like any insert arriving.
+     * @param {object} runner
+     * @param {object} spec
+     * @param {object} owner
+     * @param {boolean} fadeIn whether a fade can run (the transport is playing)
+     * @returns {void}
+     */
+    refreshRunner(runner, spec, owner, fadeIn) {
+      runner.label = insertLabelOf(spec.kind);
+      runner.bypass = spec.bypass === true;
+      if (runner.bypass) {
+        // Bypass is a crossfade too: the insert keeps its object and its
+        // parameters (an un-bypass picks both up again) but fades out of the
+        // signal path.
+        runner.wetTarget = 0;
+        if (!fadeIn) runner.wet = 0;
+        return;
+      }
+      const frozen = runner.wet === 0;
+      runner.wetTarget = 1;
+      if (runner.insert === null) {
+        // Nothing to run yet: a bypass that was just lifted, or a module that has
+        // arrived. A kind that can never be built stays a pass-through.
+        if (!runner.broken) this.attachInsert(runner, spec, owner, fadeIn);
+        return;
+      }
+      if (frozen) {
+        // It sat the bypass out and its state is where that left it (see above).
+        if (typeof runner.insert.reset === "function") runner.insert.reset();
+        this.startFadeIn(runner);
+      }
+      this.applyRunnerParams(runner, spec);
+    }
+
+    /**
+     * Give every node that is changing its target: a fade over `fadeFrames`
+     * frames, counted per FRAME (so a block a motion curve split into a dozen runs
+     * fades exactly as far as an unsplit one would have), or at once when the
+     * transport is stopped — a stopped song has nothing to fade against, so its
+     * new chain is simply the one that plays.
+     * @param {object[]} chain
+     * @param {number} fadeFrames
+     * @returns {void}
+     */
+    armFades(chain, fadeFrames) {
+      const playing = this.sequencer.isPlaying();
+      const step = 1 / fadeFrames;
+      for (let index = 0; index < chain.length; index += 1) {
+        const node = chain[index];
+        if (!node) continue;
+        if (node.blend) {
+          node.fadeFrames = fadeFrames;
+          node.fadeStep = step;
+          if (playing) continue;
+          node.weight = node.target;
+          node.prime = 0;
+          continue;
+        }
+        node.fadeFrames = fadeFrames;
+        node.fadeStep = step;
+        if (node.wet === node.wetTarget) {
+          node.prime = 0;
+          continue;
+        }
+        if (playing) continue;
+        node.wet = node.wetTarget;
+        node.prime = 0;
+      }
+    }
+
+    /**
+     * Build one runner for one insert: Crow's own dynamics in JavaScript, or a
+     * compiled Faust effect instantiated from the page's compiled module.
+     *
+     * A runner that has no insert to run yet is a PASS-THROUGH that costs nothing
+     * (see `createInsert`), so one bad insert costs only itself.
+     * @param {{id: string, kind: string, bypass: boolean, params: object}} spec
+     * @param {string} label what a message calls this insert's chain
+     * @param {object} owner
+     * @param {boolean} fadeIn whether an insert built here starts dry and fades in
+     * @returns {object} the runner `runChainList` drives
+     */
+    newRunner(spec, label, owner, fadeIn) {
+      const runner = {
+        id: asId(spec.id),
+        kind: spec.kind,
+        label: insertLabelOf(spec.kind),
+        bypass: spec.bypass === true,
+        insert: null,
+        faulted: false,
+        /** Its weight in the signal path: 1 is the insert's output, 0 its input. */
+        wet: 1,
+        /** Where that weight is heading: 0 or 1. */
+        wetTarget: 1,
+        /** Frames its insert runs before its weight starts moving (its latency). */
+        prime: 0,
+        /** The frames the current fade spans, and the step one frame takes. */
+        fadeFrames: CHAIN_FADE_FRAMES,
+        fadeStep: 1 / CHAIN_FADE_FRAMES,
+        /** The parameters it was last given, so a snapshot that turns nothing is nothing. */
+        paramsKey: null,
+        /** A Faust insert still waiting for the page's compiled modules. */
+        loading: false,
+        /** A kind that can never be built: a permanent pass-through, said once. */
+        broken: false,
+        /** Dropped by an edit: it fades out and `compactChain` lets it go. */
+        retired: false,
+      };
+      if (runner.bypass) {
+        // A bypassed insert has nothing to run, so it has nothing to build
+        // either: an un-bypass builds it then (see `refreshRunner`).
+        runner.wet = 0;
+        runner.wetTarget = 0;
+        return runner;
+      }
+      this.attachInsert(runner, spec, owner, fadeIn);
+      // An insert that could not be built (still loading, or never buildable) is
+      // a pass-through at full weight: it is in the path, it just does nothing.
+      if (runner.insert === null) {
+        runner.wet = 1;
+        runner.wetTarget = 1;
+        runner.prime = 0;
+      }
+      return runner;
+    }
+
+    /**
+     * Build a runner's insert, and give it its parameters and its fade. Called
+     * when a runner is made, and again later for one that was bypassed or waiting
+     * for a Faust module — always on the message path, never from `process()`.
+     * @param {object} runner
+     * @param {object} spec
+     * @param {object} owner
+     * @param {boolean} fadeIn whether the insert starts dry and fades in
+     * @returns {void}
+     */
+    attachInsert(runner, spec, owner, fadeIn) {
+      const insert = this.createInsert(runner, spec, owner);
+      if (insert === null) {
+        // Nothing to run: pass-through at full weight, whatever it was before.
+        runner.wet = 1;
+        runner.wetTarget = 1;
+        runner.prime = 0;
+        return;
+      }
+      runner.insert = insert;
+      runner.faulted = false;
+      // Its own delay runs off before its output is mixed in: a limiter fills its
+      // lookahead from the incoming signal instead of starting with 72 frames of
+      // the silence an empty delay line gives.
+      runner.prime = fadeIn && insert.latencyFrames > 0 ? insert.latencyFrames : 0;
+      runner.wet = fadeIn ? 0 : 1;
+      runner.wetTarget = 1;
+      runner.paramsKey = paramsKeyOf(spec.params);
+      insert.setParams(spec.params);
+      // A build that worked clears both marks, so a fault or a missed module that
+      // comes back later is reported again.
+      this.loadingReported.delete(runner.id);
+      this.brokenReported.delete(runner.id);
+    }
+
+    /**
+     * Make one runner's insert object, or say why it has none.
+     *
+     * A Faust insert whose module has not arrived yet is left to wait: the page
+     * posts its modules a moment after the engine comes up, and a song loaded
+     * before them must play rather than fail. Once they have arrived, a kind that
+     * is not among them never will be, so it is a permanent pass-through that is
+     * reported once. An insert whose kind is neither Crow's dynamics nor a
+     * compiled effect is reported once too, and so is one whose build throws, so
+     * one bad insert costs only itself.
+     * @param {object} runner
+     * @param {object} spec
+     * @param {object} owner
+     * @returns {object|null} the insert, or null for a pass-through
+     */
+    createInsert(runner, spec, owner) {
+      try {
+        if (DYNAMICS_KINDS.indexOf(spec.kind) !== -1) {
+          if (typeof StudioDynamics === "undefined" || StudioDynamics === null) {
+            throw new Error("Crow's dynamics are not part of this engine");
+          }
+          runner.loading = false;
+          runner.broken = false;
+          return StudioDynamics.create(spec.kind, sampleRate, {
+            // Only the limiter that sits on the master gets the lookahead.
+            master: owner.kind === "master" && spec.kind === "limiter",
+          });
+        }
+        const host = typeof StudioFaustHost === "undefined" ? null : StudioFaustHost;
+        if (!host || typeof host.has !== "function" || host.has(spec.kind) !== true) {
+          if (!this.faustArrived) {
+            runner.loading = true;
+            runner.broken = false;
+            this.reportLoadingInsert(runner.id, runner.label, owner.chainLabel);
+            return null;
+          }
+          runner.loading = false;
+          runner.broken = true;
+          this.reportBrokenInsert(runner, owner, `no compiled "${spec.kind}" effect was posted`);
+          return null;
+        }
+        runner.loading = false;
+        runner.broken = false;
+        return host.create(spec.kind, sampleRate);
+      } catch (error) {
+        runner.loading = false;
+        runner.broken = true;
+        this.reportBrokenInsert(
+          runner,
+          owner,
+          error && error.message ? error.message : String(error),
+        );
+        return null;
+      }
+    }
+
+    /**
+     * Say once that an insert has no compiled effect at all — its kind is not one
+     * Crow ships, or its Faust module arrived broken. It plays as a pass-through
+     * from here on.
+     * @param {object} runner
+     * @param {object} owner
+     * @param {string} reason
+     * @returns {void}
+     */
+    reportBrokenInsert(runner, owner, reason) {
+      if (this.brokenReported.has(runner.id)) return;
+      this.brokenReported.add(runner.id);
+      this.report(new Error(`${runner.label} on ${owner.chainLabel} could not be built: ${reason}`));
+    }
+
+    /**
+     * Say once that an insert is waiting for its compiled module, as its own
+     * message — not as an engine error: a song loaded a moment before the page's
+     * Faust effects arrive is not a failure, it is a load in progress, and nothing
+     * about it belongs in the log or on the console.
+     * @param {string} id
+     * @param {string} effect the effect's label
+     * @param {string} label the chain it sits in
+     * @returns {void}
+     */
+    reportLoadingInsert(id, effect, label) {
+      const insertId = asId(id);
+      if (this.loadingReported.has(insertId)) return;
+      this.loadingReported.add(insertId);
+      this.port.postMessage({
+        type: "insert_loading",
+        insert_id: insertId,
+        message: `${effect} on ${label} is still loading.`,
+      });
+    }
+
+    /**
+     * Post the master chain's own latency, once per change: the delay its inserts
+     * put on the master path — the limiter's 1.5 ms lookahead, and nothing else
+     * (plan 1d: every track and return insert is zero-latency).
+     *
+     * It is the RUNNING delay, not where an edit is heading: a fade that moves the
+     * limiter in or out crosses the number at its own midpoint, and a master
+     * limiter the NaN guard has bypassed stops counting the moment it stops
+     * delaying (see `runningLatencyOf`). It is read here, on the message path after
+     * an edit, and again after every run of the master chain, so the number a tap
+     * and a meter reading carry is the one the audio really has.
+     *
+     * The frame count is kept too: a master tap is stamped with the block's frame
+     * moved back by it, so a resample taken from the tap lines up with the song
+     * (see `postTap`).
+     * @param {object[]} chain
+     * @returns {void}
+     */
+    postMasterLatency(chain) {
+      const frames = runningLatencyOf(chain);
+      if (frames === this.masterLatencyFrames) return;
+      this.masterLatencyFrames = frames;
+      this.masterLatencyMs = (frames / sampleRate) * 1000;
+      this.port.postMessage({ type: "master_latency", ms: this.masterLatencyMs });
+    }
+
+    /**
+     * Run one chain over a run of frames, in place.
+     *
+     * A runner that is not changing costs exactly its insert's `process()`; a
+     * runner that is fading blends its insert's output against its own input by
+     * its own weight. An edit that REPLACED a segment of the chain instead runs its
+     * two paths side by side and blends their outputs (see `runBlend`) — never two
+     * copies of one chain, which would each advance the state of every insert they
+     * share.
+     *
+     * The buffers are the run's own (index 0 is the run's first frame), because
+     * a Faust insert lays its wasm buffers out for a block that starts at zero.
+     * @param {object} owner a chain holder
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} frames
+     * @returns {void}
+     */
+    runChain(owner, left, right, frames) {
+      if (owner.chain === null) return;
+      this.runChainList(owner.chain, left, right, frames, owner.chainLabel, 0);
+      // The master's delay is read after every run of its chain, so the number a
+      // tap and the meter carry really is the delay the audio was handed out
+      // with: a fade crosses it at its midpoint, and a faulted limiter stops
+      // counting at once.
+      if (owner.kind === "master") this.postMasterLatency(owner.chain);
+    }
+
+    /**
+     * One list of chain nodes over a run of frames, in place, with the NaN guard
+     * at every insert's output. A node is a runner, or a blend of two paths (see
+     * `buildChain`).
+     * @param {object[]} chain
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} frames
+     * @param {string} label the chain this list is (for a fault's sentence)
+     * @param {number} depth how many blends this list is nested inside
+     * @returns {void}
+     */
+    runChainList(chain, left, right, frames, label, depth) {
+      for (let index = 0; index < chain.length; index += 1) {
+        const node = chain[index];
+        if (!node) continue;
+        if (node.blend) {
+          this.runBlend(node, left, right, frames, label, depth);
+          continue;
+        }
+        const runner = node;
+        if (runner.wet === 0 && runner.wetTarget === 0) continue;
+        if (runner.insert === null || runner.faulted) {
+          // A pass-through — an insert still loading, one that can never be
+          // built, a bypass, or one bypassed in the engine after a bad sample —
+          // has no weight to blend: it lands on its target and costs nothing.
+          runner.wet = runner.wetTarget;
+          runner.prime = 0;
+          continue;
+        }
+        if (frames <= INSERT_BLOCK) {
+          this.runInsert(runner, left, right, frames, label);
+          continue;
+        }
+        // A host with a quantum bigger than 128 makes a longer run: an insert is
+        // handed it in 128-frame pieces, the block size it is laid out for —
+        // through the scratch pair, so no view is allocated on the audio thread.
+        const blockLeft = this.insertLeft;
+        const blockRight = this.insertRight;
+        for (let at = 0; at < frames; at += INSERT_BLOCK) {
+          const count = Math.min(INSERT_BLOCK, frames - at);
+          for (let frame = 0; frame < count; frame += 1) {
+            blockLeft[frame] = left[at + frame];
+            blockRight[frame] = right[at + frame];
+          }
+          this.runInsert(runner, blockLeft, blockRight, count, label);
+          for (let frame = 0; frame < count; frame += 1) {
+            left[at + frame] = blockLeft[frame];
+            right[at + frame] = blockRight[frame];
+          }
+        }
+      }
+    }
+
+    /**
+     * One blend over a run of frames: both paths run the SAME input, and what
+     * comes out is the leaving path's output fading out while the arriving path's
+     * fades in.
+     *
+     * The arriving path is always run, even while the weight is still 0: that is
+     * what primes it (a limiter's lookahead fills from the incoming signal), and
+     * it is why the weight waits for the arriving path's own latency before it
+     * starts moving. The two paths are level-added, never chained, so nothing the
+     * old effect made is fed to the new one and two half-in inserts cannot add up
+     * to more than the louder of them.
+     *
+     * A blend inside a blend uses the next preallocated pair, so nothing here
+     * allocates; past `BLEND_DEPTH` (a chain rewritten again and again inside a
+     * few milliseconds) the arriving path simply takes over, which is a step
+     * where the ramp would have been.
+     * @param {object} node a blend node
+     * @param {Float32Array} left the segment's input, and where its output goes
+     * @param {Float32Array} right
+     * @param {number} frames
+     * @param {string} label
+     * @param {number} depth
+     * @returns {void}
+     */
+    runBlend(node, left, right, frames, label, depth) {
+      const blendLeft = this.blendLeft;
+      const freshLeft = blendLeft === null ? undefined : blendLeft[depth];
+      if (!freshLeft) {
+        node.weight = node.target;
+        node.prime = 0;
+        this.runChainList(node.fresh, left, right, frames, label, depth);
+        return;
+      }
+      const freshRight = this.blendRight[depth];
+      for (let at = 0; at < frames; at += 1) {
+        freshLeft[at] = left[at];
+        freshRight[at] = right[at];
+      }
+      this.runChainList(node.leaving, left, right, frames, label, depth + 1);
+      this.runChainList(node.fresh, freshLeft, freshRight, frames, label, depth + 1);
+
+      const target = node.target;
+      const step = node.fadeStep;
+      let weight = node.weight;
+      let hold = node.prime;
+      for (let at = 0; at < frames; at += 1) {
+        if (hold > 0) {
+          hold -= 1;
+        } else if (weight !== target) {
+          weight = target === 1 ? weight + step : weight - step;
+          if (target === 1 ? weight >= 1 : weight <= 0) weight = target;
+          // The last step's rounding away is the target too: a weight that only
+          // misses it by less than half a step is there, and a blend that never
+          // quite arrives would never be folded away.
+          else if (Math.abs(target - weight) < step * 0.5) weight = target;
+        }
+        const leaving = 1 - weight;
+        left[at] = left[at] * leaving + freshLeft[at] * weight;
+        right[at] = right[at] * leaving + freshRight[at] * weight;
+      }
+      node.weight = weight;
+      node.prime = hold;
+    }
+
+    /**
+     * One insert over one block, in place: the block's input is kept, the insert
+     * runs, and a block that comes back with a sample that is not a finite number
+     * is replaced by that input, the insert is bypassed in the engine and the
+     * fault is reported once.
+     *
+     * A runner whose weight is not 1 is crossfading: the copy taken for the guard
+     * is its input, so the insert's output is blended back against it one frame at
+     * a time while the weight walks towards its target. The steps are counted per
+     * FRAME, never per run, so a run a motion curve cut short moves the fade
+     * exactly as far as its frames were worth and a fade can never restart.
+     *
+     * When the insert delays its audio (the master limiter, and nothing else),
+     * the two sides of that blend are NOT the same moment of the song: the dry
+     * side is the signal as it arrived and the wet side is that signal
+     * `latencyFrames` later, so the mix combs for the length of the fade. Delaying
+     * the dry side would put a jump at the fade's start or end instead, which is
+     * worse than a short comb; the file header says so too.
+     * @param {object} runner
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} frames
+     * @param {string} label
+     * @returns {void}
+     */
+    runInsert(runner, left, right, frames, label) {
+      const guardLeft = this.guardLeft;
+      const guardRight = this.guardRight;
+      for (let at = 0; at < frames; at += 1) {
+        guardLeft[at] = left[at];
+        guardRight[at] = right[at];
+      }
+      runner.insert.process(left, right, frames);
+      if (hasInvalidSample(left, right, frames)) {
+        for (let at = 0; at < frames; at += 1) {
+          left[at] = guardLeft[at];
+          right[at] = guardRight[at];
+        }
+        runner.wet = runner.wetTarget;
+        runner.prime = 0;
+        runner.faulted = true;
+        const message = `${runner.label} on ${label} produced an invalid sample; it is bypassed.`;
+        // The document is never touched: the insert stays in the song, bypassed in
+        // the ENGINE, and only its OWN parameters moving arms it again.
+        this.port.postMessage({ type: "insert_fault", insert_id: runner.id, message: message });
+        return;
+      }
+      if (runner.prime === 0 && runner.wet === runner.wetTarget) return;
+      const target = runner.wetTarget;
+      const step = runner.fadeStep;
+      let wet = runner.wet;
+      let hold = runner.prime;
+      for (let at = 0; at < frames; at += 1) {
+        if (hold > 0) {
+          // Its own latency runs off first: a limiter fills its lookahead from the
+          // incoming signal before any of its output is mixed in.
+          hold -= 1;
+        } else if (wet !== target) {
+          wet = target === 1 ? wet + step : wet - step;
+          // A weight that arrives, or only misses its target by less than half a
+          // step's rounding away, IS at it: a fade that stopped at 1e-16 would
+          // never let its runner go (see `compactChain`).
+          if (target === 1 ? wet >= 1 : wet <= 0) wet = target;
+          else if (Math.abs(target - wet) < step * 0.5) wet = target;
+        }
+        const dry = 1 - wet;
+        left[at] = left[at] * wet + guardLeft[at] * dry;
+        right[at] = right[at] * wet + guardRight[at] * dry;
+      }
+      runner.prime = hold;
+      runner.wet = wet;
+    }
+
+    /**
+     * Size the mixer's scratch for a block, once per block size. The tap's own
+     * buffers are sized the same way, in `prepareTap`.
+     * @param {number} count the frames this block holds
+     * @returns {void}
+     */
+    ensureScratch(count) {
+      if (this.scratchFrames >= count) return;
+      const size = Math.max(count, INITIAL_QUANTUM);
+      this.scratchFrames = size;
+      this.mixLeft = new Float32Array(size);
+      this.mixRight = new Float32Array(size);
+      this.guardLeft = new Float32Array(size);
+      this.guardRight = new Float32Array(size);
+      this.insertLeft = new Float32Array(INSERT_BLOCK);
+      this.insertRight = new Float32Array(INSERT_BLOCK);
+      this.rightPad = new Float32Array(size);
+      // One pair per nesting level a blend may hold (`runBlend`): an edit that
+      // lands while a blend is still fading builds one blend around another, and
+      // every level needs its own copy of the segment's input for its arriving
+      // path. Made here, once per block size, so the audio thread never allocates.
+      this.blendLeft = [];
+      this.blendRight = [];
+      for (let level = 0; level < BLEND_DEPTH; level += 1) {
+        this.blendLeft.push(new Float32Array(size));
+        this.blendRight.push(new Float32Array(size));
+      }
+      // A return's own pair is sized when the mixer is built (`applyMixer`, on the
+      // message path); a host that asks for a bigger block grows them here, once.
+      for (let index = 0; index < this.returns.length; index += 1) {
+        const record = this.returns[index];
+        if (record.mixLeft !== null && record.mixLeft.length >= size) continue;
+        record.mixLeft = new Float32Array(size);
+        record.mixRight = new Float32Array(size);
+      }
+    }
+
+    /**
+     * Post one meter reading, or none when this engine has no meter.
+     * @returns {void}
+     */
+    postMeter() {
+      if (this.meter === null) return;
+      const reading = this.meter.read();
+      this.port.postMessage({
+        type: "meter",
+        momentary: reading.momentary,
+        short_term: reading.short_term,
+        integrated: reading.integrated,
+        true_peak_db: reading.true_peak_db,
+        latency_ms: this.masterLatencyMs,
+      });
+    }
+
+    /**
+     * Count a block towards the next meter reading: one every 100 ms of audio
+     * while the playhead runs, and one more when it stops (so the master strip's
+     * last number is the one the song ended on).
+     * @param {number} frames the frames this block held
+     * @returns {void}
+     */
+    meterBlock(frames) {
+      if (this.meter === null) return;
+      const playing = this.sequencer.isPlaying();
+      if (playing) {
+        this.sinceMeter += frames;
+        if (this.sinceMeter >= this.meterEvery) {
+          // The hop is SUBTRACTED, not zeroed: a block that straddles the 100 ms
+          // line keeps its remainder, so readings land on the same frames whatever
+          // block size the host asks for.
+          this.sinceMeter -= this.meterEvery;
+          this.postMeter();
+        }
+      } else if (this.meterWasPlaying) {
+        this.postMeter();
+      }
+      this.meterWasPlaying = playing;
     }
 
     /**
@@ -2548,6 +4352,11 @@
       const firstFrame = this.frame;
       try {
         this.prepareTap(count);
+        // The mixer's scratch (the run's own copy of a track, the guard's copy of
+        // an insert's input, the 128-frame pair a long run is handed through) and
+        // each return's pair, sized once per block size. A return's buffers are
+        // made when the mixer is built, so nothing here allocates one.
+        this.ensureScratch(count);
         this.block(left, right, count);
         this.postTap(left, right, count, firstFrame);
       } catch (error) {
@@ -2586,6 +4395,13 @@
      *
      * Every block names the CONTEXT frame its first sample sits on, so the
      * caller can cut what it keeps on the frame itself instead of counting.
+     *
+     * A MASTER tap is moved back by the master chain's own latency: the samples a
+     * master tap carries at context frame F are the ones the master chain took in
+     * at F − its lookahead, so an untrimmed tap is stamped with `F − latency` and
+     * a resample of the master lines up with one of a track (which no insert
+     * delays). The track tap is stamped where it is: nothing on a track's path
+     * delays it.
      * @param {Float32Array} left the master's left channel
      * @param {Float32Array|null} right the master's right channel
      * @param {number} count the frames this block holds
@@ -2598,7 +4414,12 @@
       const frame = this.contextOffset() + firstFrame;
       if (this.tapMaster) {
         const channels = right ? [left.slice(0, count), right.slice(0, count)] : [left.slice(0, count)];
-        this.port.postMessage({ type: "tap_block", target: "master", frame: frame, channels: channels });
+        this.port.postMessage({
+          type: "tap_block",
+          target: "master",
+          frame: frame - this.masterLatencyFrames,
+          channels: channels,
+        });
       }
       if (this.tapIndex >= 0 && this.tapLeft) {
         this.port.postMessage({
@@ -2684,6 +4505,9 @@
       // reported once here, after the block, and its tracks stay silent.
       this.reportFontFailures();
       this.reportPosition(count, events.patterns);
+      // One meter reading every 100 ms of audio while the playhead runs, and one
+      // more when it stops.
+      this.meterBlock(count);
     }
 
     /**
@@ -2714,11 +4538,18 @@
     }
 
     /**
-     * Render `frames` of every track, mix them with their gain and pan, run the
-     * master bus (looper, then performance effects), and hard clip at ±1.0 —
-     * 1a's whole master stage. An audio track contributes its PCM voices here
-     * instead of a SunVox engine, and a soundfont track its own MIDI channel's
-     * dry pair, through the very same mix.
+     * Render `frames` of the song through the mixer, in the order the plan's
+     * Task 9 fixes (one final signal path):
+     *
+     *     track: source → inserts → fader/pan → sends (pre or post fader)
+     *     return: inserts → fader
+     *     tracks + returns → master sum → looper → performance bus
+     *       → master gain → master inserts → clip → output
+     *
+     * An audio track contributes its PCM voices here instead of a SunVox engine,
+     * and a soundfont track its own MIDI channel's dry pair, through the very
+     * same inserts, fader and sends. The final hard clip at ±1.0 is 1a's whole
+     * output stage, and it comes after the master chain.
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
@@ -2731,35 +4562,44 @@
       // parsed and rendered once); a loaded font no track reads is not rendered
       // at all. Each soundfont track then adds its own channel below.
       if (this.fonts !== null) this.fonts.process(frames);
+
+      // A host that hands this processor one channel still runs a stereo mixer:
+      // the right side goes to a scratch that is thrown away, at the same cost as
+      // the tap's own copy, and nothing it holds is ever heard. Only this run's
+      // frames are cleared — the rest of the scratch is this block's earlier runs.
+      const outRight = right === null ? this.rightPad : right;
+      if (right === null) this.rightPad.fill(0, offset, offset + frames);
+
+      // Every return starts a run empty: the tracks' sends fill it.
+      for (let index = 0; index < this.returns.length; index += 1) {
+        const record = this.returns[index];
+        record.mixLeft.fill(0, 0, frames);
+        record.mixRight.fill(0, 0, frames);
+      }
+
       const slots = this.slots;
-      const tapped = this.tapIndex;
       for (let index = 0; index < slots.length; index += 1) {
         const record = slots[index];
         if (!record) continue;
-        // A tapped track is rendered into its own scratch buffers first, at this
-        // sub-run's own offset (a block is rendered in several runs, one per
-        // event), and then added from there: the tap carries that track alone
-        // and the master is the same sum with the tap on or off. Nothing is
-        // copied while no track is tapped.
-        if (index === tapped && this.tapLeft) {
-          this.renderRecord(record, frames, this.tapLeft, this.tapRight, offset);
-          for (let at = 0; at < frames; at += 1) {
-            const position = offset + at;
-            left[position] += this.tapLeft[position];
-            if (right) right[position] += this.tapRight[position];
-          }
-          continue;
-        }
-        this.renderRecord(record, frames, left, right, offset);
+        this.renderTrack(record, frames, left, outRight, offset);
+      }
+      for (let index = 0; index < this.returns.length; index += 1) {
+        this.renderReturn(this.returns[index], frames, left, outRight, offset);
       }
 
       // The master bus, in the order the signal path fixes: the looper first (it
       // taps the mix BEFORE any effect and mixes its own take back in), then the
       // performance-effects chain. Both return at once when nothing is held and
-      // the looper is empty, so an idle bus costs one call per run.
+      // the looper is empty, so an idle bus costs one call per run. They read the
+      // same pair the master chain is about to process — a host with one channel
+      // included, so a stereo effect always sees two.
       this.transport.offset = offset;
-      this.perf.loop(left, right, frames, this.transport);
-      this.perf.process(left, right, frames, this.transport);
+      this.perf.loop(left, outRight, frames, this.transport);
+      this.perf.process(left, outRight, frames, this.transport);
+
+      // Then the master gain and the master's own inserts (the limiter last, by
+      // convention), then the meter, then the clip.
+      this.applyMaster(left, outRight, frames, offset);
 
       for (let at = 0; at < frames; at += 1) {
         const position = offset + at;
@@ -2773,22 +4613,179 @@
     }
 
     /**
-     * Render one track's own output into a run of frames of a mix: whatever its
-     * device is, through the very same track gain and pan.
+     * One track through the mixer for a run: its source at unity gain into the
+     * scratch, its chain, its sends (pre and post fader), then its fader and pan
+     * into the master — and its own tap, when it is the tapped track, which is
+     * its output after the inserts and the fader.
+     *
+     * The source is summed into the scratch before the chain because nothing may
+     * reach the master without going through its inserts, and a track's fader is
+     * a gain on the CHAIN's output, not a gain on its source.
+     * @param {object} record
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} offset
+     * @returns {void}
+     */
+    renderTrack(record, frames, left, right, offset) {
+      const mixLeft = this.mixLeft;
+      const mixRight = this.mixRight;
+      mixLeft.fill(0, 0, frames);
+      mixRight.fill(0, 0, frames);
+      // The chain runs on the scratch from its first frame on (a Faust insert's
+      // buffers start at zero), so the run's absolute frame is handed over
+      // separately: motion is read at the sub-step that frame stands in.
+      this.renderRecord(record, frames, mixLeft, mixRight, 0, this.frame + offset);
+      this.runChain(record, mixLeft, mixRight, frames);
+
+      const gainLeft = record.left;
+      const gainRight = record.right;
+      const preSends = record.preSends;
+      const postSends = record.postSends;
+      const tapped = record.index === this.tapIndex && this.tapLeft !== null;
+      const tappedLeft = this.tapLeft;
+      const tappedRight = this.tapRight;
+
+      if (!(gainLeft === 0 && gainRight === 0)) {
+        for (let at = 0; at < frames; at += 1) {
+          const position = offset + at;
+          const outLeft = mixLeft[at] * gainLeft;
+          const outRight = mixRight[at] * gainRight;
+          left[position] += outLeft;
+          right[position] += outRight;
+          if (tapped) {
+            tappedLeft[position] = outLeft;
+            tappedRight[position] = outRight;
+          }
+        }
+        // A PRE send taps the chain's output, before the fader and the pan; a
+        // POST send taps the fader's own output. Both are already gated by the
+        // track's mute and solo (see `applyMixer`), so a muted track sends
+        // nothing either way and the loops below are skipped for it.
+        for (let index = 0; index < preSends.length; index += 1) {
+          const send = preSends[index];
+          const targetLeft = send.target.mixLeft;
+          const targetRight = send.target.mixRight;
+          const gain = send.gain;
+          for (let at = 0; at < frames; at += 1) {
+            targetLeft[at] += mixLeft[at] * gain;
+            targetRight[at] += mixRight[at] * gain;
+          }
+        }
+        for (let index = 0; index < postSends.length; index += 1) {
+          const send = postSends[index];
+          const targetLeft = send.target.mixLeft;
+          const targetRight = send.target.mixRight;
+          const gain = send.gain;
+          for (let at = 0; at < frames; at += 1) {
+            targetLeft[at] += mixLeft[at] * gainLeft * gain;
+            targetRight[at] += mixRight[at] * gainRight * gain;
+          }
+        }
+        return;
+      }
+
+      // A muted track (or one another track's solo silences) adds nothing to the
+      // master and its sends are silent too — but its engine, voices and synth
+      // were rendered above, so it comes back where it should be.
+      if (tapped) {
+        for (let at = 0; at < frames; at += 1) {
+          const position = offset + at;
+          tappedLeft[position] = mixLeft[at] * gainLeft;
+          tappedRight[position] = mixRight[at] * gainRight;
+        }
+      }
+    }
+
+    /**
+     * One return through the mixer for a run: its inserts on what the sends gave
+     * it, then its fader and pan into the master. Returns are never muted by a
+     * solo (they are not tracks).
+     * @param {object} record
+     * @param {number} frames
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} offset
+     * @returns {void}
+     */
+    renderReturn(record, frames, left, right, offset) {
+      this.runChain(record, record.mixLeft, record.mixRight, frames);
+      const gainLeft = record.left;
+      const gainRight = record.right;
+      if (gainLeft === 0 && gainRight === 0) return;
+      const mixLeft = record.mixLeft;
+      const mixRight = record.mixRight;
+      for (let at = 0; at < frames; at += 1) {
+        const position = offset + at;
+        left[position] += mixLeft[at] * gainLeft;
+        right[position] += mixRight[at] * gainRight;
+      }
+    }
+
+    /**
+     * The master, last of all: its gain, its own inserts (the limiter last, by
+     * convention), then the meter — and back into the output, where the clip
+     * stage takes over.
+     *
+     * The master path is delayed by the master chain's total latency and nothing
+     * else: a zero-latency chain changes nothing, and the limiter's lookahead
+     * moves the master by exactly its own delay, which the meter reading and the
+     * `master_latency` message both report.
+     * @param {Float32Array} left
+     * @param {Float32Array} right
+     * @param {number} frames
+     * @param {number} offset
+     * @returns {void}
+     */
+    applyMaster(left, right, frames, offset) {
+      const masterLeft = this.mixLeft;
+      const masterRight = this.mixRight;
+      const gain = this.masterGain;
+      if (gain === 1) {
+        for (let at = 0; at < frames; at += 1) {
+          masterLeft[at] = left[offset + at];
+          masterRight[at] = right[offset + at];
+        }
+      } else {
+        for (let at = 0; at < frames; at += 1) {
+          masterLeft[at] = left[offset + at] * gain;
+          masterRight[at] = right[offset + at] * gain;
+        }
+      }
+      this.runChain(this.masterRecord, masterLeft, masterRight, frames);
+      // The meter reads the master AFTER its inserts (and before the clip, which
+      // is the output stage, not a part of the mix), and only while the playhead
+      // runs: a stopped transport has no reading to take, so the master strip's
+      // last number is the one the song ended on.
+      if (this.meter !== null && this.transport.playing) this.meter.process(masterLeft, masterRight, frames);
+      for (let at = 0; at < frames; at += 1) {
+        left[offset + at] = masterLeft[at];
+        right[offset + at] = masterRight[at];
+      }
+    }
+
+    /**
+     * Render one track's own source into a run of frames at UNITY gain: whatever
+     * its device is. The track's fader and pan are applied after its chain, on
+     * the chain's output (see `renderTrack`), so nothing here shapes the level.
      * @param {object} record
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
-     * @param {number} offset
+     * @param {number} offset where the run starts in the destination
+     * @param {number} [baseFrame] the run's first frame in the processor's own
+     *   clock, when it is not `this.frame + offset` (a track renders its source
+     *   into a scratch that starts at zero)
      * @returns {void}
      */
-    renderRecord(record, frames, left, right, offset) {
+    renderRecord(record, frames, left, right, offset, baseFrame) {
       if (record.audio) {
         this.renderAudio(record, frames, left, right, offset);
         return;
       }
       if (record.sampler) {
-        this.renderSampler(record, frames, left, right, offset);
+        this.renderSampler(record, frames, left, right, offset, baseFrame);
         return;
       }
       if (record.font) {
@@ -2800,24 +4797,21 @@
       // have to advance with the song, or a track would come back mid-note.
       const interleaved = record.engine.render(this.bufferFor(record, frames), frames, 0, record.clock);
       record.clock += frames;
-      const gainLeft = record.left;
-      const gainRight = record.right;
-      if (gainLeft === 0 && gainRight === 0) return;
       for (let at = 0; at < frames; at += 1) {
-        left[offset + at] += interleaved[at * 2] * gainLeft;
-        if (right) right[offset + at] += interleaved[at * 2 + 1] * gainRight;
+        left[offset + at] += interleaved[at * 2];
+        if (right) right[offset + at] += interleaved[at * 2 + 1];
       }
     }
 
     /**
-     * Mix one soundfont track's own output over a run of frames: its channel's
-     * dry stereo pair from the font host, through the very same track gain and
-     * pan every other track gets.
+     * Mix one soundfont track's own output over a run of frames at unity: its
+     * channel's dry stereo pair from the font host. The track's inserts, fader
+     * and pan are applied after this (`renderTrack`), exactly as they are for an
+     * engine's or a sampler's output.
      *
      * The synth has already rendered by the time this runs (`render` calls
-     * `StudioFontVoice.process` once per run), so a muted or fully panned-away
-     * track still advances its voices — it comes back where it should be, exactly
-     * like an engine's or a sampler's.
+     * `StudioFontVoice.process` once per run), so a muted track still advances its
+     * voices — it comes back where it should be.
      * @param {object} record
      * @param {number} frames
      * @param {Float32Array} left
@@ -2826,9 +4820,6 @@
      * @returns {void}
      */
     renderFont(record, frames, left, right, offset) {
-      const gainLeft = record.left;
-      const gainRight = record.right;
-      if (gainLeft === 0 && gainRight === 0) return;
       if (this.fonts === null) return;
       const channels = this.fonts.outputFor(record.track_id);
       if (!channels) return;
@@ -2836,34 +4827,33 @@
       const sourceRight = channels.right;
       const count = Math.min(frames, sourceLeft.length);
       for (let at = 0; at < count; at += 1) {
-        left[offset + at] += sourceLeft[at] * gainLeft;
-        if (right) right[offset + at] += sourceRight[at] * gainRight;
+        left[offset + at] += sourceLeft[at];
+        if (right) right[offset + at] += sourceRight[at];
       }
     }
 
     /**
-     * Mix one sampler track's voices over a run of frames, with the track's own
-     * gain and pan — exactly what an engine's output gets. Every voice is
-     * rendered even when the track is silent, so a muted track's pads come back
-     * at the right point in their sound instead of mid-note.
+     * Mix one sampler track's voices over a run of frames, at unity: the track's
+     * own gain, pan and inserts are applied after its chain (see `renderTrack`).
+     * Every voice is rendered even when the track is silent, so a muted track's
+     * pads come back at the right point in their sound instead of mid-note.
      * @param {object} record
      * @param {number} frames
      * @param {Float32Array} left
      * @param {Float32Array|null} right
      * @param {number} offset
+     * @param {number} [baseFrame] the run's first frame in the processor's clock
      * @returns {void}
      */
-    renderSampler(record, frames, left, right, offset) {
-      const gainLeft = record.left;
-      const gainRight = record.right;
+    renderSampler(record, frames, left, right, offset, baseFrame) {
       const state = this.motionStateFor(record.track_id);
-      this.renderVoiceList(record.voices, frames, left, right, offset, gainLeft, gainRight, state);
+      this.renderVoiceList(record.voices, frames, left, right, offset, 1, 1, state, baseFrame);
       // A stolen voice rings out in a fade tail for 64 frames after its slot was
       // taken (see `retireVoice`), through the very same mix. A tail is on its
       // way out, so no curve is read for it and no swept value of it is
       // restored: it keeps the values it was stolen with through its fade.
       if (record.tails && record.tails.length > 0) {
-        this.renderVoiceList(record.tails, frames, left, right, offset, gainLeft, gainRight, null);
+        this.renderVoiceList(record.tails, frames, left, right, offset, 1, 1, null, baseFrame);
       }
     }
 
@@ -2884,13 +4874,14 @@
      * @param {number} gainLeft
      * @param {number} gainRight
      * @param {object|null} state the track's motion record, or null
+     * @param {number} [baseFrame] the run's first frame in the processor's clock
      * @returns {void}
      */
-    renderVoiceList(voices, frames, left, right, offset, gainLeft, gainRight, state) {
+    renderVoiceList(voices, frames, left, right, offset, gainLeft, gainRight, state, baseFrame) {
       // The sub-step this run stands in, in absolute frames: a run that starts
       // mid-sub-step (an event landed inside one) reads that sub-step's value, not
       // its own frame's, so two hosts that cut the run differently still agree.
-      const base = this.frame + offset;
+      const base = typeof baseFrame === "number" ? baseFrame : this.frame + offset;
       const subStep = base - (base % MOTION_SUB_STEP);
       const values = state !== null ? this.motionValuesAt(state, subStep) : null;
       for (let at = 0; at < voices.length; at += 1) {
@@ -3299,8 +5290,9 @@
     /**
      * Mix one audio track's voices over a run of frames: each sounding voice
      * reads its take at its own position (which may still be negative, a short
-     * silence before the take begins), scaled by its fade envelope and then by
-     * the track's gain and pan — the very same mix the engines get.
+     * silence before the take begins), scaled by its fade envelope. The track's
+     * inserts, gain and pan are applied after this (`renderTrack`), exactly as
+     * they are for an engine's output.
      * @param {object} record
      * @param {number} frames
      * @param {Float32Array} left
@@ -3310,8 +5302,6 @@
      */
     renderAudio(record, frames, left, right, offset) {
       const voices = record.voices;
-      const gainLeft = record.left;
-      const gainRight = record.right;
       for (let at = 0; at < voices.length; at += 1) {
         const voice = voices[at];
         if (!voice.sounding) continue;
@@ -3324,10 +5314,8 @@
           voice.position = position + 1;
           if (position >= 0 && position < length) {
             const sample = channels[0][position];
-            if (gainLeft !== 0) left[offset + frame] += sample * gain * gainLeft;
-            if (right && gainRight !== 0) {
-              right[offset + frame] += (mono ? sample : channels[1][position]) * gain * gainRight;
-            }
+            left[offset + frame] += sample * gain;
+            if (right) right[offset + frame] += (mono ? sample : channels[1][position]) * gain;
           }
           advanceFade(voice);
           advanceVoiceFade(voice);

@@ -526,6 +526,83 @@ test("an agent's step outlines its clip in the agent colour", async () => {
   assert.equal(ui.document.querySelectorAll("[data-role=presence] .st-chip").length, 2, "both people are on the presence row");
 });
 
+test("a resync frame rebuilds the song quietly", async () => {
+  const ui = await bootClient();
+
+  // A refused undo already has its reason on its own row.
+  ui.click("[data-act=undo]");
+  const firstUndo = ui.sent.filter((message) => message.type === "undo").pop();
+  ui.frame({ type: "result", cmd_id: firstUndo.cmd_id, ok: false, error: "That step is blocked." });
+  await ui.settle();
+  assert.ok(ui.document.querySelector("[data-entry-id=h3] .st-conflict"), "the refusal is drawn on its row");
+
+  // A second undo is still in flight when the hub drops the document and pushes
+  // the rebuilt one whole. That frame is a resync, not the answer to a hello.
+  ui.click("[data-act=undo]");
+  const inFlight = ui.sent.filter((message) => message.type === "undo").pop();
+  const { newSongDoc, encodeDocState } = await import("../bundles/studio/server/doc.js");
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  const rebuilt = newSongDoc({ title: "Test song" });
+  runCommand(rebuilt, "track.add", { id: "bass", name: "Bass" });
+  runCommand(rebuilt, "scene.add", { id: "verse", name: "Verse" });
+  runCommand(rebuilt, "clip.write", {
+    clip_id: "c1",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Resynced line",
+    length_bars: 1,
+    notes: [{ t: 0, d: 0.5, p: 64, v: 100 }],
+  });
+  ui.frame({
+    type: "state",
+    resync: true,
+    update: Buffer.from(encodeDocState(rebuilt)).toString("base64"),
+    history: ui.stateFrame.history,
+    presence: [],
+  });
+  await ui.settle();
+
+  assert.equal(
+    /Reconnected/.test(String(ui.document.querySelector("[data-role=toast]").textContent)),
+    false,
+    "a resync is not a reconnect: nothing to announce",
+  );
+  assert.equal(
+    ui.document.querySelector("[data-clip-id=c1]").textContent.includes("Resynced line"),
+    true,
+    "the document was rebuilt from the frame",
+  );
+  assert.ok(
+    ui.document.querySelector("[data-entry-id=h3] .st-conflict"),
+    "the undo row kept the reason it already had",
+  );
+
+  // The in-flight undo was not thrown away with the frame: its result still
+  // answers against the row it was sent for, not against the toast.
+  ui.frame({
+    type: "result",
+    cmd_id: inFlight.cmd_id,
+    ok: false,
+    blocked: ["That step would leave the clip without its track."],
+  });
+  await ui.settle();
+  assert.match(
+    String(ui.document.querySelector("[data-entry-id=h3] .st-conflict").textContent),
+    /without its track/,
+  );
+
+  // A real reconnect (a state frame with no resync flag) behaves as it always
+  // has: the commands of the socket that dropped are gone, and the page says so.
+  ui.click("[data-act=undo]");
+  ui.frame({ ...ui.stateFrame, resync: undefined });
+  await ui.settle();
+  assert.match(
+    String(ui.document.querySelector("[data-role=toast]").textContent),
+    /Reconnected/,
+    "a reconnect is still announced",
+  );
+});
+
 test("a command sent while the socket is down is refused with a notice, not dropped", async () => {
   const ui = await bootClient();
   const before = ui.sent.filter((message) => message.type === "command").length;

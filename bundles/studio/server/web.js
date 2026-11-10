@@ -218,6 +218,13 @@ const ASSET_FILES = new Map([
   // The SoundFont hosts: one synth per font, one MIDI channel per track. Part of
   // the worklet module (engine-client.js's SOURCE_FILES) like the rest.
   ["font-voice.js", join("engine", "font-voice.js")],
+  // Crow's own dynamics, the host that instantiates the compiled Faust effects
+  // (plan 1d, Tasks 7 and 8) and the master meter (Task 9): all part of the
+  // worklet module too, so the route that composes `SOURCE_FILES` needs them
+  // here or it cannot build the engine's module at all.
+  ["dynamics.js", join("engine", "dynamics.js")],
+  ["faust-host.js", join("engine", "faust-host.js")],
+  ["meter.js", join("engine", "meter.js")],
   ["engine-client.js", join("engine", "engine-client.js")],
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],
   ["sunvox.wasm", join("vendor", "sunvox", "sunvox.wasm")],
@@ -226,6 +233,25 @@ const ASSET_FILES = new Map([
   // globalThis.StudioSpessa. It is part of the worklet module
   // (engine-client.js's SOURCE_FILES), served here so the browser can fetch it.
   ["spessasynth.js", join("vendor", "spessasynth", "spessasynth.js")],
+  // The compiled Faust effects (tools/build-faust.mjs): each one's wasm and its
+  // factory JSON, under the flat names engine-client.js asks for. The build
+  // output is checked in, so these are files in the bundle like the rest; the
+  // route answers 404 for one that a stale checkout does not have, and an engine
+  // then starts without that effect (see readFaustModules in engine-client.js).
+  ["faust-eq.wasm", join("vendor", "faust", "eq.wasm")],
+  ["faust-eq.json", join("vendor", "faust", "eq.json")],
+  ["faust-filter.wasm", join("vendor", "faust", "filter.wasm")],
+  ["faust-filter.json", join("vendor", "faust", "filter.json")],
+  ["faust-delay.wasm", join("vendor", "faust", "delay.wasm")],
+  ["faust-delay.json", join("vendor", "faust", "delay.json")],
+  ["faust-reverb.wasm", join("vendor", "faust", "reverb.wasm")],
+  ["faust-reverb.json", join("vendor", "faust", "reverb.json")],
+  ["faust-chorus.wasm", join("vendor", "faust", "chorus.wasm")],
+  ["faust-chorus.json", join("vendor", "faust", "chorus.json")],
+  ["faust-phaser.wasm", join("vendor", "faust", "phaser.wasm")],
+  ["faust-phaser.json", join("vendor", "faust", "phaser.json")],
+  ["faust-saturation.wasm", join("vendor", "faust", "saturation.wasm")],
+  ["faust-saturation.json", join("vendor", "faust", "saturation.json")],
   // The panel's read replica of the song needs Yjs in the browser. It is the
   // dependency the hub itself uses, so the page applies updates with exactly
   // the code the hub encoded them with. Its own imports are served beside it
@@ -738,17 +764,33 @@ export function createStudioWeb({
   /**
    * Push one hub broadcast to the song's clients.
    *
-   * The hub calls this after every applied step (`{update, entry}`) and after
-   * every presence change (`{presence}`). Anything else is ignored, so the hub
-   * can add payloads later without this layer guessing at them.
+   * The hub calls this after every applied step (`{update, entry}`), after
+   * every presence change (`{presence}`) and when a song's document was dropped
+   * and rebuilt, whole (`{state}` — a state frame, which the page answers by
+   * building its document from the server's again). A `{state, resync: true}`
+   * frame says the same document was rebuilt under the page rather than
+   * answering a fresh hello, so the page keeps the commands it already has on
+   * the wire and says nothing about reconnecting. Anything else is ignored, so
+   * the hub can add payloads later without this layer guessing at them.
    * @param {string} song_id
-   * @param {{update?: Uint8Array, entry?: object|null, presence?: object[]}} payload
+   * @param {{update?: Uint8Array, entry?: object|null, presence?: object[],
+   *          state?: Uint8Array, history?: object[], resync?: boolean}} payload
    * @returns {void}
    */
   function broadcast(song_id, payload) {
     if (!payload || typeof payload !== "object") return;
-    if ("presence" in payload) {
+    if ("presence" in payload && payload.state == null) {
       sendToSong(song_id, { type: "presence", presence: payload.presence ?? [] });
+      return;
+    }
+    if (payload.state != null) {
+      sendToSong(song_id, {
+        type: "state",
+        update: toBase64(payload.state),
+        history: payload.history ?? [],
+        presence: payload.presence ?? hub.presence(song_id),
+        resync: payload.resync === true,
+      });
       return;
     }
     if (payload.update != null) {

@@ -15,10 +15,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeDocState } from "../bundles/studio/server/doc.js";
-import { newSongDoc, snapshot } from "../bundles/studio/server/doc.js";
+import {
+  checkInvariants,
+  clipMap,
+  insertMap,
+  invariantReasons,
+  newSongDoc,
+  objectMap,
+  patternKey,
+  patternMap,
+  sendKey,
+  sendMap,
+  snapshot,
+  takeMap,
+  trackList,
+} from "../bundles/studio/server/doc.js";
 import { StudioError, runCommand } from "../bundles/studio/server/commands/registry.js";
 import "../bundles/studio/server/commands/core.js";
 import "../bundles/studio/server/commands/arrangement.js";
+import "../bundles/studio/server/commands/mixer.js";
 import {
   OBJECT_GONE,
   REDO_COMMAND,
@@ -829,6 +844,433 @@ test("a blocked undo leaves the doc byte-identical", (t) => {
   assert.ok(plan.blocked.length > 0);
   s.doc.transact(() => applyPlan(s.doc, plan));
   assert.equal(docBytes(s.doc), before);
+  assert.deepEqual(trackNames(s.doc), ["Bass"]);
+});
+
+test("an unrelated undo is not blocked by a violation already in the song", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  const mixed = s.run("track.set_mix", { track_id: "bass", gain_db: -3 });
+
+  // A violation the song already holds and no undo put there — the shape two
+  // peers' writes merging can leave behind, here notes running past the end of
+  // the clip that carries them. It is reported, and it is not this undo's to
+  // answer for.
+  s.doc.transact(() => {
+    const clip = s.doc.getMap("song").get("clips").get("bass-verse");
+    clip.set("notes", [note(0, 8, 36, 100)]);
+  });
+  assert.match(checkInvariants(s.doc).join(" "), /past its/);
+
+  // The step is unrelated to it, so taking it back goes through: blocking it
+  // would leave every step in the song stuck behind a merge nobody can undo.
+  const plan = planUndo(s.doc, mixed.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual([...plan.apply.keys()], ["track:bass|gain_db"]);
+  assert.equal(plan.apply.get("track:bass|gain_db"), 0);
+
+  // Applying it leaves the song's own violation exactly where it was.
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.equal(snapshot(s.doc).tracks[0].gain_db, 0);
+  assert.match(checkInvariants(s.doc).join(" "), /past its/);
+});
+
+test("an undo that lowers an over-limit count is not blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  const effects = [];
+  for (let index = 1; index <= 8; index += 1) {
+    effects.push(s.run("insert.add", { id: `i${index}`, owner: "master", kind: "eq" }));
+  }
+
+  // Two more effects of one chain than a chain may hold — the shape two peers'
+  // writes merging leaves behind, which no undo put there.
+  s.doc.transact(() => {
+    for (const index of [9, 10]) {
+      insertMap(s.doc).set(
+        `i${index}`,
+        objectMap({ id: `i${index}`, owner: "master", order: index, kind: "eq", bypass: false }),
+      );
+    }
+  });
+  assert.match(checkInvariants(s.doc).join(" "), /would hold 10 effects/);
+
+  // Undoing an effect leaves nine: still over the limit, but not one worse than
+  // the song already was, so the step goes through.
+  const plan = planUndo(s.doc, effects[7].entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual([...plan.apply.keys()], ["insert:i8|*"]);
+
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.match(checkInvariants(s.doc).join(" "), /would hold 9 effects/);
+});
+
+test("a second orphan send for the same missing track is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("return.add", { id: "a", name: "A" });
+  s.run("return.add", { id: "b", name: "B" });
+  s.run("send.set", { track_id: "bass", return_id: "a", level_db: -6 });
+  s.run("send.set", { track_id: "bass", return_id: "b", level_db: -6 });
+  const off = s.run("send.set", { track_id: "bass", return_id: "a", level_db: null });
+
+  // The track goes, one send stays: exactly what a removal and a write merging
+  // can leave. The song already holds one send whose track is not there.
+  s.doc.transact(() => trackList(s.doc).delete(0, 1));
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1);
+  assert.match(already[0], /without its track/);
+
+  // Undoing the removal puts the other send back — a SECOND send with no track.
+  // The two sentences read exactly alike, which is why they are compared by what
+  // they are about: this one is worse than the song already was.
+  const plan = planUndo(s.doc, off.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its track/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("a second out-of-range send from the same track is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("return.add", { id: "a", name: "A" });
+  s.run("return.add", { id: "b", name: "B" });
+
+  // Two sends from one track at a level no command would write: an old or
+  // merged document can hold them, which is the shape this guard is for.
+  s.doc.transact(() => {
+    for (const id of ["a", "b"]) {
+      sendMap(s.doc).set(
+        sendKey("bass", id),
+        objectMap({ track_id: "bass", return_id: id, level_db: 12, pre: false }),
+      );
+    }
+  });
+  assert.equal(checkInvariants(s.doc).length, 2);
+
+  // A step brings the second one back into range; undoing it puts it out again.
+  const fixed = s.run("send.set", { track_id: "bass", return_id: "b", level_db: -6 });
+  assert.equal(checkInvariants(s.doc).length, 1);
+
+  // Both sentences name the same track and read alike — the second one is still
+  // a reason the plan makes the song worse.
+  const plan = planUndo(s.doc, fixed.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /would be at 12 dB/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("more notes past a clip end than before is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 8,
+    notes: [note(0, 1, 36, 100), note(20, 1, 36, 100), note(24, 1, 36, 100)],
+  });
+  const edited = s.run("clip.edit_notes", { clip_id: "bass-verse", remove: [2] });
+
+  // The clip is shortened under its notes by a merge — a command refuses to do
+  // it — so one note is past its end already, and the song says so.
+  s.doc.transact(() => clipMap(s.doc).get("bass-verse").set("length_bars", 1));
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1);
+  assert.match(already[0], /past its 1 bar/);
+
+  // The undo of the edit puts the third note back: TWO notes past the end, and
+  // the sentence still names the first one, so only the count tells them apart.
+  const plan = planUndo(s.doc, edited.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /past its 1 bar/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("fixing one send while breaking another is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { id: "bass", name: "Bass" });
+  s.run("return.add", { id: "a", name: "A" });
+  s.run("return.add", { id: "b", name: "B" });
+
+  // One step moved both sends: it brought the first into range and pushed the
+  // second out of it. The song holds one out-of-range send either way, so only
+  // what the reason is ABOUT tells an undo that it breaks a different one.
+  const step = makeEntry({
+    song_id: SONG_ID,
+    seq: 100,
+    command: "send.set",
+    author: HUMAN,
+    touched: ["send:bass/a", "send:bass/b"],
+    before: { "send:bass/a|level_db": 12, "send:bass/b|level_db": -6 },
+    after: { "send:bass/a|level_db": -6, "send:bass/b|level_db": 12 },
+  });
+  s.doc.transact(() => {
+    for (const [returnId, level] of [["a", -6], ["b", 12]]) {
+      sendMap(s.doc).set(
+        sendKey("bass", returnId),
+        objectMap({ track_id: "bass", return_id: returnId, level_db: level, pre: false }),
+      );
+    }
+  });
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1, `unexpected reasons: ${already.join(" | ")}`);
+  assert.match(already[0], /would be at 12 dB/);
+
+  const plan = planUndo(s.doc, step);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /would be at 12 dB/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("fixing one effect parameter while breaking another is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { id: "bass", name: "Bass" });
+  s.run("insert.add", { id: "c1", owner: "track:bass", kind: "compressor" });
+
+  // One step set two parameters of one insert: the ratio came back into range
+  // and the threshold went out of it. One bad value either way, on a different
+  // parameter — so the two reasons must not share a subject.
+  const step = makeEntry({
+    song_id: SONG_ID,
+    seq: 100,
+    command: "insert.set",
+    author: HUMAN,
+    touched: ["insert:c1"],
+    before: { "insert:c1|params.ratio": 30, "insert:c1|params.threshold_db": -18 },
+    after: { "insert:c1|params.ratio": 4, "insert:c1|params.threshold_db": 5 },
+  });
+  s.doc.transact(() => {
+    insertMap(s.doc).get("c1").set("params", { ratio: 4, threshold_db: 5 });
+  });
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1, `unexpected reasons: ${already.join(" | ")}`);
+  assert.match(already[0], /"threshold_db" to 5/);
+
+  const plan = planUndo(s.doc, step);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /"ratio" to 30/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("a third copy of a duplicated id is still blocked", (t) => {
+  const s = studio(t);
+  s.run("track.add", { id: "bass", name: "Bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "c1",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Bass line",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  const removed = s.run("clip.remove", { clip_id: "c1" });
+
+  // A merge left two clips carrying one id under keys of their own. The
+  // sentence about them reads exactly like the one about a second copy, so only
+  // the count says the undo would make it three.
+  s.doc.transact(() => {
+    for (const key of ["c2", "c3"]) {
+      clipMap(s.doc).set(
+        key,
+        objectMap({
+          id: "c1",
+          track_id: "bass",
+          scene_id: "verse",
+          name: `Merged ${key}`,
+          length_bars: 1,
+          notes: [],
+        }),
+      );
+    }
+  });
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1, `unexpected reasons: ${already.join(" | ")}`);
+  assert.match(already[0], /two clips with the id "c1"/);
+  assert.equal(invariantReasons(s.doc)[0].count, 2);
+
+  const plan = planUndo(s.doc, removed.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /two clips with the id "c1"/);
+  assert.equal(checkInvariants(s.doc).length, 1, "a blocked plan wrote nothing");
+});
+
+test("inserting an earlier segment does not block an unrelated undo", (t) => {
+  const s = studio(t);
+  s.run("track.add", { id: "bass", name: "Bass", kind: "audio" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+
+  // An audio clip whose comp a merge left with a segment playing a take that
+  // has since been discarded: a violation no undo put there.
+  const take = (id) => ({
+    id,
+    clip_id: "vox",
+    storage_key: `studio/song-1/takes/${id}.wav`,
+    rate: 48000,
+    channels: 1,
+    frames: 96000,
+  });
+  s.doc.transact(() => {
+    clipMap(s.doc).set(
+      "vox",
+      objectMap({
+        id: "vox",
+        track_id: "bass",
+        scene_id: "verse",
+        name: "Vox",
+        length_bars: 2,
+        notes: [],
+        kind: "audio",
+        comp: [
+          { take_id: "t-a", from_beat: 0, to_beat: 2 },
+          { take_id: "t-a", from_beat: 2, to_beat: 4 },
+          { take_id: "t-b", from_beat: 4, to_beat: 8 },
+        ],
+      }),
+    );
+    takeMap(s.doc).set("t-a", objectMap(take("t-a")));
+    takeMap(s.doc).set("t-b", objectMap({ ...take("t-b"), discarded: true }));
+  });
+
+  // A step inserted the segment at beat 2, so undoing it takes that segment out
+  // and every segment behind it moves up one place. The bad segment is the very
+  // same segment before and after the plan: only its index changed.
+  const step = makeEntry({
+    song_id: SONG_ID,
+    seq: 100,
+    command: "take.keep",
+    author: HUMAN,
+    touched: ["clip:vox"],
+    before: {
+      "clip:vox|comp": [
+        { take_id: "t-a", from_beat: 0, to_beat: 4 },
+        { take_id: "t-b", from_beat: 4, to_beat: 8 },
+      ],
+    },
+    after: {
+      "clip:vox|comp": [
+        { take_id: "t-a", from_beat: 0, to_beat: 2 },
+        { take_id: "t-a", from_beat: 2, to_beat: 4 },
+        { take_id: "t-b", from_beat: 4, to_beat: 8 },
+      ],
+    },
+  });
+
+  const already = checkInvariants(s.doc);
+  assert.equal(already.length, 1, `unexpected reasons: ${already.join(" | ")}`);
+  assert.match(already[0], /which is discarded/);
+
+  const plan = planUndo(s.doc, step);
+  assert.deepEqual(plan.conflicts, []);
+  assert.deepEqual(plan.blocked, []);
+  assert.deepEqual([...plan.apply.keys()], ["clip:vox|comp"]);
+
+  s.doc.transact(() => applyPlan(s.doc, plan));
+  assert.equal(snapshot(s.doc).clips.vox.comp.length, 2, "the undo went through");
+  assert.equal(checkInvariants(s.doc).length, 1, "the song's own violation is still the only one");
+});
+
+test("checkInvariants text for a bad motion lane is one sentence, as before", (t) => {
+  const s = studio(t);
+  const trackId = s.run("track.add", { name: "Kit", kind: "sampler" }).result.args.id;
+  const bankId = Object.values(snapshot(s.doc).banks).find((bank) => bank.track_id === trackId).id;
+  const verse = s.run("scene.add", { name: "Verse" }).result.args.id;
+
+  // A pattern clip whose lane a merge left with two points past the loop, the
+  // second of them also out of the pad field's range.
+  s.doc.transact(() => {
+    clipMap(s.doc).set(
+      "loop",
+      objectMap({
+        id: "loop",
+        track_id: trackId,
+        scene_id: verse,
+        name: "Kit loop",
+        length_bars: 1,
+        notes: [],
+        kind: "pattern",
+        length_steps: 16,
+        step_beats: 0.25,
+        swing: 0,
+        chain: [],
+      }),
+    );
+    patternMap(s.doc).set(
+      patternKey("loop", "a"),
+      objectMap({
+        id: "a",
+        clip_id: "loop",
+        name: "A",
+        order: 0,
+        [`motion|${bankId}.0|cutoff_hz`]: [
+          { step_frac: 20, value: 2000 },
+          { step_frac: 30, value: 90000 },
+        ],
+      }),
+    );
+  });
+
+  // One lane is still one sentence — the first bad point's first failing check
+  // — and how many points are bad is counted on it instead of said again.
+  assert.deepEqual(checkInvariants(s.doc), [
+    'The pattern "A" would put a motion point at step 20, outside its 16 step positions.',
+  ]);
+  const reasons = invariantReasons(s.doc);
+  assert.equal(reasons.length, 1, "one reason per lane");
+  assert.equal(reasons[0].code, "motion-point-past-loop");
+  assert.equal(reasons[0].count, 2, "both bad points are counted on the one sentence");
+});
+
+test("an undo that creates a violation is still blocked", (t) => {
+  const s = studio(t);
+  const added = s.run("track.add", { name: "Bass", id: "bass" });
+  s.run("scene.add", { id: "verse", name: "Verse" });
+  s.run("clip.write", {
+    clip_id: "bass-verse",
+    track_id: "bass",
+    scene_id: "verse",
+    name: "Verse bass",
+    length_bars: 1,
+    notes: [note(0, 1, 36, 100)],
+  });
+  assert.deepEqual(checkInvariants(s.doc), [], "the song is clean before the undo");
+
+  // Only reasons the plan CREATES block it: this undo would leave the clip
+  // without its track, which the song did not hold before the plan.
+  const plan = planUndo(s.doc, added.entry);
+  assert.deepEqual(plan.conflicts, []);
+  assert.equal(plan.apply.size, 0);
+  assert.equal(plan.blocked.length, 1);
+  assert.match(plan.blocked[0], /without its track/);
+
+  // Nothing was written, and the song still holds no violation of its own.
+  assert.deepEqual(checkInvariants(s.doc), []);
   assert.deepEqual(trackNames(s.doc), ["Bass"]);
 });
 
