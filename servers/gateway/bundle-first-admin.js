@@ -66,6 +66,11 @@ export {
   FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY,
   FIRST_ADMIN_SETUP_BODY_KEY,
   FIRST_ADMIN_KEPT_BODY_KEY,
+  FIRST_ADMIN_INVITE_CLOSE_BODY_KEY,
+  FIRST_ADMIN_INVITE_CREATE_BODY_KEY,
+  FIRST_ADMIN_INVITE_CREATE_OPEN_BODY_KEY,
+  FIRST_ADMIN_INVITE_BODY_KEY,
+  FIRST_ADMIN_INVITE_SIGNUPS_OPEN_KEY,
   FIRST_ADMIN_SAVED_KEY,
   firstAdminOf,
   firstAdminNeedsOperator,
@@ -75,6 +80,9 @@ export {
   firstAdminLink,
   firstAdminTitle,
   firstAdminBody,
+  firstAdminInviteBody,
+  firstAdminInviteReason,
+  inviteNotice,
   pendingFirstAdminNotices,
 } from "./dashboard/shared/first-admin.js";
 
@@ -192,7 +200,8 @@ export async function firstAdminSavedBundleIds(db, manifests = {}) {
     }
     for (const [id, keys] of byBundle) {
       const manifest = manifests ? manifests[id] : null;
-      if (keys.has(firstAdminSavedKey(manifest))) out.add(id);
+      const key = firstAdminSavedKey(manifest);
+      if (key && keys.has(key)) out.add(id);
     }
   } catch {
     return new Set();
@@ -288,6 +297,10 @@ export async function clearFirstAdminNotice(db, bundleId, { nowMs = Date.now(), 
  * @param {string} [o.bundleName]         display name (else the manifest's, else the id)
  * @param {string} [o.installId]          installed.json's installedAt for this install
  * @param {string} [o.autoResult]         runFirstAdminSetup's result for THIS install
+ * @param {{result?: string, signups?: string|null}|null} [o.inviteResult]
+ *        the invite step's outcome for THIS install (an invite-only app): when Crow
+ *        invited the owner's email AND confirmed sign-ups off, there is nothing
+ *        left to claim, so no bell rings.
  * @param {number} [o.nowMs]              clock seam
  * @param {Function} [o.notify]           createNotification-shaped seam (tests)
  * @param {string} [o.lang]               force a language (else the dashboard setting)
@@ -301,12 +314,13 @@ export async function notifyFirstAdmin({
   bundleName = null,
   installId = null,
   autoResult = null,
+  inviteResult = null,
   nowMs = Date.now(),
   notify = createNotification,
   lang = null,
   log = console,
 }) {
-  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult })) return null;
+  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult, inviteResult })) return null;
   const key = firstAdminNoticeKey(bundleId);
   const stamp = typeof installId === "string" && installId ? installId : new Date(nowMs).toISOString();
   try {
@@ -352,15 +366,16 @@ export async function reportFirstAdminNotice({
   bundleName = null,
   installId = null,
   autoResult = null,
+  inviteResult = null,
   dbFactory = createDbClient,
   log = console,
   ...rest
 } = {}) {
   let db = null;
   try {
-    if (!firstAdminNeedsNotice(manifest, { autoResult })) return null;
+    if (!firstAdminNeedsNotice(manifest, { autoResult, inviteResult })) return null;
     db = dbFactory();
-    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, log, ...rest });
+    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, inviteResult, log, ...rest });
   } catch (err) {
     try { log.warn(`[bundles] first-admin notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
     return null;

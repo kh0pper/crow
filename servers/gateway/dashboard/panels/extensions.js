@@ -84,6 +84,15 @@ export default {
       const { pendingFirstAdminNotices, firstAdminDoneValues, firstAdminAutoResults, firstAdminSavedBundleIds } = await import("../../bundle-first-admin.js");
       const manifests = {};
       for (const id of Object.keys(localInstalled)) manifests[id] = getManifest(id);
+      // Security audit N3-4 phase 2e: an invite-only app's card is decided by what its
+      // OWN admin API reports (accounts + sign-ups). Best-effort and cached ~60 s in the
+      // handler, so a page render costs one admin login at most per minute, and a
+      // stopped container cannot stall every load.
+      let inviteStates = {};
+      try {
+        const { inviteStatesFor } = await import("../../first-admin/vaultwarden-invite.js");
+        inviteStates = await inviteStatesFor(localInstalled, manifests, { db });
+      } catch { inviteStates = {}; }
       firstAdminPending = pendingFirstAdminNotices({
         installed: localInstalled,
         manifests,
@@ -93,6 +102,7 @@ export default {
         proxyMountFailed: !!getProxyMountFailure(),
         adminSaved: await firstAdminSavedBundleIds(db, manifests),
         autoResults: await firstAdminAutoResults(db),
+        inviteStates,
       });
     } catch { /* no card rather than no page */ }
 

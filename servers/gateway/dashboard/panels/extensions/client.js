@@ -2096,6 +2096,66 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
             });
           });
         });
+        // --- Invite-only apps (N3-4 phase 2e): invite the owner's email, close sign-ups ---
+        // The app's own admin API decides; the server answers with a result word and a
+        // plain sentence, and the page reloads so the card shows what is really true
+        // now (the server drops its ~60 s state cache on every such call).
+        var INVITE_RESULT_TEXT = {
+          "invalid-email": '${tJs("bundles.firstAdmin.invite.resultInvalidEmail", lang)}',
+          "no-token": '${tJs("bundles.firstAdmin.invite.resultNoToken", lang)}',
+          "unreachable": '${tJs("bundles.firstAdmin.invite.resultUnreachable", lang)}'
+        };
+        var CLOSE_RESULT_TEXT = {
+          "unknown": '${tJs("bundles.firstAdmin.invite.resultCloseUnknown", lang)}',
+          "failed": '${tJs("bundles.firstAdmin.invite.resultCloseFailed", lang)}'
+        };
+        function reloadFirstAdminCard() {
+          try { if (location && typeof location.reload === "function") location.reload(); } catch (e) { /* nothing to reload */ }
+        }
+        document.querySelectorAll(".ext-firstadmin-invite").forEach(function(form) {
+          form.addEventListener("submit", function(ev) {
+            if (ev && ev.preventDefault) ev.preventDefault();
+            var id = form.getAttribute("data-id");
+            var card = form.closest ? form.closest(".ext-firstadmin") : null;
+            var emailEl = form.querySelector(".ext-firstadmin-invite-email");
+            var btn = form.querySelector("button[type=submit]");
+            var email = emailEl && emailEl.value ? emailEl.value.trim() : "";
+            if (!email) {
+              showFirstAdminMessage(card, '${tJs("bundles.firstAdmin.invite.emailRequired", lang)}');
+              if (emailEl) emailEl.focus();
+              return;
+            }
+            if (btn) { btn.disabled = true; btn.textContent = '${tJs("bundles.firstAdmin.invite.sending", lang)}'; }
+            apiCall("first-admin-invite", { bundle_id: id, email: email }).then(function(res) {
+              var d = res.data || {};
+              if (res.ok && d.ok) { reloadFirstAdminCard(); return; }
+              if (btn) { btn.disabled = false; btn.textContent = '${tJs("bundles.firstAdmin.invite.inviteAction", lang)}'; }
+              showFirstAdminMessage(card, INVITE_RESULT_TEXT[d.result] || d.error || '${tJs("bundles.firstAdmin.invite.resultFailed", lang)}');
+            }).catch(function() {
+              if (btn) { btn.disabled = false; btn.textContent = '${tJs("bundles.firstAdmin.invite.inviteAction", lang)}'; }
+              showFirstAdminMessage(card, '${tJs("extensions.networkError", lang)}');
+            });
+          });
+        });
+        document.querySelectorAll(".ext-firstadmin-close").forEach(function(closeBtn) {
+          closeBtn.addEventListener("click", function() {
+            var id = closeBtn.getAttribute("data-id");
+            var card = closeBtn.closest ? closeBtn.closest(".ext-firstadmin") : null;
+            closeBtn.disabled = true;
+            closeBtn.textContent = '${tJs("bundles.firstAdmin.invite.closing", lang)}';
+            apiCall("first-admin-close-signups", { bundle_id: id }).then(function(res) {
+              var d = res.data || {};
+              if (res.ok && d.ok) { reloadFirstAdminCard(); return; }
+              closeBtn.disabled = false;
+              closeBtn.textContent = '${tJs("bundles.firstAdmin.invite.closeSignups", lang)}';
+              showFirstAdminMessage(card, CLOSE_RESULT_TEXT[d.result] || d.error || '${tJs("bundles.firstAdmin.invite.resultCloseFailed", lang)}');
+            }).catch(function() {
+              closeBtn.disabled = false;
+              closeBtn.textContent = '${tJs("bundles.firstAdmin.invite.closeSignups", lang)}';
+              showFirstAdminMessage(card, '${tJs("extensions.networkError", lang)}');
+            });
+          });
+        });
       })();
     <\/script>`;
 }

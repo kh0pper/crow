@@ -24,6 +24,13 @@ import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia, clearFirstAdminNotice } from "../bundle-first-admin.js";
 import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE } from "../bundle-first-admin-setup.js";
+import {
+  inviteHandlerFor,
+  inviteFirstAdminOnInstall,
+  inviteResultSentence,
+  closeSignupsSentence,
+  clearInviteStateCache,
+} from "../first-admin/vaultwarden-invite.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
@@ -1310,6 +1317,10 @@ export function _setHookRunnerForTest(fn) { _hookRunnerForTest = fn || null; }
 // Test-only: seams for the first-admin setup run (script runner, keychain, .env writer).
 let _firstAdminSetupDepsForTest = null;
 export function _setFirstAdminSetupDepsForTest(d) { _firstAdminSetupDepsForTest = d || null; }
+
+// Test-only: seams for the first-admin INVITE step (fetch, keychain reader, clock).
+let _firstAdminInviteDepsForTest = null;
+export function _setFirstAdminInviteDepsForTest(d) { _firstAdminInviteDepsForTest = d || null; }
 
 /**
  * Ownership of this bundle's compose project. refusal: another Crow install of the SAME
@@ -3382,6 +3393,23 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
+    // Security audit N3-4 phase 2e: an INVITE-ONLY app (manifest
+    // `firstAdmin.invite`) gets the owner's email invited through its own admin API
+    // and sign-ups closed, so nobody else can register. Runs only when the app is
+    // actually up (the same condition as the post-install hook) and the operator
+    // filled the email in; the REVIEWED manifest decides, and the step never throws
+    // into the install (one plain job-log sentence per result).
+    let inviteOutcome = null;
+    if (!composeFailure) {
+      inviteOutcome = await inviteFirstAdminOnInstall({
+        bundleId,
+        manifest: getManifest(bundleId),
+        installDir: join(BUNDLES_DIR, bundleId),
+        log: (m) => appendLog(job, m),
+        deps: _firstAdminInviteDepsForTest || {},
+      });
+    }
+
     // ntfy autowire (spec 2026-10-03): Crow creates its own login + private topic on the
     // server it just started. Non-fatal — Settings › Notifications can re-run it.
     if (manifest?.autowire === AUTOWIRE_KIND && !composeFailure) {
@@ -3494,6 +3522,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // What Crow's own setup run did for THIS install (null when it did not run):
       // an "ok" stays silent, everything else asks the operator to look.
       autoResult: firstAdminAuto,
+      // What the invite step did for THIS install: an invited email plus confirmed-
+      // closed sign-ups means there is nothing left for anyone to claim.
+      inviteResult: inviteOutcome,
     });
 
     if (composeFailure) {
@@ -3619,7 +3650,7 @@ export default function bundlesRouter() {
   // (which never saves to the keychain for a peer, and whose result Start re-checks
   // without consent), never install, mint consent, uninstall or re-apply storage here:
   // a peer-minted consent token would let it apply a privileged bundle the owner never saw.
-  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin", "/bundles/api/first-admin-done", "/bundles/api/first-admin-auto", "/bundles/api/first-admin-save"]);
+  const OWNER_ONLY = new Set(["/bundles/api/install", "/bundles/api/install-set", "/bundles/api/uninstall", "/bundles/api/repin", "/bundles/api/first-admin-done", "/bundles/api/first-admin-auto", "/bundles/api/first-admin-save", "/bundles/api/first-admin-invite", "/bundles/api/first-admin-close-signups"]);
   router.use((req, res, next) => {
     if (!req.crossHostAuth) return next();
     // Express matches routes case-insensitively and ignores a trailing slash: compare
@@ -3784,6 +3815,71 @@ export default function bundlesRouter() {
     }
     if (saved !== "saved") return res.status(500).json({ error: "Could not save the password. Try again." });
     res.json({ ok: true });
+  });
+
+  // POST /bundles/api/first-admin-invite — the operator's own email, invited through
+  // an app's admin API (security audit N3-4 phase 2e). Only a bundle whose REVIEWED
+  // manifest declares one of Crow's invite handlers (getManifest: the installed copy
+  // can be written from inside the bundle's container), and only the owner at this
+  // machine's dashboard. Sentences are fixed: nothing from the app is echoed.
+  router.post("/bundles/api/first-admin-invite", async (req, res) => {
+    if (!(await isLocalOwner(req))) {
+      return res.status(403).json({ error: "Only the owner at this machine's dashboard can invite an account", code: "owner_only" });
+    }
+    const bundleId = req.body && req.body.bundle_id;
+    if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
+    const entry = getInstalled().find((i) => i && i.id === bundleId);
+    if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    const manifest = getManifest(bundleId);
+    const handler = inviteHandlerFor(manifest);
+    if (!handler) {
+      return res.status(400).json({ error: "This extension does not invite anyone; there is nothing to invite.", code: "no_invite_handler" });
+    }
+    const rawEmail = req.body && typeof req.body.email === "string" ? req.body.email.trim().slice(0, 320) : "";
+    const name = manifest?.name || bundleId;
+    const out = await handler.inviteResult({
+      email: rawEmail,
+      installDir: join(BUNDLES_DIR, bundleId),
+      ...(_firstAdminInviteDepsForTest || {}),
+    });
+    // The card re-renders from a fresh read: never a stale "nobody is invited yet".
+    clearInviteStateCache(bundleId);
+    const message = inviteResultSentence(out.result, { email: rawEmail, name, signups: out.signups });
+    if (out.result === "invalid-email") {
+      return res.status(400).json({ ok: false, result: out.result, error: message });
+    }
+    if (out.result !== "invited" && out.result !== "already") {
+      // A 200 with ok:false, like the auto route: the card shows the sentence, and the
+      // failure is the app's state (no token, not running), not a broken request.
+      return res.json({ ok: false, result: out.result, error: message });
+    }
+    return res.json({ ok: true, result: out.result, signups: out.signups, message });
+  });
+
+  // POST /bundles/api/first-admin-close-signups — close the app's sign-ups to
+  // everyone, then re-read it. Owner action, invite-handler bundles only.
+  router.post("/bundles/api/first-admin-close-signups", async (req, res) => {
+    if (!(await isLocalOwner(req))) {
+      return res.status(403).json({ error: "Only the owner at this machine's dashboard can close an app's sign-ups", code: "owner_only" });
+    }
+    const bundleId = req.body && req.body.bundle_id;
+    if (!bundleId || !isValidBundleId(bundleId)) return res.status(400).json({ error: "Invalid bundle ID" });
+    const entry = getInstalled().find((i) => i && i.id === bundleId);
+    if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    const manifest = getManifest(bundleId);
+    const handler = inviteHandlerFor(manifest);
+    if (!handler) {
+      return res.status(400).json({ error: "This extension does not invite anyone; there is nothing to close.", code: "no_invite_handler" });
+    }
+    const name = manifest?.name || bundleId;
+    const result = await handler.closeSignups({
+      installDir: join(BUNDLES_DIR, bundleId),
+      ...(_firstAdminInviteDepsForTest || {}),
+    });
+    clearInviteStateCache(bundleId);
+    const message = closeSignupsSentence(result, { name });
+    if (result !== "off") return res.json({ ok: false, result, error: message });
+    return res.json({ ok: true, result, message });
   });
 
   // GET /bundles/api/engine-blast — Uninstall blast-radius for the bot engine

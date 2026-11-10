@@ -23,12 +23,27 @@ connect to it over HTTP(S).
 
 ## One-time setup (do this in order)
 
-1. **Admin token: nothing to do.** Crow generates it when you install the
+Vaultwarden is **invite-only from install**. Sign-ups are closed from the start,
+Crow invites your own email through Vaultwarden's admin panel (no mail server
+needed), and only that address can create an account. Nobody else can ever
+register — not another account on this machine, not a bot, not a visitor.
+
+1. **Give Crow your email when you install the extension.** The install form asks
+   for `VAULTWARDEN_OWNER_EMAIL` (the address you will use to sign in). Crow
+   invites it as soon as the server answers, and closes sign-ups.
+
+   **Already installed the extension?** The Extensions page shows a card: enter
+   your email there (**Invite my email**). If an account already exists but
+   sign-ups are still open, the same card offers **Close sign-ups**. Neither needs
+   a restart or a terminal.
+
+2. **Admin token: nothing to do.** Crow generates it when you install the
    extension, keeps only an Argon2id hash in the extension's settings, and
    saves the token itself in **Settings → Passwords** (encrypted, this machine
    only). The Extensions page shows it to you once right after install; later,
    reveal it from Settings → Passwords (Crow asks you to confirm it's you).
-   Use it to sign in at `/admin`.
+   Use it to sign in at `/admin` — that token is the admin panel's, it is not an
+   account of yours.
 
    **Installed before Crow generated tokens?** Your typed token keeps working: Crow
    reuses it as it is (plaintext in the extension's settings, not in the keychain) — add
@@ -40,7 +55,7 @@ connect to it over HTTP(S).
    `mcp-addons.json` (older versions copied it there); only new installs get a generated,
    keychain-held token.
 
-2. **Start the bundle** from the Extensions panel.
+3. **Start the bundle** from the Extensions panel.
 
    **Give it a secure https address (needed to save passwords to the vault from
    Crow).** The Bitwarden CLI that Crow uses refuses plain `http://` servers, and
@@ -55,16 +70,14 @@ connect to it over HTTP(S).
    Tailscale name and the port you chose) and restart the bundle. Until you do,
    Crow tells you that vault saving needs a secure https address.
 
-3. **Create your account** at `http://localhost:8097` — this becomes your
-   personal vault. Use a long, memorable master password you will
-   remember forever. It cannot be reset from the admin panel.
+4. **Create your account** at `http://localhost:8097` **with the email Crow
+   invited**. This becomes your personal vault. Use a long, memorable master
+   password you will remember forever. It cannot be reset from the admin panel.
+   Any other address is refused: the sign-up form says the account is not invited.
 
-4. **Disable open signups.** Edit `.env`:
-   ```
-   VAULTWARDEN_SIGNUPS_ALLOWED=false
-   ```
-   Restart the bundle. New users can now only be invited from the
-   admin panel.
+   Crow notices the account on the Extensions page and the card goes away on its
+   own. If sign-ups are somehow still open, that card offers **Close sign-ups** —
+   press it.
 
 5. **Set up a backup.** The one thing standing between you and
    catastrophic loss is `~/.crow/vaultwarden/data`. A reasonable
@@ -73,6 +86,11 @@ connect to it over HTTP(S).
    0 3 * * * tar czf ~/backups/vaultwarden-$(date +\%Y\%m\%d).tgz -C ~/.crow vaultwarden/data
    ```
    Copy those tarballs off-host. Test a restore at least once.
+
+**Inviting someone else later** (a partner, a second device owner) is done in
+Vaultwarden's own admin panel at `/admin` → Users → Invite, with the admin token
+from Settings → Passwords. Invited people can register even though sign-ups are
+closed.
 
 ## Day-to-day use
 

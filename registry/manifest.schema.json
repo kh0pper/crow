@@ -135,7 +135,8 @@
             "script": { "type": "string", "minLength": 1, "maxLength": 300 },
             "timeout_s": { "type": "integer", "minimum": 1, "maximum": 600 }
           }
-        }
+        },
+        "invite": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "requires": {

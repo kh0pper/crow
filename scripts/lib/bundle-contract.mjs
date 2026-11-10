@@ -9,6 +9,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, isAbsolute, basename } from "node:path";
 import Ajv from "ajv";
+import { INVITE_HANDLER_NAMES, isInviteHandlerName } from "../../servers/gateway/first-admin/registry.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -138,6 +139,15 @@ function fileExists(bundleDir, rel) {
  *   none           no login of its own (public/anonymous UI, or a viewer whose
  *                  gate Crow already applies).
  *
+ * One field rides on `finish-setup` (security audit N3-4 phase 2e):
+ *
+ *   invite         `"finish-setup"` plus `"invite": "vaultwarden"` says Crow can
+ *                  make the app INVITE-ONLY through the app's own admin API: it
+ *                  invites the owner's email and closes sign-ups. The value is a
+ *                  name from Crow's CODE-HELD handler list
+ *                  (servers/gateway/first-admin/registry.js), never a path, a URL
+ *                  or anything else the manifest supplies.
+ *
  * The last rule is the load-bearing one: a webUI without a firstAdmin is an
  * undeclared claim surface, so `build-registry --check` fails it (at runtime
  * the same manifest is treated as `finish-setup` — the warning shows rather
@@ -182,6 +192,15 @@ function validateFirstAdmin(manifest, bundleDir) {
     errors.push(`firstAdmin.path must be an app path starting with "/"`);
   }
   if (fa.note !== undefined && typeof fa.note !== "string") errors.push("firstAdmin.note must be a string");
+  // `invite` (N3-4 phase 2e): only on a finish-setup app, and only a handler name
+  // Crow really ships — a manifest names code, it never supplies it.
+  if (fa.invite !== undefined) {
+    if (mode !== "finish-setup") {
+      errors.push(`firstAdmin.invite is only allowed with mode "finish-setup"`);
+    } else if (!isInviteHandlerName(fa.invite)) {
+      errors.push(`firstAdmin.invite must name one of Crow's invite handlers (${INVITE_HANDLER_NAMES.join(", ")})`);
+    }
+  }
   // `user` is the documented default username, or — via "setup" — the admin
   // username Crow itself creates, so the protocol has something to create.
   const setupUser = mode === "crow" && fa.via === "setup";

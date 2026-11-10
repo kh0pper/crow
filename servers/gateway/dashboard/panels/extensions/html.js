@@ -7,7 +7,7 @@
 
 import { escapeHtml, badge, formatDate } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
-import { firstAdminBody, firstAdminTitle } from "../../shared/first-admin.js";
+import { firstAdminBody, firstAdminTitle, firstAdminInviteBody, firstAdminInviteReason } from "../../shared/first-admin.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
@@ -160,6 +160,8 @@ export function renderIcon(addon, size) {
  *   panels/extensions.js via data-queries' cached dockerAvailable() probe —
  *   never probed here, same purity rule as needsConfig). Defaults true so the
  *   pure render tests and any legacy caller show no banner.
+ * @param {Array<object>} [firstAdminPending] the cards pendingFirstAdminNotices()
+ *   produced (`invite` entries included: an invite-only app's card, N3-4 phase 2e).
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
 
@@ -320,15 +322,38 @@ export function buildExtensionsHTML({
   // here); every card offers the operator's own login as an inline form.
   const firstAdminHtml = (firstAdminPending || []).map((e) => {
     const title = firstAdminTitle(e.name, lang);
-    const body = firstAdminBody({ mode: e.mode, via: e.via, user: e.user, note: e.note, kept: e.kept }, e.name, lang) || "";
-    const open = e.linkUnavailable
-      ? `<span class="ext-firstadmin__unavailable" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.linkUnavailable", lang))}</span>`
-      : e.restartPending
-        ? `<span class="ext-firstadmin__restart" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.restartFirst", lang))}</span>`
-        : `<a class="btn btn-sm btn-primary ext-firstadmin-open" href="${escapeHtml(e.link.href)}" target="_blank" rel="noopener"${e.link.onclick || ""}>${escapeHtml(t("bundles.firstAdmin.open", lang))}</a>`;
+    const inv = e.invite && typeof e.invite === "object" ? e.invite : null;
+    const inviteKind = inv ? inv.kind : null;
+    // An invite-only app's card says what its OWN admin API reported (N3-4 phase 2e);
+    // "blocked" keeps today's card and appends one sentence saying why.
+    let body = firstAdminBody({ mode: e.mode, via: e.via, user: e.user, note: e.note, kept: e.kept }, e.name, lang) || "";
+    if (inv && inviteKind !== "blocked") body = firstAdminInviteBody(inv, e.name, lang) || body;
+    if (inv && inviteKind === "blocked") body = `${body} ${firstAdminInviteReason(inv.reason, e.name, lang)}`.trim();
+    // Nobody has an account yet in the "invite" state, so there is nothing to open.
+    const open = inviteKind === "invite"
+      ? ""
+      : e.linkUnavailable
+        ? `<span class="ext-firstadmin__unavailable" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.linkUnavailable", lang))}</span>`
+        : e.restartPending
+          ? `<span class="ext-firstadmin__restart" style="font-size:0.85rem;color:var(--crow-text-tertiary)">${escapeHtml(t("bundles.firstAdmin.restartFirst", lang))}</span>`
+          : `<a class="btn btn-sm btn-primary ext-firstadmin-open" href="${escapeHtml(e.link.href)}" target="_blank" rel="noopener"${e.link.onclick || ""}>${escapeHtml(t("bundles.firstAdmin.open", lang))}</a>`;
     const auto = e.canAuto
       ? `<button type="button" class="btn btn-sm btn-secondary ext-firstadmin-auto" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.setItUp", lang))}</button>`
       : "";
+    // Sign-ups still open (a registered account exists, or one is invited): the one
+    // action that closes the machine off is offered on the card itself.
+    const closeSignups = inv && (inviteKind === "close" || (inviteKind === "create" && inv.signups === "on"))
+      ? `<button type="button" class="btn btn-sm btn-secondary ext-firstadmin-close" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.invite.closeSignups", lang))}</button>`
+      : "";
+    const inviteForm = inviteKind === "invite"
+      ? `<form class="ext-firstadmin-invite" data-id="${escapeHtml(e.id)}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-top:0.5rem">
+            <input class="ext-firstadmin-invite-email" type="email" autocomplete="off" maxlength="320" required aria-label="${escapeHtml(t("bundles.firstAdmin.invite.emailLabel", lang))}" placeholder="${escapeHtml(t("bundles.firstAdmin.invite.emailLabel", lang))}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:16rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">
+            <button type="submit" class="btn btn-sm btn-primary ext-firstadmin-invite-btn">${escapeHtml(t("bundles.firstAdmin.invite.inviteAction", lang))}</button>
+          </form>`
+      : "";
+    const done = e.canDone === false
+      ? ""
+      : `<button type="button" class="btn btn-sm btn-secondary ext-firstadmin-done" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.done", lang))}</button>`;
     const save = e.canSave === false ? "" : `<form class="ext-firstadmin-save" data-id="${escapeHtml(e.id)}" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-top:0.5rem">
             <input class="ext-firstadmin-save-user" type="text" autocomplete="off" maxlength="200" aria-label="${escapeHtml(t("bundles.firstAdmin.username", lang))}" placeholder="${escapeHtml(t("bundles.firstAdmin.username", lang))}" value="${escapeHtml(e.user || "")}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:12rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">
             <input class="ext-firstadmin-save-pass" type="password" autocomplete="off" maxlength="1024" required aria-label="${escapeHtml(t("bundles.firstAdmin.passwordLabel", lang))}" placeholder="${escapeHtml(t("bundles.firstAdmin.passwordLabel", lang))}" style="font-size:0.85rem;padding:0.25rem 0.4rem;max-width:12rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control)">
@@ -341,8 +366,10 @@ export function buildExtensionsHTML({
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
           ${open}
           ${auto}
-          <button type="button" class="btn btn-sm btn-secondary ext-firstadmin-done" data-id="${escapeHtml(e.id)}">${escapeHtml(t("bundles.firstAdmin.done", lang))}</button>
+          ${closeSignups}
+          ${done}
         </div>
+        ${inviteForm}
         ${save}
       </div>`;
   }).join("");
