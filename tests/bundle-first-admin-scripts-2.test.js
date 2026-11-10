@@ -174,8 +174,12 @@ for (const app of ["linkding", "paperless", "romm"]) {
     const r = run(app);
     assert.equal(r.status, 0, r.stderr);
     assertPasswordStayedOutOfSight(r);
-    assert.equal(r.calls[0].argv.startsWith("inspect"), true, "the container is checked before it is touched");
-    assert.equal(r.calls[0].argv.includes(CONTAINERS[app]), true, "and the app's own container is the one named");
+    // RomM first asks compose for its container id (no fixed name); then, like the others,
+    // the container's state is checked before anything runs inside it.
+    const lookups = app === "romm" ? 1 : 0;
+    if (lookups) assert.equal(r.calls[0].argv.startsWith("compose ps -q romm"), true, "RomM's container comes from compose");
+    assert.equal(r.calls[lookups].argv.startsWith("inspect"), true, "the container is checked before it is touched");
+    assert.equal(r.calls[lookups].argv.includes(CONTAINERS[app]), true, "and the app's own container is the one named");
     const create = r.calls.find((c) => c.argv.includes(CREATE[app]));
     assert.ok(create, "the account is created through the app's own tooling");
     assert.equal(create.stdin, `admin\n${PASSWORD}\n`, "the username and the password arrive on stdin");
@@ -196,7 +200,7 @@ for (const app of ["linkding", "paperless", "romm"]) {
   test(`${app}: a container that is not running, or no docker at all, is exit 4`, () => {
     const stopped = run(app, { env: { FAKE_RUNNING_0: "false" } });
     assert.equal(stopped.status, 4);
-    assert.equal(stopped.calls.length, 1, "only the state check ran");
+    assert.equal(stopped.calls.length, app === "romm" ? 2 : 1, "only the lookup and the state check ran");
     const noDocker = run(app, { withDocker: false });
     assert.equal(noDocker.status, 4);
     assert.equal(noDocker.calls.length, 0);
