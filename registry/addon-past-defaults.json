@@ -570,6 +570,7 @@
         "http://localhost:8097"
       ],
       "VAULTWARDEN_SIGNUPS_ALLOWED": [
+        "false",
         "true"
       ],
       "VAULTWARDEN_URL": [
