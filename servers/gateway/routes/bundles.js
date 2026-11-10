@@ -76,8 +76,8 @@ import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeOverrideFiles, expandComposeVars, hostGrants, normalizeHostGrants } from "../compose-guard.js";
-import { COMPOSE_EDITED_FILE, COMPOSE_SHA_FILE, composeInPastCommits, fileSha256, markComposeEdited, readRecordedComposeSha, recordInstalledCompose } from "../bundle-compose-state.js";
+import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeOverrideFiles, expandComposeVars, hostGrants, normalizeHostGrants, parseDotEnv, requiredComposeVars } from "../compose-guard.js";
+import { COMPOSE_EDITED_FILE, COMPOSE_NEEDS_CONFIG_FILE, COMPOSE_SHA_FILE, COMPOSE_STATE_FILE, clearComposeEdited, clearComposeNeedsConfig, composeInPastCommits, markComposeEdited, markComposeNeedsConfig, readComposeEdited, readComposeState, readRecordedComposeSha, recordInstalledCompose, sha256, writeComposeState } from "../bundle-compose-state.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -699,7 +699,7 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
     const rel = relativePath(".", p);
     if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
     // The installed compose's bookkeeping is Crow's own record, never a repo file.
-    if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE) continue;
+    if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE || rel === COMPOSE_STATE_FILE || rel === COMPOSE_NEEDS_CONFIG_FILE) continue;
     if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
     let real;
     try { real = realpathSync.native(join(appSrc, rel)); } catch { continue; }
@@ -716,62 +716,149 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
 const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "node_modules", ".git"]);
 
 /**
- * N8-1: refresh the INSTALLED compose file on a version change, unless the owner
- * edited it.
+ * N8-1: bring an installed docker bundle's compose file up to the repo's copy,
+ * at ANY version, on EVERY boot — unless the owner edited it.
  *
  * A docker bundle's compose is code: it declares the ports, mounts and settings the
- * container runs with. It used to be refreshed only when the manifest opted in with
- * `refreshFiles`, so ~40 bundles whose binds were later tightened to loopback kept
- * their old (wider) bind forever. It is now refreshed by default — but never over an
- * owner's edit:
+ * container runs with. It used to be copied only at install or on a version change
+ * that opted in with `refreshFiles`, so ~40 bundles whose binds were later tightened
+ * to loopback kept their old (wider) bind forever. It is now refreshed by default.
+ * The version gate is deliberately NOT part of the decision: the release that tightens
+ * a bind is a commit to the compose file, not necessarily a manifest version bump, so
+ * an install whose version already equals the repo's can still be running an old file
+ * (the live case this exists for).
  *
- *   unmodified = the installed bytes' sha256 equals the one recorded at the last
- *                install/refresh (`.crow-compose.sha256`), or — for installs made
- *                before that record existed — the bundle's compose at any past
- *                commit of the checkout (bounded git history, via the same runner).
- *   edited     = neither: the file is left exactly as it is, marked
- *                (`.crow-compose.edited`) for the Fix-it card, and logged by bundle
- *                name only.
+ * The decision, cheapest first:
+ *
+ *   installed bytes == repo bytes     write the record if missing; done — no git.
+ *   installed sha == recorded sha      Crow's own copy, the repo moved on: copy the
+ *                                      repo file; no git.
+ *   verdict cached for this pair       reuse it: steady-state boots only hash files.
+ *   otherwise                          ONE bounded history lookup (`git log --raw`,
+ *                                      one call, blob ids compared in Node): a hit
+ *                                      means unmodified → copy; no hit means edited;
+ *                                      git cannot answer means unknown.
+ *
+ *   edited     the installed bytes match nothing the checkout shipped: left exactly as
+ *              it is, marked (`.crow-compose.edited`) for the Fix-it card, logged by
+ *              bundle name only.
+ *   unknown    no git / no checkout / a timeout: nothing is copied and NO edit mark is
+ *              written (we do not know), one log line.
+ *   needs-config the shipped compose requires a `${X:?…}` the installed .env does not
+ *              set: copying it would break Start, so the old copy stays and a card
+ *              names the key to set first.
+ *
+ * The verdict is cached in `.crow-compose.state.json` for the (installed bytes, repo
+ * compose) pair, so a given pair costs at most one git call — ever.
  *
  * Owner-specific settings belong in `docker-compose.override.yml`, which Crow never
- * writes, reads as part of the live model and does not include here. A compose that
- * the manifest already lists in `refreshFiles` was copied by that step (today's
- * behaviour) and only gets its sha recorded. An installed copy with
- * `"refresh": false` never reaches this function (refreshVersionedBundle returns
- * before any copy).
+ * writes, reads as part of the live model and does not include here. An installed copy
+ * whose manifest carries `"refresh": false` never reaches this function.
  *
- * @returns {Promise<"copied"|"recorded"|"edited"|"none">}
+ * @returns {Promise<"copied"|"current"|"edited"|"unknown"|"needs-config"|"none">}
  */
-async function refreshInstalledCompose({ id, appSrc, destDir, repoManifest, runner, alreadyCopied, log = (m) => console.log(m) }) {
+async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoManifest, installedManifest, runner, log = (m) => console.log(m) }) {
+  if (installedManifest?.refresh === false) return "none";
   const composeRel = manifestComposeFile(repoManifest);
   if (!composeRel) return "none";
   const src = join(appSrc, composeRel);
   const dst = join(destDir, composeRel);
-  if (!existsSync(src)) return "none";
   // The install copies the whole tree, so a missing installed compose is a broken
   // install, not an owner edit: leave it alone (nothing runs from it).
-  if (!existsSync(dst)) return "none";
+  if (!existsSync(src) || !existsSync(dst)) return "none";
 
-  if (alreadyCopied) {
-    recordInstalledCompose(destDir, repoManifest);
-    return "recorded";
+  let repoBytes;
+  let installedBytes;
+  try {
+    repoBytes = readFileSync(src);
+    installedBytes = readFileSync(dst);
+  } catch {
+    return "none";
+  }
+  const repoComposeSha = sha256(repoBytes);
+  const installedSha = sha256(installedBytes);
+
+  // 1. Already the repo's copy. Nothing to decide, and never a git call.
+  if (installedSha === repoComposeSha) {
+    const state = readComposeState(destDir);
+    if (!state || state.installedSha !== installedSha || state.repoComposeSha !== repoComposeSha || state.verdict !== "match") {
+      writeComposeState(destDir, { installedSha, repoComposeSha, verdict: "match" });
+    }
+    if (readRecordedComposeSha(destDir) !== installedSha) recordInstalledCompose(destDir, repoManifest);
+    // The owner may have restored the file by hand, or an earlier boot kept it:
+    // the notes clear by themselves now that the bytes are Crow's own again.
+    clearComposeEdited(destDir);
+    clearComposeNeedsConfig(destDir);
+    return "current";
   }
 
-  const installedSha = fileSha256(dst);
-  if (!installedSha) return "none";
+  // 2. The installed bytes are exactly what Crow wrote last time: the repo has moved
+  //    on and the owner has not touched it. Refresh without git.
+  let verdict = null;
   const recorded = readRecordedComposeSha(destDir);
-  let unmodified = !!recorded && recorded === installedSha;
-  if (!unmodified) {
-    unmodified = (await composeInPastCommits({ appRoot: APP_ROOT, bundleId: id, composeRel, sha: installedSha, runner })) === true;
+  if (recorded && recorded === installedSha) {
+    verdict = "match";
+  } else {
+    const cached = readComposeState(destDir);
+    if (cached && cached.installedSha === installedSha && cached.repoComposeSha === repoComposeSha && cached.verdict) {
+      verdict = cached.verdict;
+    }
   }
-  if (!unmodified) {
-    markComposeEdited(destDir, composeRel);
-    log(`[bundles] ${id}: installed ${composeRel} has local changes — not updated; put your changes in docker-compose.override.yml so Crow can update the compose file`);
+
+  // 3. Nothing cached for this exact pair: ONE bounded history lookup decides between
+  //    "unmodified" and "owner edit". Unavailable history is `unknown`, never `edited`.
+  if (!verdict) {
+    const hit = await composeInPastCommits({ appRoot: repoRoot, bundleId: id, composeRel, bytes: installedBytes, runner });
+    if (hit === null) {
+      writeComposeState(destDir, { installedSha, repoComposeSha, verdict: "unknown" });
+      log(`[bundles] ${id}: cannot tell whether the installed ${composeRel} has local changes (git history unavailable) — left as it is`);
+      return "unknown";
+    }
+    verdict = hit ? "match" : "edited";
+    writeComposeState(destDir, { installedSha, repoComposeSha, verdict });
+  }
+
+  if (verdict === "unknown") return "unknown";
+  if (verdict === "edited") {
+    if (!readComposeEdited(destDir)) {
+      markComposeEdited(destDir, composeRel);
+      log(`[bundles] ${id}: installed ${composeRel} has local changes — not updated; move your changes into docker-compose.override.yml so Crow can update the compose file`);
+    }
     return "edited";
   }
+
+  // 4. A refresh must never break Start: a compose that requires a variable the
+  //    installed .env cannot fill is not copied. The old copy keeps working and the
+  //    Fix-it card names the key to set first; the next boot retries.
+  const missing = missingRequiredKeys(repoBytes.toString("utf8"), {
+    dotEnv: parseDotEnv(join(destDir, ".env")),
+    env: process.env,
+  });
+  if (missing.length > 0) {
+    markComposeNeedsConfig(destDir, { compose: composeRel, missing });
+    writeComposeState(destDir, { installedSha, repoComposeSha, verdict: "needs-config" });
+    log(`[bundles] ${id}: not updating ${composeRel} — it needs ${missing.join(", ")} set first`);
+    return "needs-config";
+  }
+
   copyBundleRefreshItem(appSrc, destDir, composeRel);
   recordInstalledCompose(destDir, repoManifest);
+  writeComposeState(destDir, { installedSha: repoComposeSha, repoComposeSha, verdict: "match" });
+  clearComposeNeedsConfig(destDir);
   return "copied";
+}
+
+/**
+ * The required `${X:?…}` keys a compose text needs that neither the installed .env nor
+ * the environment the gateway hands to `docker compose` can fill (a blank value fails
+ * the `${X:?}` form too, so blank counts as missing). Names only, never values.
+ */
+function missingRequiredKeys(text, { dotEnv = {}, env = {} } = {}) {
+  const set = (k) => {
+    const v = dotEnv[k] !== undefined && dotEnv[k] !== null ? dotEnv[k] : env[k];
+    return v !== undefined && v !== null && String(v).trim() !== "";
+  };
+  return requiredComposeVars(text).filter((k) => !set(k));
 }
 
 /**
@@ -837,12 +924,12 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  *   2. Re-copies the served PANELS_DIR artifacts (<id>.js, <id>-routes.js),
  *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
  *      symlink exists (install-parity — an April-era install may predate it).
- *   3. For a docker bundle, also re-copies its compose file BY DEFAULT when the
- *      installed copy is unmodified (never over an owner edit — see
- *      refreshInstalledCompose), so a tightened port bind actually reaches an
- *      existing install. The running container keeps the old bind until the
- *      bundle is restarted; a Fix-it card says so
- *      (fix-it/detectors/bundle-bind-drift.js).
+ *   3. For a docker bundle, manifest.refreshFiles is copied as before. The compose
+ *      file itself is NOT part of this version-keyed step: it is caught up on every
+ *      boot at any version by catchUpInstalledCompose, which never overwrites an
+ *      owner edit and never breaks Start on a missing required key. The running
+ *      container keeps the old bind until the bundle is restarted; a Fix-it card
+ *      says so (fix-it/detectors/bundle-bind-drift.js).
  *   4. Runs `npm install --omit=dev` in destDir, via the injected runner,
  *      ONLY when an added dependency name triggers it (warn-only; never
  *      throws into the caller).
@@ -951,18 +1038,6 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
     for (const rel of opted) touched.push(`refresh:${rel}`);
     if (opted.length) {
       console.log(`[bundles] ${id}: refreshFiles copied (${opted.join(", ")}) — running containers keep the old files/compose until the bundle is restarted`);
-    }
-    // N8-1: the compose file itself is code, so it is refreshed by default — but
-    // never over an owner's edit (see refreshInstalledCompose).
-    const composeOutcome = await refreshInstalledCompose({
-      id, appSrc, destDir, repoManifest, runner, log,
-      alreadyCopied: manifestComposeFile(repoManifest) ? opted.includes(manifestComposeFile(repoManifest)) : false,
-    });
-    if (composeOutcome === "copied") {
-      touched.push("compose");
-      console.log(`[bundles] ${id}: compose file updated — Restart/Start it in Extensions to apply its network settings`);
-    } else if (composeOutcome === "edited") {
-      touched.push("compose:edited");
     }
   }
 
@@ -1181,6 +1256,10 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
   } catch (err) {
     errors.push({ id: "*", error: `wall migration: ${err?.message || err}` });
   }
+  // The compose catch-up's git lookups run against the checkout `appBundles` comes
+  // from (APP_BUNDLES is <repo>/bundles), never against a different constant: a test
+  // or an alternate source tree must resolve its own history.
+  const repoRoot = dirname(appBundles);
   // Skill sync (bundle-skill-sync.js): what it did per skill, and the copies
   // it kept (the caller notifies the owner once per edited skill per repo hash).
   const skillLines = [];
@@ -1262,6 +1341,31 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
         continue;
       }
       const refreshed = await refreshVersionedBundle({ id, appSrc, destDir, runner, log });
+
+      // N8-1: the compose catch-up runs at ANY version, on EVERY boot. The release
+      // that tightens a bind is a commit to the compose file, not necessarily a
+      // manifest bump, so an install whose version already equals the repo's can
+      // still be running an old file (the live case this exists for). Runs after the
+      // version refresh, whose manifest copy is what the installed `refresh` flag is
+      // read from. Its own catch: a compose problem never blocks the code repair.
+      try {
+        if (repoManifest?.docker) {
+          const composeOutcome = await catchUpInstalledCompose({
+            id, appSrc, destDir, repoRoot, repoManifest,
+            installedManifest: readJsonSafe(join(destDir, "manifest.json"), null),
+            runner, log,
+          });
+          if (composeOutcome === "copied") {
+            repaired.push(`${id}: compose updated (restart the bundle to apply its network settings)`);
+          }
+          // `edited` / `needs-config` / `unknown` are steady states with their own
+          // one-time log line (written when the note is created) — repeating them in
+          // the boot repair report would nag on every start.
+        }
+      } catch (err) {
+        errors.push({ id, error: `compose refresh: ${err.message}` });
+      }
+
       if (refreshed) {
         repaired.push(`${id}: refreshed ${refreshed.oldVersion} -> ${refreshed.newVersion} (${refreshed.touched.join(", ") || "no files changed"})`);
         continue; // refresh fully supersedes the missing-only phase for this bundle
@@ -1334,6 +1438,34 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
   }
 
   return { repaired, errors, skillLines, skillsKept };
+}
+
+// Test-only: replace the post-Start/Stop/install re-run of the bind-drift check.
+let _bindDriftRecheckForTest = null;
+export function _setBindDriftRecheckForTest(fn) { _bindDriftRecheckForTest = fn || null; }
+
+/**
+ * Re-run the bind-drift check for ONE bundle after its containers changed (a Start,
+ * a stop, an install's `up`): a "restart to apply" card must clear as soon as the
+ * binds are in effect, and a stop leaves no bind that could drift. Fire-and-forget —
+ * the check is best effort (it never throws), a slow docker must not delay the
+ * response, and the card simply stays until the next boot if this does not land.
+ * Opens its own db handle so the install job (which has no request db) can call it too.
+ */
+function rebindDriftCheck(bundleId) {
+  if (_bindDriftRecheckForTest) {
+    try { _bindDriftRecheckForTest(bundleId); } catch { /* a test seam never throws here */ }
+    return;
+  }
+  setImmediate(async () => {
+    let db;
+    try {
+      const { runBootCheck } = await import("../fix-it/index.js");
+      db = createDbClient();
+      await runBootCheck(db, "bundle-bind-drift", { only: [bundleId] });
+    } catch { /* the card stays until the next boot */ }
+    finally { try { db?.close(); } catch { /* already closed */ } }
+  });
 }
 
 function getInstalled() { return readInstalled(INSTALLED_PATH); }
@@ -2986,7 +3118,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     mkdirSync(destDir, { recursive: true });
     cpSync(sourceDir, destDir, { recursive: true });
     // N8-1: remember the compose bytes as installed, so a later version change can
-    // tell an unmodified compose from an owner edit (refreshInstalledCompose).
+    // tell an unmodified compose from an owner edit (catchUpInstalledCompose).
     recordInstalledCompose(destDir, manifest);
     appendLog(job, "Copied bundle files");
 
@@ -3237,6 +3369,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         try {
           await runCompose(upArgs, { cwd: destDir, timeout: pullTimeoutMs(manifest) });
           appendLog(job, "Containers started");
+          // The containers were created from the installed compose just now: let the
+          // bind-drift check see them, so a stale "restart to apply" card from an
+          // earlier copy resolves without waiting for the next gateway boot (N8-1).
+          rebindDriftCheck(bundleId);
         } catch (err) {
           const detail = err.stderr || err.message;
           appendLog(job, `docker compose up failed: ${detail}`);
@@ -4762,17 +4898,13 @@ export default function bundlesRouter() {
         await runCompose(upArgs, { cwd: bundleDir });
         // The containers were just (re)created from the installed compose: re-run the
         // bind-drift check for this bundle so a "restart to apply" card clears now,
-        // without waiting for the next gateway start (N8-1). Fire-and-forget: the
-        // check is best effort (never throws), and a slow docker must not delay the
-        // Start response. The card stays until the next boot if this does not land.
-        setImmediate(async () => {
-          try {
-            const { runBootCheck } = await import("../fix-it/index.js");
-            await runBootCheck(dbForXhost, "bundle-bind-drift", { only: [bundleId] });
-          } catch { /* the card stays until the next boot */ }
-        });
+        // without waiting for the next gateway start (N8-1).
+        rebindDriftCheck(bundleId);
       } else if (action === "stop") {
         await runComposeTeardown(["stop"], { cwd: bundleDir });
+        // Nothing is running any more, so no bind can be wider than the compose:
+        // the drift card must resolve now, not at the next boot.
+        rebindDriftCheck(bundleId);
       } else {
         return res.status(400).json({ error: `unsupported action: ${action}` });
       }

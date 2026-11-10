@@ -875,23 +875,66 @@ function addLongPort(out, entry, env) {
 }
 
 /**
- * The published ports of a compose text: `{ containerPort, protocol, hostIP }` per entry.
- * `hostIP: null` means compose publishes it on every interface. Both port syntaxes are
- * read (`- "127.0.0.1:8555:5000"`, long `target:`/`host_ip:` entries, `a-b` ranges) and
- * `${VAR}` values expand against `env` exactly as compose resolves them. Line-based, like
- * the rest of this module — it reads what a bundle's compose FILE declares, not the
- * merged model (`docker compose config`), which needs docker.
+ * Which service each line of a compose text belongs to: a line index → service
+ * name map, or null for a line outside the `services:` block. Line-based, like
+ * the rest of this module. Two services may publish the SAME container port
+ * (one on 127.0.0.1, one on every interface), so a port expectation that does
+ * not carry its service cannot tell them apart.
+ */
+function serviceByLine(lines) {
+  const owner = new Array(lines.length).fill(null);
+  let servicesIndent = -1;
+  let serviceIndent = -1;
+  let current = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || /^\s*#/.test(line)) { owner[i] = current; continue; }
+    const ind = /^(\s*)/.exec(line)[1].length;
+    const key = /^(\s*)([A-Za-z0-9._-]+)\s*:\s*(#.*)?$/.exec(line);
+    // A second file's `services:` (compose + its overrides are joined by the caller)
+    // starts a fresh block: this must be checked BEFORE "left the block".
+    if (key && ind === 0 && key[2] === "services") {
+      servicesIndent = 0;
+      serviceIndent = -1;
+      current = null;
+      owner[i] = null;
+      continue;
+    }
+    if (servicesIndent < 0) { owner[i] = null; continue; }
+    if (key && ind <= servicesIndent) { servicesIndent = -1; serviceIndent = -1; current = null; owner[i] = null; continue; }
+    if (key) {
+      if (serviceIndent < 0) serviceIndent = ind;
+      if (ind === serviceIndent) current = key[2];
+    }
+    owner[i] = current;
+  }
+  return owner;
+}
+
+/**
+ * The published ports of a compose text: `{ service, containerPort, protocol, hostIP }`
+ * per entry. `hostIP: null` means compose publishes it on every interface. Both port
+ * syntaxes are read (`- "127.0.0.1:8555:5000"`, long `target:`/`host_ip:` entries, `a-b`
+ * ranges) and `${VAR}` values expand against `env` exactly as compose resolves them.
+ * `service` is the enclosing service's name (`null` for a `ports:` outside `services:`),
+ * so callers can keep two services' publishes apart. Line-based, like the rest of this
+ * module — it reads what a bundle's compose FILE declares, not the merged model
+ * (`docker compose config`), which needs docker.
  */
 export function composePublishedPorts(text, env = {}) {
   const out = [];
   const lines = String(text ?? "").split(/\r?\n/);
+  const services = serviceByLine(lines);
   for (let i = 0; i < lines.length; i++) {
     const key = /^(\s*)ports:\s*(.*)$/.exec(lines[i]);
     if (!key) continue;
+    const service = services[i] ?? null;
+    const first = out.length;
     const indent = key[1].length;
     const inline = composeScalar(key[2]);
     if (inline.startsWith("[")) {
       for (const item of inline.slice(1).replace(/\]\s*$/, "").split(",")) addShortPort(out, item, env);
+      for (const entry of out.slice(first)) entry.service = service;
       continue;
     }
     let long = null;
@@ -915,19 +958,27 @@ export function composePublishedPorts(text, env = {}) {
       flushLong();
     }
     flushLong();
+    for (const entry of out.slice(first)) entry.service = service;
   }
   return out;
 }
 
+/** The expectation map key: the service's name plus `containerPort/protocol`. */
+export function composeExpectationKey(service, containerPort, protocol) {
+  return `${service || ""}|${containerPort}/${protocol}`;
+}
+
 /**
- * `containerPort/protocol` → `{ hostIPs }` for every published port of a compose text
- * (one or more files, e.g. the installed compose plus its overrides, joined by the
- * caller). `hostIPs` holds "" for an all-interfaces publish.
+ * `service|containerPort/protocol` → `{ hostIPs }` for every published port of a compose
+ * text (one or more files, e.g. the installed compose plus its overrides, joined by the
+ * caller). `hostIPs` holds "" for an all-interfaces publish. The service is part of the
+ * key on purpose: two services may publish the same container port, one on a specific IP
+ * and one on every interface, and a flat key would let one mask the other.
  */
 export function composePortExpectations(text, env = {}) {
   const byPort = new Map();
   for (const p of composePublishedPorts(text, env)) {
-    const key = `${p.containerPort}/${p.protocol}`;
+    const key = composeExpectationKey(p.service, p.containerPort, p.protocol);
     const entry = byPort.get(key) || { hostIPs: [] };
     entry.hostIPs.push(p.hostIP ? p.hostIP : "");
     byPort.set(key, entry);
@@ -935,25 +986,52 @@ export function composePortExpectations(text, env = {}) {
   return Object.fromEntries(byPort);
 }
 
+/** A published port (or host port) range: `8000-8002`. Compared by no one, carded as no one. */
+const PORT_RANGE_RE = /-\d+$/;
+
 /**
  * Where the RUNNING containers bind ports WIDER than the compose says: a running
  * `0.0.0.0`/`::`/empty host IP while compose publishes the port on a specific IP, or a
- * published container port compose no longer has. Narrower or equal is not drift.
+ * WIDE published container port compose no longer has. Narrower or equal is not drift.
+ *
+ * Expectations are keyed by service + `containerPort/protocol` (composeExpectationKey),
+ * so two services sharing a container port cannot mask each other. A bind whose service
+ * label is unknown falls back to every expectation for that port. A PORT RANGE (`8000-8002`)
+ * is skipped entirely: it is not one port, and carding each port of it as "extra" would
+ * invent ports the file does not disown.
  *
  * @param {object} o
  * @param {object} o.expected  composePortExpectations() output
- * @param {Array}  o.running   [{ containerPort, protocol, hostIp, hostPort }]
+ * @param {Array}  o.running   [{ service, containerPort, protocol, hostIp, hostPort }]
  * @returns {Array<{containerPort, protocol, hostIp, hostPort, kind: "wider"|"extra"}>}
  */
 export function portBindDrift({ expected = {}, running = [] } = {}) {
   const drifted = [];
   for (const bind of Array.isArray(running) ? running : []) {
+    const containerPort = String(bind?.containerPort ?? "").trim();
+    const hostPort = String(bind?.hostPort ?? "").trim();
+    if (PORT_RANGE_RE.test(containerPort) || PORT_RANGE_RE.test(hostPort)) continue;
     const protocol = String(bind?.protocol || "tcp").toLowerCase();
-    const key = `${bind?.containerPort}/${protocol}`;
-    const entry = expected[key];
-    if (!entry) { drifted.push({ ...bind, protocol, kind: "extra" }); continue; }
-    const expectedSpecific = entry.hostIPs.length > 0
-      && entry.hostIPs.every((ip) => !WIDE_HOST_IPS.has(String(ip ?? "").trim()));
+    const service = bind?.service ? String(bind.service) : "";
+    const suffix = `|${containerPort}/${protocol}`;
+    const exact = expected[composeExpectationKey(service, containerPort, protocol)];
+    // A KNOWN service whose file does not declare the port is an extra publish;
+    // only an unknown service label falls back to any service's expectation.
+    const entries = exact
+      ? [exact]
+      : service
+        ? []
+        : Object.entries(expected).filter(([k]) => k.endsWith(suffix)).map(([, v]) => v);
+    if (entries.length === 0) {
+      // A port the file no longer publishes is only worth a card while it is
+      // reachable from other devices: a loopback extra is nobody's business.
+      if (WIDE_HOST_IPS.has(String(bind?.hostIp ?? "").trim())) {
+        drifted.push({ ...bind, protocol, kind: "extra" });
+      }
+      continue;
+    }
+    const expectedSpecific = entries.every((e) => Array.isArray(e.hostIPs) && e.hostIPs.length > 0
+      && e.hostIPs.every((ip) => !WIDE_HOST_IPS.has(String(ip ?? "").trim())));
     if (expectedSpecific && WIDE_HOST_IPS.has(String(bind?.hostIp ?? "").trim())) {
       drifted.push({ ...bind, protocol, kind: "wider" });
     }

@@ -17,6 +17,9 @@ import addonWallDetector, {
   whyText as addonWallWhyText,
 } from "./detectors/addon-wall.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
+import restoreBundleCompose, {
+  ACTION_ID as RESTORE_COMPOSE_ACTION,
+} from "./remedies/restore-bundle-compose.js";
 import addonUnwallRemedy, {
   FLASH_ID_RE,
   KEEP_OFF_ACTION,
@@ -45,6 +48,9 @@ export function wireFixIt() {
   registry.registerDetector(bundleBindDriftDetector);
   registry.registerDetector(addonWallDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
+  // The owner's own copy of a bundle compose, put back with the previous file kept
+  // as <composefile>.bak (bundle-bind-drift.js's compose-edited card).
+  registry.registerRemedy(RESTORE_COMPOSE_ACTION, restoreBundleCompose);
   // An add-on that could not run inside its wall: run it unwalled by the
   // owner's choice, or answer the card and leave it off.
   registry.registerRemedy("addon-unwall", addonUnwallRemedy);
@@ -313,7 +319,9 @@ export async function handleFixItAction(req, res, { db }) {
       }
       const fn = registry.getRemedy(entry.actionId);
       if (!fn) return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
-      const result = await fn(entry.args || {}, { db, item });
+      // `req` rides along for a remedy that must prove the OWNER at this machine's
+      // dashboard (the compose restore): it is the request, never stored card data.
+      const result = await fn(entry.args || {}, { db, item, req });
       if (result && result.resolved) {
         await store.markResolved(db, itemId);
         const done = typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash) ? result.flash : "fixit_fixed";

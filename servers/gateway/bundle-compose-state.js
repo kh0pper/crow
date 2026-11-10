@@ -5,27 +5,48 @@
  * A docker bundle's compose file used to be copied into `~/.crow/bundles/<id>/`
  * only at install, or on a version change when the manifest opted in with
  * `refreshFiles`. Installs made before a port bind was tightened therefore kept
- * the old bind forever. The refresh now covers the compose by default — but it
- * must never overwrite an owner's edit, so the installed folder remembers:
+ * the old bind forever. The refresh now covers the compose on EVERY boot, at
+ * any version — but it must never overwrite an owner's edit, so the installed
+ * folder remembers:
  *
- *   .crow-compose.sha256   the sha256 of the compose bytes as last copied by
- *                          Crow (install or refresh). Equal bytes → unmodified.
- *   .crow-compose.edited   present when the installed compose matched neither
- *                          the recorded sha nor the bundle's compose at any past
- *                          commit of the checkout: an owner edit, left as is and
- *                          surfaced on a Fix-it card.
+ *   .crow-compose.sha256        the sha256 of the compose bytes as last copied
+ *                              by Crow (install or refresh). Equal bytes →
+ *                              unmodified, and a refresh needs no git at all.
+ *   .crow-compose.state.json   { installedSha, repoComposeSha, verdict }: the
+ *                              decision made for this exact pair of files, so a
+ *                              steady-state boot only hashes two files and runs
+ *                              no git. verdict is one of "match" (the installed
+ *                              bytes are a version the checkout ships),
+ *                              "edited" (they are not), "unknown" (git could not
+ *                              answer) or "needs-config" (the shipped compose
+ *                              needs a key the installed .env does not set).
+ *   .crow-compose.edited       present while the installed compose matched
+ *                              neither the recorded sha nor any past commit: an
+ *                              owner edit, left as is and surfaced on a Fix-it
+ *                              card. Removed by itself as soon as the file
+ *                              matches again.
+ *   .crow-compose.needs-config { compose, missing }: the shipped compose was
+ *                              not copied because `${X:?…}` would fail Start.
+ *                              The card names the key to set; the next boot
+ *                              retries the refresh.
  *
- * Both files live inside the installed bundle folder, are never part of
+ * All of these live inside the installed bundle folder, are never part of
  * `refreshFiles` copying (which only copies repo → installed) and are never
- * synced to a peer.
+ * synced to a peer. Every write is atomic (temp file beside it, then rename),
+ * so a reader never sees a half-written record.
  */
-import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { manifestComposeFile } from "./bundles-config.js";
 
 export const COMPOSE_SHA_FILE = ".crow-compose.sha256";
 export const COMPOSE_EDITED_FILE = ".crow-compose.edited";
+export const COMPOSE_STATE_FILE = ".crow-compose.state.json";
+export const COMPOSE_NEEDS_CONFIG_FILE = ".crow-compose.needs-config";
+
+/** The verdicts a state record may carry (anything else is a stale/foreign file). */
+export const COMPOSE_VERDICTS = Object.freeze(["match", "edited", "unknown", "needs-config"]);
 
 /** How many past commits of the checkout are searched for an unmodified compose. */
 export const COMPOSE_HISTORY_COMMITS = 200;
@@ -35,6 +56,28 @@ export const COMPOSE_GIT_TIMEOUT_MS = 20_000;
 
 export function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
+}
+
+/** git's own object id for a blob: sha1("blob <byteLength>\0" + bytes). */
+export function gitBlobId(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes ?? ""), "utf8");
+  return createHash("sha1").update(`blob ${buf.length}\0`).update(buf).digest("hex");
+}
+
+/**
+ * Write one small bookkeeping file atomically: a temp file beside it is
+ * renamed into place, so a boot or a request that reads it mid-write sees the
+ * old content, never a torn line.
+ */
+export function writeFileAtomic(path, data, mode = 0o600) {
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    writeFileSync(tmp, data, { mode });
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
 }
 
 /** The sha256 of a file's bytes, or null when it cannot be read. */
@@ -57,14 +100,14 @@ export function recordInstalledCompose(destDir, manifest) {
   if (!rel) return null;
   const sha = fileSha256(join(destDir, rel));
   if (!sha) return null;
-  writeFileSync(join(destDir, COMPOSE_SHA_FILE), `${sha}\n`);
+  writeFileAtomic(join(destDir, COMPOSE_SHA_FILE), `${sha}\n`);
   clearComposeEdited(destDir);
   return sha;
 }
 
 /** Note that the installed compose was left alone because it carries owner changes. */
 export function markComposeEdited(destDir, composeRel) {
-  writeFileSync(join(destDir, COMPOSE_EDITED_FILE), `${JSON.stringify({ compose: composeRel })}\n`);
+  writeFileAtomic(join(destDir, COMPOSE_EDITED_FILE), `${JSON.stringify({ compose: composeRel })}\n`);
 }
 
 export function clearComposeEdited(destDir) {
@@ -77,45 +120,97 @@ export function readComposeEdited(destDir) {
   try { return JSON.parse(readFileSync(join(destDir, COMPOSE_EDITED_FILE), "utf8")) || {}; } catch { return {}; }
 }
 
+/** The cached verdict for one (installed bytes, repo compose) pair, or null. */
+export function readComposeState(destDir) {
+  let raw;
+  try { raw = JSON.parse(readFileSync(join(destDir, COMPOSE_STATE_FILE), "utf8")); } catch { return null; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const str = (v) => (typeof v === "string" && v ? v : null);
+  return {
+    installedSha: str(raw.installedSha),
+    repoComposeSha: str(raw.repoComposeSha),
+    verdict: COMPOSE_VERDICTS.includes(raw.verdict) ? raw.verdict : null,
+  };
+}
+
+export function writeComposeState(destDir, { installedSha, repoComposeSha, verdict }) {
+  writeFileAtomic(join(destDir, COMPOSE_STATE_FILE), `${JSON.stringify({ installedSha, repoComposeSha, verdict })}\n`);
+}
+
+/** Note the shipped compose was not copied: Start would fail on a blank `${X:?}`. */
+export function markComposeNeedsConfig(destDir, { compose, missing }) {
+  writeFileAtomic(join(destDir, COMPOSE_NEEDS_CONFIG_FILE), `${JSON.stringify({ compose, missing })}\n`);
+}
+
+/** The `{ compose, missing }` note for a skipped refresh, or null. */
+export function readComposeNeedsConfig(destDir) {
+  let raw;
+  try { raw = JSON.parse(readFileSync(join(destDir, COMPOSE_NEEDS_CONFIG_FILE), "utf8")); } catch { return null; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const missing = Array.isArray(raw.missing) ? raw.missing.filter((k) => typeof k === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) : [];
+  return { compose: typeof raw.compose === "string" ? raw.compose : null, missing };
+}
+
+export function clearComposeNeedsConfig(destDir) {
+  rmSync(join(destDir, COMPOSE_NEEDS_CONFIG_FILE), { force: true });
+}
+
 /**
- * Whether the bundle's compose file at ANY past commit of the checkout has the
- * given sha256 (`null` when git cannot answer: no git, not a checkout, an
- * unreadable log). Installs made before this bookkeeping existed have no
- * recorded sha; their compose is still unmodified when it is byte-identical to
- * what the repo shipped at some commit. The search stops at the first match,
- * and every git call is time-bounded and goes through the caller's runner (the
- * same seam as the rest of the install/refresh paths).
+ * The blob ids of every past version of a bundle's compose file, from ONE
+ * bounded git call: `git log -n<N> --format= --raw --no-abbrev --no-renames`.
+ * With `--raw` each commit lists `:<mode> <mode> <src blob> <dst blob> <status>`
+ * per changed path; the dst blob is the file's content at that commit (`-n`
+ * limits the commits, so the walk is bounded). Renames are split into an add
+ * and a delete, so a moved compose cannot hide its content.
+ *
+ * `null` when git cannot answer (no `.git`, git missing, an unreadable
+ * checkout, a timeout): the caller must treat that as "unknown", never as
+ * "no match". An answer with no rows means the checkout has no history for the
+ * path at all, which IS a definite "not a shipped version".
  *
  * @param {object} o
  * @param {string} o.appRoot    the repo checkout (git -C)
  * @param {string} o.bundleId
  * @param {string} o.composeRel bundle-relative compose path
- * @param {string} o.sha        the installed compose's sha256
  * @param {Function} o.runner   (cmd, args, opts) => Promise<{stdout}>
  * @param {number} [o.maxCommits]
  * @param {number} [o.timeoutMs]
- * @returns {Promise<boolean|null>}
+ * @returns {Promise<Set<string>|null>}
  */
-export async function composeInPastCommits({ appRoot, bundleId, composeRel, sha, runner, maxCommits = COMPOSE_HISTORY_COMMITS, timeoutMs = COMPOSE_GIT_TIMEOUT_MS }) {
+export async function composeBlobIdsInHistory({ appRoot, bundleId, composeRel, runner, maxCommits = COMPOSE_HISTORY_COMMITS, timeoutMs = COMPOSE_GIT_TIMEOUT_MS }) {
   const rel = `bundles/${bundleId}/${composeRel}`.split("\\").join("/");
   let stdout;
   try {
-    ({ stdout } = await runner("git", ["-C", appRoot, "log", "--format=%H", "-n", String(maxCommits), "--", rel], { timeout: timeoutMs }));
+    ({ stdout } = await runner("git", ["-C", appRoot, "log", `-n${maxCommits}`, "--format=", "--raw", "--no-abbrev", "--no-renames", "--", rel], { timeout: timeoutMs }));
   } catch {
     return null; // no git, or not a checkout: history is unavailable
   }
-  const commits = String(stdout || "")
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => /^[0-9a-f]{7,64}$/.test(s));
-  if (commits.length === 0) return null;
-  for (const commit of commits) {
-    try {
-      const { stdout: blob } = await runner("git", ["-C", appRoot, "show", `${commit}:${rel}`], { timeout: timeoutMs });
-      if (sha256(String(blob ?? "")) === sha) return true;
-    } catch {
-      continue; // the path did not exist at that commit
-    }
+  const ids = new Set();
+  for (const line of String(stdout || "").split("\n")) {
+    if (!line.startsWith(":")) continue;
+    const m = /^:[0-7]{6} [0-7]{6} ([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64})/.exec(line);
+    // An all-zero dst blob is a deletion: there is no content to match.
+    if (!m || /^0+$/.test(m[2])) continue;
+    ids.add(m[2]);
   }
-  return false;
+  return ids;
+}
+
+/**
+ * Whether the installed compose bytes are byte-for-byte a version the checkout
+ * shipped (its git blob id is in the path's history), compared on the RAW
+ * Buffer — a file is bytes, and decoding it as text first would change its
+ * object id. The CRLF→LF spelling of the same bytes counts too: a checkout made
+ * on a CRLF host shipped the same compose.
+ *
+ * @returns {Promise<boolean|null>} true / false, or null when history is
+ *   unavailable (see composeBlobIdsInHistory) — never conflated with "edited".
+ */
+export async function composeInPastCommits({ appRoot, bundleId, composeRel, bytes, runner, maxCommits, timeoutMs }) {
+  const ids = await composeBlobIdsInHistory({ appRoot, bundleId, composeRel, runner, maxCommits, timeoutMs });
+  if (ids === null) return null;
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes ?? ""), "utf8");
+  if (ids.has(gitBlobId(buf))) return true;
+  const lf = Buffer.from(buf.toString("utf8").split("\r\n").join("\n"), "utf8");
+  return ids.has(gitBlobId(lf));
 }
