@@ -10,6 +10,7 @@ services:
     environment:
       - VIKUNJA_DATABASE_TYPE=sqlite
       - VIKUNJA_DATABASE_PATH=/db/vikunja.db
+      - VIKUNJA_SERVICE_ENABLEREGISTRATION=${VIKUNJA_ENABLE_REGISTRATION:-true}
       - VIKUNJA_SERVICE_PUBLICURL=${VIKUNJA_URL:-http://localhost:3456}/
       - VIKUNJA_SERVICE_FRONTENDURL=${VIKUNJA_URL:-http://localhost:3456}/
     init: true

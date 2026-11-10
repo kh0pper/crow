@@ -27,7 +27,9 @@ Instala Vikunja como un bundle de Crow. Esto ejecuta Vikunja en Docker junto a t
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Vikunja estará disponible en `http://tu-servidor:3456` para la configuración inicial. Vikunja mantiene su propia página de registro, así que la cuenta la creas tú: regístrate en la interfaz web y luego cierra el registro otra vez poniendo `VIKUNJA_SERVICE_ENABLEREGISTRATION=false` y reiniciando el bundle. Mientras no lo hagas, cualquiera que alcance esa página puede crear una cuenta. La tarjeta de Extensiones muestra **Finish Vikunja's setup now** (termina la configuración) con un enlace directo hasta que pulses Done.
+Vikunja estará disponible en `http://tu-servidor:3456`. Crow crea la cuenta `admin` por sí mismo justo después de la instalación, guarda su contraseña en **Ajustes** → **Contraseñas** y luego cierra el registro y reinicia Vikunja para que la página deje de aceptar cuentas nuevas. A más personas se les añade desde las propias herramientas de administración de Vikunja, no desde una página pública de registro.
+
+Si configuraste Vikunja antes de esta versión, su página de registro puede seguir abierta: pon `VIKUNJA_ENABLE_REGISTRATION=false` en su tarjeta de Extensiones y pulsa **Restart** (reiniciar).
 
 Después, genera un token de API desde **Settings** > **API Tokens**.
 

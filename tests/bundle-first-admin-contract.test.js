@@ -373,9 +373,20 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
     },
     { "adguard-home": "admin", trilium: "trilium", kolibri: "admin" },
   );
-  // Vikunja keeps its own registration page, and the card says how to close it.
-  assert.equal(manifests.vikunja?.firstAdmin?.mode, "finish-setup");
-  assert.match(manifests.vikunja?.firstAdmin?.note || "", /VIKUNJA_SERVICE_ENABLEREGISTRATION=false/);
+  // Vikunja's own registration page was the claimable one. Crow registers the account
+  // `admin` itself and then turns registration off (the manifest's after-step writes the
+  // switch and recreates the container), so a passer-by has nothing left to claim. The note
+  // stays for one case only: an install that was set up by hand before this version (its
+  // script finds accounts and leaves them alone, so registration is still open there).
+  assert.deepEqual(
+    { mode: manifests.vikunja?.firstAdmin?.mode, user: manifests.vikunja?.firstAdmin?.user },
+    { mode: "crow", user: "admin" },
+  );
+  assert.deepEqual(manifests.vikunja?.firstAdmin?.setup?.after, {
+    env: { VIKUNJA_ENABLE_REGISTRATION: "false" },
+    recreate: true,
+  });
+  assert.match(manifests.vikunja?.firstAdmin?.note || "", /VIKUNJA_ENABLE_REGISTRATION=false/);
   // These two connect to an app the operator already runs (nit 7).
   assert.equal(manifests.immich?.firstAdmin?.mode, "external");
   assert.equal(manifests.kodi?.firstAdmin?.mode, "external");

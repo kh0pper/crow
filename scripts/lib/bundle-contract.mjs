@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, isAbsolute, basename } from "node:path";
 import Ajv from "ajv";
 import { INVITE_HANDLER_NAMES, isInviteHandlerName } from "../../servers/gateway/first-admin/registry.js";
+import { firstAdminAfterProblems } from "../../servers/gateway/bundle-first-admin-after.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -341,6 +342,12 @@ function validateSetupFirstAdmin(manifest, bundleDir, fa) {
     if (setup.timeout_s !== undefined && (!Number.isInteger(setup.timeout_s) || setup.timeout_s < 1 || setup.timeout_s > 600)) {
       errors.push(`firstAdmin: setup.timeout_s must be an integer between 1 and 600`);
     }
+    // `setup.after` (N3-4, "Crow creates, then closes"): the values Crow writes into the
+    // bundle's .env once the admin exists, and whether it recreates the containers so the
+    // app reads them. The rules live beside the runtime that applies them
+    // (servers/gateway/bundle-first-admin-after.js), so a manifest cannot declare a step
+    // Crow would not run.
+    errors.push(...firstAdminAfterProblems(manifest));
   }
   if (fa.userEnv !== undefined) {
     const declared = typeof fa.userEnv === "string" && envVars.some((v) => v && v.name === fa.userEnv);

@@ -27,7 +27,9 @@ Install Vikunja as a Crow bundle. This runs Vikunja in Docker alongside your Cro
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-Vikunja will be available at `http://your-server:3456` for initial setup. Vikunja keeps its own registration page, so you create the account: register in the web UI, then close registration again by setting `VIKUNJA_SERVICE_ENABLEREGISTRATION=false` and restarting the bundle. Until you do, anyone who can reach that page can create an account. The Extensions card shows **Finish Vikunja's setup now** with a direct link until you press Done.
+Vikunja will be available at `http://your-server:3456`. Crow creates the account `admin` itself right after the install, keeps its password in **Settings** → **Passwords**, then turns registration off and restarts Vikunja so the page stops accepting new accounts. More people are added from Vikunja's own admin tools, not from a public sign-up page.
+
+If you set Vikunja up before this version, its registration page may still be open: set `VIKUNJA_ENABLE_REGISTRATION=false` on its Extensions card and press **Restart**.
 
 After that, generate an API token from **Settings** > **API Tokens**.
 

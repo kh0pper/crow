@@ -24,6 +24,7 @@ import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
 import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia, clearFirstAdminNotice } from "../bundle-first-admin.js";
 import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE } from "../bundle-first-admin-setup.js";
+import { applyFirstAdminAfter, firstAdminAfterPlan, firstAdminAfterFailureSentence } from "../bundle-first-admin-after.js";
 import {
   inviteHandlerFor,
   inviteFirstAdminOnInstall,
@@ -1994,6 +1995,49 @@ function startConsent(bundleId, { crossHost = false } = {}) {
 
 export { startConsent as _startConsentForTest, consentRecord as _consentRecordForTest };
 
+/**
+ * Recreate one installed bundle's containers through the same guards a Start runs — the ONE
+ * path every non-interactive recreate uses (the shared-storage re-apply and the first-admin
+ * "after" step). It never throws: the caller gets a plain reason and reports it.
+ *
+ * The order is Start's: ownership (never another install's containers), the consent + compose
+ * safety check on what Compose will apply NOW (textCheck: false — an operator's override is
+ * part of that model, and the installed bundle was consented to at install), then
+ * `up -d --force-recreate` so the container really takes the new environment.
+ *
+ * It is never called for a peer request (no request reaches it: both callers are local) and
+ * never for a satellite (that bundle's containers run on another instance's host).
+ *
+ * @param {string} bundleId
+ * @returns {Promise<{ok: true, recreated: boolean} | {ok: false, code: string, reason: string}>}
+ */
+async function recreateBundleGuarded(bundleId) {
+  if (!bundleId || !isValidBundleId(bundleId)) return { ok: false, code: "invalid_bundle", reason: "That is not a valid bundle id." };
+  const entry = getInstalled().find((i) => i && i.id === bundleId);
+  if (!entry) return { ok: false, code: "not_installed", reason: `Bundle '${bundleId}' is not installed` };
+  if (isSatelliteEntry(entry)) {
+    return { ok: false, code: "satellite", reason: `Bundle '${bundleId}' runs on another instance, so this one cannot restart it` };
+  }
+  const orchRefusal = bundleOrchestrationRefusal(bundleId);
+  if (orchRefusal) return { ok: false, code: orchRefusal.code || "orchestration_refused", reason: orchRefusal.error };
+  const bundleDir = join(BUNDLES_DIR, bundleId);
+  // No compose file: an MCP-server or skill-only bundle has no containers to recreate.
+  if (!existsSync(join(bundleDir, "docker-compose.yml"))) return { ok: true, recreated: false };
+  try {
+    const own = await composeOwnership(bundleId, bundleDir, getInstalledFirstManifest(bundleId));
+    if (own.refusal) return { ok: false, code: "compose_project_foreign", reason: own.refusal };
+    if (own.warning) console.warn(`[bundles] ${bundleId} recreate: ${own.warning}`);
+    const sc = startConsent(bundleId);
+    const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: sc.manifest, consentVerified: sc.consentVerified, textCheck: false });
+    if (!gate.valid) return { ok: false, code: "compose_security_check", reason: `Security check failed: ${gate.reason}` };
+    await runCompose(["up", "-d", "--force-recreate"], { cwd: bundleDir });
+    return { ok: true, recreated: true };
+  } catch (err) {
+    return { ok: false, code: "compose_failed", reason: String((err && (err.stderr || err.message)) || "docker compose up failed").trim() };
+  }
+}
+export { recreateBundleGuarded as _recreateBundleGuardedForTest };
+
 // Follow-up B: who may allow a folder outside Crow's home (the owner at this machine's own
 // dashboard), and the folders each check may admit.
 let _ownerCheckForTest = null;
@@ -3729,6 +3773,20 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           user: typeof reviewed?.firstAdmin?.user === "string" ? reviewed.firstAdmin.user : null,
           reason: auto.reason || null,
         }));
+        // "Crow creates, then closes" (N3-4): the manifest's own after-step — the values the
+        // app needs to stop accepting sign-ups, and one guarded recreate so it reads them.
+        // Only when the app really holds Crow's password (exit 0 or 5); a failure here never
+        // undoes the account, which is already in the keychain.
+        if (auto.result === "ok" && firstAdminAfterPlan(reviewed)) {
+          const after = await applyFirstAdminAfter({
+            bundleId,
+            manifest: reviewed,
+            destDir: join(BUNDLES_DIR, bundleId),
+            recreate: recreateBundleGuarded,
+          });
+          if (after.line) appendLog(job, after.line);
+          if (!after.ok) appendLog(job, firstAdminAfterFailureSentence(reviewed?.name || bundleId));
+        }
       }
     }
 
@@ -4140,6 +4198,22 @@ export default function bundlesRouter() {
     if (out.result === "busy") {
       return res.status(409).json({ error: "Crow is already setting up this app's admin login. Wait for it to finish." });
     }
+    // "Crow creates, then closes": the manifest's after-step runs only once the app holds
+    // Crow's password. Its own failure is reported, never treated as the setup's: the login
+    // is saved either way.
+    let after = null;
+    const log = [...(out.log || [])];
+    if (out.result === "ok" && firstAdminAfterPlan(manifest)) {
+      const step = await applyFirstAdminAfter({
+        bundleId,
+        manifest,
+        destDir: join(BUNDLES_DIR, bundleId),
+        recreate: recreateBundleGuarded,
+      });
+      if (step.line) log.push(step.line);
+      if (!step.ok) log.push(firstAdminAfterFailureSentence(manifest?.name || bundleId));
+      after = step.outcome;
+    }
     // The card shows this sentence as-is; it never carries the password.
     res.json({
       ok: out.result === "ok",
@@ -4153,7 +4227,9 @@ export default function bundlesRouter() {
       // An ok can carry a reason (the app took the password, but Crow could not log in with
       // it to confirm): the card keeps that sentence under the "saved" line.
       ...(out.reason ? { reason: out.reason } : {}),
-      log: out.log || [],
+      // The after-step's own plain outcome (absent when this app declares none).
+      ...(after ? { after } : {}),
+      log,
     });
   });
 
@@ -5292,16 +5368,14 @@ export default function bundlesRouter() {
       if (injected === null) {
         return res.status(400).json({ error: "No shared-storage config in DB. Enter MinIO endpoint + credentials in Settings → Shared Storage first." });
       }
-      // Force-recreate so the affected containers pick up the new env.
-      const composePath = join(bundleDir, "docker-compose.yml");
-      if (existsSync(composePath)) {
-        // Checked AFTER the injection: the new .env is part of what Compose applies.
-        const sc = startConsent(bundleId);
-        const gate = await checkBundleCompose(bundleDir, { bundleId, manifest: sc.manifest, consentVerified: sc.consentVerified, textCheck: false });
-        if (!gate.valid) return res.status(403).json({ error: `Security check failed: ${gate.reason}`, code: "compose_security_check" });
-        await runCompose(["up", "-d", "--force-recreate"], { cwd: bundleDir });
+      // Force-recreate so the affected containers pick up the new env: the same guarded path
+      // every non-interactive recreate uses (consent + compose safety check + ownership).
+      const rec = await recreateBundleGuarded(bundleId);
+      if (!rec.ok) {
+        const status = rec.code === "compose_project_foreign" ? 409 : rec.code === "compose_security_check" ? 403 : 500;
+        return res.status(status).json({ error: rec.reason, ...(rec.code ? { code: rec.code } : {}) });
       }
-      res.json({ ok: true, version: injected.version, recreated: existsSync(composePath) });
+      res.json({ ok: true, version: injected.version, recreated: rec.recreated });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
