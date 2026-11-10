@@ -88,6 +88,56 @@ export async function runSyncConflictExpirySweep(dbFactory = createDbClient) {
 }
 
 /**
+ * One version-history sweep (servers/shared/history/sweep.js): read the two
+ * LOCAL settings (history.trash_days, default 30; history.retention, default
+ * "forever" — local-scope, so they never travel to a peer), then redact,
+ * coalesce and erase-past-the-Trash-period. NEVER throws: a boot interval must
+ * not cascade into an outage, and the next run picks up whatever this one could
+ * not finish.
+ *
+ * `db` is passed in by the timer so the sweep keeps ONE handle for the life of
+ * the process: its scan cursors live with the handle (sweep.js), and a fresh
+ * handle every five minutes would restart the backlog walk from the top.
+ *
+ * @param {{db?: object, dbFactory?: () => object}} [opts]
+ * @returns {Promise<object|null>} the sweep's counts, or null when it failed
+ */
+export async function runHistorySweep({ db = null, dbFactory = createDbClient } = {}) {
+  let owned = false;
+  try {
+    const { sweep } = await import("../../shared/history/sweep.js");
+    const { readSetting } = await import("../dashboard/settings/registry.js");
+    if (!db) {
+      db = dbFactory();
+      owned = true;
+    }
+    const rawDays = await readSetting(db, "history.trash_days");
+    const rawRetention = await readSetting(db, "history.retention");
+    const trashDays = rawDays === null || rawDays === undefined || rawDays === "" ? 30 : Number(rawDays);
+    const retention = rawRetention === null || rawRetention === undefined || rawRetention === "" ? "forever" : String(rawRetention);
+    const result = await sweep(db, { trashDays, retention });
+    if (result.redacted > 0 || result.coalesced > 0 || result.erased.length > 0) {
+      console.log(
+        `[history] sweep: ${result.redacted} version(s) redacted, ${result.coalesced} coalesced, ` +
+          `${result.erased.length} Trash item(s) erased (Trash period ${result.trashDays} days)`,
+      );
+    }
+    return result;
+  } catch (err) {
+    console.warn("[history] sweep cycle failed:", err?.message || err);
+    return null;
+  } finally {
+    if (owned) {
+      try {
+        db?.close?.();
+      } catch {
+        /* a stuck close must not fail the cycle */
+      }
+    }
+  }
+}
+
+/**
  * Create the reserved Crow voice bot once (servers/shared/voice-bot.js
  * ensureVoiceBot). Skipped on a --no-auth gateway: a loopback secondary
  * gateway is never the operator's dashboard. Opens a fresh db client via the
@@ -721,6 +771,47 @@ export async function runPostListenSetup(server, app, deps) {
     }, XHOST_AUDIT_PRUNE_BOOT_DELAY_MS).unref();
 
     console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
+  }
+
+  // Version history sweep (the version history design, Task 4): redact
+  // secret-shaped text out of stored versions, coalesce rapid saves, and erase
+  // Trash items past the Trash period. Every five minutes, first run a minute
+  // after boot; the interval is unref'd and each cycle is fully try/caught, so a
+  // failing sweep can never take the gateway down. Runs on EVERY gateway
+  // (--no-auth included): history is local to each instance, so each machine
+  // erases on its own clock.
+  {
+    const HISTORY_SWEEP_FIRST_RUN_MS = 60 * 1000;        // 1 min
+    const HISTORY_SWEEP_INTERVAL_MS = 5 * 60 * 1000;      // 5 min
+    // One handle for the process: the sweep's scan cursors live with it.
+    let sweepDb = null;
+    // A tick that lands while a run is still in flight is skipped, not queued:
+    // two overlapping passes would fight over the same coalescing cursor and
+    // could delete a version the other one just decided to keep.
+    let historySweepInFlight = false;
+    const historySweepCycle = async () => {
+      if (historySweepInFlight) return;
+      try {
+        if (!sweepDb) sweepDb = createDbClient();
+      } catch (err) {
+        console.warn("[history] sweep skipped: no database handle:", err?.message || err);
+        return;
+      }
+      historySweepInFlight = true;
+      try {
+        await runHistorySweep({ db: sweepDb });
+      } catch (err) {
+        // runHistorySweep already logs; this only guarantees no unhandled rejection.
+        console.warn("[history] sweep cycle failed:", err?.message || err);
+      } finally {
+        historySweepInFlight = false;
+      }
+    };
+    setTimeout(() => {
+      historySweepCycle();
+      setInterval(historySweepCycle, HISTORY_SWEEP_INTERVAL_MS).unref();
+    }, HISTORY_SWEEP_FIRST_RUN_MS).unref();
+    console.log("[history] sweep armed (5-min interval, first run in 1 min)");
   }
 
   // Old sync conflicts expire on their own (operator ruling): the winner is

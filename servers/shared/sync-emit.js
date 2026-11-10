@@ -16,6 +16,7 @@
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
 import { SYNCED_TABLES, shouldSyncRow, shouldInitInstanceSync, stripLocalOnlyColumns } from "../sharing/instance-sync.js";
+import { eraseSyncEnabled } from "./history/erase.js";
 import {
   ensureSyncTables,
   seedCounterSql,
@@ -174,7 +175,13 @@ async function enforceOutboxCap(db) {
  * @param {object|null} syncManager - an InstanceSyncManager, or null/undefined
  * @param {object} db - db client (used only on the queue path)
  * @param {string} table
- * @param {"insert"|"update"|"delete"} op
+ * @param {"insert"|"update"|"delete"|"erase"} op - `erase` is
+ *   servers/shared/history/erase.js's permanent-erase event: like `delete` it
+ *   names a row that is gone (nothing to stamp), and the receiver applies it as
+ *   a delete + a history erase + a tombstone. It is queued and drained exactly
+ *   like any other op ONCE erase emission is enabled (the local
+ *   `history.erase_sync` setting, default off — see erase.js ERASE_SYNC_SETTING);
+ *   with the setting off an erase is never queued.
  * @param {object} row
  * @param {object} [opts]
  * @param {number} [opts.lamportTs] - preserve-lamport mode (queue path
@@ -202,6 +209,11 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     // wedges claimed/reclaimed forever and eventually cap-evicts real rows).
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null;
+    // An ERASE travels only when the operator turned erase emission on
+    // (history.erase_sync, default off — servers/shared/history/erase.js
+    // ERASE_SYNC_SETTING): the same gate the live manager applies, so the queue
+    // door cannot smuggle past it what emitChange would refuse.
+    if (op === "erase" && !(await eraseSyncEnabled(db))) return null;
     // Local-only columns never enter the queue: the outbox row IS the emitted
     // payload (`row_json`, replayed verbatim by the drain's emitChange), and a
     // providers row's api_key belongs to this instance alone — the same strip
@@ -228,7 +240,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
       // (skipped on delete or shape mismatch, same as the mint path), outbox
       // INSERT — all with the caller's literal value, still one atomic batch.
       const statements = [seedCounterSql(instanceId), floorCounterSql(instanceId, preserveLamport)];
-      if (op !== "delete") {
+      if (op !== "delete" && op !== "erase") {
         const stampStmt = stampSql(table, row, preserveLamport, origin);
         if (stampStmt) statements.push(stampStmt);
       }
@@ -245,7 +257,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     // out (stamped-but-never-queued).
     const statements = [seedCounterSql(instanceId)];
     const bumpIdx = statements.push(bumpCounterSql(instanceId)) - 1;
-    if (op !== "delete") {
+    if (op !== "delete" && op !== "erase") {
       const stampStmt = subselectStampSql(table, row, instanceId, origin);
       if (stampStmt) statements.push(stampStmt);
     }

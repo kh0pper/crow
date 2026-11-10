@@ -253,6 +253,11 @@ export default {
     const formAction = isEdit ? "edit" : "create";
     const submitLabel = isEdit ? t("blog.saveChanges", lang) : t("blog.createDraft", lang);
     const cancelLink = isEdit ? ` <a href="/dashboard/blog" class="btn btn-secondary" style="margin-left:0.5rem">${t("common.cancel", lang)}</a>` : "";
+    // The version history design §3.1: an editor of covered content carries one
+    // History link for the item it is editing (here, the post's earlier saves).
+    const historyLink = isEdit
+      ? ` <a href="/dashboard/history/blog_post/${editPost.id}" data-turbo-frame="_top" class="btn btn-secondary" style="margin-left:0.5rem">${t("history.pageTitle", lang)}</a>`
+      : "";
 
     const postForm = `<form method="POST" id="create-post-form">
       <input type="hidden" name="action" value="${formAction}">
@@ -306,7 +311,7 @@ export default {
         </div>
       </div>
       <div style="margin-top:1rem">
-        <button type="submit" class="btn btn-primary">${submitLabel}</button>${cancelLink}
+        <button type="submit" class="btn btn-primary">${submitLabel}</button>${cancelLink}${historyLink}
       </div>
     </form>`;
 

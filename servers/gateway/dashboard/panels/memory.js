@@ -248,7 +248,8 @@ export default {
       if (isSummaryMemorySource(mem.source)) {
         const body = `<p class="crow-memory-summary-note" style="color:var(--crow-text-muted)">${escapeHtml(t("memory.summaryReadOnly", lang))}</p>
           <div style="background:var(--crow-bg-elevated);padding:1rem 1.25rem;border-radius:0.5rem;line-height:1.55">${escapeHtml(String(mem.content || ""))}</div>
-          <a href="/dashboard/memory" class="btn btn-secondary" style="margin-top:1rem">${t("memory.cancel", lang)}</a>`;
+          <a href="/dashboard/memory" class="btn btn-secondary" style="margin-top:1rem">${t("memory.cancel", lang)}</a>
+          <a href="/dashboard/history/memory/${mem.id}" data-turbo-frame="_top" class="btn btn-secondary" style="margin-top:1rem">${t("history.pageTitle", lang)}</a>`;
         return layout({ title: t("memory.viewPageTitle", lang), content: section(`${t("memory.viewPageTitle", lang)} #${escapeHtml(String(mem.id))}`, body) });
       }
 
@@ -272,6 +273,7 @@ export default {
         <div style="display:flex;gap:0.5rem;margin-top:1rem">
           <button type="submit" class="btn btn-primary">${t("memory.save", lang)}</button>
           <a href="/dashboard/memory" class="btn btn-secondary">${t("memory.cancel", lang)}</a>
+          <a href="/dashboard/history/memory/${mem.id}" data-turbo-frame="_top" class="btn btn-secondary">${t("history.pageTitle", lang)}</a>
         </div>
       </form>`;
 
@@ -396,6 +398,9 @@ export default {
         const categoryBadge = badge(m.category || "general", "draft");
         const importanceIndicator = renderImportance(m.importance);
         const editBtn = `<a href="/dashboard/memory?edit=${m.id}" data-turbo-frame="_top" class="btn btn-sm btn-secondary">${t("memory.edit", lang)}</a>`;
+        // The version history design §3.1: each covered item has a History view of
+        // its own. A memory's is one link from its row (and from its view page).
+        const historyBtn = `<a href="/dashboard/history/memory/${m.id}" data-turbo-frame="_top" class="btn btn-sm btn-secondary">${t("history.pageTitle", lang)}</a>`;
         const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("memory.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${m.id}"><button class="btn btn-sm btn-danger" type="submit">${t("memory.delete", lang)}</button></form>`;
 
         const isLong = content.length > 200;
@@ -415,7 +420,7 @@ export default {
           importanceIndicator,
           contentCell,
           `<span class="mono">${formatDate(m.updated_at, lang)}</span>`,
-          `${editBtn} ${deleteBtn}`,
+          `${editBtn} ${historyBtn} ${deleteBtn}`,
         ];
       });
       memoryList = dataTable([t("memory.categoryLabel", lang), t("memory.importanceLabel", lang), t("memory.contentLabel", lang), t("memory.updatedLabel", lang), t("memory.actionsLabel", lang)], rows, { stack: true, wide: [2] });

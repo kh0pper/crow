@@ -19,6 +19,7 @@ import { runSchedulerHooks } from "./scheduler-hooks.js";
 import { ONCE, scheduleKind, reminderText, settleDue, graceMs, cronNext, zoneFor, missedRunInsert, ALIVE_SLACK_MS, BOTCRON_PREFIX } from "../shared/schedule-core.js";
 import { instanceZone, instanceLang, ownerZone, hasRunsTable, hasTzColumn } from "../shared/schedule-store.js";
 import { fmt } from "../shared/relative-dates.js";
+import { withWriteContext, systemWriteContext } from "../shared/history/write-context.js";
 
 const CHECK_INTERVAL_MS = 60 * 1000;
 const RETENTION_EVERY = 60; // ticks between run-history prunes (and at boot)
@@ -117,8 +118,16 @@ async function deliverReminder(db, schedule, { late = false, lang = "en" } = {})
 /**
  * Run a schedule now (the panel's Run now, and requested runs from the memory server). Reminders
  * only for now; it never changes next_run. → { ok, runId?, error? }
+ *
+ * A schedule is a 'system' author in version history, with its own id as the author
+ * and `schedule:<id>` as the job (Task 2 of the version history design), whether the
+ * clock or the panel triggered the run.
  */
-export async function runNow(database, schedule, { runId = null } = {}) {
+export async function runNow(database, schedule, opts = {}) {
+  return withWriteContext(systemWriteContext(schedule?.id ?? null), () => runNowAsSystem(database, schedule, opts));
+}
+
+async function runNowAsSystem(database, schedule, { runId = null } = {}) {
   const db = database; // local: never rebinds the scheduler's own handle
   const finish = async (status, detail) => {
     if (!(await hasRunsTable(db))) return null;
@@ -329,8 +338,13 @@ async function settlePass() {
   for (const row of rows) {
     try {
       const kind = scheduleKind(row.task);
-      if (kind === "briefing") await advanceOwned(row, now, zone);
-      else if (kind === "reminder") await settleReminder(row, now, { zone, grace, runs, lang });
+      // Each schedule's work runs as a 'system' write with that schedule's id, so
+      // anything it changes to covered content is attributable to the schedule
+      // (Task 2 of the version history design).
+      await withWriteContext(systemWriteContext(row.id), async () => {
+        if (kind === "briefing") await advanceOwned(row, now, zone);
+        else if (kind === "reminder") await settleReminder(row, now, { zone, grace, runs, lang });
+      });
     } catch (err) {
       console.error(`[scheduler] #${row.id}: ${err.message}`);
     }
@@ -342,9 +356,16 @@ async function settlePass() {
 }
 
 /**
- * Check for due schedules and update them.
+ * Check for due schedules and update them. The whole tick runs as a 'system' write
+ * context, so covered content a schedule or an installed bundle's tick hook changes
+ * is attributed to the scheduler rather than left unattributed or looking like the
+ * owner's edit (each schedule's own pass narrows it to `schedule:<id>`).
  */
 async function tick() {
+  return withWriteContext(systemWriteContext(), tickAsSystem);
+}
+
+async function tickAsSystem() {
   if (!db) return;
 
   // The heartbeat is the START of the previous tick, so a slow hook in that tick cannot make a

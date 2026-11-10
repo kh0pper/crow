@@ -83,6 +83,7 @@ import settingsPanel from "./panels/settings.js";
 import contactsPanel from "./panels/contacts.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
+import historyPanel, { mountHistoryRoutes } from "./panels/history.js";
 import boardPanel from "./panels/board.js";
 import designSystemPanel from "./panels/design-system.js";
 import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, handleMeetPost, handlePreviewsPost } from "./panels/onboarding.js";
@@ -159,6 +160,7 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   registerPanel(contactsPanel);
   registerPanel(botBuilderPanel);
   registerPanel(botBoardPanel);
+  registerPanel(historyPanel);
   registerPanel(boardPanel);
   registerPanel(designSystemPanel);
   registerPanel(onboardingPanel);
@@ -1134,6 +1136,13 @@ export default function dashboardRouter(mcpAuthMiddleware, { renderLayout: rende
   // A project's Services page (project services): hidden, and a 404 like any unknown path, while
   // CROW_SERVICES_UI is off.
   router.all("/dashboard/project/:slug/services", (req, res, next) => (servicesUiEnabled() ? dispatchPanel(req, res, next, "project-services") : next()));
+  // Version history pages (implementation plan Task 5): the nested paths
+  // (/dashboard/history/jobs, /dashboard/history/trash and an item's
+  // /dashboard/history/<type>/<id>) are registered before the single-segment
+  // panel route, and dispatch to the hidden `history` panel so they get the
+  // dashboard's normal chrome. Owner-only, GET and POST alike — the panel
+  // checks (dashboard/index.js's `/dashboard/:panelId` never sees them).
+  mountHistoryRoutes(router, (req, res, next) => dispatchPanel(req, res, next, "history"));
   router.all("/dashboard/:panelId", (req, res, next) => {
     const panelId = req.params.panelId;
     // Skip if it matches login/logout (already handled)

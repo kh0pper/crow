@@ -9,6 +9,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
+import { t } from "../../shared/i18n.js";
 
 export default {
   id: "shared-context",
@@ -26,9 +27,9 @@ export default {
     }
   },
 
-  async render({ db }) {
+  async render({ db, lang = "en" }) {
     const { rows } = await db.execute({
-      sql: `SELECT section_key, section_title, sort_order, device_id, project_id, content
+      sql: `SELECT id, section_key, section_title, sort_order, device_id, project_id, content
             FROM crow_context ORDER BY sort_order, section_key`,
       args: [],
     });
@@ -42,10 +43,15 @@ export default {
       if (r.project_id) scope.push(`project=${r.project_id}`);
       const scopeStr = scope.length ? ` <span style="font-size:0.72rem;color:var(--crow-accent)">[${scope.join(" ")}]</span>` : "";
       const contentPreview = (r.content || "").slice(0, 200).replace(/\n/g, " ");
+      // The version history design §3.1: one History link per covered item — a
+      // context section is one, and its versions are readable/restorable there.
+      const historyLink = r.id == null
+        ? ""
+        : ` <a href="/dashboard/history/context_section/${escapeHtml(String(r.id))}" data-turbo-frame="_top" style="font-size:0.78rem;color:var(--crow-accent);text-decoration:none">${escapeHtml(t("history.pageTitle", lang))}</a>`;
       return `
         <div style="padding:12px;border:1px solid var(--crow-border);border-radius:4px;margin-bottom:8px">
           <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem">${escapeHtml(r.section_key)}${scopeStr}</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem">${escapeHtml(r.section_key)}${scopeStr}${historyLink}</div>
           </div>
           <div style="font-weight:500;margin-bottom:4px">${escapeHtml(r.section_title || "")}</div>
           <div style="font-size:0.82rem;color:var(--crow-text-muted);line-height:1.4">${escapeHtml(contentPreview)}${(r.content || "").length > 200 ? "…" : ""}</div>

@@ -15,6 +15,7 @@ import { forwardedAddrs, classifyPeer, isOverlayAddr, normalizeAddr } from "../.
 import { peerTrust } from "../../shared/peer-trust.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { escapeHtml } from "./shared/components.js";
+import { withWriteContext, ownerWriteContext, peerWriteContext } from "../../shared/history/write-context.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -604,8 +605,78 @@ export function isAllowedEnrollNetwork(req) {
 }
 
 /**
+ * The `src:<instance id>` a session a paired instance minted through SSO carries,
+ * or null. `mintSsoSession` stores `scopes = 'dashboard sso src:<id>'`; the tag is
+ * revoke plumbing (PT-1) AND the fact that decides whose writes the session makes.
+ */
+export function ssoSourceOf(scopes) {
+  const m = /(?:^|\s)sso src:(\S+)/.exec(String(scopes ?? ""));
+  return m && m[1] ? m[1] : null;
+}
+
+/**
+ * The version-history write context a dashboard request writes under.
+ *
+ * A password sign-in on this instance is the OWNER: keyed by the first 8 hex of
+ * the session's sha256 (never a user name, an email or the raw session id) with
+ * the session as the job, so the owner's edits group per sign-in (the version
+ * history design, §8.1).
+ *
+ * A session a paired instance minted through SSO is NOT the owner — the same rule
+ * routes/chat.js applies when it decides whose turn a chat is — so its writes are
+ * stamped `peer`, with the minting instance as both author and origin.
+ *
+ * Null when the request carries no session: the write is then recorded as
+ * unattributed, never as the owner.
+ */
+export function ownerRequestWriteContext(req) {
+  const ssoSrc = req?.dashboardSsoSrc;
+  if (typeof ssoSrc === "string" && ssoSrc) return peerWriteContext(ssoSrc);
+  // An SSO session whose source is unknown is still not the owner: no context,
+  // so its writes are recorded unattributed rather than as the owner's.
+  if (req?.dashboardSso) return null;
+  return ownerWriteContext(req?.dashboardSession);
+}
+
+/**
+ * Verify a dashboard session AND say who its writes belong to: `{ valid, ssoSrc }`,
+ * where `ssoSrc` is the instance id that minted an SSO session (null for a local
+ * password session). One query, so the middleware never reads the session twice.
+ * `verifySession` below stays the plain yes/no check for callers that only gate.
+ */
+export async function sessionAuth(token) {
+  if (!token) return { valid: false, ssoSrc: null };
+  const db = createDbClient();
+  try {
+    const result = await db.execute({
+      sql: "SELECT scopes FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND julianday(expires_at) > julianday('now')",
+      args: [hashToken(token)],
+    });
+    if (result.rows.length === 0) return { valid: false, ssoSrc: null };
+    const scopes = String(result.rows[0].scopes ?? "");
+    return { valid: true, ssoSrc: ssoSourceOf(scopes), sso: /(?:^|\s)sso(?:\s|$)/.test(scopes) };
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Dashboard auth middleware.
  * Checks session cookie or redirects to login.
+ *
+ * On success the rest of the request runs INSIDE a write context: every write this
+ * request makes to covered content — including the panels' direct SQL on crow.db,
+ * whose triggers cannot see who is asking — is attributed to this sign-in (or, for
+ * an SSO session, to the instance that minted it). Express's next() is called
+ * inside the async-local store, so downstream handlers and their promises inherit
+ * it.
+ *
+ * That inheritance is why a handler that starts something LONG-LIVED (a child
+ * process, an interval, a background worker) must open it with
+ * `withoutWriteContext` (servers/shared/history/write-context.js): otherwise the
+ * worker's every later write is stamped with this request's author. A model's tool
+ * call is the other side of the same coin — it takes its own context (see
+ * servers/gateway/ai/tool-executor.js).
  */
 export function dashboardAuth(req, res, next) {
   // Network check
@@ -625,10 +696,14 @@ export function dashboardAuth(req, res, next) {
   const cookies = parseCookies(req);
   const token = cookies[SESSION_COOKIE];
 
-  verifySession(token).then((valid) => {
+  sessionAuth(token).then(({ valid, ssoSrc, sso }) => {
     if (valid) {
       req.dashboardSession = token;
-      next();
+      if (ssoSrc) req.dashboardSsoSrc = ssoSrc;
+      if (sso) req.dashboardSso = true;
+      const ctx = ownerRequestWriteContext(req);
+      if (ctx) withWriteContext(ctx, () => next());
+      else next();
     } else {
       res.redirectAfterPost("/dashboard/login");
     }

@@ -10,6 +10,33 @@
  * Conflict resolution: if incoming.lamport_ts > local.lamport_ts → apply;
  * otherwise run the equivalence check — equal data → skip silently; differing
  * data → log to sync_conflicts and notify the operator.
+ *
+ * TWO EXCEPTIONS SIT ABOVE THAT RULE, both from the operator's 2026-11-10 ruling
+ * that an erase is permanent:
+ *
+ *   1. AN ERASE MAY TRAVEL. An erase (servers/shared/history/erase.js) emits
+ *      `{ table, op: "erase", row }` on the item's own table, so it is signed,
+ *      origin-bound and delivered exactly like an ordinary change; the receiver
+ *      deletes its live row (through the same gates an inbound delete passes —
+ *      key resolution, local-only protection, the lamport conflict check), erases
+ *      its own versions through the same armed door and records its own
+ *      tombstone. No new synced table is introduced (see erase.js's
+ *      ERASURE_SYNC_TABLES for why an op was the smaller change). ONLY ITEMS THAT
+ *      SYNC ARE ANNOUNCED, and emission is gated by the local setting
+ *      `history.erase_sync` (default OFF: there is no peer capability to gate on
+ *      yet — see erase.js ERASE_SYNC_SETTING). THE RECEIVER REQUIRES IT TOO
+ *      (opt-in on both sides): with the setting off here, an inbound erase is
+ *      logged and recorded as a tombstone bounded to its lamport — no row deleted,
+ *      no version erased.
+ *   2. AN ERASED ITEM IS NEVER RE-CREATED, on either instance: an inbound
+ *      insert/update naming a tombstoned item is refused WHEN IT DOES NOT
+ *      POST-DATE THE ERASE (its lamport_ts is at or below the tombstone's
+ *      erase_lamport — a genuinely new item reusing the id later is accepted).
+ *      An erase that never travelled is bounded by the local counter at erase
+ *      time (erase.js readLocalLamportOrNull), so only a store whose counter
+ *      cannot be read refuses everything.
+ *      This applies to the TOMBSTONE, not to the delete-wins rule below —
+ *      concurrent delete vs Trash restore is still resolved exactly as before.
  */
 
 import { SUMMARY_SOURCE_PREFIX, isSummaryMemorySource, parseSummarySource } from "../shared/summary-source.js";
@@ -33,6 +60,17 @@ import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incom
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
 import { noticeProviderKeyNeeded } from "../shared/provider-key-need.js";
 import { providerEndpointChanged, noticeProviderEndpointHeld } from "../shared/provider-endpoint.js";
+import { withWriteContext, peerWriteContext } from "../shared/history/write-context.js";
+import {
+  applyRemoteErasure,
+  eraseLiveRowStatements,
+  eraseSyncEnabled,
+  erasureItemType,
+  erasureKeys,
+  findEraseRefusal,
+  queueFailedRemoteErasure,
+  SUMMARY_TOMBSTONE_PREFIX,
+} from "../shared/history/erase.js";
 
 /** How long the re-pair fence waits to learn a peer feed's remote length (PT-1). */
 const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
@@ -1400,6 +1438,197 @@ export function _resetEntryOriginModeLog() { _warnedBadOriginMode = false; }
 
 const ORIGIN_LOG_INTERVAL_MS = 3_600_000;
 
+/* ------------------------------ inbound ERASE resolution ------------------- */
+/*
+ * Where an inbound erase's item is found, which the apply, the failed-apply
+ * fallback and the sweep's retry all share — one implementation, so a retry can
+ * never resolve (or protect) differently from the first attempt.
+ */
+
+/** The gated statements that reach one live row by id, plus its versions. */
+function eraseItemForId(table, id, lamportTs) {
+  const item = { itemId: id === undefined || id === null ? null : String(id) };
+  if (item.itemId !== null) Object.assign(item, eraseLiveRowStatements(table, "id = ?", [item.itemId], lamportTs));
+  return item;
+}
+
+/** A memory row's own `source` (null when there is no such row). */
+async function memorySourceOf(db, id) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
+    return rows[0]?.source ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The local memory an erase names, with the protection gates EVERY erase path runs.
+ *
+ * A summary is resolved by its SOURCE (its wire id is the sender's); anything else
+ * by its id, and then the LOCAL row that id really is decides: a starter / Maker Lab
+ * memory is never a peer's to erase, and a local summary is protected unless the
+ * erase named its source (which is its portable identity).
+ *
+ * @returns {Promise<{protected: boolean, item: object|null}>}
+ */
+async function memoryEraseTarget(db, wireRow, keys, lamportTs) {
+  if (isSummaryMemorySource(wireRow?.source)) {
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT id FROM memories WHERE source = ? ORDER BY id LIMIT 1",
+        args: [String(wireRow.source)],
+      });
+      return { protected: false, item: eraseItemForId("memories", rows[0]?.id, lamportTs) };
+    } catch {
+      return { protected: false, item: { itemId: null } };
+    }
+  }
+  if (wireRow?.id === undefined || wireRow?.id === null) return { protected: false, item: null };
+  const localSource = await memorySourceOf(db, wireRow.id);
+  if (isLocalOnlyMemorySource(localSource)) return { protected: true, item: null };
+  if (
+    isSummaryMemorySource(localSource) &&
+    !keys.includes(`${SUMMARY_TOMBSTONE_PREFIX}${localSource}`)
+  ) {
+    return { protected: true, item: null };
+  }
+  return { protected: false, item: eraseItemForId("memories", wireRow.id, lamportTs) };
+}
+
+/**
+ * The local items one context section's erase names: the live row (if any) by its
+ * id, and every item this instance's Trash holds under that scope.
+ *
+ * @param {object} db
+ * @param {object} wireScope {section_key, device_id, project_uuid?} — the wire row,
+ *   or the scope parsed back out of a queued tombstone key
+ * @param {number|null} lamportTs the erase's lamport (the gate in each statement)
+ * @returns {Promise<{drop?: string, error?: string, items: object[]}>}
+ */
+async function contextEraseItems(db, wireScope, lamportTs) {
+  // Its natural key: the wire carries the scope, the local project id is derived.
+  const mapped = await mapInboundContextProject(db, wireScope ?? {});
+  if (mapped.drop) return { drop: mapped.drop, items: [] };
+  const sk = mapped.row.section_key;
+  if (sk == null) return { drop: "no section_key", items: [] };
+  const devId = mapped.row.device_id ?? null;
+  const projId = mapped.row.project_id ?? null;
+
+  const live = [];
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+      args: [sk, devId, projId],
+    });
+    for (const found of rows) live.push(String(found.id));
+  } catch (err) {
+    return { error: err.message, items: [] };
+  }
+
+  const ids = [...live];
+  // A section already in this instance's Trash has no live row, but it still has
+  // versions — find them by the scope their snapshots carry.
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT DISTINCT item_id FROM item_versions
+             WHERE item_type = 'context_section'
+               AND json_extract(snapshot_json, '$.section_key') = ?
+               AND json_extract(snapshot_json, '$.device_id') IS ?
+               AND json_extract(snapshot_json, '$.project_uuid') IS ?`,
+      args: [sk, devId, wireScope?.project_uuid ?? null],
+    });
+    for (const found of rows) if (!ids.includes(String(found.item_id))) ids.push(String(found.item_id));
+  } catch {
+    /* no history table (or no JSON1): the live row's history is still erased */
+  }
+
+  // A live row gets the gated pair, by id — the row we read, and nothing else (a
+  // section is keyed by its scope, so there is at most one, and its rowid is exact
+  // where the scope predicate would have to be repeated in three places).
+  return {
+    items: ids.map((itemId) => (live.includes(itemId) ? eraseItemForId("crow_context", itemId, lamportTs) : { itemId })),
+  };
+}
+
+/**
+ * Re-resolve a QUEUED inbound erase (erase.js's pending_remote_erasures marker,
+ * which holds only the tombstone keys and the erase lamport) into the items the
+ * apply transaction needs.
+ *
+ * This is what makes the 5-minute sweep's retry safe: it runs exactly the gates
+ * the first attempt ran — summary-by-source routing, the local-only protection, a
+ * section's scope→row lookup — instead of replaying pre-built statements. The
+ * protection itself is checked again inside the transaction (erase.js), on the
+ * live row's source as well as its newest snapshot.
+ *
+ * @param {object} db
+ * @param {{itemType: string, keys?: string[], lamport?: number|null}} payload
+ * @returns {Promise<{itemType: string, keys: string[], items: object[], protected: boolean}>}
+ */
+export async function resolveQueuedRemoteErasure(db, { itemType, keys = [], lamport = null } = {}) {
+  const wanted = (Array.isArray(keys) ? keys : []).map(String);
+  const bound = Number.isFinite(Number(lamport)) ? Number(lamport) : null;
+
+  if (itemType === "memory") {
+    const summaryKey = wanted.find((key) => key.startsWith(SUMMARY_TOMBSTONE_PREFIX));
+    const wire = summaryKey
+      ? { source: summaryKey.slice(SUMMARY_TOMBSTONE_PREFIX.length) }
+      : { id: wanted.find((key) => !key.startsWith(SUMMARY_TOMBSTONE_PREFIX)) ?? null };
+    const target = await memoryEraseTarget(db, wire, wanted, bound);
+    return {
+      itemType,
+      keys: wanted,
+      items: [target.item ?? { itemId: null }],
+      protected: Boolean(target.protected),
+    };
+  }
+
+  if (itemType === "context_section") {
+    const items = [];
+    const seen = new Set();
+    const push = (item) => {
+      const id = item?.itemId === null || item?.itemId === undefined ? null : String(item.itemId);
+      const key = id ?? `scope:${items.length}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push(item);
+    };
+    for (const key of wanted) {
+      const scope = parseScopeKey(key);
+      if (scope) {
+        const resolved = await contextEraseItems(db, scope, bound);
+        if (resolved.drop || resolved.error) continue;
+        for (const item of resolved.items) push(item);
+        continue;
+      }
+      // A tombstone keyed by the local id (the fallback shape): the row itself, or
+      // its versions if the row is already in this instance's Trash.
+      if (/^\d+$/.test(key)) push(eraseItemForId("crow_context", key, bound));
+    }
+    return { itemType, keys: wanted, items, protected: false };
+  }
+
+  return { itemType, keys: wanted, items: [], protected: false };
+}
+
+/** A context-section tombstone key back into the scope it encodes, or null. */
+function parseScopeKey(key) {
+  if (typeof key !== "string" || !key.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(key);
+    if (!parsed || typeof parsed !== "object") return null;
+    if (typeof parsed.section_key !== "string" || parsed.section_key === "") return null;
+    return {
+      section_key: parsed.section_key,
+      device_id: parsed.device_id ?? null,
+      project_uuid: parsed.project_uuid ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export class InstanceSyncManager {
   /**
    * @param {object} identity - Crow identity (from loadOrCreateIdentity)
@@ -2670,6 +2899,14 @@ export class InstanceSyncManager {
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
+    // AN ERASE TRAVELS ONLY WHEN THE OPERATOR SAYS SO (servers/shared/history/
+    // erase.js ERASE_SYNC_SETTING, default OFF). A peer on older code consumes
+    // `op: "erase"` as a no-op (memories) or a lamport touch (crow_context) and
+    // never catches up, and there is no application-level capability to gate on
+    // yet — see ERASE_SYNC_SETTING. Off means the tombstone is LOCAL: it still
+    // refuses a peer's re-create here, and no erase event leaves the host.
+    if (op === "erase" && !(await eraseSyncEnabled(this.db))) return null;
+
     // 2c C1: a re-emit passes opts.lamportTs to preserve the row's ORIGINAL emit
     // lamport — a redelivery must never fabricate recency over a peer's newer
     // write. Preserve-mode skips the mint AND the local re-stamp; the counter is
@@ -2717,7 +2954,11 @@ export class InstanceSyncManager {
     // the row keeps its original lamport; 2c C1). Statement built by the shared
     // stamping module (servers/shared/sync-stamp.js) so the stdio door's
     // emitOrQueue (Task 2) stamps rows the same way this manager does.
-    if (op !== "delete" && preservedTs === null) {
+    // A stamp-free op: a delete has no row left to stamp, and neither has an
+    // erase (it removes the row it names, and a tombstone is not a row that
+    // carries a lamport) — stamping would only write a fresh lamport onto
+    // whatever still answers to that id.
+    if (op !== "delete" && op !== "erase" && preservedTs === null) {
       try {
         // An LWW Ramble row also records that THIS instance wrote the
         // Lamport (fix round 2, I-2), so a tie breaks the same everywhere.
@@ -2872,8 +3113,27 @@ export class InstanceSyncManager {
 
   /**
    * Apply a single sync entry from a remote instance.
+   *
+   * Runs inside the PEER's version-history write context (Task 2 of the version
+   * history design, review focus 2): whatever this change writes to a covered
+   * table is stamped with the peer's instance id as author AND origin, so a change
+   * that arrived from another machine is never recorded as 'owner' and never as
+   * 'unattributed'. The id is the id of the feed the entry arrived on (authenticated
+   * before any row is applied), not the entry's own claim.
+   *
+   * This adds no sync surface: item_versions is local-only (never in SYNCED_TABLES)
+   * and carries no emitting trigger, so the stamp's UPDATE queues no outbound
+   * event, and the apply path below emits nothing itself — it only writes.
    */
   async _applyEntry(remoteInstanceId, entry) {
+    return withWriteContext(peerWriteContext(remoteInstanceId), () =>
+      // Called through the prototype so a caller that binds _applyEntry to a
+      // bare receiver (the keychain local-only test does) still reaches it.
+      InstanceSyncManager.prototype._applyEntryInner.call(this, remoteInstanceId, entry),
+    );
+  }
+
+  async _applyEntryInner(remoteInstanceId, entry) {
     const { table, op, row: signedRow, lamport_ts, instance_id, signature } = entry;
 
     // Validate table
@@ -2919,6 +3179,50 @@ export class InstanceSyncManager {
 
     // Advance local counter
     await this._advanceCounter(lamport_ts);
+
+    // AN ERASE IS ITS OWN OP (servers/shared/history/erase.js). It is not a
+    // delete: it also removes the item's whole history and leaves a permanent
+    // tombstone, on both instances. Routed before every per-table path so the
+    // natural-key appliers (which know nothing of it) never see it.
+    //
+    // AN ERASE IS OPT-IN ON BOTH SIDES (the security review). The sender only emits
+    // one when ITS `history.erase_sync` is on, and this instance only APPLIES one
+    // when its own is. With the setting off here the event is logged and NOTHING is
+    // written for it: no live row deleted, no version erased, no tombstone, and so
+    // no restore gate either — a receiver that has not opted in behaves exactly as
+    // if the peer had never sent an erase, and the item (and its future writes) keep
+    // working. Recording a tombstone here would be a refusal this instance never
+    // agreed to, and an inbound entry is never a reason to create one.
+    if (op === "erase") {
+      try {
+        if (!(await eraseSyncEnabled(this.db))) {
+          this._logUnappliedErase(table, row, instance_id, lamport_ts);
+        } else {
+          await this._applyErase(table, row, instance_id, lamport_ts);
+        }
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply erase on ${table}:`, err.message);
+        // The entry is consumed whatever happens (the checkpoint advances), so a
+        // failure BEFORE applyRemoteErasure must still leave the tombstone and a
+        // pending marker for the sweep (erase.js's queueFailedRemoteErasure).
+        try {
+          await this._recordUnfinishedErase(table, row, instance_id, lamport_ts);
+        } catch (queueErr) {
+          console.error(`[instance-sync] could not record an unfinished erase on ${table}:`, queueErr?.message ?? queueErr);
+        }
+      }
+      return;
+    }
+
+    // AN ERASED ITEM IS NEVER RE-CREATED (the operator's ruling, 2026-11-10). The
+    // tombstone is permanent FOR THE ITEM THAT WAS ERASED, so an insert/update for
+    // a tombstoned item is refused here on BOTH instances whenever it does not
+    // post-date the erase: a peer that still holds a copy (its own Trash, a
+    // restore, a queued edit) cannot bring back what this instance erased. A
+    // genuinely new item that reuses that id/name later carries a higher lamport
+    // and is applied. Deletes are not refused — a delete applied to nothing is a
+    // no-op, and delete-wins stays exactly as it was.
+    if ((op === "insert" || op === "update") && (await this._refuseErased(table, op, row, lamport_ts))) return;
 
     // Tables keyed by 'key' instead of 'id' need special-case apply logic.
     if (table === "dashboard_settings") {
@@ -4215,9 +4519,12 @@ export class InstanceSyncManager {
    * @param {object} [loggedRow] - the incoming row as it would be written
    *   (memories: project_id mapped from project_uuid), recorded as the losing
    *   version; defaults to incomingRow. Comparison always uses incomingRow.
+   * @param {{record?: boolean}} [opts] `record: false` answers the question
+   *   without writing a sync_conflicts row (and without a bell) — for the local
+   *   winning an inbound ERASE, where there is nothing to review.
    * @returns {Promise<"apply"|"skip">}
    */
-  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op, loggedRow = incomingRow) {
+  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op, loggedRow = incomingRow, { record = true } = {}) {
     try {
       const { rows } = await this.db.execute({
         sql: `SELECT * FROM ${table} WHERE id = ?`,
@@ -4256,6 +4563,13 @@ export class InstanceSyncManager {
       // row is shown in full on the settings page (security audit N1b-7).
       // _insertConflictRow strips again — this call-site strip keeps the shape
       // obvious where the raw row is in hand.
+      //
+      // `record: false` is for a caller that has already decided how to answer and
+      // must not leave a reviewable row (an inbound ERASE that loses to a newer
+      // local edit once used it; today the erase path does not read this at all —
+      // its gate is in the SQL of the apply's own transaction, see
+      // eraseLiveRowStatements — but the option stays for the next such caller).
+      if (!record) return "skip";
       try {
         const inserted = await this._insertConflictRow(
           table, String(rowId),
@@ -4454,6 +4768,286 @@ export class InstanceSyncManager {
       if (!raced[0]) throw err;
       await updateLocal(raced[0].id);
     }
+  }
+
+  /**
+   * Apply an ERASE that arrived from a peer (`op === "erase"`).
+   *
+   * The instruction is "this item must not exist on either of us": the live row
+   * goes if it is here (through THIS instance's Trash, so it is a normal delete),
+   * the item's versions go through the same armed door every local erase uses, and
+   * this instance records its OWN tombstone (keyed the way it will later be asked
+   * about, with the erasing instance as the origin and the erase event's lamport as
+   * `erase_lamport`) — the tombstone is what makes the erase stick, since the
+   * peer's next restore emits an insert `_refuseErased` then refuses.
+   *
+   * AN INBOUND ERASE GOES THROUGH THE SAME GATES AS AN INBOUND DELETE (review):
+   *
+   *   key resolution     DELETE_KEY_POLICY / _resolveDeleteKey for a table that has
+   *                      one (memories: by id); a session SUMMARY memory by its
+   *                      source, exactly as its own delete path routes it; a
+   *                      crow_context section by its composite scope
+   *                      (mapInboundContextProject, its natural key);
+   *   _isLocallyProtected  a starter, Maker Lab or summary memory is never erased by
+   *                      a peer (the ids are per-instance AUTOINCREMENT: a collision
+   *                      must not destroy local-only content). The erase path asks
+   *                      memoryEraseTarget for the same judgement — it also allows a
+   *                      summary the erase NAMED by its source, which is the only
+   *                      wire identity a summary has — and the transaction asks
+   *                      again, on the live row's own source AND on the newest
+   *                      snapshot (a trashed row has no live row);
+   *   THE LAMPORT GATE   and the reason this is not a blunt remote delete: if the
+   *                      local row is live and NEWER than the erase, it stays — the
+   *                      row, its versions and its tombstone are all untouched, and
+   *                      only a log line says why. If it is older, the erase applies
+   *                      as a delete (so its delete version lands in this instance's
+   *                      Trash) and is then tombstoned. The gate is NOT a conflict
+   *                      read out here: it is the `AND COALESCE(lamport_ts, 0) < ?`
+   *                      in the DELETE itself (erase.js's eraseLiveRowStatements),
+   *                      inside the apply's one transaction, so a local edit that
+   *                      lands in between (or a sweep retry of the same work) can
+   *                      never be deleted.
+   *
+   * Item identity on the wire is the one that table's ordinary ops use:
+   *   - memories: the row id (its delete path's key — the erase event carries the
+   *     same `{ id }` the delete did, so tombstones and undo stay one key space),
+   *     plus the row's `source`, which is how the sender's shouldSyncRow decided
+   *     the item syncs at all and how this side recognises a summary;
+   *   - crow_context: the composite scope (section_key + device_id + portable
+   *     project uuid), because crow_context rowids are per instance. Its history
+   *     is found by the live row's id and, for a section already in this
+   *     instance's Trash, by the scope recorded in its versions' snapshots.
+   *
+   * The apply itself (live-row delete + version erase + tombstone, one transaction,
+   * and the pending marker a failure leaves for the sweep) is erase.js's
+   * applyRemoteErasure.
+   *
+   * Idempotent: a re-delivered erase finds nothing to delete, nothing to erase
+   * and an existing tombstone.
+   *
+   * @param {string} table the item's own table (the entry's `table`)
+   * @param {object} row the wire row ({id, source} or the section's scope)
+   * @param {string} instanceId the entry's origin instance
+   * @param {number} lamportTs the entry's lamport (the erase's own bound)
+   */
+  async _applyErase(table, row, instanceId, lamportTs) {
+    const itemType = erasureItemType(table);
+    if (!itemType) {
+      console.warn(`[instance-sync] ignored an erase event on ${String(table).slice(0, 64)} (not an erasure-propagating table)`);
+      return;
+    }
+    const meta = {
+      originInstance: instanceId,
+      erasedAt: typeof row?.erased_at === "string" ? row.erased_at : null,
+      erasedBy: typeof row?.erased_by === "string" ? row.erased_by : null,
+      eraseLamport: Number.isFinite(Number(lamportTs)) ? Number(lamportTs) : null,
+    };
+    if (itemType === "memory") {
+      await this._applyMemoryErase(row, instanceId, lamportTs, meta);
+      return;
+    }
+    await this._applyContextErase(row, instanceId, lamportTs, meta);
+  }
+
+  /**
+   * The memory half of _applyErase: gate, then erase.
+   *
+   * Summary memories are routed by SOURCE before the id-keyed protection check,
+   * exactly as the inbound-op path does: a summary's wire id is the sender's, so
+   * an id-keyed erase would delete whichever unrelated local memory holds it.
+   *
+   * The lamport gate is NOT read here: eraseLiveRowStatements puts it in the DELETE
+   * itself, inside the apply's transaction, and a sweep retry re-resolves the item
+   * and rebuilds the same statements — so both are gated by the same SQL.
+   */
+  async _applyMemoryErase(row, instanceId, lamportTs, meta) {
+    if (row?.id === undefined || row?.id === null) return;
+    // A summary's wire id is the SENDER's, so it is never a tombstone key (the
+    // source is, and nothing else); an ordinary memory's id is (its delete path's
+    // key).
+    const keys = erasureKeys("memory", {
+      itemId: isSummaryMemorySource(row.source) ? null : row.id,
+      snapshot: { source: row.source ?? null },
+    });
+
+    const target = await memoryEraseTarget(this.db, row, keys, lamportTs);
+    if (target.protected) {
+      console.warn(
+        `[instance-sync] ignored an erase from ${String(instanceId).slice(0, 12)}… on a protected local memories id=${String(row.id).slice(0, 64)}`,
+      );
+      return;
+    }
+
+    const outcome = await applyRemoteErasure(
+      this.db,
+      { itemType: "memory", keys, items: [target.item ?? { itemId: null }] },
+      meta,
+    );
+    if (outcome.kept) {
+      // Nothing is recorded for review: the answer is "the local version is newer"
+      // (or "this is local-only content") and the item is alive.
+      console.warn(
+        `[instance-sync] kept a newer local memory instead of applying an erase from ${String(instanceId).slice(0, 12)}…`,
+      );
+    }
+  }
+
+  /**
+   * The context-section half of _applyErase: scope → local rows → erase.
+   *
+   * The lamport gate lives in the DELETE (see eraseLiveRowStatements), inside the
+   * apply's one transaction — a section edited after this lookup but before the
+   * delete survives, and so does the same edit when the sweep retries the work
+   * (which resolves the same items again, through contextEraseItems).
+   */
+  async _applyContextErase(row, instanceId, lamportTs, meta) {
+    const itemType = "context_section";
+    const scopeKeys = erasureKeys(itemType, { snapshot: row });
+    const resolved = await contextEraseItems(this.db, row ?? {}, lamportTs);
+    if (resolved.drop) {
+      console.warn(`[instance-sync] erase of a context section dropped: ${resolved.drop}`);
+      return;
+    }
+    if (resolved.error) {
+      console.warn("[instance-sync] erase: crow_context lookup failed:", resolved.error);
+      return;
+    }
+    const items = resolved.items.length === 0 ? [{ itemId: null }] : resolved.items;
+    const outcome = await applyRemoteErasure(this.db, { itemType, keys: scopeKeys, items }, meta);
+    if (outcome.kept) {
+      console.warn(
+        `[instance-sync] kept a newer local context section instead of applying an erase from ${String(instanceId).slice(0, 12)}…`,
+      );
+    }
+  }
+
+  /**
+   * Log an inbound erase that this instance does NOT apply, because its own
+   * `history.erase_sync` is off (the security review).
+   *
+   * "Erase sync is opt-in on both sides": with the setting off here the event
+   * changes NOTHING. No live row is deleted, no version is erased, and — the
+   * point — no tombstone is written and no restore gate appears: a receiver that
+   * has not opted in behaves as if the entry had never arrived, so its own items
+   * and every later write for them keep working. Recording a tombstone "bounded to
+   * the erase's lamport" was the earlier shape and was still a refusal this
+   * instance never agreed to; an inbound entry must not create one.
+   */
+  _logUnappliedErase(table, row, instanceId, lamportTs) {
+    if (!erasureItemType(table)) return;
+    console.warn(
+      `[instance-sync] did not apply an erase from ${String(instanceId).slice(0, 12)}… on ${table} ` +
+        `(lamport ${String(lamportTs)}): this instance has not turned erase sync on (history.erase_sync) — ` +
+        "nothing was written for it",
+    );
+  }
+
+  /**
+   * The fallback for an erase whose apply threw BEFORE applyRemoteErasure ran: the
+   * entry is consumed either way (the checkpoint advances), so the tombstone and a
+   * pending marker are written here instead — the sweep finishes the rest. See
+   * erase.js's queueFailedRemoteErasure.
+   *
+   * ONLY THE KEYS ARE HANDED OVER (the security review): no local item ids, no
+   * ready-made SQL. The marker is resolved again when it is retried, and the erase
+   * then runs the same protection / summary / source gates as the first attempt.
+   */
+  async _recordUnfinishedErase(table, row, instanceId, lamportTs) {
+    const itemType = erasureItemType(table);
+    if (!itemType) return;
+    const meta = {
+      originInstance: instanceId,
+      erasedAt: typeof row?.erased_at === "string" ? row.erased_at : null,
+      erasedBy: typeof row?.erased_by === "string" ? row.erased_by : null,
+      eraseLamport: Number.isFinite(Number(lamportTs)) ? Number(lamportTs) : null,
+    };
+    let keys = [];
+    if (itemType === "memory") {
+      if (row?.id === undefined || row?.id === null) return;
+      keys = erasureKeys(itemType, {
+        itemId: isSummaryMemorySource(row.source) ? null : row.id,
+        snapshot: { source: row.source ?? null },
+      });
+    } else {
+      const mapped = await mapInboundContextProject(this.db, row ?? {});
+      if (mapped.drop) return;
+      keys = erasureKeys(itemType, { snapshot: row });
+    }
+    await queueFailedRemoteErasure(this.db, { itemType, keys }, meta);
+  }
+
+  /**
+   * Refuse an inbound insert/update for an item this instance ERASED.
+   *
+   * THE TOMBSTONE IS VERSIONED (review): it refuses a change only while that change
+   * does not post-date the erase it came from. `erase_lamport` is the lamport of
+   * the erase event; an inbound insert/update whose lamport_ts is at or below it is
+   * the erased item coming back (a Trash restore on the peer, a queued edit, a
+   * stale copy) and is refused, while a genuinely NEW item that reuses the same id
+   * or section name later — necessarily written with a higher lamport — is
+   * accepted. A tombstone with NO erase_lamport is one whose store could not read
+   * its own counter at erase time, and refuses everything: nothing a peer sends can
+   * be shown to post-date it (erase.js readLocalLamportOrNull).
+   *
+   * Logged ONCE per (item_type, tombstone key) per process: a peer that keeps
+   * re-delivering the same restore would otherwise fill the log, and the fact
+   * never changes. Nothing is written — not the row, not a conflict row (there is
+   * nothing to review: the tombstone is the operator's answer) — and the caller's
+   * checkpoint advances past the entry, so it is consumed rather than retried
+   * forever. The log names the table and item type only, never the key (a context
+   * section's key is its section_key, which is user content).
+   *
+   * @param {string} table
+   * @param {string} op
+   * @param {object} row the inbound wire row
+   * @param {number} lamportTs the inbound entry's lamport_ts (undefined = unknown,
+   *   which is treated as ancient — an entry without a lamport cannot post-date an
+   *   erase)
+   * @returns {Promise<boolean>} true when the entry must not be applied
+   */
+  async _refuseErased(table, op, row, lamportTs) {
+    const itemType = erasureItemType(table);
+    if (!itemType) return false;
+    const keys = [];
+    if (itemType === "memory") {
+      if (row?.id === undefined || row?.id === null) return false;
+      // A summary memory is keyed by its source on the wire (its id is the
+      // sender's), so its tombstone is too — see erasureKeys.
+      keys.push(
+        ...erasureKeys(itemType, {
+          itemId: isSummaryMemorySource(row.source) ? null : row.id,
+          snapshot: { source: row.source ?? null },
+        }),
+      );
+    } else {
+      const mapped = await mapInboundContextProject(this.db, row ?? {});
+      if (mapped.drop) return false; // the applier drops it anyway, for its own reason
+      keys.push(...erasureKeys(itemType, { snapshot: row }));
+      // A tombstone recorded under a local row id (the fallback shape) must be
+      // found too, so a live row with this scope contributes its id.
+      try {
+        const { rows } = await this.db.execute({
+          sql: "SELECT id FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+          args: [mapped.row.section_key, mapped.row.device_id ?? null, mapped.row.project_id ?? null],
+        });
+        for (const found of rows) keys.push(String(found.id));
+      } catch {
+        /* nothing to add */
+      }
+    }
+    const refusedBy = await findEraseRefusal(this.db, itemType, keys, lamportTs);
+    if (!refusedBy) return false;
+
+    if (!this._erasedRefusals) this._erasedRefusals = new Set();
+    const latch = `${itemType}\u0000${refusedBy.item_id}`;
+    if (!this._erasedRefusals.has(latch)) {
+      this._erasedRefusals.add(latch);
+      console.warn(
+        `[instance-sync] refused an inbound ${op} on ${table}: it does not post-date the erase of that item ` +
+          `(tombstone ${this._erasedRefusals.size}; further entries for it stay silent)`,
+      );
+    }
+    return true;
   }
 
   /**
@@ -4818,6 +5412,13 @@ export class InstanceSyncManager {
    * is safe and on-disk storage persists; the instance lazily re-inits on
    * un-revoke (boot.js eagerInitPairedPeers / tailnet-sync paths gate on status
    * and will reopen when the instance is un-revoked).
+   */
+  /**
+   * Protected local row (review I1): a starter or Maker Lab memory, or a summary,
+   * whose id a peer's op merely collides with. The ERASE path asks
+   * memoryEraseTarget instead (it additionally allows a summary the erase named by
+   * its source, the summary's only wire identity); this is the inbound
+   * insert/update/delete gate.
    */
   async _isLocallyProtected(table, id) {
     if (table !== "memories") return false;

@@ -73,6 +73,7 @@ import { reportResult, decideResult, listResults } from "./board/result-service.
 import { askDecision, notifyBatch } from "./board/decision-service.js";
 import { assertAssignableBot } from "./board/bot-lookup.js";
 import { offerCard } from "./board/offer-service.js";
+import { withWriteContext, botActorWriteContext } from "../shared/history/write-context.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -94,11 +95,24 @@ function errResult(e) {
 /** Register one board_* tool: `fn(args, extra)` returns plain data on success
  *  (wrapped in `ok()`) or throws a `{code,http}` error (wrapped in
  *  `errResult()` → MCP isError). Centralizes the try/catch so every verb
- *  below is a one-liner. */
-function tool(server, name, description, schema, fn) {
+ *  below is a one-liner.
+ *
+ *  `resolveActor` (optional) wraps the handler in the version-history write
+ *  context the resolved actor implies (Task 2 of the version history design): a
+ *  VERIFIED bot's write — even one the tool makes through the gateway's own DB
+ *  client — is attributed to that bot and its job, so history can show the job
+ *  and undo it later. An unverified actor, or the operator's token, yields no
+ *  context and the write stays 'unattributed': a bearer token alone never makes
+ *  a write the owner's. */
+function registerTool(server, name, description, schema, fn, resolveActor) {
   server.tool(name, description, schema, async (args, extra) => {
     try {
-      return ok(await fn(args, extra));
+      const run = () => fn(args, extra);
+      let ctx = null;
+      if (typeof resolveActor === "function") {
+        try { ctx = botActorWriteContext(resolveActor(extra)); } catch { ctx = null; }
+      }
+      return ok(await (ctx ? withWriteContext(ctx, run) : run()));
     } catch (e) {
       return errResult(e);
     }
@@ -438,6 +452,10 @@ export function createBoardMcpServer(options = {}) {
   const verifyActor = options.verifyActor;
   const verifyThread = options.verifyThread;
   const resolveActor = (extra) => resolveActorWith(extra, verifyActor, verifyThread);
+  // Every board_* verb below runs through registerTool, so it also runs inside
+  // the write context its verified actor implies. Aliased to `tool` to keep the
+  // verbs reading as before.
+  const tool = (srv, name, description, schema, fn) => registerTool(srv, name, description, schema, fn, resolveActor);
 
   const server = new McpServer(
     { name: "crow-board", version: "0.1.0" },

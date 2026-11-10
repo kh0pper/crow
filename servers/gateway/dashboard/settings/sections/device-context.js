@@ -20,7 +20,7 @@ export default {
   async render({ db, lang }) {
     const currentDeviceId = process.env.CROW_DEVICE_ID || "";
     const contextSections = await db.execute({
-      sql: "SELECT section_key, section_title, device_id, enabled FROM crow_context ORDER BY sort_order, section_key",
+      sql: "SELECT id, section_key, section_title, device_id, enabled FROM crow_context ORDER BY sort_order, section_key",
       args: [],
     });
 
@@ -42,6 +42,15 @@ export default {
       ];
     });
 
+    // The version history design §3.1: a context section's own History, one link
+    // per section, in the same table row that names it.
+    const contextRowsWithHistory = contextRows.map((cells, i) => [
+      ...cells,
+      globalSections[i] && globalSections[i].id != null
+        ? `<a href="/dashboard/history/context_section/${escapeHtml(String(globalSections[i].id))}" data-turbo-frame="_top">${escapeHtml(t("history.pageTitle", lang))}</a>`
+        : "",
+    ]);
+
     const deviceLabel = currentDeviceId
       ? `<span class="mono" style="font-size:0.85rem">${escapeHtml(currentDeviceId)}</span>`
       : `<span style="color:var(--crow-text-muted)">${t("settings.notSetDevice", lang)}</span>`;
@@ -50,7 +59,12 @@ export default {
       <div style="margin-bottom:1rem">
         <span style="color:var(--crow-text-muted);font-size:0.85rem">${t("settings.deviceId", lang)}</span> ${deviceLabel}
       </div>
-      ${dataTable([t("settings.sectionColumn", lang), t("settings.keyColumn", lang), t("settings.statusColumn", lang)], contextRows)}
+      ${dataTable([
+        t("settings.sectionColumn", lang),
+        t("settings.keyColumn", lang),
+        t("settings.statusColumn", lang),
+        t("history.pageTitle", lang),
+      ], contextRowsWithHistory)}
       <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
         Set <code>CROW_DEVICE_ID</code> in .env to enable per-device context overrides.
         ${currentDeviceId ? `This device has ${deviceSections.length} override(s). ` : ""}
