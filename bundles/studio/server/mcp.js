@@ -560,7 +560,7 @@ export function libraryList(snapshot, catalogEntries = [], bundledEntries = []) 
           track_name: trackName(trackId),
         })),
         ...libraryInsertUsers(snapshot, entry.id).map((insertId) => {
-          const insert = inserts[insertId];
+          const insert = Object.hasOwn(inserts, insertId) ? inserts[insertId] : null;
           return {
             insert_id: insertId,
             owner: typeof insert?.owner === "string" ? insert.owner : "",
@@ -589,7 +589,9 @@ export function libraryList(snapshot, catalogEntries = [], bundledEntries = []) 
       credit: typeof row.credit === "string" ? row.credit : "",
       // Whether this song already holds it: an entry the song holds is one an
       // amp insert may name, and one it does not hold is the person's to add.
-      in_song: Boolean(library[row.id]),
+      // Own properties only: the row's id is the bundle's own string, but
+      // `library` is a plain object and a prototype key is not a held sound.
+      in_song: Object.hasOwn(library, row.id) && Boolean(library[row.id]),
     }));
 
   return { entries, available_catalog: available, available_bundled: bundled };
@@ -650,6 +652,9 @@ export function mixList(snapshot, lastRender = null) {
    */
   const soundOf = (id) => {
     if (typeof id !== "string" || id === "") return null;
+    // Own properties only: the id comes out of the document, but `library` is a
+    // plain object, and `library["constructor"]` is not a sound.
+    if (!Object.hasOwn(library, id)) return null;
     const entry = library[id];
     if (!entry || typeof entry !== "object") return null;
     return {

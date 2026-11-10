@@ -3088,11 +3088,15 @@
      * A cabinet is not parsed from a file: the page (or a render) decoded the
      * stored 24-bit WAV and resampled it to the context's rate, so what arrives
      * is Float32 channel data, TRANSFERRED. The partitions are built HERE, on the
-     * message path, never in `process()`. A cabinet longer than a second after
-     * that resampling is refused with the plan's sentence, and the insert plays
-     * dry (no cabinet) rather than not at all.
+     * message path, never in `process()`. The one-second rule is judged ONCE, at
+     * the rate of the file the PCM came from (`source_rate`/`source_frames`, which
+     * the page and a render both send): a 44.1 kHz starter cabinet of 44101 frames
+     * is 192002 frames at 192 kHz and still loads. Without a source rate the
+     * length is judged at the PCM's own rate. A cabinet that is refused plays dry
+     * (no cabinet) rather than not at all.
      * @param {string} id
-     * @param {{channels?: unknown, rate?: unknown}} message
+     * @param {{channels?: unknown, rate?: unknown, source_rate?: unknown,
+     *          source_frames?: unknown}} message
      * @param {unknown} requestId
      * @returns {void}
      */
@@ -3100,6 +3104,8 @@
       const channels = readChannels(message.channels);
       const rate = Number(message.rate);
       const usableRate = Number.isFinite(rate) && rate > 0 ? rate : sampleRate;
+      const sourceRate = Number(message.source_rate);
+      const sourceFrames = Number(message.source_frames);
       const frames = channels.length > 0 ? channels[0].length : 0;
       if (frames === 0) {
         this.answerLibrary(requestId, id, false, "An impulse response holds no audio.");
@@ -3107,7 +3113,7 @@
       }
       const problem =
         typeof StudioConvolver === "object" && StudioConvolver !== null
-          ? StudioConvolver.lengthProblem(frames, usableRate)
+          ? StudioConvolver.lengthProblem(frames, usableRate, sourceFrames, sourceRate)
           : frames > usableRate + IR_LENGTH_TOLERANCE_FRAMES
             ? "An impulse response is at most 1 second long."
             : null;
@@ -3117,7 +3123,13 @@
         this.reportCaptureFailure(id, problem);
         return;
       }
-      this.cabinets.set(id, { channels: channels, frames: frames, rate: usableRate });
+      this.cabinets.set(id, {
+        channels: channels,
+        frames: frames,
+        rate: usableRate,
+        sourceFrames: Number.isFinite(sourceFrames) && sourceFrames > 0 ? sourceFrames : 0,
+        sourceRate: Number.isFinite(sourceRate) && sourceRate > 0 ? sourceRate : 0,
+      });
       this.cabinetFailed.delete(id);
       this.ampNeeded.delete(id);
       this.answerLibrary(requestId, id, true);
@@ -5314,7 +5326,12 @@
         convolver = null;
         if (id === "" || pcm === undefined || !available) return;
         try {
-          convolver = StudioConvolver.create({ channels: pcm.channels, rate: contextRate });
+          convolver = StudioConvolver.create({
+            channels: pcm.channels,
+            rate: contextRate,
+            sourceFrames: pcm.sourceFrames,
+            sourceRate: pcm.sourceRate,
+          });
           state.cabinetLoads += 1;
         } catch (error) {
           convolver = null;

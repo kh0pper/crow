@@ -230,6 +230,47 @@ function fakeHub() {
   };
 }
 
+/**
+ * The fake hub, but with the one property the real one has and a plain fake does
+ * not: `openSong` answers a COPY of the song's library as it stood when the read
+ * started. A snapshot is a document, not a live view — which is exactly why two
+ * concurrent asks can each hold one, and why an ask that reads the song BEFORE
+ * another ask's add lands can hold a stale one.
+ *
+ * `holdNextOpen()` makes the next read park after it has taken its copy, so a
+ * test can finish one add while another request is holding an older snapshot.
+ * @returns {object} the hub, with `holdNextOpen()` on it
+ */
+function slowSnapshotHub() {
+  const hub = fakeHub();
+  const realOpen = hub.openSong.bind(hub);
+  let held = null;
+  hub.openSong = async (songId) => {
+    const opened = await realOpen(songId);
+    const snapshot = { ...opened.snapshot, library: { ...opened.snapshot.library } };
+    if (held !== null) {
+      const wait = held;
+      held = null;
+      wait.markEntered();
+      await wait.gate;
+    }
+    return { ...opened, snapshot };
+  };
+  hub.holdNextOpen = () => {
+    let releaseGate = () => {};
+    let markEntered = () => {};
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    const entered = new Promise((resolve) => {
+      markEntered = resolve;
+    });
+    held = { gate, markEntered };
+    return { entered, release: () => releaseGate() };
+  };
+  return hub;
+}
+
 /** @returns {string|null} one cookie's value out of a Cookie header. */
 function cookieOf(header, name) {
   for (const part of String(header || "").split(";")) {
@@ -254,10 +295,10 @@ function dashboardAuth(req, res, next) {
  * @param {import("node:test").TestContext} t
  * @param {{catalog: object, library?: object, otherLibrary?: object,
  *          storage?: object|null, canWrite?: Function|null,
- *          bundledPath?: string}} options
+ *          bundledPath?: string, hub?: object}} options
  */
-async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, storage = null, canWrite = null, bundledPath = undefined }) {
-  const hub = fakeHub();
+async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, storage = null, canWrite = null, bundledPath = undefined, hub: givenHub = null }) {
+  const hub = givenHub ?? fakeHub();
   hub.state[SONG].library = songLibrary;
   hub.state[OTHER_SONG].library = otherLibrary;
   const crowHome = homeFor(t);
@@ -1150,4 +1191,74 @@ test("a bundled cabinet is served with its sha256 checked", async (t) => {
   const refused = await call(tampered.base, `/api/studio/songs/${SONG}/library/${entry.id}/file`);
   assert.equal(refused.status, 404);
   assert.deepEqual(refused.body, { error: MISSING_INSTRUMENT });
+});
+
+test("a song entry that names an older bundled file gets \"missing\", not the new sound", async (t) => {
+  // A later bundle may ship a DIFFERENT file under the same id. The song's entry
+  // names the file it was added with, so the route answers "missing" — the page
+  // then offers the starter again through the person's own route — rather than
+  // serve the new sound under the old entry's name.
+  const catalogue = catalogRow("http://127.0.0.1:1", fakeBank());
+  const older = Buffer.from("an older cabinet, before the bundle changed", "ascii");
+  const entry = {
+    id: "cabinet-ampmix",
+    kind: "ir",
+    name: "Cabinet 1 (AmpMix)",
+    source: "bundled",
+    catalog_id: null,
+    storage_key: null,
+    upload_id: null,
+    sha256: sha256Of(older),
+    bytes: CABINET_BYTES,
+    licence: "CC-BY-3.0",
+    credit: CABINET_CREDIT,
+    author_label: "You",
+  };
+  const { base } = await boot(t, { catalog: catalogue, library: { [entry.id]: entry } });
+  const answer = await call(base, `/api/studio/songs/${SONG}/library/${entry.id}/file`);
+  assert.equal(answer.status, 404, "the file the bundle ships now is not the file this song holds");
+  assert.deepEqual(answer.body, { error: MISSING_INSTRUMENT });
+
+  // The starter route that would add it says the same thing in its own words:
+  // the song's copy is out of date, so it is removed and added again.
+  const again = await call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    body: { song_id: SONG, bundled_id: entry.id },
+  });
+  assert.equal(again.status, 409, JSON.stringify(again.body));
+  assert.match(again.body.error, /out of date/);
+});
+
+test("two concurrent starter adds add one entry and both succeed", async (t) => {
+  // The second ask reads the song BEFORE the first ask's add lands, so the
+  // snapshot it holds is stale by the time it gets to the work. The route reads
+  // the song again inside the serialized work, so the second ask finds the entry
+  // the first added instead of issuing a second `library.add` the hub refuses.
+  const hub = slowSnapshotHub();
+  const { base } = await boot(t, { catalog: catalogRow("http://127.0.0.1:1", fakeBank()), hub });
+
+  const held = hub.holdNextOpen();
+  const second = call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    body: { song_id: SONG, bundled_id: "starter-a2" },
+  });
+  // The second request is parked with its snapshot in hand, before its add (or
+  // anyone else's) could reach the song.
+  await held.entered;
+
+  const first = await call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    body: { song_id: SONG, bundled_id: "starter-a2" },
+  });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.added, true, "the first ask adds the entry");
+
+  held.release();
+  const answer = await second;
+  assert.equal(answer.status, 200, `a concurrent second ask has to succeed, got ${JSON.stringify(answer.body)}`);
+  assert.equal(answer.body.entry.id, "starter-a2");
+  assert.equal(answer.body.added, false, "it found the entry the first ask added");
+
+  assert.equal(Object.keys(hub.state[SONG].library).length, 1, "one entry, however many asks");
+  assert.equal(hub.commands.length, 1, "and exactly one library.add");
 });

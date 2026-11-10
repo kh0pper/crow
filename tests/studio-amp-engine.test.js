@@ -65,6 +65,9 @@ const { OfflineAudioContext } = bundleRequire("node-web-audio-api");
 const studioEngine = bundleRequire(join(ENGINE_DIR, "engine-client.js"));
 const namHostApi = bundleRequire(join(ENGINE_DIR, "nam-host.js"));
 const convolverApi = bundleRequire(join(ENGINE_DIR, "convolver.js"));
+// The page's own resampler: the PCM a cabinet arrives as is what a page builds
+// with this very file, so a length test uses it too.
+const resampleApi = bundleRequire(join(ENGINE_DIR, "resample.js"));
 
 // The server's own renderer and WAV encoder: a render's amp files are read and
 // decoded the way `server/render.js` does it (plan 1d, Task 13).
@@ -610,6 +613,81 @@ test("the convolver matches direct convolution within 1e-6", () => {
     "An impulse response is at most 1 second long; this one is 1.1 s.",
   );
   assert.throws(() => convolverApi.create({ channels: [tooLong], rate: SAMPLE_RATE }), /at most 1 second long/);
+});
+
+test("a starter cabinet loads at 44.1, 48, 96, 176.4 and 192 kHz", async () => {
+  // The five starter cabinets ship as 24-bit stereo 44.1 kHz files of 44101
+  // frames: exactly one second plus one frame. The page checks the FILE at its
+  // own rate (44101 <= 44100 + 2), but the engine used to re-check the RESAMPLED
+  // PCM at the context's rate, where those frames are 176404 at 176.4 kHz — and
+  // refused a cabinet the page had just accepted. The rule is now judged once,
+  // at the file's rate, and the engine accepts the length that follows from it.
+  const STARTER_RATE = 44100;
+  const STARTER_FRAMES = 44101;
+  const starter = new Float32Array(STARTER_FRAMES);
+  starter[0] = 0.9;
+  for (let at = 1; at < STARTER_FRAMES; at += 1) {
+    starter[at] = Math.exp(-at / 4000) * Math.sin((2 * Math.PI * 1200 * at) / STARTER_RATE) * 0.3;
+  }
+
+  for (const rate of [44100, 48000, 96000, 176400, 192000]) {
+    const channels =
+      rate === STARTER_RATE ? [Float32Array.from(starter)] : resampleApi.toRate([starter], STARTER_RATE, rate);
+    const convolver = convolverApi.create({
+      channels: channels,
+      rate: rate,
+      sourceFrames: STARTER_FRAMES,
+      sourceRate: STARTER_RATE,
+    });
+    assert.equal(convolver.frames, channels[0].length, `the whole cabinet is kept at ${rate} Hz`);
+    assert.equal(convolver.latencyFrames, 0, "and it is still zero latency");
+  }
+
+  // The very length the old check refused: 44.1 kHz frames resampled to 176.4 kHz
+  // is longer than a second AT THAT RATE, and is still the same cabinet.
+  const high = resampleApi.toRate([starter], STARTER_RATE, 176400);
+  assert.equal(high[0].length, 176404, "44101 frames at 44.1 kHz are 176404 at 176.4 kHz");
+  assert.match(
+    String(convolverApi.lengthProblem(high[0].length, 176400)),
+    /at most 1 second long/,
+    "judged at the context rate alone, that length is over the limit — which is the bug",
+  );
+  assert.equal(convolverApi.lengthProblem(high[0].length, 176400, STARTER_FRAMES, STARTER_RATE), null);
+
+  // The rule is still a rule: a payload that claims a short file and carries far
+  // more PCM than that file could resample to is refused.
+  assert.match(
+    String(convolverApi.lengthProblem(200000, 192000, STARTER_FRAMES, STARTER_RATE)),
+    /at most 1 second long/,
+  );
+  // ... and a file that really is over a second is refused with ITS length.
+  assert.equal(
+    convolverApi.lengthProblem(52800, 48000, 52800, 48000),
+    "An impulse response is at most 1 second long; this one is 1.1 s.",
+  );
+
+  // The engine's own message path, at the two rates that used to refuse it: the
+  // page sends the file's rate and length with the PCM, and the cabinet loads.
+  for (const rate of [176400, 192000]) {
+    const host = await processorHost(rate);
+    const channels = resampleApi.toRate([starter], STARTER_RATE, rate);
+    host.post({
+      type: "library",
+      request_id: `starter-${rate}`,
+      library_id: "ir-starter",
+      kind: "ir",
+      channels: channels,
+      rate: rate,
+      source_rate: STARTER_RATE,
+      source_frames: STARTER_FRAMES,
+    });
+    await host.flush();
+    const answer = postsOfType(host.posts, "library_loaded").filter(
+      (message) => message.request_id === `starter-${rate}`,
+    );
+    assert.equal(answer.length, 1, `the load has to be answered at ${rate} Hz, got ${JSON.stringify(host.posts)}`);
+    assert.equal(answer[0].ok, true, `a 44.1 kHz starter cabinet has to load at ${rate} Hz`);
+  }
 });
 
 test("a legacy capture plays silence and says why once", async () => {

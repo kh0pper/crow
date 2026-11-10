@@ -455,12 +455,28 @@ async function bootMixer(options = {}) {
     },
   });
 
+  // A gate a test can use to hold the gateway's starter route open, so a second
+  // pick can be made while the first starter sound is still on its way.
+  let starterGate = null;
+  let releaseStarter = () => {};
+  if (options.holdStarter === true) {
+    let release = () => {};
+    starterGate = {
+      promise: new Promise((resolve) => {
+        release = resolve;
+      }),
+    };
+    releaseStarter = () => release();
+  }
+
   const fetchStub = async (url, init = {}) => {
     const target = String(url);
     requests.push({ url: target, method: init.method || "GET", body: init.body || null });
-    if (target.includes("/module-types")) return response(200, { generators: ["Analog generator"], modules: {} });
-    if (target.includes("/project-bot")) return response(404, { error: "not_found" });
+    if (target.includes("/module-types")) return response(200, { generators: ["Analog generator"], modules: {} });    if (target.includes("/project-bot")) return response(404, { error: "not_found" });
     if (target.includes("/api/studio/library/bundled")) {
+      // A test can hold the gateway's answer open, to see what a second pick does
+      // while the first starter sound is still on its way.
+      if (starterGate !== null) await starterGate.promise;
       // The gateway's own route (dashboard session + CSRF): it answers with the
       // library entry the song now holds, whose id IS the bundled row's id.
       const body = init.body ? JSON.parse(String(init.body)) : {};
@@ -664,6 +680,8 @@ async function bootMixer(options = {}) {
     frame,
     stateFrame,
     runTimers,
+    /** Let the starter route's held answer through (see `holdStarter`). */
+    releaseStarter,
     /** Every message of one command the page sent, in order. */
     commands(id) {
       return sent.filter((message) => message.type === "command" && message.command === id);
@@ -1158,6 +1176,19 @@ test("picking a starter tone sends one insert.set", async () => {
   // whose choice it is.
   assert.match(String(editor.textContent), /My capture by me/);
   assert.match(String(editor.textContent), /Only you can change this amp's capture\./);
+  // The credit line rides on the option itself too — the sound being chosen, not
+  // only the one already chosen — for a library entry and for a starter sound.
+  const captureOptions = [...capture.querySelectorAll("option")];
+  assert.equal(
+    String(captureOptions.find((option) => option.value === "lib-cap").title),
+    "My capture by me",
+    "the song's own capture carries its credit on its own option",
+  );
+  assert.equal(
+    String(captureOptions.find((option) => option.value === "bundled:starter-a2").title),
+    BUNDLED_STARTERS[0].credit,
+    "and a starter sound carries the bundle's credit line on its own option",
+  );
   // The three numbers come from AMP_PARAMS.
   for (const name of ["input_db", "output_db", "ir_mix"]) {
     assert.ok(editor.querySelector(`[data-param="${name}"]`), `the amp editor controls ${name}`);
@@ -1180,6 +1211,53 @@ test("picking a starter tone sends one insert.set", async () => {
   assert.equal(sets.length, 1, `picking a starter tone is one command (${sets.length})`);
   assert.deepEqual(sets[0].args, { id: "ins-amp", params: { model_id: "starter-a2" } });
   assert.equal(ui.commands("insert.add").length, 0, "the chain is unchanged: no amp was added");
+});
+
+test("a second starter pick while one is in flight says so and shows the sound it plays", async () => {
+  const ui = await bootMixer({ fixture: await ampSong(), holdStarter: true });
+  await ui.openMixer();
+  ui.chip("ins-amp").dispatchEvent(ui.event("click"));
+  await ui.settle();
+
+  const capture = ui.mixer().querySelector("[data-act=amp-capture]");
+  ui.choose(capture, "bundled:starter-a2");
+  await ui.settle();
+  assert.equal(
+    ui.requests.filter((request) => request.url.includes("/api/studio/library/bundled")).length,
+    1,
+    "the first pick asks the gateway for the starter sound",
+  );
+
+  // The first add has not answered yet. A second pick must not look applied: it
+  // says what is happening, and the picker goes back to the capture the amp
+  // really plays.
+  const again = ui.mixer().querySelector("[data-act=amp-capture]");
+  ui.choose(again, "bundled:starter-a2");
+  await ui.settle();
+  assert.match(
+    String(ui.document.querySelector("[data-role=toast]").textContent),
+    /Adding the starter sound/,
+    "the page says the starter sound is still being added",
+  );
+  assert.equal(
+    ui.requests.filter((request) => request.url.includes("/api/studio/library/bundled")).length,
+    1,
+    "a second pick while one is in flight asks the gateway nothing",
+  );
+  assert.equal(ui.commands("insert.set").length, 0, "and applies nothing");
+  const redrawn = ui.mixer().querySelector("[data-act=amp-capture]");
+  assert.deepEqual(
+    [...redrawn.querySelectorAll("option")].filter((option) => option.selected).map((option) => option.value),
+    ["lib-cap"],
+    "the picker shows the capture the amp plays, never the choice that was not applied",
+  );
+
+  // The first pick still lands: one insert.set naming the starter capture.
+  ui.releaseStarter();
+  await ui.settle();
+  const sets = ui.commands("insert.set");
+  assert.equal(sets.length, 1, `the first pick is the one that lands (${sets.length})`);
+  assert.deepEqual(sets[0].args, { id: "ins-amp", params: { model_id: "starter-a2" } });
 });
 
 test("picking a cabinet sends one insert.set", async () => {

@@ -1451,9 +1451,11 @@ async function loadCaptures(engine, captures, libraryBytes) {
  * Float32 channels — the same two steps `panel/client.js` takes, so a render and
  * a page convolve the same PCM.
  *
- * A cabinet longer than a second after that resampling is refused with the
- * plan's sentence (and reported), never rendered: the engine refuses it too, so
- * the two agree whatever order they see it in.
+ * A cabinet longer than a second AT ITS FILE'S RATE is refused with the plan's
+ * sentence (and reported), never rendered: the check is the page's own, made once
+ * at the rate the file was stored in, and the file's rate and length ride along
+ * with the PCM so the engine judges the same thing rather than the longer
+ * resampled copy.
  * @param {object} engine the engine `studioEngine.create()` returned
  * @param {Array<{id: string, entry: object|null}>} cabinets
  * @param {Function|undefined} libraryBytes the caller's reader
@@ -1484,19 +1486,23 @@ async function loadCabinets(engine, cabinets, libraryBytes, rate) {
       continue;
     }
     let channels = null;
+    let sourceFrames = 0;
+    let sourceRate = 0;
     try {
       const decoded = decodeWav(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
       const frames = decoded.channels[0] ? decoded.channels[0].length : 0;
       if (frames === 0) throw new Error("An impulse response holds no audio.");
       // One second at the file's own rate, with the plan's two-frame tolerance:
       // a cabinet shipped as exactly 1 s at 44.1 kHz is 44101 frames, and it
-      // loads. The engine and the page take the same tolerance.
+      // loads. The engine and the page take the same tolerance, at the same rate.
       if (frames > decoded.rate * CABINET_MAX_SECONDS + 2) {
         const seconds = (Math.round((frames / decoded.rate) * 10) / 10).toFixed(1);
         throw new Error(
           `An impulse response is at most 1 second long; this one is ${seconds} s.`,
         );
       }
+      sourceFrames = frames;
+      sourceRate = decoded.rate;
       channels =
         decoded.rate === rate
           ? decoded.channels.map((channel) => Float32Array.from(channel))
@@ -1507,7 +1513,10 @@ async function loadCabinets(engine, cabinets, libraryBytes, rate) {
     }
     let answer = null;
     try {
-      answer = await engine.loadLibrary(cabinet.id, "ir", channels);
+      answer = await engine.loadLibrary(cabinet.id, "ir", channels, {
+        sourceRate: sourceRate,
+        sourceFrames: sourceFrames,
+      });
     } catch (error) {
       missing.push({ id: cabinet.id, reason: engineReasonOf(error) });
       continue;
@@ -1931,6 +1940,11 @@ async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }
     if (!library || typeof library.bundledFile !== "function") return null;
     const file = await library.bundledFile(String(entry.id ?? ""));
     if (!file || !file.bytes) return null;
+    // The entry names the file the song was given. A bundle that now ships a
+    // DIFFERENT file under that id is not that sound, so it reads as a file this
+    // device does not hold (the same rule the library file route keeps), never as
+    // the new one under the old name.
+    if (String(entry.sha256 ?? "").toLowerCase() !== String(file.entry?.sha256 ?? "").toLowerCase()) return null;
     if (file.bytes.length > cap) throw new Error("its file is larger than its kind can be");
     return file.bytes;
   }

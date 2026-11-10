@@ -67,14 +67,68 @@
   /** The most channels an input or an IR may have. */
   const MAX_CHANNELS = 2;
 
-  /** @returns {string} the plan's sentence for a cabinet that is too long. */
-  function lengthProblem(frames, rate) {
+  /** The plan's sentence for a cabinet longer than a second. */
+  function tooLongText(count, frequency) {
+    const seconds = (Math.round((count / frequency) * 10) / 10).toFixed(1);
+    return `An impulse response is at most 1 second long; this one is ${seconds} s.`;
+  }
+
+  /**
+   * The longest PCM a cabinet read from a file may hold once it has been
+   * resampled to the context's rate.
+   *
+   * The one-second rule is a rule about the FILE: the page and a render check
+   * `sourceFrames <= sourceRate + FRAME_TOLERANCE` at the file's own rate, and
+   * resampling multiplies that length by `rate / sourceRate`. So the engine
+   * accepts exactly the length that follows from a file that passed — a 44.1 kHz
+   * starter cabinet of 44101 frames is 176404 frames at 176.4 kHz and 192002 at
+   * 192 kHz, and both are cabinets — and refuses a payload whose PCM is longer
+   * than its own stated source could ever resample to.
+   * @param {unknown} sourceFrames the frames the file held
+   * @param {unknown} sourceRate the file's own rate, in Hz
+   * @param {unknown} rate the rate the PCM was resampled to, in Hz
+   * @returns {number|null} the longest accepted length, or null with no source
+   */
+  function resampledLimit(sourceFrames, sourceRate, rate) {
+    const count = Math.max(0, Math.trunc(Number(sourceFrames) || 0));
+    const from = Number(sourceRate);
+    const to = Number(rate);
+    if (!Number.isFinite(from) || from <= 0) return null;
+    if (!Number.isFinite(to) || to <= 0) return null;
+    // `Math.ceil`, because `StudioResample.toRate` rounds its output length up
+    // or down; the limit is never smaller than what it can produce.
+    return Math.ceil((count * to) / from);
+  }
+
+  /**
+   * The refusal for one cabinet, or null when it is a cabinet.
+   *
+   * Judged ONCE, at the file's own rate, when the caller says where the PCM came
+   * from (`sourceFrames` and `sourceRate`, which the page and a render both
+   * pass). Without that, the length is judged at the rate the PCM is in, which
+   * is what a caller handing over PCM it made itself has.
+   * @param {unknown} frames the frames the PCM holds
+   * @param {unknown} rate the rate the PCM is in, in Hz
+   * @param {unknown} [sourceFrames] the frames the file held, if the PCM came from one
+   * @param {unknown} [sourceRate] the file's own rate, if the PCM came from one
+   * @returns {string|null}
+   */
+  function lengthProblem(frames, rate, sourceFrames, sourceRate) {
     const count = Math.max(0, Math.trunc(Number(frames) || 0));
     const frequency = Number(rate);
     if (!Number.isFinite(frequency) || frequency <= 0) return null;
+    const fromRate = Number(sourceRate);
+    const fromFrames = Math.max(0, Math.trunc(Number(sourceFrames) || 0));
+    if (Number.isFinite(fromRate) && fromRate > 0 && fromFrames > 0) {
+      // The rule is about the file. A file that is over the limit is refused
+      // with ITS length, whatever the PCM in hand says.
+      if (fromFrames > fromRate + FRAME_TOLERANCE) return tooLongText(fromFrames, fromRate);
+      const limit = resampledLimit(fromFrames, fromRate, frequency);
+      if (limit !== null && count > limit) return tooLongText(count, frequency);
+      return null;
+    }
     if (count <= frequency + FRAME_TOLERANCE) return null;
-    const seconds = (Math.round((count / frequency) * 10) / 10).toFixed(1);
-    return `An impulse response is at most 1 second long; this one is ${seconds} s.`;
+    return tooLongText(count, frequency);
   }
 
   /** @returns {number} the smallest power of two at or above a value. */
@@ -163,8 +217,11 @@
   /**
    * Build one cabinet convolver.
    * @param {{channels: Float32Array[]|Float64Array[]|ArrayLike<number>[],
-   *          rate: number}} options `channels` is the IR's own PCM (one array
-   *   for a mono cabinet, two for a stereo one), already at the context's rate
+   *          rate: number, sourceFrames?: number,
+   *          sourceRate?: number}} options `channels` is the IR's own PCM (one
+   *   array for a mono cabinet, two for a stereo one), already at the context's
+   *   rate; `sourceFrames`/`sourceRate` say what the file held before it was
+   *   resampled, so the one-second rule is applied once, at the file's rate
    * @returns {{latencyFrames: number, frames: number, channels: number,
    *            partitions: number,
    *            process: function(Float32Array, Float32Array|null, number): void,
@@ -183,7 +240,10 @@
     }
     if (usable.length === 0) throw new Error("An impulse response holds no audio.");
     const frames = usable[0].length;
-    const problem = lengthProblem(frames, rate);
+    // The page (and a render) says where these frames came from, so the length
+    // is judged once, at the file's own rate, exactly as the page judged it
+    // before it resampled.
+    const problem = lengthProblem(frames, rate, settings.sourceFrames, settings.sourceRate);
     if (problem) throw new Error(problem);
 
     const irChannels = usable.length >= 2 ? 2 : 1;
@@ -402,6 +462,7 @@
   const api = {
     create: create,
     lengthProblem: lengthProblem,
+    resampledLimit: resampledLimit,
     MAX_SECONDS: MAX_SECONDS,
     LENGTH_TOLERANCE_FRAMES: FRAME_TOLERANCE,
     PARTITION_FRAMES: PARTITION_FRAMES,

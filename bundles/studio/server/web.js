@@ -1288,6 +1288,27 @@ export function createStudioWeb({
   }
 
   /**
+   * Send one library file whose bytes are ALREADY in hand and ALREADY verified
+   * (a bundled starter sound is hashed against the bundle's own list before it is
+   * offered), so the route never reads the path a second time: what goes out is
+   * the exact buffer that was checked.
+   * @param {object} res
+   * @param {Buffer|Uint8Array} bytes the verified bytes
+   * @param {string} contentType
+   * @returns {void}
+   */
+  function sendVerifiedFile(res, bytes, contentType) {
+    if (!bytes || typeof bytes.length !== "number" || bytes.length === 0) {
+      res.status(404).json({ error: MISSING_INSTRUMENT_TEXT });
+      return;
+    }
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", AUDIO_CACHE_CONTROL);
+    res.setHeader("Content-Length", String(bytes.length));
+    res.end(bytes);
+  }
+
+  /**
    * Answer one take route, or refuse it when this instance cannot stage takes.
    *
    * The refusal comes before the body is read and before the hub is asked
@@ -1878,12 +1899,27 @@ export function createStudioWeb({
     // the song already holds and answers it without a second `library.add`.
     const starters = new Map();
 
-    /** @returns {object|null} the library entry one song holds for a bundled row. */
-    function bundledEntryIn(snap, bundledId) {
+    /**
+     * The library entry one song holds FOR one bundled row, or null.
+     *
+     * Own properties only (a library id is a caller's string, and `library` is a
+     * plain object), and only an entry that IS that bundle's sound: the same id
+     * that came from somewhere else — an upload, a catalog download — is not the
+     * starter sound, and neither is an entry of another kind.
+     * @param {object|null|undefined} snap
+     * @param {string} bundledId
+     * @param {string} [kind] the bundled row's kind, when it is known
+     * @returns {object|null}
+     */
+    function bundledEntryIn(snap, bundledId, kind) {
       const entries = snap?.library;
       if (!entries || typeof entries !== "object") return null;
+      if (!Object.hasOwn(entries, bundledId)) return null;
       const found = entries[bundledId];
-      return found && typeof found === "object" ? found : null;
+      if (!found || typeof found !== "object") return null;
+      if (found.source !== "bundled") return null;
+      if (kind !== undefined && String(found.kind ?? "") !== String(kind)) return null;
+      return found;
     }
 
     r.post("/api/studio/library/bundled", dashboardAuth, requireCsrf, libraryHandled(async (req, res) => {
@@ -1901,18 +1937,37 @@ export function createStudioWeb({
       // opened: a member who may only read a song cannot add a sound to it.
       if (!canWrite) return res.status(503).json({ error: LIBRARY_UNAVAILABLE_TEXT });
       await canWrite(Number(row.project_id));
-      const opened = await hub.openSong(songId);
+      // The hub's own read, before any work is queued: an unknown song and a
+      // project this caller may not see both refuse here (the ACL error becomes
+      // a 403 in `handled`). The snapshot itself is re-read inside the
+      // serialized work below.
+      await hub.openSong(songId);
+
+      // A hash as the song holds it, lower-case, for a comparison that does not
+      // care which case a bundle's list was written in.
+      const shaOf = (entry) => String(entry?.sha256 ?? "").toLowerCase();
 
       const key = `${songId}:${bundledId}`;
       const running = starters.get(key);
       if (running) return res.json(await running);
       const work = (async () => {
-        const held = bundledEntryIn(opened?.snapshot, bundledId);
+        // The bundle's own row first: it says what this starter sound IS (its
+        // kind, its hash), which is what decides whether the song already holds
+        // it. An id the bundle no longer ships refuses here, with the store's
+        // own 404 sentence.
+        const current = await library.bundledEntry(bundledId);
+        // The snapshot is read INSIDE this serialized work: two asks for the
+        // same starter sound may interleave, and one that read the song before
+        // the other's add landed would issue a second `library.add` the hub
+        // refuses. Reading it here is what makes the second ask find the entry
+        // and answer it instead.
+        const opened = await hub.openSong(songId);
+        const held = bundledEntryIn(opened?.snapshot, bundledId, current.kind);
         if (held) {
           // The song already holds it. Whether that is the right sound is a
-          // question about THIS bundle, so the record is still checked.
-          const current = await library.bundledEntry(bundledId);
-          if (String(held.sha256 ?? "").toLowerCase() !== current.sha256) {
+          // question about THIS bundle: a bundle that now ships a different file
+          // under the same id is not the sound this song was given.
+          if (shaOf(held) !== shaOf(current)) {
             const error = new Error(
               "This song's copy of that starter sound is out of date: the bundle now ships a different file. Remove it from the song and add it again to get the new one.",
             );
@@ -2000,7 +2055,18 @@ export function createStudioWeb({
           return missing();
         }
         if (!file) return missing();
-        return sendStoredFile(res, file.path, contentType);
+        // The song's entry names the file it was added with. A bundle that now
+        // ships a different file under that id is not this sound, so the answer
+        // is "missing" (the page offers it again) and never the new sound under
+        // the old name.
+        if (
+          String(entry.sha256 ?? "").toLowerCase() !== String(file.entry?.sha256 ?? "").toLowerCase()
+        ) {
+          return missing();
+        }
+        // The bytes that were just hashed against the list are what goes out —
+        // never a fresh read of the path the hash was taken from.
+        return sendVerifiedFile(res, file.bytes, contentType);
       }
 
       if (entry.catalog_id) {

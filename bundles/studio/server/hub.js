@@ -852,6 +852,16 @@ function ampReferenceMoves(insert, params) {
  * moving or retuning one is an ordinary agent edit — so only an amp reaches
  * these two answers. ADDING an amp is not a loss: an agent may build a guitar
  * chain with a capture the operator put in the song's library (plan 1d, PR C).
+ *
+ * KNOWN GAP (review, Task 15 — left in place deliberately, no code for it yet):
+ * this rule only asks what a write does to an amp that ALREADY EXISTS. An agent
+ * can therefore reach the same sound by another route: bypass the operator's
+ * amp and add a SECOND amp that names a capture already in the song's library,
+ * so the operator's choice is still theirs and untouched while the track is
+ * heard through the agent's. Closing that needs the rule to be about the chain
+ * and the song ("which capture does this track hear?"), not about one insert's
+ * fields — a design decision for the "who can change a sound" rule, not a
+ * guard to bolt on here.
  * @param {object} snap - the song as it stands before the step
  * @param {string} insertId
  * @param {string} field - `"*"`, `"kind"`, `"params.<name>"`, or another field

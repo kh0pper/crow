@@ -6,8 +6,9 @@ the bytes before anything plays them, so a file that no longer matches its recor
 is refused rather than played.
 
 A starter sound reaches a song only when the person at the Studio page adds it
-(there is no agent tool for that). The picker shows the `credit` line of every
-entry beside the sound, and a render lists the credits of the sounds it heard.
+(there is no agent tool for that). The picker shows each entry's `credit` line on
+that entry's own option (hover it), and the line under the picker names the sound
+the amp currently plays; a render lists the credits of the sounds it heard.
 
 ## `starter-a2.nam` — the starter capture
 

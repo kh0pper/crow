@@ -2030,3 +2030,64 @@ test("a render plays a starter capture through a starter cabinet", async () => {
   );
   assert.equal(missing.seconds, 1, "the render still happened");
 });
+
+test("a song entry that names an older bundled file is missing, not the new sound", async () => {
+  // The song's entry names the file it was added with. A bundle that now ships a
+  // DIFFERENT file under that id is not that sound, so the cabinet reads as a file
+  // this device does not hold and is named in `missing_library` — the same rule
+  // the library file route keeps — rather than playing the new file under the old
+  // entry's name.
+  const { createLibraryStore, readBundled } = await import("../bundles/studio/server/library-store.js");
+  const { entries } = await readBundled();
+  const starter = entries.find((entry) => entry.id === "starter-a2");
+  const cabinet = entries.find((entry) => entry.id === "cabinet-ampmix");
+  assert.ok(starter, "the bundle ships the starter capture");
+  assert.ok(cabinet, "and the starter cabinets");
+
+  const song = audioSong([{ scene_id: "scene-1", clip_id: "clip-1", take_id: TAKE_ID }]);
+  const stale = starterEntry(cabinet);
+  // An older file under the same id: what the song was given, before a later
+  // bundle replaced it.
+  stale.sha256 = "0".repeat(64);
+  song.library = { [starter.id]: starterEntry(starter), [cabinet.id]: stale };
+  song.inserts = {
+    "amp-1": {
+      id: "amp-1",
+      owner: "track:audio-1",
+      order: 1,
+      kind: "amp",
+      bypass: false,
+      params: { model_id: starter.id, ir_id: cabinet.id, input_db: 0, output_db: 0, ir_mix: 1 },
+    },
+  };
+
+  const crowHome = mkdtempSync(join(tmpdir(), "studio-stale-starter-"));
+  const storage = fakeStorage();
+  storage.objects.set(takeKey(TAKE_ID), takeWav());
+  const renderer = createRenderer({
+    db: fakeDb(),
+    storage,
+    acl: fakeAcl(),
+    library: createLibraryStore({ crowHome }),
+    maxSeconds: 300,
+    now: () => CLOCK,
+  });
+
+  const result = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT,
+    snapshot: song,
+    scene_id: "scene-1",
+    seconds: 1,
+  });
+  assert.deepEqual(
+    result.missing_library.map((item) => item.id),
+    [cabinet.id],
+    `the out-of-date cabinet has to be named, got ${JSON.stringify(result.missing_library)}`,
+  );
+  assert.equal(
+    result.missing_library.some((item) => item.id === starter.id),
+    false,
+    "the capture the song still matches is not reported",
+  );
+});

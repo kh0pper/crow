@@ -130,11 +130,14 @@
  *   an offline render does): past that the engine drops the least-recently
  *   played one, and `onSampleNeeded(listener)` says which sample a trigger
  *   wanted so the page can load it back.
- * - `loadLibrary(id, kind, bytes)` hands the engine one library FILE — a
- *   SoundFont bank (`kind: "font"`), a NAM capture (`kind: "nam"`, the `.nam`
- *   file's own bytes) or a cabinet IR (`kind: "ir"`, whose decoded and
- *   resampled `Float32Array` channels are passed instead of a file) —
- *   transferred rather than copied, and resolves with what became of it:
+ * - `loadLibrary(id, kind, bytes, options)` hands the engine one library FILE —
+ *   a SoundFont bank (`kind: "font"`), a NAM capture (`kind: "nam"`, the
+ *   `.nam` file's own bytes) or a cabinet IR (`kind: "ir"`, whose decoded and
+ *   resampled `Float32Array` channels are passed instead of a file, with
+ *   `options.sourceRate`/`options.sourceFrames` naming the rate and length of
+ *   the file they came from so the one-second rule is judged there and not on
+ *   the longer resampled copy) — transferred rather than copied, and resolves
+ *   with what became of it:
  *   `{status: "loaded" | "deferred" | "failed", reason?}`. There is no fetch on
  *   the audio thread, so the page (or a render) reads the file and posts it
  *   here. Banks and captures are parsed ONLY while the transport is stopped (the
@@ -2222,7 +2225,11 @@
        * @param {string} libraryId
        * @param {string} kind `"font"` (a capture or cabinet is acknowledged and
        *   left to the host that reads them)
-       * @param {Uint8Array|ArrayBuffer|ArrayBufferView} bytes the file itself
+       * @param {Uint8Array|ArrayBuffer|ArrayBufferView|Float32Array[]} bytes the
+       *   file itself, or a cabinet's decoded PCM
+       * @param {{sourceRate?: number, sourceFrames?: number}} [options] for a
+       *   cabinet: the rate and the length of the file the PCM came from, so the
+       *   engine applies the one-second rule once, at that file's own rate
        * @returns {Promise<{status: "loaded"|"deferred"|"failed", reason?: string,
        *   presets?: Array<{bank: number, program: number, name: string}>}>}
        *   `failed` carries why: a bank that will not parse, one with no
@@ -2230,7 +2237,7 @@
        *   that loaded carries the `presets` of the bank it parsed; an
        *   empty id is refused here, before anything is posted
        */
-      loadLibrary(libraryId, kind, bytes) {
+      loadLibrary(libraryId, kind, bytes, options) {
         // An empty id names nothing: answer at once, without posting a message
         // the processor would only have to ignore.
         if (libraryId === undefined || libraryId === null || String(libraryId) === "") {
@@ -2243,15 +2250,27 @@
         // A cabinet arrives as decoded PCM, not as a file: `bytes` may be the
         // channel array the page (or a render) decoded and resampled the stored
         // WAV to. It is transferred, so the processor builds its partitions
-        // without ever seeing the WAV.
+        // without ever seeing the WAV. `options.sourceRate`/`sourceFrames` say
+        // what that file held, so the one-second rule is judged where it belongs
+        // — at the file's own rate — instead of on the length resampling gave it
+        // at a higher context rate.
         if (Array.isArray(bytes) && bytes.length > 0 && bytes[0] instanceof Float32Array) {
           const channels = bytes.slice(0, 2);
+          const sourceRate = Number(options && options.sourceRate);
+          const sourceFrames = Number(options && options.sourceFrames);
+          const message = {
+            type: "library",
+            request_id: requestId,
+            library_id: id,
+            kind: what,
+            channels: channels,
+            rate: context.sampleRate,
+          };
+          if (Number.isFinite(sourceRate) && sourceRate > 0) message.source_rate = sourceRate;
+          if (Number.isFinite(sourceFrames) && sourceFrames > 0) message.source_frames = sourceFrames;
           return new Promise((resolve) => {
             pendingLibrary.set(requestId, resolve);
-            post(
-              { type: "library", request_id: requestId, library_id: id, kind: what, channels: channels, rate: context.sampleRate },
-              channels.map((channel) => channel.buffer),
-            );
+            post(message, channels.map((channel) => channel.buffer));
           });
         }
         const data = bytesOf(bytes);
