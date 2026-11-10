@@ -73,7 +73,7 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
-import { hasKeptData, markKeptData, clearKeptData } from "../../shared/addon-walls-file.js";
+import { recordKeptData, clearKeptData, keptDataMatches } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -2383,24 +2383,26 @@ function isStdioAddonManifest(manifest) {
  * Review item 5: refuse an install over a pre-existing `<dataDir>/<id>`, so an add-on
  * never starts inside a folder someone else filled (a hand-made dir, a leftover of
  * another tool). The one exception is Crow's own kept data: an uninstall never deletes
- * the folder and records it in `<crowHome>/addon-walls.json` (`keptData`). Nothing
- * inside the folder is read for this decision — a planted `addon-walls.json` there
- * grants nothing.
+ * the folder and records it in `<crowHome>/addon-walls.json` (`keptData`), and that
+ * record names ONE folder — its device, inode and owner — so a folder swapped in after
+ * the uninstall (or a symlink to one) inherits nothing. Nothing inside the folder is
+ * read for this decision — a planted `addon-walls.json` there grants nothing.
  *
  * @returns {object|null} the refusal ({ok:false,status,code,error,extra}) or null.
  */
 export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
   if (!isStdioAddonManifest(manifest) || !bundleId) return null;
-  if (!pathExistsNoFollow(join(dataDir, bundleId))) return null;
-  let kept = false;
-  try {
-    kept = hasKeptData(crowHome, bundleId);
-  } catch (err) {
-    // A read that throws grants nothing: the refusal stands (readAddonWalls is {} then).
-    console.warn(`[bundles] could not read the add-on wall file for '${bundleId}': ${err?.message || err}`);
-    kept = false;
+  const dir = join(dataDir, bundleId);
+  if (!pathExistsNoFollow(dir)) {
+    // No folder, so any record for it is stale: drop it rather than let it name a
+    // folder a later install would then create.
+    try { clearKeptData(crowHome, bundleId); } catch (err) {
+      console.warn(`[bundles] could not clear the kept-data record for '${bundleId}': ${err?.message || err}`);
+    }
+    return null;
   }
-  if (kept) return null;
+  // A symlink never matches (the record names a plain directory), so it is always refused.
+  if (keptDataMatches(crowHome, bundleId, dir)) return null;
   return {
     ok: false, status: 409, code: "addon_data_dir_exists",
     error: "A folder for this add-on already exists; remove or rename it, then install again",
@@ -2412,20 +2414,28 @@ export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
  * Review item 5: create the add-on's own data folder, right after its MCP entry is
  * registered. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
  * and recorded as Crow's own kept data, so a failed install can be retried — the folder
- * is ours, not a stranger's. A folder that already exists (one an uninstall kept) is
- * left exactly as it is.
+ * is ours, not a stranger's.
+ *
+ * Exported for tests. `mkdir` is the check: a folder that appeared between
+ * validateInstall and here is only accepted when the kept-data record already names
+ * exactly that folder (an uninstall kept it), otherwise the install fails.
  */
-function ensureAddonDataDir(bundleId, manifest) {
+export function ensureAddonDataDir(bundleId, manifest) {
   if (!isStdioAddonManifest(manifest) || !bundleId) return;
   const dir = join(resolveDataDir(), bundleId);
-  if (pathExistsNoFollow(dir)) return;
   // Never `recursive`: the data dir itself is the instance's own and must already exist.
   // A failure here fails the install (runInstallJob's handler) instead of leaving an
   // add-on recorded whose only writable folder was never made.
-  mkdirSync(dir, { mode: 0o700 });
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+    if (keptDataMatches(CROW_HOME, bundleId, dir)) return;
+    throw new Error("a folder for this add-on appeared during the install; remove or rename it, then install again");
+  }
   chmodSync(dir, 0o700);
   try {
-    markKeptData(CROW_HOME, bundleId);
+    recordKeptData(CROW_HOME, bundleId, lstatSync(dir, { bigint: true }));
   } catch (err) {
     console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
   }
@@ -4168,7 +4178,17 @@ export default function bundlesRouter() {
         // `delete_data` did to its containers' volumes). Record it as Crow's own kept data,
         // so a reinstall over it is allowed and a folder nobody here created stays refused.
         try {
-          if (pathExistsNoFollow(join(resolveDataDir(), bundle_id))) markKeptData(CROW_HOME, bundle_id);
+          const keptDir = join(resolveDataDir(), bundle_id);
+          // Already recorded AND unchanged: the record stays as it is.
+          if (!keptDataMatches(CROW_HOME, bundle_id, keptDir)) {
+            let keptStat = null;
+            try { keptStat = lstatSync(keptDir, { bigint: true }); } catch { keptStat = null; }
+            if (keptStat && keptStat.isDirectory() && Number(keptStat.uid) === process.getuid?.()) {
+              recordKeptData(CROW_HOME, bundle_id, keptStat);
+            } else if (keptStat) {
+              appendLog(job, "Kept data folder was not recorded: it is not a plain folder owned by Crow");
+            }
+          }
         } catch (err) {
           console.warn(`[bundles] could not record the kept data folder for '${bundle_id}': ${err?.message || err}`);
         }
