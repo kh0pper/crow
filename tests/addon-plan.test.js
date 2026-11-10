@@ -98,6 +98,25 @@ const closePlan = (plan) => {
   }
 };
 
+/** The reason a venv interpreter outside the managed Python folders carries. */
+const INTERPRETER_REASON = "the add-on's interpreter is outside the managed Python folders";
+
+/** Point the add-on's venv interpreter at `target`, run `fn`, then drop the venv folder. */
+function withVenvPython(target, fn) {
+  const venvBin = mk(ADDON_DATA, ".venv", "bin");
+  const link = join(venvBin, "python");
+  rmSync(link, { force: true });
+  symlinkSync(target, link);
+  try { return fn(); } finally { rmSync(join(ADDON_DATA, ".venv"), { recursive: true, force: true }); }
+}
+
+/** A plan built while the venv interpreter points at `target`. */
+const planWithVenvPython = (target, over = {}) => withVenvPython(target, () => planOf(over));
+
+/** `p` is neither a path-bind source nor a bind destination on either side. */
+const unbound = (args, p) => !pathSources(args).some((src) => src === p || src.startsWith(p + "/"))
+  && !fdOps(args).some((q) => q[2] === p || q[2].startsWith(p + "/"));
+
 /** A profile in `deriveProfile`'s shape, with only the wall-relevant fields. */
 function profileOf(over = {}) {
   return {
@@ -480,20 +499,85 @@ test("an empty root, a private home, and the namespace flags", () => {
 });
 
 test("a uv entry binds the uv file, not ~/.local, and sets UV_PROJECT_ENVIRONMENT", () => {
-  const pythonRoot = mk(T, "pythons", "cpython-3.13");
+  const pythonRoot = mk(HOME, ".local", "share", "uv", "python", "cpython-3.13");
   const pythonBin = mk(pythonRoot, "bin");
   writeFileSync(join(pythonBin, "python3"), "");
-  const venvBin = mk(ADDON_DATA, ".venv", "bin");
   // A venv's `python` is a symlink into the interpreter install, so the plan
   // binds the install's root and not the venv folder.
-  symlinkSync(join(pythonBin, "python3"), join(venvBin, "python"));
-
-  const plan = planOf({ entry: { command: "uv", args: ["run", "server"] }, pathEnv: UV_DIR });
+  const plan = planWithVenvPython(join(pythonBin, "python3"), { entry: { command: "uv", args: ["run", "server"] }, pathEnv: UV_DIR });
   try {
     assert.ok(has(plan.args, "--ro-bind", join(UV_DIR, "uv")), "the uv file itself, read-only");
     assert.ok(!has(plan.args, "--ro-bind", join(HOME, ".local")), "never the whole ~/.local");
     assert.ok(has(plan.args, "--ro-bind", pythonRoot), "the interpreter install, read-only");
     assert.equal(plan.env.UV_PROJECT_ENVIRONMENT, join(ADDON_DATA, ".venv"));
+  } finally { closePlan(plan); }
+});
+
+// ---- the venv interpreter symlink is the add-on's choice ------------------
+
+test("a venv interpreter inside uv's managed Pythons is bound read-only at its install root", () => {
+  const pythonRoot = mk(HOME, ".local", "share", "uv", "python", "cpython-3.12-linux");
+  const pythonBin = mk(pythonRoot, "bin");
+  const python3 = join(pythonBin, "python3");
+  writeFileSync(python3, "");
+  const plan = planWithVenvPython(python3);
+  try {
+    assert.ok(has(plan.args, "--ro-bind", pythonRoot), "--ro-bind " + pythonRoot + " is present");
+    assert.ok(!plan.refused.some((r) => r.reason === INTERPRETER_REASON), "a managed interpreter draws no refusal");
+  } finally { closePlan(plan); }
+});
+
+test("a venv interpreter symlinked at another add-on's data folder is refused and nothing of it is bound", () => {
+  const otherRoot = mk(DATA, "other", "a");
+  const target = join(mk(otherRoot, "bin"), "python");
+  writeFileSync(target, "");
+  const plan = planWithVenvPython(target);
+  try {
+    assert.ok(plan.refused.some((r) => r.path === otherRoot && r.reason === INTERPRETER_REASON), "the interpreter root is refused: " + JSON.stringify(plan.refused));
+    assert.ok(unbound(plan.args, join(DATA, "other")), "no bind source or destination under " + join(DATA, "other"));
+  } finally { closePlan(plan); }
+});
+
+test("a venv interpreter symlinked into the owner's home is refused and nothing of it is bound", () => {
+  const notesRoot = mk(HOME, "notes", "x");
+  const target = join(mk(notesRoot, "bin"), "python");
+  writeFileSync(target, "");
+  const plan = planWithVenvPython(target);
+  try {
+    assert.ok(plan.refused.some((r) => r.path === notesRoot && r.reason === INTERPRETER_REASON), "the interpreter root is refused: " + JSON.stringify(plan.refused));
+    assert.ok(unbound(plan.args, notesRoot), "never bound: " + notesRoot);
+    assert.ok(unbound(plan.args, join(HOME, "notes")), "not through the folder holding it either");
+  } finally { closePlan(plan); }
+});
+
+test("a venv interpreter symlinked into the Crow home is refused and nothing of it is bound", () => {
+  const otherRoot = mk(BUNDLES, "other", "x");
+  const target = join(mk(otherRoot, "bin"), "python");
+  writeFileSync(target, "");
+  const plan = planWithVenvPython(target);
+  try {
+    assert.ok(plan.refused.some((r) => r.path === otherRoot && r.reason === INTERPRETER_REASON), "the interpreter root is refused: " + JSON.stringify(plan.refused));
+    assert.ok(unbound(plan.args, otherRoot), "never bound: " + otherRoot);
+  } finally { closePlan(plan); }
+});
+
+test("an absolute command naming a Crow-home secret is refused and nothing is bound", () => {
+  const secret = join(CROW, "secrets", "run");
+  writeFileSync(secret, "#!/bin/sh\n");
+  const plan = planOf({ entry: { command: secret, args: [] }, pathEnv: "" });
+  try {
+    assert.ok(plan.refused.some((r) => r.path === secret), "the command is refused: " + JSON.stringify(plan.refused));
+    assert.ok(unbound(plan.args, secret), "never bound: " + secret);
+  } finally { closePlan(plan); }
+});
+
+test("an absolute command naming another bundle in the Crow home is refused by the refuse list", () => {
+  const command = join(BUNDLES, "other", "run.sh");
+  writeFileSync(command, "#!/bin/sh\n");
+  const plan = planOf({ entry: { command, args: [] }, pathEnv: "" });
+  try {
+    assert.ok(plan.refused.some((r) => r.path === command && /Crow home/.test(r.reason)), "refused by the Crow-home rule: " + JSON.stringify(plan.refused));
+    assert.ok(unbound(plan.args, command), "never bound: " + command);
   } finally { closePlan(plan); }
 });
 

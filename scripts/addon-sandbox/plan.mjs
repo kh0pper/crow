@@ -92,6 +92,10 @@ export function buildAddonPlan(o = {}) {
 
   const realp = (p) => { try { return p && exists(p) ? realpathSync(p) : null; } catch { return null; } };
   const crowHomeReal = realp(crowHome) || crowHome;
+  const homeReal = realp(home) || home;
+  /** uv's managed Pythons; a bind is allowed only BELOW one of these, at either spelling of the home. */
+  const uvPythonRoots = [...new Set([join(home, ".local", "share", "uv", "python"), join(homeReal, ".local", "share", "uv", "python")])];
+  const INTERPRETER_OUTSIDE = "the add-on's interpreter is outside the managed Python folders";
   const dataReal = realp(dataDirIn) || dataDirIn;
   const installDir = join(crowHome, "bundles", id);
   const stateNames = (Array.isArray(files.state) ? files.state : [])
@@ -179,16 +183,35 @@ export function buildAddonPlan(o = {}) {
     const commandFile = isAbsolute(command) ? (exists(command) ? resolve(command) : null) : (command ? which(command, pathEnv, exists) : null);
     if (commandFile) {
       const r = realp(commandFile);
-      if (r && !under(r, "/usr") && !under(r, "/opt")) add(ro, r, { label: "add-on command" });
+      const why = r ? refusePath(r) : null;
+      if (why) refused.push({ path: commandFile, reason: why });
+      else if (r && !under(r, "/usr") && !under(r, "/opt")) add(ro, r, { label: "add-on command" });
     }
 
     // A venv's interpreter: `bin/python` is a symlink into the Python install,
-    // so its real path's grandparent is the install to bind read-only.
+    // so its real path's grandparent is the install to bind read-only. The
+    // symlink itself sits in the add-on's own WRITABLE data folder, so its
+    // target is the add-on's choice: only a system dir (already bound by
+    // rootArgs) or a uv-managed Python below `<home>/.local/share/uv/python`
+    // may be bound, and never through the data dir or the Crow home.
     const venvPython = join(dataReal, id, ".venv", "bin", "python");
     if (exists(venvPython)) {
       const py = realp(venvPython);
       const interpreterRoot = py ? dirname(dirname(py)) : null;
-      if (interpreterRoot) add(ro, interpreterRoot, { label: "interpreter" });
+      if (!interpreterRoot) {
+        refused.push({ path: venvPython, reason: INTERPRETER_OUTSIDE });
+      } else if (under(interpreterRoot, "/usr") || under(interpreterRoot, "/opt")) {
+        // Already bound read-only by rootArgs: nothing to add.
+      } else {
+        const managed = uvPythonRoots.some((u) => interpreterRoot !== u && under(interpreterRoot, u));
+        const why = !managed
+          ? INTERPRETER_OUTSIDE
+          : under(interpreterRoot, dataReal) || under(interpreterRoot, crowHomeReal)
+            ? INTERPRETER_OUTSIDE
+            : (refusePath(interpreterRoot) || forbidden(interpreterRoot));
+        if (why) refused.push({ path: interpreterRoot, reason: why });
+        else add(ro, interpreterRoot, { label: "interpreter" });
+      }
     }
 
     // ---- data, by fd ----
