@@ -45,8 +45,6 @@ El servidor de contenido necesita un inicio de sesión: cada página que muestra
 
 El servidor de contenido guarda sus usuarios en su propia base de datos de usuarios (`/config/users.sqlite`). Las cuentas creadas en la antigua versión de escritorio no se conservan: vivían en el archivo de usuarios de la aplicación de escritorio, bajo `/config/.config/calibre/`, y el servidor de contenido nunca lo lee. Crow crea `admin`; añade más cuentas con las propias herramientas de Calibre (`calibre-server --manage-users`) si las necesitas.
 
-Calibre bloquea una dirección tras cinco inicios de sesión fallidos, y todos los que llaman desde este ordenador comparten una sola dirección, así que una contraseña guardada equivocada puede bloquear brevemente también las herramientas de Crow: espera un minuto y vuelve a intentarlo, o corrige la contraseña en **Ajustes → Contraseñas**.
-
 Una carpeta de biblioteca sin `metadata.db` se rellena con una biblioteca de Calibre vacía en el primer arranque, para que el servidor tenga dónde funcionar.
 
 ### Actualizar desde la versión de escritorio

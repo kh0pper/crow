@@ -28,9 +28,6 @@ tools:
   desktop app's own user file under `/config/.config/calibre/`, not in the content server's
   `/config/users.sqlite`. Crow creates `admin`; more accounts come from calibre's own tools
   (`calibre-server --manage-users`).
-- Calibre blocks an address after five failed logins, and every caller on this computer shares
-  one address, so a wrong saved password can briefly block Crow's tools too: wait a minute
-  before retrying, or fix the password in Settings → Passwords.
 
 ## Upgrading from the desktop version
 
@@ -94,6 +91,6 @@ tools:
 ## Error Handling
 
 - If Calibre is unreachable: "Cannot connect to Calibre at the configured URL. Make sure the content server is running."
-- If auth fails (401): "Calibre rejected the credentials. Read the login Crow saved in Settings → Passwords, or set CALIBRE_USERNAME and CALIBRE_PASSWORD in the bundle settings." If it worked a minute ago, Calibre may have blocked this computer's address after five failed logins: wait a minute and try again.
+- If auth fails (401): "Calibre rejected the credentials. Read the login Crow saved in Settings → Passwords, or set CALIBRE_USERNAME and CALIBRE_PASSWORD in the bundle settings."
 - If a book is not found: the book may have been removed from the library
 - If a format is not available: show available formats and let the user choose another

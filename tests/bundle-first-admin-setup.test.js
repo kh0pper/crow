@@ -8,12 +8,15 @@
  *      when no input is given),
  *   3. runFirstAdminSetup over every exit code, every keychain failure and the seams —
  *      including the bundle's mcp-addons.json entry (an MCP child reads THAT, never the
- *      bundle's .env) and the one reload that loads it,
+ *      bundle's .env) and the report that a restart is needed for it, which never starts
+ *      the restart itself,
  *   4. the same function against a REAL bash script in a temp bundle dir,
  *   5. pendingFirstAdminNotices with `adminSaved` / `autoResults`,
  *   6. the bell for a crow/setup bundle (silent on ok, once on anything else),
  *   7. the two routes (owner-only, installed-only, 400 for a non-setup app, 409 while a
- *      run is in flight — the install path's run included — and the real keychain write),
+ *      run is in flight — the install path's run included — `needs_restart` when the MCP
+ *      entry was written and NO gateway restart started by either route, and the real
+ *      keychain write),
  *   8. the card: the Set-it-up button, the password field and the escaping.
  *
  * Scratch CROW_HOME/CROW_DATA_DIR before anything Crow-side is imported, so this file
@@ -309,7 +312,8 @@ function seams(over = {}) {
     writeMarker: async (db, id, value) => { calls.marker.push({ id, ...value }); return true; },
     now: () => Date.parse("2026-11-05T12:00:00Z"),
     warn: (m) => { calls.warn.push(String(m)); },
-    // The bundle's MCP entry and the reload that loads it: recorded, never a real file.
+    // The bundle's MCP entry, and the report that a restart is needed for it: recorded,
+    // never a real file and never a real restart.
     applyMcpEnv: async (id, values, manifest) => { calls.mcpEnv.push({ id, values, manifest }); return true; },
     requestReload: async () => { calls.reload.push(true); },
     ...over,
@@ -377,10 +381,10 @@ test("exit 0: the generated password is saved as a generated keychain entry, mar
   assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
   assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
   // Security review round 2, finding 1: an MCP tool child is spawned with ITS mcp-addons.json
-  // entry and never reads the bundle's .env, so the same values go there — and the run asks for
-  // the one reload the operator's Configure save asks for.
+  // entry and never reads the bundle's .env, so the same values go there — and the run reports
+  // that a restart is needed to load it (review round 3, finding 1: it never starts one).
   assert.deepEqual(calls.mcpEnv, [{ id: "frigate", values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" }, manifest: SETUP_MANIFEST }]);
-  assert.equal(calls.reload.length, 1, "exactly one reload request");
+  assert.equal(calls.reload.length, 1, "exactly one restart-needed report");
   assert.equal(JSON.stringify(out).includes(PASSPHRASE), false, "and never the password in the answer");
 });
 
@@ -391,13 +395,13 @@ test("a failed setup leaves the bundle's MCP entry alone", async () => {
   const { out } = await runSetup(deps);
   assert.equal(out.result, "failed");
   assert.deepEqual(calls.mcpEnv, [], "no login was made, so nothing may be written into the entry");
-  assert.equal(calls.reload.length, 0, "and nothing to reload");
+  assert.equal(calls.reload.length, 0, "and nothing to report");
 });
 
 test("the real seam writes the bundle's own mcp-addons entry, and a bundle without one is no error", async () => {
   const addonsPath = join(TMP_HOME, "mcp-addons.json");
   rmSync(addonsPath, { force: true });
-  // No entry: this app has no MCP server. Nothing is written, nothing is reloaded, and the
+  // No entry: this app has no MCP server. Nothing is written, no restart is reported, and the
   // run is still an ok — the login is in the keychain either way.
   const none = seams();
   delete none.deps.applyMcpEnv;
@@ -506,7 +510,7 @@ test("exit 5: the app took the password, so it is saved like exit 0 and reported
   );
   assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
   assert.equal(calls.mcpEnv.length, 1, "an unproven login is still pushed to the MCP entry");
-  assert.equal(calls.reload.length, 1, "and loaded, exactly as exit 0 does");
+  assert.equal(calls.reload.length, 1, "and reported, exactly as exit 0 does");
   assert.equal(out.reason, FIRST_ADMIN_UNPROVEN);
   assert.equal(out.reason, "Crow saved the new login, but could not log in with it to confirm");
   assert.equal(out.log.includes(FIRST_ADMIN_UNPROVEN), true, "the install log carries the sentence too");
@@ -822,7 +826,16 @@ test("crow/setup asks until Crow's own run for THIS install returned ok", () => 
   assert.equal(kept.length, 1);
   assert.equal(kept[0].kept, true);
   assert.equal(kept[0].canAuto, false);
+  assert.equal(kept[0].canDone, true, "a kept card keeps its Done button: there is nothing left for Crow to do");
   assert.match(firstAdminBody(kept[0], "Frigate", "en"), /already has an admin/);
+  // And Done really does close a kept card for this install (review round 3, finding 3).
+  assert.deepEqual(
+    pendingFirstAdminNotices({ installed, manifests, liveProxyIds: live, autoResults: { frig: { install: INSTALL, result: "kept" } }, done: { frig: INSTALL } }),
+    [],
+    "a kept setup install can be marked done",
+  );
+  // An upgraded setup install with no kept record ignores the old Done marker: the card's job is
+  // still to create or save the login Crow does not have.
   // not-running / failed still offer the run.
   for (const result of ["not-running", "failed"]) {
     const card = pendingFirstAdminNotices({ installed, manifests, liveProxyIds: live, autoResults: { frig: { install: INSTALL, result } } });
@@ -1133,6 +1146,7 @@ test("the auto route runs the setup and the real keychain, marker and .env all c
       assert.equal(r.body.result, "ok");
       assert.match(r.body.message, /^Crow created Frigate's admin login \(admin\) and saved it in Settings → Passwords\.$/);
       assert.deepEqual(r.body.log, ["created the admin"]);
+      assert.equal(r.body.needs_restart, false, "this scratch install registered no MCP entry, so nothing needs a restart");
       assert.equal(JSON.stringify(r.body).includes("APP_ADMIN"), false, "never a secret in the answer");
     });
     const { createDbClient } = await import("../servers/db.js");
@@ -1198,6 +1212,13 @@ test("an unproven login comes back as ok with its sentence, and the keychain kee
 test("first-admin-save stores the operator's own login under the bundle's admin key", async () => {
   const saveManifest = { ...SETUP_MANIFEST, id: "frigate-save", name: "Frigate Save" };
   seedInstalled(saveManifest);
+  // This bundle registers an MCP server, so the saved login also lands in its entry: the answer
+  // then says a restart is needed to load it (and the route starts none).
+  writeFileSync(
+    join(TMP_HOME, "mcp-addons.json"),
+    JSON.stringify({ "frigate-save": { command: "node", args: ["server/index.js"], env: {} } }),
+    { mode: 0o600 },
+  );
   await withServer({ owner: true }, async (post) => {
     const bad = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-save", username: "admin", password: "" });
     assert.equal(bad.status, 400);
@@ -1207,7 +1228,9 @@ test("first-admin-save stores the operator's own login under the bundle's admin 
 
     const r = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-save", username: "alex", password: "Typed-Pass-1" });
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    assert.deepEqual(r.body, { ok: true });
+    // The login went into the bundle's MCP entry (frigate registers one), so the answer says a
+    // restart is needed — and the route started none itself.
+    assert.deepEqual(r.body, { ok: true, needs_restart: true });
   });
   const { createDbClient } = await import("../servers/db.js");
   const { listEntries, openEntrySecret } = await import("../servers/gateway/keychain/store.js");
@@ -1250,9 +1273,44 @@ test("saving the login never overwrites one Crow already keeps", async () => {
   }
 });
 
+test("both card routes answer needs_restart and neither restarts the gateway itself", async () => {
+  // Review round 3, finding 1: a restart started from these routes would kill any install job
+  // that is running. They report that one is needed instead, and the card says so.
+  const autoManifest = { ...SETUP_MANIFEST, id: "frigate-restart-auto", name: "Frigate Restart Auto" };
+  const saveManifest = { ...SETUP_MANIFEST, id: "frigate-restart-save", name: "Frigate Restart Save" };
+  seedInstalled(autoManifest);
+  seedInstalled(saveManifest);
+  writeFileSync(
+    join(TMP_HOME, "mcp-addons.json"),
+    JSON.stringify({
+      "frigate-restart-auto": { command: "node", args: ["server/index.js"], env: {} },
+      "frigate-restart-save": { command: "node", args: ["server/index.js"], env: {} },
+    }),
+    { mode: 0o600 },
+  );
+  const restarts = [];
+  B._setRestartHookForTest((delayMs) => restarts.push(delayMs));
+  B._setFirstAdminSetupDepsForTest({ runScript: async () => ({ stdout: "created the admin\n", stderr: "" }) });
+  try {
+    await withServer({ owner: true }, async (post) => {
+      const auto = await post("/bundles/api/first-admin-auto", { bundle_id: "frigate-restart-auto" });
+      assert.equal(auto.status, 200, JSON.stringify(auto.body));
+      assert.equal(auto.body.result, "ok");
+      assert.equal(auto.body.needs_restart, true, "the MCP entry was written, so a restart loads it");
+      const saved = await post("/bundles/api/first-admin-save", { bundle_id: "frigate-restart-save", username: "admin", password: "Typed-Pass-7" });
+      assert.equal(saved.status, 200, JSON.stringify(saved.body));
+      assert.equal(saved.body.needs_restart, true, "and the operator's login reached its entry too");
+    });
+  } finally {
+    B._setFirstAdminSetupDepsForTest(null);
+    B._setRestartHookForTest(null);
+  }
+  assert.deepEqual(restarts, [], "neither route restarts the gateway itself");
+});
+
 test("saveFirstAdminLogin reports a keychain failure instead of throwing", async () => {
   const said = [];
-  const status = await saveFirstAdminLogin({
+  const { result } = await saveFirstAdminLogin({
     bundleId: SETUP_ID,
     manifest: SETUP_MANIFEST,
     username: "admin",
@@ -1265,7 +1323,7 @@ test("saveFirstAdminLogin reports a keychain failure instead of throwing", async
       warn: (m) => said.push(String(m)),
     },
   });
-  assert.equal(status, "failed");
+  assert.equal(result, "failed");
   assert.equal(said.join("\n").includes("Typed-Pass-2"), false, "the cause is logged, never the password");
 });
 
@@ -1279,11 +1337,11 @@ test("a login the operator saved also reaches the bundle's MCP entry — and a b
     applyMcpEnv: async (id, values, manifest) => { calls.mcpEnv.push({ id, values, manifest }); return true; },
     requestReload: async () => { calls.reload.push(true); },
   };
-  const status = await saveFirstAdminLogin({ bundleId: "frigate", manifest: SETUP_MANIFEST, username: "admin", password: "Typed-Pass-1", deps });
-  assert.equal(status, "saved");
+  const saved = await saveFirstAdminLogin({ bundleId: "frigate", manifest: SETUP_MANIFEST, username: "admin", password: "Typed-Pass-1", deps });
+  assert.deepEqual(saved, { result: "saved", mcpEnvUpdated: true });
   // Same entries a setup run writes: without them Crow's own tools keep answering 401.
   assert.deepEqual(calls.mcpEnv, [{ id: "frigate", values: { FRIGATE_PASSWORD: "Typed-Pass-1", FRIGATE_USER: "admin" }, manifest: SETUP_MANIFEST }]);
-  assert.equal(calls.reload.length, 1, "and the one reload that loads it");
+  assert.equal(calls.reload.length, 1, "and one report that a restart is needed");
 
   // A finish-setup app has no `secretEnv`/`userEnv` to write — nothing is pushed, no error.
   calls.mcpEnv.length = 0;
@@ -1295,7 +1353,7 @@ test("a login the operator saved also reaches the bundle's MCP entry — and a b
     password: "Typed-Pass-1",
     deps: { ...deps, applyMcpEnv: async () => { throw new Error("there is nothing to write"); } },
   });
-  assert.equal(finish, "saved");
+  assert.deepEqual(finish, { result: "saved", mcpEnvUpdated: false });
   assert.deepEqual(calls.mcpEnv, []);
   assert.equal(calls.reload.length, 0);
 });
@@ -1468,6 +1526,37 @@ test("saving the login the operator made posts it and clears the card", async ()
   assert.equal(document.querySelectorAll(".ext-firstadmin").length, 0, "the keychain holds it now");
   assert.equal(calls.some((c) => c.url.includes("first-admin-done")), false);
   assert.ok(click);
+});
+
+test("an ok run that wrote the bundle's MCP entry says to restart, in Configure's words", async () => {
+  const { document, settle, click } = boot(renderCards([CARD]), {
+    fetchImpl: () => ({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ ok: true, result: "ok", needs_restart: true, message: "Crow created Frigate's admin login (admin) and saved it in Settings → Passwords.", log: [] }),
+    }),
+  });
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  click(card.querySelector(".ext-firstadmin-auto"));
+  await settle();
+  const after = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  assert.equal(after.querySelector(".ext-firstadmin__saved").textContent, t("bundles.firstAdmin.savedInPasswords", "en"));
+  assert.equal(after.querySelector(".ext-firstadmin__needs-restart").textContent, t("extensions.configureNeedsRestart", "en"), "the same sentence Configure's save shows");
+});
+
+test("a saved login that reached the MCP entry leaves the card saying to restart", async () => {
+  const { document, settle } = boot(renderCards([CARD]), {
+    fetchImpl: () => ({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, needs_restart: true }) }),
+  });
+  const card = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  const form = card.querySelector(".ext-firstadmin-save");
+  form.querySelector(".ext-firstadmin-save-pass").value = "Typed-Pass-1";
+  form.dispatchEvent(new (document.defaultView.Event)("submit", { bubbles: true, cancelable: true }));
+  await settle();
+  const after = document.querySelector('.ext-firstadmin[data-addon-id="frig"]');
+  assert.ok(after, "the card stays to carry the sentence");
+  assert.equal(after.textContent.trim(), t("extensions.configureNeedsRestart", "en"));
+  assert.equal(after.querySelector(".ext-firstadmin-save"), null, "its form is gone");
 });
 
 test("the card escapes the app name and the username it comes with", () => {

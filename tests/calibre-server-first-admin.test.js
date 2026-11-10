@@ -22,21 +22,21 @@
  *   6. a password the protocol refuses (empty, short) or a username that is not a plain
  *      account name: exit 1, with docker not even asked,
  *   7. a create Calibre confirmed but a login it never accepts: exit 5 (Crow keeps the
- *      password), and at most TWO login attempts — Calibre bans an address after five
- *      failures,
+ *      password), and at most TWO login attempts,
  *   8. a create that answers unclearly is settled by Calibre's own account list: the name now
  *      listed is proved with a real login (0), an install with other accounts is left alone
- *      (3), a list still empty after five re-reads changed nothing (1), an unreadable re-check
- *      changes nothing (1), and a create the docker client timed out on is kept when the
- *      account appears on a later read (0) — `timeout` kills the client, not the add,
+ *      (3), an unreadable re-read is tried again rather than treated as a verdict, and a create
+ *      the docker client timed out on (exit 124) whose account never appears before the loop's
+ *      25 s deadline is kept with exit 5 — `timeout` kills the client, not the add, so the
+ *      account may yet exist; a clean refusal whose account never appears is exit 1,
  *   9. the compose: no 3000/3001, the content server only, `--enable-auth --auth-mode basic`
  *      with the user database, the library mounted at /library, the loopback publish, and a
  *      config-volume owner that runs on the SAME image after Docker's first copy-up,
  *   10. the manifest passes the bundle contract and carries the declaration the installer and
  *      the card need (including the address saved with the login and the refreshed compose),
  *   11. the docs and the skill say who creates the login and where it is kept, that the old
- *      desktop-mode users are NOT carried over, how to upgrade, and that five failed logins
- *      block the address every caller on this machine shares (en + es).
+ *      desktop-mode users are NOT carried over, how to upgrade, and say nothing about a login
+ *      ban — Calibre's `--ban-for` default is 0, so it never bans (en + es).
  *
  * No docker and no network here: a `docker` and a `curl` stand-in are written into a temp dir
  * that sits first on PATH, record every argv and the stdin they received, and replay canned
@@ -344,10 +344,13 @@ test("a create Calibre confirmed but a login it never accepts is kept (exit 5)",
   assertPasswordStayedOutOfSight(r);
 });
 
-test("the proof makes at most TWO login attempts (five failures ban the address)", () => {
+test("the proof makes at most TWO login attempts", () => {
   const script = readFileSync(join(B, "scripts", "first-admin.sh"), "utf8");
   assert.match(script, /\[ "\$attempt" -ge 2 \]/, "the proof loop's own cap is two");
-  assert.match(script, /AT MOST TWO/, "and the script says why");
+  assert.match(script, /AT MOST TWO/, "and the script says so");
+  // Calibre's `--ban-for` default is 0: it never bans, so the cap is about not repeating a
+  // proof that already failed, not about an address allowance.
+  assert.doesNotMatch(script, /ban/i, "the script does not claim a login ban that does not exist");
   // A name that is not listed is never a reason to log in: that path saves nothing.
   const notOurs = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "1", FAKE_USERS_1: "second-user" } });
   assert.equal(notOurs.status, 3, notOurs.stderr);
@@ -378,7 +381,7 @@ test("an unclear create on an app that still has no accounts changes nothing (ex
   assert.match(r.stderr, /did not create the account, so nothing was changed/);
   assert.equal(proofCalls(r).length, 0, "no proof after a create that did not happen");
   assert.equal(/nothing of Crow's was saved/.test(r.stderr), false, "that is the exit-3 sentence");
-  assert.equal(listCalls(r).length, 6, "the list is read once up front and re-read five times before deciding");
+  assert.ok(listCalls(r).length > 2, "the list is re-read until the loop's deadline before deciding");
 });
 
 test("a create the docker client timed out on is kept when the account shows up on a later read", () => {
@@ -394,11 +397,38 @@ test("a create the docker client timed out on is kept when the account shows up 
   assertPasswordStayedOutOfSight(r);
 });
 
-test("an unreadable re-check after an unclear create changes nothing (exit 1)", () => {
-  const r = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "1", FAKE_USERS_1: "<<fail>>" } });
+test("an unreadable re-read after an unclear create is tried again, not treated as a verdict", () => {
+  // Review round 3, finding 2: an UNREADABLE re-read says nothing about whether the account
+  // exists. It must not end the run — the list becomes readable a moment later, the account is
+  // there, and the password Crow holds is proved with a real login.
+  const r = run({ answers: { FAKE_USERS: "<<fail>>", FAKE_USERS_0: "", FAKE_ADD_0: "1", FAKE_USERS_3: ADMIN } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(listCalls(r).length >= 4, "the unreadable reads were tried again");
+  assert.equal(proofCalls(r).length, 1, "and the password the app holds was proved");
+  assertPasswordStayedOutOfSight(r);
+});
+
+test("a create the docker client timed out on, whose list never becomes readable, keeps the password (exit 5)", () => {
+  // `timeout 30` killed the CLIENT: the add may still have gone through inside the container,
+  // and Calibre never lets the script read its account list. Dropping the password here could
+  // leave an account nobody on this machine knows the password to, so it is kept.
+  const r = run({ answers: { FAKE_USERS: "<<fail>>", FAKE_USERS_0: "", FAKE_ADD_0: "124" } });
+  assert.equal(r.status, 5, r.stderr);
+  assert.match(r.stderr, /may have gone through, so Crow kept the new password/);
+  assert.match(r.stderr, /use the login in Settings → Passwords/);
+  assert.equal(addCalls(r).length, 1, "the create was attempted exactly once");
+  assert.equal(proofCalls(r).length, 0, "no login can be proved from a list nobody could read");
+  assert.ok(listCalls(r).length > 2, "and the reads were retried until the deadline");
+  assertPasswordStayedOutOfSight(r);
+});
+
+test("a clean refusal whose account never appears before the deadline is still exit 1", () => {
+  // Calibre answered (not 124): nothing changed, so nothing is kept.
+  const r = run({ answers: { FAKE_USERS: "<<fail>>", FAKE_USERS_0: "", FAKE_ADD_0: "1" } });
   assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /did not report whether it created the account/);
-  assert.equal(proofCalls(r).length, 0, "no proof without a state");
+  assert.match(r.stderr, /did not create the account, so nothing was changed/);
+  assert.equal(proofCalls(r).length, 0);
+  assertPasswordStayedOutOfSight(r);
 });
 
 test("an unclear create whose login is refused is exit 3 (the account is not Crow's)", () => {
@@ -454,7 +484,7 @@ test("the manifest passes the bundle contract and declares the setup script Crow
   const manifest = manifestOf("calibre-server");
   const { errors } = validateManifest(manifest, B, { bundleExists: () => true });
   assert.deepEqual(errors, [], "the whole manifest");
-  assert.equal(manifest.version, "1.0.5", "a bundle change is a version bump (the installed copy refreshes on it)");
+  assert.equal(manifest.version, "1.0.6", "a bundle change is a version bump (the installed copy refreshes on it)");
   assert.deepEqual(manifest.refreshFiles, ["docker-compose.yml"], "an installed copy receives the fixed compose");
   assert.deepEqual(manifest.firstAdmin, {
     mode: "crow",
@@ -505,8 +535,8 @@ test("the script names its container for the tests, validates before any call, a
   assert.match(script, /\[ "\$\{#PW\}" -ge 12 \]/, "a password shorter than 12 characters is refused");
   assert.equal(script.includes(PASSWORD), false, "no password is baked into the script");
   const exit5 = script.split("\n").filter((line) => /^\s*die ".*" 5$/.test(line));
-  assert.equal(exit5.length, 1, "one exit-5 path");
-  assert.match(exit5[0], /Crow kept the new password; use the login in Settings → Passwords/);
+  assert.equal(exit5.length, 2, "two exit-5 paths: an accepted create whose login fails, and a create the client timed out on");
+  for (const line of exit5) assert.match(line, /Crow kept the new password; use the login in Settings → Passwords/);
 });
 
 // ── the notes the operator reads ────────────────────────────────────────────────────
@@ -527,8 +557,10 @@ test("the docs and the skill say the desktop app is gone and who creates the log
     assert.match(doc, /not carried over|no se conservan/, `${path}: says the old users are not carried over`);
     assert.doesNotMatch(doc, /keeps them|los conserva/, `${path}: no false promise about an existing install's users`);
     assert.match(doc, /users\.sqlite/, `${path}: names the file the content server's users live in`);
-    // Five failed logins block the address every caller on this machine shares.
-    assert.match(doc, /five failed logins|cinco inicios de sesión fallidos/, `${path}: warns about the login ban`);
+    // Calibre's `--ban-for` default is 0, so there is no login ban to warn about (review round
+    // 3, finding 4): a doc that claims one is wrong, and a reader who waits a minute for it is
+    // waiting for nothing.
+    assert.doesNotMatch(doc, /five failed logins|cinco inicios de sesión fallidos|blocks an address|bloquea una dirección/, `${path}: claims a login ban Calibre does not have`);
     // The upgrade path: the button that creates the login once the update is applied.
     assert.match(doc, /Upgrading from the desktop version|Actualizar desde la versión de escritorio/, `${path}: has the upgrade section`);
     assert.match(doc, /Set it up for me/, `${path}: names the button that creates the login`);
@@ -539,7 +571,7 @@ test("the docs and the skill say the desktop app is gone and who creates the log
   assert.doesNotMatch(skill, /keeps them/, "no false promise about an existing install's users");
   assert.match(skill, /not carried over/, "it says the old desktop-mode users do not come over");
   assert.match(skill, /users\.sqlite/, "and where the content server's own users live");
-  assert.match(skill, /five failed logins/, "it warns about the login ban");
+  assert.doesNotMatch(skill, /five failed logins|blocks an address/, "no login ban: Calibre's --ban-for default is 0");
   assert.match(skill, /Upgrading from the desktop version/, "and covers the upgrade");
   assert.match(skill, /Set it up for me/, "naming the button that creates the login");
 });

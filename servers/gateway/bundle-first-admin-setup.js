@@ -43,9 +43,11 @@
  * The same values also go into the bundle's mcp-addons.json entry (applyEnvToMcpAddons): an
  * MCP child is spawned with ITS entry's env and never reads the bundle's .env, so a bundle
  * whose own server logs in (calibre-server, kavita, navidrome) would otherwise start with a
- * username and no password and answer 401 to every call. After that write the run asks for
- * the reload the operator's Configure save asks for (a gateway restart: mcp-addons.json is
- * read when the child is spawned, so a running one keeps the old env). A keychain save
+ * username and no password and answer 401 to every call. mcp-addons.json is read when the child
+ * is spawned, so a running one keeps the old env until the gateway restarts — but the run never
+ * restarts the gateway itself: a restart here kills any install job that is running (review
+ * round 3, finding 1). It reports `mcpEnvUpdated`, the card routes answer `needs_restart`, and
+ * the Extensions card shows Configure's own "restart to apply" sentence. A keychain save
  * that fails AFTER the app's password changed still parks the password in .env, under
  * `secretEnv` even when the manifest does not declare it. When BOTH the keychain and the .env write fail, the run
  * reports `failed` and says the app's password has changed and must be reset in the app:
@@ -276,9 +278,8 @@ function defaultDeps() {
     writeMarker: writeFirstAdminAutoResult,
     now: () => Date.now(),
     warn: (m) => console.warn(m),
-    // The bundle's MCP entry (mcp-addons.json) and the reload the operator's own Configure save
-    // asks for are the routes module's. Imported lazily: that module imports THIS one, and it
-    // resolves its paths from CROW_HOME when it is first loaded.
+    // The bundle's MCP entry (mcp-addons.json) is the routes module's. Imported lazily: that
+    // module imports THIS one, and it resolves its paths from CROW_HOME when it is first loaded.
     applyMcpEnv: async (id, values, reviewed) => {
       const [{ applyEnvToMcpAddons }, { MCP_ADDONS_PATH }] = await Promise.all([
         import("./routes/bundles.js"),
@@ -286,9 +287,12 @@ function defaultDeps() {
       ]);
       return applyEnvToMcpAddons(id, values, MCP_ADDONS_PATH, reviewed);
     },
-    requestReload: async () => {
-      const { scheduleGatewayRestart } = await import("./routes/bundles.js");
-      scheduleGatewayRestart(3000);
+    // mcp-addons.json is read when an MCP child is spawned, so the entry a run just wrote is
+    // only loaded by a restart. This run never starts one — a restart mid-install kills the job
+    // that asked for it (review round 3, finding 1) — it reports, exactly like Configure's save:
+    // the card route's `needs_restart` is what the operator sees.
+    requestReload: async ({ bundleId: id } = {}) => {
+      console.log(`[bundles] ${id || "bundle"}: the new admin login is in the extension's MCP settings; restart the gateway to load it`);
     },
   };
 }
@@ -330,7 +334,8 @@ function resolveReviewedScript(scriptDir, relScript) {
  * `{ result: "ok"|"kept"|"not-running"|"failed"|"busy"|"skipped", reason?, log, mcpEnvUpdated? }`
  * where `log` is the last 20 non-empty lines of the script's stdout (the installer appends
  * them to its job log; the route hands them to the card) and `mcpEnvUpdated` says the
- * bundle's mcp-addons.json entry was written with the new login (see requestReload).
+ * bundle's mcp-addons.json entry was written with the new login, so a gateway restart is needed
+ * before its MCP child uses it (the card route answers `needs_restart`; nothing restarts here).
  * `"busy"` means another run for this bundle — the install path's or the card's — is
  * already in flight.
  *
@@ -396,8 +401,9 @@ export async function runFirstAdminSetup({
     // The bundle's own MCP server gets its env from ITS mcp-addons.json entry, never from the
     // bundle's .env (addon-env.js): without this it starts after setup with a username and no
     // password and answers 401 to every call. The entry is the one the operator's Configure
-    // save writes, and the reload that follows is the same one that save asks for. True when
-    // the entry was written; a bundle that is not an MCP add-on has none, and that is no error.
+    // save writes, and the report below is the same one that save gives: it says a restart is
+    // needed, it does not start one. True when the entry was written; a bundle that is not an
+    // MCP add-on has none, and that is no error.
     const pushLoginToMcp = async (values) => {
       if (!values || Object.keys(values).length === 0) return false;
       let wrote = false;
@@ -411,7 +417,7 @@ export async function runFirstAdminSetup({
       if (!wrote) return false;
       try {
         await d.requestReload({ bundleId });
-      } catch { /* the values are saved; a reload that will not start is the gateway's business */ }
+      } catch { /* the values are saved; a report that fails is not the login's problem */ }
       return true;
     };
 
@@ -534,13 +540,16 @@ export async function runFirstAdminSetup({
  * throws. A login Crow already keeps is left untouched: that one is changed in
  * Settings → Passwords, not from this form.
  *
- * Like a setup run, a saved login also reaches the bundle's MCP entry (applyEnvToMcpAddons)
- * and asks for the reload that loads it: an MCP child reads ITS entry, never the bundle's
- * .env, so without this the operator's login would leave Crow's own tools answering 401
- * (review round 2, finding 1 — same gap as the automatic run).
+ * Like a setup run, a saved login also reaches the bundle's MCP entry (applyEnvToMcpAddons),
+ * and the answer says whether it did (`mcpEnvUpdated`): an MCP child reads ITS entry, never the
+ * bundle's .env, so without that write the operator's login would leave Crow's own tools
+ * answering 401 (review round 2, finding 1 — same gap as the automatic run). Nothing restarts
+ * the gateway from here (review round 3, finding 1): the route hands `needs_restart` to the
+ * card, which shows Configure's own sentence.
  *
- * @returns {Promise<"saved"|"already"|"failed">} `"already"` = an active entry exists
- *          for this bundle's admin key; `"failed"` = the caller's fixed sentence.
+ * @returns {Promise<{result: "saved"|"already"|"failed", mcpEnvUpdated: boolean}>}
+ *          `"already"` = an active entry exists for this bundle's admin key;
+ *          `"failed"` = the caller's fixed sentence.
  */
 export async function saveFirstAdminLogin({ bundleId, manifest, username = "", password, crowHome = process.env.CROW_HOME || null, deps = {} } = {}) {
   const d = { ...defaultDeps(), ...(deps || {}) };
@@ -549,7 +558,7 @@ export async function saveFirstAdminLogin({ bundleId, manifest, username = "", p
   let db = null;
   try {
     db = await d.openDb();
-    if (await d.hasSaved(db, bundleId, envKey)) return "already";
+    if (await d.hasSaved(db, bundleId, envKey)) return { result: "already", mcpEnvUpdated: false };
     const key = await d.ensureWriteKey(db, { crowHome });
     await d.save(db, key, {
       bundleId,
@@ -574,15 +583,15 @@ export async function saveFirstAdminLogin({ bundleId, manifest, username = "", p
     if (secretKey && declaredEnv.has(secretKey)) values[secretKey] = password;
     const user = typeof username === "string" ? username.trim() : "";
     if (plan && !plan.refused && plan.userEnv && user && declaredEnv.has(plan.userEnv)) values[plan.userEnv] = user;
+    let mcpEnvUpdated = false;
     if (Object.keys(values).length > 0) {
-      let wrote = false;
-      try { wrote = !!(await d.applyMcpEnv(bundleId, values, manifest)); } catch { wrote = false; }
-      if (wrote) { try { await d.requestReload({ bundleId }); } catch { /* the values are saved */ } }
+      try { mcpEnvUpdated = !!(await d.applyMcpEnv(bundleId, values, manifest)); } catch { mcpEnvUpdated = false; }
+      if (mcpEnvUpdated) { try { await d.requestReload({ bundleId }); } catch { /* the values are saved */ } }
     }
-    return "saved";
+    return { result: "saved", mcpEnvUpdated };
   } catch (err) {
     try { d.warn(`[bundles] ${bundleId}: the admin login was not saved (${err && (err.code || err.name) ? err.code || err.name : "error"})`); } catch { /* console gone */ }
-    return "failed";
+    return { result: "failed", mcpEnvUpdated: false };
   } finally {
     try { db?.close?.(); } catch { /* already closed */ }
   }

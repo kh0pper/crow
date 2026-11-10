@@ -15,7 +15,8 @@
 #   0 = the account for the declared user now has exactly that password
 #   3 = Calibre already has accounts (set up earlier); left alone, nothing changed
 #   4 = not running / not answering / account list unreadable / no docker or curl here
-#   5 = Calibre confirmed Crow's create, but logging in with that password did not succeed
+#   5 = Calibre may hold the password, but Crow could not confirm it (a create the docker client
+#       timed out on, or a create it accepted whose login did not succeed); Crow keeps the password
 #   1 = anything else (a create that did not happen and left no account behind)
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
@@ -105,31 +106,49 @@ if [ -z "$confirmed" ]; then
   # Calibre answered without saying it created the account (a name that already exists
   # answers "already exists" with a nonzero exit), or `timeout` killed the docker CLIENT
   # while the create went on inside the container. Its own account list decides, never the
-  # exit code alone — and it is read again a few times first: a create that just timed out
-  # can appear a second or two later, and dropping the password then would leave an account
-  # nobody here knows the password to. Five reads over ~8 s, well inside this step's share
-  # of the manifest's 180 s. The name appearing is not proof by itself: the login below is.
+  # exit code alone — and it is read again until a deadline: a create that just timed out can
+  # appear a second or two later, and dropping the password then would leave an account nobody
+  # here knows the password to. An UNREADABLE re-read is "try again", never an exit: a
+  # transient failure says nothing about whether the account exists. The name appearing is not
+  # proof by itself: the login below is.
+  #
+  # Worst-case time of this whole script, against the manifest's timeout_s 180:
+  #   wait for the server  45 s budget + one 5 s probe       ≈  50 s
+  #   first account list   `timeout 20`                      =  20 s
+  #   the create           `timeout 30`                      =  30 s
+  #   this re-read loop    25 s deadline + one 20 s read + 2 =  47 s
+  #   the proof            2 x max-time 10 + one 3 s sleep   =  23 s
+  #                                                           ≈ 170 s, inside 180
   found=""
-  reread=0
-  while [ "$reread" -lt 5 ]; do
-    if [ "$reread" -gt 0 ]; then sleep 2; fi
-    reread=$((reread + 1))
+  reread_deadline=$((SECONDS + 25))
+  while :; do
     # An unreadable list is never "no accounts": creating over one would claim an install
-    # whose accounts are someone else's.
-    read_users || die "Calibre did not report whether it created the account; check the app's own login before trying again." 1
-    if [ -n "$(printf '%s' "$USERS_RAW" | tr -d '[:space:]')" ]; then
-      has_account || die "Calibre has accounts, but none named '$ADMIN_USER', so Crow's password cannot open one; left alone, and nothing of Crow's was saved." 3
-      found=1
-      break
+    # whose accounts are someone else's. It is not a verdict here either — try again.
+    if read_users; then
+      if [ -n "$(printf '%s' "$USERS_RAW" | tr -d '[:space:]')" ]; then
+        has_account || die "Calibre has accounts, but none named '$ADMIN_USER', so Crow's password cannot open one; left alone, and nothing of Crow's was saved." 3
+        found=1
+        break
+      fi
     fi
+    [ "$SECONDS" -lt "$reread_deadline" ] || break
+    sleep 2
   done
-  [ -n "$found" ] || die "Calibre did not create the account, so nothing was changed; check the app's own login." 1
+  if [ -z "$found" ]; then
+    # The account never appeared before the deadline. 124 is `timeout` killing the docker
+    # client: the add may still have gone through inside the container, so the password is
+    # kept (exit 5) — exactly as when a create is confirmed but its login cannot be proved.
+    if [ "$add_exit" -eq 124 ]; then
+      die "Calibre did not report whether it created the account before this script's deadline; the add may have gone through, so Crow kept the new password; use the login in Settings → Passwords." 5
+    fi
+    die "Calibre did not create the account, so nothing was changed; check the app's own login." 1
+  fi
 fi
 
 # ── prove the new login works ──────────────────────────────────────────────────────
 # The running server reads the user database live, so no restart is needed. AT MOST TWO
-# attempts: Calibre bans an address after five failed logins, so a third try here would eat
-# into that allowance for no gain.
+# attempts: a login that fails twice is not going to start working on a third, and every extra
+# request only lengthens the run.
 cfg_probe() {
   printf 'url = "%s/ajax/library-info"\nmax-time = 10\nuser = "%s"\n' "$BASE_URL" "$(esc "$ADMIN_USER:$PW")"
 }

@@ -45,8 +45,6 @@ The content server needs a login: every page that shows your books and every dow
 
 The content server keeps its users in its own user database (`/config/users.sqlite`). Accounts made in the old desktop version are not carried over: those lived in the desktop app's own user file under `/config/.config/calibre/`, and the content server never reads it. Crow creates `admin`; add more accounts with calibre's own tools (`calibre-server --manage-users`) if you need them.
 
-Calibre blocks an address after five failed logins, and every caller on this computer shares one address, so a wrong saved password can briefly block Crow's tools too: wait a minute and try again, or fix the password in **Settings → Passwords**.
-
 A library folder with no `metadata.db` is filled with an empty Calibre library on the first start, so the server has somewhere to run.
 
 ### Upgrading from the desktop version

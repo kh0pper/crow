@@ -306,7 +306,10 @@ Exit `5` exists so that a password the app really did take is never thrown away 
 the script could not log in with it afterwards: a proof that fails is not a failure of
 the change. Retry the proof a couple of times (an app that just restarted may not answer
 yet), and exit `5` only once the app itself has confirmed the change — then Crow keeps the
-password and says on the card that it could not log in with it to confirm.
+password and says on the card that it could not log in with it to confirm. The same exit
+covers a create the script could not read back within its own budget: if the script's own
+timeout killed the call, the app may still have taken the password, so it exits `5` (Crow
+keeps it) rather than `1` (which drops it).
 
 The script reports what happened through its exit code:
 
@@ -364,14 +367,16 @@ changed, the answer is `failed` with "the app's admin password changed but Crow
 could not keep it; reset it in the app": the login now exists only inside the app,
 so the card and the bell stay until the operator resets it (or saves it by hand).
 
-The saved login also goes into the bundle's own `mcp-addons.json` entry, and the run
-asks for the same gateway reload the operator's Configure save asks for: an MCP child
-is spawned with ITS entry's env and never reads the bundle's `.env`, so a bundle whose
-MCP server logs in (calibre-server, kavita, navidrome) would otherwise start with a
-username and no password and answer 401 to every call. A bundle that declares no
-`server` has no entry, and that is not an error. The install path does not restart
-mid-job: it marks the install as needing one, and its single end-of-install restart
-loads the entry.
+The saved login also goes into the bundle's own `mcp-addons.json` entry: an MCP child is
+spawned with ITS entry's env and never reads the bundle's `.env`, so a bundle whose MCP server
+logs in (calibre-server, kavita, navidrome) would otherwise start with a username and no
+password and answer 401 to every call. A bundle that declares no `server` has no entry, and
+that is not an error. **Nothing restarts the gateway by itself**: an entry written by a setup
+run (install or card) or by "Save the login you made" comes back as `needs_restart`, and the
+Extensions card shows the same "restart the gateway to apply this change" sentence Configure's
+save shows. A restart started from inside one of these runs would kill any install job that
+is running. The install path marks the install as needing one, and its single end-of-install
+restart loads the entry.
 
 Two calls in one install are not wasted: Crow never runs the script when the
 keychain already holds this app's admin login, and it makes sure the keychain can be
@@ -382,10 +387,11 @@ setting up this app's admin login" (409 on the card's request) instead of racing
 first.
 In the Extensions card, an app whose setup Crow can do itself offers "Set it up for
 me", and every card offers "Save the login you made" (the operator's own username
-and password, saved under the bundle's admin key) — either one clears the card, and
-so does a keychain entry the operator saved by hand. That form never replaces a
-login Crow already keeps; changing one is done in Settings → Passwords. (An
-invite-only app's card is different: it has neither form — see below.)
+and password, saved under the bundle's admin key) — either one clears the card (when
+the login also reached the bundle's MCP entry, the card stays with the restart
+sentence instead), and so does a keychain entry the operator saved by hand. That form
+never replaces a login Crow already keeps; changing one is done in Settings →
+Passwords. (An invite-only app's card is different: it has neither form — see below.)
 
 **Prefer `crow` whenever the app can take its admin from the environment or a CLI**
 (Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator
