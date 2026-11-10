@@ -188,3 +188,8 @@ test("through the wall context: a third-party add-on declaring FRIGATE_PASSWORD 
     if (saved === undefined) delete process.env.FRIGATE_PASSWORD; else process.env.FRIGATE_PASSWORD = saved;
   }
 });
+
+test("the root-password pattern is denied from the gateway env even when a repo manifest declares it", () => {
+  const env = wallChildEnv({ baseEnv: { WORKSPACE_DB_ROOT_PASSWORD: "fake-root-0109", S3_SECRET_KEY: "fake-s3-0110" }, declaredKeys: ["WORKSPACE_DB_ROOT_PASSWORD", "S3_SECRET_KEY"], declaredSource: "repo", credentialKeys: [] });
+  assert.deepEqual(env, {});
+});

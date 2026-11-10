@@ -28,11 +28,22 @@ export const WALL_BASE_ENV_ALLOW = Object.freeze([
   "CROW_APP_ROOT", "CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_GATEWAY_PORT", "PORT",
 ]);
 
-/** Gateway secrets that never come from the gateway env into a wall, even when declared. */
+/**
+ * Gateway secrets that never come from the gateway env into a wall, even when
+ * declared. Aligned with lane B's Phase 0 deny list (ADDON_DENY_KEYS and
+ * ADDON_DENY_KEY_RE in servers/gateway/addon-env.js); TODO(Phase 0): import
+ * `isDeniedAddonKey` from there instead of keeping this copy.
+ */
 export const WALL_ENV_DENY = Object.freeze([
-  "CROW_LOCAL_MCP_TOKEN", "MINIO_ROOT_PASSWORD", "MINIO_ROOT_USER", "PHONE_RUNNER_SECRET",
-  "CROW_BROWSER_VNC_PASSWORD", "CROW_DASHBOARD_PASSWORD", "CROW_SESSION_SECRET",
+  "CROW_LOCAL_MCP_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN",
+  "PHONE_RUNNER_SECRET", "CROW_BROWSER_VNC_PASSWORD", "MINIO_ROOT_PASSWORD", "MINIO_ROOT_USER",
+  "S3_ACCESS_KEY", "S3_SECRET_KEY", "VAPID_PRIVATE_KEY", "CROW_OAUTH_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET",
+  "CLOUDFLARE_TUNNEL_TOKEN", "NTFY_AUTH_TOKEN", "CROW_BACKUP_TOKEN", "CROW_SETUP_TOKEN", "CROW_ENROLL_OTC",
+  "CROW_PEER_TOKENS_PATH", "CREDENTIALS_DIRECTORY", "TURN_SECRET",
+  "CROW_DASHBOARD_PASSWORD", "CROW_SESSION_SECRET",
 ]);
+/** Any key named like a database root password (Phase 0's ADDON_DENY_KEY_RE). */
+export const WALL_ENV_DENY_RE = /_ROOT_PASSWORD$/;
 
 import { credentialKeyNames } from "../../servers/shared/credentials-env.js";
 
@@ -75,7 +86,7 @@ export function wallChildEnv({ baseEnv = {}, ownEnv = {}, declaredKeys = [], dec
   // Declared keys come only from a REVIEWED repo manifest (the Phase 0 rule).
   const declared = declaredSource === "repo" && Array.isArray(declaredKeys) ? declaredKeys : [];
   for (const k of declared) {
-    if (typeof k !== "string" || !ENV_NAME_RE.test(k) || deny.has(k)) continue;
+    if (typeof k !== "string" || !ENV_NAME_RE.test(k) || deny.has(k) || WALL_ENV_DENY_RE.test(k)) continue;
     if (typeof base[k] === "string") env[k] = base[k];
   }
   for (const [k, v] of Object.entries(own)) {
