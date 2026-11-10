@@ -24,6 +24,10 @@
  *    notice. Flags are written through `setAddonWallsFlag`, which takes a fixed
  *    allowlist of keys and keeps every other key of the document.
  *
+ * A change found before Crow's own next write is handed to the one outside
+ * listener, or held in a small queue while there is none (the watch starts at
+ * boot, so a diff found first is still reported when it does).
+ *
  * A missing, unreadable, unparsable or non-object file reads as `{}`: it grants
  * nothing, so every caller fails closed.
  */
@@ -91,19 +95,32 @@ export function writeAddonWalls(crowHome, obj) {
   chmodSync(path, 0o600);
   // The bytes just written are the new baseline (no second read, so nothing can
   // slip in between): Crow's own write is never reported as an outside one.
-  knownStates.set(path, { hash: hashOf(body), modes: effectiveModes(doc) });
+  knownStates.set(path, { hash: hashOf(body), modes: effectiveModes(doc), other: otherSignature(doc) });
 }
 
 // --- the known state, and a change made outside Crow -----------------------
 
-/** The known state per file path: `{ hash, modes }`, hash null for a missing file. */
+/** The known state per file path: `{ hash, modes, other }`, hash null for a missing file. */
 const knownStates = new Map();
 
 /** Test seam: the listener the store hands an outside change to. */
 let outsideListener = null;
+/** Diffs found while no listener was set, oldest first, and how many overflowed. */
+const pendingDiffs = [];
+let pendingDropped = 0;
 
 /** The keys this store may write outside `keptData` and `modes`. */
 const FLAG_KEYS = Object.freeze(["walledNoticeV1"]);
+
+/** How many outside diffs are held while no listener is set (the oldest go first). */
+export const MAX_PENDING_OUTSIDE_DIFFS = 64;
+
+/** Everything but the modes, canonically: the flags and the kept-data list. */
+function otherSignature(doc) {
+  const rest = {};
+  for (const key of Object.keys(doc).sort()) if (key !== "modes") rest[key] = doc[key];
+  return JSON.stringify(rest);
+}
 
 /** The effective per-id modes of one document (only an exact mode counts). */
 function effectiveModes(doc) {
@@ -128,11 +145,13 @@ function fileState(crowHome) {
     bytes = readFileSync(addonWallsPath(crowHome));
   } catch (err) {
     if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") throw err;
-    return { hash: null, modes: {} };
+    return { hash: null, modes: {}, other: otherSignature({}) };
   }
+  const doc = parseDoc(bytes);
   return {
     hash: hashOf(bytes),
-    modes: effectiveModes(parseDoc(bytes)),
+    modes: effectiveModes(doc),
+    other: otherSignature(doc),
   };
 }
 
@@ -152,8 +171,22 @@ function parseDoc(bytes) {
 }
 
 function notifyOutside(diff) {
-  if (typeof outsideListener !== "function") return;
-  try { outsideListener(diff); } catch { /* a listener never breaks a write */ }
+  if (typeof outsideListener === "function") {
+    try { outsideListener(diff); } catch { /* a listener never breaks a write */ }
+    return;
+  }
+  // No listener yet: hold it for the one that starts later, bounded so a long
+  // boot cannot grow this without limit. The oldest go first and are counted.
+  pendingDiffs.push(diff);
+  while (pendingDiffs.length > MAX_PENDING_OUTSIDE_DIFFS) {
+    pendingDiffs.shift();
+    pendingDropped++;
+  }
+}
+
+/** What the queue holds right now, and how many diffs it dropped on overflow. */
+export function addonWallsPendingDiffs() {
+  return { queued: pendingDiffs.length, dropped: pendingDropped };
 }
 
 /**
@@ -174,8 +207,11 @@ export function rememberAddonWalls(crowHome) {
  * Did the file change since the state Crow last wrote or recorded?
  *
  * `null` when the bytes hash to the known hash (a missing file and a known
- * "missing" are equal). Otherwise the modes that differ, and the known state
- * moves to the new content so one change is reported once. Never throws.
+ * "missing" are equal). Otherwise the modes that differ and whether anything
+ * else changed (`walledNoticeV1`, `keptData`), and the known state moves to the
+ * new content so one change is reported once. Never throws.
+ *
+ * @returns {{modesChanged: Array<{id:string,from:string|null,to:string|null}>, otherChanged: boolean}|null}
  */
 export function checkAddonWallsOutside(crowHome) {
   const path = addonWallsPath(crowHome);
@@ -196,16 +232,26 @@ export function checkAddonWallsOutside(crowHome) {
     if (from === to) continue;
     modesChanged.push({ id, from, to });
   }
-  return { modesChanged };
+  // An edit that moves no mode is still somebody else's: the first-walled-boot
+  // flag and the kept-data list are reported as one "other settings" change.
+  return { modesChanged, otherChanged: (known?.other ?? otherSignature({})) !== next.other };
 }
 
 /**
  * The one listener the store tells about a change it did not write. `null`
  * clears it. It reports only: nothing here can prevent the change.
+ *
+ * Every diff queued while there was no listener is delivered to `fn` now, in
+ * order, then the queue is cleared — the watch starts after Crow's own first
+ * writes, and an edit found before it must not be lost.
  */
 export function setAddonWallsOutsideListener(fn) {
   outsideListener = typeof fn === "function" ? fn : null;
-  return outsideListener !== null;
+  if (!outsideListener) return false;
+  for (const diff of pendingDiffs.splice(0)) {
+    try { outsideListener(diff); } catch { /* a listener never breaks a write */ }
+  }
+  return true;
 }
 
 /**

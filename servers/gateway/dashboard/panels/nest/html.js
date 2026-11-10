@@ -13,7 +13,7 @@ import { getAddonLogo } from "../../shared/logos.js";
 import { isSafeDestPath } from "../../../../shared/sso-ticket.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { appTileLink } from "../../shared/app-link.js";
-import { STALE_FLASH, STALE_MESSAGE, UNWALLED_FLASH, UNWALLED_MESSAGE } from "../../../fix-it/remedies/addon-unwall.js";
+import { STALE_FLASH, STALE_MESSAGE, UNWALLED_FLASH, unwalledMessageFor } from "../../../fix-it/remedies/addon-unwall.js";
 
 // ─── Icons ───
 // One shared stroke set (shared/app-icons.js). Icon strings from manifests and
@@ -115,8 +115,9 @@ function buildPeerTileHref(gatewayUrl, hostname, pathname, port) {
  * @param {{ok: boolean, issues: Array, details: Array}|null} health
  * @param {string} lang
  * @param {string|null} flash  — flash param from query string after backup action
+ * @param {string|null} flashAddon — the add-on a flash may name (re-checked)
  */
-function buildHealthStrip(health, lang, flash) {
+function buildHealthStrip(health, lang, flash, flashAddon = null) {
   // Flash banner (shown after POST backup redirect)
   let flashHtml = "";
   if (flash === "backup_ok") {
@@ -132,7 +133,7 @@ function buildHealthStrip(health, lang, flash) {
   } else if (flash === "fixit_not_pending") {
     flashHtml = `<div class="nest-flash nest-flash--error">That card isn't open any more — nothing was changed.</div>`;
   } else if (flash === UNWALLED_FLASH) {
-    flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(UNWALLED_MESSAGE)}</div>`;
+    flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(unwalledMessageFor(flashAddon))}</div>`;
   } else if (flash === STALE_FLASH) {
     flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(STALE_MESSAGE)}</div>`;
   }
@@ -197,7 +198,7 @@ function buildHealthStrip(health, lang, flash) {
 }
 
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash, fixItHtml } = data;
+  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash, flashAddon, fixItHtml } = data;
   const carouselMode = Array.isArray(peerOverviews) && peerOverviews.length > 0;
 
   let tileIndex = 0;
@@ -317,7 +318,7 @@ export function buildNestHTML(data, lang) {
   </div>`;
 
   // --- Health Strip ---
-  const healthStripHtml = buildHealthStrip(healthSignals || null, lang, flash || null);
+  const healthStripHtml = buildHealthStrip(healthSignals || null, lang, flash || null, flashAddon || null);
 
   // --- Unified carousel (Phase 2) ---
   // Active when the handler wrapper has passed peer overviews. One

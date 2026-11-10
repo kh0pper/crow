@@ -21,6 +21,7 @@ export const WALL_WORDS = Object.freeze({
   noBwrap: { en: "not walled on this computer; docker reachable", es: "no aislado en este equipo; docker accesible" },
   backend: { en: "not walled (approved commands)", es: "no aislado (comandos aprobados)" },
   failed: { en: "off: it could not run inside its wall", es: "apagado: no pudo ejecutarse aislado" },
+  stopped: { en: "off: it stopped", es: "apagado: se detuvo" },
 });
 
 /** What a walled add-on still reaches beyond its wall. */
@@ -66,6 +67,10 @@ export const NOTICE = Object.freeze({
   stateOn: { en: "on", es: "activado" },
   stateOff: { en: "off", es: "desactivado" },
   noChoice: { en: "no choice", es: "sin elección" },
+  otherChanged: {
+    en: "Other wall settings in addon-walls.json changed",
+    es: "Otros ajustes de aislamiento en addon-walls.json cambiaron",
+  },
   label: { en: "Add-on walls", es: "Aislamiento de complementos" },
   action: { en: "Check add-ons", es: "Revisar complementos" },
 });

@@ -8,7 +8,8 @@
  * connected server and the operator's two switches, and nothing else.
  *
  * The probe is the spawner's own (`probePiSandbox`, cached in this process), so
- * rendering a status never starts an add-on and never starts bwrap.
+ * rendering a status never starts an add-on; the probe may run bwrap once and
+ * is cached.
  */
 import { piSandboxReasonCode, probePiSandbox } from "../../../../scripts/pi-bots/pi_sandbox.mjs";
 import { SUMMARY, RESIDUAL_LINE, langOf, langText, fillText, wallWord } from "../../../../scripts/addon-sandbox/words.mjs";
@@ -48,13 +49,14 @@ export async function addonWallEntriesNow() {
 }
 
 /** The order the non-walled words are counted in, for the summary line. */
-const COUNT_ORDER = Object.freeze(["crowDb", "storage", "owner", "failed", "killSwitch", "hostOff", "noBwrap"]);
+const COUNT_ORDER = Object.freeze(["crowDb", "storage", "owner", "failed", "stopped", "killSwitch", "hostOff", "noBwrap"]);
 
 /**
  * One entry's status word key. Precedence:
- *   backend > failed > (unwalled: the decision's source) > (walled: crowDb >
- *   storage > walled).
- * Nothing here can turn a walled add-on into a walled-looking one it is not.
+ *   backend > failed > stopped > (unwalled: the decision's source) > (walled:
+ *   crowDb > storage > walled).
+ * Nothing here can turn a walled add-on into a walled-looking one it is not:
+ * only mode "walled" ever reads as "walled".
  */
 export function addonWallWord(entry, { env = process.env } = {}) {
   const e = entry && typeof entry === "object" ? entry : {};
@@ -65,7 +67,9 @@ export function addonWallWord(entry, { env = process.env } = {}) {
 
   if (mode === "refused") return "failed";
   if (mode === "walled") {
-    // A walled add-on that is not connected did not get to run inside its wall.
+    // A walled add-on that stopped after it connected did not keep running
+    // inside its wall; one that errored never ran there at all.
+    if (status === "disconnected") return "stopped";
     if (status && status !== "connected") return "failed";
     if (wall?.profile?.crowDb === true) return "crowDb";
     if (Array.isArray(wall?.residuals) && wall.residuals.some((r) => r && r.kind === "storage")) return "storage";
@@ -78,7 +82,8 @@ export function addonWallWord(entry, { env = process.env } = {}) {
   if (source === "owner") return "owner";
   if (source === "default") return "hostOff";
   if (source === "refused") return "failed";
-  if (source === "walled") return "walled";
+  // The decision said walled but this run is not: it never ran walled.
+  if (source === "walled") return "failed";
 
   // No record at all: only the operator's switches, then the owner's own file,
   // can free an add-on, so those are the only honest words left.

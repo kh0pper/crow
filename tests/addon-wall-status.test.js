@@ -81,10 +81,39 @@ test("one entry, one word: the wall record and the operator's switches decide it
   assert.equal(addonWallWord(entry("a", { mode: "refused", source: "refused" }), { env: WALLED }), "failed");
   assert.equal(addonWallWord(entry("a", walledWall(), { status: "error" }), { env: WALLED }), "failed",
     "a walled add-on that is not connected did not run inside its wall");
+  assert.equal(addonWallWord(entry("a", walledWall(), { status: "disconnected" }), { env: WALLED }), "stopped",
+    "one that stopped after it connected is not a failure to start");
   assert.equal(addonWallWord(entry("a", { mode: "unwalled", source: "kill-switch" }), { env: KILLED }), "killSwitch");
   assert.equal(addonWallWord(entry("a", { mode: "unwalled", source: "default" }), { env: OFF }), "hostOff");
   assert.equal(addonWallWord(entry("a", { mode: "unwalled", source: "owner" }), { env: WALLED }), "owner");
   assert.equal(addonWallWord(entry("a", { mode: "unwalled", source: "no-bwrap" }), { env: WALLED }), "noBwrap");
+});
+
+test("only a walled mode ever reads as 'walled'", () => {
+  // The decision says its source was the wall, but this run is not walled: the
+  // add-on is not walled, and the word must not claim it is.
+  assert.equal(addonWallWord(entry("a", { mode: "unwalled", source: "walled" }), { env: WALLED }), "failed");
+  assert.equal(addonWallWord(entry("a", { mode: "refused", source: "walled" }), { env: WALLED }), "failed");
+  assert.equal(addonWallWord(entry("a", { source: "walled" }), { env: WALLED }), "failed");
+  assert.equal(addonWallWord(entry("a", walledWall()), { env: WALLED }), "walled");
+});
+
+test("a stopped add-on is counted after the failed ones", () => {
+  const entries = [
+    entry("plain", walledWall()),
+    entry("broken", { mode: "refused", source: "refused" }),
+    entry("gone", walledWall(), { status: "disconnected" }),
+    entry("mine", { mode: "unwalled", source: "owner" }),
+  ];
+  const status = addonWallStatus({ probe: SANDBOXED, env: WALLED, entries, lang: "en" });
+  assert.deepEqual(status.entries.map((e) => e.wordKey), ["walled", "failed", "stopped", "owner"]);
+  assert.equal(
+    status.sentence,
+    "Add-ons: 1 of 4 walled off; 1 not walled (your choice); 1 off: it could not run inside its wall; 1 off: it stopped",
+  );
+  assert.equal(status.severity, "warn", "a stopped add-on is not running walled");
+  assert.equal(WALL_WORDS.stopped.en, "off: it stopped");
+  assert.equal(WALL_WORDS.stopped.es, "apagado: se detuvo");
 });
 
 test("shares Crow's database wins over a storage residual, and both over a plain wall", () => {

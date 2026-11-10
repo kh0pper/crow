@@ -121,18 +121,23 @@ async function send(createNotification, db, notice, extra) {
 }
 
 /**
- * Record the file as the baseline, send this boot's notices, and mark the
- * first-walled-boot notice as had. Never throws.
+ * Record the file as the baseline (unless the boot path already did), send this
+ * boot's notices, and mark the first-walled-boot notice as had. Never throws.
+ *
+ * The gateway takes it baseline BEFORE the add-ons load (post-listen) and passes
+ * `rememberBaseline: false` here: an edit made between boot and settle is then
+ * reported by the watch, not adopted as this process's own.
  *
  * @returns {Promise<{boot:boolean, walled:boolean}>}
  */
-export async function runAddonWallNotices({ db = null, crowHome = null, env = process.env, entries = [], createNotification = null, lang = null } = {}) {
+export async function runAddonWallNotices({ db = null, crowHome = null, env = process.env, entries = [], createNotification = null, lang = null, rememberBaseline = true } = {}) {
   const out = { boot: false, walled: false };
   try {
     if (!crowHome) return out;
     // The baseline comes first: an edit made while the gateway was down is not
-    // this process's doing, and must not be reported as if it were.
-    rememberAddonWalls(crowHome);
+    // this process's doing, and must not be reported as if it were. A boot that
+    // took it before loading the add-ons passes false and keeps the queue.
+    if (rememberBaseline) rememberAddonWalls(crowHome);
     if (typeof createNotification !== "function") return out;
     const L = await noticeLanguage(db, lang);
 

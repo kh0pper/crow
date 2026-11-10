@@ -17,10 +17,12 @@ import addonWallDetector, {
 } from "./detectors/addon-wall.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import addonUnwallRemedy, {
+  FLASH_ID_RE,
   KEEP_OFF_ACTION,
   KEEP_OFF_LABEL,
   STALE_MESSAGE as ADDON_WALL_STALE,
   UNWALL_ACTION,
+  UNWALLED_FLASH,
   keepOffRemedy,
   unwallLabel,
 } from "./remedies/addon-unwall.js";
@@ -263,6 +265,16 @@ export async function renderFixItCards(db, { lang, req } = {}) {
   return `<div class="nest-fixits" style="margin:0 1rem 1rem" aria-label="Things Crow noticed">${cards}</div>`;
 }
 
+/**
+ * The `&addon=<id>` a flash may carry: only the unwall flash, and only for a
+ * slug id (the param is rendered on the next page, so it is checked here).
+ */
+function flashAddonQuery(flash, params) {
+  if (flash !== UNWALLED_FLASH) return "";
+  const id = params && typeof params.addon === "string" ? params.addon : "";
+  return FLASH_ID_RE.test(id) ? `&addon=${encodeURIComponent(id)}` : "";
+}
+
 /** POST /dashboard/fix-it/action — remedy or dismiss. */
 export async function handleFixItAction(req, res, { db }) {
   wireFixIt();
@@ -299,7 +311,7 @@ export async function handleFixItAction(req, res, { db }) {
       if (result && result.resolved) {
         await store.markResolved(db, itemId);
         const done = typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash) ? result.flash : "fixit_fixed";
-        return res.redirectAfterPost(`/dashboard/nest?flash=${done}`);
+        return res.redirectAfterPost(`/dashboard/nest?flash=${done}${flashAddonQuery(done, result.flashParams)}`);
       }
       if (result && typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash)) {
         return res.redirectAfterPost(`/dashboard/nest?flash=${result.flash}`);

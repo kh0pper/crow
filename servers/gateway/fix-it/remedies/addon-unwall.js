@@ -42,6 +42,18 @@ export const STALE_MESSAGE = "This failure is from before Crow last restarted; s
 /** The flash the Nest page renders after the owner unwalled an add-on. */
 export const UNWALLED_FLASH = "fixit_addon_unwalled";
 export const UNWALLED_MESSAGE = "Done. That add-on now runs without its wall on this computer. You can wall it again on its page under Extensions.";
+/** An add-on id a flash may name: one lowercase slug. */
+export const FLASH_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * The unwall flash text: the add-on's id when the caller names one it may show,
+ * else the generic line. The id is a query value, so it is re-checked here.
+ */
+export function unwalledMessageFor(id) {
+  return typeof id === "string" && FLASH_ID_RE.test(id)
+    ? `Done. ${id} now runs without its wall on this computer. You can wall it again on its page under Extensions.`
+    : UNWALLED_MESSAGE;
+}
 /** Shown when the choice could not be saved. */
 export const SAVE_FAILED_MESSAGE = "Crow could not save that choice, so nothing was changed.";
 
@@ -102,7 +114,7 @@ export default async function addonUnwall(args, ctx) {
   } catch (err) {
     console.warn(`[fix-it] add-on ${record.id}: the reconnect did not run — ${err?.message || err}`);
   }
-  return { resolved: true, status, flash: UNWALLED_FLASH };
+  return { resolved: true, status, flash: UNWALLED_FLASH, flashParams: { addon: record.id } };
 }
 
 /** "Keep it off": answer the card and change nothing else. */

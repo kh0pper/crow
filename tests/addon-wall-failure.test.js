@@ -39,7 +39,9 @@ const proxy = await import("../servers/gateway/proxy.js");
 const fixIt = await import("../servers/gateway/fix-it/index.js");
 const failures = await import("../scripts/addon-sandbox/failures.mjs");
 const remedyMod = await import("../servers/gateway/fix-it/remedies/addon-unwall.js");
+const { setWallMode } = await import("../servers/shared/addon-walls-file.js");
 const { addonWallMode } = await import("../scripts/addon-sandbox/spawn.mjs");
+const { buildNestHTML } = await import("../servers/gateway/dashboard/panels/nest/html.js");
 
 const db = createDbClient();
 /** The add-on ids these cases connect, so each one is dropped afterwards. */
@@ -338,8 +340,13 @@ test("a reconnect that fails after the choice was saved still answers the click 
 // ---- forged and stale cards -------------------------------------------------
 
 test("a forged card (no ref) is refused and the wall file is untouched", async () => {
+  // A real failure for the same add-on is live: the forged card still names no
+  // ref, so nothing may be written for it.
+  const ref = failures.recordWallFailure("browser", "stopped with exit code 7");
+  assert.equal(setWallMode(HOME, "notes", "walled"), true, "the wall file exists, so the byte check is exact");
   const itemId = await insertCard("addon-wall:forged", { args: { id: "browser" } });
   const before = wallsBytes();
+  assert.ok(before, "there is a wall file to compare");
 
   const redirected = await clickRemedy(itemId);
   assert.match(redirected, /flash=fixit_addon_stale/);
@@ -347,6 +354,7 @@ test("a forged card (no ref) is refused and the wall file is untouched", async (
   const after = wallsBytes();
   if (before === null) assert.equal(after, null, "no wall file was created");
   else assert.deepEqual(after, before, "addon-walls.json is byte-identical");
+  assert.equal(failures.wallFailureByRef(ref)?.id, "browser", "the real record is untouched");
   assert.equal((await store.getItem(db, itemId)).status, "pending", "the card is still open");
 });
 
@@ -634,6 +642,9 @@ test("addonWallEntries is a plain snapshot of the entries that went through the 
   proxy.connectedServers.set("builtin-x", { client: { callTool: () => {} }, tools: [], status: "connected", isBuiltin: true, wall });
   proxy.connectedServers.set("backend-3", { client: null, tools: [], status: "connected", isBackend: true, backendName: "Paperless" });
   proxy.connectedServers.set("instance-p1", { client: {}, tools: [], status: "connected", isRemote: true });
+  // An add-on that never went through the wall decision (an HTTP add-on, one
+  // that failed before it): no local child ran, so it is neither walled nor counted.
+  proxy.connectedServers.set("http-x", { client: {}, tools: [], status: "connected", isAddon: true });
   try {
     const entries = proxy.addonWallEntries();
     assert.deepEqual(entries.find((e) => e.id === "builtin-x"), {
@@ -643,11 +654,13 @@ test("addonWallEntries is a plain snapshot of the entries that went through the 
       id: "backend-3", kind: "backend", name: "Paperless", status: "connected", wall: null,
     });
     assert.equal(entries.some((e) => e.id === "instance-p1"), false, "a federation peer is not an add-on here");
+    assert.equal(entries.some((e) => e.id === "http-x"), false, "an add-on with no wall record never ran a local child");
     assert.equal(JSON.stringify(entries).includes("callTool"), false, "no client reaches the snapshot");
   } finally {
     proxy.connectedServers.delete("builtin-x");
     proxy.connectedServers.delete("backend-3");
     proxy.connectedServers.delete("instance-p1");
+    proxy.connectedServers.delete("http-x");
   }
 });
 
@@ -688,4 +701,155 @@ test("the sweep kills the matching orphan and leaves the others alone", async ()
 
   await proxy.initProxyServers();
   assert.deepEqual(killed, [9001], "only the init-adopted bwrap wrapper in a bundles folder");
+});
+
+test("the sweep does nothing in a gateway that is PID 1 in a container", () => {
+  const killed = [];
+  const procs = [
+    { pid: 9001, ppid: 1, argv: ["/usr/bin/bwrap", "--chdir", join(HOME, "bundles", "browser"), "--", process.execPath, NETNS_ENTRY] },
+  ];
+  proxy._setProxyDepsForTest({ listProcs: () => procs, killPid: (pid) => { killed.push(pid); } });
+  try {
+    assert.equal(proxy.sweepOrphanAddonWrappers({ selfPid: 1 }), 0, "a PID-1 gateway owns its ppid-1 children");
+    assert.deepEqual(killed, [], "nothing was killed");
+    assert.equal(proxy.sweepOrphanAddonWrappers({ selfPid: 4242 }), 1, "any other pid sweeps as before");
+    assert.deepEqual(killed, [9001]);
+  } finally {
+    proxy._setProxyDepsForTest(null);
+  }
+});
+
+// ---- the failure record's own guards --------------------------------------
+
+test("an older, out-of-order emit never overwrites the card with a dead ref", async () => {
+  const emitted = [];
+  proxy._setProxyDepsForTest({ emitFixIt: async (_db, name, payload) => { emitted.push({ name, ...payload }); } });
+
+  // Two failures for one add-on, both recorded before either emit runs: the
+  // second drops the first's record, so only the live one raises a card.
+  proxy.reportWallFailure("browser", { refused: true, cwd: join(HOME, "bundles", "browser") });
+  proxy.reportWallFailure("browser", { refused: true, cwd: join(HOME, "bundles", "browser") });
+
+  await waitFor(() => emitted.length >= 1, 2000, "the live record's card");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(emitted.length, 1, "only the live record is emitted");
+  assert.equal(emitted[0].name, "addon-wall-failed");
+  assert.equal(failures.wallFailureByRef(emitted[0].ref)?.id, "browser", "the emitted ref is the live one");
+});
+
+test("a failure's paths are shown relative to the add-on's own install folder, never a stored cwd", async () => {
+  const emitted = [];
+  proxy._setProxyDepsForTest({ emitFixIt: async (_db, name, payload) => { emitted.push(payload); } });
+  const line = (p) => ({ stderrLines: () => [`EACCES: permission denied, open '${p}'`] });
+
+  // A cwd outside both folders the wall allows is ignored.
+  const elsewhere = join(HOME, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  proxy.reportWallFailure("browser", { transport: line(join(elsewhere, "x")), cwd: elsewhere });
+  await waitFor(() => emitted.length >= 1, 2000, "the first card");
+  assert.equal(emitted[0].reason, "could not open a file outside its folder", "the stored folder is not shown");
+
+  // The bundled install folder is: at it and below it.
+  emitted.length = 0;
+  failures._resetWallFailuresForTest();
+  proxy.reportWallFailure("browser", { transport: line(join(HOME, "bundles", "browser", "notes.txt")), cwd: join(HOME, "bundles", "browser") });
+  await waitFor(() => emitted.length >= 1, 2000, "the second card");
+  assert.equal(emitted[0].reason, "could not open notes.txt");
+});
+
+// ---- a gateway shutdown is not a wall failure ---------------------------
+
+test("a walled close during the 2 s window raises no card when Crow is closing", async () => {
+  process.env.CROW_ADDON_WALLS_DEFAULT = "walled";
+  const emitted = [];
+  proxy._setProxyDepsForTest({
+    addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
+    startAddonWall: async () => ({
+      walled: true,
+      tier: "walled",
+      cmd: process.execPath,
+      args: [TINY_SERVER_PATH],
+      env: { ...process.env, CRASH_AFTER_LIST: "1" },
+      stdioExtra: [],
+      relay: null,
+      profile: { id: "crashy", network: { internet: false, hosts: [] } },
+      cleanup: () => {},
+    }),
+    emitFixIt: async (_db, name, payload) => { emitted.push({ name, ...payload }); },
+  });
+
+  try {
+    await proxy.connectAddonServer("crashy", { command: "node", args: ["server/index.js"] });
+    // Wait for the child's own close: that is what starts the 2 s wait.
+    await waitFor(() => proxy.connectedServers.get("crashy")?.status === "error", 5000, "the walled close");
+    const entry = proxy.connectedServers.get("crashy");
+    // Crow's own close marks the entry closing; it is the same entry afterwards.
+    await proxy.disconnectAddonServer("crashy");
+    proxy.connectedServers.set("crashy", entry);
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.deepEqual(emitted, [], "an exiting gateway never raises a card");
+    const cards = (await store.listPending(db)).filter((i) => i.dedupKey === "addon-wall:crashy");
+    assert.equal(cards.length, 0, "no card");
+  } finally {
+    delete process.env.CROW_ADDON_WALLS_DEFAULT;
+  }
+});
+
+// ---- a weaker tier is never called a wall --------------------------------
+
+test("a decision with no source and a weaker tier never reads as walled", async () => {
+  const { addonWallWord } = await import("../servers/gateway/dashboard/shared/addon-wall-status.js");
+  for (const [tier, source] of [["nnp", "no-bwrap"], ["walled", "refused"]]) {
+    proxy._setProxyDepsForTest({
+      addonWallMode: () => ({ mode: "walled", reason: null }),
+      startAddonWall: async () => ({
+        walled: false,
+        tier,
+        cmd: process.execPath,
+        args: [TINY_SERVER_PATH],
+        env: { ...process.env },
+        reason: "no usable bwrap here",
+      }),
+    });
+    const installDir = join(HOME, "bundles", "steady");
+    await proxy.connectAddonServer("steady", { command: "node", args: [TINY_SERVER_PATH], cwd: installDir });
+    const entry = proxy.connectedServers.get("steady");
+    assert.equal(entry.wall.mode, "unwalled");
+    assert.equal(entry.wall.source, source, `${tier}: the fallback source`);
+    assert.notEqual(
+      addonWallWord({ id: "steady", kind: "addon", status: entry.status, wall: entry.wall }, { env: {} }),
+      "walled",
+      `${tier}: a non-walled run is never called walled`,
+    );
+    await proxy.disconnectAddonServer("steady");
+  }
+});
+
+// ---- the unwall flash names the add-on -----------------------------------
+
+test("the unwall success flash names the add-on from the live record, and only a plain id is shown", async () => {
+  const reason = "its wall could not be set up on this computer";
+  const ref = failures.recordWallFailure("browser", reason);
+  await fixIt.emitFixIt(db, "addon-wall-failed", { id: "browser", reason, ref });
+  const card = await waitForCard("addon-wall:browser");
+  remedyMod._setAddonUnwallDepsForTest({
+    crowHome: HOME,
+    reconnect: async () => ({ ok: true, status: "connected" }),
+  });
+
+  const redirected = await clickRemedy(card.id);
+  assert.match(redirected, /flash=fixit_addon_unwalled&addon=browser$/);
+
+  const nestData = (flashAddon) => ({
+    pinnedItems: [], bundles: [], instances: [], trustedInstances: [], peerOverviews: [],
+    ssoEnabled: false, healthSignals: null, flash: "fixit_addon_unwalled", flashAddon,
+  });
+  assert.ok(buildNestHTML(nestData("browser"), "en").includes(
+    "Done. browser now runs without its wall on this computer. You can wall it again on its page under Extensions."));
+  assert.ok(buildNestHTML(nestData(null), "en").includes(remedyMod.UNWALLED_MESSAGE), "no id: the generic line");
+  for (const bad of ["<script>alert(1)</script>", "Browser", "a/b", "", "x\" onmouseover=\"y"]) {
+    const html = buildNestHTML(nestData(bad), "en");
+    assert.ok(html.includes(remedyMod.UNWALLED_MESSAGE), `the id ${JSON.stringify(bad)} is not shown`);
+    assert.equal(html.includes("alert(1)"), false);
+  }
 });

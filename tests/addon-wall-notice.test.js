@@ -17,7 +17,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addonWallsPath, readAddonWalls, rememberAddonWalls, setAddonWallsOutsideListener, setWallMode } from "../servers/shared/addon-walls-file.js";
+import { addonWallsPath, addonWallsPendingDiffs, readAddonWalls, rememberAddonWalls, setAddonWallsOutsideListener, setWallMode, MAX_PENDING_OUTSIDE_DIFFS } from "../servers/shared/addon-walls-file.js";
 import { bootNoticeFor, runAddonWallNotices, startAddonWallsWatch, walledNoticeFor } from "../scripts/addon-sandbox/notice.mjs";
 import { addonWallStatus, renderAddonWallStatus } from "../servers/gateway/dashboard/shared/addon-wall-status.js";
 import { NOTICE, RESIDUAL_LINE, SUMMARY, WALL_WORDS, sandboxLine } from "../scripts/addon-sandbox/words.mjs";
@@ -331,6 +331,132 @@ test("stop() ends the watch: a change after it reports nothing", async () => {
   writeFileSync(addonWallsPath(crowHome), JSON.stringify({ modes: { notes: "walled" } }, null, 2) + "\n", { mode: 0o600 });
   await delay(400);
   assert.deepEqual(alerts, []);
+});
+
+// ─── the queue: a diff found before the watch starts ──────────────────────
+
+/** Empty the store's queue (an earlier case may have left one) and say how much it dropped. */
+function drainQueue() {
+  setAddonWallsOutsideListener(() => {});
+  setAddonWallsOutsideListener(null);
+  return addonWallsPendingDiffs().dropped;
+}
+
+test("a diff found with no listener is queued and delivered when one is set", () => {
+  const crowHome = scratchHome();
+  drainQueue();
+  setWallMode(crowHome, "notes", "unwalled");
+  rememberAddonWalls(crowHome);
+  try {
+    // Another writer moves a mode...
+    writeFileSync(addonWallsPath(crowHome), JSON.stringify({ modes: { notes: "unwalled", other: "walled" } }, null, 2) + "\n", { mode: 0o600 });
+    // ...and Crow's own next write finds it while no listener exists yet.
+    assert.equal(setWallMode(crowHome, "notes", "walled"), true);
+    assert.deepEqual(addonWallsPendingDiffs().queued, 1, "held for the watch, not dropped");
+
+    const seen = [];
+    setAddonWallsOutsideListener((diff) => seen.push(diff));
+    assert.equal(seen.length, 1, "the queue was delivered at once");
+    assert.deepEqual(seen[0].modesChanged, [{ id: "other", from: null, to: "walled" }]);
+    assert.deepEqual(addonWallsPendingDiffs().queued, 0, "and cleared");
+  } finally {
+    setAddonWallsOutsideListener(null);
+  }
+});
+
+test("the queue is bounded: the oldest diffs go first and are counted", () => {
+  const crowHome = scratchHome();
+  const droppedBefore = drainQueue();
+  rememberAddonWalls(crowHome);
+  const total = MAX_PENDING_OUTSIDE_DIFFS + 6;
+  try {
+    for (let i = 0; i < total; i++) {
+      writeFileSync(addonWallsPath(crowHome), JSON.stringify({ modes: { ["addon-" + i]: "walled" } }, null, 2) + "\n", { mode: 0o600 });
+      setWallMode(crowHome, "notes", i % 2 ? "walled" : "unwalled");
+    }
+    const stats = addonWallsPendingDiffs();
+    assert.equal(stats.queued, MAX_PENDING_OUTSIDE_DIFFS);
+    assert.equal(stats.dropped - droppedBefore, total - MAX_PENDING_OUTSIDE_DIFFS, "the overflow is counted");
+  } finally {
+    drainQueue();
+  }
+});
+
+test("an edit made between the boot baseline and the notices is reported once, not silently adopted", async () => {
+  const crowHome = scratchHome();
+  drainQueue();
+  // The boot path: the baseline first, then the add-ons load — and an edit
+  // lands in that window, before the notices run.
+  rememberAddonWalls(crowHome);
+  writeFileSync(addonWallsPath(crowHome), JSON.stringify({ modes: { notes: "unwalled" } }, null, 2) + "\n", { mode: 0o600 });
+
+  const { calls, createNotification } = collector();
+  const res = await runAddonWallNotices({
+    db: emptyDb(),
+    crowHome,
+    env: WALLED,
+    entries: [entry("notes", walledWall())],
+    createNotification,
+    lang: "en",
+    rememberBaseline: false,
+  });
+  try {
+    assert.equal(res.walled, true, "the first-walled-boot note still went out");
+    assert.equal(calls.length, 1);
+    assert.equal(readAddonWalls(crowHome).walledNoticeV1, true, "the marker was written");
+
+    const seen = [];
+    setAddonWallsOutsideListener((diff) => seen.push(diff));
+    assert.equal(seen.length, 1, "the edit was held for the watch, exactly once");
+    assert.deepEqual(seen[0].modesChanged, [{ id: "notes", from: null, to: "unwalled" }]);
+    assert.equal(seen[0].otherChanged, false, "the marker Crow wrote itself is not reported");
+  } finally {
+    setAddonWallsOutsideListener(null);
+  }
+});
+
+test("an outside change that only sets the first-walled-boot flag is reported too", () => {
+  const crowHome = scratchHome();
+  drainQueue();
+  setWallMode(crowHome, "notes", "unwalled");
+  rememberAddonWalls(crowHome);
+  const seen = [];
+  setAddonWallsOutsideListener((diff) => seen.push(diff));
+  try {
+    const doc = readAddonWalls(crowHome);
+    doc.walledNoticeV1 = true;
+    writeFileSync(addonWallsPath(crowHome), JSON.stringify(doc, null, 2) + "\n", { mode: 0o600 });
+    assert.equal(setWallMode(crowHome, "notes", "walled"), true);
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].modesChanged, [], "no mode moved");
+    assert.equal(seen[0].otherChanged, true, "but a wall setting did");
+  } finally {
+    setAddonWallsOutsideListener(null);
+  }
+});
+
+test("a change that moves only a mode is not reported as other settings", () => {
+  const crowHome = scratchHome();
+  drainQueue();
+  setWallMode(crowHome, "notes", "unwalled");
+  rememberAddonWalls(crowHome);
+  const seen = [];
+  setAddonWallsOutsideListener((diff) => seen.push(diff));
+  try {
+    writeFileSync(addonWallsPath(crowHome), JSON.stringify({ modes: { notes: "walled" } }, null, 2) + "\n", { mode: 0o600 });
+    assert.equal(setWallMode(crowHome, "notes", "unwalled"), true);
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].modesChanged, [{ id: "notes", from: "unwalled", to: "walled" }]);
+    assert.equal(seen[0].otherChanged, false);
+  } finally {
+    setAddonWallsOutsideListener(null);
+  }
+});
+
+test("the other-settings line is words.mjs text, in English and Spanish", () => {
+  assert.equal(NOTICE.otherChanged.en, "Other wall settings in addon-walls.json changed");
+  assert.match(NOTICE.otherChanged.es, /addon-walls\.json/);
+  assert.notEqual(NOTICE.otherChanged.es, NOTICE.otherChanged.en);
 });
 
 // ─── the status page ───────────────────────────────────────────────────────
