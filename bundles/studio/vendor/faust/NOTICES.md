@@ -1,11 +1,41 @@
 # Faust effect licences
 
 Studio's Faust effects are compiled from `bundles/studio/effects/*.dsp` with
-the Faust compiler (`@grame/faustwasm`, at build time only). The Faust
-standard library is licensed per function, so each compiled effect carries
-the union of the licences its functions declared. The build's licence lint
-allows only MIT, BSD-2-Clause, BSD-3-Clause, STK-4.3 and LGPL-2.1 with the
-Faust exception; everything else refuses the build.
+the Faust compiler (`@grame/faustwasm`, at build time only, LGPL-2.1 — its
+notice is `LICENSE-faustwasm.txt` beside this file). The Faust standard
+library is licensed per function, so each compiled effect carries the union
+of the licences its functions declared.
+
+## How the lint decides what ships
+
+`bundles/studio/tools/build-faust.mjs` refuses an effect unless all three of
+these pass:
+
+1. **The licence declarations in the compiled meta.** Only MIT,
+   BSD-2-Clause, BSD-3-Clause, STK-4.3 and LGPL-2.1 with the Faust exception
+   may ship; anything else (the GPL-only and AGPL-only functions included)
+   refuses the build.
+2. **An allowlist of reviewed libraries that declare nothing.** Faust's own
+   libraries do not all carry a `declare license`, and a library that
+   declares nothing contributes nothing to the meta — so the build refuses
+   any such library unless the allowlist names it *at the version the meta
+   reports*, with the terms its file header states in a comment. A
+   `faustwasm` upgrade that bumps one of these libraries refuses the build
+   until someone reads the new header.
+3. **A denylist of GPL-3.0-only code that is declared only in a comment.**
+   `basics.lib`'s `sliding*` block carries
+   `// SPDX-License-Identifier: GPL-3.0` and no `declare license` at all, so
+   a program that calls it compiles with no GPL entry anywhere; and
+   permissively declared functions call it in turn (`filters.lib/avg_rect`
+   is `ba.slidingMean`). Those names are refused by match on the compiled
+   meta and on the `.dsp` sources.
+
+**The denylist is maintained by review, not derived from the meta.** The
+meta records the licences a program's own functions declare, not the call
+graph beneath them: a function that calls `fi.avg_rect` (which calls
+`ba.slidingMean`) leaves no trace of the GPL code in the top-level meta.
+Reading each new effect's sources, and re-reading the libraries on a
+`faustwasm` upgrade, is what keeps the list complete.
 
 ## What each effect uses
 
@@ -52,34 +82,134 @@ Faust exception; everything else refuses the build.
 ## Libraries that declare no licence
 
 The compiler emits a licence entry only for a function or library that
-declares one. These libraries were used without a declaration, so the
-compiled meta states no terms for their functions. Every licence it DOES
-state is listed above and passed the lint; the silent ones are Faust's own
-libraries, whose file headers carry the STK-4.3 or LGPL-with-Faust-exception
-notice the declarations next to them use.
+declares one, so these libraries were used without the compiled meta
+stating any terms for them. None of them is accepted on trust: each is on
+the build's reviewed allowlist, at the version below, because its file
+header (a comment, which the compiler never copies into a meta) states
+terms Crow may ship under. They are Faust's own libraries; the citations
+are the Faust libraries as `faustwasm` ships them, in its
+`libfaust-wasm.data`.
 
-- chorus: delays.lib, platform.lib
-- delay: delays.lib, platform.lib
-- eq: basics.lib, platform.lib, routes.lib, signals.lib
-- filter: platform.lib
-- phaser: phaflangers.lib, platform.lib
-- reverb: basics.lib, delays.lib, oscillators.lib, platform.lib, routes.lib, signals.lib
-- saturation: platform.lib
+- `basics.lib` 1.23.6 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~4238-4268; its 'further contributions' note, ~4201-4210, says code without an indication of its own is 'expected' to be LGPL, STK-4.3, MIT, BSD or similar).
+  Used by: eq, reverb.
+- `delays.lib` 1.3.3 — LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~11392-11421).
+  Used by: chorus, delay, reverb.
+- `oscillators.lib` 1.9.5 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~42320-42360); the functions Crow uses from it declare their own STK-4.3.
+  Used by: reverb.
+- `phaflangers.lib` 1.1.3 — STK-4.3 (the MIT-style Synthesis ToolKit licence): it has no GRAME/LGPL block at all, and its JOS section header, libfaust-wasm.data ~45554-45562, places the functions below it under STK-4.3; its 'further contributions' note, ~45871-45879, is the same 'expected' wording.
+  Used by: phaser.
+- `platform.lib` 1.3.1 — LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~52482-52515).
+  Used by: chorus, delay, eq, filter, phaser, reverb, saturation.
+- `routes.lib` 1.4.1 — LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~55017-55050).
+  Used by: eq, reverb.
+- `signals.lib` 1.8.0 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~55723-55757).
+  Used by: eq, reverb.
+
+## Copyright and authorship
+
+The compiler's meta records the author and copyright line a library
+declares, per function where it declares one and per library otherwise.
+They are reproduced here, grouped by library, because MIT, BSD and STK-4.3
+all require the notice to travel with the code. A function with no entry
+of its own is covered by its library's entry, or (for a library in the
+list above) by the header cited there.
+
+### analyzers.lib
+
+- `analyzer_tpt_df` — author: Julius O. Smith III
+
+### delays.lib
+
+- `fdelay1a` — author: Julius O. Smith III
+- `fdelay4` — author: Julius O. Smith III
+- `fdelayltv` — author: Julius O. Smith III
+
+### filters.lib
+
+- `_tanhalf` — author: Julius O. Smith III
+- `_tpt_df` — author: Julius O. Smith III
+- `filterbank_tpt_df` — author: Julius O. Smith III
+- `fir` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `high_shelf` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `highpass` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `highpass_plus_lowpass` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `highpass_plus_lowpass_tpt_df` — author: Julius O. Smith III
+- `highpass_tpt_df` — author: Julius O. Smith III
+- `highshelf` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `iir` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `low_shelf` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `lowpass` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `lowpass0_highpass1` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `lowpass_tpt_df` — author: Julius O. Smith III
+- `lowshelf` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `nlf2` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `peak_eq` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `resonbp` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `resonhp` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `resonlp` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `svf` — author: Oleg Nesterov; copyright: Copyright (C) 2020 Oleg Nesterov <oleg@redhat.com>
+- `tf1` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `tf1s` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `tf1s_df` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `tf2` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `tf2s` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+- `tf2s_df` — author: Julius O. Smith III; copyright: Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>
+
+### maths.lib
+
+- the library itself — author: GRAME; copyright: GRAME
+
+### oscillators.lib
+
+- `lf_sawpos` — author: Bart Brouns, revised by Stéphane Letz
+
+### reverbs.lib
+
+- `jpverb` — author: Julian Parker, bug fixes and minor interface changes by Till Bovermann
 
 ## Notes
 
-- **MIT** and **BSD** entries need no text of their own here: the Faust
-  libraries that declare them ship their own notices in
-  `node_modules/@grame/faustwasm` (the compiler package), and both licences
-  ask only that the copyright notice travel with the code. The functions
-  this directory uses under MIT are `re.jpverb` (Julian Parker, with fixes
-  by Till Bovermann) and the phaser/allpass functions of the phaser library
-  (Julius O. Smith III).
+- **MIT.** Its text is below, once. The MIT functions this build ships are
+  `analyzers.lib/analyzer_tpt_df`, `filters.lib/_tanhalf`, `filters.lib/_tpt_df`, `filters.lib/filterbank_tpt_df`, `filters.lib/highpass_plus_lowpass_tpt_df`, `filters.lib/highpass_tpt_df`, `filters.lib/lowpass_tpt_df`, `reverbs.lib/jpverb`. Their copyright lines are under "Copyright and authorship".
+- **BSD-2-Clause and BSD-3-Clause** likewise ask only that the copyright
+  notice travel with the code; it is under 'Copyright and authorship'.
 - **LicenseRef-LGPL-2.1-or-later-with-Faust-exception** is the LGPL with the
-  Faust exception that lets generated code ship under Crow's own terms.
-- **STK-4.3** is the permissive, MIT-style licence of the Synthesis ToolKit,
-  which the filter and effect libraries' `jos` sections carry. Its text is
-  below.
+  Faust exception, which lets generated code ship under Crow's own terms.
+  The compiler package's own LGPL notice — a different thing, and not the
+  licence of the compiled effects — is `LICENSE-faustwasm.txt`.
+- **STK-4.3** is the permissive, MIT-style licence of the Synthesis ToolKit
+  (no relation to the MIT-declared functions above), which the filter and
+  effect libraries' `jos` sections carry. Its text is below.
+- **`pf.phaser2_stereo`** (the phaser effect) carries no licence
+  declaration, so it appears in no row above: `phaflangers.lib` is one of
+  the reviewed libraries in the list above, and its JOS section header
+  places the functions below it under STK-4.3 — which is what the phaser
+  ships under, NOT the MIT of the reverb's `jpverb` or of the `_tpt_df`
+  filters.
+
+## MIT
+
+```text
+Copyright (c) the authors of the functions listed above
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## STK 4.3
 

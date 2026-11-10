@@ -7,7 +7,9 @@ compiled by the Faust compiler to a WebAssembly module, and each
 `<kind>.json` is the factory JSON that came with it: the runtime reads a
 control's parameter offset, range and default out of it
 (`engine/faust-host.js`), and a test compares its controls with the song
-document's `EFFECT_PARAMS`.
+document's `EFFECT_PARAMS`. They are compiled with `-ftz 2`, so a denormal
+is flushed inside the DSP's own state rather than left to slow the block
+down; `engine/faust-host.js` flushes its output as well.
 
 The compiler, at build time only:
 
@@ -20,7 +22,9 @@ compiled effects carry no Faust compiler code.
 ## Licences of what the compiled effects use
 
 `LICENSES.json` lists, per effect, every licence the compiled program's meta
-declared, and `NOTICES.md` carries the STK 4.3 text those functions are
-offered under. The build refuses any function whose licence Crow may not
-ship — the GPL-only and AGPL-only ones included — so this directory only
-ever holds permissively licensed code.
+declared, and `NOTICES.md` is the redistribution notice: how the lint
+decides, the reviewed libraries that declare nothing, the author and
+copyright lines, and the MIT and STK 4.3 texts. The build refuses any
+function whose licence Crow may not ship — the GPL-only and AGPL-only ones
+included, and GPL code that is declared only in a comment — so this
+directory only ever holds permissively licensed code.

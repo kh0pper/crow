@@ -3,12 +3,17 @@
  *
  * The seven Faust inserts are compiled to WebAssembly at build time by
  * `tools/build-faust.mjs`, which also refuses any effect that uses a Faust
- * library function whose licence Crow may not ship. These tests pin four things:
+ * library function whose licence Crow may not ship. These tests pin five things:
  *
- *   1. **The lint.** Two fixtures compile and must be refused — one GPL-3.0-only
- *      function (`co.FFcompressor_N_chan`), one AGPL-3.0-only (`ba.processArray`)
- *      — plus a unit pass over the allowlist itself, so a spelling that must be
- *      let through (or refused) is tested without a compiler.
+ *   1. **The lint.** Two fixtures compile and must be refused for a licence the
+ *      meta DECLARES — one GPL-3.0-only function (`co.FFcompressor_N_chan`), one
+ *      AGPL-3.0-only (`ba.processArray`) — and two more for a licence it does
+ *      not: `ba.slidingMax` (GPL-3.0-only, declared only in a comment, so the
+ *      meta is silent) and `fi.avg_rect` (declares STK-4.3, calls
+ *      `ba.slidingMean`). Plus unit passes over the licence allowlist, the
+ *      reviewed-undeclared library list and the comment-only GPL denylist, so a
+ *      spelling or a version that must be let through (or refused) is tested
+ *      without a compiler.
  *   2. **The parameters.** Each compiled effect's controls are exactly the song
  *      document's `EFFECT_PARAMS` entry for its kind: the same names, the same
  *      ranges, the same defaults (a chooser's words become 0..n-1, and its word's
@@ -22,6 +27,10 @@
  *      byte-identical to `vendor/faust/`, licences and notices included. That
  *      last one needs `node bundles/studio/tools/build-faust.mjs` to have been
  *      run; until the output is committed it fails, naming the files.
+ *   5. **The notices and the host's error paths.** `NOTICES.md` carries what a
+ *      redistribution needs (the MIT text once, the STK-4.3 text, the author and
+ *      copyright lines), and `compileModules` compiles each effect on its own so
+ *      one corrupt module does not take the others down with it.
  *
  * The tests that need compiled effects compile into a temporary directory of
  * their own, so they pass on a checkout whose `vendor/faust/` is not there yet.
@@ -43,6 +52,8 @@ import { EFFECT_KINDS, EFFECT_PARAMS } from "../bundles/studio/server/doc.js";
 // The render's asset list must ask for the same effects the engine asks for.
 import { FAUST_KINDS as RENDER_FAUST_KINDS } from "../bundles/studio/server/render.js";
 import {
+  COMMENT_ONLY_GPL,
+  REVIEWED_UNDECLARED,
   VENDOR_DIR,
   buildFaust,
   compileEffect,
@@ -50,6 +61,7 @@ import {
   effectKinds,
   isAllowedLicence,
   lintMeta,
+  lintSource,
   staleOutput,
   writeFaust,
 } from "../bundles/studio/tools/build-faust.mjs";
@@ -94,6 +106,8 @@ const BLOCK = 128;
 /** The build's output, and the compiled effect modules the host tests use. */
 let built = null;
 let tempDir = "";
+/** kind → {wasm, json}: what a page is handed, reusable after a release(). */
+let postedModules = null;
 
 /**
  * The value of every one of a kind's parameters, as the song document holds
@@ -165,6 +179,7 @@ before(async () => {
     };
   }
   await StudioFaustHost.compileModules(modules);
+  postedModules = modules;
 });
 
 after(() => {
@@ -216,6 +231,176 @@ test("the lint refuses an AGPL function", async () => {
     `expected an AGPL-3.0-only refusal, got ${JSON.stringify(fixture.lint.refused)}`,
   );
   await assert.rejects(() => compileEffect("agpl-process-array", source), /processArray.*AGPL-3\.0-only/);
+});
+
+test("the lint refuses a comment-only GPL function", async () => {
+  // `ba.slidingMax` is GPL-3.0-only, and `basics.lib` says so in a comment and
+  // in no `declare` at all — so the compiled meta carries NO licence entry for
+  // it. A declarations-only lint (what this file had before the fix) passed the
+  // program; the source text is what catches it.
+  const source = readFileSync(join(FIXTURES, "gpl-sliding.dsp"), "utf8");
+  const fixture = await compileProgram("gpl-sliding", source);
+
+  assert.equal(fixture.lint.ok, false, "a program using a comment-only GPL function must not pass the lint");
+  const silentMeta = fixture.meta.some((entry) =>
+    Object.keys(entry).some((key) => /slidingMax:licen[cs]e$/.test(key)),
+  );
+  assert.equal(silentMeta, false, "basics.lib declares no licence for slidingMax, so the meta cannot refuse it");
+
+  const refusal = fixture.lint.refused.find((item) => item.function === "basics.lib/slidingMax");
+  assert.ok(
+    refusal,
+    `the refusal must name basics.lib/slidingMax, named: ${fixture.lint.refused.map((item) => item.function).join(", ")}`,
+  );
+  assert.equal(refusal.licence, "GPL-3.0 (declared only in a comment)");
+
+  await assert.rejects(
+    () => compileEffect("gpl-sliding", source),
+    (error) => {
+      assert.match(error.message, /gpl-sliding\.dsp/);
+      assert.match(error.message, /basics\.lib\/slidingMax/);
+      assert.match(error.message, /GPL-3\.0 \(declared only in a comment\)/);
+      return true;
+    },
+  );
+});
+
+test("the lint refuses a permissive function that calls GPL code", async () => {
+  // `fi.avg_rect` declares STK-4.3 — a licence Crow MAY ship, and the meta says
+  // so — but its body is `x : ba.slidingMean(...)`, which is GPL-3.0-only. The
+  // declaration alone passes; the denylist is what refuses it.
+  const source = readFileSync(join(FIXTURES, "gpl-stk-caller.dsp"), "utf8");
+  const fixture = await compileProgram("gpl-stk-caller", source);
+
+  const declared = fixture.meta
+    .flatMap((entry) => Object.entries(entry))
+    .find(([key]) => key === "filters.lib/avg_rect:license");
+  assert.equal(declared && declared[1], "LicenseRef-STK-4.3", "the fixture must exercise a function that declares a licence");
+  assert.equal(isAllowedLicence("LicenseRef-STK-4.3"), true, "STK-4.3 alone is shippable — that is the hole");
+
+  assert.equal(fixture.lint.ok, false, "a function whose body is GPL code must not pass the lint");
+  const refusal = fixture.lint.refused.find((item) => item.function === "filters.lib/avg_rect");
+  assert.ok(
+    refusal,
+    `the refusal must name filters.lib/avg_rect, named: ${fixture.lint.refused.map((item) => item.function).join(", ")}`,
+  );
+  assert.equal(refusal.licence, "GPL-3.0 (declared only in a comment)");
+  // And it is refused even when only the meta is read (no source at hand).
+  const metaOnly = lintMeta(fixture.meta);
+  assert.ok(metaOnly.refused.some((item) => item.function === "filters.lib/avg_rect"));
+
+  await assert.rejects(
+    () => compileEffect("gpl-stk-caller", source),
+    (error) => {
+      assert.match(error.message, /filters\.lib\/avg_rect/);
+      assert.match(error.message, /GPL-3\.0 \(declared only in a comment\)/);
+      return true;
+    },
+  );
+});
+
+test("the lint refuses an undeclared library that is not on the reviewed list", () => {
+  // A synthetic meta: the real ones need a compiler, and the point here is the
+  // allowlist's key, not a compile. `mystery.lib` is used (it reports a version)
+  // and declares no licence anywhere, which is exactly the shape that used to
+  // pass silently.
+  const synthetic = [
+    { "maths.lib/license": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception" },
+    { "maths.lib/version": "2.9.3" },
+    { "mystery.lib/name": "An Unreviewed Library" },
+    { "mystery.lib/version": "0.9.1" },
+  ];
+  const lint = lintMeta(synthetic);
+  assert.equal(lint.ok, false, "an undeclared library nobody reviewed must refuse the build");
+  const refusal = lint.refused.find((item) => item.function === "mystery.lib");
+  assert.ok(refusal, `the refusal must name the library, named: ${lint.refused.map((item) => item.function).join(", ")}`);
+  assert.equal(
+    refusal.note,
+    "mystery.lib 0.9.1 has no licence declaration and is not on the reviewed list",
+  );
+  assert.equal(lint.undeclared.length, 1, "the notices still have to be told about it");
+
+  // The same shape with a reviewed library at its reviewed version passes, and
+  // so does every library on the list.
+  for (const entry of REVIEWED_UNDECLARED) {
+    const reviewed = [
+      { "maths.lib/license": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception" },
+      { [`${entry.library}/version`]: entry.version },
+    ];
+    const ok = lintMeta(reviewed);
+    assert.equal(
+      ok.ok,
+      true,
+      `${entry.library} ${entry.version} is on the reviewed list but was refused: ${JSON.stringify(ok.refused)}`,
+    );
+    assert.equal(ok.undeclared[0].reviewed.version, entry.version);
+  }
+  assert.deepEqual(
+    REVIEWED_UNDECLARED.map((entry) => entry.library).sort(),
+    [
+      "basics.lib",
+      "delays.lib",
+      "oscillators.lib",
+      "phaflangers.lib",
+      "platform.lib",
+      "routes.lib",
+      "signals.lib",
+    ],
+    "the reviewed list must be exactly the libraries the shipped effects use without a declaration",
+  );
+});
+
+test("the lint refuses a reviewed library at a different version", () => {
+  // A faustwasm upgrade that bumps a library's version has to be re-read, not
+  // inherited: the pin is the version, not the name.
+  const bumped = [
+    { "maths.lib/license": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception" },
+    { "basics.lib/version": "1.24.0" },
+  ];
+  const lint = lintMeta(bumped);
+  assert.equal(lint.ok, false, "a reviewed library at a new version must refuse the build");
+  assert.equal(
+    lint.refused[0].note,
+    "basics.lib 1.24.0 has no licence declaration and is not on the reviewed list",
+  );
+
+  // The reviewed version of the very same program passes.
+  const pinned = [
+    { "maths.lib/license": "LicenseRef-LGPL-2.1-or-later-with-Faust-exception" },
+    { "basics.lib/version": "1.23.6" },
+  ];
+  assert.equal(lintMeta(pinned).ok, true);
+});
+
+test("the denylist is the comment-only GPL code, and each entry is addressable", () => {
+  const names = COMMENT_ONLY_GPL.map((entry) => `${entry.library}/${entry.name}`);
+  for (const required of [
+    "basics.lib/slidingReduce",
+    "basics.lib/slidingSum",
+    "basics.lib/slidingSump",
+    "basics.lib/slidingMax",
+    "basics.lib/slidingMin",
+    "basics.lib/slidingMean",
+    "basics.lib/slidingMeanp",
+    "basics.lib/slidingRMS",
+    "basics.lib/slidingRMSp",
+    "filters.lib/avg_rect",
+  ]) {
+    assert.ok(names.includes(required), `${required} must be on the denylist`);
+  }
+  // The one-pole averages are NOT in that family, and must not be denied.
+  for (const permissive of ["fi.avg_tau", "fi.avg_t60", "fi.avg_t19"]) {
+    assert.equal(lintSource(`${permissive}(0.01)`).length, 0, `${permissive} does not call the sliding code`);
+  }
+  // The source half matches a prefixed call and nothing else.
+  assert.deepEqual(lintSource("process = ba.slidingMax(64, 128);"), [
+    { function: "basics.lib/slidingMax", licence: "GPL-3.0 (declared only in a comment)" },
+  ]);
+  assert.deepEqual(lintSource("process = my.ba.slidingMax;"), [], "a dotted name is not a call into ba");
+  for (const entry of COMMENT_ONLY_GPL) {
+    assert.ok(entry.library.endsWith(".lib"), `${entry.name} needs its library`);
+    assert.ok(/^[a-z][a-z0-9]*$/.test(entry.prefix), `${entry.name} needs its library's prefix`);
+  }
 });
 
 test("the allowlist is the permissive licences, and only those", () => {
@@ -279,6 +464,13 @@ test("every shipped effect passes the lint and matches its compiled output", asy
     const effect = await compileProgram(kind, source);
     assert.equal(effect.lint.ok, true, `${kind}.dsp: ${JSON.stringify(effect.lint.refused)}`);
     assert.ok(effect.lint.accepted.length > 0, `${kind}.dsp must carry at least one licence entry`);
+    // Every library it used without a declaration is on the reviewed list, at
+    // the version the meta reports — otherwise the lint would have refused it.
+    assert.ok(effect.lint.undeclared.length > 0, `${kind} uses Faust's undeclared libraries`);
+    for (const item of effect.lint.undeclared) {
+      assert.ok(item.reviewed, `${kind}: ${item.library} ${item.version} must be on the reviewed list`);
+      assert.equal(item.reviewed.version, item.version, `${kind}: ${item.library} is pinned to a version`);
+    }
   }
 
   // A fresh compile has to be what is checked in — wasm bytes, factory JSON,
@@ -322,6 +514,56 @@ test("every shipped effect passes the lint and matches its compiled output", asy
     readFileSync(join(BUNDLE_DIR, "..", "..", "node_modules", "@grame", "faustwasm", "COPYING.txt"), "utf8"),
     "faustwasm's licence must be copied verbatim",
   );
+});
+
+test("the notices say what a redistribution needs", () => {
+  // Read the build's own output, not the checked-in copy: this test is about
+  // what the notices contain, not about whether they have been regenerated.
+  const notices = String(built.files.get("NOTICES.md"));
+
+  // How the lint decides, including the half a meta-only check cannot see.
+  assert.match(notices, /allowlist of reviewed libraries that declare nothing/i);
+  assert.match(notices, /denylist of GPL-3\.0-only code that is declared only in a comment/i);
+  assert.match(notices, /maintained by review/, "the meta cannot see every call, and the notices must say so");
+
+  // The MIT text exactly once, for jpverb and the _tpt_df/analyzer filters and
+  // any other MIT function used.
+  assert.equal(
+    notices.split("Copyright (c) the authors of the functions listed above").length - 1,
+    1,
+    "the MIT licence text must appear exactly once",
+  );
+  assert.match(notices, /## MIT/);
+  for (const name of ["reverbs.lib/jpverb", "filters.lib/_tpt_df", "analyzers.lib/analyzer_tpt_df"]) {
+    assert.ok(notices.includes(name), `the MIT note must name ${name}`);
+  }
+
+  // The STK-4.3 text is still there, in full.
+  assert.match(notices, /## STK 4\.3/);
+  assert.match(notices, /## STK 4\.3[\s\S]*Permission is hereby granted/);
+
+  // The copyright/author lines the licences require to travel with the code.
+  assert.match(notices, /## Copyright and authorship/);
+  assert.match(notices, /### filters\.lib/);
+  assert.match(notices, /### maths\.lib/);
+  assert.match(notices, /copyright: Copyright \(C\)/);
+  assert.match(notices, /author: Julius O\. Smith III/);
+
+  // The reviewed libraries, with the terms their headers state, at a version.
+  assert.match(notices, /`basics\.lib` 1\.23\.6 — LGPL-2\.1-or-later with the Faust exception/);
+  assert.match(notices, /`phaflangers\.lib` 1\.1\.3 — STK-4\.3/);
+  assert.match(notices, /libfaust-wasm\.data/);
+
+  // The phaser is STK-4.3 by its section header, NOT MIT.
+  assert.match(notices, /phaser2_stereo/);
+  assert.match(notices, /under STK-4\.3/);
+  assert.match(notices, /NOT the MIT/);
+  assert.doesNotMatch(notices, /phaser\/allpass/);
+
+  // Everything a recipient needs is here or beside it — never a pointer into a
+  // build-time dependency directory, which is not shipped.
+  assert.match(notices, /LICENSE-faustwasm\.txt/);
+  assert.doesNotMatch(notices, /node_modules/);
 });
 
 test("every Faust effect exposes exactly the document's parameters", async () => {
@@ -529,4 +771,49 @@ test("the engine hands its compiled effects to the processor", async () => {
   });
   assert.ok(reported.length > 0, "a corrupt effect has to be reported, not swallowed");
   assert.match(reported.join(" | "), /reverb/, "the report has to name the effect");
+});
+
+test("one corrupt effect module does not block the others", async () => {
+  // Each kind is compiled on its own, so a truncated download of one effect
+  // leaves the rest of the chain usable. Start from an empty page to prove it.
+  StudioFaustHost.release();
+  try {
+    assert.equal(StudioFaustHost.has("eq"), false, "the page must start with no effects");
+    const corrupt = Uint8Array.from(postedModules.reverb.wasm);
+    corrupt.fill(0, 0, 8);
+
+    let caught = null;
+    try {
+      await StudioFaustHost.compileModules({
+        eq: postedModules.eq,
+        reverb: { wasm: corrupt, json: postedModules.reverb.json },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    assert.ok(caught, "a corrupt effect has to be reported, not swallowed");
+    assert.match(caught.message, /reverb/, "the report has to name the effect that failed");
+    assert.deepEqual(
+      Object.keys(caught.failures || {}),
+      ["reverb"],
+      "the report has to be per kind, naming only the one that failed",
+    );
+
+    // The good one still compiled, and is a usable insert.
+    assert.equal(StudioFaustHost.has("eq"), true, "the other effect must still have compiled");
+    assert.equal(StudioFaustHost.has("reverb"), false, "the corrupt one must not be held");
+    const insert = StudioFaustHost.create("eq", 48000);
+    const left = new Float32Array(BLOCK);
+    const right = new Float32Array(BLOCK);
+    for (let at = 0; at < BLOCK; at += 1) {
+      left[at] = 0.25;
+      right[at] = -0.25;
+    }
+    insert.process(left, right, BLOCK);
+    assert.equal(nonFiniteFrames(left, right, BLOCK), 0, "the surviving effect must still process audio");
+  } finally {
+    StudioFaustHost.release();
+    await StudioFaustHost.compileModules(postedModules);
+  }
 });

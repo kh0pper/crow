@@ -37,15 +37,46 @@
  * licence entry at all is refused as unknown — that is a compile whose terms
  * nobody can state.
  *
+ * Declarations are only half the story, because Faust's own libraries are not
+ * uniformly declared:
+ *
+ * 1. **Undeclared libraries.** A library with no `declare license` anywhere
+ *    contributes no licence entry at all, so a meta-driven lint cannot see it.
+ *    Those libraries are refused unless `REVIEWED_UNDECLARED` below lists the
+ *    library AT THAT VERSION, with the terms its file header states in a
+ *    comment. A faustwasm upgrade that bumps a library changes its version and
+ *    so refuses until someone reads the new header — which is the point.
+ * 2. **Comment-only GPL.** `basics.lib`'s `sliding*` block is GPL-3.0-only,
+ *    declared in a `// SPDX-License-Identifier: GPL-3.0` comment and in no
+ *    `declare` at all, so the meta is silent about it; and permissively
+ *    declared functions call it (`filters.lib/avg_rect` is `ba.slidingMean`,
+ *    `co.RMS_compression_gain_mono_db` is `ba.slidingRMS`). `COMMENT_ONLY_GPL`
+ *    below is the denylist of both, refused by name from the compiled meta AND
+ *    from the `.dsp` source text.
+ *
+ * The denylist is maintained by review, not derived: the meta records the
+ * licences a program's own functions declare, not the call graph under them, so
+ * a new path into that code (a new effect, a faustwasm upgrade) is a thing to
+ * read for. NOTICES.md says so too.
+ *
+ * The effects are compiled with `-ftz 2`, so denormals are flushed inside the
+ * DSP's own state (a deterministic bit mask, bit-identical in Chromium and
+ * Node) and not only at the host's output (`engine/faust-host.js` flushes that
+ * too, which is what catches a value a module computes without storing it).
+ *
  * `lintMeta` is exported as a pure function so the tests can feed it a meta
- * array directly as well as a compiled one.
+ * array directly as well as a compiled one; `lintSource` lints a `.dsp`'s text,
+ * and `compileProgram` runs both through `lintProgram`.
  *
  * ## What it produces (bundles/studio/vendor/faust/)
  *
  *   <kind>.wasm               the compiled mono DSP, as the factory returned it
  *   <kind>.json               the factory JSON (parameter paths/indices, size)
  *   LICENSES.json             kind → sorted [{function, licence}]
- *   NOTICES.md                the per-kind licence table and the STK 4.3 text
+ *   NOTICES.md                how the lint decides, the per-kind licence table,
+ *                             the reviewed undeclared libraries, every
+ *                             author/copyright line the metas carry, and the
+ *                             MIT and STK 4.3 texts
  *   README.md                 the banner: what this is, and faustwasm's version
  *   LICENSE-faustwasm.txt     faustwasm's own licence, verbatim (COPYING.txt)
  *
@@ -101,6 +132,159 @@ const LGPL_FAUST_EXCEPTION =
 /** What a licence entry is called when the meta carries none at all. */
 const UNKNOWN_LICENCE = "unknown";
 
+/** What a licence entry is called when the library declared none. */
+const NO_DECLARATION = "no licence declaration";
+
+/** The version a library is reported at when its meta carries none. */
+const UNKNOWN_VERSION = "unknown";
+
+/**
+ * The licence GPL-only code is reported under when only a comment states it.
+ * Deliberately spelled out: the compiled meta names no licence for it at all, so
+ * a reader of a refusal has to be told where the GPL claim comes from.
+ */
+const COMMENT_ONLY_GPL_LICENCE = "GPL-3.0 (declared only in a comment)";
+
+/**
+ * The Faust libraries Crow may use even though they declare NO licence, keyed by
+ * library AND by the version the compiler's meta reports.
+ *
+ * The compiler copies a library's `declare license` into the compiled meta and
+ * nothing else, so a library whose terms live only in its file header is
+ * invisible to a meta-driven lint — it would pass whatever its header says. Each
+ * entry below is a header someone read: the terms stated, and where in
+ * `node_modules/@grame/faustwasm/libfaust-wasm/libfaust-wasm.data` they are (the
+ * Faust libraries as the compiler ships them, quoted so the citation survives a
+ * package upgrade the way the version pin does not).
+ *
+ * The version is part of the key on purpose: `faustwasm` upgrades have changed
+ * these files, so a new version refuses the build — "<lib> <version> has no
+ * licence declaration and is not on the reviewed list" — until its header has
+ * been read and this list updated. That is the whole point of the pin.
+ *
+ * `oscillators.lib` is here although the task that added this list named six
+ * libraries: `reverb` reaches it through `re.jpverb`'s LFO, and the build's own
+ * undeclared-library report said so. `signals.lib` is v1.8.0 and `routes.lib`
+ * v1.4.1 (the two names are easy to swap: the file whose banner says
+ * `signals.lib` declares "Faust Routing Library" v1.8.0).
+ *
+ * @type {ReadonlyArray<{library: string, version: string, licence: string}>}
+ */
+export const REVIEWED_UNDECLARED = Object.freeze([
+  Object.freeze({
+    library: "basics.lib",
+    version: "1.23.6",
+    licence:
+      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~4238-4268; its 'further contributions' note, ~4201-4210, says code without an indication of its own is 'expected' to be LGPL, STK-4.3, MIT, BSD or similar)",
+  }),
+  Object.freeze({
+    library: "delays.lib",
+    version: "1.3.3",
+    licence:
+      "LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~11392-11421)",
+  }),
+  Object.freeze({
+    library: "oscillators.lib",
+    version: "1.9.5",
+    licence:
+      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~42320-42360); the functions Crow uses from it declare their own STK-4.3",
+  }),
+  Object.freeze({
+    library: "phaflangers.lib",
+    version: "1.1.3",
+    licence:
+      "STK-4.3 (the MIT-style Synthesis ToolKit licence): it has no GRAME/LGPL block at all, and its JOS section header, libfaust-wasm.data ~45554-45562, places the functions below it under STK-4.3; its 'further contributions' note, ~45871-45879, is the same 'expected' wording",
+  }),
+  Object.freeze({
+    library: "platform.lib",
+    version: "1.3.1",
+    licence:
+      "LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~52482-52515)",
+  }),
+  Object.freeze({
+    library: "routes.lib",
+    version: "1.4.1",
+    licence:
+      "LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~55017-55050)",
+  }),
+  Object.freeze({
+    library: "signals.lib",
+    version: "1.8.0",
+    licence:
+      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~55723-55757)",
+  }),
+]);
+
+/** `library.lib` → the reviewed entry for it. */
+const REVIEWED_BY_LIBRARY = new Map(REVIEWED_UNDECLARED.map((entry) => [entry.library, entry]));
+
+/**
+ * GPL-3.0-only code that a Faust library declares only in a COMMENT, plus the
+ * functions that call it.
+ *
+ * `basics.lib`'s "Sliding Reduce" section is contributed by Bart Brouns under
+ * `// SPDX-License-Identifier: GPL-3.0` and declares no licence, so the compiled
+ * meta says nothing about it: a program whose whole `process` is
+ * `ba.slidingMax(64,128)` compiles with no GPL entry anywhere and passed the old
+ * lint. The same silence covers functions that declare a permissive licence and
+ * call it anyway — `fi.avg_rect` is `x : ba.slidingMean(...)` — so those names
+ * are here too, and so are their callers (`an.band_powers` and the descriptors
+ * built on it), one and two hops out. Each entry is a name a person found by
+ * reading the library bodies; see the note in NOTICES.md about why the list is
+ * maintained by review rather than derived.
+ *
+ * Checked and deliberately absent: `fi.avg_tau`, `fi.avg_t60` and `fi.avg_t19`
+ * are one-pole averages (`fi.lptau`/`fi.lpt60`/`fi.lpt19`), not sliding ones.
+ * `co.RMS_compression_gain_mono_db` and `co.peak_expansion_gain_mono_db` are
+ * listed for completeness — they call the GPL code and also declare GPL-3.0-only
+ * themselves, so they refuse either way.
+ *
+ * @type {ReadonlyArray<{library: string, prefix: string, name: string}>}
+ */
+export const COMMENT_ONLY_GPL = Object.freeze([
+  // basics.lib: the GPL-3.0 comment-only section (libfaust-wasm.data ~7615).
+  { library: "basics.lib", prefix: "ba", name: "slidingReduce" },
+  { library: "basics.lib", prefix: "ba", name: "slidingSum" },
+  { library: "basics.lib", prefix: "ba", name: "slidingSump" },
+  { library: "basics.lib", prefix: "ba", name: "slidingMax" },
+  { library: "basics.lib", prefix: "ba", name: "slidingMin" },
+  { library: "basics.lib", prefix: "ba", name: "slidingMean" },
+  { library: "basics.lib", prefix: "ba", name: "slidingMeanp" },
+  { library: "basics.lib", prefix: "ba", name: "slidingRMS" },
+  { library: "basics.lib", prefix: "ba", name: "slidingRMSp" },
+  // Declared functions whose BODIES call the code above.
+  { library: "filters.lib", prefix: "fi", name: "avg_rect" }, // : ba.slidingMean
+  { library: "compressors.lib", prefix: "co", name: "RMS_compression_gain_mono_db" }, // : ba.slidingRMS
+  { library: "compressors.lib", prefix: "co", name: "peak_expansion_gain_mono_db" }, // : ba.slidingMax
+  // ... and the functions that call fi.avg_rect (libfaust-wasm.data ~2029-4017).
+  { library: "analyzers.lib", prefix: "an", name: "abs_envelope_rect" },
+  { library: "analyzers.lib", prefix: "an", name: "ms_envelope_rect" },
+  { library: "analyzers.lib", prefix: "an", name: "band_powers" },
+  { library: "analyzers.lib", prefix: "an", name: "spectral_flux" },
+  { library: "analyzers.lib", prefix: "an", name: "loudness_meansquare" },
+  { library: "analyzers.lib", prefix: "an", name: "spectral_centroid" },
+  { library: "analyzers.lib", prefix: "an", name: "spectral_spread" },
+  { library: "analyzers.lib", prefix: "an", name: "loudness_momentary" },
+  { library: "analyzers.lib", prefix: "an", name: "loudness_shortterm" },
+  { library: "analyzers.lib", prefix: "an", name: "loudness_integrated" },
+]);
+
+/** `library.lib/function` → its denylist entry. */
+const DENIED_BY_FUNCTION = new Map(
+  COMMENT_ONLY_GPL.map((entry) => [`${entry.library}/${entry.name}`, entry]),
+);
+
+/**
+ * The denylist entry for one function of one library, or null.
+ * @param {string} library `filters.lib`
+ * @param {string} [name] the function, as the meta spells it
+ * @returns {{library: string, prefix: string, name: string}|null}
+ */
+function denialFor(library, name) {
+  if (!name) return null; // a library-level entry is not a function of the denylist
+  return DENIED_BY_FUNCTION.get(`${library}/${name}`) || null;
+}
+
 /**
  * @param {string} licence one licence id as a Faust library declares it
  * @returns {boolean} whether Crow may ship code under it
@@ -113,19 +297,6 @@ export function isAllowedLicence(licence) {
 }
 
 /**
- * Lint a compiled program's meta array — the licence gate the whole task exists
- * for. Pure: it reads the array and returns a verdict, so a test can hand it a
- * hand-written array as easily as a compiled one.
- *
- * @param {Array<Object<string, string>>|null} meta the factory JSON's `meta`
- * @returns {{ok: boolean, refused: Array<{function: string, licence: string}>,
- *            accepted: Array<{function: string, licence: string}>,
- *            unknown: boolean}}
- *   `refused` names each function (or library) whose licence may not ship, with
- *   the licence it declared; `accepted` is everything the lint let through;
- *   `unknown` says the program carried no licence entry at all.
- */
-/**
  * Compare two strings by UTF-16 code units, as Array.prototype.sort does by
  * default. Never localeCompare: the output is checked in, and a locale-aware
  * order can differ between machines, so `--check` would flap.
@@ -137,6 +308,47 @@ function byCodePoint(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/**
+ * Every `library.lib` the meta mentions, with the version it reports.
+ * @param {Array<Object<string, string>>|null} meta a compiled program's meta
+ * @returns {Map<string, string>}
+ */
+export function libraryVersions(meta) {
+  const versions = new Map();
+  for (const entry of Array.isArray(meta) ? meta : []) {
+    if (!entry || typeof entry !== "object") continue;
+    for (const [key, value] of Object.entries(entry)) {
+      const match = /^([^/]+\.lib)\/version$/.exec(key);
+      if (!match) continue;
+      versions.set(match[1], String(value == null ? "" : value).trim());
+    }
+  }
+  return versions;
+}
+
+/**
+ * Lint a compiled program's meta array — the licence gate the whole task exists
+ * for. Pure: it reads the array and returns a verdict, so a test can hand it a
+ * hand-written array as easily as a compiled one.
+ *
+ * Three refusals come out of it: a declared licence Crow may not ship, a
+ * denylisted (comment-only GPL) function, and a library that declares nothing
+ * and is not on `REVIEWED_UNDECLARED` at the version the meta reports.
+ *
+ * @param {Array<Object<string, string>>|null} meta the factory JSON's `meta`
+ * @returns {{ok: boolean,
+ *            refused: Array<{function: string, licence: string, note?: string}>,
+ *            accepted: Array<{function: string, licence: string}>,
+ *            undeclared: Array<{library: string, version: string,
+ *                               reviewed: object|null}>,
+ *            unknown: boolean}}
+ *   `refused` names each function (or library) whose licence may not ship, with
+ *   the licence it declared — or a `note` that says it in a sentence, for a
+ *   library with no declaration at all; `accepted` is everything the lint let
+ *   through; `undeclared` is every library used without a declaration, reviewed
+ *   or not (the notices list them); `unknown` says the program carried no
+ *   licence entry at all.
+ */
 export function lintMeta(meta) {
   const refused = [];
   const accepted = [];
@@ -150,20 +362,86 @@ export function lintMeta(meta) {
       const match = /^([^/]+)\/(?:([^:]+):)?(licen[cs]e)$/.exec(key);
       if (!match) continue;
       const where = match[2] ? `${match[1]}/${match[2]}` : match[1];
+      // A denylisted function refuses whatever its own declaration says: the
+      // point of the list is that its body calls GPL-only code.
+      if (denialFor(match[1], match[2])) {
+        refused.push({ function: where, licence: COMMENT_ONLY_GPL_LICENCE });
+        continue;
+      }
       const licence = String(value == null ? "" : value).trim();
       if (isAllowedLicence(licence)) accepted.push({ function: where, licence });
       else refused.push({ function: where, licence });
     }
+  }
+  // Libraries that declare no licence at all: the meta is silent about their
+  // terms, so they are judged against the reviewed list, at this version.
+  const versions = libraryVersions(meta);
+  const undeclared = [];
+  for (const library of undeclaredLibraries(meta)) {
+    const version = versions.get(library) || UNKNOWN_VERSION;
+    const reviewed = REVIEWED_BY_LIBRARY.get(library) || null;
+    undeclared.push({ library, version, reviewed });
+    if (reviewed && reviewed.version === version) continue;
+    refused.push({
+      function: library,
+      licence: NO_DECLARATION,
+      note: `${library} ${version} has no licence declaration and is not on the reviewed list`,
+    });
   }
   if (accepted.length === 0 && refused.length === 0) {
     return {
       ok: false,
       refused: [{ function: "(the compiled program)", licence: UNKNOWN_LICENCE }],
       accepted,
+      undeclared,
       unknown: true,
     };
   }
-  return { ok: refused.length === 0, refused, accepted, unknown: false };
+  return { ok: refused.length === 0, refused, accepted, undeclared, unknown: false };
+}
+
+/**
+ * Lint a `.dsp` SOURCE for the denylisted, comment-only GPL functions — the half
+ * a compiled meta cannot see. A `.dsp` that calls `ba.slidingMax(…)` compiles
+ * with no GPL entry anywhere, so the text is what catches it; the meta check in
+ * `lintMeta` is what catches a *declared* function whose body calls one
+ * (`fi.avg_rect`), which the source text need not mention.
+ *
+ * Only the prefixed spellings are matched (`ba.slidingMax`, `fi.avg_rect`, …),
+ * because that is how the standard libraries are called through
+ * `stdfaust.lib`; a comment that mentions one refuses too, which is a cheap
+ * price for not missing a real call.
+ *
+ * @param {string} source the `.dsp` text
+ * @returns {Array<{function: string, licence: string}>} the denied uses
+ */
+export function lintSource(source) {
+  const text = String(source == null ? "" : source);
+  const refused = [];
+  for (const entry of COMMENT_ONLY_GPL) {
+    // `(?<![\w.])` so `x.ba.slidingMax` is not a call to `ba.slidingMax`.
+    const pattern = new RegExp(`(?<![\\w.])${entry.prefix}\\.${entry.name}(?![\\w])`);
+    if (pattern.test(text)) {
+      refused.push({ function: `${entry.library}/${entry.name}`, licence: COMMENT_ONLY_GPL_LICENCE });
+    }
+  }
+  return refused;
+}
+
+/**
+ * Both halves of the lint for one program: its compiled meta and its source.
+ * @param {Array<Object<string, string>>|null} meta the factory JSON's `meta`
+ * @param {string} source the `.dsp` text
+ * @returns {ReturnType<typeof lintMeta>}
+ */
+export function lintProgram(meta, source) {
+  const lint = lintMeta(meta);
+  const refused = [...lint.refused];
+  for (const item of lintSource(source)) {
+    if (refused.some((have) => have.function === item.function)) continue;
+    refused.push(item);
+  }
+  return { ...lint, ok: refused.length === 0, refused };
 }
 
 /**
@@ -174,11 +452,16 @@ export function lintMeta(meta) {
  * @returns {string}
  */
 export function refusalMessage(kind, lint) {
-  const parts = lint.refused.map((item) => `${item.function} (${item.licence})`).join(", ");
+  const parts = lint.refused
+    // The "no licence at all" entry is the message itself, not one of its parts.
+    .filter((item) => !(lint.unknown && item.function === "(the compiled program)"))
+    .map((item) => (item.note ? item.note : `${item.function}: ${item.licence}`))
+    .join(", ");
   if (lint.unknown) {
-    return `${kind}.dsp compiled to a program whose meta names no licence at all, so Crow cannot state its terms`;
+    const nothing = `${kind}.dsp compiled to a program whose meta names no licence at all, so Crow cannot state its terms`;
+    return parts === "" ? nothing : `${nothing}; it also uses code Crow may not ship: ${parts}`;
   }
-  return `${kind}.dsp uses a function Crow may not ship: ${parts}`;
+  return `${kind}.dsp uses code Crow may not ship: ${parts}`;
 }
 
 /**
@@ -261,12 +544,24 @@ export function effectKinds() {
     .sort();
 }
 
+/** The compiler options every effect is built with. */
+const COMPILE_OPTIONS =
+  "-ftz 2";
+
 /**
  * Compile one effect WITHOUT judging its licence: the raw result, for the lint's
  * own tests and for `compileEffect` below.
+ *
+ * `-ftz 2` flushes denormals to zero inside the DSP's own arithmetic — a
+ * deterministic bit mask on every float op, bit-identical in Chromium and Node —
+ * so a delay line or a filter state cannot hold a denormal (slow, and different
+ * on each CPU) between blocks. `engine/faust-host.js` flushes its output too;
+ * that one catches a value a module computes without storing it.
  * @param {string} kind the effect's name (its `.dsp` file's base name)
  * @param {string} source the Faust source
  * @returns {Promise<{kind: string, wasm: Buffer, json: string, meta: object[],
+ *                    credits: Array<{library: string, function: string,
+ *                                    author: string, copyright: string}>,
  *                    lint: ReturnType<typeof lintMeta>}>}
  * @throws {Error} when the source does not compile
  */
@@ -274,14 +569,21 @@ export async function compileProgram(kind, source) {
   const compiler = await faustCompiler();
   let factory;
   try {
-    factory = await compiler.createMonoDSPFactory(kind, source, "");
+    factory = await compiler.createMonoDSPFactory(kind, source, COMPILE_OPTIONS);
   } catch (error) {
     throw new Error(`build-faust: ${kind}.dsp did not compile: ${error?.message || error}`);
   }
   if (!factory) throw new Error(`build-faust: ${kind}.dsp produced no factory`);
   const json = String(factory.json);
   const meta = JSON.parse(json).meta;
-  return { kind, wasm: Buffer.from(factory.code), json, meta, lint: lintMeta(meta) };
+  return {
+    kind,
+    wasm: Buffer.from(factory.code),
+    json,
+    meta,
+    credits: creditEntries(meta),
+    lint: lintProgram(meta, source),
+  };
 }
 
 /**
@@ -289,13 +591,52 @@ export async function compileProgram(kind, source) {
  * @param {string} kind the effect's name (its `.dsp` file's base name)
  * @param {string} source the Faust source
  * @returns {Promise<{kind: string, wasm: Buffer, json: string, meta: object[],
- *                    lint: ReturnType<typeof lintMeta>}>}
+ *                    credits: Array<object>, lint: ReturnType<typeof lintMeta>}>}
  * @throws {Error} when the source does not compile, or its licence may not ship
  */
 export async function compileEffect(kind, source) {
   const effect = await compileProgram(kind, source);
   if (!effect.lint.ok) throw new Error(`build-faust: ${refusalMessage(kind, effect.lint)}`);
   return effect;
+}
+
+/**
+ * The author and copyright lines a compiled program's meta carries, per library
+ * and function — what the permissive licences require to travel with the code,
+ * and what this repository's `node_modules` is not (it is not shipped). Values
+ * have their line breaks collapsed, so a `declare … copyright` that spans three
+ * lines stays one deterministic line of Markdown.
+ * @param {Array<Object<string, string>>|null} meta a compiled program's meta
+ * @returns {Array<{library: string, function: string, author: string,
+ *                  copyright: string}>} `function` is "" for a library's own
+ *   entry; sorted by library then function
+ */
+export function creditEntries(meta) {
+  const found = new Map();
+  for (const entry of Array.isArray(meta) ? meta : []) {
+    if (!entry || typeof entry !== "object") continue;
+    for (const [key, value] of Object.entries(entry)) {
+      const match = /^([^/]+\.lib)\/(?:([^:]+):)?(author|copyright)$/.exec(key);
+      if (!match) continue;
+      const field = match[3];
+      const id = `${match[1]}\u0000${match[2] || ""}`;
+      const item = found.get(id) || {
+        library: match[1],
+        function: match[2] || "",
+        author: "",
+        copyright: "",
+      };
+      item[field] = String(value == null ? "" : value)
+        .replace(/\s+/g, " ")
+        .trim();
+      found.set(id, item);
+    }
+  }
+  return [...found.values()].sort((a, b) =>
+    a.library === b.library
+      ? byCodePoint(a.function, b.function)
+      : byCodePoint(a.library, b.library),
+  );
 }
 
 /**
@@ -358,7 +699,9 @@ export function readmeText(info) {
     "`<kind>.json` is the factory JSON that came with it: the runtime reads a",
     "control's parameter offset, range and default out of it",
     "(`engine/faust-host.js`), and a test compares its controls with the song",
-    "document's `EFFECT_PARAMS`.",
+    "document's `EFFECT_PARAMS`. They are compiled with `-ftz 2`, so a denormal",
+    "is flushed inside the DSP's own state rather than left to slow the block",
+    "down; `engine/faust-host.js` flushes its output as well.",
     "",
     "The compiler, at build time only:",
     "",
@@ -371,10 +714,12 @@ export function readmeText(info) {
     "## Licences of what the compiled effects use",
     "",
     "`LICENSES.json` lists, per effect, every licence the compiled program's meta",
-    "declared, and `NOTICES.md` carries the STK 4.3 text those functions are",
-    "offered under. The build refuses any function whose licence Crow may not",
-    "ship — the GPL-only and AGPL-only ones included — so this directory only",
-    "ever holds permissively licensed code.",
+    "declared, and `NOTICES.md` is the redistribution notice: how the lint",
+    "decides, the reviewed libraries that declare nothing, the author and",
+    "copyright lines, and the MIT and STK 4.3 texts. The build refuses any",
+    "function whose licence Crow may not ship — the GPL-only and AGPL-only ones",
+    "included, and GPL code that is declared only in a comment — so this",
+    "directory only ever holds permissively licensed code.",
     "",
   ].join("\n");
 }
@@ -384,11 +729,9 @@ export function readmeText(info) {
  *
  * The compiler emits a licence entry only where a library declares one, so a
  * meta-driven lint cannot see the terms of a function whose library is silent.
- * This is that gap, named: the library list goes into NOTICES.md so the gap is
- * on the record rather than implied. (In practice these are Faust's own
- * libraries — `delays.lib`, `phaflangers.lib`, `basics.lib`, `signals.lib` —
- * whose file headers carry the STK-4.3 / LGPL-with-Faust-exception notice the
- * functions above them declare.)
+ * The lint refuses such a library unless `REVIEWED_UNDECLARED` names it at the
+ * version the meta reports; this function is how both find them, and their list
+ * goes into NOTICES.md so the gap is on the record rather than implied.
  * @param {Array<Object<string, string>>} meta a compiled program's meta array
  * @returns {string[]} the libraries with no licence entry anywhere, sorted
  */
@@ -408,77 +751,241 @@ export function undeclaredLibraries(meta) {
 }
 
 /**
- * The notices: the per-kind licence table, the permissive licences in full where
- * they ask for a notice, and where each text came from.
+ * The MIT licence, with a placeholder for the copyright line: the copyright of
+ * each MIT function is in the meta and is reproduced above it, so the text is
+ * written once instead of once per function.
+ */
+const MIT_TEXT = [
+  "Copyright (c) the authors of the functions listed above",
+  "",
+  "Permission is hereby granted, free of charge, to any person obtaining a copy",
+  "of this software and associated documentation files (the \"Software\"), to deal",
+  "in the Software without restriction, including without limitation the rights",
+  "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell",
+  "copies of the Software, and to permit persons to whom the Software is",
+  "furnished to do so, subject to the following conditions:",
+  "",
+  "The above copyright notice and this permission notice shall be included in all",
+  "copies or substantial portions of the Software.",
+  "",
+  "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR",
+  "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,",
+  "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE",
+  "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER",
+  "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,",
+  "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE",
+  "SOFTWARE.",
+].join("\n");
+
+/**
+ * The notices: what the lint does, the per-kind licence table, the reviewed
+ * libraries that declare nothing, the copyright and author lines the licences
+ * require to travel with the code, and the licence texts themselves.
+ *
+ * This file is the redistribution notice for `vendor/faust/`: everything a
+ * recipient needs is either here or next to it (`LICENSE-faustwasm.txt`). It
+ * deliberately does not point at `node_modules`, which is a build-time thing and
+ * is not shipped.
+ *
  * @param {Object<string, Array<{function: string, licence: string}>>} licences
- * @param {string} stkText
- * @param {Object<string, string[]>} [undeclared] kind → the libraries with no
- *   licence declaration, as `undeclaredLibraries` finds them
+ *   kind → the licence entries the compiled effect carried, as LICENSES.json
+ * @param {string} stkText the STK 4.3 text, verbatim
+ * @param {Object<string, Array<{library: string, version: string,
+ *                              reviewed: object|null}>>} [undeclared]
+ *   kind → the libraries that declared no licence, as `lintMeta` reports them
+ * @param {Array<{library: string, function: string, author: string,
+ *               copyright: string}>} [credits] every author/copyright line the
+ *   compiled metas carried, merged across kinds
  * @returns {string}
  */
-export function noticesText(licences, stkText, undeclared = {}) {
-  const kinds = Object.keys(licences).sort();
+export function noticesText(licences, stkText, undeclared = {}, credits = []) {
+  const kinds = Object.keys(licences).sort(byCodePoint);
+  /** licence → every function that declared it, across all the effects. */
+  const byLicence = new Map();
+  for (const kind of kinds) {
+    for (const entry of licences[kind]) {
+      const list = byLicence.get(entry.licence) || new Set();
+      list.add(entry.function);
+      byLicence.set(entry.licence, list);
+    }
+  }
+  /** @param {string} licence @returns {string[]} sorted function names */
+  const functionsUnder = (licence) => [...(byLicence.get(licence) || [])].sort(byCodePoint);
+  const mit = functionsUnder("MIT");
+  const bsd = [...functionsUnder("BSD-2-Clause"), ...functionsUnder("BSD-3-Clause")].sort(
+    byCodePoint,
+  );
+
   const lines = [
     "# Faust effect licences",
     "",
     "Studio's Faust effects are compiled from `bundles/studio/effects/*.dsp` with",
-    "the Faust compiler (`@grame/faustwasm`, at build time only). The Faust",
-    "standard library is licensed per function, so each compiled effect carries",
-    "the union of the licences its functions declared. The build's licence lint",
-    "allows only MIT, BSD-2-Clause, BSD-3-Clause, STK-4.3 and LGPL-2.1 with the",
-    "Faust exception; everything else refuses the build.",
+    "the Faust compiler (`@grame/faustwasm`, at build time only, LGPL-2.1 — its",
+    "notice is `LICENSE-faustwasm.txt` beside this file). The Faust standard",
+    "library is licensed per function, so each compiled effect carries the union",
+    "of the licences its functions declared.",
+    "",
+    "## How the lint decides what ships",
+    "",
+    "`bundles/studio/tools/build-faust.mjs` refuses an effect unless all three of",
+    "these pass:",
+    "",
+    "1. **The licence declarations in the compiled meta.** Only MIT,",
+    "   BSD-2-Clause, BSD-3-Clause, STK-4.3 and LGPL-2.1 with the Faust exception",
+    "   may ship; anything else (the GPL-only and AGPL-only functions included)",
+    "   refuses the build.",
+    "2. **An allowlist of reviewed libraries that declare nothing.** Faust's own",
+    "   libraries do not all carry a `declare license`, and a library that",
+    "   declares nothing contributes nothing to the meta — so the build refuses",
+    "   any such library unless the allowlist names it *at the version the meta",
+    "   reports*, with the terms its file header states in a comment. A",
+    "   `faustwasm` upgrade that bumps one of these libraries refuses the build",
+    "   until someone reads the new header.",
+    "3. **A denylist of GPL-3.0-only code that is declared only in a comment.**",
+    "   `basics.lib`'s `sliding*` block carries",
+    "   `// SPDX-License-Identifier: GPL-3.0` and no `declare license` at all, so",
+    "   a program that calls it compiles with no GPL entry anywhere; and",
+    "   permissively declared functions call it in turn (`filters.lib/avg_rect`",
+    "   is `ba.slidingMean`). Those names are refused by match on the compiled",
+    "   meta and on the `.dsp` sources.",
+    "",
+    "**The denylist is maintained by review, not derived from the meta.** The",
+    "meta records the licences a program's own functions declare, not the call",
+    "graph beneath them: a function that calls `fi.avg_rect` (which calls",
+    "`ba.slidingMean`) leaves no trace of the GPL code in the top-level meta.",
+    "Reading each new effect's sources, and re-reading the libraries on a",
+    "`faustwasm` upgrade, is what keeps the list complete.",
     "",
     "## What each effect uses",
     "",
   ];
   for (const kind of kinds) {
-    const entries = licences[kind];
     lines.push(`### ${kind}`, "");
-    const byLicence = new Map();
-    for (const entry of entries) {
-      const list = byLicence.get(entry.licence) || [];
+    const perKind = new Map();
+    for (const entry of licences[kind]) {
+      const list = perKind.get(entry.licence) || [];
       list.push(entry.function);
-      byLicence.set(entry.licence, list);
+      perKind.set(entry.licence, list);
     }
-    for (const licence of [...byLicence.keys()].sort()) {
-      const functions = byLicence.get(licence).sort();
+    for (const licence of [...perKind.keys()].sort(byCodePoint)) {
+      const functions = perKind.get(licence).sort(byCodePoint);
       lines.push(`- ${licence}: ${functions.map((name) => `\`${name}\``).join(", ")}`);
     }
     lines.push("");
   }
-  const silent = kinds.filter((kind) => (undeclared[kind] || []).length > 0);
-  if (silent.length > 0) {
+
+  // The reviewed undeclared libraries, with the terms their headers state.
+  const silent = new Map(); // library → {version, reviewed, kinds}
+  for (const kind of kinds) {
+    for (const item of undeclared[kind] || []) {
+      const have = silent.get(item.library) || {
+        version: item.version,
+        reviewed: item.reviewed,
+        kinds: [],
+      };
+      have.kinds.push(kind);
+      silent.set(item.library, have);
+    }
+  }
+  if (silent.size > 0) {
     lines.push(
       "## Libraries that declare no licence",
       "",
       "The compiler emits a licence entry only for a function or library that",
-      "declares one. These libraries were used without a declaration, so the",
-      "compiled meta states no terms for their functions. Every licence it DOES",
-      "state is listed above and passed the lint; the silent ones are Faust's own",
-      "libraries, whose file headers carry the STK-4.3 or LGPL-with-Faust-exception",
-      "notice the declarations next to them use.",
+      "declares one, so these libraries were used without the compiled meta",
+      "stating any terms for them. None of them is accepted on trust: each is on",
+      "the build's reviewed allowlist, at the version below, because its file",
+      "header (a comment, which the compiler never copies into a meta) states",
+      "terms Crow may ship under. They are Faust's own libraries; the citations",
+      "are the Faust libraries as `faustwasm` ships them, in its",
+      "`libfaust-wasm.data`.",
       "",
     );
-    for (const kind of silent) lines.push(`- ${kind}: ${undeclared[kind].join(", ")}`);
+    for (const library of [...silent.keys()].sort(byCodePoint)) {
+      const item = silent.get(library);
+      const terms = item.reviewed
+        ? item.reviewed.licence
+        : "NOT REVIEWED — the build refuses this library";
+      lines.push(
+        `- \`${library}\` ${item.version} — ${terms}.`,
+        `  Used by: ${item.kinds.join(", ")}.`,
+      );
+    }
     lines.push("");
   }
-  lines.push(
+
+  // Author and copyright lines, grouped per library: what MIT, BSD and STK-4.3
+  // all require to be passed on with the code.
+  if (credits.length > 0) {
+    lines.push(
+      "## Copyright and authorship",
+      "",
+      "The compiler's meta records the author and copyright line a library",
+      "declares, per function where it declares one and per library otherwise.",
+      "They are reproduced here, grouped by library, because MIT, BSD and STK-4.3",
+      "all require the notice to travel with the code. A function with no entry",
+      "of its own is covered by its library's entry, or (for a library in the",
+      "list above) by the header cited there.",
+      "",
+    );
+    const byLibrary = new Map();
+    for (const item of credits) {
+      const list = byLibrary.get(item.library) || [];
+      list.push(item);
+      byLibrary.set(item.library, list);
+    }
+    for (const library of [...byLibrary.keys()].sort(byCodePoint)) {
+      lines.push(`### ${library}`, "");
+      const items = byLibrary
+        .get(library)
+        .sort((a, b) => byCodePoint(a.function, b.function));
+      for (const item of items) {
+        const who = item.function ? `\`${item.function}\`` : "the library itself";
+        const facts = [];
+        if (item.author) facts.push(`author: ${item.author}`);
+        if (item.copyright) facts.push(`copyright: ${item.copyright}`);
+        lines.push(`- ${who} — ${facts.join("; ")}`);
+      }
+      lines.push("");
+    }
+  }
+
+  const notes = [
     "## Notes",
     "",
-    "- **MIT** and **BSD** entries need no text of their own here: the Faust",
-    "  libraries that declare them ship their own notices in",
-    "  `node_modules/@grame/faustwasm` (the compiler package), and both licences",
-    "  ask only that the copyright notice travel with the code. The functions",
-    "  this directory uses under MIT are `re.jpverb` (Julian Parker, with fixes",
-    "  by Till Bovermann) and the phaser/allpass functions of the phaser library",
-    "  (Julius O. Smith III).",
+    "- **MIT.** Its text is below, once. The MIT functions this build ships are",
+    mit.length > 0
+      ? `  ${mit.map((name) => `\`${name}\``).join(", ")}. Their copyright lines are under "Copyright and authorship".`
+      : "  none of the functions this build uses.",
+    "- **BSD-2-Clause and BSD-3-Clause** likewise ask only that the copyright",
+    "  notice travel with the code; it is under 'Copyright and authorship'.",
+  ];
+  if (bsd.length > 0) {
+    notes.push(`  The BSD functions this build ships are ${bsd.map((name) => `\`${name}\``).join(", ")}.`);
+  }
+  notes.push(
     "- **LicenseRef-LGPL-2.1-or-later-with-Faust-exception** is the LGPL with the",
-    "  Faust exception that lets generated code ship under Crow's own terms.",
-    "- **STK-4.3** is the permissive, MIT-style licence of the Synthesis ToolKit,",
-    "  which the filter and effect libraries' `jos` sections carry. Its text is",
-    "  below.",
+    "  Faust exception, which lets generated code ship under Crow's own terms.",
+    "  The compiler package's own LGPL notice — a different thing, and not the",
+    "  licence of the compiled effects — is `LICENSE-faustwasm.txt`.",
+    "- **STK-4.3** is the permissive, MIT-style licence of the Synthesis ToolKit",
+    "  (no relation to the MIT-declared functions above), which the filter and",
+    "  effect libraries' `jos` sections carry. Its text is below.",
+    "- **`pf.phaser2_stereo`** (the phaser effect) carries no licence",
+    "  declaration, so it appears in no row above: `phaflangers.lib` is one of",
+    "  the reviewed libraries in the list above, and its JOS section header",
+    "  places the functions below it under STK-4.3 — which is what the phaser",
+    "  ships under, NOT the MIT of the reverb's `jpverb` or of the `_tpt_df`",
+    "  filters.",
+    "",
+    "## MIT",
+    "",
+    "```text",
+    MIT_TEXT,
+    "```",
     "",
   );
+  lines.push(...notes);
   if (stkText) {
     lines.push(
       "## STK 4.3",
@@ -521,19 +1028,30 @@ export async function buildFaust() {
   const files = new Map();
   const licences = {};
   const undeclared = {};
+  // The author/copyright lines, merged across the effects: a function used by
+  // three effects is one notice, not three.
+  const credited = new Map();
   for (const kind of kinds) {
     const source = readFileSync(join(SOURCE_DIR, `${kind}.dsp`), "utf8");
     const effect = await compileEffect(kind, source);
     files.set(`${kind}.wasm`, effect.wasm);
     files.set(`${kind}.json`, effect.json);
     licences[kind] = sortedLicences(effect.lint.accepted);
-    undeclared[kind] = undeclaredLibraries(effect.meta);
+    undeclared[kind] = effect.lint.undeclared;
+    for (const credit of effect.credits) {
+      credited.set(`${credit.library}\u0000${credit.function}`, credit);
+    }
   }
+  const credits = [...credited.values()].sort((a, b) =>
+    a.library === b.library
+      ? byCodePoint(a.function, b.function)
+      : byCodePoint(a.library, b.library),
+  );
   // Sorted keys, so two runs of the same sources produce the same bytes.
   const sortedKinds = {};
-  for (const kind of Object.keys(licences).sort()) sortedKinds[kind] = licences[kind];
+  for (const kind of Object.keys(licences).sort(byCodePoint)) sortedKinds[kind] = licences[kind];
   files.set("LICENSES.json", `${JSON.stringify(sortedKinds, null, 2)}\n`);
-  files.set("NOTICES.md", noticesText(sortedKinds, stkNoticeText(info.dir), undeclared));
+  files.set("NOTICES.md", noticesText(sortedKinds, stkNoticeText(info.dir), undeclared, credits));
   files.set("README.md", readmeText(info));
   files.set("LICENSE-faustwasm.txt", info.licenceText);
   return { files, licences: sortedKinds, info };

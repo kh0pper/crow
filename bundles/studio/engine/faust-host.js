@@ -279,35 +279,55 @@
    * effect, once. Called from a port message, outside the audio block, because
    * compiling is asynchronous and `process()` must never wait.
    *
+   * Each kind is compiled on its own: one effect whose bytes will not compile
+   * (a truncated download, a stale file) does not stop the others, which stay in
+   * this page's table and can be instantiated. The failures are then reported
+   * together, in one `Error` whose `message` names every kind that failed and
+   * whose `failures` field is kind → why, so a caller that catches it can still
+   * see what did compile (`compiled` on the error, and `has()` afterwards).
+   *
    * @param {Object<string, {wasm: ArrayBuffer|ArrayBufferView, json: string|object}>} modules
    *   one entry per effect: its compiled bytes and its factory JSON
    * @returns {Promise<Object<string, boolean>>} which kinds this page now holds
-   * @throws {Error} naming the effect when its bytes will not compile, its JSON
-   *   is missing, or it wants an import this host cannot supply
+   * @throws {Error} naming each effect that failed — its bytes would not compile,
+   *   its JSON is missing, or it wants an import this host cannot supply
    */
   async function compileModules(modules) {
     const compiled = Object.create(null);
+    /** @type {Object<string, string>} kind → what went wrong */
+    const failures = Object.create(null);
     if (!modules || typeof modules !== "object") return compiled;
     for (const kind of Object.keys(modules)) {
       const item = modules[kind];
       if (!item || typeof item !== "object") continue;
-      const meta = metaOf(item.json);
-      if (!meta) throw new Error(`StudioFaustHost: the ${kind} effect arrived without its factory JSON`);
-      let module;
       try {
-        module = await WebAssembly.compile(arrayBufferOf(item.wasm));
-      } catch (error) {
-        throw new Error(`StudioFaustHost: the ${kind} effect would not compile: ${error?.message || error}`);
-      }
-      for (const need of WebAssembly.Module.imports(module)) {
-        const supplied = need.module === "env" && need.kind === "function" && Object.hasOwn(IMPORTED_FUNCTIONS, need.name);
-        const memory = need.module === "env" && need.kind === "memory";
-        if (!supplied && !memory) {
-          throw new Error(`StudioFaustHost: the ${kind} effect wants an import this host does not have (${need.module}.${need.name})`);
+        const meta = metaOf(item.json);
+        if (!meta) throw new Error(`the ${kind} effect arrived without its factory JSON`);
+        let module;
+        try {
+          module = await WebAssembly.compile(arrayBufferOf(item.wasm));
+        } catch (error) {
+          throw new Error(`the ${kind} effect would not compile: ${error?.message || error}`);
         }
+        for (const need of WebAssembly.Module.imports(module)) {
+          const supplied = need.module === "env" && need.kind === "function" && Object.hasOwn(IMPORTED_FUNCTIONS, need.name);
+          const memory = need.module === "env" && need.kind === "memory";
+          if (!supplied && !memory) {
+            throw new Error(`the ${kind} effect wants an import this host does not have (${need.module}.${need.name})`);
+          }
+        }
+        MODULES.set(kind, { module: module, meta: meta });
+        compiled[kind] = true;
+      } catch (error) {
+        failures[kind] = String(error?.message || error);
       }
-      MODULES.set(kind, { module: module, meta: meta });
-      compiled[kind] = true;
+    }
+    const failed = Object.keys(failures);
+    if (failed.length > 0) {
+      const error = new Error(`StudioFaustHost: ${failed.map((kind) => failures[kind]).join("; ")}`);
+      error.failures = failures;
+      error.compiled = compiled;
+      throw error;
     }
     return compiled;
   }
@@ -365,14 +385,22 @@
     }
     const sampleRate = positive(rate) || DEFAULT_RATE;
 
-    // A memory for a module that ever wants one; a Faust mono module defines and
-    // exports its own, and that one is used below.
-    const envMemory = new WebAssembly.Memory({ initial: 2 });
-    const instance = new WebAssembly.Instance(entry.module, {
-      env: Object.assign({}, IMPORTED_FUNCTIONS, { memory: envMemory, memoryBase: 0, tableBase: 0 }),
-    });
+    // A memory for a module that wants to import one; a Faust mono module defines
+    // and exports its own, and that one is used below. Allocating the two pages
+    // only when the module's imports ask for them keeps a host that never needs
+    // one from holding 128 KiB per insert for nothing.
+    const importsMemory = WebAssembly.Module.imports(entry.module).some(
+      (need) => need.module === "env" && need.kind === "memory",
+    );
+    const envMemory = importsMemory ? new WebAssembly.Memory({ initial: 2 }) : null;
+    const env = Object.assign({}, IMPORTED_FUNCTIONS, { memoryBase: 0, tableBase: 0 });
+    if (envMemory) env.memory = envMemory;
+    const instance = new WebAssembly.Instance(entry.module, { env: env });
     const api = instance.exports;
     const memory = api.memory instanceof WebAssembly.Memory ? api.memory : envMemory;
+    if (!memory) {
+      throw new Error(`StudioFaustHost: the ${name} effect neither imports nor exports a memory`);
+    }
 
     // The mono layout faustwasm's own instantiator uses, and the one libfaust
     // lays out: the DSP struct at 0, then a table of pointers to the input
