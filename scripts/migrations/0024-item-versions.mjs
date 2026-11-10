@@ -45,7 +45,8 @@
 // The triggers can disappear without this migration's record disappearing (an
 // init-db rebuild of a covered table drops them). servers/shared/history/ensure.js
 // re-creates them on every boot for exactly that reason; this file is the one
-// that also writes baselines.
+// that also writes baselines, and the boot re-ensure therefore only arms capture
+// for a table this migration has already baselined.
 //
 // TODO(history-redaction, Task 4): text that matches the public-hygiene secret
 // patterns is meant to be stored as "[redacted]" with redacted = 1. That cannot
@@ -194,10 +195,10 @@ export function run({ dbPath, log = () => {} }) {
       const install = db.transaction(() => {
         for (const sql of triggerSql(itemType)) db.exec(sql);
         const startedAt = performance.now();
-        const before = db.prepare("SELECT COUNT(*) AS n FROM item_versions").get().n;
-        db.exec(baselineSql(itemType, spec));
-        const added = db.prepare("SELECT COUNT(*) AS n FROM item_versions").get().n - before;
-        return { added, ms: performance.now() - startedAt };
+        // The INSERT's own change count, not two COUNT(*) scans of a table that
+        // grows with every write on the instance.
+        const { changes } = db.prepare(baselineSql(itemType, spec)).run();
+        return { added: Number(changes), ms: performance.now() - startedAt };
       });
       const { added, ms } = install.immediate();
       log(`  ${spec.table}: triggers ensured, ${added} baseline version(s) in ${ms.toFixed(1)} ms`);

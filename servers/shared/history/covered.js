@@ -17,11 +17,13 @@
  *               credential-shaped. It is the item as it was, because Task 4's
  *               erase and the reader both need the row, not just the edit.
  *
- * They differ on purpose. Placement/ownership pointers (memories.project_id /
- * project_uuid / instance_id, blog_posts.published_at / nostr_event_id) are not
- * changes worth a version on their own, but they must be IN the snapshot so a
- * version keeps its filing (a deleted memory's versions stay findable by
- * project) and so a redaction/erase knows what it is erasing.
+ * They differ on purpose. Some pointers (memories.instance_id, blog_posts.
+ * published_at / nostr_event_id) are not changes worth a version on their own
+ * but must be IN the snapshot so a redaction/erase knows what it is erasing and
+ * a reader sees the row as it was. A memory's FILING is different: project_id /
+ * project_uuid ARE tracked (a memory that moves between projects, or is unfiled
+ * by a project delete, must show up in that project's history) — with one
+ * exception, the sync layer's uuid stamp, see STAMP_ONLY_TRANSITIONS below.
  *
  * `projectRef` is the ordering used to fill item_versions.project_ref: the first
  * non-empty column in the list, cast to TEXT. That column is the erase scope —
@@ -56,10 +58,14 @@
  *
  * `tracked` is the update trigger's WHEN list, in display order. Choices worth
  * knowing:
- *   - memories: the six content columns. NOT project_id / project_uuid /
- *     instance_id (placement pointers the write path and the sync layer stamp)
- *     and NOT access_count / accessed_at — a memory that is only *recalled* is
- *     not a change (review focus 1).
+ *   - memories: the six content columns plus project_id / project_uuid. A filing
+ *     change IS a change: a memory moved to another project (or unfiled when its
+ *     project is deleted — servers/shared/project-lifecycle.js) writes an update
+ *     version under the new project_ref, otherwise the old project's history
+ *     would keep claiming it. The one exception is the sync layer stamping a
+ *     portable uuid onto an already-filed row (STAMP_ONLY_TRANSITIONS). NOT
+ *     instance_id (a placement pointer), and NOT access_count / accessed_at — a
+ *     memory that is only *recalled* is not a change (review focus 1).
  *   - blog_posts: every content column (the plan's six plus the byline, the
  *     visibility and the cover image). NOT nostr_event_id (an id derived from
  *     publishing elsewhere), NOT published_at/created_at/updated_at.
@@ -76,7 +82,16 @@ export const COVERED = Object.freeze({
   memory: Object.freeze({
     table: "memories",
     idColumn: "id",
-    tracked: Object.freeze(["content", "context", "tags", "source", "category", "importance"]),
+    tracked: Object.freeze([
+      "content",
+      "context",
+      "tags",
+      "source",
+      "category",
+      "importance",
+      "project_id",
+      "project_uuid",
+    ]),
     snapshot: Object.freeze([
       "content",
       "context",
@@ -145,6 +160,60 @@ export const COVERED = Object.freeze({
   }),
 });
 
+/* ------------------------------------------- erase by project (Task 4) */
+
+/**
+ * TODO(history-erase, Task 4): erase-by-project is a CLOSURE over the item, not a
+ * row delete. Two consequences, both load-bearing:
+ *
+ *   1. Take every version of every item_id that has ANY version with that
+ *      project_ref — not just the versions whose own project_ref matches. A
+ *      memory that moved from project A to project B has versions under both,
+ *      and erasing A must not leave half of that item's history behind (nor may
+ *      A's erase reach into B's live memory: the closure is over VERSIONS, and
+ *      the versions it takes go with the project).
+ *   2. Match BOTH keys. project_ref holds the portable uuid when the row had one
+ *      and the local project id (cast to TEXT) otherwise, because pre-project_uuid
+ *      rows and project_id-only writes carry no uuid. So the predicate is
+ *      `project_ref IN (<project uuid>, CAST(<local project id> AS TEXT))`, and
+ *      both values must be bound as TEXT (a bare integer never equals the
+ *      stored text).
+ *
+ * Both are queries against idx_item_versions_project: the closure is one lookup
+ * for the item_id set plus one indexed pass over (item_type, item_id).
+ */
+
+/* ------------------------------------------------- the sync layer's stamp */
+
+/**
+ * A tracked column can move without the content changing: the sync layer STAMPS a
+ * portable pointer onto a row that is already filed. memories.project_uuid is the
+ * one case (mapInboundMemoryProject / a summary memory whose uuid arrives later):
+ * project_uuid goes NULL → uuid while project_id stays exactly what it was.
+ *
+ * Checked against instance-sync: a regular memory never carries project_uuid on
+ * the wire (OUTBOUND_TRANSFORMS drops a null one and only a summary memory has a
+ * uuid), so this does NOT fire for every memory on sync. It does fire for that
+ * summary-memory case, and a version there would say "this memory moved" when
+ * nothing moved — the filing is the same project, only its portable id is now
+ * known. So the transition is excluded from the WHEN clause on its own: it counts
+ * only while project_id is unchanged.
+ *
+ * Anything else still counts. A content edit in the same statement as the stamp
+ * writes a version (the other terms of the WHEN are unaffected), a real filing
+ * change moves project_id and so is recorded, and unfiling (uuid → NULL, from a
+ * project delete) is a change, not a stamp.
+ *
+ * `column` is the tracked column being stamped; `unchanged` are the tracked
+ * columns that must compare equal (NULL-safe IS) for it to count as a stamp.
+ */
+export const STAMP_ONLY_TRANSITIONS = Object.freeze({
+  memory: Object.freeze({
+    column: "project_uuid",
+    unchanged: Object.freeze(["project_id"]),
+  }),
+});
+
 /** A credential-shaped column name. Never tracked, never snapshotted. */
 export const SECRET_COLUMN = /api_key|token|secret|password/i;
 
@@ -160,6 +229,19 @@ for (const [itemType, spec] of Object.entries(COVERED)) {
   for (const column of [...spec.tracked, ...spec.projectRef]) {
     if (!spec.snapshot.includes(column)) {
       throw new Error(`history: ${itemType}.${column} is tracked or a project ref but is not snapshotted`);
+    }
+  }
+  // A stamp exclusion names columns the WHEN clause already compares; if either
+  // list changed underneath it, the exclusion would silently stop matching.
+  const stamp = STAMP_ONLY_TRANSITIONS[itemType];
+  if (stamp) {
+    if (!spec.tracked.includes(stamp.column)) {
+      throw new Error(`history: ${itemType}.${stamp.column} is a stamp-only column but is not tracked`);
+    }
+    for (const column of stamp.unchanged) {
+      if (!spec.tracked.includes(column)) {
+        throw new Error(`history: ${itemType}.${column} guards a stamp but is not tracked`);
+      }
     }
   }
   if (spec.snapshot.includes(spec.idColumn)) {
@@ -259,16 +341,28 @@ const IMMUTABLE_COMPARISONS = [
   .join("\n      AND ");
 
 /**
- * The two guard triggers that make item_versions append-only:
+ * The three guard triggers that make item_versions append-only:
  *
+ *   hist_item_versions_guard_bi  BEFORE INSERT — aborts an insert that names an
+ *                                id which already exists, unless armed. NEW.id
+ *                                is NULL for the capture triggers and for the
+ *                                baseline (AUTOINCREMENT assigns it), so this
+ *                                only ever stops an explicit
+ *                                `INSERT OR REPLACE INTO item_versions (id, …)`
+ *                                — SQLite's REPLACE deletes the conflicting row
+ *                                and inserts a new one, which would otherwise
+ *                                rewrite history without the UPDATE guard ever
+ *                                seeing it.
  *   hist_item_versions_guard_au  BEFORE UPDATE — aborts unless (a) an armed
  *                                erase is in progress, or (b) this is a single
  *                                attribution stamp on a row that is still
- *                                'unattributed' (Task 2 sets author_kind/
- *                                author_id/job_id/origin_instance and nothing
- *                                else). Because (b) requires OLD.author_kind =
- *                                'unattributed', attribution can be stamped
- *                                exactly once per row.
+ *                                'unattributed' and carries no attribution yet:
+ *                                NEW.author_kind must name a REAL author (not
+ *                                'unattributed' again) and OLD.author_id /
+ *                                OLD.job_id / OLD.origin_instance must all be
+ *                                NULL, so attribution happens exactly once and
+ *                                cannot be "re-stamped" into a different (or no)
+ *                                author.
  *   hist_item_versions_guard_ad  BEFORE DELETE — aborts unless armed.
  *
  * Name attribution here, not in the caller, so a Task 2 stamp and the guard can
@@ -277,12 +371,26 @@ const IMMUTABLE_COMPARISONS = [
 export function guardTriggerDefs() {
   return [
     {
+      name: "hist_item_versions_guard_bi",
+      sql: `CREATE TRIGGER IF NOT EXISTS hist_item_versions_guard_bi
+BEFORE INSERT ON item_versions
+WHEN NEW."id" IS NOT NULL
+ AND ${ARMED} = 0
+ AND EXISTS (SELECT 1 FROM item_versions WHERE "id" = NEW."id")
+BEGIN
+  SELECT RAISE(ABORT, 'version history is append-only (an existing version cannot be replaced)');
+END`,
+    },
+    {
       name: "hist_item_versions_guard_au",
       sql: `CREATE TRIGGER IF NOT EXISTS hist_item_versions_guard_au
 BEFORE UPDATE ON item_versions
 WHEN ${ARMED} = 0
  AND NOT (OLD.author_kind = 'unattributed'
-      AND NEW.author_kind IN ('owner','bot','peer','system','unattributed')
+      AND NEW.author_kind <> 'unattributed'
+      AND OLD.author_id IS NULL
+      AND OLD.job_id IS NULL
+      AND OLD.origin_instance IS NULL
       AND ${IMMUTABLE_COMPARISONS})
 BEGIN
   SELECT RAISE(ABORT, 'version history is append-only');
@@ -314,8 +422,10 @@ export const ATTRIBUTION_FIELDS = Object.freeze([...ATTRIBUTION_COLUMNS]);
  *   hist_<table>_ai  AFTER INSERT  → op 'insert', snapshot of NEW
  *   hist_<table>_au  AFTER UPDATE  → op 'update' of NEW, but ONLY when a tracked
  *                                     column actually changed (each compared with
- *                                     IS NOT, so a NULL↔value move counts and a
- *                                     recalled memory does not)
+ *                                     IS NOT, so a NULL→value move counts and a
+ *                                     recalled memory does not — except a
+ *                                     stamp-only transition, see
+ *                                     STAMP_ONLY_TRANSITIONS)
  *   hist_<table>_ad  AFTER DELETE  → op 'delete', snapshot of OLD (a delete
  *                                     keeps what it removed)
  *
@@ -342,7 +452,18 @@ export function triggerDefs(itemType) {
     `INSERT INTO item_versions (item_type, item_id, op, snapshot_json, project_ref)\n` +
     `    VALUES (${str(itemType)}, ${idOf(row)}, ${str(op)}, ${snapshotExpr(spec, row)}, ` +
     `${projectRefExpr(spec, row)});`;
-  const changed = spec.tracked.map((c) => `NEW."${c}" IS NOT OLD."${c}"`).join(" OR ");
+  // A stamp-only transition is excluded TERM BY TERM, not from the whole WHEN:
+  // a statement that both stamps the pointer and edits the content must still
+  // write a version (for the edit), and only the stamp's own term goes quiet.
+  const stamp = STAMP_ONLY_TRANSITIONS[itemType];
+  const changeExpr = spec.tracked
+    .map((c) => {
+      const cmp = `NEW."${c}" IS NOT OLD."${c}"`;
+      if (!stamp || stamp.column !== c) return cmp;
+      const unchanged = stamp.unchanged.map((u) => `NEW."${u}" IS OLD."${u}"`).join(" AND ");
+      return `(${cmp}\n        AND NOT (OLD."${c}" IS NULL AND NEW."${c}" IS NOT NULL AND ${unchanged}))`;
+    })
+    .join(" OR ");
 
   return [
     {
@@ -353,7 +474,7 @@ export function triggerDefs(itemType) {
       name: au,
       sql:
         `CREATE TRIGGER IF NOT EXISTS ${au} AFTER UPDATE ON ${spec.table}\n` +
-        `WHEN ${changed}\nBEGIN\n  ${insert("NEW", "update")}\nEND`,
+        `WHEN ${changeExpr}\nBEGIN\n  ${insert("NEW", "update")}\nEND`,
     },
     {
       name: ad,

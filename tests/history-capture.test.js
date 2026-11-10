@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import Database from "better-sqlite3";
 
-import { COVERED, guardTriggerSql, triggerSql } from "../servers/shared/history/covered.js";
+import { COVERED, STAMP_ONLY_TRANSITIONS, guardTriggerSql, triggerSql } from "../servers/shared/history/covered.js";
 import { ensureHistoryTriggers, ensureHistoryTriggersAtBoot } from "../servers/shared/history/ensure.js";
 import {
   ITEM_VERSIONS_DDL,
@@ -65,10 +65,20 @@ function initDbFixture(prefix) {
   };
 }
 
-/** init-db fixture with 0024 applied (the migrated instance). */
+/** init-db fixture with 0024 applied (the migrated instance). The registry's
+ *  bookkeeping row is recorded too, exactly as scripts/migrations/runner.mjs
+ *  writes it: the boot re-ensure only arms capture for a baselined table, and
+ *  "0024 recorded as applied" is one of the two ways it knows. */
 function migratedFixture(prefix = "hist-capture-") {
   const fx = initDbFixture(prefix);
   run({ dbPath: fx.dbPath, log: () => {} });
+  const db = fx.open();
+  db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
+  db.prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(
+    "0024-item-versions",
+    new Date().toISOString(),
+  );
+  db.close();
   return fx;
 }
 
@@ -160,27 +170,109 @@ test("UPDATE memories SET access_count=access_count+1, accessed_at=datetime('now
   }
 });
 
-test("a filing change is not a version on its own, but the snapshot still carries the filing", () => {
+test("moving a memory to another project writes a version under the new project", () => {
   const fx = migratedFixture();
   try {
     const db = fx.open();
-    const info = db.prepare("INSERT INTO memories (content) VALUES (?)").run("filed later");
-    const before = versionCount(db, "memory", info.lastInsertRowid);
-    // project_id / project_uuid are PLACEMENT pointers: not tracked (see COVERED),
-    // so filing an existing memory is not a content change ...
-    db.prepare("UPDATE memories SET project_id = 4, project_uuid = 'proj-a' WHERE id = ?").run(
+    const info = db
+      .prepare("INSERT INTO memories (content, project_id, project_uuid) VALUES (?, ?, ?)")
+      .run("filed under the first project", 7, "proj-first");
+    // The write path's own filing change: project_id and project_uuid together.
+    db.prepare("UPDATE memories SET project_id = 9, project_uuid = 'proj-second' WHERE id = ?").run(
       info.lastInsertRowid,
     );
-    assert.equal(versionCount(db, "memory", info.lastInsertRowid), before, "filing is not a change");
-    // ... but a later real edit records the new filing in its snapshot, so a
-    // version is never left pointing at the wrong project.
-    db.prepare("UPDATE memories SET content = ? WHERE id = ?").run("filed and edited", info.lastInsertRowid);
+
     const rows = versionsOf(db, "memory", info.lastInsertRowid);
-    assert.equal(rows.at(-1).op, "update");
+    assert.deepEqual(rows.map((r) => r.op), ["insert", "update"], "a move between projects is a change");
+    assert.equal(rows[0].project_ref, "proj-first");
+    assert.equal(rows[1].project_ref, "proj-second", "the new version belongs to the project it moved INTO");
+    const snapshot = JSON.parse(rows[1].snapshot_json);
+    assert.equal(snapshot.project_id, 9);
+    assert.equal(snapshot.project_uuid, "proj-second");
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
+test("unfiling memories on project delete writes versions", () => {
+  // The statement servers/shared/project-lifecycle.js runs inside its delete
+  // transaction: memories are unfiled, never deleted.
+  const UNFILE_SQL =
+    "UPDATE memories SET project_id = NULL, project_uuid = NULL, updated_at = datetime('now') " +
+    "WHERE project_id = ? OR (project_uuid IS NOT NULL AND project_uuid = ?)";
+  const fx = migratedFixture();
+  try {
+    const db = fx.open();
+    const filed = db
+      .prepare("INSERT INTO memories (content, project_id, project_uuid) VALUES (?, ?, ?)")
+      .run("a deleted project's memory", 7, "proj-gone");
+    const filesById = db
+      .prepare("INSERT INTO memories (content, project_id, project_uuid) VALUES (?, ?, ?)")
+      .run("filed by the uuid only", null, "proj-gone");
+    const kept = db
+      .prepare("INSERT INTO memories (content, project_id, project_uuid) VALUES (?, ?, ?)")
+      .run("another project's memory", 8, "proj-kept");
+
+    const unfiled = db.prepare(UNFILE_SQL).run(7, "proj-gone");
+    assert.equal(unfiled.changes, 2, "both of the deleted project's memories were unfiled");
+
+    for (const info of [filed, filesById]) {
+      const rows = versionsOf(db, "memory", info.lastInsertRowid);
+      assert.deepEqual(rows.map((r) => r.op), ["insert", "update"], "unfiling is recorded, not silent");
+      assert.equal(rows[1].project_ref, null, "the unfiled version has no project scope");
+      const snapshot = JSON.parse(rows[1].snapshot_json);
+      assert.equal(snapshot.project_id, null);
+      assert.equal(snapshot.project_uuid, null);
+    }
+    assert.equal(versionCount(db, "memory", kept.lastInsertRowid), 1, "another project's memory is untouched");
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
+test("a project_uuid stamp on an already-filed memory is not a version (sync noise)", () => {
+  const fx = migratedFixture();
+  try {
+    const db = fx.open();
+    // A row filed by its local id only (pre-project_uuid, or a write path that
+    // named just the project). The sync layer later stamps the portable uuid onto
+    // it while project_id stays exactly the same — see COVERED.memory and
+    // STAMP_ONLY_TRANSITIONS in covered.js.
+    const info = db
+      .prepare("INSERT INTO memories (content, project_id) VALUES (?, ?)")
+      .run("filed by id only", 4);
+    const before = versionCount(db, "memory", info.lastInsertRowid);
+    db.prepare("UPDATE memories SET project_uuid = 'proj-a' WHERE id = ?").run(info.lastInsertRowid);
+    assert.equal(
+      versionCount(db, "memory", info.lastInsertRowid),
+      before,
+      "filling the portable id of the SAME project is a stamp, not a move",
+    );
+
+    // The stamp does not hide a real change made in the same statement: an edit
+    // that also stamps the uuid is recorded, and its snapshot carries both.
+    const unstamped = db
+      .prepare("INSERT INTO memories (content, project_id) VALUES (?, ?)")
+      .run("will be edited", 4);
+    db.prepare("UPDATE memories SET content = ?, project_uuid = 'proj-a' WHERE id = ?").run(
+      "edited while being stamped",
+      unstamped.lastInsertRowid,
+    );
+    const rows = versionsOf(db, "memory", unstamped.lastInsertRowid);
+    assert.deepEqual(rows.map((r) => r.op), ["insert", "update"], "a content edit is still recorded");
     assert.equal(rows.at(-1).project_ref, "proj-a");
-    const snapshot = JSON.parse(rows.at(-1).snapshot_json);
-    assert.equal(snapshot.project_id, 4);
-    assert.equal(snapshot.project_uuid, "proj-a");
+    assert.equal(JSON.parse(rows.at(-1).snapshot_json).content, "edited while being stamped");
+
+    // And the exclusion is only for NULL -> value: unfiling (value -> NULL) IS a
+    // change, because the memory really left its project.
+    db.prepare("UPDATE memories SET project_uuid = NULL WHERE id = ?").run(info.lastInsertRowid);
+    assert.equal(
+      versionCount(db, "memory", info.lastInsertRowid),
+      before + 1,
+      "dropping the portable id is a filing change",
+    );
     db.close();
   } finally {
     fx.dispose();
@@ -303,6 +395,12 @@ test("the migration logs a baseline row count and elapsed ms per covered table",
     }
     const memoryLine = lines.find((l) => l.includes("memories: triggers ensured"));
     assert.match(memoryLine, /1 baseline version\(s\)/, "the count is the real number of rows baselined");
+
+    // The count comes from the INSERT's own `.changes`, not from two COUNT(*) scans
+    // of a table that grows with every write on the instance.
+    const src = readFileSync(join(REPO, "scripts", "migrations", "0024-item-versions.mjs"), "utf8");
+    assert.match(src, /const \{ changes \} = db\.prepare\(baselineSql\(itemType, spec\)\)\.run\(\)/);
+    assert.doesNotMatch(src, /COUNT\(\*\) AS n FROM item_versions/);
   } finally {
     fx.dispose();
   }
@@ -355,7 +453,7 @@ test("a write between trigger creation and baseline cannot skip the baseline", (
     assert.match(src, /install\.immediate\(\)/, "the transaction takes the write lock up front");
     assert.ok(
       src.indexOf("for (const sql of triggerSql(itemType)) db.exec(sql);") <
-        src.indexOf("db.exec(baselineSql(itemType, spec));"),
+        src.indexOf("db.prepare(baselineSql(itemType, spec)).run()"),
       "the baseline runs inside that same transaction, after the triggers",
     );
   } finally {
@@ -617,6 +715,55 @@ test("attribution can be stamped once", () => {
   }
 });
 
+test("an unattributed row cannot be re-stamped while staying unattributed", () => {
+  const fx = migratedFixture();
+  try {
+    const db = fx.open();
+    const info = db.prepare("INSERT INTO memories (content) VALUES (?)").run("nobody's edit yet");
+    const id = String(info.lastInsertRowid);
+    const stamp = (sql, args = []) =>
+      db.prepare(`${sql} WHERE item_type = 'memory' AND item_id = ?`).run(...args, id);
+
+    // The exemption requires a REAL author: NEW.author_kind must not still be
+    // 'unattributed', so "stamping" a row with no author changes nothing and is
+    // refused (otherwise the guard's "once" would be a no-op instead).
+    assert.throws(
+      () => stamp("UPDATE item_versions SET author_kind = 'unattributed'"),
+      /version history is append-only/,
+      "an unattributed row cannot be updated while it stays unattributed",
+    );
+    assert.throws(
+      () => stamp("UPDATE item_versions SET author_kind = 'unattributed', author_id = 'x'"),
+      /version history is append-only/,
+      "nor may it acquire attribution columns while claiming no author",
+    );
+    const untouched = versionsOf(db, "memory", id)[0];
+    assert.equal(untouched.author_kind, "unattributed", "the row is unchanged");
+    assert.equal(untouched.author_id, null);
+
+    // A real stamp is still allowed exactly once ...
+    assert.doesNotThrow(() =>
+      stamp("UPDATE item_versions SET author_kind = 'owner', author_id = 'abcd1234'"),
+    );
+    assert.equal(versionsOf(db, "memory", id)[0].author_kind, "owner");
+    // ... and an attributed row cannot be blanked back or re-attributed, even to
+    // the SAME author: OLD.author_id is no longer NULL.
+    assert.throws(
+      () => stamp("UPDATE item_versions SET author_kind = 'unattributed', author_id = NULL"),
+      /version history is append-only/,
+    );
+    assert.throws(
+      () => stamp("UPDATE item_versions SET author_kind = 'owner', author_id = 'abcd1234'"),
+      /version history is append-only/,
+      "a second stamp of the same values is still a second stamp",
+    );
+    assert.equal(versionsOf(db, "memory", id)[0].author_id, "abcd1234", "the first stamp survives");
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
 test("an armed erase can delete", () => {
   const fx = migratedFixture();
   try {
@@ -626,19 +773,96 @@ test("an armed erase can delete", () => {
     const before = versionCount(db, "memory", info.lastInsertRowid);
     assert.ok(before > 0);
 
-    // Task 4's shape: arm inside its own transaction, erase, disarm.
+    // Task 4's shape, in ONE transaction: arm, erase, disarm. The disarm must be
+    // inside the same transaction — an erase that commits with the switch still
+    // on would leave history rewritable (the boot ensure disarms a stuck one).
     db.transaction(() => {
       db.prepare("UPDATE item_versions_erase SET armed = 1").run();
       db.prepare("DELETE FROM item_versions WHERE project_ref = ?").run("proj-x");
+      db.prepare("UPDATE item_versions_erase SET armed = 0").run();
     }).immediate();
-    db.prepare("UPDATE item_versions_erase SET armed = 0").run();
 
     assert.equal(versionCount(db, "memory", info.lastInsertRowid), 0, "the armed erase deleted the versions");
+    assert.equal(
+      db.prepare("SELECT armed FROM item_versions_erase").get().armed,
+      0,
+      "the switch is back off in the same transaction",
+    );
     assert.throws(
       () => db.prepare("DELETE FROM item_versions").run(),
       /version history is append-only/,
       "disarming closes the door again",
     );
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
+test("a switch left armed is disarmed at boot", () => {
+  const fx = migratedFixture();
+  try {
+    const db = fx.open();
+    const info = db.prepare("INSERT INTO memories (content, project_uuid) VALUES (?, ?)").run("erase me", "proj-y");
+    // The state an erase that armed the switch and died before committing leaves:
+    // armed = 1 is visible to every other connection, so history would be freely
+    // rewritable until someone noticed.
+    db.prepare("UPDATE item_versions_erase SET armed = 1").run();
+    assert.equal(db.prepare("SELECT armed FROM item_versions_erase").get().armed, 1);
+
+    const logs = [];
+    const res = ensureHistoryTriggersAtBoot({ dbPath: fx.dbPath, log: (m) => logs.push(m) });
+    assert.equal(res.disarmed, 1, "the boot ensure reports the reset");
+    assert.ok(logs.some((l) => /disarmed/.test(l)), `the disarm is logged: ${logs.join(" | ")}`);
+    assert.equal(db.prepare("SELECT armed FROM item_versions_erase").get().armed, 0, "the switch is off");
+    assert.throws(
+      () => db.prepare("DELETE FROM item_versions").run(),
+      /version history is append-only/,
+      "and the append-only door is shut again",
+    );
+    assert.ok(versionCount(db, "memory", info.lastInsertRowid) > 0, "nothing was erased");
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
+test("an existing version cannot be replaced by INSERT OR REPLACE", () => {
+  const fx = migratedFixture();
+  try {
+    const db = fx.open();
+    const info = db.prepare("INSERT INTO memories (content) VALUES (?)").run("the original words");
+    const id = String(info.lastInsertRowid);
+    const version = versionsOf(db, "memory", id)[0];
+
+    // SQLite's REPLACE deletes the conflicting row and inserts a new one, so the
+    // DELETE guard never sees it — the BEFORE INSERT guard has to refuse it.
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            "INSERT OR REPLACE INTO item_versions (id, item_type, item_id, op, snapshot_json) " +
+              "VALUES (?, 'memory', ?, 'update', '{\"content\":\"rewritten\"}')",
+          )
+          .run(version.id, id),
+      /version history is append-only/,
+      "an insert naming an existing id is refused",
+    );
+    assert.equal(versionCount(db, "memory", id), 1, "still exactly one version");
+    assert.equal(
+      JSON.parse(versionsOf(db, "memory", id)[0].snapshot_json).content,
+      "the original words",
+      "the historical value is intact",
+    );
+
+    // An armed erase is the one door: Task 4 may replace a row while it holds the
+    // switch (a restore/rewrite goes through its audited path).
+    db.transaction(() => {
+      db.prepare("UPDATE item_versions_erase SET armed = 1").run();
+      db.prepare("DELETE FROM item_versions WHERE id = ?").run(version.id);
+      db.prepare("UPDATE item_versions_erase SET armed = 0").run();
+    }).immediate();
+    assert.equal(versionCount(db, "memory", id), 0, "the armed path still works");
     db.close();
   } finally {
     fx.dispose();
@@ -780,7 +1004,7 @@ test("the migration installs hist_<table>_{ai,au,ad} and leaves the FTS triggers
         assert.ok(names.has(`hist_${spec.table}_${suffix}`), `hist_${spec.table}_${suffix} must exist`);
       }
     }
-    for (const name of ["hist_item_versions_guard_au", "hist_item_versions_guard_ad"]) {
+    for (const name of ["hist_item_versions_guard_bi", "hist_item_versions_guard_au", "hist_item_versions_guard_ad"]) {
       assert.ok(names.has(name), `the append-only guard ${name} must be installed with the table`);
     }
     for (const name of [
@@ -813,9 +1037,19 @@ test("triggerSql emits the three triggers from COVERED, and the update trigger c
     for (const column of spec.tracked) {
       assert.ok(au.includes(`NEW."${column}" IS NOT OLD."${column}"`), `${itemType}: .${column} is compared`);
     }
-    // The WHEN clause names every tracked column, and nothing untracked.
+    // The WHEN clause compares every tracked column exactly once (a stamp-only
+    // exclusion narrows one of those comparisons; it never adds a column).
     const when = au.slice(au.indexOf("WHEN"), au.indexOf("BEGIN"));
-    assert.equal((when.match(/IS NOT/g) || []).length, spec.tracked.length);
+    assert.equal((when.match(/IS NOT OLD\."/g) || []).length, spec.tracked.length);
+    const stamp = STAMP_ONLY_TRANSITIONS[itemType];
+    if (stamp) {
+      assert.ok(when.includes(`OLD."${stamp.column}" IS NULL AND NEW."${stamp.column}" IS NOT NULL`), `${itemType}: the stamp-only transition is named`);
+      for (const column of stamp.unchanged) {
+        assert.ok(when.includes(`NEW."${column}" IS OLD."${column}"`), `${itemType}: the stamp is scoped to ${column} unchanged`);
+      }
+    } else {
+      assert.ok(!/IS NULL AND NEW\./.test(when), `${itemType}: no stamp exclusion without a stamp-only transition`);
+    }
 
     // The STORED list is the snapshot, not the tracked list: filing columns and
     // the publishing facts are recorded by every trigger.
@@ -828,8 +1062,68 @@ test("triggerSql emits the three triggers from COVERED, and the update trigger c
       assert.match(stmt, /hex:/, `${itemType}: a BLOB is stored as hex`);
     }
   }
-  assert.equal(guardTriggerSql().length, 2, "one guard per mutation kind (UPDATE, DELETE)");
+  assert.equal(guardTriggerSql().length, 3, "one guard per mutation kind (insert-in-place, UPDATE, DELETE)");
   assert.throws(() => triggerSql("no_such_item_type"), /unknown item_type/);
+});
+
+test("ensure does not arm capture before the baseline", () => {
+  const fx = initDbFixture("hist-ensure-nobaseline-");
+  try {
+    const db = fx.open();
+    // The table and its guards exist (an earlier build created them) but 0024 was
+    // never recorded and no baseline was ever written — a store whose covered
+    // tables only appeared now.
+    db.exec(ITEM_VERSIONS_DDL);
+    db.exec("DROP TRIGGER hist_item_versions_guard_ad");
+
+    const first = ensureHistoryTriggers(db);
+    assert.deepEqual(first.restored, ["hist_item_versions_guard_ad"], "the guard is always ensured");
+    assert.deepEqual(
+      first.awaitingBaseline.sort(),
+      ["blog_posts", "crow_context", "memories"],
+      "capture is left to the migration until a baseline exists",
+    );
+    const names = () =>
+      new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'").all().map((r) => r.name));
+    for (const spec of Object.values(COVERED)) {
+      assert.ok(!names().has(`hist_${spec.table}_ai`), `${spec.table}: no capture trigger yet`);
+    }
+    const missed = db.prepare("INSERT INTO memories (content) VALUES (?)").run("written before the baseline");
+    assert.equal(versionCount(db, "memory", missed.lastInsertRowid), 0, "nothing pretends to capture it");
+    db.close();
+
+    // The migration baselines the row that predates history and installs capture;
+    // the next boot's ensure then finds nothing to do.
+    run({ dbPath: fx.dbPath, log: () => {} });
+    const after = fx.open();
+    const baseline = after
+      .prepare("SELECT op, author_kind FROM item_versions WHERE item_type = 'memory'")
+      .all();
+    assert.deepEqual(baseline, [{ op: "insert", author_kind: "system" }], "the migration baselined the old row");
+    const second = ensureHistoryTriggers(after);
+    assert.deepEqual(second.restored, [], "the migration already installed capture");
+    assert.deepEqual(
+      second.awaitingBaseline,
+      ["blog_posts"],
+      "a table with no rows has no system version to prove a baseline — only the recorded migration can",
+    );
+
+    // The registry records 0024 as applied; from then on an empty table counts as
+    // baselined too (its first live write is the whole history).
+    after.exec(
+      "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)",
+    );
+    after
+      .prepare("INSERT OR REPLACE INTO schema_migrations (id, applied_at) VALUES (?, ?)")
+      .run("0024-item-versions", new Date().toISOString());
+    assert.deepEqual(ensureHistoryTriggers(after).awaitingBaseline, [], "the recorded migration covers every table");
+
+    const live = after.prepare("INSERT INTO memories (content) VALUES (?)").run("written after the baseline");
+    assert.equal(versionCount(after, "memory", live.lastInsertRowid), 1, "capture is live");
+    after.close();
+  } finally {
+    fx.dispose();
+  }
 });
 
 test("a covered table that is absent is skipped with a reason, and the run defers so a later boot retries", () => {
@@ -866,12 +1160,16 @@ test("a covered table that is absent is skipped with a reason, and the run defer
     db = new Database(dbPath);
     const info = db.prepare("INSERT INTO memories (content) VALUES (?)").run("captured on the retry");
     assert.equal(versionCount(db, "memory", info.lastInsertRowid), 1, "the retry installed the triggers");
-    // ... and the boot re-ensure tolerates the same partial store.
+    // ... and the boot re-ensure tolerates the same partial store. memories has
+    // live versions but no baseline (the migration ran against an empty table and
+    // is not recorded here), so its capture is the migration's to keep.
+    const ensured = ensureHistoryTriggers(db);
     assert.deepEqual(
-      ensureHistoryTriggers(db).skipped.sort(),
+      ensured.skipped.sort(),
       ["blog_posts", "crow_context"],
       "ensure reports what it cannot cover yet instead of throwing",
     );
+    assert.deepEqual(ensured.awaitingBaseline, ["memories"], "and what awaits its baseline");
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

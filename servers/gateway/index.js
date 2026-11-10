@@ -271,8 +271,26 @@ try {
 // TABLE takes its triggers with it) while migration 0024 stays recorded, so
 // re-ensure them every boot. One line: the module resolves this instance's own
 // crow.db and is a no-op when every trigger is present. See
-// servers/shared/history/ensure.js.
-try { await (await import("../shared/history/ensure.js")).ensureHistoryTriggersAtBoot(); } catch (e) { console.warn(`[history] trigger ensure skipped: ${e.message}`); }
+// servers/shared/history/ensure.js. A failure here must not stop the boot — but
+// it does mean writes are no longer being versioned, so it is also spooled into
+// the in-app bell (servers/shared/alert-spool.js, drained by post-listen), the
+// same way a migration failure is. Otherwise the only trace is a log line nobody
+// reads.
+try { await (await import("../shared/history/ensure.js")).ensureHistoryTriggersAtBoot(); } catch (e) {
+  console.warn(`[history] trigger ensure skipped: ${e.message}`);
+  try {
+    const { writeAlertFile } = await import("../shared/alert-spool.js");
+    writeAlertFile({
+      code: "history-capture",
+      title: "Crow version history: capture is off",
+      body:
+        `The boot re-ensure of the version-history triggers failed (${e.message}), so changes may no longer ` +
+        "be recorded in history. Run the migration registry for this instance's store and restart the gateway.",
+    });
+  } catch (spoolErr) {
+    console.warn(`[history] alert spool write failed: ${spoolErr?.message}`);
+  }
+}
 
 // Object storage service check: the root docker-compose.yml makes Garage the
 // default (`--profile storage`) and moves MinIO to `--profile minio-legacy`. A
