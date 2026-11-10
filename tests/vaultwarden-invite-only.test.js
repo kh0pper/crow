@@ -555,6 +555,28 @@ test("S2: a redirect to the login form is the same as a 401 (one re-login)", asy
   assert.equal(logins, 2);
 });
 
+test("S2: an expired cookie on GET /admin answers 200 with the LOGIN page — that is a re-login, not an unreadable form", async () => {
+  let logins = 0;
+  let stale = false;
+  const loginPage = '<html><form method="post"><input type="password" name="token" class="form-control"></form></html>';
+  const fake = fakeVaultwarden({
+    "POST /admin": () => {
+      logins++;
+      return res_({ status: 200, cookies: [`VW_ADMIN=jwt-${logins}; Path=/admin`], body: "" });
+    },
+    "GET /admin": (call) => {
+      if (stale && cookieHeader(call) === "VW_ADMIN=jwt-1") return res_({ status: 200, body: loginPage });
+      return res_({ status: 200, body: adminPage({ signups: "off" }) });
+    },
+    "POST /admin/config": () => res_({ status: 200 }),
+  });
+  const deps = { installDir: LOOPBACK_DIR(), fetch: fake.fetchImpl, readAdminToken: async () => TOKEN };
+  assert.equal(await H.closeSignups(deps), "off");
+  stale = true;
+  assert.equal(await H.closeSignups(deps), "off", "the login page was read as an incomplete settings form");
+  assert.equal(logins, 2, "exactly one re-login");
+});
+
 test("S2: a 429 is 'rate-limited' — its own reason, its own sentence, nothing posted", async () => {
   const limited = fakeVaultwarden({ "POST /admin": () => res_({ status: 429, body: "slow down" }) });
   const deps = { installDir: LOOPBACK_DIR(), fetch: limited.fetchImpl, readAdminToken: async () => TOKEN };

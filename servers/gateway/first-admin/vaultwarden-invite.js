@@ -352,7 +352,12 @@ async function adminGetText({ base, path, cookie, fetchImpl }) {
   if (isExpired(res)) return { expired: true };
   if (res.status !== 200) return { error: "unknown" };
   try {
-    return { text: await res.text() };
+    const text = await res.text();
+    // An expired or invalid VW_ADMIN cookie on GET /admin is not a 401: Vaultwarden
+    // answers 200 with its LOGIN page. That page has the token field and no settings
+    // form, so it means "log in again", never "a settings page with too few fields".
+    if (!text.includes('id="input_signups_allowed"') && /<input[^>]*name="token"/i.test(text)) return { expired: true };
+    return { text };
   } catch {
     return { error: "unknown" };
   }
