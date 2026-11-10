@@ -20,11 +20,15 @@
  *    slug) reads as no choice at all, so a broken file never frees an add-on.
  *    The mode decision reads this file and the operator's switches only: never
  *    the child env, crow.db or an add-on's own folders.
+ *  - `walledNoticeV1: true` — this host has already had the first-walled-boot
+ *    notice. Flags are written through `setAddonWallsFlag`, which takes a fixed
+ *    allowlist of keys and keeps every other key of the document.
  *
  * A missing, unreadable, unparsable or non-object file reads as `{}`: it grants
  * nothing, so every caller fails closed.
  */
 
+import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -67,17 +71,153 @@ export function readAddonWalls(crowHome) {
  * Write the document: a sibling temp file at mode 0600, renamed over the real
  * path (never a partial file a reader could parse), then chmod 0600 again in
  * case the rename landed on a file with a wider mode.
+ *
+ * A change made outside Crow is reported BEFORE it is overwritten: the check
+ * runs first, so our own next write can never launder someone else's edit.
  */
 export function writeAddonWalls(crowHome, obj) {
   const path = addonWallsPath(crowHome);
+  let outside = null;
+  try { outside = checkAddonWallsOutside(crowHome); } catch { outside = null; }
+  if (outside) notifyOutside(outside);
   const tmp = `${path}.tmp-${process.pid}`;
-  const body = `${JSON.stringify(obj && typeof obj === "object" ? obj : {}, null, 2)}\n`;
+  const doc = obj && typeof obj === "object" ? obj : {};
+  const body = `${JSON.stringify(doc, null, 2)}\n`;
   writeFileSync(tmp, body, { mode: 0o600 });
   // `mode` above applies only when the temp file is created: a leftover from a
   // crashed writer keeps its old mode, so pin it before the rename too.
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
   chmodSync(path, 0o600);
+  // The bytes just written are the new baseline (no second read, so nothing can
+  // slip in between): Crow's own write is never reported as an outside one.
+  knownStates.set(path, { hash: hashOf(body), modes: effectiveModes(doc) });
+}
+
+// --- the known state, and a change made outside Crow -----------------------
+
+/** The known state per file path: `{ hash, modes }`, hash null for a missing file. */
+const knownStates = new Map();
+
+/** Test seam: the listener the store hands an outside change to. */
+let outsideListener = null;
+
+/** The keys this store may write outside `keptData` and `modes`. */
+const FLAG_KEYS = Object.freeze(["walledNoticeV1"]);
+
+/** The effective per-id modes of one document (only an exact mode counts). */
+function effectiveModes(doc) {
+  const modes = doc && typeof doc === "object" && !Array.isArray(doc) ? doc.modes : null;
+  if (!modes || typeof modes !== "object" || Array.isArray(modes)) return {};
+  const out = {};
+  for (const [id, mode] of Object.entries(modes)) {
+    if (!isAddonId(id)) continue;
+    if (mode === "walled" || mode === "unwalled") out[id] = mode;
+  }
+  return out;
+}
+
+/**
+ * The file as bytes: its sha256 (`null` when missing) and the modes it reads as.
+ * A file that cannot be read for another reason throws — the caller then reports
+ * nothing rather than inventing a change.
+ */
+function fileState(crowHome) {
+  let bytes;
+  try {
+    bytes = readFileSync(addonWallsPath(crowHome));
+  } catch (err) {
+    if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") throw err;
+    return { hash: null, modes: {} };
+  }
+  return {
+    hash: hashOf(bytes),
+    modes: effectiveModes(parseDoc(bytes)),
+  };
+}
+
+/** The sha256 of these bytes, as the known state keeps it. */
+function hashOf(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** The document in these bytes: a parse failure or a non-object is `{}`. */
+function parseDoc(bytes) {
+  try {
+    const doc = JSON.parse(String(bytes));
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+  } catch {
+    return {};
+  }
+}
+
+function notifyOutside(diff) {
+  if (typeof outsideListener !== "function") return;
+  try { outsideListener(diff); } catch { /* a listener never breaks a write */ }
+}
+
+/**
+ * Record the file as it is right now (boot). Nothing is reported: this is the
+ * baseline the watch compares against. Never throws.
+ */
+export function rememberAddonWalls(crowHome) {
+  try {
+    const state = fileState(crowHome);
+    knownStates.set(addonWallsPath(crowHome), state);
+    return state;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did the file change since the state Crow last wrote or recorded?
+ *
+ * `null` when the bytes hash to the known hash (a missing file and a known
+ * "missing" are equal). Otherwise the modes that differ, and the known state
+ * moves to the new content so one change is reported once. Never throws.
+ */
+export function checkAddonWallsOutside(crowHome) {
+  const path = addonWallsPath(crowHome);
+  let next;
+  try { next = fileState(crowHome); } catch { return null; }
+  if (!knownStates.has(path)) {
+    knownStates.set(path, next);
+    return null;
+  }
+  const known = knownStates.get(path);
+  if (known?.hash === next.hash) return null;
+  knownStates.set(path, next);
+  const before = known?.modes || {};
+  const modesChanged = [];
+  for (const id of [...new Set([...Object.keys(before), ...Object.keys(next.modes)])].sort()) {
+    const from = before[id] ?? null;
+    const to = next.modes[id] ?? null;
+    if (from === to) continue;
+    modesChanged.push({ id, from, to });
+  }
+  return { modesChanged };
+}
+
+/**
+ * The one listener the store tells about a change it did not write. `null`
+ * clears it. It reports only: nothing here can prevent the change.
+ */
+export function setAddonWallsOutsideListener(fn) {
+  outsideListener = typeof fn === "function" ? fn : null;
+  return outsideListener !== null;
+}
+
+/**
+ * Set one of the fixed flags this file may carry, keeping every other key.
+ * False for a key outside the allowlist (and then nothing is written).
+ */
+export function setAddonWallsFlag(crowHome, key, value) {
+  if (!FLAG_KEYS.includes(key)) return false;
+  const doc = readAddonWalls(crowHome);
+  doc[key] = value;
+  writeAddonWalls(crowHome, doc);
+  return true;
 }
 
 /**

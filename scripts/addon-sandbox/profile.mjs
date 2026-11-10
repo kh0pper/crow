@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { ADDON_DOORS, ADDON_STATE_DIRS } from "../../servers/shared/addon-doors.js";
+import { labelPhrase } from "./words.mjs";
 
 // --- compose ports ---------------------------------------------------------
 
@@ -368,26 +369,9 @@ export function loadPolicySource({ id, appBundlesDir, installedBundlesDir }) {
 
 const HOST_FIELD_NAME_RE = /(_URL|_HOST|_BASE_URL)$/;
 
-/** Provisional wording; a later task moves these phrases into a constants module. */
+/** One part's phrases, from the one words module every surface reads. */
 function labelPhrases(part) {
-  switch (part.kind) {
-    case "internet":
-      return ["use the internet", "usar internet"];
-    case "local-host":
-      return [`reach ${part.label} on this computer`, `acceder a ${part.label} en este equipo`];
-    case "network-host":
-      return [`reach ${part.host}:${part.port} on your network`, `acceder a ${part.host}:${part.port} en tu red`];
-    case "door":
-      return [`talk to Crow's ${part.id} door`, `hablar con la puerta ${part.id} de Crow`];
-    case "own-folder":
-      return ["keep files in its own folder", "guardar archivos en su propia carpeta"];
-    case "oauth-dir":
-      return ["use the sign-in folder you chose", "usar la carpeta de inicio de sesión que elegiste"];
-    case "crow-db":
-      return ["can read Crow's stored keys and change its database", "puede leer las claves guardadas de Crow y cambiar su base de datos"];
-    default:
-      return ["", ""];
-  }
+  return labelPhrase(part);
 }
 
 function sameJson(a, b) {

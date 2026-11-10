@@ -466,6 +466,66 @@ export async function runPostListenSetup(server, app, deps) {
     });
   }).catch((err) => console.warn("[convergence] verification skipped:", err.message));
 
+  // Add-on walls (PR D): once the add-ons have settled, one bell note about the
+  // walls that are not up, the first-walled-boot note, then the watch that
+  // reports a settings change made outside Crow. Fire-and-forget: it never
+  // delays listen and never throws. Skipped on a --no-auth gateway, which is
+  // nobody's dashboard (its add-ons are not the operator's add-ons).
+  if (!noAuth) {
+    (async () => {
+      let db = null;
+      try {
+        const proxy = await import("../proxy.js");
+        await Promise.race([
+          proxy.addonsSettled(),
+          new Promise((r) => setTimeout(r, 10 * 60 * 1000).unref()),
+        ]);
+        const { runAddonWallNotices, startAddonWallsWatch, noticeLanguage } = await import("../../../scripts/addon-sandbox/notice.mjs");
+        const { NOTICE, langText } = await import("../../../scripts/addon-sandbox/words.mjs");
+        const { createNotification } = await import("../../shared/notifications.js");
+        const crowHome = proxy.resolveCrowHome();
+        const entries = typeof proxy.addonWallEntries === "function" ? proxy.addonWallEntries() : [];
+        try {
+          db = createDbClient();
+          await runAddonWallNotices({ db, crowHome, env: process.env, entries, createNotification });
+        } finally {
+          try { db?.close?.(); } catch {}
+        }
+        // One note per change, listing each mode that moved. The watch reports;
+        // it cannot stop the change, and the new modes apply at the next connect.
+        startAddonWallsWatch({
+          crowHome,
+          onChange: (diff) => {
+            const changed = Array.isArray(diff?.modesChanged) ? diff.modesChanged : [];
+            if (changed.length === 0) return;
+            let watchDb = null;
+            Promise.resolve()
+              .then(async () => {
+                watchDb = createDbClient();
+                const lang = await noticeLanguage(watchDb);
+                const noChoice = langText(NOTICE.noChoice, lang);
+                const body = changed.map((c) => `${c.id}: ${c.from ?? noChoice} -> ${c.to ?? noChoice}`).join("\n");
+                await createNotification(watchDb, {
+                  title: langText(NOTICE.outsideTitle, lang),
+                  body,
+                  source: "addon-walls",
+                  type: "system",
+                  priority: "high",
+                  action_url: "/dashboard/extensions",
+                });
+              })
+              .catch((err) => console.warn("[addon-walls] change notice skipped:", err?.message || err))
+              .finally(() => { try { watchDb?.close?.(); } catch {} });
+          },
+        });
+      } catch (err) {
+        console.warn("[addon-walls] notices skipped:", err?.message || err);
+      } finally {
+        try { db?.close?.(); } catch {}
+      }
+    })();
+  }
+
   // Bring up alwaysResident vLLM bundles (embed, etc.) via gpu-orchestrator.
   // Non-fatal — if docker isn't available the gateway still runs; bundles
   // just have to be started manually.
