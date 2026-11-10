@@ -18,7 +18,7 @@
  * (preflightBundleUp) with the same checkComposeModel.
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
-import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
+import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute, posix } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -364,15 +364,30 @@ export function reservedCommunityId(id) {
 }
 
 /**
- * The first path segment of a bundle-relative path, or null when the value is not one:
- * absolute, carries a `\`/`$`/NUL, or walks out with `..`. Same shape rule bundles-config.js
- * applies to `docker.composefile`, kept here so nothing imports that module (cycle).
+ * The first path segment a bundle-relative value resolves to, or null when it resolves
+ * outside the bundle. Resolved EXACTLY as the gateway resolves a declared path — with
+ * `path.join` against the bundle dir, which keeps an absolute value and a `..` INSIDE the
+ * folder (join("/b", "/data/x.js") and join("/b", "panel/../data/x.js") are both
+ * "/b/data/x.js"). A `\` or `$` is an ordinary filename character on Linux, so a file
+ * named `ui\r.js` really is the `ui\r.js` entry and is resolved as one.
  */
-function bundleRelativeTop(p) {
-  if (typeof p !== "string" || !p || isAbsolute(p) || /[\\$\0]/.test(p)) return null;
-  const segs = p.split("/").filter((s) => s !== "" && s !== ".");
-  if (!segs.length || segs.includes("..")) return null;
-  return segs[0];
+const FAKE_BUNDLE_ROOT = "/b";
+function resolvedBundleTop(value) {
+  if (typeof value !== "string" || !value) return null;
+  const rel = posix.relative(FAKE_BUNDLE_ROOT, posix.join(FAKE_BUNDLE_ROOT, value));
+  if (!rel || rel === "." || rel === ".." || rel.startsWith("../")) return null;
+  return rel.split("/")[0];
+}
+
+/**
+ * The top-level entry `docker.composefile` names: bundles-config.js manifestComposeFile
+ * normalises it with path.relative(".", v), so `deploy/../data/c.yml` becomes `data/c.yml`
+ * and is read from there. Repeated here (not imported: that module reaches this one).
+ */
+function resolvedComposeTop(declared) {
+  const v = declared === undefined || declared === null || declared === "" ? "docker-compose.yml" : declared;
+  if (typeof v !== "string" || isAbsolute(v) || v.includes("\\") || v.includes("$")) return null;
+  return resolvedBundleTop(v);
 }
 
 /**
@@ -382,22 +397,29 @@ function bundleRelativeTop(p) {
  * file at every install/Start — so the folder holding one is as much a control entry as
  * `panel/` or the fixed compose names.
  *
- * An object `panel` resolves to panel/<id>.js (routes/bundles.js resolvePanelPath), i.e. the
- * `panel` entry itself. Absolute and `..` values name nothing inside the bundle, so they are
- * left to the manifest contract rather than guessed at here.
+ * Each declared path is resolved the way that gateway path resolves it, so a declaration
+ * that points somewhere else ("/data/routes.js", "panel/../data/x.js", an object panel's
+ * id) names the entry it really lands in. Only a value that resolves outside the bundle
+ * names nothing here; the manifest contract refuses it.
+ *
+ * @returns {Map<string, string[]>} top-level entry → the manifest keys naming a file there
  */
 function manifestControlTops(manifest) {
-  const tops = new Set();
-  const collect = (v) => {
-    if (typeof v === "string") { const t = bundleRelativeTop(v); if (t) tops.add(t); return; }
-    if (Array.isArray(v)) { for (const x of v) collect(x); return; }
-    if (v && typeof v === "object") for (const x of Object.values(v)) collect(x);
+  const tops = new Map();
+  const add = (top, key) => {
+    if (!top) return;
+    const keys = tops.get(top);
+    if (!keys) tops.set(top, [key]);
+    else if (!keys.includes(key)) keys.push(key);
   };
-  const declared = manifest?.docker?.composefile;
-  collect(declared === undefined || declared === null || declared === "" ? "docker-compose.yml" : declared);
-  if (typeof manifest?.panel === "string") collect(manifest.panel);
-  else if (manifest?.panel && typeof manifest.panel === "object") tops.add("panel");
-  collect(manifest?.panelRoutes);
+  add(resolvedComposeTop(manifest?.docker?.composefile), "docker.composefile");
+  if (typeof manifest?.panel === "string") add(resolvedBundleTop(manifest.panel), "panel");
+  else if (manifest?.panel && typeof manifest.panel === "object") {
+    // routes/bundles.js resolvePanelPath: the file is panel/<panel.id || bundle id>.js.
+    const panelId = manifest.panel.id || manifest.id;
+    if (typeof panelId === "string") add(resolvedBundleTop(`panel/${panelId}.js`), "panel.id");
+  }
+  if (typeof manifest?.panelRoutes === "string") add(resolvedBundleTop(manifest.panelRoutes), "panelRoutes");
   return tops;
 }
 
@@ -475,8 +497,12 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         // Same for Crow's own `.crow-compose.*` bookkeeping (COMPOSE_STATE_PREFIX above) and
         // for whatever path this manifest declares (manifestControl above).
         const top = p.slice(bundleReal.length + 1).split(sep)[0];
-        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || manifestControl.has(top) || top.startsWith(COMPOSE_STATE_PREFIX) || (ctx.shipped && ctx.shipped.has(top)))) {
-          return refuse(`${what}: mounts the bundle's own control files read-write`);
+        if (!readOnly) {
+          if (p === bundleReal || BUNDLE_CONTROL.has(top) || top.startsWith(COMPOSE_STATE_PREFIX) || (ctx.shipped && ctx.shipped.has(top))) {
+            return refuse(`${what}: mounts the bundle's own control files read-write`);
+          }
+          const declaredBy = manifestControl.get(top);
+          if (declaredBy) return refuse(`${what}: mounts '${top}' (declared by ${declaredBy.map((k) => `manifest.${k}`).join(", ")}) read-write`);
         }
         return null;
       }

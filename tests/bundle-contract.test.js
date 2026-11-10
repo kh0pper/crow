@@ -109,6 +109,61 @@ test("panel string is file-checked; panel object is shape-only", () => {
   assert.equal(validateManifest({ ...VALID, panel: { id: "demo", extends: "homepage" } }, missing.dir).ok, true);
 });
 
+// Every path a manifest names is read by the gateway relative to the bundle dir, so an
+// absolute one, one carrying a `\` (an ordinary filename character on Linux) or one that
+// walks out with `..` is refused here — even when the file it points at exists.
+test("declared paths must be plain relative paths inside the bundle", () => {
+  const b = tmpBundle("demo", {
+    "docker-compose.yml": "x",
+    "panel/demo.js": "//",
+    "panel/routes.js": "//",
+    "skills/x.md": "# x",
+    "scripts/hook.sh": "#!/bin/sh",
+  });
+  // The ordinary shape still passes.
+  assert.equal(validateManifest({
+    ...VALID,
+    docker: { composefile: "docker-compose.yml" },
+    panel: "panel/demo.js",
+    panelRoutes: "panel/routes.js",
+    skills: ["skills/x.md"],
+    postInstall: { script: "scripts/hook.sh" },
+  }, b.dir).ok, true);
+  // An object panel's id is a file name (panel/<id>.js): a plain name only.
+  assert.equal(validateManifest({ ...VALID, panel: { id: "gis", extends: "data-dashboard" } }, b.dir).ok, true);
+  for (const id of ["../data/evil", "a/b", "Data", "demo.js"]) {
+    const r = validateManifest({ ...VALID, panel: { id } }, b.dir);
+    assert.equal(r.ok, false, `panel.id ${id}`);
+    assert.ok(r.errors.some((e) => e.startsWith("panel.id ")), r.errors.join("; "));
+  }
+  // Absolute (`/etc/...` really exists on the host), `..`, and `\`.
+  for (const v of ["/etc/docker-compose.yml", "../outside.yml", "deploy/../../x.yml", "deploy\\compose.yml"]) {
+    const r = validateManifest({ ...VALID, docker: { composefile: v } }, b.dir);
+    assert.equal(r.ok, false, `docker.composefile ${v}`);
+    assert.ok(r.errors.some((e) => e.startsWith(`docker.composefile "`) && e.includes("relative path")), r.errors.join("; "));
+  }
+  for (const v of ["/etc/hostname", "../outside.js", "panel/../panel/demo.js", "panel\\demo.js"]) {
+    const r = validateManifest({ ...VALID, panel: v }, b.dir);
+    assert.equal(r.ok, false, `panel ${v}`);
+    assert.ok(r.errors.some((e) => e.startsWith(`panel "`) && e.includes("relative path")), r.errors.join("; "));
+  }
+  for (const v of ["/etc/hostname", "panel/../../x.js", "panel\\routes.js"]) {
+    const r = validateManifest({ ...VALID, panelRoutes: v }, b.dir);
+    assert.equal(r.ok, false, `panelRoutes ${v}`);
+    assert.ok(r.errors.some((e) => e.startsWith(`panelRoutes "`) && e.includes("relative path")), r.errors.join("; "));
+  }
+  for (const v of ["/etc/hostname", "../outside.md", "skills\\x.md"]) {
+    const r = validateManifest({ ...VALID, skills: [v] }, b.dir);
+    assert.equal(r.ok, false, `skill ${v}`);
+    assert.ok(r.errors.some((e) => e.startsWith(`skill "`) && e.includes("relative path")), r.errors.join("; "));
+  }
+  for (const v of ["/etc/hook.sh", "../outside.sh", "scripts\\hook.sh"]) {
+    const r = validateManifest({ ...VALID, postInstall: { script: v } }, b.dir);
+    assert.equal(r.ok, false, `postInstall ${v}`);
+    assert.ok(r.errors.some((e) => e.startsWith(`postInstall.script "`) && e.includes("relative path")), r.errors.join("; "));
+  }
+});
+
 test("requires.bundles existence checked via resolver", () => {
   const { dir } = tmpBundle("demo");
   const m = { ...VALID, requires: { bundles: ["companion"] } };

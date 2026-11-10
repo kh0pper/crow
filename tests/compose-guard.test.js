@@ -918,11 +918,43 @@ test("model: settings-section.js, and the paths a manifest itself declares (comp
   const objectPanel = { ...base, panel: { id: "gis", name: "GIS Map" } };
   assert.equal(c(objectPanel, rw("panel")).valid, false);
   assert.equal(c(objectPanel, rw("data")).valid, true);
-  // The default compose path, and absolute or .. values, name nothing inside the bundle.
+  // Its id is a FILE NAME there (resolvePanelPath: panel/<panel.id || bundle id>.js), so a value
+  // that climbs lands in whatever folder path.join puts it in.
+  const evilPanel = { ...base, panel: { id: "../data/evil" } };
+  assert.equal(c(evilPanel, rw("data")).valid, false);
+  assert.equal(c(evilPanel, ro("data")).valid, true);
+  assert.match(c(evilPanel, rw("data")).reason, /declared by manifest\.panel\.id/);
+  // A string panel is resolved the same way (join(destDir, manifest.panel)).
+  const climbPanel = { ...base, panel: "panel/../data/p.js" };
+  assert.equal(c(climbPanel, rw("data")).valid, false);
+  assert.equal(c(climbPanel, ro("data")).valid, true);
+  assert.match(c(climbPanel, rw("data")).reason, /declared by manifest\.panel\b/);
+  // A declared path is resolved as the gateway resolves it: path.join keeps an absolute value
+  // and a `..` INSIDE the bundle, so both of these are the data/ entry.
+  for (const v of ["panel/../data/x.js", "/data/routes.js"]) {
+    const m = { ...base, panelRoutes: v };
+    assert.equal(c(m, rw("data")).valid, false, v);
+    assert.equal(c(m, ro("data")).valid, true, `${v} ro`);
+  }
+  assert.match(c({ ...base, panelRoutes: "panel/../data/x.js" }, rw("data")).reason, /declared by manifest\.panelRoutes/);
+  assert.match(c({ ...base, panelRoutes: "panel/../data/x.js" }, rw("data")).reason, /mounts 'data'/);
+  // A `\` is an ordinary filename character: the file is the `ui\r.js` entry, not `ui`.
+  const backslashRoutes = { ...base, panelRoutes: "ui\\r.js" };
+  assert.equal(c(backslashRoutes, rw("ui\\r.js")).valid, false);
+  assert.equal(c(backslashRoutes, ro("ui\\r.js")).valid, true);
+  assert.equal(c(backslashRoutes, rw("ui")).valid, true, "the ui folder is not what it names");
+  // docker.composefile is normalised by manifestComposeFile (path.relative(".", v)):
+  // deploy/../data/c.yml is read from data/c.yml.
+  const climbCompose = { ...base, docker: { composefile: "deploy/../data/c.yml" } };
+  assert.equal(c(climbCompose, rw("data")).valid, false);
+  assert.equal(c(climbCompose, ro("data")).valid, true);
+  assert.match(c(climbCompose, rw("data")).reason, /declared by manifest\.docker\.composefile/);
+  // The default compose path, and values that really resolve outside the bundle, name nothing.
   assert.equal(c({ ...base, docker: { composefile: "docker-compose.yml" } }, rw("data")).valid, true);
-  for (const v of ["/etc/compose.yml", "../outside/compose.yml", "${MEDIA}/compose.yml"]) {
+  for (const v of ["/etc/compose.yml", "../outside/compose.yml", "${MEDIA}/compose.yml", "..\\outside\\compose.yml"]) {
     assert.equal(c({ ...base, docker: { composefile: v } }, rw("data")).valid, true, v);
   }
+  assert.equal(c({ ...base, panelRoutes: "../outside/r.js" }, rw("data")).valid, true);
   // A manifest without these fields changes nothing: the bundle's own runtime folder stays writable.
   assert.equal(c(base, rw("data")).valid, true);
 });
