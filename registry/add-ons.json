@@ -749,7 +749,7 @@
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "version": "1.0.3",
+      "version": "1.0.6",
       "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
       "type": "bundle",
       "author": "Crow",
@@ -765,6 +765,9 @@
       "docker": {
         "composefile": "docker-compose.yml"
       },
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "server": {
         "command": "node",
         "args": [
@@ -802,12 +805,13 @@
         },
         {
           "name": "CALIBRE_USERNAME",
-          "description": "HTTP Basic auth username (if auth enabled)",
+          "description": "Calibre login username (Crow creates `admin` at install and writes it here; leave it as `admin`)",
+          "default": "admin",
           "required": false
         },
         {
           "name": "CALIBRE_PASSWORD",
-          "description": "HTTP Basic auth password",
+          "description": "Calibre login password. Crow generates it at install and keeps it in Settings → Passwords.",
           "required": false,
           "secret": true
         }
@@ -821,9 +825,18 @@
         "label": "Calibre"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "CALIBRE_PASSWORD",
+        "userEnv": "CALIBRE_USERNAME",
+        "urlEnv": "CALIBRE_URL"
       },
-      "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to existing Calibre content server (set CALIBRE_URL).",
+      "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to an existing Calibre content server (set CALIBRE_URL). The bundle runs the content server itself with a login required — the desktop app over a web browser is gone — and Crow creates its `admin` account at install, keeping the password in Settings → Passwords. Users made in the old desktop version are not carried over: they lived in the desktop app's own user file, which the content server never reads.",
       "official": true
     },
     {

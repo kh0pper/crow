@@ -52,6 +52,9 @@
     "calibre-server": {
       "CALIBRE_URL": [
         "http://localhost:8081"
+      ],
+      "CALIBRE_USERNAME": [
+        "admin"
       ]
     },
     "calibre-web": {
