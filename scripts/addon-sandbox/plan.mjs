@@ -638,6 +638,10 @@ export function buildAddonPlan(o = {}) {
     // generated `.mcp.json` carries resolved secrets, so it is masked here under
     // the same skips and caps: no add-on reads one through a path bind.
     {
+      // The same caps scanEnvMasks applies to these path-bound trees (its
+      // defaults), so a tree it accepted is walked to the end here too.
+      const secretScanMaxDepth = Number.isInteger(o.secretScanMaxDepth) ? o.secretScanMaxDepth : ENV_SCAN_MAX_DEPTH;
+      const secretScanMaxEntries = Number.isInteger(o.secretScanMaxEntries) ? o.secretScanMaxEntries : ENV_SCAN_MAX_ENTRIES;
       const maskedDirs = new Set(masks.filter(([, k]) => k === "dir").map(([d]) => d));
       const boundDirs = [...ro.keys(), ...rw.keys()].filter((p) => {
         try { return statSync(p).isDirectory(); } catch { return false; }
@@ -652,7 +656,7 @@ export function buildAddonPlan(o = {}) {
           let names = [];
           try { names = readdirSync(at); } catch { return; }
           for (const name of names) {
-            if (++seen > envScanMaxEntries) { capped = true; return; }
+            if (++seen > secretScanMaxEntries) { capped = true; return; }
             const p = join(at, name);
             let st;
             try { st = lstatSync(p); } catch { continue; }
@@ -661,13 +665,18 @@ export function buildAddonPlan(o = {}) {
               continue;
             }
             if (st.isDirectory() && !ENV_SCAN_SKIP.has(name) && !maskedDirs.has(p)) {
-              if (depth >= envScanMaxDepth) { capped = true; return; }
+              if (depth >= secretScanMaxDepth) { capped = true; return; }
               walk(p, depth + 1);
               if (capped) return;
             }
           }
         };
         walk(root, 1);
+        // Fail closed, as the .env scan does: a tree too large to scan is never
+        // bound with a secret file left unmasked somewhere below the cap.
+        if (capped) {
+          throw new ContainRefused(root + " is too large to scan for secret files (cap " + secretScanMaxEntries + " entries / depth " + secretScanMaxDepth + "); refusing to bind it unscanned");
+        }
       }
     }
 

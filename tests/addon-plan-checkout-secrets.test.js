@@ -216,3 +216,6 @@ test("a data dir outside the checkout keeps the data-dir ops exactly as before",
     assert.equal(dbPlan.env.CROW_DB_PATH, join(DATA_OUT, "crow.db"));
   } finally { closePlan(dbPlan); }
 });
+test("a tree too large to scan for .mcp.json is refused, never bound with one left unmasked", () => {
+  assert.throws(() => planOf({ secretScanMaxEntries: 3 }), (err) => err instanceof ContainRefused && /too large to scan for secret files/.test(err.message));
+});

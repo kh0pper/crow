@@ -232,8 +232,9 @@ function realEmitWallFailure(db, eventName, payload) {
 
 /**
  * The folder a failure's paths are shown relative to: the add-on's own install
- * folder, and only when it is one of the two the wall allows. A stored `cwd` is
- * crow.db data, so anything else falls back to the installed copy.
+ * folder, and only when it is one of the two the wall allows. The entry's `cwd`
+ * comes from mcp-addons.json, which unwalled same-user code can edit, so anything
+ * else falls back to the installed copy.
  */
 function wallInstallRoot(id, cwd) {
   const fallback = join(resolveCrowHome(), "bundles", id);

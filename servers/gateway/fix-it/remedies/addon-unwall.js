@@ -20,7 +20,7 @@ import { setWallMode } from "../../../shared/addon-walls-file.js";
 import {
   CARD_DEDUP_PREFIX,
   clearWallFailures,
-  wallFailureByRef,
+  wallFailureByItemId,
 } from "../../../../scripts/addon-sandbox/failures.mjs";
 
 /** The action ids this detector's cards carry. */
@@ -78,19 +78,17 @@ function reconnectNow() {
 }
 
 export default async function addonUnwall(args, ctx) {
-  const ref = args && typeof args.ref === "string" ? args.ref : "";
-  const record = wallFailureByRef(ref);
+  // The record is found by the card the owner clicked (the binding made when the
+  // card was stored), never by the stored args: `args.ref` is crow.db data, and a
+  // late, out-of-order write can leave an older ref there. A card that copied a
+  // ref, or one from another source, answers with the same stale line.
   const item = ctx?.item;
+  const itemId = Number(item?.id);
+  const record = Number.isInteger(itemId) ? wallFailureByItemId(itemId) : null;
   const bound = !!record
-    && Number.isInteger(record.itemId)
+    && record.itemId === itemId
     && record.dedupKey === CARD_DEDUP_PREFIX + record.id;
   if (!record || !bound) return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
-  // The click must come from the card this record was bound to. A card that
-  // copied the ref, or one from another source, answers with the same stale line.
-  const itemId = Number(item?.id);
-  if (!Number.isInteger(itemId) || record.itemId !== itemId) {
-    return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
-  }
   if (item?.source !== "addon-wall" || item?.dedupKey !== record.dedupKey) {
     return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
   }
@@ -118,6 +116,11 @@ export default async function addonUnwall(args, ctx) {
 }
 
 /** "Keep it off": answer the card and change nothing else. */
-export function keepOffRemedy() {
+export function keepOffRemedy(_args, ctx) {
+  // The owner answered: drop the record too, so a card a crow.db writer sets
+  // back to pending can never offer a working unwall again.
+  const itemId = Number(ctx?.item?.id);
+  const record = Number.isInteger(itemId) && ctx?.item?.source === "addon-wall" ? wallFailureByItemId(itemId) : null;
+  if (record) clearWallFailures(record.id);
   return { resolved: true };
 }

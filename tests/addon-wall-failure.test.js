@@ -853,3 +853,36 @@ test("the unwall success flash names the add-on from the live record, and only a
     assert.equal(html.includes("alert(1)"), false);
   }
 });
+// ---- review round 2: the record is found by the clicked card, and "Keep it off" spends it ----
+
+test("a card whose stored ref went stale still unwalls the add-on its bound record names", async () => {
+  const ref = failures.recordWallFailure("browser", "stopped with exit code 3");
+  await fixIt.emitFixIt(db, "addon-wall-failed", { id: "browser", reason: "stopped with exit code 3", ref });
+  const card = await waitForCard("addon-wall:browser");
+  // An out-of-order write left a dead ref in the stored args.
+  const stale = "0".repeat(32);
+  await db.execute({ sql: "UPDATE fix_it_items SET remedies = ? WHERE id = ?", args: [JSON.stringify([{ actionId: "addon-unwall", kind: "instant", args: { ref: stale } }]), card.id] });
+  const reconnected = [];
+  remedyMod._setAddonUnwallDepsForTest({ crowHome: HOME, reconnect: async (id) => { reconnected.push(id); return { ok: true, status: "connected" }; } });
+  const redirected = await clickRemedy(card.id);
+  assert.match(redirected, /flash=fixit_addon_unwalled/);
+  assert.deepEqual(reconnected, ["browser"]);
+});
+
+test("Keep it off spends the record: a card set back to pending can no longer unwall", async () => {
+  const ref = failures.recordWallFailure("browser", "stopped with exit code 3");
+  await fixIt.emitFixIt(db, "addon-wall-failed", { id: "browser", reason: "stopped with exit code 3", ref });
+  const card = await waitForCard("addon-wall:browser");
+  const before = wallsBytes();
+  assert.match(await clickRemedy(card.id, "addon-keep-off"), /flash=fixit_fixed/);
+  assert.equal(failures.wallFailureByItemId(card.id), null, "the record is gone");
+  // A crow.db writer reopens the answered card.
+  await db.execute({ sql: "UPDATE fix_it_items SET status = 'pending' WHERE id = ?", args: [card.id] });
+  const reconnected = [];
+  remedyMod._setAddonUnwallDepsForTest({ crowHome: HOME, reconnect: async (id) => { reconnected.push(id); return { ok: true }; } });
+  assert.match(await clickRemedy(card.id), /flash=fixit_addon_stale/);
+  assert.deepEqual(reconnected, []);
+  const after = wallsBytes();
+  if (before === null) assert.equal(after, null);
+  else assert.deepEqual(after, before, "addon-walls.json is byte-identical");
+});
