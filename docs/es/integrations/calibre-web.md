@@ -37,7 +37,7 @@ Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de Calibre-Web"
 
-Calibre-Web estará disponible en `http://tu-servidor:8083`. Crea una cuenta de administrador inicial a través de la interfaz web en el primer arranque.
+Calibre-Web estará disponible en `http://tu-servidor:8083`. Crow reemplaza la contraseña de administración que trae su imagen por una que genera, y guarda ese inicio de sesión en **Ajustes → Contraseñas**; una instalación anterior a la versión 1.0.4 del bundle conserva la contraseña de fábrica hasta que pulses **Configúralo por mí** en la tarjeta de Extensiones.
 
 ### Opción B: Conectar a Calibre-Web existente
 

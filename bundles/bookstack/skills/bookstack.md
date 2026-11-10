@@ -72,6 +72,7 @@ tools:
 - The search endpoint searches across all content types (pages, chapters, books, shelves)
 - Use markdown format for creating and updating pages when possible
 - BookStack preserves revision history, so updates are non-destructive
+- Crow sets BookStack's admin password at install and keeps it in Settings → Passwords; for an install made before this version, use "Set it up for me" on the Extensions card. Never tell the user to sign in with BookStack's shipped demo login
 - Store the user's frequently used book/chapter IDs in memory for quick access
 
 ## Error Handling

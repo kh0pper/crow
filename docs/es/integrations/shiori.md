@@ -27,14 +27,14 @@ Instala Shiori como un bundle de Crow. Esto ejecuta Shiori en Docker junto a tu 
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Shiori estará disponible en `http://tu-servidor:8086` para la configuración inicial. Las credenciales predeterminadas son `shiori` / `gopher`. Cambia la contraseña inmediatamente después del primer inicio de sesión.
+Shiori estará disponible en `http://tu-servidor:8086`. Crow le da a su cuenta de administración una contraseña que genera y guarda ese inicio de sesión en **Ajustes → Contraseñas**.
 
 ::: warning Mapeo de puertos
 El puerto predeterminado de Shiori (8080) se remapea a **8086** para evitar conflictos con otros servicios.
 :::
 
-::: warning Credenciales predeterminadas
-Cambia la contraseña predeterminada (`shiori` / `gopher`) inmediatamente después del primer inicio de sesión.
+::: warning Contraseña de administración
+Shiori incluye un inicio de sesión de demostración (`shiori` / `gopher`). Crow reemplaza esa contraseña durante la instalación, y el nuevo inicio de sesión está en **Ajustes → Contraseñas**. Una instalación anterior a la versión 1.0.3 del bundle conserva el inicio de sesión de demostración hasta que pulses **Configúralo por mí** en la tarjeta de Extensiones (o guardes allí tu propio inicio de sesión).
 :::
 
 ### Opción B: Conectar a Shiori existente
@@ -88,7 +88,7 @@ volumes:
 
 ### Falló el inicio de sesión
 
-Verifica que el nombre de usuario y la contraseña sean correctos. Si estás usando las credenciales predeterminadas, son `shiori` / `gopher`. Si cambiaste la contraseña en la interfaz web de Shiori, actualiza `SHIORI_PASSWORD` en tu archivo `.env`.
+Verifica que el nombre de usuario y la contraseña sean correctos. El inicio de sesión del bundle de Crow es el que Crow guardó en **Ajustes → Contraseñas** al instalar Shiori. Si cambiaste la contraseña en la interfaz web de Shiori, actualiza `SHIORI_PASSWORD` en tu archivo `.env`.
 
 ### "Conexión rechazada" o tiempo de espera agotado
 

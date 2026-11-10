@@ -1,7 +1,7 @@
 {
   "id": "stirling-pdf",
   "name": "Stirling PDF",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
   "type": "bundle",
   "author": "Crow",
@@ -18,6 +18,12 @@
   ],
   "ports": [8092],
   "webUI": { "port": 8092, "path": "/", "label": "Stirling PDF" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Stirling PDF has no public API suitable for MCP. This bundle ships a panel with an iframe to the web UI and a tiny MCP server with a status check. Stirling 2.x includes a login form by default; create the admin account on first visit. Bound to 127.0.0.1 only."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 120 },
+    "user": "admin",
+    "secretEnv": "STIRLING_ADMIN_PASSWORD"
+  },
+  "notes": "Crow replaces Stirling PDF's shipped admin password with one it generates and saves in Settings → Passwords (a run makes a single sign-in attempt, because failed ones lock the account). Stirling PDF has no public API suitable for MCP. This bundle ships a panel with an iframe to the web UI and a tiny MCP server with a status check. Bound to 127.0.0.1 only."
 }

@@ -37,7 +37,7 @@ Restart the bundle for changes to take effect:
 
 > "Crow, restart the Calibre-Web bundle"
 
-Calibre-Web will be available at `http://your-server:8083`. Create an initial admin account through the web UI on first launch.
+Calibre-Web will be available at `http://your-server:8083`. Crow replaces the admin password its image ships with one it generates, and saves that login in **Settings → Passwords**; an install made before bundle version 1.0.4 keeps the shipped password until you press **Set it up for me** on the Extensions card.
 
 ### Option B: Connect to existing Calibre-Web
 

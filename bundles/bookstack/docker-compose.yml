@@ -14,6 +14,9 @@ services:
       - DB_DATABASE=bookstack
       - DB_USERNAME=bookstack
       - DB_PASSWORD=${BOOKSTACK_DB_PASSWORD:-bookstack}
+      # Laravel refuses to start without an application key; Crow generates one and keeps
+      # it in the bundle's .env (an existing install receives it at its next upgrade).
+      - APP_KEY=${BOOKSTACK_APP_KEY:?Set BOOKSTACK_APP_KEY}
       - APP_URL=${BOOKSTACK_URL:-http://localhost:6875}
     depends_on:
       bookstack-db:

@@ -1,7 +1,7 @@
 {
   "id": "shiori",
   "name": "Shiori",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Simple bookmark manager — save web pages with cached content for offline reading",
   "type": "bundle",
   "author": "Crow",
@@ -21,6 +21,13 @@
   ],
   "ports": [8086],
   "webUI": { "port": 8086, "path": "/", "label": "Shiori" },
-  "firstAdmin": { "mode": "default-login", "user": "shiori", "note": "The default password is in this app's documentation; change it now." },
-  "notes": "Self-host via Docker or connect to an existing Shiori instance. Default credentials are shiori/gopher — change them after first login."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 120 },
+    "user": "shiori",
+    "secretEnv": "SHIORI_PASSWORD",
+    "userEnv": "SHIORI_USERNAME"
+  },
+  "notes": "Crow replaces Shiori's shipped login with a password it generates and saves in Settings → Passwords. Self-host via Docker or connect to an existing Shiori instance."
 }

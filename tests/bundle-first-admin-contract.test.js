@@ -308,7 +308,18 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
   );
   // The apps whose admin Crow creates from a SCRIPT it runs (via "setup"): the password
   // reaches the app on stdin, so the discovery window is closed instead of documented.
-  for (const id of ["frigate", "motioneye", "wallabag", "uptime-kuma", "gitea", "forgejo"]) {
+  for (const id of [
+    "frigate",
+    "motioneye",
+    "wallabag",
+    "uptime-kuma",
+    "gitea",
+    "forgejo",
+    "shiori",
+    "bookstack",
+    "calibre-web",
+    "stirling-pdf",
+  ]) {
     assert.deepEqual(
       { mode: manifests[id]?.firstAdmin?.mode, via: manifests[id]?.firstAdmin?.via, script: manifests[id]?.firstAdmin?.setup?.script },
       { mode: "crow", via: "setup", script: "scripts/first-admin.sh" },
@@ -316,10 +327,18 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
     );
     assert.equal(manifests[id]?.firstAdmin?.note, undefined, `${id}: a crow/setup app has no note to read`);
   }
-  // The documented default logins (shiori ships shiori/gopher).
+  // The four apps that shipped a documented default login (Shiori's shiori/gopher,
+  // BookStack's admin@admin.com/password, Calibre-Web's admin/admin123, Stirling's
+  // admin/stirling): Crow replaces that password now, so the declaration names the account
+  // its script gives the generated one to. The email one is BookStack's.
   assert.deepEqual(
-    { mode: manifests.shiori?.firstAdmin?.mode, user: manifests.shiori?.firstAdmin?.user },
-    { mode: "default-login", user: "shiori" },
+    {
+      shiori: manifests.shiori?.firstAdmin?.user,
+      bookstack: manifests.bookstack?.firstAdmin?.user,
+      "calibre-web": manifests["calibre-web"]?.firstAdmin?.user,
+      "stirling-pdf": manifests["stirling-pdf"]?.firstAdmin?.user,
+    },
+    { shiori: "shiori", bookstack: "admin@localhost.localdomain", "calibre-web": "admin", "stirling-pdf": "admin" },
   );
   // The audit's headline example: uptime-kuma's own setup page. Crow claims the account
   // itself now (via a setup script), so nothing is left for a passer-by to claim.

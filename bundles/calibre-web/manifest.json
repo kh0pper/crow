@@ -1,7 +1,7 @@
 {
   "id": "calibre-web",
   "name": "Calibre-Web",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Web-based ebook reader and library manager for Calibre",
   "type": "bundle",
   "author": "Crow",
@@ -22,6 +22,13 @@
   ],
   "ports": [8083],
   "webUI": { "port": 8083, "path": "/", "label": "Calibre-Web" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys)."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 120 },
+    "user": "admin",
+    "secretEnv": "CALIBRE_WEB_PASSWORD",
+    "userEnv": "CALIBRE_WEB_USERNAME"
+  },
+  "notes": "Crow replaces Calibre-Web's shipped admin password with one it generates and saves in Settings → Passwords. Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys)."
 }

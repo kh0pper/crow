@@ -64,7 +64,7 @@ tools:
 - Shiori caches full page content by default, making pages available offline
 - Cached pages preserve the original content even if the source page changes or goes down
 - The Shiori web UI provides a reader view for cached content
-- Default login credentials are shiori/gopher; remind users to change them
+- Crow sets Shiori's admin password when the bundle is installed and keeps it in Settings → Passwords; for an install made before this version, use "Set it up for me" on the Extensions card. Never tell the user to sign in with Shiori's shipped demo password
 - Store the user's preferred tags in memory for consistent categorization
 - Shiori is ideal for archiving important pages, research, and reference material
 
