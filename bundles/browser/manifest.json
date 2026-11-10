@@ -20,7 +20,7 @@
   "server": {
     "command": "node",
     "args": ["server/index.js"],
-    "envKeys": ["CROW_BROWSER_CDP_PORT", "CROW_BROWSER_VNC_PORT", "CROW_BROWSER_RFB_PORT", "CROW_BROWSER_CONTAINER_NAME", "CROW_BROWSER_DISPLAY"]
+    "envKeys": ["CROW_BROWSER_CDP_PORT", "CROW_BROWSER_VNC_PORT", "CROW_BROWSER_RFB_PORT", "CROW_BROWSER_CONTAINER_NAME", "CROW_BROWSER_DISPLAY", "CROW_BROWSER_PROXY_USER", "CROW_BROWSER_PROXY_PASS"]
   },
   "mcpServers": ["browser", "crow-browser"],
   "desktop": { "path": "vnc.html", "lease": true },
