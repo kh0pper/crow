@@ -526,7 +526,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.6.0",
+      "version": "1.6.1",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -567,6 +567,17 @@
           "CROW_BROWSER_DISPLAY",
           "CROW_BROWSER_PROXY_USER",
           "CROW_BROWSER_PROXY_PASS"
+        ]
+      },
+      "sandbox": {
+        "ownEnvFile": true,
+        "network": {
+          "hosts": [
+            "env:CROW_BROWSER_CDP_URL"
+          ]
+        },
+        "doors": [
+          "browser"
         ]
       },
       "mcpServers": [
@@ -613,6 +624,11 @@
           "name": "CROW_BROWSER_CDP_PORT",
           "description": "Chrome DevTools Protocol port",
           "default": "9222"
+        },
+        {
+          "name": "CROW_BROWSER_CDP_URL",
+          "description": "CDP address the add-on uses when it runs walled (e.g. http://127.0.0.1:9222). Leave empty unless walls are on.",
+          "required": false
         },
         {
           "name": "CROW_BROWSER_VNC_PORT",
@@ -1602,7 +1618,7 @@
     {
       "id": "frigate",
       "name": "Frigate NVR",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
       "type": "bundle",
       "author": "Crow",
@@ -1619,6 +1635,14 @@
       "icon": "phone-video",
       "docker": {
         "composefile": "docker-compose.yml"
+      },
+      "sandbox": {
+        "files": {
+          "write": [
+            "env:FRIGATE_CONFIG_PATH",
+            "env:FRIGATE_MEDIA_PATH"
+          ]
+        }
       },
       "server": {
         "command": "node",
@@ -1731,7 +1755,7 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
       "type": "bundle",
       "author": "Crow",
@@ -2903,7 +2927,7 @@
     {
       "id": "knowledge-base",
       "name": "Knowledge Base",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Multilingual knowledge base — create, manage, and share organized collections of guides and articles with structured resource tracking and verification workflows",
       "type": "mcp-server",
       "author": "Crow",
@@ -2927,6 +2951,9 @@
       },
       "panel": "panel/knowledge-base.js",
       "panelRoutes": "panel/routes.js",
+      "sandbox": {
+        "network": "internet"
+      },
       "skills": [
         "skills/knowledge-base.md"
       ],
@@ -3958,7 +3985,7 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.2.8",
+      "version": "1.2.9",
       "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
@@ -3990,6 +4017,9 @@
       },
       "panel": "panel/media.js",
       "panelRoutes": "panel/routes.js",
+      "sandbox": {
+        "network": "internet"
+      },
       "skills": [
         "skills/media.md"
       ],
@@ -7864,7 +7894,7 @@
     {
       "id": "workspace",
       "name": "Crow Workspace",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "description": "Your own private office on this machine: files, documents you can edit together (ONLYOFFICE), calendars and contacts that sync to your phones, and forms, built on Nextcloud. Tailnet only, never public.",
       "type": "bundle",
       "author": "Crow",
@@ -7900,6 +7930,15 @@
         ],
         "envKeys": [],
         "configureEnv": "envKeys-only"
+      },
+      "sandbox": {
+        "network": {
+          "internet": true,
+          "hosts": [
+            "env:WORKSPACE_NC_INTERNAL_URL",
+            "env:WORKSPACE_OO_INTERNAL_URL"
+          ]
+        }
       },
       "npm_required": true,
       "skills": [
@@ -8007,6 +8046,20 @@
           "propagate": false,
           "pattern": "^[0-9]{2,5}$",
           "pattern_hint": "a port number"
+        },
+        {
+          "name": "WORKSPACE_NC_INTERNAL_URL",
+          "description": "Address Crow's Workspace tools use to reach Nextcloud on this machine. Leave it as it is unless you moved its published port.",
+          "default": "http://127.0.0.1:3070",
+          "required": false,
+          "propagate": false
+        },
+        {
+          "name": "WORKSPACE_OO_INTERNAL_URL",
+          "description": "Address Crow's Workspace tools use to reach the document editor on this machine. Leave it as it is unless you moved its published port.",
+          "default": "http://127.0.0.1:3071",
+          "required": false,
+          "propagate": false
         }
       ],
       "notes": "One Workspace per machine. Uses about 3-5 GB RAM, no GPU. Every internal password is generated at install; you type only the admin password, which setup uses once and then removes. Setup finishes on its own after the containers start (a few minutes on first install). Then open Office in Crow to publish it on your tailnet and set up phones. Includes Crow's Workspace tools (ws_*): the bot edits only what you share with “Crow bot”, every change is a version you can undo, and Office › Quick edit makes small changes from a phone. Uninstalling keeps your files and database in ~/.crow/workspace, the generated secrets, the backup timer and the tailnet addresses; see the Workspace guide for the cleanup commands. 'Delete data' does not remove those files.",

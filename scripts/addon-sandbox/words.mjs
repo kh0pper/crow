@@ -56,6 +56,10 @@ export const NOTICE = Object.freeze({
     en: "Add-ons now run inside walls on this computer",
     es: "Ahora los complementos se ejecutan aislados en este equipo",
   },
+  rolloutOffTitle: {
+    en: "Add-on walls are switched off on this computer",
+    es: "El aislamiento de los complementos está desactivado en este equipo",
+  },
   outsideTitle: {
     en: "Add-on wall settings were changed outside Crow",
     es: "La configuración de aislamiento de complementos se cambió fuera de Crow",

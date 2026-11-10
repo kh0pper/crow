@@ -116,6 +116,53 @@ Here is a more complete example (a bundle with Docker, an MCP server, a panel, a
 | `firstAdmin` | **Yes when there is a `webUI`** | How the app's own first admin is created (see below) — `build-registry` refuses a web UI without it |
 | `notes` | No | Additional notes shown on the Extensions page |
 | `featured` | No | `true` surfaces the add-on in the Extensions page's Featured section (Browse view) |
+| `sandbox` | No | What the MCP server may reach when Crow runs it inside a wall (see below) |
+
+### The sandbox block
+
+When Crow runs your MCP server inside a wall, what it can reach comes from your manifest's `sandbox` block, the values the owner enters, and your compose file. Without the block, an add-on gets the internet and every `*_URL`/`*_HOST`/`*_BASE_URL` field it declares; the block says exactly what it gets instead. The wall is described in [Add-on Walls](../architecture/addon-walls.md).
+
+```json
+{
+  "id": "weather-mcp",
+  "name": "Weather MCP",
+  "version": "1.0.1",
+  "type": "mcp-server",
+  "description": "Forecasts and alerts",
+  "author": "Your Name",
+  "category": "productivity",
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["WEATHER_URL"] },
+  "env_vars": [
+    { "name": "WEATHER_URL", "description": "Weather API base URL", "required": true },
+    { "name": "WEATHER_CACHE_DIR", "description": "Folder of downloaded forecasts", "required": false },
+    { "name": "WEATHER_STATE_FILE", "description": "File of alert thresholds", "required": false },
+    { "name": "WEATHER_TOKEN_FILE", "description": "Token file for the account", "required": false }
+  ],
+  "sandbox": {
+    "network": { "internet": true, "hosts": ["env:WEATHER_URL"] },
+    "files": {
+      "read": ["env:WEATHER_CACHE_DIR"],
+      "write": ["env:WEATHER_STATE_FILE"],
+      "oauthDir": "env:WEATHER_TOKEN_FILE"
+    },
+    "ownEnvFile": true
+  }
+}
+```
+
+| Field | Rule |
+|---|---|
+| `network` | `"none"`, `"internet"`, or `{ "internet": true, "hosts": ["env:NAME", ...] }`. `"internet"` is HTTPS CONNECT on port 443 to public addresses only. |
+| `network.hosts` | `env:` names only — never a literal host. Each field the owner fills in becomes one exact `host:port` entry; a private address is allowed there because the owner typed it. |
+| `doors` | Only your own id's door set, and only if Crow ships one for it. **An add-on cannot name another add-on's doors.** First-party only. |
+| `files.read` | Paths bound read-only. Values are `env:NAME`, and only a value the owner typed is bound. |
+| `files.write` | Paths bound read-write, same rule. |
+| `files.oauthDir` | One `env:NAME` naming a token file. Its folder is bound read-write, so your app can add files beside the token. |
+| `ownEnvFile` | `true` binds your bundle's own `.env` (read-only) on top of the mask that hides every other `.env`. The file must be `<CROW_HOME>/bundles/<id>/.env`, a real file: a symlinked `.env` is refused. |
+
+State folders are not part of this block. A few add-ons keep state directly in the Crow home, and those folder names come from Crow's core table (`ADDON_STATE_DIRS` in `servers/shared/addon-doors.js`), only for a first-party id. A manifest cannot choose one.
+
+Finally, a first-party bundle's policy is read from Crow's own copy of the manifest, not from the installed one. An installed `sandbox` block that differs from it keeps the add-on off with the card "its installed files changed; reinstall it to wall it" — so do not edit the installed copy, and bump `version` when you change the block.
 
 ### `webUI` Field
 
@@ -158,7 +205,7 @@ machine can answer that page on `127.0.0.1` before you do. So a manifest with a
 | `mode` | When | What Crow does |
 |---|---|---|
 | `crow` | Crow can create the admin at install | the password is generated and saved in the keychain |
-| `finish-setup` | the app has its own first-run admin page | shows "Finish <app>'s setup now" (with a link) until the operator presses Done, and rings the bell once |
+| `finish-setup` | the app has its own first-run admin page | shows "Finish &lt;app&gt;'s setup now" (with a link) until the operator presses Done, and rings the bell once |
 | `default-login` | the app ships a documented default login | the same notice, naming the default user |
 | `external` | it connects to an app you already run | nothing: the login is that app's |
 | `none` | no login of its own | nothing |

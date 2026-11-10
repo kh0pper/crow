@@ -31,6 +31,7 @@ import { wallModeOverride } from "../../servers/shared/addon-walls-file.js";
 import { createEgressRelay } from "../pi-bots/pi_egress.mjs";
 import { probePiSandbox, scrubSandboxEnv } from "../pi-bots/pi_sandbox.mjs";
 import { buildSeccompProgram, seccompSupported } from "../pi-bots/pi_seccomp.mjs";
+import { ADDON_WALLS_CODE_DEFAULT, hostWallsDefault, killSwitchOn } from "./host-switch.mjs";
 import { isLoopbackHost } from "./profile.mjs";
 import { wallChildEnv, wallResiduals } from "./wall-env.mjs";
 import { buildAddonPlan } from "./plan.mjs";
@@ -56,19 +57,30 @@ const KILL_SWITCH_REASON = "walls switched off by the operator (CROW_ADDON_WALLS
 const DEFAULT_OFF_REASON = "walls are off on this computer";
 const OWNER_REASON = "your choice";
 
-/** A wall that could not be built: the add-on stays OFF. */
+/** The per-host default when the operator set none (host-switch.mjs owns it). */
+export { ADDON_WALLS_CODE_DEFAULT };
+
+/**
+ * A wall that could not be built: the add-on stays OFF. `code` says WHICH rule
+ * refused it (`installed-changed` today), so a caller can word its card for that
+ * rule; a refusal with no code reads as the plain one.
+ */
 export class AddonWallRefused extends Error {
-  constructor(message) {
+  constructor(message, code = null) {
     super(message);
     this.name = "AddonWallRefused";
+    this.code = typeof code === "string" && code ? code : null;
   }
 }
 
-/** `err` as an AddonWallRefused, keeping a message that already says "add-on refused". */
+/** `err` as an AddonWallRefused, keeping its message and any code it already carries. */
 function asRefused(err) {
   if (err instanceof AddonWallRefused) return err;
   const text = err && typeof err.message === "string" && err.message ? err.message : "the wall could not be built";
-  return new AddonWallRefused(/^add-on refused/.test(text) ? text : "add-on refused: " + text);
+  return new AddonWallRefused(
+    /^add-on refused/.test(text) ? text : "add-on refused: " + text,
+    err && typeof err.code === "string" ? err.code : null,
+  );
 }
 
 /**
@@ -76,8 +88,8 @@ function asRefused(err) {
  *
  * The precedence, from the GATEWAY's env and the wall file only:
  *  1. `CROW_ADDON_WALLS=off` — the operator's kill switch;
- *  2. `CROW_ADDON_WALLS_DEFAULT` is not "walled" — the per-host default, off in
- *     this release;
+ *  2. `CROW_ADDON_WALLS_DEFAULT` is not "walled" — the per-host default; unset
+ *     means the code default (`ADDON_WALLS_CODE_DEFAULT`, off in this release);
  *  3. the owner's `"unwalled"` choice for this id in `addon-walls.json`;
  *  4. walled.
  * A missing, unreadable or corrupt wall file reads as no choice at all, so it
@@ -87,10 +99,10 @@ function asRefused(err) {
  */
 export function addonWallMode({ id, gatewayEnv = process.env, crowHome } = {}) {
   const env = gatewayEnv && typeof gatewayEnv === "object" ? gatewayEnv : {};
-  if (env.CROW_ADDON_WALLS === "off") {
+  if (killSwitchOn(env)) {
     return { mode: "unwalled", reason: KILL_SWITCH_REASON, source: "kill-switch" };
   }
-  if (env.CROW_ADDON_WALLS_DEFAULT !== "walled") {
+  if (hostWallsDefault(env) !== "walled") {
     return { mode: "unwalled", reason: DEFAULT_OFF_REASON, source: "default" };
   }
   let override = null;
@@ -345,8 +357,16 @@ export async function wrapAddonSpawn(o = {}) {
       for (const h of hosts) {
         const port = Number(h.port);
         if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
-        if (isLoopbackHost(h.host)) loopback.push({ port, source: h.source === "owner" ? "owner" : "default" });
-        else if (h.scheme === "http") plainHttpHosts.push({ host: h.host, port });
+        if (isLoopbackHost(h.host)) {
+          // A media add-on's TTS port is the one entry the gateway makes itself:
+          // it keeps that provenance (and the compose project it belongs to) so
+          // the relay can re-check the named exception rather than trust a name.
+          if (h.source === "gateway-tts" && typeof h.ownerProject === "string" && h.ownerProject) {
+            loopback.push({ port, source: "gateway-tts", ownerProject: h.ownerProject });
+          } else {
+            loopback.push({ port, source: h.source === "owner" ? "owner" : "default" });
+          }
+        } else if (h.scheme === "http") plainHttpHosts.push({ host: h.host, port });
         else listed.push({ host: h.host, port });
       }
       relay = createRelay({

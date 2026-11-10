@@ -1,7 +1,7 @@
 {
   "id": "media",
   "name": "Media Hub",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
   "type": "mcp-server",
   "author": "Crow",
@@ -15,6 +15,7 @@
   },
   "panel": "panel/media.js",
   "panelRoutes": "panel/routes.js",
+  "sandbox": { "network": "internet" },
   "skills": ["skills/media.md"],
   "capabilities": {
     "mcp_server_id": "media",

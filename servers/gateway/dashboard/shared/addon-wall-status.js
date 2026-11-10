@@ -14,6 +14,7 @@
 import { piSandboxReasonCode, probePiSandbox } from "../../../../scripts/pi-bots/pi_sandbox.mjs";
 import { SUMMARY, RESIDUAL_LINE, langOf, langText, fillText, wallWord } from "../../../../scripts/addon-sandbox/words.mjs";
 import { escapeHtml } from "./components.js";
+import { hostWallsDefault, killSwitchOn } from "../../../../scripts/addon-sandbox/host-switch.mjs";
 
 /** Test seam: the probe every status surface uses. Null restores the real one. */
 let probeOverride = null;
@@ -87,8 +88,8 @@ export function addonWallWord(entry, { env = process.env } = {}) {
 
   // No record at all: only the operator's switches, then the owner's own file,
   // can free an add-on, so those are the only honest words left.
-  if (env && env.CROW_ADDON_WALLS === "off") return "killSwitch";
-  if (env && env.CROW_ADDON_WALLS_DEFAULT !== "walled") return "hostOff";
+  if (killSwitchOn(env)) return "killSwitch";
+  if (hostWallsDefault(env) !== "walled") return "hostOff";
   return "owner";
 }
 
@@ -115,8 +116,8 @@ export function addonWallStatus({ probe = null, env = process.env, entries = [],
   const backends = list.filter((e) => e.kind === "backend").map((e) => statusRow(e, env, L));
 
   const source = env && typeof env === "object" ? env : {};
-  const killSwitch = source.CROW_ADDON_WALLS === "off";
-  const hostWalled = source.CROW_ADDON_WALLS_DEFAULT === "walled";
+  const killSwitch = killSwitchOn(source);
+  const hostWalled = hostWallsDefault(source) === "walled";
   const probeCode = piSandboxReasonCode(probe || addonWallProbe(), "auto");
 
   let code;

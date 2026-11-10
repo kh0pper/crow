@@ -612,8 +612,14 @@
       "WORKSPACE_ADMIN_USER": [
         "admin"
       ],
+      "WORKSPACE_NC_INTERNAL_URL": [
+        "http://127.0.0.1:3070"
+      ],
       "WORKSPACE_NC_SERVE_PORT": [
         "8456"
+      ],
+      "WORKSPACE_OO_INTERNAL_URL": [
+        "http://127.0.0.1:3071"
       ],
       "WORKSPACE_OO_SERVE_PORT": [
         "8457"

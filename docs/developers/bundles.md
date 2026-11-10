@@ -104,6 +104,62 @@ An add-on's MCP server is a child process of the gateway, and it does **not** in
 
 So a value your server needs from the gateway's `.env` (an API key, a host, a tuning knob) must be declared in the manifest — and so in the registry entry `npm run build-registry` generates from it. `tests/addon-env-declared.test.js` scans every published bundle's `server/` code for environment reads (including a read through a local alias such as `const env = process.env` or a `function f(env = process.env)` parameter) and fails on a key that is neither in the base allowlist nor declared by that bundle's entry nor one of the storage keys its bundle keeps; it also scans the app modules a server `appImport`s, and the few exemptions it carries each name a key that is set somewhere else (for example in the bundle's own `.env`) and say why. While developing a server outside the gateway, `node --import ./scripts/dev/addon-env-read-logger.mjs` with `CROW_ADDON_ENV_ALLOW` set to the keys it should have prints one line per undeclared key it reads (`[addon-env] read of undeclared <KEY>`, never a value).
 
+## The sandbox block
+
+A manifest may say what its MCP server is allowed to reach when Crow runs it inside a wall. Crow derives the add-on's profile from this block, the values the owner entered and the bundle's compose file; the wall itself is described in [Add-on Walls](../architecture/addon-walls.md).
+
+```json
+"sandbox": {
+  "network": { "internet": true, "hosts": ["env:MY_SERVICE_URL"] },
+  "doors": ["my-addon-id"],
+  "files": {
+    "read": ["env:MY_DATA_DIR"],
+    "write": ["env:MY_STATE_FILE"],
+    "oauthDir": "env:MY_TOKEN_FILE"
+  },
+  "ownEnvFile": true
+}
+```
+
+### `network`
+
+| Shape | What the add-on reaches |
+|---|---|
+| `"none"` | Nothing. No internet, no listed host. |
+| `"internet"` | HTTPS CONNECT on port 443 only, to public global-unicast addresses. Never this computer, the LAN or the tailnet. |
+| `{ "internet": true, "hosts": ["env:NAME", ...] }` | The same internet rule, plus one exact `host:port` entry per listed field. A private or LAN address is allowed there because the owner typed it. |
+| omitted | The internet, plus every declared `*_URL`, `*_HOST` or `*_BASE_URL` field that is set — the rule from before this block existed. |
+
+`hosts` holds `env:` names only, never a literal host: the address is whatever the owner enters in that field. Name fields your `env_vars` (or `envKeys`) already declare, so the install form asks for them. A listed field the owner left empty is dropped and reported, and the add-on starts without that host. There are no wildcards, subdomains or port ranges — an entry is the whole permission.
+
+A manifest default is not a choice the owner made. A default address is bound only when it is loopback and names a port this bundle's own compose file publishes on `127.0.0.1` over TCP; a public `https:` default is covered by the internet instead. Anything else is dropped and reported.
+
+### `doors`
+
+A few first-party bundles may talk to the gateway through a door (the kiosk display state, Studio's song hub, the browser container's restart). The door sets live in Crow's core table (`ADDON_DOORS`); a manifest can name its own set but never add one. The example above uses a placeholder id: a `doors` entry only means something for a bundle id Crow ships a set for — `kiosk`, `studio` and `browser` today — and for every other id the field is left out.
+
+**An add-on cannot name another add-on's doors.** A listed door whose name is not the bundle's own id is refused, a door listed for an id Crow ships no set for is refused, and doors are for first-party bundles only. Leave the field out unless you are shipping one of those bundles: an omitted `doors` gives a first-party bundle its own set when one exists, and nothing otherwise.
+
+### `files`
+
+| Field | Meaning |
+|---|---|
+| `files.read` | Paths bound read-only. |
+| `files.write` | Paths bound read-write. |
+| `files.oauthDir` | One path naming a token file. Its **folder** is bound read-write, so the app can add files beside the token. |
+
+Every value is `env:NAME` and only a value the owner typed is bound: a path that is only a manifest default is refused, because it is not a choice the owner made.
+
+State folders are **not** a manifest field. A few add-ons keep state directly in the Crow home, and those folder names come from Crow's core table `ADDON_STATE_DIRS` — keyed by id, only for a first-party bundle. A pattern or a manifest-chosen name would collide with Crow's own home entries.
+
+### `ownEnvFile`
+
+Set `true` to let the add-on read its own `.env`: the file `<CROW_HOME>/bundles/<id>/.env`, bound read-only on top of the mask that hides every other `.env` in the trees the wall binds. The file must be a real file in that folder — a symlinked `.env` names a file the add-on does not own, and is refused.
+
+### Where a first-party bundle's policy comes from
+
+For a bundle that exists in Crow's own checkout, the `sandbox` block, the `env_vars` defaults and the compose ports are read from **the checkout copy**, never from the installed one — unwalled code can write the installed manifest. When the installed manifest's `sandbox` block or defaults differ from the checkout copy, the add-on stays off with the card "its installed files changed; reinstall it to wall it". Editing an installed manifest therefore turns the wall off; it never widens it. A local or third-party bundle has no checkout copy, so its installed manifest is used as it was installed.
+
 ## Voice display phrase lists (`capabilities.voice_intent`)
 
 An add-on whose tools an assistant may use by voice can say which words mean "this request is for me":
@@ -135,7 +191,7 @@ So **a bundle that declares a `webUI` must also declare `firstAdmin`**, and
 | `mode` | Meaning | What Crow does |
 |---|---|---|
 | `crow` | Crow creates the app's first admin at install | the generated password is in the keychain (Settings → Passwords) |
-| `finish-setup` | The app has its own first-run admin/setup page | shows "Finish <app>'s setup now", with a direct link, until the operator presses Done |
+| `finish-setup` | The app has its own first-run admin/setup page | shows "Finish &lt;app&gt;'s setup now", with a direct link, until the operator presses Done |
 | `default-login` | The app ships a documented default login | same notice, naming the default user |
 | `external` | It connects to an app you already run, whose login is that app's (Immich, Kodi) | nothing — there is no account of ours to claim |
 | `none` | The app has no login of its own (a public/anonymous UI, or a viewer whose gate Crow already applies) | nothing |

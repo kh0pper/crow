@@ -58,11 +58,6 @@ const BUNDLES = join(ROOT, "bundles");
 const KNOWN_VIOLATIONS = [
   // tracked: media phase 1 (the analyzer is removed there)
   { bundle: "media", file: "server/ai-analyzer.js", spec: "../../gateway/ai/provider.js", tracked: "media phase 1" },
-  // tracked: funkwhale rework (its owner). Each import sits in a try/catch, so the installed
-  // server starts but runs WITHOUT rate limiting, the moderation queue and notifications.
-  { bundle: "funkwhale", file: "server/server.js", spec: "../../../servers/shared/rate-limiter.js", tracked: "funkwhale rework" },
-  { bundle: "funkwhale", file: "server/server.js", spec: "../../../servers/db.js", tracked: "funkwhale rework" },
-  { bundle: "funkwhale", file: "server/server.js", spec: "../../../servers/shared/notifications.js", tracked: "funkwhale rework" },
 ];
 
 // ---------------------------------------------------------------------------

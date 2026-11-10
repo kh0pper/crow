@@ -285,7 +285,7 @@
       "id": "browser",
       "source": "repo",
       "network": {
-        "internet": true,
+        "internet": false,
         "hosts": []
       },
       "doors": [
@@ -302,12 +302,14 @@
         ]
       },
       "crowDb": false,
-      "ownEnvFile": false,
-      "refused": [],
-      "labelParts": [
+      "ownEnvFile": true,
+      "refused": [
         {
-          "kind": "internet"
-        },
+          "what": "host:CROW_BROWSER_CDP_URL",
+          "reason": "the field CROW_BROWSER_CDP_URL is not set"
+        }
+      ],
+      "labelParts": [
         {
           "kind": "door",
           "id": "browser"
@@ -318,12 +320,10 @@
       ],
       "label": {
         "en": [
-          "use the internet",
           "talk to Crow's browser door",
           "keep files in its own folder"
         ],
         "es": [
-          "usar internet",
           "hablar con la puerta browser de Crow",
           "guardar archivos en su propia carpeta"
         ]
@@ -855,7 +855,16 @@
       },
       "crowDb": false,
       "ownEnvFile": false,
-      "refused": [],
+      "refused": [
+        {
+          "what": "file:FRIGATE_CONFIG_PATH",
+          "reason": "a default path the owner did not choose"
+        },
+        {
+          "what": "file:FRIGATE_MEDIA_PATH",
+          "reason": "a default path the owner did not choose"
+        }
+      ],
       "labelParts": [
         {
           "kind": "internet"
@@ -2916,7 +2925,22 @@
       "source": "repo",
       "network": {
         "internet": true,
-        "hosts": []
+        "hosts": [
+          {
+            "host": "127.0.0.1",
+            "port": 3070,
+            "scheme": "http",
+            "from": "WORKSPACE_NC_INTERNAL_URL",
+            "source": "default-own-service"
+          },
+          {
+            "host": "127.0.0.1",
+            "port": 3071,
+            "scheme": "http",
+            "from": "WORKSPACE_OO_INTERNAL_URL",
+            "source": "default-own-service"
+          }
+        ]
       },
       "doors": [],
       "files": {
@@ -2933,6 +2957,18 @@
           "kind": "internet"
         },
         {
+          "kind": "local-host",
+          "label": "127.0.0.1:3070",
+          "host": "127.0.0.1",
+          "port": 3070
+        },
+        {
+          "kind": "local-host",
+          "label": "127.0.0.1:3071",
+          "host": "127.0.0.1",
+          "port": 3071
+        },
+        {
           "kind": "own-folder"
         },
         {
@@ -2942,11 +2978,15 @@
       "label": {
         "en": [
           "use the internet",
+          "reach 127.0.0.1:3070 on this computer",
+          "reach 127.0.0.1:3071 on this computer",
           "keep files in its own folder",
           "read Crow's stored keys and change its database"
         ],
         "es": [
           "usar internet",
+          "acceder a 127.0.0.1:3070 en este equipo",
+          "acceder a 127.0.0.1:3071 en este equipo",
           "guardar archivos en su propia carpeta",
           "leer las claves guardadas de Crow y cambiar su base de datos"
         ]
