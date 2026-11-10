@@ -9,6 +9,7 @@ import * as store from "../../shared/fix-it/store.js";
 import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
+import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import { recordSuppressedRequest } from "./peer-card-counters.js";
 import { CARD_ACTION_IDS } from "./peer-card-policy.js";
@@ -23,6 +24,7 @@ export function wireFixIt() {
   registry.registerDetector(remoteExposureDetector);
   registry.registerDetector(caddyProxySocketDetector);
   registry.registerDetector(bootGuardDetector);
+  registry.registerDetector(dataBackendReapprovalDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   // N1b-8: the peer-scoped card offers three durations, and each button needs
   // its own actionId (the POST carries only action_id). All three run the same
@@ -35,11 +37,14 @@ export function wireFixIt() {
  * The detectors runBootChecks() drives. A condition no request emits an event for
  * belongs here; the list is exported so the set can be asserted, not grepped.
  */
-export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector]);
+export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector, dataBackendReapprovalDetector]);
 
 /** Build a db-bound store; the bound upsertItem also fires urgent push. */
 function boundStore(db) {
   return {
+    // A boot check that must read a table of its own (data-backend-reapproval)
+    // reaches it through the store it was handed, never through a second client.
+    db,
     upsertItem: async (item) => {
       const r = await store.upsertItem(db, item);
       if (item.severity === "urgent" && r.notify) {
@@ -114,6 +119,10 @@ export async function runBootChecks(db, opts = {}) {
 }
 
 function remedyButton(item, r, req) {
+  // A link entry is navigation only: nothing is posted, so no remedy runs.
+  if (r && typeof r.href === "string" && r.href.startsWith("/") && !r.href.startsWith("//")) {
+    return `<a class="btn btn-secondary" href="${escapeHtml(r.href)}" data-fixit-link>${escapeHtml(r.label || "Open")}</a>`;
+  }
   const gated = r.kind === "confirm" || r.kind === "guided";
   // v1 ships only `instant`. A gated remedy renders disabled with a note so a
   // destructive action can never be a careless one-tap (framework enforces it

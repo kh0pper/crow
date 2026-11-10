@@ -6,11 +6,16 @@
  *   a row in `pending_approval`.
  * - The dashboard owner approves it on the Projects page (session-authed,
  *   CSRF-checked POST). Approval runs the launcher check and stores, in
- *   `approved_ref_sha256`, one SHA-256 over the exact `connection_ref` text
- *   AND the current contents of every non-root-owned file the command line
- *   names (the launcher, and any argument that is an existing file — the
- *   script an interpreter runs).
- * - The gateway starts a row only while that hash still matches: any later
+ *   `approved_ref_sha256`, an HMAC-SHA256 (`hmac1:<hex>`) over one SHA-256 of
+ *   the exact `connection_ref` text AND the current contents of every
+ *   non-root-owned file the command line names (the launcher, and any
+ *   argument that is an existing file — the script an interpreter runs).
+ * - The HMAC key is 32 random bytes in `<CROW_HOME>/secrets/` (see
+ *   data-backend-approval-key.js), never in crow.db: a process that can write
+ *   the row cannot compute an approval for it. The bare-64-hex value older
+ *   versions stored is LEFTOVER, not an approval (isLegacyApproval): those
+ *   rows stay stopped until the owner approves them again.
+ * - The gateway starts a row only while that HMAC still matches: any later
  *   edit of the command, args, env-var names, or of one of those files,
  *   voids the approval. Code fetched at start (npx/uvx packages) and files a
  *   script opens on its own are NOT covered — the page says so.
@@ -21,13 +26,22 @@
  *   table, and project clone bundles carry backend manifests without
  *   inserting them.
  */
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { resolveAddonCommand, checkLauncherArgs, sha256File } from "./resolve-command.js";
 import { buildBotBaseEnv } from "./bot-env.js";
+import { ensureApprovalKey, readApprovalKey } from "./data-backend-approval-key.js";
 
 export const PENDING_STATUS = "pending_approval";
+
+/** The approved value's prefix: `hmac1:<64 hex>`. */
+export const APPROVAL_PREFIX = "hmac1:";
+const KEYED_APPROVAL = /^hmac1:[0-9a-f]{64}$/;
+const BARE_SHA256 = /^[0-9a-f]{64}$/;
+
+/** What the owner is told (and what the row's last_error carries) about an old approval. */
+export const LEGACY_APPROVAL_MESSAGE = "Approved before Crow keyed its approvals; approve it again on the Projects page";
 
 export function refHash(connectionRef) {
   return createHash("sha256").update(String(connectionRef ?? ""), "utf8").digest("hex");
@@ -92,19 +106,52 @@ export function approvalHash(connectionRef, cwd = process.cwd()) {
   return h.digest("hex");
 }
 
-/**
- * True when `row` (an mcp_server data_backends row) is owner-approved as it
- * stands — command line AND pinned file contents. Hashes files: call it at
- * start, never while rendering a page.
- */
-export function isApproved(row) {
-  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
-  return row.approved_ref_sha256 === approvalHash(row.connection_ref);
+/** The stored form of an approval: `hmac1:` + HMAC-SHA256(key, pin). */
+function hmacFor(key, pin) {
+  return APPROVAL_PREFIX + createHmac("sha256", key).update(pin, "utf8").digest("hex");
 }
 
-/** Display only (no file reads): an approval is on record; it is re-checked at start. */
+/**
+ * The keyed approval value for a connection_ref: `hmac1:<hmac>`, or null when
+ * the reference cannot be hashed (a pinned file is gone or unreadable).
+ */
+export function keyedApproval(key, connectionRef) {
+  const pin = approvalHash(connectionRef);
+  if (!pin || !Buffer.isBuffer(key)) return null;
+  return hmacFor(key, pin);
+}
+
+/**
+ * True when `row` (an mcp_server data_backends row) is owner-approved as it
+ * stands — command line AND pinned file contents — under THIS machine's
+ * approval key. Hashes files: call it at start, never while rendering a page.
+ * Never creates the key: a missing (or unreadable) key means no approval is
+ * valid. An old bare-64-hex value is not an approval.
+ */
+export function isApproved(row, { crowHome } = {}) {
+  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
+  if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
+  const key = readApprovalKey({ crowHome });
+  if (!key) return false;
+  const want = keyedApproval(key, row.connection_ref);
+  if (!want) return false;
+  const got = Buffer.from(row.approved_ref_sha256.slice(APPROVAL_PREFIX.length), "hex");
+  const expected = Buffer.from(want.slice(APPROVAL_PREFIX.length), "hex");
+  return got.length === expected.length && timingSafeEqual(got, expected);
+}
+
+/** Display only (no file reads): a keyed approval is on record; it is re-checked at start. */
 export function hasApproval(row) {
-  return !!row && typeof row.approved_ref_sha256 === "string" && row.approved_ref_sha256.length === 64;
+  return !!row && typeof row.approved_ref_sha256 === "string" && KEYED_APPROVAL.test(row.approved_ref_sha256);
+}
+
+/**
+ * Display only: the value is the bare SHA-256 older versions stored, made when
+ * the hash sat in the same row it protects. It proves nothing now — the row is
+ * stopped until the owner approves it again.
+ */
+export function isLegacyApproval(row) {
+  return !!row && typeof row.approved_ref_sha256 === "string" && BARE_SHA256.test(row.approved_ref_sha256);
 }
 
 /** The environment an approved backend starts with: allowlisted basics plus its declared vars. */
@@ -234,10 +281,11 @@ export function verifyBackendLaunch(connRef, opts = {}) {
  * Owner action: approve the row's current connection_ref. `expectedHash` is
  * the hash of the connection_ref the owner was shown (refHash): the approval
  * only lands if the row still carries exactly that text. Runs the launcher
- * check now (it hashes, bounded) and pins file contents.
+ * check now (it hashes, bounded), pins file contents, and keys the result with
+ * this machine's approval key (made if it is not there yet).
  * @returns {Promise<{ ok: boolean, reason?: string }>}
  */
-export async function approveBackend(db, id, expectedHash) {
+export async function approveBackend(db, id, expectedHash, { crowHome } = {}) {
   const { rows } = await db.execute({
     sql: "SELECT id, connection_ref FROM data_backends WHERE id = ? AND backend_type = 'mcp_server'",
     args: [id],
@@ -258,9 +306,20 @@ export async function approveBackend(db, id, expectedHash) {
   if (!launch.ok) return refuse(launch.reason);
   const pin = approvalHash(ref);
   if (!pin) return refuse(`a file it runs cannot be pinned (missing, not a regular file, or over ${MAX_PINNED_FILE_BYTES / (1024 * 1024)} MB)`);
+  // A key that cannot be made means nothing can be approved: without it no
+  // row would ever pass isApproved, so never store an unapprovable value.
+  let key = readApprovalKey({ crowHome });
+  if (!key) {
+    try {
+      key = ensureApprovalKey({ crowHome });
+    } catch {
+      return refuse("Crow could not create its approval key; nothing was approved");
+    }
+  }
+  const value = hmacFor(key, pin);
   await db.execute({
     sql: "UPDATE data_backends SET approved_ref_sha256 = ?, status = 'disconnected', last_error = NULL, updated_at = datetime('now') WHERE id = ?",
-    args: [pin, id],
+    args: [value, id],
   });
   return { ok: true };
 }
@@ -277,10 +336,10 @@ export async function approveBackend(db, id, expectedHash) {
  * the instant between this check and exec.
  * @returns {{ ok: true, command: string, args: string[], envVars: string[] } | { ok: false, reason: string }}
  */
-export function prepareSpawn(row, cwd = process.cwd()) {
+export function prepareSpawn(row, cwd = process.cwd(), { crowHome } = {}) {
   const parsed = parseStoredSpec(row && row.connection_ref);
   if (!parsed.ok) return parsed;
-  if (!isApproved(row)) return { ok: false, reason: "not approved as it stands (its command or a file it runs changed)" };
+  if (!isApproved(row, { crowHome })) return { ok: false, reason: "not approved as it stands (its command or a file it runs changed)" };
   const launch = verifyBackendLaunch(parsed.spec);
   if (!launch.ok) return launch;
   const real = new Map(pinnedFiles(parsed.spec, cwd).map((f) => [f.path, f.real]));

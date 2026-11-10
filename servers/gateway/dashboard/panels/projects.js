@@ -18,7 +18,8 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
-import { approveBackend, revokeBackendApproval, hasApproval, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
+import { approveBackend, revokeBackendApproval, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
+import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { csrfInput } from "../shared/csrf.js";
 import { canOwnProject, assertCanChangeStatus } from "../../../shared/project-lifecycle.js";
 import {
@@ -145,7 +146,7 @@ export default {
         const sep = back.includes("?") ? "&" : "?";
         if (!Number.isInteger(backendId) || backendId <= 0) return res.redirectAfterPost(`${back}${sep}error=backend_not_found`);
         if (action === "approve_backend") {
-          const r = await approveBackend(db, backendId, String(req.body.ref_sha256 || ""));
+          const r = await approveBackend(db, backendId, String(req.body.ref_sha256 || ""), { crowHome: resolveCrowHome() });
           if (!r.ok) return res.redirectAfterPost(`${back}${sep}error=backend_not_approved`);
           import("../../proxy.js").then((m) => m.loadDynamicBackends()).catch(() => {});
         } else {
@@ -785,6 +786,9 @@ export function renderBackendApproval(projectId, b, req = {}) {
   }
   const { command, args, envVars } = parsed.spec;
   const approved = hasApproval(b);
+  // An approval from before approvals were keyed is not one: say so, and offer
+  // the normal Approve button (pressing it writes the new form).
+  const legacyHtml = isLegacyApproval(b) ? `<div style="${warn}">${prose(LEGACY_APPROVAL_MESSAGE)}</div>` : "";
   const csrf = csrfInput(req);
   const btn = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem";
   const hidden = `${csrf}<input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}">`;
@@ -815,6 +819,7 @@ export function renderBackendApproval(projectId, b, req = {}) {
 
   return `<div style="font-size:0.75rem">
     <div>${approved ? "Approved (checked again every time it starts). It runs:" : "Waiting for your approval. It would run:"}</div>
+    ${legacyHtml}
     <div>Command:</div><code style="${code}">${show(command)}</code>
     <div>Arguments (${args.length}), each passed exactly as shown:</div>${argsHtml}
     ${notes.map((n) => `<div style="${warn}">${n}</div>`).join("")}

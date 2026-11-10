@@ -21,7 +21,7 @@ import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-z
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { createDbClient } from "../db.js";
-import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { isApproved, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -504,6 +504,9 @@ export function disconnectDynamicBackend(backendId) {
  */
 export async function loadDynamicBackends() {
   let db;
+  // The key that makes an approval unforgeable lives outside crow.db, under
+  // this instance's home (resolved here, at call time, like every instance path).
+  const crowHome = resolveSharedCrowHome();
   try {
     db = createDbClient();
     const { rows } = await db.execute(
@@ -534,8 +537,24 @@ export async function loadDynamicBackends() {
 
       // Owner approval gate: a registered command runs only after the
       // dashboard owner approved this exact connection_ref (an edit voids it).
-      // The check covers the stored text and the contents of the files it runs.
-      if (!isApproved(row)) {
+      // The check covers the stored text and the contents of the files it runs,
+      // keyed with a secret kept outside crow.db.
+      //
+      // A bare-64-hex value is what older versions stored: recomputable from the
+      // row itself, so a crow.db writer could forge it. It is not an approval;
+      // the row is stopped and the owner is told to approve it again (the value
+      // is left alone: nothing is deleted).
+      if (isLegacyApproval(row)) {
+        if (row.status !== PENDING_STATUS || row.last_error !== LEGACY_APPROVAL_MESSAGE) {
+          await db.execute({
+            sql: "UPDATE data_backends SET status = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?",
+            args: [PENDING_STATUS, LEGACY_APPROVAL_MESSAGE, row.id],
+          });
+        }
+        console.warn(`  [proxy] Backend #${row.id} "${row.name}": approved before approvals were keyed — not started`);
+        continue;
+      }
+      if (!isApproved(row, { crowHome })) {
         const why = hasApproval(row)
           ? "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page"
           : "Waiting for the owner to approve it on the Projects page";
@@ -581,7 +600,7 @@ export async function loadDynamicBackends() {
         args: launch.args,
         envVars: launch.envVars,
         baseEnv: backendEnv([]),
-        preSpawn: () => prepareSpawn(fresh),
+        preSpawn: () => prepareSpawn(fresh, undefined, { crowHome }),
       };
 
       try {
