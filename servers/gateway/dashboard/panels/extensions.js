@@ -15,6 +15,12 @@ import { buildExtensionsHTML } from "./extensions/html.js";
 import { localModelsCounts } from "./extensions/local-models-card.js";
 import { serversClientJS } from "./extensions/servers-client.js";
 import { serversPanelData } from "./extensions/servers-data.js";
+import { isLocalPasswordSessionOn } from "../local-session.js";
+
+// Test-only: stand in for the invite-state read, which logs in to the app's own
+// admin panel (a test has no container). The session gate in front of it still runs.
+let _inviteStatesForTest = null;
+export function _setInviteStatesForTest(fn) { _inviteStatesForTest = fn || null; }
 
 export default {
   id: "extensions",
@@ -84,6 +90,31 @@ export default {
       const { pendingFirstAdminNotices, firstAdminDoneValues, firstAdminAutoResults, firstAdminSavedBundleIds } = await import("../../bundle-first-admin.js");
       const manifests = {};
       for (const id of Object.keys(localInstalled)) manifests[id] = getManifest(id);
+      // Security audit N3-4 phase 2e: an invite-only app's card is decided by what its
+      // OWN admin API reports (accounts + sign-ups). The handler is resolved from the
+      // REVIEWED repo manifest (bundles-config getManifest — the same copy the routes
+      // use), never from the installed manifest, which the bundle's own container can
+      // rewrite; and only the real Vaultwarden bundle may run it. Computing a state
+      // means logging in to the app's admin panel, so it is done on the owner's own
+      // session only; otherwise the card stays "cannot read" (cached ~5 min).
+      let inviteStates = {};
+      try {
+        if (localInstalled.vaultwarden && await isLocalPasswordSessionOn(db, req)) {
+          const { getManifest: getReviewedManifest } = await import("../../bundles-config.js");
+          const { inviteStatesFor } = await import("../../first-admin/vaultwarden-invite.js");
+          const readInviteStates = _inviteStatesForTest || inviteStatesFor;
+          inviteStates = await readInviteStates({
+            installed: localInstalled,
+            manifest: getReviewedManifest("vaultwarden"),
+            db,
+          });
+        }
+      } catch (err) {
+        // No state is the safe direction (the card says it cannot read the app), but
+        // a silent catch hid a broken import once: say so, one line, no secrets.
+        inviteStates = {};
+        console.warn(`[extensions] invite state not computed: ${err?.message ?? err}`);
+      }
       firstAdminPending = pendingFirstAdminNotices({
         installed: localInstalled,
         manifests,
@@ -93,6 +124,7 @@ export default {
         proxyMountFailed: !!getProxyMountFailure(),
         adminSaved: await firstAdminSavedBundleIds(db, manifests),
         autoResults: await firstAdminAutoResults(db),
+        inviteStates,
       });
     } catch { /* no card rather than no page */ }
 

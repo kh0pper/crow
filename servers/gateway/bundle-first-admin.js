@@ -66,6 +66,11 @@ export {
   FIRST_ADMIN_DEFAULT_LOGIN_BODY_KEY,
   FIRST_ADMIN_SETUP_BODY_KEY,
   FIRST_ADMIN_KEPT_BODY_KEY,
+  FIRST_ADMIN_INVITE_CLOSE_BODY_KEY,
+  FIRST_ADMIN_INVITE_CREATE_BODY_KEY,
+  FIRST_ADMIN_INVITE_CREATE_OPEN_BODY_KEY,
+  FIRST_ADMIN_INVITE_BODY_KEY,
+  FIRST_ADMIN_INVITE_SIGNUPS_OPEN_KEY,
   FIRST_ADMIN_SAVED_KEY,
   firstAdminOf,
   firstAdminNeedsOperator,
@@ -75,6 +80,9 @@ export {
   firstAdminLink,
   firstAdminTitle,
   firstAdminBody,
+  firstAdminInviteBody,
+  firstAdminInviteReason,
+  inviteNotice,
   pendingFirstAdminNotices,
 } from "./dashboard/shared/first-admin.js";
 
@@ -84,6 +92,13 @@ export const FIRST_ADMIN_NOTICE_PREFIX = "first_admin_notice:";
 export const FIRST_ADMIN_NOTIFICATION_SOURCE = "bundle-installer";
 /** What Crow's own setup run did for this bundle, at this install (`firstAdmin.via: "setup"`). */
 export const FIRST_ADMIN_AUTO_PREFIX = "first_admin_auto:";
+/**
+ * The address Crow actually invited into this bundle's own admin panel. An
+ * invite-only app's installed `.env` carries an owner email too, but that file is
+ * editable through `POST /bundles/api/env`: only this marker (written here, by
+ * Crow, on a successful invite) says which registered account is the expected one.
+ */
+export const FIRST_ADMIN_INVITED_PREFIX = "first_admin_invited:";
 
 /** The operator pressed Done for this bundle at this install (`<installedAt>`). */
 export const firstAdminDoneKey = (bundleId) => `${FIRST_ADMIN_DONE_PREFIX}${bundleId}`;
@@ -91,6 +106,8 @@ export const firstAdminDoneKey = (bundleId) => `${FIRST_ADMIN_DONE_PREFIX}${bund
 export const firstAdminNoticeKey = (bundleId) => `${FIRST_ADMIN_NOTICE_PREFIX}${bundleId}`;
 /** This bundle's most recent automatic setup outcome (`{install, result}`). */
 export const firstAdminAutoKey = (bundleId) => `${FIRST_ADMIN_AUTO_PREFIX}${bundleId}`;
+/** The address Crow invited into this bundle's admin panel, last time it invited one. */
+export const firstAdminInvitedKey = (bundleId) => `${FIRST_ADMIN_INVITED_PREFIX}${bundleId}`;
 
 /**
  * Every `first_admin_done:<id>` marker, as id → install timestamp. One query;
@@ -122,6 +139,48 @@ async function writeMarker(db, key, value) {
     sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
     args: [key, value, value],
   });
+}
+
+/**
+ * The address Crow last invited into this bundle's own admin panel, or null. Plain
+ * SQL like the other markers; an unreadable table (or no db handed in) is "no
+ * record", which callers must treat as "nothing is expected yet".
+ *
+ * @param {object|null} db libsql-shaped client
+ * @param {string} bundleId
+ * @returns {Promise<string|null>}
+ */
+export async function firstAdminInvitedEmail(db, bundleId) {
+  if (!db || typeof db.execute !== "function" || typeof bundleId !== "string" || !bundleId) return null;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [firstAdminInvitedKey(bundleId)] });
+    const value = String(rows?.[0]?.value ?? "").trim();
+    return value === "" ? null : value;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remember the address an invite really succeeded for (install path or the owner's
+ * own invite route). Written as plain SQL like the Done marker: per install, local
+ * only, no registry entry (`first_admin_*` is in INSTANCE_SCOPE_KEYS). Never throws.
+ *
+ * @param {object|null} db libsql-shaped client
+ * @param {string} bundleId
+ * @param {string} email the address the app accepted
+ * @returns {Promise<boolean>}
+ */
+export async function recordFirstAdminInvite(db, bundleId, email) {
+  if (!db || typeof bundleId !== "string" || !bundleId) return false;
+  const address = typeof email === "string" ? email.trim() : "";
+  if (address === "") return false;
+  try {
+    await writeMarker(db, firstAdminInvitedKey(bundleId), address);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -192,7 +251,8 @@ export async function firstAdminSavedBundleIds(db, manifests = {}) {
     }
     for (const [id, keys] of byBundle) {
       const manifest = manifests ? manifests[id] : null;
-      if (keys.has(firstAdminSavedKey(manifest))) out.add(id);
+      const key = firstAdminSavedKey(manifest);
+      if (key && keys.has(key)) out.add(id);
     }
   } catch {
     return new Set();
@@ -288,6 +348,10 @@ export async function clearFirstAdminNotice(db, bundleId, { nowMs = Date.now(), 
  * @param {string} [o.bundleName]         display name (else the manifest's, else the id)
  * @param {string} [o.installId]          installed.json's installedAt for this install
  * @param {string} [o.autoResult]         runFirstAdminSetup's result for THIS install
+ * @param {{result?: string, signups?: string|null}|null} [o.inviteResult]
+ *        the invite step's outcome for THIS install (an invite-only app): when Crow
+ *        invited the owner's email AND confirmed sign-ups off, there is nothing
+ *        left to claim, so no bell rings.
  * @param {number} [o.nowMs]              clock seam
  * @param {Function} [o.notify]           createNotification-shaped seam (tests)
  * @param {string} [o.lang]               force a language (else the dashboard setting)
@@ -301,12 +365,13 @@ export async function notifyFirstAdmin({
   bundleName = null,
   installId = null,
   autoResult = null,
+  inviteResult = null,
   nowMs = Date.now(),
   notify = createNotification,
   lang = null,
   log = console,
 }) {
-  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult })) return null;
+  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult, inviteResult })) return null;
   const key = firstAdminNoticeKey(bundleId);
   const stamp = typeof installId === "string" && installId ? installId : new Date(nowMs).toISOString();
   try {
@@ -352,15 +417,16 @@ export async function reportFirstAdminNotice({
   bundleName = null,
   installId = null,
   autoResult = null,
+  inviteResult = null,
   dbFactory = createDbClient,
   log = console,
   ...rest
 } = {}) {
   let db = null;
   try {
-    if (!firstAdminNeedsNotice(manifest, { autoResult })) return null;
+    if (!firstAdminNeedsNotice(manifest, { autoResult, inviteResult })) return null;
     db = dbFactory();
-    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, log, ...rest });
+    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, inviteResult, log, ...rest });
   } catch (err) {
     try { log.warn(`[bundles] first-admin notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
     return null;

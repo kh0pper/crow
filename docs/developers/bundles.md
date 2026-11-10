@@ -151,6 +151,7 @@ Optional fields:
 | `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }` |
 | `secretEnv` | with `crow`: the keychain entry name for the admin password — an `env_vars` entry with `generate: "secret"` + `keychain: true` for `via: "env"`, any name for `via: "setup"` |
 | `userEnv` | with `crow`, optional: the `env_vars` entry holding the admin's username |
+| `invite` | with `finish-setup` only: the name of a CODE-HELD invite handler (today: `"vaultwarden"`) — see the next section |
 
 Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`):
 
@@ -170,6 +171,15 @@ Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`)
   `crow`/`via: "setup"` (where the script needs a username to create), and nowhere else.
 - `via`/`secretEnv`/`userEnv` are only allowed with `crow`, and `setup` only with
   `via: "setup"`.
+- `invite` is only allowed with `finish-setup`, and its value must name a handler
+  Crow really ships (`INVITE_HANDLER_NAMES` in
+  `servers/gateway/first-admin/registry.js`). The manifest names code; it never
+  supplies it. Each handler is also bound to the ONE bundle it belongs to
+  (`INVITE_HANDLERS[name].bundleId`): a manifest that merely names it on any other
+  bundle resolves to nothing, so it can never drive that app's admin token. The only
+  value a handler reads from a reviewed manifest is the local port it talks to
+  (`webUI.port`); the operator's email comes from the bundle's own `.env` at install
+  time, never from a manifest.
 - With `crow`/`via: "setup"`, `secretEnv` and `userEnv` must be plain uppercase env
   names (letters, digits and `_`) and must not start with `COMPOSE_`, `DOCKER_` or
   `CROW_` — Crow and Compose reserve those prefixes.
@@ -263,7 +273,8 @@ In the Extensions card, an app whose setup Crow can do itself offers "Set it up 
 me", and every card offers "Save the login you made" (the operator's own username
 and password, saved under the bundle's admin key) — either one clears the card, and
 so does a keychain entry the operator saved by hand. That form never replaces a
-login Crow already keeps; changing one is done in Settings → Passwords.
+login Crow already keeps; changing one is done in Settings → Passwords. (An
+invite-only app's card is different: it has neither form — see below.)
 
 **Prefer `crow` whenever the app can take its admin from the environment or a CLI**
 (Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator
@@ -277,6 +288,66 @@ claimed by the first Plex account that reaches it unless a claim token was set).
 
 Like every other bundle change, a new or edited `firstAdmin` needs a `version`
 bump: the installed copy refreshes only when the version differs.
+
+## Invite-only apps: `firstAdmin.invite`
+
+A few apps can be closed off completely without Crow ever creating an account:
+their own admin API can INVITE an address and stop accepting sign-ups. The one that
+exists today is Vaultwarden, and it is the reason the field exists — Crow can never
+create a usable Vaultwarden account (its vault keys are made in the browser) and the
+admin token's plaintext lives only in Crow's keychain, so this has to run in the
+gateway with a secret in hand:
+
+```json
+"firstAdmin": { "mode": "finish-setup", "invite": "vaultwarden" },
+"env_vars": [
+  { "name": "VAULTWARDEN_SIGNUPS_ALLOWED", "default": "false" },
+  { "name": "VAULTWARDEN_OWNER_EMAIL", "required": false,
+    "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+    "pattern_hint": "an email address like you@example.com" }
+]
+```
+
+What happens, in order:
+
+1. At install, after `compose up` succeeded, the installer waits up to 60 s for the
+   app's `/alive` to answer, then runs the handler: it logs in to the app's admin
+   panel with the token from Crow's keychain, invites the address in the bundle's
+   `.env` (`VAULTWARDEN_OWNER_EMAIL`), and closes sign-ups. Closing reads the app's
+   WHOLE admin settings form and posts all of it back with `signups_allowed` off
+   (Vaultwarden replaces its stored `config.json` with whatever the body holds, so a
+   partial body would wipe SMTP and every other setting), then re-reads the app's
+   state to confirm — a 200 from the app proves nothing on its own. The bundle's
+   `.env` gets `VAULTWARDEN_SIGNUPS_ALLOWED=false` too. One plain sentence lands in
+   the install log. A failed invite NEVER fails the install.
+2. The Extensions card follows the app's own state. A registered account with
+   sign-ups closed shows nothing; sign-ups still open offer **Close sign-ups**; an
+   invited address (and only that: a *disabled* account does not count) with no
+   account yet says to create it; no account at all asks for the email (**Invite my
+   email**); an app Crow cannot read keeps today's card plus one sentence saying why.
+   Accounts registered under addresses other than the one Crow invited are named on
+   the card. That address is recorded in `dashboard_settings`
+   (`first_admin_invited:<id>`, never synced) when an invite succeeds; the editable
+   `.env` is only the install-time input, so changing it hides nobody. With no
+   recorded invite, every registered address is named.
+   **Done** only hides the "Crow could not read the app" card: every state that is a
+   live warning (close / create / invite) shows the card again on the next render,
+   whether or not Done was pressed.
+3. A handler is only ever resolved from the frozen `INVITE_HANDLERS` map
+   (`servers/gateway/first-admin/vaultwarden-invite.js`), and only for the bundle it
+   is bound to (`inviteHandlerFor(manifest, bundleId)`); the manifest is always the
+   REVIEWED one (`bundles-config.getManifest`), never `~/.crow/bundles/<id>/manifest.json`.
+   Handlers talk to `http://127.0.0.1:<webUI.port of the reviewed manifest>` and
+   nothing else: `VAULTWARDEN_URL` in the installed `.env` is ignored for admin
+   calls, because that file is writable through `POST /bundles/api/env`.
+   The app's admin cookie is kept in memory and reused while it works, because
+   Vaultwarden rate-limits admin logins; a 429 reads as `rate-limited` in the card
+   and in the action's answer.
+
+A keychain entry named by a handler as its ADMIN-PANEL token (e.g.
+`VAULTWARDEN_ADMIN_TOKEN`) is never treated as "the app's login": it does not hide
+the card (`firstAdminSavedKey` returns null for it). The app's own state is the
+signal.
 
 ## Draft / unpublished
 
