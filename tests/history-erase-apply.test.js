@@ -37,6 +37,7 @@ import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
 import { withWriteContext } from "../servers/shared/history/write-context.js";
 import {
   applyRemoteErasure,
+  clampPeerEraseLamport,
   eraseLiveRowStatements,
   isErased,
   PENDING_REMOTE_ERASURES_TABLE,
@@ -292,6 +293,89 @@ test("on a store with no history the tombstone is still written (and the live ro
 /** The scope key a context section's tombstone is recorded under (erasureKeys). */
 const scopeKey = (sectionKey, { deviceId = null, projectUuid = null } = {}) =>
   JSON.stringify({ section_key: sectionKey, device_id: deviceId, project_uuid: projectUuid });
+
+test("a peer-supplied erase lamport is clamped to what this instance has seen from that peer", async () => {
+  const fx = fixture("hist-erase-clamp-");
+  const { db } = fx;
+  try {
+    // This store's counter is at 10, and it has seen lamport 30 written by the peer.
+    await db.execute("INSERT INTO sync_state (instance_id, local_counter) VALUES ('inst-clamp', 10)");
+    await db.execute({
+      sql: "INSERT INTO memories (content, instance_id, lamport_ts) VALUES ('from the peer', 'remote-clamp', 30)",
+      args: [],
+    });
+
+    // A peer may not assert a bound beyond the furthest moment this instance has
+    // seen it reach (+1): otherwise an erase carrying lamport 9e6 would refuse
+    // every future write for that id, from everyone, forever.
+    assert.equal(await clampPeerEraseLamport(db, 9_000_000, "remote-clamp"), 31);
+    // A value at or below the ceiling is kept as sent.
+    assert.equal(await clampPeerEraseLamport(db, 12, "remote-clamp"), 12);
+
+    // The apply writes the CLAMPED value into erase_lamport.
+    const outcome = await applyRemoteErasure(
+      db,
+      { itemType: "memory", keys: ["77"], items: [{ itemId: null }] },
+      { ...ERASE_META, originInstance: "remote-clamp", eraseLamport: 9_000_000 },
+    );
+    assert.equal(outcome.tombstones, 1);
+    const bound = (await db.execute({
+      sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = '77'",
+      args: [],
+    })).rows[0].erase_lamport;
+    assert.equal(Number(bound), 31, "the tombstone carries the clamp, not the peer's claim");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a queued inbound erase carries only the tombstone keys and the lamport, and the sweep re-resolves it with the same protection", async () => {
+  const fx = fixture("hist-erase-queue-shape-");
+  const { db } = fx;
+  try {
+    // A starter memory in this instance's Trash: a peer's erase names its id (memory
+    // ids are per-instance AUTOINCREMENT), and the protection must hold on the retry
+    // too — the queue is not allowed to be a weaker door than the apply.
+    const starter = await insertMemory(db, "a starter demo", { source: "starter" });
+    await withWriteContext(OWNER, () => db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [starter] }));
+    assert.equal(await versionCount(db, starter), 2, "insert + delete, in this instance's Trash");
+
+    // The state a failed apply leaves behind: a tombstone and a marker holding the
+    // KEYS and the LAMPORT only.
+    await db.execute(`CREATE TABLE IF NOT EXISTS ${PENDING_REMOTE_ERASURES_TABLE} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))`);
+    await db.execute({
+      sql: `INSERT INTO ${PENDING_REMOTE_ERASURES_TABLE} (item_type, payload_json) VALUES (?, ?)`,
+      args: [
+        "memory",
+        JSON.stringify({
+          itemType: "memory",
+          keys: [String(starter)],
+          originInstance: "remote-queued",
+          by: "owner:remote-owner",
+          lamport: 500,
+          at: new Date().toISOString(),
+        }),
+      ],
+    });
+    assert.equal(await markerCount(db), 1);
+
+    // The sweep resolves the keys again, sees the local-only source, and does
+    // nothing: no version erased, no tombstone written for the protected item.
+    const swept = await sweep(db, { syncManager: null });
+    assert.equal(swept.pendingErased, 1, "the marker was finished (there was nothing legitimate to do)");
+    assert.equal(await markerCount(db), 0, "and cleared");
+    assert.equal(await versionCount(db, starter), 2, "the local-only item keeps its history");
+    assert.equal(await isErased(db, "memory", String(starter)), false, "and it is not tombstoned by the queue");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
 
 test("a retried inbound erase never deletes a section edited after the erase", async () => {
   const fx = fixture("hist-erase-retry-newer-");

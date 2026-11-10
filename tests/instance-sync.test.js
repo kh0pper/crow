@@ -2397,7 +2397,7 @@ test("E9. a summary memory's erase is routed by its source, never by the sender'
   }
 });
 
-test("E10. with erase sync OFF here, an inbound erase is logged and only a bounded tombstone is written", async () => {
+test("E10. with erase sync OFF here, an inbound erase is logged and NOTHING is written for it", async () => {
   await ensureHistorySchema();
   const INST = "inst-e10";
   const REMOTE = "remote-e10";
@@ -2425,15 +2425,22 @@ test("E10. with erase sync OFF here, an inbound erase is logged and only a bound
 
     assert.equal(await memoryExists(db, 9810), true, "no live row is deleted when this instance has not opted in");
     assert.equal(await historyCount(db, "memory", 9810), 2, "and no version is erased");
-    const tombs = await tombstoneRows(db, "memory", "9810");
-    assert.equal(tombs.length, 1, "the event is still acknowledged with a tombstone");
+    // NOTHING IS WRITTEN: not even a tombstone. A tombstone would be a refusal this
+    // instance never agreed to — it would gate its own restores and refuse the
+    // peer's later writes for that id, for an erase it did not apply.
+    assert.deepEqual(await tombstoneRows(db, "memory", "9810"), [], "no tombstone is written for it");
+
+    // And there is no restore gate: the peer's later write for that id still lands.
+    feed.push(signEntry({
+      table: "memories", op: "update",
+      row: { id: 9810, content: "the peer's later edit", lamport_ts: null },
+      lamport_ts: 8, instance_id: REMOTE,
+    }));
+    await mgr._processNewEntries(REMOTE, feed);
     assert.equal(
-      Number((await db.execute({
-        sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = '9810'",
-        args: [],
-      })).rows[0].erase_lamport),
-      7,
-      "bounded to the erase's lamport, so a later write that post-dates it still lands",
+      (await db.execute({ sql: "SELECT content FROM memories WHERE id = 9810", args: [] })).rows[0].content,
+      "the peer's later edit",
+      "a receiver that has not opted in keeps taking the peer's writes for that item",
     );
   } finally {
     await db.execute({
@@ -2494,6 +2501,53 @@ test("E11. an erase whose apply throws before the transaction still tombstones a
     );
   } finally {
     // This file shares one DB: do not leave the marker for another case to trip on.
+    await db.execute({ sql: "DELETE FROM pending_remote_erasures", args: [] });
+    db.close();
+  }
+});
+
+test("E12. the failed-apply fallback is not a way round the local-only protection", async () => {
+  await ensureHistorySchema();
+  const INST = "inst-e12";
+  const REMOTE = "remote-e12";
+  const { mgr, db } = makeManager(INST);
+  try {
+    // A Maker Lab learner record under an id the peer also uses. Memory ids are
+    // per-instance AUTOINCREMENT, so the peer's erase must never reach it — and
+    // the FALLBACK (taken when the apply throws) must not reach it either: it runs
+    // the same protection before it writes anything.
+    await db.execute({
+      sql: "INSERT INTO memories (id, category, content, source, lamport_ts) VALUES (9812, 'general', 'a learner record', 'maker-lab', 5)",
+      args: [],
+    });
+
+    const realApply = mgr._applyErase.bind(mgr);
+    mgr._applyErase = async () => {
+      throw new Error("simulated pre-apply failure");
+    };
+    const feed = makeStubFeed();
+    feed.push(signEntry({
+      table: "memories", op: "erase",
+      row: { id: 9812, erased_at: "2026-11-10T00:00:00.000Z", erased_by: "owner:abcd1234" },
+      lamport_ts: 9_000, instance_id: REMOTE,
+    }));
+    try {
+      await mgr._processNewEntries(REMOTE, feed);
+    } finally {
+      mgr._applyErase = realApply;
+    }
+
+    assert.equal(await memoryExists(db, 9812), true, "the local-only memory is still here");
+    assert.deepEqual(await tombstoneRows(db, "memory", "9812"), [], "no tombstone is written for it");
+    assert.equal(
+      Number((await db.execute({
+        sql: "SELECT COUNT(*) AS n FROM pending_remote_erasures WHERE payload_json LIKE '%9812%'",
+        args: [],
+      })).rows[0].n),
+      0,
+      "and nothing is queued for the sweep to finish either",
+    );
+  } finally {
     await db.execute({ sql: "DELETE FROM pending_remote_erasures", args: [] });
     db.close();
   }

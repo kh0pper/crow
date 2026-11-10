@@ -282,7 +282,16 @@ test("erasing a starter or maker-lab memory sends nothing to the peer", async ()
       { syncManager: a.mgr },
     );
     assert.equal(gated.emitted, 0, "with the setting off, no erase event leaves the host");
-    assert.equal(gated.eraseLamport, null, "and the tombstone is unbounded");
+    assert.equal(gated.eraseLamport, null, "and there is no event lamport to report");
+    // The item SYNCS and nothing was announced, so its tombstone is UNBOUNDED (the
+    // operator's ruling, 2026-11-10): erased stays erased here, and the peer's copy
+    // simply stays on the peer.
+    const boundOf = async (itemId) =>
+      (await a.db.execute({
+        sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'memory' AND item_id = ?",
+        args: [String(itemId)],
+      })).rows[0]?.erase_lamport;
+    assert.equal(await boundOf(98), null, "the unannounced erase of a syncing item is unbounded");
     await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [99, "a trailing marker"]);
     await a.mgr.emitChange("memories", "insert", { id: 99, content: "a trailing marker", lamport_ts: null });
     assert.ok(await until(async () => (await hasMemory(b.db, 99)) !== null), "the feed drained past it");
@@ -319,6 +328,12 @@ test("erasing a starter or maker-lab memory sends nothing to the peer", async ()
     );
     assert.ok(await isErased(a.db, "memory", "95"), "locally, the starter erase is still tombstoned");
     assert.ok(await isErased(a.db, "memory", "96"), "and the Maker Lab one too");
+    // Neither of those ever syncs, so there is no peer write to refuse and their
+    // tombstones may stay counter-bounded (the tight bound).
+    for (const id of [95, 96]) {
+      const bound = await boundOf(id);
+      assert.ok(Number.isFinite(Number(bound)), `memory/${id} never syncs, so its tombstone keeps the counter (got ${bound})`);
+    }
 
     // 3. And a Maker Lab LEARNER erase is never announced, whatever the item says.
     await insert(97, "a memory a learner erase takes");
@@ -336,6 +351,7 @@ test("erasing a starter or maker-lab memory sends nothing to the peer", async ()
     assert.ok(await hasMemory(b.db, 97), "the peer's copy of the learner's memory is untouched");
     assert.deepEqual(await tombstoneKeys(b.db), ["memory:94"], "and no tombstone was learned for it");
     assert.equal(await isErased(a.db, "memory", "97"), true, "while it IS erased (and tombstoned) here");
+    assert.equal(await boundOf(97), null, "and its tombstone is unbounded: the item syncs and nothing was announced");
   } finally {
     link?.close();
     await fleet.cleanup();
@@ -499,9 +515,9 @@ test(
   },
 );
 
-/* ------------------- an UNANNOUNCED erase is still bounded (review item 1) */
+/* ------------ an UNANNOUNCED erase is UNBOUNDED (the operator's ruling) ----- */
 
-test("with erase sync off, a section re-created after its name was erased syncs from the peer", async () => {
+test("with erase sync off, an erased section refuses later peer writes for that name", async () => {
   const fleet = await makeFleet();
   let link;
   try {
@@ -531,8 +547,10 @@ test("with erase sync off, a section re-created after its name was erased syncs 
       "the peer received the delete",
     );
 
-    // A's Trash period passes. Erase emission is OFF (the default), so the erase is
-    // LOCAL-ONLY — and it must still bound its tombstone, to A's own counter.
+    // A's Trash period passes. Erase emission is OFF (the default), so no erase
+    // event leaves A — and THE ITEM SYNCS, so its tombstone is UNBOUNDED (the
+    // operator's ruling, 2026-11-10): the peers were told nothing, so "erased" has
+    // to mean erased here for good.
     const swept = await sweep(a.db, {
       now: new Date(Date.now() + 40 * 86_400_000),
       trashDays: 30,
@@ -544,19 +562,32 @@ test("with erase sync off, a section re-created after its name was erased syncs 
       sql: "SELECT erase_lamport FROM item_erasures WHERE item_type = 'context_section'",
       args: [],
     })).rows[0];
-    assert.ok(
-      Number.isFinite(Number(bound?.erase_lamport)),
-      `the unannounced erase is still bounded (got ${JSON.stringify(bound)})`,
-    );
+    assert.ok(bound, "the tombstone is there");
+    assert.equal(bound.erase_lamport, null, "and it is UNBOUNDED: an unannounced erase refuses every later write");
 
-    // B writes a genuinely NEW section under that name, AFTER the erase: its lamport
-    // is above the tombstone's bound, so A accepts it instead of refusing it forever.
+    // B writes a section under that name, AFTER the erase. A refuses it: the erased
+    // name stays erased here, and B's copy simply stays on B (the accepted cost of
+    // the ruling). This is the case that used to sync in, when an unannounced erase
+    // was bounded to the local counter.
     await writeLocal(b.db, "INSERT INTO crow_context (section_key, section_title, content) VALUES ('reborn-section', 'A new section', 'new body')");
     await b.mgr.emitChange("crow_context", "insert", wire("new body"));
+    await writeLocal(b.db, "INSERT INTO crow_context (section_key, section_title, content) VALUES ('marker-section', 'Marker', 'the feed drained')");
+    await b.mgr.emitChange("crow_context", "insert", {
+      section_key: "marker-section", section_title: "Marker", content: "the feed drained",
+      sort_order: 2, enabled: 1, device_id: null, lamport_ts: null,
+    });
     assert.ok(
-      await until(async () => (await sectionContent(a.db, "reborn-section")) === "new body"),
-      "a section re-created after its name was erased syncs from the peer",
+      await until(async () => (await sectionContent(a.db, "marker-section")) === "the feed drained"),
+      "the feed drained past the re-created section",
     );
+    await sleep(300);
+
+    assert.equal(
+      await sectionContent(a.db, "reborn-section"),
+      null,
+      "with erase sync off, an erased section refuses later peer writes for that name",
+    );
+    assert.equal(await sectionContent(b.db, "reborn-section"), "new body", "the peer's copy stays on the peer");
   } finally {
     link?.close();
     await fleet.cleanup();

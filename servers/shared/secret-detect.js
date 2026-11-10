@@ -4,7 +4,9 @@
  * replace it with "[secret removed]" before the bot sees it.
  *
  * Three rules:
- *   - known key prefixes: the public-hygiene guard's SECRET_PATTERNS, one source of truth;
+ *   - known key prefixes: SECRET_PATTERNS from servers/shared/history/secret-patterns.js —
+ *     the same list the public-hygiene guard and the history sweep use, one source of truth;
+ *     (a runtime module; the CI script imports IT, never the other way round);
  *   - "password: …" phrasing: the value after a password/secret/token/api key label and ":",
  *     "=" or " is " (the "is" form only when the value holds a digit);
  *   - high-entropy tokens: each "/"-separated segment of a key-character run, outside any URL
@@ -16,10 +18,9 @@
  *
  * Pure functions, no I/O. False negatives are expected (that is why the card exists); false
  * positives have the composer's "It's not a secret" escape. `detectorSource()` hands the same
- * rules to the client as { source, flags } pairs, since the hygiene module itself imports
- * node-only modules.
+ * rules to the client as { source, flags } pairs.
  */
-import { SECRET_PATTERNS } from "../../scripts/check-public-hygiene.mjs";
+import { SECRET_PATTERNS } from "./history/secret-patterns.js";
 
 export const SECRET_REMOVED = "[secret removed]";
 

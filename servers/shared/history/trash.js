@@ -71,12 +71,48 @@ export function normalizeTrashDays(days) {
 }
 
 /**
+ * The Trash listing SQL, with the presence or absence of the age filter chosen.
+ *
+ * "The item's newest delete, and nothing newer than it" is exactly "the item's
+ * LATEST version is a delete": if the newest version is not a delete, the newest
+ * delete is older and the anti-join fails it.
+ *
+ * Exported so a test can EXPLAIN the very statement the page runs (and assert it
+ * stays on the Trash index) without keeping a second copy of the query.
+ *
+ * @param {{before?: string|null}} [opts]
+ * @returns {string}
+ */
+export function trashEntriesSql({ before = null } = {}) {
+  const ageFilter = typeof before === "string" && before !== "" ? " AND v.created_at <= ?" : "";
+  return `SELECT v.item_type, v.item_id, v.op, v.created_at, v.author_kind, v.author_id,
+                 v.job_id, v.origin_instance, v.redacted, v.snapshot_json
+            FROM (
+              SELECT item_type, item_id, MAX(id) AS delete_id
+                FROM item_versions
+               WHERE op = 'delete'
+               GROUP BY item_type, item_id
+            ) d
+            JOIN item_versions v ON v.id = d.delete_id
+           WHERE NOT EXISTS (
+                   SELECT 1 FROM item_versions newer
+                    WHERE newer.item_type = d.item_type
+                      AND newer.item_id = d.item_id
+                      AND newer.id > d.delete_id
+                 )${ageFilter}
+           ORDER BY d.delete_id DESC
+           LIMIT ?`;
+}
+
+/**
  * The items whose LATEST version is a `delete`, newest deletion first.
  *
- * One indexed pass over item_versions: the inner query picks each item's newest
- * version id (idx_item_versions_item), the outer one keeps the deletes. `before`
- * is an ISO timestamp: only deletions at or before it (the sweep's and
- * emptyTrash's age filter).
+ * One pass over the Trash INDEX (0024's `idx_item_versions_deletes`, a partial index
+ * on (item_type, item_id, id) WHERE op = 'delete'): the inner query groups the deletes
+ * by item and takes each item's newest delete id — an index-only scan, no table read
+ * for the rows the Trash does not list — and the anti-join then keeps the ones with
+ * NO newer version at all (idx_item_versions_item). `before` is an ISO timestamp:
+ * only deletions at or before it (the sweep's and emptyTrash's age filter).
  *
  * Exported because the sweep needs the same definition of "in the Trash" that the
  * Trash page shows — one query, two callers, no chance of the two drifting.
@@ -90,29 +126,13 @@ export function normalizeTrashDays(days) {
  */
 export async function trashEntries(db, { before = null, limit = MAX_TRASH_ROWS } = {}) {
   const args = [];
-  let ageFilter = "";
   if (typeof before === "string" && before !== "") {
     // `<=`, not `<`: an age filter of 0 days means "everything deleted up to now",
     // and a deletion recorded in the same millisecond as the call is still that.
-    ageFilter = " AND v.created_at <= ?";
     args.push(before);
   }
   args.push(normalizeLimit(limit));
-  const { rows } = await db.execute({
-    sql: `SELECT v.item_type, v.item_id, v.op, v.created_at, v.author_kind, v.author_id,
-                 v.job_id, v.origin_instance, v.redacted, v.snapshot_json
-            FROM item_versions v
-           WHERE v.op = 'delete'${ageFilter}
-             AND NOT EXISTS (
-               SELECT 1 FROM item_versions newer
-                WHERE newer.item_type = v.item_type
-                  AND newer.item_id = v.item_id
-                  AND newer.id > v.id
-             )
-           ORDER BY v.id DESC
-           LIMIT ?`,
-    args,
-  });
+  const { rows } = await db.execute({ sql: trashEntriesSql({ before }), args });
   return rows.map((row) => ({
     itemType: row.item_type,
     itemId: String(row.item_id),

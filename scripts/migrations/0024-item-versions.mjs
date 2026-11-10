@@ -82,6 +82,7 @@ import { performance } from "node:perf_hooks";
 import {
   COVERED,
   ITEM_VERSIONS_ERASE_DDL,
+  ITEM_VERSIONS_TRASH_INDEX_SQL,
   SECRET_COLUMN,
   guardTriggerSql,
   projectRefExpr,
@@ -150,6 +151,7 @@ export const ITEM_VERSIONS_DDL =
   CREATE INDEX IF NOT EXISTS idx_item_versions_project
     ON item_versions(project_ref);
 ` +
+  ITEM_VERSIONS_TRASH_INDEX_SQL +
   ITEM_VERSIONS_ERASE_DDL +
   "\n" +
   guardTriggerSql().join(";\n") +
@@ -219,7 +221,7 @@ export function run({ dbPath, log = () => {} }) {
       db.exec("CREATE INDEX IF NOT EXISTS idx_item_versions_project ON item_versions(project_ref)");
       log("  item_versions: added project_ref (an earlier build predated it)");
     }
-    log("  item_versions: ensured (table, 3 indexes, append-only guards, erase control)");
+    log("  item_versions: ensured (table, 4 indexes, append-only guards, erase control)");
 
     const unready = [];
     for (const [itemType, spec] of Object.entries(COVERED)) {

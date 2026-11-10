@@ -44,6 +44,7 @@ import { resolveDbPath } from "../../db.js";
 import {
   COVERED,
   ITEM_VERSIONS_ERASE_DDL,
+  ITEM_VERSIONS_TRASH_INDEX_SQL,
   guardTriggerDefs,
   tableColumns,
   triggerDefs,
@@ -52,6 +53,9 @@ import { ITEM_ERASURES_DDL, PENDING_ERASURES_DDL, PENDING_REMOTE_ERASURES_DDL } 
 
 const tableExists = (db, table) =>
   Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+
+const indexExists = (db, index) =>
+  Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(index));
 
 const columnsOf = (db, table) =>
   new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
@@ -90,8 +94,9 @@ const hasBaseline = (db, itemType, recorded) =>
 /**
  * Re-create every missing history trigger on one open crow.db.
  *
- * Also ensures the tombstone table (item_erasures) and disarms a stuck erase
- * switch; neither is a trigger, so neither appears in `restored`.
+ * Also ensures the tombstone table (item_erasures), the two local bookkeeping tables
+ * beside it, the Trash listing's partial index, and disarms a stuck erase switch;
+ * none of those is a trigger, so none appears in `restored`.
  *
  * @param {import("better-sqlite3").Database} db
  * @returns {{restored: string[], skipped: string[], awaitingBaseline: string[],
@@ -149,6 +154,12 @@ export function ensureHistoryTriggers(db) {
   // it again), and both IF NOT EXISTS.
   if (!tableExists(db, "pending_erasures")) db.exec(PENDING_ERASURES_DDL);
   if (!tableExists(db, "pending_remote_erasures")) db.exec(PENDING_REMOTE_ERASURES_DDL);
+
+  // The Trash listing's partial index (the same unreleased 0024 revision as the two
+  // tables above): the listing is planned onto it, so a dev store that recorded an
+  // earlier build of the migration must pick it up here rather than keep a
+  // full-table plan forever. IF NOT EXISTS, so a healthy store is a no-op.
+  if (!indexExists(db, "idx_item_versions_deletes")) db.exec(ITEM_VERSIONS_TRASH_INDEX_SQL);
 
   // A switch still armed at boot belongs to an erase transaction that never
   // committed; leaving it on would let anything rewrite history without the

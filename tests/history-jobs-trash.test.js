@@ -27,7 +27,7 @@ import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
 import { withWriteContext } from "../servers/shared/history/write-context.js";
 import { undoJob, UNDO_REASONS } from "../servers/shared/history/jobs.js";
 import { listVersions, restoreVersion } from "../servers/shared/history/api.js";
-import { emptyTrash, listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
+import { emptyTrash, listTrash, restoreFromTrash, trashEntriesSql } from "../servers/shared/history/trash.js";
 import { eraseItems, isErased } from "../servers/shared/history/erase.js";
 import { sweep, COALESCE_WINDOW_MS } from "../servers/shared/history/sweep.js";
 
@@ -223,6 +223,35 @@ test("an owner edit to one of them after the job leaves skipped holding exactly 
   }
 });
 
+test("the Trash listing runs on the partial delete index (idx_item_versions_deletes)", async () => {
+  const fx = fixture("hist-trash-index-");
+  const db = fx.open();
+  try {
+    // The index migration 0024 adds: exactly the rows the listing groups (a delete is
+    // the Trash entry), so the per-item "newest delete" is an index-only scan instead
+    // of a full table walk every time the Trash page opens.
+    const indexes = (await db.execute({
+      sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'item_versions'",
+      args: [],
+    })).rows.map((row) => row.name);
+    assert.ok(indexes.includes("idx_item_versions_deletes"), "the partial delete index is part of the migration");
+
+    // And the statement the page runs is planned onto it — both with and without the
+    // sweep's age filter (the index does not carry created_at, so the filter stays in
+    // the outer query).
+    for (const before of [null, new Date().toISOString()]) {
+      const plan = (await db.execute({
+        sql: `EXPLAIN QUERY PLAN ${trashEntriesSql({ before })}`,
+        args: before ? [before, 5] : [5],
+      })).rows.map((row) => row.detail).join(" | ");
+      assert.match(plan, /idx_item_versions_deletes/, `the Trash listing uses the delete index (before=${before}): ${plan}`);
+    }
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
 test("undoing a job that CREATED an item sends it to the Trash, and a Trash restore brings it back", async () => {
   const fx = fixture("hist-trash-");
   const db = fx.open();
@@ -294,6 +323,46 @@ test("an AWS-shaped key in a memory is [redacted] in its versions after one swee
     // A second sweep has nothing left to do (the rows are redacted = 1).
     const again = await sweep(db);
     assert.equal(again.redacted, 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("the redaction scan remembers how far it got, so the newest rows are not re-scanned every 5 minutes", async () => {
+  const fx = fixture("hist-redact-mark-");
+  const db = fx.open();
+  try {
+    const readMark = async () => {
+      const { rows } = await db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = 'history.redact_scanned_to'",
+        args: [],
+      });
+      return rows[0] ? Number(rows[0].value) : null;
+    };
+    const maxVersionId = async () =>
+      Number((await db.execute({ sql: "SELECT MAX(id) AS top FROM item_versions", args: [] })).rows[0].top);
+
+    // A clean store: nothing to redact, but the pass still records the mark — the
+    // point is that one pass scans each row once, not once per interval.
+    const id = await insertMemory(db, OWNER, { content: "no secrets here" });
+    await sweep(db);
+    assert.equal(await readMark(), await maxVersionId(), "the mark is the highest version scanned");
+
+    // A secret written AFTER the mark is the fresh window's job: caught by the next
+    // pass, without walking the rows below again.
+    await updateMemory(db, OWNER, id, { content: `a leaked key: ${AWS_KEY}` });
+    const after = await maxVersionId();
+    assert.ok(after > (await readMark()), "the new version sits above the mark");
+    const swept = await sweep(db);
+    assert.ok(swept.redacted >= 1, "the fresh window caught the new version");
+    assert.equal(await readMark(), after, "and moved the mark up to it");
+    const rows = await versionsOf(db, "memory", id);
+    assert.ok(rows.every((row) => !/AKIA/.test(row.snapshot_json)), "no version holds the key now");
+
+    // A row that matched nothing is never marked redacted, which is exactly why the
+    // mark has to exist: without it those rows would be decoded again every pass.
+    assert.equal(Number(rows[0].redacted), 0, "a clean version stays redacted = 0, so the mark is what stops the re-scan");
   } finally {
     db.close();
     fx.dispose();
@@ -773,7 +842,7 @@ test("a tombstone survives a restart", async () => {
   }
 });
 
-test("an unannounced erase is bounded by the local counter, and a re-erase moves the tombstone forward", async () => {
+test("an unannounced erase of an item that syncs is unbounded; a local-only item keeps its counter bound", async () => {
   const fx = fixture("hist-tomb-bound-");
   const db = fx.open();
   try {
@@ -787,29 +856,48 @@ test("an unannounced erase is bounded by the local counter, and a re-erase moves
     // store, so the greatest sync_state row is the series this host has reached).
     await db.execute("INSERT INTO sync_state (instance_id, local_counter) VALUES ('inst-bound', 5)");
 
+    // 1. AN ITEM THAT SYNCS, ERASED WITHOUT AN ANNOUNCEMENT (emission off here). The
+    // operator's ruling of 2026-11-10: the peers were told nothing, so the tombstone
+    // refuses EVERY later write for that id — "erased stays erased" — which is the
+    // unbounded shape (erase_lamport NULL).
     const id = await insertMemory(db, OWNER, { content: "the first life of this id" });
     await deleteMemory(db, OWNER, id);
     const first = await eraseItems(db, [{ itemType: "memory", itemId: id }], SYSTEM, { syncManager: null });
     assert.equal(first.emitted, 0, "nothing was announced (no sync manager, emission off)");
     assert.equal(first.eraseLamport, null, "nothing to report as an event lamport");
     const one = await tombstone(id);
-    assert.equal(Number(one.erase_lamport), 5, "the tombstone is still bounded — to this instance's counter");
+    assert.equal(one.erase_lamport, null, "the tombstone is unbounded — no peer was ever told about the erase");
 
-    // A new life of that id, erased again after the counter moved: the bound moves
-    // FORWARD (a re-erase never lowers what this store already refuses below), and
-    // the newest erased_at is the restore gate's window.
-    await db.execute("UPDATE sync_state SET local_counter = 9 WHERE instance_id = 'inst-bound'");
-    await insertMemory(db, OWNER, { id, content: "the second life of this id" });
-    await deleteMemory(db, OWNER, id);
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    // ... and NULL is sticky: a later, higher counter never bounds it again. The
+    // erase sync being off when it mattered is not undone by turning it on later
+    // (nothing is re-emitted retroactively).
+    await db.execute("UPDATE sync_state SET local_counter = 42 WHERE instance_id = 'inst-bound'");
+    await insertMemory(db, OWNER, { id, content: "another life of this id" });
     await eraseItems(db, [{ itemType: "memory", itemId: id }], SYSTEM, { syncManager: null });
-    const two = await tombstone(id);
-    assert.equal(Number(two.erase_lamport), 9, "the bound moved forward to the newer erase's counter");
-    assert.ok(String(two.erased_at) >= String(one.erased_at), "and erased_at is the newer erase's");
+    assert.equal((await tombstone(id)).erase_lamport, null, "a re-erase never bounds an unbounded tombstone");
+
+    // 2. AN ITEM THAT NEVER SYNCS (a starter memory) may stay counter-bounded: there
+    // is no peer write to refuse, so the tight bound costs nothing — and a re-erase
+    // moves it FORWARD (a re-erase never lowers what this store already refuses
+    // below), with the newest erased_at as the restore gate's window.
+    const starter = await insertMemory(db, OWNER, { content: "a starter demo", source: "starter" });
+    await deleteMemory(db, OWNER, starter);
+    await eraseItems(db, [{ itemType: "memory", itemId: starter }], SYSTEM, { syncManager: null });
+    const bounded = await tombstone(starter);
+    assert.equal(Number(bounded.erase_lamport), 42, "a never-synced item's tombstone keeps this instance's counter");
+
+    await db.execute("UPDATE sync_state SET local_counter = 77 WHERE instance_id = 'inst-bound'");
+    await insertMemory(db, OWNER, { id: starter, content: "the second life of this id", source: "starter" });
+    await deleteMemory(db, OWNER, starter);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await eraseItems(db, [{ itemType: "memory", itemId: starter }], SYSTEM, { syncManager: null });
+    const two = await tombstone(starter);
+    assert.equal(Number(two.erase_lamport), 77, "the bound moved forward to the newer erase's counter");
+    assert.ok(String(two.erased_at) >= String(bounded.erased_at), "and erased_at is the newer erase's");
     assert.equal(
       Number((await db.execute({
         sql: "SELECT COUNT(*) AS n FROM item_erasures WHERE item_type = 'memory' AND item_id = ?",
-        args: [String(id)],
+        args: [String(starter)],
       })).rows[0].n),
       1,
       "still one tombstone for the item, not a second row",

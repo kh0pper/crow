@@ -164,9 +164,12 @@ async function markerRemains(db, learnerId) {
  * instead, and null routes an emitted event through the durable queue door. It is
  * not a silencer, so the actor stays the guarantee.
  *
- * An unannounced erase is still BOUNDED: its tombstone records this instance's
- * lamport counter at erase time, so a peer's genuinely new item is not refused
- * forever (and a synced-in copy of the learner's memory still is).
+ * An unannounced erase leaves the tombstone the operator's 2026-11-10 ruling asks
+ * for: for an item that SYNCS (a context section the learner's project deleted, a
+ * shared memory the purge took) it is UNBOUNDED — no peer was told, so the item
+ * never comes back here — while an item that never syncs (the learner's own
+ * `maker-lab` memories) keeps the local counter as its bound, because there is no
+ * peer write to refuse.
  *
  * `projectId` is the LOCAL project_spaces id and is only safe on the FIRST run,
  * where the caller has just read that row and knows it is this learner's. A retry

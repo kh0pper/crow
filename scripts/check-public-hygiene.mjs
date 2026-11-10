@@ -70,6 +70,7 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { inflateRawSync, inflateSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
+import { SECRET_PATTERNS } from "../servers/shared/history/secret-patterns.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ALLOWLIST_PATH = join(REPO_ROOT, "scripts/public-hygiene-allowlist.txt");
@@ -137,26 +138,11 @@ const MAIL_HEADER_LINE = new RegExp(String.raw`(?:^[\s>]*|\\r?\\n|\r?\n)${MAIL_H
 const MAIL_HEADER_JSON = new RegExp(String.raw`"name"\s*:\s*"${MAIL_HEADERS}"`, "i");
 const GMAIL_MESSAGE_ID = /Message-ID:\s*<[^>@\s]+@mail\.gmail\.com>/i;
 
-export const SECRET_PATTERNS = [
-  ["github token", /\bgh[opsur]_[A-Za-z0-9]{36}\b/g],
-  ["github fine-grained token", /\bgithub_pat_[A-Za-z0-9_]{22,}/g],
-  ["sk- api key", /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}/g],
-  ["stripe live key", /\b[rs]k_live_[A-Za-z0-9]{24,}/g],
-  ["tailscale auth key", /\btskey-[A-Za-z0-9-]{10,}/g],
-  ["aws access key", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g],
-  ["google api key", /\bAIza[0-9A-Za-z_-]{35}\b/g],
-  ["google oauth client secret", /\bGOCSPX-[A-Za-z0-9_-]{28}\b/g],
-  ["google oauth access token", /\bya29\.[A-Za-z0-9_-]{20,}/g],
-  ["brave search key", /\bBSA[A-Za-z0-9_-]{24,}\b/g],
-  ["slack token", /\bxox[abprs]-[A-Za-z0-9-]{10,}/g],
-  ["hugging face token", /\bhf_[A-Za-z]{34}\b/g],
-  ["gitlab token", /\bglpat-[A-Za-z0-9_-]{20,}/g],
-  ["npm token", /\bnpm_[A-Za-z0-9]{36}\b/g],
-  ["nostr secret key", /\bnsec1[02-9ac-hj-np-z]{58}\b/g],
-  ["discord webhook", /discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]{60,}/g],
-  ["pem private key", /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----/g],
-  ["pgp private key", /-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}/g],
-];
+// THE list lives in the runtime's tree (servers/shared/history/secret-patterns.js)
+// and is imported here: the history sweep redacts stored versions with exactly
+// these patterns, and a runtime module must never import a CI script. Re-exported
+// so this file keeps its own public surface.
+export { SECRET_PATTERNS };
 
 export function loadAllowlist(text) {
   const tailnets = new Set();

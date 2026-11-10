@@ -423,6 +423,18 @@ export const ITEM_VERSIONS_ERASE_DDL = `
 // True while Task 4's erase has the history table open for mutation.
 const ARMED = `EXISTS (SELECT 1 FROM ${ITEM_VERSIONS_ERASE_TABLE} WHERE armed = 1)`;
 
+/**
+ * The Trash listing's index: a delete IS the Trash entry (trash.js), so the listing
+ * is "every delete, per item, that has no newer version" — exactly the rows a
+ * partial index on (item_type, item_id, id) WHERE op = 'delete' holds. Defined here,
+ * beside the table's other DDL, so migration 0024 and the boot ensure share one
+ * definition: a store that already recorded an earlier build of 0024 never runs it
+ * again and would otherwise keep the full-table plan.
+ */
+export const ITEM_VERSIONS_TRASH_INDEX_SQL = `
+  CREATE INDEX IF NOT EXISTS idx_item_versions_deletes
+    ON item_versions(item_type, item_id, id) WHERE op = 'delete';`;
+
 // Everything an attribution stamp (Task 2) is NOT allowed to touch. `IS` is
 // NULL-safe, so a NULL→NULL move is still "unchanged".
 const ATTRIBUTION_COLUMNS = ["author_kind", "author_id", "job_id", "origin_instance"];

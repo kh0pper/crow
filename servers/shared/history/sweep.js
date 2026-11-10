@@ -10,10 +10,12 @@
  *       connection, and a trigger that fell back to LIKE would store the secret
  *       anyway — see covered.js), so the scan happens here in JavaScript against
  *       the SAME patterns CI uses for this public repository
- *       (scripts/check-public-hygiene.mjs's SECRET_PATTERNS). A matching
- *       snapshot_json is rewritten with "[redacted]" in place of each match and
- *       the row is marked redacted = 1 — which api.js then refuses to restore,
- *       because the row no longer holds the item's value.
+ *       (servers/shared/history/secret-patterns.js SECRET_PATTERNS — the one
+ *       list, imported by scripts/check-public-hygiene.mjs too; the runtime never
+ *       imports a CI script). A matching snapshot_json is rewritten with
+ *       "[redacted]" in place of each match and the row is marked redacted = 1 —
+ *       which api.js then refuses to restore, because the row no longer holds the
+ *       item's value.
  *       LIVE DATA IS NOT HISTORY'S BUSINESS: the memory, post or section itself
  *       keeps its text. Only the stored versions are rewritten.
  *       Rewriting a version is a history edit, so it goes through the armed
@@ -45,6 +47,12 @@
  *       marker in pending_remote_erasures (erase.js). This pass retries those
  *       through the same apply path — the feed loop cannot: it consumes an entry
  *       whose apply threw, so without this the erase would simply stop halfway.
+ *       The marker holds only the TOMBSTONE KEYS and the erase lamport, so this
+ *       pass re-resolves the item first (a summary by its source, a memory by the
+ *       id the wire named, a section by its scope) and the retry runs the same
+ *       local-only / summary / source gates the first attempt ran. A marker that
+ *       cannot be resolved stays for the next run: failing closed is the safe
+ *       direction, the tombstone is already in place.
  *
  * RETENTION. `history.retention` defaults to `forever`, and `forever` keeps
  * everything. Any other value is currently a NO-OP: a thinning schedule is not
@@ -56,18 +64,34 @@
  * id, continuing from a per-connection cursor (a WeakMap keyed by the db handle,
  * so an in-process caller that keeps one handle — the gateway's sweep does —
  * keeps making progress across runs while a fresh handle restarts from the
- * beginning). Redaction walks the backlog from the cursor AND scans the newest
- * batch, so a secret written a minute ago is caught by the next run while the
- * older rows are still covered over time. A full walk is idempotent: redacted
- * rows are excluded and a coalesce pair is gone after the first pass.
+ * beginning). Redaction walks the backlog from that cursor AND scans the FRESH
+ * WINDOW — the rows written since the last pass — so a secret written a minute
+ * ago is caught by the next run while the older rows are still covered over
+ * time. A full walk is idempotent: redacted rows are excluded and a coalesce pair
+ * is gone after the first pass.
+ *
+ * THE FRESH WINDOW KEEPS A "SCANNED UP TO" MARK. "Scan the newest batch" was a
+ * re-scan of the same rows every five minutes: a version with no secret in it is
+ * never marked `redacted = 1`, so the same N rows were read, decoded and walked
+ * forever. The mark — `history.redact_scanned_to` in dashboard_settings, the
+ * local key/value Crow already keeps its history settings in (and a key the sync
+ * allowlist does not carry, so it never leaves the host) — records the highest
+ * version id the fresh window has covered. Each pass scans only rows ABOVE it,
+ * ascending, and moves it forward; on a store that has never been scanned the
+ * window starts at the newest batch (so the first pass covers exactly what the
+ * old code covered). The BACKLOG walk is unchanged: it is what covers versions
+ * written before the mark existed.
  */
-import { SECRET_PATTERNS } from "../../../scripts/check-public-hygiene.mjs";
+import { SECRET_PATTERNS } from "./secret-patterns.js";
 import { withoutWriteContext } from "./write-context.js";
 import { eraseItems, finishPendingRemoteErasures, runArmedStatements } from "./erase.js";
 import { trashEntries, normalizeTrashDays, DEFAULT_TRASH_DAYS } from "./trash.js";
 
 /** Rows per pass when the caller does not say. */
 export const DEFAULT_BATCH = 500;
+
+/** The local setting that records how far the fresh-window scan has got. */
+export const REDACT_SCAN_SETTING = "history.redact_scanned_to";
 
 /** The only retention value that is applied today. */
 export const RETENTION_FOREVER = "forever";
@@ -208,6 +232,64 @@ async function historyReady(db) {
 
 /* ------------------------------------------------------------- (a) redact */
 
+/**
+ * The persisted "scanned up to" mark: the highest version id the FRESH WINDOW has
+ * covered, or null on a store that has never been scanned.
+ *
+ * It lives in dashboard_settings — the local key/value table Crow already keeps
+ * `history.trash_days` and `history.erase_sync` in — under a key the sync
+ * allowlist does not carry, so it is per-instance and never travels. A store with
+ * no settings table (a bare test shim) simply has no mark.
+ */
+async function readRedactScanMark(db) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+      args: [REDACT_SCAN_SETTING],
+    });
+    const value = Number(rows[0]?.value);
+    return rows.length > 0 && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Move the mark forward (never back). A store that cannot keep it re-scans — safe. */
+async function writeRedactScanMark(db, id) {
+  const value = Math.trunc(Number(id));
+  if (!Number.isFinite(value) || value < 0) return;
+  try {
+    await db.execute({
+      sql: `INSERT INTO dashboard_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+             WHERE CAST(excluded.value AS INTEGER) > CAST(dashboard_settings.value AS INTEGER)`,
+      args: [REDACT_SCAN_SETTING, String(value)],
+    });
+  } catch (err) {
+    // A store with no settings table (a bare test shim) has nowhere to keep the
+    // mark; anything else is worth a line. Either way the next pass starts at the
+    // backlog cursor, which is the conservative direction (re-scan).
+    if (!/no such table/i.test(String(err?.message ?? ""))) {
+      console.warn("[history] sweep: could not record the redaction scan mark:", err?.message ?? err);
+    }
+  }
+}
+
+/** Where the fresh window starts on this pass (see readRedactScanMark). */
+async function redactWindowStart(db, batchSize) {
+  const mark = await readRedactScanMark(db);
+  if (mark !== null) return mark;
+  // Never scanned here: cover the newest batch, exactly what "scan the newest N
+  // rows" used to cover, and let the mark take it from there.
+  try {
+    const { rows } = await db.execute("SELECT MAX(id) AS top FROM item_versions");
+    const top = Number(rows[0]?.top);
+    return Number.isFinite(top) ? Math.max(0, top - batchSize) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Redact one page of versions. @returns {Promise<number>} rows rewritten */
 async function redactPage(db, rows) {
   const matches = [];
@@ -230,7 +312,9 @@ async function redactPage(db, rows) {
 
 /**
  * One redaction pass: continue the backlog walk from the cursor, then scan the
- * newest batch (so a secret written since the last run is caught at once).
+ * FRESH WINDOW — the versions written since the last pass, above the persisted
+ * "scanned up to" mark — so a secret written since the last run is caught at
+ * once and none of those rows is scanned twice.
  */
 async function redactPass(db, batchSize) {
   const cursor = cursorFor(db);
@@ -245,17 +329,29 @@ async function redactPass(db, batchSize) {
     cursor.redact = Number(backlog.rows[backlog.rows.length - 1].id);
   } else if (cursor.redact > 0) {
     // The walk reached the end: start the next one from the top. Rows written
-    // meanwhile have higher ids and are scanned by the newest-batch pass below.
+    // meanwhile have higher ids and are scanned by the fresh window below.
     cursor.redact = 0;
   }
 
-  const newest = await db.execute({
-    sql: `SELECT id, snapshot_json FROM item_versions
-           WHERE redacted = 0
-           ORDER BY id DESC LIMIT ?`,
-    args: [batchSize],
+  const from = await redactWindowStart(db, batchSize);
+  // The window scans by ID, redacted rows included: they are skipped for the work
+  // but still count as scanned, so the mark stays a contiguous "everything up to
+  // here has been looked at" (a row that matched nothing, or was already redacted,
+  // must not pin the mark forever).
+  const fresh = await db.execute({
+    sql: `SELECT id, snapshot_json, redacted FROM item_versions
+           WHERE id > ?
+           ORDER BY id ASC LIMIT ?`,
+    args: [from, batchSize],
   });
-  redacted += await redactPage(db, newest.rows);
+  redacted += await redactPage(
+    db,
+    fresh.rows.filter((row) => Number(row.redacted) !== 1),
+  );
+  // Persist the mark even when the page was empty (a store whose ids are sparse
+  // would otherwise restart from the same place forever), and only forwards.
+  const highest = fresh.rows.length > 0 ? Number(fresh.rows[fresh.rows.length - 1].id) : null;
+  await writeRedactScanMark(db, highest === null ? from : Math.max(from, highest));
   return redacted;
 }
 
