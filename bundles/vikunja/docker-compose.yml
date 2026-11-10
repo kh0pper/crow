@@ -1,6 +1,22 @@
 services:
+  # Vikunja runs as uid 1000 in a distroless image (no shell, no chown), and Docker creates
+  # named volumes owned by root, so on a fresh install it cannot write its files or database.
+  # This one-shot step hands both volumes to uid 1000 and exits; Vikunja starts after it.
+  vikunja-volume-owner:
+    image: busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+    container_name: crow-vikunja-volume-owner
+    command: ["chown", "1000:1000", "/app/vikunja/files", "/db"]
+    network_mode: none
+    volumes:
+      - vikunja-data:/app/vikunja/files
+      - vikunja-db:/db
+    restart: "no"
+
   vikunja:
     image: vikunja/vikunja:2.8.0
+    depends_on:
+      vikunja-volume-owner:
+        condition: service_completed_successfully
     container_name: crow-vikunja
     ports:
       - "127.0.0.1:3456:3456"

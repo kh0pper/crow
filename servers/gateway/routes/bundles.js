@@ -3741,6 +3741,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // The REVIEWED manifest and script decide what runs: the installed folder can be
     // mounted into the bundle's own container, so it is not trusted (see startConsent).
     let firstAdminAuto = null;
+    // What the manifest's own follow-up step did for THIS install ({ok, outcome}), or null
+    // when it did not run: a failure here has to reach the owner, not only the job log.
+    let firstAdminAfter = null;
     if (!composeFailure && firstAdminVia(manifest) === "setup") {
       const reviewed = getManifest(bundleId);
       const plan = firstAdminSetupPlan(reviewed);
@@ -3785,6 +3788,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
             recreate: recreateBundleGuarded,
           });
           if (after.line) appendLog(job, after.line);
+          firstAdminAfter = { ok: after.ok, outcome: after.outcome };
           if (!after.ok) appendLog(job, firstAdminAfterFailureSentence(reviewed?.name || bundleId));
         }
       }
@@ -3901,8 +3905,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // leaves an app setup page anyone on this machine can claim. One bell, once
     // per install, pointing at the Extensions card that says what to do. Silent
     // for `crow` via env/postInstall, `external` and `none` manifests, and for a
-    // `crow`/via-"setup" bundle whose own setup run returned "ok"; never in the
-    // job log (the owner reads the bell, and the log line would be a second,
+    // `crow`/via-"setup" bundle whose own setup run returned "ok" AND whose
+    // follow-up step (setup.after) did not fail — an app that still accepts
+    // sign-ups is exactly as claimable as one nobody set up. Never in the job log
+    // (the owner reads the bell, and the log line would be a second,
     // easier-to-miss copy).
     //
     // BEFORE the half-failure returns below: a compose/hook failure still leaves
@@ -3919,6 +3925,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       // What Crow's own setup run did for THIS install (null when it did not run):
       // an "ok" stays silent, everything else asks the operator to look.
       autoResult: firstAdminAuto,
+      // ...and what its follow-up step did: an install whose registration Crow could
+      // not close still leaves the app's door open, so that rings even though the
+      // account itself was created.
+      afterResult: firstAdminAfter,
       // What the invite step did for THIS install: an invited email plus confirmed-
       // closed sign-ups means there is nothing left for anyone to claim.
       inviteResult: inviteOutcome,

@@ -70,6 +70,7 @@ const {
 const { parseEnvText } = await import("../servers/gateway/bundle-env-codec.js");
 const express = (await import("express")).default;
 const B = await import("../servers/gateway/routes/bundles.js");
+const { createDbClient } = await import("../servers/db.js");
 
 B._setAppBundlesForTest(TMP_BUNDLES);
 B._setRestartHookForTest(() => {});
@@ -149,6 +150,39 @@ test("the after-step's rules: env and recreate only, declared names, plain short
   // An env-only block is fine: some apps need a value but restart themselves.
   assert.deepEqual(firstAdminAfterProblems(withAfter({ env: { [SWITCH]: "false" } })), []);
   assert.deepEqual(firstAdminAfterPlan(withAfter({ env: { [SWITCH]: "false" } })), { env: { [SWITCH]: "false" }, recreate: false });
+});
+
+test("after.env refuses what compose or Crow's own writer cannot take, and names the key", () => {
+  // A fixture with the shipped after-step plus extra declared env_vars and firstAdmin fields.
+  const vars = (list, after, faOver = {}) => ({
+    ...AFTER_MANIFEST,
+    env_vars: [...AFTER_MANIFEST.env_vars, ...list],
+    firstAdmin: { ...AFTER_MANIFEST.firstAdmin, ...faOver, setup: { ...AFTER_MANIFEST.firstAdmin.setup, after } },
+  });
+  const why = (manifest) => firstAdminAfterProblems(manifest).join(" ");
+
+  // A key compose could not read back as that variable.
+  assert.match(why(vars([{ name: "fx_switch" }], { env: { fx_switch: "false" } })), /fx_switch must be an env name/);
+  assert.match(why(vars([{ name: "FX SWITCH" }], { env: { "FX SWITCH": "false" } })), /FX SWITCH must be an env name/);
+  // Compose's own namespace changes how compose runs, not how the app does.
+  assert.match(why(vars([{ name: "COMPOSE_PROFILES" }], { env: { COMPOSE_PROFILES: "app" } })), /COMPOSE_PROFILES must not start with COMPOSE_ or DOCKER_/);
+  assert.match(why(vars([{ name: "DOCKER_BUILDKIT" }], { env: { DOCKER_BUILDKIT: "1" } })), /DOCKER_BUILDKIT must not start with COMPOSE_ or DOCKER_/);
+  // The two values the setup run writes itself are not a plaintext step's to set.
+  assert.match(why(vars([{ name: "FX_ADMIN_PASSWORD" }], { env: { FX_ADMIN_PASSWORD: "x" } })), /FX_ADMIN_PASSWORD is one of the two values Crow writes itself/);
+  assert.match(
+    why(vars([{ name: "FX_ADMIN_USER" }], { env: { FX_ADMIN_USER: "root" } }, { userEnv: "FX_ADMIN_USER" })),
+    /FX_ADMIN_USER is one of the two values Crow writes itself/,
+  );
+  // A value Crow generates, keeps in the keychain, or keeps secret is not a constant to write.
+  assert.match(why(vars([{ name: "FX_SECRET", secret: true }], { env: { FX_SECRET: "x" } })), /FX_SECRET names an env_vars entry Crow keeps secret or generates/);
+  assert.match(why(vars([{ name: "FX_GEN", generate: "hex32" }], { env: { FX_GEN: "x" } })), /FX_GEN names an env_vars entry Crow keeps secret or generates/);
+  assert.match(why(vars([{ name: "FX_KC", keychain: true }], { env: { FX_KC: "x" } })), /FX_KC names an env_vars entry Crow keeps secret or generates/);
+  // A value the .env codec refuses (one value per line; no executable backtick).
+  assert.match(why(withAfter({ env: { [SWITCH]: "true\nfalse" } })), new RegExp(`${SWITCH} contains a line break or NUL character`));
+  assert.match(why(withAfter({ env: { [SWITCH]: "it's `open`" } })), new RegExp(`${SWITCH} cannot contain a backtick`));
+  // The shipped shape still passes every one of them.
+  assert.deepEqual(firstAdminAfterProblems(AFTER_MANIFEST), []);
+  assert.deepEqual(firstAdminAfterProblems(vars([{ name: "FX_SECOND_SWITCH", default: "true" }], { env: { [SWITCH]: "false", FX_SECOND_SWITCH: "off" } })), []);
 });
 
 test("the manifest contract refuses what the runtime would not do", () => {
@@ -337,6 +371,22 @@ const installedEnv = (id) => {
   try { return parseEnvText(readFileSync(join(TMP_HOME, "bundles", id, ".env"), "utf8")); } catch { return null; }
 };
 
+/** The first-admin bells this install left in the (scratch) dashboard's notifications. */
+async function firstAdminBells(id) {
+  const db = createDbClient();
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT title, body, action_url, metadata FROM notifications WHERE source = 'bundle-installer' AND is_dismissed = 0",
+      args: [],
+    });
+    return (rows || []).filter((row) => {
+      try { return JSON.parse(String(row?.metadata || ""))?.bundle === id; } catch { return false; }
+    });
+  } finally {
+    try { db.close(); } catch { /* already closed */ }
+  }
+}
+
 test("the install path applies the after-step once, after an ok run, and the .env really carries it", async () => {
   const id = "fx-after-ok";
   const manifest = afterBundle(id);
@@ -353,6 +403,7 @@ test("the install path applies the after-step once, after an ok run, and the .en
     const log = job.log.join("\n");
     assert.match(log, /^after: "applied"$/m);
     assert.equal(/press Restart/.test(log), false, "there is nothing to press Restart for");
+    assert.deepEqual(await firstAdminBells(id), [], "and nothing to ring about");
   } finally {
     unstubDocker();
   }
@@ -393,6 +444,46 @@ test("a failed recreate is reported as one plain line, and the account is still 
     const log = job.log.join("\n");
     assert.match(log, /^after: "recreate-failed: port is already allocated"$/m);
     assert.match(log, /registration may still be open: press Restart on the Extensions card/);
+  } finally {
+    unstubDocker();
+  }
+});
+
+test("a failed after-step reaches the owner as one bell with the press-Restart sentence", async () => {
+  const id = "fx-after-bell";
+  const manifest = afterBundle(id);
+  stubDocker({ failRecreate: true });
+  const { deps } = setupSeams();
+  B._setFirstAdminSetupDepsForTest(deps);
+  try {
+    const { out } = await installBundle(id, manifest);
+    assert.equal(out.ok, true, "the install itself is fine");
+    const bells = await firstAdminBells(id);
+    assert.equal(bells.length, 1, "exactly one bell for this install");
+    assert.equal(bells[0].body, firstAdminAfterFailureSentence(manifest.name));
+    assert.match(bells[0].body, /registration may still be open: press Restart on the Extensions card/);
+    assert.equal(bells[0].action_url, `/dashboard/extensions?q=${id}`, "the Extensions detail, as the other notices");
+    assert.equal(`${bells[0].title} ${bells[0].body}`.includes(PASSPHRASE), false, "never the password");
+  } finally {
+    unstubDocker();
+  }
+});
+
+test("no after-step declared: an ok setup run still rings nothing", async () => {
+  const id = "fx-no-after-bell";
+  // A copy: afterBundle's own object shares firstAdmin with the fixture.
+  const manifest = {
+    ...afterBundle(id),
+    firstAdmin: { ...AFTER_MANIFEST.firstAdmin, setup: { script: "scripts/first-admin.sh", timeout_s: 30 } },
+  };
+  writeFileSync(join(TMP_BUNDLES, id, "manifest.json"), JSON.stringify(manifest, null, 2));
+  stubDocker();
+  const { deps } = setupSeams();
+  B._setFirstAdminSetupDepsForTest(deps);
+  try {
+    const { out } = await installBundle(id, manifest);
+    assert.equal(out.ok, true, out.reason);
+    assert.deepEqual(await firstAdminBells(id), [], "unchanged: the account is Crow's, so silence");
   } finally {
     unstubDocker();
   }

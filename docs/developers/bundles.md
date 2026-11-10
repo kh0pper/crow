@@ -333,7 +333,7 @@ place. Those bundles declare the follow-up step beside the script:
 
 | field | rule |
 |---|---|
-| `env` | `KEY: value` pairs written into the installed bundle's `.env` after the setup script reports `0` or `5` (that is, once the app really holds the password). Every key must name an `env_vars` entry the bundle DECLARES — Crow never writes a variable the app's own manifest did not declare — and every value is a plain string of at most 200 characters. The write is the line-preserving one every install-time step uses (mode 600, comments and other values untouched). |
+| `env` | `KEY: value` pairs written into the installed bundle's `.env` after the setup script reports `0` or `5` (that is, once the app really holds the password). Every key must be a plain env name (`A-Z`, digits, `_`) that names an `env_vars` entry the bundle DECLARES — Crow never writes a variable the app's own manifest did not declare — and must not be `COMPOSE_…`/`DOCKER_…` (those change how compose itself runs), `firstAdmin.secretEnv` or `firstAdmin.userEnv` (Crow writes those two itself), or an entry that is `secret: true`, has `generate`, or has `keychain: true` (a value Crow keeps or generates is not a constant to write). Every value is a plain string of at most 200 characters that the `.env` codec can write (no line break or NUL, no backtick next to a quote or a trailing backslash). The write is the line-preserving one every install-time step uses (mode 600, comments and other values untouched). |
 | `recreate` | boolean. `true` recreates the bundle's containers ONCE, through Crow's guarded path (the same consent + compose safety check + ownership check a Start runs, then `up -d --force-recreate`), because a container keeps its old environment until it is re-created. |
 
 No other fields are accepted, and a block that writes nothing and recreates nothing is
@@ -346,8 +346,9 @@ app still holds it. One plain line says what happened — `after: "applied"`, or
 `after: "recreate-failed: <plain reason>"` (a settings file that would not take the value is
 `after: "env-failed: <plain reason>"`) — and the answer adds that registration may still be
 open and to press Restart. The line lands in the install log, and in the Extensions card's
-answer; it never fails the install. Like every other bundle change, this one needs a
-`version` bump.
+answer; at install it also rings the owner's bell once (the same notice the card is), because
+an app that still accepts sign-ups is as claimable as one nobody set up. It never fails the
+install. Like every other bundle change, this one needs a `version` bump.
 
 The script's last 20 non-empty stdout lines become part of the install log (and of
 the card's answer when the run is retried from Extensions), so print what you did,

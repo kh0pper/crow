@@ -32,12 +32,19 @@
  * something the runtime would not do.
  */
 import { writeBundleEnv } from "./bundle-env-secrets.js";
+import { envValueProblem } from "./bundle-env-codec.js";
 
 /** The longest value a manifest may hand an app through `after.env`. */
 export const FIRST_ADMIN_AFTER_MAX_VALUE = 200;
 
 /** The keys `after` may carry. Anything else is refused rather than silently ignored. */
 const AFTER_KEYS = new Set(["env", "recreate"]);
+
+/** A name compose can read back as this exact variable (no lowercase, no dots, no dashes). */
+const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+/** Prefixes that change how compose (or docker) itself runs, not how the app does. */
+const RESERVED_ENV_PREFIXES = ["COMPOSE_", "DOCKER_"];
 
 /** The setup block a manifest declares, or null. */
 function setupOf(manifest) {
@@ -48,10 +55,13 @@ function setupOf(manifest) {
 
 /**
  * Why this manifest's `firstAdmin.setup.after` cannot be used — [] when it can (or when
- * there is none). The rules: only `env` and `recreate`; `env` values are plain strings of at
- * most 200 characters; every `env` key names an env_vars entry the bundle DECLARES (Crow
- * never writes a variable the app's own manifest did not declare); `recreate` is a boolean;
- * and the block has to do something.
+ * there is none). The rules: only `env` and `recreate`; every `env` key is a valid env name
+ * (`A-Z`, digits, `_`), is not Compose's or Docker's own (`COMPOSE_`/`DOCKER_`), is not one of
+ * the two names Crow writes itself (`firstAdmin.secretEnv`/`userEnv`), and names an env_vars
+ * entry the bundle DECLARES that Crow does not keep secret or generate (Crow never writes a
+ * variable the app's own manifest did not declare, and never a plaintext value over a
+ * generated one); `env` values are plain strings of at most 200 characters that the .env
+ * codec can write; `recreate` is a boolean; and the block has to do something.
  *
  * @param {object|null} manifest a REVIEWED manifest
  * @returns {string[]} plain sentences, empty when the declaration is usable
@@ -77,19 +87,33 @@ export function firstAdminAfterProblems(manifest) {
       errors.push("firstAdmin.setup.after.env must be an object of KEY: value pairs");
     } else {
       envKeys = Object.keys(after.env);
-      const declared = new Set(
-        (Array.isArray(manifest.env_vars) ? manifest.env_vars : [])
-          .map((v) => (v && typeof v.name === "string" ? v.name : null))
-          .filter(Boolean),
-      );
+      const declared = new Map();
+      for (const v of Array.isArray(manifest.env_vars) ? manifest.env_vars : []) {
+        if (v && typeof v.name === "string" && !declared.has(v.name)) declared.set(v.name, v);
+      }
+      // The two values the setup run writes itself: a plaintext step must not race it.
+      const fa = manifest.firstAdmin && typeof manifest.firstAdmin === "object" ? manifest.firstAdmin : null;
+      const owned = new Set([fa?.secretEnv, fa?.userEnv].filter((n) => typeof n === "string" && n !== ""));
       for (const key of envKeys) {
         const value = after.env[key];
-        if (!declared.has(key)) {
+        const entry = declared.get(key);
+        if (!ENV_NAME.test(key)) {
+          errors.push(`firstAdmin.setup.after.env ${key} must be an env name: capitals, digits and underscores, starting with a letter`);
+        } else if (RESERVED_ENV_PREFIXES.some((p) => key.startsWith(p))) {
+          errors.push(`firstAdmin.setup.after.env ${key} must not start with COMPOSE_ or DOCKER_ — those change how compose itself runs`);
+        } else if (owned.has(key)) {
+          errors.push(`firstAdmin.setup.after.env ${key} is one of the two values Crow writes itself (firstAdmin.secretEnv/firstAdmin.userEnv), so it cannot be set here`);
+        } else if (!entry) {
           errors.push(`firstAdmin.setup.after.env ${key} must name a declared env_vars entry`);
         } else if (typeof value !== "string") {
           errors.push(`firstAdmin.setup.after.env ${key} must be a plain string`);
+        } else if (entry.secret === true || entry.generate !== undefined || entry.keychain === true) {
+          errors.push(`firstAdmin.setup.after.env ${key} names an env_vars entry Crow keeps secret or generates, so it cannot be given a value here`);
         } else if (value.length > FIRST_ADMIN_AFTER_MAX_VALUE) {
           errors.push(`firstAdmin.setup.after.env ${key} must be at most ${FIRST_ADMIN_AFTER_MAX_VALUE} characters`);
+        } else {
+          const problem = envValueProblem(value);
+          if (problem) errors.push(`firstAdmin.setup.after.env ${key} ${problem}`);
         }
       }
     }

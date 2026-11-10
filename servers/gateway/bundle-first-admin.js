@@ -46,6 +46,7 @@
 import { createDbClient } from "../db.js";
 import { createNotification } from "../shared/notifications.js";
 import { bundlePageUrl } from "./bundle-pull-alert.js";
+import { firstAdminAfterFailureSentence } from "./bundle-first-admin-after.js";
 import {
   FIRST_ADMIN_SAVED_KEY,
   firstAdminOf,
@@ -54,6 +55,7 @@ import {
   firstAdminVia,
   firstAdminTitle,
   firstAdminBody,
+  firstAdminAfterFailed,
 } from "./dashboard/shared/first-admin.js";
 
 // The manifest-shape half (modes, the contract rules, the link rule) is pure and
@@ -75,6 +77,7 @@ export {
   firstAdminOf,
   firstAdminNeedsOperator,
   firstAdminNeedsNotice,
+  firstAdminAfterFailed,
   firstAdminSavedKey,
   firstAdminVia,
   firstAdminLink,
@@ -336,10 +339,12 @@ export async function clearFirstAdminNotice(db, bundleId, { nowMs = Date.now(), 
  *
  * Silent for `crow` (via env/postInstall), `external` and `none`, silent when this
  * install's bell already rang. A `crow`/`via: "setup"` bundle is owed the bell unless
- * ITS OWN automatic run for this install returned "ok" (autoResult): a script that
- * failed, found the app not answering, or found an admin already in place is exactly
- * what the operator must hear about. A web UI bundle that declares nothing falls back
- * to `finish-setup` (firstAdminOf), so an undeclared third-party install still rings.
+ * ITS OWN automatic run for this install returned "ok" (autoResult) AND its follow-up
+ * step did not fail (afterResult): a script that failed, found the app not answering,
+ * or found an admin already in place is exactly what the operator must hear about, and
+ * so is an app whose registration Crow could not close afterwards — otherwise the door
+ * stays open unnoticed. A web UI bundle that declares nothing falls back to
+ * `finish-setup` (firstAdminOf), so an undeclared third-party install still rings.
  *
  * @param {object} o
  * @param {object} o.db                   libsql-shaped client
@@ -348,6 +353,9 @@ export async function clearFirstAdminNotice(db, bundleId, { nowMs = Date.now(), 
  * @param {string} [o.bundleName]         display name (else the manifest's, else the id)
  * @param {string} [o.installId]          installed.json's installedAt for this install
  * @param {string} [o.autoResult]         runFirstAdminSetup's result for THIS install
+ * @param {{ok?: boolean, outcome?: string|null}|null} [o.afterResult]
+ *        applyFirstAdminAfter's own `{ ok, outcome }` for THIS install: a failure is
+ *        what rings, with the "press Restart" sentence as the body
  * @param {{result?: string, signups?: string|null}|null} [o.inviteResult]
  *        the invite step's outcome for THIS install (an invite-only app): when Crow
  *        invited the owner's email AND confirmed sign-ups off, there is nothing
@@ -365,13 +373,14 @@ export async function notifyFirstAdmin({
   bundleName = null,
   installId = null,
   autoResult = null,
+  afterResult = null,
   inviteResult = null,
   nowMs = Date.now(),
   notify = createNotification,
   lang = null,
   log = console,
 }) {
-  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult, inviteResult })) return null;
+  if (!db || !bundleId || !firstAdminNeedsNotice(manifest, { autoResult, inviteResult, afterResult })) return null;
   const key = firstAdminNoticeKey(bundleId);
   const stamp = typeof installId === "string" && installId ? installId : new Date(nowMs).toISOString();
   try {
@@ -390,7 +399,11 @@ export async function notifyFirstAdmin({
     const setup = firstAdminVia(manifest) === "setup";
     const row = await notify(db, {
       title: firstAdminTitle(name, language),
-      body: firstAdminBody({ ...fa, via: setup ? "setup" : null, kept: autoResult === "kept" }, name, language),
+      // A follow-up step that failed leaves the app's own door open: the operator is told
+      // what to do about that, not that there is a setup page to claim (the account exists).
+      body: firstAdminAfterFailed(afterResult)
+        ? firstAdminAfterFailureSentence(name)
+        : firstAdminBody({ ...fa, via: setup ? "setup" : null, kept: autoResult === "kept" }, name, language),
       type: "system",
       source: FIRST_ADMIN_NOTIFICATION_SOURCE,
       priority: "normal",
@@ -417,6 +430,7 @@ export async function reportFirstAdminNotice({
   bundleName = null,
   installId = null,
   autoResult = null,
+  afterResult = null,
   inviteResult = null,
   dbFactory = createDbClient,
   log = console,
@@ -424,9 +438,9 @@ export async function reportFirstAdminNotice({
 } = {}) {
   let db = null;
   try {
-    if (!firstAdminNeedsNotice(manifest, { autoResult, inviteResult })) return null;
+    if (!firstAdminNeedsNotice(manifest, { autoResult, inviteResult, afterResult })) return null;
     db = dbFactory();
-    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, inviteResult, log, ...rest });
+    return await notifyFirstAdmin({ db, bundleId, manifest, bundleName, installId, autoResult, afterResult, inviteResult, log, ...rest });
   } catch (err) {
     try { log.warn(`[bundles] first-admin notification skipped: ${err?.message ?? err}`); } catch { /* console gone */ }
     return null;
