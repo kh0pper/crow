@@ -30,7 +30,22 @@ after(() => rmSync(T, { recursive: true, force: true }));
 
 const UID = process.getuid();
 const mk = (...p) => { const d = join(...p); mkdirSync(d, { recursive: true }); return d; };
-const fdCount = () => readdirSync("/proc/self/fd").length;
+/**
+ * The fds this process holds on anything inside this test's scratch tree, as sorted
+ * "fd -> target" strings. Only the plan opens files there, so this set is
+ * deterministic, unlike a process-wide count (other threads open and close fds of
+ * their own at any time). An fd that closes between the listing and its readlink is
+ * not one of ours and is skipped.
+ */
+const scratchFds = () => {
+  const out = [];
+  for (const fd of readdirSync("/proc/self/fd")) {
+    let target;
+    try { target = readlinkSync("/proc/self/fd/" + fd); } catch { continue; }
+    if (target === T || target.startsWith(T + "/")) out.push(fd + " -> " + target);
+  }
+  return out.sort();
+};
 
 // ---- a fake host layout --------------------------------------------------
 
@@ -685,7 +700,7 @@ test("a folder bound by fd that is too large to scan is not bound, and its fd is
     writeFileSync(p, "");
     filler.push(p);
   }
-  const before = fdCount();
+  const before = scratchFds();
   let plan;
   try {
     plan = planOf({
@@ -700,7 +715,7 @@ test("a folder bound by fd that is too large to scan is not bound, and its fd is
     if (plan) closePlan(plan);
     for (const p of filler) rmSync(p, { force: true });
   }
-  assert.equal(fdCount(), before, "the dropped fd was closed by the plan");
+  assert.deepEqual(scratchFds(), before, "the dropped fd was closed by the plan");
 });
 
 // ---- the command file ---------------------------------------------------
@@ -873,18 +888,18 @@ test("an absolute command outside /usr and /opt binds the command FILE, not its 
 
 test("a refusal from the plan closes every fd it opened", (t) => {
   try {
-    const before = fdCount();
+    const before = scratchFds();
     assert.throws(() => planOf({ id: "not-installed" }), ContainRefused, "no install folder");
     assert.throws(() => planOf({ dataDir: join(CROW, "no-such-data") }), ContainRefused, "no data folder");
-    assert.equal(fdCount(), before, "a refusal before any open leaks nothing");
+    assert.deepEqual(scratchFds(), before, "a refusal before any open leaks nothing");
 
     // A checked open that walks several components and then refuses the leaf.
     mk(BUNDLES, "linked-data", "server");
     const linked = join(CROW, "linked-data");
     symlinkSync(APP, linked);
-    const beforeWalk = fdCount();
+    const beforeWalk = scratchFds();
     assert.throws(() => planOf({ id: "linked-data", dataDir: CROW }), ContainRefused, "a symlinked data leaf refuses");
-    assert.equal(fdCount(), beforeWalk, "no fd left open by the failed walk");
+    assert.deepEqual(scratchFds(), beforeWalk, "no fd left open by the failed walk");
   } catch (err) {
     if (err && (err.code === "EPERM" || err.code === "ENOSYS")) { t.skip("this host does not allow symlinks in the scratch dir"); return; }
     throw err;
@@ -899,13 +914,13 @@ test("a missing install folder refuses with a reason naming it", () => {
 // ---- the id is a slug ----------------------------------------------------
 
 test("an add-on id that is not one lowercase slug is refused before anything is opened", () => {
-  const before = fdCount();
+  const before = scratchFds();
   for (const bad of ["../x", "a/b", ".", "..", "", "A", undefined]) {
     assert.throws(() => planOf({ id: bad }),
       (e) => e instanceof ContainRefused && /invalid add-on id/.test(e.message),
       "id " + JSON.stringify(bad) + " is refused");
   }
-  assert.equal(fdCount(), before, "no fd left open by a refused id");
+  assert.deepEqual(scratchFds(), before, "no fd left open by a refused id");
 });
 
 // ---- a read-write data bind answers to the write side of the list --------
@@ -924,16 +939,16 @@ test("a data folder whose real path lands on the checkout is refused for the rea
     throw err;
   }
   try {
-    const before = fdCount();
+    const before = scratchFds();
     assert.throws(() => planOf({ dataDir: link }),
       (e) => e instanceof ContainRefused && /cannot be bound read-write/.test(e.message) && /never writable/.test(e.message),
       "the <id> folder inside the checkout is refused");
-    assert.equal(fdCount(), before, "no fd left open");
+    assert.deepEqual(scratchFds(), before, "no fd left open");
 
     assert.throws(() => planOf({ dataDir: link, profile: profileOf({ crowDb: true }) }),
       (e) => e instanceof ContainRefused && /cannot be bound read-write/.test(e.message) && /never writable/.test(e.message),
       "a crow.db profile is refused the same folder");
-    assert.equal(fdCount(), before, "no fd left open");
+    assert.deepEqual(scratchFds(), before, "no fd left open");
   } finally {
     rmSync(link, { force: true });
     rmSync(target, { recursive: true, force: true });
