@@ -12,6 +12,8 @@
  *
  *   <ownHome>/bundles/<id>[/...]        -> <id>
  *   <appRoot>/bundles/<id>[/...]        -> <id>, only when <id> is installed
+ *                                          (or, from the gateway, has a local
+ *                                          mcp-addons.json entry)
  *   <another home>/bundles/<id>[/...]   -> "other-instance:<id>"
  *   anything else                       -> no owner (a containerized Crow
  *                                          gateway, a repo checkout, a stale
@@ -114,7 +116,7 @@ function labelOf(labels, name) {
  * @param {string} [o.ownHome]        this Crow's home (CROW_HOME)
  * @param {string[]} [o.otherHomes]   other Crow homes on this computer
  * @param {string} [o.appRoot]        this Crow's checkout (CROW_APP_ROOT)
- * @param {Function} [o.installedIds] () => Set of installed bundle ids
+ * @param {Function} [o.installedIds] () => Set of the ids this Crow has installed or configured
  * @param {Function} [o.now]          clock (tests)
  * @returns {{snapshot: () => Promise<{publishes: object[], containers: object[], subnets: string[], addonProjects: Map<string,string>}>}}
  */
