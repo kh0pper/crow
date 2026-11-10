@@ -392,11 +392,13 @@ test("the denylist is the comment-only GPL code, and each entry is addressable",
   for (const permissive of ["fi.avg_tau", "fi.avg_t60", "fi.avg_t19"]) {
     assert.equal(lintSource(`${permissive}(0.01)`).length, 0, `${permissive} does not call the sliding code`);
   }
-  // The source half matches a prefixed call and nothing else.
-  assert.deepEqual(lintSource("process = ba.slidingMax(64, 128);"), [
-    { function: "basics.lib/slidingMax", licence: "GPL-3.0 (declared only in a comment)" },
-  ]);
-  assert.deepEqual(lintSource("process = my.ba.slidingMax;"), [], "a dotted name is not a call into ba");
+  // The source half matches the bare name under any prefix, or none.
+  const sliding = [{ function: "basics.lib/slidingMax", licence: "GPL-3.0 (declared only in a comment)" }];
+  assert.deepEqual(lintSource("process = ba.slidingMax(64, 128);"), sliding);
+  assert.deepEqual(lintSource("process = my.ba.slidingMax;"), sliding, "a nested prefix still reaches ba");
+  assert.deepEqual(lintSource('b = library("basics.lib"); process = b.slidingMax(64,128);'), sliding, "a renamed library");
+  assert.deepEqual(lintSource('import("basics.lib"); process = slidingMax(64,128);'), sliding, "an imported bare name");
+  assert.deepEqual(lintSource("process = ba.slidingMaxed;"), [], "a longer name is a different name");
   for (const entry of COMMENT_ONLY_GPL) {
     assert.ok(entry.library.endsWith(".lib"), `${entry.name} needs its library`);
     assert.ok(/^[a-z][a-z0-9]*$/.test(entry.prefix), `${entry.name} needs its library's prefix`);
@@ -816,4 +818,15 @@ test("one corrupt effect module does not block the others", async () => {
     StudioFaustHost.release();
     await StudioFaustHost.compileModules(postedModules);
   }
+});
+test("an undenied caller two hops out is still refused through the meta", async () => {
+  // `an.rms_envelope_rect` is not on the denylist and the source never names
+  // anything on it; it calls `an.ms_envelope_rect`, which calls `fi.avg_rect`.
+  // The meta records declared functions transitively, so `avg_rect`'s own entry
+  // appears and the denylist refuses it from the meta alone.
+  const source = 'import("stdfaust.lib"); process = an.rms_envelope_rect(0.01) <: _,_;';
+  assert.deepEqual(lintSource(source), [], "the source half sees nothing on the denylist");
+  const program = await compileProgram("two-hop-caller", source);
+  assert.equal(program.lint.ok, false, "the meta half must catch the GPL code underneath");
+  assert.ok(lintMeta(program.meta).refused.some((item) => item.function === "filters.lib/avg_rect"));
 });

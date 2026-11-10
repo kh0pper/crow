@@ -54,10 +54,11 @@
  *    below is the denylist of both, refused by name from the compiled meta AND
  *    from the `.dsp` source text.
  *
- * The denylist is maintained by review, not derived: the meta records the
- * licences a program's own functions declare, not the call graph under them, so
- * a new path into that code (a new effect, a faustwasm upgrade) is a thing to
- * read for. NOTICES.md says so too.
+ * The denylist is maintained by review, not derived: the meta records every
+ * DECLARED function a program reaches, transitively (phaser.dsp never names
+ * `os.`, yet its meta carries `oscillators.lib/lf_sawpos`), but nothing about
+ * UNDECLARED code, so a new path into comment-only code (a new effect, a
+ * faustwasm upgrade) is a thing to read for. NOTICES.md says so too.
  *
  * The effects are compiled with `-ftz 2`, so denormals are flushed inside the
  * DSP's own state (a deterministic bit mask, bit-identical in Chromium and
@@ -168,14 +169,15 @@ const COMMENT_ONLY_GPL_LICENCE = "GPL-3.0 (declared only in a comment)";
  * v1.4.1 (the two names are easy to swap: the file whose banner says
  * `signals.lib` declares "Faust Routing Library" v1.8.0).
  *
- * @type {ReadonlyArray<{library: string, version: string, licence: string}>}
+ * @type {ReadonlyArray<{library: string, version: string, licence: string, copyright?: string}>}
  */
 export const REVIEWED_UNDECLARED = Object.freeze([
   Object.freeze({
     library: "basics.lib",
     version: "1.23.6",
     licence:
-      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~4238-4268; its 'further contributions' note, ~4201-4210, says code without an indication of its own is 'expected' to be LGPL, STK-4.3, MIT, BSD or similar)",
+      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~4238-4268), except its JOS section (~4421-4722, incl. ba.bypass1/bypass2/bypass1to2 marked STK-4.3 in comments), which is STK-4.3",
+    copyright: "Copyright (C) 2003-2017 by Julius O. Smith III (the JOS section, STK-4.3)",
   }),
   Object.freeze({
     library: "delays.lib",
@@ -187,13 +189,15 @@ export const REVIEWED_UNDECLARED = Object.freeze([
     library: "oscillators.lib",
     version: "1.9.5",
     licence:
-      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~42320-42360); the functions Crow uses from it declare their own STK-4.3",
+      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~42320-42360), except its JOS section (~42993 on), which is STK-4.3; the functions Crow uses from it declare their own STK-4.3",
+    copyright: "Copyright (C) 2003-2022 by Julius O. Smith III (the JOS section, STK-4.3)",
   }),
   Object.freeze({
     library: "phaflangers.lib",
     version: "1.1.3",
     licence:
-      "STK-4.3 (the MIT-style Synthesis ToolKit licence): it has no GRAME/LGPL block at all, and its JOS section header, libfaust-wasm.data ~45554-45562, places the functions below it under STK-4.3; its 'further contributions' note, ~45871-45879, is the same 'expected' wording",
+      "STK-4.3 (the MIT-style Synthesis ToolKit licence) for the functions Crow uses: its JOS section header, libfaust-wasm.data ~45554-45562, places the functions below it (phaser2_stereo included, ~45826) under STK-4.3; its GRAME/LGPL block (~45831-45865) is empty",
+    copyright: "Copyright (C) 2003-2017 by Julius O. Smith III (the JOS section, STK-4.3)",
   }),
   Object.freeze({
     library: "platform.lib",
@@ -211,7 +215,8 @@ export const REVIEWED_UNDECLARED = Object.freeze([
     library: "signals.lib",
     version: "1.8.0",
     licence:
-      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~55723-55757)",
+      "LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~55723-55757), except its JOS section (~56024 on, si.smooth onward), which is STK-4.3",
+    copyright: "Copyright (C) 2003-2017 by Julius O. Smith III (the JOS section, STK-4.3)",
   }),
 ]);
 
@@ -407,10 +412,11 @@ export function lintMeta(meta) {
  * `lintMeta` is what catches a *declared* function whose body calls one
  * (`fi.avg_rect`), which the source text need not mention.
  *
- * Only the prefixed spellings are matched (`ba.slidingMax`, `fi.avg_rect`, …),
- * because that is how the standard libraries are called through
- * `stdfaust.lib`; a comment that mentions one refuses too, which is a cheap
- * price for not missing a real call.
+ * The bare function name is matched under any prefix or none (`ba.slidingMax`,
+ * `b.slidingMax` after `b = library("basics.lib")`, `sf.ba.slidingMax`, or
+ * `slidingMax` after `import("basics.lib")`); a comment or a local definition
+ * that uses one of the names refuses too, which is a cheap price for not
+ * missing a real call.
  *
  * @param {string} source the `.dsp` text
  * @returns {Array<{function: string, licence: string}>} the denied uses
@@ -419,8 +425,12 @@ export function lintSource(source) {
   const text = String(source == null ? "" : source);
   const refused = [];
   for (const entry of COMMENT_ONLY_GPL) {
-    // `(?<![\w.])` so `x.ba.slidingMax` is not a call to `ba.slidingMax`.
-    const pattern = new RegExp(`(?<![\\w.])${entry.prefix}\\.${entry.name}(?![\\w])`);
+    // The bare name under ANY prefix (or none): `b = library("basics.lib");
+    // b.slidingMean`, `sf.ba.slidingMean` and `import("basics.lib"); slidingSum`
+    // all reach the same code, and Faust cannot build a name at run time, so a
+    // use of it always spells it. A local definition with the same name refuses
+    // too — a cheap price for not missing a real call.
+    const pattern = new RegExp(`(?<![\\w])${entry.name}(?![\\w])`);
     if (pattern.test(text)) {
       refused.push({ function: `${entry.library}/${entry.name}`, licence: COMMENT_ONLY_GPL_LICENCE });
     }
@@ -850,11 +860,12 @@ export function noticesText(licences, stkText, undeclared = {}, credits = []) {
     "   meta and on the `.dsp` sources.",
     "",
     "**The denylist is maintained by review, not derived from the meta.** The",
-    "meta records the licences a program's own functions declare, not the call",
-    "graph beneath them: a function that calls `fi.avg_rect` (which calls",
-    "`ba.slidingMean`) leaves no trace of the GPL code in the top-level meta.",
-    "Reading each new effect's sources, and re-reading the libraries on a",
-    "`faustwasm` upgrade, is what keeps the list complete.",
+    "meta records every declared function a program reaches, transitively, but",
+    "nothing about undeclared code: `ba.slidingMean` is GPL only in a comment, so",
+    "a program reaching it leaves no GPL entry. A declared caller such as",
+    "`fi.avg_rect` does leave its own entry, which is why the denylist names",
+    "the declared callers too. Reading each new effect's sources, and re-reading",
+    "the libraries on a `faustwasm` upgrade, is what keeps the list complete.",
     "",
     "## What each effect uses",
     "",
@@ -910,6 +921,7 @@ export function noticesText(licences, stkText, undeclared = {}, credits = []) {
         `- \`${library}\` ${item.version} — ${terms}.`,
         `  Used by: ${item.kinds.join(", ")}.`,
       );
+      if (item.reviewed && item.reviewed.copyright) lines.push(`  ${item.reviewed.copyright}.`);
     }
     lines.push("");
   }

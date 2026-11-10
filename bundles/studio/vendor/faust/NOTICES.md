@@ -31,11 +31,12 @@ these pass:
    meta and on the `.dsp` sources.
 
 **The denylist is maintained by review, not derived from the meta.** The
-meta records the licences a program's own functions declare, not the call
-graph beneath them: a function that calls `fi.avg_rect` (which calls
-`ba.slidingMean`) leaves no trace of the GPL code in the top-level meta.
-Reading each new effect's sources, and re-reading the libraries on a
-`faustwasm` upgrade, is what keeps the list complete.
+meta records every declared function a program reaches, transitively, but
+nothing about undeclared code: `ba.slidingMean` is GPL only in a comment, so
+a program reaching it leaves no GPL entry. A declared caller such as
+`fi.avg_rect` does leave its own entry, which is why the denylist names
+the declared callers too. Reading each new effect's sources, and re-reading
+the libraries on a `faustwasm` upgrade, is what keeps the list complete.
 
 ## What each effect uses
 
@@ -90,20 +91,24 @@ terms Crow may ship under. They are Faust's own libraries; the citations
 are the Faust libraries as `faustwasm` ships them, in its
 `libfaust-wasm.data`.
 
-- `basics.lib` 1.23.6 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~4238-4268; its 'further contributions' note, ~4201-4210, says code without an indication of its own is 'expected' to be LGPL, STK-4.3, MIT, BSD or similar).
+- `basics.lib` 1.23.6 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~4238-4268), except its JOS section (~4421-4722, incl. ba.bypass1/bypass2/bypass1to2 marked STK-4.3 in comments), which is STK-4.3.
   Used by: eq, reverb.
+  Copyright (C) 2003-2017 by Julius O. Smith III (the JOS section, STK-4.3).
 - `delays.lib` 1.3.3 — LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~11392-11421).
   Used by: chorus, delay, reverb.
-- `oscillators.lib` 1.9.5 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~42320-42360); the functions Crow uses from it declare their own STK-4.3.
+- `oscillators.lib` 1.9.5 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~42320-42360), except its JOS section (~42993 on), which is STK-4.3; the functions Crow uses from it declare their own STK-4.3.
   Used by: reverb.
-- `phaflangers.lib` 1.1.3 — STK-4.3 (the MIT-style Synthesis ToolKit licence): it has no GRAME/LGPL block at all, and its JOS section header, libfaust-wasm.data ~45554-45562, places the functions below it under STK-4.3; its 'further contributions' note, ~45871-45879, is the same 'expected' wording.
+  Copyright (C) 2003-2022 by Julius O. Smith III (the JOS section, STK-4.3).
+- `phaflangers.lib` 1.1.3 — STK-4.3 (the MIT-style Synthesis ToolKit licence) for the functions Crow uses: its JOS section header, libfaust-wasm.data ~45554-45562, places the functions below it (phaser2_stereo included, ~45826) under STK-4.3; its GRAME/LGPL block (~45831-45865) is empty.
   Used by: phaser.
+  Copyright (C) 2003-2017 by Julius O. Smith III (the JOS section, STK-4.3).
 - `platform.lib` 1.3.1 — LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~52482-52515).
   Used by: chorus, delay, eq, filter, phaser, reverb, saturation.
 - `routes.lib` 1.4.1 — LGPL-2.1-or-later with the Faust exception (header comment, libfaust-wasm.data ~55017-55050).
   Used by: eq, reverb.
-- `signals.lib` 1.8.0 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~55723-55757).
+- `signals.lib` 1.8.0 — LGPL-2.1-or-later with the Faust exception (GRAME header comment, libfaust-wasm.data ~55723-55757), except its JOS section (~56024 on, si.smooth onward), which is STK-4.3.
   Used by: eq, reverb.
+  Copyright (C) 2003-2017 by Julius O. Smith III (the JOS section, STK-4.3).
 
 ## Copyright and authorship
 
