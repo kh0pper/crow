@@ -21,7 +21,7 @@ import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-z
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { createDbClient } from "../db.js";
-import { isApproved, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { isApproved, approvalNotFromThisMachine, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -555,9 +555,15 @@ export async function loadDynamicBackends() {
         continue;
       }
       if (!isApproved(row, { crowHome })) {
-        const why = hasApproval(row)
-          ? "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page"
-          : "Waiting for the owner to approve it on the Projects page";
+        // Three different situations, three different sentences: never approved;
+        // approved but this machine cannot check it (no key or no record entry,
+        // e.g. a restore, since secrets/ is never backed up); approved here but
+        // what it pins changed.
+        const why = !hasApproval(row)
+          ? "Waiting for the owner to approve it on the Projects page"
+          : approvalNotFromThisMachine(row, { crowHome })
+            ? MACHINE_APPROVAL_MESSAGE
+            : "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page";
         // Keep an approval-refusal reason the owner has not acted on yet.
         if (row.status !== PENDING_STATUS || (hasApproval(row) && row.last_error !== why)) {
           await db.execute({

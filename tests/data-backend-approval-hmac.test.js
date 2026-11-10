@@ -4,18 +4,21 @@
  * An `mcp_server` data backend is a command the gateway runs. Its owner approval
  * used to be a plain SHA-256 kept in the SAME crow.db row, so anything that can
  * write crow.db could compute it and plant an "approved" row. The stored value is
- * now `hmac1:<hex>`: an HMAC over that same hash, keyed by 32 random bytes in
- * `<CROW_HOME>/secrets/` — a file a crow.db writer cannot read or forge.
+ * now `hmac1:<hex>`: an HMAC over that same hash plus the row's id and a nonce
+ * kept beside the key in `<CROW_HOME>/secrets/` — files a crow.db writer cannot
+ * read or forge. The nonce is what binds a value to one row and makes a revoked
+ * one useless if it is ever written back.
  *
  * Everything runs in a scratch HOME / data dir set BEFORE any app import.
  */
 import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -33,14 +36,17 @@ execFileSync(process.execPath, ["scripts/init-db.js"], { cwd: ROOT, env: process
 const CORE = join(DATA, "crow.db");
 
 const {
-  approveBackend, approvalHash, prepareSpawn, isApproved, hasApproval, isLegacyApproval,
-  LEGACY_APPROVAL_MESSAGE,
+  approveBackend, revokeBackendApproval, approvalHash, prepareSpawn, isApproved, hasApproval, isLegacyApproval,
+  approvalNotFromThisMachine, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE,
 } = await import("../servers/shared/data-backend-approval.js");
-const { approvalKeyPath, ensureApprovalKey, readApprovalKey, APPROVAL_KEY_BYTES } =
-  await import("../servers/shared/data-backend-approval-key.js");
+const {
+  approvalKeyPath, approvalRecordPath, ensureApprovalKey, readApprovalKey, approvalNonce, setApprovalNonce,
+  clearApprovalNonce, APPROVAL_KEY_BYTES,
+} = await import("../servers/shared/data-backend-approval-key.js");
 const { createDbClient } = await import("../servers/db.js");
 const { loadDynamicBackends } = await import("../servers/gateway/proxy.js");
 const fixitStore = await import("../servers/shared/fix-it/store.js");
+const { renderFixItCards, LINK_REMEDIES } = await import("../servers/gateway/fix-it/index.js");
 
 function raw() { return new Database(CORE); }
 function projectId() {
@@ -71,6 +77,9 @@ beforeEach(() => {
     d.prepare("DELETE FROM data_backends").run();
     d.prepare("DELETE FROM fix_it_items").run();
   } finally { d.close(); }
+  // The per-row nonce record outlives rows on purpose; sqlite reuses ids after
+  // a delete, so each test starts from no nonces.
+  rmSync(approvalRecordPath(CROW_HOME), { force: true });
 });
 
 // ------------------------------------------------------------------ the key file
@@ -89,6 +98,106 @@ test("the approval key is 32 bytes, 0600, in a 0700 secrets dir, and made once",
   writeFileSync(path, "short");
   assert.equal(readApprovalKey({ crowHome: home }), null);
   rmSync(home, { recursive: true, force: true });
+});
+
+test("a 0-byte key file (a crash between create and write) is replaced on the next approval", async () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-emptykey-"));
+  const db = createDbClient(CORE);
+  try {
+    const path = approvalKeyPath(home);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, "", { mode: 0o600 });
+    chmodSync(path, 0o600);
+    assert.equal(statSync(path).size, 0);
+    assert.equal(readApprovalKey({ crowHome: home }), null, "0 bytes is not a key");
+
+    // Approving is what replaces it: the empty file is not a key, so the owner
+    // must not be stuck forever after a crash.
+    const rowId = pendingRow(markerRef(join(HOME, "after-crash")));
+    assert.equal((await approveBackend(db, rowId, undefined, { crowHome: home })).ok, true);
+    assert.equal(statSync(path).size, APPROVAL_KEY_BYTES, "the empty key file was not replaced");
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.deepEqual(readApprovalKey({ crowHome: home }), ensureApprovalKey({ crowHome: home }));
+    assert.equal(isApproved(rowById(rowId), { crowHome: home }), true, "the approval replaced the key but does not verify under it");
+  } finally {
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a key file of the wrong length is refused, never overwritten, and approve stores nothing", async () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-shortkey-"));
+  const path = approvalKeyPath(home);
+  const db = createDbClient(CORE);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, "k".repeat(31), { mode: 0o600 });
+    chmodSync(path, 0o600);
+    assert.equal(readApprovalKey({ crowHome: home }), null);
+    assert.throws(() => ensureApprovalKey({ crowHome: home }), /does not hold a key/);
+    assert.equal(statSync(path).size, 31, "a non-empty key file was overwritten");
+
+    const id = pendingRow(markerRef(join(HOME, "wrong-key-length")));
+    const r = await approveBackend(db, id, undefined, { crowHome: home });
+    assert.equal(r.ok, false);
+    assert.equal(rowById(id).approved_ref_sha256, null, "a row was approved under an unusable key");
+    assert.equal(statSync(path).size, 31, "a refused approval rewrote the key file");
+  } finally {
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("concurrent ensureApprovalKey calls agree on one key", async () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-keyrace-"));
+  try {
+    const path = approvalKeyPath(home);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // The crash leftover, which each racing process also finds and replaces.
+    writeFileSync(path, "", { mode: 0o600 });
+    chmodSync(path, 0o600);
+    const moduleUrl = pathToFileURL(join(ROOT, "servers/shared/data-backend-approval-key.js")).href;
+    const code = `const m = await import(${JSON.stringify(moduleUrl)});`
+      + `process.stdout.write(m.ensureApprovalKey({ crowHome: ${JSON.stringify(home)} }).toString("hex"));`;
+    const run = () => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", code], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      let why = "";
+      child.stdout.on("data", (d) => { out += d; });
+      child.stderr.on("data", (d) => { why += d; });
+      child.on("error", reject);
+      child.on("close", (exitCode) => (exitCode === 0
+        ? resolve(out)
+        : reject(new Error(`a racing ensureApprovalKey failed (${exitCode}): ${why.slice(0, 300)}`))));
+    });
+    const keys = await Promise.all([run(), run(), run(), run()]);
+    assert.equal(new Set(keys).size, 1, "the racing processes minted different keys");
+    assert.equal(keys[0].length, APPROVAL_KEY_BYTES * 2);
+    assert.equal(readApprovalKey({ crowHome: home }).toString("hex"), keys[0], "the key on disk is not the one returned");
+    assert.equal(statSync(path).size, APPROVAL_KEY_BYTES);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("a key file another principal can read is refused", async () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-loosekey-"));
+  const path = approvalKeyPath(home);
+  const db = createDbClient(CORE);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, Buffer.alloc(APPROVAL_KEY_BYTES, 3), { mode: 0o644 });
+    chmodSync(path, 0o644);
+    assert.equal(readApprovalKey({ crowHome: home }), null, "a group/world-readable key was used");
+    assert.throws(() => ensureApprovalKey({ crowHome: home }), /mode 600/);
+    assert.equal(statSync(path).mode & 0o777, 0o644, "a loose key file was replaced instead of refused");
+
+    const id = pendingRow(markerRef(join(HOME, "loose-key")));
+    assert.equal((await approveBackend(db, id, undefined, { crowHome: home })).ok, false);
+    assert.equal(rowById(id).approved_ref_sha256, null);
+  } finally {
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("the check path never creates a key: a missing key means no approval is valid", () => {
@@ -178,6 +287,129 @@ test("approveBackend writes a keyed value; an edited command or pinned file void
   }
 });
 
+test("a revoked approval's old value is not accepted when it is written back", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const marker = join(HOME, "revoked-replay");
+    const ref = markerRef(marker);
+    const id = pendingRow(ref);
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const old = rowById(id).approved_ref_sha256;
+    assert.equal(isApproved(rowById(id)), true, "positive control");
+
+    assert.equal(await revokeBackendApproval(db, id), true);
+    assert.equal(rowById(id).approved_ref_sha256, null);
+    assert.equal(approvalNonce(id), null, "the revoke kept the row's nonce on record");
+
+    // Anyone who saw the old value writes it back into the column.
+    const d = raw();
+    d.prepare("UPDATE data_backends SET approved_ref_sha256 = ?, status = 'pending_approval' WHERE id = ?").run(old, id);
+    d.close();
+    assert.equal(isApproved(rowById(id)), false, "a revoked value was accepted again");
+    assert.equal(approvalNotFromThisMachine(rowById(id)), true);
+    assert.equal(prepareSpawn(rowById(id)).ok, false);
+
+    await loadDynamicBackends();
+    assert.equal(existsSync(marker), false, "a revoked backend was started again");
+    assert.equal(rowById(id).status, "pending_approval");
+  } finally {
+    db.close();
+  }
+});
+
+test("an approval copied onto another row with the same connection_ref is not accepted", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const ref = markerRef(join(HOME, "copied-approval"));
+    const first = pendingRow(ref);
+    assert.equal((await approveBackend(db, first)).ok, true);
+    const value = rowById(first).approved_ref_sha256;
+    const second = pendingRow(ref, value);
+    assert.equal(isApproved(rowById(second)), false, "a copied approval was accepted on another row");
+    assert.equal(approvalNotFromThisMachine(rowById(second)), true);
+    assert.equal(prepareSpawn(rowById(second)).ok, false);
+    assert.equal(isApproved(rowById(first)), true, "positive control: the row it was made for");
+  } finally {
+    db.close();
+  }
+});
+
+test("re-approving writes a fresh nonce, so only the latest value verifies", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "reapproved")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const before = rowById(id).approved_ref_sha256;
+    const nonceBefore = approvalNonce(id);
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const after = rowById(id).approved_ref_sha256;
+    const nonceAfter = approvalNonce(id);
+    assert.notEqual(nonceBefore, nonceAfter, "the re-approval reused the nonce");
+    assert.notEqual(before, after);
+    assert.equal(isApproved(rowById(id)), true);
+    assert.equal(isApproved({ ...rowById(id), approved_ref_sha256: before }), false, "the value from before the re-approval was accepted");
+  } finally {
+    db.close();
+  }
+});
+
+test("the approval record is 0600, one nonce per row, and a missing record approves nothing", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "record-missing")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    const path = approvalRecordPath(CROW_HOME);
+    assert.equal(statSync(path).mode & 0o777, 0o600, "record mode");
+    const rec = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(rec.v, 1);
+    assert.deepEqual(Object.keys(rec.rows), [String(id)]);
+    assert.match(rec.rows[String(id)], /^[0-9a-f]{32}$/);
+    assert.equal(isApproved(rowById(id)), true, "positive control");
+
+    rmSync(path);
+    assert.equal(approvalNonce(id), null);
+    assert.equal(isApproved(rowById(id)), false, "a missing record still approved the row");
+    assert.equal(approvalNotFromThisMachine(rowById(id)), true);
+    assert.equal(prepareSpawn(rowById(id)).ok, false);
+  } finally {
+    db.close();
+  }
+});
+
+test("a record another principal can rewrite approves nothing", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const id = pendingRow(markerRef(join(HOME, "record-loose")));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    assert.equal(isApproved(rowById(id)), true, "positive control");
+    const path = approvalRecordPath(CROW_HOME);
+    chmodSync(path, 0o644);
+    assert.equal(isApproved(rowById(id)), false, "a group/world-writable record was trusted");
+    assert.equal(approvalNotFromThisMachine(rowById(id)), true);
+  } finally {
+    db.close();
+  }
+});
+
+test("setApprovalNonce replaces a row's nonce and clearApprovalNonce drops it", async () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-records-"));
+  try {
+    await setApprovalNonce(7, "a".repeat(32), { crowHome: home });
+    await setApprovalNonce(8, "b".repeat(32), { crowHome: home });
+    assert.equal(approvalNonce(7, { crowHome: home }), "a".repeat(32));
+    await setApprovalNonce(7, "c".repeat(32), { crowHome: home });
+    assert.equal(approvalNonce(7, { crowHome: home }), "c".repeat(32));
+    assert.equal(approvalNonce(8, { crowHome: home }), "b".repeat(32), "another row's nonce was lost");
+    await setApprovalNonce(7, "not-hex", { crowHome: home }).then(
+      () => assert.fail("a malformed nonce was stored"),
+      () => {});
+    await clearApprovalNonce(7, { crowHome: home });
+    assert.equal(approvalNonce(7, { crowHome: home }), null);
+    assert.equal(approvalNonce(8, { crowHome: home }), "b".repeat(32));
+    assert.equal(statSync(approvalRecordPath(home)).mode & 0o777, 0o600);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("approving refuses when the key cannot be created, and stores nothing", async () => {
   const db = createDbClient(CORE);
   const blocked = mkdtempSync(join(tmpdir(), "crow-badkeyhome-"));
@@ -248,7 +480,9 @@ test("fix-it: one card counting the legacy approvals, and none for keyed rows", 
     assert.equal(pending[0].title, "Data backends need approving again");
     assert.match(pending[0].why, /^2 data backend\(s\) were approved before Crow protected approvals/);
     assert.match(pending[0].why, /Projects page/);
-    assert.ok((pending[0].remedies || []).some((r) => r.href === "/dashboard/projects"), "the card links to the Projects page");
+    assert.ok((pending[0].remedies || []).some((r) => r.kind === "link"), "the card has a link remedy");
+    assert.equal((pending[0].remedies || [])[0].href, undefined, "a link target must never be stored in the row");
+    assert.equal(LINK_REMEDIES[(pending[0].remedies || [])[0].actionId], "/dashboard/projects", "the card links to the Projects page");
 
     // Answered: the card resolves itself.
     const d = raw();
@@ -284,8 +518,94 @@ test("Projects page: a legacy row shows the re-approve sentence and the Approve 
     id: 6, backend_type: "mcp_server", connection_ref: ref, approved_ref_sha256: `hmac1:${"b".repeat(64)}`,
   });
   assert.equal(keyed.includes(escaped), false, "a keyed approval is not shown as legacy");
-  assert.match(keyed, /name="action" value="revoke_backend"/);
+  // A keyed value needs its row's nonce on record before this machine can call
+  // it approved; nothing in this render re-hashes the pinned files.
+  assert.match(keyed, /name="action" value="approve_backend"/, "a value this machine cannot check is not 'approved'");
+  await setApprovalNonce(6, "e".repeat(32));
+  const keyedHere = renderBackendApproval(1, {
+    id: 6, backend_type: "mcp_server", connection_ref: ref, approved_ref_sha256: `hmac1:${"b".repeat(64)}`,
+  });
+  assert.match(keyedHere, /name="action" value="revoke_backend"/);
 
   const never = renderBackendApproval(1, { id: 7, backend_type: "mcp_server", connection_ref: ref, approved_ref_sha256: null });
   assert.equal(never.includes(escaped), false);
+});
+
+// ------------------------------------------------------- Fix-it link targets
+test("fix-it: a stored href is never rendered; a link's target is held in code", async () => {
+  const db = createDbClient(CORE);
+  try {
+    const stored = ["/\\evil.example", "/\t/evil.example", "https://x"];
+    for (const [i, href] of stored.entries()) {
+      await fixitStore.upsertItem(db, {
+        source: "test-link", dedupKey: `unknown-${i}`, title: "A card", severity: "warn",
+        remedies: [{ actionId: "not-a-remedy", kind: "link", label: "Open", href }],
+      });
+    }
+    const unknown = await renderFixItCards(db, { req: {} });
+    assert.equal(unknown.includes("evil.example"), false, "a stored href reached the page");
+    assert.equal(unknown.includes("https://x"), false, "a stored href reached the page");
+    assert.equal(unknown.includes("data-fixit-link"), false, "an unknown actionId rendered a link");
+
+    // The registered actionId renders the path from LINK_REMEDIES, whatever href is stored.
+    const { default: projectsPanel } = await import("../servers/gateway/dashboard/panels/projects.js");
+    assert.equal(LINK_REMEDIES["open-projects-page"], projectsPanel.route, "the code-held link must be the Projects page route");
+    await fixitStore.upsertItem(db, {
+      source: "test-link", dedupKey: "known", title: "Another card", severity: "warn",
+      remedies: [{ actionId: "open-projects-page", kind: "link", label: "Open the Projects page", href: "/\\evil.example" }],
+    });
+    const known = await renderFixItCards(db, { req: {} });
+    assert.ok(known.includes(`href="${projectsPanel.route}"`), "the code-held target is missing");
+    assert.equal(known.includes("evil.example"), false, "a stored href reached the page");
+  } finally {
+    db.close();
+  }
+});
+
+test("fix-it: an approval re-runs the re-approval check, so its card clears without a restart", async () => {
+  const { refreshReapprovalCard } = await import("../servers/gateway/dashboard/panels/projects.js");
+  const db = createDbClient(CORE);
+  try {
+    const legacyRef = markerRef(join(HOME, "legacy-panel"));
+    const id = pendingRow(legacyRef, approvalHash(legacyRef));
+    await detector.check(boundStore(db));
+    assert.equal((await fixitStore.listPending(db)).length, 1, "positive control: the card is up");
+    assert.equal((await approveBackend(db, id)).ok, true);
+    assert.equal((await fixitStore.listPending(db)).length, 1, "the card clears only when the check runs");
+    await refreshReapprovalCard(db);
+    assert.deepEqual(await fixitStore.listPending(db), [], "the card stayed up after the approval");
+
+    const src = readFileSync(join(ROOT, "servers/gateway/dashboard/panels/projects.js"), "utf8");
+    assert.match(src, /approveBackend\([\s\S]{0,500}?refreshReapprovalCard\(db\)/,
+      "the approve handler never re-runs the re-approval check");
+  } finally {
+    db.close();
+  }
+});
+
+// ---------------------------------------------- an approval from another machine
+test("an approval this machine cannot check says so, in the row and on the page", async () => {
+  const { renderBackendApproval } = await import("../servers/gateway/dashboard/panels/projects.js");
+  const db = createDbClient(CORE);
+  try {
+    const marker = join(HOME, "restored-machine");
+    const id = pendingRow(markerRef(marker));
+    assert.equal((await approveBackend(db, id)).ok, true);
+    // A restore: crow.db came over, secrets/ (the key and the nonce record) did not.
+    rmSync(approvalRecordPath(CROW_HOME), { force: true });
+    await loadDynamicBackends();
+    assert.equal(existsSync(marker), false, "a row approved on another machine was started");
+
+    const row = rowById(id);
+    assert.equal(row.status, "pending_approval");
+    assert.equal(row.last_error, MACHINE_APPROVAL_MESSAGE);
+
+    const html = renderBackendApproval(1, row);
+    assert.ok(html.includes(MACHINE_APPROVAL_MESSAGE), "the page does not say the approval is not from this machine");
+    assert.equal(html.includes("Approved (checked again every time it starts)"), false, "the page still says Approved");
+    assert.match(html, /name="action" value="approve_backend"/, "the page must offer the Approve button");
+    assert.doesNotMatch(html, /name="action" value="revoke_backend"/);
+  } finally {
+    db.close();
+  }
 });

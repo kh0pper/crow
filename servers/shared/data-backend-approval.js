@@ -9,12 +9,16 @@
  *   `approved_ref_sha256`, an HMAC-SHA256 (`hmac1:<hex>`) over one SHA-256 of
  *   the exact `connection_ref` text AND the current contents of every
  *   non-root-owned file the command line names (the launcher, and any
- *   argument that is an existing file — the script an interpreter runs).
- * - The HMAC key is 32 random bytes in `<CROW_HOME>/secrets/` (see
- *   data-backend-approval-key.js), never in crow.db: a process that can write
- *   the row cannot compute an approval for it. The bare-64-hex value older
- *   versions stored is LEFTOVER, not an approval (isLegacyApproval): those
- *   rows stay stopped until the owner approves them again.
+ *   argument that is an existing file — the script an interpreter runs) AND
+ *   the row's id and the nonce recorded for that id outside the database.
+ * - The HMAC key is 32 random bytes in `<CROW_HOME>/secrets/`, and the nonce
+ *   lives in a per-row record beside it (see data-backend-approval-key.js),
+ *   never in crow.db: a process that can write the row cannot compute an
+ *   approval for it, cannot replay an old value after a revoke (the nonce is
+ *   gone) and cannot copy one row's value onto another (different id, no
+ *   nonce). The bare-64-hex value older versions stored is LEFTOVER, not an
+ *   approval (isLegacyApproval): those rows stay stopped until the owner
+ *   approves them again.
  * - The gateway starts a row only while that HMAC still matches: any later
  *   edit of the command, args, env-var names, or of one of those files,
  *   voids the approval. Code fetched at start (npx/uvx packages) and files a
@@ -31,7 +35,9 @@ import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { resolveAddonCommand, checkLauncherArgs, sha256File } from "./resolve-command.js";
 import { buildBotBaseEnv } from "./bot-env.js";
-import { ensureApprovalKey, readApprovalKey } from "./data-backend-approval-key.js";
+import {
+  ensureApprovalKey, readApprovalKey, approvalNonce, newApprovalNonce, setApprovalNonce, clearApprovalNonce,
+} from "./data-backend-approval-key.js";
 
 export const PENDING_STATUS = "pending_approval";
 
@@ -42,6 +48,13 @@ const BARE_SHA256 = /^[0-9a-f]{64}$/;
 
 /** What the owner is told (and what the row's last_error carries) about an old approval. */
 export const LEGACY_APPROVAL_MESSAGE = "Approved before Crow keyed its approvals; approve it again on the Projects page";
+
+/**
+ * What the owner is told about an approval this machine cannot verify at all:
+ * the approval key or the row's nonce is missing, which is what a restore on
+ * another machine leaves behind (secrets/ is never backed up).
+ */
+export const MACHINE_APPROVAL_MESSAGE = "Its approval does not match this machine's approval key (for example after a restore); approve it again on the Projects page";
 
 export function refHash(connectionRef) {
   return createHash("sha256").update(String(connectionRef ?? ""), "utf8").digest("hex");
@@ -106,38 +119,61 @@ export function approvalHash(connectionRef, cwd = process.cwd()) {
   return h.digest("hex");
 }
 
-/** The stored form of an approval: `hmac1:` + HMAC-SHA256(key, pin). */
-function hmacFor(key, pin) {
-  return APPROVAL_PREFIX + createHmac("sha256", key).update(pin, "utf8").digest("hex");
+/** Domain separation: this HMAC signs an approval and nothing else keyed with this key. */
+const APPROVAL_DOMAIN = "crow-data-backend-approval\0v1\0";
+
+/** The stored form of an approval: `hmac1:` + HMAC-SHA256(key, domain, row id, nonce, pin). */
+function hmacFor(key, rowId, nonce, pin) {
+  return APPROVAL_PREFIX + createHmac("sha256", key)
+    .update(`${APPROVAL_DOMAIN}${String(rowId)}\0${nonce}\0${pin}`, "utf8")
+    .digest("hex");
 }
 
 /**
- * The keyed approval value for a connection_ref: `hmac1:<hmac>`, or null when
- * the reference cannot be hashed (a pinned file is gone or unreadable).
+ * The keyed approval value for a row: `hmac1:<hmac>`, or null when the
+ * reference cannot be hashed (a pinned file is gone or unreadable). The value
+ * covers the row's id and the nonce recorded for it, so it belongs to that row
+ * and cannot be replayed after a revoke.
  */
-export function keyedApproval(key, connectionRef) {
+export function keyedApproval(key, rowId, nonce, connectionRef) {
   const pin = approvalHash(connectionRef);
-  if (!pin || !Buffer.isBuffer(key)) return null;
-  return hmacFor(key, pin);
+  if (!pin || !Buffer.isBuffer(key) || typeof nonce !== "string" || !nonce) return null;
+  return hmacFor(key, rowId, nonce, pin);
 }
 
 /**
  * True when `row` (an mcp_server data_backends row) is owner-approved as it
  * stands — command line AND pinned file contents — under THIS machine's
- * approval key. Hashes files: call it at start, never while rendering a page.
- * Never creates the key: a missing (or unreadable) key means no approval is
- * valid. An old bare-64-hex value is not an approval.
+ * approval key and the nonce recorded for this row. Hashes files: call it at
+ * start, never while rendering a page. Never creates the key or the record: a
+ * missing (or unreadable, or refused) one means no approval is valid. An old
+ * bare-64-hex value is not an approval.
  */
 export function isApproved(row, { crowHome } = {}) {
   if (!row || typeof row.approved_ref_sha256 !== "string") return false;
   if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
   const key = readApprovalKey({ crowHome });
   if (!key) return false;
-  const want = keyedApproval(key, row.connection_ref);
+  const nonce = approvalNonce(row.id, { crowHome });
+  if (!nonce) return false;
+  const want = keyedApproval(key, row.id, nonce, row.connection_ref);
   if (!want) return false;
   const got = Buffer.from(row.approved_ref_sha256.slice(APPROVAL_PREFIX.length), "hex");
   const expected = Buffer.from(want.slice(APPROVAL_PREFIX.length), "hex");
   return got.length === expected.length && timingSafeEqual(got, expected);
+}
+
+/**
+ * True when a keyed value cannot be checked on this machine at all: the
+ * approval key or the row's record entry is missing (a restore on another
+ * machine, since secrets/ is never backed up). Two small files outside crow.db,
+ * never a pinned file, so the dashboard may call it while rendering to tell this
+ * apart from "what it pins changed".
+ */
+export function approvalNotFromThisMachine(row, { crowHome } = {}) {
+  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
+  if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
+  return !readApprovalKey({ crowHome }) || !approvalNonce(row.id, { crowHome });
 }
 
 /** Display only (no file reads): a keyed approval is on record; it is re-checked at start. */
@@ -281,8 +317,10 @@ export function verifyBackendLaunch(connRef, opts = {}) {
  * Owner action: approve the row's current connection_ref. `expectedHash` is
  * the hash of the connection_ref the owner was shown (refHash): the approval
  * only lands if the row still carries exactly that text. Runs the launcher
- * check now (it hashes, bounded), pins file contents, and keys the result with
- * this machine's approval key (made if it is not there yet).
+ * check now (it hashes, bounded), pins file contents, records a fresh nonce
+ * for this row in `<CROW_HOME>/secrets/data-backend-approvals.json` FIRST, and
+ * only then stores the keyed value in the row — under this machine's approval
+ * key, made if it is not there yet.
  * @returns {Promise<{ ok: boolean, reason?: string }>}
  */
 export async function approveBackend(db, id, expectedHash, { crowHome } = {}) {
@@ -291,11 +329,12 @@ export async function approveBackend(db, id, expectedHash, { crowHome } = {}) {
     args: [id],
   });
   if (!rows.length) return { ok: false, reason: "backend not found" };
+  const rowId = rows[0].id;
   const ref = rows[0].connection_ref;
   const refuse = async (reason) => {
     await db.execute({
       sql: "UPDATE data_backends SET last_error = ?, updated_at = datetime('now') WHERE id = ?",
-      args: [`Not approved: ${reason}`, id],
+      args: [`Not approved: ${reason}`, rowId],
     });
     return { ok: false, reason };
   };
@@ -316,10 +355,19 @@ export async function approveBackend(db, id, expectedHash, { crowHome } = {}) {
       return refuse("Crow could not create its approval key; nothing was approved");
     }
   }
-  const value = hmacFor(key, pin);
+  // The nonce is recorded FIRST: a value whose nonce is not on record verifies
+  // for nothing, so a failure here must leave the row unapproved rather than
+  // half-approved. A fresh nonce also voids the row's previous value.
+  const nonce = newApprovalNonce();
+  try {
+    await setApprovalNonce(rowId, nonce, { crowHome });
+  } catch {
+    return refuse("Crow could not record its approval; nothing was approved");
+  }
+  const value = hmacFor(key, rowId, nonce, pin);
   await db.execute({
     sql: "UPDATE data_backends SET approved_ref_sha256 = ?, status = 'disconnected', last_error = NULL, updated_at = datetime('now') WHERE id = ?",
-    args: [value, id],
+    args: [value, rowId],
   });
   return { ok: true };
 }
@@ -346,8 +394,19 @@ export function prepareSpawn(row, cwd = process.cwd(), { crowHome } = {}) {
   return { ok: true, command: launch.command, args: parsed.spec.args.map((a) => real.get(a) ?? a), envVars: launch.envVars };
 }
 
-/** Owner action: withdraw an approval (the row stays, it is no longer started). */
-export async function revokeBackendApproval(db, id) {
+/**
+ * Owner action: withdraw an approval (the row stays, it is no longer started).
+ * The row's nonce is removed from the record FIRST, so a value copied back into
+ * the column afterwards verifies for nothing. If the record cannot be written
+ * the column is still cleared (the leftover nonce alone approves nothing) and a
+ * warning says so without naming anything secret.
+ */
+export async function revokeBackendApproval(db, id, { crowHome } = {}) {
+  try {
+    await clearApprovalNonce(id, { crowHome });
+  } catch {
+    console.warn(`[data-backend-approval] could not update the approval record for backend #${id}; the approval is withdrawn anyway`);
+  }
   const r = await db.execute({
     sql: "UPDATE data_backends SET approved_ref_sha256 = NULL, status = ?, updated_at = datetime('now') WHERE id = ? AND backend_type = 'mcp_server'",
     args: [PENDING_STATUS, id],

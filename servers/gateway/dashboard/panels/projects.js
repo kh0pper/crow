@@ -18,7 +18,7 @@ import {
   appendAudit,
 } from "../../../shared/project-acl.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
-import { approveBackend, revokeBackendApproval, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
+import { approveBackend, revokeBackendApproval, hasApproval, isLegacyApproval, approvalNotFromThisMachine, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, refHash, parseStoredSpec, visibleText, pinnedFiles, backendEnvNames } from "../../../shared/data-backend-approval.js";
 import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { csrfInput } from "../shared/csrf.js";
 import { canOwnProject, assertCanChangeStatus } from "../../../shared/project-lifecycle.js";
@@ -98,6 +98,18 @@ const STATUS_BADGE_MAP = {
   archived: "draft",
 };
 
+/**
+ * After an approval, re-run the re-approval boot check so that card clears
+ * without a gateway restart. Never throws: a Fix-it card is never worth failing
+ * an approval for.
+ */
+export async function refreshReapprovalCard(db) {
+  try {
+    const fixIt = await import("../../fix-it/index.js");
+    await fixIt.runBootCheck(db, "data-backend-reapproval");
+  } catch { /* the card clears at the next boot check */ }
+}
+
 export default {
   id: "projects",
   name: "Projects",
@@ -149,10 +161,14 @@ export default {
           const r = await approveBackend(db, backendId, String(req.body.ref_sha256 || ""), { crowHome: resolveCrowHome() });
           if (!r.ok) return res.redirectAfterPost(`${back}${sep}error=backend_not_approved`);
           import("../../proxy.js").then((m) => m.loadDynamicBackends()).catch(() => {});
-        } else {
-          await revokeBackendApproval(db, backendId);
-          import("../../proxy.js").then((m) => m.disconnectDynamicBackend(backendId)).catch(() => {});
+          // The re-approval Fix-it card counts the rows still waiting: run its
+          // check now, so approving the last one clears the card without a
+          // gateway restart.
+          await refreshReapprovalCard(db);
+          return res.redirectAfterPost(back);
         }
+        await revokeBackendApproval(db, backendId, { crowHome: resolveCrowHome() });
+        import("../../proxy.js").then((m) => m.disconnectDynamicBackend(backendId)).catch(() => {});
         return res.redirectAfterPost(back);
       }
 
@@ -765,8 +781,10 @@ async function renderDetailView(db, projectId, layout, lang, req = {}) {
  * keys that are never spawned, or is too long to show in full cannot be
  * approved.
  *
- * Rendering reads no file contents (stat only): the launcher check and the
- * file pins run when the owner presses Approve and again at every start.
+ * Rendering stats the launcher and the pinned files, and reads only the
+ * approval key and the per-row record (two small files outside crow.db): the
+ * launcher check and the file pins run when the owner presses Approve and again
+ * at every start.
  * The requester's free-text name comes last, in a distinct box, marked
  * unverified. The approval form carries the hash of the stored text the
  * owner saw and the CSRF token.
@@ -785,10 +803,16 @@ export function renderBackendApproval(projectId, b, req = {}) {
     return `<div style="font-size:0.75rem"><div style="${warn}">Cannot be approved: ${prose(parsed.reason)}. Remove it and register it again.</div>${label}</div>`;
   }
   const { command, args, envVars } = parsed.spec;
-  const approved = hasApproval(b);
+  // An approval this machine cannot verify at all (no approval key, or no record
+  // entry for this row — what a restore on another machine leaves behind, since
+  // secrets/ is never backed up) is shown as what it is, not as "Approved": the
+  // row is not running, and pressing Approve again writes a value for here.
+  const machineMismatch = approvalNotFromThisMachine(b);
+  const approved = hasApproval(b) && !machineMismatch;
   // An approval from before approvals were keyed is not one: say so, and offer
   // the normal Approve button (pressing it writes the new form).
   const legacyHtml = isLegacyApproval(b) ? `<div style="${warn}">${prose(LEGACY_APPROVAL_MESSAGE)}</div>` : "";
+  const machineHtml = machineMismatch ? `<div style="${warn}">${prose(MACHINE_APPROVAL_MESSAGE)}</div>` : "";
   const csrf = csrfInput(req);
   const btn = "padding:0.25rem 0.5rem;border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);cursor:pointer;font-size:0.75rem";
   const hidden = `${csrf}<input type="hidden" name="id" value="${Number(projectId)}"><input type="hidden" name="backend_id" value="${Number(b.id)}">`;
@@ -820,6 +844,7 @@ export function renderBackendApproval(projectId, b, req = {}) {
   return `<div style="font-size:0.75rem">
     <div>${approved ? "Approved (checked again every time it starts). It runs:" : "Waiting for your approval. It would run:"}</div>
     ${legacyHtml}
+    ${machineHtml}
     <div>Command:</div><code style="${code}">${show(command)}</code>
     <div>Arguments (${args.length}), each passed exactly as shown:</div>${argsHtml}
     ${notes.map((n) => `<div style="${warn}">${n}</div>`).join("")}

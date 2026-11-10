@@ -17,8 +17,8 @@ import { isLegacyApproval } from "../../../shared/data-backend-approval.js";
 
 export const SOURCE = "data-backend-reapproval";
 export const DEDUP_KEY = "data-backend:legacy-approval";
-/** Where the owner re-approves a backend (the Projects panel's route). */
-export const PROJECTS_URL = "/dashboard/projects";
+/** The link remedy whose target lives in code (fix-it/index.js LINK_REMEDIES). */
+export const REMEDY_ACTION_ID = "open-projects-page";
 
 export const TITLE = "Data backends need approving again";
 
@@ -61,10 +61,12 @@ export default {
       why: bodyText(count),
       severity: "warn",
       // A link, not a POST: the owner approves on the Projects page, where the
-      // command is shown in full. handleFixItAction refuses a non-instant entry,
-      // so this actionId can never be executed as one.
-      remedies: [{ actionId: "open-projects-page", kind: "link", label: "Open the Projects page", href: PROJECTS_URL }],
-      context: { legacyApprovals: count, projectsUrl: PROJECTS_URL },
+      // command is shown in full. The destination is held in code (LINK_REMEDIES,
+      // fix-it/index.js) — only the actionId is stored, so a crow.db writer
+      // cannot point this card at another host. handleFixItAction refuses a
+      // non-instant entry, so this actionId can never be executed as one.
+      remedies: [{ actionId: REMEDY_ACTION_ID, kind: "link", label: "Open the Projects page" }],
+      context: { legacyApprovals: count },
     });
     return { count };
   },

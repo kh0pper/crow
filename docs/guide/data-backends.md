@@ -40,7 +40,9 @@ What an approval covers:
 - **The files it runs.** Approval pins the current contents of the launcher (when it is a file path) and of every argument that names an existing file, such as the script an interpreter runs, except root-owned system files. Editing one of those files stops it from starting until you approve it again.
 - **Not** code the command downloads when it starts (for example `npx` or `uvx` packages), and not other files a script opens by itself.
 
-The stored approval is keyed with a secret Crow keeps outside its database (in `~/.crow/secrets/`, which bots cannot read and backups never carry), so nothing that can write Crow's database can approve a command for you. An approval made by a version from before that change is not accepted: the backend shows as waiting with **Approved before Crow keyed its approvals; approve it again on the Projects page**, and one more **Approve and run exactly this** brings it back.
+The stored approval is keyed with a secret Crow keeps outside its database (in `~/.crow/secrets/`, which a sandboxed bot cannot read and backups never carry), so nothing that can write Crow's database can approve a command for you. The key also covers a per-row record kept beside it, so a value belongs to one backend: withdrawing an approval, or copying a value onto another backend, leaves it verifying for nothing. An approval made by a version from before that change is not accepted: the backend shows as waiting with **Approved before Crow keyed its approvals; approve it again on the Projects page**, and one more **Approve and run exactly this** brings it back.
+
+Because those secrets are never backed up, **restoring a backup onto a new machine needs re-approval**: the backends show as waiting with **Its approval does not match this machine's approval key (for example after a restore); approve it again on the Projects page**. Approve each one again once you have checked the command it would run.
 
 The launcher is checked when you approve and again every time it starts, with the same rules as add-ons: `node`, `npm` and `npx` are the gateway's own; any other bare name (such as `uvx`) must be found in a root-owned system directory; a launcher anywhere else must be an absolute path with its SHA-256 in `command_sha256`; a `uv`/`uvx` `--from git+…` source must name a full commit SHA. A `command_sha256` in the registration was supplied by whoever registered it — the page says so, and says when the launcher is not owned by root.
 
@@ -112,7 +114,7 @@ The AI queries the backend, formats the results, and stores them as a source wit
 
 ## Security Considerations
 
-- Registering an `mcp_server` backend never runs anything: only the owner, signed in to Crow's Nest, can approve a command, and an approval stops applying the moment the command or a file it runs changes
+- Registering an `mcp_server` backend never runs anything: only the owner, signed in to Crow's Nest, can approve a command, and an approval stops applying the moment the command or a file it runs changes, when the owner withdraws it, and on a machine whose approval secrets were not carried over (a restore)
 - An approved backend gets an allowlisted environment plus its declared variables, never the gateway's whole environment
 - Backends are never copied from peers: a shared project carries a description of its backends, not a runnable registration
 - `sqlite` datasets are opened read-only, one statement per query, with a row cap, a size cap and a time limit (a query runs in a separate process that is stopped at the limit)
