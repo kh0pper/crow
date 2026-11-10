@@ -12,12 +12,13 @@
 # argument, an environment value or output.
 #
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin.
-# Exit 0 = the admin now has exactly that password, 3 = Kavita already has an admin (nothing
-# changed), 4 = not running / not answering / unreadable, 5 = Kavita took the new password
-# but logging in with it did not succeed, anything else = failed. A register answer that
-# does not say the account was made is settled by reading Kavita's own state again: a
-# server that now has an admin keeps the password and proves it (0 or 5), one that still
-# has none changed nothing (1).
+# Exit 0 = the admin now has exactly that password, 3 = this install already has an admin that
+# is not provably Crow's and nothing of Crow's was saved, 4 = not running / not answering /
+# unreadable, 5 = Kavita confirmed Crow's own change but logging in with it did not succeed,
+# anything else = failed. A register answer that does not say the account was made is settled
+# by reading Kavita's own state again: a server that now has an admin is proved with a real
+# login (0, or 3 when that login does not work — the admin is then someone else's), one that
+# still has none changed nothing (1).
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -51,7 +52,10 @@ esc() { local s="${1//\\/\\\\}"; printf '%s' "${s//\"/\\\"}"; }
 # ── one HTTP call inside the container, its config on stdin ────────────────────────
 # Prints the body and then one final line with the HTTP status code (that is what
 # `-w '\n%{http_code}'` appends). Nothing at all means the request did not happen.
-http() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -L -K - -w '\n%{http_code}' 2>/dev/null || true; }
+# Following a redirect belongs to a READ only: a POST answered with one has to show up as
+# that answer instead of being replayed to wherever the redirect points.
+http_get() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -L -K - -w '\n%{http_code}' 2>/dev/null || true; }
+http_post() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -K - -w '\n%{http_code}' 2>/dev/null || true; }
 code_of() { printf '%s' "${1##*$'\n'}"; }
 body_of() { printf '%s' "${1%$'\n'*}"; }
 
@@ -61,15 +65,20 @@ cfg_post() {
     "$1" "$(esc "$2")"
 }
 
-# Does the body carry this text? `grep` exiting 1 on no match is not an error here.
-has() { printf '%s' "$1" | grep -q -- "$2"; }
+# The registered account's roles, as Kavita writes them: `"roles":["Admin","Login"]`. The
+# wrapper is stripped and the list is split on its commas, so each entry is compared exactly —
+# a username that merely contains the word is not a role. (`grep` exiting 1 is no error here.)
+roles_of() {
+  printf '%s' "$1" | tr -d '[:space:]' | grep -o '"roles":\[[^]]*\]' | tail -n 1 | sed 's/^"roles":\[//; s/\]$//' || true
+}
+is_admin() { printf '%s' "$1" | tr ',' '\n' | grep -qx '"Admin"'; }
 
 # FRESH (no admin yet) / DONE / UNKNOWN / OFFLINE. Kavita answers this one anonymously with
 # a bare JSON boolean. Only a POSITIVE `false` may lead to a change; anything else is
 # reported as unreadable.
 admin_state() {
   local resp code body answer
-  resp="$(http "$(cfg_get "$BASE_URL/api/Admin/exists")")"
+  resp="$(http_get "$(cfg_get "$BASE_URL/api/Admin/exists")")"
   code="$(code_of "$resp")"
   body="$(body_of "$resp")"
   if [ -z "$resp" ] || [ -z "$code" ] || [ "$code" = "000" ]; then printf '%s' "OFFLINE"; return 0; fi
@@ -103,21 +112,27 @@ esac
 # Kavita's registration wants an email address; the account is a local one, so the address
 # is derived from the username in the reserved .invalid domain and never receives mail.
 register_body="{\"username\":\"$ADMIN_USER\",\"email\":\"$ADMIN_USER@localhost.invalid\",\"password\":\"$(esc "$PW")\"}"
-resp="$(http "$(cfg_post "$BASE_URL/api/Account/register" "$register_body")")"
+# `confirmed` records the one thing that lets Crow keep the password after a login that does
+# not work: Kavita itself answering 200 with the Admin role for Crow's own registration.
+confirmed=""
+resp="$(http_post "$(cfg_post "$BASE_URL/api/Account/register" "$register_body")")"
 code="$(code_of "$resp")"
-made_admin=""
-if [ "$code" = "200" ] && has "$(body_of "$resp")" 'Admin'; then made_admin=1; fi
-if [ -z "$made_admin" ]; then
+if [ "$code" = "200" ] && is_admin "$(roles_of "$(body_of "$resp")")"; then confirmed=1; fi
+if [ -z "$confirmed" ]; then
   # Kavita refused (a second registration answers 400 "Not allowed"), or did not say what it
-  # did. Its own state decides, never the status code alone.
+  # did. Its own state decides, never the status code alone. An admin that appeared is proved
+  # with a real login — Crow's password either opens it or the account is someone else's, and
+  # the password is discarded.
   again="$(admin_state)"
   case "$again" in
-    DONE) die "Kavita already has its own admin account, so this install was left alone; nothing was changed." 3 ;;
+    DONE) ;;
     FRESH) die "Kavita did not create the admin account, so nothing was changed; check the app's own login." 1 ;;
     *) die "Kavita did not report whether it created the admin account; check the app's own login before trying again." 1 ;;
   esac
 fi
-say "Kavita's admin account '$ADMIN_USER' is in place."
+# Only Kavita's own Admin-role answer makes that account Crow's; an admin that appeared on its
+# own is proved below, so it is not claimed here.
+if [ -n "$confirmed" ]; then say "Kavita's admin account '$ADMIN_USER' is in place."; fi
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 login_body="{\"username\":\"$ADMIN_USER\",\"password\":\"$(esc "$PW")\"}"
@@ -127,7 +142,7 @@ cfg_login() {
 }
 prove() {
   local answer
-  answer="$(http "$(cfg_login)")"
+  answer="$(http_post "$(cfg_login)")"
   if [ "$(code_of "$answer")" = "200" ]; then printf '%s' "LOGIN-OK"; else printf '%s' "LOGIN-FAIL"; fi
 }
 attempt=1
@@ -142,9 +157,13 @@ while :; do
   sleep 3
 done
 if [ "$proof" != "LOGIN-OK" ]; then
-  # Kavita confirmed the change, so the new password IS its password: Crow keeps it and says
-  # it could not log in with it (exit 5).
-  die "Kavita accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  # Kavita itself confirmed the change, so the new password IS its password: Crow keeps it and
+  # says it could not log in with it (exit 5). Without that confirmation an admin that appeared
+  # is not Crow's — Crow's password does not open it — so nothing is saved (exit 3).
+  if [ -n "$confirmed" ]; then
+    die "Kavita accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  fi
+  die "Kavita already has an admin account that is not Crow's: logging in with Crow's password did not succeed; left alone, and nothing of Crow's was saved." 3
 fi
 
 say "Kavita's admin login for '$ADMIN_USER' now uses the password Crow generated."

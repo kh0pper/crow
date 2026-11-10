@@ -24,20 +24,27 @@
  *      tries, and the message says Crow kept the new password instead of sending the
  *      operator to set one by hand,
  *   7. a create step that answers unclearly is settled by the app's own state, never by the
- *      status code alone: an app that now has its admin goes on to the proof (0 or 5), one
- *      that still has none changed nothing (1),
+ *      status code alone: an app that now has its admin is proved with a real login (0), and
+ *      one whose login Crow's password does not open is not Crow's at all (3); an app that
+ *      still has none changed nothing (1),
  *   8. Jellyfin's wizard steps run in order and the user step (which names the admin and its
- *      password) comes BEFORE the wizard is completed,
+ *      password) comes BEFORE the wizard is completed — and after the GET that creates
+ *      Jellyfin's default user, without which a fresh install answers 404,
  *   9. Navidrome's first-run flag is matched in both of the spellings its page can carry
  *      (`firstTime":true` and the JSON-escaped `firstTime\":true`),
  *   10. Audiobookshelf is reached through node inside its container (that image has no
  *      command-line HTTP client), its compose healthcheck no longer probes with the tool
  *      the image does not ship, and the manifest refreshes that compose file,
- *   11. Kavita registers the account and then proves it with its own login call,
+ *   11. Kavita registers the account and then proves it with its own login call, and only an
+ *      exact `"Admin"` role counts — a username containing the word does not,
  *   12. nothing may outlive the protocol timeout: every curl config carries max-time, the
  *      node request carries its own timeout, and every $SECONDS budget plus every request
  *      bound fits inside the manifest's timeout_s,
- *   13. the four manifests carry what the contract, the runner and the card need (including
+ *   13. Jellyfin's 503 while it is loading is "not ready", not "unreadable", and a readable
+ *      wizard state is only acted on when it arrives twice in a row,
+ *   14. a POST never follows a redirect (`-L` belongs to the reads, where Navidrome's `/app/`
+ *      answers one),
+ *   15. the four manifests carry what the contract, the runner and the card need (including
  *      admin passwords that an install must not block on), and the generated registry
  *      carries the same declarations.
  *
@@ -95,6 +102,7 @@ const KAVITA_LOGIN_FAIL = '\n401';
 const DEFAULTS = {
   FAKE_JELLYFIN_STATE: JELLYFIN_FRESH,
   FAKE_JELLYFIN_CONFIG: "204",
+  FAKE_JELLYFIN_USER_GET: '{"Name":"root"}\n200',
   FAKE_JELLYFIN_USER: "204",
   FAKE_JELLYFIN_ACCESS: "204",
   FAKE_JELLYFIN_COMPLETE: "204",
@@ -187,7 +195,17 @@ const FAKE_DOCKER = [
   'case "$url" in',
   '  *:8096/System/Info/Public*) next JELLYFIN_STATE "$FAKE_JELLYFIN_STATE"; emit ;;',
   '  *:8096/Startup/Configuration*) next JELLYFIN_CONFIG "$FAKE_JELLYFIN_CONFIG"; emit ;;',
-  '  *:8096/Startup/User*) next JELLYFIN_USER "$FAKE_JELLYFIN_USER"; emit ;;',
+  '  *:8096/Startup/User*)',
+  '    method=GET',
+  '    case "$(cat "$stdinf")" in *request*) method=POST ;; esac',
+  '    if [ "$method" = "GET" ]; then',
+  '      : > "$dir/user-created"',
+  '      next JELLYFIN_USER_GET "$FAKE_JELLYFIN_USER_GET"; emit',
+  "    fi",
+  // On a fresh 12.4 install the default user only exists once that read has happened: a POST
+  // that arrives first answers 404. The stand-in models exactly that.
+  '    if [ ! -f "$dir/user-created" ]; then printf "\\n404"; exit 0; fi',
+  '    next JELLYFIN_USER "$FAKE_JELLYFIN_USER"; emit ;;',
   '  *:8096/Startup/RemoteAccess*) next JELLYFIN_ACCESS "$FAKE_JELLYFIN_ACCESS"; emit ;;',
   '  *:8096/Startup/Complete*) next JELLYFIN_COMPLETE "$FAKE_JELLYFIN_COMPLETE"; emit ;;',
   '  *:8096/Users/AuthenticateByName*) next JELLYFIN_LOGIN "$FAKE_JELLYFIN_LOGIN"; emit ;;',
@@ -268,7 +286,6 @@ function run(bundle, { password = `${PASSWORD}\n`, answers = {}, mode = "full", 
 
 const argvText = (r) => r.calls.map((c) => c.argv).join("\n");
 const stdinText = (r) => r.calls.map((c) => c.stdin).join("\n");
-const count = (r, needle) => r.calls.filter((c) => c.argv.includes(needle) || c.stdin.includes(needle)).length;
 
 /** The calls that are a request to one API path — inside the container either way. */
 const isNodeCall = (c) => c.argv.includes("node -e");
@@ -276,6 +293,11 @@ const isNodeCall = (c) => c.argv.includes("node -e");
 const requestedPath = (c) => (isNodeCall(c) ? c.argv.trim().split(/\s+/).pop() : null);
 const toPath = (r, path) => r.calls.filter((c) => (isNodeCall(c) ? requestedPath(c) === path : c.stdin.includes(path)));
 const indexOfPath = (r, path) => r.calls.findIndex((c) => (isNodeCall(c) ? requestedPath(c) === path : c.stdin.includes(path)));
+/** The method a recorded request used: the curl config's `request`, or the node snippet's argv. */
+const methodOf = (call) =>
+  isNodeCall(call) ? (call.argv.includes(" POST ") ? "POST" : "GET") : (configValue(call.stdin, "request") || "GET");
+/** The calls that are a request to one API path with one method. */
+const toPathAs = (r, path, method) => toPath(r, path).filter((c) => methodOf(c) === method);
 
 /** The whole point: the password is on a pipe, never in a command line, never printed. */
 function assertPasswordStayedOutOfSight(r, password = PASSWORD) {
@@ -314,8 +336,11 @@ const APPS = {
     /** The password as it arrives at the app, read out of the recorded request. */
     createPasswordIn: (call) => JSON.parse(configValue(call.stdin, "data")).Password,
     loginPasswordIn: (call) => JSON.parse(configValue(call.stdin, "data")).Pw,
-    /** A wizard the re-check finds finished means the password is the live one: prove it. */
-    unclearDoneExit: 0,
+    /**
+     * How many reads of the setup state come before the re-check after an unclear create: the
+     * wait wants two agreeing reads, so the re-check is the third.
+     */
+    recheck: 2,
     freshMessage: /did not finish its setup wizard, so nothing was changed/,
     unknownMessage: /did not report whether its setup wizard finished/,
   },
@@ -333,8 +358,7 @@ const APPS = {
     loginFail: NAVIDROME_LOGIN_FAIL,
     createPasswordIn: (call) => JSON.parse(configValue(call.stdin, "data")).password,
     loginPasswordIn: (call) => JSON.parse(configValue(call.stdin, "data")).password,
-    /** An admin that already exists may not be Crow's: ask the operator to save the login they use. */
-    unclearDoneExit: 3,
+    recheck: 1,
     freshMessage: /did not create the admin account, so nothing was changed/,
     unknownMessage: /did not report whether it created the admin account/,
   },
@@ -352,7 +376,7 @@ const APPS = {
     loginFail: KAVITA_LOGIN_FAIL,
     createPasswordIn: (call) => JSON.parse(configValue(call.stdin, "data")).password,
     loginPasswordIn: (call) => JSON.parse(configValue(call.stdin, "data")).password,
-    unclearDoneExit: 3,
+    recheck: 1,
     freshMessage: /did not create the admin account, so nothing was changed/,
     unknownMessage: /did not report whether it created the admin account/,
   },
@@ -371,8 +395,7 @@ const APPS = {
     /** Audiobookshelf's snippet reads the username and the password as its first two stdin lines. */
     createPasswordIn: (call) => call.stdin.split("\n")[1],
     loginPasswordIn: (call) => call.stdin.split("\n")[1],
-    /** An initialized root user is the one the create just made: prove that password. */
-    unclearDoneExit: 0,
+    recheck: 1,
     freshMessage: /did not create the root user, so nothing was changed/,
     unknownMessage: /did not report whether it created the root user/,
   },
@@ -388,7 +411,7 @@ for (const [app, a] of Object.entries(APPS)) {
     assert.equal(r.calls[0].argv.startsWith("docker inspect"), true, "the container is checked before it is touched");
     assert.equal(r.calls[0].argv.includes(a.container), true, "and the app's own container is the one named");
 
-    const creates = toPath(r, a.createPath);
+    const creates = toPathAs(r, a.createPath, "POST");
     assert.equal(creates.length, 1, "the account is created exactly once");
     assert.equal(a.createPasswordIn(creates[0]), PASSWORD, "with the generated password, on the pipe");
 
@@ -401,7 +424,7 @@ for (const [app, a] of Object.entries(APPS)) {
     const r = run(app, { answers: { [a.stateKey]: `${a.done}` } });
     assert.equal(r.status, 3, r.stderr);
     assert.match(r.stderr, /already (has|finished|set up)/i);
-    assert.equal(toPath(r, a.createPath).length, 0, "no account may be touched");
+    assert.equal(toPathAs(r, a.createPath, "POST").length, 0, "no account may be touched");
     assert.equal(toPath(r, a.loginPath).length, 0, "and nothing has to be proved");
   });
 
@@ -435,7 +458,7 @@ for (const [app, a] of Object.entries(APPS)) {
       const r = run(app, { answers: { [a.stateKey]: answer } });
       assert.equal(r.status, 4, `${JSON.stringify(answer)}: ${r.stderr}`);
       assert.match(r.stderr, /nothing was changed/);
-      assert.equal(toPath(r, a.createPath).length, 0, `${JSON.stringify(answer)}: no create call`);
+      assert.equal(toPathAs(r, a.createPath, "POST").length, 0, `${JSON.stringify(answer)}: no create call`);
       assert.equal(argvText(r).includes(PASSWORD), false, `${JSON.stringify(answer)}: the password stayed home`);
     }
   });
@@ -446,36 +469,50 @@ for (const [app, a] of Object.entries(APPS)) {
     assert.match(r.stderr, /accepted the new password, but logging in with it did not succeed/);
     assert.match(r.stderr, /Crow kept the new password; use the login in Settings → Passwords/);
     assert.equal(toPath(r, a.loginPath).length, 3, "the proof is retried three times");
-    assert.equal(toPath(r, a.createPath).length, 1, "the change really happened first");
+    assert.equal(toPathAs(r, a.createPath, "POST").length, 1, "the change really happened first");
     assertPasswordStayedOutOfSight(r);
   });
 
-  test(`${app}: an unclear create is settled by the app's own state, never by the status code`, () => {
+  test(`${app}: an unclear create that re-detects as DONE is proved with Crow's password`, () => {
     const r = run(app, {
-      answers: { [a.createKey]: a.createUnclear, [`${a.stateKey}_1`]: a.done },
+      answers: { [a.createKey]: a.createUnclear, [`${a.stateKey}_${a.recheck}`]: a.done },
     });
-    assert.equal(r.status, a.unclearDoneExit, r.stderr);
-    assert.equal(toPath(r, a.createPath).length, 1, "the create is attempted once");
-    if (a.unclearDoneExit === 0) {
-      assert.equal(toPath(r, a.loginPath).length, 1, "the password the app took is proved");
-    } else {
-      assert.equal(toPath(r, a.loginPath).length, 0, "an admin that may not be Crow's is never proved with Crow's password");
-    }
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(toPathAs(r, a.createPath, "POST").length, 1, "the create is attempted once");
+    assert.equal(toPath(r, a.loginPath).length, 1, "the password the app may hold is proved");
+    assertPasswordStayedOutOfSight(r);
+  });
+
+  test(`${app}: an unclear create re-detected as DONE whose login fails is exit 3, nothing saved`, () => {
+    const r = run(app, {
+      answers: {
+        [a.createKey]: a.createUnclear,
+        [`${a.stateKey}_${a.recheck}`]: a.done,
+        [a.loginKey]: a.loginFail,
+      },
+    });
+    assert.equal(r.status, 3, r.stderr);
+    assert.match(r.stderr, /already/i, "the app already has an admin");
+    assert.match(r.stderr, /not Crow's/);
+    assert.match(r.stderr, /left alone, and nothing of Crow's was saved/);
+    assert.equal(toPath(r, a.loginPath).length, 3, "the login is tried before the password is dropped");
+    assert.equal(argvText(r).includes(PASSWORD), false, "nothing of Crow's is saved, so nothing leaks either");
     assertPasswordStayedOutOfSight(r);
   });
 
   test(`${app}: an unclear create on an app that still has no admin changes nothing (exit 1)`, () => {
     const r = run(app, {
-      answers: { [a.createKey]: a.createUnclear, [`${a.stateKey}_1`]: a.fresh },
+      answers: { [a.createKey]: a.createUnclear, [`${a.stateKey}_${a.recheck}`]: a.fresh },
     });
     assert.equal(r.status, 1, `${r.stderr}`);
     assert.match(r.stderr, a.freshMessage);
     assert.equal(toPath(r, a.loginPath).length, 0, "no proof after a create that did not happen");
+    assert.equal(/nothing of Crow's was saved/.test(r.stderr), false, "that is the exit-3 sentence, and here the app has no admin at all");
   });
 
   test(`${app}: an unreadable re-check after an unclear create changes nothing (exit 1)`, () => {
     const r = run(app, {
-      answers: { [a.createKey]: a.createUnclear, [`${a.stateKey}_1`]: a.unreadable[0] },
+      answers: { [a.createKey]: a.createUnclear, [`${a.stateKey}_${a.recheck}`]: a.unreadable[0] },
     });
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, a.unknownMessage);
@@ -500,8 +537,9 @@ test("jellyfin: the wizard's steps run in order, and the user step comes before 
   assert.equal(access < complete, true, "then the wizard is completed");
   assert.equal(complete < login, true, "and only then the login is proved");
 
-  assert.equal(count(r, "/Startup/User"), 1, "the user step is attempted once");
-  const userCall = toPath(r, "/Startup/User")[0];
+  assert.equal(toPathAs(r, "/Startup/User", "GET").length, 1, "the default user is READ once, which is what creates it");
+  assert.equal(toPathAs(r, "/Startup/User", "POST").length, 1, "and the user step is posted once");
+  const userCall = toPathAs(r, "/Startup/User", "POST")[0];
   assert.deepEqual(JSON.parse(configValue(userCall.stdin, "data")), { Name: "admin", Password: PASSWORD });
   assert.equal(configValue(userCall.stdin, "request"), "POST", "the method is in the config, not an argument");
   assert.equal(configValue(toPath(r, "/Startup/Configuration")[0].stdin, "request"), "POST");
@@ -524,10 +562,24 @@ test("jellyfin: a completed wizard is exit 3 even when the account looks like it
   assert.equal(toPath(r, "/Startup/Configuration").length, 0, "no wizard step may run");
 });
 
+test("jellyfin: the default user is read before the user step is posted", () => {
+  // On a fresh 12.4 install the POST answers 404 until that read has created the default
+  // user — the stand-in models exactly that, so the order is part of the fix.
+  const r = run("jellyfin");
+  assert.equal(r.status, 0, r.stderr);
+  const reads = toPathAs(r, "/Startup/User", "GET");
+  const posts = toPathAs(r, "/Startup/User", "POST");
+  assert.equal(reads.length, 1, "one plain read of the user endpoint");
+  assert.equal(posts.length, 1, "and one POST that names the admin");
+  assert.equal(r.calls.indexOf(reads[0]) < r.calls.indexOf(posts[0]), true, "the read goes first");
+  assert.equal(configValues(reads[0].stdin, "data").length, 0, "the read carries no body");
+  assert.equal(posts[0].stdin.includes("Password"), true, "and the POST is the one with the account in it");
+});
+
 test("jellyfin: a user step the app refused is settled by the wizard's own state", () => {
   // The wizard is finished by the time the re-check happens: the password the app took is
-  // kept and proved, rather than reported as a failed change.
-  const kept = run("jellyfin", { answers: { FAKE_JELLYFIN_USER_0: "500", FAKE_JELLYFIN_STATE_1: JELLYFIN_DONE } });
+  // proved with a real login, rather than reported as a failed change.
+  const kept = run("jellyfin", { answers: { FAKE_JELLYFIN_USER_0: "500", FAKE_JELLYFIN_STATE_2: JELLYFIN_DONE } });
   assert.equal(kept.status, 0, kept.stderr);
   assert.equal(toPath(kept, "/Users/AuthenticateByName").length, 1, "the login is proved");
 
@@ -538,11 +590,46 @@ test("jellyfin: a user step the app refused is settled by the wizard's own state
   assert.equal(toPath(stopped, "/Startup/RemoteAccess").length, 0, "and the wizard was not carried further");
 });
 
-test("jellyfin: Complete failing after the user step also goes back to the wizard's state", () => {
-  const kept = run("jellyfin", { answers: { FAKE_JELLYFIN_COMPLETE_0: "500", FAKE_JELLYFIN_STATE_1: JELLYFIN_DONE } });
-  assert.equal(kept.status, 0, kept.stderr);
-  assert.equal(toPath(kept, "/Startup/User").length, 1, "the account was written once, not twice");
-  assert.equal(toPath(kept, "/Users/AuthenticateByName").length, 1, "and the login is proved");
+test("jellyfin: a wizard state read once is not acted on — it has to answer twice", () => {
+  // A 200 that arrives while Jellyfin is still coming up is not the wizard's last word.
+  const r = run("jellyfin", { answers: { FAKE_JELLYFIN_STATE_0: JELLYFIN_DONE } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(toPath(r, "/Startup/Configuration").length, 1, "one finished-looking read is not a finished wizard");
+});
+
+test("jellyfin: 503 while it is loading is 'not ready', not 'unreadable'", () => {
+  const loading = '{"message":"Jellyfin Server is loading"}\n503';
+  const r = run("jellyfin", { answers: { FAKE_JELLYFIN_STATE_0: loading, FAKE_JELLYFIN_STATE_1: loading } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(/could not be read/.test(r.stderr), false, "a loading server is never reported as unreadable");
+  assert.equal(toPath(r, "/Startup/Configuration").length, 1, "the wizard is finished once the app answers");
+});
+
+test("jellyfin: a 503 between two 200s restarts the wait, and the 200s still settle it", () => {
+  const loading = '{"message":"Jellyfin Server is loading"}\n503';
+  const r = run("jellyfin", { answers: { FAKE_JELLYFIN_STATE_1: loading } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(toPath(r, "/Startup/Configuration").length, 1, "the wizard is finished after the loading pass");
+});
+
+test("jellyfin: a Complete that failed is retried once before the wizard's state is asked", () => {
+  const r = run("jellyfin", { answers: { FAKE_JELLYFIN_COMPLETE_0: "500" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(toPath(r, "/Startup/Complete").length, 2, "the idempotent step is attempted twice");
+  assert.equal(toPathAs(r, "/Startup/User", "POST").length, 1, "the account is written once, not twice");
+  assert.equal(toPath(r, "/System/Info/Public").length, 2, "no re-check was needed after the retry");
+  assert.equal(toPath(r, "/Users/AuthenticateByName").length, 1, "and the login is proved");
+});
+
+test("jellyfin: a wizard that never completes after Crow set the admin says so honestly", () => {
+  const r = run("jellyfin", {
+    answers: { FAKE_JELLYFIN_COMPLETE_0: "500", FAKE_JELLYFIN_COMPLETE_1: "500" },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /Crow set the admin, but Jellyfin's setup wizard is still open; press Set it up for me again\./);
+  assert.equal(/nothing was changed/.test(r.stderr), false, "the account WAS written, so it must not claim nothing changed");
+  assert.equal(toPath(r, "/Startup/Complete").length, 2, "Complete is retried once, not forever");
+  assert.equal(toPath(r, "/Users/AuthenticateByName").length, 0, "no login is proved while the wizard is open");
 });
 
 test("jellyfin: a first step the app refuses is exit 1 with nothing set", () => {
@@ -574,13 +661,24 @@ test("navidrome: the JSON-escaped firstTime flag is a fresh install, and its fal
 });
 
 test("navidrome: a create the app refuses is settled by its own state, and its 403 is not read as 'set up'", () => {
-  // The app says it cannot make another first admin and its page now says the admin exists.
-  const kept = run("navidrome", {
+  // The app says it cannot make another first admin and its page now says the admin exists:
+  // the password Crow may hold is proved with a real login instead of being thrown away.
+  const proved = run("navidrome", {
     answers: { FAKE_NAVIDROME_CREATE: NAVIDROME_REFUSED, FAKE_NAVIDROME_STATE_1: NAVIDROME_PAGE("false") },
   });
-  assert.equal(kept.status, 3, kept.stderr);
-  assert.match(kept.stderr, /already has its own first admin/);
-  assert.equal(toPath(kept, "/auth/login").length, 0, "nothing to prove");
+  assert.equal(proved.status, 0, proved.stderr);
+  assert.equal(toPath(proved, "/auth/login").length, 1, "the login is the proof");
+
+  // The same page with a login that does not work: that first admin is someone else's.
+  const foreign = run("navidrome", {
+    answers: {
+      FAKE_NAVIDROME_CREATE: NAVIDROME_REFUSED,
+      FAKE_NAVIDROME_STATE_1: NAVIDROME_PAGE("false"),
+      FAKE_NAVIDROME_LOGIN: NAVIDROME_LOGIN_FAIL,
+    },
+  });
+  assert.equal(foreign.status, 3, foreign.stderr);
+  assert.match(foreign.stderr, /already has a first admin that is not Crow's/);
 
   // The same 403 while the page still says no admin exists: nothing was created.
   const nothing = run("navidrome", {
@@ -588,6 +686,21 @@ test("navidrome: a create the app refuses is settled by its own state, and its 4
   });
   assert.equal(nothing.status, 1, nothing.stderr);
   assert.match(nothing.stderr, /did not create the admin account/);
+});
+
+test("navidrome: a page carrying both flags, or the flag twice, is unreadable (the read fails closed)", () => {
+  // Both values on one page means the page no longer says which is true: acting on either
+  // would be a guess, so nothing is touched.
+  for (const answer of [
+    '{"firstTime":true,"firstTime":false}\n200',
+    '{"firstTime\\":true,"firstTime\\":false}\n200',
+    '{"firstTime":true,"firstTime\\":false}\n200',
+  ]) {
+    const r = run("navidrome", { answers: { FAKE_NAVIDROME_STATE: answer } });
+    assert.equal(r.status, 4, `${answer}: ${r.stderr}`);
+    assert.match(r.stderr, /could not be read/);
+    assert.equal(toPath(r, "/auth/createAdmin").length, 0, `${answer}: no create call`);
+  }
 });
 
 test("navidrome: a 200 without isAdmin:true is not a created admin", () => {
@@ -612,9 +725,19 @@ test("kavita: the account is registered and then proved with Kavita's own login 
 });
 
 test("kavita: a registration the app refuses is settled by its own admin state", () => {
-  const kept = run("kavita", { answers: { FAKE_KAVITA_CREATE: KAVITA_REFUSED, FAKE_KAVITA_STATE_1: "true\n200" } });
-  assert.equal(kept.status, 3, kept.stderr);
-  assert.match(kept.stderr, /already has its own admin account/);
+  const proved = run("kavita", { answers: { FAKE_KAVITA_CREATE: KAVITA_REFUSED, FAKE_KAVITA_STATE_1: "true\n200" } });
+  assert.equal(proved.status, 0, proved.stderr);
+  assert.equal(toPath(proved, "/api/Account/login").length, 1, "the login is the proof");
+
+  const foreign = run("kavita", {
+    answers: {
+      FAKE_KAVITA_CREATE: KAVITA_REFUSED,
+      FAKE_KAVITA_STATE_1: "true\n200",
+      FAKE_KAVITA_LOGIN: KAVITA_LOGIN_FAIL,
+    },
+  });
+  assert.equal(foreign.status, 3, foreign.stderr);
+  assert.match(foreign.stderr, /already has an admin account that is not Crow's/);
 
   const nothing = run("kavita", { answers: { FAKE_KAVITA_CREATE: KAVITA_REFUSED, FAKE_KAVITA_STATE_1: "false\n200" } });
   assert.equal(nothing.status, 1, nothing.stderr);
@@ -625,6 +748,25 @@ test("kavita: a 200 whose roles are not an admin's is not a created admin", () =
   const r = run("kavita", { answers: { FAKE_KAVITA_CREATE: '[{"username":"admin","roles":["Login"]}]\n200' } });
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /did not create the admin account/);
+});
+
+test("kavita: a username containing 'Admin' is not the Admin role", () => {
+  // The role is matched inside the roles array, exactly: a name is not a permission.
+  const r = run("kavita", {
+    user: "AdminFan",
+    answers: { FAKE_KAVITA_CREATE: '[{"username":"AdminFan","token":"t","roles":["Login"]}]\n200' },
+  });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /did not create the admin account/);
+  assert.equal(toPath(r, "/api/Account/login").length, 0, "nothing is proved without the role");
+});
+
+test("kavita: the Admin role is read out of the roles array, not out of the whole answer", () => {
+  const r = run("kavita", {
+    answers: { FAKE_KAVITA_CREATE: '[{"username":"admin","roles":["Login","Admin"]}]\n200' },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(toPath(r, "/api/Account/login").length, 1, "a real Admin role is still confirmed");
 });
 
 // ── Audiobookshelf: node inside the container, and the healthcheck fix ────────────
@@ -680,9 +822,15 @@ test("audiobookshelf: the compose healthcheck probes with a tool the image ships
 // ── nothing may outlive the protocol timeout ──────────────────────────────────────
 
 const budgetOf = (script, name) => {
-  const line = script.split("\n").find((l) => l.startsWith(`${name}=$((SECONDS + `));
+  const line = script.split("\n").find((l) => l.trimStart().startsWith(`${name}=$((SECONDS + `));
   assert.ok(line, `${name} is a $SECONDS budget`);
   return Number(/SECONDS \+ (\d+)\)/.exec(line)[1]);
+};
+
+/** A $SECONDS budget the app may not have: 0 when the script never sets it. */
+const budgetOrZero = (script, name) => {
+  const line = script.split("\n").find((l) => l.trimStart().startsWith(`${name}=$((SECONDS + `));
+  return line ? Number(/SECONDS \+ (\d+)\)/.exec(line)[1]) : 0;
 };
 
 const manifestOf = (id) => JSON.parse(readFileSync(join(B(id), "manifest.json"), "utf8"));
@@ -710,22 +858,31 @@ for (const [app, a] of Object.entries(APPS)) {
     const timeout = manifestOf(app).firstAdmin.setup.timeout_s;
     const wait = budgetOf(script, "wait_deadline");
     const proof = budgetOf(script, "proof_deadline");
+    // Jellyfin's wizard is read again after an unclear step, with a budget of its own.
+    const recheck = budgetOrZero(script, "recheck_deadline");
+    if (app === "jellyfin") assert.equal(recheck > 0, true, "the re-check after an unclear step is its own small budget");
     assert.equal(wait < timeout, true, `${app}: the health wait (${wait}s) is inside the ${timeout}s the runner allows`);
     const bounds = app === "audiobookshelf"
       ? [Number(/timeout: (\d+)/.exec(snippetOf(script, "HTTP_REQUEST"))[1]) / 1000]
       : requestBounds(script);
     assert.equal(bounds.length > 0, true, `${app}: every request carries its own time bound`);
-    // The worst case: both $SECONDS budgets run out AND every request that ran can take its
+    // The worst case: every $SECONDS budget runs out AND every request that ran can take its
     // own bound. It has to fit what the runner allows, or the runner kills a run that is
     // still working and the operator is told nothing.
-    const worst = wait + proof + bounds.reduce((x, y) => x + y, 0);
-    assert.equal(worst < timeout, true, `${app}: worst case ${wait} + ${proof} + ${bounds.join(" + ")} = ${worst}s inside ${timeout}s`);
+    const worst = wait + recheck + proof + bounds.reduce((x, y) => x + y, 0);
+    assert.equal(
+      worst < timeout,
+      true,
+      `${app}: worst case ${wait} + ${recheck} + ${proof} + ${bounds.join(" + ")} = ${worst}s inside ${timeout}s`,
+    );
+    // With the re-check counted, Jellyfin's worst case stays well (30s+) under the timeout.
+    if (app === "jellyfin") assert.equal(worst <= timeout - 30, true, `${app}: ${worst}s leaves the runner ${timeout - worst}s of slack`);
     assert.equal(bounds.every((b) => b > 0 && b <= 15), true, `${app}: no single request may take more than 15s`);
   });
 }
 
 for (const app of ["jellyfin", "navidrome", "kavita"]) {
-  test(`${app}: every request carries max-time in its config and names a loopback URL`, () => {
+  test(`${app}: every request carries max-time, names a loopback URL, and only a read follows a redirect`, () => {
     const r = run(app);
     assert.equal(r.status, 0, r.stderr);
     const requests = r.calls.filter((c) => c.argv.includes("curl"));
@@ -734,7 +891,15 @@ for (const app of ["jellyfin", "navidrome", "kavita"]) {
       assert.match(call.stdin, /^max-time = \d+$/m, `${app}: ${call.argv} carries max-time`);
       assert.match(call.stdin, /^url = "http:\/\/127\.0\.0\.1:\d+\//m, `${app}: and names a loopback URL inside the container`);
       assert.equal(/"(localhost|0\.0\.0\.0)/.test(call.stdin), false, `${app}: never the container's own localhost name`);
+      // A POST that a redirect answers must be seen as that answer: never replayed onward.
+      if (methodOf(call) === "POST") {
+        assert.equal(call.argv.includes(" -L "), false, `${app}: a POST must not follow a redirect`);
+        assert.equal(configLines(call.stdin).some((l) => l.key === "location"), false, `${app}: nor ask for it in its config`);
+      }
     }
+    const reads = requests.filter((c) => methodOf(c) === "GET");
+    assert.equal(reads.length >= 1, true, `${app}: the detection is a read`);
+    for (const call of reads) assert.equal(call.argv.includes(" -L "), true, `${app}: a read may follow a redirect`);
   });
 }
 
@@ -808,6 +973,7 @@ test("the admin passwords Crow fills are not fields an install blocks on", () =>
     const spec = (manifestOf(id).env_vars || []).find((v) => v.name === name);
     assert.equal(spec.default, "admin", `${id}: ${name} defaults to the account Crow creates`);
     assert.match(spec.description, /Crow creates `admin`/, `${id}: and says so`);
+    assert.match(spec.description, /leave it as `admin`/, `${id}: the form says Crow fills it in, so nobody renames it`);
   }
 });
 

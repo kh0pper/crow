@@ -16,7 +16,7 @@
   "requires": { "env": ["KAVITA_USERNAME"], "min_ram_mb": 512, "min_disk_mb": 1000 },
   "env_vars": [
     { "name": "KAVITA_URL", "description": "Kavita server URL", "default": "http://localhost:5000", "required": true },
-    { "name": "KAVITA_USERNAME", "description": "Kavita username for API authentication (Crow creates `admin` at install and writes it here)", "default": "admin", "required": true },
+    { "name": "KAVITA_USERNAME", "description": "Kavita username for API authentication (Crow creates `admin` at install and writes it here; leave it as `admin`)", "default": "admin", "required": true },
     { "name": "KAVITA_PASSWORD", "description": "Kavita password for API authentication. Crow generates it at install and keeps it in Settings → Passwords.", "required": false, "secret": true },
     { "name": "KAVITA_LIBRARY_PATH", "description": "Host path for manga/comics/ebooks (Docker mode).", "required": false }
   ],

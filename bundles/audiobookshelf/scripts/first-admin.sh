@@ -12,13 +12,14 @@
 # Neither value is an argument, an environment value or output.
 #
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin.
-# Exit 0 = the admin now has exactly that password, 3 = Audiobookshelf is already set up
-# (nothing changed), 4 = not running / not answering / unreadable, 5 = Audiobookshelf took
-# the new password but logging in with it did not succeed, anything else = failed. A create
-# answer that does not say the account was made is settled by reading Audiobookshelf's own
-# state again — a second init answers 500, so the status code alone never means "already set
-# up": an install that now has its root user keeps the password and proves it (0 or 5), one
-# that still has none changed nothing (1).
+# Exit 0 = the admin now has exactly that password, 3 = Audiobookshelf already has a root user
+# that is not provably Crow's and nothing of Crow's was saved, 4 = not running / not answering
+# / unreadable, 5 = Audiobookshelf confirmed Crow's own change but logging in with it did not
+# succeed, anything else = failed. A create answer that does not say the account was made is
+# settled by reading Audiobookshelf's own state again — a second init answers 500, so the
+# status code alone never means "already set up": an install that now has its root user is
+# proved with a real login (0, or 3 when that login does not work — the account is then
+# someone else's), one that still has none changed nothing (1).
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -123,10 +124,17 @@ case "$state" in
 esac
 
 # ── create the root user ───────────────────────────────────────────────────────────
+# `confirmed` records the one thing that lets Crow keep the password after a login that does
+# not work: Audiobookshelf itself answering CREATED to Crow's own init.
+confirmed=""
 create="$(abs_http POST /init)"
-if [ "$create" != "CREATED" ]; then
+if [ "$create" = "CREATED" ]; then
+  confirmed=1
+else
   # Whatever the status was, the app's own state decides. A second init answers 500 rather
-  # than a 4xx, so "not 200" alone is never read as "already set up".
+  # than a 4xx, so "not 200" alone is never read as "already set up". An initialized root user
+  # is proved with a real login — Crow's password either opens it or the account is someone
+  # else's, and the password is discarded.
   again="$(abs_http GET /status)"
   case "$again" in
     READY) ;;
@@ -134,7 +142,9 @@ if [ "$create" != "CREATED" ]; then
     *) die "Audiobookshelf did not report whether it created the root user; check the app's own login before trying again." 1 ;;
   esac
 fi
-say "Audiobookshelf's admin account '$ADMIN_USER' is in place."
+# Only Audiobookshelf's own CREATED answer makes that account Crow's; a root user that
+# appeared on its own is proved below, so it is not claimed here.
+if [ -n "$confirmed" ]; then say "Audiobookshelf's admin account '$ADMIN_USER' is in place."; fi
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 prove() {
@@ -154,9 +164,13 @@ while :; do
   sleep 3
 done
 if [ "$proof" != "LOGIN-OK" ]; then
-  # Audiobookshelf confirmed the change, so the new password IS its password: Crow keeps it
-  # and says it could not log in with it (exit 5).
-  die "Audiobookshelf accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  # Audiobookshelf itself confirmed the change, so the new password IS its password: Crow keeps
+  # it and says it could not log in with it (exit 5). Without that confirmation a root user
+  # that appeared is not Crow's — Crow's password does not open it — so nothing is saved (3).
+  if [ -n "$confirmed" ]; then
+    die "Audiobookshelf accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  fi
+  die "Audiobookshelf is already set up with a root user that is not Crow's: logging in with Crow's password did not succeed; left alone, and nothing of Crow's was saved." 3
 fi
 
 say "Audiobookshelf's admin login for '$ADMIN_USER' now uses the password Crow generated."

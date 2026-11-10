@@ -11,12 +11,13 @@
 # never an argument, an environment value or output.
 #
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin.
-# Exit 0 = the admin now has exactly that password, 3 = the wizard is already finished so
-# this install has an admin of its own (nothing changed), 4 = not running / not answering /
-# unreadable, 5 = Jellyfin took the new password but logging in with it did not succeed,
-# anything else = failed. A wizard step that answers unclearly is settled by asking
-# Jellyfin's own state again: a finished wizard means the password is kept and proved
-# (0 or 5), an unfinished one means nothing was changed (1).
+# Exit 0 = the admin now has exactly that password, 3 = this install has an admin that is not
+# provably Crow's and nothing of Crow's was saved, 4 = not running / not answering /
+# unreadable, 5 = Jellyfin itself confirmed Crow's change but logging in with it did not
+# succeed, anything else = failed. A wizard step that answers unclearly is settled by asking
+# Jellyfin's own state again: a finished wizard means the password is proved (0, or 5 when
+# Jellyfin wrote it and will not log in with it), an unfinished one means nothing was changed
+# (1).
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -50,7 +51,10 @@ esc() { local s="${1//\\/\\\\}"; printf '%s' "${s//\"/\\\"}"; }
 # ── one HTTP call inside the container, its config on stdin ────────────────────────
 # Prints the body and then one final line with the HTTP status code (that is what
 # `-w '\n%{http_code}'` appends). Nothing at all means the request did not happen.
-http() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -L -K - -w '\n%{http_code}' 2>/dev/null || true; }
+# Following a redirect belongs to a READ only: a POST answered with one has to show up as
+# that answer instead of being replayed to wherever the redirect points.
+http_get() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -L -K - -w '\n%{http_code}' 2>/dev/null || true; }
+http_post() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -K - -w '\n%{http_code}' 2>/dev/null || true; }
 code_of() { printf '%s' "${1##*$'\n'}"; }
 body_of() { printf '%s' "${1%$'\n'*}"; }
 
@@ -66,14 +70,17 @@ json_flag() {
   printf '%s' "$1" | tr -d '[:space:]' | grep -o "\"$2\":\(true\|false\)" | tail -n 1 | sed 's/^.*://' || true
 }
 
-# FRESH (the wizard has not been finished) / DONE / UNKNOWN / OFFLINE. Only a POSITIVE
-# un-finished signal may lead to a change; everything else is reported as unreadable.
+# FRESH (the wizard has not been finished) / DONE / UNKNOWN / LOADING / OFFLINE. Only a
+# POSITIVE un-finished signal may lead to a change; everything else is reported as unreadable.
+# 503 is Jellyfin saying its server is still loading: that is a first start in progress, not
+# an answer, and it arrives for several seconds — sometimes after a few 200s.
 wizard_state() {
   local resp code body flag
-  resp="$(http "$(cfg_get "$BASE_URL/System/Info/Public")")"
+  resp="$(http_get "$(cfg_get "$BASE_URL/System/Info/Public")")"
   code="$(code_of "$resp")"
   body="$(body_of "$resp")"
   if [ -z "$resp" ] || [ -z "$code" ] || [ "$code" = "000" ]; then printf '%s' "OFFLINE"; return 0; fi
+  if [ "$code" = "503" ]; then printf '%s' "LOADING"; return 0; fi
   if [ "$code" != "200" ]; then printf '%s' "UNKNOWN"; return 0; fi
   flag="$(json_flag "$body" StartupWizardCompleted)"
   case "$flag" in
@@ -83,16 +90,39 @@ wizard_state() {
   esac
 }
 
+# ── read the wizard's state, and mean it ───────────────────────────────────────────
+# LOADING and silence mean "still starting", so both only restart the wait. With CONFIRM=1 a
+# readable answer also has to arrive twice in a row before anything is done with it. A state
+# that has not settled by DEADLINE (a $SECONDS value) reads as UNKNOWN, and silence as
+# OFFLINE, so neither is ever acted on.
+state_until() {
+  local deadline="$1" confirm="$2" state="" seen="" answer="" settled=""
+  while [ "$SECONDS" -lt "$deadline" ] && [ -z "$settled" ]; do
+    state="$(wizard_state)"
+    case "$state" in
+      OFFLINE | LOADING) seen="" ;;
+      UNKNOWN) answer="UNKNOWN"; settled=1 ;;
+      *)
+        if [ "$confirm" != "1" ] || [ "$state" = "$seen" ]; then
+          answer="$state"; settled=1
+        else
+          seen="$state"
+        fi ;;
+    esac
+    [ -n "$settled" ] || sleep 2
+  done
+  if [ -n "$settled" ]; then printf '%s' "$answer"; return 0; fi
+  case "$state" in
+    FRESH | DONE | UNKNOWN) printf '%s' "UNKNOWN" ;;
+    *) printf '%s' "OFFLINE" ;;
+  esac
+}
+
 # ── wait for the app (a first start prepares its own configuration first) ──────────
 # Bounded twice: a $SECONDS budget well inside the manifest's 180 s, and max-time 10 in
 # the probe's own config, so a single stuck request cannot outlive the wait.
-state=""
 wait_deadline=$((SECONDS + 60))
-while [ "$SECONDS" -lt "$wait_deadline" ]; do
-  state="$(wizard_state)"
-  if [ "$state" != "OFFLINE" ]; then break; fi
-  sleep 2
-done
+state="$(state_until "$wait_deadline" 1)"
 case "$state" in
   FRESH) ;;
   DONE) die "Jellyfin's setup wizard is already finished, so this install already has its own admin; left alone, and nothing was changed." 3 ;;
@@ -102,35 +132,59 @@ esac
 
 # ── finish the wizard: configuration, the admin user, remote access, complete ───────
 # The first step only prepares the server, so a refusal there means nothing was set.
-resp="$(http "$(cfg_post "$BASE_URL/Startup/Configuration" '{"UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}')")"
+resp="$(http_post "$(cfg_post "$BASE_URL/Startup/Configuration" '{"UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}')")"
 [ "$(code_of "$resp")" = "204" ] || die "Jellyfin did not accept the setup wizard's first step, so nothing was changed." 1
 
-# The user step renames Jellyfin's single default user and sets its password. From here on
-# the account may exist even when an answer is unclear, so an unclear answer is settled by
-# reading the wizard's own state instead of the status code.
+# Jellyfin's single default user is created by READING this endpoint: on a fresh install the
+# POST below answers 404 until that GET has run once. Its body holds nothing Crow needs.
+http_get "$(cfg_get "$BASE_URL/Startup/User")" >/dev/null
+
+# The user step renames that default user and sets its password. From here on the account may
+# exist even when an answer is unclear, so an unclear answer is settled by reading the
+# wizard's own state instead of the status code. `confirmed` records the one thing that lets
+# Crow keep the password after a login that does not work: Jellyfin itself reporting that it
+# wrote the account (204 on the user step).
 user_body="{\"Name\":\"$ADMIN_USER\",\"Password\":\"$(esc "$PW")\"}"
+confirmed=""
 unclear=""
-resp="$(http "$(cfg_post "$BASE_URL/Startup/User" "$user_body")")"
+resp="$(http_post "$(cfg_post "$BASE_URL/Startup/User" "$user_body")")"
 if [ "$(code_of "$resp")" != "204" ]; then
   unclear=1
 else
-  resp="$(http "$(cfg_post "$BASE_URL/Startup/RemoteAccess" '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}')")"
+  confirmed=1
+  resp="$(http_post "$(cfg_post "$BASE_URL/Startup/RemoteAccess" '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}')")"
   if [ "$(code_of "$resp")" != "204" ]; then
     unclear=1
   else
-    resp="$(http "$(cfg_post "$BASE_URL/Startup/Complete" "")")"
-    if [ "$(code_of "$resp")" != "204" ]; then unclear=1; fi
+    resp="$(http_post "$(cfg_post "$BASE_URL/Startup/Complete" "")")"
+    if [ "$(code_of "$resp")" != "204" ]; then
+      # Completing the wizard is idempotent: one retry, then the wizard's own state decides.
+      resp="$(http_post "$(cfg_post "$BASE_URL/Startup/Complete" "")")"
+      [ "$(code_of "$resp")" = "204" ] || unclear=1
+    fi
   fi
 fi
 if [ -n "$unclear" ]; then
-  again="$(wizard_state)"
+  recheck_deadline=$((SECONDS + 15))
+  again="$(state_until "$recheck_deadline" 0)"
   case "$again" in
+    # The wizard did finish after all: go on and prove the password with a real login.
     DONE) ;;
-    FRESH) die "Jellyfin did not finish its setup wizard, so nothing was changed; check the app's own setup page." 1 ;;
-    *) die "Jellyfin did not report whether its setup wizard finished; check the app's own admin login before trying again." 1 ;;
+    FRESH)
+      if [ -n "$confirmed" ]; then
+        die "Crow set the admin, but Jellyfin's setup wizard is still open; press Set it up for me again." 1
+      fi
+      die "Jellyfin did not finish its setup wizard, so nothing was changed; check the app's own setup page." 1 ;;
+    *)
+      if [ -n "$confirmed" ]; then
+        die "Crow set the admin, but Jellyfin did not report whether its setup wizard finished; press Set it up for me again." 1
+      fi
+      die "Jellyfin did not report whether its setup wizard finished; check the app's own admin login before trying again." 1 ;;
   esac
 fi
-say "Jellyfin's admin account '$ADMIN_USER' is in place."
+# Only Jellyfin's own 204 makes that account Crow's; a wizard that finished on its own is
+# proved below, so it is not claimed here.
+if [ -n "$confirmed" ]; then say "Jellyfin's admin account '$ADMIN_USER' is in place."; fi
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 # Jellyfin's own client header is what its login endpoint expects; without it the answer
@@ -143,7 +197,7 @@ cfg_login() {
 }
 prove() {
   local answer
-  answer="$(http "$(cfg_login)")"
+  answer="$(http_post "$(cfg_login)")"
   if [ "$(code_of "$answer")" = "200" ]; then printf '%s' "LOGIN-OK"; else printf '%s' "LOGIN-FAIL"; fi
 }
 attempt=1
@@ -158,9 +212,13 @@ while :; do
   sleep 3
 done
 if [ "$proof" != "LOGIN-OK" ]; then
-  # Jellyfin confirmed the change, so the new password IS its password: Crow keeps it and
-  # says it could not log in with it (exit 5).
-  die "Jellyfin accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  # Jellyfin itself confirmed the change, so the new password IS its password: Crow keeps it
+  # and says it could not log in with it (exit 5). Without that confirmation a finished
+  # wizard says nothing about whose account it is, so the password is not saved (exit 3).
+  if [ -n "$confirmed" ]; then
+    die "Jellyfin accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  fi
+  die "Jellyfin's setup wizard is already finished, but logging in with Crow's password did not succeed, so that admin is not Crow's; left alone, and nothing of Crow's was saved." 3
 fi
 
 say "Jellyfin's admin login for '$ADMIN_USER' now uses the password Crow generated."

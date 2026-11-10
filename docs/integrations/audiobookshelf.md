@@ -43,6 +43,8 @@ Audiobookshelf will be available at `http://your-server:13378`. Crow creates Aud
 
 If you installed Audiobookshelf before this version, its card on the Extensions page offers **Set it up for me**, which creates the account now and keeps the password the same way.
 
+This bundle's health check now probes Audiobookshelf with `wget`, the tool its image ships. It applies once the container is recreated: after updating, choose **Restart** on the bundle's card on the Extensions page.
+
 ### Option B: Connect to existing Audiobookshelf
 
 If you already run an Audiobookshelf instance, connect Crow to it directly.

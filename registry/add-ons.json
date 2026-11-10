@@ -2762,7 +2762,7 @@
         },
         {
           "name": "KAVITA_USERNAME",
-          "description": "Kavita username for API authentication (Crow creates `admin` at install and writes it here)",
+          "description": "Kavita username for API authentication (Crow creates `admin` at install and writes it here; leave it as `admin`)",
           "default": "admin",
           "required": true
         },
@@ -4670,7 +4670,7 @@
         },
         {
           "name": "NAVIDROME_USERNAME",
-          "description": "Navidrome username (Crow creates `admin` at install and writes it here)",
+          "description": "Navidrome username (Crow creates `admin` at install and writes it here; leave it as `admin`)",
           "default": "admin",
           "required": true
         },

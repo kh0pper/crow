@@ -11,12 +11,13 @@
 # argument, an environment value or output.
 #
 # Protocol (docs/developers/bundles.md): the password arrives as ONE line on stdin.
-# Exit 0 = the admin now has exactly that password, 3 = Navidrome already has its first
-# admin (nothing changed), 4 = not running / not answering / unreadable, 5 = Navidrome took
-# the new password but logging in with it did not succeed, anything else = failed. A create
-# answer that does not say the account was made is settled by reading Navidrome's own state
-# again: an install that now has its first admin keeps the password and proves it (0 or 5),
-# one that still has none changed nothing (1).
+# Exit 0 = the admin now has exactly that password, 3 = this install already has a first admin
+# that is not provably Crow's and nothing of Crow's was saved, 4 = not running / not answering
+# / unreadable, 5 = Navidrome confirmed Crow's own change but logging in with it did not
+# succeed, anything else = failed. A create answer that does not say the account was made is
+# settled by reading Navidrome's own state again: an install that now has its first admin is
+# proved with a real login (0, or 3 when that login does not work — the admin is then someone
+# else's), one that still has none changed nothing (1).
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -50,7 +51,10 @@ esc() { local s="${1//\\/\\\\}"; printf '%s' "${s//\"/\\\"}"; }
 # ── one HTTP call inside the container, its config on stdin ────────────────────────
 # Prints the body and then one final line with the HTTP status code (that is what
 # `-w '\n%{http_code}'` appends). Nothing at all means the request did not happen.
-http() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -L -K - -w '\n%{http_code}' 2>/dev/null || true; }
+# Following a redirect belongs to a READ only (`/app/` answers one): a POST answered with one
+# has to show up as that answer instead of being replayed to wherever the redirect points.
+http_get() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -L -K - -w '\n%{http_code}' 2>/dev/null || true; }
+http_post() { printf '%s' "$1" | docker exec -i "$CONTAINER" curl -sS -K - -w '\n%{http_code}' 2>/dev/null || true; }
 code_of() { printf '%s' "${1##*$'\n'}"; }
 body_of() { printf '%s' "${1%$'\n'*}"; }
 
@@ -70,18 +74,21 @@ json_flag() {
 
 # FRESH (no admin yet) / DONE / UNKNOWN / OFFLINE. Navidrome puts its config in the page as
 # JSON, where the flag arrives escaped as `firstTime\":true`; the unescaped spelling is the
-# same signal, so both are matched. Only a POSITIVE "not set up yet" signal may lead to a
-# change; anything else is reported as unreadable.
+# same signal, so both are matched. The read fails CLOSED: exactly one of the two values has
+# to be there (both or neither is a page no state can be read out of), and only the POSITIVE
+# "not set up yet" signal may lead to a change.
 first_time_state() {
-  local resp code body
-  resp="$(http "$(cfg_get "$BASE_URL/app/")")"
+  local resp code body fresh=0 done=0
+  resp="$(http_get "$(cfg_get "$BASE_URL/app/")")"
   code="$(code_of "$resp")"
   body="$(body_of "$resp")"
   if [ -z "$resp" ] || [ -z "$code" ] || [ "$code" = "000" ]; then printf '%s' "OFFLINE"; return 0; fi
   if [ "$code" != "200" ]; then printf '%s' "UNKNOWN"; return 0; fi
-  if has "$body" 'firstTime":true' || has "$body" 'firstTime\\":true'; then
+  if has "$body" 'firstTime":true' || has "$body" 'firstTime\\":true'; then fresh=1; fi
+  if has "$body" 'firstTime":false' || has "$body" 'firstTime\\":false'; then done=1; fi
+  if [ "$fresh" = "1" ] && [ "$done" = "0" ]; then
     printf '%s' "FRESH"
-  elif has "$body" 'firstTime":false' || has "$body" 'firstTime\\":false'; then
+  elif [ "$done" = "1" ] && [ "$fresh" = "0" ]; then
     printf '%s' "DONE"
   else
     printf '%s' "UNKNOWN"
@@ -107,21 +114,30 @@ esac
 
 # ── create the first admin ─────────────────────────────────────────────────────────
 create_body="{\"username\":\"$ADMIN_USER\",\"password\":\"$(esc "$PW")\"}"
-resp="$(http "$(cfg_post "$BASE_URL/auth/createAdmin" "$create_body")")"
+# `confirmed` records the one thing that lets Crow keep the password after a login that does
+# not work: Navidrome itself answering 200 with isAdmin true for Crow's own create.
+confirmed=""
+resp="$(http_post "$(cfg_post "$BASE_URL/auth/createAdmin" "$create_body")")"
 code="$(code_of "$resp")"
 created_flag=""
 if [ "$code" = "200" ]; then created_flag="$(json_flag "$(body_of "$resp")" isAdmin)"; fi
-if [ "$created_flag" != "true" ]; then
+if [ "$created_flag" = "true" ]; then
+  confirmed=1
+else
   # Navidrome refused, or did not say what it did. Its own state decides: a second create
-  # answers 403 with a message, never a 4xx that alone means "already set up".
+  # answers 403 with a message, never a 4xx that alone means "already set up". A first admin
+  # that appeared is proved with a real login — Crow's password either opens it or the account
+  # is someone else's, and the password is discarded.
   again="$(first_time_state)"
   case "$again" in
-    DONE) die "Navidrome already has its own first admin, so this install was left alone; nothing was changed." 3 ;;
+    DONE) ;;
     FRESH) die "Navidrome did not create the admin account, so nothing was changed; check the app's own login." 1 ;;
     *) die "Navidrome did not report whether it created the admin account; check the app's own login before trying again." 1 ;;
   esac
 fi
-say "Navidrome's admin account '$ADMIN_USER' is in place."
+# Only Navidrome's own isAdmin answer makes that account Crow's; a first admin that appeared
+# on its own is proved below, so it is not claimed here.
+if [ -n "$confirmed" ]; then say "Navidrome's admin account '$ADMIN_USER' is in place."; fi
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 login_body="{\"username\":\"$ADMIN_USER\",\"password\":\"$(esc "$PW")\"}"
@@ -131,7 +147,7 @@ cfg_login() {
 }
 prove() {
   local answer
-  answer="$(http "$(cfg_login)")"
+  answer="$(http_post "$(cfg_login)")"
   if [ "$(code_of "$answer")" = "200" ]; then printf '%s' "LOGIN-OK"; else printf '%s' "LOGIN-FAIL"; fi
 }
 attempt=1
@@ -146,9 +162,13 @@ while :; do
   sleep 3
 done
 if [ "$proof" != "LOGIN-OK" ]; then
-  # Navidrome confirmed the change, so the new password IS its password: Crow keeps it and
-  # says it could not log in with it (exit 5).
-  die "Navidrome accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  # Navidrome itself confirmed the change, so the new password IS its password: Crow keeps it
+  # and says it could not log in with it (exit 5). Without that confirmation a first admin that
+  # appeared is not Crow's — Crow's password does not open it — so nothing is saved (exit 3).
+  if [ -n "$confirmed" ]; then
+    die "Navidrome accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5
+  fi
+  die "Navidrome already has a first admin that is not Crow's: logging in with Crow's password did not succeed; left alone, and nothing of Crow's was saved." 3
 fi
 
 say "Navidrome's admin login for '$ADMIN_USER' now uses the password Crow generated."

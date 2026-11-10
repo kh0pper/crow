@@ -43,6 +43,8 @@ Audiobookshelf estará disponible en `http://tu-servidor:13378`. Crow crea el us
 
 Si instalaste Audiobookshelf antes de esta versión, su tarjeta en la página de Extensiones ofrece **Set it up for me**, que crea la cuenta ahora y guarda la contraseña de la misma forma.
 
+La comprobación de estado de este bundle ahora consulta Audiobookshelf con `wget`, la herramienta que trae su imagen. Se aplica cuando el contenedor se vuelve a crear: después de actualizar, elige **Reiniciar** en la tarjeta del bundle en la página de Extensiones.
+
 ### Opción B: Conectar a Audiobookshelf existente
 
 Si ya tienes una instancia de Audiobookshelf funcionando, conecta Crow directamente a ella.
