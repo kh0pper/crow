@@ -25,13 +25,14 @@
  * tailscale status, the interface table, the listener identification, the spawn
  * wrapper) has a test seam in `deps`.
  */
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import { tailscaleStatusAsync } from "../../servers/shared/self-dial-address.js";
+import { openCheckedBindSource } from "./bind-fd.mjs";
 import { createDockerView } from "./docker-view.mjs";
-import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener } from "./listener-owner.mjs";
+import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener, localOnlySubnets } from "./listener-owner.mjs";
 import { loadPolicySource, profileFor } from "./profile.mjs";
 import { declaredEnvKeys } from "./wall-env.mjs";
 import { AddonWallRefused, wrapAddonSpawn } from "./spawn.mjs";
@@ -48,6 +49,16 @@ const SELF_URL_VARS = ["CROW_GATEWAY_URL", "CROW_PUBLIC_URL"];
 const SPAWN_KINDS = new Set(["addon", "service", "builtin"]);
 /** A project-service child's own folder: the same rule the plan applies. */
 const SERVICE_SUBDIR_RE = /^services\/[0-9a-f][0-9a-f-]{7,63}$/;
+/** An add-on id names folders, a relay dir and a data folder: one slug or nothing. */
+const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/** The two kernel route tables, as `localOnlySubnets` reads them. */
+function readRouteTables() {
+  const read = (p) => {
+    try { return readFileSync(p, "utf8"); } catch { return ""; }
+  };
+  return { v4: read("/proc/net/route"), v6: read("/proc/net/ipv6_route") };
+}
 
 /** An absolute path without trailing slashes ("/" kept), or null. */
 function cleanPath(p) {
@@ -108,7 +119,8 @@ function asRefused(err) {
  * @param {number} o.gatewayPort     the port doors are served on
  * @param {object} [o.gatewayEnv]    the gateway's own env (public names only)
  * @param {object} [o.deps]          test seams: dockerView, identifyListener,
- *                                   tailscaleStatus, interfaces, wrapAddonSpawn
+ *                                   tailscaleStatus, interfaces, routes,
+ *                                   wrapAddonSpawn, afterServicesDir
  * @returns {{crowRoots: string[], startAddonWall: Function, selfTargets: Function,
  *            listenerOwnerFor: Function, containerOwnerFor: Function}}
  */
@@ -235,11 +247,21 @@ export function createWallContext({
       const interfaces = typeof seam.interfaces === "function" ? seam.interfaces : networkInterfaces;
       let table = {};
       try { table = interfaces() || {}; } catch { table = {}; }
-      return identifyContainerAddr(addr, {
-        addonId: id,
-        view: snap,
-        bridgeSubnets: bridgeSubnetsFromInterfaces(table),
-      });
+      const named = bridgeSubnetsFromInterfaces(table);
+      let bridgeSubnets = named;
+      if (!snap) {
+        // No docker view: the ranges the read would have named are unknown, so
+        // every local interface but loopback and the way off this computer counts
+        // as one, named bridges included.
+        let routes = {};
+        try {
+          const probe = typeof seam.routes === "function" ? seam.routes : readRouteTables;
+          const r = probe();
+          routes = r && typeof r === "object" ? r : {};
+        } catch { routes = {}; }
+        bridgeSubnets = [...new Set([...named, ...localOnlySubnets(table, routes)])];
+      }
+      return identifyContainerAddr(addr, { addonId: id, view: snap, bridgeSubnets });
     };
   }
 
@@ -328,6 +350,40 @@ export function createWallContext({
   }
 
   /**
+   * Create `<base>/services` and `<base>/services/<uuid>`, each mkdir made
+   * THROUGH a directory fd opened the way a bind source is (`bind-fd.mjs`:
+   * component by component, never following a symlink). The add-on owns
+   * `<base>`, so a symlink planted there must never redirect a mkdir into
+   * another add-on's folder, and a name swapped between the two steps is caught
+   * when the next one is opened. Both fds are closed here.
+   */
+  function createServiceSubdir(base, subdir) {
+    const uuid = String(subdir).slice("services/".length);
+    let baseFd = null;
+    let servicesFd = null;
+    try {
+      baseFd = openCheckedBindSource(base, { expect: "dir", home }).fd;
+      try {
+        mkdirSync("/proc/self/fd/" + baseFd + "/services", { mode: 0o700 });
+      } catch (err) {
+        if (!err || err.code !== "EEXIST") throw err;
+      }
+      if (typeof seam.afterServicesDir === "function") seam.afterServicesDir(join(base, "services"));
+      servicesFd = openCheckedBindSource(join(base, "services"), { expect: "dir", home }).fd;
+      try {
+        mkdirSync("/proc/self/fd/" + servicesFd + "/" + uuid, { mode: 0o700 });
+      } catch (err) {
+        if (!err || err.code !== "EEXIST") throw err;
+      }
+    } finally {
+      for (const fd of [servicesFd, baseFd]) {
+        if (!Number.isInteger(fd)) continue;
+        try { closeSync(fd); } catch { /* already closed */ }
+      }
+    }
+  }
+
+  /**
    * Build one walled spawn for an add-on, a project-service child or a built-in.
    * Every failure is an AddonWallRefused: the caller leaves the add-on off.
    *
@@ -345,6 +401,11 @@ export function createWallContext({
    */
   async function startAddonWall({ id, entry, command, args, baseEnv = process.env, ownEnv = {}, kind = "addon", dataSubdir } = {}) {
     try {
+      // The id names folders below the data dir and, for a built-in, the
+      // checkout's own bundle: checked before anything touches the filesystem.
+      if (typeof id !== "string" || !ADDON_ID_RE.test(id)) {
+        throw new AddonWallRefused("add-on refused: invalid add-on id");
+      }
       if (!SPAWN_KINDS.has(kind)) throw new AddonWallRefused("add-on refused: unknown spawn kind");
       const pastDefaults = pastDefaultsAll();
       const profile = profileFor({
@@ -372,12 +433,11 @@ export function createWallContext({
         }
         const base = join(dataDir, id);
         // Each level is created only under a real directory (never through a
-        // symlink the add-on planted in its own writable folder): mkdir follows a
-        // symlinked parent, which would create a folder wherever it points.
+        // symlink the add-on planted in its own writable folder): both mkdirs go
+        // through fds opened component by component without following links.
         realDirOrRefuse(base, "the add-on's data folder is missing");
-        ensureDir(join(base, "services"));
+        createServiceSubdir(base, dataSubdir);
         realDirOrRefuse(join(base, "services"), "the services folder is not a plain folder");
-        ensureDir(join(base, dataSubdir));
         realDirOrRefuse(join(base, dataSubdir), "the service child's folder is not a plain folder");
       }
 

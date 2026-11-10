@@ -13,7 +13,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, fstatSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,8 @@ const freshDir = (name) => {
 
 /** What the wall hands bwrap when everything works. */
 const OK_PROBE = { ok: true, pidns: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null };
+/** The probe's reason when there is no bwrap binary at all. */
+const MISSING_BWRAP = "bubblewrap (bwrap) is not installed";
 
 // ---- the mode decision ---------------------------------------------------
 
@@ -126,17 +128,33 @@ test("a corrupt wall file with a walled default still walls", () => {
 
 test("no bwrap: the walled tier is refused and the child gets setpriv, or nothing", async () => {
   const base = { id: "kiosk", command: "/usr/bin/node", args: ["server/index.js"], env: { KEEP: "1" }, profile: {}, crowHome: freshDir("nnp") };
-  const nnp = await wrapAddonSpawn({ ...base, deps: { probe: () => ({ ok: false, setpriv: "/usr/bin/setpriv", reason: "x" }) } });
+  const nnp = await wrapAddonSpawn({ ...base, deps: { probe: () => ({ ok: false, setpriv: "/usr/bin/setpriv", reason: MISSING_BWRAP }) } });
   assert.equal(nnp.walled, false);
   assert.equal(nnp.tier, "nnp");
   assert.equal(nnp.cmd, "/usr/bin/setpriv");
   assert.deepEqual(nnp.args, ["--no-new-privs", "/usr/bin/node", "server/index.js"]);
-  assert.equal(nnp.reason, "x");
+  assert.equal(nnp.reason, MISSING_BWRAP);
+  assert.equal(typeof nnp.env, "object", "the nnp tier carries the env the wall built");
 
-  const none = await wrapAddonSpawn({ ...base, deps: { probe: () => ({ ok: false, setpriv: null, reason: "no bwrap" }) } });
+  const none = await wrapAddonSpawn({ ...base, deps: { probe: () => ({ ok: false, setpriv: null, reason: MISSING_BWRAP }) } });
   assert.equal(none.walled, false);
   assert.equal(none.tier, "none");
-  assert.equal(none.reason, "no bwrap");
+  assert.equal(none.reason, MISSING_BWRAP);
+});
+
+test("a bwrap that is installed but cannot start a sandbox is a refusal, never a weaker tier", async () => {
+  const base = { id: "kiosk", command: "/usr/bin/node", args: [], profile: {}, crowHome: freshDir("blocked") };
+  for (const probe of [
+    { ok: false, setpriv: "/usr/bin/setpriv", reason: "bwrap cannot create a user namespace here (--unshare-user): exit 1" },
+    { ok: false, setpriv: null, reason: "bwrap cannot create a user namespace here (--unshare-user): false" },
+    { ok: false, setpriv: "/usr/bin/setpriv", reason: null },
+  ]) {
+    await assert.rejects(
+      wrapAddonSpawn({ ...base, deps: { probe: () => probe } }),
+      (err) => err instanceof AddonWallRefused && /bwrap is installed but cannot start a sandbox here/.test(err.message),
+      JSON.stringify(probe),
+    );
+  }
 });
 
 test("bwrap without a PID namespace is a refusal, before anything is built", async () => {
@@ -456,4 +474,58 @@ test("no seccomp table: the tier says so and child fd 3 is never used", async ()
   assert.equal(wall.stdioExtra.some((e) => e.childFd === 3), false);
   assert.equal(wall.args.includes("--info-fd"), true);
   await wall.cleanup();
+});
+
+test("a plan fd layout the wall cannot pass is a refusal that closes every plan fd", async () => {
+  const dir = freshDir("fd-layout");
+  const file = join(dir, "payload.bin");
+  writeFileSync(file, "payload");
+  const closed = (fd, what) => assert.throws(
+    () => fstatSync(fd),
+    (err) => err && err.code === "EBADF",
+    what + ": the fd is closed",
+  );
+
+  const cases = [
+    { what: "child fd 3 (bwrap's seccomp slot)", spec: (fd) => ({ fd, childFd: 3, role: "data" }) },
+    { what: "child fd 4 (bwrap's info slot)", spec: (fd) => ({ fd, childFd: 4, role: "data" }) },
+    { what: "a child fd that is not a whole number", spec: (fd) => ({ fd, childFd: "5", role: "data" }) },
+    { what: "a door token entry with no token minted", spec: (fd) => ({ fd, childFd: 6, role: "door-token" }) },
+  ];
+
+  for (const c of cases) {
+    const keep = openSync(file, "r");
+    const refused = openSync(file, "r");
+    const plan = {
+      args: ["--tmpfs", "/"],
+      env: {},
+      unsetEnv: [],
+      fds: [{ fd: keep, childFd: 5, role: "data" }, c.spec(refused)],
+      net: { sock: null, ports: [], proxyPort: null },
+      refused: [],
+    };
+    await assert.rejects(
+      wrapAddonSpawn({
+        id: "quiet",
+        command: "/usr/bin/node",
+        args: [],
+        profile: { network: { internet: false, hosts: [] }, doors: [] },
+        crowHome: freshDir("fd-layout-home"),
+        dataDir: dir,
+        home: "/home/alex",
+        nodeBin: "/usr/bin/node",
+        gatewayPort: 3001,
+        deps: {
+          probe: () => OK_PROBE,
+          tmpdir: () => freshDir("fd-layout-tmp"),
+          buildPlan: () => plan,
+          seccompSupported: () => false,
+        },
+      }),
+      (err) => err instanceof AddonWallRefused,
+      c.what,
+    );
+    closed(keep, c.what + ": the fd before it");
+    closed(refused, c.what);
+  }
 });

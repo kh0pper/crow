@@ -280,6 +280,7 @@ test("selfTargets: a failed tailscale read still gives the interface addresses",
   assert.deepEqual(targets.names, [hostname().toLowerCase()]);
   assert.deepEqual(targets.addrs, ["127.0.0.1"]);
 });
+
 test("a service child's folder is never created through a planted symlink or from a path-shaped uuid", async () => {
   const id = "probe-service";
   const appRoot = appRootWith(id);
@@ -308,4 +309,79 @@ test("a service child's folder is never created through a planted symlink or fro
   }
   assert.equal(existsSync(join(dataDir, "escape")), false);
   assert.equal(rec.calls.length, 0);
+});
+
+test("the services folder swapped for a symlink between the two steps is refused", async () => {
+  const id = "probe-service";
+  const appRoot = appRootWith(id);
+  const dataDir = freshDir("service-swap");
+  mkdirSync(join(dataDir, id), { recursive: true, mode: 0o700 });
+  const victim = freshDir("swap-victim");
+  const rec = spawnRecorder();
+  const ctx = context({
+    appRoot,
+    dataDir,
+    deps: quietDeps({
+      ...rec,
+      // Runs after `services` was created through its directory fd and before the
+      // same name is opened again: the window a rename or a symlink aims at.
+      afterServicesDir: (servicesPath) => {
+        rmSync(servicesPath, { recursive: true, force: true });
+        symlinkSync(victim, servicesPath);
+      },
+    }),
+  });
+
+  await assert.rejects(
+    ctx.startAddonWall({ id, entry: {}, command: "node", args: [], env: {}, kind: "service", dataSubdir: "services/0a1b2c3d-0000-4000-8000-00000000abcd" }),
+    (err) => err instanceof AddonWallRefused,
+  );
+  assert.deepEqual(readdirSync(victim), [], "nothing was created where the symlink points");
+  assert.equal(rec.calls.length, 0);
+});
+
+test("an id that is not one slug is refused before any filesystem call", async () => {
+  const dataDir = freshDir("bad-id-data");
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot: appRootWith("probe-service"), dataDir, deps: quietDeps(rec) });
+  for (const id of ["../probe-service", "Probe-Service", "probe/service", "", "probe service"]) {
+    await assert.rejects(
+      ctx.startAddonWall({ id, entry: {}, command: "node", args: [], env: {}, kind: "service", dataSubdir: "services/0a1b2c3d-0000-4000-8000-00000000abcd" }),
+      (err) => err instanceof AddonWallRefused && /invalid add-on id/.test(err.message),
+      JSON.stringify(id),
+    );
+    await assert.rejects(
+      ctx.startAddonWall({ id, entry: {}, command: "node", args: [], env: {}, kind: "builtin" }),
+      (err) => err instanceof AddonWallRefused && /invalid add-on id/.test(err.message),
+      JSON.stringify(id),
+    );
+  }
+  assert.deepEqual(readdirSync(dataDir), [], "nothing was created for an id that names no folder");
+  assert.equal(rec.calls.length, 0);
+});
+
+test("with no docker view every interface but loopback and the default route counts as a bridge", async () => {
+  const ipv4 = [
+    "Iface\tDestination\tGateway\t\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+    "eno1\t00000000\t0102A8C0\t\t0003\t0\t0\t100\t00000000\t0\t0\t0",
+    "mybr0\t0030AC0A\t00000000\t\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0",
+  ].join("\n");
+  const interfaces = () => ({
+    lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true }],
+    eno1: [{ address: "10.20.30.5", netmask: "255.255.255.0", family: "IPv4" }],
+    mybr0: [{ address: "172.30.0.1", netmask: "255.255.0.0", family: "IPv4" }],
+  });
+  const noDocker = () => ({ snapshot: async () => { throw new Error("docker is down"); } });
+
+  const ctx = context({ deps: quietDeps({ dockerView: noDocker, interfaces, routes: () => ({ v4: ipv4, v6: "" }) }) });
+  const owner = ctx.containerOwnerFor("kiosk");
+  assert.equal((await owner("172.30.0.5")).kind, "denied", "a custom-named bridge is a bridge range");
+  assert.equal((await owner("10.20.30.9")).kind, "not-container", "the default route's interface is not");
+  assert.equal((await owner("127.0.0.5")).kind, "not-container", "loopback never is");
+
+  // No route table at all: no default-route interface is known, so every
+  // non-loopback address is refused unless a container of this project holds it.
+  const blind = context({ deps: quietDeps({ dockerView: noDocker, interfaces, routes: () => { throw new Error("no route table"); } }) });
+  assert.equal((await blind.containerOwnerFor("kiosk")("10.20.30.9")).kind, "denied");
+  assert.equal((await blind.containerOwnerFor("kiosk")("127.0.0.5")).kind, "not-container");
 });

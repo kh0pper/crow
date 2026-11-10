@@ -49,6 +49,8 @@ const PROXY_VARS = [
   "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
   "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY",
 ];
+/** The reason `probePiSandbox` gives when there is no bwrap binary at all. */
+const BWRAP_MISSING_PREFIX = "bubblewrap (bwrap) is not installed";
 /** The reason strings the mode decision hands a status surface. */
 const KILL_SWITCH_REASON = "walls switched off by the operator (CROW_ADDON_WALLS=off)";
 const DEFAULT_OFF_REASON = "walls are off on this computer";
@@ -175,19 +177,31 @@ export async function wrapAddonSpawn(o = {}) {
 
   // No usable bwrap: no wall, and say so. `setpriv --no-new-privs` still keeps
   // sudo and setuid binaries out of reach; without that either, the child is
-  // plain. This is the one branch that returns `walled: false`.
+  // plain. This is the one branch that returns `walled: false`, and only for a
+  // probe that says bwrap is not installed at all: a bwrap that is present but
+  // cannot start a sandbox here (a refused user namespace, a blocked binary, a
+  // probe that timed out) is a refusal, never a weaker tier.
   if (!probe || probe.ok !== true) {
-    if (probe && probe.setpriv) {
+    const reason = probe && typeof probe.reason === "string" ? probe.reason : null;
+    const notInstalled = reason !== null && reason.startsWith(BWRAP_MISSING_PREFIX);
+    if (!notInstalled) {
+      throw new AddonWallRefused(
+        "add-on refused: bwrap is installed but cannot start a sandbox here ("
+        + (reason || "the probe gave no reason")
+        + ")",
+      );
+    }
+    if (probe.setpriv) {
       return {
         walled: false,
         tier: "nnp",
         cmd: probe.setpriv,
         args: ["--no-new-privs", o.command, ...(Array.isArray(o.args) ? o.args : [])],
         env: scrubSandboxEnv(childEnv),
-        reason: probe.reason,
+        reason,
       };
     }
-    return { walled: false, tier: "none", reason: probe ? probe.reason : "bubblewrap (bwrap) is not installed" };
+    return { walled: false, tier: "none", reason };
   }
   if (probe.pidns === false) {
     throw new AddonWallRefused("add-on refused: bwrap cannot make a PID namespace here");
@@ -283,15 +297,37 @@ export async function wrapAddonSpawn(o = {}) {
 
     // 4. The plan's own fds, registered now so that a later failure closes them.
     // The door token is bind DATA: it travels as a pipe the gateway writes once,
-    // never as a host file.
-    for (const spec of Array.isArray(plan.fds) ? plan.fds : []) {
-      if (!spec || !Number.isInteger(spec.childFd)) continue;
-      if (spec.childFd === SECCOMP_CHILD_FD || spec.childFd === INFO_CHILD_FD) continue;
+    // never as a host file. A layout this spawn cannot honour (an fd where bwrap's
+    // own fds go, a slot that is not a whole number, a token with nothing minted)
+    // is a refusal with every plan fd closed: a silently skipped entry would leak
+    // its host fd into the gateway for the life of the process.
+    const planFds = Array.isArray(plan.fds) ? plan.fds : [];
+    const refusePlanFds = () => {
+      const closed = new Set();
+      for (const entry of stdioExtra) {
+        if (!Number.isInteger(entry.fd)) continue;
+        const fd = entry.fd;
+        entry.fd = null;
+        closed.add(fd);
+        try { closeSync(fd); } catch { /* already closed */ }
+      }
+      for (const spec of planFds) {
+        if (!spec || !Number.isInteger(spec.fd) || spec.fd < 0 || closed.has(spec.fd)) continue;
+        closed.add(spec.fd);
+        try { closeSync(spec.fd); } catch { /* already closed */ }
+      }
+      throw new AddonWallRefused("add-on refused: the plan's fd layout cannot be passed to the wall");
+    };
+    for (const spec of planFds) {
+      if (!spec || typeof spec !== "object") continue;
+      if (!Number.isInteger(spec.childFd)) refusePlanFds();
+      if (spec.childFd === SECCOMP_CHILD_FD || spec.childFd === INFO_CHILD_FD) refusePlanFds();
       if (spec.role === "door-token") {
-        if (token) stdioExtra.push({ childFd: spec.childFd, pipe: "write", role: "door-token", data: token });
+        if (!token) refusePlanFds();
+        stdioExtra.push({ childFd: spec.childFd, pipe: "write", role: "door-token", data: token });
         continue;
       }
-      if (!Number.isInteger(spec.fd)) continue;
+      if (!Number.isInteger(spec.fd) || spec.fd < 0) refusePlanFds();
       stdioExtra.push({ childFd: spec.childFd, fd: spec.fd, role: spec.role });
     }
 

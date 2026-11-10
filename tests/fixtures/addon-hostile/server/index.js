@@ -23,9 +23,13 @@
  *   probe_pids()               every numeric /proc entry with its comm
  *   probe_sql()                NO_DB without CROW_DB_PATH, else an open of it
  *   crash()                    exit 70
+ *
+ * With HOSTILE_MARK set to a path, it writes that file as its very first act:
+ * a caller can then tell "this process ran" from "nothing was spawned" without
+ * looking at any process table.
  */
 
-import { closeSync, openSync, readFileSync, readdirSync, writeSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
 import { get as httpGet } from "node:http";
 import { connect as netConnect } from "node:net";
 
@@ -230,6 +234,16 @@ async function handle(message) {
 
 // The one line the gateway's stderr prefixer turns into `[addon:addon-hostile] hostile-started`.
 process.stderr.write("hostile-started\n");
+
+// A caller that wants to know whether this process ran at all names a file.
+const mark = process.env.HOSTILE_MARK;
+if (mark) {
+  try {
+    const fd = openSync(mark, "w");
+    writeSync(fd, "started\n");
+    closeSync(fd);
+  } catch { /* the marker is a courtesy, never a reason to fail */ }
+}
 
 let buffer = "";
 process.stdin.setEncoding("utf8");

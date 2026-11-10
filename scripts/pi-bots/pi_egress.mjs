@@ -572,6 +572,8 @@ const in6 = (a, net, plen) => {
 
 /** A host name as an allow list holds it: lower case, no trailing dot. */
 const addonHost = (h) => (typeof h === "string" ? h.trim().toLowerCase().replace(/\.$/, "") : "");
+/** The only shape an owner value may have before it is read as an add-on id. */
+const ADDON_OWNER_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const isPortNumber = (p) => Number.isInteger(p) && p > 0 && p < 65536;
 
 /** One address spelling for comparison: brackets/zone dropped, v4-mapped becomes its IPv4. */
@@ -1232,6 +1234,9 @@ export function createEgressRelay(o) {
     if (kind === "docker-publish") {
       const projectOwner = typeof owner.projectOwner === "string" ? owner.projectOwner : "";
       if (!projectOwner) return "the owner check did not name a compose project";
+      // A project owner is an add-on id or nothing: no other value is compared
+      // with this add-on's id, and none reaches the TTS exception list.
+      if (!ADDON_OWNER_ID_RE.test(projectOwner)) return "foreign project";
       if (entry.source === "gateway-tts") {
         // These entries exist for ONE thing: a TTS add-on's published port,
         // computed by the gateway (D4). This relay re-checks the named

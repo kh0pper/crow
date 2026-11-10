@@ -191,6 +191,11 @@ test("an ownerProject entry takes only that compose project's published port", a
   const sameUid = await one({ kind: "own-uid", pid: 12 });
   assert.equal(await talk(sameUid.r.socketPath, "PORT 8000\nping"), "", "own-uid is not a published port");
   assert.ok(sameUid.logs.some((l) => l.includes("(the listener is not published by paperless)")), sameUid.logs.join("\n"));
+
+  // An owner value that is not one slug names no add-on at all.
+  const odd = await one({ kind: "docker-publish", project: "paperless", projectOwner: "media:x" });
+  assert.equal(await talk(odd.r.socketPath, "PORT 8000\nping"), "", "an owner of no recognisable shape");
+  assert.ok(odd.logs.some((l) => l.includes("(foreign project)")), odd.logs.join("\n"));
 });
 
 test("a default URL never splices to a process of the same user", async () => {

@@ -667,7 +667,7 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
       log: () => {},
     })
     : wall && wall.tier === "nnp"
-      ? new StdioClientTransport({ command: wall.cmd, args: wall.args, env, cwd, stderr: "pipe" })
+      ? new StdioClientTransport({ command: wall.cmd, args: wall.args, env: wall.env, cwd, stderr: "pipe" })
       : new StdioClientTransport({ command: rc.command, args, env, cwd, stderr: "pipe" });
   attachStderr(r, transport, generation);
   const client = new Client({ name: `crow-service-${service.id}`, version: "1.0.0" });

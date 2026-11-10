@@ -16,7 +16,9 @@
  *      and then "" or a proxy URL the browser would accept              else 400
  *   4. the container name comes from THIS instance's installed bundle
  *      .env, never from the request, and must be a plain docker name    else 500
- *   5. docker restart, or a compose recreate of the bundle's own file  else 502
+ *   5. docker restart, or a compose recreate of the bundle's own file  else 502;
+ *      one docker call at a time — a request arriving while one runs is 429
+ *      `busy`, and it never reaches docker
  *
  * Nothing from the request reaches the argv: only the validated proxy_url, as
  * CROW_BROWSER_PROXY in the compose run's environment. The socket carries the
@@ -145,6 +147,10 @@ export function addonDoorsRouter({
   const parseJson = typeof json === "function" ? json : express.json({ limit: "4kb" });
   const home = typeof crowHome === "string" && crowHome !== "" ? crowHome : null;
   const router = Router();
+  // One docker call at a time: a second request while one runs is told so, and
+  // never reaches docker (a compose recreate and a restart racing each other is
+  // the way a container is left half-built).
+  let busy = false;
 
   router.post(BROWSER_CONTAINER_PATH, parseJson, async (req, res) => {
     const fail = (status, error) => {
@@ -182,7 +188,9 @@ export function addonDoorsRouter({
     const container = browserContainerName(base);
     if (!container) return fail(500, "browser container name is invalid");
 
-    // 5. The fixed docker calls.
+    // 5. The fixed docker calls, one at a time.
+    if (busy) return fail(429, "busy");
+    busy = true;
     try {
       if (action === "restart") {
         await run("docker", ["restart", container], { timeout: RESTART_TIMEOUT_MS });
@@ -195,6 +203,8 @@ export function addonDoorsRouter({
       }
     } catch {
       return fail(502, "docker failed");
+    } finally {
+      busy = false;
     }
     return res.json({ ok: true });
   });

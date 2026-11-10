@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { identifyListener } from "../scripts/addon-sandbox/listener-owner.mjs";
+import { createDockerView } from "../scripts/addon-sandbox/docker-view.mjs";
 import { startEgressRelay } from "../scripts/pi-bots/pi_egress.mjs";
 import { parseIPv6 } from "../servers/shared/ip-classify.js";
 
@@ -606,7 +607,7 @@ test("a deleted cwd or executable is refused, not compared", async () => {
 
 // ---- this computer's bridge ranges ---------------------------------------
 
-import { addrInCidr, bridgeSubnetsFromInterfaces, identifyContainerAddr } from "../scripts/addon-sandbox/listener-owner.mjs";
+import { addrInCidr, bridgeSubnetsFromInterfaces, identifyContainerAddr, localOnlySubnets } from "../scripts/addon-sandbox/listener-owner.mjs";
 
 const IFACES = {
   lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true, cidr: "127.0.0.1/8" }],
@@ -741,4 +742,101 @@ test("an unreadable address, a broken view and a missing map are refusals", asyn
     view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
   });
   assert.equal(mapped.kind, "docker-container");
+});
+
+// ---- the owner value is an add-on id, never a placeholder ------------------
+
+test("a project with two owners belongs to no add-on, whatever the add-on is called", async () => {
+  const ownHome = "/home/alex/.crow";
+  const appRoot = "/home/alex/crow";
+  const otherHome = "/home/alex/.crow-other";
+  const entry = (id, workingDir) => ({
+    Id: id,
+    Name: "/" + id,
+    Config: { Labels: { "com.docker.compose.project": "two-owners", "com.docker.compose.project.working_dir": workingDir } },
+    NetworkSettings: {
+      Networks: { bridge: { IPAddress: "172.18.0.9" } },
+      Ports: { "9000/tcp": [{ HostIp: "127.0.0.1", HostPort: String(PORT) }] },
+    },
+  });
+  const inspected = [
+    entry("a", ownHome + "/bundles/conflict"),
+    entry("b", otherHome + "/bundles/conflict"),
+  ];
+  const run = async (args) => {
+    if (args[0] === "ps") return "a\nb\n";
+    if (args[0] === "inspect") return JSON.stringify(inspected);
+    if (args[0] === "network" && args[1] === "ls") return "";
+    throw new Error("unexpected " + args.join(" "));
+  };
+  const snap = await createDockerView({ run, ownHome, appRoot, otherHomes: [otherHome] }).snapshot();
+  assert.equal(snap.addonProjects.has("two-owners"), false, "no placeholder stands in for the two owners");
+
+  // The listener path: a root-owned socket the project publishes.
+  const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+  const listener = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, ...p, addonId: "conflict", addonProjects: snap.addonProjects,
+    docker: async () => snap.publishes,
+  });
+  assert.deepEqual([listener.kind, listener.reason], ["denied", "project of no installed add-on"]);
+
+  // The container path: the address those containers hold.
+  const addr = identifyContainerAddr("172.18.0.9", { addonId: "conflict", view: snap, bridgeSubnets: [] });
+  assert.deepEqual([addr.kind, addr.reason], ["denied", "project of no installed add-on"]);
+});
+
+test("an owner value that is not one slug is no owner on either path", async () => {
+  for (const value of ["Conflict", "", "a:b", "other-instance:", " conflict", "other-instance:Kiosk"]) {
+    const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+    const listener = await identifyListener("127.0.0.1", PORT, {
+      gatewayUid: GW_UID, ...p, addonId: "conflict",
+      docker: async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project: "proj" }],
+      addonProjects: new Map([["proj", value]]),
+    });
+    assert.deepEqual([listener.kind, listener.reason], ["denied", "foreign project"], JSON.stringify(value));
+
+    const addr = identifyContainerAddr("172.18.0.5", {
+      addonId: "conflict",
+      bridgeSubnets: [],
+      view: fakeView({ containers: [container("proj", ["172.18.0.5"])], addonProjects: new Map([["proj", value]]) }),
+    });
+    assert.deepEqual([addr.kind, addr.reason], ["denied", "foreign project"], JSON.stringify(value));
+  }
+});
+
+// ---- every local interface but loopback and the default route ------------
+
+/** `/proc/net/route` text: eno1 leaves this computer, mybr0 is a local bridge. */
+const ROUTE_V4 = [
+  "Iface\tDestination\tGateway\t\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+  "eno1\t00000000\t0102A8C0\t\t0003\t0\t0\t100\t00000000\t0\t0\t0",
+  "mybr0\t0030AC0A\t00000000\t\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0",
+].join("\n");
+
+/** `/proc/net/ipv6_route` text: a default route out of eno1, a local prefix on mybr0. */
+const ROUTE_V6 = [
+  "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000003 eno1",
+  "fd003000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 mybr0",
+].join("\n");
+
+const LOCAL_IFACES = {
+  lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true }],
+  eno1: [{ address: "10.20.30.5", netmask: "255.255.255.0", family: "IPv4" }],
+  mybr0: [
+    { address: "172.30.0.1", netmask: "255.255.0.0", family: "IPv4" },
+    { address: "fd00:3000::1", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6" },
+  ],
+  docker0: [{ address: "172.17.0.1", netmask: "255.255.0.0", family: "IPv4" }],
+};
+
+test("every interface but loopback and the one a default route leaves through is a local-only range", async () => {
+  const ranges = localOnlySubnets(LOCAL_IFACES, { v4: ROUTE_V4, v6: ROUTE_V6 }).sort();
+  assert.deepEqual(ranges, ["172.17.0.0/16", "172.30.0.0/16", "fd00:3000::/64"].sort());
+  assert.equal(ranges.some((c) => c.startsWith("127.")), false, "loopback is never a local-only range");
+  assert.equal(ranges.some((c) => c.startsWith("10.")), false, "the default route's interface is not one");
+
+  // No route table: no default-route interface is known, so the LAN range counts too.
+  const blind = localOnlySubnets(LOCAL_IFACES, { v4: "", v6: "" }).sort();
+  assert.deepEqual(blind, ["10.20.30.0/24", "172.17.0.0/16", "172.30.0.0/16", "fd00:3000::/64"].sort());
+  assert.deepEqual(localOnlySubnets(null, ROUTE_V4), []);
 });

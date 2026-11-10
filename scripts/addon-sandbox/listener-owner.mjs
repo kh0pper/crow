@@ -54,6 +54,19 @@ export const TTS_PORT_EXCEPTION = Object.freeze({ media: Object.freeze(["kokoro-
 /** Host IPs a published port is reachable on from the host's loopback. */
 const PUBLISHED_HOST_IPS = new Set(["127.0.0.1", "0.0.0.0", "::", ""]);
 
+/**
+ * The shape an owner value must have before it is compared with an add-on id:
+ * one lowercase slug. A map that carries anything else (a placeholder, an
+ * empty string, a path-shaped value) names no owner, so no comparison passes.
+ */
+const OWNER_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/** `owner` may only be read as `addonId` when both are exactly one slug. */
+function ownerIsAddon(owner, addonId) {
+  return typeof owner === "string" && typeof addonId === "string"
+    && OWNER_ID_RE.test(owner) && OWNER_ID_RE.test(addonId) && owner === addonId;
+}
+
 /** An 8-char little-endian hex IPv4 field -> "a.b.c.d". */
 function hex4ToAddr(h) {
   const s = String(h || "");
@@ -279,7 +292,7 @@ async function verdictFor(listener, opts) {
       return { kind: "denied", reason: "project of no installed add-on", ...base, project };
     }
     const owner = String(opts.addonProjects.get(project) ?? "");
-    if (owner && owner === opts.addonId) return { kind: "docker-publish", project, projectOwner: owner, ...base };
+    if (ownerIsAddon(owner, opts.addonId)) return { kind: "docker-publish", project, projectOwner: owner, ...base };
     const exception = Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, opts.addonId)
       ? TTS_PORT_EXCEPTION[opts.addonId]
       : null;
@@ -521,6 +534,74 @@ export function bridgeSubnetsFromInterfaces(ifaces = networkInterfaces()) {
 }
 
 /**
+ * The interfaces carrying a default route, from the two kernel route tables.
+ * `/proc/net/route` (IPv4): a row whose Destination is `00000000`. Its columns
+ * are Iface Destination Gateway Flags RefCnt Use Metric Mask …; `/proc/net/route`
+ * is an empty set when the text is absent, unreadable or shapeless.
+ */
+function defaultV4Ifaces(text) {
+  const out = new Set();
+  for (const line of String(text || "").split("\n")) {
+    const c = line.trim().split(/\s+/);
+    if (c.length < 8) continue;
+    if (!/^0{8}$/i.test(c[1])) continue;
+    out.add(c[0]);
+  }
+  return out;
+}
+
+/**
+ * The interfaces carrying a default route, from `/proc/net/ipv6_route`: headerless
+ * rows of dest (32 hex) destPrefix (2 hex) src srcPrefix nextHop metric refcnt use
+ * flags iface, where a default route has an all-zero destination and prefix "00".
+ */
+function defaultV6Ifaces(text) {
+  const out = new Set();
+  for (const line of String(text || "").split("\n")) {
+    const c = line.trim().split(/\s+/);
+    if (c.length < 10) continue;
+    if (!/^0{32}$/i.test(c[0]) || !/^0{2}$/i.test(c[1])) continue;
+    out.add(c[9]);
+  }
+  return out;
+}
+
+/**
+ * The CIDRs of every local interface that cannot be a way off this computer:
+ * all of them but `lo` and the interface(s) a default route leaves through.
+ *
+ * With no docker view this stands in for "the docker and podman bridges": a
+ * custom-named bridge (`mybr0`) is a bridge range like any other, a LAN
+ * interface carrying the default route is not, and loopback never is. A route
+ * table that cannot be read (`routes` missing, or a text that is empty) leaves
+ * no default-route interface known, so every non-loopback subnet counts: an
+ * address there is refused unless a container of this add-on's own project
+ * holds it, which is the narrow answer, never the wide one.
+ *
+ * Pure: `routes` is `{ v4, v6 }` texts, as `/proc/net/route` and
+ * `/proc/net/ipv6_route` hold them.
+ *
+ * @param {object} [ifaces]  an `os.networkInterfaces()`-shaped object
+ * @param {{v4?: string, v6?: string}} [routes]
+ * @returns {string[]}
+ */
+export function localOnlySubnets(ifaces = networkInterfaces(), routes = {}) {
+  const out = [];
+  const table = ifaces && typeof ifaces === "object" ? ifaces : {};
+  const r = routes && typeof routes === "object" ? routes : {};
+  const defaults = new Set([...defaultV4Ifaces(r.v4), ...defaultV6Ifaces(r.v6)]);
+  for (const name of Object.keys(table)) {
+    if (name === "lo" || defaults.has(name)) continue;
+    const list = table[name];
+    for (const entry of Array.isArray(list) ? list : []) {
+      const c = interfaceCidr(entry);
+      if (c && !out.includes(c)) out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
  * Is `addr` inside `cidr`? IPv4 and IPv6, a v4-mapped spelling read as the
  * IPv4 it carries. False on anything unparsable. Pure.
  *
@@ -588,7 +669,7 @@ export function identifyContainerAddr(addr, o = {}) {
     const map = view.addonProjects instanceof Map ? view.addonProjects : new Map();
     if (!map.has(project)) return { kind: "denied", reason: "project of no installed add-on", project };
     const owner = String(map.get(project) ?? "");
-    if (owner && owner === String(o.addonId ?? "")) return { kind: "docker-container", project, projectOwner: owner };
+    if (ownerIsAddon(owner, o.addonId)) return { kind: "docker-container", project, projectOwner: owner };
     const exception = Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, o.addonId)
       ? TTS_PORT_EXCEPTION[o.addonId]
       : null;

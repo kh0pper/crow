@@ -13,7 +13,7 @@
  */
 import { test, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -122,7 +122,8 @@ test("with the walls off the add-on connects unwalled, no wall is built, and its
 
 // ---- a refused wall -------------------------------------------------------
 
-test("a refused wall leaves the add-on off with nothing spawned", async () => {
+test("a refused wall leaves the add-on off and starts nothing", async () => {
+  const mark = join(HOME, "refused-wall-started");
   const built = [];
   _setProxyDepsForTest({
     addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
@@ -132,7 +133,9 @@ test("a refused wall leaves the add-on off with nothing spawned", async () => {
     },
   });
 
-  const lines = await withConsole(async () => { await connectAddonServer(ID, ENTRY); });
+  const lines = await withConsole(async () => {
+    await connectAddonServer(ID, { ...ENTRY, env: { HOSTILE_MARK: mark } });
+  });
 
   const entry = connectedServers.get(ID);
   assert.equal(entry.status, "error");
@@ -145,6 +148,7 @@ test("a refused wall leaves the add-on off with nothing spawned", async () => {
   assert.equal(built[0].id, ID);
   assert.equal(built[0].command, process.execPath, "the resolved launcher, not the entry's bare name");
   assert.deepEqual(built[0].args, ["server/index.js"]);
+  assert.equal(existsSync(mark), false, "no child ran");
   assert.ok(!lines.some((l) => l.includes("hostile-started")), "no child ran");
 });
 
@@ -163,6 +167,66 @@ test("a wall that reports no usable bwrap connects unwalled and says so", async 
   assert.equal(entry.wall.mode, "unwalled");
   assert.equal(entry.wall.tier, "none");
   assert.equal(entry.wall.reason, "bubblewrap (bwrap) is not installed");
+});
+
+test("the nnp tier spawns with the env the wall built", async () => {
+  _setProxyDepsForTest({
+    addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
+    startAddonWall: async () => ({
+      walled: false,
+      tier: "nnp",
+      cmd: process.execPath,
+      args: [join(HOME, "bundles", ID, "server", "index.js")],
+      env: { ...process.env, MARK: "wall" },
+      profile: { id: ID, network: { internet: false, hosts: [] } },
+    }),
+  });
+
+  await withConsole(async () => { await connectAddonServer(ID, ENTRY); });
+
+  const entry = connectedServers.get(ID);
+  assert.equal(entry.status, "connected");
+  assert.equal(entry.wall.tier, "nnp");
+  const pid = entry.client?._transport?.pid;
+  assert.ok(Number.isInteger(pid) && pid > 0, "the add-on's pid");
+  const env = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean);
+  assert.ok(env.includes("MARK=wall"), "the setpriv child runs with the wall's env: " + env.filter((p) => p.startsWith("MARK=")).join(" "));
+});
+
+test("a connected walled add-on keeps its relay beside the entry, not in its data", async () => {
+  const relay = { socketPath: "/run/crow-net/relay.sock", close: () => {} };
+  const mark = join(HOME, "walled-entry-started");
+  _setProxyDepsForTest({
+    addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
+    startAddonWall: async () => ({
+      walled: true,
+      tier: "walled",
+      cmd: process.execPath,
+      args: [join(HOME, "bundles", ID, "server", "index.js")],
+      env: { ...process.env, HOSTILE_MARK: mark },
+      stdioExtra: [],
+      relay,
+      profile: { id: ID, network: { internet: false, hosts: [] } },
+      cleanup: () => {},
+    }),
+  });
+
+  await withConsole(async () => { await connectAddonServer(ID, ENTRY); });
+
+  const entry = connectedServers.get(ID);
+  assert.equal(entry.status, "connected");
+  assert.equal(entry.wall.mode, "walled");
+  assert.equal(entry.wall.tier, "walled");
+  assert.equal(existsSync(mark), true, "the wall's command line is what ran");
+  assert.equal("relay" in entry.wall, false);
+  assert.equal(JSON.stringify(entry.wall).includes("relay"), false);
+  const snapshot = JSON.parse(JSON.stringify({ ...entry, client: null }));
+  assert.equal(JSON.stringify(snapshot).includes("socketPath"), false, "the relay is not part of an entry's JSON view");
+  assert.equal("_wallRelay" in snapshot, false, "and it is not an enumerable key of the entry");
+  const held = Object.getOwnPropertyDescriptor(entry, "_wallRelay");
+  assert.ok(held, "the relay is kept for later tasks");
+  assert.equal(held.enumerable, false);
+  assert.equal(held.value, relay);
 });
 
 // ---- the child's environment ---------------------------------------------

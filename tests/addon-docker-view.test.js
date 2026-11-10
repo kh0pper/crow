@@ -121,7 +121,8 @@ test("a compose project belongs to the add-on its working_dir names", async () =
   assert.equal(s.addonProjects.get("app-missing"), undefined, "an app-root bundle that is not installed has no owner");
   assert.equal(s.addonProjects.get("other-kiosk"), "other-instance:kiosk");
   assert.equal(s.addonProjects.get("repo-checkout"), undefined, "a working dir outside every bundles folder has no owner");
-  assert.equal(s.addonProjects.get("two-owners"), "conflict");
+  assert.equal(s.addonProjects.get("two-owners"), undefined, "a project with two owners has no owner at all");
+  assert.equal(s.addonProjects.size, 3, "no placeholder value stands in for an owner");
   assert.equal(s.addonProjects.get(""), undefined, "no project label is not a project");
   // A container of a project whose folder is an add-on's: the owner is the id.
   const nested = containerEntry({ id: "c9", name: "nested", project: "sub", workingDir: HOME + "/bundles/kiosk/sub/dir" });
@@ -181,7 +182,7 @@ test("no containers means no docker inspect", async () => {
   assert.equal(s.addonProjects.size, 0);
   assert.deepEqual(calls, [["ps", "-q", "--no-trunc"], ["network", "ls", "-q", "--no-trunc"]]);
 });
-test("a project that mixes an add-on's container with one from elsewhere is a conflict", async () => {
+test("a project that mixes an add-on's container with one from elsewhere is left out of the map", async () => {
   const inspected = [
     { Id: "a", Name: "/x-1", Config: { Labels: { "com.docker.compose.project": "mixed", "com.docker.compose.project.working_dir": "/home/alex/.crow/bundles/paperless" } }, NetworkSettings: { Networks: {}, Ports: {} } },
     { Id: "b", Name: "/x-2", Config: { Labels: { "com.docker.compose.project": "mixed", "com.docker.compose.project.working_dir": "/home/alex/elsewhere" } }, NetworkSettings: { Networks: {}, Ports: {} } },
@@ -194,5 +195,26 @@ test("a project that mixes an add-on's container with one from elsewhere is a co
   };
   const view = createDockerView({ run, ownHome: "/home/alex/.crow", appRoot: "/home/alex/crow" });
   const snap = await view.snapshot();
-  assert.equal(snap.addonProjects.get("mixed"), "conflict");
+  assert.equal(snap.addonProjects.has("mixed"), false, "a project of two owners belongs to no add-on");
+});
+
+test("concurrent snapshot calls share one docker read sequence", async () => {
+  const { run, calls } = fakeRun();
+  let release = null;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const slow = async (args) => { await gate; return run(args); };
+  const view = createDockerView({ run: slow, ttlMs: 0, ownHome: HOME, appRoot: APP });
+
+  const calls3 = [view.snapshot(), view.snapshot(), view.snapshot()];
+  release();
+  const answers = await Promise.all(calls3);
+
+  assert.deepEqual(calls, [
+    ["ps", "-q", "--no-trunc"],
+    ["inspect", ...INSPECT.map((c) => c.Id)],
+    ["network", "ls", "-q", "--no-trunc"],
+    ["network", "inspect", "n1", "n2", "n3"],
+  ], "one docker sequence for the whole burst");
+  assert.equal(answers[0], answers[1]);
+  assert.equal(answers[1], answers[2]);
 });

@@ -125,15 +125,34 @@ function attachStderrPrefixer(transport, id) {
   stream.on("error", () => { /* the child's exit is what counts */ });
 }
 
-/** The `wall` field a connected add-on's entry carries: never a token, never a path. */
+/**
+ * The `wall` field a connected add-on's entry carries: plain data only (a mode,
+ * a tier, a reason and the profile snapshot), never a live object. The relay
+ * and the bind fds belong to `wrapAddonSpawn`'s cleanup, so the relay is kept
+ * beside the entry as a non-enumerable `_wallRelay` reference instead.
+ */
 function wallInfoFor(wall, mode) {
   return {
     mode: wall && wall.walled ? "walled" : "unwalled",
     tier: wall ? wall.tier : "none",
     reason: wall && wall.walled ? null : (wall?.reason || mode?.reason || null),
     profile: wall?.profile ?? null,
-    relay: wall?.relay ?? null,
   };
+}
+
+/**
+ * The connection entry for an add-on: the given fields, plus the wall's relay as
+ * a NON-enumerable `_wallRelay` (a later status surface reads it; a JSON view of
+ * the entry or of its `wall` never carries a live object).
+ */
+function wallEntry(entry, wall) {
+  const relay = wall && wall.walled && wall.relay ? wall.relay : null;
+  if (relay) {
+    try {
+      Object.defineProperty(entry, "_wallRelay", { value: relay, enumerable: false, writable: true, configurable: true });
+    } catch { /* an entry that cannot carry it loses nothing else */ }
+  }
+  return entry;
 }
 
 /**
@@ -213,7 +232,9 @@ async function connectToServer(integration) {
         onExit: wall.cleanup,
       });
     } else if (wall && wall.tier === "nnp") {
-      transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env, stderr: "pipe" });
+      // No usable bwrap here: the child runs under setpriv, with the env the wall
+      // built (never the spawn site's own).
+      transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env: wall.env, stderr: "pipe" });
       attachStderrPrefixer(transport, integration.id);
     } else {
       transport = new StdioClientTransport({ command, args, env, stderr: "pipe" });
@@ -397,7 +418,8 @@ export async function connectAddonServer(id, config) {
       } else if (wall && wall.tier === "nnp") {
         // No usable bwrap here: the child runs under setpriv, and its stderr goes
         // through the same prefixer (the process hygiene applies to every tier).
-        transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env, cwd, stderr: "pipe" });
+        // The env is the wall's own build, never the spawn site's.
+        transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env: wall.env, cwd, stderr: "pipe" });
         attachStderrPrefixer(transport, id);
       } else {
         transport = new StdioClientTransport({ command: rc.command, args: config.args || [], env, cwd, stderr: "pipe" });
@@ -422,14 +444,14 @@ export async function connectAddonServer(id, config) {
 
     console.log(`  [proxy] addon ${id}: connected, ${tools.length} tools discovered`);
 
-    connectedServers.set(id, {
+    connectedServers.set(id, wallEntry({
       client,
       tools,
       status: "connected",
       isAddon: true,
       remoteBotActor,
       ...(wallInfo ? { wall: wallInfo } : {}),
-    });
+    }, wall));
 
     transport.onclose = () => {
       console.warn(`  [proxy] addon ${id}: disconnected`);

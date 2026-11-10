@@ -17,12 +17,18 @@
  *                                          gateway, a repo checkout, a stale
  *                                          folder)
  *
- * A project whose containers name two different owners is `conflict`. Real
- * paths are compared, falling back to the raw label value when it does not
- * exist.
+ * A project whose containers name two different owners is left out of
+ * `addonProjects` altogether, exactly like a project whose containers name no
+ * add-on: it then reads as "project of no installed add-on" and no add-on may
+ * claim it. A sentinel value would be a real add-on id waiting to happen (an
+ * add-on called `conflict` would otherwise own every two-owner project), so an
+ * owner value that is not a bundle id or `other-instance:<bundle id>` is left
+ * out too. Real paths are compared, falling back to the raw label value when
+ * it does not exist.
  *
- * The answer is cached briefly (a spawn makes many decisions), and a failed
- * read is not cached. Callers treat a rejection as a refusal.
+ * The answer is cached briefly (a spawn makes many decisions), one build at a
+ * time (concurrent callers share it), and a failed read is not cached. Callers
+ * treat a rejection as a refusal.
  *
  * Node built-ins only; the docker runner and the clock are injectable.
  */
@@ -31,6 +37,13 @@ import { realpathSync } from "node:fs";
 
 /** A bundle id as the registry holds it. */
 const BUNDLE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** The one other owner spelling: an add-on of a co-hosted Crow. */
+const OTHER_INSTANCE_RE = /^other-instance:[a-z0-9][a-z0-9-]*$/;
+
+/** An owner value a project map may carry: a bundle id, or another instance's. */
+function ownerUsable(v) {
+  return typeof v === "string" && (BUNDLE_ID_RE.test(v) || OTHER_INSTANCE_RE.test(v));
+}
 /** Enough room for a host with many containers. */
 const MAX_BUFFER = 32 * 1024 * 1024;
 
@@ -186,11 +199,12 @@ export function createDockerView({
     }
     const addonProjects = new Map();
     for (const [project, owners] of byProject) {
-      if (owners.size > 1) addonProjects.set(project, "conflict");
-      else {
-        const [only] = owners;
-        if (only) addonProjects.set(project, only);
-      }
+      // More than one owner, or an owner value of no recognisable shape, is no
+      // owner at all: the project is dropped, never given a placeholder that
+      // could collide with an add-on id.
+      if (owners.size > 1) continue;
+      const [only] = owners;
+      if (ownerUsable(only)) addonProjects.set(project, only);
     }
     return { publishes, containers, subnets, addonProjects };
   }
@@ -204,13 +218,22 @@ export function createDockerView({
   }
 
   let cache = null; // { at, value }
+  let inFlight = null; // the one build a burst of callers shares
 
   async function snapshot() {
     const at = Number(now());
     if (cache && at - cache.at <= ttl) return cache.value;
-    const value = await build();
-    cache = { at: Number(now()), value };
-    return value;
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      try {
+        const value = await build();
+        cache = { at: Number(now()), value };
+        return value;
+      } finally {
+        inFlight = null;
+      }
+    })();
+    return inFlight;
   }
 
   return { snapshot };

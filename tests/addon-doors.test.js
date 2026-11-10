@@ -506,6 +506,37 @@ test("browser door: a docker failure is one fixed sentence, never docker's outpu
   assert.deepEqual(r.body, { ok: false, error: "docker failed" });
 });
 
+test("browser door: a docker call already running answers the next request 429 without reaching docker", async (t) => {
+  const crowHome = scratch("browser-busy");
+  mkdirSync(join(crowHome, "bundles", "browser"), { recursive: true });
+  writeFileSync(join(crowHome, "bundles", "browser", ".env"), SCRATCH_ENV);
+  let release = null;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  const runner = async (file, args, options) => { calls.push({ file, args, options }); await gate; return { stdout: "", stderr: "" }; };
+  const app = express();
+  app.use(addonDoorsRouter({ crowHome, runner }));
+  const { server, port } = await listen(app);
+  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+
+  const token = mintAddonDoorToken("browser");
+  const first = request(port, { method: "POST", path: CONTAINER_PATH, token, body: { action: "recreate" } });
+  for (let i = 0; i < 400 && calls.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(calls.length, 1, "the first request is inside docker");
+
+  const second = await request(port, { method: "POST", path: CONTAINER_PATH, token, body: { action: "restart" } });
+  assert.equal(second.status, 429);
+  assert.deepEqual(second.body, { ok: false, error: "busy" });
+  assert.equal(calls.length, 1, "the busy request never reached docker");
+
+  release();
+  assert.equal((await first).status, 200);
+  // Once nothing is in flight the door answers again.
+  const third = await request(port, { method: "POST", path: CONTAINER_PATH, token, body: { action: "restart" } });
+  assert.equal(third.status, 200);
+  assert.equal(calls.length, 2);
+});
+
 // --- retirement -----------------------------------------------------------
 
 test("a cleared door token opens nothing, on any door", async (t) => {

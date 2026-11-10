@@ -250,17 +250,22 @@ test("a walled service child's stderr never reaches the console (it may carry th
   const seen = [];
   const orig = { error: console.error, warn: console.warn, log: console.log };
   for (const k of Object.keys(orig)) console[k] = (...a) => { seen.push(a.map(String).join(" ")); };
+  let buffered = [];
   try {
     const conn = await github("test-token-51");
     await withDb((d) => C.ensureChild(d, conn.uuid, { crowHome: HOME }));
-    // The fixture writes one stderr line at start; give it time to arrive.
+    // The fixture writes one stderr line at start; give it time to arrive, and
+    // require it in this connection's ring buffer, so a fixture that wrote
+    // nothing cannot make the console assertion below vacuous.
     await waitFor(() => C.listChildren().some((k) => k.uuid === conn.uuid && k.pid), 5000, "the child");
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => C.childStderr(conn.uuid).some((l) => l.includes("hostile-started")), 5000, "the child's stderr line in the ring buffer");
+    buffered = C.childStderr(conn.uuid);
     await C.stopChild(conn.uuid);
   } finally {
     Object.assign(console, orig);
     await C.stopAllChildren();
     C._setChildrenForTest({ wall: null });
   }
+  assert.ok(buffered.some((l) => l.includes("hostile-started")), "the connection's ring buffer holds the line: " + JSON.stringify(buffered));
   assert.equal(seen.some((l) => l.includes("hostile-started")), false, seen.join("\n"));
 });
