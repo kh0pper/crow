@@ -17,7 +17,8 @@
   "requires": { "env": ["GITEA_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
   "env_vars": [
     { "name": "GITEA_URL", "description": "Gitea server URL", "default": "http://localhost:3040", "required": true },
-    { "name": "GITEA_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true }
+    { "name": "GITEA_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true },
+    { "name": "GITEA_DISABLE_REGISTRATION", "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Gitea's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.", "default": "true", "required": false }
   ],
   "ports": [3040, 2223],
   "webUI": { "port": 3040, "path": "/", "label": "Gitea" },

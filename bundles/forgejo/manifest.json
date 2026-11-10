@@ -17,7 +17,8 @@
   "requires": { "env": ["FORGEJO_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
   "env_vars": [
     { "name": "FORGEJO_URL", "description": "Forgejo server URL", "default": "http://localhost:3050", "required": true },
-    { "name": "FORGEJO_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true }
+    { "name": "FORGEJO_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true },
+    { "name": "FORGEJO_DISABLE_REGISTRATION", "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Forgejo's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.", "default": "true", "required": false }
   ],
   "ports": [3050, 2224],
   "webUI": { "port": 3050, "path": "/", "label": "Forgejo" },

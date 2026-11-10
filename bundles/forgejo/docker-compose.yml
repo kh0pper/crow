@@ -43,6 +43,7 @@ services:
       # sqlite settings above the app starts already installed, and Crow creates the
       # admin account itself at install.
       - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-true}
     init: true
     mem_limit: 512m
     restart: unless-stopped

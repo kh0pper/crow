@@ -642,3 +642,12 @@ test("the committed registry carries the same declarations (it is generated from
     assert.deepEqual(entry, { ...manifestOf(id), official: true }, `${id}: registry copy of the manifest`);
   }
 });
+test("gitea/forgejo: self-registration is off by default, so the first web sign-up can't become admin", () => {
+  for (const [id, prefix] of [["gitea", "GITEA"], ["forgejo", "FORGEJO"]]) {
+    const compose = readFileSync(join(REPO, "bundles", id, "docker-compose.yml"), "utf8");
+    assert.ok(compose.includes(`${prefix}__service__DISABLE_REGISTRATION=\${${prefix}_DISABLE_REGISTRATION:-true}`), id);
+    const manifest = JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));
+    const v = manifest.env_vars.find((e) => e.name === `${prefix}_DISABLE_REGISTRATION`);
+    assert.equal(v && v.default, "true", `${id}: declared, default true`);
+  }
+});
