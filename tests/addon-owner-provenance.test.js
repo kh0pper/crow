@@ -214,3 +214,10 @@ test("a reinstall keeps the claims on values it does not change, and drops the r
   const peer = B.mcpAddonEntryFor(manifest, { ACME_URL: "http://100.64.20.5:80", OTHER_URL: "http://100.64.20.7:80" }, { owner: false, priorEntry: prior });
   assert.deepEqual(peer.ownerSet, ["ACME_URL"]);
 });
+
+test("a reinstall never carries a generated key as owner-typed", () => {
+  const manifest = { ...ACME_URL_MANIFEST, server: { command: "node", args: [], envKeys: ["ACME_URL", "SECRET"] }, env_vars: [{ name: "ACME_URL" }, { name: "SECRET" }] };
+  const legacyPrior = { command: "node", args: [], env: { ACME_URL: "http://100.64.20.5:80", SECRET: "minted-value" } };
+  const e = B.mcpAddonEntryFor(manifest, { ACME_URL: "http://100.64.20.5:80", SECRET: "minted-value" }, { owner: true, edited: [], generatedKeys: ["SECRET"], priorEntry: legacyPrior });
+  assert.deepEqual(e.ownerSet, ["ACME_URL"]);
+});

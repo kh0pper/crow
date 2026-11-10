@@ -1432,7 +1432,9 @@ export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, ed
   // legacy one on the wall side, where every non-default value counts as owner-typed.
   // A reinstall over an existing entry keeps the claims on values it did not change (the
   // same rule Configure uses); only the owner's own request adds new ones.
-  const carried = carriedOwnerKeys(priorEntry, env, manifest, bundleId || manifest?.id || null);
+  // A generated key is minted by Crow, never typed, so it is never carried either.
+  const generatedSet = new Set(Array.isArray(generatedKeys) ? generatedKeys : []);
+  const carried = carriedOwnerKeys(priorEntry, env, manifest, bundleId || manifest?.id || null).filter((k) => !generatedSet.has(k));
   const fresh = owner === true
     ? ownerSetFor({ env, fromRequest, edited, generatedKeys, manifest, priorEnv: null, bundleId: null })
     : [];
