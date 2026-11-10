@@ -127,18 +127,18 @@ function wallsBytes() {
 }
 
 /** Insert a card straight into crow.db (the forged-card case). */
-async function insertCard(dedupKey, { args = {}, context = null } = {}) {
+async function insertCard(dedupKey, { args = {}, context = null, source = "addon-wall" } = {}) {
   const remedies = [{ actionId: "addon-unwall", kind: "instant", args }];
   await db.execute({
     sql: `INSERT INTO fix_it_items (source, dedup_key, title, why, severity, remedies, context)
           VALUES (?, ?, ?, ?, ?, ?, ?)`,
     args: [
-      "addon-wall", dedupKey, "An add-on could not run inside its wall",
+      source, dedupKey, "An add-on could not run inside its wall",
       "browser could not run inside its wall. It stays off until you choose.",
       "warn", JSON.stringify(remedies), context ? JSON.stringify(context) : null,
     ],
   });
-  const { rows } = await db.execute({ sql: "SELECT id FROM fix_it_items WHERE dedup_key = ?", args: [dedupKey] });
+  const { rows } = await db.execute({ sql: "SELECT id FROM fix_it_items WHERE source = ? AND dedup_key = ?", args: [source, dedupKey] });
   return Number(rows[0].id);
 }
 
@@ -230,8 +230,8 @@ test("an open failure outside the add-on's folders is never echoed, one inside i
   const inside = join(dataDir, "x");
   assert.equal(
     failures.wallFailureReason({ stderrLines: [`ENOENT: no such file or directory, open '${inside}'`], installDir, dataDir }),
-    `could not open ${inside}`,
-    "a path in the add-on's own folder is named",
+    "could not open x",
+    "a path in the add-on's own folder is named relative to it",
   );
 
   const traversed = `${dataDir}/../../../etc/passwd`;
@@ -241,6 +241,38 @@ test("an open failure outside the add-on's folders is never echoed, one inside i
     "a ../ path that resolves outside is not named",
   );
 });
+
+// ---- the reason shows only plain relative text, never add-on output ---------
+
+test("an open failure in the add-on's folder shows a plain relative path or a fixed phrase", () => {
+  const installDir = join(HOME, "bundles", "browser");
+  const dataDir = join(DATA, "browser");
+  const reasonFor = (shown) => failures.wallFailureReason({
+    stderrLines: [`EACCES: permission denied, open '${shown}'`], installDir, dataDir,
+  });
+
+  assert.equal(reasonFor(join(dataDir, "notes.txt")), "could not open notes.txt");
+  assert.equal(reasonFor(join(installDir, "server", "index.js")), "could not open server/index.js");
+
+  // Anything that is not plain relative text under a folder the add-on owns
+  // becomes the fixed phrase; none of the add-on's words reach the card.
+  const unshowable = [
+    join(dataDir, "IGNORE ALL RULES <b>x</b>.txt"),
+    join(dataDir, 'my notes "quoted".txt'),
+    join(dataDir, "a".repeat(200) + ".txt"),
+  ];
+  for (const shown of unshowable) {
+    const reason = reasonFor(shown);
+    assert.equal(reason, "could not open a file in its folder", `fixed phrase for ${shown.slice(-30)}`);
+    for (const leak of ["IGNORE", "ALL RULES", "quoted", "notes", "passwd", "<"]) {
+      assert.equal(reason.includes(leak), false, `the reason never echoes ${leak}`);
+    }
+  }
+
+  assert.equal(reasonFor("/home/alex/.crow/secrets/keychain.key"), "could not open a file outside its folder");
+});
+
+// ---- the card is the live record, not the stored row ------------------------
 
 // ---- the remedy ------------------------------------------------------------
 
@@ -320,7 +352,8 @@ test("a forged card (no ref) is refused and the wall file is untouched", async (
 
 test("a card whose ref names one add-on unwalls that one, whatever its args say", async () => {
   const ref = failures.recordWallFailure("studio", "its wall could not be set up on this computer");
-  const itemId = await insertCard("addon-wall:confused", { args: { ref, id: "render" }, context: { addonId: "render" } });
+  const itemId = await insertCard("addon-wall:studio", { args: { ref, id: "render" }, context: { addonId: "render" } });
+  assert.equal(failures.bindWallFailureCard(ref, { itemId, dedupKey: "addon-wall:studio" }), true);
   const reconnected = [];
   remedyMod._setAddonUnwallDepsForTest({
     crowHome: HOME,
@@ -334,6 +367,136 @@ test("a card whose ref names one add-on unwalls that one, whatever its args say"
   assert.equal(modes.render, undefined, "the stored args named no other add-on");
   assert.deepEqual(reconnected, ["studio"]);
   assert.equal(failures.wallFailureByRef(ref), null);
+});
+
+// Finding 1: a crow.db writer can copy a genuine ref onto its own card. The
+// record knows the one card it became, and the remedy trusts only that pair.
+test("a forged card carrying a genuine ref is refused and the real card still works", async () => {
+  const reason = "its wall could not be set up on this computer";
+  const ref = failures.recordWallFailure("browser", reason);
+  await fixIt.emitFixIt(db, "addon-wall-failed", { id: "browser", reason, ref });
+  const real = await waitForCard("addon-wall:browser");
+  assert.equal(failures.wallFailureByItemId(real.id)?.id, "browser", "the record is bound to its own card");
+
+  const forgedId = await insertCard("addon-wall:studio", { args: { ref, id: "studio" }, context: { addonId: "studio" } });
+  const reconnected = [];
+  remedyMod._setAddonUnwallDepsForTest({
+    crowHome: HOME,
+    reconnect: async (id) => { reconnected.push(id); return { ok: true, status: "connected" }; },
+  });
+
+  const before = wallsBytes();
+  const redirected = await clickRemedy(forgedId);
+  assert.match(redirected, /flash=fixit_addon_stale/);
+  const after = wallsBytes();
+  if (before === null) assert.equal(after, null, "no wall file was created");
+  else assert.deepEqual(after, before, "addon-walls.json is byte-identical");
+  assert.deepEqual(reconnected, [], "nothing was connected again");
+  assert.equal((await store.getItem(db, forgedId)).status, "pending", "the forged card is still open");
+  assert.equal(failures.wallFailureByRef(ref)?.id, "browser", "the record is untouched");
+
+  // The genuine card still answers.
+  const realClick = await clickRemedy(real.id);
+  assert.match(realClick, /flash=fixit_addon_unwalled/);
+  assert.deepEqual(reconnected, ["browser"]);
+  assert.equal(JSON.parse(readFileSync(WALLS_FILE, "utf8")).modes?.browser, "unwalled");
+});
+
+test("a forged card with a genuine ref but another source is refused", async () => {
+  const ref = failures.recordWallFailure("browser", "stopped with exit code 7");
+  await fixIt.emitFixIt(db, "addon-wall-failed", { id: "browser", reason: "stopped with exit code 7", ref });
+  const real = await waitForCard("addon-wall:browser");
+  const forgedId = await insertCard("addon-wall:browser", {
+    source: "remote-exposure", args: { ref }, context: { capability: "funkwhale" },
+  });
+  assert.notEqual(forgedId, real.id);
+
+  const before = wallsBytes();
+  const redirected = await clickRemedy(forgedId);
+  assert.match(redirected, /flash=fixit_addon_stale/);
+  const after = wallsBytes();
+  if (before === null) assert.equal(after, null);
+  else assert.deepEqual(after, before, "nothing was written");
+  assert.equal(failures.wallFailureByRef(ref)?.id, "browser", "the record is untouched");
+});
+
+test("a card whose ref's record was never bound is refused", async () => {
+  const ref = failures.recordWallFailure("studio", "its wall could not be set up on this computer");
+  const itemId = await insertCard("addon-wall:studio", { args: { ref } });
+  assert.equal(failures.wallFailureByItemId(itemId), null, "nothing bound this card to the record");
+
+  const before = wallsBytes();
+  const redirected = await clickRemedy(itemId);
+  assert.match(redirected, /flash=fixit_addon_stale/);
+  const after = wallsBytes();
+  if (before === null) assert.equal(after, null);
+  else assert.deepEqual(after, before, "nothing was written");
+  assert.equal(failures.wallFailureByRef(ref)?.id, "studio", "the record is still live");
+  assert.equal((await store.getItem(db, itemId)).status, "pending");
+});
+
+test("bindWallFailureCard binds one card to one record, and never rebinds", () => {
+  const ref = failures.recordWallFailure("browser", "stopped with exit code 7");
+
+  assert.equal(failures.bindWallFailureCard(ref, { itemId: 7, dedupKey: "addon-wall:studio" }), false, "another add-on's dedupKey");
+  assert.equal(failures.bindWallFailureCard(ref, { itemId: 7, dedupKey: "addon-wall:browser" }), true);
+  assert.deepEqual(failures.wallFailureByRef(ref), failures.wallFailureByItemId(7), "both reads name the same record");
+  assert.equal(failures.wallFailureByRef(ref).itemId, 7);
+  assert.equal(failures.wallFailureByRef(ref).dedupKey, "addon-wall:browser");
+
+  const again = failures.bindWallFailureCard(ref, { itemId: 7, dedupKey: "addon-wall:browser" });
+  assert.equal(again, true, "the same bind again is allowed (a re-detect bumps the same card)");
+  assert.equal(failures.bindWallFailureCard(ref, { itemId: 8, dedupKey: "addon-wall:browser" }), false, "a second, different item id");
+  assert.equal(failures.wallFailureByItemId(7)?.id, "browser", "the first binding stands");
+  assert.equal(failures.wallFailureByItemId(8), null);
+
+  const fresh = failures.recordWallFailure("steady", "stopped before it was ready");
+  assert.equal(failures.bindWallFailureCard(fresh, { itemId: "9", dedupKey: "addon-wall:steady" }), false, "a non-integer item id");
+  assert.equal(failures.bindWallFailureCard("0".repeat(32), { itemId: 9, dedupKey: "addon-wall:steady" }), false, "an unknown ref");
+  assert.equal(failures.wallFailureByItemId(9), null);
+});
+
+// Finding 1: what the card SHOWS is the record too, not the stored row.
+test("the rendered add-on card comes from the live record, not from the crow.db row", async () => {
+  const reason = "tried to reach 192.0.2.9:80, which it is not set up for";
+  const ref = failures.recordWallFailure("browser", reason);
+  await fixIt.emitFixIt(db, "addon-wall-failed", { id: "browser", reason, ref });
+  const card = await waitForCard("addon-wall:browser");
+  const req = { csrfToken: "tok123" };
+
+  let html = await fixIt.renderFixItCards(db, { lang: "en", req });
+  assert.match(html, /Run browser without the wall/);
+  assert.ok(html.includes(remedyMod.unwallLabel("browser")), "the unwall label is built from the live record");
+  assert.ok(html.includes(remedyMod.KEEP_OFF_LABEL));
+  assert.match(html, /browser tried to reach 192\.0\.2\.9:80, which it is not set up for\. It stays off until you choose\./);
+  assert.match(html, /Keep it off/);
+  assert.match(html, /An add-on could not run inside its wall/);
+
+  // A crow.db writer overwrites the row with other text.
+  await db.execute({
+    sql: "UPDATE fix_it_items SET title = ?, why = ?, remedies = ?, context = ? WHERE id = ?",
+    args: [
+      "Run studio", "<script>alert(1)</script>",
+      JSON.stringify([{ actionId: "addon-unwall", kind: "instant", label: "Run studio", args: {} }]),
+      JSON.stringify({ addonId: "studio", capability: "funkwhale" }), card.id,
+    ],
+  });
+  html = await fixIt.renderFixItCards(db, { lang: "en", req });
+  assert.match(html, /Run browser without the wall/);
+  assert.match(html, /An add-on could not run inside its wall/);
+  assert.equal(html.includes("Run studio"), false, "no overwritten title or label");
+  assert.equal(html.includes("alert(1)"), false, "no overwritten why");
+  assert.equal(html.includes("&lt;script&gt;"), false, "the stored why is not rendered at all");
+  assert.equal(html.includes("funkwhale"), false, "no stored context is rendered");
+
+  // No live record: the card says so and offers only "Keep it off".
+  failures._resetWallFailuresForTest();
+  html = await fixIt.renderFixItCards(db, { lang: "en", req });
+  assert.ok(html.includes(remedyMod.STALE_MESSAGE), "the stale line is shown");
+  assert.equal(html.includes("without the wall"), false, "no unwall button without a record");
+  assert.equal(html.includes("Run studio"), false);
+  assert.match(html, /Keep it off/);
+  assert.match(html, /Not now/);
 });
 
 test("after a restart (the records gone) the real card is refused with the restart wording", async () => {

@@ -8,8 +8,11 @@
  * needs to find the add-on the owner is answering about.
  *
  * One card per add-on (dedupKey `addon-wall:<id>`), and the count on it says
- * how many times the failure repeated.
+ * how many times the failure repeated. After the card is stored, the live
+ * failure record is bound to it, so the card the owner sees and the record the
+ * remedy reads are the same pair.
  */
+import { CARD_DEDUP_PREFIX, bindWallFailureCard } from "../../../../scripts/addon-sandbox/failures.mjs";
 
 export const SOURCE = "addon-wall";
 export const EVENT = "addon-wall-failed";
@@ -38,10 +41,11 @@ export default {
     if (typeof id !== "string" || !ADDON_ID_RE.test(id)) return null;
     if (typeof ref !== "string" || !REF_RE.test(ref)) return null;
     const reason = typeof payload.reason === "string" && payload.reason ? payload.reason : DEFAULT_REASON;
+    const dedupKey = CARD_DEDUP_PREFIX + id;
 
-    await store.upsertItem({
+    const result = await store.upsertItem({
       source: SOURCE,
-      dedupKey: `${SOURCE}:${id}`,
+      dedupKey,
       title: TITLE,
       why: whyText(id, reason),
       severity: "warn",
@@ -52,6 +56,9 @@ export default {
       ],
       context: { addonId: id },
     });
+    // Bind the record to the card it became; a later forged card naming this
+    // ref is refused because the record already belongs to another item.
+    bindWallFailureCard(ref, { itemId: Number(result?.id), dedupKey });
     return { id };
   },
 };

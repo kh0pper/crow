@@ -10,9 +10,21 @@ import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
 import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
-import addonWallDetector from "./detectors/addon-wall.js";
+import addonWallDetector, {
+  SOURCE as ADDON_WALL_SOURCE,
+  TITLE as ADDON_WALL_TITLE,
+  whyText as addonWallWhyText,
+} from "./detectors/addon-wall.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
-import addonUnwallRemedy, { keepOffRemedy } from "./remedies/addon-unwall.js";
+import addonUnwallRemedy, {
+  KEEP_OFF_ACTION,
+  KEEP_OFF_LABEL,
+  STALE_MESSAGE as ADDON_WALL_STALE,
+  UNWALL_ACTION,
+  keepOffRemedy,
+  unwallLabel,
+} from "./remedies/addon-unwall.js";
+import { wallFailureByItemId } from "../../../scripts/addon-sandbox/failures.mjs";
 import { recordSuppressedRequest } from "./peer-card-counters.js";
 import { CARD_ACTION_IDS } from "./peer-card-policy.js";
 import { createNotification } from "../../shared/notifications.js";
@@ -181,6 +193,47 @@ function remedyButton(item, r, req) {
   </form>`;
 }
 
+/**
+ * The parts one card shows. A "addon-wall" card never renders a stored title,
+ * why, label or context: those are crow.db columns, and the eight add-ons that
+ * share crow.db can write them. Everything comes from the live failure record
+ * bound to this item, or from this file's constants.
+ */
+function cardParts(item, req) {
+  if (item.source === ADDON_WALL_SOURCE) {
+    const record = wallFailureByItemId(Number(item.id));
+    const keepOff = { actionId: KEEP_OFF_ACTION, kind: "instant", label: KEEP_OFF_LABEL };
+    if (!record) {
+      // No record: the card answers nothing, so it offers no fix at all.
+      return {
+        title: ADDON_WALL_TITLE,
+        why: ADDON_WALL_STALE,
+        buttons: remedyButton(item, keepOff, req),
+        details: "",
+      };
+    }
+    const unwall = { actionId: UNWALL_ACTION, kind: "instant", label: unwallLabel(record.id) };
+    return {
+      title: ADDON_WALL_TITLE,
+      why: addonWallWhyText(record.id, record.reason),
+      buttons: remedyButton(item, unwall, req) + remedyButton(item, keepOff, req),
+      details: "",
+    };
+  }
+
+  const remedyBtns = (item.remedies || []).map((r) => remedyButton(item, r, req)).join("");
+  const ctx = item.context || {};
+  const techRows = [];
+  if (ctx.capability) techRows.push(`Capability: <code>${escapeHtml(ctx.capability)}</code>`);
+  if (ctx.requestingInstance) techRows.push(`Requesting instance: <code>${escapeHtml(ctx.requestingInstance)}</code>`);
+  if (ctx.caddyfile) techRows.push(`Caddyfile: <code>${escapeHtml(ctx.caddyfile)}</code>`);
+  const details = techRows.length
+    ? `<details style="margin-top:0.5rem"><summary style="cursor:pointer;color:var(--crow-text-muted);font-size:0.8rem">Technical details</summary>
+           <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-top:0.3rem">${techRows.join("<br>")}</div></details>`
+    : "";
+  return { title: item.title, why: item.why || "", buttons: remedyBtns, details };
+}
+
 /** Render the nest Fix-it card section (or "" when nothing pending). */
 export async function renderFixItCards(db, { lang, req } = {}) {
   let items = [];
@@ -188,23 +241,14 @@ export async function renderFixItCards(db, { lang, req } = {}) {
   if (!items.length) return "";
 
   const cards = items.map((item) => {
-    const remedyBtns = (item.remedies || []).map((r) => remedyButton(item, r, req)).join("");
-    const ctx = item.context || {};
-    const techRows = [];
-    if (ctx.capability) techRows.push(`Capability: <code>${escapeHtml(ctx.capability)}</code>`);
-    if (ctx.requestingInstance) techRows.push(`Requesting instance: <code>${escapeHtml(ctx.requestingInstance)}</code>`);
-    if (ctx.caddyfile) techRows.push(`Caddyfile: <code>${escapeHtml(ctx.caddyfile)}</code>`);
-    const details = techRows.length
-      ? `<details style="margin-top:0.5rem"><summary style="cursor:pointer;color:var(--crow-text-muted);font-size:0.8rem">Technical details</summary>
-           <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-top:0.3rem">${techRows.join("<br>")}</div></details>`
-      : "";
+    const parts = cardParts(item, req);
     const countBadge = item.count > 1
       ? `<span style="font-size:0.7rem;color:var(--crow-text-muted)">×${escapeHtml(String(item.count))}</span>` : "";
     return `<div class="nest-fixit-card" style="border:1px solid var(--crow-border,#2222);border-left:3px solid var(--crow-warning,#e0a000);border-radius:8px;padding:0.8rem 1rem;margin-bottom:0.6rem;background:var(--crow-surface,rgba(255,255,255,0.02))">
-      <div style="font-weight:600;margin-bottom:0.2rem">${escapeHtml(item.title)} ${countBadge}</div>
-      ${item.why ? `<div style="color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:0.6rem">${escapeHtml(item.why)}</div>` : ""}
+      <div style="font-weight:600;margin-bottom:0.2rem">${escapeHtml(parts.title)} ${countBadge}</div>
+      ${parts.why ? `<div style="color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:0.6rem">${escapeHtml(parts.why)}</div>` : ""}
       <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
-        ${remedyBtns}
+        ${parts.buttons}
         <form method="POST" action="/dashboard/fix-it/action" style="display:inline">
           ${csrfInput(req)}
           <input type="hidden" name="action" value="dismiss">
@@ -212,7 +256,7 @@ export async function renderFixItCards(db, { lang, req } = {}) {
           <button type="submit" class="btn btn-text" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer">Not now</button>
         </form>
       </div>
-      ${details}
+      ${parts.details}
     </div>`;
   }).join("");
 

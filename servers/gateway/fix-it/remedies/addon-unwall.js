@@ -9,12 +9,31 @@
  *
  * With no live record for that ref (a forged card, or one raised before Crow
  * last restarted) nothing is written and the owner is told to start the add-on
- * again. With a record: `addon-walls.json[<id>] = "unwalled"` through the one
+ * again. The record must also be bound to the very item the owner clicked:
+ * `ref` is a crow.db value too, so a writer can copy a genuine ref onto its own
+ * card, and only the binding says which card the record belongs to.
+ * With a record: `addon-walls.json[<id>] = "unwalled"` through the one
  * walls store, the record is dropped, and the add-on is connected now.
  */
 import { resolveCrowHome } from "../../../shared/crow-home.js";
 import { setWallMode } from "../../../shared/addon-walls-file.js";
-import { clearWallFailures, wallFailureByRef } from "../../../../scripts/addon-sandbox/failures.mjs";
+import {
+  CARD_DEDUP_PREFIX,
+  clearWallFailures,
+  wallFailureByRef,
+} from "../../../../scripts/addon-sandbox/failures.mjs";
+
+/** The action ids this detector's cards carry. */
+export const UNWALL_ACTION = "addon-unwall";
+export const KEEP_OFF_ACTION = "addon-keep-off";
+
+/** The "Keep it off" button's label (code-held, never the stored one). */
+export const KEEP_OFF_LABEL = "Keep it off";
+
+/** "Run <id> without the wall" — built from the live record only. */
+export function unwallLabel(id) {
+  return `Run ${id} without the wall`;
+}
 
 /** The flash the Nest page renders when the click answered nothing. */
 export const STALE_FLASH = "fixit_addon_stale";
@@ -46,10 +65,23 @@ function reconnectNow() {
   return (id) => import("../../proxy.js").then((m) => m.reconnectAddonServer(id));
 }
 
-export default async function addonUnwall(args) {
+export default async function addonUnwall(args, ctx) {
   const ref = args && typeof args.ref === "string" ? args.ref : "";
   const record = wallFailureByRef(ref);
-  if (!record) return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
+  const item = ctx?.item;
+  const bound = !!record
+    && Number.isInteger(record.itemId)
+    && record.dedupKey === CARD_DEDUP_PREFIX + record.id;
+  if (!record || !bound) return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
+  // The click must come from the card this record was bound to. A card that
+  // copied the ref, or one from another source, answers with the same stale line.
+  const itemId = Number(item?.id);
+  if (!Number.isInteger(itemId) || record.itemId !== itemId) {
+    return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
+  }
+  if (item?.source !== "addon-wall" || item?.dedupKey !== record.dedupKey) {
+    return { resolved: false, flash: STALE_FLASH, message: STALE_MESSAGE };
+  }
 
   let written = false;
   try {
