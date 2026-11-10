@@ -510,7 +510,7 @@ test("host_grants.env_files: a declared shared env file in ~/.crow/env (or CROW_
 
 test("model: a named volume binding a relative device is refused", () => {
   assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o: "bind", device: "../../data" } } } }).valid, false);
-  assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "nfs", o: "addr=10.0.0.1", device: ":/export" } } } }).valid, true, "a remote NFS volume reads nothing local");
+  assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "nfs", o: "addr=10.0.0.1", device: ":/export" } } } }).valid, false, "a remote NFS volume reaches a host export: it needs privileged consent");
 });
 
 dockerTest("review fixtures: privileged via interpolation/yes/!!bool, long-syntax socket, // and ${R:-/} roots, COMPOSE_FILE colon form", async () => {
@@ -923,6 +923,67 @@ test("model: no read-write bind into the bundle's own folder — read-only only 
   } finally {
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+test("driver_opts o: mount options apply in order, so an `ro` followed by `rw` is read-write", () => {
+  const slug = `fx-ro-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(join(dir, "data"), { recursive: true });
+  const c = (o) => check({ ...svc(), volumes: { v: { driver_opts: { type: "none", o, device: join(dir, "data") } } } }, { dir, manifest: { id: slug } });
+  const rw = c("bind,ro,rw");
+  assert.equal(rw.valid, false, "bind,ro,rw is read-write (the last option wins)");
+  assert.match(rw.reason, /mounts its own bundle folder read-write/);
+  for (const o of ["bind,rw,ro", "ro", "bind,ro", "bind, ro, rw, ro"]) assert.equal(c(o).valid, true, `${o} is read-only`);
+  for (const o of ["bind", "bind,rw", "rw,ro,rw"]) assert.equal(c(o).valid, false, `${o} is read-write`);
+  // The same last-wins reading feeds the "a container of this bundle can write here" list.
+  assert.equal(c("bind,rw,ro").valid, true);
+});
+
+test("driver_opts type: none/bind and tmpfs pass without consent; overlay, unknown types and host-folder options are refused", () => {
+  const slug = `fx-typ-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(dir, { recursive: true });
+  const c = (driver_opts, opts = {}) => check({ ...svc(), volumes: { v: { driver_opts } } }, { dir, manifest: { id: slug }, ...opts });
+  const upper = join(dir, "data");
+  // overlay ignores `device` and writes to upperdir= / workdir=, which are never bind devices.
+  for (const o of [`lowerdir=${upper},upperdir=${upper}`, "upperdir=/etc", "workdir=/etc"]) {
+    assert.equal(c({ type: "overlay", o }).valid, false, `overlay: ${o}`);
+    assert.equal(c({ type: "overlay", o }, { manifest: PRIV, consent: true }).valid, false, `consent does not open a host folder named in o: ${o}`);
+  }
+  assert.equal(c({ type: "overlay", device: "/dev/null" }).valid, false, "an unknown type without consent");
+  assert.equal(c({ type: "overlay", device: "/dev/null" }, { manifest: PRIV, consent: true }).valid, true, "a privileged bundle may use another type");
+  assert.equal(c({ type: "ext4", device: "/dev/sda1" }).valid, false, "an unknown type");
+  for (const o of ["bind,upperdir=/etc", "bind,lowerdir=/etc", "bind,workdir=/etc"]) {
+    assert.equal(c({ type: "none", o, device: upper }).valid, false, `a host-folder option on a none volume: ${o}`);
+  }
+  assert.equal(c({ type: "tmpfs", o: "size=64m" }).valid, true, "tmpfs holds no host path");
+  // A plain none/bind volume on the bundle's own CROW_HOME/<id> folder stays allowed.
+  assert.equal(c({ type: "none", o: "bind", device: join(CROW_HOME, slug) }).valid, true);
+  assert.equal(c({ type: "none", o: "bind,ro,rw", device: join(CROW_HOME, slug) }).valid, true, "its own data folder stays writable");
+});
+
+test("network filesystem volumes (nfs/nfs4/cifs/smb) need verified privileged consent", () => {
+  for (const type of ["nfs", "nfs4", "cifs", "smb"]) {
+    for (const o of ["addr=127.0.0.1", "addr=127.0.0.1,ro"]) {
+      const m = { ...svc(), volumes: { v: { driver_opts: { type, o, device: ":/export" } } } };
+      assert.equal(check(m).valid, false, `${type} ${o} without consent`);
+      assert.equal(check(m, { manifest: PRIV, consent: true }).valid, true, `${type} ${o} with consent`);
+      assert.equal(check(m, { manifest: { ...PRIV, origin: "community" }, consent: true }).valid, false, `${type}: never for a community bundle`);
+    }
+  }
+  assert.equal(check({ ...svc(), volumes: { v: { driver_opts: { type: "nfs", o: "bind,ro", device: "/etc" } } } }).valid, false, "a network type with bind is a local bind mount, checked as one");
+});
+
+test("a bind inside a read-write bind-device volume is refused (volume devices join the nesting check)", () => {
+  const id = "nest-vol";
+  const outer = join(CROW_HOME, id);
+  const m = { ...svc({ volumes: [bind(join(outer, "w", "sub"))] }), volumes: { v: { driver_opts: { type: "none", o: "bind", device: outer } } } };
+  const r = check(m, { manifest: { id } });
+  assert.equal(r.valid, false);
+  assert.match(r.reason, /sits inside another read-write/);
+  assert.equal(check(svc({ volumes: [bind(join(outer, "w", "sub"))] }), { manifest: { id } }).valid, true, "the bind alone is fine");
+  const roDevice = { ...svc({ volumes: [bind(join(outer, "w", "sub"), true)] }), volumes: { v: { driver_opts: { type: "none", o: "bind,ro", device: outer } } } };
+  assert.equal(check(roDevice, { manifest: { id } }).valid, true, "a read-only volume device does not make the bind unsafe");
 });
 
 test("declared paths: the version refresh reads the manifest's declared roots (shared/bundle-declared-paths.js)", async () => {

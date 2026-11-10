@@ -67,6 +67,35 @@ export function resolveHostPath(p, depth = 0) {
 const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
 
 /**
+ * A volume's `o` string as Docker applies it: comma-separated mount options, in order (each
+ * trimmed). Order matters — a later `rw` undoes an earlier `ro` — so `bind,ro,rw` is
+ * read-write, and `bind,rw,ro` is read-only.
+ */
+function mountOpts(o) {
+  return String(o ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+/** Read-only only when the LAST of ro/rw says so (`bind,ro,rw` is read-write). */
+function optsReadOnly(o) {
+  let readOnly = false;
+  for (const opt of mountOpts(o)) {
+    if (opt === "ro") readOnly = true;
+    else if (opt === "rw") readOnly = false;
+  }
+  return readOnly;
+}
+
+/** Does an `o` option list bind a host path (`bind` / `rbind`)? */
+function bindsHostPath(o) {
+  return mountOpts(o).some((opt) => opt === "bind" || opt === "rbind");
+}
+
+/** A mount option that names a host folder: overlayfs ignores `device` and uses these. */
+const MOUNT_DIR_OPT = /^(?:lowerdir|upperdir|workdir)=/;
+// Filesystem types that mount a host export over the network rather than a local device.
+const NETWORK_FS_TYPES = new Set(["nfs", "nfs4", "cifs", "smb", "smb3"]);
+
+/**
  * @param {object} ctx
  * @param {string} ctx.crowHome
  * @param {string} [ctx.dataDir]   the instance's data dir (crow.db lives here)
@@ -516,30 +545,56 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     return null;
   };
 
-  // A bind source inside another READ-WRITE bind of this project: the container can swap it
-  // for a symlink after this check, and Docker follows it at the next (re)start, which
-  // nothing re-checks (restart: unless-stopped). Refused.
-  const binds = [];
+  // A top-level volume's driver_opts, read the way Docker's local driver applies them: `type`
+  // decides what is mounted, and only `none` with an `o` naming bind/rbind mounts a host
+  // folder. `tmpfs` holds no host path; the network filesystems (nfs, cifs…) mount a host
+  // export and need the same verified consent as other host-reaching options; every other
+  // type (overlay…) is outside what this check understands and needs that consent too.
+  // Whatever the type, an option that names a host folder (overlayfs lowerdir=/upperdir=/
+  // workdir=) is refused: `device` is ignored then, so no bind check would ever see it.
+  const volumeBind = (name, vol) => {
+    const dopts = isObj(vol?.driver_opts) ? vol.driver_opts : {};
+    const o = String(dopts.o ?? "");
+    const type = String(dopts.type ?? "");
+    const dev = dopts.device;
+    const dirOpt = mountOpts(o).find((x) => MOUNT_DIR_OPT.test(x));
+    if (dirOpt) return refuse(`volume ${name}: mount option '${dirOpt.slice(0, 60)}' names a host folder`);
+    if (type === "" || type === "none" || (NETWORK_FS_TYPES.has(type) && bindsHostPath(o))) {
+      if (dev === undefined || dev === null) return null;
+      if (typeof dev !== "string" || !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
+      const readOnly = optsReadOnly(o);
+      const bad = checkHostPath(dev, { readOnly, what: `volume ${name}` });
+      return bad || { bind: { p: resolveHostPath(dev), rw: !readOnly, kind: "volume" } };
+    }
+    if (type === "tmpfs") return null;
+    if (NETWORK_FS_TYPES.has(type)) return needPriv(`a ${type} filesystem volume (it mounts a host export)`);
+    return needPriv(`volume ${name}: driver_opts type '${type}'`);
+  };
+  // A mount inside another READ-WRITE mount of this project: the container can swap it for a
+  // symlink after this check, and Docker follows it at the next (re)start, which nothing
+  // re-checks (restart: unless-stopped). Refused.
+  const mounts = [];
   for (const s of Object.values(model.services || {})) {
-    for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) binds.push({ p: resolveHostPath(v.source), rw: v.read_only !== true });
+    for (const v of (s && s.volumes) || []) if (v && v.type === "bind" && typeof v.source === "string" && isAbsolute(v.source)) mounts.push({ p: resolveHostPath(v.source), rw: v.read_only !== true, kind: "bind" });
+  }
+  // A local volume on a bind device is a host folder too: its device joins the same lists, so
+  // it nests (and is nested in) exactly like a bind.
+  for (const [name, vol] of Object.entries(isObj(model.volumes) ? model.volumes : {})) {
+    const one = volumeBind(name, vol);
+    if (one && one.valid === false) return one;
+    if (one?.bind?.rw) mounts.push(one.bind);
   }
   // Host folders a container of this project can write: read-write binds and local
   // volumes on a bind device (not read-only). A file the gateway or Compose reads there
   // could be swapped for a symlink or a FIFO after this check.
-  const writable = binds.filter((b) => b.rw).map((b) => b.p);
-  for (const vol of Object.values(isObj(model.volumes) ? model.volumes : {})) {
-    const dev = vol?.driver_opts?.device;
-    if (typeof dev === "string" && isAbsolute(dev) && !/(?:^|,)ro(?:,|$)/.test(String(vol.driver_opts.o || ""))) writable.push(resolveHostPath(dev));
-  }
+  const writable = mounts.filter((m) => m.rw).map((m) => m.p);
   const containerWritable = (path) => {
     const p = resolveHostPath(path);
     return writable.some((w) => under(p, w));
   };
-  {
-    for (const a of binds) {
-      for (const b of binds) {
-        if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a bind mount sits inside another read-write bind mount (${b.p.slice(-60)})`);
-      }
+  for (const a of mounts) {
+    for (const b of mounts) {
+      if (a !== b && a.rw && a.p !== b.p && under(b.p, a.p)) return refuse(`a ${b.kind} mount sits inside another read-write ${a.kind} mount (${b.p.slice(-60)})`);
     }
   }
 
@@ -714,16 +769,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
     // An external volume is another project's data (another extension's database…).
     if (vol.external && (r = needPriv(`the external volume '${vol.name || name}'`))) return r;
     if (vol.driver !== undefined && vol.driver !== "local" && (r = needPriv(`volume driver ${vol.driver}`))) return r;
-    const dev = vol.driver_opts?.device;
-    if (dev !== undefined) {
-      const o = String(vol.driver_opts.o || "");
-      const type = String(vol.driver_opts.type || "");
-      const remote = /^(nfs4?|cifs|smb3?)$/.test(type) && !/(?:^|,)r?bind(?:,|$)/.test(o);
-      if (!remote) {
-        if (typeof dev !== "string" || !dev.startsWith("/")) return refuse(`volume ${name}: a bind device that is not an absolute path`);
-        if ((r = checkHostPath(dev, { readOnly: /(?:^|,)ro(?:,|$)/.test(o), what: `volume ${name}` }))) return r;
-      }
-    }
+    // driver_opts (type, device, o) are read above, before any service's mounts and
+    // env_files are judged.
   }
   for (const [kind, items] of [["secrets", model.secrets], ["configs", model.configs]]) {
     for (const [name, it] of Object.entries(items || {})) {
