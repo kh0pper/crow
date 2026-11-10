@@ -5,6 +5,7 @@
 // bot runtime treats archived_at as gone. See docs/guide/projects.md.
 
 import { AclError, appendAudit } from "./project-acl.js";
+import { clearApprovalNonce } from "./data-backend-approval-key.js";
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { createDbClient, auditLog, resolveDataDir } from "../db.js";
@@ -290,17 +291,23 @@ async function tombstoneSlug(db, slug, id) {
  * project id, so on a peer either would hit UNRELATED rows; a memory update with a NULL project
  * carries nothing once the transform strips it. The refusals are re-checked first, inside the
  * transaction, so a member or bot added since the summary refuses with nothing changed.
- * @returns {Promise<{ contextChanged: boolean }>}
+ * @returns {Promise<{ contextChanged: boolean, backendIds: number[] }>}
  */
 async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
   const id = Number(project.id);
   await db.execute("BEGIN IMMEDIATE");
   let contextChanged = false;
+  let backendIds = [];
   try {
     const block = await currentBlock(db, id);
     if (block) throw new DeleteRefused(block.code, block.detail);
 
     await txWrite(db, "DELETE FROM service_connections WHERE project_id = ?", [id]);
+    // The ids of the rows this transaction deletes, so their approval nonces can be
+    // dropped once it commits (a rolled-back delete keeps the rows, and the approvals).
+    backendIds = await tolerant(async () => (await db.execute({
+      sql: "SELECT id FROM data_backends WHERE project_id = ?", args: [id],
+    })).rows.map((r) => Number(r.id)), []);
     await txWrite(db, "DELETE FROM data_backends WHERE project_id = ?", [id]);
     await txWrite(db, "DELETE FROM research_notes WHERE project_id = ?", [id]);
     await txWrite(db, "DELETE FROM research_sources WHERE project_id = ?", [id]);
@@ -339,7 +346,7 @@ async function purgeCrowDb(db, project, { actor, counts, beforeTombstone }) {
     try { await db.execute("ROLLBACK"); } catch { /* already rolled back */ }
     throw err;
   }
-  return { contextChanged };
+  return { contextChanged, backendIds };
 }
 
 /** Cards and their records in the resolved store; board_defs in the global store. Never unlinks a file. */
@@ -517,6 +524,15 @@ export async function deleteProject(db, projectId, {
 
   // After the commit: best effort. The tombstone already hides the project and its id is never
   // reused, so anything left behind is inert.
+
+  // The backends are gone for good, so their approval nonces go too: with one on record, a
+  // writer that put a row back with the same id, connection_ref and old value would have that
+  // value verify again. The delete stands either way — a record that cannot be written leaves
+  // the old nonce behind, and the gateway prunes a stale entry at load.
+  for (const backendId of purged.backendIds) {
+    try { await clearApprovalNonce(backendId); }
+    catch { console.warn(`[project-lifecycle] delete ${id}: backend ${backendId} approval record entry could not be dropped`); }
+  }
   const partial = [];
   if (purged.contextChanged) {
     try { (await import("../memory/crow-context.js")).invalidateContextCache(); } catch { /* cache is per-process */ }

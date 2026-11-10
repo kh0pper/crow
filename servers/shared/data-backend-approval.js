@@ -6,11 +6,20 @@
  *   a row in `pending_approval`.
  * - The dashboard owner approves it on the Projects page (session-authed,
  *   CSRF-checked POST). Approval runs the launcher check and stores, in
- *   `approved_ref_sha256`, one SHA-256 over the exact `connection_ref` text
- *   AND the current contents of every non-root-owned file the command line
- *   names (the launcher, and any argument that is an existing file — the
- *   script an interpreter runs).
- * - The gateway starts a row only while that hash still matches: any later
+ *   `approved_ref_sha256`, an HMAC-SHA256 (`hmac1:<hex>`) over one SHA-256 of
+ *   the exact `connection_ref` text AND the current contents of every
+ *   non-root-owned file the command line names (the launcher, and any
+ *   argument that is an existing file — the script an interpreter runs) AND
+ *   the row's id and the nonce recorded for that id outside the database.
+ * - The HMAC key is 32 random bytes in `<CROW_HOME>/secrets/`, and the nonce
+ *   lives in a per-row record beside it (see data-backend-approval-key.js),
+ *   never in crow.db: a process that can write the row cannot compute an
+ *   approval for it, cannot replay an old value after a revoke (the nonce is
+ *   gone) and cannot copy one row's value onto another (different id, no
+ *   nonce). The bare-64-hex value older versions stored is LEFTOVER, not an
+ *   approval (isLegacyApproval): those rows stay stopped until the owner
+ *   approves them again.
+ * - The gateway starts a row only while that HMAC still matches: any later
  *   edit of the command, args, env-var names, or of one of those files,
  *   voids the approval. Code fetched at start (npx/uvx packages) and files a
  *   script opens on its own are NOT covered — the page says so.
@@ -21,13 +30,47 @@
  *   table, and project clone bundles carry backend manifests without
  *   inserting them.
  */
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { resolveAddonCommand, checkLauncherArgs, sha256File } from "./resolve-command.js";
 import { buildBotBaseEnv } from "./bot-env.js";
+import {
+  ensureApprovalKey, readApprovalKey, readApprovalRecord, approvalNonce, newApprovalNonce, setApprovalNonce, clearApprovalNonce,
+} from "./data-backend-approval-key.js";
 
 export const PENDING_STATUS = "pending_approval";
+
+/** The approved value's prefix: `hmac1:<64 hex>`. */
+export const APPROVAL_PREFIX = "hmac1:";
+const KEYED_APPROVAL = /^hmac1:[0-9a-f]{64}$/;
+const BARE_SHA256 = /^[0-9a-f]{64}$/;
+
+/** What the owner is told (and what the row's last_error carries) about an old approval. */
+export const LEGACY_APPROVAL_MESSAGE = "Approved before Crow keyed its approvals; approve it again on the Projects page";
+
+/**
+ * What the owner is told about an approval this machine cannot verify at all:
+ * the approval key or the row's nonce is missing, which is what a restore on
+ * another machine leaves behind (secrets/ is never backed up).
+ */
+export const MACHINE_APPROVAL_MESSAGE = "Its approval does not match this machine's approval key (for example after a restore); approve it again on the Projects page";
+
+/**
+ * What the owner is told about a keyed value that belongs to ANOTHER row: this
+ * machine has the key and has nonces on record — just not for this row, so the
+ * value was copied from a row that was approved, or forged with a nonce of its
+ * own. Distinct from MACHINE_APPROVAL_MESSAGE, which is the restore case (no
+ * key, or a record with nothing in it at all).
+ */
+export const NOT_FOR_THIS_BACKEND_MESSAGE = "Its approval was not made for this backend; approve it again on the Projects page";
+
+/**
+ * What the owner is told when a stop was written but the approval record could
+ * not be: the row's value is gone, its nonce is not, so a value put back into
+ * the row would verify again until the record can be written.
+ */
+export const REVOKE_PARTIAL_MESSAGE = "Stopped, but Crow could not update its approval record; this stop is not permanent until it can. Check the folder permissions of Crow's secrets directory.";
 
 export function refHash(connectionRef) {
   return createHash("sha256").update(String(connectionRef ?? ""), "utf8").digest("hex");
@@ -92,19 +135,93 @@ export function approvalHash(connectionRef, cwd = process.cwd()) {
   return h.digest("hex");
 }
 
-/**
- * True when `row` (an mcp_server data_backends row) is owner-approved as it
- * stands — command line AND pinned file contents. Hashes files: call it at
- * start, never while rendering a page.
- */
-export function isApproved(row) {
-  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
-  return row.approved_ref_sha256 === approvalHash(row.connection_ref);
+/** Domain separation: this HMAC signs an approval and nothing else keyed with this key. */
+const APPROVAL_DOMAIN = "crow-data-backend-approval\0v1\0";
+
+/** The stored form of an approval: `hmac1:` + HMAC-SHA256(key, domain, row id, nonce, pin). */
+function hmacFor(key, rowId, nonce, pin) {
+  return APPROVAL_PREFIX + createHmac("sha256", key)
+    .update(`${APPROVAL_DOMAIN}${String(rowId)}\0${nonce}\0${pin}`, "utf8")
+    .digest("hex");
 }
 
-/** Display only (no file reads): an approval is on record; it is re-checked at start. */
+/**
+ * The keyed approval value for a row: `hmac1:<hmac>`, or null when the
+ * reference cannot be hashed (a pinned file is gone or unreadable). The value
+ * covers the row's id and the nonce recorded for it, so it belongs to that row
+ * and cannot be replayed after a revoke.
+ */
+export function keyedApproval(key, rowId, nonce, connectionRef) {
+  const pin = approvalHash(connectionRef);
+  if (!pin || !Buffer.isBuffer(key) || typeof nonce !== "string" || !nonce) return null;
+  return hmacFor(key, rowId, nonce, pin);
+}
+
+/**
+ * True when `row` (an mcp_server data_backends row) is owner-approved as it
+ * stands — command line AND pinned file contents — under THIS machine's
+ * approval key and the nonce recorded for this row. Hashes files: call it at
+ * start, never while rendering a page. Never creates the key or the record: a
+ * missing (or unreadable, or refused) one means no approval is valid. An old
+ * bare-64-hex value is not an approval.
+ */
+export function isApproved(row, { crowHome } = {}) {
+  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
+  if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
+  const key = readApprovalKey({ crowHome });
+  if (!key) return false;
+  const nonce = approvalNonce(row.id, { crowHome });
+  if (!nonce) return false;
+  const want = keyedApproval(key, row.id, nonce, row.connection_ref);
+  if (!want) return false;
+  const got = Buffer.from(row.approved_ref_sha256.slice(APPROVAL_PREFIX.length), "hex");
+  const expected = Buffer.from(want.slice(APPROVAL_PREFIX.length), "hex");
+  return got.length === expected.length && timingSafeEqual(got, expected);
+}
+
+/**
+ * True when a keyed value cannot be checked on this machine at all: the
+ * approval key or the row's record entry is missing (a restore on another
+ * machine, since secrets/ is never backed up). Two small files outside crow.db,
+ * never a pinned file, so the dashboard may call it while rendering to tell this
+ * apart from "what it pins changed". A value copied from another row reads as
+ * this too (its own entry is missing); approvalForAnotherBackend tells the two
+ * apart for the sentence the owner sees.
+ */
+export function approvalNotFromThisMachine(row, { crowHome } = {}) {
+  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
+  if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
+  return !readApprovalKey({ crowHome }) || !approvalNonce(row.id, { crowHome });
+}
+
+/**
+ * True when the value is keyed, this machine has its key, and the record holds
+ * nonces for OTHER rows but none for this one: the value was made for a
+ * different row (copied off an approved row, or forged). Reads the same two
+ * small files outside crow.db as approvalNotFromThisMachine, never a pinned
+ * file.
+ */
+export function approvalForAnotherBackend(row, { crowHome } = {}) {
+  if (!row || typeof row.approved_ref_sha256 !== "string") return false;
+  if (!KEYED_APPROVAL.test(row.approved_ref_sha256)) return false;
+  if (!readApprovalKey({ crowHome })) return false;
+  const id = row.id === undefined || row.id === null ? "" : String(row.id);
+  const rec = readApprovalRecord({ crowHome });
+  return Object.keys(rec.rows).length > 0 && !Object.hasOwn(rec.rows, id);
+}
+
+/** Display only (no file reads): a keyed approval is on record; it is re-checked at start. */
 export function hasApproval(row) {
-  return !!row && typeof row.approved_ref_sha256 === "string" && row.approved_ref_sha256.length === 64;
+  return !!row && typeof row.approved_ref_sha256 === "string" && KEYED_APPROVAL.test(row.approved_ref_sha256);
+}
+
+/**
+ * Display only: the value is the bare SHA-256 older versions stored, made when
+ * the hash sat in the same row it protects. It proves nothing now — the row is
+ * stopped until the owner approves it again.
+ */
+export function isLegacyApproval(row) {
+  return !!row && typeof row.approved_ref_sha256 === "string" && BARE_SHA256.test(row.approved_ref_sha256);
 }
 
 /** The environment an approved backend starts with: allowlisted basics plus its declared vars. */
@@ -234,20 +351,24 @@ export function verifyBackendLaunch(connRef, opts = {}) {
  * Owner action: approve the row's current connection_ref. `expectedHash` is
  * the hash of the connection_ref the owner was shown (refHash): the approval
  * only lands if the row still carries exactly that text. Runs the launcher
- * check now (it hashes, bounded) and pins file contents.
+ * check now (it hashes, bounded), pins file contents, records a fresh nonce
+ * for this row in `<CROW_HOME>/secrets/data-backend-approvals.json` FIRST, and
+ * only then stores the keyed value in the row — under this machine's approval
+ * key, made if it is not there yet.
  * @returns {Promise<{ ok: boolean, reason?: string }>}
  */
-export async function approveBackend(db, id, expectedHash) {
+export async function approveBackend(db, id, expectedHash, { crowHome } = {}) {
   const { rows } = await db.execute({
     sql: "SELECT id, connection_ref FROM data_backends WHERE id = ? AND backend_type = 'mcp_server'",
     args: [id],
   });
   if (!rows.length) return { ok: false, reason: "backend not found" };
+  const rowId = rows[0].id;
   const ref = rows[0].connection_ref;
   const refuse = async (reason) => {
     await db.execute({
       sql: "UPDATE data_backends SET last_error = ?, updated_at = datetime('now') WHERE id = ?",
-      args: [`Not approved: ${reason}`, id],
+      args: [`Not approved: ${reason}`, rowId],
     });
     return { ok: false, reason };
   };
@@ -258,9 +379,29 @@ export async function approveBackend(db, id, expectedHash) {
   if (!launch.ok) return refuse(launch.reason);
   const pin = approvalHash(ref);
   if (!pin) return refuse(`a file it runs cannot be pinned (missing, not a regular file, or over ${MAX_PINNED_FILE_BYTES / (1024 * 1024)} MB)`);
+  // A key that cannot be made means nothing can be approved: without it no
+  // row would ever pass isApproved, so never store an unapprovable value.
+  let key = readApprovalKey({ crowHome });
+  if (!key) {
+    try {
+      key = ensureApprovalKey({ crowHome });
+    } catch {
+      return refuse("Crow could not create its approval key; nothing was approved");
+    }
+  }
+  // The nonce is recorded FIRST: a value whose nonce is not on record verifies
+  // for nothing, so a failure here must leave the row unapproved rather than
+  // half-approved. A fresh nonce also voids the row's previous value.
+  const nonce = newApprovalNonce();
+  try {
+    await setApprovalNonce(rowId, nonce, { crowHome });
+  } catch {
+    return refuse("Crow could not record its approval; nothing was approved");
+  }
+  const value = hmacFor(key, rowId, nonce, pin);
   await db.execute({
     sql: "UPDATE data_backends SET approved_ref_sha256 = ?, status = 'disconnected', last_error = NULL, updated_at = datetime('now') WHERE id = ?",
-    args: [pin, id],
+    args: [value, rowId],
   });
   return { ok: true };
 }
@@ -277,21 +418,60 @@ export async function approveBackend(db, id, expectedHash) {
  * the instant between this check and exec.
  * @returns {{ ok: true, command: string, args: string[], envVars: string[] } | { ok: false, reason: string }}
  */
-export function prepareSpawn(row, cwd = process.cwd()) {
+export function prepareSpawn(row, cwd = process.cwd(), { crowHome } = {}) {
   const parsed = parseStoredSpec(row && row.connection_ref);
   if (!parsed.ok) return parsed;
-  if (!isApproved(row)) return { ok: false, reason: "not approved as it stands (its command or a file it runs changed)" };
+  if (!isApproved(row, { crowHome })) return { ok: false, reason: "not approved as it stands (its command or a file it runs changed)" };
   const launch = verifyBackendLaunch(parsed.spec);
   if (!launch.ok) return launch;
   const real = new Map(pinnedFiles(parsed.spec, cwd).map((f) => [f.path, f.real]));
   return { ok: true, command: launch.command, args: parsed.spec.args.map((a) => real.get(a) ?? a), envVars: launch.envVars };
 }
 
-/** Owner action: withdraw an approval (the row stays, it is no longer started). */
-export async function revokeBackendApproval(db, id) {
+/**
+ * Owner action: withdraw an approval (the row stays, it is no longer started).
+ * The row's nonce is removed from the record FIRST, so a value copied back into
+ * the column afterwards verifies for nothing, and again AFTER the column write,
+ * which closes the window in which an approval lands between the clear and the
+ * UPDATE (that approval's nonce would otherwise stay on record with its value
+ * erased from the row — a value that verifies again if it is written back).
+ *
+ * If the record cannot be written the column is still cleared (a leftover
+ * nonce alone approves nothing) but the stop is not permanent: a value put back
+ * into the row would verify again. The row's last_error says so, and the
+ * `partial` result tells the caller to show it. `clearNonce` is the record
+ * write (a seam for the failure case).
+ * @returns {Promise<boolean | { ok: true, partial: true }>} true when the row was
+ *   stopped; { ok: true, partial: true } when it was stopped but the record write
+ *   failed; false when no such mcp_server row was stopped (nothing changed).
+ */
+export async function revokeBackendApproval(db, id, { crowHome, clearNonce = clearApprovalNonce } = {}) {
+  const dropNonce = async () => {
+    try {
+      await clearNonce(id, { crowHome });
+      return true;
+    } catch {
+      console.warn(`[data-backend-approval] could not update the approval record for backend #${id}; the approval is withdrawn anyway`);
+      return false;
+    }
+  };
+  let recordOk = await dropNonce();
   const r = await db.execute({
     sql: "UPDATE data_backends SET approved_ref_sha256 = NULL, status = ?, updated_at = datetime('now') WHERE id = ? AND backend_type = 'mcp_server'",
     args: [PENDING_STATUS, id],
   });
-  return (r.rowsAffected ?? 0) > 0;
+  const stopped = (r.rowsAffected ?? 0) > 0;
+  if (!stopped) return false;
+  // After the column write, so an approval that landed in between loses its nonce too.
+  // This second attempt is what the result reports on: it ran last, so the record as
+  // it stands now is the one it wrote (or failed to write).
+  recordOk = await dropNonce();
+  if (!recordOk) {
+    await db.execute({
+      sql: "UPDATE data_backends SET last_error = ?, updated_at = datetime('now') WHERE id = ? AND backend_type = 'mcp_server'",
+      args: [REVOKE_PARTIAL_MESSAGE, id],
+    });
+    return { ok: true, partial: true };
+  }
+  return true;
 }

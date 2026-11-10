@@ -9,6 +9,7 @@ import * as store from "../../shared/fix-it/store.js";
 import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
+import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import { recordSuppressedRequest } from "./peer-card-counters.js";
 import { CARD_ACTION_IDS } from "./peer-card-policy.js";
@@ -23,6 +24,7 @@ export function wireFixIt() {
   registry.registerDetector(remoteExposureDetector);
   registry.registerDetector(caddyProxySocketDetector);
   registry.registerDetector(bootGuardDetector);
+  registry.registerDetector(dataBackendReapprovalDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   // N1b-8: the peer-scoped card offers three durations, and each button needs
   // its own actionId (the POST carries only action_id). All three run the same
@@ -35,11 +37,33 @@ export function wireFixIt() {
  * The detectors runBootChecks() drives. A condition no request emits an event for
  * belongs here; the list is exported so the set can be asserted, not grepped.
  */
-export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector]);
+export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector, dataBackendReapprovalDetector]);
+
+/**
+ * Where a `kind: "link"` remedy may point, held HERE and never read from the
+ * card: `fix_it_items.remedies` is a crow.db column, so a stored href is a
+ * value anything that can write crow.db controls. A browser reads `/\evil.example`
+ * (or a tab-terminated variant) as another host, which a sanitiser based on
+ * string prefixes misses. A remedy's actionId selects one of these paths; an
+ * unknown actionId renders no link at all.
+ */
+export const LINK_REMEDIES = Object.freeze({
+  // The Projects panel's route (servers/gateway/dashboard/panels/projects.js).
+  "open-projects-page": "/dashboard/projects",
+});
+
+/** The code-held target of a link remedy, or null (never a stored href). */
+export function linkRemedyTarget(r) {
+  if (!r || typeof r.actionId !== "string") return null;
+  return Object.hasOwn(LINK_REMEDIES, r.actionId) ? LINK_REMEDIES[r.actionId] : null;
+}
 
 /** Build a db-bound store; the bound upsertItem also fires urgent push. */
 function boundStore(db) {
   return {
+    // A boot check that must read a table of its own (data-backend-reapproval)
+    // reaches it through the store it was handed, never through a second client.
+    db,
     upsertItem: async (item) => {
       const r = await store.upsertItem(db, item);
       if (item.severity === "urgent" && r.notify) {
@@ -96,6 +120,23 @@ export async function emitFixIt(db, eventName, payload) {
 }
 
 /**
+ * Re-run ONE boot-check detector now. A dashboard action that answers a boot
+ * check (approving the last waiting backend) should clear its card without a
+ * gateway restart. Never throws; an unknown source does nothing.
+ */
+export async function runBootCheck(db, source, opts = {}) {
+  const detector = BOOT_CHECK_DETECTORS.find((d) => d.source === source);
+  if (!detector) return null;
+  wireFixIt();
+  try {
+    return await detector.check(boundStore(db), opts);
+  } catch (err) {
+    console.warn(`[fix-it] boot check "${source}" failed:`, err?.message || err);
+    return null;
+  }
+}
+
+/**
  * Boot checks — conditions no request emits an event for. Two: a Caddyfile on
  * this machine that still dials the gateway over loopback (the security audit's
  * finding), and a boot guard that is installed but did not run (N1c-3 L1).
@@ -103,17 +144,17 @@ export async function emitFixIt(db, eventName, payload) {
  */
 export async function runBootChecks(db, opts = {}) {
   wireFixIt();
-  const bound = boundStore(db);
-  for (const detector of BOOT_CHECK_DETECTORS) {
-    try {
-      await detector.check(bound, opts);
-    } catch (err) {
-      console.warn(`[fix-it] boot check "${detector.source}" failed:`, err?.message || err);
-    }
-  }
+  for (const detector of BOOT_CHECK_DETECTORS) await runBootCheck(db, detector.source, opts);
 }
 
 function remedyButton(item, r, req) {
+  // A link entry is navigation only: nothing is posted, so no remedy runs. Its
+  // destination comes from LINK_REMEDIES, never from the stored entry.
+  if (r && r.kind === "link") {
+    const href = linkRemedyTarget(r);
+    if (!href) return "";
+    return `<a class="btn btn-secondary" href="${escapeHtml(href)}" data-fixit-link>${escapeHtml(r.label || "Open")}</a>`;
+  }
   const gated = r.kind === "confirm" || r.kind === "guided";
   // v1 ships only `instant`. A gated remedy renders disabled with a note so a
   // destructive action can never be a careless one-tap (framework enforces it

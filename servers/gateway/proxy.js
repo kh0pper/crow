@@ -21,7 +21,8 @@ import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-z
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { createDbClient } from "../db.js";
-import { isApproved, hasApproval, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { isApproved, approvalNotFromThisMachine, approvalForAnotherBackend, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { pruneApprovalNonces } from "../shared/data-backend-approval-key.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 import { livenessStatusSql } from "../shared/instance-status.js";
 import { recordPeerProbe } from "./peer-probe-health.js";
@@ -504,11 +505,26 @@ export function disconnectDynamicBackend(backendId) {
  */
 export async function loadDynamicBackends() {
   let db;
+  // The key that makes an approval unforgeable lives outside crow.db, under
+  // this instance's home (resolved here, at call time, like every instance path).
+  const crowHome = resolveSharedCrowHome();
   try {
     db = createDbClient();
     const { rows } = await db.execute(
       "SELECT * FROM data_backends WHERE backend_type = 'mcp_server'"
     );
+
+    // A row that is gone must not leave its nonce in the record: with the nonce
+    // still on record, putting the same row back (same id, same connection_ref,
+    // same old `hmac1:` value) would verify again. Every delete path clears its
+    // own entries; this is the backstop for the ones that could not, and for
+    // entries left by an older Crow. One write, only when something is stale.
+    try {
+      const stale = await pruneApprovalNonces(rows.map((r) => r.id), { crowHome });
+      if (stale) console.log(`[proxy] dropped ${stale} approval record entr${stale === 1 ? "y" : "ies"} for backends that no longer exist`);
+    } catch {
+      console.warn("[proxy] could not prune the data-backend approval record");
+    }
 
     if (rows.length === 0) return;
 
@@ -534,11 +550,38 @@ export async function loadDynamicBackends() {
 
       // Owner approval gate: a registered command runs only after the
       // dashboard owner approved this exact connection_ref (an edit voids it).
-      // The check covers the stored text and the contents of the files it runs.
-      if (!isApproved(row)) {
-        const why = hasApproval(row)
-          ? "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page"
-          : "Waiting for the owner to approve it on the Projects page";
+      // The check covers the stored text and the contents of the files it runs,
+      // keyed with a secret kept outside crow.db.
+      //
+      // A bare-64-hex value is what older versions stored: recomputable from the
+      // row itself, so a crow.db writer could forge it. It is not an approval;
+      // the row is stopped and the owner is told to approve it again (the value
+      // is left alone: nothing is deleted).
+      if (isLegacyApproval(row)) {
+        if (row.status !== PENDING_STATUS || row.last_error !== LEGACY_APPROVAL_MESSAGE) {
+          await db.execute({
+            sql: "UPDATE data_backends SET status = ?, last_error = ?, updated_at = datetime('now') WHERE id = ?",
+            args: [PENDING_STATUS, LEGACY_APPROVAL_MESSAGE, row.id],
+          });
+        }
+        console.warn(`  [proxy] Backend #${row.id} "${row.name}": approved before approvals were keyed — not started`);
+        continue;
+      }
+      if (!isApproved(row, { crowHome })) {
+        // Four different situations, four different sentences: never approved;
+        // a value made for another row (the key and other rows' nonces are here,
+        // this row's is not: copied or forged) — checked BEFORE the restore case,
+        // which a copied value looks like from this row alone; approved but this
+        // machine cannot check it (no key or an empty record, e.g. a restore,
+        // since secrets/ is never backed up); approved here but what it pins
+        // changed.
+        const why = !hasApproval(row)
+          ? "Waiting for the owner to approve it on the Projects page"
+          : approvalForAnotherBackend(row, { crowHome })
+            ? NOT_FOR_THIS_BACKEND_MESSAGE
+            : approvalNotFromThisMachine(row, { crowHome })
+              ? MACHINE_APPROVAL_MESSAGE
+              : "Changed since it was approved (its command or a file it runs) — approve it again on the Projects page";
         // Keep an approval-refusal reason the owner has not acted on yet.
         if (row.status !== PENDING_STATUS || (hasApproval(row) && row.last_error !== why)) {
           await db.execute({
@@ -581,7 +624,7 @@ export async function loadDynamicBackends() {
         args: launch.args,
         envVars: launch.envVars,
         baseEnv: backendEnv([]),
-        preSpawn: () => prepareSpawn(fresh),
+        preSpawn: () => prepareSpawn(fresh, undefined, { crowHome }),
       };
 
       try {

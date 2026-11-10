@@ -25,6 +25,7 @@ import { slugify } from "../shared/slugify.js";
 import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
 import { assertCanChangeStatus } from "../shared/project-lifecycle.js";
 import { parseLaunchSpec, canonicalSpecText, PENDING_STATUS } from "../shared/data-backend-approval.js";
+import { clearApprovalNonce } from "../shared/data-backend-approval-key.js";
 import { resolveDatasetPath } from "../shared/sqlite-datasets.js";
 import { SOURCE_TYPES } from "./source-types.js";
 import { statusLabel, UNFETCHED_LABEL } from "./fetch-labels.js";
@@ -1809,6 +1810,16 @@ export function createProjectServer(dbPath, options = {}) {
       }
 
       await db.execute({ sql: "DELETE FROM data_backends WHERE id = ?", args: [id] });
+      // The row is gone for good, so its approval nonce goes too: with it on
+      // record, a writer that put the row back with this id, the same
+      // connection_ref and the old value would have that value verify again.
+      // The delete stands either way — a record that cannot be written only
+      // leaves the old nonce behind, and the gateway prunes a stale entry.
+      try {
+        await clearApprovalNonce(id);
+      } catch {
+        console.warn(`[research] backend #${id} removed, but its approval record entry could not be dropped`);
+      }
       return { content: [{ type: "text", text: `Backend "${backend.name}" (#${id}) removed.` }] };
     }
   );

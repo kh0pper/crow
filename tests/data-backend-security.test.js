@@ -261,7 +261,8 @@ test("dashboard: approving needs the hash of the command the owner was shown", a
   assert.match(u1, /error=backend_not_approved/);
   assert.equal(approvedHash(id), null);
   await panelPost({ action: "approve_backend", id: String(projectId()), backend_id: String(id), ref_sha256: refHash(ref) });
-  assert.equal(approvedHash(id), refHash(ref));
+  assert.match(approvedHash(id), /^hmac1:[0-9a-f]{64}$/, "the approval is stored keyed, not as a plain hash");
+  assert.notEqual(approvedHash(id), refHash(ref), "a crow.db writer must not be able to recompute the stored value");
   await panelPost({ action: "revoke_backend", id: String(projectId()), backend_id: String(id) });
   assert.equal(approvedHash(id), null);
 });
