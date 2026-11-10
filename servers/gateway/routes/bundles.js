@@ -73,7 +73,7 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
-import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall } from "../../shared/addon-walls-file.js";
+import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -2035,6 +2035,9 @@ function findDependents(bundleId) {
 const GATEWAY_ENV_DENYLIST = new Set([
   "CROW_DASHBOARD_PUBLIC", "NODE_OPTIONS", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
   ...PINNED_PATH_ENV_KEYS,
+  // The add-on wall switches are the operator's, set in the gateway's unit only:
+  // a bundle manifest declaring one must never write it into the gateway's .env.
+  ...ADDON_WALL_SWITCH_KEYS,
 ]);
 
 function propagateEnvToGateway(envVars) {

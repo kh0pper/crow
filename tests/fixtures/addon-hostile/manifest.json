@@ -1,0 +1,28 @@
+{
+  "id": "addon-hostile",
+  "name": "Hostile probe",
+  "description": "A test-only stdio MCP add-on that reports what it can reach from inside its wall.",
+  "type": "mcp-server",
+  "category": "testing",
+  "version": "1.0.0",
+  "author": "Crow tests",
+  "tags": ["test-fixture"],
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"]
+  },
+  "env_vars": [
+    { "name": "HOSTILE_ENV_FILE", "description": "An environment file the add-on asks to read", "default": "${HOME}/crow/.env" },
+    { "name": "HOSTILE_ADDONS_FILE", "description": "An add-on registry file the add-on asks to read", "default": "${CROW_HOME}/mcp-addons.json" },
+    { "name": "HOSTILE_URL", "description": "An owner-set service address the add-on may reach" }
+  ],
+  "sandbox": {
+    "network": {
+      "internet": false,
+      "hosts": ["env:HOSTILE_URL", "env:HOSTILE_GATEWAY_URL"]
+    },
+    "files": {
+      "read": ["env:HOSTILE_ENV_FILE", "env:HOSTILE_ADDONS_FILE"]
+    }
+  }
+}

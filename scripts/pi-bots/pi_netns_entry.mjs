@@ -11,7 +11,13 @@
  * Untrusted convenience: a bot that kills or replaces it only loses its own
  * network; nothing here decides what is allowed.
  *
- *   node pi_netns_entry.mjs --sock <path> --ports 3001,8003 --fds 0,1,2,4 --proxy-port 39080 -- <cmd> [args...]
+ * A namespace with no relay socket listens on nothing: the run has no way out,
+ * so the entry only closes every fd it was not handed and runs the command.
+ *
+ *   node pi_netns_entry.mjs [--sock <path> [--ports 3001,8003] [--proxy-port 39080]] --fds 0,1,2,4 -- <cmd> [args...]
+ *
+ * `--ports` and `--proxy-port` name listeners on the relayed socket, so they
+ * are a usage error without `--sock`.
  *
  * `--fds` is the EXACT list of inherited fds the spawner handed over (stdio
  * plus the pipes it really wired, e.g. the MCP config on 4). Nothing else is
@@ -62,9 +68,17 @@ function listenBoth(make, port) {
   return Promise.all(tries).then((r) => r.some(Boolean));
 }
 
+const USAGE = "[pi-netns-entry] usage: [--sock <path> [--ports a,b] [--proxy-port p]] [--fds 0,1,2,4] -- <cmd> [args]";
+
 async function main() {
   const o = parse(process.argv.slice(2));
-  if (!o.sock || !o.cmd) { console.error("[pi-netns-entry] usage: --sock <path> [--ports a,b] [--fds 0,1,2,4] [--proxy-port p] -- <cmd> [args]"); process.exit(2); }
+  // A socket is only needed to listen: with no --sock nothing is forwarded, so
+  // the ports and the proxy port (which exist to reach that socket) are a usage
+  // error rather than a listener on nothing.
+  if (!o.cmd || (!o.sock && (o.ports.length > 0 || o.proxyPort))) {
+    console.error(USAGE);
+    process.exit(2);
+  }
   // Snapshot the inherited fds BEFORE listening, so the listeners and libuv's
   // own fds are never handed to pi. ONLY the fds the spawner named: an fd it
   // did not hand over is "ignore", never a number this process happened to

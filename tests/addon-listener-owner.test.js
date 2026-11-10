@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { identifyListener } from "../scripts/addon-sandbox/listener-owner.mjs";
+import { createDockerView } from "../scripts/addon-sandbox/docker-view.mjs";
 import { startEgressRelay } from "../scripts/pi-bots/pi_egress.mjs";
 import { parseIPv6 } from "../servers/shared/ip-classify.js";
 
@@ -602,4 +603,240 @@ test("a deleted cwd or executable is refused, not compared", async () => {
     procs: [{ pid: 621, inodes: [SOCK], cwd: "/srv/app", exe: "/usr/bin/node", argv: ["/usr/bin/node", "/srv/app/x.mjs"] }],
   });
   assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ["/srv/crow"], ...ok })).kind, "own-uid");
+});
+
+// ---- this computer's bridge ranges ---------------------------------------
+
+import { addrInCidr, bridgeSubnetsFromInterfaces, identifyContainerAddr, localOnlySubnets } from "../scripts/addon-sandbox/listener-owner.mjs";
+
+const IFACES = {
+  lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true, cidr: "127.0.0.1/8" }],
+  eno1: [{ address: "10.20.30.5", netmask: "255.255.255.0", family: "IPv4" }],
+  docker0: [{ address: "172.17.0.1", netmask: "255.255.0.0", family: "IPv4", cidr: "172.17.0.1/16" }],
+  "br-0123abcd4567": [{ address: "172.19.5.1", netmask: "255.255.0.0", family: "IPv4" }],
+};
+
+test("only the docker and podman bridge interfaces name bridge ranges", async () => {
+  assert.deepEqual(bridgeSubnetsFromInterfaces(IFACES), ["172.17.0.0/16", "172.19.0.0/16"]);
+  // A netmask that is not a run of ones is not a network.
+  assert.deepEqual(bridgeSubnetsFromInterfaces({ docker0: [{ address: "172.20.0.1", netmask: "255.0.255.0" }] }), []);
+  // An IPv6 bridge range comes out in its own family.
+  const v6 = bridgeSubnetsFromInterfaces({ podman1: [{ address: "fd00:1234::1", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6" }] });
+  assert.deepEqual(v6, ["fd00:1234::/64"]);
+  assert.deepEqual(bridgeSubnetsFromInterfaces({}), []);
+  assert.deepEqual(bridgeSubnetsFromInterfaces(null), []);
+});
+
+test("addrInCidr reads both families, a v4-mapped spelling as its IPv4, and refuses what it cannot parse", async () => {
+  assert.equal(addrInCidr("172.18.0.5", "172.18.0.0/16"), true);
+  assert.equal(addrInCidr("172.19.0.5", "172.18.0.0/16"), false);
+  assert.equal(addrInCidr("::ffff:172.18.0.5", "172.18.0.0/16"), true);
+  assert.equal(addrInCidr("10.20.30.9", "0.0.0.0/0"), true);
+  assert.equal(addrInCidr("fd00:1234::5", "fd00:1234::/64"), true);
+  assert.equal(addrInCidr("fd00:1235::5", "fd00:1234::/64"), false);
+  assert.equal(addrInCidr("fd00:1234::5", "172.18.0.0/16"), false);
+  for (const [a, c] of [["nope", "172.18.0.0/16"], ["172.18.0.5", "nope"], ["172.18.0.5", "172.18.0.0"],
+    ["172.18.0.5", "172.18.0.0/xx"], ["172.18.0.5", "172.18.0.0/330"], ["fd00::1", "fd00::/129"]]) {
+    assert.equal(addrInCidr(a, c), false, a + " in " + c);
+  }
+});
+
+// ---- a resolved address that belongs to a container ----------------------
+
+/** A docker-view snapshot with the parts this decision reads. */
+const fakeView = (over = {}) => ({
+  subnets: ["172.18.0.0/16"],
+  containers: [],
+  addonProjects: new Map(),
+  publishes: [],
+  ...over,
+});
+
+const container = (project, ips) => ({ id: project + "-1", name: "/" + project, project, ips });
+
+const askContainer = (addr, over = {}, opts = {}) =>
+  identifyContainerAddr(addr, { addonId: "paperless", bridgeSubnets: [], view: fakeView(), ...opts, ...over });
+
+test("a container of this add-on's own compose project may be reached", async () => {
+  const r = await askContainer("172.18.0.5", {
+    view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([r.kind, r.project, r.projectOwner], ["docker-container", "home-paperless", "paperless"]);
+  // A container address outside every bridge range is judged the same way.
+  const direct = await askContainer("10.20.30.9", {
+    view: fakeView({ subnets: [], containers: [container("home-paperless", ["10.20.30.9"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.equal(direct.kind, "docker-container");
+});
+
+test("another add-on's compose project is a foreign project", async () => {
+  const r = await askContainer("172.18.0.5", {
+    addonId: "media",
+    view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([r.kind, r.reason], ["denied", "foreign project"]);
+  assert.equal(r.project, "home-paperless");
+});
+
+test("another instance's add-on project is refused, even for the add-on of that id", async () => {
+  const view = fakeView({ containers: [container("kiosk-proj", ["172.18.0.5"])], addonProjects: new Map([["kiosk-proj", "other-instance:kiosk"]]) });
+  const r = await askContainer("172.18.0.5", { view }, { addonId: "kiosk" });
+  assert.deepEqual([r.kind, r.reason], ["denied", "foreign project"]);
+});
+
+test("a containerized Crow gateway is a project of no installed add-on", async () => {
+  const r = await askContainer("172.18.0.9", {
+    view: fakeView({ containers: [container("crow-other", ["172.18.0.9"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([r.kind, r.reason], ["denied", "project of no installed add-on"]);
+});
+
+test("media reaches a TTS add-on's container and no other add-on does", async () => {
+  const view = fakeView({ containers: [container("media-kokoro", ["172.18.0.5"])], addonProjects: new Map([["media-kokoro", "kokoro-tts"]]) });
+  const media = await askContainer("172.18.0.5", { view }, { addonId: "media" });
+  assert.deepEqual([media.kind, media.project, media.projectOwner], ["docker-container", "media-kokoro", "kokoro-tts"]);
+  const kiosk = await askContainer("172.18.0.5", { view }, { addonId: "kiosk" });
+  assert.deepEqual([kiosk.kind, kiosk.reason], ["denied", "foreign project"]);
+  // The exception is media's: a piper project for media passes, for another add-on it does not.
+  const piper = fakeView({ containers: [container("media-piper", ["172.18.0.6"])], addonProjects: new Map([["media-piper", "piper"]]) });
+  assert.equal((await askContainer("172.18.0.6", { view: piper }, { addonId: "media" })).kind, "docker-container");
+  assert.equal((await askContainer("172.18.0.6", { view: piper }, { addonId: "paperless" })).kind, "denied");
+});
+
+test("a bridge address no container holds, an unlabelled project and two projects are refusals", async () => {
+  const noHolder = await askContainer("172.18.0.7", { view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])] }) });
+  assert.deepEqual([noHolder.kind, noHolder.reason], ["denied", "no container has that address"]);
+
+  const unlabelled = await askContainer("172.18.0.5", {
+    view: fakeView({ containers: [container("", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([unlabelled.kind, unlabelled.reason], ["denied", "unlabelled project"]);
+
+  const two = await askContainer("172.18.0.5", {
+    view: fakeView({
+      containers: [container("home-paperless", ["172.18.0.5"]), container("home-media", ["172.18.0.5"])],
+      addonProjects: new Map([["home-paperless", "paperless"], ["home-media", "media"]]),
+    }),
+  });
+  assert.deepEqual([two.kind, two.reason], ["denied", "more than one project at that address"]);
+});
+
+test("an unreadable docker view refuses a bridge address and leaves a LAN address alone", async () => {
+  const bridge = await askContainer("172.18.0.5", { view: null }, { bridgeSubnets: ["172.18.0.0/16"] });
+  assert.deepEqual([bridge.kind, bridge.reason], ["denied", "owner check failed"]);
+  // A LAN address is not a container address, so no docker view is needed.
+  const lan = await askContainer("10.20.30.9", { view: null }, { bridgeSubnets: ["172.18.0.0/16"] });
+  assert.equal(lan.kind, "not-container");
+  // A readable view with no docker networks at all: the bridge list still decides.
+  const listed = await askContainer("172.18.0.5", { view: fakeView({ subnets: [] }) }, { bridgeSubnets: ["172.18.0.0/16"] });
+  assert.deepEqual([listed.kind, listed.reason], ["denied", "no container has that address"]);
+});
+
+test("an unreadable address, a broken view and a missing map are refusals", async () => {
+  assert.deepEqual([(await askContainer("not-an-address")).reason], ["owner check failed"]);
+  assert.deepEqual([(await askContainer("172.18.0.5", { view: { get subnets() { throw new Error("boom"); } } })).reason], ["owner check failed"]);
+  const noMap = await askContainer("172.18.0.5", { view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: undefined }) });
+  assert.deepEqual([noMap.kind, noMap.reason], ["denied", "project of no installed add-on"]);
+  // A v4-mapped spelling of the same container address is the same container.
+  const mapped = await askContainer("::ffff:172.18.0.5", {
+    view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.equal(mapped.kind, "docker-container");
+});
+
+// ---- the owner value is an add-on id, never a placeholder ------------------
+
+test("a project with two owners belongs to no add-on, whatever the add-on is called", async () => {
+  const ownHome = "/home/alex/.crow";
+  const appRoot = "/home/alex/crow";
+  const otherHome = "/home/alex/.crow-other";
+  const entry = (id, workingDir) => ({
+    Id: id,
+    Name: "/" + id,
+    Config: { Labels: { "com.docker.compose.project": "two-owners", "com.docker.compose.project.working_dir": workingDir } },
+    NetworkSettings: {
+      Networks: { bridge: { IPAddress: "172.18.0.9" } },
+      Ports: { "9000/tcp": [{ HostIp: "127.0.0.1", HostPort: String(PORT) }] },
+    },
+  });
+  const inspected = [
+    entry("a", ownHome + "/bundles/conflict"),
+    entry("b", otherHome + "/bundles/conflict"),
+  ];
+  const run = async (args) => {
+    if (args[0] === "ps") return "a\nb\n";
+    if (args[0] === "inspect") return JSON.stringify(inspected);
+    if (args[0] === "network" && args[1] === "ls") return "";
+    throw new Error("unexpected " + args.join(" "));
+  };
+  const snap = await createDockerView({ run, ownHome, appRoot, otherHomes: [otherHome] }).snapshot();
+  assert.equal(snap.addonProjects.has("two-owners"), false, "no placeholder stands in for the two owners");
+
+  // The listener path: a root-owned socket the project publishes.
+  const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+  const listener = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, ...p, addonId: "conflict", addonProjects: snap.addonProjects,
+    docker: async () => snap.publishes,
+  });
+  assert.deepEqual([listener.kind, listener.reason], ["denied", "project of no installed add-on"]);
+
+  // The container path: the address those containers hold.
+  const addr = identifyContainerAddr("172.18.0.9", { addonId: "conflict", view: snap, bridgeSubnets: [] });
+  assert.deepEqual([addr.kind, addr.reason], ["denied", "project of no installed add-on"]);
+});
+
+test("an owner value that is not one slug is no owner on either path", async () => {
+  for (const value of ["Conflict", "", "a:b", "other-instance:", " conflict", "other-instance:Kiosk"]) {
+    const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+    const listener = await identifyListener("127.0.0.1", PORT, {
+      gatewayUid: GW_UID, ...p, addonId: "conflict",
+      docker: async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project: "proj" }],
+      addonProjects: new Map([["proj", value]]),
+    });
+    assert.deepEqual([listener.kind, listener.reason], ["denied", "foreign project"], JSON.stringify(value));
+
+    const addr = identifyContainerAddr("172.18.0.5", {
+      addonId: "conflict",
+      bridgeSubnets: [],
+      view: fakeView({ containers: [container("proj", ["172.18.0.5"])], addonProjects: new Map([["proj", value]]) }),
+    });
+    assert.deepEqual([addr.kind, addr.reason], ["denied", "foreign project"], JSON.stringify(value));
+  }
+});
+
+// ---- every local interface but loopback and the default route ------------
+
+/** `/proc/net/route` text: eno1 leaves this computer, mybr0 is a local bridge. */
+const ROUTE_V4 = [
+  "Iface\tDestination\tGateway\t\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+  "eno1\t00000000\t0102A8C0\t\t0003\t0\t0\t100\t00000000\t0\t0\t0",
+  "mybr0\t0030AC0A\t00000000\t\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0",
+].join("\n");
+
+/** `/proc/net/ipv6_route` text: a default route out of eno1, a local prefix on mybr0. */
+const ROUTE_V6 = [
+  "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000003 eno1",
+  "fd003000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 mybr0",
+].join("\n");
+
+const LOCAL_IFACES = {
+  lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true }],
+  eno1: [{ address: "10.20.30.5", netmask: "255.255.255.0", family: "IPv4" }],
+  mybr0: [
+    { address: "172.30.0.1", netmask: "255.255.0.0", family: "IPv4" },
+    { address: "fd00:3000::1", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6" },
+  ],
+  docker0: [{ address: "172.17.0.1", netmask: "255.255.0.0", family: "IPv4" }],
+};
+
+test("every interface but loopback and the one a default route leaves through is a local-only range", async () => {
+  const ranges = localOnlySubnets(LOCAL_IFACES, { v4: ROUTE_V4, v6: ROUTE_V6 }).sort();
+  assert.deepEqual(ranges, ["172.17.0.0/16", "172.30.0.0/16", "fd00:3000::/64"].sort());
+  assert.equal(ranges.some((c) => c.startsWith("127.")), false, "loopback is never a local-only range");
+  assert.equal(ranges.some((c) => c.startsWith("10.")), false, "the default route's interface is not one");
+
+  // No route table: no default-route interface is known, so the LAN range counts too.
+  const blind = localOnlySubnets(LOCAL_IFACES, { v4: "", v6: "" }).sort();
+  assert.deepEqual(blind, ["10.20.30.0/24", "172.17.0.0/16", "172.30.0.0/16", "fd00:3000::/64"].sort());
+  assert.deepEqual(localOnlySubnets(null, ROUTE_V4), []);
 });

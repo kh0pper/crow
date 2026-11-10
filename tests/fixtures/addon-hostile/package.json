@@ -1,0 +1,10 @@
+{
+  "name": "addon-hostile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture: a stdio MCP add-on that probes its own sandbox",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js"
+  }
+}

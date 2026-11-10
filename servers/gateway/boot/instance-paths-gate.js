@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { instancePathsVerdict, inheritedSecretsWarning, INSTANCE_PATHS_EXIT_CODE } from "../../shared/crow-home.js";
 import { SECRET_NAME_RE } from "../../shared/bot-env.js";
 import { applyCredentialFiles } from "../../shared/credentials-env.js";
+import { ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -49,6 +50,14 @@ export function runInstancePathsGate({ env = process.env, envPath = env.CROW_APP
   // moved from Environment= to LoadCredential= beats a leftover .env line.
   applyCredentialFiles(env, { roots: credentialRoots, log });
   const envFileKeys = applyEnvFile(envPath, env);
+  // The add-on wall switches belong to the gateway's unit, never to the .env a
+  // bundle install can write: one found there is dropped, with one line.
+  for (const key of ADDON_WALL_SWITCH_KEYS) {
+    if (!envFileKeys.has(key)) continue;
+    delete env[key];
+    envFileKeys.delete(key);
+    log.warn(`[instance-paths] WARNING: ${key} in ${envPath} is ignored: the add-on wall switches are read from the gateway's unit environment only`);
+  }
   const inherited = inheritedSecretsWarning(env, { envFileKeys, appEnvIsDefault: !env.CROW_APP_ENV_PATH, secretNameRe: SECRET_NAME_RE });
   if (inherited) log.warn(`[instance-paths] WARNING: ${inherited}`);
   const verdict = instancePathsVerdict(env, { envFileKeys });

@@ -35,6 +35,11 @@
  * The add-on's own `.env` (`ownEnvFile`) is not exempted from that mask: it is
  * masked like every other, then re-bound by fd ON TOP of its own mask. A
  * symlinked own `.env` names a file this add-on does not own, so it is refused.
+ *
+ * Two optional inputs narrow the same wall: `installDir` (a built-in's own copy
+ * of a bundle, `<appRoot>/bundles/<id>` or `<crowHome>/bundles/<id>`) and
+ * `dataSubdir` (`services/<uuid>`, one project-service child's folder below the
+ * add-on's data folder). Both are validated before anything is opened.
  */
 import { closeSync, existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -70,6 +75,10 @@ const DOOR_TOKEN_MOUNT = "/run/crow-addon/door-token";
 const CROW_HOME_SECRET_NAMES = ["secrets", "env", "peer-tokens.json", "identity.json", "android-keystore", ".keystore-env"];
 /** An add-on id is one lowercase slug: it names a folder, so never a path. */
 const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** A service child's own folder below the add-on's data folder: one `services/<uuid>` segment. */
+const DATA_SUBDIR_RE = /^services\/[0-9a-f][0-9a-f-]{7,63}$/;
+const INVALID_SUBDIR = "add-on refused: invalid data subfolder";
+const INSTALL_NOT_ALLOWED = "add-on refused: install folder not allowed";
 /** Refused for writing: a hidden top-level entry of the home is the operator's. */
 const HIDDEN_WRITE_REASON = "a hidden entry of the home is never writable";
 /** Refused for writing: a bind over one of these could start a program on login. */
@@ -98,7 +107,9 @@ function which(command, pathEnv, exists) {
  * @param {object} o
  *   id, profile (deriveProfile's output), entry (the mcp-addons.json entry),
  *   home, crowHome, appRoot, nodeBin, dataDir, dbPath, gatewayPort, otherHomes,
- *   selfTargets, relayDir, doorTokenFd, uid, fdBase, pathEnv, exists
+ *   selfTargets, relayDir, doorTokenFd, uid, fdBase, pathEnv, exists,
+ *   installDir (optional: `<appRoot>/bundles/<id>` or `<crowHome>/bundles/<id>`),
+ *   dataSubdir (optional: `services/<uuid>`)
  *
  *   `tokenDirsTable` is a TEST SEAM and is not passed in production: a plain
  *   object replaces the shipped `ADDON_TOKEN_DIRS` for that one lookup.
@@ -115,6 +126,11 @@ export function buildAddonPlan(o = {}) {
   const home = resolve(String(o.home));
   const id = o.id;
   const crowHome = resolve(String(o.crowHome));
+  // Both optional names are checked before anything is opened: an install
+  // folder outside the two the wall allows, and a data subfolder that is not
+  // one `services/<uuid>` segment, keep the add-on off.
+  const installDir = installFolderFor(o.installDir, { crowHome, appRoot: o.appRoot, id });
+  const dataSubdir = dataSubdirFor(o.dataSubdir);
   const dataDirIn = resolve(String(o.dataDir));
   const profile = o.profile && typeof o.profile === "object" ? o.profile : {};
   const entry = o.entry && typeof o.entry === "object" ? o.entry : {};
@@ -143,7 +159,8 @@ export function buildAddonPlan(o = {}) {
   const dataDirRoots = [...new Set([dataReal, dataDirIn])];
   /** This add-on's own folder below the data dir, at both spellings. */
   const ownDataRoots = dataDirRoots.map((root) => join(root, id));
-  const installDir = join(crowHome, "bundles", id);
+  /** The folder below the data dir this spawn may write: the add-on's own, or a service child's subfolder. */
+  const dataFolder = dataSubdir ? join(dataReal, id, dataSubdir) : join(dataReal, id);
   const stateNames = (Array.isArray(files.state) ? files.state : [])
     .filter((n) => typeof n === "string" && n && !n.includes("/") && n !== "." && n !== "..");
   const statePaths = stateNames.map((n) => join(crowHome, n));
@@ -423,7 +440,9 @@ export function buildAddonPlan(o = {}) {
     // target is the add-on's choice: only a system dir (already bound by
     // rootArgs) or a uv-managed Python below `<home>/.local/share/uv/python`
     // may be bound, and never through the data dir or the Crow home.
-    const venvPython = join(dataReal, id, ".venv", "bin", "python");
+    // A venv lives in the folder this spawn may write: the add-on's own data
+    // folder, or a service child's subfolder when one is named.
+    const venvPython = join(dataFolder, ".venv", "bin", "python");
     if (exists(venvPython)) {
       const py = realp(venvPython);
       const interpreterRoot = py ? dirname(dirname(py)) : null;
@@ -444,35 +463,42 @@ export function buildAddonPlan(o = {}) {
     }
 
     // ---- data, by fd ----
-    let addonDataDir;
-    if (profile.crowDb) {
-      if (!exists(dataReal)) throw new ContainRefused("add-on refused: the Crow data folder " + dataReal + " does not exist");
-      // A read-write data bind answers to the write side of the same list: the
-      // checkout, the Crow home and every protected path are never writable.
-      const whyWrite = forbidden(dataReal, { write: true }) || refusePath(dataReal, { write: true });
-      if (whyWrite) throw new ContainRefused("add-on refused: its data folder cannot be bound read-write (" + whyWrite + ")");
-      const opened = openCheckedBindSource(dataReal, { uid, home, refuse: (rp) => refusePath(rp, { write: true }), expect: "dir" });
-      openedFds.push(opened.fd);
-      bindFd(opened.fd, "crow-data", "--bind-fd", opened.realPath);
-      addonDataDir = join(opened.realPath, id);
-      // Every entry present now is masked except crow.db and its journals, the
-      // add-on's own folder and the operator's keep-list: no other add-on's
-      // data, no backups, no tasks.db.
-      let entries = [];
-      try { entries = readdirSync(opened.realPath); } catch { /* unreadable: nothing to mask */ }
-      for (const e of entries) {
-        if (CROW_DB_KEEP.has(e) || e === id) continue;
-        maskPathInto(masks, join(opened.realPath, e));
-      }
-    } else {
-      const dir = join(dataReal, id);
+    /** Open one data folder the checked way, bind it read-write by fd, return its real path. */
+    function bindDataFolder(dir, role = "data") {
       if (!exists(dir)) throw new ContainRefused("add-on refused: its data folder " + dir + " does not exist");
       const whyWrite = forbidden(dir, { write: true }) || refusePath(dir, { write: true });
       if (whyWrite) throw new ContainRefused("add-on refused: its data folder cannot be bound read-write (" + whyWrite + ")");
       const opened = openCheckedBindSource(dir, { uid, home, refuse: (rp) => refusePath(rp, { write: true }), expect: "dir" });
       openedFds.push(opened.fd);
-      bindFd(opened.fd, "data", "--bind-fd", opened.realPath);
-      addonDataDir = opened.realPath;
+      bindFd(opened.fd, role, "--bind-fd", opened.realPath);
+      return opened.realPath;
+    }
+
+    let addonDataDir;
+    if (profile.crowDb) {
+      if (!exists(dataReal)) throw new ContainRefused("add-on refused: the Crow data folder " + dataReal + " does not exist");
+      // A read-write data bind answers to the write side of the same list: the
+      // checkout, the Crow home and every protected path are never writable.
+      addonDataDir = join(bindDataFolder(dataReal, "crow-data"), id);
+      // Every entry present now is masked except crow.db and its journals, the
+      // add-on's own folder and the operator's keep-list: no other add-on's
+      // data, no backups, no tasks.db.
+      let entries = [];
+      try { entries = readdirSync(dataReal); } catch { /* unreadable: nothing to mask */ }
+      for (const e of entries) {
+        if (CROW_DB_KEEP.has(e) || e === id) continue;
+        maskPathInto(masks, join(dataReal, e));
+      }
+      if (dataSubdir) {
+        // A service child sees ONLY its own subfolder: the add-on's whole data
+        // folder is masked like any other entry, and the subfolder is bound by
+        // fd on top of that mask (its destination sorts after the mask's, so
+        // it lands second).
+        maskPathInto(masks, join(dataReal, id));
+        addonDataDir = bindDataFolder(join(dataReal, id, dataSubdir));
+      }
+    } else {
+      addonDataDir = bindDataFolder(dataFolder);
     }
 
     // ---- env: one data bind, one cache below it, no separate cache mount ----
@@ -685,6 +711,24 @@ export function buildAddonPlan(o = {}) {
     for (const fd of openedFds) { try { closeSync(fd); } catch { /* already closed */ } }
     throw err;
   }
+}
+
+/** The install folder a spawn may use: `<crowHome>/bundles/<id>`, or a built-in's `<appRoot>/bundles/<id>`. */
+function installFolderFor(named, { crowHome, appRoot, id }) {
+  const own = join(crowHome, "bundles", id);
+  if (named === undefined || named === null) return own;
+  const allowed = [own];
+  if (typeof appRoot === "string" && appRoot) allowed.push(join(resolve(appRoot), "bundles", id));
+  const at = typeof named === "string" && named ? resolve(named) : null;
+  if (!at || !allowed.includes(at)) throw new ContainRefused(INSTALL_NOT_ALLOWED);
+  return at;
+}
+
+/** One `services/<uuid>` segment, or a refusal. */
+function dataSubdirFor(named) {
+  if (named === undefined || named === null) return null;
+  if (typeof named !== "string" || !DATA_SUBDIR_RE.test(named)) throw new ContainRefused(INVALID_SUBDIR);
+  return named;
 }
 
 /** The index of one `[flag, src, dest]` triple, or -1. */

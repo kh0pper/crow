@@ -191,6 +191,11 @@ test("an ownerProject entry takes only that compose project's published port", a
   const sameUid = await one({ kind: "own-uid", pid: 12 });
   assert.equal(await talk(sameUid.r.socketPath, "PORT 8000\nping"), "", "own-uid is not a published port");
   assert.ok(sameUid.logs.some((l) => l.includes("(the listener is not published by paperless)")), sameUid.logs.join("\n"));
+
+  // An owner value that is not one slug names no add-on at all.
+  const odd = await one({ kind: "docker-publish", project: "paperless", projectOwner: "media:x" });
+  assert.equal(await talk(odd.r.socketPath, "PORT 8000\nping"), "", "an owner of no recognisable shape");
+  assert.ok(odd.logs.some((l) => l.includes("(foreign project)")), odd.logs.join("\n"));
 });
 
 test("a default URL never splices to a process of the same user", async () => {
@@ -548,4 +553,189 @@ test("add-on mode: a plain-HTTP request line without the PROXY line is dropped, 
   const { r } = await relay({ addon: addonOf({ plainHttpHosts: [{ host: "100.64.20.7", port: 8004 }] }) });
   const out = await talk(r.socketPath, "GET http://100.64.20.7:8004/x HTTP/1.1\r\nHost: 100.64.20.7:8004\r\n\r\n");
   assert.equal(out, "");
+});
+
+// ---- a listed target that resolves to a container on this computer --------
+
+/** An own-host view with no addresses, plus the container-owner seam. */
+const containerAddon = (over = {}) => addonOf({
+  hosts: [{ host: "svc.example.test", port: 8443 }],
+  plainHttpHosts: [{ host: "svc.example.test", port: 8080 }],
+  ...over,
+});
+const containerLookup = async () => [{ address: "172.30.0.5", family: 4 }];
+
+/** Send bytes; resolve when the peer closes, with how long that took. */
+function talkUntilClose(sockPath, first, timeout = 4000) {
+  return new Promise((resolve) => {
+    const c = connect(sockPath);
+    let buf = "";
+    const t0 = Date.now();
+    let done = false;
+    const finish = (how) => { if (done) return; done = true; try { c.destroy(); } catch {} resolve({ buf, how, ms: Date.now() - t0 }); };
+    c.on("connect", () => c.write(first));
+    c.on("data", (d) => { buf += d.toString(); });
+    c.on("error", () => finish("error"));
+    c.on("close", () => finish("close"));
+    setTimeout(() => finish("timeout"), timeout);
+  });
+}
+
+/** An HTTP upstream that accepts and then goes quiet: nothing at all, or a head and part of a body. */
+function hangingServer(mode) {
+  return new Promise((resolve) => {
+    const srv = createHttpServer((req, res) => {
+      if (mode === "body") {
+        res.writeHead(200, { "content-type": "text/plain", "content-length": "100" });
+        res.write("partial");
+      }
+    });
+    srv.listen(0, "127.0.0.1", () => {
+      closers.push(() => { try { srv.closeAllConnections?.(); } catch {} return new Promise((r) => srv.close(() => r())); });
+      resolve(srv.address().port);
+    });
+  });
+}
+
+test("a listed CONNECT entry whose address belongs to a foreign container project is refused before any splice", async () => {
+  let accepted = 0;
+  const up = await echoServer("U:", () => { accepted++; });
+  const one = (containerOwner) => relay({
+    lookup: containerLookup,
+    addon: containerAddon({ containerOwner }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+
+  const foreign = await one(async () => ({ kind: "denied", reason: "foreign project" }));
+  const refused = await talk(foreign.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\n");
+  assert.match(refused, /^HTTP\/1\.1 403/);
+  assert.ok(foreign.logs.includes("[addon-egress] addon=media deny svc.example.test:8443 (a container on this computer: foreign project)"), foreign.logs.join("\n"));
+  assert.equal(accepted, 0, "nothing reached the listed port");
+
+  const own = await one(async () => ({ kind: "docker-container", project: "home-media", projectOwner: "media" }));
+  assert.match(await talk(own.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\nping"), /U:ping$/);
+
+  // A LAN address that belongs to no container is an ordinary listed target.
+  const notAContainer = await one(async () => ({ kind: "not-container" }));
+  assert.match(await talk(notAContainer.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\nping"), /U:ping$/);
+});
+
+test("a listed plain-HTTP entry whose address belongs to a foreign container project is refused before any request", async () => {
+  const upstream = await httpServer("EMB");
+  const one = (containerOwner) => relay({
+    lookup: containerLookup,
+    addon: containerAddon({ containerOwner, _httpTarget: () => ({ host: "127.0.0.1", port: upstream.port }) }),
+  });
+  const request = "PROXY\nGET http://svc.example.test:8080/embeddings HTTP/1.1\r\nHost: svc.example.test:8080\r\n\r\n";
+
+  const foreign = await one(async () => ({ kind: "denied", reason: "foreign project" }));
+  assert.match(await talk(foreign.r.socketPath, request), /^HTTP\/1\.1 403/);
+  assert.ok(foreign.logs.includes("[addon-egress] addon=media deny svc.example.test:8080 (a container on this computer: foreign project)"), foreign.logs.join("\n"));
+  assert.equal(upstream.reqs.length, 0, "nothing reached the listed port");
+
+  const own = await one(async () => ({ kind: "docker-container", project: "home-media", projectOwner: "media" }));
+  assert.match(await talk(own.r.socketPath, request), /^HTTP\/1\.1 200/);
+  assert.equal(upstream.reqs.length, 1);
+
+  const notAContainer = await one(async () => ({ kind: "not-container" }));
+  assert.match(await talk(notAContainer.r.socketPath, request), /^HTTP\/1\.1 200/);
+  assert.equal(upstream.reqs.length, 2);
+});
+
+test("without a container view a bridge address is refused and a LAN address is not", async () => {
+  let accepted = 0;
+  const up = await echoServer("U:", () => { accepted++; });
+  const ifaces = {
+    lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4" }],
+    docker0: [{ address: "172.30.0.1", netmask: "255.255.0.0", family: "IPv4" }],
+  };
+  const one = (address) => relay({
+    lookup: async () => [{ address, family: 4 }],
+    addon: containerAddon({ _interfaces: ifaces }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+
+  const bridge = await one("172.30.0.5");
+  assert.match(await talk(bridge.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  assert.ok(bridge.logs.includes("[addon-egress] addon=media deny svc.example.test:8443 (a container on this computer: no container view)"), bridge.logs.join("\n"));
+  assert.equal(accepted, 0);
+
+  const lan = await one("10.20.30.7");
+  assert.match(await talk(lan.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\nping"), /U:ping$/);
+});
+
+test("a container-owner answer that throws is a refusal, and the answer is kept for the cache window", async () => {
+  let calls = 0;
+  const up = await echoServer("U:");
+  const { r, logs } = await relay({
+    lookup: containerLookup,
+    addon: containerAddon({ containerOwner: async () => { calls++; throw new Error("docker socket gone"); } }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+  for (let i = 0; i < 2; i++) {
+    assert.match(await talk(r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  }
+  assert.equal(calls, 1, "the second decision inside the window reused the answer");
+  assert.ok(logs.includes("[addon-egress] addon=media deny svc.example.test:8443 (a container on this computer: owner check failed)"), logs.join("\n"));
+  // An answer that is not an object is the same refusal.
+  const odd = await relay({
+    lookup: containerLookup,
+    addon: containerAddon({ containerOwner: async () => null }),
+  });
+  assert.match(await talk(odd.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  assert.ok(odd.logs.some((l) => l.includes("(a container on this computer: owner check failed)")), odd.logs.join("\n"));
+  // An object of an unknown kind passes nothing either: only the two passing kinds pass.
+  const unknown = await relay({
+    lookup: containerLookup,
+    addon: containerAddon({ containerOwner: async () => ({ kind: "maybe" }) }),
+  });
+  assert.match(await talk(unknown.r.socketPath, "PROXY\nCONNECT svc.example.test:8443 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/);
+  assert.ok(unknown.logs.some((l) => l.includes("(a container on this computer: owner check failed)")), unknown.logs.join("\n"));
+});
+
+// ---- the plain-HTTP stall timeout ----------------------------------------
+
+test("a plain-HTTP upstream that accepts and never answers is cut, and its slot is freed", async () => {
+  const silent = await hangingServer("head");
+  const responsive = await httpServer("LATE");
+  let target = { host: "127.0.0.1", port: silent };
+  const { r, logs } = await relay({
+    maxUpstream: 1,
+    plainStallMs: 200,
+    addon: addonOf({ plainHttpHosts: [{ host: "100.64.20.7", port: 8004 }], _httpTarget: () => target }),
+  });
+  const request = "PROXY\nGET http://100.64.20.7:8004/x HTTP/1.1\r\nHost: 100.64.20.7:8004\r\n\r\n";
+
+  const t0 = Date.now();
+  const out = await talk(r.socketPath, request, { timeout: 2000, settle: 40 });
+  assert.ok(Date.now() - t0 < 2000, "the answer arrived well inside the bound");
+  assert.match(out, /^HTTP\/1\.1 502/);
+  assert.ok(logs.some((l) => l.includes("(upstream ETIMEDOUT)")), logs.join("\n"));
+
+  target = { host: "127.0.0.1", port: responsive.port };
+  assert.match(await talk(r.socketPath, request), /^HTTP\/1\.1 200/);
+  assert.equal(responsive.reqs.length, 1, "the slot the stalled request held is free again");
+});
+
+test("a plain-HTTP upstream that sends headers and then stalls the body has its client connection closed", async () => {
+  const stalled = await hangingServer("body");
+  const responsive = await httpServer("LATE");
+  let target = { host: "127.0.0.1", port: stalled };
+  const { r, logs } = await relay({
+    maxUpstream: 1,
+    plainStallMs: 200,
+    addon: addonOf({ plainHttpHosts: [{ host: "100.64.20.7", port: 8004 }], _httpTarget: () => target }),
+  });
+  const request = "PROXY\nGET http://100.64.20.7:8004/x HTTP/1.1\r\nHost: 100.64.20.7:8004\r\n\r\n";
+
+  const first = await talkUntilClose(r.socketPath, request);
+  assert.notEqual(first.how, "timeout", "the client connection did not outlive the bound");
+  assert.ok(first.ms < 2000, "the connection closed inside the bound");
+  assert.match(first.buf, /^HTTP\/1\.1 200/);
+  assert.match(first.buf, /partial/);
+  assert.ok(logs.some((l) => l.includes("(upstream ETIMEDOUT)")), logs.join("\n"));
+
+  target = { host: "127.0.0.1", port: responsive.port };
+  assert.match(await talk(r.socketPath, request), /^HTTP\/1\.1 200/);
+  assert.equal(responsive.reqs.length, 1, "the slot the stalled body held is free again");
 });

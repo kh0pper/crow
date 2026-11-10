@@ -257,7 +257,7 @@ test("the guard's texts are the exact constraint texts", () => {
 
 test("manifest is 1.5.0 and the registry is in sync", () => {
   const mf = JSON.parse(readFileSync(join(ROOT, "bundles/browser/manifest.json"), "utf8"));
-  assert.equal(mf.version, "1.5.2");
+  assert.equal(mf.version, "1.6.0");
   execFileSync(process.execPath, ["scripts/build-registry.mjs", "--check"], { cwd: ROOT, stdio: "pipe" });
 });
 

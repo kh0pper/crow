@@ -9,10 +9,12 @@
 import { resolveAddonCommand, checkLauncherArgs } from "../shared/resolve-command.js";
 import { withoutCredentialKeys } from "../shared/credentials-env.js";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { resolveCrowHome as resolveSharedCrowHome } from "../shared/crow-home.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -21,7 +23,11 @@ import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-z
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
 import { addonBaseEnv, declaredPassthrough, storagePassthrough } from "./addon-env.js";
-import { createDbClient } from "../db.js";
+import { createDbClient, resolveDataDir } from "../db.js";
+import { gatewayListenPort } from "./listen-port.js";
+import { addonWallMode } from "../../scripts/addon-sandbox/spawn.mjs";
+import { AddonStdioTransport, createStderrPrefixer } from "../../scripts/addon-sandbox/transport.mjs";
+import { createWallContext } from "../../scripts/addon-sandbox/gateway-wall.mjs";
 import { isApproved, approvalNotFromThisMachine, approvalForAnotherBackend, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { pruneApprovalNonces } from "../shared/data-backend-approval-key.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
@@ -88,6 +94,71 @@ function envFromVars(vars = [], source = process.env) {
   return env;
 }
 
+/** This checkout's root, two levels above `servers/gateway`. */
+const APP_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** The wall context, created the first time a walled spawn needs it. */
+let _wallContext = null;
+function getWallContext() {
+  if (!_wallContext) {
+    _wallContext = createWallContext({
+      crowHome: resolveCrowHome(),
+      appRoot: APP_ROOT,
+      dataDir: resolveDataDir(),
+      home: homedir(),
+      nodeBin: process.execPath,
+      gatewayPort: gatewayListenPort(),
+    });
+  }
+  return _wallContext;
+}
+
+/**
+ * Feed a stdio child's stderr through the line prefixer: the child never blocks
+ * on a full stderr pipe, and every line of it reads `[addon:<id>] …`.
+ */
+function attachStderrPrefixer(transport, id) {
+  const stream = transport.stderr;
+  if (!stream || typeof stream.on !== "function") return;
+  const prefixer = createStderrPrefixer({ id });
+  stream.on("data", (chunk) => { try { prefixer.write(chunk); } catch { /* a reader that went away */ } });
+  stream.on("end", () => { try { prefixer.end(); } catch { /* nothing left to flush */ } });
+  stream.on("error", () => { /* the child's exit is what counts */ });
+}
+
+/**
+ * The `wall` field a connected add-on's entry carries: plain data only (a mode,
+ * a tier, a reason and the profile snapshot), never a live object. The relay
+ * and the bind fds belong to `wrapAddonSpawn`'s cleanup, so the relay is kept
+ * beside the entry as a non-enumerable `_wallRelay` reference instead.
+ */
+function wallInfoFor(wall, mode) {
+  return {
+    mode: wall && wall.walled ? "walled" : "unwalled",
+    tier: wall ? wall.tier : "none",
+    reason: wall && wall.walled ? null : (wall?.reason || mode?.reason || null),
+    profile: wall?.profile ?? null,
+    // Plain data: what the add-on still reaches beyond its wall (e.g. the
+    // `storage` residual, LEDGER N1b-13), so no status line calls it fully walled.
+    residuals: Array.isArray(wall?.residuals) ? wall.residuals.map((r) => ({ kind: r.kind, label: r.label })) : [],
+  };
+}
+
+/**
+ * The connection entry for an add-on: the given fields, plus the wall's relay as
+ * a NON-enumerable `_wallRelay` (a later status surface reads it; a JSON view of
+ * the entry or of its `wall` never carries a live object).
+ */
+function wallEntry(entry, wall) {
+  const relay = wall && wall.walled && wall.relay ? wall.relay : null;
+  if (relay) {
+    try {
+      Object.defineProperty(entry, "_wallRelay", { value: relay, enumerable: false, writable: true, configurable: true });
+    } catch { /* an entry that cannot carry it loses nothing else */ }
+  }
+  return entry;
+}
+
 /**
  * The environment connectToServer() gives a child. A data backend brings its own
  * allowlisted base env, and a built-in integration gets the add-on base
@@ -111,6 +182,9 @@ export function integrationChildEnv(integration, base = process.env) {
  */
 async function connectToServer(integration) {
   const env = integrationChildEnv(integration);
+  // The built-in's own vars: the walled path builds its env from these plus the
+  // allowlisted base, never from `env` above.
+  const spawnEnv = integration.env || envFromVars(integration.envVars, process.env);
 
   let command = integration.command;
   let args = integration.args;
@@ -127,15 +201,61 @@ async function connectToServer(integration) {
     args = ready.args;
   }
 
+  // A data backend (preSpawn) brings its own approval and its own wall story
+  // (D7): nothing about it changes here. Every other built-in is walled by the
+  // same rules as a bundle add-on.
+  let wall = null;
+  if (!integration.preSpawn) {
+    const wm = dep("addonWallMode", addonWallMode)({ id: integration.id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
+    if (wm.mode === "walled") {
+      try {
+        wall = await dep("startAddonWall", (o) => getWallContext().startAddonWall(o))({
+          id: integration.id,
+          entry: { command, args, env: spawnEnv },
+          command,
+          args: Array.isArray(args) ? args : [],
+          baseEnv: integration.baseEnv || process.env,
+          ownEnv: spawnEnv,
+          kind: "builtin",
+        });
+      } catch (err) {
+        const message = err?.message || "the wall could not be built";
+        console.warn(`  [proxy] ${integration.name}: not started, its wall was refused — ${message}`);
+        connectedServers.set(integration.id, {
+          client: null,
+          tools: [],
+          status: "error",
+          error: message,
+          wall: { mode: "refused", reason: message },
+        });
+        return null;
+      }
+    }
+  }
+
   // Timeout: npx/uvx may need to download packages on first run
   const CONNECT_TIMEOUT_MS = 60_000;
 
+  let transport = null;
   try {
-    const transport = new StdioClientTransport({
-      command,
-      args,
-      env,
-    });
+    if (wall && wall.walled) {
+      transport = new AddonStdioTransport({
+        id: integration.id,
+        command: wall.cmd,
+        args: wall.args,
+        env: wall.env,
+        stdioExtra: wall.stdioExtra,
+        onExit: wall.cleanup,
+      });
+    } else if (wall && wall.tier === "nnp") {
+      // No usable bwrap here: the child runs under setpriv, with the env the wall
+      // built (never the spawn site's own).
+      transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env: wall.env, stderr: "pipe" });
+      attachStderrPrefixer(transport, integration.id);
+    } else {
+      transport = new StdioClientTransport({ command, args, env, stderr: "pipe" });
+      attachStderrPrefixer(transport, integration.id);
+    }
 
     const client = new Client({
       name: `crow-proxy-${integration.id}`,
@@ -170,6 +290,11 @@ async function connectToServer(integration) {
 
     return { client, tools };
   } catch (error) {
+    // A wall that was built but whose child never connected still owns a relay,
+    // bind fds and a door token: cleanup is idempotent and covers both. A walled
+    // child that started but never answered is stopped first.
+    if (wall && wall.walled && transport) { try { await transport.close(); } catch { /* already gone */ } }
+    try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
     console.error(`  [proxy] ${integration.name}: failed to connect — ${error.message}`);
     connectedServers.set(integration.id, {
       client: null,
@@ -179,6 +304,12 @@ async function connectToServer(integration) {
     });
     return null;
   }
+}
+
+/** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
+export function addonOwnEnv(config = {}, base = process.env, id = null) {
+  const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
+  return { ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
 }
 
 /**
@@ -221,13 +352,19 @@ export function remoteBotActorForCwd(cwd) {
 /**
  * Connect to an MCP server installed as a bundle addon (from ~/.crow/mcp-addons.json).
  * Unlike connectToServer(), this takes the add-on entry's flat env dict.
+ *
+ * A stdio add-on is walled when the mode says so. A wall that cannot be built
+ * leaves it OFF (never an unwalled spawn). With the walls off, this is the
+ * same spawn as before plus the stderr prefixer.
  */
-async function connectAddonServer(id, config) {
+export async function connectAddonServer(id, config) {
   const CONNECT_TIMEOUT_MS = 60_000;
   const transportMode = (config.transport || "stdio").toLowerCase();
+  let wall = null;
+  let wallInfo = null;
+  let transport = null;
 
   try {
-    let transport;
     // Only a stdio add-on whose own manifest opts in gets the remote bot form; HTTP add-ons never do.
     let remoteBotActor = false;
     if (transportMode === "http") {
@@ -268,12 +405,58 @@ async function connectAddonServer(id, config) {
       if (rc.missing) {
         throw new Error(`command '${config.command}' not usable: ${rc.reason || "not found"} (searched the gateway PATH, ~/.local/bin, ~/.cargo/bin, ~/bin, /usr/local/bin)`);
       }
-      transport = new StdioClientTransport({
-        command: rc.command,
-        args: config.args || [],
-        env,
-        cwd,
-      });
+
+      // The mode comes from the gateway's env and `<CROW_HOME>/addon-walls.json`
+      // only; nothing the add-on can write is read here.
+      const wm = dep("addonWallMode", addonWallMode)({ id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
+      if (wm.mode === "walled") {
+        try {
+          wall = await dep("startAddonWall", (o) => getWallContext().startAddonWall(o))({
+            id,
+            entry: config,
+            command: rc.command,
+            args: config.args || [],
+            // The wall builds the child env itself: the gateway env is read only
+            // through its allowlist, never spread (defence in depth over Phase 0).
+            baseEnv: process.env,
+            ownEnv: addonOwnEnv(config, process.env, id),
+            kind: "addon",
+          });
+        } catch (err) {
+          const message = err?.message || "the wall could not be built";
+          console.error(`  [proxy] addon ${id}: not started, its wall was refused — ${message}`);
+          connectedServers.set(id, {
+            client: null,
+            tools: [],
+            status: "error",
+            error: message,
+            isAddon: true,
+            wall: { mode: "refused", reason: message },
+          });
+          return null;
+        }
+      }
+
+      if (wall && wall.walled) {
+        transport = new AddonStdioTransport({
+          id,
+          command: wall.cmd,
+          args: wall.args,
+          env: wall.env,
+          stdioExtra: wall.stdioExtra,
+          onExit: wall.cleanup,
+        });
+      } else if (wall && wall.tier === "nnp") {
+        // No usable bwrap here: the child runs under setpriv, and its stderr goes
+        // through the same prefixer (the process hygiene applies to every tier).
+        // The env is the wall's own build, never the spawn site's.
+        transport = new StdioClientTransport({ command: wall.cmd, args: wall.args, env: wall.env, cwd, stderr: "pipe" });
+        attachStderrPrefixer(transport, id);
+      } else {
+        transport = new StdioClientTransport({ command: rc.command, args: config.args || [], env, cwd, stderr: "pipe" });
+        attachStderrPrefixer(transport, id);
+      }
+      wallInfo = wallInfoFor(wall, wm);
     }
 
     const client = new Client({
@@ -292,13 +475,14 @@ async function connectAddonServer(id, config) {
 
     console.log(`  [proxy] addon ${id}: connected, ${tools.length} tools discovered`);
 
-    connectedServers.set(id, {
+    connectedServers.set(id, wallEntry({
       client,
       tools,
       status: "connected",
       isAddon: true,
       remoteBotActor,
-    });
+      ...(wallInfo ? { wall: wallInfo } : {}),
+    }, wall));
 
     transport.onclose = () => {
       console.warn(`  [proxy] addon ${id}: disconnected`);
@@ -308,6 +492,12 @@ async function connectAddonServer(id, config) {
 
     return { client, tools };
   } catch (error) {
+    // A wall that was built but whose child never connected still owns a relay,
+    // bind fds and a door token: cleanup is idempotent and covers a spawn that
+    // never happened too. Never retried unwalled. A walled child that started
+    // but never answered is stopped too: its relay is gone with the cleanup.
+    if (wall && wall.walled && transport) { try { await transport.close(); } catch { /* already gone */ } }
+    try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
     console.error(`  [proxy] addon ${id}: failed to connect — ${error.message}`);
     connectedServers.set(id, {
       client: null,
@@ -315,6 +505,7 @@ async function connectAddonServer(id, config) {
       status: "error",
       error: error.message,
       isAddon: true,
+      ...(wall && wall.walled ? { wall: { mode: "walled", tier: wall.tier, reason: null } } : {}),
     });
     return null;
   }

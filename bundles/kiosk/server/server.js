@@ -1,4 +1,7 @@
-/** Kiosk MCP tools (spec §4.1): reach live sessions through loopback /api/kiosk/internal with the announce token. */
+/**
+ * Kiosk MCP tools (spec §4.1): reach live sessions through loopback /api/kiosk/internal
+ * with the announce token, or — inside a wall — with this spawn's door token.
+ */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
@@ -11,11 +14,18 @@ export function createKioskServer({
   fetchImpl = fetch,
   baseUrl = `http://127.0.0.1:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`,
   tokenPath = join(process.env.CROW_HOME || join(homedir(), ".crow"), "kiosk-announce-token"),
+  // The door token a wall hands this spawn on a read-only fd. Set, it is the only
+  // credential this process uses: the announce token file is the unwalled path.
+  doorTokenFile = process.env.CROW_ADDON_DOOR_TOKEN_FILE || null,
 } = {}) {
   const server = new McpServer({ name: "crow-kiosk", version: "0.1.0" });
   async function call(method, path, body) {
     let token;
-    try { token = readFileSync(tokenPath, "utf8").trim(); } catch { return { error: "kiosk announce token missing — restart the Crow gateway" }; }
+    if (doorTokenFile) {
+      try { token = readFileSync(doorTokenFile, "utf8").trim(); } catch { return { error: "kiosk door token missing — restart the add-on" }; }
+    } else {
+      try { token = readFileSync(tokenPath, "utf8").trim(); } catch { return { error: "kiosk announce token missing — restart the Crow gateway" }; }
+    }
     try {
       const r = await fetchImpl(baseUrl + path, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(10_000) });
       const j = await r.json().catch(() => ({}));

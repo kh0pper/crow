@@ -1162,10 +1162,27 @@ export function createStudioWeb({
    * machine. Only `via === "local"` — a loopback socket that is not a trusted
    * proxy and carries no forwarding or tailscale-* header — may present the
    * token.
+   *
+   * A walled add-on is the third kind of caller: its relay marks the socket, and
+   * the mark is answered ONLY with this spawn's door token, for the agent paths and
+   * the method it names (`auth.isAddonRelayed` + `auth.validateAddonDoor`, both
+   * optional). The boot token is never accepted from the mark, and a marked socket
+   * never falls through to the peer check below.
    */
   function agentGuard(req, res, next) {
     if (req.headers["tailscale-funnel-request"]) {
       return res.status(403).json({ ok: false, error: "refused" });
+    }
+    if (typeof auth.isAddonRelayed === "function" && auth.isAddonRelayed(req)) {
+      let ok = false;
+      try {
+        ok = typeof auth.validateAddonDoor === "function"
+          && auth.validateAddonDoor(req.get("x-studio-token"), "studio", req.method, req.baseUrl + req.path) === true;
+      } catch {
+        ok = false;
+      }
+      if (!ok) return res.status(401).json({ ok: false, error: "unauthorized" });
+      return next();
     }
     if (auth.classifyPeer(req)?.via !== "local") {
       return res.status(403).json({ ok: false, error: "refused" });

@@ -78,7 +78,7 @@ test("the CDP token arrives as a 0400 file, is checked before the browser starts
 });
 
 test("the manifest bumps to 1.5.0, refreshes the four files, requires the token, and drops 9222 from ports", () => {
-  assert.equal(MANIFEST.version, "1.5.2", "a patch bump on top of 1.5.0: installed copies refresh");
+  assert.equal(MANIFEST.version, "1.6.0", "a minor bump: installed copies refresh");
   assert.deepEqual(
     MANIFEST.refreshFiles,
     ["docker-compose.yml", "Dockerfile", "entrypoint.sh", "cdp-relay.mjs"],

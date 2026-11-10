@@ -51,6 +51,10 @@ const { csrfTokenAccepted } = await appImport("servers/gateway/dashboard/shared/
 // socket, so `req.socket.remoteAddress` alone cannot tell a local caller from
 // a tailnet one; the agent routes ask this instead.
 const { classifyPeer } = await appImport("servers/shared/peer-class.js");
+// A walled Studio reaches the agent routes through its own relay, which marks the
+// socket; the mark is answered only with that spawn's door token (core policy).
+const { isAddonRelayAddr } = await appImport("servers/shared/bot-doors.js");
+const { validateAddonDoorToken } = await appImport("servers/shared/addon-doors.js");
 // The one definition of Crow's voice bot, so the Studio agent API never keeps a
 // second copy of that id: the voice bot reads every song and writes none.
 const { isVoiceBotId } = await appImport("servers/gateway/voice/crow-voice.js");
@@ -166,7 +170,12 @@ web = createStudioWeb({
   hub,
   Router,
   WebSocketServer,
-  auth: { isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted, classifyPeer },
+  auth: {
+    isAllowedNetwork, sessionFromRequest, verifySession, csrfTokenAccepted, classifyPeer,
+    // Optional to the web layer: present, a marked socket is judged by the door token.
+    isAddonRelayed: (req) => isAddonRelayAddr(req.socket?.remoteAddress),
+    validateAddonDoor: validateAddonDoorToken,
+  },
   crowHome,
   bundleDir: BUNDLE_DIR,
   // The instrument catalog and the one stored copy of each file, shared with
