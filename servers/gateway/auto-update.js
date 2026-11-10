@@ -386,6 +386,8 @@ const RESULT_SINCE_KEY = "auto_update_result_since";
 export const UPDATE_NOTIFIED_CODE_KEY = "auto_update_notified_code";
 export const UPDATE_NOTIFIED_AT_KEY = "auto_update_notified_at";
 export const UPDATE_NOTIFY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** The `notifications.source` every auto-update bell carries (and the one cleared on recovery). */
+export const UPDATE_NOTIFICATION_SOURCE = "auto-update";
 
 /**
  * Cause + action per classification code, keyed by exactly the codes
@@ -490,7 +492,7 @@ async function notifyUpdateFailure(value, nowMs = Date.now()) {
     const row = await createNotification(db, {
       type: "system",
       priority: "high",
-      source: "auto-update",
+      source: UPDATE_NOTIFICATION_SOURCE,
       title,
       body,
       action_url: "/dashboard/settings?section=updates",
@@ -505,6 +507,48 @@ async function notifyUpdateFailure(value, nowMs = Date.now()) {
     console.warn(`[auto-update] failure notification skipped: ${err?.message}`);
     return null;
   }
+}
+
+/**
+ * Dismiss every open update bell: the event those rows announced is over
+ * (audit N5-4). Called when a result classifies `ok` — an update applied, or
+ * "Up to date" with the updater healthy — because "Crow updates stopped: pull
+ * failed" must not outlive the failure it described. Same write as
+ * crow_dismiss_notification (is_dismissed = 1): the row is kept for History, so
+ * the bell, its count and the History list cannot disagree. Only this module's
+ * own source is touched, never another feature's bells. Never throws.
+ *
+ * @returns {Promise<number>} rows dismissed
+ */
+export async function clearUpdateFailureNotifications() {
+  if (!db) return 0;
+  try {
+    const r = await db.execute({
+      sql: "UPDATE notifications SET is_dismissed = 1, updated_at = datetime('now') WHERE source = ? AND is_dismissed = 0",
+      args: [UPDATE_NOTIFICATION_SOURCE],
+    });
+    return Number((r && r.rowsAffected) || 0);
+  } catch (err) {
+    console.warn(`[auto-update] could not clear the stopped-updates bell: ${err?.message}`);
+    return 0;
+  }
+}
+
+/**
+ * Forget the failure bell's cooldown, so the same failure returning after a
+ * recovery rings again (review N5-4). The cooldown exists to stop one standing
+ * condition from ringing on every tick; once a result proved the condition gone,
+ * a later reappearance is a NEW event and the operator has to hear it. Both keys
+ * are blanked (not deleted) so an old stamp can never be compared to a future
+ * code. Never throws.
+ */
+async function resetUpdateNotifyCooldown() {
+  if (!db) return;
+  // Nothing stamped (the usual case on a healthy install): no write on every tick.
+  const stamped = await readSettingValue(UPDATE_NOTIFIED_CODE_KEY);
+  if (!stamped) return;
+  await saveSetting(UPDATE_NOTIFIED_CODE_KEY, "", { notify: false });
+  await saveSetting(UPDATE_NOTIFIED_AT_KEY, "", { notify: false });
 }
 
 /**
@@ -552,6 +596,15 @@ async function saveSetting(key, value, { notify = true } = {}) {
       // each branch (including the migration-guard ones) without a per-branch
       // call to forget (audit N1c-2).
       if (notify) await notifyUpdateFailure(value);
+      // A good result ends the failure it followed (audit N5-4): the bell is
+      // about a condition that no longer holds, so it is dismissed here, in the
+      // one place every result write passes through — and its cooldown is
+      // forgotten with it, so the same failure returning later rings again
+      // (review N5-4) instead of staying silent for a day.
+      if (classifyUpdateResult(value)?.kind === "ok") {
+        await clearUpdateFailureNotifications();
+        await resetUpdateNotifyCooldown();
+      }
     }
     await db.execute({
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",

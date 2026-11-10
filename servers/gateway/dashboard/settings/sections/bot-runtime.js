@@ -52,6 +52,8 @@ const LEVEL_KEY = {
   [LEVEL_PARTLY]: "settings.containment.levelPartly",
   [LEVEL_NOT]: "settings.containment.levelNot",
 };
+/** The i18n key of a level word (the Bot Builder Safety tab shows the same words). */
+export { LEVEL_KEY };
 
 const WHY_KEY = {
   "world-writable without sticky": "settings.containment.whyWorldWritable",
@@ -70,7 +72,7 @@ export function _setHostBwrapProbeForTest(fn) { hostBwrapProbe = typeof fn === "
 
 /** One probe for both the containment level and the sandbox status line, so the
  *  two can never contradict each other. Never throws. */
-function currentProbe() {
+export function currentProbe() {
   if (hostBwrapProbe) {
     try {
       const v = hostBwrapProbe();
@@ -143,8 +145,11 @@ export function renderContainmentStatus({ bots = [], host = {}, ancestors = null
  * never reads, and the supervised Discord child is a separate process too, so a
  * record made here covers at most the Perch spawns and never the channel turns.
  * The same helper drives the sandbox status line, so both surfaces agree.
+ *
+ * Exported for the Bot Builder Safety tab, which shows the SAME computed level
+ * rather than its own guess (audit N1b-9).
  */
-async function containmentBots(db) {
+export async function containmentBots(db) {
   let rows = [];
   try {
     const r = await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition FROM pi_bot_defs", args: [] });

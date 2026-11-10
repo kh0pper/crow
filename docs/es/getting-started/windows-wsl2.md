@@ -69,9 +69,9 @@ curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-inst
 
 El instalador detecta Debian/Ubuntu y se ejecuta normalmente — Node.js, la plataforma Crow, un servicio systemd y un certificado HTTPS autofirmado se configuran dentro del entorno Ubuntu de WSL2. Toma de 5 a 10 minutos, igual que una instalación nativa de Linux.
 
-## Las Dos Peculiaridades de WSL2
+## Las Tres Peculiaridades de WSL2
 
-WSL2 se comporta como Linux para casi todo, pero dos cosas funcionan distinto a una máquina Linux nativa. Cada una tiene una solución sencilla.
+WSL2 se comporta como Linux para casi todo, pero tres cosas funcionan distinto a una máquina Linux nativa. Cada una se explica abajo.
 
 ### 1. Acceso desde el navegador: usa `localhost`, no `.local`
 
@@ -107,6 +107,34 @@ Si alguna vez necesitas explorar tus datos de Crow desde **Windows** (el Explora
 ```
 
 Explóralos solo de lectura desde ahí si quieres echar un vistazo a los archivos — simplemente no muevas la instalación real ahí.
+
+### 3. Red: quién puede llegar a Crow
+
+El gateway de Crow escucha en todas las interfaces dentro del entorno Ubuntu, así que si otro dispositivo de tu red puede alcanzarlo depende de cómo WSL2 reparte las direcciones de red. Eso es una configuración del lado de Windows, no de Crow, y es la diferencia entre "accesible desde este PC" y "accesible desde toda la LAN".
+
+**En el modo por defecto (NAT), otros dispositivos no pueden llegar a Crow.** WSL2 le da a su máquina virtual un adaptador ethernet virtualizado con su propia dirección IP privada detrás de Windows, así que un teléfono o un portátil de tu LAN no tiene ruta hasta el gateway. Alcanzar un servidor dentro de WSL2 desde otro dispositivo es el mismo problema que alcanzar una VM, y la respuesta documentada por Microsoft es un proxy de puerto (`netsh interface portproxy add v4tov4 …`). **No hagas eso con Crow** — usa [Tailscale](./tailscale-setup) en su lugar, que llega a Crow desde tus otros dispositivos por una red privada sin publicar un puerto en tu LAN. Desde Windows mismo, `localhost` funciona en este modo sin configuración: WSL2 lo reenvía automáticamente a la máquina virtual.
+
+::: warning Antes de usar el modo espejo (mirrored)
+Si configuras `networkingMode=mirrored` bajo `[wsl2]` en `%UserProfile%\.wslconfig` (Windows 11 22H2 y posteriores), Microsoft lista "Connect to WSL directly from your local area network (LAN)" como una ventaja — así que el puerto de Crow puede quedar accesible desde tu red. En Windows 11 22H2 con WSL 2.0.9 o posterior el firewall de Hyper-V viene encendido por defecto y filtra el tráfico entrante y saliente de WSL, pero Microsoft no documenta cuál es su acción entrante por defecto, así que **compruébala en vez de suponerla**. En un PowerShell como administrador:
+
+```powershell
+Get-NetFirewallHyperVVMSetting -PolicyStore ActiveStore -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+```
+
+Eso imprime `DefaultInboundAction`. No lo pongas en `Allow` y no agregues una regla entrante para el puerto de Crow — cualquiera de las dos deja que toda tu LAN llegue a la página de inicio de sesión del Crow's Nest. Las reglas que ya existen se listan con:
+
+```powershell
+Get-NetFirewallHyperVRule -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+```
+
+La clave `firewall` de `.wslconfig` (un booleano, `true` por defecto) es lo que permite que el Firewall de Windows y las reglas de Hyper-V filtren el tráfico de WSL: déjala activada. Los cambios en `.wslconfig` solo surten efecto después de `wsl --shutdown` y un reinicio de WSL.
+:::
+
+Nunca uses un proxy de puerto (`netsh interface portproxy add v4tov4 …`) para el puerto de Crow en ninguno de los dos modos: publica el gateway, inicio de sesión del panel incluido, en tu red mientras la regla exista.
+
+**¿En qué modo estás?** Busca `networkingMode` bajo `[wsl2]` en `%UserProfile%\.wslconfig`. Ese archivo no existe por defecto, y sin archivo (o sin esa clave) el modo es NAT.
+
+ufw dentro del entorno Ubuntu sigue filtrando lo que llega al lado Linux — el instalador lo habilita — pero es una segunda capa, no un reemplazo del lado de Windows.
 
 ## Aceleración por GPU: NVIDIA vs. AMD vs. Solo CPU
 

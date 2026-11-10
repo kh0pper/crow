@@ -22,7 +22,7 @@ import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import { reportImagePullFailure } from "../bundle-pull-alert.js";
-import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia } from "../bundle-first-admin.js";
+import { markFirstAdminDone, reportFirstAdminNotice, firstAdminVia, clearFirstAdminNotice } from "../bundle-first-admin.js";
 import { runFirstAdminSetup, saveFirstAdminLogin, firstAdminSetupPlan, firstAdminResultMessage, SETUP_UNAVAILABLE } from "../bundle-first-admin-setup.js";
 import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
@@ -4019,6 +4019,7 @@ export default function bundlesRouter() {
         appendLog(job, "Bundle files removed");
 
         // 6. Update installed.json
+        const previousEntry = getInstalled().find((i) => i.id === bundle_id) || null;
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
@@ -4032,6 +4033,21 @@ export default function bundlesRouter() {
           },
         });
         if (keptPasswords) appendLog(job, `Kept ${keptPasswords} saved password(s) in Crow keychain, marked "extension removed" (Settings → Security & passwords → Saved passwords & keys)`);
+
+        // Its "Finish <app>'s setup now" card and bell are about an app that is gone
+        // (audit N5-4). The card follows installed.json; the bell has to be dismissed,
+        // or it outlives the app it asked about.
+        try {
+          const noticeDb = createDbClient();
+          try {
+            const cleared = await clearFirstAdminNotice(noticeDb, bundle_id, {
+              installId: (previousEntry && (previousEntry.installedAt || previousEntry.installed_at)) || null,
+            });
+            if (cleared.dismissed) appendLog(job, "Cleared its finish-setup notice");
+          } finally {
+            noticeDb?.close();
+          }
+        } catch { appendLog(job, "Note: could not clear its finish-setup notice"); }
 
         let notifDb;
         try {

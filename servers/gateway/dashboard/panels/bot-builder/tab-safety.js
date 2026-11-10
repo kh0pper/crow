@@ -11,6 +11,10 @@ import { getManifest } from "../../../bundles-config.js";
 import { sourceLabel } from "./tool-access.js";
 import { installPaths, satelliteInstalls } from "../../../satellites/installs.js";
 import { getBotOptin } from "../../../satellites/store.js";
+import {
+  instanceContainment, LEVEL_CONTAINED, LEVEL_PARTLY, LEVEL_NOT, OPEN_DATA_DBS,
+} from "../../../../../scripts/pi-bots/containment-status.mjs";
+import { containmentBots, currentProbe, LEVEL_KEY } from "../../settings/sections/bot-runtime.js";
 
 export async function renderSafety(ctx) {
   const { db, def, lang, hidden } = ctx;
@@ -35,6 +39,16 @@ export async function renderSafety(ctx) {
   }
   const readPaths = Array.isArray(pp.read_paths) ? pp.read_paths : [];
   const writePaths = Array.isArray(pp.write_paths) ? pp.write_paths : [];
+  // What the folder lists really are (audit N1b-9, review N5-4). In the default
+  // tier a bot's commands run as this account, so the lists are advice, not limits;
+  // only a contain-tier spawn enforces them, and only for the bots it covers. The
+  // level is COMPUTED by containment-status.mjs through the same helper Settings →
+  // Bot Runtime uses — never re-derived here, and never inferred from this
+  // process's env.
+  const level = await instanceLevel(db, lang, { botId: ctx.botId, bot: ctx.bot });
+  const foldersSpeech = level.enforced
+    ? t(level.dbsOpen ? "botbuilder.sfFoldersEnforcedDbs" : "botbuilder.sfFoldersEnforced", lang)
+    : t("botbuilder.sfFoldersNotLimits", lang);
   const folders = card(t("botbuilder.sfFoldersTitle", lang),
     `<div class="btb-group"><label for="sf-read">${escapeHtml(t("botbuilder.labelReadPaths", lang))}</label>` +
     `<textarea id="sf-read" name="pp_read_paths" rows="3" class="btb-textarea" placeholder="/home/you/notes">${escapeHtml(readPaths.join("\n"))}</textarea>` +
@@ -42,7 +56,12 @@ export async function renderSafety(ctx) {
     `<p class="btb-hint">${t("botbuilder.hintReadPaths", lang)}</p></div>` +
     `<div class="btb-group"><label for="sf-write">${escapeHtml(t("botbuilder.sfWritePaths", lang))}</label>` +
     `<textarea id="sf-write" name="pp_write_paths" rows="3" class="btb-textarea">${escapeHtml(writePaths.join("\n"))}</textarea>` +
-    `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>`);
+    `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>` +
+    `<p class="btb-hint" data-testid="containment-level">${escapeHtml(level.text)}</p>` +
+    `<p class="btb-hint" data-testid="containment-folders">${escapeHtml(foldersSpeech)}` +
+    (level.runsChecked ? ` ${escapeHtml(t("botbuilder.sfContainmentRunsChecked", lang))}` : "") +
+    (level.enforced ? "" : ` <a href="/dashboard/settings?section=bot-runtime">${escapeHtml(t("botbuilder.sfContainmentLink", lang))}</a>`) +
+    `</p>`);
 
   const crowHome = ctx.crowHome || resolveCrowHome();
   // Satellite-hosted bundles (SAT-7 part B): the per-bot "also on other people's turns" opt-in,
@@ -85,8 +104,71 @@ export async function renderSafety(ctx) {
 
   return `<form method="POST" class="btb-form" id="btb-safety-form">${hidden("safety")}` +
     email + folders + satCard + ask +
-    `<p class="btb-hint">${t("botbuilder.hintPermEnforced", lang)}</p>` +
+    `<p class="btb-hint" data-testid="safety-summary">${escapeHtml(t(level.enforced ? "botbuilder.sfSummaryContained" : "botbuilder.sfSummaryNotContained", lang))}</p>` +
     actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.sfSave", lang))}</button>`) + `</form>`;
+}
+
+/**
+ * THIS bot's containment, in the words Settings → Bot Runtime uses (audit N1b-9,
+ * review N5-4).
+ *
+ * `enforced` is true only when THIS bot has its own `contained` / `partly contained`
+ * entry in containmentBots(): that helper lists only ENABLED pi bots, and the contain
+ * tier can cover a subset of them (CROW_PI_CONTAIN_BOTS), so another bot's
+ * containment says nothing about this bot's folders. `dbsOpen` follows this bot's own
+ * open lines (containment-status.mjs's OPEN_DATA_DBS), so the database sentence
+ * appears only when it is true FOR THIS BOT.
+ *
+ * `runsChecked` is true for a pi bot the list does not cover because it is disabled:
+ * pi_contain.mjs picks the tier at every pi spawn (containSelected), so containment is
+ * decided when the bot runs — which is never a reason to claim the folders are limits
+ * now, and never a claim about a non-pi engine, which pi_contain does not touch.
+ *
+ * Never throws: an unreadable level, a failed probe (review L4) or a bad record leaves
+ * the not-limits wording, because this page may not print limits it cannot show.
+ *
+ * @returns {Promise<{level:string, enforced:boolean, dbsOpen:boolean, runsChecked:boolean, text:string}>}
+ */
+async function instanceLevel(db, lang, { botId = null, bot = null } = {}) {
+  try {
+    const bots = await containmentBots(db);
+    const probe = currentProbe();
+    const inst = instanceContainment(bots, { host: { bwrap: probe.ok === true } });
+    const level = Object.hasOwn(LEVEL_KEY, inst.level) ? inst.level : LEVEL_NOT;
+    const mine = botId ? bots.find((b) => b && String(b.botId) === String(botId)) : null;
+    // A spawn record is history: if bwrap is not on this host now, nothing is contained
+    // now, whatever an earlier run recorded.
+    const enforced = probe.ok === true && !!mine
+      && (mine.level === LEVEL_CONTAINED || mine.level === LEVEL_PARTLY);
+    const dbsOpen = enforced && Array.isArray(mine.open)
+      && mine.open.some((line) => String(line).endsWith(OPEN_DATA_DBS));
+    // The same key (and the same words) Bot Runtime's own level line uses, so the two
+    // surfaces can never drift; "no bots" when this process could observe none.
+    // This page is about ONE bot: when it has its own entry, the line shows that bot's
+    // level (never the instance-wide minimum, which could read "not contained" right
+    // above "containment is on for this bot"); otherwise the instance's level.
+    const shown = mine
+      ? (enforced ? (Object.hasOwn(LEVEL_KEY, mine.level) ? mine.level : LEVEL_NOT) : LEVEL_NOT)
+      : level;
+    const text = bots.length > 0
+      ? fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[shown], lang) })
+      : t("settings.containment.noBots", lang);
+    const runsChecked = !enforced && !mine && isDisabledPiBot(bot);
+    return { level: shown, enforced, dbsOpen, runsChecked, text };
+  } catch {
+    return {
+      level: LEVEL_NOT, enforced: false, dbsOpen: false, runsChecked: false,
+      text: fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[LEVEL_NOT], lang) }),
+    };
+  }
+}
+
+/** A pi bot the containment list does not cover because it is disabled (so nothing ran here). */
+function isDisabledPiBot(bot) {
+  if (!bot || Number(bot.enabled) === 1) return false;
+  let def = {};
+  try { def = JSON.parse(bot.definition || "{}") || {}; } catch { def = {}; }
+  return def.engine == null || def.engine === "pi";
 }
 
 /**

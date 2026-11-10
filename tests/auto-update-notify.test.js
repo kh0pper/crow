@@ -54,9 +54,14 @@ function stubDb(initial = {}) {
       if (/INSERT INTO notifications/.test(sql || "")) {
         notifications.push({
           type: args[0], source: args[1], title: args[2], body: args[3],
-          priority: args[4], action_url: args[5], metadata: args[6],
+          priority: args[4], action_url: args[5], metadata: args[6], is_dismissed: 0,
         });
         return { rows: [], lastInsertRowid: notifications.length };
+      }
+      if (/UPDATE notifications SET is_dismissed = 1/.test(sql || "") && /WHERE source = \?/.test(sql || "")) {
+        const mine = notifications.filter((n) => n.source === args[0] && !n.is_dismissed);
+        for (const n of mine) n.is_dismissed = 1;
+        return { rows: [], rowsAffected: mine.length };
       }
       return { rows: [] };
     },
@@ -150,6 +155,46 @@ test("a failure result rings once: system, high, auto-update, Updates card link"
     assert.ok(Number.isFinite(Date.parse(db.settings.get(UPDATE_NOTIFIED_AT_KEY))));
     // The text must not carry command output (paths/secrets live there).
     assert.ok(!/fatal:|error:|\.git|stdout|stderr/i.test(`${n.title} ${n.body}`));
+  } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(REAL_APP_ROOT);
+    fx.cleanup();
+  }
+});
+
+test("a failure that returns after a recovery rings again", async () => {
+  // The cooldown is for a STANDING condition, not for the failure itself: once a
+  // healthy result cleared the bell, the same failure coming back is a new event and
+  // has to ring (review N5-4) — otherwise the operator hears nothing for 24 h.
+  const fx = originFixture();
+  const db = stubDb();
+  try {
+    _setAppRootForTest(fx.work);
+    _setDbForTest(db);
+
+    // The failure rings and stamps the cooldown.
+    g(fx.work, "checkout", "-b", "feature/x");
+    const first = await checkForUpdates();
+    assert.equal(first.skipped, "not-on-main", JSON.stringify(first));
+    assert.equal(db.notifications.length, 1);
+    assert.equal(db.settings.get(UPDATE_NOTIFIED_CODE_KEY), "not-on-main", "the cooldown is stamped");
+
+    // The updater recovers: an ok result dismisses the bell AND forgets the cooldown.
+    g(fx.work, "checkout", "main");
+    const recovered = await checkForUpdates();
+    assert.equal(recovered.updated, false, JSON.stringify(recovered));
+    assert.equal(db.settings.get("auto_update_last_result"), "Up to date");
+    assert.equal(db.notifications[0].is_dismissed, 1, "the stopped-updates bell is gone");
+    assert.equal(db.settings.get(UPDATE_NOTIFIED_CODE_KEY), "", "the cooldown code is reset");
+    assert.equal(db.settings.get(UPDATE_NOTIFIED_AT_KEY), "", "and so is its clock");
+
+    // The very same failure returns minutes later: it rings again.
+    g(fx.work, "checkout", "feature/x");
+    const again = await checkForUpdates();
+    assert.equal(again.skipped, "not-on-main", JSON.stringify(again));
+    assert.equal(db.notifications.length, 2, "the same failure rings again after a recovery");
+    assert.equal(db.notifications[1].is_dismissed, 0, "and the new bell is open");
+    assert.equal(JSON.parse(db.notifications[1].metadata).code, "not-on-main");
   } finally {
     _setDbForTest(null);
     _setAppRootForTest(REAL_APP_ROOT);
