@@ -25,10 +25,12 @@
  *      password), and at most TWO login attempts,
  *   8. a create that answers unclearly is settled by Calibre's own account list: the name now
  *      listed is proved with a real login (0), an install with other accounts is left alone
- *      (3), an unreadable re-read is tried again rather than treated as a verdict, and a create
- *      the docker client timed out on (exit 124) whose account never appears before the loop's
- *      25 s deadline is kept with exit 5 — `timeout` kills the client, not the add, so the
- *      account may yet exist; a clean refusal whose account never appears is exit 1,
+ *      (3), an unreadable re-read is tried again rather than treated as a verdict, a create the
+ *      docker client timed out on (exit 124) whose account then shows up in Calibre's list is a
+ *      change Calibre confirmed — proved with a real login (0), or kept with exit 5 when that
+ *      proof fails — while one whose account never appears by the loop's 25 s deadline, or
+ *      whose list never becomes readable, is exit 1 and saves nothing; a clean refusal whose
+ *      account never appears is exit 1 too,
  *   9. the compose: no 3000/3001, the content server only, `--enable-auth --auth-mode basic`
  *      with the user database, the library mounted at /library, the loopback publish, and a
  *      config-volume owner that runs on the SAME image after Docker's first copy-up,
@@ -384,16 +386,27 @@ test("an unclear create on an app that still has no accounts changes nothing (ex
   assert.ok(listCalls(r).length > 2, "the list is re-read until the loop's deadline before deciding");
 });
 
-test("a create the docker client timed out on is kept when the account shows up on a later read", () => {
+test("a create the docker client timed out on is confirmed by Calibre's own list, then proved (exit 0)", () => {
   // `timeout 30` kills the CLIENT; the add can still finish inside the container. Calibre's
-  // own list gaining the account is the proof — dropping the password here would leave an
-  // account nobody on this machine knows the password to.
+  // own list gaining the account is the app confirming the change, and the login below proves
+  // the password Crow holds.
   const r = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "124", FAKE_USERS_1: "", FAKE_USERS_2: ADMIN } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(addCalls(r).length, 1, "the create is attempted exactly once");
   assert.equal(listCalls(r).length, 3, "the account was found on the third read");
   assert.equal(proofCalls(r).length, 1, "and the password the container took is proved with a real login");
   assert.equal(configValue(proofCalls(r)[0].stdin, "user"), `${ADMIN}:${PASSWORD}`);
+  assertPasswordStayedOutOfSight(r);
+});
+
+test("a create Calibre's own list confirmed but a login it never accepts is kept (exit 5)", () => {
+  // Review round 4: the listing is the app's confirmation, so it is what makes a failed proof
+  // exit 5 (the password IS Calibre's) rather than 3 (the account is not Crow's).
+  const r = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "124", FAKE_USERS_1: "", FAKE_USERS_2: ADMIN, FAKE_PROOF: "401" } });
+  assert.equal(r.status, 5, r.stderr);
+  assert.match(r.stderr, /accepted the new password, but logging in with it did not succeed/);
+  assert.match(r.stderr, /Crow kept the new password; use the login in Settings → Passwords/);
+  assert.equal(proofCalls(r).length, 2, "the proof is tried twice and no more");
   assertPasswordStayedOutOfSight(r);
 });
 
@@ -408,14 +421,16 @@ test("an unreadable re-read after an unclear create is tried again, not treated 
   assertPasswordStayedOutOfSight(r);
 });
 
-test("a create the docker client timed out on, whose list never becomes readable, keeps the password (exit 5)", () => {
-  // `timeout 30` killed the CLIENT: the add may still have gone through inside the container,
-  // and Calibre never lets the script read its account list. Dropping the password here could
-  // leave an account nobody on this machine knows the password to, so it is kept.
+test("a create the docker client timed out on, whose list never becomes readable, saves nothing (exit 1)", () => {
+  // Review round 4: exit 5 is only for a change THE APP confirmed. Here Calibre never listed
+  // the account — the list never became readable at all — so nothing was confirmed, nothing is
+  // kept, and the message says how to undo it if the add did go through inside the container.
   const r = run({ answers: { FAKE_USERS: "<<fail>>", FAKE_USERS_0: "", FAKE_ADD_0: "124" } });
-  assert.equal(r.status, 5, r.stderr);
-  assert.match(r.stderr, /may have gone through, so Crow kept the new password/);
-  assert.match(r.stderr, /use the login in Settings → Passwords/);
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /Calibre did not answer while Crow was creating 'admin'/);
+  assert.match(r.stderr, /nothing is saved/);
+  assert.match(r.stderr, /remove it with calibre-server --manage-users/);
+  assert.match(r.stderr, /press Set it up for me again/);
   assert.equal(addCalls(r).length, 1, "the create was attempted exactly once");
   assert.equal(proofCalls(r).length, 0, "no login can be proved from a list nobody could read");
   assert.ok(listCalls(r).length > 2, "and the reads were retried until the deadline");
@@ -535,7 +550,7 @@ test("the script names its container for the tests, validates before any call, a
   assert.match(script, /\[ "\$\{#PW\}" -ge 12 \]/, "a password shorter than 12 characters is refused");
   assert.equal(script.includes(PASSWORD), false, "no password is baked into the script");
   const exit5 = script.split("\n").filter((line) => /^\s*die ".*" 5$/.test(line));
-  assert.equal(exit5.length, 2, "two exit-5 paths: an accepted create whose login fails, and a create the client timed out on");
+  assert.equal(exit5.length, 1, "one exit-5 path: a change Calibre itself confirmed whose login fails");
   for (const line of exit5) assert.match(line, /Crow kept the new password; use the login in Settings → Passwords/);
 });
 

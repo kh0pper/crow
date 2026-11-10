@@ -21,7 +21,7 @@
  *   exit 0   the app's admin <user> now has exactly that password
  *   exit 3   the app already has its own admin (set up earlier by the operator)
  *   exit 4   the app is not running / not answering; nothing changed
- *   exit 5   the app accepted the new password, but logging in with it did not succeed
+ *   exit 5   the app itself confirmed the new password, but logging in with it did not succeed
  *   other    failed (a timeout counts as failed)
  *
  * The manifest and the script come from Crow's OWN copy of the bundle (the reviewed

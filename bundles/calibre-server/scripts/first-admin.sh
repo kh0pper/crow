@@ -15,9 +15,11 @@
 #   0 = the account for the declared user now has exactly that password
 #   3 = Calibre already has accounts (set up earlier); left alone, nothing changed
 #   4 = not running / not answering / account list unreadable / no docker or curl here
-#   5 = Calibre may hold the password, but Crow could not confirm it (a create the docker client
-#       timed out on, or a create it accepted whose login did not succeed); Crow keeps the password
-#   1 = anything else (a create that did not happen and left no account behind)
+#   5 = Calibre itself confirmed the new password (its own account list showing the account
+#       counts as that confirmation), but logging in with it did not succeed; Crow keeps the
+#       password
+#   1 = anything else: a create that did not happen, or one that timed out whose account never
+#       appeared in Calibre's own list before the deadline — nothing was confirmed, nothing saved
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -106,11 +108,14 @@ if [ -z "$confirmed" ]; then
   # Calibre answered without saying it created the account (a name that already exists
   # answers "already exists" with a nonzero exit), or `timeout` killed the docker CLIENT
   # while the create went on inside the container. Its own account list decides, never the
-  # exit code alone — and it is read again until a deadline: a create that just timed out can
-  # appear a second or two later, and dropping the password then would leave an account nobody
-  # here knows the password to. An UNREADABLE re-read is "try again", never an exit: a
-  # transient failure says nothing about whether the account exists. The name appearing is not
-  # proof by itself: the login below is.
+  # exit code alone — and it is read again until a deadline, because a create that just timed
+  # out can appear a second or two later. An UNREADABLE re-read is "try again", never an exit:
+  # a transient failure says nothing about whether the account exists.
+  #
+  # The name appearing in Calibre's own list IS Calibre confirming the change, so a create the
+  # docker client timed out on (exit 124) becomes `confirmed` once it is listed, and the login
+  # below then proves the password (0, or 5 when the proof fails). A name that never appears is
+  # no confirmation at all: nothing is saved (exit 1).
   #
   # Worst-case time of this whole script, against the manifest's timeout_s 180:
   #   wait for the server  45 s budget + one 5 s probe       ≈  50 s
@@ -119,6 +124,8 @@ if [ -z "$confirmed" ]; then
   #   this re-read loop    25 s deadline + one 20 s read + 2 =  47 s
   #   the proof            2 x max-time 10 + one 3 s sleep   =  23 s
   #                                                           ≈ 170 s, inside 180
+  # The timed-out path stops in this loop instead (exit 1 on the same deadline), so it ends a
+  # proof's worth of time earlier — the budget above stays the worst case.
   found=""
   reread_deadline=$((SECONDS + 25))
   while :; do
@@ -127,6 +134,9 @@ if [ -z "$confirmed" ]; then
     if read_users; then
       if [ -n "$(printf '%s' "$USERS_RAW" | tr -d '[:space:]')" ]; then
         has_account || die "Calibre has accounts, but none named '$ADMIN_USER', so Crow's password cannot open one; left alone, and nothing of Crow's was saved." 3
+        # A create the docker client timed out on is confirmed by Calibre's own list gaining
+        # the account; a create that answered for itself (exit 0) was confirmed above.
+        if [ "$add_exit" -eq 124 ]; then confirmed=1; fi
         found=1
         break
       fi
@@ -135,11 +145,12 @@ if [ -z "$confirmed" ]; then
     sleep 2
   done
   if [ -z "$found" ]; then
-    # The account never appeared before the deadline. 124 is `timeout` killing the docker
-    # client: the add may still have gone through inside the container, so the password is
-    # kept (exit 5) — exactly as when a create is confirmed but its login cannot be proved.
+    # Calibre never listed the account before the deadline, so nothing was confirmed and
+    # nothing is saved. 124 is `timeout` killing the docker client: the add may still have run
+    # inside the container, so the message says how to undo it if it shows up later — but an
+    # account Calibre never confirmed is not exit 5, whatever the add's exit code was.
     if [ "$add_exit" -eq 124 ]; then
-      die "Calibre did not report whether it created the account before this script's deadline; the add may have gone through, so Crow kept the new password; use the login in Settings → Passwords." 5
+      die "Calibre did not answer while Crow was creating '$ADMIN_USER'; nothing is saved. If an '$ADMIN_USER' account shows up in Calibre later, remove it with calibre-server --manage-users and press Set it up for me again." 1
     fi
     die "Calibre did not create the account, so nothing was changed; check the app's own login." 1
   fi
@@ -169,8 +180,9 @@ while :; do
   sleep 3
 done
 if [ "$proof" != "LOGIN-OK" ]; then
-  # Calibre itself confirmed the create, so the new password IS its password: Crow keeps it
-  # and says it could not log in with it (exit 5). Without that confirmation the account is
+  # Calibre itself confirmed the create (its own command exited 0, or its own account list
+  # gained the account after a timed-out add), so the new password IS its password: Crow keeps
+  # it and says it could not log in with it (exit 5). Without that confirmation the account is
   # not Crow's — Crow's password does not open it — so nothing is saved (exit 3).
   if [ -n "$confirmed" ]; then
     die "Calibre accepted the new password, but logging in with it did not succeed; Crow kept the new password; use the login in Settings → Passwords." 5

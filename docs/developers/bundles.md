@@ -305,11 +305,11 @@ argument is visible in the process list on both sides.
 Exit `5` exists so that a password the app really did take is never thrown away because
 the script could not log in with it afterwards: a proof that fails is not a failure of
 the change. Retry the proof a couple of times (an app that just restarted may not answer
-yet), and exit `5` only once the app itself has confirmed the change — then Crow keeps the
-password and says on the card that it could not log in with it to confirm. The same exit
-covers a create the script could not read back within its own budget: if the script's own
-timeout killed the call, the app may still have taken the password, so it exits `5` (Crow
-keeps it) rather than `1` (which drops it).
+yet), and exit `5` only when the app itself confirmed the change — an app's own account
+list showing the new account counts as that confirmation — then Crow keeps the
+password and says on the card that it could not log in with it to confirm. A create the
+script could not confirm is never exit `5`: if its call timed out and the account never
+shows up in the app's own list, nothing was confirmed, so nothing is saved (`1`).
 
 The script reports what happened through its exit code:
 
@@ -318,7 +318,7 @@ The script reports what happened through its exit code:
 | `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords), into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars`, and into the bundle's `mcp-addons.json` entry when it has one |
 | `3` | the app already has its own admin (set up earlier by the operator); nothing changed | leaves everything alone, and asks the operator to save the login they use |
 | `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
-| `5` | the app accepted the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
+| `5` | the app itself confirmed the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
 | anything else, or a timeout | failed | says so on the card and in the install log |
 
 ### `setup.after`: what Crow does once the admin exists
