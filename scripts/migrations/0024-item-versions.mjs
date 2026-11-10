@@ -5,8 +5,9 @@
 // value after the change, who made it and which job it belonged to. Filled by
 // SQLite triggers on each covered table, so a write is recorded however it
 // arrives — including a bot's own direct SQL connection, which is the case the
-// feature exists for. The field lists and the trigger bodies come from
-// servers/shared/history/covered.js, so the two can never drift.
+// feature exists for. The field lists, the trigger bodies and the append-only
+// guards come from servers/shared/history/covered.js, so the two can never
+// drift.
 //
 // LOCAL ONLY: item_versions is never added to instance-sync's SYNCED_TABLES. Each
 // instance records the versions of every change it applies, including ones that
@@ -15,18 +16,36 @@
 // Additive only, no SCHEMA_GENERATION bump (init-db.js is untouched): the
 // registry is the rail for schema a running instance can pick up on boot.
 //
+// ATOMIC PER TABLE: for each covered table the triggers and the baseline are one
+// BEGIN IMMEDIATE transaction (better-sqlite3 db.transaction(...).immediate()).
+// It has to be one transaction because a write landing between "triggers exist"
+// and "baseline written" would be captured by the trigger AND count as the
+// item's only version, so the baseline guard would then skip it — leaving a row
+// whose first real version is a later edit and whose original value is lost.
+// One transaction means no other connection sees an intermediate state.
+//
+// The baseline is guarded PER ITEM, not per item type: a row that already has
+// ANY version is left alone (it was captured live), every other row gets one
+// 'insert' baseline authored by 'system'. That also makes a partially completed
+// earlier run safe to repeat.
+//
 // Idempotent in its own right, because a database restored from backup can lose
-// its schema_migrations row: the table, the indexes and the triggers are all
-// IF NOT EXISTS, and the baseline is guarded per item type (see baselineSql), so
-// a second run writes nothing.
+// its schema_migrations row: the table, the indexes, the control table and the
+// triggers are all IF NOT EXISTS, and the baseline is per item, so a second run
+// writes nothing.
 //
 // Tolerant of absent tables: memories / blog_posts / crow_context are created by
 // init-db.js, but a store can be missing one (a partial restore, or a bare DB on
 // a co-hosted instance that has not run init-db yet). An absent table — or a
-// present one that is still missing a tracked column — is skipped with a logged
-// reason, and the run DEFERS, so a later boot retries and picks up the triggers
-// then. The table itself is always created: it holds no data of its own until a
-// covered table is there to fill it.
+// present one that is still missing a tracked or snapshotted column — is skipped
+// with a logged reason, and the run DEFERS, so a later boot retries and picks up
+// the triggers then. The table itself is always created: it holds no data of its
+// own until a covered table is there to fill it.
+//
+// The triggers can disappear without this migration's record disappearing (an
+// init-db rebuild of a covered table drops them). servers/shared/history/ensure.js
+// re-creates them on every boot for exactly that reason; this file is the one
+// that also writes baselines.
 //
 // TODO(history-redaction, Task 4): text that matches the public-hygiene secret
 // patterns is meant to be stored as "[redacted]" with redacted = 1. That cannot
@@ -36,12 +55,21 @@
 // versions with redacted = 0; until then a secret written into a covered column
 // is copied verbatim into item_versions.
 import Database from "better-sqlite3";
-import { COVERED, SECRET_COLUMN, triggerSql } from "../../servers/shared/history/covered.js";
+import { performance } from "node:perf_hooks";
+import {
+  COVERED,
+  ITEM_VERSIONS_ERASE_DDL,
+  SECRET_COLUMN,
+  guardTriggerSql,
+  projectRefExpr,
+  snapshotExpr,
+  triggerSql,
+} from "../../servers/shared/history/covered.js";
 
 export const id = "0024-item-versions";
 
-// rollbackSafe: a new table, its indexes and triggers on existing tables;
-// older code neither reads nor writes any of them.
+// rollbackSafe: a new table, its indexes, guards and triggers on existing
+// tables; older code neither reads nor writes any of them.
 export const rollbackSafe = true;
 
 // Whole content snapshots (they are small for text rows; diffs are computed at
@@ -50,13 +78,24 @@ export const rollbackSafe = true;
 // author_id / job_id / origin_instance are stamped by the gateway after the
 // trigger has inserted the row (Task 2), which is why they are nullable and
 // `author_kind` defaults rather than being required.
-export const ITEM_VERSIONS_DDL = `
+//
+// `project_ref` is the erase scope: the item's project at the time of the
+// version (memories: project_uuid else project_id; crow_context: project_id;
+// blog_posts: NULL — a post belongs to the instance, not a project). It is a
+// copy, not a join, so a version stays findable by project after the project row
+// or the item itself is gone. This is Task 4's index.
+//
+// The erase control table and the append-only guards are appended from
+// covered.js: the guards must be installed with the table, not later.
+export const ITEM_VERSIONS_DDL =
+  `
   CREATE TABLE IF NOT EXISTS item_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     item_type TEXT NOT NULL,
     item_id TEXT NOT NULL,
     op TEXT NOT NULL CHECK(op IN ('insert','update','delete')),
     snapshot_json TEXT NOT NULL,
+    project_ref TEXT,
     author_kind TEXT NOT NULL DEFAULT 'unattributed'
       CHECK(author_kind IN ('owner','bot','peer','system','unattributed')),
     author_id TEXT,
@@ -70,26 +109,37 @@ export const ITEM_VERSIONS_DDL = `
     ON item_versions(item_type, item_id, id);
   CREATE INDEX IF NOT EXISTS idx_item_versions_job
     ON item_versions(job_id);
-`;
+  CREATE INDEX IF NOT EXISTS idx_item_versions_project
+    ON item_versions(project_ref);
+` +
+  ITEM_VERSIONS_ERASE_DDL +
+  "\n" +
+  guardTriggerSql().join(";\n") +
+  ";\n";
 
 /**
- * One `insert` baseline version per existing row of a covered table, authored by
- * the migration ('system'), so an upgraded instance has a starting point for
- * content that predates history.
+ * One `insert` baseline version per existing row of a covered table that has no
+ * version yet, authored by the migration ('system'), so an upgraded instance has
+ * a starting point for content that predates history.
  *
- * Guarded per item type on purpose: the WHERE NOT EXISTS makes the whole
- * statement a no-op once that item type has ANY version, so re-running (or a
- * partially completed earlier run) never duplicates baselines. It is also why it
- * is one statement rather than a count comparison — SQLite runs it atomically.
+ * Guarded per ITEM (`v.item_id = CAST(t.<id> AS TEXT)`), not per item type: a row
+ * already captured by a live trigger keeps its real versions instead of gaining a
+ * second 'insert', and a partially completed earlier run fills only the gaps.
+ * Every value goes through covered.js's BLOB-safe expression, and `project_ref`
+ * is filled the same way the triggers fill it.
  */
 export function baselineSql(itemType, spec) {
   const quoted = (s) => `'${String(s).replace(/'/g, "''")}'`;
-  const snapshot = `json_object(${spec.tracked.map((c) => `${quoted(c)}, ${c}`).join(", ")})`;
-  return `INSERT INTO item_versions (item_type, item_id, op, snapshot_json, author_kind)
-    SELECT ${quoted(itemType)}, CAST(${spec.idColumn} AS TEXT), 'insert', ${snapshot}, 'system'
-      FROM ${spec.table}
-     WHERE NOT EXISTS (SELECT 1 FROM item_versions WHERE item_type = ${quoted(itemType)})
-     ORDER BY ${spec.idColumn}`;
+  const idOf = `CAST(t."${spec.idColumn}" AS TEXT)`;
+  return `INSERT INTO item_versions (item_type, item_id, op, snapshot_json, project_ref, author_kind)
+    SELECT ${quoted(itemType)}, ${idOf}, 'insert', ${snapshotExpr(spec, "t")},
+           ${projectRefExpr(spec, "t")}, 'system'
+      FROM ${spec.table} t
+     WHERE NOT EXISTS (
+       SELECT 1 FROM item_versions v
+        WHERE v.item_type = ${quoted(itemType)}
+          AND v.item_id = ${idOf})
+     ORDER BY t."${spec.idColumn}"`;
 }
 
 const tableExists = (db, table) =>
@@ -103,7 +153,17 @@ export function run({ dbPath, log = () => {} }) {
   db.pragma("busy_timeout = 10000");
   try {
     db.exec(ITEM_VERSIONS_DDL);
-    log("  item_versions: ensured (table + 2 indexes)");
+
+    // A dev instance that ran an earlier build of this same (unreleased)
+    // migration already has the table without project_ref, and CREATE TABLE IF
+    // NOT EXISTS will not add it. Cheap insurance so that never turns into a
+    // trigger that cannot compile.
+    if (tableExists(db, "item_versions") && !columnsOf(db, "item_versions").has("project_ref")) {
+      db.exec("ALTER TABLE item_versions ADD COLUMN project_ref TEXT");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_item_versions_project ON item_versions(project_ref)");
+      log("  item_versions: added project_ref (an earlier build predated it)");
+    }
+    log("  item_versions: ensured (table, 3 indexes, append-only guards, erase control)");
 
     const unready = [];
     for (const [itemType, spec] of Object.entries(COVERED)) {
@@ -114,8 +174,9 @@ export function run({ dbPath, log = () => {} }) {
       }
       const columns = columnsOf(db, spec.table);
       // A trigger naming a column the table does not have fails to compile, so a
-      // half-built table defers instead of breaking the boot.
-      const missingColumns = [spec.idColumn, ...spec.tracked].filter((c) => !columns.has(c));
+      // half-built table defers instead of breaking the boot. snapshot is a
+      // superset of tracked (covered.js asserts it), so this covers both lists.
+      const missingColumns = [spec.idColumn, ...spec.snapshot].filter((c) => !columns.has(c));
       if (missingColumns.length) {
         unready.push(spec.table);
         log(
@@ -123,16 +184,23 @@ export function run({ dbPath, log = () => {} }) {
         );
         continue;
       }
-      const secretTracked = spec.tracked.filter((c) => SECRET_COLUMN.test(c));
-      if (secretTracked.length) {
-        throw new Error(`history: ${spec.table} tracks a credential column (${secretTracked.join(", ")})`);
+      const secretColumns = [...spec.tracked, ...spec.snapshot].filter((c) => SECRET_COLUMN.test(c));
+      if (secretColumns.length) {
+        throw new Error(`history: ${spec.table} would version a credential column (${secretColumns.join(", ")})`);
       }
 
-      for (const sql of triggerSql(itemType)) db.exec(sql);
-      const before = db.prepare("SELECT COUNT(*) AS n FROM item_versions").get().n;
-      db.exec(baselineSql(itemType, spec));
-      const added = db.prepare("SELECT COUNT(*) AS n FROM item_versions").get().n - before;
-      log(`  ${spec.table}: triggers ensured${added > 0 ? `, ${added} baseline version(s)` : ""}`);
+      // Triggers AND baseline in one BEGIN IMMEDIATE transaction: no other
+      // connection can observe (or write through) the half-installed state.
+      const install = db.transaction(() => {
+        for (const sql of triggerSql(itemType)) db.exec(sql);
+        const startedAt = performance.now();
+        const before = db.prepare("SELECT COUNT(*) AS n FROM item_versions").get().n;
+        db.exec(baselineSql(itemType, spec));
+        const added = db.prepare("SELECT COUNT(*) AS n FROM item_versions").get().n - before;
+        return { added, ms: performance.now() - startedAt };
+      });
+      const { added, ms } = install.immediate();
+      log(`  ${spec.table}: triggers ensured, ${added} baseline version(s) in ${ms.toFixed(1)} ms`);
     }
 
     if (unready.length) {

@@ -267,6 +267,13 @@ try {
   }
 }
 
+// Version-history capture triggers live on tables init-db can rebuild (a DROP
+// TABLE takes its triggers with it) while migration 0024 stays recorded, so
+// re-ensure them every boot. One line: the module resolves this instance's own
+// crow.db and is a no-op when every trigger is present. See
+// servers/shared/history/ensure.js.
+try { await (await import("../shared/history/ensure.js")).ensureHistoryTriggersAtBoot(); } catch (e) { console.warn(`[history] trigger ensure skipped: ${e.message}`); }
+
 // Object storage service check: the root docker-compose.yml makes Garage the
 // default (`--profile storage`) and moves MinIO to `--profile minio-legacy`. A
 // .env still saying MINIO_ENDPOINT=minio with no minio service would boot a
