@@ -88,6 +88,11 @@ export default {
   // that read belongs on this section's own page, not in the menu.
 
   async render({ req, db, lang }) {
+    // History settings (sizes, the erase-sync switch) are the owner's: another
+    // session sees only that the section exists.
+    if ((await isLocalPasswordSessionOn(db, req).catch(() => false)) !== true) {
+      return `<p class="settings-hint">${escapeHtml(t("history.ownerOnly", lang))}</p>`;
+    }
     const rawDays = await readSetting(db, HISTORY_SETTINGS.trashDays).catch(() => null);
     const days = effectiveTrashDays(rawDays);
     const eraseSync = eraseSyncOn(await readSetting(db, HISTORY_SETTINGS.eraseSync).catch(() => null));

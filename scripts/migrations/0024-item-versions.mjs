@@ -147,7 +147,7 @@ export const ITEM_VERSIONS_DDL =
   CREATE INDEX IF NOT EXISTS idx_item_versions_item
     ON item_versions(item_type, item_id, id);
   CREATE INDEX IF NOT EXISTS idx_item_versions_job
-    ON item_versions(job_id);
+    ON item_versions(job_id, id, created_at, item_type, item_id);
   CREATE INDEX IF NOT EXISTS idx_item_versions_project
     ON item_versions(project_ref);
 ` +

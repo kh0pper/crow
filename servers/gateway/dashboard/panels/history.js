@@ -157,6 +157,16 @@ async function handlePost({ req, db, ctx, lang }) {
   if (action === "restore") {
     const versionId = Number(req.body?.version_id);
     if (!Number.isInteger(versionId) || versionId <= 0) return { notice: notice("error", t("history.result.notFound", lang)) };
+    // A version is restored only from its own item's page.
+    const pathType = req.params?.itemType;
+    const pathId = req.params?.itemId;
+    if (pathType && pathId) {
+      const own = await db.execute({
+        sql: "SELECT 1 FROM item_versions WHERE id = ? AND item_type = ? AND item_id = ?",
+        args: [versionId, String(pathType), String(pathId)],
+      });
+      if (own.rows.length === 0) return { notice: notice("error", t("history.result.notFound", lang)) };
+    }
     try {
       const result = await withWriteContext(ctx, () =>
         restoreVersion(db, { versionId, syncManager }, ctx),
@@ -205,7 +215,7 @@ async function handlePost({ req, db, ctx, lang }) {
   if (action === "trash_restore") {
     const itemType = String(req.body?.item_type || "");
     const itemId = String(req.body?.item_id || "");
-    if (!COVERED[itemType] || !ITEM_ID_RE.test(itemId)) return { notice: notice("error", t("history.result.notFound", lang)) };
+    if (!Object.hasOwn(COVERED, itemType) || !ITEM_ID_RE.test(itemId)) return { notice: notice("error", t("history.result.notFound", lang)) };
     try {
       await withWriteContext(ctx, () => restoreFromTrash(db, { itemType, itemId }, ctx, { syncManager }));
       return { notice: notice("ok", t("history.result.trashRestored", lang)) };
@@ -262,7 +272,7 @@ async function handler(req, res, { db, layout, lang: rawLang }) {
   // exist must not be able to carry out a restore on its way to a 404.
   const itemType = view === "item" ? String(req.params?.itemType || "") : null;
   const itemId = view === "item" ? String(req.params?.itemId || "") : null;
-  if (view === "item" && (!COVERED[itemType] || !ITEM_ID_RE.test(itemId))) {
+  if (view === "item" && (!Object.hasOwn(COVERED, itemType) || !ITEM_ID_RE.test(itemId))) {
     res.status(404);
     return layout({ title, content: renderNotFound(lang) });
   }

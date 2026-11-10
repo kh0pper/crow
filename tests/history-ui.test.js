@@ -642,7 +642,11 @@ test("the Settings section renders for the owner with the size line and the read
     // The section is registered on the real Settings menu (a deep link must not
     // bounce to the Settings home).
     assert.equal(settingsRegistry.getSettingsSection("history")?.id, "history");
-    const html = await historySection.render({ req: { query: {}, csrfToken: CSRF }, db: s.db, lang: "en" });
+    // A non-owner sees only that the section exists.
+    const other = await historySection.render({ req: { query: {}, csrfToken: CSRF }, db: s.db, lang: "en" });
+    assert.match(other, /Only the owner of this Crow/);
+    assert.doesNotMatch(other, /Forever/);
+    const html = await historySection.render({ req: markFromLaptop(fromLaptop({ query: {}, csrfToken: CSRF, dashboardSession: OWN })), db: s.db, lang: "en" });
     assert.match(html, /Forever/);
     assert.match(html, /Days a deleted item stays in the Trash/);
     assert.match(html, /Turn this on only when every paired Crow runs this version\./);
@@ -667,3 +671,12 @@ test("every history.* and settings.history* key has an en and an es string", () 
     assert.notEqual(translations[key].es, translations[key].en, `${key} is not translated`);
   }
 });
+
+test("every form on the history pages opts out of Turbo Drive", async () => {
+  // The panel answers a POST with a 200 page; Turbo Drive drops such answers.
+  const src = await import("node:fs").then((fs) => fs.readFileSync(new URL("../servers/gateway/dashboard/shared/history-view.js", import.meta.url), "utf8"));
+  const forms = src.match(/<form\b[^>]*>/g) || [];
+  assert.ok(forms.length >= 5);
+  for (const f of forms) assert.match(f, /data-turbo="false"/, f);
+});
+

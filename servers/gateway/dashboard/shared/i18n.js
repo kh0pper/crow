@@ -5401,6 +5401,7 @@ export const translations = {
   "history.result.conflict": { en: "That version cannot be put back without overwriting something newer.", es: "Esa versión no se puede reponer sin sobrescribir algo más reciente." },
   "history.result.redacted": { en: "That version held a secret, so it was redacted and no longer holds the item's value. Pick a different version.", es: "Esa versión contenía un secreto, así que se redactó y ya no contiene el valor del elemento. Elige otra versión." },
   "history.result.notFound": { en: "That version no longer exists.", es: "Esa versión ya no existe." },
+  "history.ownerOnly": { en: "Only the owner of this Crow can see and change its history settings.", es: "Solo el propietario de este Crow puede ver y cambiar los ajustes del historial." },
   "history.result.failed": { en: "That could not be done. Nothing was changed.", es: "No se pudo hacer. No se cambió nada." },
   "history.result.notInTrash": { en: "That item is not in the Trash.", es: "Ese elemento no está en la papelera." },
   "history.result.notOwner": { en: "Only the owner can do that.", es: "Solo el propietario puede hacerlo." },

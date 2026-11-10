@@ -121,7 +121,7 @@ const isObject = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v)
 
 /** The covered spec for an item type, or a clear refusal. */
 function specFor(itemType) {
-  const spec = typeof itemType === "string" ? COVERED[itemType] : null;
+  const spec = typeof itemType === "string" && Object.hasOwn(COVERED, itemType) ? COVERED[itemType] : null;
   if (!spec) throw historyError("unsupported", `unknown item type ${JSON.stringify(itemType)}`);
   return spec;
 }
@@ -295,7 +295,7 @@ function diffKind(before, after) {
 /** The spec for a pair of versions: their item type's, or one built from their keys. */
 function specForPair(a, b) {
   for (const v of [a, b]) {
-    if (isObject(v) && typeof v.itemType === "string" && COVERED[v.itemType]) return COVERED[v.itemType];
+    if (isObject(v) && typeof v.itemType === "string" && Object.hasOwn(COVERED, v.itemType)) return COVERED[v.itemType];
   }
   const keys = [];
   for (const v of [a, b]) {

@@ -300,7 +300,7 @@ export function renderVersionList({ itemType, itemId, versions = [], shown = ver
   const rows = visible
     .map((version, i) => {
       const older = versions[i + 1] || null;
-      const restore = `<form method="POST" action="${escapeHtml(path)}" class="hv-actions">${csrfField(csrf)}
+      const restore = `<form method="POST" data-turbo="false" action="${escapeHtml(path)}" class="hv-actions">${csrfField(csrf)}
         <input type="hidden" name="action" value="restore">
         <input type="hidden" name="version_id" value="${escapeHtml(String(version.id))}">
         <button type="submit" class="btn btn-sm btn-secondary">${escapeHtml(t("history.restoreVersion", lang))}</button>
@@ -404,7 +404,7 @@ export function renderJobsList({ jobs = [], hasMore = false, before = null, who 
         })
         .join("");
       const undo = jobCanBeUndone(job.jobId)
-        ? `<form method="POST" action="${escapeHtml(JOBS_PATH)}" class="hv-actions">${csrfField(csrf)}
+        ? `<form method="POST" data-turbo="false" action="${escapeHtml(JOBS_PATH)}" class="hv-actions">${csrfField(csrf)}
             <input type="hidden" name="action" value="undo_job">
             <input type="hidden" name="job_id" value="${escapeHtml(String(job.jobId))}">
             <button type="submit" class="btn btn-sm btn-secondary">${escapeHtml(t("history.undoJob", lang))}</button>
@@ -455,7 +455,7 @@ export function renderTrashList({ items = [], csrf = "", lang = "en" } = {}) {
       return `<div class="hv-row">
         <div class="hv-label">${escapeHtml(typeWord(item.itemType, lang))}: ${escapeHtml(label)}</div>
         <div class="hv-sub">${escapeHtml(fill(t("history.deletedLine", lang), { when: formatWhen(item.deletedAt, lang), who }))}</div>
-        <form method="POST" action="${escapeHtml(TRASH_PATH)}" class="hv-actions">${csrfField(csrf)}
+        <form method="POST" data-turbo="false" action="${escapeHtml(TRASH_PATH)}" class="hv-actions">${csrfField(csrf)}
           <input type="hidden" name="action" value="trash_restore">
           <input type="hidden" name="item_type" value="${escapeHtml(String(item.itemType))}">
           <input type="hidden" name="item_id" value="${escapeHtml(String(item.itemId))}">
@@ -475,14 +475,14 @@ export function renderTrashPage({ items = [], trashDays = 30, csrf = "", notice 
   const confirm = confirming
     ? `<div class="hv-notice hv-notice-error">
         <div class="hv-notice-head">${escapeHtml(t("history.emptyTrashAsk", lang))}</div>
-        <form method="POST" action="${escapeHtml(TRASH_PATH)}" class="hv-actions">${csrfField(csrf)}
+        <form method="POST" data-turbo="false" action="${escapeHtml(TRASH_PATH)}" class="hv-actions">${csrfField(csrf)}
           <input type="hidden" name="action" value="empty_trash">
           <input type="hidden" name="confirm" value="1">
           <button type="submit" class="btn btn-sm btn-danger">${escapeHtml(t("history.emptyTrashYes", lang))}</button>
           <a class="btn btn-sm btn-secondary" href="${escapeHtml(TRASH_PATH)}">${escapeHtml(t("history.emptyTrashNo", lang))}</a>
         </form>
       </div>`
-    : `<form method="POST" action="${escapeHtml(TRASH_PATH)}" class="hv-actions">${csrfField(csrf)}
+    : `<form method="POST" data-turbo="false" action="${escapeHtml(TRASH_PATH)}" class="hv-actions">${csrfField(csrf)}
         <input type="hidden" name="action" value="empty_trash">
         <button type="submit" class="btn btn-sm btn-secondary"${items.length === 0 ? " disabled" : ""}>${escapeHtml(
           t("history.emptyTrash", lang),
