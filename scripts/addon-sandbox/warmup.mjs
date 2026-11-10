@@ -29,7 +29,7 @@
  */
 import { spawn as spawnChild } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync } from "node:fs";
+import { closeSync, existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { resolveAddonCommand } from "../../servers/shared/resolve-command.js";
@@ -77,6 +77,9 @@ function gitRefHost(ref) {
 }
 
 /** True when the ref is a `git+` source at all, whether or not it parses. */
+/** A git source this computer cannot prepare (no uv, or no data folder to build in). */
+const GIT_PREP_REASON = "its git source cannot be prepared here";
+
 function isGitRef(ref) {
   return typeof ref === "string" && ref.toLowerCase().startsWith("git+");
 }
@@ -107,7 +110,7 @@ function quietOf(list) {
  * @param {() => (string|null)} [o.resolveUv]
  * @returns {{steps: {command: string, args: string[]}[], hosts: string[], env: object}|{refused: string}|null}
  */
-export function warmupPlanFor({ command, args, installDir, nodeBin = process.execPath, resolveUv } = {}) {
+export function warmupPlanFor({ command, args, installDir, dataDir, nodeBin = process.execPath, resolveUv } = {}) {
   if (typeof command !== "string" || !command) return null;
   const list = Array.isArray(args) ? args.map(String) : [];
   const launcher = basename(command);
@@ -147,8 +150,28 @@ export function warmupPlanFor({ command, args, installDir, nodeBin = process.exe
       // A pinned git source must be built: it is the add-on's own pinned code,
       // so this step does not carry --no-build.
       if (host !== GIT_HUB) return { refused: OTHER_SOURCE_REASON };
+      // uv has no "build only this one package" switch: --no-build and
+      // --only-binary :all: refuse the git source too. So the pinned git package
+      // (the add-on's own code) is built ALONE first (--no-deps, into a scratch
+      // venv in the add-on's own data folder), which leaves its wheel in the
+      // cache; then the real resolve runs with --no-build, so every dependency
+      // must be a wheel and one that needs a source build is refused.
+      // Residual: the git package's own build-backend requirements are
+      // installed into uv's isolated build env the usual way.
+      const uv = typeof resolveUv === "function" ? resolveUv() : defaultResolveUv();
+      // The data folder is bound at its real path inside the wall.
+      let dir = null;
+      if (typeof dataDir === "string" && dataDir.startsWith("/")) {
+        try { dir = realpathSync(dataDir); } catch { dir = null; }
+      }
+      if (!uv || !dir) return { refused: GIT_PREP_REASON };
+      const venv = join(dir, ".cache", "crow-warm-venv");
       return {
-        steps: [{ command, args: ["--from", ref, "python", "-c", "0"] }],
+        steps: [
+          { command: uv, args: ["venv", "--quiet", "--allow-existing", venv] },
+          { command: uv, args: ["pip", "install", "--quiet", "--python", join(venv, "bin", "python"), "--no-deps", ref] },
+          { command, args: ["--no-build", "--from", ref, "python", "-c", "0"] },
+        ],
         hosts: [...PYPI_HOSTS, ...GIT_HOSTS],
         env: {},
       };
@@ -368,6 +391,7 @@ export async function warmAddon({
   command,
   args,
   installDir,
+  dataDir,
   nodeBin = process.execPath,
   wallCtx,
   baseEnv = process.env,
@@ -378,7 +402,7 @@ export async function warmAddon({
   const spawnFn = typeof seam.spawn === "function" ? seam.spawn : spawnChild;
   let plan;
   try {
-    plan = warmupPlanFor({ command, args, installDir, nodeBin });
+    plan = warmupPlanFor({ command, args, installDir, dataDir, nodeBin, resolveUv: seam.resolveUv });
   } catch (err) {
     const reason = err && typeof err.message === "string" && err.message ? err.message : "the warm-up could not be planned";
     return { ok: false, reason, exitCode: null, stderrLines: [], denials: [] };

@@ -78,12 +78,31 @@ test("uvx prepares the --from source it will run, else its positional tool", () 
   assert.equal(warmupPlanFor({ command: "uvx", args: [] }), null, "no tool named");
 });
 
-test("a pinned github ref adds its hosts, and gets built because it is the add-on's own code", () => {
+test("a pinned github ref: only the git package is built (alone, --no-deps), then every dependency must be a wheel", () => {
   const ref = `git+https://github.com/owner/repo@${GIT_SHA}`;
-  const plan = warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"] });
-  assert.deepEqual(plan.steps, [{ command: "uvx", args: ["--from", ref, "python", "-c", "0"] }]);
+  const data = freshDir("git-data");
+  const plan = warmupPlanFor({ command: "/opt/uv/uvx", args: ["--from", ref, "tool"], dataDir: data, resolveUv: () => "/opt/uv/uv" });
+  const venv = join(data, ".cache", "crow-warm-venv");
+  assert.deepEqual(plan.steps, [
+    { command: "/opt/uv/uv", args: ["venv", "--quiet", "--allow-existing", venv] },
+    { command: "/opt/uv/uv", args: ["pip", "install", "--quiet", "--python", join(venv, "bin", "python"), "--no-deps", ref] },
+    { command: "/opt/uv/uvx", args: ["--no-build", "--from", ref, "python", "-c", "0"] },
+  ]);
+  // The one step that may build is the git package with no dependencies at all.
+  assert.ok(plan.steps[1].args.includes("--no-deps"));
+  // The resolve of the whole tree builds nothing: a dependency that needs a
+  // source build makes uv refuse ("Building source distributions is disabled").
+  assert.equal(plan.steps[2].args[0], "--no-build");
   assert.deepEqual(plan.hosts, [...PYPI_HOSTS, "github.com", "codeload.github.com"]);
   assert.deepEqual(plan.env, {});
+});
+
+test("a pinned github ref with no uv or no data folder is refused, never built some other way", () => {
+  const ref = `git+https://github.com/owner/repo@${GIT_SHA}`;
+  const refused = { refused: "its git source cannot be prepared here" };
+  assert.deepEqual(warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"], dataDir: freshDir("g2"), resolveUv: () => null }), refused);
+  assert.deepEqual(warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"], resolveUv: () => "/opt/uv/uv" }), refused);
+  assert.deepEqual(warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"], dataDir: join(T, "missing"), resolveUv: () => "/opt/uv/uv" }), refused);
 });
 
 test("a git ref on any other host is refused, not widened to", () => {
