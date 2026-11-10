@@ -220,3 +220,20 @@ test("through the wall context, a walled storage consumer's result carries the s
   const kiosk = await ctx.startAddonWall({ id: "kiosk", entry: {}, command: process.execPath, args: [], baseEnv: {}, ownEnv: {}, kind: "addon" });
   assert.deepEqual(kiosk.residuals, []);
 });
+
+test("wrapAddonSpawn with no envKind takes the narrowest env rule; an unknown kind is refused", async () => {
+  const base = { PATH: "/usr/bin", S3_SECRET_KEY: "fake-s3-sk-0130", FRIGATE_PASSWORD: "fake-frigate-0131" };
+  const common = {
+    command: process.execPath, args: [], baseEnv: base, ownEnv: {}, profile: { network: { internet: false, hosts: [] }, doors: [] },
+    entry: {}, crowHome: "/home/alex/.crow", dataDir: "/home/alex/.crow/data", appRoot: REPO, home: "/home/alex",
+    nodeBin: process.execPath, gatewayPort: 3001, selfTargets: { names: [], addrs: [] },
+    deps: { probe: () => OK_PROBE, buildPlan: () => PLAN, seccompSupported: () => false },
+  };
+  for (const id of ["studio", "frigate"]) {
+    const wall = await wrapAddonSpawn({ ...common, id });
+    assert.equal("S3_SECRET_KEY" in wall.env, false, id);
+    assert.equal("FRIGATE_PASSWORD" in wall.env, false, id);
+    assert.deepEqual(wall.residuals, [], id);
+  }
+  await assert.rejects(wrapAddonSpawn({ ...common, id: "studio", envKind: "everything" }), /unknown spawn kind/);
+});

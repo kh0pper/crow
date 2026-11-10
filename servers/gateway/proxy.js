@@ -306,6 +306,12 @@ async function connectToServer(integration) {
   }
 }
 
+/** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
+export function addonOwnEnv(config = {}, base = process.env, id = null) {
+  const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
+  return { ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
+}
+
 /**
  * The environment of a bundle add-on's stdio child started BY THE GATEWAY: the allowlisted base
  * (addon-env.js), the keys the add-on's registry entry declares, the storage env the four
@@ -319,12 +325,6 @@ async function connectToServer(integration) {
  * The passthrough reads from a base without the names this process applied from systemd
  * credentials: those values are the gateway's own, not part of the environment it was given.
  */
-/** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
-export function addonOwnEnv(config = {}, base = process.env, id = null) {
-  const derived = id ? addonDerivedEnv(id, config.env, undefined, withoutCredentialKeys(base)) : {};
-  return { ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
-}
-
 export function addonStdioEnv(config = {}, base = process.env, id = null, opts = {}) {
   const gate = withoutCredentialKeys(base);
   const derived = id ? addonDerivedEnv(id, config.env, undefined, gate) : {};

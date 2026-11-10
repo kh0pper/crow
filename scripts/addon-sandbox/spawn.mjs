@@ -166,7 +166,13 @@ export async function wrapAddonSpawn(o = {}) {
 
   // The child env is the wall's own build, whatever env the spawn site holds:
   // an allowlisted slice of the gateway env, the declared keys, the add-on's own.
-  const childEnv = wallChildEnv({ id, kind: o.envKind || "addon", baseEnv: o.baseEnv, ownEnv: o.ownEnv });
+  // The env rule: a caller that names none gets the NARROWEST one (no declared or
+  // storage passthrough); a name that is not one of the three is a refusal.
+  const envKind = o.envKind === undefined || o.envKind === null ? "service" : o.envKind;
+  if (!["addon", "service", "builtin"].includes(envKind)) {
+    throw new AddonWallRefused("add-on refused: unknown spawn kind");
+  }
+  const childEnv = wallChildEnv({ id, kind: envKind, baseEnv: o.baseEnv, ownEnv: o.ownEnv });
 
   let probe;
   try {
@@ -421,7 +427,7 @@ export async function wrapAddonSpawn(o = {}) {
       profile,
       refused: Array.isArray(plan.refused) ? plan.refused : [],
       // What this add-on still reaches beyond its wall (LEDGER N1b-13 storage).
-      residuals: wallResiduals({ id, kind: o.envKind || "addon" }),
+      residuals: wallResiduals({ id, kind: envKind }),
       discardFds,
       cleanup,
     };
