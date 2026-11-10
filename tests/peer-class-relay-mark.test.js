@@ -63,3 +63,45 @@ test("isRelayedSocket is true for both relay marks and false for a neighbouring 
   // Nothing in this test depends on an address being listed as a proxy.
   for (const a of SPY) assert.equal(typeof isLocalPeer(a, {}), "boolean", a);
 });
+/**
+ * The add-on branch in classifyPeer is the ONLY thing that keeps the add-on
+ * mark out of the Serve and proxy branches. isLocalPeer refusing the mark is
+ * not enough on its own: with Serve's uid check switched off, or with loopback
+ * listed as a trusted proxy, a Serve-shaped or proxied request from the mark
+ * would otherwise come out as "serve" or "proxy". Each case below fails if that
+ * one branch is removed.
+ */
+function withEnv(vars, fn) {
+  const saved = {};
+  for (const k of Object.keys(vars)) { saved[k] = process.env[k]; process.env[k] = vars[k]; }
+  try { return fn(); } finally {
+    for (const k of Object.keys(vars)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+}
+
+test("the add-on mark is never read as Serve, even when Serve's uid check is off", () => {
+  withEnv({ CROW_SERVE_PEER_UIDS: "off" }, () => {
+    // Control: the same request shape from plain loopback IS read as Serve here,
+    // so the case below depends on the add-on branch alone.
+    const control = classifyPeer({ socket: { remoteAddress: "127.0.0.1" }, headers: { ...SERVE_SHAPED } });
+    assert.equal(control.via, "serve");
+    for (const a of ["127.0.78.1", "::ffff:127.0.78.1"]) {
+      const r = classifyPeer({ socket: { remoteAddress: a }, headers: { ...SERVE_SHAPED } });
+      assert.equal(r.via, "unverified", a);
+      assert.equal(r.client, "127.0.78.1", a);
+      assert.equal(r.tailnetLogin, null, a);
+    }
+  });
+});
+
+test("the add-on mark is never a trusted proxy, even when loopback is listed as one", () => {
+  withEnv({ CROW_TRUSTED_PROXIES: "loopback" }, () => {
+    const control = classifyPeer({ socket: { remoteAddress: "127.0.0.1" }, headers: { "x-forwarded-for": "100.64.20.5" } });
+    assert.equal(control.via, "proxy");
+    for (const a of ["127.0.78.1", "::ffff:127.0.78.1"]) {
+      const r = classifyPeer({ socket: { remoteAddress: a }, headers: { "x-forwarded-for": "100.64.20.5" } });
+      assert.equal(r.via, "unverified", a);
+      assert.equal(r.client, "127.0.78.1", a);
+    }
+  });
+});
