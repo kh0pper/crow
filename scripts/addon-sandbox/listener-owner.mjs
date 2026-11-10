@@ -39,6 +39,7 @@
  */
 import { readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { isIP } from "node:net";
+import { networkInterfaces } from "node:os";
 
 /** A listening TCP socket's state in /proc/net/tcp{,6}. */
 const LISTEN = "0A";
@@ -369,6 +370,232 @@ export async function identifyListener(addr, port, o = {}) {
       return published[0];
     }
     return results[0];
+  } catch {
+    return { kind: "denied", reason: "owner check failed" };
+  }
+}
+
+// ---- container addresses --------------------------------------------------
+//
+// A listed host:port may resolve to a container of an add-on's own compose
+// project rather than to a loopback port, and the same project rules decide
+// whether that container may be reached: this add-on's own project, or the one
+// named TTS exception for `media`. The bridge ranges and the container
+// addresses come from this computer, so an address inside one of them is only
+// reachable through a container whose working_dir is an installed add-on's
+// bundle folder.
+
+/** The bridge interfaces docker, podman and the CNI plugin create. */
+const BRIDGE_IFACE_RE = /^(docker\d*|br-[0-9a-f]{6,}|podman\d*|cni-podman\d*)$/;
+
+/** Eight 16-bit groups of an IPv6 spelling, or null. */
+function groups6(a) {
+  let s = String(a ?? "").trim().replace(/^\[(.*)\]$/, "$1").split("%")[0].toLowerCase();
+  if (!s) return null;
+  if (s.includes(".")) {
+    // A trailing dotted quad is the last two groups.
+    const cut = s.lastIndexOf(":");
+    if (cut < 0) return null;
+    const q = s.slice(cut + 1).split(".");
+    if (q.length !== 4 || q.some((x) => !/^\d{1,3}$/.test(x) || Number(x) > 255)) return null;
+    const hi = ((Number(q[0]) << 8) | Number(q[1])).toString(16);
+    const lo = ((Number(q[2]) << 8) | Number(q[3])).toString(16);
+    s = s.slice(0, cut + 1) + hi + ":" + lo;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(":") : []) : [];
+  for (const g of [...head, ...tail]) if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+  if (halves.length === 2) {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 1) return null;
+    return [...head, ...Array(fill).fill("0"), ...tail].map((x) => parseInt(x, 16));
+  }
+  if (head.length !== 8) return null;
+  return head.map((x) => parseInt(x, 16));
+}
+
+const big6 = (g) => g.reduce((acc, x) => (acc << 16n) | BigInt(x), 0n);
+
+/** An address as one comparison sees it: a family, and its value in that family (v4-mapped read as IPv4). */
+function addrParts(a) {
+  const s = canon(a);
+  if (!s) return null;
+  const fam = isIP(s);
+  if (fam === 4) return { fam: 4, v4: s };
+  if (fam !== 6) return null;
+  const g = groups6(s);
+  if (!g) return null;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) {
+    return { fam: 4, v4: [g[6] >> 8, g[6] & 255, g[7] >> 8, g[7] & 255].join(".") };
+  }
+  return { fam: 6, g };
+}
+
+/** One spelling of an address for equality (a v4-mapped form compares as its IPv4). */
+function addrKey(a) {
+  const p = addrParts(a);
+  if (!p) return null;
+  return p.fam === 4 ? "v4:" + p.v4 : "v6:" + format6(p.g);
+}
+
+/** The high `plen` bits of an IPv4 address, as an integer. */
+function head4(a, plen) {
+  if (plen <= 0) return 0;
+  const n = a.split(".").reduce((acc, o) => acc * 256 + Number(o), 0);
+  return Math.floor(n / 2 ** (32 - plen));
+}
+
+/** An IPv6 group list with everything past `plen` cleared. */
+function net6(g, plen) {
+  if (plen <= 0) return [0, 0, 0, 0, 0, 0, 0, 0];
+  const keep = BigInt(128 - plen);
+  const v = (big6(g) >> keep) << keep;
+  return [0, 1, 2, 3, 4, 5, 6, 7].map((i) => Number((v >> BigInt(112 - i * 16)) & 0xffffn));
+}
+
+/** A netmask as a prefix length, or null when its bits are not a run of ones then zeros. */
+function prefixFromMask(mask) {
+  const p = addrParts(mask);
+  if (!p) return null;
+  const bits = p.fam === 4
+    ? p.v4.split(".").map((o) => Number(o).toString(2).padStart(8, "0")).join("")
+    : p.g.map((x) => x.toString(2).padStart(16, "0")).join("");
+  if (!/^1*0*$/.test(bits)) return null;
+  const zero = bits.indexOf("0");
+  return zero < 0 ? bits.length : zero;
+}
+
+/** The network `addr/plen` names, as a CIDR string, or null. */
+function cidrOf(parts, plen) {
+  if (!parts) return null;
+  if (parts.fam === 4) {
+    if (!(plen >= 0 && plen <= 32)) return null;
+    const size = 2 ** (32 - plen);
+    const base = Math.floor(parts.v4.split(".").reduce((acc, o) => acc * 256 + Number(o), 0) / size) * size;
+    return [base >>> 24, (base >>> 16) & 255, (base >>> 8) & 255, base & 255].join(".") + "/" + plen;
+  }
+  if (!(plen >= 0 && plen <= 128)) return null;
+  return format6(net6(parts.g, plen)) + "/" + plen;
+}
+
+/** One interface entry as a CIDR: its `cidr` field, else its address and netmask. */
+function interfaceCidr(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  let addr = entry.address;
+  let plen = null;
+  const cidr = typeof entry.cidr === "string" ? entry.cidr.trim() : "";
+  if (cidr) {
+    const p = cidr.split("/");
+    if (p.length === 2 && /^\d{1,3}$/.test(p[1])) { addr = p[0]; plen = Number(p[1]); }
+  }
+  if (plen === null) {
+    if (typeof entry.netmask !== "string") return null;
+    plen = prefixFromMask(entry.netmask);
+    if (plen === null) return null;
+  }
+  return cidrOf(addrParts(addr), plen);
+}
+
+/**
+ * The CIDR of every docker/podman bridge interface on this computer
+ * (`docker0`, `docker_gwbridge`, `br-<id>`, `podman0`, `cni-podman0`), IPv4 and
+ * IPv6. Pure: o is an `os.networkInterfaces()`-shaped object.
+ *
+ * @param {object} [ifaces]
+ * @returns {string[]}
+ */
+export function bridgeSubnetsFromInterfaces(ifaces = networkInterfaces()) {
+  const out = [];
+  const table = ifaces && typeof ifaces === "object" ? ifaces : {};
+  for (const name of Object.keys(table)) {
+    if (!BRIDGE_IFACE_RE.test(name)) continue;
+    const list = table[name];
+    for (const entry of Array.isArray(list) ? list : []) {
+      const c = interfaceCidr(entry);
+      if (c && !out.includes(c)) out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * Is `addr` inside `cidr`? IPv4 and IPv6, a v4-mapped spelling read as the
+ * IPv4 it carries. False on anything unparsable. Pure.
+ *
+ * @param {string} addr
+ * @param {string} cidr
+ * @returns {boolean}
+ */
+export function addrInCidr(addr, cidr) {
+  try {
+    const a = addrParts(addr);
+    if (!a) return false;
+    const parts = String(cidr ?? "").trim().split("/");
+    if (parts.length !== 2 || !/^\d{1,3}$/.test(parts[1])) return false;
+    const plen = Number(parts[1]);
+    const b = addrParts(parts[0]);
+    if (!b || a.fam !== b.fam) return false;
+    if (a.fam === 4) return plen <= 32 && head4(a.v4, plen) === head4(b.v4, plen);
+    if (plen > 128) return false;
+    if (plen === 0) return true;
+    const shift = BigInt(128 - plen);
+    return (big6(a.g) >> shift) === (big6(b.g) >> shift);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Who may be reached at a resolved address that belongs to a container on this
+ * computer?
+ *
+ * An address inside a docker/podman bridge range, or the address of a running
+ * container, may only be reached through this add-on's own compose project —
+ * or, for `media`, a TTS add-on's project (the one named exception). Every
+ * other answer is a refusal: a foreign project, a project of no installed
+ * add-on (which covers a containerized Crow gateway, whose working dir is not
+ * an add-on folder), an unlabelled project, more than one project at the
+ * address, a bridge address no container holds, and an unreadable docker view.
+ *
+ * @param {string} addr
+ * @param {object} o
+ *   `addonId`         the add-on being walled
+ *   `view`            a docker-view snapshot, or null when the read failed
+ *   `bridgeSubnets`   CIDR strings of this computer's bridge interfaces
+ * @returns {{kind: "not-container"|"docker-container"|"denied", reason?: string, project?: string, projectOwner?: string}}
+ */
+export function identifyContainerAddr(addr, o = {}) {
+  try {
+    const key = addrKey(addr);
+    if (!key) return { kind: "denied", reason: "owner check failed" };
+    const view = o.view && typeof o.view === "object" ? o.view : null;
+    const subnets = [
+      ...(Array.isArray(o.bridgeSubnets) ? o.bridgeSubnets : []),
+      ...(view && Array.isArray(view.subnets) ? view.subnets : []),
+    ];
+    const inBridge = subnets.some((c) => addrInCidr(addr, c));
+    const all = view && Array.isArray(view.containers) ? view.containers : [];
+    const holders = all.filter((c) => c && Array.isArray(c.ips) && c.ips.some((ip) => addrKey(ip) === key));
+    if (!inBridge && !holders.length) return { kind: "not-container" };
+    if (!view) return { kind: "denied", reason: "owner check failed" };
+    if (!holders.length) return { kind: "denied", reason: "no container has that address" };
+    const projects = new Set(holders.map((c) => String(c.project ?? "").trim()));
+    if (projects.size > 1) return { kind: "denied", reason: "more than one project at that address" };
+    const project = [...projects][0];
+    if (!project) return { kind: "denied", reason: "unlabelled project" };
+    const map = view.addonProjects instanceof Map ? view.addonProjects : new Map();
+    if (!map.has(project)) return { kind: "denied", reason: "project of no installed add-on", project };
+    const owner = String(map.get(project) ?? "");
+    if (owner && owner === String(o.addonId ?? "")) return { kind: "docker-container", project, projectOwner: owner };
+    const exception = Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, o.addonId)
+      ? TTS_PORT_EXCEPTION[o.addonId]
+      : null;
+    if (owner && Array.isArray(exception) && exception.includes(owner)) {
+      return { kind: "docker-container", project, projectOwner: owner };
+    }
+    return { kind: "denied", reason: "foreign project", project };
   } catch {
     return { kind: "denied", reason: "owner check failed" };
   }

@@ -37,7 +37,7 @@
 import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { isDoorPath, RELAY_SOURCE_V4, ADDON_RELAY_SOURCE_V4 } from "../../servers/shared/bot-doors.js";
-import { TTS_PORT_EXCEPTION } from "../addon-sandbox/listener-owner.mjs";
+import { TTS_PORT_EXCEPTION, addrInCidr, bridgeSubnetsFromInterfaces } from "../addon-sandbox/listener-owner.mjs";
 import { spawnSync } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -695,6 +695,11 @@ function normalizeAddon(raw) {
     selfAddrs: addrs,
     listenerOwner: typeof raw.listenerOwner === "function" ? raw.listenerOwner : null,
     ownerCacheMs: Number.isFinite(cacheMs) && cacheMs >= 0 ? cacheMs : 2000,
+    // The container-address answer for a listed entry: given by the caller
+    // (the gateway's docker view), or absent, in which case a bridge address
+    // on this computer is refused. `_interfaces` is the interface-list seam.
+    containerOwner: typeof raw.containerOwner === "function" ? raw.containerOwner : null,
+    ifaces: raw._interfaces && typeof raw._interfaces === "object" ? raw._interfaces : null,
     httpTarget: typeof raw._httpTarget === "function" ? raw._httpTarget : null,
   };
 }
@@ -786,6 +791,9 @@ export function createEgressRelay(o) {
   const headTimeoutMs = o.headTimeoutMs ?? 10000;
   const idleMs = o.idleMs ?? 120000;
   const abandonMs = o.abandonMs ?? 30000;
+  // A plain-HTTP upstream that accepts and then stalls would hold a relay slot
+  // for the rest of the spawn: an idle upstream socket is cut after this.
+  const plainStallMs = o.plainStallMs ?? 30000;
   const lookup = o.lookup || ((h) => dnsLookup(h, { all: true, verbatim: true }));
   // One line per (decision, target), bounded: a bot that sprays distinct
   // hosts must not grow the spawner's memory (one summary line instead).
@@ -1072,8 +1080,11 @@ export function createEgressRelay(o) {
 
   /** Upstream trouble on a plain-HTTP forward: fail closed (502, like a door). */
   function failPlain(req, res, e) {
-    if (res.headersSent) { try { res.destroy(); } catch {} return; }
-    refusePlain(req, res, "upstream " + ((e && e.code) || "error"), 502);
+    // The reason is noted in both cases: a stall after the headers has no
+    // response left to carry it.
+    const reason = "upstream " + ((e && e.code) || "error");
+    if (res.headersSent) { note("deny", targetOf(req), reason); try { res.destroy(); } catch {} return; }
+    refusePlain(req, res, reason, 502);
   }
 
   /** Forward one checked plain-HTTP request upstream, streamed both ways. */
@@ -1087,6 +1098,11 @@ export function createEgressRelay(o) {
     upstreamLive++;
     let released = false;
     const release = () => { if (!released) { released = true; upstreamLive--; } };
+    // An upstream that accepted and went quiet: before the response it is the
+    // existing 502, after it the client's connection is destroyed.
+    up.setTimeout(plainStallMs, () => {
+      try { up.destroy(Object.assign(new Error("upstream idle timeout"), { code: "ETIMEDOUT" })); } catch {}
+    });
     up.on("error", (e) => { release(); failPlain(req, res, e); });
     up.on("close", release);
     up.on("response", (ur) => {
@@ -1133,6 +1149,18 @@ export function createEgressRelay(o) {
       const r = listedAddrReason(a && a.address, view);
       if (r) return { reason: r };
     }
+    // A listed entry may name a container on this computer (a bridge address,
+    // or a container's own address): only this add-on's compose project, or
+    // the one named TTS exception, may be reached there.
+    for (const a of addrs) {
+      const addr = a && a.address;
+      const v = cfg.containerOwner ? await containerOwnerOf(addr) : containerAddrFallback(addr);
+      // Only the two passing answers pass: anything else (a denial, an
+      // unexpected shape) is a refusal.
+      if (!v || (v.kind !== "docker-container" && v.kind !== "not-container")) {
+        return { reason: "a container on this computer: " + ((v && v.kind === "denied" && v.reason) || "owner check failed") };
+      }
+    }
     return { addrs };
   }
 
@@ -1148,6 +1176,43 @@ export function createEgressRelay(o) {
       if (!value || typeof value !== "object") value = { kind: "denied", reason: "owner check failed" };
     } catch { value = { kind: "denied", reason: "owner check failed" }; }
     ownerCache.set(key, { at: now, value });
+    return value;
+  }
+
+  // ---- add-on mode: a listed address that belongs to a container ----------
+  // A listed host:port may resolve into this computer's docker/podman network.
+  // The caller's containerOwner (the gateway's docker view) names the compose
+  // project behind that address; without one, a bridge address is refused.
+  const containerCache = new Map(); // address -> { at, value }
+  let bridgeCache = null;
+  /** This computer's bridge ranges, read once per relay. */
+  const bridgeSubnets = () => {
+    if (!bridgeCache) {
+      // No list given: the interface read happens in listener-owner.mjs.
+      try { bridgeCache = bridgeSubnetsFromInterfaces(cfg.ifaces || undefined); }
+      catch { bridgeCache = []; }
+    }
+    return bridgeCache;
+  };
+  /** No container view was given: a bridge address on this computer is refused. */
+  const containerAddrFallback = (addr) => {
+    for (const c of bridgeSubnets()) {
+      try { if (addrInCidr(addr, c)) return { kind: "denied", reason: "no container view" }; } catch {}
+    }
+    return { kind: "not-container" };
+  };
+  /** The container-owner answer for one listed address, cached per address. */
+  async function containerOwnerOf(addr) {
+    const key = canonTargetAddr(addr);
+    const now = Date.now();
+    const hit = containerCache.get(key);
+    if (hit && now - hit.at <= cfg.ownerCacheMs) return hit.value;
+    let value = null;
+    try {
+      const v = await cfg.containerOwner(addr);
+      value = v && typeof v === "object" ? v : { kind: "denied", reason: "owner check failed" };
+    } catch { value = { kind: "denied", reason: "owner check failed" }; }
+    containerCache.set(key, { at: now, value });
     return value;
   }
 

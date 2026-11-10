@@ -603,3 +603,142 @@ test("a deleted cwd or executable is refused, not compared", async () => {
   });
   assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ["/srv/crow"], ...ok })).kind, "own-uid");
 });
+
+// ---- this computer's bridge ranges ---------------------------------------
+
+import { addrInCidr, bridgeSubnetsFromInterfaces, identifyContainerAddr } from "../scripts/addon-sandbox/listener-owner.mjs";
+
+const IFACES = {
+  lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true, cidr: "127.0.0.1/8" }],
+  eno1: [{ address: "10.20.30.5", netmask: "255.255.255.0", family: "IPv4" }],
+  docker0: [{ address: "172.17.0.1", netmask: "255.255.0.0", family: "IPv4", cidr: "172.17.0.1/16" }],
+  "br-0123abcd4567": [{ address: "172.19.5.1", netmask: "255.255.0.0", family: "IPv4" }],
+};
+
+test("only the docker and podman bridge interfaces name bridge ranges", async () => {
+  assert.deepEqual(bridgeSubnetsFromInterfaces(IFACES), ["172.17.0.0/16", "172.19.0.0/16"]);
+  // A netmask that is not a run of ones is not a network.
+  assert.deepEqual(bridgeSubnetsFromInterfaces({ docker0: [{ address: "172.20.0.1", netmask: "255.0.255.0" }] }), []);
+  // An IPv6 bridge range comes out in its own family.
+  const v6 = bridgeSubnetsFromInterfaces({ podman1: [{ address: "fd00:1234::1", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6" }] });
+  assert.deepEqual(v6, ["fd00:1234::/64"]);
+  assert.deepEqual(bridgeSubnetsFromInterfaces({}), []);
+  assert.deepEqual(bridgeSubnetsFromInterfaces(null), []);
+});
+
+test("addrInCidr reads both families, a v4-mapped spelling as its IPv4, and refuses what it cannot parse", async () => {
+  assert.equal(addrInCidr("172.18.0.5", "172.18.0.0/16"), true);
+  assert.equal(addrInCidr("172.19.0.5", "172.18.0.0/16"), false);
+  assert.equal(addrInCidr("::ffff:172.18.0.5", "172.18.0.0/16"), true);
+  assert.equal(addrInCidr("10.20.30.9", "0.0.0.0/0"), true);
+  assert.equal(addrInCidr("fd00:1234::5", "fd00:1234::/64"), true);
+  assert.equal(addrInCidr("fd00:1235::5", "fd00:1234::/64"), false);
+  assert.equal(addrInCidr("fd00:1234::5", "172.18.0.0/16"), false);
+  for (const [a, c] of [["nope", "172.18.0.0/16"], ["172.18.0.5", "nope"], ["172.18.0.5", "172.18.0.0"],
+    ["172.18.0.5", "172.18.0.0/xx"], ["172.18.0.5", "172.18.0.0/330"], ["fd00::1", "fd00::/129"]]) {
+    assert.equal(addrInCidr(a, c), false, a + " in " + c);
+  }
+});
+
+// ---- a resolved address that belongs to a container ----------------------
+
+/** A docker-view snapshot with the parts this decision reads. */
+const fakeView = (over = {}) => ({
+  subnets: ["172.18.0.0/16"],
+  containers: [],
+  addonProjects: new Map(),
+  publishes: [],
+  ...over,
+});
+
+const container = (project, ips) => ({ id: project + "-1", name: "/" + project, project, ips });
+
+const askContainer = (addr, over = {}, opts = {}) =>
+  identifyContainerAddr(addr, { addonId: "paperless", bridgeSubnets: [], view: fakeView(), ...opts, ...over });
+
+test("a container of this add-on's own compose project may be reached", async () => {
+  const r = await askContainer("172.18.0.5", {
+    view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([r.kind, r.project, r.projectOwner], ["docker-container", "home-paperless", "paperless"]);
+  // A container address outside every bridge range is judged the same way.
+  const direct = await askContainer("10.20.30.9", {
+    view: fakeView({ subnets: [], containers: [container("home-paperless", ["10.20.30.9"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.equal(direct.kind, "docker-container");
+});
+
+test("another add-on's compose project is a foreign project", async () => {
+  const r = await askContainer("172.18.0.5", {
+    addonId: "media",
+    view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([r.kind, r.reason], ["denied", "foreign project"]);
+  assert.equal(r.project, "home-paperless");
+});
+
+test("another instance's add-on project is refused, even for the add-on of that id", async () => {
+  const view = fakeView({ containers: [container("kiosk-proj", ["172.18.0.5"])], addonProjects: new Map([["kiosk-proj", "other-instance:kiosk"]]) });
+  const r = await askContainer("172.18.0.5", { view }, { addonId: "kiosk" });
+  assert.deepEqual([r.kind, r.reason], ["denied", "foreign project"]);
+});
+
+test("a containerized Crow gateway is a project of no installed add-on", async () => {
+  const r = await askContainer("172.18.0.9", {
+    view: fakeView({ containers: [container("crow-other", ["172.18.0.9"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([r.kind, r.reason], ["denied", "project of no installed add-on"]);
+});
+
+test("media reaches a TTS add-on's container and no other add-on does", async () => {
+  const view = fakeView({ containers: [container("media-kokoro", ["172.18.0.5"])], addonProjects: new Map([["media-kokoro", "kokoro-tts"]]) });
+  const media = await askContainer("172.18.0.5", { view }, { addonId: "media" });
+  assert.deepEqual([media.kind, media.project, media.projectOwner], ["docker-container", "media-kokoro", "kokoro-tts"]);
+  const kiosk = await askContainer("172.18.0.5", { view }, { addonId: "kiosk" });
+  assert.deepEqual([kiosk.kind, kiosk.reason], ["denied", "foreign project"]);
+  // The exception is media's: a piper project for media passes, for another add-on it does not.
+  const piper = fakeView({ containers: [container("media-piper", ["172.18.0.6"])], addonProjects: new Map([["media-piper", "piper"]]) });
+  assert.equal((await askContainer("172.18.0.6", { view: piper }, { addonId: "media" })).kind, "docker-container");
+  assert.equal((await askContainer("172.18.0.6", { view: piper }, { addonId: "paperless" })).kind, "denied");
+});
+
+test("a bridge address no container holds, an unlabelled project and two projects are refusals", async () => {
+  const noHolder = await askContainer("172.18.0.7", { view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])] }) });
+  assert.deepEqual([noHolder.kind, noHolder.reason], ["denied", "no container has that address"]);
+
+  const unlabelled = await askContainer("172.18.0.5", {
+    view: fakeView({ containers: [container("", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.deepEqual([unlabelled.kind, unlabelled.reason], ["denied", "unlabelled project"]);
+
+  const two = await askContainer("172.18.0.5", {
+    view: fakeView({
+      containers: [container("home-paperless", ["172.18.0.5"]), container("home-media", ["172.18.0.5"])],
+      addonProjects: new Map([["home-paperless", "paperless"], ["home-media", "media"]]),
+    }),
+  });
+  assert.deepEqual([two.kind, two.reason], ["denied", "more than one project at that address"]);
+});
+
+test("an unreadable docker view refuses a bridge address and leaves a LAN address alone", async () => {
+  const bridge = await askContainer("172.18.0.5", { view: null }, { bridgeSubnets: ["172.18.0.0/16"] });
+  assert.deepEqual([bridge.kind, bridge.reason], ["denied", "owner check failed"]);
+  // A LAN address is not a container address, so no docker view is needed.
+  const lan = await askContainer("10.20.30.9", { view: null }, { bridgeSubnets: ["172.18.0.0/16"] });
+  assert.equal(lan.kind, "not-container");
+  // A readable view with no docker networks at all: the bridge list still decides.
+  const listed = await askContainer("172.18.0.5", { view: fakeView({ subnets: [] }) }, { bridgeSubnets: ["172.18.0.0/16"] });
+  assert.deepEqual([listed.kind, listed.reason], ["denied", "no container has that address"]);
+});
+
+test("an unreadable address, a broken view and a missing map are refusals", async () => {
+  assert.deepEqual([(await askContainer("not-an-address")).reason], ["owner check failed"]);
+  assert.deepEqual([(await askContainer("172.18.0.5", { view: { get subnets() { throw new Error("boom"); } } })).reason], ["owner check failed"]);
+  const noMap = await askContainer("172.18.0.5", { view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: undefined }) });
+  assert.deepEqual([noMap.kind, noMap.reason], ["denied", "project of no installed add-on"]);
+  // A v4-mapped spelling of the same container address is the same container.
+  const mapped = await askContainer("::ffff:172.18.0.5", {
+    view: fakeView({ containers: [container("home-paperless", ["172.18.0.5"])], addonProjects: new Map([["home-paperless", "paperless"]]) }),
+  });
+  assert.equal(mapped.kind, "docker-container");
+});
