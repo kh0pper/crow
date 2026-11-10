@@ -288,7 +288,7 @@ test("a fresh install registers the account once and proves the login, password 
 test("the account is only registered while the app has none", () => {
   const r = run();
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(usersCalls(r).length, 1, "Vikunja's own account list is read once before anything is written");
+  assert.equal(usersCalls(r).length, 2, "Vikunja's own account list is read once before anything is written, and once after to name any other account");
   assert.match(usersCalls(r)[0].argv, /docker exec crow-vikunja \/app\/vikunja\/vikunja user list/);
   assert.equal(r.calls[0].argv.startsWith("docker inspect"), true, "the container is checked before it is touched");
 });
@@ -367,7 +367,7 @@ test("an unclear registration that left an account behind is proved, and that is
     },
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(usersCalls(r).length, 2, "Vikunja's own list decides after an unclear answer");
+  assert.equal(usersCalls(r).length, 3, "Vikunja's own list decides after an unclear answer (and names any other account after)");
   assert.equal(callsTo(r, "/api/v1/login").length, 1, "the password the app may hold is proved");
   assertPasswordStayedOutOfSight(r);
 });
@@ -520,7 +520,8 @@ test("vikunja: a user list without the table header is unreadable (exit 4), neve
 });
 
 test("vikunja: another account made while registration was open is named after setup", () => {
-  const r = run({ answers: { FAKE_USERS_1: USERS_TABLE([[1, "admin", "admin@localhost.invalid"], [2, "intruder", "x@example.com"]]) } });
+  const both = USERS_TABLE([[1, "admin", "admin@localhost.invalid"], [2, "intruder", "x@example.com"]]);
+  const r = run({ answers: { FAKE_USERS_1: both, FAKE_USERS_2: both } });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /also has these accounts, made while registration was open: intruder/);
+  assert.match(`${r.stdout}${r.stderr}`, /also has these accounts, made while registration was open: intruder/, `user list calls: ${usersCalls(r).length}`);
 });
