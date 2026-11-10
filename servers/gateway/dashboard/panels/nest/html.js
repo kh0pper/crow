@@ -13,6 +13,7 @@ import { getAddonLogo } from "../../shared/logos.js";
 import { isSafeDestPath } from "../../../../shared/sso-ticket.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { appTileLink } from "../../shared/app-link.js";
+import { STALE_FLASH, STALE_MESSAGE, UNWALLED_FLASH, UNWALLED_MESSAGE } from "../../../fix-it/remedies/addon-unwall.js";
 
 // ─── Icons ───
 // One shared stroke set (shared/app-icons.js). Icon strings from manifests and
@@ -130,6 +131,10 @@ function buildHealthStrip(health, lang, flash) {
     flashHtml = `<div class="nest-flash nest-flash--error">Couldn't apply that fix.</div>`;
   } else if (flash === "fixit_not_pending") {
     flashHtml = `<div class="nest-flash nest-flash--error">That card isn't open any more — nothing was changed.</div>`;
+  } else if (flash === UNWALLED_FLASH) {
+    flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(UNWALLED_MESSAGE)}</div>`;
+  } else if (flash === STALE_FLASH) {
+    flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(STALE_MESSAGE)}</div>`;
   }
 
   if (!health) return flashHtml;

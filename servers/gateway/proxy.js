@@ -10,10 +10,10 @@ import { resolveAddonCommand, checkLauncherArgs } from "../shared/resolve-comman
 import { withoutCredentialKeys } from "../shared/credentials-env.js";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { resolveCrowHome as resolveSharedCrowHome } from "../shared/crow-home.js";
+import { resolveCrowHome as resolveSharedCrowHome, isWithin } from "../shared/crow-home.js";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -27,6 +27,7 @@ import { createDbClient, resolveDataDir } from "../db.js";
 import { gatewayListenPort } from "./listen-port.js";
 import { addonWallMode } from "../../scripts/addon-sandbox/spawn.mjs";
 import { AddonStdioTransport, createStderrPrefixer } from "../../scripts/addon-sandbox/transport.mjs";
+import { clearWallFailures, recordWallFailure, wallFailureReason } from "../../scripts/addon-sandbox/failures.mjs";
 import { createWallContext } from "../../scripts/addon-sandbox/gateway-wall.mjs";
 import { isApproved, approvalNotFromThisMachine, approvalForAnotherBackend, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { pruneApprovalNonces } from "../shared/data-backend-approval-key.js";
@@ -95,7 +96,24 @@ function envFromVars(vars = [], source = process.env) {
 }
 
 /** This checkout's root, two levels above `servers/gateway`. */
-const APP_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const APP_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+/** The in-namespace entry every walled child runs first (scripts/pi-bots). */
+const PI_NETNS_ENTRY = fileURLToPath(new URL("../../scripts/pi-bots/pi_netns_entry.mjs", import.meta.url));
+
+/** An add-on id is one lowercase slug; it names folders and a relay dir. */
+const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/** A walled add-on that goes away within this window of connecting is a failure. */
+const WALL_CLOSE_WINDOW_MS = 60_000;
+
+/** Marks an entry whose close Crow itself asked for (never a wall failure). */
+const CLOSING = Symbol("closing");
+function markClosing(entry) {
+  if (entry && typeof entry === "object") {
+    try { entry[CLOSING] = true; } catch { /* a frozen entry closes as before */ }
+  }
+}
 
 /** The wall context, created the first time a walled spawn needs it. */
 let _wallContext = null;
@@ -137,11 +155,24 @@ function wallInfoFor(wall, mode) {
     mode: wall && wall.walled ? "walled" : "unwalled",
     tier: wall ? wall.tier : "none",
     reason: wall && wall.walled ? null : (wall?.reason || mode?.reason || null),
+    source: wallSource(wall, mode),
     profile: wall?.profile ?? null,
     // Plain data: what the add-on still reaches beyond its wall (e.g. the
     // `storage` residual, LEDGER N1b-13), so no status line calls it fully walled.
     residuals: Array.isArray(wall?.residuals) ? wall.residuals.map((r) => ({ kind: r.kind, label: r.label })) : [],
   };
+}
+
+/**
+ * Where one entry's wall mode came from: the mode decision's own source, or
+ * "no-bwrap" when the decision said walled and this computer has no usable
+ * bwrap (so the child runs at a weaker tier, or not at all).
+ */
+function wallSource(wall, mode) {
+  if (mode?.source === "walled") return wall && wall.walled ? "walled" : "no-bwrap";
+  if (mode?.source) return mode.source;
+  const tier = wall ? wall.tier : "none";
+  return tier === "nnp" || tier === "none" ? "no-bwrap" : "walled";
 }
 
 /**
@@ -157,6 +188,71 @@ function wallEntry(entry, wall) {
     } catch { /* an entry that cannot carry it loses nothing else */ }
   }
   return entry;
+}
+
+/**
+ * Every connected entry that went through the wall decision, as a snapshot of
+ * plain data: { id, kind, name, status, wall }. `kind` is "addon" for a bundle
+ * add-on, "builtin" for a built-in integration and "backend" for an approved
+ * data backend (whose `name` is its row's display name). Never a client, never
+ * a relay — a status surface may serialise this as it is.
+ */
+export function addonWallEntries() {
+  const entries = [];
+  for (const [id, entry] of connectedServers) {
+    if (!entry) continue;
+    let kind = null;
+    if (entry.isBackend) kind = "backend";
+    else if (entry.isAddon) kind = "addon";
+    else if (entry.isBuiltin) kind = "builtin";
+    if (!kind) continue;
+    entries.push({
+      id,
+      kind,
+      name: kind === "backend" ? (entry.backendName || id) : id,
+      status: entry.status || "unknown",
+      wall: entry.wall ? { ...entry.wall } : null,
+    });
+  }
+  return entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** The emit a failure card goes through: fix-it's own, on a client of its own. */
+function realEmitWallFailure(db, eventName, payload) {
+  return import("./fix-it/index.js").then((m) => m.emitFixIt(db, eventName, payload));
+}
+
+/**
+ * Record one walled add-on's failure and raise its Fix-it card, fire-and-forget.
+ * The card carries the record's ref only; the reason is built here (denials,
+ * then the child's stderr, then its exit code) so no card ever echoes a path
+ * outside the add-on's own folders. Never throws, never blocks a connect.
+ */
+function reportWallFailure(id, { refused = false, wall = null, transport = null, cwd = null } = {}) {
+  try {
+    const relay = wall?.relay || connectedServers.get(id)?._wallRelay || null;
+    const denials = typeof relay?.denials === "function" ? relay.denials() : [];
+    const stderrLines = typeof transport?.stderrLines === "function" ? transport.stderrLines() : [];
+    const reason = wallFailureReason({
+      denials,
+      stderrLines,
+      exitCode: Number.isInteger(transport?.exitCode) ? transport.exitCode : null,
+      installDir: typeof cwd === "string" && cwd ? cwd : join(resolveCrowHome(), "bundles", id),
+      dataDir: join(resolveDataDir(), id),
+      refused,
+    });
+    const ref = recordWallFailure(id, reason);
+    if (!ref) return;
+
+    let db = null;
+    try { db = createDbClient(); } catch { return; }
+    Promise.resolve()
+      .then(() => dep("emitFixIt", realEmitWallFailure)(db, "addon-wall-failed", { id, reason, ref }))
+      .catch((err) => console.warn(`  [proxy] addon ${id}: the Fix-it card could not be raised — ${err?.message || err}`))
+      .finally(() => { try { db.close(); } catch { /* already closed */ } });
+  } catch (err) {
+    console.warn(`  [proxy] addon ${id}: the wall failure could not be recorded — ${err?.message || err}`);
+  }
 }
 
 /**
@@ -205,9 +301,10 @@ async function connectToServer(integration) {
   // (D7): nothing about it changes here. Every other built-in is walled by the
   // same rules as a bundle add-on.
   let wall = null;
+  let wallMode = null;
   if (!integration.preSpawn) {
-    const wm = dep("addonWallMode", addonWallMode)({ id: integration.id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
-    if (wm.mode === "walled") {
+    wallMode = dep("addonWallMode", addonWallMode)({ id: integration.id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
+    if (wallMode.mode === "walled") {
       try {
         wall = await dep("startAddonWall", (o) => getWallContext().startAddonWall(o))({
           id: integration.id,
@@ -226,6 +323,7 @@ async function connectToServer(integration) {
           tools: [],
           status: "error",
           error: message,
+          isBuiltin: true,
           wall: { mode: "refused", reason: message },
         });
         return null;
@@ -275,10 +373,15 @@ async function connectToServer(integration) {
 
     console.log(`  [proxy] ${integration.name}: connected, ${tools.length} tools discovered`);
 
+    // A built-in that went through the wall decision carries its wall the same
+    // way an add-on does; a data backend is marked as one (its `name` is the row's).
+    const wallInfo = wallMode ? wallInfoFor(wall, wallMode) : null;
     connectedServers.set(integration.id, {
       client,
       tools,
       status: "connected",
+      ...(integration.preSpawn ? { isBackend: true, backendName: integration.name } : { isBuiltin: true }),
+      ...(wallInfo ? { wall: wallInfo } : {}),
     });
 
     // Handle unexpected disconnection
@@ -301,6 +404,8 @@ async function connectToServer(integration) {
       tools: [],
       status: "error",
       error: error.message,
+      ...(integration.preSpawn ? { isBackend: true, backendName: integration.name } : { isBuiltin: true }),
+      ...(wall && wall.walled ? { wall: { mode: "walled", tier: wall.tier, reason: null } } : {}),
     });
     return null;
   }
@@ -360,6 +465,8 @@ export function remoteBotActorForCwd(cwd) {
 export async function connectAddonServer(id, config) {
   const CONNECT_TIMEOUT_MS = 60_000;
   const transportMode = (config.transport || "stdio").toLowerCase();
+  // The add-on's own code folder: the entry may name one, else the installed copy.
+  const installDir = config.cwd || join(resolveCrowHome(), "bundles", id);
   let wall = null;
   let wallInfo = null;
   let transport = null;
@@ -394,7 +501,7 @@ export async function connectAddonServer(id, config) {
       });
     } else {
       // stdio (default, backward-compatible)
-      const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
+      const cwd = installDir;
       const env = addonStdioEnv(config, process.env, id);
       remoteBotActor = remoteBotActorForCwd(cwd);
       // Bare command names (uvx, uv, npx) resolve against the gateway PATH,
@@ -433,6 +540,7 @@ export async function connectAddonServer(id, config) {
             isAddon: true,
             wall: { mode: "refused", reason: message },
           });
+          reportWallFailure(id, { refused: true, cwd: installDir });
           return null;
         }
       }
@@ -484,10 +592,26 @@ export async function connectAddonServer(id, config) {
       ...(wallInfo ? { wall: wallInfo } : {}),
     }, wall));
 
+    // It runs walled now: the failure the owner may still be looking at is over.
+    if (wall && wall.walled) clearWallFailures(id);
+    const connectedAt = Date.now();
+
+    // This connection's own entry: a later reconnect replaces the map's entry,
+    // and this transport's late close must never mark (or card) the new one.
+    const ownEntry = connectedServers.get(id);
     transport.onclose = () => {
       console.warn(`  [proxy] addon ${id}: disconnected`);
       const entry = connectedServers.get(id);
+      if (entry !== ownEntry) return;
       if (entry) entry.status = "disconnected";
+      // A walled child that goes away right after connecting is a wall failure,
+      // not a shutdown: it stays off, and the owner gets the card. A close Crow
+      // asked for (uninstall, reconnect, gateway stop) is not a failure.
+      if (entry && entry[CLOSING] === true) return;
+      if (wall && wall.walled && Date.now() - connectedAt < WALL_CLOSE_WINDOW_MS) {
+        if (entry) entry.status = "error";
+        reportWallFailure(id, { wall, transport, cwd: installDir });
+      }
     };
 
     return { client, tools };
@@ -496,6 +620,9 @@ export async function connectAddonServer(id, config) {
     // bind fds and a door token: cleanup is idempotent and covers a spawn that
     // never happened too. Never retried unwalled. A walled child that started
     // but never answered is stopped too: its relay is gone with the cleanup.
+    // The failure is recorded BEFORE the cleanup: the relay's denials are still
+    // readable here (and stay readable after it, harmlessly).
+    if (wall && wall.walled) reportWallFailure(id, { wall, transport, cwd: installDir });
     if (wall && wall.walled && transport) { try { await transport.close(); } catch { /* already gone */ } }
     try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
     console.error(`  [proxy] addon ${id}: failed to connect — ${error.message}`);
@@ -516,10 +643,48 @@ export async function connectAddonServer(id, config) {
  */
 export async function disconnectAddonServer(id) {
   const entry = connectedServers.get(id);
+  markClosing(entry);
   if (entry && entry.client) {
     try { await entry.client.close(); } catch {}
   }
   connectedServers.delete(id);
+}
+
+/**
+ * Connect one installed add-on now (the owner's "Wall it again", and the
+ * "Run without the wall" remedy). Which add-on runs, and how, comes from this
+ * instance's mcp-addons.json entry and the wall decision — never from a caller.
+ * Never throws.
+ *
+ * @returns {Promise<{ok: boolean, status?: string, reason?: string}>}
+ */
+export async function reconnectAddonServer(id) {
+  if (typeof id !== "string" || !ADDON_ID_RE.test(id)) return { ok: false, reason: "invalid add-on id" };
+
+  let config = null;
+  try {
+    const all = JSON.parse(readFileSync(join(resolveCrowHome(), "mcp-addons.json"), "utf8"));
+    config = all && typeof all === "object" && Object.hasOwn(all, id) ? all[id] : null;
+  } catch {
+    return { ok: false, reason: "the add-on list could not be read" };
+  }
+  if (!config || typeof config !== "object") return { ok: false, reason: "that add-on is not installed" };
+  // A satellite-hosted bundle's tools come from its host, never from a spawn here.
+  if ((config.transport || "stdio").toLowerCase() === "satellite") {
+    return { ok: false, reason: "that add-on runs on another computer" };
+  }
+  // A service add-on without its fields is connected per project, not Crow-wide.
+  if (!isLegacyConfiguredAddon(id, config)) return { ok: false, reason: "that add-on's account fields are not set" };
+
+  try {
+    await dep("disconnectAddonServer", disconnectAddonServer)(id);
+    await dep("connectAddonServer", connectAddonServer)(id, config);
+  } catch (err) {
+    console.warn(`  [proxy] addon ${id}: reconnect failed — ${err?.message || err}`);
+    return { ok: false, status: "error" };
+  }
+  const status = connectedServers.get(id)?.status ?? "error";
+  return { ok: status === "connected", status };
 }
 
 /**
@@ -531,6 +696,7 @@ export async function shutdownAll() {
   const entries = [...connectedServers.entries()];
   await Promise.allSettled(
     entries.map(async ([id, entry]) => {
+      markClosing(entry);
       if (entry.client) {
         try { await entry.client.close(); } catch {}
       }
@@ -540,11 +706,19 @@ export async function shutdownAll() {
 }
 
 /**
- * Kill stale addon server processes left over from a previous gateway instance.
- * Finds node processes whose cwd is in ~/.crow/bundles/ and whose parent is
- * NOT the current gateway (i.e., orphans from a crash or restart).
+ * Kill stale addon server processes left over from a previous gateway instance:
+ * a node add-on whose cwd is in <crowHome>/bundles/, and an orphaned bwrap
+ * wrapper around a walled add-on (isOrphanAddonWrapper). Both sweeps kill only
+ * init-adopted processes (ppid 1).
  */
 function cleanupStaleAddonProcesses() {
+  let cleaned = sweepStaleAddonNodes();
+  cleaned += sweepOrphanAddonWrappers();
+  if (cleaned > 0) console.log(`  [proxy] Cleaned up ${cleaned} stale addon process(es)`);
+}
+
+/** The node add-ons an earlier gateway left behind, adopted by init. */
+function sweepStaleAddonNodes() {
   let cleaned = 0;
   try {
     const bundleDir = join(resolveCrowHome(), "bundles");
@@ -553,7 +727,7 @@ function cleanupStaleAddonProcesses() {
       "pgrep", ["-a", "-f", "node server/index\\.js"],
       { encoding: "utf8", timeout: 5000 }
     ).trim();
-    if (!output) return;
+    if (!output) return 0;
 
     for (const line of output.split("\n")) {
       const pid = parseInt(line.split(/\s+/)[0], 10);
@@ -575,7 +749,73 @@ function cleanupStaleAddonProcesses() {
       } catch {}
     }
   } catch {}
-  if (cleaned > 0) console.log(`  [proxy] Cleaned up ${cleaned} stale addon process(es)`);
+  return cleaned;
+}
+
+/** The process table the wrapper sweep reads: one { pid, ppid, argv } per process. */
+function listProcsReal() {
+  const procs = [];
+  let names = [];
+  try { names = readdirSync("/proc"); } catch { return procs; }
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    let argv = [];
+    try { argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean); } catch { continue; }
+    if (argv.length === 0) continue;
+    let ppid = null;
+    try {
+      // "pid (comm) state ppid …": comm may hold spaces, so split after its paren.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
+      ppid = parseInt(fields[1], 10);
+    } catch { continue; }
+    if (!Number.isInteger(ppid)) continue;
+    procs.push({ pid, ppid, argv });
+  }
+  return procs;
+}
+
+/**
+ * Whether one process is an orphaned bwrap wrapper around a walled add-on: all
+ * four of an init-adopted process (ppid 1), a bwrap command line, the wall's
+ * in-namespace entry AND a --chdir into a bundles folder. The --chdir is what
+ * tells it from a bot: a bot runs the same netns entry under bwrap too, but not
+ * into a bundles folder.
+ */
+export function isOrphanAddonWrapper({ ppid, argv, crowHome, appRoot, netnsEntry } = {}) {
+  if (ppid !== 1) return false;
+  if (!Array.isArray(argv) || argv.length === 0) return false;
+  if (basename(String(argv[0])) !== "bwrap") return false;
+  const entry = typeof netnsEntry === "string" && netnsEntry ? netnsEntry : PI_NETNS_ENTRY;
+  if (!argv.some((a) => typeof a === "string" && (a === entry || a.endsWith(entry)))) return false;
+  const at = argv.indexOf("--chdir");
+  if (at < 0 || at + 1 >= argv.length) return false;
+  const dir = argv[at + 1];
+  if (typeof dir !== "string" || !dir) return false;
+  const roots = [];
+  if (typeof crowHome === "string" && crowHome) roots.push(join(crowHome, "bundles"));
+  if (typeof appRoot === "string" && appRoot) roots.push(join(appRoot, "bundles"));
+  return roots.some((root) => isWithin(dir, root));
+}
+
+/** SIGTERM the orphaned bwrap wrappers an earlier gateway left behind. */
+function sweepOrphanAddonWrappers() {
+  let killed = 0;
+  let procs = [];
+  try { procs = dep("listProcs", listProcsReal)() || []; } catch { return 0; }
+  const crowHome = resolveCrowHome();
+  const killPid = dep("killPid", (pid) => process.kill(pid, "SIGTERM"));
+  for (const proc of procs) {
+    if (!proc || !Number.isInteger(proc.pid) || proc.pid === process.pid) continue;
+    if (!isOrphanAddonWrapper({ ppid: proc.ppid, argv: proc.argv, crowHome, appRoot: APP_ROOT, netnsEntry: PI_NETNS_ENTRY })) continue;
+    try {
+      console.log(`  [proxy] Killing stale walled add-on wrapper PID ${proc.pid}`);
+      killPid(proc.pid);
+      killed++;
+    } catch { /* it may have gone already */ }
+  }
+  return killed;
 }
 
 // Test seam: a test swaps the spawn-side functions for fakes (never set in production).

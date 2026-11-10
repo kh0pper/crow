@@ -10,7 +10,9 @@ import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
 import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
+import addonWallDetector from "./detectors/addon-wall.js";
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
+import addonUnwallRemedy, { keepOffRemedy } from "./remedies/addon-unwall.js";
 import { recordSuppressedRequest } from "./peer-card-counters.js";
 import { CARD_ACTION_IDS } from "./peer-card-policy.js";
 import { createNotification } from "../../shared/notifications.js";
@@ -25,7 +27,12 @@ export function wireFixIt() {
   registry.registerDetector(caddyProxySocketDetector);
   registry.registerDetector(bootGuardDetector);
   registry.registerDetector(dataBackendReapprovalDetector);
+  registry.registerDetector(addonWallDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
+  // An add-on that could not run inside its wall: run it unwalled by the
+  // owner's choice, or answer the card and leave it off.
+  registry.registerRemedy("addon-unwall", addonUnwallRemedy);
+  registry.registerRemedy("addon-keep-off", keepOffRemedy);
   // N1b-8: the peer-scoped card offers three durations, and each button needs
   // its own actionId (the POST carries only action_id). All three run the same
   // one-device grant; the duration rides in the stored args.
@@ -57,6 +64,12 @@ export function linkRemedyTarget(r) {
   if (!r || typeof r.actionId !== "string") return null;
   return Object.hasOwn(LINK_REMEDIES, r.actionId) ? LINK_REMEDIES[r.actionId] : null;
 }
+
+/**
+ * The flash codes a remedy may send the owner back with. Fixed here, never read
+ * from the remedy result unchecked: the redirect target is built from it.
+ */
+export const REMEDY_FLASHES = Object.freeze(["fixit_addon_stale", "fixit_addon_unwalled"]);
 
 /** Build a db-bound store; the bound upsertItem also fires urgent push. */
 function boundStore(db) {
@@ -241,7 +254,11 @@ export async function handleFixItAction(req, res, { db }) {
       const result = await fn(entry.args || {}, { db, item });
       if (result && result.resolved) {
         await store.markResolved(db, itemId);
-        return res.redirectAfterPost("/dashboard/nest?flash=fixit_fixed");
+        const done = typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash) ? result.flash : "fixit_fixed";
+        return res.redirectAfterPost(`/dashboard/nest?flash=${done}`);
+      }
+      if (result && typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash)) {
+        return res.redirectAfterPost(`/dashboard/nest?flash=${result.flash}`);
       }
       return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
     }

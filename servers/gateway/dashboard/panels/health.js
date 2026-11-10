@@ -227,7 +227,7 @@ export default {
 
     // Flash param from post-backup / fix-it redirects
     const flash = (typeof req.query?.flash === "string" &&
-      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error", "fixit_not_pending"].includes(req.query.flash))
+      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error", "fixit_not_pending", "fixit_addon_stale", "fixit_addon_unwalled"].includes(req.query.flash))
       ? req.query.flash
       : null;
 
