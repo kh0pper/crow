@@ -766,7 +766,10 @@ export function createDbClient(dbPath) {
       if (!statements.some((s) => needsStamp(db, sqlOf(s)))) return txn(statements);
       // The statements run inline rather than through `txn`, so this is ONE
       // transaction (no nested savepoint): the same all-or-nothing contract.
-      return runStamped(() => statements.map((s) => executeOne(db, sqlOf(s), argsOf(s))), ctx);
+      // Nested db.transaction: a SAVEPOINT when the caller already holds a
+      // transaction, so a failed statement still undoes the batch's earlier ones.
+      const batchTxn = db.transaction(() => statements.map((s) => executeOne(db, sqlOf(s), argsOf(s))));
+      return runStamped(() => batchTxn(), ctx);
     },
     async executeMultiple(sql) {
       // DDL and bulk bootstrap only (schema, indexes, keychain tables) — never a

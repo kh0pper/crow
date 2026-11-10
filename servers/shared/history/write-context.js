@@ -101,7 +101,7 @@ export function withWriteContext(ctx, fn) {
   const outer = writeContext.getStore() || null;
   const merged = !outer
     ? add
-    : outer.authorKind === add.authorKind
+    : outer.authorKind === add.authorKind && (!add.authorId || add.authorId === outer.authorId)
       ? { ...outer, ...add }
       : { ...add };
   // No author kind anywhere: nothing to attribute the write to, so do not open a

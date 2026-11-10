@@ -632,6 +632,9 @@ export function ssoSourceOf(scopes) {
 export function ownerRequestWriteContext(req) {
   const ssoSrc = req?.dashboardSsoSrc;
   if (typeof ssoSrc === "string" && ssoSrc) return peerWriteContext(ssoSrc);
+  // An SSO session whose source is unknown is still not the owner: no context,
+  // so its writes are recorded unattributed rather than as the owner's.
+  if (req?.dashboardSso) return null;
   return ownerWriteContext(req?.dashboardSession);
 }
 
@@ -650,7 +653,8 @@ export async function sessionAuth(token) {
       args: [hashToken(token)],
     });
     if (result.rows.length === 0) return { valid: false, ssoSrc: null };
-    return { valid: true, ssoSrc: ssoSourceOf(result.rows[0].scopes) };
+    const scopes = String(result.rows[0].scopes ?? "");
+    return { valid: true, ssoSrc: ssoSourceOf(scopes), sso: /(?:^|\s)sso(?:\s|$)/.test(scopes) };
   } finally {
     db.close();
   }
@@ -692,10 +696,11 @@ export function dashboardAuth(req, res, next) {
   const cookies = parseCookies(req);
   const token = cookies[SESSION_COOKIE];
 
-  sessionAuth(token).then(({ valid, ssoSrc }) => {
+  sessionAuth(token).then(({ valid, ssoSrc, sso }) => {
     if (valid) {
       req.dashboardSession = token;
       if (ssoSrc) req.dashboardSsoSrc = ssoSrc;
+      if (sso) req.dashboardSso = true;
       const ctx = ownerRequestWriteContext(req);
       if (ctx) withWriteContext(ctx, () => next());
       else next();

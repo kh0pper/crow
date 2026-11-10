@@ -935,3 +935,17 @@ test("the stamp adds less than 1 ms per write", async () => {
     fx.dispose();
   }
 });
+test("a different bot nested inside a bot carries none of the outer bot's job", async () => {
+  const { withWriteContext, currentWriteContext } = await import("../servers/shared/history/write-context.js");
+  let seen = null;
+  withWriteContext({ authorKind: "bot", authorId: "a", jobId: "card:7" }, () => {
+    withWriteContext({ authorKind: "bot", authorId: "b" }, () => { seen = currentWriteContext(); });
+  });
+  assert.equal(seen.authorId, "b");
+  assert.equal(seen.jobId ?? null, null, "bot b must not inherit bot a's job");
+});
+
+test("an SSO session without a source is never the owner", async () => {
+  const { ownerRequestWriteContext } = await import("../servers/gateway/dashboard/auth.js");
+  assert.equal(ownerRequestWriteContext({ dashboardSso: true, dashboardSession: "x".repeat(40) }), null);
+});
