@@ -28,6 +28,7 @@ import { existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { isDefaultCrowHome, resolveInstanceDataDir } from "./shared/crow-home.js";
+import { currentWriteContext } from "./shared/history/write-context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -233,6 +234,36 @@ function executeOne(db, sql, rawArgs) {
     lastInsertRowid: info.lastInsertRowid,
   };
 }
+
+/* ------------------------------------------- version-history attribution */
+
+/**
+ * The stamp (Task 2 of the version history design): a write made inside a write
+ * context (servers/shared/history/write-context.js) attributes the versions its
+ * capture triggers just wrote to that context's author.
+ *
+ * `id > :before AND author_kind = 'unattributed'` is deliberately narrow:
+ *   - `id > before` (the max id read at the start of the same transaction) can
+ *     only match rows the write itself created, so a concurrent connection's
+ *     versions are never touched;
+ *   - `author_kind = 'unattributed'` makes attribution happen exactly once, and
+ *     is what item_versions' guard trigger allows (covered.js names the same four
+ *     columns as the only legal single edit of a version row).
+ *
+ * item_versions is local-only (never in SYNCED_TABLES) and carries no trigger
+ * that emits, so this UPDATE queues no outbound sync event of its own.
+ */
+const STAMP_SQL = `
+  UPDATE item_versions
+     SET author_kind = ?, author_id = ?, job_id = ?, origin_instance = ?
+   WHERE id > ? AND author_kind = 'unattributed'`;
+
+/**
+ * A statement whose FIRST keyword writes, even though it returns rows: SQLite's
+ * INSERT/UPDATE/DELETE ... RETURNING is a `reader` to better-sqlite3, and it must
+ * still be stamped. Comments and leading whitespace are skipped.
+ */
+const LEADING_WRITE = /^\s*(?:(?:--[^\n]*\n)|\/\*[\s\S]*?\*\/|\s)*(?:insert|update|delete|replace)\b/i;
 
 /**
  * Per-path keeper handles. SQLite in WAL mode unlinks the -wal/-shm files
@@ -487,21 +518,107 @@ export function createDbClient(dbPath) {
   // Registers keeper only when the DB is actually in WAL mode.
   ensureKeeper(filePath, requestedMode);
 
+  /* -- attribution state, per handle ------------------------------------- */
+
+  // Does this store have the history tables yet? Cached per handle (an instance
+  // that has run the migration never re-checks). A "no" IS re-checked on the
+  // next write: a long-lived client outlives the migration that adds the table.
+  // item_versions_erase is required too — the append-only guard trigger's WHEN
+  // clause reads it, so a stamp on a store that lost it would fail the write.
+  let itemVersionsPresent = null;
+  const VERSIONS_TABLES = ["item_versions", "item_versions_erase"];
+  let maxIdStmt = null;
+  let stampStmt = null;
+  let stampingTxn = null;
+  // sql → is it a reader? Attribution wraps a write in a transaction, and a
+  // dashboard request keeps a context open across dozens of SELECTs; preparing
+  // each distinct statement once is cheaper than wrapping reads nobody stamps.
+  const readerCache = new Map();
+
+  function hasItemVersions() {
+    if (itemVersionsPresent === true) return true;
+    try {
+      const rows = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${VERSIONS_TABLES.map(() => "?").join(", ")})`,
+        )
+        .all(...VERSIONS_TABLES);
+      itemVersionsPresent = rows.length === VERSIONS_TABLES.length;
+    } catch {
+      itemVersionsPresent = false;
+    }
+    return itemVersionsPresent === true;
+  }
+
+  function isReader(sql) {
+    const known = readerCache.get(sql);
+    if (known !== undefined) return known;
+    let reader;
+    try {
+      reader = db.prepare(sql).reader === true && !LEADING_WRITE.test(sql);
+    } catch {
+      reader = false; // let executeOne raise the real error
+    }
+    if (readerCache.size < 500) readerCache.set(sql, reader);
+    return reader;
+  }
+
+  /**
+   * Run `work` and the stamp in ONE immediate transaction (BEGIN IMMEDIATE): the
+   * max-id read, the write and the attribution are atomic, so two writers cannot
+   * interleave a stamp onto each other's rows — and a throw from `work` rolls back
+   * everything, including any version the triggers wrote, so nothing is stamped
+   * after a failed write.
+   */
+  function runStamped(work, ctx) {
+    maxIdStmt ||= db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM item_versions");
+    stampStmt ||= db.prepare(STAMP_SQL);
+    stampingTxn ||= db.transaction((job) => {
+      const before = Number(maxIdStmt.get().id);
+      const result = job.work(); // throws → the whole transaction rolls back
+      stampStmt.run(
+        job.ctx.authorKind,
+        job.ctx.authorId,
+        job.ctx.jobId,
+        job.ctx.originInstance,
+        before,
+      );
+      return result;
+    });
+    return stampingTxn.immediate({ work, ctx });
+  }
+
+  const sqlOf = (s) => (typeof s === "string" ? s : s.sql);
+  const argsOf = (s) => (typeof s === "string" ? [] : s.args);
+
   return {
     async execute(arg) {
-      if (typeof arg === "string") return executeOne(db, arg, []);
-      return executeOne(db, arg.sql, arg.args);
+      const sql = sqlOf(arg);
+      const ctx = currentWriteContext();
+      // No context, a read, or a store without the history table: exactly as before.
+      if (!ctx || typeof sql !== "string" || isReader(sql) || !hasItemVersions()) {
+        return executeOne(db, sql, argsOf(arg));
+      }
+      return runStamped(() => executeOne(db, sql, argsOf(arg)), ctx);
     },
     async batch(statements) {
       // Wrap in a single transaction so all statements commit atomically,
       // matching libsql's batch() semantics.
-      const txn = db.transaction((stmts) => stmts.map((s) => {
-        if (typeof s === "string") return executeOne(db, s, []);
-        return executeOne(db, s.sql, s.args);
-      }));
-      return txn(statements);
+      const txn = db.transaction((stmts) => stmts.map((s) => executeOne(db, sqlOf(s), argsOf(s))));
+      const ctx = currentWriteContext();
+      // A batch of pure reads (or no context, or no history table yet) keeps the
+      // old shape. Otherwise the batch AND the stamp are one immediate
+      // transaction: the batch keeps its all-or-nothing rollback, and a failed
+      // statement never leaves a stamp behind for rows that were never written.
+      const writes = statements.some((s) => !isReader(sqlOf(s)));
+      if (!ctx || !writes || !hasItemVersions()) return txn(statements);
+      // The statements run inline rather than through `txn`, so this is ONE
+      // transaction (no nested savepoint): the same all-or-nothing contract.
+      return runStamped(() => statements.map((s) => executeOne(db, sqlOf(s), argsOf(s))), ctx);
     },
     async executeMultiple(sql) {
+      // DDL and bulk bootstrap only (schema, indexes, keychain tables) — never a
+      // write to covered content, so version attribution does not apply here.
       db.exec(sql);
       return [];
     },

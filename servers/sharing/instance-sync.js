@@ -33,6 +33,7 @@ import { mintLamport, advanceCounter, stampSql, ensureLamportOriginColumn, incom
 import { deleteContactArtifactComments } from "../shared/artifact-comment-delete.js";
 import { noticeProviderKeyNeeded } from "../shared/provider-key-need.js";
 import { providerEndpointChanged, noticeProviderEndpointHeld } from "../shared/provider-endpoint.js";
+import { withWriteContext, peerWriteContext } from "../shared/history/write-context.js";
 
 /** How long the re-pair fence waits to learn a peer feed's remote length (PT-1). */
 const REPAIR_FENCE_UPDATE_TIMEOUT_MS = 15_000;
@@ -2872,8 +2873,25 @@ export class InstanceSyncManager {
 
   /**
    * Apply a single sync entry from a remote instance.
+   *
+   * Runs inside the PEER's version-history write context (Task 2 of the version
+   * history design, review focus 2): whatever this change writes to a covered
+   * table is stamped with the peer's instance id as author AND origin, so a change
+   * that arrived from another machine is never recorded as 'owner' and never as
+   * 'unattributed'. The id is the id of the feed the entry arrived on (authenticated
+   * before any row is applied), not the entry's own claim.
+   *
+   * This adds no sync surface: item_versions is local-only (never in SYNCED_TABLES)
+   * and carries no emitting trigger, so the stamp's UPDATE queues no outbound
+   * event, and the apply path below emits nothing itself — it only writes.
    */
   async _applyEntry(remoteInstanceId, entry) {
+    return withWriteContext(peerWriteContext(remoteInstanceId), () =>
+      this._applyEntryInner(remoteInstanceId, entry),
+    );
+  }
+
+  async _applyEntryInner(remoteInstanceId, entry) {
     const { table, op, row: signedRow, lamport_ts, instance_id, signature } = entry;
 
     // Validate table

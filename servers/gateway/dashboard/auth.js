@@ -15,6 +15,7 @@ import { forwardedAddrs, classifyPeer, isOverlayAddr, normalizeAddr } from "../.
 import { peerTrust } from "../../shared/peer-trust.js";
 import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { escapeHtml } from "./shared/components.js";
+import { withWriteContext, ownerWriteContext } from "../../shared/history/write-context.js";
 
 export function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -604,8 +605,25 @@ export function isAllowedEnrollNetwork(req) {
 }
 
 /**
+ * The version-history write context a dashboard request writes under: the owner,
+ * keyed by the first 8 hex of the session's sha256 (never a user name, an email
+ * or the raw session id) with the session as the job, so the owner's edits group
+ * per sign-in (the version history design, §8.1). Null when the request carries
+ * no session — the write is then recorded as unattributed, never as the owner.
+ */
+export function ownerRequestWriteContext(req) {
+  return ownerWriteContext(req?.dashboardSession);
+}
+
+/**
  * Dashboard auth middleware.
  * Checks session cookie or redirects to login.
+ *
+ * On success the rest of the request runs INSIDE the owner's write context: every
+ * write this request makes to covered content — including the panels' direct SQL
+ * on crow.db, whose triggers cannot see who is asking — is attributed to this
+ * sign-in. Express's next() is called inside the async-local store, so downstream
+ * handlers and their promises inherit it.
  */
 export function dashboardAuth(req, res, next) {
   // Network check
@@ -628,7 +646,9 @@ export function dashboardAuth(req, res, next) {
   verifySession(token).then((valid) => {
     if (valid) {
       req.dashboardSession = token;
-      next();
+      const ctx = ownerRequestWriteContext(req);
+      if (ctx) withWriteContext(ctx, () => next());
+      else next();
     } else {
       res.redirectAfterPost("/dashboard/login");
     }

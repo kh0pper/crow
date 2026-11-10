@@ -84,7 +84,7 @@ import { isInitializeRequest, CallToolRequestSchema } from "@modelcontextprotoco
 import { createMcpHandler } from "./routes/mcp.js";
 import { isLocalPeer } from "../shared/peer-class.js";
 import { loopbackActorGate, noteRefusedOnce, readActorHeaders } from "./loopback-gate.js";
-import { callerContext } from "./caller-context.js";
+import { callerContext, withCallerContext } from "./caller-context.js";
 import { recordToolCall } from "./session-logger.js";
 import { redactAcross, redactSecrets } from "../shared/redact-secrets.js";
 import { isOwnerTurnScope } from "../shared/turn-principal.js";
@@ -651,11 +651,14 @@ export function mountLoopbackMcp(app, opts) {
     // 11. Run the request inside the caller context.
     const h = handlersFor(storeName);
     if (sid && h.store.has(sid)) lastSeen.set(seenKey(storeName, sid), m.now());
-    const store = { caller: `bot:${botId}`, botId, peer: false, crossHost: false, family: m.family, scopeRef, projectId: actor.defProjectId ?? null, ctx };
+    const store = { caller: `bot:${botId}`, botId, threadId: actor.threadId ?? null, peer: false, crossHost: false, family: m.family, scopeRef, projectId: actor.defProjectId ?? null, ctx };
     requestState.set(store, { lang, method, sid, key, tools, closed: closed.signal });
     const handler = req.method === "POST" ? h.postHandler : req.method === "GET" ? h.getHandler : h.deleteHandler;
     try {
-      await callerContext.run(store, () => handler(req, res));
+      // The caller context, and the version-history write context it implies: a
+      // write this verified bot's tool call causes in this process is attributed
+      // to the bot (servers/shared/history/write-context.js).
+      await withCallerContext(store, () => handler(req, res));
     } catch {
       if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id });
     }
