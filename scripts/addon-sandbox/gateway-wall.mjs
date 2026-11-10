@@ -298,6 +298,24 @@ export function createWallContext({
     return out;
   }
 
+  /**
+   * The ids this Crow has configured: everything `installed.json` lists, plus
+   * every key of `<crowHome>/mcp-addons.json`. An add-on with its own
+   * mcp-addons.json entry is configured on this Crow even when installed.json
+   * does not list it (a checkout-linked add-on), so a container its checkout
+   * compose folder started is its own; only that same id can ever claim such a
+   * project, and mcp-addons.json is never bound into any wall. Read fresh on
+   * each call; a missing, unreadable or unparseable file adds nothing.
+   */
+  function configuredIds() {
+    const out = installedIds();
+    let raw = null;
+    try { raw = JSON.parse(readFileSync(join(crowHome, "mcp-addons.json"), "utf8")); } catch { return out; }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    for (const key of Object.keys(raw)) if (ADDON_ID_RE.test(key)) out.add(key);
+    return out;
+  }
+
   /** One docker view for every question a spawn asks. */
   function dockerView() {
     if (viewCache) return viewCache;
@@ -305,7 +323,7 @@ export function createWallContext({
       ownHome: crowHome,
       otherHomes: coHostedHomePaths(),
       appRoot,
-      installedIds,
+      installedIds: configuredIds,
     };
     let made = null;
     if (typeof seam.dockerView === "function") made = seam.dockerView(opts);

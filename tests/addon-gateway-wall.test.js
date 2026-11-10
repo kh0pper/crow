@@ -71,6 +71,18 @@ function spawnRecorder() {
   };
 }
 
+/** A docker view seam that records the options it was handed. */
+function viewRecorder() {
+  const opts = [];
+  return {
+    opts,
+    dockerView: (o) => {
+      opts.push(o);
+      return EMPTY_VIEW;
+    },
+  };
+}
+
 /** One context over a fresh layout. */
 function context({ deps = quietDeps(), appRoot = null, dataDir = null, gatewayEnv = {}, crowHome = null, home = null } = {}) {
   const theHome = home || freshDir("home");
@@ -165,6 +177,88 @@ test("containerOwnerFor: this add-on's own project passes; a bridge address with
   });
   const verdict = await down.containerOwnerFor("kiosk")("172.17.0.55");
   assert.equal(verdict.kind, "denied");
+});
+
+// ---- the ids the docker view is handed ------------------------------------
+
+test("the docker view gets the ids installed.json lists and the ones mcp-addons.json configures", async () => {
+  const home = freshDir("configured-home");
+  const crowHome = join(home, ".crow");
+  mkdirSync(crowHome, { recursive: true });
+  const installedPath = join(crowHome, "installed.json");
+  const addonsPath = join(crowHome, "mcp-addons.json");
+  writeFileSync(installedPath, JSON.stringify(["installed-only"]));
+  writeFileSync(addonsPath, JSON.stringify({ "linked-one": { command: "node", args: [] } }));
+
+  const rec = viewRecorder();
+  const ctx = context({
+    crowHome,
+    home,
+    deps: quietDeps({ ...rec, identifyListener: async () => ({ kind: "denied" }) }),
+  });
+  await ctx.listenerOwnerFor("linked-one")("127.0.0.1", 8123);
+  assert.equal(rec.opts.length, 1, "the view is built once");
+
+  const ids = rec.opts[0].installedIds();
+  assert.ok(ids instanceof Set, "the view gets a Set");
+  assert.equal(ids.has("linked-one"), true, "an id only mcp-addons.json names is configured");
+  assert.equal(ids.has("installed-only"), true, "an id only installed.json lists is configured");
+
+  // Read fresh on each call: a new entry counts without a new view.
+  writeFileSync(addonsPath, JSON.stringify({ "linked-one": {}, "linked-two": {} }));
+  const later = rec.opts[0].installedIds();
+  assert.equal(later.has("linked-two"), true);
+  assert.equal(later.has("linked-one"), true);
+});
+
+test("mcp-addons.json keys that are not one slug never join the ids the view gets", async () => {
+  const home = freshDir("slug-home");
+  const crowHome = join(home, ".crow");
+  mkdirSync(crowHome, { recursive: true });
+  writeFileSync(join(crowHome, "installed.json"), JSON.stringify(["installed-only"]));
+  // Written as text so `__proto__` stays an ordinary key of the parsed document.
+  writeFileSync(
+    join(crowHome, "mcp-addons.json"),
+    '{"../x":{},"Upper":{},"":{},"a/b":{},"__proto__":{},"good-one":{}}',
+  );
+
+  const rec = viewRecorder();
+  const ctx = context({
+    crowHome,
+    home,
+    deps: quietDeps({ ...rec, identifyListener: async () => ({ kind: "denied" }) }),
+  });
+  await ctx.listenerOwnerFor("kiosk")("127.0.0.1", 8123);
+  const ids = rec.opts[0].installedIds();
+
+  for (const odd of ["../x", "Upper", "", "a/b", "__proto__"]) {
+    assert.equal(ids.has(odd), false, "not one slug: " + JSON.stringify(odd));
+  }
+  assert.equal(ids.has("good-one"), true);
+  assert.equal(ids.has("installed-only"), true);
+  assert.equal(ids.size, 2, "only the installed id and the one slug-shaped key are in the set");
+});
+
+test("an invalid or array-shaped mcp-addons.json adds nothing and does not throw", async () => {
+  for (const text of ['{"linked-one": ', '["linked-one"]', "null", '"linked-one"']) {
+    const home = freshDir("broken-home");
+    const crowHome = join(home, ".crow");
+    mkdirSync(crowHome, { recursive: true });
+    writeFileSync(join(crowHome, "installed.json"), JSON.stringify(["installed-only"]));
+    writeFileSync(join(crowHome, "mcp-addons.json"), text);
+
+    const rec = viewRecorder();
+    const ctx = context({
+      crowHome,
+      home,
+      deps: quietDeps({ ...rec, identifyListener: async () => ({ kind: "denied" }) }),
+    });
+    await ctx.listenerOwnerFor("kiosk")("127.0.0.1", 8123);
+    const ids = rec.opts[0].installedIds();
+    assert.equal(ids.has("installed-only"), true, "installed.json still counts: " + text);
+    assert.equal(ids.has("linked-one"), false, "the broken document adds nothing: " + text);
+    assert.equal(ids.size, 1, "the narrower set: " + text);
+  }
 });
 
 // ---- the three spawn kinds ------------------------------------------------
