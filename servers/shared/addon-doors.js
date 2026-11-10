@@ -10,6 +10,12 @@
  *    names that add-on has always used for its state. Never a name pattern, and
  *    never a manifest field (a pattern would collide with Crow-home entries such
  *    as `<CROW_HOME>/android-keystore`).
+ *  - `ADDON_TOKEN_DIRS` maps a FIRST-PARTY id to home-relative folders it may
+ *    hold read-write even though they sit under a hidden top-level entry of the
+ *    home (a dot-directory such as `~/.local/share/<app>`). A hidden entry of
+ *    the home is never writable otherwise, so entries are added only with a
+ *    reviewed first-party need — never for a manifest field and never from
+ *    anything an add-on can write.
  *
  * Data only: the token minting and validation that turns a door set into a
  * capability arrives in a later task.
@@ -44,4 +50,11 @@ export const ADDON_DOORS = deepFreeze({
 
 export const ADDON_STATE_DIRS = deepFreeze({
   browser: ["browser-sessions", "browser-downloads", "browser-exports"],
+});
+
+export const ADDON_TOKEN_DIRS = deepFreeze({
+  // Empty on purpose: an entry here is a folder under a hidden home entry (a
+  // PATH dir, a dot-config dir) that the add-on may write. Add one only with a
+  // reviewed first-party need, as a home-relative path such as
+  // ".local/share/<app>".
 });

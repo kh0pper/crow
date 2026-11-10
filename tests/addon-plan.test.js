@@ -20,7 +20,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import { ContainRefused, neverBound } from "../scripts/pi-bots/pi_contain.mjs";
 import { buildAddonPlan } from "../scripts/addon-sandbox/plan.mjs";
@@ -61,11 +61,16 @@ writeFileSync(join(CROW, "addon-walls.json"), "{}");
 const SSH_DIR = mk(HOME, ".ssh");
 const SSH_KEY = join(SSH_DIR, "id_ed25519");
 writeFileSync(SSH_KEY, "k");
-const CONFIG = mk(HOME, ".config", "acme-mcp");
-const TOKEN = join(CONFIG, "token.json");
+// A folder the owner chose for a sign-in file: visible (and below a visible
+// folder, not a direct child of the home), so it is writable.
+const SIGNIN = mk(HOME, "signin", "acme");
+const TOKEN = join(SIGNIN, "token.json");
 writeFileSync(TOKEN, "{}");
-const KEYFILE = join(CONFIG, "key.pem");
+const KEYFILE = join(SIGNIN, "key.pem");
 writeFileSync(KEYFILE, "k");
+// A HIDDEN top-level entry of the home: never writable, whatever names it.
+const CONFIG = mk(HOME, ".config", "acme-mcp");
+writeFileSync(join(CONFIG, "token.json"), "{}");
 writeFileSync(join(HOME, ".config", "token.json"), "{}");
 const UV_DIR = mk(HOME, ".local", "bin");
 writeFileSync(join(UV_DIR, "uv"), "");
@@ -210,7 +215,7 @@ test("every source in an add-on-writable tree is bound by fd, never by path", ()
     }),
   });
   try {
-    const writable = [ADDON_DATA, STATE, CONFIG, KEYFILE];
+    const writable = [ADDON_DATA, STATE, SIGNIN, KEYFILE];
     const sources = pathSources(plan.args);
     for (const p of writable) assert.ok(!sources.includes(p), p + " is never a path-bind source");
     const ops = fdOps(plan.args);
@@ -221,10 +226,10 @@ test("every source in an add-on-writable tree is bound by fd, never by path", ()
     for (const q of ops) assert.ok(numbers.has(q[1]), "every fd op names a listed child fd");
 
     // The sign-in folder comes before the file inside it.
-    const folderAt = plan.args.indexOf(CONFIG);
+    const folderAt = plan.args.indexOf(SIGNIN);
     const fileAt = plan.args.indexOf(KEYFILE);
     assert.ok(folderAt > 0 && fileAt > folderAt, "parents before children");
-    assert.equal(plan.fds.find((f) => readlinkSync("/proc/self/fd/" + f.fd) === CONFIG).role, "oauth-dir");
+    assert.equal(plan.fds.find((f) => readlinkSync("/proc/self/fd/" + f.fd) === SIGNIN).role, "oauth-dir");
     assert.equal(plan.fds.find((f) => readlinkSync("/proc/self/fd/" + f.fd) === KEYFILE).role, "file-read");
     assert.equal(plan.fds.find((f) => readlinkSync("/proc/self/fd/" + f.fd) === STATE).role, "state");
   } finally { closePlan(plan); }
@@ -305,7 +310,7 @@ test("a local-only profile gets its loopback port and no proxy variables", () =>
 // ---- never bound ---------------------------------------------------------
 
 test("neverBound(home) never appears as a bind source, including through a symlinked value", () => {
-  const linkDir = mk(CONFIG, "keys");
+  const linkDir = mk(SIGNIN, "keys");
   const link = join(linkDir, "key-link.pem");
   symlinkSync(SSH_KEY, link);
   const plan = planOf({
@@ -390,10 +395,10 @@ test("an owner-set sign-in folder is bound read-write as a directory; a direct c
     }),
   });
   try {
-    const op = fdOps(plan.args).find((q) => q[2] === CONFIG);
+    const op = fdOps(plan.args).find((q) => q[2] === SIGNIN);
     assert.ok(op, "the folder is bound by fd");
     assert.equal(plan.fds.find((f) => String(f.childFd) === op[1]).role, "oauth-dir");
-    assert.ok(!pathSources(plan.args).includes(CONFIG), "never a path-bind source");
+    assert.ok(!pathSources(plan.args).includes(SIGNIN), "never a path-bind source");
   } finally { closePlan(plan); }
 
   const childOfHome = planOf({
@@ -406,13 +411,26 @@ test("an owner-set sign-in folder is bound read-write as a directory; a direct c
     assert.ok(!fdOps(childOfHome.args).some((q) => q[2] === join(HOME, ".config")), "~/.config is not bound");
   } finally { closePlan(childOfHome); }
 
-  const missingFile = planOf({
+  // A sign-in folder one level further down a hidden entry is refused too:
+  // `~/.config/<app>` is still a hidden entry of the home.
+  const hiddenDir = planOf({
     profile: profileOf({
-      files: { read: [], write: [], oauthDir: { from: "ACME_TOKEN_DIR", path: join(CONFIG, "nope.json"), source: "owner" }, state: [] },
+      files: { read: [], write: [], oauthDir: { from: "ACME_TOKEN_DIR", path: join(CONFIG, "token.json"), source: "owner" }, state: [] },
     }),
   });
   try {
-    assert.ok(missingFile.refused.some((r) => r.path === join(CONFIG, "nope.json") && /does not contain/.test(r.reason)));
+    assert.ok(hiddenDir.refused.some((r) => r.path === join(CONFIG, "token.json") && /hidden entry of the home/.test(r.reason)),
+      "the hidden folder is refused: " + JSON.stringify(hiddenDir.refused));
+    assert.ok(!fdOps(hiddenDir.args).some((q) => q[2] === CONFIG), "~/.config/acme-mcp is not bound");
+  } finally { closePlan(hiddenDir); }
+
+  const missingFile = planOf({
+    profile: profileOf({
+      files: { read: [], write: [], oauthDir: { from: "ACME_TOKEN_DIR", path: join(SIGNIN, "nope.json"), source: "owner" }, state: [] },
+    }),
+  });
+  try {
+    assert.ok(missingFile.refused.some((r) => r.path === join(SIGNIN, "nope.json") && /does not contain/.test(r.reason)));
   } finally { closePlan(missingFile); }
 });
 
@@ -461,20 +479,236 @@ test("a non-crowDb plan has no data-dir bind, no CROW_DB_PATH, and unsets it", (
 
 // ---- env files, masks ----------------------------------------------------
 
-test("the add-on's own .env stays readable; every other bound .env is masked", () => {
+test("ownEnvFile: the own .env is masked, then re-bound by fd on top of its own mask", () => {
   const ownEnv = realpathSync(join(BUNDLES, "acme", ".env"));
   const plan = planOf({ profile: profileOf({ ownEnvFile: true }) });
   try {
-    assert.ok(!masked(plan.args, ownEnv), "bundles/acme/.env is kept readable");
+    const ops = pairs(plan.args);
+    const maskAt = ops.findIndex((q) => q[0] === "--ro-bind" && q[1] === "/dev/null" && q[2] === ownEnv);
+    const bindAt = ops.findIndex((q) => q[0] === "--ro-bind-fd" && q[2] === ownEnv);
+    assert.ok(maskAt >= 0, "the own .env is masked like every other");
+    assert.ok(bindAt >= 0, "and re-bound by fd");
+    assert.ok(bindAt > maskAt, "the fd bind comes after the mask, so it lands on top");
+    const spec = plan.fds.find((f) => f.role === "own-env");
+    assert.ok(spec, "the own .env fd is listed with its own role");
+    assert.equal(String(spec.childFd), ops[bindAt][1]);
+    assert.equal(readlinkSync("/proc/self/fd/" + spec.fd), ownEnv, "the fd really is the own .env");
+
     assert.ok(masked(plan.args, join(APP, ".env")), "the checkout's .env is masked");
     assert.ok(masked(plan.args, join(APP, "bundles", "other", ".env")), "another bundle's .env in the checkout is masked");
-    assert.ok(!plan.args.includes(join(BUNDLES, "other", ".env")), "an unbound bundle's .env is not named at all");
+    assert.ok(!plan.refused.some((r) => r.path === ownEnv), "nothing was refused");
   } finally { closePlan(plan); }
 
   const plain = planOf();
   try {
-    assert.ok(masked(plain.args, ownEnv), "without ownEnvFile the add-on's own .env is masked too");
+    assert.ok(masked(plain.args, ownEnv), "without ownEnvFile the own .env is masked too");
+    assert.ok(!fdOps(plain.args).some((q) => q[2] === ownEnv), "and nothing is bound over the mask");
   } finally { closePlan(plain); }
+});
+
+test("ownEnvFile with a symlinked own .env: refused, and the target stays masked", (t) => {
+  const own = join(BUNDLES, "acme", ".env");
+  const target = join(APP, ".env");
+  rmSync(own, { force: true });
+  try {
+    symlinkSync(target, own);
+  } catch (err) {
+    writeFileSync(own, "ACME=1");
+    if (err && (err.code === "EPERM" || err.code === "ENOSYS")) { t.skip("this host does not allow symlinks in the scratch dir"); return; }
+    throw err;
+  }
+  let plan;
+  try {
+    plan = planOf({ profile: profileOf({ ownEnvFile: true }) });
+    assert.ok(!fdOps(plan.args).some((q) => q[2] === own),
+      "no fd bind of a symlinked own .env: " + JSON.stringify(fdOps(plan.args)));
+    assert.equal(plan.fds.some((f) => f.role === "own-env"), false, "no own-env fd is handed over");
+    assert.ok(masked(plan.args, realpathSync(target)), "the target the add-on named stays masked");
+    assert.ok(plan.refused.some((r) => r.path === own && /symlink/.test(r.reason)),
+      "the own .env is refused: " + JSON.stringify(plan.refused));
+    // Another bundle's .env and the checkout's .env stay masked, and no bundle
+    // other than this one is even named.
+    assert.ok(masked(plan.args, realpathSync(join(APP, ".env"))));
+    assert.ok(!plan.args.includes(join(BUNDLES, "other", ".env")), "an unbound bundle's .env is not named at all");
+  } finally {
+    if (plan) closePlan(plan);
+    rmSync(own, { force: true });
+    writeFileSync(own, "ACME=1");
+  }
+});
+
+// ---- a read-write bind never lands in a hidden home entry ----------------
+
+test("a read-write bind is refused under a hidden home entry, except the add-on's own trees", () => {
+  const uvToken = join(UV_DIR, "tok.json");
+  writeFileSync(uvToken, "{}");
+  const bashrc = join(HOME, ".bashrc");
+  writeFileSync(bashrc, "");
+  const unit = join(HOME, ".config", "systemd", "user", "x.conf");
+  mk(dirname(unit));
+  writeFileSync(unit, "");
+  const autoItem = join(HOME, ".config", "autostart", "x", "y.json");
+  mk(dirname(autoItem));
+  writeFileSync(autoItem, "");
+  const notes = mk(HOME, "notes");
+  const noteFile = join(notes, "out.txt");
+  writeFileSync(noteFile, "");
+
+  try {
+    // An owner-set sign-in file inside a PATH directory (~/.local/bin).
+    const pathDir = planOf({
+      profile: profileOf({ files: { read: [], write: [], oauthDir: { from: "ACME_TOKEN", path: uvToken, source: "owner" }, state: [] } }),
+    });
+    try {
+      assert.ok(pathDir.refused.some((r) => r.path === uvToken && /hidden entry of the home/.test(r.reason)),
+        "~/.local/bin/tok.json is refused: " + JSON.stringify(pathDir.refused));
+      assert.ok(!fdOps(pathDir.args).some((q) => q[2] === UV_DIR), "~/.local/bin is not bound read-write");
+      assert.ok(!has(pathDir.args, "--bind", UV_DIR), "nor by path");
+    } finally { closePlan(pathDir); }
+
+    const writes = planOf({
+      profile: profileOf({
+        files: {
+          read: [],
+          write: [
+            { from: "RC", path: bashrc, source: "owner" },
+            { from: "UNIT", path: unit, source: "owner" },
+            { from: "AUTO", path: autoItem, source: "owner" },
+            { from: "NOTE", path: noteFile, source: "owner" },
+          ],
+          oauthDir: null,
+          state: ["browser-sessions"],
+        },
+      }),
+    });
+    try {
+      for (const p of [bashrc, unit, autoItem]) {
+        assert.ok(writes.refused.some((r) => r.path === p), p + " refused: " + JSON.stringify(writes.refused));
+        assert.ok(!fdOps(writes.args).some((q) => q[2] === p), p + " not bound");
+      }
+      assert.ok(writes.refused.some((r) => r.path === unit && /autostart or systemd/.test(r.reason)),
+        "a unit file is refused for the systemd component");
+      assert.ok(writes.refused.some((r) => r.path === autoItem && /autostart or systemd/.test(r.reason)),
+        "an autostart entry is refused for the autostart component");
+
+      // The add-on's own trees stay writable: its data folder, its state
+      // folder (itself under the hidden Crow home), and a visible owner path.
+      assert.ok(fdOps(writes.args).some((q) => q[2] === ADDON_DATA), "the own data folder is bound");
+      assert.ok(fdOps(writes.args).some((q) => q[2] === STATE), "the own state folder is bound");
+      assert.ok(fdOps(writes.args).some((q) => q[2] === noteFile), "a visible owner-set write path is bound");
+    } finally { closePlan(writes); }
+  } finally {
+    rmSync(uvToken, { force: true });
+    rmSync(unit, { force: true });
+    rmSync(join(HOME, ".config", "systemd"), { recursive: true, force: true });
+    rmSync(join(HOME, ".config", "autostart"), { recursive: true, force: true });
+    rmSync(notes, { recursive: true, force: true });
+    rmSync(bashrc, { force: true });
+  }
+});
+
+// ---- .env files inside a folder bound by fd -----------------------------
+
+test("a .env inside a folder bound by fd is masked, at any depth", () => {
+  const stateEnv = join(STATE, ".env");
+  const stateDeep = join(mk(STATE, "sub"), ".env.local");
+  const signEnv = join(SIGNIN, ".env");
+  const signDeep = join(mk(SIGNIN, "sub"), ".env.local");
+  for (const p of [stateEnv, stateDeep, signEnv, signDeep]) writeFileSync(p, "SECRET=1");
+  const plan = planOf({
+    profile: profileOf({ files: { read: [], write: [], oauthDir: { from: "ACME_TOKEN", path: TOKEN, source: "owner" }, state: ["browser-sessions"] } }),
+  });
+  try {
+    assert.ok(fdOps(plan.args).some((q) => q[2] === STATE), "the state folder is still bound");
+    assert.ok(fdOps(plan.args).some((q) => q[2] === SIGNIN), "the sign-in folder is still bound");
+    for (const p of [stateEnv, stateDeep, signEnv, signDeep]) assert.ok(masked(plan.args, p), p + " masked");
+    // The mask sits after the bind of the folder holding it.
+    const ops = pairs(plan.args);
+    const bindAt = ops.findIndex((q) => q[2] === STATE && q[0] !== "--ro-bind");
+    const maskAt = ops.findIndex((q) => q[0] === "--ro-bind" && q[1] === "/dev/null" && q[2] === stateEnv);
+    assert.ok(bindAt >= 0 && maskAt > bindAt, "the folder's bind comes first, then the mask");
+  } finally {
+    closePlan(plan);
+    for (const p of [stateEnv, stateDeep, signEnv, signDeep]) rmSync(p, { force: true });
+    rmSync(join(STATE, "sub"), { recursive: true, force: true });
+    rmSync(join(SIGNIN, "sub"), { recursive: true, force: true });
+  }
+});
+
+test("a folder bound by fd that is too large to scan is not bound, and its fd is closed", () => {
+  const filler = [];
+  for (let i = 0; i < 6; i++) {
+    const p = join(STATE, "f" + i);
+    writeFileSync(p, "");
+    filler.push(p);
+  }
+  const before = fdCount();
+  let plan;
+  try {
+    plan = planOf({
+      envScanMaxEntries: 3,
+      profile: profileOf({ files: { read: [], write: [], oauthDir: null, state: ["browser-sessions"] } }),
+    });
+    assert.ok(plan.refused.some((r) => r.path === STATE && /too large to scan for .env files/.test(r.reason)),
+      "the state folder is refused: " + JSON.stringify(plan.refused));
+    assert.ok(!fdOps(plan.args).some((q) => q[2] === STATE), "the state folder is not bound");
+    for (const f of plan.fds) assert.notEqual(readlinkSync("/proc/self/fd/" + f.fd), STATE, "no fd for it is handed over");
+  } finally {
+    if (plan) closePlan(plan);
+    for (const p of filler) rmSync(p, { force: true });
+  }
+  assert.equal(fdCount(), before, "the dropped fd was closed by the plan");
+});
+
+// ---- the command file ---------------------------------------------------
+
+test("a command inside a tree the add-on can write is either already visible or refused", () => {
+  // Already visible: inside the install folder and inside the own data folder.
+  const inInstall = join(BUNDLES, "acme", "server", "index.js");
+  const visible = planOf({ entry: { command: inInstall, args: [] }, pathEnv: "" });
+  try {
+    assert.ok(!has(visible.args, "--ro-bind", inInstall), "the install folder's own file is not bound again");
+    assert.ok(!visible.refused.some((r) => r.path === inInstall), "and not refused either");
+  } finally { closePlan(visible); }
+
+  const ownRun = join(ADDON_DATA, "run.sh");
+  writeFileSync(ownRun, "#!/bin/sh\n");
+  const inData = planOf({ entry: { command: ownRun, args: [] }, pathEnv: "" });
+  try {
+    assert.ok(!has(inData.args, "--ro-bind", ownRun), "the data folder's own file is not bound again");
+    assert.ok(!inData.refused.some((r) => r.path === ownRun), "and not refused either");
+  } finally {
+    closePlan(inData);
+    rmSync(ownRun, { force: true });
+  }
+
+  // Refused: another add-on's data folder, a state folder, an owner-set write
+  // path, and the Crow home outside the install folder.
+  const otherRun = join(mk(DATA, "other", "bin"), "run.sh");
+  writeFileSync(otherRun, "#!/bin/sh\n");
+  const stateRun = join(STATE, "run.sh");
+  writeFileSync(stateRun, "#!/bin/sh\n");
+  const notes = mk(HOME, "notes");
+  const noteRun = join(notes, "run.sh");
+  writeFileSync(noteRun, "#!/bin/sh\n");
+  writeFileSync(join(notes, "out.txt"), "");
+  const profile = profileOf({
+    files: { read: [], write: [{ from: "NOTE", path: notes, source: "owner" }], oauthDir: null, state: ["browser-sessions"] },
+  });
+  try {
+    for (const [cmd, reason] of [[otherRun, /another add-on's data folder/], [stateRun, /this add-on can write/], [noteRun, /this add-on can write/]]) {
+      const plan = planOf({ entry: { command: cmd, args: [] }, pathEnv: "", profile });
+      try {
+        assert.ok(plan.refused.some((r) => r.path === cmd && reason.test(r.reason)),
+          cmd + " refused: " + JSON.stringify(plan.refused));
+        assert.ok(unbound(plan.args, cmd), cmd + " is not a bind source");
+      } finally { closePlan(plan); }
+    }
+  } finally {
+    rmSync(otherRun, { force: true });
+    rmSync(stateRun, { force: true });
+    rmSync(notes, { recursive: true, force: true });
+  }
 });
 
 // ---- the root and the namespaces ----------------------------------------

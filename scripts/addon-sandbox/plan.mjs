@@ -17,6 +17,18 @@
  * 5): its data folder, its state folders, a sign-in folder it owns, and every
  * owner-set file. Read-only code (the checkout, the node install, the install
  * folder) keeps the path binds the bot plan uses, with every `.env` masked.
+ *
+ * Two rules hold for every read-write bind:
+ *  - a hidden top-level entry of the home is never writable, except this
+ *    add-on's own data folder, its own state folders and the first-party dirs
+ *    core lists for it (`ADDON_TOKEN_DIRS`); and no bind is ever writable over
+ *    anything that starts a program (`autostart`, `systemd`);
+ *  - a folder bound by fd is walked for `.env` files like any path-bound dir
+ *    (a `.env` inside a state or sign-in folder is masked too).
+ *
+ * The add-on's own `.env` (`ownEnvFile`) is not exempted from that mask: it is
+ * masked like every other, then re-bound by fd ON TOP of its own mask. A
+ * symlinked own `.env` names a file this add-on does not own, so it is refused.
  */
 import { closeSync, existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -24,6 +36,9 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
   ContainRefused,
   ENV_NAME_RE,
+  ENV_SCAN_MAX_DEPTH,
+  ENV_SCAN_MAX_ENTRIES,
+  ENV_SCAN_SKIP,
   NET_RELAY_MOUNT,
   assembleBindArgs,
   makeBindPolicy,
@@ -31,6 +46,7 @@ import {
   rootArgs,
   scanEnvMasks,
 } from "../pi-bots/pi_contain.mjs";
+import { ADDON_TOKEN_DIRS } from "../../servers/shared/addon-doors.js";
 import { isLoopbackHost } from "./profile.mjs";
 import { openCheckedBindSource } from "./bind-fd.mjs";
 
@@ -48,6 +64,12 @@ const DOOR_TOKEN_MOUNT = "/run/crow-addon/door-token";
 const CROW_HOME_SECRET_NAMES = ["secrets", "env", "peer-tokens.json", "identity.json", "android-keystore", ".keystore-env"];
 /** An add-on id is one lowercase slug: it names a folder, so never a path. */
 const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+/** Refused for writing: a hidden top-level entry of the home is the operator's. */
+const HIDDEN_WRITE_REASON = "a hidden entry of the home is never writable";
+/** Refused for writing: a bind over one of these could start a program on login. */
+const AUTOSTART_WRITE_REASON = "an autostart or systemd folder is never writable";
+/** Path components that can start something when the owner logs in. */
+const AUTOSTART_COMPONENTS = new Set(["autostart", "systemd"]);
 
 const expandHome = (p, home) => (p === "~" ? home : typeof p === "string" && p.startsWith("~/") ? home + p.slice(1) : p);
 
@@ -142,14 +164,40 @@ export function buildAddonPlan(o = {}) {
     const tokenFiles = [];
     try { for (const e of readdirSync(crowHomeReal)) if (/-token$/.test(e)) tokenFiles.push(join(crowHomeReal, e)); } catch { /* no home yet */ }
 
+    // The read-write allowlist for a hidden top-level entry of the home: the
+    // bot rule (`forbidden(..., { policy: true })`) exempts the whole data dir,
+    // which is too wide for a bind this add-on can write. Only these trees are
+    // writable below a hidden entry: this add-on's own data folder (the data
+    // dir itself for a crow.db profile), its own state folders, and the
+    // first-party dirs core lists for it.
+    const tokenDirNames = Object.prototype.hasOwnProperty.call(ADDON_TOKEN_DIRS, id) && Array.isArray(ADDON_TOKEN_DIRS[id])
+      ? ADDON_TOKEN_DIRS[id].filter((n) => typeof n === "string" && n && !n.includes(".."))
+      : [];
+    const hiddenWriteRoots = [];
+    const addWriteRoot = (p) => {
+      for (const q of [resolve(p), realp(p)]) if (q && !hiddenWriteRoots.includes(q)) hiddenWriteRoots.push(q);
+    };
+    for (const p of [profile.crowDb ? dataReal : join(dataReal, id), ...statePaths]) addWriteRoot(p);
+    for (const n of tokenDirNames) addWriteRoot(join(home, n));
+
+    /** The hidden top-level entry of `home` a path sits under, or null. */
+    function hiddenEntryOf(p) {
+      if (!under(p, home)) return null;
+      const top = p.slice(home.length + 1).split(sep)[0];
+      return top && top.startsWith(".") ? top : null;
+    }
+
     /**
      * The one refuse list: applied to a path before it is bound, again to its
      * real path, and passed as `refuse` to every checked open.
+     *
+     * `ownEnv` names the add-on's own `.env`, the only environment file that may
+     * be bound (by fd, on top of its own mask).
      */
-    function refusePath(p, { write = false } = {}) {
+    function refusePath(p, { write = false, ownEnv = false } = {}) {
       if (typeof p !== "string" || !p || !isAbsolute(p)) return "not an absolute path";
       const base = basename(p);
-      if (ENV_NAME_RE.test(base)) return "an environment file is never bound";
+      if (!ownEnv && ENV_NAME_RE.test(base)) return "an environment file is never bound";
       if (base === "mcp-addons.json") return "Crow's add-on registry is never bound";
       if (base === "addon-walls.json") return "the wall settings are never bound";
       for (const n of [...crowSecrets, ...tokenFiles]) {
@@ -158,7 +206,80 @@ export function buildAddonPlan(o = {}) {
       if (under(p, crowHomeReal) && !allowedCrowHomeRoots.some((r) => under(p, r))) {
         return "the Crow home is not a bind source outside this add-on's own folders";
       }
-      return forbidden(p, { write });
+      if (!write) return forbidden(p);
+      // A write bind over a folder that starts something on login, on ANY
+      // component (a unit, a desktop autostart entry), is never made.
+      if (p.split(sep).some((c) => AUTOSTART_COMPONENTS.has(c))) return AUTOSTART_WRITE_REASON;
+      // The bot's rule first: a hidden top-level entry of the home is never
+      // writable from a policy. It exempts the whole data dir, so the narrower
+      // allowlist above is applied here instead.
+      const bot = forbidden(p, { write: true, policy: true });
+      if (!bot) return null;
+      if (!hiddenEntryOf(p)) return bot; // refused for a reason of its own
+      if (hiddenWriteRoots.some((r) => under(p, r))) return forbidden(p, { write: true });
+      // A hidden entry outside this add-on's own trees: never writable. A more
+      // specific reason (a protected path, code) still wins.
+      return forbidden(p, { write: true }) || HIDDEN_WRITE_REASON;
+    }
+
+    // ---- .env files inside a folder bound by fd ----
+    // A folder bound by fd is not in the ro/rw maps, so scanEnvMasks never sees
+    // it: a `.env` inside a state folder or the sign-in folder would stay
+    // readable. The same names, skips and caps are walked here instead.
+    const envScanMaxDepth = Number.isInteger(o.envScanMaxDepth) ? o.envScanMaxDepth : ENV_SCAN_MAX_DEPTH;
+    const envScanMaxEntries = Number.isInteger(o.envScanMaxEntries) ? o.envScanMaxEntries : ENV_SCAN_MAX_ENTRIES;
+    const envScanCapReason = "too large to scan for .env files (cap " + envScanMaxEntries + " entries / depth " + envScanMaxDepth + "); not bound";
+
+    /** Every `.env` file inside `root`, or null when the folder is too large to scan. */
+    function envFilesInFolder(root) {
+      const found = [];
+      const maskedDirs = new Set(masks.filter(([, k]) => k === "dir").map(([d]) => d));
+      let seen = 0;
+      let capped = false;
+      const walk = (dir, depth) => {
+        if (capped) return;
+        let names = [];
+        try { names = readdirSync(dir); } catch { return; }
+        for (const n of names) {
+          if (++seen > envScanMaxEntries) { capped = true; return; }
+          const p = join(dir, n);
+          let st;
+          try { st = lstatSync(p); } catch { continue; }
+          if (ENV_NAME_RE.test(n)) {
+            if (st.isFile()) found.push(p);
+            continue;
+          }
+          if (st.isDirectory() && !ENV_SCAN_SKIP.has(n) && !maskedDirs.has(p)) {
+            if (depth >= envScanMaxDepth) { capped = true; return; }
+            walk(p, depth + 1);
+            if (capped) return;
+          }
+        }
+      };
+      walk(root, 1);
+      return capped ? null : found;
+    }
+
+    /** Close an fd this plan opened and forget it (the bind it was for is dropped). */
+    function dropFd(fd) {
+      const at = openedFds.indexOf(fd);
+      if (at >= 0) openedFds.splice(at, 1);
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+
+    /**
+     * Bind an opened folder read-write by fd with every `.env` inside it masked.
+     * A folder too large to scan is not bound at all: it is dropped and refused.
+     */
+    function bindOpenedDirFd(opened, role, labelPath) {
+      const found = envFilesInFolder(opened.realPath);
+      if (!found) {
+        dropFd(opened.fd);
+        refused.push({ path: labelPath, reason: envScanCapReason });
+        return;
+      }
+      for (const p of found) maskPathInto(masks, p);
+      bindFd(opened.fd, role, "--bind-fd", opened.realPath);
     }
 
     // ---- root ----
@@ -182,6 +303,22 @@ export function buildAddonPlan(o = {}) {
       }
     }
 
+    // Trees this add-on can write, computed before anything is bound so the
+    // command file can be checked against them. A command inside one of them is
+    // the add-on's own choice: it is either already visible through a bind or
+    // refused, never a read-only bind source of ours.
+    const writableTrees = [];
+    const addWritableTree = (p) => {
+      for (const q of [resolve(p), realp(p)]) if (q && !writableTrees.includes(q)) writableTrees.push(q);
+    };
+    for (const spec of Array.isArray(files.write) ? files.write : []) {
+      if (spec && typeof spec.path === "string" && spec.path) addWritableTree(expandHome(spec.path, home));
+    }
+    if (files.oauthDir && typeof files.oauthDir === "object" && typeof files.oauthDir.path === "string" && files.oauthDir.path) {
+      addWritableTree(dirname(resolve(expandHome(files.oauthDir.path, home))));
+    }
+    for (const p of statePaths) addWritableTree(p);
+
     // The command itself, never its `dirname(dirname(...))`: that root can be
     // an ancestor of a never-bound path (delta 11).
     const command = typeof entry.command === "string" ? entry.command : "";
@@ -190,9 +327,19 @@ export function buildAddonPlan(o = {}) {
     const commandFile = isAbsolute(command) ? (exists(command) ? resolve(command) : null) : (command ? which(command, pathEnv, exists) : null);
     if (commandFile) {
       const r = realp(commandFile);
-      const why = r ? refusePath(r) : null;
-      if (why) refused.push({ path: commandFile, reason: why });
-      else if (r && !under(r, "/usr") && !under(r, "/opt")) add(ro, r, { label: "add-on command" });
+      if (!r) {
+        refused.push({ path: commandFile, reason: "does not exist" });
+      } else if (under(r, installRoot) || under(r, join(dataReal, id))) {
+        // Already visible through the install folder or the data folder bind.
+      } else if (under(r, dataReal)) {
+        refused.push({ path: commandFile, reason: "another add-on's data folder is never a bind source" });
+      } else if (writableTrees.some((t) => under(r, t))) {
+        refused.push({ path: commandFile, reason: "a path this add-on can write is never a bind source" });
+      } else {
+        const why = refusePath(r);
+        if (why) refused.push({ path: commandFile, reason: why });
+        else if (!under(r, "/usr") && !under(r, "/opt")) add(ro, r, { label: "add-on command" });
+      }
     }
 
     // A venv's interpreter: `bin/python` is a symlink into the Python install,
@@ -284,6 +431,9 @@ export function buildAddonPlan(o = {}) {
         return;
       }
       openedFds.push(opened.fd);
+      // An owner-set entry may be a FOLDER: then every `.env` inside it is
+      // masked too (a folder bound by fd is not in the ro/rw maps).
+      if (opened.isDir) { bindOpenedDirFd(opened, write ? "dir-write" : "dir-read", spec.path); return; }
       bindFd(opened.fd, write ? "file-write" : "file-read", write ? "--bind-fd" : "--ro-bind-fd", opened.realPath);
     };
     for (const spec of Array.isArray(files.read) ? files.read : []) {
@@ -309,8 +459,6 @@ export function buildAddonPlan(o = {}) {
         const whyFor = (d) => {
           if (d === home) return "the whole home";
           if (dirname(d) === home) return "a direct child of the home";
-          const base = basename(d);
-          if (base === "autostart" || base === "systemd") return "an autostart or systemd folder";
           if (under(d, crowHomeReal)) return "the Crow home is never writable";
           for (const n of never) if (under(n, d)) return "an ancestor of a protected path (" + n + ")";
           return refusePath(d, { write: true });
@@ -328,7 +476,7 @@ export function buildAddonPlan(o = {}) {
           }
           if (opened) {
             openedFds.push(opened.fd);
-            bindFd(opened.fd, "oauth-dir", "--bind-fd", opened.realPath);
+            bindOpenedDirFd(opened, "oauth-dir", oauth.path);
           }
         }
       }
@@ -349,23 +497,18 @@ export function buildAddonPlan(o = {}) {
       }
       if (opened) {
         openedFds.push(opened.fd);
-        bindFd(opened.fd, "state", "--bind-fd", opened.realPath);
+        bindOpenedDirFd(opened, "state", p);
       }
     }
 
     // ---- .env masks over every path-bound dir ----
-    // The checkout, the node install and the install folder are walked and every
-    // .env in them is masked; the add-on's own .env stays readable when its
-    // manifest asks for it. The data folder is bound by fd and holds only this
-    // add-on's own files, so nothing Crow owns is reachable there.
-    const keep = new Set();
-    if (profile.ownEnvFile === true) {
-      const own = join(installRoot, ".env");
-      keep.add(own);
-      const ownReal = realp(own);
-      if (ownReal) keep.add(ownReal);
-    }
-    scanEnvMasks({ ro, rw, masks, policyDirs: new Set(), exists, home, refused, keep: keep.size ? keep : null });
+    // The checkout, the node install and the installed copy are walked and every
+    // .env in them is masked, at any depth. Nothing is kept readable by path:
+    // an add-on's own `.env` is re-bound BY FD on top of its own mask below, so
+    // a symlinked one cannot unmask a file the add-on does not own. The data
+    // folder is bound by fd and holds only this add-on's own files, so nothing
+    // Crow owns is reachable there.
+    scanEnvMasks({ ro, rw, masks, policyDirs: new Set(), exists, home, refused });
 
     // ---- network ----
     const netCfg = profile.network && typeof profile.network === "object" ? profile.network : {};
@@ -419,6 +562,34 @@ export function buildAddonPlan(o = {}) {
       if (at >= 0) bindArgs.splice(at, 0, "--perms", "0400");
     }
     args.push(...bindArgs);
+
+    // ---- the add-on's own .env: by fd, ON TOP of its own mask ----
+    // The mask above covers `<installRoot>/.env` like every other .env. When the
+    // manifest asks for it (`ownEnvFile`), the file itself is opened with the
+    // checked walk and bound again by fd, after the mask, so it lands on top. It
+    // must BE `<installRoot>/.env`: a symlink (or anything that resolves
+    // elsewhere) names a file this add-on does not own, and is refused.
+    if (profile.ownEnvFile === true) {
+      const ownEnv = join(installRoot, ".env");
+      if (exists(ownEnv)) {
+        let opened = null;
+        try {
+          opened = openCheckedBindSource(ownEnv, {
+            uid, home, expect: "file",
+            refuse: (rp) => (rp !== ownEnv ? "the add-on's own environment file must be " + ownEnv : refusePath(rp, { ownEnv: true })),
+          });
+        } catch (err) {
+          if (!(err instanceof ContainRefused)) throw err;
+          refused.push({ path: ownEnv, reason: err.message });
+        }
+        if (opened) {
+          openedFds.push(opened.fd);
+          const childFd = childFdFor();
+          fdSpecs.push({ fd: opened.fd, childFd, role: "own-env", flag: "--ro-bind-fd", dest: ownEnv });
+          args.push("--ro-bind-fd", String(childFd), ownEnv);
+        }
+      }
+    }
 
     args.push("--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try",
       "--unshare-net", "--cap-drop", "ALL", "--die-with-parent", "--new-session", "--chdir", installRoot);
