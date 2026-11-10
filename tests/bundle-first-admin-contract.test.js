@@ -308,7 +308,7 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
   );
   // The apps whose admin Crow creates from a SCRIPT it runs (via "setup"): the password
   // reaches the app on stdin, so the discovery window is closed instead of documented.
-  for (const id of ["frigate", "motioneye", "wallabag"]) {
+  for (const id of ["frigate", "motioneye", "wallabag", "uptime-kuma", "gitea", "forgejo"]) {
     assert.deepEqual(
       { mode: manifests[id]?.firstAdmin?.mode, via: manifests[id]?.firstAdmin?.via, script: manifests[id]?.firstAdmin?.setup?.script },
       { mode: "crow", via: "setup", script: "scripts/first-admin.sh" },
@@ -321,8 +321,12 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
     { mode: manifests.shiori?.firstAdmin?.mode, user: manifests.shiori?.firstAdmin?.user },
     { mode: "default-login", user: "shiori" },
   );
-  // The audit's headline example: uptime-kuma's own setup page.
-  assert.equal(manifests["uptime-kuma"]?.firstAdmin?.mode, "finish-setup");
+  // The audit's headline example: uptime-kuma's own setup page. Crow claims the account
+  // itself now (via a setup script), so nothing is left for a passer-by to claim.
+  assert.deepEqual(
+    { mode: manifests["uptime-kuma"]?.firstAdmin?.mode, user: manifests["uptime-kuma"]?.firstAdmin?.user },
+    { mode: "crow", user: "crow-admin" },
+  );
   // Plex runs its OWN server in this bundle, unclaimed until someone signs in:
   // the first Plex account that reaches it can claim it (review B2).
   assert.equal(manifests.plex?.firstAdmin?.mode, "finish-setup");

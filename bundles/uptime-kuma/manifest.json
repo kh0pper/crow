@@ -1,7 +1,7 @@
 {
   "id": "uptime-kuma",
   "name": "Uptime Kuma",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Service monitoring and uptime tracking with response-time graphs and status pages",
   "type": "bundle",
   "author": "Crow",
@@ -16,11 +16,18 @@
   "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
   "env_vars": [
     { "name": "UPTIMEKUMA_URL", "description": "Uptime Kuma base URL", "default": "http://localhost:3007", "required": true },
-    { "name": "UPTIMEKUMA_USERNAME", "description": "Admin username for Prometheus /metrics basic auth (set after first-run wizard)", "required": false },
-    { "name": "UPTIMEKUMA_PASSWORD", "description": "Admin password for /metrics basic auth", "required": false, "secret": true }
+    { "name": "UPTIMEKUMA_USERNAME", "description": "Admin username for Prometheus /metrics basic auth (Crow creates this account at install)", "required": false },
+    { "name": "UPTIMEKUMA_PASSWORD", "description": "Admin password for /metrics basic auth (Crow creates it at install and saves it in Settings → Passwords)", "required": false, "secret": true }
   ],
   "ports": [3007],
   "webUI": { "port": 3007, "path": "/", "label": "Uptime Kuma" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. On first launch, open the web UI to create the admin account. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "crow-admin",
+    "secretEnv": "UPTIMEKUMA_PASSWORD",
+    "userEnv": "UPTIMEKUMA_USERNAME"
+  },
+  "notes": "Crow creates Uptime Kuma's admin account itself at install and writes UPTIMEKUMA_USERNAME/UPTIMEKUMA_PASSWORD into this bundle's settings, so the first-run page is never left open for anything else on the machine to claim; the password is in Settings → Passwords. Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions."
 }

@@ -3,10 +3,12 @@
 # The image listens on port 3001 internally; we publish on 127.0.0.1:3007
 # to keep it host-local and avoid a collision with Crow's gateway (3001).
 #
-# First-run: open http://localhost:3007 to create the admin account and
-# monitors. The MCP server and dashboard panel here only use the public
-# ping endpoint and the Prometheus /metrics endpoint (basic auth with the
-# admin credentials once the wizard has been completed).
+# First-run: Crow creates the admin account itself at install (the password is
+# in Settings → Passwords), so the setup page is not left open for anyone else
+# on the machine. The MCP server and dashboard panel here only use the public
+# ping endpoint and the Prometheus /metrics endpoint (basic auth with that
+# account: UPTIMEKUMA_USERNAME / UPTIMEKUMA_PASSWORD are written into this
+# bundle's .env at install).
 
 services:
   uptime-kuma:
