@@ -82,6 +82,7 @@ import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
 import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, setWallMode, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys, profileFor, pendingHostFields } from "../../../scripts/addon-sandbox/profile.mjs";
+import { pinEntryIfWalled, PinRefused } from "../../../scripts/addon-sandbox/pin.mjs";
 import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
 import { addonWallStatus } from "../dashboard/shared/addon-wall-status.js";
 import { isStorageEnvConsumer } from "../addon-env.js";
@@ -1138,9 +1139,25 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
   return n;
 }
 
-export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run, skillMode = skillSyncMode(), skillLedger = null, log = (m) => console.log(m) } = {}) {
+export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run, skillMode = skillSyncMode(), skillLedger = null, log = (m) => console.log(m), env = process.env, migrateLinked = null } = {}) {
   const repaired = [];
   const errors = [];
+
+  // Add-on walls: a checkout-linked add-on is copied into the Crow home before any
+  // add-on starts, and ONLY on a host whose walls are on (the gate is the first
+  // statement of migrateLinkedAddons: with the switch unset it reads nothing and
+  // changes nothing). Never blocks the rest of the repair.
+  try {
+    const migrate = typeof migrateLinked === "function"
+      ? migrateLinked
+      : (await import("../../../scripts/addon-sandbox/migrate-linked.mjs")).migrateLinkedAddons;
+    const r = await migrate({ crowHome: CROW_HOME, appRoot: APP_ROOT, dataDir: resolveDataDir(), env, mcpAddonsPath: MCP_ADDONS_PATH, log });
+    for (const id of r?.migrated || []) repaired.push(`${id}: moved into the Crow home for its wall`);
+    for (const id of r?.repointed || []) repaired.push(`${id}: its own-host URL repointed to its local port`);
+    for (const f of r?.failed || []) errors.push({ id: f.id, error: `wall migration: ${f.reason}` });
+  } catch (err) {
+    errors.push({ id: "*", error: `wall migration: ${err?.message || err}` });
+  }
   // Skill sync (bundle-skill-sync.js): what it did per skill, and the copies
   // it kept (the caller notifies the owner once per edited skill per repo hash).
   const skillLines = [];
@@ -1459,6 +1476,36 @@ export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, ed
   const pin = bundleDir ? launcherPin(manifest.server.command, bundleDir) : null;
   return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}),
     ...(pin ? { command_sha256: pin } : {}), ownerSet };
+}
+
+/**
+ * The entry an install writes: `mcpAddonEntryFor`'s, pinned to one exact version
+ * when this host's walls are on (scripts/addon-sandbox/pin.mjs).
+ *
+ * With the walls off nothing is resolved and the entry is written unchanged.
+ * A launcher that cannot be pinned to one version fails the install, and no
+ * entry is written: a walled add-on must not run tomorrow whatever the registry
+ * serves then.
+ */
+async function pinnedMcpEntry({ manifest, reqEnv, generated, ownerEnv, editedEnv, destDir, bundleId, priorEntry, job }) {
+  const built = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, {
+    bundleDir: destDir,
+    edited: ownerEnv !== null ? editedEnv : null,
+    owner: ownerEnv !== null,
+    generatedKeys: Object.keys(generated || {}),
+    priorEntry,
+    bundleId,
+  });
+  let entry = built;
+  try {
+    entry = await pinEntryIfWalled(built, { env: process.env });
+  } catch (err) {
+    if (!(err instanceof PinRefused)) throw err;
+    appendLog(job, `Could not pin ${bundleId} to one version: ${err.message}`);
+    throw new Error(`could not pin ${bundleId} to one version: ${err.message}`);
+  }
+  if (JSON.stringify(entry) !== JSON.stringify(built)) appendLog(job, `Pinned ${bundleId} to one exact version`);
+  return entry;
 }
 
 /**
@@ -3214,7 +3261,17 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: ownerEnv !== null ? editedEnv : null, owner: ownerEnv !== null, generatedKeys: Object.keys(generated || {}), priorEntry: mcpAddons[bundleId] || null, bundleId });
+        mcpAddons[bundleId] = await pinnedMcpEntry({
+          manifest,
+          reqEnv,
+          generated,
+          ownerEnv,
+          editedEnv,
+          destDir,
+          bundleId,
+          priorEntry: mcpAddons[bundleId] || null,
+          job,
+        });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -3253,7 +3310,17 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // Before the entry is written (see the bundle branch above).
         ensureAddonDataDir(bundleId, manifest);
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: ownerEnv !== null ? editedEnv : null, owner: ownerEnv !== null, generatedKeys: Object.keys(generated || {}), priorEntry: mcpAddons[bundleId] || null, bundleId });
+        mcpAddons[bundleId] = await pinnedMcpEntry({
+          manifest,
+          reqEnv,
+          generated,
+          ownerEnv,
+          editedEnv,
+          destDir,
+          bundleId,
+          priorEntry: mcpAddons[bundleId] || null,
+          job,
+        });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }

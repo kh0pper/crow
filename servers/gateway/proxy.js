@@ -27,8 +27,9 @@ import { createDbClient, resolveDataDir } from "../db.js";
 import { gatewayListenPort } from "./listen-port.js";
 import { addonWallMode } from "../../scripts/addon-sandbox/spawn.mjs";
 import { AddonStdioTransport, createStderrPrefixer } from "../../scripts/addon-sandbox/transport.mjs";
-import { clearWallFailures, recordWallFailure, wallFailureByRef, wallFailureReason } from "../../scripts/addon-sandbox/failures.mjs";
+import { clearWallFailures, recordWallFailure, wallFailureByRef, wallFailureReason, WARMUP_REASON } from "../../scripts/addon-sandbox/failures.mjs";
 import { createWallContext } from "../../scripts/addon-sandbox/gateway-wall.mjs";
+import { warmAddon } from "../../scripts/addon-sandbox/warmup.mjs";
 import { isApproved, approvalNotFromThisMachine, approvalForAnotherBackend, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { pruneApprovalNonces } from "../shared/data-backend-approval-key.js";
 import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
@@ -254,16 +255,27 @@ function wallInstallRoot(id, cwd) {
  * The card carries the record's ref only; the reason is built here (denials,
  * then the child's stderr, then its exit code) so no card ever echoes a path
  * outside the add-on's own folders. Never throws, never blocks a connect.
+ *
+ * `warmup` is the failed prepare run's own result: its denials, stderr lines and
+ * exit code stand in for a transport's (a prepare run has no transport), and the
+ * card is worded for that case.
  */
-export function reportWallFailure(id, { refused = false, wall = null, transport = null, cwd = null } = {}) {
+export function reportWallFailure(id, { refused = false, wall = null, transport = null, cwd = null, warmup = null } = {}) {
   try {
     const relay = wall?.relay || connectedServers.get(id)?._wallRelay || null;
-    const denials = typeof relay?.denials === "function" ? relay.denials() : [];
-    const stderrLines = typeof transport?.stderrLines === "function" ? transport.stderrLines() : [];
+    const denials = warmup && Array.isArray(warmup.denials)
+      ? warmup.denials
+      : (typeof relay?.denials === "function" ? relay.denials() : []);
+    const stderrLines = warmup && Array.isArray(warmup.stderrLines)
+      ? warmup.stderrLines
+      : (typeof transport?.stderrLines === "function" ? transport.stderrLines() : []);
+    const exitCode = warmup
+      ? (Number.isInteger(warmup.exitCode) ? warmup.exitCode : null)
+      : (Number.isInteger(transport?.exitCode) ? transport.exitCode : null);
     const reason = wallFailureReason({
       denials,
       stderrLines,
-      exitCode: Number.isInteger(transport?.exitCode) ? transport.exitCode : null,
+      exitCode,
       installDir: wallInstallRoot(id, cwd),
       dataDir: join(resolveDataDir(), id),
       refused,
@@ -337,6 +349,32 @@ async function connectToServer(integration) {
   if (!integration.preSpawn) {
     wallMode = dep("addonWallMode", addonWallMode)({ id: integration.id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
     if (wallMode.mode === "walled") {
+      // The prepare run first: a walled child fetches nothing it did not fetch inside its own wall.
+      const warm = await dep("warmAddon", warmAddon)({
+        id: integration.id,
+        kind: "builtin",
+        entry: { command, args, env: spawnEnv },
+        command,
+        args: Array.isArray(args) ? args : [],
+        installDir: join(APP_ROOT, "bundles", integration.id),
+        nodeBin: process.execPath,
+        wallCtx: getWallContext(),
+        baseEnv: integration.baseEnv || process.env,
+        ownEnv: spawnEnv,
+      });
+      if (!warm || warm.ok !== true) {
+        const message = warm?.reason || WARMUP_REASON;
+        console.warn(`  [proxy] ${integration.name}: not started, its packages could not be prepared — ${message}`);
+        connectedServers.set(integration.id, {
+          client: null,
+          tools: [],
+          status: "error",
+          error: message,
+          isBuiltin: true,
+          wall: { mode: "refused", reason: message },
+        });
+        return null;
+      }
       try {
         wall = await dep("startAddonWall", (o) => getWallContext().startAddonWall(o))({
           id: integration.id,
@@ -549,6 +587,39 @@ export async function connectAddonServer(id, config) {
       // only; nothing the add-on can write is read here.
       const wm = dep("addonWallMode", addonWallMode)({ id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
       if (wm.mode === "walled") {
+        // The prepare run comes first, inside the same wall: a walled child
+        // reaches no registry of its own, so its cache is filled before the
+        // first real start, or the add-on stays off.
+        const warm = await dep("warmAddon", warmAddon)({
+          id,
+          kind: "addon",
+          entry: config,
+          command: rc.command,
+          args: config.args || [],
+          installDir,
+          nodeBin: process.execPath,
+          wallCtx: getWallContext(),
+          baseEnv: process.env,
+          ownEnv: addonOwnEnv(config, process.env, id),
+        });
+        if (!warm || warm.ok !== true) {
+          const message = warm?.reason || WARMUP_REASON;
+          console.error(`  [proxy] addon ${id}: not started, its packages could not be prepared — ${message}`);
+          connectedServers.set(id, {
+            client: null,
+            tools: [],
+            status: "error",
+            error: message,
+            isAddon: true,
+            wall: { mode: "refused", reason: message },
+          });
+          // A wall the prepare run could not even get is that wall's refusal (its own
+          // code, e.g. installed-changed); a prepare run that ran and failed is "warmup".
+          reportWallFailure(id, warm?.refused
+            ? { refused: warm.code || true, cwd: installDir }
+            : { refused: "warmup", warmup: warm, cwd: installDir });
+          return null;
+        }
         try {
           wall = await dep("startAddonWall", (o) => getWallContext().startAddonWall(o))({
             id,
@@ -572,7 +643,7 @@ export async function connectAddonServer(id, config) {
             isAddon: true,
             wall: { mode: "refused", reason: message },
           });
-          reportWallFailure(id, { refused: true, cwd: installDir });
+          reportWallFailure(id, { refused: err?.code || true, cwd: installDir });
           return null;
         }
       }

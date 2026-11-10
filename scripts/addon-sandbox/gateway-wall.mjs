@@ -25,16 +25,17 @@
  * tailscale status, the interface table, the listener identification, the spawn
  * wrapper) has a test seam in `deps`.
  */
-import { closeSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import { tailscaleStatusAsync } from "../../servers/shared/self-dial-address.js";
 import { openCheckedBindSource } from "./bind-fd.mjs";
 import { createDockerView } from "./docker-view.mjs";
-import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener, localOnlySubnets } from "./listener-owner.mjs";
-import { profileFor } from "./profile.mjs";
+import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener, localOnlySubnets, TTS_PORT_EXCEPTION } from "./listener-owner.mjs";
+import { composePortsFrom, profileFor } from "./profile.mjs";
 import { AddonWallRefused, wrapAddonSpawn } from "./spawn.mjs";
+import { labelPhrase } from "./words.mjs";
 
 /** Another Crow home beside this one (`~/.crow`, `~/.crow-r2`, …). */
 const CO_HOSTED_HOME_RE = /^\.crow(-|$)/;
@@ -46,6 +47,12 @@ const PAST_DEFAULTS_REL = join("registry", "addon-past-defaults.json");
 const SELF_URL_VARS = ["CROW_GATEWAY_URL", "CROW_PUBLIC_URL"];
 /** The spawn kinds this context builds. */
 const SPAWN_KINDS = new Set(["addon", "service", "builtin"]);
+/** Why a wall is built: a real start, or the one prepare run before it. */
+const WALL_PURPOSES = new Set(["run", "warmup"]);
+/** The profile refuse entry a changed installed copy produces. */
+const INSTALLED_DIFFERS = "installed manifest differs";
+/** The profile part kinds that describe what an add-on reaches. */
+const NETWORK_LABEL_KINDS = new Set(["internet", "local-host", "network-host"]);
 /** A project-service child's own folder: the same rule the plan applies. */
 const SERVICE_SUBDIR_RE = /^services\/[0-9a-f][0-9a-f-]{7,63}$/;
 /** An add-on id names folders, a relay dir and a data folder: one slug or nothing. */
@@ -99,11 +106,98 @@ function hostOfUrl(raw) {
   return host || null;
 }
 
-/** `err` as an AddonWallRefused, keeping a message that already says "add-on refused". */
+/** `err` as an AddonWallRefused, keeping its message and any code it already carries. */
 function asRefused(err) {
   if (err instanceof AddonWallRefused) return err;
   const text = err && typeof err.message === "string" && err.message ? err.message : "the wall could not be built";
-  return new AddonWallRefused(/^add-on refused/.test(text) ? text : "add-on refused: " + text);
+  return new AddonWallRefused(
+    /^add-on refused/.test(text) ? text : "add-on refused: " + text,
+    err && typeof err.code === "string" ? err.code : null,
+  );
+}
+
+/**
+ * The one exception to "an add-on cannot name another add-on's service": a
+ * media add-on reaches the local TTS ports its compose project publishes.
+ *
+ * The ports come from the REPO copy of the TTS bundle (compose file and
+ * manifest: the installed copy is writable by unwalled code), the project name
+ * from one docker snapshot, and the ids from `installed.json`. Every host this
+ * function adds carries `source: "gateway-tts"` and the project that owns it, so
+ * the relay re-checks the named exception instead of trusting a name. Any host
+ * already carrying that source is dropped first: this function is the only
+ * place one may come from.
+ *
+ * No snapshot, no installed entry, no repo manifest, or a project value shared
+ * by two projects: that TTS add-on adds nothing.
+ *
+ * @param {object} profile   a `profileFor` result
+ * @param {object} o
+ * @param {string} o.id      the add-on being walled
+ * @param {string} o.appRoot this Crow's checkout
+ * @param {Function|Set} o.installedIds
+ * @param {object|null} o.snapshot  the docker view's snapshot
+ * @returns {object} a new profile
+ */
+export async function withGatewayTtsHosts(profile, { id, appRoot, installedIds, snapshot } = {}) {
+  const source = profile && typeof profile === "object" ? profile : {};
+  const net = source.network && typeof source.network === "object" ? source.network : {};
+  const hosts = (Array.isArray(net.hosts) ? net.hosts : []).filter((h) => h && h.source !== "gateway-tts");
+  const labelParts = Array.isArray(source.labelParts) ? [...source.labelParts] : [];
+  const label = {
+    en: Array.isArray(source.label?.en) ? [...source.label.en] : [],
+    es: Array.isArray(source.label?.es) ? [...source.label.es] : [],
+  };
+  const withHosts = () => ({ ...source, network: { ...net, hosts }, labelParts, label });
+
+  const ttsIds = Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, id) ? TTS_PORT_EXCEPTION[id] : null;
+  if (!Array.isArray(ttsIds) || ttsIds.length === 0) return source;
+  const projects = snapshot && snapshot.addonProjects instanceof Map ? snapshot.addonProjects : null;
+  if (!projects) return withHosts();
+
+  let ids = null;
+  try {
+    const raw = typeof installedIds === "function" ? installedIds() : installedIds;
+    ids = raw instanceof Set ? raw : new Set(Array.isArray(raw) ? raw.map(String) : []);
+  } catch {
+    ids = new Set();
+  }
+  if (!ids) return withHosts();
+
+  for (const ttsId of ttsIds) {
+    if (typeof ttsId !== "string" || !ids.has(ttsId)) continue;
+    const dir = join(appRoot, "bundles", ttsId);
+    const manifestPath = join(dir, "manifest.json");
+    if (!existsSync(manifestPath)) continue; // the repo copy only
+    let manifest = null;
+    try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); } catch { continue; }
+    const composeRel = typeof manifest?.docker?.composefile === "string" && manifest.docker.composefile
+      ? manifest.docker.composefile
+      : "docker-compose.yml";
+    let composeText = "";
+    try { composeText = readFileSync(join(dir, composeRel), "utf8"); } catch { continue; }
+    const ports = composePortsFrom(composeText, manifest);
+    if (!ports.length) continue;
+    const owners = [...projects.entries()].filter(([, value]) => value === ttsId).map(([project]) => project);
+    if (owners.length !== 1) continue;
+    const ownerProject = owners[0];
+    const labelName = typeof manifest.name === "string" && manifest.name ? manifest.name : ttsId;
+    for (const port of ports) {
+      hosts.push({ host: "127.0.0.1", port, scheme: "http", from: "tts:" + ttsId, source: "gateway-tts", ownerProject });
+      const part = { kind: "local-host", label: labelName, host: "127.0.0.1", port };
+      const [en, es] = labelPhrase(part);
+      let at = 0;
+      for (let i = 0; i < labelParts.length; i++) {
+        if (NETWORK_LABEL_KINDS.has(labelParts[i]?.kind)) at = i + 1;
+      }
+      labelParts.splice(at, 0, part);
+      if (label.en.length > at) label.en.splice(at, 0, en);
+      else label.en.push(en);
+      if (label.es.length > at) label.es.splice(at, 0, es);
+      else label.es.push(es);
+    }
+  }
+  return withHosts();
 }
 
 /**
@@ -396,9 +490,10 @@ export function createWallContext({
    * @param {object} [o.ownEnv]   the add-on's own env (entry env, connection values, derived)
    * @param {"addon"|"service"|"builtin"} o.kind
    * @param {string} [o.dataSubdir]  `services/<uuid>`, a project-service child only
+   * @param {"run"|"warmup"} [o.purpose]  a real start, or the one prepare run before it
    * @returns {Promise<object>} a WallResult
    */
-  async function startAddonWall({ id, entry, command, args, baseEnv = process.env, ownEnv = {}, kind = "addon", dataSubdir } = {}) {
+  async function startAddonWall({ id, entry, command, args, baseEnv = process.env, ownEnv = {}, kind = "addon", dataSubdir, purpose = "run" } = {}) {
     try {
       // The id names folders below the data dir and, for a built-in, the
       // checkout's own bundle: checked before anything touches the filesystem.
@@ -406,8 +501,9 @@ export function createWallContext({
         throw new AddonWallRefused("add-on refused: invalid add-on id");
       }
       if (!SPAWN_KINDS.has(kind)) throw new AddonWallRefused("add-on refused: unknown spawn kind");
+      if (!WALL_PURPOSES.has(purpose)) throw new AddonWallRefused("add-on refused: unknown wall purpose");
       const pastDefaults = pastDefaultsAll();
-      const profile = profileFor({
+      let profile = profileFor({
         id,
         entry: entry && typeof entry === "object" ? entry : {},
         appBundlesDir: join(appRoot, "bundles"),
@@ -415,6 +511,18 @@ export function createWallContext({
         pastDefaultsAll: pastDefaults,
         gatewayPort,
       });
+      // A first-party add-on whose installed policy differs from the repo copy:
+      // the installed manifest's sandbox block is the one unwalled code could edit.
+      if (Array.isArray(profile.refused) && profile.refused.some((r) => r && r.what === INSTALLED_DIFFERS)) {
+        throw new AddonWallRefused("add-on refused: its installed files differ from Crow's copy", "installed-changed");
+      }
+      if (purpose === "warmup") {
+        // The prepare run fetches packages and reaches nothing else: internet
+        // only, no listed host, no door, no token.
+        profile = { ...profile, network: { internet: true, hosts: [] }, doors: [] };
+      } else if (Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, id)) {
+        profile = await withGatewayTtsHosts(profile, { id, appRoot, installedIds, snapshot: await snapshotOrNull() });
+      }
 
       let installDir;
       if (kind === "builtin") {

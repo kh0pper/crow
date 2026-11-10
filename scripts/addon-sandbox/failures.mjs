@@ -31,6 +31,10 @@ const PLAIN_RELATIVE_RE = /^[A-Za-z0-9._/-]{1,128}$/;
 
 /** The wall itself could not be built here. */
 export const REFUSED_REASON = "its wall could not be set up on this computer";
+/** The installed copy's policy differs from Crow's copy of the bundle. */
+export const INSTALLED_CHANGED_REASON = "its installed files changed; reinstall it to wall it";
+/** The prepare run inside the wall did not finish. */
+export const WARMUP_REASON = "could not get its packages ready inside its wall";
 /** A child that went away without an exit code of its own. */
 export const NOT_READY_REASON = "stopped before it was ready";
 /** Shown when a denial target is not plain host:port text. */
@@ -166,17 +170,15 @@ function openFailureText(resolved, roots) {
 }
 
 /**
- * The one line a card shows for a failure, first match:
- *  1. the wall could not be built;
- *  2. the relay's last denial — a target only when it is plain host:port text;
- *  3. the newest stderr line naming an open failure — the path relative to the
+ * What one child's own evidence says, first match:
+ *  1. the relay's last denial — a target only when it is plain host:port text;
+ *  2. the newest stderr line naming an open failure — the path relative to the
  *     add-on's own install or data folder, and only when that relative path is
  *     plain text, so a card never echoes a secret path or foreign markup;
- *  4. the exit code.
+ *  3. the exit code;
+ *  4. the not-ready text.
  */
-export function wallFailureReason({ denials, stderrLines, exitCode, installDir, dataDir, refused } = {}) {
-  if (refused) return REFUSED_REASON;
-
+function evidenceReason({ denials, stderrLines, exitCode, installDir, dataDir } = {}) {
   const denied = Array.isArray(denials) ? denials.filter((d) => typeof d === "string" && d) : [];
   const lastDenial = denied.length ? denied[denied.length - 1] : null;
   if (lastDenial) {
@@ -196,4 +198,22 @@ export function wallFailureReason({ denials, stderrLines, exitCode, installDir, 
 
   if (Number.isInteger(exitCode)) return `stopped with exit code ${exitCode}`;
   return NOT_READY_REASON;
+}
+
+/**
+ * The one line a card shows for a failure, first match:
+ *  1. the installed copy changed;
+ *  2. the prepare run could not fill the add-on's cache, with the same evidence
+ *     a stopped child gives, or alone when it left none;
+ *  3. the wall could not be built;
+ *  4. the evidence itself (see `evidenceReason`).
+ */
+export function wallFailureReason({ denials, stderrLines, exitCode, installDir, dataDir, refused } = {}) {
+  if (refused === "installed-changed") return INSTALLED_CHANGED_REASON;
+  if (refused === "warmup") {
+    const detail = evidenceReason({ denials, stderrLines, exitCode, installDir, dataDir });
+    return detail === NOT_READY_REASON ? WARMUP_REASON : `${WARMUP_REASON}: ${detail}`;
+  }
+  if (refused) return REFUSED_REASON;
+  return evidenceReason({ denials, stderrLines, exitCode, installDir, dataDir });
 }
