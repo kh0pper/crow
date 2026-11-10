@@ -148,6 +148,9 @@ test("a refused wall leaves the add-on off and starts nothing", async () => {
   assert.equal(built[0].id, ID);
   assert.equal(built[0].command, process.execPath, "the resolved launcher, not the entry's bare name");
   assert.deepEqual(built[0].args, ["server/index.js"]);
+  // A spawned fixture writes its mark within milliseconds (the walled-mode test
+  // below shows the mark appearing); wait well past that before saying none ran.
+  await new Promise((r) => setTimeout(r, 750));
   assert.equal(existsSync(mark), false, "no child ran");
   assert.ok(!lines.some((l) => l.includes("hostile-started")), "no child ran");
 });

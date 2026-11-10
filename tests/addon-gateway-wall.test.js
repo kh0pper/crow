@@ -385,3 +385,19 @@ test("with no docker view every interface but loopback and the default route cou
   assert.equal((await blind.containerOwnerFor("kiosk")("10.20.30.9")).kind, "denied");
   assert.equal((await blind.containerOwnerFor("kiosk")("127.0.0.5")).kind, "not-container");
 });
+
+test("a service child's folder is created when the data dir is reached through a symlink", async () => {
+  const id = "probe-service";
+  const appRoot = appRootWith(id);
+  const realData = freshDir("service-data-real");
+  mkdirSync(join(realData, id), { recursive: true, mode: 0o700 });
+  const linkParent = freshDir("service-data-link");
+  const dataDir = join(linkParent, "data");
+  symlinkSync(realData, dataDir);
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot, dataDir, deps: quietDeps(rec) });
+  const subdir = "services/0a1b2c3d-0000-4000-8000-0000000000cc";
+  await ctx.startAddonWall({ id, entry: {}, command: "node", args: [], kind: "service", dataSubdir: subdir });
+  assert.equal(rec.calls.length, 1);
+  assert.equal(statSync(join(realData, id, subdir)).isDirectory(), true);
+});

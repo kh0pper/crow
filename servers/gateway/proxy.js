@@ -220,8 +220,8 @@ async function connectToServer(integration) {
   // Timeout: npx/uvx may need to download packages on first run
   const CONNECT_TIMEOUT_MS = 60_000;
 
+  let transport = null;
   try {
-    let transport;
     if (wall && wall.walled) {
       transport = new AddonStdioTransport({
         id: integration.id,
@@ -275,7 +275,9 @@ async function connectToServer(integration) {
     return { client, tools };
   } catch (error) {
     // A wall that was built but whose child never connected still owns a relay,
-    // bind fds and a door token: cleanup is idempotent and covers both.
+    // bind fds and a door token: cleanup is idempotent and covers both. A walled
+    // child that started but never answered is stopped first.
+    if (wall && wall.walled && transport) { try { await transport.close(); } catch { /* already gone */ } }
     try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
     console.error(`  [proxy] ${integration.name}: failed to connect — ${error.message}`);
     connectedServers.set(integration.id, {

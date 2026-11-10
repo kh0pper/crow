@@ -431,7 +431,12 @@ export function createWallContext({
         if (typeof dataSubdir !== "string" || !SERVICE_SUBDIR_RE.test(dataSubdir)) {
           throw new AddonWallRefused("add-on refused: invalid data subfolder");
         }
-        const base = join(dataDir, id);
+        // The data dir at its REAL path: the checked opens refuse any symlinked
+        // component, and a host whose home or data dir is reached through a
+        // symlink must still get its service children (as plan.mjs uses dataReal).
+        let dataReal = dataDir;
+        try { dataReal = realpathSync(dataDir); } catch { /* missing: the check below refuses */ }
+        const base = join(dataReal, id);
         // Each level is created only under a real directory (never through a
         // symlink the add-on planted in its own writable folder): both mkdirs go
         // through fds opened component by component without following links.
