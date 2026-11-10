@@ -1,7 +1,7 @@
 {
   "id": "adguard-home",
   "name": "AdGuard Home",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Network-wide ads and tracker blocking DNS server. Filters queries with user-configurable blocklists and serves the admin UI in the browser.",
   "type": "bundle",
   "author": "Crow",
@@ -13,14 +13,21 @@
   "panel": "panel/adguard-home.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/adguard-home.md"],
-  "requires": { "env": ["ADGUARD_USERNAME", "ADGUARD_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
   "env_vars": [
     { "name": "ADGUARD_URL", "description": "AdGuard Home admin URL", "default": "http://localhost:3020", "required": false },
-    { "name": "ADGUARD_USERNAME", "description": "Admin username (set during initial setup wizard)", "required": true },
-    { "name": "ADGUARD_PASSWORD", "description": "Admin password (set during initial setup wizard)", "required": true, "secret": true }
+    { "name": "ADGUARD_USERNAME", "description": "Admin username. Crow creates `admin` at install and keeps it as `admin`; only change it if you set the app up yourself.", "default": "admin", "required": false },
+    { "name": "ADGUARD_PASSWORD", "description": "Admin password. Crow generates it at install, fills it into the setup wizard and keeps it in Settings → Passwords.", "required": false, "secret": true }
   ],
   "ports": [3020, 5335, 8530],
   "webUI": { "port": 3020, "path": "/", "label": "AdGuard Home" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "First-boot: open http://localhost:3020 and complete the setup wizard. Bind admin to port 3000 (container), DNS to port 53, and set admin credentials — then copy them into .env. DNS port exposed on 127.0.0.1:5335 to avoid conflicting with systemd-resolved on host. To serve DNS to your LAN, edit the compose to bind 0.0.0.0:53 (significant — plan the host firewall and upstream DNS redirect first)."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "ADGUARD_PASSWORD",
+    "userEnv": "ADGUARD_USERNAME"
+  },
+  "notes": "Crow fills in AdGuard Home's first-run setup at install: the admin account `admin` with a generated password (Settings → Passwords), the web UI kept on container port 3000 (host 3020) and DNS on container port 53. DNS is exposed on 127.0.0.1:5335 to avoid conflicting with systemd-resolved on host. To serve DNS to your LAN, edit the compose to bind 0.0.0.0:53 (significant — plan the host firewall and upstream DNS redirect first)."
 }

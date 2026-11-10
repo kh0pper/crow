@@ -16,6 +16,21 @@ tools:
 
 # TriliumNext Knowledge Base
 
+## First-run setup
+
+TriliumNext has no admin username: the first password set on its own pages owns the whole
+database. **Crow sets that password itself** at install and keeps it in
+**Settings → Passwords**, so there is never a moment when anyone else on the machine could
+claim the notes.
+
+An install whose password was already set (an older install, or one you set up yourself)
+is left alone: press **Save the login you made** on the Extensions card so Crow keeps it, and
+find the password in **Settings → Passwords** when you need it.
+
+Separate from that password, the MCP tools need an **ETAPI token**: create it in the web UI
+under **Options → ETAPI**, then put it in `TRILIUM_ETAPI_TOKEN` (Crow's integration settings
+or the bundle's `.env`).
+
 ## When to Activate
 
 - User asks to search, create, or organize notes

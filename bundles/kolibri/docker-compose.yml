@@ -1,3 +1,9 @@
+# Kolibri — offline-first learning platform from Learning Equality.
+#
+# Pinned to 0.19.5. The image sets KOLIBRI_HOME=/kolibri and its entrypoint refuses to
+# start unless /kolibri is a MOUNT — so the data volume is mounted exactly there. It also
+# ships python (and no curl or wget), which is what the healthcheck below uses.
+
 services:
   kolibri:
     image: learningequality/kolibri:0.19.5
@@ -5,16 +11,15 @@ services:
     ports:
       - "127.0.0.1:${KOLIBRI_HTTP_PORT:-8041}:8080"
     volumes:
-      - ${KOLIBRI_DATA_PATH:-kolibri-data}:/kolibrihome
+      - ${KOLIBRI_DATA_PATH:-kolibri-data}:/kolibri
     environment:
       - KOLIBRI_HTTP_PORT=8080
       - KOLIBRI_LANG=en
-      - KOLIBRI_FACILITY_NAME=${KOLIBRI_FACILITY_NAME:-Home Lab}
     init: true
     mem_limit: 1500m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/public/info/"]
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8080/api/public/info/', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5

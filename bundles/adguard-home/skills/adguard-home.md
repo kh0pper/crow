@@ -22,23 +22,24 @@ It's not a per-app content blocker — it decides what your network can resolve.
 Point a device's DNS at AdGuard Home and ads/trackers disappear before any
 browser plugin gets involved.
 
-## First-run setup (required)
+## First-run setup
 
-The image ships without credentials. Before any MCP tool will work:
+AdGuard Home ships without credentials, and its first start serves its own setup wizard on
+port 3000 inside the container. **Crow fills that wizard in itself** at install: the admin
+account is `admin`, the password is the one Crow generated, and both are kept in
+**Settings → Passwords** (the bundle's `.env` receives `ADGUARD_USERNAME`/`ADGUARD_PASSWORD`
+so these MCP tools can log in). The web UI stays on container port 3000 — host-mapped to
+3020 — and DNS on container port 53, host-mapped to 5335.
 
-1. `docker compose up -d` inside the bundle directory
-2. Open `http://localhost:3020` in a browser
-3. Walk through the setup wizard:
-   - **Admin web interface port**: leave as 3000 (container-side; host-mapped
-     to 3020)
-   - **DNS server port**: leave as 53 (container-side; host-mapped to 5335)
-   - **Admin credentials**: pick a username + strong password
-4. Copy the credentials into your Crow `.env`:
-   ```
-   ADGUARD_USERNAME=<your-username>
-   ADGUARD_PASSWORD=<your-password>
-   ```
-5. Restart Crow gateway so it picks up the new env.
+If this install's setup was finished before Crow did it (an older install, or you set it up
+yourself), it already has a login of yours: press **Set it up for me** on the Extensions card
+to let Crow do it where it still can, or **Save the login you made** so Crow keeps yours.
+Either way the credentials must also reach the gateway `.env`:
+
+```
+ADGUARD_USERNAME=<your-username>
+ADGUARD_PASSWORD=<your-password>
+```
 
 ## Using Crow DNS on the host
 
@@ -89,6 +90,7 @@ it back on.
   use."
 - **Stats empty on first boot**: nothing to show until a client actually
   sends queries. Point one device at `127.0.0.1:5335` to generate traffic.
-- **Losing the admin password**: edit `~/.crow/adguard-home/conf/AdGuardHome.yaml`
-  to reset the `users:` block (password is bcrypt-hashed; generate with
-  `htpasswd -B -n -b <user> <pass>` and paste the hash in).
+- **Losing the admin password**: it is in **Settings → Passwords** in Crow. If it was
+deleted there, edit `~/.crow/adguard-home/conf/AdGuardHome.yaml` to reset the `users:`
+block (password is bcrypt-hashed; generate with `htpasswd -B -n -b <user> <pass>` and
+paste the hash in).

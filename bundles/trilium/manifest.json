@@ -1,7 +1,7 @@
 {
   "id": "trilium",
   "name": "TriliumNext",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
   "type": "bundle",
   "author": "Crow",
@@ -21,6 +21,12 @@
   ],
   "ports": [8088],
   "webUI": { "port": 8088, "path": "/", "label": "TriliumNext" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker or connect to existing TriliumNext (set TRILIUM_URL + TRILIUM_ETAPI_TOKEN). Get your ETAPI token from Options > ETAPI in the TriliumNext UI."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "trilium",
+    "secretEnv": "TRILIUM_PASSWORD"
+  },
+  "notes": "Self-host via Docker or connect to existing TriliumNext (set TRILIUM_URL + TRILIUM_ETAPI_TOKEN). TriliumNext's password is set by Crow at install and kept in Settings → Passwords. Get your ETAPI token from Options > ETAPI in the TriliumNext UI."
 }
