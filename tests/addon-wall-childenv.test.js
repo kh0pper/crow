@@ -11,13 +11,14 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createWallContext } from "../scripts/addon-sandbox/gateway-wall.mjs";
 import { wrapAddonSpawn } from "../scripts/addon-sandbox/spawn.mjs";
+import { applyCredentialFiles, _resetCredentialKeysForTest } from "../servers/shared/credentials-env.js";
 import { WALL_BASE_ENV_ALLOW, WALL_ENV_DENY, declaredEnvKeys, wallChildEnv } from "../scripts/addon-sandbox/wall-env.mjs";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -116,7 +117,7 @@ test("a project-service child never gets the gateway's own token for its service
 
 test("wallChildEnv: the deny list wins over a declaration; an add-on's own value is its own", () => {
   const base = { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0105", ...SECRETS, RANDOM_GATEWAY_KEY: "x" };
-  const env = wallChildEnv({ baseEnv: base, ownEnv: { OWN: "1" }, declaredKeys: ["FRIGATE_PASSWORD", "CROW_LOCAL_MCP_TOKEN", "MINIO_ROOT_PASSWORD", "bad-name"] });
+  const env = wallChildEnv({ baseEnv: base, ownEnv: { OWN: "1" }, declaredKeys: ["FRIGATE_PASSWORD", "CROW_LOCAL_MCP_TOKEN", "MINIO_ROOT_PASSWORD", "bad-name"], declaredSource: "repo", credentialKeys: [] });
   assert.deepEqual(env, { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0105", OWN: "1" });
   for (const k of ["CROW_LOCAL_MCP_TOKEN", "MINIO_ROOT_PASSWORD"]) assert.ok(WALL_ENV_DENY.includes(k));
   for (const k of Object.keys(SECRETS)) assert.equal(WALL_BASE_ENV_ALLOW.includes(k), false);
@@ -126,4 +127,64 @@ test("declaredEnvKeys: only a repo-sourced manifest declares anything", () => {
   const m = { server: { envKeys: ["A_KEY"] }, env_vars: [{ name: "B_KEY" }, { name: "not ok" }] };
   assert.deepEqual(declaredEnvKeys(m, "repo"), ["A_KEY", "B_KEY"]);
   assert.deepEqual(declaredEnvKeys(m, "installed"), []);
+});
+
+test("a key the gateway took from systemd credentials is never passed, even declared; CREDENTIALS_DIRECTORY never is", () => {
+  // The real path: the gateway applies its LoadCredential files, which records the names.
+  const root = join(T, "run-credentials");
+  const dir = join(root, "crow-gateway.service");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(dir, "FRIGATE_PASSWORD"), "fake-cred-frigate-0106\n", { mode: 0o600 });
+  // Names are recorded only when applied to the real process env (as the gateway does).
+  const saved = { FRIGATE_PASSWORD: process.env.FRIGATE_PASSWORD, CREDENTIALS_DIRECTORY: process.env.CREDENTIALS_DIRECTORY };
+  delete process.env.FRIGATE_PASSWORD;
+  process.env.CREDENTIALS_DIRECTORY = dir;
+  _resetCredentialKeysForTest();
+  try {
+    const r = applyCredentialFiles(process.env, { dir, roots: [root], log: { warn() {}, log() {} } });
+    assert.deepEqual(r.applied, ["FRIGATE_PASSWORD"]);
+    const env = wallChildEnv({ baseEnv: process.env, ownEnv: { CREDENTIALS_DIRECTORY: "/x" }, declaredKeys: ["FRIGATE_PASSWORD", "CREDENTIALS_DIRECTORY"], declaredSource: "repo" });
+    assert.equal("FRIGATE_PASSWORD" in env, false, "a credential-applied key stays in the gateway");
+    assert.equal(Object.values(env).includes("fake-cred-frigate-0106"), false);
+    assert.equal("CREDENTIALS_DIRECTORY" in env, false, "the credentials path never reaches the child, not even from its own env");
+    assert.equal(env.PATH, process.env.PATH);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    _resetCredentialKeysForTest();
+  }
+});
+
+test("declared keys count only from a repo-sourced manifest: an installed or third-party one gets nothing", () => {
+  const base = { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0107" };
+  for (const src of [null, "installed", "third-party", undefined]) {
+    const env = wallChildEnv({ baseEnv: base, declaredKeys: ["FRIGATE_PASSWORD"], declaredSource: src, credentialKeys: [] });
+    assert.equal("FRIGATE_PASSWORD" in env, false, String(src));
+  }
+  assert.equal(wallChildEnv({ baseEnv: base, declaredKeys: ["FRIGATE_PASSWORD"], declaredSource: "repo", credentialKeys: [] }).FRIGATE_PASSWORD, "fake-frigate-0107");
+});
+
+test("through the wall context: a third-party add-on declaring FRIGATE_PASSWORD gets nothing; first-party frigate gets its own", async () => {
+  const saved = process.env.FRIGATE_PASSWORD;
+  process.env.FRIGATE_PASSWORD = "fake-frigate-0108";
+  try {
+    const ctx = context();
+    // A third-party bundle, installed only (no repo copy), declaring the same key.
+    const crowHome = join(T, "home", ".crow");
+    const inst = join(crowHome, "bundles", "acme-cam");
+    mkdirSync(join(inst, "server"), { recursive: true });
+    writeFileSync(join(inst, "manifest.json"), JSON.stringify({
+      id: "acme-cam", name: "Acme cam", version: "1.0.0", type: "mcp-server",
+      server: { command: "node", args: ["server/index.js"], envKeys: ["FRIGATE_PASSWORD"] },
+      env_vars: [{ name: "FRIGATE_PASSWORD", description: "x" }],
+    }));
+    mkdirSync(join(crowHome, "data", "acme-cam"), { recursive: true, mode: 0o700 });
+    const third = await ctx.startAddonWall({ id: "acme-cam", entry: {}, command: process.execPath, args: [], baseEnv: process.env, ownEnv: {}, kind: "addon" });
+    assert.equal("FRIGATE_PASSWORD" in third.env, false, "a third-party manifest declares nothing");
+
+    mkdirSync(join(crowHome, "data", "frigate"), { recursive: true, mode: 0o700 });
+    const first = await ctx.startAddonWall({ id: "frigate", entry: {}, command: process.execPath, args: [], baseEnv: process.env, ownEnv: {}, kind: "addon" });
+    assert.equal(first.env.FRIGATE_PASSWORD, "fake-frigate-0108", "the reviewed repo manifest's own key reaches it");
+  } finally {
+    if (saved === undefined) delete process.env.FRIGATE_PASSWORD; else process.env.FRIGATE_PASSWORD = saved;
+  }
 });

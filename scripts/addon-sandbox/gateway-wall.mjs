@@ -387,10 +387,12 @@ export function createWallContext({
       // connection's values (never the gateway's own token for that service), and
       // a built-in's own vars are already its ownEnv.
       let declaredKeys = [];
+      let declaredSource = null;
       if (kind === "addon") try {
         const src = loadPolicySource({ id, appBundlesDir: join(appRoot, "bundles"), installedBundlesDir: join(crowHome, "bundles") });
+        declaredSource = src && src.source === "repo" ? "repo" : null;
         declaredKeys = declaredEnvKeys(src && src.manifest, src && src.source);
-      } catch { declaredKeys = []; }
+      } catch { declaredKeys = []; declaredSource = null; }
 
       const wrap = typeof seam.wrapAddonSpawn === "function" ? seam.wrapAddonSpawn : wrapAddonSpawn;
       return await wrap({
@@ -400,6 +402,7 @@ export function createWallContext({
         baseEnv,
         ownEnv,
         declaredKeys,
+        declaredSource,
         profile,
         entry: { ...(entry && typeof entry === "object" ? entry : {}), command },
         crowHome,
