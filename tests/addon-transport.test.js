@@ -16,7 +16,7 @@ import { fstatSync, mkdtempSync, openSync, realpathSync, rmSync, statSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AddonStdioTransport, createStderrPrefixer } from "../scripts/addon-sandbox/transport.mjs";
+import { AddonStdioTransport, createStderrPrefixer, _STDERR_COPY_LIMIT } from "../scripts/addon-sandbox/transport.mjs";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-transport-")));
 after(() => rmSync(T, { recursive: true, force: true }));
@@ -206,4 +206,41 @@ test("a child that exits by itself closes the transport once", async () => {
   await t.close();
   assert.ok(Date.now() - started < 1000, "close() on an exited child returns at once");
   assert.deepEqual(events, ["exit", "close"], "and does not close twice");
+});
+/** A child that writes `mb` MiB to stderr in 64 KiB chunks, then exits 0. */
+function stderrFlood(mb) {
+  const script = "const b=Buffer.alloc(65536,120);let n=" + (mb * 16) + ";" +
+    "function go(){while(n>0){n--;if(!process.stderr.write(b)){process.stderr.once('drain',go);return;}}process.exit(0);}go();";
+  return { command: process.execPath, args: ["-e", script] };
+}
+
+/** Resolves when the transport's child has closed. */
+function closed(transport) {
+  return new Promise((resolve) => { transport.onclose = () => resolve(); });
+}
+
+test("a stderr flood with no reader buffers nothing beyond the prefixer, and the child is never held up", async () => {
+  let logged = 0;
+  const t = new AddonStdioTransport({ id: "flood", ...stderrFlood(20), env: { PATH: process.env.PATH }, log: () => { logged++; } });
+  const done = closed(t);
+  await t.start();
+  await done;
+  assert.equal(t._stderrStream, null, "no raw copy exists without a reader");
+  assert.ok(logged > 0, "the prefixer still saw the output");
+});
+
+test("a reader that never reads holds at most the copy limit, with one truncation line", async () => {
+  const t = new AddonStdioTransport({ id: "flood", ...stderrFlood(20), env: { PATH: process.env.PATH }, log: () => {} });
+  const copy = t.stderr; // a reader exists but never reads
+  const done = closed(t);
+  await t.start();
+  await done;
+  // 20 MiB were written; the copy holds no more than the limit plus the one marker line.
+  assert.ok(copy.writableLength + copy.readableLength <= _STDERR_COPY_LIMIT + 64 * 1024 + 64,
+    "buffered " + (copy.writableLength + copy.readableLength));
+  const chunks = [];
+  copy.on("data", (c) => chunks.push(c));
+  await new Promise((r) => copy.on("end", r));
+  const text = Buffer.concat(chunks).toString("latin1");
+  assert.equal(text.split("[stderr truncated]").length - 1, 1, "one marker for one gap");
 });

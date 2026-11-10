@@ -30,6 +30,10 @@ import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/s
 const TRUNCATED_MARK = " …[truncated]";
 /** One rate-limit window. */
 const WINDOW_MS = 1000;
+/** The most stderr a `stderr` reader may leave unread before chunks are dropped. */
+const STDERR_COPY_LIMIT = 1024 * 1024;
+/** Written once into the copy when a slow (or absent-minded) reader falls behind. */
+const STDERR_TRUNCATED_LINE = "[stderr truncated]\n";
 
 /**
  * A line-splitting, capping, rate-limited stderr reader.
@@ -173,6 +177,8 @@ export function createStderrPrefixer({
  *    then ends (the door token).
  * Whatever sits between those slots is `"ignore"`.
  */
+export const _STDERR_COPY_LIMIT = STDERR_COPY_LIMIT;
+
 export class AddonStdioTransport {
   /**
    * @param {object} o
@@ -201,7 +207,11 @@ export class AddonStdioTransport {
     this.extraStreams = {};
 
     this._readBuffer = new ReadBuffer();
-    this._stderrStream = new PassThrough();
+    // The raw stderr copy exists only once a reader asks for it (the getter):
+    // with no reader, nothing is buffered beyond the prefixer's own line cap.
+    this._stderrStream = null;
+    this._stderrDropping = false;
+    this._stderrEnded = false;
     this._prefixer = createStderrPrefixer(log ? { id, log } : { id });
     this._proc = null;
     this._exited = false;
@@ -213,9 +223,33 @@ export class AddonStdioTransport {
     return this._proc?.pid ?? null;
   }
 
-  /** A copy of everything the child writes to stderr, for existing readers. */
+  /**
+   * A copy of the child's stderr, for existing readers, created on first use.
+   * A reader that falls more than STDERR_COPY_LIMIT behind loses chunks (one
+   * "[stderr truncated]" line marks the gap): the child and the prefixer never
+   * wait on it, and the gateway never buffers more than that limit for it.
+   */
   get stderr() {
+    if (!this._stderrStream) {
+      this._stderrStream = new PassThrough();
+      if (this._stderrEnded) this._stderrStream.end();
+    }
     return this._stderrStream;
+  }
+
+  /** Copy one stderr chunk to the reader, if there is one, within the limit. */
+  _copyStderr(chunk) {
+    const s = this._stderrStream;
+    if (!s || s.writableEnded) return;
+    if (s.writableLength + chunk.length > STDERR_COPY_LIMIT) {
+      if (!this._stderrDropping) {
+        this._stderrDropping = true;
+        try { s.write(STDERR_TRUNCATED_LINE); } catch { /* a reader that went away */ }
+      }
+      return;
+    }
+    this._stderrDropping = false;
+    try { s.write(chunk); } catch { /* a reader that went away */ }
   }
 
   /** The last emitted stderr lines, without the prefix. */
@@ -295,7 +329,8 @@ export class AddonStdioTransport {
         // A tail line without a newline is still worth logging, and a reader of
         // the PassThrough must see the end.
         try { this._prefixer.end(); } catch { /* nothing left to flush */ }
-        try { this._stderrStream.end(); } catch { /* already ended */ }
+        this._stderrEnded = true;
+        try { this._stderrStream?.end(); } catch { /* already ended */ }
         this.onclose?.();
       });
 
@@ -310,7 +345,7 @@ export class AddonStdioTransport {
         try { this.onerror?.(err); } catch { /* the caller's handler */ }
       });
       proc.stderr?.on("data", (chunk) => {
-        try { this._stderrStream.write(chunk); } catch { /* a reader that went away */ }
+        this._copyStderr(chunk);
         this._prefixer.write(chunk);
       });
       proc.stderr?.on("error", (err) => {
