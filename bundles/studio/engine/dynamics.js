@@ -20,6 +20,9 @@
  *     process(left, right, frames, sc, sc) in place on Float32Array blocks
  *     reset()                              back to silence, no parameter change
  *     latencyFrames                        0, or round(0.0015 × rate) for the master limiter
+ *     state / gain                         (gate only, read-only) whether it is open, and
+ *                                          the gain its envelope is applying — for tests
+ *                                          and for a meter
  *
  * ## It is a classic script
  *
@@ -45,11 +48,21 @@
  * - **limiter** — on the master, a brickwall: the audio is delayed by
  *   `latencyFrames`, the true peak of the UNDELAYED input is measured through
  *   the same 4× polyphase filter `server/loudness.js` measures it with, and the
- *   gain is the smallest one the whole lookahead window can survive, ramped
- *   DOWN in a straight line across the lookahead (a step a millisecond before a
- *   peak is audible; a ramp that is already there when the peak is output is
- *   not), then released upward per `release_ms`. So the reduction is in place
- *   when a peak reaches the output and no sample passes the ceiling.
+ *   gain is ramped DOWN in a straight line steep enough for EVERY frame in the
+ *   lookahead window: each frame's own requirement has to be reached
+ *   `rampLead` frames before that frame is output, so the slope is the steepest
+ *   of those deadlines — not the one the window's minimum asks for. (Those are
+ *   not the same deadline: a shallower peak nearer the output and a deeper one
+ *   still entering the window share a window but not a deadline, and a line
+ *   aimed only at the deeper minimum is still above the shallower requirement
+ *   when the shallower frame is handed out.) The gain is then released upward
+ *   per `release_ms`. So the reduction is in place when a peak reaches the
+ *   output — the inter-sample peaks the detector finds between the frames it
+ *   already saw included — and no sample passes the ceiling. (A step a
+ *   millisecond before a peak is audible; a ramp that is already there when the
+ *   peak is output is not.) A ceiling lowered mid-play is the one deliberate
+ *   exception: it holds at once, in a step, not once the old peaks have drained
+ *   out of the lookahead.
  *   "The ceiling" means the ceiling as that 4× estimator reads it: a 4×
  *   oversampled true-peak meter reconstructs the waveform between samples only
  *   up to its own oversampling, and under-reads audio whose energy sits very
@@ -63,7 +76,9 @@
  *   attack/hold/release envelope whose closed floor is `range_db`. The detector
  *   is a peak envelope of the linked pair — instant attack, ~10 ms release —
  *   not the raw sample, so a low tone does not chatter at its zero crossings
- *   when `hold_ms` is 0.
+ *   when `hold_ms` is 0. Whether it is open and what gain it is applying are
+ *   readable from outside as `state` and `gain` — read-only, for tests and for
+ *   a meter.
  * - **de-esser** — a split-band compressor: a second-order band-pass at
  *   `freq_hz` drives the detector, and the reduction is applied to the band
  *   above `freq_hz × 0.7` only. The split is subtractive (the high band is
@@ -73,10 +88,13 @@
  *
  * Everything is sized in `create()` — the lookahead ring, the true-peak
  * histories, the RMS window, the filters' states — so `process()` allocates
- * nothing, throws nothing and calls no `Math.random`. The state is `Float64Array`
- * and plain doubles throughout, and every recursive state variable is flushed to
- * exactly 0 below 1e-30, the way `engine/perf-fx.js` flushes its own: a
- * decaying tail cannot cost a CPU spike on one machine and not another.
+ * nothing, throws nothing and calls no `Math.random`. (The rms detector does
+ * re-add its window once per full wrap, to throw away the running sum's
+ * rounding drift; that is a pass over memory `create()` already made.) The state
+ * is `Float64Array` and plain doubles throughout, and every recursive state
+ * variable is flushed to exactly 0 below 1e-30, the way `engine/perf-fx.js`
+ * flushes its own: a decaying tail cannot cost a CPU spike on one machine and
+ * not another.
  *
  * A sample that is not a finite number reads as 0 before it touches anything.
  * One NaN or ±Infinity in a biquad, in the RMS running sum or in the limiter's
@@ -127,6 +145,18 @@
    * inside the ceiling too, not only the sample that carries it.
    */
   const LIMITER_RAMP_LEAD_FRACTION = 1 / 8;
+
+  /**
+   * The fewest frames that early lead may be. The true-peak detector's
+   * interpolation lags the samples it describes: the value it reports for the
+   * peak BETWEEN two frames is only known six frames later (twelve taps per
+   * phase, centred on the sixth), so a peak's gain has to be in place at least
+   * six frames before the peak's own frame is handed out — plus a margin, so a
+   * ramp is still a ramp at the end. Hence a floor of 8 at any rate, with an
+   * eighth of the lookahead above it (`round(L/8)`: 8 frames at 44.1 kHz,
+   * 9 at 48 kHz, 18 at 96 kHz).
+   */
+  const LIMITER_RAMP_LEAD_MIN_FRAMES = 8;
 
   /**
    * The gate's detector release, in seconds: a peak envelope that follows the
@@ -553,7 +583,8 @@
    * Build one dynamics insert.
    *
    * The returned object is the insert the processor holds: `setParams` once per
-   * change, `process` on every block, `reset` when the chain is rebuilt.
+   * change, `process` on every block, `reset` when the chain is rebuilt. A gate
+   * also answers `state` and `gain` (read-only, see above).
    * @param {"compressor"|"limiter"|"gate"|"deesser"} kind which dynamics this is
    * @param {number} rate the AudioContext's sample rate, in Hz
    * @param {{master?: boolean}} [options] `master: true` makes a limiter the
@@ -564,7 +595,8 @@
    *            process: function(Float32Array, Float32Array|null, number,
    *                             Float32Array|null, Float32Array|null): void,
    *            reset: function(): void,
-   *            params: function(): Object<string, number|string>}}
+   *            params: function(): Object<string, number|string>,
+   *            state?: boolean, gain?: number}}
    * @throws {Error} when `kind` is not one of `KINDS` (never from `process`)
    */
   function create(kind, rate, options) {
@@ -621,8 +653,13 @@
       // can be re-applied to the frames still on their way out.
       peakRing: new Float64Array(lookaheadFrames + 1),
       requiredIndex: 0,
-      // How many frames before the frame a ramp is aimed at the ramp lands.
-      rampLead: Math.max(1, Math.round(lookaheadFrames * LIMITER_RAMP_LEAD_FRACTION)),
+      // How many frames before the frame a ramp is aimed at the ramp lands: never
+      // less than the true-peak filter's own lag plus a margin, so the gain is not
+      // still arriving when the frames a peak sits between are output.
+      rampLead: Math.max(
+        LIMITER_RAMP_LEAD_MIN_FRAMES,
+        Math.round(lookaheadFrames * LIMITER_RAMP_LEAD_FRACTION),
+      ),
       gain: 1,
       detector: createTruePeakState(),
     };
@@ -708,7 +745,13 @@
         requested[at] = value;
         if (value < lowest) lowest = value;
       }
-      if (limiter.gain > lowest) limiter.gain = lowest;
+      if (limiter.gain > lowest) {
+        // Lowering the ceiling mid-play steps the gain at once, and that is the
+        // requirement — the new ceiling holds from the very next sample, not
+        // once the old peaks have drained out of the lookahead. The ramp is for
+        // peaks that can be seen coming; a ceiling that just moved cannot be.
+        limiter.gain = lowest;
+      }
     }
 
     /** Recompute what a parameter change means for the limiter. @returns {void} */
@@ -850,10 +893,25 @@
         const power = (left * left + right * right) * 0.5;
         compressor.rmsSum -= compressor.rmsRing[compressor.rmsIndex];
         compressor.rmsRing[compressor.rmsIndex] = power;
-        compressor.rmsIndex = compressor.rmsIndex + 1 >= size ? 0 : compressor.rmsIndex + 1;
+        const wrapped = compressor.rmsIndex + 1 >= size;
+        compressor.rmsIndex = wrapped ? 0 : compressor.rmsIndex + 1;
         compressor.rmsSum += power;
         if (compressor.rmsFilled < size) compressor.rmsFilled += 1;
-        compressor.rmsSum = flush(compressor.rmsSum);
+        if (wrapped) {
+          // Once per full window, add the ring up again from scratch. A running
+          // sum that adds a huge sample and later subtracts it does not come
+          // back to what it was: the rounding error of every addition next to it
+          // stays, so the sum drifts and can even end up negative — and a
+          // negative mean turns into a NaN level and a detector that never
+          // compresses again. One O(window) pass every 10 ms throws the drift
+          // away (no allocation: the ring is the one `create()` made).
+          let sum = 0;
+          for (let at = 0; at < size; at += 1) sum += compressor.rmsRing[at];
+          compressor.rmsSum = sum;
+        }
+        // A sum of squares is never negative; holding it there keeps a rounding
+        // excursion from reaching the square root.
+        compressor.rmsSum = compressor.rmsSum > 0 ? flush(compressor.rmsSum) : 0;
         // The same floor and ceiling a peak reading gets: a mean power of 0 is
         // MIN_LEVEL_DB, and a huge one cannot turn the gain into a NaN later.
         levelDb = levelOf(Math.sqrt(compressor.rmsSum / compressor.rmsFilled));
@@ -913,40 +971,54 @@
       // is why the reduction is already in place when a peak reaches the output.
       const length = requested.length;
       const nowRequired = requested[limiter.requiredIndex];
+      const held = limiter.gain;
       let target = nowRequired;
-      let targetIn = 0;
+      // A straight line down has to be at EVERY slot's own requirement by the
+      // time that slot is output, so the line's slope is the steepest of those
+      // deadlines — not the one the window's minimum asks for. They differ
+      // whenever a deeper peak is further away than a shallower one: aiming at
+      // the minimum alone leaves the gain above the nearer, shallower
+      // requirement when that frame is handed out, and the clamp below then takes
+      // the difference in one step — at the very moment the true peak between the
+      // frames already output is what the ceiling is about. Subtracting
+      // `rampLead` makes every line land early rather than on the frame itself
+      // (`max(1, …)`: a slot inside the lead can only be met now, which is what
+      // the clamp is for). Slot 0 is the frame being output, so its line has one
+      // frame — the same promise the clamp makes, taken here so the ramp above is
+      // decided the same way.
+      let steepest = held > nowRequired ? held - nowRequired : 0;
       for (let ahead = 1; ahead < length; ahead += 1) {
         const slot =
           limiter.requiredIndex + ahead >= length
             ? limiter.requiredIndex + ahead - length
             : limiter.requiredIndex + ahead;
         const value = requested[slot];
-        if (value < target) {
-          target = value;
-          targetIn = ahead;
+        if (value < target) target = value;
+        if (value < held) {
+          const remaining = ahead - limiter.rampLead;
+          const frames = remaining > 1 ? remaining : 1;
+          const slope = (held - value) / frames;
+          if (slope > steepest) steepest = slope;
         }
       }
 
       if (target < limiter.gain) {
-        // Down in a straight line, not in a step. The ramp is aimed at the frame
-        // the window minimum belongs to, and finishes `rampLead` frames before
-        // that frame is output, so it is always there in time and never above
-        // what the peak needs when it reaches the output. Recomputing the slope
-        // every frame keeps the line straight as the window moves; a nearer or
-        // deeper peak arriving mid-ramp steepens it instead of being waited for.
-        const remaining = targetIn - limiter.rampLead;
-        const frames = remaining > 1 ? remaining : 1;
-        const next = limiter.gain - (limiter.gain - target) / frames;
+        // Down in a straight line, not in a step, and never below the window's
+        // minimum. Recomputing the slope every frame keeps the line straight as
+        // the window moves; a nearer or deeper peak arriving mid-ramp steepens it
+        // instead of being waited for.
+        const next = held - steepest;
         limiter.gain = next > target ? next : target;
       } else {
         // Up per `release_ms`, which is slow enough to be a pole, not a step.
         limiter.gain = flush(limiter.gain + limiter.releaseCoefficient * (target - limiter.gain));
       }
 
-      // The gain the frame being output actually gets. The ramp gets there by
-      // itself in every ordinary case; this is the hard promise for a peak that
-      // arrives inside the lookahead of one already seen, so what leaves never
-      // needs a step at the ceiling either.
+      // The gain the frame being output actually gets. With the slope above this
+      // clamp does not bind — the ramp is at each slot's requirement a whole lead
+      // before that slot arrives — but it stays as the hard promise: what leaves
+      // is never above what the frame being output asked for, not even on the
+      // frame a ceiling dropped or a window no ramp could have anticipated.
       const gain = limiter.gain < nowRequired ? limiter.gain : nowRequired;
 
       // The delayed audio, out of the same slot the new frame goes into.
@@ -1124,7 +1196,7 @@
     refresh();
     reset();
 
-    return {
+    const insert = {
       kind: name,
       rate: sampleRate,
       latencyFrames: latencyFrames,
@@ -1133,6 +1205,28 @@
       reset: reset,
       params: params,
     };
+
+    if (name === "gate") {
+      // The gate's own state, read-only: `state` is whether its hysteresis has it
+      // open, `gain` is the gain its envelope is applying on this frame (1 open,
+      // `range_db`'s gain shut). For tests and for a meter — reading either
+      // allocates nothing and there is no setter, so nothing outside can move the
+      // audio path's state.
+      Object.defineProperty(insert, "state", {
+        enumerable: true,
+        get: function () {
+          return gate.open;
+        },
+      });
+      Object.defineProperty(insert, "gain", {
+        enumerable: true,
+        get: function () {
+          return gate.gain;
+        },
+      });
+    }
+
+    return insert;
   }
 
   const api = {

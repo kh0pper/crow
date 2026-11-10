@@ -23,12 +23,15 @@
  * - **No allocation and no NaN.** Every insert is driven with every parameter at
  *   both ends of its range — one at a time and all at once — over a full-scale
  *   sine and over silence, with typed arrays and `Math.random` counted while it
- *   runs, and then for a long stretch with the heap measured: `process()` may
- *   make neither, and may hand back nothing but finite samples.
+ *   runs (that counter is the allocation guard), and then for a long stretch with
+ *   the heap measured, which catches what is KEPT rather than what is garbage.
+ *   `process()` may make neither, and may hand back nothing but finite samples.
  * - **The shapes, not just the levels.** The soft knee, the rms detector, the
- *   master limiter's gain ramp into a peak, the gate's hold and its smoothed
- *   detector, and `reset()` are each checked for what they are supposed to do,
- *   at 44100, 48000 and 96000 Hz where the rate can matter.
+ *   master limiter's gain ramp into a peak and across rising crests, the gate's
+ *   hold, its smoothed detector and its own `state`/`gain` (read off frame by
+ *   frame, which is the only honest way to catch it chattering), and `reset()`
+ *   are each checked for what they are supposed to do, at 44100, 48000 and
+ *   96000 Hz where the rate can matter.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -282,6 +285,48 @@ test("the compressor's rms detector reads the window's power, not its peak", () 
   assert.ok(passed > 0.85, `rms detection has to leave them, their window power is under the threshold; it read ${passed}`);
 });
 
+test("a huge sample does not leave the rms detector wrong", () => {
+  // The rms detector is a running sum of squares: add 1e18, then subtract it
+  // again a window later, and the double that held it has rounded away every
+  // small value added beside it (its ulp is 64). The sum comes back as 0 — or, on
+  // another signal, as some drift or even a negative number, whose square root is
+  // NaN and whose level then reads as silence. Either way the detector would
+  // never compress again. The sum is now rebuilt from the window once per wrap,
+  // so after a full window a huge sample leaves no trace: the same gain as a
+  // fresh insert fed the same tone and nothing else.
+  const settings = {
+    detect: "rms",
+    threshold_db: -20,
+    ratio: 4,
+    knee_db: 0,
+    attack_ms: 0.1,
+    release_ms: 5,
+    makeup_db: 0,
+    sidechain_hp_hz: 0,
+  };
+  const frames = framesOf(0.4);
+  const from = frames - framesOf(0.05);
+
+  const poisoned = tone(frames, 100, 0.5);
+  poisoned.left[0] = 1e9;
+  poisoned.right[0] = 1e9;
+  const insert = StudioDynamics.create("compressor", SAMPLE_RATE);
+  insert.setParams(settings);
+  const soaked = render(insert, poisoned);
+
+  const twin = StudioDynamics.create("compressor", SAMPLE_RATE);
+  twin.setParams(settings);
+  const clean = render(twin, tone(frames, 100, 0.5));
+
+  const after = peakOf(soaked.left, from);
+  const reference = peakOf(clean.left, from);
+  assert.ok(reference > 0.1, `the twin has to be compressing a tone, it reads ${reference}`);
+  assert.ok(
+    Math.abs(after - reference) < reference * 0.01,
+    `after the window a huge sample may not change the rms detector's gain: ${after.toFixed(5)} against a fresh twin's ${reference.toFixed(5)}`,
+  );
+});
+
 test("a soft knee turns the compressor down inside the knee, smoothly", () => {
   // The knee this compressor uses is the standard quadratic one (Reiss), whose
   // reduction above the threshold is (1/ratio - 1) × (over + knee/2)² / (2 × knee):
@@ -499,6 +544,100 @@ test("the master limiter ramps into a peak instead of stepping", () => {
   }
 });
 
+test("the master limiter holds the ceiling and ramps on rising crests", () => {
+  // The window's minimum is not the only deadline in the window, and it is not
+  // the first one either. Three bursts, each 2 dB hotter than the last, put a
+  // shallower peak nearer the output while the deeper ones are still on their way
+  // in: a ramp aimed only at the window minimum (the deepest peak, and the one
+  // furthest from the output) is gentler than the nearer peak's own requirement,
+  // so the gain is still above it when that peak is handed out — and the clamp
+  // that catches it is a step of about a decibel, taken exactly where the ceiling
+  // is about the true peak between frames already gone. The ramp has to be steep
+  // enough for EVERY frame in the window.
+  //
+  // The old ramp — the window minimum with its own deadline — fails this without
+  // stepping to catch: the gain simply is not low enough while the earlier crest
+  // is handed out, and the output's true peak comes out at -0.65 dBTP at 44.1 kHz
+  // and -0.78 dBTP at 48 kHz under a -1 dBTP ceiling (and 0.6 dB over it with the
+  // bursts 6 dB apart). It does produce a step on other crest spacings; this
+  // signal is the one the review asked for.
+  const ceilingDb = -1;
+  for (const rate of RATES) {
+    const frames = framesAt(rate, 0.4);
+    const insert = StudioDynamics.create("limiter", rate, { master: true });
+    insert.setParams({ ceiling_db: ceilingDb, release_ms: 50 });
+
+    // Square bursts, about 20 frames apart at 48 kHz (the same fraction of the
+    // lookahead at any rate, so all three are inside one window while the first
+    // is already on its way out), each one 2 dB hotter and all of them over the
+    // ceiling. The flat tops carry the inter-sample overshoot a true-peak
+    // detector exists to see, and every sample of a burst is ± the burst's
+    // amplitude, so out/in is the gain the limiter applied on every one of them.
+    const spacing = Math.max(2, Math.round((rate * 20) / SAMPLE_RATE));
+    const halfPeriod = Math.max(2, Math.round((rate * 4) / SAMPLE_RATE));
+    const burstFrames = halfPeriod * 4;
+    const first = framesAt(rate, 0.06);
+    const base = amplitudeOf(ceilingDb + 1); // ~1 dB over, before the overshoot
+    const signal = silence(frames);
+    for (let burst = 0; burst < 3; burst += 1) {
+      const amplitude = base * amplitudeOf(2 * burst);
+      const start = first + burst * spacing;
+      for (let at = 0; at < burstFrames; at += 1) {
+        const value = Math.floor(at / halfPeriod) % 2 === 0 ? amplitude : -amplitude;
+        signal.left[start + at] = value;
+        signal.right[start + at] = value;
+      }
+    }
+    assert.ok(
+      truePeakDb(signal.left, signal.right, frames) > ceilingDb + 3,
+      `the crests have to be well over the ceiling before a limiter is asked to hold them`,
+    );
+
+    const rendered = render(insert, signal);
+    const delay = insert.latencyFrames;
+    let previous = 0;
+    let previousAt = -2;
+    let worstStep = 0;
+    let worstAt = -1;
+    let moved = 0;
+    for (let at = delay; at < frames; at += 1) {
+      const inputAt = at - delay;
+      const delayedIn = signal.left[inputAt];
+      if (delayedIn === 0) continue;
+      const gain = rendered.left[at] / delayedIn;
+      // Only frame-to-frame, never across the silence between two bursts: a
+      // change over four frames is four ramp steps, not one.
+      if (inputAt - previousAt === 1) {
+        const change = Math.abs(gain - previous);
+        if (change > worstStep) {
+          worstStep = change;
+          worstAt = inputAt;
+        }
+        if (change > 1e-9) moved += 1;
+      }
+      previous = gain;
+      previousAt = inputAt;
+    }
+
+    const outTruePeak = truePeakDb(rendered.left, rendered.right, frames);
+    assert.ok(
+      outTruePeak <= ceilingDb + 0.05,
+      `at ${rate} Hz rising crests have to stay inside a ${ceilingDb} dBTP ceiling, the output's true peak is ${outTruePeak} dBTP`,
+    );
+    // The same per-frame bound the DC-step ramp test uses: a whole unit of gain
+    // spread over 7/8 of the lookahead, times 1.25 of slack.
+    const bound = 0.02 * (48000 / rate);
+    assert.ok(
+      worstStep < bound,
+      `at ${rate} Hz the limiter may not step its gain on a rising crest: the largest frame-to-frame change is ${worstStep.toFixed(4)} (frame ${worstAt}, the ramp allows ${bound.toFixed(4)})`,
+    );
+    assert.ok(
+      moved > 0,
+      `at ${rate} Hz the gain has to move across the crests, it changed on only ${moved} frames`,
+    );
+  }
+});
+
 test("the gate closes below threshold and opens with hysteresis", () => {
   const settings = {
     threshold_db: -40,
@@ -544,10 +683,16 @@ test("the gate closes below threshold and opens with hysteresis", () => {
 });
 
 test("the gate does not chatter on a low tone with no hold", () => {
-  // 20 Hz is the worst case: with the raw sample as the detector the gate sees a
-  // level of -240 dB twenty-five times a second, and with hold at 0 it slams shut
-  // and open again at every zero crossing. The smoothed peak envelope is above
-  // the threshold the whole time, so it never once closes.
+  // 20 Hz is the worst case: with the raw sample as the detector the gate reads
+  // silence twenty-five times a second. |0.5 sin θ| is under -40 dBFS (0.01) for
+  // |θ| < 0.02 rad, and 20 Hz at 48 kHz moves 2.6 mrad a frame, so the old raw
+  // detector sat under the threshold for about seven frames around every zero
+  // crossing — twice per 50 ms period, so roughly eighty times in this two-second
+  // run. With hold at 0 every one of those frames closed the gate and the next
+  // one opened it again: the old code would report ~80 open→closed transitions
+  // below (and a gain down at `range_db`'s 1e-4 on each of those frames), where
+  // this test demands 0. The smoothed peak envelope — instant attack, a 10 ms
+  // release against a 25 ms half period — never comes near the threshold.
   const insert = StudioDynamics.create("gate", SAMPLE_RATE);
   insert.setParams({
     threshold_db: -40,
@@ -559,24 +704,43 @@ test("the gate does not chatter on a low tone with no hold", () => {
   });
   const frames = framesOf(2);
   const signal = tone(frames, 20, 0.5); // -6 dBFS, 34 dB over the threshold
-  const rendered = render(insert, signal);
 
-  // The gain the gate applied, read off where the tone is loud enough to divide
-  // by: 0.95 is "open", anything under 0.9 is a closure.
-  let openedAt = -1;
-  let closedAfter = 0;
+  // One frame at a time, reading the gate's own read-only `state` and `gain`.
+  // Dividing the output by the input is useless exactly where the old detector
+  // failed (the input IS silent at a zero crossing), which is how a test can end
+  // up passing the raw-sample detector it was written for: this one watches the
+  // gate, so a closure is visible on the frame it happens.
+  const left = new Float32Array(1);
+  const right = new Float32Array(1);
+  let openFrames = 0;
+  let closures = 0;
+  let lowestGain = 1;
   for (let at = 0; at < frames; at += 1) {
-    const sample = signal.left[at];
-    if (Math.abs(sample) < 0.3) continue;
-    const gain = rendered.left[at] / sample;
-    if (gain > 0.95) {
-      if (openedAt < 0) openedAt = at;
-    } else if (openedAt >= 0) {
-      closedAfter += 1;
+    left[0] = signal.left[at];
+    right[0] = signal.right[at];
+    insert.process(left, right, 1);
+    if (insert.state) {
+      openFrames += 1;
+      // The first frames are the gate's own attack up to 1, not the tone.
+      if (at >= framesOf(0.05) && insert.gain < lowestGain) lowestGain = insert.gain;
+    } else if (openFrames > 0) {
+      closures += 1;
     }
   }
-  assert.ok(openedAt >= 0, "the gate has to open on a tone 34 dB over its threshold");
-  assert.equal(closedAfter, 0, `the gate closed on ${closedAfter} frames after it opened: a low tone chatters without a smoothed detector`);
+
+  assert.ok(
+    openFrames >= frames - 1,
+    `the gate has to open on a tone 34 dB over its threshold, it was open on ${openFrames} of ${frames} frames`,
+  );
+  assert.equal(
+    closures,
+    0,
+    `the gate closed ${closures} times after it opened: a low tone chatters without a smoothed detector`,
+  );
+  assert.ok(
+    lowestGain > 0.999,
+    `over a tone 34 dB above its threshold the gate's gain has to stay at 1, it fell to ${lowestGain}`,
+  );
 });
 
 test("the gate turns a sound on and off at its threshold", () => {
@@ -1029,15 +1193,16 @@ test("no dynamics insert allocates or produces NaN at its parameter extremes", (
   }
 });
 
-test("process() keeps the heap where it is over a long run", () => {
-  // Counting `new Float32Array` only catches typed arrays. A plain object, an
-  // array or a closure inside `process()` would walk straight past that counter,
-  // so this drives every kind for a long stretch on reused buffers and compares
-  // `process.memoryUsage().heapUsed`. `global.gc` is not available in the suite,
-  // so the bound has to be generous — but the run is long enough that a single
-  // small object per frame would put ~60 MB of garbage through the heap, so a
-  // residual of a few megabytes is the difference between "nothing per frame"
-  // and "something".
+test("process() retains no heap growth over a long run", () => {
+  // What this can see is RETENTION, not allocation. A short-lived object per
+  // frame is garbage the young generation scavenges within a few megabytes — it
+  // never shows up as a rise in `heapUsed`, so this test would not notice it, and
+  // it is not meant to: the allocation guard is the typed-array and `Math.random`
+  // counter in the test above. This one is the long-run guard — an object KEPT
+  // (a growing array, a cache, one closure per block that outlives its block) is
+  // the only thing that moves this number, and over this run a single small
+  // retained object per frame would be ~60 MB.
+  // `global.gc` is not available in the suite, so the bound has to be generous.
   const blocksPerPass = 200;
   const passes = 10;
   const hot = tone(BLOCK, 200, 0.9);
@@ -1087,7 +1252,7 @@ test("process() keeps the heap where it is over a long run", () => {
   const frames = blocksPerPass * passes * BLOCK * inserts.length;
   assert.ok(
     growth < 24 * 1024 * 1024,
-    `${frames} frames later the heap grew by ${(growth / 1048576).toFixed(1)} MB, which is a per-frame allocation`,
+    `${frames} frames later the heap grew by ${(growth / 1048576).toFixed(1)} MB, which is something being kept, not just garbage`,
   );
 });
 
