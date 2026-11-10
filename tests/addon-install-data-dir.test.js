@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -78,30 +78,36 @@ test("a symlink at the path is refused even with a record copied from its target
 
 test("a record taken from a folder that was removed, then a new folder at the same path, is refused", () => {
   reset();
-  const probe = scratch();
   mkdirSync(ADDON_DIR, { recursive: true });
   const old = bigStat(ADDON_DIR);
-  rmSync(ADDON_DIR, { recursive: true, force: true });
+  // Rename aside instead of deleting: the renamed folder keeps the original inode in use,
+  // so a new folder at the same path cannot be handed the same dev/ino by the filesystem.
+  const oldPath = `${ADDON_DIR}-old`;
+  renameSync(ADDON_DIR, oldPath);
   assert.equal(recordKeptData(CROW_HOME, ID, old), true, "a record may outlive its folder");
 
-  // tmpfs may hand the freed inode straight back; burn through them until the new
-  // folder really is a different one.
-  let st = null;
-  for (let i = 0; i < 20; i += 1) {
-    mkdirSync(ADDON_DIR);
-    st = bigStat(ADDON_DIR);
-    if (String(st.ino) !== String(old.ino)) break;
-    rmSync(ADDON_DIR, { recursive: true, force: true });
-    mkdirSync(join(probe, `burn-${i}`));
-  }
+  mkdirSync(ADDON_DIR);
+  const st = bigStat(ADDON_DIR);
   assert.notEqual(String(st.ino), String(old.ino), "the new folder is a different folder");
-  if (!existsSync(ADDON_DIR)) mkdirSync(ADDON_DIR);
+  assert.notEqual(`${st.dev}:${st.ino}`, `${old.dev}:${old.ino}`, "the new folder is a different dev/ino pair");
   assert.equal(keptDataMatches(CROW_HOME, ID, ADDON_DIR), false);
   const refused = addonDataDirRefusal(STDIO_MANIFEST, ID, { dataDir: DATA_DIR, crowHome: CROW_HOME });
   assert.equal(refused.status, 409);
   assert.equal(refused.code, "addon_data_dir_exists");
   reset();
-  rmSync(probe, { recursive: true, force: true });
+  rmSync(oldPath, { recursive: true, force: true });
+});
+
+test("the record stays after a successful ensureAddonDataDir, so an in-place reinstall finds it", () => {
+  reset();
+  ensureAddonDataDir(ID, STDIO_MANIFEST);
+  assert.notEqual(keptDataRecord(CROW_HOME, ID), null, "the folder Crow made is still recorded");
+  // That record is what lets a reinstall over the same folder (the install folder removed,
+  // the data folder kept) go through without an uninstall.
+  assert.equal(addonDataDirRefusal(STDIO_MANIFEST, ID, { dataDir: DATA_DIR, crowHome: CROW_HOME }), null);
+  ensureAddonDataDir(ID, STDIO_MANIFEST);
+  assert.notEqual(keptDataRecord(CROW_HOME, ID), null, "a second pass over the same folder keeps the record");
+  reset();
 });
 
 test("a genuine kept data folder (record taken from its own lstat) is allowed", async () => {

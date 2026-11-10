@@ -166,13 +166,15 @@ function stripLineComment(line) {
 }
 
 const DB_IMPORT_PATTERNS = [
-  // appImport("servers/db.js") — any quote style, optional spaces.
+  // A call to the bundle app-import helper with the servers/db.js specifier —
+  // any quote style, optional spaces.
   /appImport\s*\(\s*(["'`])servers\/db\.js\1\s*\)/,
-  // await import("../../../servers/db.js")
+  // A dynamic import whose specifier is one or more parent-directory segments
+  // followed by the servers/db.js path.
   /\bimport\s*\(\s*(["'`])(?:\.\.\/)+servers\/db\.js\1\s*\)/,
-  // import { x } from "../../../servers/db.js"
+  // A re-export clause naming the same relative servers/db.js specifier.
   /\bfrom\s*(["'`])(?:\.\.\/)+servers\/db\.js\1/,
-  // pathToFileURL(join(<root>, "servers", "db.js"))
+  // pathToFileURL over a join of the root, then the servers and db.js segments.
   /pathToFileURL\s*\(\s*join\s*\([^()]*(["'`])servers\1\s*,\s*(["'`])db\.js\2/,
 ];
 

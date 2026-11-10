@@ -2382,11 +2382,14 @@ function isStdioAddonManifest(manifest) {
 /**
  * Review item 5: refuse an install over a pre-existing `<dataDir>/<id>`, so an add-on
  * never starts inside a folder someone else filled (a hand-made dir, a leftover of
- * another tool). The one exception is Crow's own kept data: an uninstall never deletes
- * the folder and records it in `<crowHome>/addon-walls.json` (`keptData`), and that
- * record names ONE folder — its device, inode and owner — so a folder swapped in after
- * the uninstall (or a symlink to one) inherits nothing. Nothing inside the folder is
- * read for this decision — a planted `addon-walls.json` there grants nothing.
+ * another tool). The one exception is Crow's own kept data, recorded per add-on in
+ * `<crowHome>/addon-walls.json` (`keptData`): an install records the folder it made
+ * `<dataDir>/<id>` and keeps that record while the add-on is installed, and an uninstall
+ * never deletes the folder, so the record also covers a reinstall over it. A record names
+ * ONE folder — its device, inode and owner — so a folder swapped in after the uninstall
+ * (or a symlink to one) inherits nothing. A record whose folder is gone is stale and
+ * dropped here. Nothing inside the folder is read for this decision — a planted
+ * `addon-walls.json` there grants nothing.
  *
  * @returns {object|null} the refusal ({ok:false,status,code,error,extra}) or null.
  */
@@ -2413,8 +2416,10 @@ export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
 /**
  * Review item 5: create the add-on's own data folder, right after its MCP entry is
  * registered. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
- * and recorded as Crow's own kept data, so a failed install can be retried — the folder
- * is ours, not a stranger's.
+ * and recorded as Crow's own kept data — the record names exactly the folder Crow made,
+ * so a failed install can be retried and an in-place reinstall over that same folder is
+ * allowed. The record stays while the add-on is installed; one whose folder is gone is
+ * dropped by the next check (see addonDataDirRefusal).
  *
  * Exported for tests. `mkdir` is the check: a folder that appeared between
  * validateInstall and here is only accepted when the kept-data record already names
@@ -3404,11 +3409,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason: hookFailure, needsRestart };
     }
 
-    try {
-      clearKeptData(CROW_HOME, bundleId);
-    } catch (err) {
-      console.warn(`[bundles] could not clear the kept-data record for '${bundleId}': ${err?.message || err}`);
-    }
     return { ok: true, needsRestart };
   } catch (err) {
     const reason = err?.message || String(err);
