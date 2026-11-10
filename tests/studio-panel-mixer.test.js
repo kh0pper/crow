@@ -40,7 +40,7 @@ import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
 import studioPanel, { MIXER_EFFECTS_SCRIPT } from "../bundles/studio/panel/studio.js";
 import { CLIENT_SCRIPT } from "../bundles/studio/panel/client.js";
-import { EFFECT_PARAMS, EFFECT_KINDS } from "../bundles/studio/server/doc.js";
+import { EFFECT_PARAMS, EFFECT_KINDS, AMP_PARAMS } from "../bundles/studio/server/doc.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 /** The rate the fake context runs at. */
@@ -49,6 +49,108 @@ const RATE = 48000;
 /** Who made a step: the operator, or the agent a mix pass comes from. */
 const HUMAN = { kind: "human", id: "local", label: "You" };
 const AGENT = { kind: "agent", id: "agent:mcp", label: "Studio agent" };
+
+/**
+ * The starter sounds the bundle ships, as the page is handed them
+ * (`window.StudioMixer.bundled`): the shape `library/bundled.json` has, narrowed
+ * to what a picker and a credit line need.
+ */
+const BUNDLED_STARTERS = [
+  {
+    id: "starter-a2",
+    kind: "nam",
+    name: "Starter capture (NAM example model)",
+    licence: "MIT",
+    credit: "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT",
+  },
+  {
+    id: "cabinet-ampmix",
+    kind: "ir",
+    name: "Cabinet 1 (AmpMix)",
+    licence: "CC-BY-3.0",
+    credit: '"Impulse Responses" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0',
+  },
+];
+
+/**
+ * A song with one audio track playing an amp: the operator's own capture in the
+ * library, their own cabinet, and an amp insert that names both. This is what
+ * the amp editor edits (plan 1d, Task 15).
+ * @returns {Promise<{doc: object, history: object[]}>}
+ */
+async function ampSong() {
+  const { newSongDoc } = await import("../bundles/studio/server/doc.js");
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  await import("../bundles/studio/server/commands/core.js");
+  await import("../bundles/studio/server/commands/library.js");
+  await import("../bundles/studio/server/commands/mixer.js");
+
+  const doc = newSongDoc({ title: "Amp song", bpm: 120 });
+  const history = [];
+  let seq = 0;
+
+  /** One step, applied for real and recorded as the hub records it. */
+  const step = (command, args, author, options = {}) => {
+    const result = runCommand(doc, command, args, { author, ...options });
+    seq += 1;
+    const entry = {
+      id: "a" + String(seq),
+      song_id: "song-1",
+      seq,
+      command,
+      args: result.args,
+      summary: result.summary,
+      author,
+      touched: result.touched,
+      inverse: { before: result.before, after: result.after },
+      before: result.before,
+      after: result.after,
+      undo_of: null,
+      undone_by: null,
+      created_at: new Date().toISOString(),
+    };
+    history.push(entry);
+    return entry;
+  };
+
+  const capture = {
+    id: "lib-cap",
+    kind: "nam",
+    name: "My capture",
+    source: "upload",
+    upload_id: "cap-upload",
+    storage_key: "projects/71/studio/song-1/library/lib-cap-upload.nam",
+    sha256: "a".repeat(64),
+    bytes: 1024,
+    licence: "",
+    credit: "My capture by me",
+    author_label: "You",
+  };
+  const cabinet = {
+    id: "lib-cab",
+    kind: "ir",
+    name: "My cabinet",
+    source: "upload",
+    upload_id: "cab-upload",
+    storage_key: "projects/71/studio/song-1/library/lib-cab-upload.wav",
+    sha256: "b".repeat(64),
+    bytes: 2048,
+    licence: "",
+    credit: "My cabinet by me",
+    author_label: "You",
+  };
+
+  step("track.add", { id: "guitar", name: "Guitar", kind: "audio" }, HUMAN);
+  // A library entry is Studio's own step, issued by the gateway's upload finish.
+  step("library.add", { entry: capture }, HUMAN, { internal: true });
+  step("library.add", { entry: cabinet }, HUMAN, { internal: true });
+  step(
+    "insert.add",
+    { id: "ins-amp", owner: "track:guitar", kind: "amp", params: { model_id: "lib-cap", ir_id: "lib-cab" } },
+    HUMAN,
+  );
+  return { doc, history };
+}
 
 /** The stand-in dashboard layout: a bare document around the panel content. */
 function minimalLayout({ title, content }) {
@@ -221,6 +323,10 @@ function fakeEngine() {
       engine.meter = listener;
       return () => {};
     },
+    onMonitorLatency(listener) {
+      engine.monitorLatency = listener;
+      return () => {};
+    },
     onMasterLatency(listener) {
       engine.masterLatency = listener;
       return () => {};
@@ -351,9 +457,30 @@ async function bootMixer(options = {}) {
 
   const fetchStub = async (url, init = {}) => {
     const target = String(url);
-    requests.push({ url: target, method: init.method || "GET" });
+    requests.push({ url: target, method: init.method || "GET", body: init.body || null });
     if (target.includes("/module-types")) return response(200, { generators: ["Analog generator"], modules: {} });
     if (target.includes("/project-bot")) return response(404, { error: "not_found" });
+    if (target.includes("/api/studio/library/bundled")) {
+      // The gateway's own route (dashboard session + CSRF): it answers with the
+      // library entry the song now holds, whose id IS the bundled row's id.
+      const body = init.body ? JSON.parse(String(init.body)) : {};
+      const starter = BUNDLED_STARTERS.find((row) => row.id === body.bundled_id) || null;
+      if (!starter) return response(404, { error: "This Crow ships no starter sound." });
+      return response(200, {
+        entry: {
+          id: starter.id,
+          kind: starter.kind,
+          name: starter.name,
+          source: "bundled",
+          sha256: "c".repeat(64),
+          bytes: 1,
+          licence: starter.licence,
+          credit: starter.credit,
+          author_label: "You",
+        },
+        added: true,
+      });
+    }
     if (target.includes("/api/studio/songs")) return response(200, [{ id: "song-1", project_id: 71, title: "Mix song" }]);
     return response(200, {});
   };
@@ -381,8 +508,14 @@ async function bootMixer(options = {}) {
     StudioTakeStore: fakeTakeStore(),
     StudioEngine: { create: async () => engine },
     // The effects table the handler emits beside the client (see
-    // MIXER_EFFECTS_SCRIPT): the very same table the document checks against.
-    StudioMixer: { kinds: EFFECT_KINDS, params: EFFECT_PARAMS },
+    // MIXER_EFFECTS_SCRIPT): the very same table the document checks against,
+    // with the amp's own table and the starter sounds this bundle ships beside it.
+    StudioMixer: {
+      kinds: EFFECT_KINDS,
+      params: EFFECT_PARAMS,
+      amp: { kind: "amp", label: AMP_PARAMS.amp.label, params: AMP_PARAMS.amp.params },
+      bundled: BUNDLED_STARTERS,
+    },
     addEventListener(name, handler) {
       (windowListeners[name] ||= []).push(handler);
     },
@@ -966,6 +1099,130 @@ test("the master meter shows the target", async () => {
   assert.ok(latency, "the limiter's delay has its own line");
   assert.equal(latency.hidden, false);
   assert.equal(String(latency.textContent), "Limiter look-ahead: 1.5 ms");
+});
+
+// ---- the amp editor (plan 1d, Task 15) -------------------------------------
+
+test("adding an amp from the + effect menu opens the amp editor", async () => {
+  const ui = await bootMixer({ fixture: await ampSong() });
+  await ui.openMixer();
+  assert.equal(ui.commands("insert.add").length, 0, "the fixture's own amp was made before the page opened");
+
+  const menu = ui.chain("track:guitar").querySelector("[data-act=insert-add]");
+  assert.ok(menu, "the guitar's chain has its + effect menu");
+  const labels = [...menu.querySelectorAll("option")].map((option) => String(option.textContent));
+  assert.ok(labels.includes("Amp"), "the menu offers Amp after the effects");
+  for (const kind of EFFECT_KINDS) {
+    assert.ok(labels.includes(EFFECT_PARAMS[kind].label), `and still offers ${kind}`);
+  }
+
+  // An amp needs a sound before it can exist: the pick opens the editor, and
+  // nothing is added until a capture is chosen.
+  ui.choose(menu, "amp");
+  await ui.settle();
+  assert.equal(ui.commands("insert.add").length, 0, "picking Amp adds nothing on its own");
+  const editor = ui.mixer().querySelector("[data-role=mix-editor]");
+  assert.equal(editor.hidden, false, "the amp editor opens");
+  const capture = editor.querySelector("[data-act=amp-capture]");
+  assert.ok(capture, "with its capture picker");
+  assert.ok(editor.querySelector("[data-act=amp-cabinet]"), "and its cabinet picker");
+
+  // The capture pick is the insert.add: one command, with the capture on it.
+  ui.choose(capture, "lib-cap");
+  await ui.settle();
+  const added = ui.commands("insert.add");
+  assert.equal(added.length, 1, "a capture pick adds the amp once");
+  assert.equal(added[0].args.kind, "amp");
+  assert.equal(added[0].args.owner, "track:guitar");
+  assert.deepEqual(added[0].args.params, { model_id: "lib-cap" });
+  assert.equal(ui.commands("insert.set").length, 0, "and sends no insert.set");
+});
+
+test("picking a starter tone sends one insert.set", async () => {
+  const ui = await bootMixer({ fixture: await ampSong() });
+  await ui.openMixer();
+
+  // The amp's chip opens its own editor: the capture, the cabinet and the three
+  // numbers — not one control per effect parameter.
+  ui.chip("ins-amp").dispatchEvent(ui.event("click"));
+  await ui.settle();
+  const editor = ui.mixer().querySelector("[data-role=mix-editor]");
+  assert.equal(editor.hidden, false, "the amp's editor is open");
+  const capture = editor.querySelector("[data-act=amp-capture]");
+  assert.ok(capture, "the amp editor has a capture picker");
+  const values = [...capture.querySelectorAll("option")].map((option) => option.value);
+  assert.ok(values.includes("lib-cap"), "the song's own capture is offered");
+  assert.ok(values.includes("bundled:starter-a2"), "so is the starter capture the bundle ships");
+  assert.ok(values.includes("__upload"), "and the way to bring one in");
+  // The capture is a library entry: its credit line shows, and the editor says
+  // whose choice it is.
+  assert.match(String(editor.textContent), /My capture by me/);
+  assert.match(String(editor.textContent), /Only you can change this amp's capture\./);
+  // The three numbers come from AMP_PARAMS.
+  for (const name of ["input_db", "output_db", "ir_mix"]) {
+    assert.ok(editor.querySelector(`[data-param="${name}"]`), `the amp editor controls ${name}`);
+  }
+
+  const before = ui.commands("insert.set").length;
+  ui.choose(capture, "bundled:starter-a2");
+  await ui.settle();
+
+  // The starter sound is added to the song through the person's own route...
+  const posted = ui.requests.filter(
+    (request) => request.method === "POST" && request.url.includes("/api/studio/library/bundled"),
+  );
+  assert.equal(posted.length, 1, "the starter sound went through the gateway's own route once");
+  assert.deepEqual(JSON.parse(posted[0].body), { song_id: "song-1", bundled_id: "starter-a2" });
+
+  // ...and picking it is ONE insert.set naming the capture, once the library has
+  // it. It is never an insert.add: the amp is already in the chain.
+  const sets = ui.commands("insert.set").slice(before);
+  assert.equal(sets.length, 1, `picking a starter tone is one command (${sets.length})`);
+  assert.deepEqual(sets[0].args, { id: "ins-amp", params: { model_id: "starter-a2" } });
+  assert.equal(ui.commands("insert.add").length, 0, "the chain is unchanged: no amp was added");
+});
+
+test("picking a cabinet sends one insert.set", async () => {
+  const ui = await bootMixer({ fixture: await ampSong() });
+  await ui.openMixer();
+  ui.chip("ins-amp").dispatchEvent(ui.event("click"));
+  await ui.settle();
+  const editor = ui.mixer().querySelector("[data-role=mix-editor]");
+  const cabinet = editor.querySelector("[data-act=amp-cabinet]");
+  assert.ok(cabinet, "the amp editor has a cabinet picker");
+  const values = [...cabinet.querySelectorAll("option")].map((option) => option.value);
+  assert.ok(values.includes(""), "No cabinet is a choice");
+  assert.ok(values.includes("lib-cab"), "the song's own cabinet is offered");
+  assert.ok(values.includes("bundled:cabinet-ampmix"), "and a starter cabinet");
+
+  // A starter cabinet is added through the person's route, then ONE insert.set.
+  ui.choose(cabinet, "bundled:cabinet-ampmix");
+  await ui.settle();
+  let sets = ui.commands("insert.set");
+  assert.equal(sets.length, 1, "a cabinet pick is one command");
+  assert.deepEqual(sets[0].args, { id: "ins-amp", params: { ir_id: "cabinet-ampmix" } });
+
+  // No cabinet is a pick too, and it sends `null` — one command.
+  ui.chip("ins-amp").dispatchEvent(ui.event("click"));
+  await ui.settle();
+  const again = ui.mixer().querySelector("[data-role=mix-editor]");
+  ui.choose(again.querySelector("[data-act=amp-cabinet]"), "");
+  await ui.settle();
+  sets = ui.commands("insert.set");
+  assert.equal(sets.length, 2);
+  assert.deepEqual(sets[1].args, { id: "ins-amp", params: { ir_id: null } });
+});
+
+test("the monitor switch hears the chain while recording", async () => {
+  const ui = await bootMixer({ fixture: await ampSong() });
+  const monitor = ui.document.querySelector('[data-act=monitor][data-track-id="guitar"]');
+  assert.ok(monitor, "an armed-capable audio track offers monitoring");
+  assert.equal(String(monitor.textContent), "Hear the chain while recording");
+  assert.match(
+    String(monitor.getAttribute("title")),
+    /through this track's effects and amp/,
+    "and says what it sends the input through",
+  );
 });
 
 // ---- the agent's mix pass --------------------------------------------------

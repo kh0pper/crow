@@ -341,6 +341,24 @@ const RENDER_FONT_BUDGET_BYTES = 1024 * 1024 * 1024;
 /** The largest a bank file can be (plan 1d's limit table: 512 MB). */
 const MAX_FONT_BYTES = 512 * 1024 * 1024;
 
+/** The largest a capture file can be (plan 1d's limit table: 20 MB). */
+const MAX_CAPTURE_BYTES = 20 * 1024 * 1024;
+
+/** The largest a cabinet file can be (plan 1d's limit table: 10 MB). */
+const MAX_CABINET_BYTES = 10 * 1024 * 1024;
+
+/**
+ * The cap one library kind's file is read under, so a capture is held to its
+ * own size rather than a bank's.
+ * @param {string} kind - "font", "nam" or "ir"
+ * @returns {number}
+ */
+function maxLibraryBytes(kind) {
+  if (kind === "nam") return MAX_CAPTURE_BYTES;
+  if (kind === "ir") return MAX_CABINET_BYTES;
+  return MAX_FONT_BYTES;
+}
+
 /**
  * The device engine that marks a track as a SoundFont one. It is `doc.js`'s
  * `SOUNDFONT_DEVICE.engine`, spelled here so this file keeps importing no app
@@ -763,8 +781,9 @@ export function createRenderer({
       const prefix = await storagePrefixFor(db, project_id);
       const takeAudio = (take) => takeAudioFrom({ storage, bucket, prefix, songId: song_id, take });
       const sampleAudio = (sample) => sampleAudioFrom({ storage, bucket, prefix, songId: song_id, sample });
-      // A bank comes from the instrument store (a catalog entry) or from the
-      // upload's own storage key (an upload), never from anywhere else.
+      // A library file comes from the instrument store (a catalog entry), from
+      // the bundle itself (a starter sound), or from the upload's own storage
+      // key (an upload), never from anywhere else.
       const libraryBytes = (entry) =>
         fontBytesFrom({ library: libraryStore(), storage, bucket, prefix, songId: song_id, entry });
       const audio = await renderAudio(snapshot, {
@@ -1469,7 +1488,10 @@ async function loadCabinets(engine, cabinets, libraryBytes, rate) {
       const decoded = decodeWav(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
       const frames = decoded.channels[0] ? decoded.channels[0].length : 0;
       if (frames === 0) throw new Error("An impulse response holds no audio.");
-      if (frames > decoded.rate * CABINET_MAX_SECONDS) {
+      // One second at the file's own rate, with the plan's two-frame tolerance:
+      // a cabinet shipped as exactly 1 s at 44.1 kHz is 44101 frames, and it
+      // loads. The engine and the page take the same tolerance.
+      if (frames > decoded.rate * CABINET_MAX_SECONDS + 2) {
         const seconds = (Math.round((frames / decoded.rate) * 10) / 10).toFixed(1);
         throw new Error(
           `An impulse response is at most 1 second long; this one is ${seconds} s.`,
@@ -1864,23 +1886,28 @@ async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
 }
 
 /**
- * Read one library entry's FONT file, the way this instance keeps it.
+ * Read one library entry's FILE, the way this instance keeps it.
+ *
+ * This is the render's one reader for every kind a song's library holds: a bank
+ * (kind "font"), a capture ("nam") and a cabinet ("ir"). The loaders ask it only
+ * for the entries of the kind they want, so the kind is checked here as a
+ * guard, not as a filter.
  *
  * A catalog entry is read from the one verified copy at
  * `<CROW_HOME>/studio/library/<sha256>.<ext>`, and only after the store says
  * those bytes still hash to the name: a file whose name is not what it says is
- * no bank any song may play (`library-store.js`). An uploaded entry is read from
+ * no bank any song may play (`library-store.js`). A bundled entry (a starter
+ * capture or cabinet) is read from the bundle's own `library/files/`, hashed
+ * against `library/bundled.json` on every read. An uploaded entry is read from
  * the exact storage key its upload wrote, and only when that key sits under
  * this song's own `studio/<song_id>/library/`, named for this very entry — the
  * same own-prefix rule the library file route keeps, so a render can read
- * nothing of a song but that song's own files. A bundled file ships inside the
- * bundle and nothing serves one yet, so it reads as a file this Crow does not
- * have.
+ * nothing of a song but that song's own files.
  *
  * `null` means "this device does not hold it" (nothing stored, a key that is
- * not this song's, a storage object that is gone), which the render reports as
- * "not on this device". A read that fails any other way throws, and the render
- * reports "could not be read".
+ * not this song's, a storage object that is gone, a bundle without that file),
+ * which the render reports as "not on this device". A read that fails any other
+ * way throws, and the render reports "could not be read".
  *
  * @param {object} options
  * @param {object|null} options.library the instrument store (`createLibraryStore`)
@@ -1893,8 +1920,20 @@ async function takeAudioFrom({ storage, bucket, prefix, songId, take }) {
  */
 async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }) {
   if (!entry || typeof entry !== "object") return null;
-  if (entry.kind !== "font") return null;
-  if (entry.source === "bundled") return null;
+  const kind = typeof entry.kind === "string" ? entry.kind : "";
+  if (kind !== "font" && kind !== "nam" && kind !== "ir") return null;
+  const cap = maxLibraryBytes(kind);
+
+  // A starter sound is inside the bundle: the store verifies it against the
+  // bundled list on every read, and a file the bundle does not carry is one
+  // this device does not have.
+  if (entry.source === "bundled") {
+    if (!library || typeof library.bundledFile !== "function") return null;
+    const file = await library.bundledFile(String(entry.id ?? ""));
+    if (!file || !file.bytes) return null;
+    if (file.bytes.length > cap) throw new Error("its file is larger than its kind can be");
+    return file.bytes;
+  }
 
   const catalogId = typeof entry.catalog_id === "string" ? entry.catalog_id : "";
   if (catalogId !== "") {
@@ -1907,7 +1946,7 @@ async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }
     if (!path) return null;
     const info = statSync(path);
     if (!info.isFile()) return null;
-    if (info.size > MAX_FONT_BYTES) throw new Error("its file is larger than a bank can be");
+    if (info.size > cap) throw new Error("its file is larger than its kind can be");
     return readFileSync(path);
   }
 
@@ -1915,12 +1954,12 @@ async function fontBytesFrom({ library, storage, bucket, prefix, songId, entry }
   const storedKey = typeof entry.storage_key === "string" ? entry.storage_key : "";
   if (id === "" || storedKey === "") return null;
   if (!storage || typeof storage.getObject !== "function") return null;
-  // An uploaded bank: the exact key its finish wrote, under this song's own
+  // An uploaded file: the exact key its finish wrote, under this song's own
   // `library/` directory, named for this entry. A key anywhere else — another
   // song's, another project's, or one with a `..` in it — is not this song's.
   const ownPrefix = `${prefix}studio/${songId}/library/${id}.`;
   if (!storedKey.startsWith(ownPrefix) || storedKey.slice(ownPrefix.length).includes("/")) return null;
-  return readStoredFile({ storage, bucket, key: storedKey, maxBytes: MAX_FONT_BYTES });
+  return readStoredFile({ storage, bucket, key: storedKey, maxBytes: cap });
 }
 
 /**

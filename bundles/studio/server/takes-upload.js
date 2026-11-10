@@ -118,10 +118,11 @@
  *           sample, and stored as the 24-bit WAV this file frames at finish
  *           (Task 12) — `<library_id>.wav` under the same `library/`
  *           directory, reference type `studio_library`, `library.add` with kind
- *           "ir". It is at most 1 second long (frames ≤ the declared rate) and
- *           10 MB, and a song may have 16 cabinet uploads in progress at once.
- *           The server's own `decodeAudioData` is never used: it only ever sees
- *           the PCM the page decoded.
+ *           "ir". It is at most 1 second long (frames ≤ the declared rate plus
+ *           the two-frame tolerance every check shares, so a 44.1 kHz cabinet
+ *           of 44101 frames loads) and 10 MB, and a song may have 16 cabinet
+ *           uploads in progress at once. The server's own `decodeAudioData` is
+ *           never used: it only ever sees the PCM the page decoded.
  *
  * ## One upload id belongs to one kind
  *
@@ -269,6 +270,13 @@ const IR_MAX_BYTES = 10485760;
 
 /** The longest cabinet IR: 1 second, after the page has resampled it. */
 const IR_MAX_SECONDS = 1;
+
+/**
+ * How many frames past the declared rate a cabinet may run and still be one
+ * second long: two, everywhere the limit is checked (this route, the page and
+ * the engine). A 44.1 kHz IR that is exactly one second long is 44101 frames.
+ */
+const IR_FRAME_TOLERANCE = 2;
 
 /** The extension a cabinet is stored under: the WAV the sample path writes. */
 const IR_EXTENSION = "wav";
@@ -504,7 +512,11 @@ function uploadCap(kind, takeCap, meta = null) {
     const usable = Number.isInteger(rate) && rate > 0 && Number.isInteger(channels) && channels > 0;
     // A meta with no readable rate can hold nothing: the refusal that follows
     // names the length, and 0 compared against it always refuses.
-    return usable ? rate * channels : 0;
+    //
+    // A cabinet is capped by its LENGTH, with the same two-frame tolerance the
+    // length check takes: a 44.1 kHz cabinet of 44101 frames is one second's
+    // worth, not a file over the cap.
+    return usable ? (rate + IR_FRAME_TOLERANCE) * channels : 0;
   }
   return takeCap;
 }
@@ -874,7 +886,7 @@ function irUploadOf(body, rate, channels) {
   if (!Number.isInteger(frames) || frames <= 0) {
     throw badRequest("A cabinet upload needs the number of frames it holds.");
   }
-  if (frames > rate) throw irLengthRefusal(frames, rate);
+  if (frames > rate + IR_FRAME_TOLERANCE) throw irLengthRefusal(frames, rate);
   const bytes = frames * channels * BYTES_PER_SAMPLE;
   if (bytes > IR_MAX_BYTES) {
     throw tooLarge(`That cabinet is ${Math.ceil(bytes / MB_BYTES)} MB; Studio takes cabinets up to 10 MB.`);

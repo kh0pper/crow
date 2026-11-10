@@ -875,12 +875,11 @@
   const AMP_INSTANCE_PREFIX = "insert:";
 
   /**
-   * The cabinet length tolerance the page uses too: one frame per 48000. An IR of
-   * exactly one second at another rate comes back one frame long after resampling
-   * to the context's rate, and that is not a cabinet over the limit (see
-   * `lengthProblem` in engine/convolver.js).
+   * The cabinet length tolerance the page and the server use too: two frames
+   * past the rate. A cabinet shipped as exactly one second at 44.1 kHz is 44101
+   * frames, and it loads (see `lengthProblem` in engine/convolver.js).
    */
-  const IR_LENGTH_TOLERANCE_RATE = 48000;
+  const IR_LENGTH_TOLERANCE_FRAMES = 2;
 
   /** The master's gain range, in dB: `MIXER_RANGES.master.gain_db` in `doc.js`. */
   const LOWEST_MASTER_GAIN_DB = -24;
@@ -3034,7 +3033,7 @@
       const problem =
         typeof StudioConvolver === "object" && StudioConvolver !== null
           ? StudioConvolver.lengthProblem(frames, usableRate)
-          : frames > usableRate + usableRate / IR_LENGTH_TOLERANCE_RATE
+          : frames > usableRate + IR_LENGTH_TOLERANCE_FRAMES
             ? "An impulse response is at most 1 second long."
             : null;
       if (problem) {

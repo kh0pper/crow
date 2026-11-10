@@ -179,7 +179,7 @@ function makeRenderer() {
  * Build the server and a client talking to it over an in-memory transport.
  * @returns {Promise<Client>}
  */
-async function connect({ hub, renderer, env = {}, actor = null, catalog = null }) {
+async function connect({ hub, renderer, env = {}, actor = null, catalog = null, bundled = null }) {
   const server = createStudioServer({
     hub,
     renderer,
@@ -187,6 +187,7 @@ async function connect({ hub, renderer, env = {}, actor = null, catalog = null }
     env,
     actor,
     ...(catalog ? { catalog } : {}),
+    ...(bundled ? { bundled } : {}),
   });
   const client = new Client({ name: "studio-mcp-test", version: "0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -2137,6 +2138,200 @@ test("agent mixes a song to its target with a master limiter and the render says
       assert.equal(entry.author.kind, "agent", `${command} is the agent's step, never the person's`);
       assert.equal(entry.author.id, "mcp");
     }
+  } finally {
+    await client.close();
+  }
+});
+
+// ---- the amp over MCP (plan 1d, Task 15) ------------------------------------
+
+/** The starter sounds this bundle ships, as the MCP reader reports them. */
+const STARTER_SHA = "2d2d744516dc0197737a2c5001010429692d4cb20d72b08264781de626fcf4ca";
+
+const STARTER_LIST = [
+  {
+    id: "starter-a2",
+    kind: "nam",
+    name: "Starter capture (NAM example model)",
+    licence: "MIT",
+    credit: "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT",
+  },
+  {
+    id: "cabinet-ampmix",
+    kind: "ir",
+    name: "Cabinet 1 (AmpMix)",
+    licence: "CC-BY-3.0",
+    credit: '"Impulse Responses" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0',
+  },
+];
+
+test("studio_library lists the starter sounds a person can add", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+  // The operator has already added one starter capture to the song (the
+  // gateway's starter route issued this, as Studio's own step).
+  await addLibraryEntry(hub, songId, {
+    id: "starter-a2",
+    kind: "nam",
+    name: "Starter capture (NAM example model)",
+    source: "bundled",
+    sha256: STARTER_SHA,
+    bytes: 665758,
+    licence: "MIT",
+    credit: "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT",
+    author_label: "You",
+  });
+
+  const client = await connect({
+    hub: hubClientOf(hub, db),
+    renderer: makeRenderer().renderer,
+    bundled: async () => ({ entries: STARTER_LIST }),
+  });
+  try {
+    const result = await client.callTool({ name: "studio_library", arguments: { song_id: songId } });
+    assert.notEqual(result.isError, true, textOf(result));
+    const body = JSON.parse(textOf(result));
+    assert.deepEqual(body.available_bundled, [
+      {
+        bundled_id: "starter-a2",
+        kind: "nam",
+        name: "Starter capture (NAM example model)",
+        licence: "MIT",
+        credit: "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT",
+        in_song: true,
+      },
+      {
+        bundled_id: "cabinet-ampmix",
+        kind: "ir",
+        name: "Cabinet 1 (AmpMix)",
+        licence: "CC-BY-3.0",
+        credit: '"Impulse Responses" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0',
+        in_song: false,
+      },
+    ]);
+    // The read names no file: not a path, not a size, not a hash.
+    const text = textOf(result);
+    assert.ok(!text.includes("starter-a2.nam"), "the starter's file name stays on the server");
+    // A reader with nothing to offer still reads: the starter offer is empty, the
+    // song's own entries are still there.
+    const noStarters = await connect({
+      hub: hubClientOf(hub, db),
+      renderer: makeRenderer().renderer,
+      bundled: async () => ({ entries: [] }),
+    });
+    try {
+      const read = JSON.parse(textOf(await noStarters.callTool({ name: "studio_library", arguments: { song_id: songId } })));
+      assert.deepEqual(read.available_bundled, []);
+      assert.equal(read.entries.length, 1, "the song's own library is still listed");
+    } finally {
+      await noStarters.close();
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test("agent builds a guitar chain but cannot swap or remove the capture you chose", async (t) => {
+  const { db, hub, songId } = await realSong(t);
+
+  // The operator's own half: two captures and a cabinet in the song's library,
+  // and an audio track for them to run on. A library entry is theirs alone.
+  const captureA = {
+    ...makeLibraryEntry(songId, "lib-cap-a", {
+      kind: "nam",
+      name: "My capture A",
+      storage_key: `${RENDER_PREFIX}studio/${songId}/library/lib-cap-a.nam`,
+      sha256: "a".repeat(64),
+      credit: "Capture A by the operator",
+    }),
+    bytes: 4096,
+  };
+  const captureB = {
+    ...captureA,
+    id: "lib-cap-b",
+    name: "My capture B",
+    storage_key: `${RENDER_PREFIX}studio/${songId}/library/lib-cap-b.nam`,
+    sha256: "b".repeat(64),
+  };
+  const cabinet = {
+    ...makeLibraryEntry(songId, "lib-cab", {
+      kind: "ir",
+      name: "My cabinet",
+      storage_key: `${RENDER_PREFIX}studio/${songId}/library/lib-cab.wav`,
+      sha256: "c".repeat(64),
+      credit: "Cabinet by the operator",
+    }),
+    bytes: 8192,
+  };
+  await addLibraryEntry(hub, songId, captureA);
+  await addLibraryEntry(hub, songId, captureB);
+  await addLibraryEntry(hub, songId, cabinet);
+  await seed(hub, songId, "amp-track", "track.add", { id: "guitar", name: "Guitar", kind: "audio" });
+
+  const client = await connect({ hub: hubClientOf(hub, db), renderer: makeRenderer().renderer });
+  try {
+    /** Run one tool that must succeed, and hand back its sentence. */
+    const run = async (name, args) => {
+      const result = await client.callTool({ name, arguments: { song_id: songId, ...args } });
+      assert.notEqual(result.isError, true, `${name} was refused: ${textOf(result)}`);
+      return textOf(result);
+    };
+
+    // The agent's chain: an amp on the capture and cabinet the song already
+    // holds, a gate before it and an equalizer after it, then a reverb return
+    // the amp is sent to. Every step is the agent's own and undoable.
+    assert.match(
+      await run("studio_insert_add", {
+        id: "amp",
+        owner: "track:guitar",
+        kind: "amp",
+        params: { model_id: "lib-cap-a", ir_id: "lib-cab", input_db: 3, output_db: -2, ir_mix: 0.8 },
+      }),
+      /Added an amp to Guitar/,
+    );
+    await run("studio_insert_add", { id: "gate", owner: "track:guitar", kind: "gate", after: null });
+    await run("studio_insert_add", { id: "eq", owner: "track:guitar", kind: "eq" });
+    await run("studio_return_add", { id: "verb", name: "Reverb" });
+    await run("studio_send_set", { track_id: "guitar", return_id: "verb", level_db: -18 });
+
+    // The amp's own three numbers are the agent's: it mixes them, one insert.set
+    // each, and the capture and cabinet stay exactly as the operator chose them.
+    assert.match(
+      await run("studio_insert_set", { id: "amp", params: { input_db: 6, ir_mix: 0.5 } }),
+      /input_db, ir_mix on Guitar/,
+    );
+
+    // The mixer read names both sounds and their credits.
+    const mix = JSON.parse(textOf(await client.callTool({ name: "studio_mix", arguments: { song_id: songId } })));
+    const amp = mix.tracks[0].inserts.find((insert) => insert.kind === "amp");
+    assert.ok(amp, "the amp is in the guitar's chain");
+    assert.deepEqual(amp.capture, { id: "lib-cap-a", name: "My capture A", credit: "Capture A by the operator" });
+    assert.deepEqual(amp.cabinet, { id: "lib-cab", name: "My cabinet", credit: "Cabinet by the operator" });
+    assert.equal(amp.params.input_db, 6, "the settings the engine will use");
+    assert.equal(amp.params.ir_mix, 0.5);
+    // An effect has neither key: a reader can tell an amp from an effect.
+    const eq = mix.tracks[0].inserts.find((insert) => insert.kind === "eq");
+    assert.equal("capture" in eq, false);
+    assert.equal("cabinet" in eq, false);
+
+    // Swapping the capture, swapping the cabinet, and removing the amp are the
+    // operator's, and each is refused in the hub's own sentence.
+    for (const params of [{ model_id: "lib-cap-b" }, { ir_id: null }]) {
+      const swapped = await client.callTool({ name: "studio_insert_set", arguments: { song_id: songId, id: "amp", params } });
+      assert.equal(swapped.isError, true, `${JSON.stringify(params)} must need a yes`);
+      assert.match(textOf(swapped), /Only the operator changes the capture or cabinet an amp plays/);
+    }
+    const removed = await client.callTool({ name: "studio_insert_remove", arguments: { song_id: songId, id: "amp" } });
+    assert.equal(removed.isError, true);
+    assert.match(textOf(removed), /Only the operator removes an amp/);
+
+    // What the agent may do instead: bypass the amp. It stays in the chain with
+    // the operator's capture on it.
+    assert.match(await run("studio_insert_bypass", { id: "amp", bypass: true }), /bypasse/i);
+    const after = JSON.parse(textOf(await client.callTool({ name: "studio_mix", arguments: { song_id: songId } })));
+    const held = after.tracks[0].inserts.find((insert) => insert.kind === "amp");
+    assert.equal(held.bypass, true);
+    assert.equal(held.capture.id, "lib-cap-a", "still the operator's capture");
+    assert.equal(held.params.ir_id, "lib-cab", "still the operator's cabinet");
   } finally {
     await client.close();
   }

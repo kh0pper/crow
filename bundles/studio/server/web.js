@@ -144,6 +144,13 @@ const LIBRARY_OUT_OF_DATE_TEXT = "This song's copy of that instrument is out of 
 const AGENT_DOWNLOAD_REFUSED_TEXT =
   "Downloading instruments is for the person at the Studio page; an agent cannot download one.";
 
+/** What an agent is told when it asks to add a starter sound to a song. */
+const AGENT_STARTER_REFUSED_TEXT =
+  "Adding a starter sound is for the person at the Studio page; an agent cannot add one.";
+
+/** What a caller is told when Studio could not add a starter sound. */
+const STARTER_FAILED_TEXT = "Studio could not add that starter sound.";
+
 /** How often the instrument housekeeping pass runs once Studio is up. */
 export const LIBRARY_GC_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -1857,11 +1864,112 @@ export function createStudioWeb({
       return res.json(await work);
     }));
 
+    // A STARTER SOUND ships inside this bundle (`library/files/`, listed in
+    // `library/bundled.json`). Adding one to a song is a person's own action,
+    // like a download: it is behind the dashboard session and the CSRF header,
+    // it refuses a caller that presents the Studio agent token, and there is no
+    // agent tool for it. Nothing goes over the network — the bytes are already
+    // here — but the file is still hashed against the list before it is offered,
+    // so a bundle whose file no longer matches its record refuses instead of
+    // adding a name that plays the wrong sound.
+    //
+    // The entry's id IS the bundled row's id (`starter-a2`, `cabinet-ampmix`),
+    // which is what makes adding one idempotent: a second ask finds the entry
+    // the song already holds and answers it without a second `library.add`.
+    const starters = new Map();
+
+    /** @returns {object|null} the library entry one song holds for a bundled row. */
+    function bundledEntryIn(snap, bundledId) {
+      const entries = snap?.library;
+      if (!entries || typeof entries !== "object") return null;
+      const found = entries[bundledId];
+      return found && typeof found === "object" ? found : null;
+    }
+
+    r.post("/api/studio/library/bundled", dashboardAuth, requireCsrf, libraryHandled(async (req, res) => {
+      if (agentCaller(req)) return res.status(403).json({ error: AGENT_STARTER_REFUSED_TEXT });
+      if (!library) return res.status(503).json({ error: LIBRARY_UNAVAILABLE_TEXT });
+      const songId = String(req.body?.song_id ?? "");
+      const bundledId = String(req.body?.bundled_id ?? "");
+      if (songId === "" || bundledId === "") {
+        return res.status(400).json({ error: "Adding a starter sound needs a song and a starter sound." });
+      }
+
+      const row = await readSongRow(songId);
+      if (!row) return res.status(404).json({ error: `There is no song "${songId}".` });
+      // The same write check a download takes, asserted before the song is
+      // opened: a member who may only read a song cannot add a sound to it.
+      if (!canWrite) return res.status(503).json({ error: LIBRARY_UNAVAILABLE_TEXT });
+      await canWrite(Number(row.project_id));
+      const opened = await hub.openSong(songId);
+
+      const key = `${songId}:${bundledId}`;
+      const running = starters.get(key);
+      if (running) return res.json(await running);
+      const work = (async () => {
+        const held = bundledEntryIn(opened?.snapshot, bundledId);
+        if (held) {
+          // The song already holds it. Whether that is the right sound is a
+          // question about THIS bundle, so the record is still checked.
+          const current = await library.bundledEntry(bundledId);
+          if (String(held.sha256 ?? "").toLowerCase() !== current.sha256) {
+            const error = new Error(
+              "This song's copy of that starter sound is out of date: the bundle now ships a different file. Remove it from the song and add it again to get the new one.",
+            );
+            error.status = 409;
+            throw error;
+          }
+          return { entry: held, added: false };
+        }
+        const file = await library.bundledFile(bundledId);
+        if (!file) {
+          const error = new Error(MISSING_INSTRUMENT_TEXT);
+          error.status = 404;
+          throw error;
+        }
+        const entry = {
+          // The bundled row's own id, so the same starter sound is the same
+          // entry in every song that holds it.
+          id: file.entry.id,
+          kind: file.entry.kind,
+          name: file.entry.name,
+          source: "bundled",
+          sha256: file.entry.sha256,
+          bytes: file.entry.bytes,
+          licence: file.entry.licence,
+          credit: file.entry.credit,
+          author_label: HUMAN_AUTHOR.label,
+        };
+        // Studio's own command, issued as the person at the page. The new
+        // entry's own id plus a fresh uuid makes a remove-then-add a new step
+        // rather than a replay of the add that was undone.
+        const applied = await hub.runCommand({
+          song_id: songId,
+          cmd_id: `library-bundled:${key}:${randomUUID()}`,
+          command: "library.add",
+          args: { entry },
+          author: HUMAN_AUTHOR,
+          internal: true,
+        });
+        if (applied?.ok !== true) {
+          const error = new Error(String(applied?.error ?? STARTER_FAILED_TEXT));
+          error.status = statusForCode(applied?.code);
+          throw error;
+        }
+        return { entry: applied.entry?.after?.[`library:${entry.id}|*`] ?? entry, added: true };
+      })().finally(() => starters.delete(key));
+      starters.set(key, work);
+      return res.json(await work);
+    }));
+
     // One library file, for the panel to load into the worklet. A catalog entry
     // serves this Crow's verified copy; an uploaded entry serves the exact
     // storage key its upload wrote under this song's own `library/` directory.
+    // A bundled entry is served from the bundle's own `library/files/`, hashed
+    // against `library/bundled.json` before a byte goes out.
     // Anything else — a catalog file nobody downloaded, another song's upload, a
-    // key that is not this entry's — is MISSING_INSTRUMENT_TEXT.
+    // key that is not this entry's, a starter file the bundle does not carry —
+    // is MISSING_INSTRUMENT_TEXT.
     r.get("/api/studio/songs/:id/library/:library_id/file", dashboardAuth, handled(async (req, res) => {
       const songId = String(req.params.id ?? "");
       const libraryId = String(req.params.library_id ?? "");
@@ -1877,10 +1985,23 @@ export function createStudioWeb({
       const contentType = CONTENT_TYPE_BY_KIND[entry.kind] ?? "application/octet-stream";
 
       // A bundled file ships inside the bundle itself (`library/files/`), not in
-      // a song's storage and not in the download cache. Nothing serves one yet
-      // (Crow's own captures arrive with a later task), so it reads as a file
-      // this Crow does not have rather than as a storage failure.
-      if (entry.source === "bundled") return missing();
+      // a song's storage and not in the download cache, and it is hashed
+      // against the bundle's own list before it is served: a starter sound must
+      // be the file the bundle promises, not a name that happens to match.
+      if (entry.source === "bundled") {
+        if (!library) return res.status(503).json({ error: LIBRARY_UNAVAILABLE_TEXT });
+        let file = null;
+        try {
+          file = await library.bundledFile(String(entry.id ?? ""));
+        } catch (err) {
+          // A file that no longer matches the list is a broken install: the
+          // sentence stays the same, and the detail goes to the log.
+          console.warn("[studio] bundled file:", err?.message || err);
+          return missing();
+        }
+        if (!file) return missing();
+        return sendStoredFile(res, file.path, contentType);
+      }
 
       if (entry.catalog_id) {
         if (!library) return res.status(503).json({ error: LIBRARY_UNAVAILABLE_TEXT });

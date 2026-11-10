@@ -105,10 +105,10 @@ async function loadPanelScript(name, exportName) {
 /** The client script, loaded once when the panel module is imported. */
 const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
 
-// The effect table comes from the bundle's own server/doc.js BY PATH, like the
-// client: an installed copy lives at <crow-home>/panels/studio.js, where a
-// relative "../server/doc.js" would point at a file that is not there.
-const { EFFECT_KINDS, EFFECT_PARAMS } = await import(
+// The effect and amp tables come from the bundle's own server/doc.js BY PATH,
+// like the client: an installed copy lives at <crow-home>/panels/studio.js,
+// where a relative "../server/doc.js" would point at a file that is not there.
+const { EFFECT_KINDS, EFFECT_PARAMS, AMP_PARAMS } = await import(
   pathToFileURL(join(findBundleDir(), "server", "doc.js")).href
 );
 
@@ -117,11 +117,14 @@ const { EFFECT_KINDS, EFFECT_PARAMS } = await import(
  *
  * The effects a chain holds and each parameter's range live in exactly one
  * place (`server/doc.js`: `EFFECT_PARAMS`), which the server checks every
- * `insert.set` against. The mixer screen's "+ effect" menu and its insert
- * editor read that same table, so a control can never offer a value the
- * document would refuse. It travels as its own classic script, the way the
- * controllers' routing rule does, because the client is emitted as one string
- * and cannot import a module at runtime.
+ * `insert.set` against. The amp is the one insert kind whose sound is a file the
+ * operator chose, so it travels beside the effects as `amp` (its own table,
+ * `AMP_PARAMS`, plus the kind's id) — the "+ effect" menu offers it and its
+ * editor draws its three numbers from the same table. `bundled` is the starter
+ * sounds this bundle ships, which the amp editor's pickers offer beside the
+ * song's own captures and cabinets. All of it travels as its own classic script,
+ * the way the controllers' routing rule does, because the client is emitted as
+ * one string and cannot import a module at runtime.
  * @type {string}
  */
 export const MIXER_EFFECTS_SCRIPT =
@@ -130,7 +133,7 @@ export const MIXER_EFFECTS_SCRIPT =
   ";})();";
 
 /**
- * The effects table as a JSON literal that is safe inside a classic script tag.
+ * The effect table as a JSON literal that is safe inside a classic script tag.
  *
  * `<` travels as `\u003c` and the two JavaScript line terminators (U+2028 and
  * U+2029) as their escapes, so no label an effect table ever grows can close the
@@ -139,10 +142,45 @@ export const MIXER_EFFECTS_SCRIPT =
  * @returns {string}
  */
 function mixerEffectsJson() {
-  return JSON.stringify({ kinds: EFFECT_KINDS, params: EFFECT_PARAMS })
+  return JSON.stringify({
+    kinds: EFFECT_KINDS,
+    params: EFFECT_PARAMS,
+    amp: { kind: "amp", label: AMP_PARAMS.amp.label, params: AMP_PARAMS.amp.params },
+    bundled: findBundled(),
+  })
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
+}
+
+/**
+ * The starter sounds this bundle ships, as the amp editor's pickers offer them.
+ *
+ * Read once from the bundle the page is served out of (`library/bundled.json`),
+ * and narrowed to what a picker and a credit line need: the id, the kind, the
+ * name, the licence and the credit. The size and hash stay on the server, where
+ * the file route and a render check them. A bundle without the list carries no
+ * starters, and the pickers simply offer the song's own sounds.
+ * @returns {Array<{id: string, kind: string, name: string, licence: string, credit: string}>}
+ */
+function findBundled() {
+  const dir = findBundleDir();
+  if (!dir) return [];
+  try {
+    const list = JSON.parse(readFileSync(join(dir, "library", "bundled.json"), "utf8"));
+    const entries = Array.isArray(list?.entries) ? list.entries : [];
+    return entries
+      .filter((row) => row && typeof row.id === "string" && (row.kind === "nam" || row.kind === "ir"))
+      .map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        name: typeof row.name === "string" ? row.name : row.id,
+        licence: typeof row.licence === "string" ? row.licence : "",
+        credit: typeof row.credit === "string" ? row.credit : "",
+      }));
+  } catch {
+    return [];
+  }
 }
 
 /**

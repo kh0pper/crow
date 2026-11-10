@@ -26,12 +26,16 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
 import {
+  DEFAULT_BUNDLED_PATH,
   DEFAULT_CATALOG_PATH,
   DOWNLOAD_TIMEOUT_TEXT,
+  bundledFileFor,
   createLibraryStore,
   downloadCatalogEntry,
   libraryDir,
   libraryGc,
+  readBundled,
+  readBundledFile,
 } from "../bundles/studio/server/library-store.js";
 import { createStudioWeb, startLibraryGc } from "../bundles/studio/server/web.js";
 import { isAllowedNetwork } from "../servers/gateway/dashboard/auth.js";
@@ -249,9 +253,10 @@ function dashboardAuth(req, res, next) {
  * and one catalog override, the real web router, and the fakes above.
  * @param {import("node:test").TestContext} t
  * @param {{catalog: object, library?: object, otherLibrary?: object,
- *          storage?: object|null, canWrite?: Function|null}} options
+ *          storage?: object|null, canWrite?: Function|null,
+ *          bundledPath?: string}} options
  */
-async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, storage = null, canWrite = null }) {
+async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, storage = null, canWrite = null, bundledPath = undefined }) {
   const hub = fakeHub();
   hub.state[SONG].library = songLibrary;
   hub.state[OTHER_SONG].library = otherLibrary;
@@ -279,6 +284,7 @@ async function boot(t, { catalog, library: songLibrary = {}, otherLibrary = {}, 
     libraryStore: (await import("../bundles/studio/server/library-store.js")).createLibraryStore({
       crowHome,
       catalogPath,
+      bundledPath,
     }),
   });
 
@@ -902,4 +908,246 @@ test("a redirect to another host is refused", async (t) => {
     (err) => err.status === 502 && /redirected/.test(err.message),
   );
   assert.deepEqual(storedNames(second), []);
+});
+
+// ---- the starter sounds that ship inside the bundle -------------------------
+
+/** The sha256 and size the operator pinned for the starter capture. */
+const STARTER_SHA = "2d2d744516dc0197737a2c5001010429692d4cb20d72b08264781de626fcf4ca";
+
+/** The sha256 of the first starter cabinet, and the size all five share. */
+const AMPMIX_SHA = "08bfb52f8699632ecbf7a602dc284327b9a19e6e403b86d6cc42f4d71bda4836";
+const CABINET_BYTES = 264710;
+
+/** The credit line every starter cabinet carries, in the picker's own words. */
+const CABINET_CREDIT =
+  '"Impulse Responses" by David Fau Casquel (archive.org/details/ImpulseResponses), CC BY 3.0';
+
+test("the bundled list matches the files and their notices", async () => {
+  const { entries } = await readBundled();
+  assert.deepEqual(
+    entries.map((entry) => entry.id),
+    ["starter-a2", "cabinet-ampmix", "cabinet-ampmix2", "cabinet-axhom", "cabinet-bestplugins", "cabinet-mixxx"],
+    "the six starter sounds, in the order the bed ships them",
+  );
+
+  const noticesPath = join(fileURLToPath(new URL("../bundles/studio/library/files/", import.meta.url)), "NOTICES.md");
+  const notices = readFileSync(noticesPath, "utf8");
+  for (const entry of entries) {
+    const path = bundledFileFor(entry);
+    const bytes = readFileSync(path);
+    assert.equal(bytes.length, entry.bytes, `${entry.file} is the number of bytes the list pins`);
+    assert.equal(sha256Of(bytes), entry.sha256, `${entry.file} hashes to the sha256 the list pins`);
+    assert.ok(notices.includes(entry.file), `NOTICES.md names ${entry.file}`);
+    assert.ok(["MIT", "CC-BY-3.0"].includes(entry.licence), `${entry.file} carries a licence Studio can ship`);
+    assert.ok(entry.credit !== "", `${entry.file} carries a credit line`);
+    assert.ok(entry.name.length <= 80, `${entry.file}'s display name fits an entry`);
+    // The read the file route and a render both use: verified before it serves.
+    const verified = await readBundledFile(entry.id);
+    assert.equal(verified.path, path);
+    assert.equal(sha256Of(verified.bytes), entry.sha256);
+  }
+
+  // The capture is NAM's own A2 example model, under a neutral name, with the
+  // credit the operator pinned — and no amplifier brand on it anywhere, because
+  // its source gear is unknown.
+  const starter = entries.find((entry) => entry.id === "starter-a2");
+  assert.equal(starter.kind, "nam");
+  assert.equal(starter.name, "Starter capture (NAM example model)");
+  assert.equal(starter.sha256, STARTER_SHA);
+  assert.equal(starter.bytes, 665758);
+  assert.equal(starter.licence, "MIT");
+  assert.equal(starter.credit, "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT");
+  assert.match(starter.source_url, /NeuralAmpModelerCore\/blob\/main\/example_models\/A2\.nam$/);
+  assert.match(notices, /\*\*unknown\.\*\*/, "NOTICES says the capture's source gear is unknown");
+  assert.match(notices, /MIT License/, "and carries the MIT licence in full");
+  assert.match(notices, /Copyright \(c\) 2023 Steven Atkinson/);
+  assert.match(notices, /unmodified/i);
+
+  // The five starter cabinets, in the operator's order, all the same size, all
+  // from the CC BY 3.0 set.
+  const cabinets = entries.filter((entry) => entry.kind === "ir");
+  assert.deepEqual(
+    cabinets.map((entry) => entry.name),
+    [
+      "Cabinet 1 (AmpMix)",
+      "Cabinet 2 (AmpMix2)",
+      "Cabinet 3 (Axhom)",
+      "Cabinet 4 (Bestplugins)",
+      "Cabinet 5 (Mixxx)",
+    ],
+    "the display names the operator fixed",
+  );
+  for (const cabinet of cabinets) {
+    assert.equal(cabinet.bytes, CABINET_BYTES, `${cabinet.file} is 264710 bytes`);
+    assert.equal(cabinet.licence, "CC-BY-3.0");
+    assert.equal(cabinet.credit, CABINET_CREDIT);
+    assert.equal(cabinet.source_url, "https://archive.org/details/ImpulseResponses");
+  }
+  // The sixth file of that upstream set (1.17 s) is deliberately not shipped, and
+  // NOTICES says so; the licence pointer is there for the five that are.
+  assert.equal(entries.some((entry) => /bestplugins2/i.test(entry.file)), false);
+  assert.match(notices, /Bestplugins2\.wav/);
+  assert.match(notices, /not\*\* part of the starter/i);
+  assert.match(notices, /creativecommons\.org\/licenses\/by\/3\.0/);
+});
+
+test("a bundled file that no longer matches its record is refused", async () => {
+  // A bundle whose file is not the file its list pins: the verified read refuses
+  // rather than serving a name that plays the wrong sound.
+  const dir = mkdtempSync(join(tmpdir(), "studio-bundled-"));
+  mkdirSync(join(dir, "files"), { recursive: true });
+  const wrong = Buffer.from("RIFFnot-the-cabinet-WAVE", "ascii");
+  writeFileSync(join(dir, "files", "cabinet-ampmix.wav"), wrong);
+  const bundledPath = join(dir, "bundled.json");
+  writeFileSync(
+    bundledPath,
+    JSON.stringify({
+      version: 1,
+      entries: [
+        {
+          id: "cabinet-ampmix",
+          kind: "ir",
+          name: "Cabinet 1 (AmpMix)",
+          file: "cabinet-ampmix.wav",
+          sha256: sha256Of(Buffer.from("some other cabinet")),
+          bytes: wrong.length,
+          licence: "CC-BY-3.0",
+          credit: CABINET_CREDIT,
+          source_url: "https://example.test/ir",
+        },
+        {
+          id: "starter-a2",
+          kind: "nam",
+          name: "Starter capture (NAM example model)",
+          file: "not-carried.nam",
+          sha256: STARTER_SHA,
+          bytes: 665758,
+          licence: "MIT",
+          credit: "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT",
+          source_url: "https://example.test/nam",
+        },
+      ],
+    }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => readBundledFile("cabinet-ampmix", { bundledPath }),
+    /does not match the bundle's own record/,
+  );
+  // A file the list promises but this bundle does not carry reads as a file this
+  // Crow does not have, not as a crash.
+  assert.equal(await readBundledFile("starter-a2", { bundledPath }), null);
+  // A bundle with no list at all ships no starter sounds, rather than failing.
+  assert.deepEqual((await readBundled({ bundledPath: join(dir, "none.json") })).entries, []);
+});
+
+test("adding a starter capture adds one library entry, once", async (t) => {
+  const { base, hub } = await boot(t, { catalog: catalogRow("http://127.0.0.1:1", fakeBank()) });
+
+  const first = await call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    body: { song_id: SONG, bundled_id: "starter-a2" },
+  });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.added, true, "the first ask adds the entry");
+  const entry = first.body.entry;
+  assert.equal(entry.id, "starter-a2", "the entry's id is the bundled row's own id");
+  assert.equal(entry.kind, "nam");
+  assert.equal(entry.source, "bundled");
+  assert.equal(entry.name, "Starter capture (NAM example model)");
+  assert.equal(entry.sha256, STARTER_SHA);
+  assert.equal(entry.bytes, 665758);
+  assert.equal(entry.licence, "MIT");
+  assert.equal(entry.credit, "NAM example A2 model by Steven Atkinson (NeuralAmpModelerCore), MIT");
+
+  // The same ask again finds the entry the song holds: one command, one entry.
+  const second = await call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    body: { song_id: SONG, bundled_id: "starter-a2" },
+  });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.added, false, "a second ask adds nothing");
+  assert.equal(second.body.entry.id, "starter-a2");
+  assert.equal(hub.commands.length, 1, "the song got one library.add");
+  assert.equal(hub.commands[0].command, "library.add");
+  assert.equal(hub.commands[0].internal, true, "issued as Studio's own step, by the person");
+  assert.equal(hub.commands[0].author.kind, "human");
+  assert.equal(Object.keys(hub.state[SONG].library).length, 1);
+
+  // An agent that presents the Studio agent token is refused, and adds nothing.
+  const refused = await call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    headers: { "x-studio-token": "agent" },
+    body: { song_id: SONG, bundled_id: "cabinet-ampmix" },
+  });
+  assert.equal(refused.status, 403);
+  assert.match(refused.body.error, /for the person at the Studio page/);
+  assert.equal(hub.commands.length, 1);
+
+  // A starter sound this bundle does not ship adds nothing either.
+  const unknown = await call(base, "/api/studio/library/bundled", {
+    method: "POST",
+    body: { song_id: SONG, bundled_id: "no-such-sound" },
+  });
+  assert.equal(unknown.status, 404);
+  assert.equal(hub.commands.length, 1);
+});
+
+test("a bundled cabinet is served with its sha256 checked", async (t) => {
+  const catalogue = catalogRow("http://127.0.0.1:1", fakeBank());
+  const entry = {
+    id: "cabinet-ampmix",
+    kind: "ir",
+    name: "Cabinet 1 (AmpMix)",
+    source: "bundled",
+    catalog_id: null,
+    storage_key: null,
+    upload_id: null,
+    sha256: AMPMIX_SHA,
+    bytes: CABINET_BYTES,
+    licence: "CC-BY-3.0",
+    credit: CABINET_CREDIT,
+    author_label: "You",
+  };
+  const served = await boot(t, { catalog: catalogue, library: { [entry.id]: entry } });
+  const answer = await call(served.base, `/api/studio/songs/${SONG}/library/${entry.id}/file`);
+  assert.equal(answer.status, 200);
+  assert.equal(answer.headers.get("content-type"), "audio/wav");
+  assert.equal(answer.headers.get("content-length"), String(CABINET_BYTES));
+  assert.equal(answer.bytes.length, CABINET_BYTES);
+  assert.equal(sha256Of(answer.bytes), AMPMIX_SHA, "the bytes are the file the list pins");
+  assert.deepEqual(storedNames(served.crowHome), [], "a bundled file is never copied into the Crow home");
+
+  // A bundle whose file does not match its record serves nothing, with the same
+  // sentence a file this Crow does not hold gets.
+  const dir = mkdtempSync(join(tmpdir(), "studio-bundled-"));
+  mkdirSync(join(dir, "files"), { recursive: true });
+  const wrong = Buffer.from("RIFFnot-the-cabinet-WAVE", "ascii");
+  writeFileSync(join(dir, "files", "cabinet-ampmix.wav"), wrong);
+  const bundledPath = join(dir, "bundled.json");
+  writeFileSync(
+    bundledPath,
+    JSON.stringify({
+      version: 1,
+      entries: [
+        {
+          id: entry.id,
+          kind: "ir",
+          name: entry.name,
+          file: "cabinet-ampmix.wav",
+          sha256: AMPMIX_SHA,
+          bytes: CABINET_BYTES,
+          licence: "CC-BY-3.0",
+          credit: CABINET_CREDIT,
+          source_url: "https://example.test/ir",
+        },
+      ],
+    }),
+    "utf8",
+  );
+  const tampered = await boot(t, { catalog: catalogue, library: { [entry.id]: entry }, bundledPath });
+  const refused = await call(tampered.base, `/api/studio/songs/${SONG}/library/${entry.id}/file`);
+  assert.equal(refused.status, 404);
+  assert.deepEqual(refused.body, { error: MISSING_INSTRUMENT });
 });

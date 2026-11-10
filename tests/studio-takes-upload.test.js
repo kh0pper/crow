@@ -2099,20 +2099,48 @@ test("an IR over 1 s is refused", async () => {
     },
   );
 
-  // A cabinet that is one frame too long for the rate it declared is refused as
-  // it arrives, not at finish.
+  // A cabinet that is more than a second long for the rate it declared is
+  // refused as it arrives, not at finish. (Two frames past the rate are allowed
+  // — see the starter-cabinet test below — so this one is a whole 0.1 s over.)
   const id = randomUUID();
   await uploads.begin(id, irRequest({ frames: 48000 }));
-  const tooLong = pcm24(signal(48001, 2));
+  const tooLong = pcm24(signal(52800, 2));
   await assert.rejects(
     () => uploads.putChunk(id, 0, tooLong),
     (error) => {
       assert.equal(error.status, 413);
-      assert.equal(error.message, "An impulse response is at most 1 second long; this one is 1.0 s.");
+      assert.equal(error.message, "An impulse response is at most 1 second long; this one is 1.1 s.");
       return true;
     },
   );
   assert.equal(storage.uploads.length, 0);
+});
+
+test("a starter cabinet of 44101 frames at 44.1 kHz loads", async () => {
+  const { uploads, storage } = setup();
+
+  // The five starter cabinets are 24-bit stereo 44.1 kHz and 44101 frames long:
+  // exactly one second plus one frame. The plan allows two frames of tolerance
+  // everywhere the length is checked, and this is the file that needs it.
+  const id = randomUUID();
+  await uploads.begin(id, irRequest({ rate: 44100, channels: 2, frames: 44101 }));
+  const channels = signal(44101, 2);
+  const hashes = await stageChunks(uploads, id, [pcm24(channels)]);
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+  assert.equal(finished.library.kind, "ir");
+  const wav = decodeWav(storage.uploads[0].bytes);
+  assert.equal(wav.rate, 44100);
+  assert.equal(wav.channels[0].length, 44101, "the whole starter cabinet is stored");
+
+  // And the engine's own check says the same thing: 44101 frames at 44.1 kHz is
+  // a cabinet, not a file over the limit. (The page's check is the same two
+  // frames.)
+  const convolver = (await import("../bundles/studio/engine/convolver.js")).default;
+  assert.equal(convolver.lengthProblem(44101, 44100), null);
+  // One frame past the tolerance is refused, so the tolerance is a tolerance and
+  // not an absence of a check.
+  assert.match(String(convolver.lengthProblem(44103, 44100)), /at most 1 second long/);
+  assert.equal(convolver.lengthProblem(48001, 48000), null);
 });
 
 test("a repeated cabinet begin with other channels or rate is refused", async () => {
