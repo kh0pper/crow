@@ -53,16 +53,26 @@ export function readCanonicalMcp(path = CANONICAL_MCP_PATH) {
   try {
     raw = readFileSync(path, "utf8");
   } catch (e) {
-    throw new Error("cannot read canonical mcp.json at " + path + ": " + e.message);
+    // The errno travels on the error (`ENOENT`, `EACCES`, …). A caller that
+    // renders to the operator needs it: a FRESH install has no mcp.json at all,
+    // which is a normal state ("no tools yet"), not a failure to report (audit
+    // N5-4). The message is unchanged for every existing reader.
+    const err = new Error("cannot read canonical mcp.json at " + path + ": " + e.message);
+    err.code = e.code || "EREAD";
+    throw err;
   }
   let j;
   try {
     j = JSON.parse(raw);
   } catch (e) {
-    throw new Error("canonical mcp.json is not valid JSON: " + e.message);
+    const err = new Error("canonical mcp.json is not valid JSON: " + e.message);
+    err.code = "EJSON";
+    throw err;
   }
   if (!j || typeof j.mcpServers !== "object" || !j.mcpServers) {
-    throw new Error("canonical mcp.json has no mcpServers object");
+    const err = new Error("canonical mcp.json has no mcpServers object");
+    err.code = "ESHAPE";
+    throw err;
   }
   return j;
 }

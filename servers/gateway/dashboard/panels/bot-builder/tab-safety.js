@@ -11,6 +11,10 @@ import { getManifest } from "../../../bundles-config.js";
 import { sourceLabel } from "./tool-access.js";
 import { installPaths, satelliteInstalls } from "../../../satellites/installs.js";
 import { getBotOptin } from "../../../satellites/store.js";
+import {
+  instanceContainment, LEVEL_CONTAINED, LEVEL_PARTLY, LEVEL_NOT, OPEN_DATA_DBS,
+} from "../../../../../scripts/pi-bots/containment-status.mjs";
+import { containmentBots, currentProbe, LEVEL_KEY } from "../../settings/sections/bot-runtime.js";
 
 export async function renderSafety(ctx) {
   const { db, def, lang, hidden } = ctx;
@@ -35,6 +39,15 @@ export async function renderSafety(ctx) {
   }
   const readPaths = Array.isArray(pp.read_paths) ? pp.read_paths : [];
   const writePaths = Array.isArray(pp.write_paths) ? pp.write_paths : [];
+  // What the folder lists really are (audit N1b-9). In the default tier a bot's
+  // commands run as this account, so the lists are advice, not limits; only the
+  // contain tier enforces them. The level is COMPUTED by containment-status.mjs
+  // through the same helper Settings → Bot Runtime uses — never re-derived here,
+  // and never inferred from this process's env.
+  const level = await instanceLevel(db, lang);
+  const foldersSpeech = level.enforced
+    ? t(level.dbsOpen ? "botbuilder.sfFoldersEnforcedDbs" : "botbuilder.sfFoldersEnforced", lang)
+    : t("botbuilder.sfFoldersNotLimits", lang);
   const folders = card(t("botbuilder.sfFoldersTitle", lang),
     `<div class="btb-group"><label for="sf-read">${escapeHtml(t("botbuilder.labelReadPaths", lang))}</label>` +
     `<textarea id="sf-read" name="pp_read_paths" rows="3" class="btb-textarea" placeholder="/home/you/notes">${escapeHtml(readPaths.join("\n"))}</textarea>` +
@@ -42,7 +55,11 @@ export async function renderSafety(ctx) {
     `<p class="btb-hint">${t("botbuilder.hintReadPaths", lang)}</p></div>` +
     `<div class="btb-group"><label for="sf-write">${escapeHtml(t("botbuilder.sfWritePaths", lang))}</label>` +
     `<textarea id="sf-write" name="pp_write_paths" rows="3" class="btb-textarea">${escapeHtml(writePaths.join("\n"))}</textarea>` +
-    `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>`);
+    `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>` +
+    `<p class="btb-hint" data-testid="containment-level">${escapeHtml(level.text)}</p>` +
+    `<p class="btb-hint" data-testid="containment-folders">${escapeHtml(foldersSpeech)}` +
+    (level.enforced ? "" : ` <a href="/dashboard/settings?section=bot-runtime">${escapeHtml(t("botbuilder.sfContainmentLink", lang))}</a>`) +
+    `</p>`);
 
   const crowHome = ctx.crowHome || resolveCrowHome();
   // Satellite-hosted bundles (SAT-7 part B): the per-bot "also on other people's turns" opt-in,
@@ -85,8 +102,33 @@ export async function renderSafety(ctx) {
 
   return `<form method="POST" class="btb-form" id="btb-safety-form">${hidden("safety")}` +
     email + folders + satCard + ask +
-    `<p class="btb-hint">${t("botbuilder.hintPermEnforced", lang)}</p>` +
+    `<p class="btb-hint" data-testid="safety-summary">${escapeHtml(t(level.enforced ? "botbuilder.sfSummaryContained" : "botbuilder.sfSummaryNotContained", lang))}</p>` +
     actionBar(`<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.sfSave", lang))}</button>`) + `</form>`;
+}
+
+/**
+ * This instance's containment level, in the words Settings → Bot Runtime uses.
+ * `enforced` is true only when at least one bot was OBSERVED in the contain
+ * tier: with no bot to look at, or a `not contained` one, the folder lists are
+ * not limits and the page must not say they are. `dbsOpen` follows the open
+ * lines (containment-status.mjs's OPEN_DATA_DBS, one per bot, `<bot id>: `-prefixed
+ * for the instance), so the database sentence appears only when it is true.
+ *
+ * @returns {Promise<{level:string, enforced:boolean, dbsOpen:boolean, text:string}>}
+ */
+async function instanceLevel(db, lang) {
+  const bots = await containmentBots(db);
+  const probe = currentProbe();
+  const inst = instanceContainment(bots, { host: { bwrap: probe.ok === true } });
+  const level = Object.hasOwn(LEVEL_KEY, inst.level) ? inst.level : LEVEL_NOT;
+  const enforced = bots.length > 0 && (level === LEVEL_CONTAINED || level === LEVEL_PARTLY);
+  const dbsOpen = inst.open.some((line) => String(line).endsWith(OPEN_DATA_DBS));
+  // The same key (and the same words) Bot Runtime's own level line uses, so the two
+  // surfaces can never drift; "no bots" when this process could observe none.
+  const text = bots.length > 0
+    ? fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[level], lang) })
+    : t("settings.containment.noBots", lang);
+  return { level, enforced, dbsOpen, text };
 }
 
 /**

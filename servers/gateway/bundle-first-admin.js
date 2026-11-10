@@ -80,6 +80,8 @@ export {
 
 export const FIRST_ADMIN_DONE_PREFIX = "first_admin_done:";
 export const FIRST_ADMIN_NOTICE_PREFIX = "first_admin_notice:";
+/** `notifications.source` of a bundle's first-admin bell (the Removal row shares it). */
+export const FIRST_ADMIN_NOTIFICATION_SOURCE = "bundle-installer";
 /** What Crow's own setup run did for this bundle, at this install (`firstAdmin.via: "setup"`). */
 export const FIRST_ADMIN_AUTO_PREFIX = "first_admin_auto:";
 
@@ -212,14 +214,60 @@ export async function markFirstAdminDone(db, bundleId, installId, { nowMs = Date
 }
 
 /** The dashboard language, read straight from dashboard_settings; "en" when unreadable. */
-async function readLanguage(db) {
-  try {
+async function readLanguage(db) {  try {
     const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] });
     const v = rows?.[0]?.value;
     return v === "es" || v === "en" ? v : "en";
   } catch {
     return "en";
   }
+}
+
+/**
+ * A bundle was REMOVED: its "Finish <app>'s setup now" bell goes with it (audit N5-4).
+ *
+ * The card itself is built from installed.json (pendingFirstAdminNotices), so the removal
+ * already empties it; the Done marker written here keeps a stale render from bringing one
+ * back and records that there is nothing left to finish. The bell is the row that does NOT
+ * disappear on its own, so it is dismissed the same way crow_dismiss_notification does it
+ * (is_dismissed = 1, the row is kept for History) — and ONLY this bundle's first-admin
+ * notice: the "Removed: X" row from the same source, and every other bundle's bell, stay.
+ *
+ * Never throws: an uninstall must not fail over a bell.
+ *
+ * @returns {Promise<{dismissed: number, done: string|null}>}
+ */
+export async function clearFirstAdminNotice(db, bundleId, { nowMs = Date.now(), installId = null, log = console } = {}) {
+  if (!db || typeof bundleId !== "string" || !bundleId) return { dismissed: 0, done: null };
+  let dismissed = 0;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, metadata FROM notifications WHERE source = ? AND is_dismissed = 0",
+      args: [FIRST_ADMIN_NOTIFICATION_SOURCE],
+    });
+    const mine = [];
+    for (const row of rows || []) {
+      let meta = null;
+      try { meta = JSON.parse(String((row && row.metadata) || "")); } catch { meta = null; }
+      if (!meta || meta.kind !== "bundle-first-admin" || meta.bundle !== bundleId) continue;
+      if (row && row.id != null) mine.push(row.id);
+    }
+    for (const id of mine) {
+      await db.execute({
+        sql: "UPDATE notifications SET is_dismissed = 1, updated_at = datetime('now') WHERE id = ?",
+        args: [id],
+      });
+    }
+    dismissed = mine.length;
+  } catch (err) {
+    try { log.warn(`[bundles] first-admin notice not cleared: ${err?.message ?? err}`); } catch { /* console gone */ }
+  }
+  let done = null;
+  // Stamped with THIS install when the caller still knows it (the uninstall path
+  // reads installed.json before the record goes), so the marker really is "this
+  // install owes nothing" — the same stamp the Done button writes.
+  try { done = await markFirstAdminDone(db, bundleId, installId, { nowMs }); } catch { done = null; }
+  return { dismissed, done };
 }
 
 /**
@@ -278,7 +326,7 @@ export async function notifyFirstAdmin({
       title: firstAdminTitle(name, language),
       body: firstAdminBody({ ...fa, via: setup ? "setup" : null, kept: autoResult === "kept" }, name, language),
       type: "system",
-      source: "bundle-installer",
+      source: FIRST_ADMIN_NOTIFICATION_SOURCE,
       priority: "normal",
       action_url: bundlePageUrl(bundleId),
       metadata: { kind: "bundle-first-admin", bundle: bundleId, mode: fa.mode },

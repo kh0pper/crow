@@ -69,7 +69,10 @@ export async function probeAll(crowHome = resolveCrowHome()) {
   try {
     canonical = readCanonicalMcp();
   } catch (e) {
-    return { _error: String(e.message || e) };
+    // `_code` is the errno (ENOENT = no mcp.json yet: a fresh install). Callers
+    // that show the error to the operator use it to say "no tools yet" instead
+    // of quoting a path and an errno (audit N5-4).
+    return { _error: String(e.message || e), _code: e && e.code ? String(e.code) : null };
   }
   const surface = serversForProbe(canonical, crowHome);
   const names = Object.keys(surface);

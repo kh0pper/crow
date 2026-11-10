@@ -45,9 +45,52 @@ import { classifySkills } from "../../../skills-catalog.js";
 import { REPO_SKILLS_DIR } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
 import { addSkillToolsGuarded, skillToolHints } from "../../../../../scripts/pi-bots/skill-tools.mjs";
 import { isVoiceBotDef } from "../../../../shared/voice-bot.js";
+import { isCrowOwnServer } from "../../../../../scripts/pi-bots/containment-status.mjs";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const APP_BUNDLES_DIR = fileURLToPath(new URL("../../../../../bundles", import.meta.url));
+
+/**
+ * A source that is an app REMOVED from this Crow (audit N5-4).
+ *
+ * Removing a bundle whose manifest registers an MCP server (every docker bundle with a
+ * `server` block) deletes its folder and its installed.json row but can leave the
+ * `mcp-addons.json` registration behind, so the next render tries to start a server that is
+ * no longer there and lists the dead app as "couldn't load this service's tools (Cannot find
+ * module …)". A bot's grants for it are just as dead. The row is not drawn for such an app;
+ * its grants are counted in one quiet line instead, and NOTHING is deleted here —
+ * reinstalling the app brings both back. Crow's own servers ship in the checkout, and a
+ * connected service or a satellite bundle is never this, whatever it reports.
+ */
+const MISSING_FILES_RE = /ENOENT|Cannot find module|MODULE_NOT_FOUND|no such file or directory|not installed on this instance/i;
+function isRemovedApp(src, crowHome) {
+  if (!src || src.ok || src.connected === true || src.satellite === true) return false;
+  // Only a "the files are not there" failure. A timeout, a refused token or a broken
+  // launcher is a real service with a problem, and stays a row (that is what the row
+  // is for); a removed app is one whose launcher cannot even be found.
+  if (!MISSING_FILES_RE.test(String(src.error || ""))) return false;
+  const id = String(src.server || "");
+  if (!id || id.includes("..") || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return false;
+  if (isCrowOwnServer(id)) return false;
+  try { return !existsSync(join(crowHome, "bundles", id)); } catch { return false; }
+}
+
+/**
+ * A tool-list failure in the page's own words. A damaged or unreadable file keeps its
+ * technical detail in a muted note (an operator can act on a filename); anything else falls
+ * back to the sentence the page already had.
+ */
+function probeErrorHtml(error, code, lang) {
+  const detail = String(error || "");
+  const plain = code === "EJSON" || code === "ESHAPE"
+    ? t("botbuilder.abProbeErrorDamaged", lang)
+    : (code === "EACCES" || code === "EPERM" ? t("botbuilder.abProbeErrorNoAccess", lang) : null);
+  if (!plain) return `<p class="btb-err">${escapeHtml(fill(t("botbuilder.abProbeError", lang), { error: detail }))}</p>`;
+  return `<p class="btb-err">${escapeHtml(plain)}` +
+    (detail ? ` <span class="btb-muted">(${escapeHtml(detail.slice(0, 160))})</span>` : "") + `</p>`;
+}
 
 function sourceRow(src, selected, lang, { memory = false } = {}) {
   const key = src.server;
@@ -173,10 +216,25 @@ export async function renderAbilities(ctx) {
     name: "cmd_mode", legend: t("botbuilder.abCmd", lang), current: cMode, options: cmdOpts, hintHtml: cmdHint,
   }) + (cMode === "auto" ? await classifierStatusHtml(db, lang) : "");
 
-  const { error: probeErr, sources } = await loadSources({ db, projectId: def.project_id ?? null, crowHome });
+  const { error: probeErr, errorCode: probeErrCode, sources } = await loadSources({ db, projectId: def.project_id ?? null, crowHome });
   const memSrc = sources.find((s) => s.server === MEMORY_SOURCE);
   const connected = sources.filter((s) => s.connected === true);
   const others = sources.filter((s) => s.server !== MEMORY_SOURCE && s.connected !== true);
+  // Removed apps (audit N5-4): not rows, one quiet line with how many of this bot's
+  // grants point at them. Nothing is cleared here; the grants are kept as written.
+  const removedApps = new Set();
+  const shownSources = [];
+  for (const s of others) {
+    if (isRemovedApp(s, crowHome)) removedApps.add(s.server);
+    else shownSources.push(s);
+  }
+  let removedGrants = 0;
+  for (const key of selected) {
+    const i = key.indexOf("/");
+    if (i > 0 && removedApps.has(key.slice(0, i))) removedGrants += 1;
+  }
+  // A fresh install has no canonical mcp.json at all: that is "no tools yet", not an error.
+  const noToolsYet = !sources.length && !probeErr;
   const memRow = memSrc ? sourceRow(memSrc, selected, lang, { memory: true }) : "";
 
   const computer = card(t("botbuilder.abComputerTitle", lang), filesCtl + cmdCtl + memRow);
@@ -184,9 +242,14 @@ export async function renderAbilities(ctx) {
   const catalog = {};
   for (const s of sources) if (s.ok) catalog[s.server] = s.catalog.map((x) => [x.name, x.access]);
   const servicesBody =
-    (probeErr ? `<p class="btb-err">${escapeHtml(fill(t("botbuilder.abProbeError", lang), { error: probeErr }))}</p>` : "") +
+    (probeErr ? probeErrorHtml(probeErr, probeErrCode, lang) : "") +
     (skillToolsCapped ? `<p class="btb-hint" data-testid="skill-tools-capped">${escapeHtml(t("botbuilder.abSkillToolsCapped", lang))}</p>` : "") +
-    (others.length ? others.map((s) => sourceRow(s, selected, lang)).join("") : `<p class="btb-hint">${escapeHtml(t("botbuilder.abNoSources", lang))}</p>`) +
+    (shownSources.length
+      ? shownSources.map((s) => sourceRow(s, selected, lang)).join("")
+      : `<p class="btb-hint" data-testid="${noToolsYet ? "no-tools-yet" : "no-sources"}">${escapeHtml(t(noToolsYet ? "botbuilder.abNoToolsYet" : "botbuilder.abNoSources", lang))}</p>`) +
+    (removedGrants
+      ? `<p class="btb-hint" data-testid="removed-apps">${escapeHtml(fill(t("botbuilder.abRemovedApps", lang), { n: removedGrants }))}</p>`
+      : "") +
     `<input type="hidden" name="src_catalog" value="${escapeHtml(JSON.stringify(catalog))}">`;
   const services = card(t("botbuilder.abServicesTitle", lang), servicesBody, t("botbuilder.abServicesLead", lang));
   // This project's connections get their own card, only when it has any.

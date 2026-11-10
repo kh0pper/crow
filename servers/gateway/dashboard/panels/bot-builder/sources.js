@@ -29,13 +29,14 @@ export function _setSourcesForTest(v) { _override = v; }
  * services (one row per service, tools from the cache or a single start), and the bundles
  * installed on a paired satellite (the owner-approved pin's tools, read from crow's own records).
  * @param {{db?:object, projectId?:number|null, crowHome?:string}} [opts]
- * @returns {Promise<{error:string|null, sources:Array<object>}>}
+ * @returns {Promise<{error:string|null, errorCode:string|null, sources:Array<object>}>}
  */
 export async function loadSources({ db = null, projectId = null, crowHome = null } = {}) {
   if (_override) return typeof _override === "function" ? _override() : _override;
   const home = crowHome || resolveCrowHome();
   const out = [];
   let error = null;
+  let errorCode = null;
   const probe = await probeAll();
   // Operator-set account labels: an optional "account" string on a server's
   // settings entry (~/.pi/agent/mcp.json or <crowHome>/mcp-addons.json).
@@ -43,7 +44,12 @@ export async function loadSources({ db = null, projectId = null, crowHome = null
   try { canonical = readCanonicalMcp().mcpServers || {}; } catch { canonical = {}; }
   const accountOf = (block) => (block && typeof block.account === "string" ? block.account : "");
   if (probe && probe._error) {
-    error = String(probe._error);
+    // A missing ~/.pi/agent/mcp.json is a FRESH install, not a failure: there are
+    // simply no tools yet, so the page shows an empty state rather than an errno
+    // and a file path (audit N5-4). Every other errno/shape stays an error, with
+    // its code, so the page can word it plainly.
+    errorCode = probe._code ? String(probe._code) : null;
+    error = errorCode === "ENOENT" ? null : String(probe._error);
   } else {
     for (const server of Object.keys(probe || {}).sort()) {
       const p = probe[server];
@@ -88,7 +94,7 @@ export async function loadSources({ db = null, projectId = null, crowHome = null
       out.push(src);
     }
   } catch { /* satellites are optional */ }
-  return { error, sources: out };
+  return { error, errorCode, sources: out };
 }
 
 /** A satellite bundle's display name: its manifest's `name` (this checkout's copy), else the id. */
