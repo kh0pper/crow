@@ -21,7 +21,7 @@ import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { renderSong, createRenderer } from "../bundles/studio/server/render.js";
+import { renderSong, createRenderer, unhostableInserts } from "../bundles/studio/server/render.js";
 import { createStudioServer } from "../bundles/studio/server/mcp.js";
 import { integratedLufs, truePeakDb } from "../bundles/studio/server/loudness.js";
 import { decodeWav, encodeWav24 } from "../bundles/studio/server/wav.js";
@@ -74,6 +74,26 @@ function peakOf(left, right) {
     }
   }
   return peak;
+}
+
+/**
+ * How far apart two renders are: the largest sample difference over both
+ * channels. Two renders of the same song are bit-identical, so anything above
+ * the float noise means the audio really changed.
+ * @param {{left: Float32Array, right: Float32Array}} one
+ * @param {{left: Float32Array, right: Float32Array}} other
+ * @returns {number}
+ */
+function largestDifference(one, other) {
+  let largest = 0;
+  for (const channel of ["left", "right"]) {
+    const count = Math.min(one[channel].length, other[channel].length);
+    for (let at = 0; at < count; at += 1) {
+      const gap = Math.abs(one[channel][at] - other[channel][at]);
+      if (gap > largest) largest = gap;
+    }
+  }
+  return largest;
 }
 
 /** @returns {string} ASCII from a DataView, for the RIFF chunk ids. */
@@ -1391,6 +1411,250 @@ function fakeLibraryStore(sha256, path) {
     },
   };
 }
+
+/**
+ * One insert, as `server/doc.js`'s snapshot carries it: the id, the chain it
+ * sits in, its fractional place in that chain, its kind, whether it is bypassed
+ * and every parameter.
+ * @param {string} id
+ * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+ * @param {number} order
+ * @param {string} kind
+ * @param {object} params
+ * @param {boolean} [bypass]
+ * @returns {object}
+ */
+function insertOf(id, owner, order, kind, params, bypass = false) {
+  return { id, owner, order, kind, bypass, params };
+}
+
+test("a render runs every chain", async () => {
+  // One song with a track insert, a return with its own insert fed by a send,
+  // and a master insert — the three chains the mixer has (plan 1d, Task 9).
+  // Each one is switched OFF on its own, and the render has to hear the
+  // difference: an insert the render quietly skipped would show up here as two
+  // identical mixes.
+  const trackFilter = insertOf("ins-filter", "track:track-1", 0, "filter", { mode: "lp", cutoff_hz: 150, resonance: 0.7 });
+  const returnSaturation = insertOf("ins-return", "return:verb", 0, "saturation", {
+    drive_db: 36,
+    tone: 1,
+    output_db: 0,
+    mix: 1,
+  });
+  const masterCompressor = insertOf("ins-master", "master", 0, "compressor", {
+    detect: "peak",
+    threshold_db: -50,
+    ratio: 20,
+    knee_db: 0,
+    attack_ms: 0.5,
+    release_ms: 20,
+    makeup_db: 0,
+    sidechain_hp_hz: 0,
+  });
+
+  /**
+   * The song with the three chains in it, any of them bypassed.
+   * @param {{track?: boolean, ret?: boolean, master?: boolean}} [bypass]
+   * @returns {object}
+   */
+  const mixSong = (bypass = {}) => ({
+    ...oneTrackSong(),
+    inserts: {
+      [trackFilter.id]: { ...trackFilter, bypass: bypass.track === true },
+      [returnSaturation.id]: { ...returnSaturation, bypass: bypass.ret === true },
+      [masterCompressor.id]: { ...masterCompressor, bypass: bypass.master === true },
+    },
+    returns: { verb: { id: "verb", name: "Reverb", gain_db: 0, pan: 0, mute: false } },
+    sends: { "track-1/verb": { track_id: "track-1", return_id: "verb", level_db: -6, pre: false } },
+    master: { gain_db: 0, target: { lufs: -14, true_peak_db: -1 } },
+  });
+
+  const render = (bypass) => renderSong(mixSong(bypass), { scene_id: "scene-1", seconds: 2 });
+
+  const all = await render();
+  assert.deepEqual(all.effect_problems, [], "every chain ran: no insert had to be skipped");
+  assert.deepEqual(all.missing_library, []);
+  assert.ok(peakOf(all.left, all.right) > 0.005, "the mixed song sounds, so the comparisons mean something");
+
+  /**
+   * How far apart two renders are, over both channels.
+   * @param {object} one
+   * @param {object} other
+   * @returns {number}
+   */
+  const distance = largestDifference;
+
+  const withoutTrack = await render({ track: true });
+  assert.ok(
+    distance(all, withoutTrack) > 0.01,
+    "bypassing the track's filter has to change the mix the render measures",
+  );
+
+  const withoutReturn = await render({ ret: true });
+  assert.ok(
+    distance(all, withoutReturn) > 0.01,
+    "bypassing the return's insert has to change the mix the render measures",
+  );
+
+  const withoutMaster = await render({ master: true });
+  assert.ok(
+    distance(all, withoutMaster) > 0.01,
+    "bypassing the master's compressor has to change the mix the render measures",
+  );
+
+  // The master chain is measured where it lands: the master compressor squashes
+  // the song, so the same audio sums to a quieter true peak with it in.
+  assert.ok(
+    truePeakDb(all.left, all.right, SAMPLE_RATE) < truePeakDb(withoutMaster.left, withoutMaster.right, SAMPLE_RATE),
+    "the master's insert is measured on the final output, not before it",
+  );
+});
+
+test("a render names a Faust insert it cannot host, and renders anyway", async () => {
+  // A checkout that has not run `tools/build-faust.mjs` holds no compiled
+  // effects. The insert is not fatal: it passes audio through, the rest of the
+  // chain plays, and the render says which insert it could not run (plan 1d,
+  // Task 11).
+  const phaser = insertOf("ins-phaser", "track:track-1", 0, "phaser", {
+    rate_hz: 0.5,
+    depth: 1,
+    feedback: 0.4,
+    mix: 1,
+  });
+  const song = {
+    ...oneTrackSong(),
+    inserts: {
+      [phaser.id]: phaser,
+      // A bypassed insert is skipped by the chain, so it is nothing to report.
+      "ins-off": { ...phaser, id: "ins-off", bypass: true },
+    },
+    returns: { verb: { id: "verb", name: "Reverb", gain_db: 0, pan: 0, mute: false } },
+  };
+
+  // The host with no build output names every effect it cannot host, with the
+  // effect and the chain it sits in: a fresh checkout's answer, held here
+  // against a song rather than against a build that would have to be undone.
+  assert.deepEqual(unhostableInserts(song, new Set()), [
+    {
+      insert_id: "ins-phaser",
+      message: 'phaser on Lead could not be built: this render has no compiled "phaser" effect.',
+    },
+  ]);
+  assert.deepEqual(
+    unhostableInserts(song, new Set(["phaser"])),
+    [],
+    "a host that has the module has nothing to report",
+  );
+  assert.deepEqual(
+    unhostableInserts(
+      {
+        ...song,
+        inserts: { ...song.inserts, "ins-rev": insertOf("ins-rev", "return:verb", 0, "reverb", {}) },
+      },
+      new Set(),
+    ).map((problem) => problem.message),
+    [
+      'phaser on Lead could not be built: this render has no compiled "phaser" effect.',
+      'reverb on Reverb could not be built: this render has no compiled "reverb" effect.',
+    ],
+    "a return's chain is named by the return's name, not its id",
+  );
+
+  // This checkout HAS built its effects, so the same song renders with the
+  // phaser really in the chain and reports no problem at all.
+  const hosted = await renderSong(song, { scene_id: "scene-1", seconds: 1 });
+  assert.deepEqual(hosted.effect_problems, []);
+  const plain = await renderSong(oneTrackSong(), { scene_id: "scene-1", seconds: 1 });
+  assert.ok(
+    largestDifference(hosted, plain) > 0.01,
+    "the hosted effect changes the audio, so the chain really ran",
+  );
+
+  // An insert the ENGINE had to bypass after an invalid sample is reported too,
+  // from the processor's own message, and the song still renders around it.
+  // (Forcing that here would need an effect that misbehaves, so the fault is fed
+  // to the same collector the port feeds: `faultProblems` through a stubbed
+  // engine would prove less than the port test the engine has.)
+  assert.equal(hosted.seconds, 1, "the render happened");
+});
+
+test("a stored render carries the target, meets_target and the metered short-term figure", async () => {
+  // The storage rail's half of the mixer's figures (plan 1d, Task 11): the song's
+  // own target, whether the master chain's output meets it, and the short-term
+  // figure the engine's meter took. The audio renderer is stubbed with a loud
+  // sine, so the arithmetic is checked exactly instead of approximately.
+  const tone = sine({ seconds: 2, amplitude: 0.5, channels: 2 });
+  const db = fakeDb();
+  const storage = fakeStorage();
+  const acl = fakeAcl();
+  const renderer = createRenderer({
+    db,
+    storage,
+    acl,
+    maxSeconds: 300,
+    now: () => CLOCK,
+    renderAudio: async () => ({
+      ...tone,
+      sampleRate: SAMPLE_RATE,
+      seconds: 2,
+      short_term_max_lufs: -5.5,
+      effect_problems: [{ insert_id: "ins-x", message: "x on Lead produced an invalid sample; it is bypassed." }],
+    }),
+  });
+
+  const song = {
+    ...oneTrackSong(),
+    master: { gain_db: 0, target: { lufs: -6, true_peak_db: -3 } },
+  };
+  const met = await renderer.render({
+    song_id: "song-1",
+    project_id: PROJECT, snapshot: song, scene_id: "scene-1", seconds: 2,
+  });
+  // A half-scale sine on both channels reads about -6 LUFS and -6.02 dBTP.
+  assert.ok(Math.abs(met.lufs - -6.02) < 0.3, `expected about -6 LUFS, got ${met.lufs}`);
+  assert.deepEqual(met.target, { lufs: -6, true_peak_db: -3 });
+  assert.deepEqual(met.meets_target, { lufs: true, true_peak: true });
+  assert.equal(met.short_term_max_lufs, -5.5, "the engine's own short-term figure comes back untouched");
+  assert.deepEqual(met.effect_problems, [
+    { insert_id: "ins-x", message: "x on Lead produced an invalid sample; it is bypassed." },
+  ]);
+
+  const audit = acl.audits.find((entry) => entry.action === "studio.render");
+  assert.deepEqual(audit.payload.target, met.target, "the audit line carries the target");
+  assert.deepEqual(audit.payload.meets_target, met.meets_target);
+  assert.equal(audit.payload.short_term_max_lufs, -5.5);
+  assert.deepEqual(audit.payload.effect_problems, met.effect_problems);
+
+  // A target the mix does not reach says so, field by field: the loudness is far
+  // below -14 LUFS and the peak is under the ceiling all the same.
+  const silent = createRenderer({
+    db: fakeDb(),
+    storage: fakeStorage(),
+    acl: fakeAcl(),
+    maxSeconds: 300,
+    now: () => CLOCK,
+    renderAudio: async () => stubAudio(),
+  });
+  const quiet = await silent.render({
+    song_id: "song-1", project_id: PROJECT, snapshot: oneTrackSong(), seconds: 1,
+  });
+  assert.deepEqual(quiet.target, { lufs: -14, true_peak_db: -1 }, "a song without a master reads the reference");
+  assert.deepEqual(quiet.meets_target, { lufs: false, true_peak: true }, "silence is quiet, not loud enough");
+  assert.equal(quiet.short_term_max_lufs, null, "a stub with no meter reports no short-term figure");
+  assert.deepEqual(quiet.effect_problems, []);
+
+  // The renderer remembers the song's last render for `studio_mix`.
+  assert.deepEqual(renderer.lastRender("song-1"), {
+    integrated_lufs: met.lufs,
+    true_peak_db: met.true_peak_db,
+    short_term_max_lufs: -5.5,
+    target: { lufs: -6, true_peak_db: -3 },
+    meets_target: { lufs: true, true_peak: true },
+    seconds: 2,
+    storage_key: met.storage_key,
+  });
+  assert.equal(renderer.lastRender("song-2"), null, "a song nothing has rendered has no last render");
+});
 
 test("a render loads the fonts its tracks use", async () => {
   // Four tracks: one bank plays on two of them (so it is read once), one bank is

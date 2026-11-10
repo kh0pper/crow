@@ -52,6 +52,16 @@
  * actions (plan 1d, Global Constraints "Who can change a sound"). What an agent
  * may change about an instrument is the preset, with `studio_track_set_program`.
  *
+ * `studio_mix` is the mixer's read: every chain in the song (each track's, each
+ * return's, the master's) with its inserts in the order they run, every send,
+ * every return, the master's gain and loudness target, and how the last render
+ * of this song measured against that target. It is read-only too — but the
+ * mixer is the one part of the song an agent runs as a pass of ordinary steps:
+ * the effects (insert.add/set/move/bypass/remove), the sends (send.set), the
+ * returns (return.add/set/remove) and the master (master.set) are all tools,
+ * each one an undoable step, and the panel outlines such a pass in the agent's
+ * colour so the person can A/B it and undo it.
+ *
  * `studio_session_summary` exists because a song does not fit in a prompt: it
  * returns the tracks, scenes and a page of clips with note counts, and the
  * agent asks for one clip's notes with `studio_get_clip` when it needs them.
@@ -87,7 +97,7 @@ import "./commands/instruments.js";
 // mix step is an undoable step, never a sound leaving the song.
 import "./commands/mixer.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
-import { libraryUsers } from "./doc.js";
+import { libraryUsers, effectLabel } from "./doc.js";
 // The vetted instrument catalog: what `studio_library` says this Crow could
 // download. It is the bundle's own module (Node built-ins only), and a caller
 // may inject its own reader so a test never depends on the checked-in file.
@@ -545,6 +555,121 @@ export function libraryList(snapshot, catalogEntries = []) {
 }
 
 /**
+ * The song's mixer, the way `studio_mix` reports it: every strip with its chain
+ * in the order the engine runs it, every send, every return, the master, and the
+ * last render's figures.
+ *
+ * An insert is `{id, kind, label, bypass, params}` — the kind the engine hosts,
+ * the word a person calls it, whether the chain skips it, and every parameter at
+ * the value the engine will use (the document fills a missing one with its own
+ * default), so an agent reads the settings it is about to change rather than
+ * guessing them.
+ *
+ * A send is `{track_id, return_id, level_db, pre}`, and a return is
+ * `{id, name, gain_db, pan, mute}` plus its own chain: returns are not tracks,
+ * so they appear here and nowhere a track reader looks.
+ *
+ * `last_render` is the last render THIS process made of the song, if it made
+ * one: the integrated loudness, true peak and highest short-term figure it
+ * measured, the target it measured against, and whether it met it. It is null
+ * for a song no render has measured since this process started.
+ *
+ * @param {object} snapshot - the hub's `snapshot()` shape
+ * @param {object|null} [lastRender] - `renderer.lastRender(song_id)`, or null
+ * @returns {{tracks: object[], returns: object[], master: object,
+ *            last_render: (object|null)}}
+ */
+export function mixList(snapshot, lastRender = null) {
+  const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
+  const inserts = Object.values(snapshot?.inserts && typeof snapshot.inserts === "object" ? snapshot.inserts : {}).filter(
+    (insert) => insert && typeof insert === "object",
+  );
+  const sends = Object.values(snapshot?.sends && typeof snapshot.sends === "object" ? snapshot.sends : {}).filter(
+    (send) => send && typeof send === "object",
+  );
+  const returns = Object.values(snapshot?.returns && typeof snapshot.returns === "object" ? snapshot.returns : {}).filter(
+    (item) => item && typeof item === "object",
+  );
+  const master = snapshot?.master && typeof snapshot.master === "object" ? snapshot.master : {};
+  const target = master.target && typeof master.target === "object" ? master.target : {};
+
+  /**
+   * One chain's inserts, in the order the engine runs them: `order` first (a
+   * fractional place, so an effect between two others sorts between them), then
+   * the id, so a chain read twice answers in the same order.
+   * @param {string} owner - `"track:<id>"`, `"return:<id>"` or `"master"`
+   * @returns {object[]}
+   */
+  const chainOf = (owner) =>
+    inserts
+      .filter((insert) => insert.owner === owner)
+      .sort((left, right) => (Number(left.order) || 0) - (Number(right.order) || 0) || String(left.id).localeCompare(String(right.id)))
+      .map((insert) => ({
+        id: insert.id,
+        kind: typeof insert.kind === "string" ? insert.kind : "",
+        label: effectLabel(insert.kind),
+        bypass: insert.bypass === true,
+        params: insert.params && typeof insert.params === "object" ? { ...insert.params } : {},
+      }));
+
+  const strips = tracks.map((track) => ({
+    track_id: track.id,
+    track: typeof track.name === "string" ? track.name : track.id,
+    inserts: chainOf(`track:${track.id}`),
+    sends: sends
+      .filter((send) => send.track_id === track.id)
+      .map((send) => ({
+        track_id: send.track_id,
+        return_id: send.return_id,
+        level_db: Number(send.level_db) || 0,
+        pre: send.pre === true,
+      }))
+      .sort((left, right) => String(left.return_id).localeCompare(String(right.return_id))),
+  }));
+
+  const returnStrips = returns
+    .map((item) => ({
+      id: item.id,
+      name: typeof item.name === "string" ? item.name : "",
+      gain_db: Number(item.gain_db) || 0,
+      pan: Number(item.pan) || 0,
+      mute: item.mute === true,
+      inserts: chainOf(`return:${item.id}`),
+    }))
+    // A fixed order (name, then id), whatever order the document's map holds
+    // them in after a reload or a merge.
+    .sort((left, right) => left.name.localeCompare(right.name) || String(left.id).localeCompare(String(right.id)));
+
+  const lufs = Number(target.lufs);
+  const peak = Number(target.true_peak_db);
+
+  return {
+    tracks: strips,
+    returns: returnStrips,
+    master: {
+      gain_db: Number(master.gain_db) || 0,
+      target: {
+        lufs: Number.isFinite(lufs) ? lufs : -14,
+        true_peak_db: Number.isFinite(peak) ? peak : -1,
+      },
+      inserts: chainOf("master"),
+    },
+    last_render: lastRender && typeof lastRender === "object"
+      ? {
+          integrated_lufs: lastRender.integrated_lufs ?? null,
+          true_peak_db: lastRender.true_peak_db ?? null,
+          short_term_max_lufs: lastRender.short_term_max_lufs ?? null,
+          target: lastRender.target && typeof lastRender.target === "object" ? { ...lastRender.target } : null,
+          meets_target: lastRender.meets_target && typeof lastRender.meets_target === "object"
+            ? { ...lastRender.meets_target }
+            : null,
+          seconds: lastRender.seconds ?? null,
+        }
+      : null,
+  };
+}
+
+/**
  * The sample listing's neighbours: the plain words a MIDI mapping is reported
  * in, and the listing `studio_midi` answers with.
  *
@@ -989,6 +1114,33 @@ export function createStudioServer({
     },
   );
 
+  // ---- the mixer ---------------------------------------------------------
+
+  server.registerTool(
+    "studio_mix",
+    {
+      title: "Read the song's mixer",
+      description:
+        "Every chain in the song with the settings the engine will use: each track's inserts in the order they run {id, kind, label, bypass, params}, its sends {track_id, return_id, level_db, pre}; each return {id, name, gain_db, pan, mute} with its own inserts; and the master {gain_db, target: {lufs, true_peak_db}} with its chain. last_render is how the last render this process made of the song measured (integrated_lufs, true_peak_db, short_term_max_lufs, target, meets_target) — null until one has run. Read-only. What you may change is the mix, one undoable step at a time: effects (studio_insert_add, studio_insert_set, studio_insert_move, studio_insert_bypass, studio_insert_remove), sends (studio_send_set), returns (studio_return_add, studio_return_set, studio_return_remove) and the master (studio_master_set). A run of those steps is a mix pass, outlined in your colour for the person, who may A/B it and undo it (undo one step, or the whole pass); A/B is theirs, never yours, and it never writes the song.",
+      inputSchema: {
+        song_id: z.string().min(1).describe("the song whose mixer to read"),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const opened = await hub.snapshot(args.song_id, authorFor(extra));
+        if (isRefusal(opened)) return errorResult(refusalText(opened));
+        if (!opened || !opened.snapshot) throw new Error(`There is no song "${args.song_id}".`);
+        // The last render is this MCP process's memory of the song: a renderer
+        // that keeps none (a fake in a test) answers null.
+        const last = typeof renderer?.lastRender === "function" ? renderer.lastRender(args.song_id) : null;
+        return textResult(mixList(opened.snapshot, last));
+      } catch (err) {
+        return errorResult(errorText(err));
+      }
+    },
+  );
+
   // ---- the controllers ----------------------------------------------------
 
   server.registerTool(
@@ -1103,7 +1255,7 @@ export function createStudioServer({
     {
       title: "Render the song to audio",
       description:
-        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB). The operator's render length limit applies; listen before and after a change and report the numbers. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits.",
+        "Render the song — one scene, one clip, or the arrangement (the timeline) from a bar — offline through the same engine the operator hears, master chain and all, store a 24-bit WAV and return its download url with the integrated loudness (LUFS) and the true peak (dB), both measured after the master inserts. short_term_max_lufs is the highest 3 s short-term figure the engine's own master meter took while it played. target is the song's own loudness target and meets_target says whether this render met it: lufs within 1 LU of the target, true_peak at or under its ceiling. The operator's render length limit applies; listen before and after a change and report the numbers against the target. The song's instruments are loaded from this device: an instrument it does not hold plays silence and is named in missing_library, and a credit-bearing bank the render heard is named in credits. An insert the render could not run (a compiled effect this host does not have, or one the engine bypassed) is named in effect_problems; the rest of the chain still played.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song to render"),
         scene_id: z.string().min(1).optional().describe("render this scene (every clip it holds)"),
@@ -1144,14 +1296,21 @@ export function createStudioServer({
         // Every credit-bearing instrument the render heard, so the agent can
         // repeat the credit its licence asks for.
         const credits = Array.isArray(out.credits) ? out.credits.filter((credit) => typeof credit === "string" && credit !== "") : [];
+        // An insert the render could not run: named, never fatal (plan 1d,
+        // Task 11), so the agent knows which part of the chain it did not hear.
+        const effectProblems = Array.isArray(out.effect_problems) ? out.effect_problems : [];
         return textResult({
           url: out.url,
           lufs: out.lufs,
           true_peak_db: out.true_peak_db,
+          short_term_max_lufs: out.short_term_max_lufs ?? null,
+          target: out.target ?? null,
+          meets_target: out.meets_target ?? null,
           seconds: out.seconds,
           ...(missing.length > 0 ? { missing_samples: missing } : {}),
           ...(missingLibrary.length > 0 ? { missing_library: missingLibrary } : {}),
           ...(credits.length > 0 ? { credits } : {}),
+          ...(effectProblems.length > 0 ? { effect_problems: effectProblems } : {}),
         });
       } catch (err) {
         return errorResult(errorText(err));

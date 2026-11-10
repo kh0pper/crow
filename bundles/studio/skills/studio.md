@@ -17,6 +17,10 @@ triggers:
   - render the song
   - undo that
   - mix the tracks
+  - add an effect
+  - add a compressor
+  - add some reverb
+  - master the song
   - sampler
   - drum pattern
   - step lock
@@ -42,6 +46,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 - `studio_get_clip` — read a clip before you change it: its notes, or a pattern clip's patterns, steps and motion lanes.
 - `studio_samples` — on a sampler track, read the song's samples first: id, name, seconds, origin, the pads that play each one and its slices in order. Ids come from there.
 - `studio_library` — on a soundfont track, read the song's banks first: id, name, licence, credit and the tracks that play each one. Ids come from there.
+- `studio_mix` — before you touch a chain: the effects in it, the sends and returns, the master's gain and the song's target, and the figures the last render measured.
 - `studio_module_types` — the real controller names, ranges and defaults. A track device must be a generator: Analog generator, DrumSynth, Generator or SpectraVoice.
 - Load `studio-preferences` at the start of every session — it reads and stores preferences through `crow-memory` — and store one whenever the operator teaches you one.
 
@@ -59,7 +64,7 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | Audio tracks | A track is either a SunVox instrument or an audio track (`studio_track_add` with `kind: "audio"`). An audio clip holds **takes** the operator recorded and a **comp**: which take plays over which beats (`from_beat`–`to_beat`, sorted, never overlapping). |
 | Takes | Only the operator records. You can read takes (`studio_takes`), keep one (`studio_take_keep`: it alone plays over the whole clip), comp (`studio_clip_set_comp`), restore a discarded one (`studio_take_restore`) and fix its timing (`studio_take_set_offset`). You cannot add or discard a take, and you cannot remove a clip, track or scene that holds takes — ask the operator. |
 | Timeline | The arrangement: clips **placed** on bars, one lane per track, plus **markers** and **sections** on the ruler. A placement longer than its clip loops it; `offset_beats` starts it part-way into the clip; audio placements can fade in and out. The operator switches Session / Arrangement; you edit either. |
-| Missing | No insert effects, sends, EQ, compressor or master bus yet. Say "Studio cannot yet …" rather than improvising. |
+| Missing | An amp insert (a NAM capture with a cabinet) arrives in a later Studio version, and there is no sidechain from another track and no look-ahead on a track insert. Say "Studio cannot yet …" rather than improvising. |
 
 ## Request → tools
 
@@ -80,12 +85,15 @@ Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.r
 | "make that clip 8 bars" | `studio_clip_set_length` (`length_bars`) |
 | "make it busier" | `studio_clip_edit_notes` `add` on off-beats (0.5 or 0.25 offsets), shorten existing note lengths with `move`, or add a second clip on another track. Report the event count before and after |
 | "make it sparser" | delete notes whose starts fall off the main beats with `remove`, lengthen the survivors with `move`, drop inner velocities 10–20 |
-| "louder / quieter" | `studio_track_set_mix` `gain_db` in 1.5–3 dB steps (never above +12), or scale `v` by 10–15 % of its current value (never above 127); re-render and quote both LUFS readings |
+| "louder / quieter" | `studio_track_set_mix` `gain_db` in 1.5–3 dB steps (never above +12), or scale `v` by 10–15 % of its current value (never above 127); for the whole song the master's `gain_db` (`studio_master_set`); re-render and quote both LUFS readings |
 | "wider / more stereo" | `studio_track_set_mix` `pan` two parts apart (−0.5 and +0.5); keep bass, kick and lead at 0. There is no width effect |
 | "mute / solo / level / pan" | `studio_track_set_mix` |
 | "play it" | You cannot start or stop the operator's playback. `studio_render` instead and give the operator the download URL |
 | "undo that" / "redo it" | `studio_history`, then `studio_undo` with that entry's `id` as `entry_id`, on the newest entry authored by you (unless the operator names another); `studio_redo` takes the same `entry_id` and puts it back |
-| "how loud is it / is it balanced?" | `studio_render` with `seconds` plus `scene_id` or `clip_id`; report `lufs` and `true_peak_db` |
+| "how loud is it / is it balanced?" | `studio_mix` for the chains and the last render's figures, then `studio_render` with `seconds` plus `scene_id` or `clip_id`; report `lufs`, `true_peak_db` and `short_term_max_lufs` against the song's `target` |
+| "add EQ / a compressor / reverb here" | `studio_insert_add` with `owner: "track:<id>"`, a `kind` and `params` from the table in **Mixer**; read the chains first with `studio_mix` |
+| "give it some space / a reverb" | `studio_return_add`, an insert on that return (`kind: "reverb"`, `mix` 1), then one `studio_send_set` per source track |
+| "master it / hit −14 LUFS" | the master's chain (`studio_insert_add` with `owner: "master"`, a `limiter` last), `studio_master_set` for `gain_db` and `target`, then `studio_render` and report `meets_target` |
 | "tempo / key / title" | `studio_song_set_meta` (`bpm` 20–300) |
 | "which take is best / keep take 2" | `studio_takes` for the clip (seconds, author, `in_comp`), render the scene once per candidate after `studio_take_keep`, report LUFS and peak, and let the operator's ear choose; restore the previous comp if they prefer it |
 | "use the first half of take 1 and the end of take 3" | `studio_clip_set_comp` with two segments that meet exactly (e.g. `0–8` and `8–16` beats); the switch has a 64-sample crossfade |
@@ -135,6 +143,24 @@ The names Studio shows beside a program number, by family. The numbers are the `
 **The drum bank (bank 128)** names a kit by program: 0 Standard, 8 Room, 16 Power, 24 Electronic, 25 TR-808, 32 Jazz, 40 Brush, 48 Orchestra, 56 SFX. There the program picks the kit and the NOTES pick the drums — the GM percussion map runs 35–81, from kick and snare up through toms, cymbals, Latin percussion and triangles. The map, the drum programming and the voicing for each family are in `studio-arranging-and-sound`.
 
 Every bank's presets are its own: the names above are what GM asks for, not a promise that this bank holds that sound. Pick a preset, render, and quote what you heard before you write the part around it.
+
+## Mixer
+
+Every track, every return and the master has its own **chain** of effects, its own level, and — for a track — its own sends into the song's **returns**. The mixer screen draws one strip per track, then the returns, then the master (its gain, the momentary, short-term and integrated LUFS, the true peak, and the song's target). One effect is one undoable step, its parameters are one undoable field each, and the chain runs in the order the strips show: a track's inserts, then its fader and pan, then its sends; a return's inserts, then its fader; then the master's gain and the master's inserts, limiter last.
+
+| Tool | What it does |
+|---|---|
+| `studio_mix` | Read the mixer: each track's inserts in order `{id, kind, label, bypass, params}` and its sends, each return with its own chain, the master's `gain_db` and `target`, and the last render's figures. Read this before you change a chain |
+| `studio_insert_add` | Add an effect to a chain: `owner` is `"track:<id>"`, `"return:<id>"` or `"master"`, `kind` is one of `eq`, `filter`, `delay`, `reverb`, `chorus`, `phaser`, `saturation`, `compressor`, `limiter`, `gate`, `deesser`; `after` places it, and leaving `after` out appends it to the end |
+| `studio_insert_set` | One or more parameters of one insert by name (`{ratio: 4, threshold_db: -18}`); the names and ranges are `EFFECT_PARAMS`'s, and a value outside its range is refused with the range |
+| `studio_insert_move` / `studio_insert_bypass` / `studio_insert_remove` | Reorder a chain, switch one effect out without losing its settings, or take it away |
+| `studio_return_add` / `studio_return_set` / `studio_return_remove` | The returns: their own name, level, pan, mute and chain. A return a send still feeds cannot be removed |
+| `studio_send_set` | `{track_id, return_id, level_db, pre}` — −60..+6 dB, `null` takes the send away, `pre: false` is after the track's fader (what a reverb wants) |
+| `studio_master_set` | The master's `gain_db` (−24..+12) and the song's `target` `{lufs, true_peak_db}`: one step sets both |
+
+A chain holds at most 8 effects and a song 8 returns. A **master limiter** is the only insert with look-ahead (1.5 ms, shown in the master strip as the master's delay); every track and return insert is zero-latency, so a limiter there is a clipper. An insert the engine cannot run — a compiled effect this build does not have, or one that produced an invalid sample — is bypassed in the ENGINE and reported once ("… produced an invalid sample; it is bypassed."), and a render names it in `effect_problems`; the song is never edited for it.
+
+**A mix pass is yours to make, and the person's to judge.** Consecutive mixer steps are outlined in your colour as one pass, with **A/B** (hear the song as it was before the pass, without writing anything) and **Undo pass** (take the pass back, newest step first, stopping at the first step the person changed since). A/B and Undo pass are theirs: you cannot run either, so say how many steps a pass costs before you start, and prefer 3–4 to 12. The song's target is the person's too (`master.set` is yours, but a target they picked is not yours to move without asking).
 
 ## Sampler
 

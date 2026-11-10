@@ -50,7 +50,7 @@ A song page carries an **Ask the agent** box. It opens a chat with the song proj
 
 ## Renders and loudness
 
-The bot can render the song, one scene, or one clip through the same engine your browser plays, and it hears the result through that render. Each render is written into the project's storage as a WAV and reports its **integrated loudness** (LUFS) and **true peak** (dBTP), so a mix can be compared by numbers rather than by memory. Renders are limited in length by the instance's setting (see below).
+The bot can render the song, one scene, or one clip through the same engine your browser plays, **chains and all**, and it hears the result through that render. Each render is written into the project's storage as a WAV and reports its **integrated loudness** (LUFS), its **true peak** (dBTP) and the **highest short-term figure** (3 s window) the master meter read while it played, all measured on the final output — after the master's own chain. It also reports the song's target and whether the render **meets** it: the loudness within 1 LU of the target and the true peak at or under its ceiling. Renders are limited in length by the instance's setting (see below).
 
 ## Instruments
 
@@ -67,6 +67,24 @@ The bot can render the song, one scene, or one clip through the same engine your
 **What the bot can do with instruments.** It reads the library — id, name, licence, credit, and which tracks play each bank — and it picks presets, one undoable step each, outlined in its colour like any other agent edit. It cannot add a bank to the song, download one, or point a track at a different bank: those are your actions, and Studio refuses it with *Only the operator changes the instrument a track plays.* A bank that a track plays cannot be removed from the library at all until that track plays another one.
 
 **Credits.** Every bank's licence and credit are shown where the instrument is chosen and in the library list, and a render's metadata carries a `credits` list of the banks it heard.
+
+## Mixer
+
+Every track, every return and the master has its own strip, and the mixer screen — the **Mixer** button beside Session and Arrangement — draws them in that order: your tracks, then the returns, then the master on the right. At phone width the strips scroll sideways inside their own box.
+
+**Effects.** Each strip holds a **chain** of up to eight effects, run top to bottom. Press **+ effect** to pick one — equalizer, filter, delay, reverb, chorus, phaser, saturation, compressor, limiter, gate, de-esser — and drag to reorder, or use the switch on an effect to **bypass** it without losing its settings. Opening an effect shows its own controls with their real ranges, and each change is one undoable step. A chain edit while the song plays crossfades over 64 frames, so it does not click.
+
+**Sends and returns.** **+ return** makes a strip of its own (a reverb or a delay, typically) with its own chain and level. Every track's strip has a **Sends** control: pick a return and a level, −60 to +6 dB, and choose whether the send is taken **after** the fader (the usual choice, so pulling the fader down takes the reverb with it) or **before** it. One track can feed up to eight returns, a song holds up to eight returns, and a return still fed by a send cannot be removed until the send is gone.
+
+**The master and its target.** The master strip has a **Level** (−24 to +12 dB), the song's **Target in LUFS** with its **True-peak ceiling**, and its own chain — the limiter belongs there, last. The target picker offers **−14 LUFS — streaming services turn louder songs down to about this** (so **−14 LUFS is a reference, not a delivery rule**), **−16 LUFS — speech**, and **Custom** (anywhere from −30 to −6 LUFS), with a ceiling of −6 to −0.1 dBTP (default −1). The pick is one undoable step.
+
+**The limiter's look-ahead.** The master limiter is the one effect in Studio with look-ahead: 1.5 ms, shown under the master strip as **Limiter look-ahead: 1.5 ms**. Everything on a track or a return is zero-latency by rule, so the mix you hear and the mix a render measures line up; a limiter on a track works as a clipper instead, without the delay or the ceiling guarantee.
+
+**An agent's mix pass.** The bot can build chains, set every effect's parameters, add returns, set sends and set the master's level and target — each step undoable, and a run of them outlined in the bot's colour under a banner with **Hear: before (A/B)** / **Hear: after (A/B)** and **Undo pass**. A/B plays the song as it was *before* the pass without changing anything, so you can hear the difference in place; it leaves the moment you change anything. **Undo pass** takes the pass back newest step first, stopping at the first step you changed since and telling you which one. **Undo** on a single step still works exactly as it does anywhere else.
+
+**When an effect fails.** If an effect produces a sample that is not a number — a broken build, a hostile setting — Studio catches it at that effect's output, replaces the block with the signal that went in, bypasses the effect **in the engine** (never in the song) and says so once on the strip: *"<effect> on <track> produced an invalid sample; it is bypassed."* The rest of the chain plays. Moving that effect's own parameters (or its bypass switch) arms it again. A render reports such an effect in its `effect_problems` list rather than failing, and the same goes for a compiled effect this build does not have.
+
+**What the bot cannot do.** It cannot remove a sound: swapping an amp capture (a later Studio version), taking a pad's sample, replacing a track's bank or taking back a library file are all your steps. What it may do is the mix itself, which is why every mixer step is an ordinary undoable field.
 
 ## Recording takes
 
@@ -177,6 +195,11 @@ Every timeline change is one undoable step, and the bot can do all of it too (pl
 | Bank file | 512 MB | — |
 | Banks loaded in a page | 1024 MB | — |
 | Instruments a render holds (all of the song's banks) | 1024 MB, refused before it starts | — |
+| Effects per chain | 8 | — |
+| Returns per song | 8 | — |
+| Sends per track | 8 | — |
+| Master gain / loudness target | −24 to +12 dB / −30 to −6 LUFS, ceiling −6 to −0.1 dBTP | — |
+| Master limiter look-ahead | 1.5 ms (the only insert that delays anything) | — |
 
 Every limit refuses with a plain-English error that names it; nothing is ever truncated to fit.
 
