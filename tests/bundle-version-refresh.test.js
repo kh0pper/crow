@@ -1169,7 +1169,7 @@ describe("default compose refresh (N8-1)", () => {
     assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.sha256")), "no record is written either");
     assert.equal(lines.filter((l) => l.includes("git history unavailable")).length, 1, "one log line");
     assert.ok(!lines.some((l) => l.includes("move your changes into")), "never reported as an owner edit");
-    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")), "`unknown` is never cached");
+    assert.equal(stateAt(id).verdict, "unknown", "`unknown` is recorded for the bind-drift card (never used as a decision)");
 
     // Because it is not cached, the NEXT boot asks git again instead of
     // remembering "cannot tell" for good.
@@ -1177,7 +1177,8 @@ describe("default compose refresh (N8-1)", () => {
     const again = [];
     await repairInstalledBundleAssets({ appBundles: repoRoot, run: second, log: (m) => again.push(m) });
     assert.equal(second.calls.filter((c) => c.cmd === "git").length, 1, "the retry runs git again");
-    assert.equal(again.filter((l) => l.includes("git history unavailable")).length, 1);
+    assert.equal(again.filter((l) => l.includes("git history unavailable")).length, 0, "the same undecided pair is logged once, not every boot");
+    assert.equal(stateAt(id).verdict, "unknown");
     assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")));
   });
 
@@ -1205,7 +1206,7 @@ describe("default compose refresh (N8-1)", () => {
     for (const id of [idA, idB]) {
       assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, `${id}: nothing is copied`);
       assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), `${id}: no edit mark`);
-      assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")), `${id}: no cached unknown`);
+      assert.equal(stateAt(id).verdict, "unknown", `${id}: unknown recorded for the card, not as a decision`);
     }
   });
 
@@ -1217,7 +1218,7 @@ describe("default compose refresh (N8-1)", () => {
     assert.deepEqual(errors, []);
     assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, "nothing is copied");
     assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), "a folder git does not track is no edit");
-    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")), "`unknown` is never cached");
+    assert.equal(stateAt(id).verdict, "unknown", "`unknown` is recorded for the bind-drift card (never used as a decision)");
     assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 1, "the lookup did run");
   });
 

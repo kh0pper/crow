@@ -812,8 +812,8 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     verdict = "match";
   } else {
     const cached = readComposeState(destDir);
-    // "unknown" is never a decision: a record that says so (an older version wrote
-    // it) must not make "Crow could not tell" permanent for this pair.
+    // "unknown" is never a decision: a record that says so (kept for the bind-drift
+    // detector) must not make "Crow could not tell" permanent for this pair.
     if (cached && cached.installedSha === installedSha && cached.repoComposeSha === repoComposeSha && cached.verdict && cached.verdict !== "unknown") {
       verdict = cached.verdict;
     }
@@ -825,12 +825,16 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
   if (!verdict) {
     const hit = await composeInPastCommits({ appRoot: repoRoot, bundleId: id, composeRel, bytes: installedBytes, runner });
     if (hit === null) {
-      // Never cached: the next boot asks again (one git call per boot at most).
-      clearComposeState(destDir);
+      // Recorded for the bind-drift detector (its "Crow now ships it tighter" card reads
+      // this verdict), but never used as a decision: the cached check above skips
+      // "unknown", so the next boot asks git again. Logged once per pair, not every boot.
+      const prev = readComposeState(destDir);
+      const samePair = prev && prev.installedSha === installedSha && prev.repoComposeSha === repoComposeSha && prev.verdict === "unknown";
+      writeComposeState(destDir, { installedSha, repoComposeSha, verdict: "unknown" });
       // No hold is in effect: this boot could not decide, so an image-change note
       // from an earlier pair would claim a reason that no longer applies.
       clearComposeImageChange(destDir);
-      log(`[bundles] ${id}: cannot tell whether the installed ${composeRel} has local changes (git history unavailable) — left as it is`);
+      if (!samePair) log(`[bundles] ${id}: cannot tell whether the installed ${composeRel} has local changes (git history unavailable) — left as it is`);
       return "unknown";
     }
     verdict = hit ? "match" : "edited";
