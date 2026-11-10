@@ -142,8 +142,9 @@ test("a walled start hands the wrapper the service's own folder and runs the wal
     assert.equal(started.dataSubdir, "services/" + conn.uuid);
     assert.equal(started.command, process.execPath, "the resolved launcher, not the entry's bare name");
     assert.deepEqual(started.args, [FIXTURE]);
-    assert.equal(started.env[GH], "test-token-21", "the connection's env is the wall's input");
-    assert.equal("CROW_ADDON_HOST" in started.env, true);
+    assert.equal(started.ownEnv[GH], "test-token-21", "the connection's env is the wall's own-env input");
+    assert.equal("CROW_ADDON_HOST" in started.ownEnv, true);
+    assert.equal(started.baseEnv, process.env, "the gateway env goes in as baseEnv, read only through the allowlist");
 
     assert.equal(C.childState(conn.uuid), "running");
     await C.stopChild(conn.uuid);

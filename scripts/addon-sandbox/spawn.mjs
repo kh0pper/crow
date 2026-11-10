@@ -32,6 +32,7 @@ import { createEgressRelay } from "../pi-bots/pi_egress.mjs";
 import { probePiSandbox, scrubSandboxEnv } from "../pi-bots/pi_sandbox.mjs";
 import { buildSeccompProgram, seccompSupported } from "../pi-bots/pi_seccomp.mjs";
 import { isLoopbackHost } from "./profile.mjs";
+import { wallChildEnv } from "./wall-env.mjs";
 import { buildAddonPlan } from "./plan.mjs";
 
 /** The in-namespace entry the walled command runs first. */
@@ -132,7 +133,10 @@ function openSeccompProgram(build, tmpdirFn) {
  * @param {string} o.id
  * @param {string} o.command
  * @param {string[]} o.args
- * @param {object} o.env              the add-on's connection env, as it is today
+ * @param {object} [o.baseEnv]        the gateway's env: read ONLY through the wall's allowlist and the
+ *                                    manifest's declared keys (wall-env.mjs), never spread
+ * @param {object} [o.ownEnv]         the add-on's own env (entry env, connection values, derived keys)
+ * @param {string[]} [o.declaredKeys] env names the reviewed repo manifest declares
  * @param {object} o.profile          `deriveProfile`'s output
  * @param {object} o.entry            the add-on's registry entry
  * @param {string} o.crowHome
@@ -157,6 +161,10 @@ export async function wrapAddonSpawn(o = {}) {
     throw new AddonWallRefused("add-on refused: invalid add-on id");
   }
 
+  // The child env is the wall's own build, whatever env the spawn site holds:
+  // an allowlisted slice of the gateway env, the declared keys, the add-on's own.
+  const childEnv = wallChildEnv({ baseEnv: o.baseEnv, ownEnv: o.ownEnv, declaredKeys: o.declaredKeys });
+
   let probe;
   try {
     probe = typeof deps.probe === "function" ? deps.probe() : probePiSandbox();
@@ -174,7 +182,7 @@ export async function wrapAddonSpawn(o = {}) {
         tier: "nnp",
         cmd: probe.setpriv,
         args: ["--no-new-privs", o.command, ...(Array.isArray(o.args) ? o.args : [])],
-        env: o.env,
+        env: scrubSandboxEnv(childEnv),
         reason: probe.reason,
       };
     }
@@ -357,7 +365,7 @@ export async function wrapAddonSpawn(o = {}) {
     ];
 
     // 9. The env: the plan's own, never the gateway's proxy or token settings.
-    const env = { ...(o.env && typeof o.env === "object" ? o.env : {}) };
+    const env = { ...childEnv };
     for (const name of Array.isArray(plan.unsetEnv) ? plan.unsetEnv : []) delete env[name];
     for (const name of PROXY_VARS) delete env[name];
     for (const name of Object.keys(env)) if (name.startsWith("CROW_ADDON_DOOR")) delete env[name];

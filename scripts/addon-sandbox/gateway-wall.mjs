@@ -32,7 +32,8 @@ import { basename, dirname, join } from "node:path";
 import { tailscaleStatusAsync } from "../../servers/shared/self-dial-address.js";
 import { createDockerView } from "./docker-view.mjs";
 import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener } from "./listener-owner.mjs";
-import { profileFor } from "./profile.mjs";
+import { loadPolicySource, profileFor } from "./profile.mjs";
+import { declaredEnvKeys } from "./wall-env.mjs";
 import { AddonWallRefused, wrapAddonSpawn } from "./spawn.mjs";
 
 /** Another Crow home beside this one (`~/.crow`, `~/.crow-r2`, …). */
@@ -335,12 +336,14 @@ export function createWallContext({
    * @param {object} o.entry     the mcp-addons.json entry (or the built-in's own)
    * @param {string} o.command
    * @param {string[]} o.args
-   * @param {object} o.env       the child's connection env
+   * @param {object} [o.baseEnv]  the gateway's env: the wall reads it only through its allowlist
+   *                             and the reviewed manifest's declared keys, never spreads it
+   * @param {object} [o.ownEnv]   the add-on's own env (entry env, connection values, derived)
    * @param {"addon"|"service"|"builtin"} o.kind
    * @param {string} [o.dataSubdir]  `services/<uuid>`, a project-service child only
    * @returns {Promise<object>} a WallResult
    */
-  async function startAddonWall({ id, entry, command, args, env, kind = "addon", dataSubdir } = {}) {
+  async function startAddonWall({ id, entry, command, args, baseEnv = process.env, ownEnv = {}, kind = "addon", dataSubdir } = {}) {
     try {
       if (!SPAWN_KINDS.has(kind)) throw new AddonWallRefused("add-on refused: unknown spawn kind");
       const pastDefaults = pastDefaultsAll();
@@ -378,12 +381,25 @@ export function createWallContext({
         realDirOrRefuse(join(base, dataSubdir), "the service child's folder is not a plain folder");
       }
 
+      // The keys the add-on may take from the gateway env beyond the base allowlist:
+      // only what its REVIEWED repo manifest declares (wall-env.mjs).
+      // A bundle add-on only: a project-service child's credentials are its
+      // connection's values (never the gateway's own token for that service), and
+      // a built-in's own vars are already its ownEnv.
+      let declaredKeys = [];
+      if (kind === "addon") try {
+        const src = loadPolicySource({ id, appBundlesDir: join(appRoot, "bundles"), installedBundlesDir: join(crowHome, "bundles") });
+        declaredKeys = declaredEnvKeys(src && src.manifest, src && src.source);
+      } catch { declaredKeys = []; }
+
       const wrap = typeof seam.wrapAddonSpawn === "function" ? seam.wrapAddonSpawn : wrapAddonSpawn;
       return await wrap({
         id,
         command,
         args,
-        env,
+        baseEnv,
+        ownEnv,
+        declaredKeys,
         profile,
         entry: { ...(entry && typeof entry === "object" ? entry : {}), command },
         crowHome,

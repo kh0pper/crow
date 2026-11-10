@@ -179,7 +179,8 @@ async function connectToServer(integration) {
           entry: { command, args, env: spawnEnv },
           command,
           args: Array.isArray(args) ? args : [],
-          env,
+          baseEnv: integration.baseEnv || process.env,
+          ownEnv: spawnEnv,
           kind: "builtin",
         });
       } catch (err) {
@@ -274,6 +275,12 @@ async function connectToServer(integration) {
  * With an `id`, a service add-on also gets its manifest's derived env (e.g. Render's AUTH_HEADER),
  * rendered from `config.env` over `base`.
  */
+/** A walled add-on's own env: its entry env, its derived keys, and the gateway host mark. */
+export function addonOwnEnv(config = {}, base = process.env, id = null) {
+  const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
+  return { ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
+}
+
 export function addonStdioEnv(config = {}, base = process.env, id = null) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
   return { ...withoutCredentialKeys(base), ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
@@ -357,7 +364,10 @@ export async function connectAddonServer(id, config) {
             entry: config,
             command: rc.command,
             args: config.args || [],
-            env,
+            // The wall builds the child env itself: the gateway env is read only
+            // through its allowlist, never spread (defence in depth over Phase 0).
+            baseEnv: process.env,
+            ownEnv: addonOwnEnv(config, process.env, id),
             kind: "addon",
           });
         } catch (err) {

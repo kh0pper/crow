@@ -253,12 +253,15 @@ test("a walled spawn: the command line, the env, the fd layout and one cleanup",
     id: "kiosk",
     command: "/usr/bin/node",
     args: ["server/index.js"],
-    env: {
+    // The add-on's own env (an entry env could hold any of these); the gateway's
+    // own env goes in as baseEnv and is read only through the wall's allowlist.
+    ownEnv: {
       KEEP: "1",
       CROW_DB_PATH: "/home/alex/.crow/data/crow.db",
       HTTP_PROXY: "http://127.0.0.1:9",
       CROW_ADDON_DOOR_TOKEN_FILE: "/tmp/spoofed-token",
     },
+    baseEnv: { PATH: "/usr/bin", CROW_LOCAL_MCP_TOKEN: "fake-local-token-0003" },
     profile,
     entry: { command: "/usr/bin/node" },
     crowHome: freshDir("walled-home"),
@@ -322,6 +325,8 @@ test("a walled spawn: the command line, the env, the fd layout and one cleanup",
   assert.equal(wall.env.HOME, "/home/alex");
   assert.equal(wall.env.TMPDIR, "/tmp");
   assert.equal(wall.env.KEEP, "1");
+  assert.equal(wall.env.PATH, "/usr/bin", "an allowlisted gateway key reaches it");
+  assert.equal("CROW_LOCAL_MCP_TOKEN" in wall.env, false, "a gateway secret never does");
 
   // The fds: seccomp at 3, the info pipe at 4, the plan's bind fd at 5.
   const seccompEntry = wall.stdioExtra.find((e) => e.childFd === 3);

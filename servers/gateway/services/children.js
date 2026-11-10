@@ -636,7 +636,10 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
         entry,
         command: rc.command,
         args,
-        env,
+        // The connection env is the child's own; the gateway env is read only
+        // through the wall's allowlist (no declared keys for a service child).
+        baseEnv: process.env,
+        ownEnv: env,
         kind: "service",
         dataSubdir: "services/" + conn.uuid,
       });
