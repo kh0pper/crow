@@ -884,7 +884,7 @@ test("uptime-kuma: the health wait and every snippet are bounded, well inside th
 
 test("gitea/forgejo: the notes say self-registration turns off for an existing install", () => {
   const sentence =
-    "Self-registration is off by default: an existing install switches to it at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings.";
+    "Self-registration is off by default: an existing install switches it off at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings.";
   const registry = JSON.parse(readFileSync(join(REPO, "registry", "add-ons.json"), "utf8"))["add-ons"];
   for (const id of ["gitea", "forgejo"]) {
     const notes = manifestOf(id).notes;

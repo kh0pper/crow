@@ -155,7 +155,7 @@ sock.on("connect", () => {
 # around the health check itself (coreutils/busybox timeout in the image; where it is
 # missing the exec returns at once and the budget alone ends the wait).
 up=""
-wait_deadline=$((SECONDS + 75))
+wait_deadline=$((SECONDS + 60))
 while [ "$SECONDS" -lt "$wait_deadline" ]; do
   if docker exec "$CONTAINER" timeout 10 node /app/extra/healthcheck.js </dev/null >/dev/null 2>&1; then
     up=1
