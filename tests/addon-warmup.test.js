@@ -321,6 +321,7 @@ test("a plan that cannot be built is a refusal, never a throw and never a wall",
   });
   assert.equal(option.ok, false);
   assert.equal(option.refused, true);
+  assert.equal(option.code, "warmup", "a plan refusal carries the warm-up's own code");
   assert.match(option.reason, /not supported for a walled add-on/);
 
   const ref = `git+https://example.invalid/repo@${GIT_SHA}`;
@@ -334,6 +335,7 @@ test("a plan that cannot be built is a refusal, never a throw and never a wall",
   });
   assert.equal(host.ok, false);
   assert.equal(host.refused, true);
+  assert.equal(host.code, "warmup");
   assert.equal(host.reason, "its packages come from a host Crow does not fetch from");
 
   assert.equal(stub.starts.length, 0, "no wall is built for a plan that was refused");
@@ -421,6 +423,7 @@ test("a wall that refuses the prepare run is reported, never thrown", async () =
 
   assert.equal(out.ok, false);
   assert.equal(out.refused, true);
+  assert.equal(out.code, "installed-changed", "a wall refusal keeps its own code");
   assert.match(out.reason, /installed files differ/);
   assert.equal(fake.calls.length, 0, "nothing was spawned");
   assert.equal(stub.counts.cleanup, 0, "there was no wall to clean up");

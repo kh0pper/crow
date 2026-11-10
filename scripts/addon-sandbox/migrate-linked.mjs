@@ -13,7 +13,8 @@
  *     target are written to <crowHome>/addon-walls-migrate/<id>-<stamp>.json
  *     (file 0600, folder 0700) BEFORE anything about that id changes. Any failed
  *     step puts the folder switch back, removes what that attempt created and
- *     drops its backup file, so the id ends up exactly as it was;
+ *     drops its backup file, so the id ends up exactly as it was — except that a
+ *     folder the switch could not put back keeps its backup for `--undo`;
  *   - the registry: the new mcp-addons.json is a clone with the one new entry,
  *     written before the in-memory document changes;
  *   - the copy: <crowHome>/bundles/<id>.migrating (no .venv, .git, __pycache__,
@@ -427,25 +428,34 @@ function repin(next, dir) {
  * Put the folder back the way it was: the copy aside, the old link back in
  * place, the copy and every path this attempt created in the data folder
  * removed, and the backup file this attempt wrote deleted. Every step is
- * guarded, so one that fails still leaves the rest done.
+ * guarded, so one that fails still leaves the rest done. When a rename did not
+ * go back, the backup stays: it is what `--undo` restores from.
  */
 function undoAttempt(state) {
-  const { linkPath, copyPath, keptName, copyInPlace, backupPath, created } = state;
+  const { id, linkPath, copyPath, keptName, linkAside, copyInPlace, backupPath, created, log } = state;
+  let stuck = false;
   if (copyInPlace) {
-    try { renameSync(linkPath, copyPath); } catch { /* the copy stays at <id> */ }
+    try { renameSync(linkPath, copyPath); } catch { /* the copy stays at <id> */ stuck = true; }
   }
-  if (keptName) {
-    try { renameSync(join(dirname(linkPath), keptName), linkPath); } catch { /* reported by the caller */ }
+  if (linkAside) {
+    try { renameSync(join(dirname(linkPath), keptName), linkPath); } catch { /* reported below */ stuck = true; }
   }
   rmSync(copyPath, { recursive: true, force: true });
   for (const p of created || []) rmSync(p, { recursive: true, force: true });
+  // A folder that could not be put back: keep its backup, the one thing
+  // `--undo` restores from.
+  if (stuck) {
+    log?.(`[addon-migrate] ${id}: could not put the folders back; its backup is kept for --undo`);
+    return;
+  }
   if (backupPath) rmSync(backupPath, { force: true });
 }
 
 /**
  * Copy, check and switch one linked add-on. Returns its new entry and a
  * `rollback` that puts everything back; throws on any failure, with the id left
- * exactly as it was and the backup of that attempt removed.
+ * exactly as it was and the backup of that attempt removed (kept when a folder
+ * could not be put back).
  */
 async function migrateOne({ id, source, how, entry, ctx }) {
   const { crowHome, stamp, at, dataRoot } = ctx;
@@ -469,7 +479,7 @@ async function migrateOne({ id, source, how, entry, ctx }) {
     linkName, linkTarget, stamp, at,
   });
 
-  const state = { linkPath, copyPath, keptName: linkName, copyInPlace: false, backupPath, created: [] };
+  const state = { id, linkPath, copyPath, keptName: linkName, linkAside: false, copyInPlace: false, backupPath, created: [], log: ctx.log };
   const undo = () => undoAttempt(state);
   try {
     const next = await copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx, state });
@@ -482,9 +492,10 @@ async function migrateOne({ id, source, how, entry, ctx }) {
 
 /** Steps 2-8 for one id: copy, check, prepare, copy the data out, switch in, rewrite the entry. */
 async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx, state }) {
-  const { dataRoot, homeDir, run, log, verify, afterCopy, afterSwitchStep } = ctx;
+  const { dataRoot, homeDir, run, log, verify, afterCopy, afterSwitchStep, copyData } = ctx;
   const next = deepCopy(entry);
   const envPaths = stub ? [] : envPathsInside(entry, source, homeDir);
+  const copyInto = typeof copyData === "function" ? copyData : cpSync;
 
   // 2. The copy: a stale one is ours to drop, then copy with the shared filter.
   rmSync(copyPath, { recursive: true, force: true });
@@ -520,8 +531,10 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
     if (lexists(join(copyPath, "pyproject.toml"))) {
       const envDir = join(dataRoot, id);
       const top = createdTop(envDir);
-      ensurePrivateDir(envDir);
+      // Recorded before it is made: a folder this attempt starts is removed again
+      // even when the step that makes it fails part-way.
       if (top) state.created.push(top);
+      ensurePrivateDir(envDir);
       next.env = { ...(next.env || {}), UV_PROJECT_ENVIRONMENT: join(envDir, ".venv") };
     }
   }
@@ -535,9 +548,11 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
       log(`[addon-migrate] ${id}: ${p.rel} is already in the data folder; kept that copy`);
     } else {
       const top = createdTop(dest);
-      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
-      cpSync(p.abs, dest, { recursive: true, verbatimSymlinks: true });
+      // Recorded before the copy: a copy that stops part-way still leaves
+      // nothing for a later boot to mistake for a finished one.
       if (top) state.created.push(top);
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+      copyInto(p.abs, dest, { recursive: true, verbatimSymlinks: true });
     }
     next.env = { ...(next.env || {}), [p.key]: dest };
   }
@@ -545,6 +560,7 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
   // 7. Switch: the old link aside, the copy in.
   if (linkName) {
     renameSync(linkPath, join(dirname(linkPath), linkName));
+    state.linkAside = true;
     if (typeof afterSwitchStep === "function") await afterSwitchStep({ id, step: "aside", linkPath, copyPath });
   }
   renameSync(copyPath, linkPath);
@@ -575,7 +591,7 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
 export async function migrateLinkedAddons({
   crowHome, appRoot, dataDir, env = process.env, mcpAddonsPath,
   selfNames, runner, now = () => new Date(), log = console.log, home,
-  verify, afterCopy, afterSwitchStep, writeAddons,
+  verify, afterCopy, afterSwitchStep, copyData, writeAddons,
 } = {}) {
   if (!wallsOnForHost(env)) return { skipped: "walls off", migrated: [], repointed: [], failed: [] };
 
@@ -606,7 +622,7 @@ export async function migrateLinkedAddons({
     ? writeAddons
     : (doc) => writeAtomicPrivate(addonsPath, JSON.stringify(doc, null, 2));
   const self = selfNames || await resolveSelfNames({ env });
-  const ctx = { crowHome, appRoot, dataRoot, stamp, at, homeDir, run, log, verify, afterCopy, afterSwitchStep };
+  const ctx = { crowHome, appRoot, dataRoot, stamp, at, homeDir, run, log, verify, afterCopy, afterSwitchStep, copyData };
 
   for (const item of findLinkedAddons({ crowHome, appRoot, dataDir: dataRoot, addons, log })) {
     let made = null;

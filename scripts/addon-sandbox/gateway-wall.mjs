@@ -538,7 +538,7 @@ export function createWallContext({
         // refusal rather than a wider wall.
         const names = Array.isArray(warmupHosts) ? warmupHosts : [];
         for (const name of names) {
-          if (typeof name !== "string" || !WARMUP_HOSTS.includes(name)) throw new AddonWallRefused(WARMUP_HOSTS_REASON);
+          if (typeof name !== "string" || !WARMUP_HOSTS.includes(name)) throw new AddonWallRefused(WARMUP_HOSTS_REASON, "warmup");
         }
         // It also gets none of the add-on's own things: a prepare run executes
         // package code, so no crow.db, no owner file or folder, no state
@@ -594,7 +594,10 @@ export function createWallContext({
         args,
         baseEnv,
         ownEnv,
-        envKind: kind,
+        // A prepare run gets the narrowest env rule whatever kind was passed: no
+        // declared key from the gateway env, no storage passthrough. Its plan env
+        // is the only own env it carries.
+        envKind: purpose === "warmup" ? "service" : kind,
         profile,
         entry: { ...(entry && typeof entry === "object" ? entry : {}), command },
         crowHome,

@@ -31,6 +31,9 @@ execFileSync(process.execPath, ["scripts/init-db.js"], {
 
 const { AddonWallRefused, wrapAddonSpawn } = await import("../scripts/addon-sandbox/spawn.mjs");
 const { createWallContext, withGatewayTtsHosts } = await import("../scripts/addon-sandbox/gateway-wall.mjs");
+const { wallChildEnv } = await import("../scripts/addon-sandbox/wall-env.mjs");
+const { warmAddon } = await import("../scripts/addon-sandbox/warmup.mjs");
+const { STORAGE_ENV_KEYS } = await import("../servers/gateway/addon-env.js");
 const failures = await import("../scripts/addon-sandbox/failures.mjs");
 const proxy = await import("../servers/gateway/proxy.js");
 
@@ -75,7 +78,7 @@ function spawnRecorder() {
 const EMPTY_VIEW = { snapshot: async () => ({ publishes: [], containers: [], subnets: [], addonProjects: new Map() }) };
 
 /** A context over one scratch layout; every out-of-process answer is a stub. */
-function context({ appRoot, crowHome = join(freshDir("home"), ".crow"), deps = {} } = {}) {
+function context({ appRoot, crowHome = join(freshDir("home"), ".crow"), gatewayEnv = {}, deps = {} } = {}) {
   const home = freshDir("operator-home");
   return createWallContext({
     crowHome,
@@ -84,7 +87,7 @@ function context({ appRoot, crowHome = join(freshDir("home"), ".crow"), deps = {
     home,
     nodeBin: process.execPath,
     gatewayPort: 3001,
-    gatewayEnv: {},
+    gatewayEnv,
     deps: {
       dockerView: () => EMPTY_VIEW,
       tailscaleStatus: async () => null,
@@ -276,9 +279,92 @@ test("a warm-up wall hands the wrap the plan's registries only, and refuses any 
       purpose: "warmup",
       warmupHosts: ["evil.example"],
     }),
-    (err) => err instanceof AddonWallRefused && /package registries only/.test(err.message),
+    (err) => err instanceof AddonWallRefused && /package registries only/.test(err.message) && err.code === "warmup",
   );
   assert.equal(refused.calls.length, 0, "a warm-up host outside the list never reaches the wrap");
+});
+
+// ---- the warm-up's child env: the narrowest rule -------------------------
+
+const DECLARED_TEST_KEY = "DECLARED_TEST_KEY";
+const DECLARED_TEST_VALUE = "declared-test-value-0701";
+
+/** The gateway env these cases carry: a declared key, and one storage secret. */
+const DECLARING_GATEWAY_ENV = {
+  PATH: "/usr/bin:/bin",
+  [DECLARED_TEST_KEY]: DECLARED_TEST_VALUE,
+  S3_ENDPOINT: "http://127.0.0.1:9000",
+  S3_ACCESS_KEY: "fake-s3-ak-0702",
+  S3_SECRET_KEY: "fake-s3-sk-0703",
+  MINIO_ROOT_USER: "fake-root-0704",
+  MINIO_ROOT_PASSWORD: "fake-root-pw-0705",
+};
+
+/** The registry seam: one published first-party bundle that declares the test key. */
+const declaringRegistry = (id) => () => ({
+  id,
+  origin: "first-party",
+  server: { envKeys: [DECLARED_TEST_KEY] },
+  env_vars: [],
+});
+
+test("a warm-up gets the narrowest env rule: no declared key and no storage key, whatever kind was passed", async () => {
+  const id = "studio";
+  const appRoot = appRootWith({
+    [id]: {
+      server: { command: "node", args: [], envKeys: [DECLARED_TEST_KEY] },
+      sandbox: { network: { internet: false, hosts: [] } },
+    },
+  });
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot, gatewayEnv: DECLARING_GATEWAY_ENV, deps: rec });
+
+  await ctx.startAddonWall({
+    id,
+    entry: {},
+    command: "uvx",
+    args: ["tool==1.0"],
+    baseEnv: DECLARING_GATEWAY_ENV,
+    ownEnv: { PLAN_SETTING: "1" },
+    kind: "addon",
+    purpose: "warmup",
+    warmupHosts: ["pypi.org"],
+  });
+  assert.equal(rec.calls[0].envKind, "service", "a prepare run takes the narrowest env rule, whatever kind was passed");
+
+  const warmEnv = wallChildEnv({
+    id,
+    kind: rec.calls[0].envKind,
+    baseEnv: rec.calls[0].baseEnv,
+    ownEnv: rec.calls[0].ownEnv,
+    credentialKeys: [],
+    registryFor: declaringRegistry(id),
+  });
+  assert.equal(DECLARED_TEST_KEY in warmEnv, false, "no declared key from the gateway env reaches a prepare run");
+  for (const key of STORAGE_ENV_KEYS) assert.equal(key in warmEnv, false, `a prepare run carries ${key}`);
+  assert.equal(warmEnv.PLAN_SETTING, "1", "the plan's own settings are the only own env it gets");
+
+  // The same add-on's real start keeps its own env rule.
+  await ctx.startAddonWall({
+    id,
+    entry: {},
+    command: "node",
+    args: ["server/index.js"],
+    baseEnv: DECLARING_GATEWAY_ENV,
+    ownEnv: {},
+    kind: "addon",
+  });
+  assert.equal(rec.calls[1].envKind, "addon");
+  const runEnv = wallChildEnv({
+    id,
+    kind: rec.calls[1].envKind,
+    baseEnv: rec.calls[1].baseEnv,
+    ownEnv: rec.calls[1].ownEnv,
+    credentialKeys: [],
+    registryFor: declaringRegistry(id),
+  });
+  assert.equal(runEnv[DECLARED_TEST_KEY], DECLARED_TEST_VALUE, "a real start still gets its declared key");
+  assert.equal(runEnv.S3_SECRET_KEY, DECLARING_GATEWAY_ENV.S3_SECRET_KEY, "and a storage consumer its storage env");
 });
 
 // ---- spawn.mjs: how a TTS host reaches the relay ------------------------
@@ -428,7 +514,7 @@ test("a prepare run's own words never reach the add-on's status or its card", as
   assert.equal(JSON.stringify(emitted[0]).includes("/home/alex/secret"), false);
 });
 
-test("a refused prepare run shows the refusal's own fixed text, not its raw message", async () => {
+test("an uncoded wall refusal during the prepare run shows the plain reason, not its raw message", async () => {
   proxy._setProxyDepsForTest({
     addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
     warmAddon: async () => ({
@@ -450,6 +536,79 @@ test("a refused prepare run shows the refusal's own fixed text, not its raw mess
   assert.equal(entry.error, failures.REFUSED_REASON);
   assert.equal(entry.wall.reason, failures.REFUSED_REASON);
   assert.equal(JSON.stringify(entry).includes("/home/alex/secret"), false);
+});
+
+test("a coded refusal during the prepare run keeps its code: warm-up for a plan, installed-changed for the copy", async () => {
+  const cases = [
+    { code: "warmup", reason: failures.WARMUP_REASON },
+    { code: "installed-changed", reason: failures.INSTALLED_CHANGED_REASON },
+  ];
+  for (const one of cases) {
+    failures._resetWallFailuresForTest();
+    proxy.connectedServers.delete(WARMED_ID);
+    const emitted = [];
+    proxy._setProxyDepsForTest({
+      addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
+      warmAddon: async () => ({
+        ok: false,
+        refused: true,
+        code: one.code,
+        reason: "--with: /home/alex/secret/option is not supported for a walled add-on",
+        exitCode: null,
+        stderrLines: [],
+        denials: [],
+      }),
+      startAddonWall: async () => { throw new Error("no wall is built after a refused prepare run"); },
+      emitFixIt: async (_db, name, payload) => { emitted.push({ name, ...payload }); },
+    });
+
+    assert.equal(await proxy.connectAddonServer(WARMED_ID, { command: "node", args: ["server/index.js"] }), null);
+    const entry = proxy.connectedServers.get(WARMED_ID);
+    assert.equal(entry.status, "error", one.code);
+    assert.equal(entry.error, one.reason, one.code);
+    assert.equal(entry.wall.reason, one.reason, one.code);
+    assert.equal(JSON.stringify(entry).includes("/home/alex/secret"), false, one.code);
+
+    const deadline = Date.now() + 5000;
+    while (emitted.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(emitted.length, 1, one.code);
+    assert.equal(emitted[0].name, "addon-wall-failed");
+    assert.equal(emitted[0].reason, one.reason, one.code);
+  }
+});
+
+test("a plan refusal reaches the card as the warm-up reason, not as the plain wall refusal", async () => {
+  const refusedPlan = await warmAddon({
+    id: "kiosk",
+    command: "uvx",
+    args: ["--with", "evil", "tool==1.0"],
+    installDir: freshDir("refused-plan"),
+    wallCtx: { startAddonWall: async () => { throw new Error("no wall is built for a refused plan"); } },
+    deps: { spawn: () => { throw new Error("nothing is spawned for a refused plan"); } },
+  });
+  assert.equal(refusedPlan.ok, false);
+  assert.equal(refusedPlan.refused, true);
+  assert.equal(refusedPlan.code, "warmup", "a plan refusal carries the warm-up's own code");
+  assert.equal(failures.wallFailureReason({ refused: refusedPlan.code || true }), failures.WARMUP_REASON);
+
+  const emitted = [];
+  proxy._setProxyDepsForTest({
+    emitFixIt: async (_db, name, payload) => { emitted.push({ name, ...payload }); },
+  });
+  try {
+    proxy.reportWallFailure("browser", {
+      refused: refusedPlan.code || true,
+      warmup: refusedPlan,
+      cwd: join(HOME, "bundles", "browser"),
+    });
+    const deadline = Date.now() + 5000;
+    while (emitted.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0].reason, failures.WARMUP_REASON);
+    assert.notEqual(emitted[0].reason, failures.REFUSED_REASON);
+  } finally {
+    proxy._setProxyDepsForTest(null);
+  }
 });
 
 // ---- proxy.js: the prepare run in front of the first start ---------------

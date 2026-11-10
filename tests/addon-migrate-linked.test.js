@@ -368,6 +368,80 @@ test("a failed registry write rolls the folder switch back and removes that atte
   assert.deepEqual(backupsIn(crowHome), [], "the backup of that attempt is gone");
 });
 
+test("a data copy that stops part-way leaves nothing behind, and a retry copies the folder fresh", async (t) => {
+  const root = scratch(t, "datapartial");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "texas", { "state/gov.db": "SQLite format 3\n" });
+  linkBundle(crowHome, "texas", source);
+  writeAddons(addonsPath, {
+    texas: { command: "node", args: ["server/index.js"], env: { STATE_DIR: join(source, "state") } },
+  });
+
+  const lines = [];
+  const addonsBefore = readFileSync(addonsPath, "utf8");
+  const listingBefore = readdirSync(join(crowHome, "bundles"));
+
+  const failed = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: fakeRunner(), now: NOW, log: (line) => lines.push(String(line)),
+    // A copy that writes half the bytes and then gives up.
+    copyData: (_from, to) => {
+      mkdirSync(to, { recursive: true, mode: 0o700 });
+      writeFileSync(join(to, "gov.db"), "SQLite fo");
+      throw new Error("the data copy stopped part-way");
+    },
+  });
+
+  assert.deepEqual(failed.migrated, []);
+  assert.equal(failed.failed.length, 1);
+  assert.equal(failed.failed[0].id, "texas");
+  assert.match(failed.failed[0].reason, /stopped part-way/);
+  assert.equal(existsSync(join(dataDir, "texas")), false, "the part-made data folder is gone");
+  assert.equal(readFileSync(addonsPath, "utf8"), addonsBefore, "the entry is untouched");
+  assert.deepEqual(readdirSync(join(crowHome, "bundles")), listingBefore, "the copy is gone");
+  assert.deepEqual(backupsIn(crowHome), [], "the backup of that attempt is gone");
+
+  lines.length = 0;
+  const retry = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: fakeRunner(), now: NOW, log: (line) => lines.push(String(line)),
+  });
+  assert.deepEqual(retry.migrated, ["texas"]);
+  assert.equal(readFileSync(join(dataDir, "texas", "state", "gov.db"), "utf8"), "SQLite format 3\n", "a fresh copy, not the rest of a partial one");
+  assert.equal(lines.some((line) => /kept that copy/.test(line)), false, "the retry never read a partial copy as done");
+});
+
+test("a folder that could not be put back keeps its backup for --undo", async (t) => {
+  const root = scratch(t, "undostuck");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "acme");
+  linkBundle(crowHome, "acme", source);
+  writeAddons(addonsPath, { acme: { command: "node", args: ["server/index.js"] } });
+
+  const kept = join(crowHome, "bundles", `acme.linked-${STAMP}`);
+  const lines = [];
+  const r = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: fakeRunner(), now: NOW, log: (line) => lines.push(String(line)),
+    // The kept-aside link is gone before the switch is undone, so the restoring
+    // rename cannot put the folder back.
+    afterSwitchStep: ({ step }) => {
+      if (step !== "place") return;
+      rmSync(kept, { recursive: true, force: true });
+      throw new Error("the switch failed after the old link was moved aside");
+    },
+  });
+
+  assert.deepEqual(r.migrated, []);
+  assert.equal(r.failed.length, 1);
+  assert.equal(r.failed[0].id, "acme");
+  assert.deepEqual(backupsIn(crowHome), [`acme-${STAMP}.json`], "the backup stays, and --undo can read it");
+  assert.equal(
+    lines.includes("[addon-migrate] acme: could not put the folders back; its backup is kept for --undo"),
+    true,
+  );
+});
+
 test("a failed install leaves nothing behind under the add-on's data folder", async (t) => {
   const root = scratch(t, "installfail");
   const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);

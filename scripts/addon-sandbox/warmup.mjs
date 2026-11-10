@@ -76,10 +76,10 @@ function gitRefHost(ref) {
   }
 }
 
-/** True when the ref is a `git+` source at all, whether or not it parses. */
 /** A git source this computer cannot prepare (no uv, or no data folder to build in). */
 const GIT_PREP_REASON = "its git source cannot be prepared here";
 
+/** True when the ref is a `git+` source at all, whether or not it parses. */
 function isGitRef(ref) {
   return typeof ref === "string" && ref.toLowerCase().startsWith("git+");
 }
@@ -239,9 +239,13 @@ function refusedResult(err) {
   return { ok: false, refused: true, code, reason, exitCode: null, stderrLines: [], denials: [] };
 }
 
-/** A plan this module would not build: the reason, and nothing ran. */
+/**
+ * A plan this module would not build: the reason, and nothing ran. It carries the
+ * warm-up's own code, so the card reads the warm-up reason rather than a wall the
+ * add-on never asked for.
+ */
 function planRefused(reason) {
-  return { ok: false, refused: true, code: null, reason, exitCode: null, stderrLines: [], denials: [] };
+  return { ok: false, refused: true, code: "warmup", reason, exitCode: null, stderrLines: [], denials: [] };
 }
 
 /**
