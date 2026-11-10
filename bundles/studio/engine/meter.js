@@ -19,6 +19,27 @@
  * - **true peak** — the largest true peak since the last `reset()`, held, in
  *   dBTP.
  *
+ * ## The integrated measurement is a histogram, not a list
+ *
+ * A Play can run for hours and an integrated reading is posted every 100 ms, so
+ * neither the blocks nor the work of reading them may grow with time. The gating
+ * blocks are therefore kept the way libebur128 keeps them: in a FIXED histogram
+ * of block powers (`binSum` / `binCount` below), one bin per tenth of a LU from
+ * the absolute gate's −70 LUFS up to +5 LUFS, so
+ *
+ * - a completed block costs one `log10` (to name its bin) and two array adds, and
+ *   allocates nothing;
+ * - a reading is two walks of those 750 bins with no log per stored block,
+ *   whatever the length of the Play;
+ * - the memory is one `Float64Array` and one `Uint32Array` of 750, made once —
+ *   the bound on a Play is therefore its 32-bit per-bin block count, which is
+ *   about thirteen years of continuous audio at ten blocks a second (the
+ *   momentary and short-term windows are rings, and were always constant).
+ *
+ * The one thing quantising costs is that a block is judged by its bin's own mean
+ * power, which is worth at most half a bin — 0.05 LU. A test holds the whole
+ * measurement to `server/loudness.js` within 0.1 LU.
+ *
  * ## It is the render's meter, streamed
  *
  * `server/loudness.js` measures a whole render at once: it filters the audio
@@ -43,14 +64,13 @@
  *
  * ## Nothing allocated, nothing thrown, no Math.random
  *
- * Everything is sized in `create()`: the biquads' state, the hop ring, the
- * block list, the true-peak histories and the object `read()` fills in. The
- * block list is the only thing that can grow (a Play longer than ~109 minutes
- * at 100 ms blocks doubles it once), and `process()` never allocates. A sample
- * that is not a finite number reads as 0, so one NaN from a broken insert can
- * never live in the meter's state, and every recursive value is flushed to
- * exactly 0 below 1e-30 the way `engine/dynamics.js` and `engine/perf-fx.js`
- * flush theirs.
+ * Everything is sized in `create()`: the biquads' state, the hop ring, the gating
+ * histogram, the true-peak histories and the object `read()` fills in. Nothing
+ * in this file grows with the length of a Play, so `process()` never allocates
+ * and the cost of a reading never changes. A sample that is not a finite number
+ * reads as 0, so one NaN from a broken insert can never live in the meter's
+ * state, and every recursive value is flushed to exactly 0 below 1e-30 the way
+ * `engine/dynamics.js` and `engine/perf-fx.js` flush theirs.
  *
  * ## It is a classic script
  *
@@ -113,12 +133,23 @@
   const TRUE_PEAK_PHASES = buildTruePeakPhases();
 
   /**
-   * How many 400 ms blocks the integrated measurement holds to begin with: about
-   * 109 minutes of one Play at 100 ms hops. Past it the list doubles (a
-   * reallocation outside the ordinary path), so a working day of one Play still
-   * measures everything it heard.
+   * The lowest loudness the integrated histogram keeps, in LUFS: the absolute
+   * gate. A block quieter than this can never pass either gate, so it is not
+   * stored at all.
    */
-  const INITIAL_BLOCK_CAPACITY = 65536;
+  const HISTOGRAM_FLOOR_LUFS = ABSOLUTE_GATE_LUFS;
+
+  /** The loudest a block is before it goes in the top bin (LUFS). */
+  const HISTOGRAM_CEILING_LUFS = 5;
+
+  /** One bin per tenth of a LU: the grid libebur128 buckets gating blocks on. */
+  const HISTOGRAM_BIN_LU = 0.1;
+
+  /** How many bins that grid holds: fixed for the meter's whole life. */
+  const HISTOGRAM_BINS = Math.round((HISTOGRAM_CEILING_LUFS - HISTOGRAM_FLOOR_LUFS) / HISTOGRAM_BIN_LU);
+
+  /** The relative gate as a factor in the power domain: −10 LU is a tenth the power. */
+  const RELATIVE_GATE_POWER = Math.pow(10, RELATIVE_GATE_LU / 10);
 
   /** @returns {number} the value, or 0 when it is below the denormal floor. */
   function flush(value) {
@@ -341,9 +372,23 @@
     let momentarySum = 0;
     let shortTermSum = 0;
 
-    /** Every completed block's mean-square power, in the order they were heard. */
-    let blocks = new Float64Array(INITIAL_BLOCK_CAPACITY);
-    let blockCount = 0;
+    /**
+     * The integrated measurement's histogram: per bin, the SUM of the gating-block
+     * powers that fell in it and how many blocks that was. Fixed at
+     * `HISTOGRAM_BINS` for the meter's whole life, so a Play of any length is
+     * measured in constant memory and a reading never walks a block list. Blocks
+     * below the absolute gate are not stored: they can never pass either gate.
+     */
+    const binSum = new Float64Array(HISTOGRAM_BINS);
+    const binCount = new Uint32Array(HISTOGRAM_BINS);
+
+    /**
+     * What the histogram holds, for a panel or a test: `blocks` is how many gating
+     * blocks it has taken since the reset, and `lastReadBins` how many bins the
+     * newest integrated reading walked — the cost of a reading, which does not
+     * depend on `blocks`.
+     */
+    const stats = { bins: HISTOGRAM_BINS, blocks: 0, lastReadBins: 0 };
 
     /** The largest true peak since the last reset, as a magnitude. */
     let peak = 0;
@@ -363,12 +408,15 @@
 
     /** @returns {void} the integrated measurement's own state, given back. */
     function resetIntegrated() {
-      blockCount = 0;
+      binSum.fill(0);
+      binCount.fill(0);
+      stats.blocks = 0;
+      stats.lastReadBins = 0;
     }
 
     /**
-     * Put the meter back to silence. The block list is kept (only its count is
-     * dropped), so a Play never allocates.
+     * Put the meter back to silence. The histogram is cleared, not reallocated, so
+     * a Play never allocates.
      * @returns {void}
      */
     function reset() {
@@ -387,6 +435,26 @@
       shortTermSum = 0;
       peak = 0;
       resetIntegrated();
+    }
+
+    /**
+     * Put one gating block's mean-square power in the histogram: one `log10` (the
+     * loudness that names the bin) and two array adds, ten times a second while a
+     * song plays. A block at or below the absolute gate is dropped — neither gate
+     * could ever let it through.
+     * @param {number} power the block's mean-square power
+     * @returns {void}
+     */
+    function storeBlock(power) {
+      if (!(power > 0)) return;
+      const loudness = loudnessOf(power);
+      if (!(loudness > HISTOGRAM_FLOOR_LUFS)) return;
+      let bin = Math.floor((loudness - HISTOGRAM_FLOOR_LUFS) / HISTOGRAM_BIN_LU);
+      if (bin < 0) bin = 0;
+      else if (bin >= HISTOGRAM_BINS) bin = HISTOGRAM_BINS - 1;
+      binSum[bin] += power;
+      binCount[bin] += 1;
+      stats.blocks += 1;
     }
 
     /**
@@ -412,16 +480,10 @@
       hopFramesFilled = 0;
       if (hopCount >= blockHops) {
         // `momentarySum` is exactly the last `blockHops` hops, which is one
-        // gating block: the power `server/loudness.js` would put in its list.
-        // A block is stored at EVERY hop (the same 75 % overlap it measures), so
+        // gating block: the power `server/loudness.js` would put in its list. A
+        // block is stored at EVERY hop (the same 75 % overlap it measures), so
         // the gate sees the very same set of blocks a render's does.
-        if (blockCount >= blocks.length) {
-          const grown = new Float64Array(blocks.length * 2);
-          grown.set(blocks, 0);
-          blocks = grown;
-        }
-        blocks[blockCount] = momentarySum / blockFrames;
-        blockCount += 1;
+        storeBlock(momentarySum / blockFrames);
       }
     }
 
@@ -463,31 +525,38 @@
 
     /**
      * The gated integrated loudness of every block since the reset — the two
-     * passes `integratedLufs()` makes, over the blocks this meter heard.
+     * passes `integratedLufs()` makes, over the histogram instead of the list.
+     *
+     * The first pass is the mean power of every block above the absolute gate
+     * (that is everything the histogram holds); the second keeps only the bins
+     * whose own mean power clears the relative gate, ten LU below the first
+     * pass's mean. Both are walks of `HISTOGRAM_BINS`, so the reading costs the
+     * same after an hour as after a second.
      * @returns {number} LUFS, or -Infinity when no block clears the gates
      */
     function integratedLoudness() {
-      if (blockCount === 0) return -Infinity;
+      stats.lastReadBins = HISTOGRAM_BINS;
       let above = 0;
       let aboveCount = 0;
-      for (let index = 0; index < blockCount; index += 1) {
-        const power = blocks[index];
-        if (loudnessOf(power) > ABSOLUTE_GATE_LUFS) {
-          above += power;
-          aboveCount += 1;
-        }
+      for (let bin = 0; bin < HISTOGRAM_BINS; bin += 1) {
+        const count = binCount[bin];
+        if (count === 0) continue;
+        above += binSum[bin];
+        aboveCount += count;
       }
       if (aboveCount === 0) return -Infinity;
-      const relativeThreshold = loudnessOf(above / aboveCount) + RELATIVE_GATE_LU;
+      const threshold = (above / aboveCount) * RELATIVE_GATE_POWER;
       let gated = 0;
       let gatedCount = 0;
-      for (let index = 0; index < blockCount; index += 1) {
-        const power = blocks[index];
-        const loudness = loudnessOf(power);
-        if (loudness > ABSOLUTE_GATE_LUFS && loudness > relativeThreshold) {
-          gated += power;
-          gatedCount += 1;
-        }
+      for (let bin = 0; bin < HISTOGRAM_BINS; bin += 1) {
+        const count = binCount[bin];
+        if (count === 0) continue;
+        const sum = binSum[bin];
+        // A bin is judged by the mean of the blocks in it: the only thing the
+        // histogram costs, and at most half a bin (0.05 LU) of it.
+        if (sum / count <= threshold) continue;
+        gated += sum;
+        gatedCount += count;
       }
       if (gatedCount === 0) return -Infinity;
       return loudnessOf(gated / gatedCount);
@@ -519,6 +588,7 @@
       process: process,
       read: read,
       reset: reset,
+      stats: stats,
     };
   }
 
@@ -536,6 +606,9 @@
     TRUE_PEAK_OVERSAMPLE: TRUE_PEAK_OVERSAMPLE,
     TRUE_PEAK_TAPS: TRUE_PEAK_TAPS,
     TRUE_PEAK_PHASES: Object.freeze(TRUE_PEAK_PHASES),
+    HISTOGRAM_BINS: HISTOGRAM_BINS,
+    HISTOGRAM_BIN_LU: HISTOGRAM_BIN_LU,
+    HISTOGRAM_FLOOR_LUFS: HISTOGRAM_FLOOR_LUFS,
   };
 
   if (typeof globalThis !== "undefined") globalThis.StudioMeter = api;

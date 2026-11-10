@@ -22,19 +22,29 @@
  *   - **Sends** (`a send feeds its return pre and post fader`) — a pre send is
  *     tapped before the fader and a post send after it, and the return's own
  *     fader and pan land on both.
- *   - **Editing a chain while the song plays** (Review Focus 3): old → new over
- *     exactly 64 frames, linearly, with no step bigger than the ramp.
+ *   - **Editing a chain while the song plays** (Review Focus 3): the fade is
+ *     armed once and counts down per FRAME, so it lands on exactly 64 frames even
+ *     when a motion curve splits a block into 32-frame runs; a second edit that
+ *     lands mid-fade continues the ramp instead of restarting it; removing every
+ *     insert fades out once; and the inserts an edit did not touch are never
+ *     rebuilt — a reverb keeps its tail and a master limiter its delay line.
  *   - **A failed insert** (Review Focus 3): a block that comes back with a NaN is
  *     replaced by that insert's input, the insert is bypassed in the ENGINE (the
- *     song is never edited) and the fault is said once — and a rebuild of it
- *     clears the fault.
+ *     song is never edited) and the fault is said once — an unrelated edit leaves
+ *     it bypassed, and only its OWN parameters moving arms it again (once).
  *   - **A Faust insert whose module has not arrived** passes audio through and
- *     says so once, and becomes a real effect when the modules land.
+ *     says so once, as `insert_loading` (its own message, not an engine error),
+ *     and becomes a real effect when the modules land. An insert whose kind can
+ *     never be built is not rebuilt on every edit.
  *   - **The meter**: the same BS.1770-4 gating `server/loudness.js` measures a
- *     render with, within 0.1 LU, and the same 4× true-peak filter; and the
- *     processor posts a reading every 100 ms of audio and once on stop.
+ *     render with, within 0.1 LU, and the same 4× true-peak filter; the processor
+ *     posts a reading every 100 ms of audio and once on stop; and the integrated
+ *     measurement's cost does not grow with the length of a Play (a fixed
+ *     histogram of gating blocks, not a list).
  *   - **Mute and solo** reach the sends, and a return is never muted by a solo.
- *   - **The master limiter** holds its ceiling after the performance-effects bus.
+ *   - **The master limiter** holds its ceiling after the performance-effects bus,
+ *     and a master tap is stamped with the master chain's latency taken off so a
+ *     master resample lines up with a track's.
  *   - **The CPU gate**: 8 tracks × (eq, compressor, delay), 2 returns (reverb and
  *     delay) and a master limiter render 30 s of audio faster than real time.
  *   - **The two duplicated tables**: the effect labels and the dynamics kinds the
@@ -99,25 +109,40 @@ const SOURCE_NAMES = Object.freeze([
  * guard has to catch. NOT product code.
  * @param {number} factor the gain every insert applies
  * @param {string[]} [nanKinds] the kinds whose insert writes NaN instead
+ * @param {{buildsKey?: string, brokenKinds?: string[]}} [extra] `buildsKey`
+ *   records every `create` and `reset` on `globalThis[buildsKey]` (as
+ *   `"create:<kind>"` / `"reset:<kind>"`); `brokenKinds` are kinds whose `create`
+ *   throws, so their insert can never be built
  * @returns {string} one classic script, ready to be concatenated into the module
  */
-function stubDynamicsSource(factor, nanKinds = []) {
+function stubDynamicsSource(factor, nanKinds = [], extra = {}) {
+  const buildsKey = typeof extra.buildsKey === "string" ? extra.buildsKey : "";
+  const brokenKinds = Array.isArray(extra.brokenKinds) ? extra.brokenKinds : [];
   return [
     "(function () {",
     '  "use strict";',
     '  const KINDS = Object.freeze(["compressor", "limiter", "gate", "deesser"]);',
     `  const NAN_KINDS = ${JSON.stringify(nanKinds)};`,
+    `  const BROKEN_KINDS = ${JSON.stringify(brokenKinds)};`,
+    `  const BUILDS_KEY = ${JSON.stringify(buildsKey)};`,
     `  const FACTOR = ${factor};`,
+    "  function record(entry) {",
+    '    if (BUILDS_KEY === "") return;',
+    "    globalThis[BUILDS_KEY].push(entry);",
+    "  }",
     "  function create(kind, rate) {",
+    '    record("create:" + kind);',
+    "    if (BROKEN_KINDS.indexOf(kind) !== -1) throw new Error('this insert will not build');",
     "    const poison = NAN_KINDS.indexOf(kind) !== -1;",
     "    return {",
     "      kind: kind,",
     "      rate: rate,",
     "      latencyFrames: 0,",
     "      setParams: function setParams() {},",
-    "      reset: function reset() {},",
+    '      reset: function reset() { record("reset:" + kind); },',
     "      params: function params() { return {}; },",
     "      process: function process(left, right, frames) {",
+    '        record("process:" + frames);',
     "        for (let index = 0; index < frames; index += 1) {",
     "          if (poison) {",
     "            left[index] = NaN;",
@@ -321,7 +346,8 @@ async function host(song, plan = {}) {
   };
 
   post({ type: "song", snapshot: song });
-  post({ type: "audio", take_id: "take-1", channels: [takeOf(plan.take === undefined ? 0.4 : plan.take)] });
+  const take = plan.takeSamples instanceof Float32Array ? plan.takeSamples : takeOf(plan.take === undefined ? 0.4 : plan.take);
+  post({ type: "audio", take_id: "take-1", channels: [take] });
   for (const item of plan.hold || []) post({ type: "fx", name: item.name, amount: item.amount, on: true });
   post({ type: "launchScene", id: "scene-1" });
   post({ type: "play" });
@@ -332,17 +358,21 @@ async function host(song, plan = {}) {
     flush: flush,
     posts: posts,
     /**
-     * Render `blocks` blocks of 128 frames and hand back the master.
+     * Render `blocks` blocks and hand back the master.
+     *
+     * `size` is how many frames each `process()` call is handed, so a test can
+     * render a part of a block (which is how a chain edit is caught mid-fade).
      * @param {number} blocks
+     * @param {number} [size]
      * @returns {{left: Float32Array, right: Float32Array}}
      */
-    run(blocks) {
-      const total = blocks * BLOCK;
+    run(blocks, size = BLOCK) {
+      const total = blocks * size;
       const left = new Float32Array(total);
       const right = new Float32Array(total);
       for (let index = 0; index < blocks; index += 1) {
-        const start = index * BLOCK;
-        const channels = [left.subarray(start, start + BLOCK), right.subarray(start, start + BLOCK)];
+        const start = index * size;
+        const channels = [left.subarray(start, start + size), right.subarray(start, start + size)];
         processor.process([], [channels]);
       }
       return { left: left, right: right };
@@ -379,6 +409,23 @@ function largestStep(out, from = 0, to = out.left.length) {
   return step;
 }
 
+/**
+ * The root-mean-square of a run's left channel over a window.
+ * @param {{left: Float32Array}} out
+ * @param {number} from
+ * @param {number} to
+ * @returns {number}
+ */
+function rmsOf(out, from, to) {
+  let sum = 0;
+  let count = 0;
+  for (let index = Math.max(0, from); index < Math.min(out.left.length, to); index += 1) {
+    sum += out.left[index] * out.left[index];
+    count += 1;
+  }
+  return count === 0 ? 0 : Math.sqrt(sum / count);
+}
+
 /** @returns {number} a level in dB as an amplitude. */
 function amplitudeOf(db) {
   return Math.pow(10, db / 20);
@@ -389,6 +436,51 @@ const DIRECT = 0.4 * Math.cos(Math.PI / 4);
 
 /** The constant-power gain of a centred pan, which a return's own fader applies. */
 const CENTRE = Math.cos(Math.PI / 4);
+
+/** @returns {object} one sampler track (silent unless a pad is triggered). */
+function samplerTrack(overrides = {}) {
+  return audioTrack(1, { name: "Curve", device: { engine: "sampler" }, ...overrides });
+}
+
+/**
+ * A song whose blocks are cut into 32-frame runs: a silent sampler track whose
+ * pattern carries a motion curve (the motion grid is what splits a block into
+ * runs), plus the audio track under test. The sampler plays no step and has no
+ * PCM loaded, so the master is the audio track's chain output alone.
+ * @param {object} [parts] the same parts `audioSong` takes
+ * @returns {object}
+ */
+function motionSong(parts = {}) {
+  const song = audioSong({ ...parts, tracks: [samplerTrack(), audioTrack(2)] });
+  song.clips["clip-track-1"] = {
+    id: "clip-track-1",
+    track_id: "track-1",
+    scene_id: "scene-1",
+    name: "Curve",
+    length_bars: 1,
+    length_steps: 16,
+    step_beats: 0.25,
+    swing: 0,
+    chain: [],
+    kind: "pattern",
+    notes: [],
+  };
+  song.patterns = {
+    "clip-track-1/a": {
+      id: "a",
+      clip_id: "clip-track-1",
+      name: "A",
+      order: 0,
+      motion: {
+        "bank-a.0|gain_db": [
+          { step_frac: 0, value: -60 },
+          { step_frac: 15, value: -6 },
+        ],
+      },
+    },
+  };
+  return song;
+}
 
 test("a send feeds its return pre and post fader", async () => {
   const returns = { "ret-1": { id: "ret-1", name: "Hall", gain_db: 0, pan: 0, mute: false } };
@@ -540,6 +632,269 @@ test("editing a chain while playing crossfades", async () => {
   );
 });
 
+test("a chain edit fades over exactly 64 frames while a motion curve splits the block", async () => {
+  // A motion curve cuts every block into 32-frame runs, so this is the case the
+  // fade used to lose: a fade that restarted per run could never finish. The
+  // insert's own process() calls prove the runs really are that short.
+  const key = "__builds_motion_fade";
+  globalThis[key] = [];
+  const dynamics = stubDynamicsSource(0.5, [], { buildsKey: key });
+  const plain = motionSong();
+  const edited = motionSong({
+    inserts: { "ins-half": insertOf("ins-half", "track:track-2", 1, "compressor", {}) },
+  });
+
+  const hostUnderTest = await host(plain, { dynamics });
+  const before = hostUnderTest.run(4);
+  assert.ok(
+    Math.abs(before.left[BLOCK * 3] - DIRECT) < 1e-6,
+    `the unedited track has to play at its own level, got ${before.left[BLOCK * 3]}`,
+  );
+
+  hostUnderTest.post({ type: "song", snapshot: edited });
+  await hostUnderTest.flush();
+  const after = hostUnderTest.run(2);
+
+  const oldLevel = DIRECT;
+  const newLevel = DIRECT / 2;
+  for (let at = 0; at < 64; at += 1) {
+    // 1/64 of the way on the first frame, all the way on the 64th — counted in
+    // frames, so the runs the curve cut the block into cannot restart it.
+    const weight = (at + 1) / 64;
+    const wanted = newLevel * weight + oldLevel * (1 - weight);
+    assert.ok(
+      Math.abs(after.left[at] - wanted) < 1e-6,
+      `frame ${at} of the fade has to be ${wanted}, got ${after.left[at]}`,
+    );
+  }
+  assert.ok(
+    Math.abs(after.left[64] - newLevel) < 1e-7,
+    `the 64th frame is the new chain's own output (${newLevel}), got ${after.left[64]}`,
+  );
+  assert.ok(
+    Math.abs(after.left[BLOCK] - newLevel) < 1e-7,
+    `and it stays there (${newLevel}), got ${after.left[BLOCK]}`,
+  );
+
+  // The motion grid was really in play: the insert only ever saw 32-frame runs.
+  const runs = globalThis[key].filter((entry) => entry.startsWith("process:"));
+  assert.ok(runs.length >= 8, `the insert has to have run, got ${runs.length} calls`);
+  for (const entry of runs) {
+    assert.equal(entry, "process:32", "a motion curve has to cut every block into 32-frame runs");
+  }
+
+  const ramp = Math.abs(oldLevel - newLevel) / 64;
+  assert.ok(
+    largestStep(after, 0, 2 * BLOCK) <= ramp + 1e-7,
+    `the fade must not step more than its own ramp (${ramp}), largest step was ${largestStep(after, 0, 2 * BLOCK)}`,
+  );
+});
+
+test("a second edit during a fade does not click or restart from zero", async () => {
+  const dynamics = stubDynamicsSource(0.5);
+  const one = audioSong({
+    inserts: { "ins-a": insertOf("ins-a", "track:track-1", 1, "compressor", {}) },
+  });
+  const two = audioSong({
+    inserts: {
+      "ins-a": insertOf("ins-a", "track:track-1", 1, "compressor", {}),
+      "ins-b": insertOf("ins-b", "track:track-1", 2, "compressor", {}),
+    },
+  });
+
+  const hostUnderTest = await host(audioSong(), { dynamics });
+  hostUnderTest.run(2);
+
+  // Edit one, then catch it a third of the way through its fade.
+  hostUnderTest.post({ type: "song", snapshot: one });
+  await hostUnderTest.flush();
+  const first = hostUnderTest.run(1, 20);
+  for (let at = 0; at < 20; at += 1) {
+    const wet = (at + 1) / 64;
+    const wanted = DIRECT * (1 - 0.5 * wet);
+    assert.ok(
+      Math.abs(first.left[at] - wanted) < 1e-6,
+      `frame ${at} of the first fade has to be ${wanted}, got ${first.left[at]}`,
+    );
+  }
+
+  // A second edit arrives while insert A is still fading in. It must keep A's
+  // weight where it was (a continuation, not a restart) and fade B in on top.
+  hostUnderTest.post({ type: "song", snapshot: two });
+  await hostUnderTest.flush();
+  const second = hostUnderTest.run(1, 20);
+  for (let at = 0; at < 20; at += 1) {
+    const wetA = (21 + at) / 64;
+    const wetB = (at + 1) / 64;
+    const wanted = DIRECT * (1 - 0.5 * wetA) * (1 - 0.5 * wetB);
+    assert.ok(
+      Math.abs(second.left[at] - wanted) < 1e-6,
+      `frame ${at} after the second edit has to be ${wanted}, got ${second.left[at]}`,
+    );
+  }
+  // The tell for a restart: the dry level again, which is what A had already
+  // faded away from.
+  assert.ok(
+    second.left[0] < DIRECT * 0.93,
+    `the second edit must not restart the first fade, got ${second.left[0]} for ${DIRECT}`,
+  );
+  const ramp = DIRECT / 64;
+  assert.ok(
+    largestStep(second) <= ramp + 1e-7,
+    `no frame of the joined fade may step more than one ramp step (${ramp}), largest step was ${largestStep(second)}`,
+  );
+});
+
+test("removing every insert while playing fades once", async () => {
+  const dynamics = stubDynamicsSource(0.5);
+  const withInsert = audioSong({
+    inserts: { "ins-half": insertOf("ins-half", "track:track-1", 1, "compressor", {}) },
+  });
+  const hostUnderTest = await host(withInsert, { dynamics });
+  const before = hostUnderTest.run(4);
+  assert.ok(
+    Math.abs(before.left[BLOCK * 3] - DIRECT / 2) < 1e-7,
+    `the insert has to halve the track, got ${before.left[BLOCK * 3]}`,
+  );
+
+  hostUnderTest.post({ type: "song", snapshot: audioSong() });
+  await hostUnderTest.flush();
+  const after = hostUnderTest.run(2);
+  for (let at = 0; at < 64; at += 1) {
+    // The insert's weight goes 1 → 0 over 64 frames, so its output fades back
+    // to the dry track exactly once.
+    const wet = (63 - at) / 64;
+    const wanted = DIRECT * (1 - 0.5 * wet);
+    assert.ok(
+      Math.abs(after.left[at] - wanted) < 1e-6,
+      `frame ${at} of the fade-out has to be ${wanted}, got ${after.left[at]}`,
+    );
+  }
+  assert.ok(Math.abs(after.left[64] - DIRECT) < 1e-7, `the 64th frame is the dry track, got ${after.left[64]}`);
+  for (let at = 64; at < after.left.length; at += 1) {
+    assert.ok(
+      Math.abs(after.left[at] - DIRECT) < 1e-7,
+      `the fade has to happen once: frame ${at} came back at ${after.left[at]}`,
+    );
+  }
+  const ramp = Math.abs(DIRECT - DIRECT / 2) / 64;
+  assert.ok(
+    largestStep(after, 0, 2 * BLOCK) <= ramp + 1e-7,
+    `the fade-out must not step more than its own ramp (${ramp}), largest step was ${largestStep(after, 0, 2 * BLOCK)}`,
+  );
+});
+
+test("a chain with an insert that cannot be built is not rebuilt on every edit", async () => {
+  const key = "__builds_broken_insert";
+  globalThis[key] = [];
+  const dynamics = stubDynamicsSource(0.5, [], { buildsKey: key, brokenKinds: ["gate"] });
+  const doomed = insertOf("ins-doomed", "track:track-1", 1, "gate", {});
+  const songOf = (inserts) => audioSong({ inserts: inserts });
+
+  const hostUnderTest = await host(songOf({ "ins-doomed": doomed }), { dynamics });
+  hostUnderTest.run(2);
+  const builds = () => globalThis[key].filter((entry) => entry === "create:gate").length;
+  const errors = () => hostUnderTest.posts.filter((message) => message.type === "error");
+  assert.equal(builds(), 1, "the insert is built once and cannot be built");
+  assert.equal(errors().length, 1, `one report for an insert that will not build, got ${errors().length}`);
+  assert.equal(errors()[0].error, "gate on Track 1 could not be built: this insert will not build");
+
+  // Two snapshots that change another insert's parameters, one that edits the
+  // chain around it (an insert added), and one that edits another chain
+  // entirely: none of them is a reason to try building it again.
+  const edited = [
+    songOf({
+      "ins-doomed": doomed,
+      "ins-comp": insertOf("ins-comp", "track:track-1", 2, "compressor", { threshold_db: -12 }),
+    }),
+    songOf({
+      "ins-doomed": doomed,
+      "ins-comp": insertOf("ins-comp", "track:track-1", 2, "compressor", { threshold_db: -18 }),
+    }),
+    songOf({ "ins-doomed": doomed, "ins-limiter": insertOf("ins-limiter", "master", 1, "limiter", {}) }),
+    songOf({ "ins-doomed": doomed }),
+  ];
+  for (const snapshot of edited) {
+    hostUnderTest.post({ type: "song", snapshot: snapshot });
+    await hostUnderTest.flush();
+    hostUnderTest.run(1);
+  }
+  assert.equal(builds(), 1, `an insert that cannot be built must not be rebuilt on every edit, got ${builds()}`);
+  assert.equal(errors().length, 1, "and must not be reported again");
+
+  // The chain still plays: what is left of it halves the track.
+  hostUnderTest.post({ type: "song", snapshot: edited[1] });
+  await hostUnderTest.flush();
+  const out = hostUnderTest.run(2);
+  assert.ok(
+    Math.abs(out.left[Math.round(BLOCK * 1.5)] - DIRECT / 2) < 1e-6,
+    `the inserts that do build have to run, got ${out.left[Math.round(BLOCK * 1.5)]}`,
+  );
+});
+
+test("an unrelated edit does not re-arm a faulted insert; changing its params does, once", async () => {
+  const key = "__builds_fault_latch";
+  globalThis[key] = [];
+  const dynamics = stubDynamicsSource(0.5, ["gate"], { buildsKey: key });
+  const songOf = (params, gainDb) =>
+    audioSong({
+      tracks: [audioTrack(1, { gain_db: gainDb })],
+      inserts: { "ins-nan": insertOf("ins-nan", "track:track-1", 1, "gate", params) },
+    });
+  const hostUnderTest = await host(songOf({ threshold_db: -20 }, 0), { dynamics });
+  const faults = () => hostUnderTest.posts.filter((message) => message.type === "insert_fault");
+
+  const out = hostUnderTest.run(4);
+  assert.ok(
+    Math.abs(out.left[BLOCK * 3] - DIRECT) < 1e-6,
+    `the poisoned block has to be the insert's input, got ${out.left[BLOCK * 3]}`,
+  );
+  assert.equal(faults().length, 1, "the fault is said once");
+
+  // An unrelated edit — the track's fader — leaves the insert bypassed: it is
+  // not re-armed, not reset, and says nothing.
+  hostUnderTest.post({ type: "song", snapshot: songOf({ threshold_db: -20 }, -6) });
+  await hostUnderTest.flush();
+  const quiet = hostUnderTest.run(2);
+  assert.ok(
+    Math.abs(quiet.left[Math.round(BLOCK * 1.5)] - DIRECT * amplitudeOf(-6)) < 1e-6,
+    `the bypassed insert has to stay bypassed, got ${quiet.left[Math.round(BLOCK * 1.5)]}`,
+  );
+  assert.equal(faults().length, 1, "an unrelated edit must not re-arm a faulted insert");
+  assert.equal(
+    globalThis[key].filter((entry) => entry === "reset:gate").length,
+    0,
+    "and must not reset it either",
+  );
+
+  // Its OWN parameters moving arms it again — once — and resetting it is how
+  // the NaN it is holding is thrown away.
+  hostUnderTest.post({ type: "song", snapshot: songOf({ threshold_db: -30 }, -6) });
+  await hostUnderTest.flush();
+  const rearmed = hostUnderTest.run(2);
+  assert.ok(
+    Math.abs(rearmed.left[BLOCK + 64] - DIRECT * amplitudeOf(-6)) < 1e-6,
+    `the re-armed insert has to run (and be caught) again, got ${rearmed.left[BLOCK + 64]}`,
+  );
+  assert.equal(faults().length, 2, "its own parameters moving arms it once");
+  assert.equal(
+    globalThis[key].filter((entry) => entry === "reset:gate").length,
+    1,
+    "and clearing the fault resets the insert",
+  );
+
+  // Changing something else again does not arm it a third time.
+  hostUnderTest.post({ type: "song", snapshot: songOf({ threshold_db: -30 }, -12) });
+  await hostUnderTest.flush();
+  hostUnderTest.run(2);
+  assert.equal(faults().length, 2, "an unrelated edit after the re-arm must not arm it again");
+  assert.equal(
+    globalThis[key].filter((entry) => entry === "create:gate").length,
+    1,
+    "and the insert is never rebuilt for a parameter turn",
+  );
+});
+
 test("an insert that produces NaN is bypassed and reported", async () => {
   // The "gate" insert writes NaN; everything else halves.
   const dynamics = stubDynamicsSource(0.5, ["gate"]);
@@ -608,15 +963,18 @@ test("a Faust insert that is still loading passes audio and says so once", async
       `a loading insert passes audio through, frame ${at} was ${dry.left[at]}`,
     );
   }
-  const said = hostUnderTest.posts.filter(
-    (message) => message.type === "error" && String(message.error).includes("is still loading."),
-  );
+  const said = hostUnderTest.posts.filter((message) => message.type === "insert_loading");
   assert.equal(said.length, 1, `one "still loading" per insert, got ${said.length}: ${JSON.stringify(said)}`);
-  assert.equal(said[0].error, "reverb on Track 1 is still loading.", "the sentence names the effect and the track");
+  assert.equal(said[0].insert_id, "ins-reverb", "the message names the insert");
+  assert.equal(said[0].message, "reverb on Track 1 is still loading.", "the sentence names the effect and the track");
+  assert.equal(
+    hostUnderTest.posts.filter((message) => message.type === "error").length,
+    0,
+    "a load in progress is not an engine error and never reaches onError",
+  );
 
   // The modules arrive: the processor compiles them and builds the chains
-  // again, so the reverb becomes a real insert (over a crossfade, while the
-  // song plays).
+  // again, so the reverb becomes a real insert (faded in while the song plays).
   const modules = {};
   modules.reverb = {
     wasm: new Uint8Array(readFileSync(join(FAUST_DIR, "reverb.wasm"))).buffer,
@@ -627,10 +985,200 @@ test("a Faust insert that is still loading passes audio and says so once", async
   const withReverb = hostUnderTest.run(8);
   assert.ok(firstDifference(withReverb, dry) !== -1, "once its module is compiled the reverb has to change the master");
   assert.equal(
-    hostUnderTest.posts.filter((message) => message.type === "error").length,
+    hostUnderTest.posts.filter((message) => message.type === "insert_loading").length,
     1,
     "a load that worked is not reported again",
   );
+  assert.equal(
+    hostUnderTest.posts.filter((message) => message.type === "error").length,
+    0,
+    "and it never said anything on the error channel",
+  );
+  // The module arrived, so this insert is live from here on: a snapshot that
+  // changes something else must not rebuild it as "still loading" again.
+  hostUnderTest.post({ type: "song", snapshot: song });
+  await hostUnderTest.flush();
+  hostUnderTest.run(2);
+  assert.equal(
+    hostUnderTest.posts.filter((message) => message.type === "insert_loading").length,
+    1,
+    "an insert with its module is never loading again",
+  );
+});
+
+test("bypassing an eq in front of a return's reverb keeps the reverb tail", async () => {
+  // A 100 ms tone burst into a fully wet reverb, through an equalizer, and then
+  // 60 ms of silence: what the master carries by the time the edit arrives is
+  // the reverb's own tail. Bypassing the equalizer is a chain edit, and the
+  // reverb behind it must keep its state — a rebuilt reverb would start from
+  // silence, which on a fully wet reverb is a hole where the tail was.
+  const returns = { "ret-1": { id: "ret-1", name: "Hall", gain_db: 0, pan: 0, mute: false } };
+  const inserts = {
+    "ins-eq": insertOf("ins-eq", "return:ret-1", 1, "eq", { low_freq_hz: 200, low_gain_db: 9, mid_gain_db: 0, high_gain_db: 0 }),
+    "ins-rev": insertOf("ins-rev", "return:ret-1", 2, "reverb", { size: 0.85, damping: 0.1, predelay_ms: 0, mix: 1 }),
+  };
+  const sends = { "track-1/ret-1": { track_id: "track-1", return_id: "ret-1", level_db: 0, pre: true } };
+  const songOf = (bypassEq) =>
+    audioSong({
+      tracks: [audioTrack(1, { gain_db: -60 })],
+      returns: returns,
+      sends: sends,
+      inserts: {
+        "ins-eq": { ...inserts["ins-eq"], bypass: bypassEq },
+        "ins-rev": inserts["ins-rev"],
+      },
+    });
+  // A tone for 100 ms, then silence.
+  const burst = toneTake(0.4, 200);
+  burst.fill(0, 4800);
+
+  const modules = {};
+  for (const kind of ["eq", "reverb"]) {
+    modules[kind] = {
+      wasm: new Uint8Array(readFileSync(join(FAUST_DIR, `${kind}.wasm`))).buffer,
+      json: readFileSync(join(FAUST_DIR, `${kind}.json`), "utf8"),
+    };
+  }
+
+  const edited = await host(songOf(false), { takeSamples: burst });
+  edited.post({ type: "faust-modules", modules: modules });
+  await edited.flush();
+  const untouched = await host(songOf(false), { takeSamples: burst });
+  untouched.post({ type: "faust-modules", modules: modules });
+  await untouched.flush();
+
+  // 60 blocks is 7680 frames: the burst ended at 4800, so the tail is ringing.
+  const beforeEdit = edited.run(60);
+  const reference = untouched.run(60);
+  const preRms = rmsOf(beforeEdit, 7680 - 64, 7680);
+  assert.ok(preRms > 1e-4, `the reverb tail has to be ringing before the edit, got ${preRms}`);
+
+  edited.post({ type: "song", snapshot: songOf(true) });
+  await edited.flush();
+  const afterEdit = edited.run(2);
+  const afterReference = untouched.run(2);
+
+  // The tail carries on as it would have: the equalizer faded out in front of a
+  // reverb whose input is silence, and what the reverb still hears of it is the
+  // equalizer's own decay. A reverb that had been rebuilt instead would have
+  // started from silence — a hole where the tail was, an order of magnitude
+  // bigger than this.
+  const tolerance = Math.max(1e-6, preRms * 0.05);
+  for (let at = 0; at < 256; at += 1) {
+    assert.ok(
+      Math.abs(afterEdit.left[at] - afterReference.left[at]) < tolerance,
+      `frame ${at} after the edit has to be the same tail (${afterReference.left[at]}), got ${afterEdit.left[at]}`,
+    );
+  }
+  const tailRms = rmsOf(afterEdit, 0, 64);
+  const referenceRms = rmsOf(afterReference, 0, 64);
+  assert.ok(
+    tailRms > 0.5 * referenceRms,
+    `a rebuilt reverb would have started from silence instead of ringing on (${referenceRms} → ${tailRms})`,
+  );
+  assert.ok(
+    largestStep(beforeEdit, 7680 - 64, 7680) > 0,
+    "the tail has to be moving for the continuity check to mean anything",
+  );
+});
+
+test("adding an eq to the master while playing keeps the limiter's output continuous", async () => {
+  // The master limiter looks 1.5 ms (72 frames at 48 kHz) ahead, so a rebuilt
+  // one would output 72 frames of the silence of an empty delay line — longer
+  // than the 64-frame fade. Adding an equalizer IN FRONT of it must not cut it.
+  const limiter = insertOf("ins-limiter", "master", 2, "limiter", { ceiling_db: -1.5, release_ms: 60 });
+  const equalizer = insertOf("ins-eq", "master", 1, "eq", {
+    low_freq_hz: 200,
+    low_gain_db: 6,
+    mid_freq_hz: 900,
+    mid_gain_db: 0,
+    mid_q: 1,
+    high_freq_hz: 6000,
+    high_gain_db: 0,
+  });
+  const plain = audioSong({ inserts: { "ins-limiter": limiter } });
+  const editedSong = audioSong({ inserts: { "ins-eq": equalizer, "ins-limiter": limiter } });
+
+  const hostUnderTest = await host(plain, { takeSamples: toneTake(0.4, 200) });
+  hostUnderTest.post({
+    type: "faust-modules",
+    modules: {
+      eq: {
+        wasm: new Uint8Array(readFileSync(join(FAUST_DIR, "eq.wasm"))).buffer,
+        json: readFileSync(join(FAUST_DIR, "eq.json"), "utf8"),
+      },
+    },
+  });
+  await hostUnderTest.flush();
+
+  const before = hostUnderTest.run(30);
+  const latencyPosts = () => hostUnderTest.posts.filter((message) => message.type === "master_latency");
+  assert.equal(latencyPosts().length, 1, "the master chain's latency is posted once for the limiter");
+  const preRms = rmsOf(before, 30 * BLOCK - 240, 30 * BLOCK);
+  const preStep = largestStep(before, 30 * BLOCK - 240, 30 * BLOCK);
+  assert.ok(preRms > 0.1, `the limited master has to be playing, got ${preRms}`);
+  assert.ok(preStep > 0, "the tone has to be moving for the step check to mean anything");
+
+  hostUnderTest.post({ type: "song", snapshot: editedSong });
+  await hostUnderTest.flush();
+  const after = hostUnderTest.run(2);
+
+  // No frame of silence: the window the empty lookahead would have swallowed is
+  // full of the limiter's own (already primed) output.
+  assert.ok(
+    peakOf(after.left.subarray(0, 72)) > 0.1,
+    `a rebuilt limiter would have output silence for 72 frames, peak was ${peakOf(after.left.subarray(0, 72))}`,
+  );
+  assert.ok(
+    rmsOf(after, 0, 240) > 0.5 * preRms,
+    `the limiter's output has to stay continuous (${preRms} before), got ${rmsOf(after, 0, 240)}`,
+  );
+  // No click: the added equalizer fades in, so nothing steps more than the
+  // equalized tone itself does.
+  assert.ok(
+    largestStep(after, 0, 2 * BLOCK) <= preStep * 2.5 + 1e-4,
+    `the added equalizer must not step more than the audio (${preStep}), largest step was ${largestStep(after, 0, 2 * BLOCK)}`,
+  );
+  // And the equalizer really is in the path now (its +6 dB is audible), with the
+  // limiter's delay unchanged — it was reused, not rebuilt.
+  const postRms = rmsOf(after, BLOCK, 2 * BLOCK);
+  assert.ok(
+    postRms > preRms * 1.2,
+    `the added equalizer has to change the master (${preRms} → ${postRms})`,
+  );
+  assert.equal(latencyPosts().length, 1, "a reused limiter keeps the master chain's latency where it was");
+});
+
+test("a master tap is stamped with the master chain's latency taken off", async () => {
+  const limiter = insertOf("ins-limiter", "master", 1, "limiter", { ceiling_db: -1.5, release_ms: 60 });
+  const latencyFrames = Math.round(StudioDynamics.MASTER_LOOKAHEAD_SECONDS * SAMPLE_RATE);
+
+  const limited = await host(audioSong({ inserts: { "ins-limiter": limiter } }));
+  limited.post({ type: "tap", target: "master", on: true });
+  await limited.flush();
+  limited.run(2);
+  const taps = limited.posts.filter((message) => message.type === "tap_block" && message.target === "master");
+  assert.equal(taps.length, 2, `a tap posts one block per block, got ${taps.length}`);
+  assert.equal(
+    taps[0].frame,
+    -latencyFrames,
+    `the first block's master tap is that many frames late (${latencyFrames}), got ${taps[0].frame}`,
+  );
+  assert.equal(
+    taps[1].frame - taps[0].frame,
+    BLOCK,
+    "and the blocks are still one block apart",
+  );
+  assert.equal(taps[0].channels.length, 2, "a master tap carries the stereo master");
+
+  // Without a master limiter there is no latency to take off.
+  const plain = await host(audioSong());
+  plain.post({ type: "tap", target: "master", on: true });
+  await plain.flush();
+  plain.run(2);
+  const plainTaps = plain.posts.filter((message) => message.type === "tap_block" && message.target === "master");
+  assert.equal(plainTaps[0].frame, 0, `a master with no latency is stamped where it is, got ${plainTaps[0].frame}`);
+  assert.equal(plainTaps[1].frame, BLOCK);
 });
 
 test("the meter matches the server's loudness within 0.1 LU", () => {
@@ -783,6 +1331,64 @@ test("the processor posts a meter reading every 100 ms of audio and once on stop
   );
 });
 
+test("the meter's update cost does not grow with playing time", () => {
+  // The integrated measurement is a fixed histogram of gating blocks. Feeding it
+  // a minute of audio must leave a reading's cost exactly where it was after ten
+  // seconds: `stats.lastReadBins` is the work one `read()` does, and it is the
+  // same number whatever `stats.blocks` has grown to (the old block list walked
+  // every block it held, with a log10 each, so a long Play got slower).
+  const rate = SAMPLE_RATE;
+  const meter = StudioMeter.create(rate);
+  meter.reset();
+  const block = 4800;
+  const frames = new Float32Array(block * 4);
+  const tone = new Float32Array(block * 4);
+  for (const target of [tone, frames]) {
+    for (let at = 0; at < target.length; at += 1) {
+      target[at] = Math.sin((2 * Math.PI * 997 * at) / rate) * amplitudeOf(-12);
+    }
+  }
+
+  /** Feed `seconds` of the tone, in 100 ms blocks, and time the read at the end. */
+  const feed = (seconds) => {
+    const blocks = Math.round(seconds * 10);
+    for (let index = 0; index < blocks; index += 1) {
+      meter.process(frames, frames, block);
+    }
+    const started = process.hrtime.bigint();
+    const reading = meter.read();
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+    return { reading: reading, blocks: meter.stats.blocks, bins: meter.stats.lastReadBins, ms: elapsed };
+  };
+
+  const early = feed(10);
+  const late = feed(50);
+  assert.ok(early.blocks > 60, `ten seconds have to fill the histogram, got ${early.blocks} blocks`);
+  assert.ok(
+    late.blocks > early.blocks * 5,
+    `a minute of Play has to hold six times the blocks, got ${early.blocks} → ${late.blocks}`,
+  );
+  assert.equal(early.bins, StudioMeter.HISTOGRAM_BINS, "a reading walks the fixed histogram");
+  assert.equal(
+    late.bins,
+    early.bins,
+    `a reading's work must not grow with playing time, ${early.bins} → ${late.bins}`,
+  );
+  assert.ok(
+    StudioMeter.HISTOGRAM_BINS <= 1024,
+    `the histogram has to stay small enough to walk every 100 ms, got ${StudioMeter.HISTOGRAM_BINS}`,
+  );
+  // The same reading either way, and no slower after a minute.
+  assert.ok(
+    Math.abs(late.reading.integrated - early.reading.integrated) < 0.01,
+    `the same tone has to read the same (${early.reading.integrated} → ${late.reading.integrated})`,
+  );
+  assert.ok(
+    late.ms <= early.ms * 2 + 2,
+    `a reading after a minute must not cost more than one after ten seconds (${early.ms.toFixed(3)} → ${late.ms.toFixed(3)} ms)`,
+  );
+});
+
 test("the master limiter holds the ceiling after the perf-FX bus", async () => {
   // 0.9 through a centred fader is 0.636 per channel: above a −6 dB ceiling.
   const ceilingDb = -6;
@@ -890,6 +1496,17 @@ test("a mixed song renders faster than real time in Node", async (t) => {
   const hostUnderTest = await host(song, { take: 0.2 });
   hostUnderTest.post({ type: "faust-modules", modules: modules });
   await hostUnderTest.flush();
+  // Every insert of this mix is a compiled effect and they are all in: from the
+  // moment the modules land, nothing is "still loading" any more, and nothing
+  // says anything on the error channel either. (The song was posted a moment
+  // before its effects, so the one "still loading" each insert said first is
+  // behind us — that is a load in progress, not a failure.)
+  const afterModules = hostUnderTest.posts.length;
+  assert.deepEqual(
+    hostUnderTest.posts.filter((message) => message.type === "error"),
+    [],
+    "a mix whose effects are all compiled reports no error",
+  );
 
   const blocks = Math.round((SAMPLE_RATE * seconds) / BLOCK);
   const started = process.hrtime.bigint();
@@ -903,6 +1520,18 @@ test("a mixed song renders faster than real time in Node", async (t) => {
   assert.ok(
     ratio < 1,
     `a mixed song has to render faster than real time; ${seconds} s took ${elapsed.toFixed(2)} s (${ratio.toFixed(2)}×)`,
+  );
+  // And while it rendered, not one insert said it was still loading: the
+  // compiled effects are live, so the mix really is the one measured above.
+  assert.deepEqual(
+    hostUnderTest.posts.slice(afterModules).filter((message) => message.type === "insert_loading"),
+    [],
+    "with the compiled effects posted, no insert is still loading",
+  );
+  assert.deepEqual(
+    hostUnderTest.posts.slice(afterModules).filter((message) => message.type === "error"),
+    [],
+    "and no insert complained while the mix rendered",
   );
 });
 

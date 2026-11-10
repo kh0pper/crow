@@ -187,6 +187,11 @@
  *   message}`: an insert that produced a sample that is not a finite number. It
  *   is bypassed in the ENGINE (the document is never touched), and this is said
  *   once — the message names the effect and the track, return or master.
+ * - `onInsertLoading(listener)` follows `{type:"insert_loading", insert_id,
+ *   message}`: a Faust insert whose compiled module the page has not posted yet.
+ *   It passes audio through until the module lands, and this arrives once per
+ *   insert. It is not an error and never reaches `onError` or the console: it is
+ *   a load in progress, and the message names the effect and its chain.
  */
 (function () {
   "use strict";
@@ -912,6 +917,7 @@
  *                    lastMeter: function(): (object|null),
  *                    onMasterLatency: function(function): function,
  *                    onInsertFault: function(function): function,
+ *                    onInsertLoading: function(function): function,
   *                    loadLibrary: function(string, string, Uint8Array): Promise<{status: string, reason?: string}>,
  *                    unloadLibrary: function(string): void,
  *                    onLibraryNeeded: function(function): function,
@@ -1395,6 +1401,7 @@
     const meterListeners = new Set();
     const masterLatencyListeners = new Set();
     const insertFaultListeners = new Set();
+    const insertLoadingListeners = new Set();
     /**
      * The latest meter reading, kept so a panel that draws after the fact (or a
      * test that asks once) can read it without waiting for the next 100 ms. A
@@ -1724,6 +1731,24 @@
         for (const listener of insertFaultListeners) {
           try {
             listener(fault);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "insert_loading") {
+        // A Faust insert whose compiled module has not arrived: it passes audio
+        // through until the module lands, and this is said once. It is a load in
+        // progress, not an engine error, so it never reaches `onError` — the
+        // console — and the panel can show it as the insert warming up.
+        const loading = {
+          insert_id: String(message.insert_id),
+          message: String(message.message),
+        };
+        for (const listener of insertLoadingListeners) {
+          try {
+            listener(loading);
           } catch {
             /* one bad listener must not stop the others hearing about it */
           }
@@ -2342,6 +2367,22 @@
       },
 
       /**
+       * Follow an insert that is waiting for its compiled Faust module:
+       * `{insert_id, message}`. It passes audio through until the module lands and
+       * says so once — a load in progress, never an error. It never reaches
+       * `onError` or the console.
+       * @param {(loading: {insert_id: string, message: string}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onInsertLoading(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        insertLoadingListeners.add(listener);
+        return function unsubscribe() {
+          insertLoadingListeners.delete(listener);
+        };
+      },
+
+      /**
        * Follow the engine's failures (a device that could not be built, a song
        * the processor refused, a fault it survived). They are also logged.
        * @param {(text: string) => void} listener
@@ -2417,6 +2458,7 @@
         meterListeners.clear();
         masterLatencyListeners.clear();
         insertFaultListeners.clear();
+        insertLoadingListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
         pendingLibrary.clear();

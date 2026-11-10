@@ -2536,6 +2536,23 @@ test("mixer song bit-identical in Chromium and Node", async (t) => {
   assert.ok(nodePeak > 0.01, `the Node mixer render has to be audible, peak was ${nodePeak}`);
   const nodeHash = hashChannels(node.left, node.right);
 
+  // The mixer really is in the render: the same song with its inserts taken out
+  // (the sends and returns stay) has to sound different, or a chain that was
+  // silently dropped would pass the hash comparison below for the wrong reason.
+  const dry = await renderSong({ ...song, inserts: {} }, { seconds: seconds, sampleRate: SAMPLE_RATE });
+  assert.notEqual(
+    hashChannels(dry.left, dry.right),
+    nodeHash,
+    "the mixed render has to differ from the same song with no inserts",
+  );
+  let difference = 0;
+  for (let at = 0; at < node.left.length; at += 1) difference += Math.abs(node.left[at] - dry.left[at]);
+  difference /= Math.max(1, node.left.length);
+  assert.ok(
+    difference > 1e-4,
+    `the inserts have to change the mix: the mean |difference| was ${difference}`,
+  );
+
   const tab = await openTab();
   try {
     await tab.navigate(origin + "/");
