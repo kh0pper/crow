@@ -164,8 +164,11 @@ export const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "ex
   "credential_spec", "oom_kill_disable", "use_api_socket", "post_start", "pre_stop", "develop", "models", "provider"]);
 const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "configs"]);
 // Top-level entries of a bundle folder that the gateway reads or runs.
+// `.crow-compose.*` is Crow's own record of the installed compose (bundle-compose-state.js):
+// read by the version refresh and the bind-drift card, so never mountable read-write.
 const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
+  ".crow-compose.sha256", ".crow-compose.edited",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
 // The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
 // never reaches bundle "rook-x"'s folder). No bundle id may end in one (tested).
@@ -763,6 +766,199 @@ export function requiredComposeVars(text) {
   let m;
   while ((m = re.exec(String(text || ""))) !== null) out.add(m[1]);
   return [...out];
+}
+
+/**
+ * Compose-style variable expansion of one value: ${V}, ${V:-d}, ${V-d},
+ * ${V:?m}, ${V?m}, ${V:+a}, ${V+a} and bare $V (nesting allowed in the
+ * default). An unset variable expands to "" (what compose substitutes; a `?`
+ * form would have failed the run, so no container holds that mount anyway).
+ */
+export function expandComposeVars(value, env) {
+  const str = String(value);
+  let out = "";
+  let i = 0;
+  while (i < str.length) {
+    const ch = str[i];
+    if (ch !== "$") { out += ch; i++; continue; }
+    if (str[i + 1] === "$") { out += "$"; i += 2; continue; }
+    if (str[i + 1] === "{") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < str.length && depth > 0) {
+        if (str[j] === "{") depth++;
+        else if (str[j] === "}") depth--;
+        if (depth > 0) j++;
+      }
+      const body = str.slice(i + 2, j);
+      i = j + 1;
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?)([-?+])([\s\S]*))?$/.exec(body);
+      if (!m) continue;
+      const [, name, colon, op, arg = ""] = m;
+      const v = env[name];
+      const isSet = v !== undefined && v !== null;
+      const usable = colon ? isSet && String(v) !== "" : isSet;
+      if (op === "-") out += usable ? String(v) : expandComposeVars(arg, env);
+      else if (op === "+") out += usable ? expandComposeVars(arg, env) : "";
+      else out += isSet ? String(v) : "";
+      continue;
+    }
+    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(str.slice(i + 1));
+    if (!m) { out += ch; i++; continue; }
+    out += env[m[0]] !== undefined && env[m[0]] !== null ? String(env[m[0]]) : "";
+    i += 1 + m[0].length;
+  }
+  return out;
+}
+
+/**
+ * The compose override files Compose merges from the same directory as `composeRel`:
+ * docker-compose.override.y[a]ml, compose.override.y[a]ml and `<name>.override.<ext>`
+ * for a non-default composefile. Bundle-relative, in a fixed order.
+ */
+export function composeOverrideFiles(composeRel) {
+  const dir = dirname(composeRel);
+  const at = (name) => (dir === "." ? name : join(dir, name));
+  const files = ["docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"];
+  const m = /^(.*)\.(ya?ml)$/.exec(basename(composeRel));
+  if (m) files.push(`${m[1]}.override.${m[2]}`);
+  return [...new Set(files)].map(at);
+}
+
+/** A host IP meaning "every interface": a bind on one of these is wider than a specific one. */
+export const WIDE_HOST_IPS = new Set(["", "0.0.0.0", "::", "[::]"]);
+
+/** A compose scalar without the quotes/comments compose allows around it. */
+function composeScalar(raw) {
+  return String(raw ?? "").replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "").trim();
+}
+
+/** Ports in one `a-b` range as a list (capped), or the literal text when it is not one. */
+function expandPortRange(text) {
+  const m = /^(\d+)-(\d+)$/.exec(String(text ?? "").trim());
+  if (!m) { const p = String(text ?? "").trim(); return p ? [p] : []; }
+  const lo = Number(m[1]);
+  const hi = Number(m[2]);
+  if (!Number.isInteger(lo) || !Number.isInteger(hi) || hi < lo || hi - lo > 63) return [String(text).trim()];
+  return Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i));
+}
+
+/** One short-syntax port spec (`[ip:][host:]container[/proto]`) → published-port entries. */
+function addShortPort(out, raw, env) {
+  let spec = composeScalar(expandComposeVars(String(raw ?? ""), env));
+  if (!spec) return;
+  let protocol = "tcp";
+  const slash = spec.lastIndexOf("/");
+  if (slash >= 0) {
+    protocol = composeScalar(spec.slice(slash + 1)).toLowerCase() || "tcp";
+    spec = spec.slice(0, slash);
+  }
+  const parts = spec.split(":");
+  let hostIP = null;
+  let container = null;
+  if (parts.length === 1) container = parts[0];
+  else if (parts.length === 2) container = parts[1];
+  else { hostIP = parts.slice(0, -2).join(":"); container = parts.at(-1); }
+  hostIP = hostIP ? hostIP.replace(/^\[|\]$/g, "").trim() || null : null;
+  for (const containerPort of expandPortRange(container)) out.push({ containerPort, protocol, hostIP });
+}
+
+/** One long-syntax port entry (`target`/`published`/`host_ip`/`protocol`) → published-port entries. */
+function addLongPort(out, entry, env) {
+  const target = composeScalar(expandComposeVars(String(entry.target ?? ""), env));
+  if (!target) return;
+  const protocol = (composeScalar(expandComposeVars(String(entry.protocol ?? "tcp"), env)) || "tcp").toLowerCase();
+  const hostIP = entry.host_ip === undefined
+    ? null
+    : composeScalar(expandComposeVars(String(entry.host_ip), env)).replace(/^\[|\]$/g, "") || null;
+  for (const containerPort of expandPortRange(target)) out.push({ containerPort, protocol, hostIP });
+}
+
+/**
+ * The published ports of a compose text: `{ containerPort, protocol, hostIP }` per entry.
+ * `hostIP: null` means compose publishes it on every interface. Both port syntaxes are
+ * read (`- "127.0.0.1:8555:5000"`, long `target:`/`host_ip:` entries, `a-b` ranges) and
+ * `${VAR}` values expand against `env` exactly as compose resolves them. Line-based, like
+ * the rest of this module — it reads what a bundle's compose FILE declares, not the
+ * merged model (`docker compose config`), which needs docker.
+ */
+export function composePublishedPorts(text, env = {}) {
+  const out = [];
+  const lines = String(text ?? "").split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const key = /^(\s*)ports:\s*(.*)$/.exec(lines[i]);
+    if (!key) continue;
+    const indent = key[1].length;
+    const inline = composeScalar(key[2]);
+    if (inline.startsWith("[")) {
+      for (const item of inline.slice(1).replace(/\]\s*$/, "").split(",")) addShortPort(out, item, env);
+      continue;
+    }
+    let long = null;
+    const flushLong = () => { if (long && long.target !== undefined) addLongPort(out, long, env); long = null; };
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const ind = /^(\s*)/.exec(line)[1].length;
+      if (ind <= indent) break;
+      const item = /^\s*-\s*(.*)$/.exec(line);
+      if (item) {
+        flushLong();
+        const val = composeScalar(item[1]);
+        const kv = /^([A-Za-z_]+)\s*:\s*(.*)$/.exec(val);
+        if (kv) long = { [kv[1]]: composeScalar(kv[2]) };
+        else addShortPort(out, val, env);
+        continue;
+      }
+      const kv = /^\s+([A-Za-z_]+)\s*:\s*(.*)$/.exec(line);
+      if (kv && long) { long[kv[1]] = composeScalar(kv[2]); continue; }
+      flushLong();
+    }
+    flushLong();
+  }
+  return out;
+}
+
+/**
+ * `containerPort/protocol` → `{ hostIPs }` for every published port of a compose text
+ * (one or more files, e.g. the installed compose plus its overrides, joined by the
+ * caller). `hostIPs` holds "" for an all-interfaces publish.
+ */
+export function composePortExpectations(text, env = {}) {
+  const byPort = new Map();
+  for (const p of composePublishedPorts(text, env)) {
+    const key = `${p.containerPort}/${p.protocol}`;
+    const entry = byPort.get(key) || { hostIPs: [] };
+    entry.hostIPs.push(p.hostIP ? p.hostIP : "");
+    byPort.set(key, entry);
+  }
+  return Object.fromEntries(byPort);
+}
+
+/**
+ * Where the RUNNING containers bind ports WIDER than the compose says: a running
+ * `0.0.0.0`/`::`/empty host IP while compose publishes the port on a specific IP, or a
+ * published container port compose no longer has. Narrower or equal is not drift.
+ *
+ * @param {object} o
+ * @param {object} o.expected  composePortExpectations() output
+ * @param {Array}  o.running   [{ containerPort, protocol, hostIp, hostPort }]
+ * @returns {Array<{containerPort, protocol, hostIp, hostPort, kind: "wider"|"extra"}>}
+ */
+export function portBindDrift({ expected = {}, running = [] } = {}) {
+  const drifted = [];
+  for (const bind of Array.isArray(running) ? running : []) {
+    const protocol = String(bind?.protocol || "tcp").toLowerCase();
+    const key = `${bind?.containerPort}/${protocol}`;
+    const entry = expected[key];
+    if (!entry) { drifted.push({ ...bind, protocol, kind: "extra" }); continue; }
+    const expectedSpecific = entry.hostIPs.length > 0
+      && entry.hostIPs.every((ip) => !WIDE_HOST_IPS.has(String(ip ?? "").trim()));
+    if (expectedSpecific && WIDE_HOST_IPS.has(String(bind?.hostIp ?? "").trim())) {
+      drifted.push({ ...bind, protocol, kind: "wider" });
+    }
+  }
+  return drifted;
 }
 
 function parseDotEnvText(text) {

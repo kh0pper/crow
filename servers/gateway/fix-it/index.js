@@ -10,6 +10,7 @@ import remoteExposureDetector from "./detectors/remote-exposure.js";
 import caddyProxySocketDetector from "./detectors/caddy-proxy-socket.js";
 import bootGuardDetector from "./detectors/boot-guard.js";
 import dataBackendReapprovalDetector from "./detectors/data-backend-reapproval.js";
+import bundleBindDriftDetector from "./detectors/bundle-bind-drift.js";
 import addonWallDetector, {
   SOURCE as ADDON_WALL_SOURCE,
   TITLE as ADDON_WALL_TITLE,
@@ -41,6 +42,7 @@ export function wireFixIt() {
   registry.registerDetector(caddyProxySocketDetector);
   registry.registerDetector(bootGuardDetector);
   registry.registerDetector(dataBackendReapprovalDetector);
+  registry.registerDetector(bundleBindDriftDetector);
   registry.registerDetector(addonWallDetector);
   registry.registerRemedy("expose-capability", exposeCapabilityRemedy);
   // An add-on that could not run inside its wall: run it unwalled by the
@@ -58,7 +60,7 @@ export function wireFixIt() {
  * The detectors runBootChecks() drives. A condition no request emits an event for
  * belongs here; the list is exported so the set can be asserted, not grepped.
  */
-export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector, dataBackendReapprovalDetector]);
+export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, bootGuardDetector, dataBackendReapprovalDetector, bundleBindDriftDetector]);
 
 /**
  * Where a `kind: "link"` remedy may point, held HERE and never read from the
@@ -71,6 +73,10 @@ export const BOOT_CHECK_DETECTORS = Object.freeze([caddyProxySocketDetector, boo
 export const LINK_REMEDIES = Object.freeze({
   // The Projects panel's route (servers/gateway/dashboard/panels/projects.js).
   "open-projects-page": "/dashboard/projects",
+  // The Extensions page, where a bundle is restarted (its Restart action) and
+  // where its compose file is explained. The compose refresh and the bind-drift
+  // card never restart anything themselves.
+  "open-extensions-page": "/dashboard/extensions",
 });
 
 /** The code-held target of a link remedy, or null (never a stored href). */

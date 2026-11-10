@@ -15,7 +15,7 @@
 import { isPlaceholderValue } from "./bundle-env-placeholders.js";
 import { parseEnvText } from "./bundle-env-codec.js";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, relative as relativePath, isAbsolute } from "node:path";
 import { resolveCrowHome } from "../shared/crow-home.js";
 import { fileURLToPath } from "node:url";
 import { ungrantedFolderKeys } from "./folder-grants.js";
@@ -79,6 +79,20 @@ export function getInstalledFirstManifest(bundleId) {
     readJson(join(BUNDLES_DIR, bundleId, "manifest.json")) ??
     readJson(join(APP_BUNDLES, bundleId, "manifest.json"))
   );
+}
+
+/**
+ * The bundle-relative path of `manifest.docker.composefile` (default
+ * "docker-compose.yml"), or null when the declared value is not a plain
+ * relative path that stays inside the bundle dir.
+ */
+export function manifestComposeFile(manifest) {
+  const declared = manifest?.docker?.composefile;
+  if (declared === undefined || declared === null || declared === "") return "docker-compose.yml";
+  if (typeof declared !== "string" || isAbsolute(declared) || declared.includes("\\") || declared.includes("$")) return null;
+  const rel = relativePath(".", declared);
+  if (!rel || rel.startsWith("..")) return null;
+  return rel;
 }
 
 /** Parse a KEY=value .env file into a plain object (same grammar as the installer writes). */

@@ -63,6 +63,7 @@ import {
   APP_BUNDLES,
   getManifest,
   getInstalledFirstManifest,
+  manifestComposeFile,
   needsConfigKeys,
   _setAppBundlesForTest,
 } from "../bundles-config.js";
@@ -75,7 +76,8 @@ import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, hostGrants, normalizeHostGrants } from "../compose-guard.js";
+import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeOverrideFiles, expandComposeVars, hostGrants, normalizeHostGrants } from "../compose-guard.js";
+import { COMPOSE_EDITED_FILE, COMPOSE_SHA_FILE, composeInPastCommits, fileSha256, markComposeEdited, readRecordedComposeSha, recordInstalledCompose } from "../bundle-compose-state.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -497,61 +499,11 @@ function copyBundleRefreshItem(appSrc, destDir, item) {
 }
 
 /**
- * The bundle-relative path of `manifest.docker.composefile` (default
- * "docker-compose.yml"), or null when the declared value is not a plain
- * relative path that stays inside the bundle dir.
+ * The bundle-relative compose path and the compose variable expansion live in
+ * bundles-config.js (manifestComposeFile) and compose-guard.js
+ * (expandComposeVars, composeOverrideFiles): the bind-drift detector reads the
+ * same rules without importing this route module.
  */
-function manifestComposeFile(manifest) {
-  const declared = manifest?.docker?.composefile;
-  if (declared === undefined || declared === null || declared === "") return "docker-compose.yml";
-  if (typeof declared !== "string" || isAbsolute(declared) || declared.includes("\\") || declared.includes("$")) return null;
-  const rel = relativePath(".", declared);
-  if (!rel || rel.startsWith("..")) return null;
-  return rel;
-}
-
-/**
- * Compose-style variable expansion of one value: ${V}, ${V:-d}, ${V-d},
- * ${V:?m}, ${V?m}, ${V:+a}, ${V+a} and bare $V (nesting allowed in the
- * default). An unset variable expands to "" (what compose substitutes; a `?`
- * form would have failed the run, so no container holds that mount anyway).
- */
-function expandComposeVars(value, env) {
-  const str = String(value);
-  let out = "";
-  let i = 0;
-  while (i < str.length) {
-    const ch = str[i];
-    if (ch !== "$") { out += ch; i++; continue; }
-    if (str[i + 1] === "$") { out += "$"; i += 2; continue; }
-    if (str[i + 1] === "{") {
-      let depth = 1;
-      let j = i + 2;
-      while (j < str.length && depth > 0) {
-        if (str[j] === "{") depth++;
-        else if (str[j] === "}") depth--;
-        if (depth > 0) j++;
-      }
-      const body = str.slice(i + 2, j);
-      i = j + 1;
-      const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:(:?)([-?+])([\s\S]*))?$/.exec(body);
-      if (!m) continue;
-      const [, name, colon, op, arg = ""] = m;
-      const v = env[name];
-      const isSet = v !== undefined && v !== null;
-      const usable = colon ? isSet && String(v) !== "" : isSet;
-      if (op === "-") out += usable ? String(v) : expandComposeVars(arg, env);
-      else if (op === "+") out += usable ? expandComposeVars(arg, env) : "";
-      else out += isSet ? String(v) : "";
-      continue;
-    }
-    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(str.slice(i + 1));
-    if (!m) { out += ch; i++; continue; }
-    out += env[m[0]] !== undefined && env[m[0]] !== null ? String(env[m[0]]) : "";
-    i += 1 + m[0].length;
-  }
-  return out;
-}
 
 /** The host-side part of a short-syntax volume (`src:dst[:mode]`), brace-aware. */
 function shortVolumeSource(item) {
@@ -606,15 +558,7 @@ function composeBindSources(text, projectDir, env, { rwOnly = false } = {}) {
  * composefile).
  */
 function installedComposeFiles(composeRel) {
-  const dir = dirname(composeRel);
-  const at = (name) => (dir === "." ? name : join(dir, name));
-  const files = new Set([composeRel]);
-  for (const n of ["docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"]) {
-    files.add(at(n));
-  }
-  const m = /^(.*)\.(ya?ml)$/.exec(basename(composeRel));
-  if (m) files.add(at(`${m[1]}.override.${m[2]}`));
-  return [...files];
+  return [composeRel, ...composeOverrideFiles(composeRel)];
 }
 
 /** realpath when the path exists, else the lexical path. */
@@ -754,6 +698,8 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
     if (typeof p !== "string" || !p || isAbsolute(p) || p.includes("\\") || p.includes("$")) continue;
     const rel = relativePath(".", p);
     if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
+    // The installed compose's bookkeeping is Crow's own record, never a repo file.
+    if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE) continue;
     if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
     let real;
     try { real = realpathSync.native(join(appSrc, rel)); } catch { continue; }
@@ -768,6 +714,65 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
 
 /** Local dev/test droppings never copied with a build context. */
 const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "node_modules", ".git"]);
+
+/**
+ * N8-1: refresh the INSTALLED compose file on a version change, unless the owner
+ * edited it.
+ *
+ * A docker bundle's compose is code: it declares the ports, mounts and settings the
+ * container runs with. It used to be refreshed only when the manifest opted in with
+ * `refreshFiles`, so ~40 bundles whose binds were later tightened to loopback kept
+ * their old (wider) bind forever. It is now refreshed by default — but never over an
+ * owner's edit:
+ *
+ *   unmodified = the installed bytes' sha256 equals the one recorded at the last
+ *                install/refresh (`.crow-compose.sha256`), or — for installs made
+ *                before that record existed — the bundle's compose at any past
+ *                commit of the checkout (bounded git history, via the same runner).
+ *   edited     = neither: the file is left exactly as it is, marked
+ *                (`.crow-compose.edited`) for the Fix-it card, and logged by bundle
+ *                name only.
+ *
+ * Owner-specific settings belong in `docker-compose.override.yml`, which Crow never
+ * writes, reads as part of the live model and does not include here. A compose that
+ * the manifest already lists in `refreshFiles` was copied by that step (today's
+ * behaviour) and only gets its sha recorded. An installed copy with
+ * `"refresh": false` never reaches this function (refreshVersionedBundle returns
+ * before any copy).
+ *
+ * @returns {Promise<"copied"|"recorded"|"edited"|"none">}
+ */
+async function refreshInstalledCompose({ id, appSrc, destDir, repoManifest, runner, alreadyCopied, log = (m) => console.log(m) }) {
+  const composeRel = manifestComposeFile(repoManifest);
+  if (!composeRel) return "none";
+  const src = join(appSrc, composeRel);
+  const dst = join(destDir, composeRel);
+  if (!existsSync(src)) return "none";
+  // The install copies the whole tree, so a missing installed compose is a broken
+  // install, not an owner edit: leave it alone (nothing runs from it).
+  if (!existsSync(dst)) return "none";
+
+  if (alreadyCopied) {
+    recordInstalledCompose(destDir, repoManifest);
+    return "recorded";
+  }
+
+  const installedSha = fileSha256(dst);
+  if (!installedSha) return "none";
+  const recorded = readRecordedComposeSha(destDir);
+  let unmodified = !!recorded && recorded === installedSha;
+  if (!unmodified) {
+    unmodified = (await composeInPastCommits({ appRoot: APP_ROOT, bundleId: id, composeRel, sha: installedSha, runner })) === true;
+  }
+  if (!unmodified) {
+    markComposeEdited(destDir, composeRel);
+    log(`[bundles] ${id}: installed ${composeRel} has local changes — not updated; put your changes in docker-compose.override.yml so Crow can update the compose file`);
+    return "edited";
+  }
+  copyBundleRefreshItem(appSrc, destDir, composeRel);
+  recordInstalledCompose(destDir, repoManifest);
+  return "copied";
+}
 
 /**
  * True iff the repo package.json declares a dependency NAME absent from the
@@ -832,7 +837,13 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  *   2. Re-copies the served PANELS_DIR artifacts (<id>.js, <id>-routes.js),
  *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
  *      symlink exists (install-parity — an April-era install may predate it).
- *   3. Runs `npm install --omit=dev` in destDir, via the injected runner,
+ *   3. For a docker bundle, also re-copies its compose file BY DEFAULT when the
+ *      installed copy is unmodified (never over an owner edit — see
+ *      refreshInstalledCompose), so a tightened port bind actually reaches an
+ *      existing install. The running container keeps the old bind until the
+ *      bundle is restarted; a Fix-it card says so
+ *      (fix-it/detectors/bundle-bind-drift.js).
+ *   4. Runs `npm install --omit=dev` in destDir, via the injected runner,
  *      ONLY when an added dependency name triggers it (warn-only; never
  *      throws into the caller).
  *
@@ -840,7 +851,7 @@ function bundleNeedsNpmInstall(appSrc, destDir) {
  * either manifest is unreadable/missing or the versions are equal. Otherwise
  * returns { oldVersion, newVersion, touched }.
  */
-async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
+async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) => console.log(m) }) {
   const repoManifest = readJsonSafe(join(appSrc, "manifest.json"), null);
   const installedManifest = readJsonSafe(join(destDir, "manifest.json"), null);
   if (!repoManifest || !installedManifest) return null;
@@ -940,6 +951,18 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
     for (const rel of opted) touched.push(`refresh:${rel}`);
     if (opted.length) {
       console.log(`[bundles] ${id}: refreshFiles copied (${opted.join(", ")}) — running containers keep the old files/compose until the bundle is restarted`);
+    }
+    // N8-1: the compose file itself is code, so it is refreshed by default — but
+    // never over an owner's edit (see refreshInstalledCompose).
+    const composeOutcome = await refreshInstalledCompose({
+      id, appSrc, destDir, repoManifest, runner, log,
+      alreadyCopied: manifestComposeFile(repoManifest) ? opted.includes(manifestComposeFile(repoManifest)) : false,
+    });
+    if (composeOutcome === "copied") {
+      touched.push("compose");
+      console.log(`[bundles] ${id}: compose file updated — Restart/Start it in Extensions to apply its network settings`);
+    } else if (composeOutcome === "edited") {
+      touched.push("compose:edited");
     }
   }
 
@@ -1238,7 +1261,7 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
         errors.push({ id, error: "could not generate a missing key — refresh skipped, retried on the next boot" });
         continue;
       }
-      const refreshed = await refreshVersionedBundle({ id, appSrc, destDir, runner });
+      const refreshed = await refreshVersionedBundle({ id, appSrc, destDir, runner, log });
       if (refreshed) {
         repaired.push(`${id}: refreshed ${refreshed.oldVersion} -> ${refreshed.newVersion} (${refreshed.touched.join(", ") || "no files changed"})`);
         continue; // refresh fully supersedes the missing-only phase for this bundle
@@ -2962,6 +2985,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     installSnap = snapshotInstallDir(sourceDir, destDir, { backupRoot: join(CROW_HOME, ".install-rollback") });
     mkdirSync(destDir, { recursive: true });
     cpSync(sourceDir, destDir, { recursive: true });
+    // N8-1: remember the compose bytes as installed, so a later version change can
+    // tell an unmodified compose from an owner edit (refreshInstalledCompose).
+    recordInstalledCompose(destDir, manifest);
     appendLog(job, "Copied bundle files");
 
     // 1.5 If the bundle ships its own package.json (typically because it
@@ -4734,6 +4760,17 @@ export default function bundlesRouter() {
         // reaches a container that is re-created, so force it.
         if (req?.body?.recreate === true) upArgs.push("--force-recreate");
         await runCompose(upArgs, { cwd: bundleDir });
+        // The containers were just (re)created from the installed compose: re-run the
+        // bind-drift check for this bundle so a "restart to apply" card clears now,
+        // without waiting for the next gateway start (N8-1). Fire-and-forget: the
+        // check is best effort (never throws), and a slow docker must not delay the
+        // Start response. The card stays until the next boot if this does not land.
+        setImmediate(async () => {
+          try {
+            const { runBootCheck } = await import("../fix-it/index.js");
+            await runBootCheck(dbForXhost, "bundle-bind-drift", { only: [bundleId] });
+          } catch { /* the card stays until the next boot */ }
+        });
       } else if (action === "stop") {
         await runComposeTeardown(["stop"], { cwd: bundleDir });
       } else {
