@@ -2,10 +2,12 @@
  * The listener-owner check an add-on's relay asks before it splices a loopback
  * port (review item 7): who is behind `127.0.0.1:<port>`?
  *
- * Pure cases inject the /proc text, the fd links, the argv/cwd and the docker
- * view, so no rule depends on the machine running the suite. One real case
- * starts a stub at `<scratch>/servers/gateway/index.js`, which the kernel's own
- * tables identify as a gateway, and shows the relay refusing its port.
+ * Pure cases inject the /proc text, the fd links, the argv/cwd/exe and the
+ * docker view, so no rule depends on the machine running the suite: the roots a
+ * same-uid listener must stay outside of and the wall's own pids are fixtures
+ * too. One real case starts a stub at `<scratch>/servers/gateway/index.js`,
+ * which the kernel's own tables identify as a gateway, and shows the relay
+ * refusing its port.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -53,7 +55,7 @@ const v4row = (addr, port, opts) => row(field4(addr) + ":" + portHex(port), opts
 const v6row = (addr, port, opts) => row(field6(addr) + ":" + portHex(port), opts);
 const table = (...rows) => [HEAD, ...rows].join("\n");
 
-/** A fake /proc tree: the two net tables, plus one entry per process (fds, cmdline, cwd). */
+/** A fake /proc tree: the two net tables, plus one entry per process (fds, cmdline, cwd, exe). */
 function fakeProc({ tcp = table(), tcp6 = table(), procs = [] } = {}) {
   const files = new Map([["/proc/net/tcp", tcp], ["/proc/net/tcp6", tcp6]]);
   const links = new Map();
@@ -65,6 +67,9 @@ function fakeProc({ tcp = table(), tcp6 = table(), procs = [] } = {}) {
     inodes.forEach((inode, i) => links.set(fdDir + "/" + (i + 3), "socket:[" + inode + "]"));
     files.set("/proc/" + p.pid + "/cmdline", (p.argv || []).join("\0") + "\0");
     if (p.cwd) links.set("/proc/" + p.pid + "/cwd", p.cwd);
+    // `<pid>/exe` is a link too; `exe: null` leaves it unreadable.
+    const exe = p.exe === undefined ? "/usr/bin/node" : p.exe;
+    if (exe) links.set("/proc/" + p.pid + "/exe", exe);
   }
   const miss = () => { throw Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" }); };
   return {
@@ -77,6 +82,20 @@ function fakeProc({ tcp = table(), tcp6 = table(), procs = [] } = {}) {
 const GW_UID = 1000;
 const PORT = 8300;
 const SOCK = 4242;
+
+/** This Crow's two roots, as the caller passes them (lexical and real spellings). */
+const CROW_APP_ROOT = "/home/alex/crow";
+const CROW_HOME = "/home/alex/.crow";
+const ROOTS = [CROW_APP_ROOT, CROW_HOME];
+
+/** Compose project -> add-on id, as the gateway passes it (installed add-ons only). */
+const INSTALLED = new Map([
+  ["home-paperless", "paperless"],
+  ["home-media", "media"],
+  ["media-kokoro", "kokoro-tts"],
+  ["media-piper", "piper"],
+  ["home-funkwhale", "funkwhale"],
+]);
 
 // ---- a gateway uid socket -------------------------------------------------
 
@@ -97,6 +116,17 @@ test("a gateway process is refused, in this checkout and in a co-hosted one", as
     procs: [{ pid: 501, inodes: [SOCK], cwd: "/", argv: ["node", "/srv/crow-b/servers/gateway/index.js"] }],
   });
   assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...other })).reason, "gateway");
+
+  // A checkout that IS one of the Crow roots still reads as a gateway: those
+  // two reasons are named before any same-uid rule.
+  const own = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, crowRoots: ROOTS,
+    ...fakeProc({
+      tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+      procs: [{ pid: 502, inodes: [SOCK], cwd: CROW_APP_ROOT, argv: ["node", "servers/gateway/index.js"] }],
+    }),
+  });
+  assert.deepEqual([own.kind, own.reason], ["denied", "gateway"]);
 });
 
 test("a satellite process is refused", async () => {
@@ -108,12 +138,12 @@ test("a satellite process is refused", async () => {
   assert.deepEqual([r.kind, r.reason], ["denied", "satellite"]);
 });
 
-test("any other process of the same uid is the add-on's own service", async () => {
+test("any other process of the same uid, outside this Crow, is the add-on's own service", async () => {
   const p = fakeProc({
     tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
     procs: [{ pid: 700, inodes: [SOCK], cwd: "/srv/app", argv: ["node", "server.mjs"] }],
   });
-  const r = await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...p });
+  const r = await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...p, crowRoots: ROOTS });
   assert.equal(r.kind, "own-uid");
   assert.equal(r.pid, 700);
   assert.equal(r.inode, String(SOCK));
@@ -144,13 +174,16 @@ test("a root-owned socket no container publishes is refused (the tailscaled case
   assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...p })).reason, "no docker view");
 });
 
-test("a root socket a container publishes is a published port, with its project", async () => {
+test("a root socket a container publishes is a published port, with its project and its owner", async () => {
   const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
   for (const hostIp of ["127.0.0.1", "0.0.0.0", "::", ""]) {
-    const docker = async () => [{ hostIp, hostPort: PORT, project: "paperless" }];
-    const r = await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...p, docker });
+    const docker = async () => [{ hostIp, hostPort: PORT, project: "home-paperless" }];
+    const r = await identifyListener("127.0.0.1", PORT, {
+      gatewayUid: GW_UID, ...p, docker, addonId: "paperless", addonProjects: INSTALLED,
+    });
     assert.equal(r.kind, "docker-publish", hostIp || "(empty)");
-    assert.equal(r.project, "paperless");
+    assert.equal(r.project, "home-paperless");
+    assert.equal(r.projectOwner, "paperless");
   }
 });
 
@@ -166,6 +199,67 @@ test("a port published by another installed add-on's project is refused", async 
     gatewayUid: GW_UID, ...p, docker, addonId: "media", addonProjects: new Map([["otherproj", "media"]]),
   });
   assert.equal(own.kind, "docker-publish");
+  assert.equal(own.projectOwner, "media");
+});
+
+test("a published port with no compose project label is refused", async () => {
+  const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+  for (const project of ["", "   ", null, undefined]) {
+    const docker = async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project }];
+    const r = await identifyListener("127.0.0.1", PORT, {
+      gatewayUid: GW_UID, ...p, docker, addonId: "paperless", addonProjects: INSTALLED,
+    });
+    assert.deepEqual([r.kind, r.reason], ["denied", "unlabelled project"], String(project));
+  }
+});
+
+test("a project no installed add-on owns is refused", async () => {
+  const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+  const docker = async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project: "mystery-1" }];
+  const r = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, ...p, docker, addonId: "paperless", addonProjects: INSTALLED,
+  });
+  assert.deepEqual([r.kind, r.reason], ["denied", "project of no installed add-on"]);
+  // With no installed-add-on map at all, every project is unknown.
+  const blind = await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...p, docker, addonId: "paperless" });
+  assert.deepEqual([blind.kind, blind.reason], ["denied", "project of no installed add-on"]);
+});
+
+test("only the add-on's own compose project passes, and it names its owner", async () => {
+  const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+  const docker = async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project: "home-paperless" }];
+  const own = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, ...p, docker, addonId: "paperless", addonProjects: INSTALLED,
+  });
+  assert.deepEqual([own.kind, own.project, own.projectOwner], ["docker-publish", "home-paperless", "paperless"]);
+  // Another add-on reaching the same port: a foreign project.
+  const media = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, ...p, docker, addonId: "media", addonProjects: INSTALLED,
+  });
+  assert.deepEqual([media.kind, media.reason], ["denied", "foreign project"]);
+});
+
+test("media reaches the TTS add-ons' published ports and nothing else through the one named exception", async () => {
+  const p = fakeProc({ tcp: table(v4row("127.0.0.1", PORT, { uid: 0, inode: 900 })) });
+  for (const [project, tts] of [["media-kokoro", "kokoro-tts"], ["media-piper", "piper"]]) {
+    const docker = async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project }];
+    const viaMedia = await identifyListener("127.0.0.1", PORT, {
+      gatewayUid: GW_UID, ...p, docker, addonId: "media", addonProjects: INSTALLED,
+    });
+    assert.deepEqual([viaMedia.kind, viaMedia.project, viaMedia.projectOwner], ["docker-publish", project, tts], tts);
+    // The exception is media's alone.
+    const viaPaperless = await identifyListener("127.0.0.1", PORT, {
+      gatewayUid: GW_UID, ...p, docker, addonId: "paperless", addonProjects: INSTALLED,
+    });
+    assert.deepEqual([viaPaperless.kind, viaPaperless.reason], ["denied", "foreign project"], tts);
+  }
+  // A TTS add-on's project is no general licence: another add-on's project is
+  // still only its own add-on's to reach.
+  const docker = async () => [{ hostIp: "127.0.0.1", hostPort: PORT, project: "home-funkwhale" }];
+  const funkwhale = await identifyListener("127.0.0.1", PORT, {
+    gatewayUid: GW_UID, ...p, docker, addonId: "media", addonProjects: INSTALLED,
+  });
+  assert.deepEqual([funkwhale.kind, funkwhale.reason], ["denied", "foreign project"]);
 });
 
 test("two projects publishing one port, and a failing docker view, are both refusals", async () => {
@@ -200,7 +294,7 @@ test("no listener is a refusal; another port, a connected socket and another add
   });
   assert.deepEqual([(await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...p })).reason], ["nothing listens there"]);
   // The one on PORT+1 is that port's listener, not this one's.
-  assert.equal((await identifyListener("127.0.0.1", PORT + 1, { gatewayUid: GW_UID, ...p })).kind, "own-uid");
+  assert.equal((await identifyListener("127.0.0.1", PORT + 1, { gatewayUid: GW_UID, crowRoots: ROOTS, ...p })).kind, "own-uid");
 });
 
 test("a wildcard listener answers loopback, in both families; every matching listener must pass", async () => {
@@ -209,7 +303,7 @@ test("a wildcard listener answers loopback, in both families; every matching lis
     tcp6: table(v6row("::", PORT, { uid: GW_UID, inode: SOCK })),
     procs: [{ pid: 700, inodes: [SOCK], cwd: "/srv/app", argv: ["node", "server.mjs"] }],
   });
-  assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...wild })).kind, "own-uid");
+  assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ROOTS, ...wild })).kind, "own-uid");
   // 0.0.0.0 plus a gateway on ::ffff:127.0.0.1: the gateway wins.
   const mixed = fakeProc({
     tcp: table(v4row("0.0.0.0", PORT, { uid: GW_UID, inode: SOCK })),
@@ -219,13 +313,13 @@ test("a wildcard listener answers loopback, in both families; every matching lis
       { pid: 701, inodes: [4245], cwd: "/srv/app", argv: ["node", "servers/gateway/index.js"] },
     ],
   });
-  assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, ...mixed })).reason, "gateway");
+  assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ROOTS, ...mixed })).reason, "gateway");
   // An IPv6 loopback listener is found by its own spelling.
   const v6 = fakeProc({
     tcp6: table(v6row("::1", PORT, { uid: GW_UID, inode: SOCK })),
     procs: [{ pid: 700, inodes: [SOCK], cwd: "/srv/app", argv: ["node", "server.mjs"] }],
   });
-  const r = await identifyListener("::1", PORT, { gatewayUid: GW_UID, ...v6 });
+  const r = await identifyListener("::1", PORT, { gatewayUid: GW_UID, crowRoots: ROOTS, ...v6 });
   assert.equal(r.kind, "own-uid");
   assert.equal(r.reason, undefined);
 });
@@ -235,6 +329,86 @@ test("a port outside 1..65535 is refused rather than looked up", async () => {
     const r = await identifyListener("127.0.0.1", port, { gatewayUid: GW_UID, ...fakeProc() });
     assert.equal(r.kind, "denied", String(port));
   }
+});
+
+// ---- a same-uid listener: this Crow's own code, or the wall's ----------------
+
+/** One same-uid listener process; each case varies where its paths point. */
+const ownUidProc = (p = {}) => fakeProc({
+  tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+  procs: [{ pid: 700, inodes: [SOCK], cwd: "/srv/app", argv: ["/usr/bin/node", "server.mjs"], ...p }],
+});
+
+/** Ask about that one listener. */
+const askOwnUid = (opts, p = {}) => identifyListener("127.0.0.1", PORT, {
+  gatewayUid: GW_UID, selfPids: [1], crowRoots: ROOTS, ...ownUidProc(p), ...opts,
+});
+
+test("a process whose argv, cwd or executable lies under this Crow is Crow's own code", async () => {
+  const cases = [
+    { what: "a bundle's MCP server", cwd: "/srv/app", argv: ["/usr/bin/node", CROW_HOME + "/bundles/x/server/index.js"] },
+    { what: "a phone runner under the checkout's scripts", cwd: CROW_APP_ROOT + "/scripts/phone", argv: ["/usr/bin/node", "runner.mjs"] },
+    { what: "a cwd in the Crow home", cwd: CROW_HOME, argv: ["/usr/bin/node", "/opt/app/server.mjs"] },
+    { what: "an executable in the Crow home", cwd: "/srv/app", argv: ["/usr/bin/node", "/opt/app/server.mjs"], exe: CROW_HOME + "/bundles/x/bin/node" },
+    { what: "the root itself", cwd: CROW_APP_ROOT, argv: ["/usr/bin/node", "/opt/app/server.mjs"] },
+  ];
+  for (const c of cases) {
+    const r = await askOwnUid({}, c);
+    assert.deepEqual([r.kind, r.reason], ["denied", "Crow's own code"], c.what);
+  }
+  // A sibling directory whose name merely starts with the root's is not under it.
+  const sibling = await askOwnUid({ crowRoots: ["/srv/crow"] }, {
+    cwd: "/srv/crow-other", argv: ["/usr/bin/node", "/srv/crow-other/app.js"],
+  });
+  assert.equal(sibling.kind, "own-uid");
+  assert.equal(sibling.pid, 700);
+  // Real and lexical spellings both count when the caller passes both.
+  const real = await askOwnUid({ crowRoots: ["/srv/crow-link", "/srv/crow-real"] }, {
+    cwd: "/srv/app", argv: ["/usr/bin/node", "/srv/crow-real/servers/memory/index.js"],
+  });
+  assert.deepEqual([real.kind, real.reason], ["denied", "Crow's own code"]);
+});
+
+test("the relay's own process and the wall's helpers are refused", async () => {
+  // selfPids defaults to this process.
+  const selfDefault = await askOwnUid({ selfPids: undefined }, { pid: process.pid });
+  assert.deepEqual([selfDefault.kind, selfDefault.reason], ["denied", "the wall's own process"]);
+  const named = await askOwnUid({ selfPids: [700, 1] });
+  assert.deepEqual([named.kind, named.reason], ["denied", "the wall's own process"]);
+  // The netns entry point, wherever in argv it appears.
+  const entry = await askOwnUid({}, { cwd: "/srv/wall", argv: ["/usr/bin/node", "/srv/wall/pi_netns_entry.mjs"] });
+  assert.deepEqual([entry.kind, entry.reason], ["denied", "the wall's own process"]);
+  // bwrap as argv[0].
+  const bwrap = await askOwnUid({}, { cwd: "/srv/wall", argv: ["/usr/bin/bwrap", "--unshare-net", "/usr/bin/node", "x.mjs"] });
+  assert.deepEqual([bwrap.kind, bwrap.reason], ["denied", "the wall's own process"]);
+});
+
+test("with no Crow root to compare against, every same-uid listener is refused", async () => {
+  const saved = [process.env.CROW_APP_ROOT, process.env.CROW_HOME];
+  const restore = () => ["CROW_APP_ROOT", "CROW_HOME"].forEach((k, i) => {
+    if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i];
+  });
+  try {
+    delete process.env.CROW_APP_ROOT;
+    delete process.env.CROW_HOME;
+    const noEnv = await askOwnUid({ crowRoots: undefined });
+    assert.deepEqual([noEnv.kind, noEnv.reason], ["denied", "no Crow roots to check against"]);
+    const empty = await askOwnUid({ crowRoots: [] });
+    assert.deepEqual([empty.kind, empty.reason], ["denied", "no Crow roots to check against"]);
+    // With no list passed, the env names the roots.
+    process.env.CROW_APP_ROOT = "/srv/crow-env";
+    const fromEnv = await askOwnUid({ crowRoots: undefined }, {
+      cwd: "/srv/crow-env/scripts/phone", argv: ["/usr/bin/node", "runner.mjs"],
+    });
+    assert.deepEqual([fromEnv.kind, fromEnv.reason], ["denied", "Crow's own code"]);
+  } finally { restore(); }
+});
+
+test("a same-uid listener whose cwd or executable cannot be read is refused", async () => {
+  const noExe = await askOwnUid({}, { exe: null });
+  assert.deepEqual([noExe.kind, noExe.reason], ["denied", "owner check failed"]);
+  const noCwd = await askOwnUid({}, { cwd: undefined });
+  assert.deepEqual([noCwd.kind, noCwd.reason], ["denied", "owner check failed"]);
 });
 
 // ---- one real case, through the kernel's own tables ----------------------
@@ -282,7 +456,9 @@ test("a real gateway stub is identified through /proc, and the relay refuses its
     });
     assert.ok(Number.isInteger(port) && port > 0, "the stub is listening on an ephemeral port");
 
-    const owner = await identifyListener("127.0.0.1", port, {});
+    // The roots here must not cover the scratch dir, so it is the gateway rule
+    // (not "Crow's own code") that refuses this listener.
+    const owner = await identifyListener("127.0.0.1", port, { crowRoots: ["/srv/crow-elsewhere"] });
     if (owner.kind === "denied" && (owner.reason === "unmapped" || owner.reason === "nothing listens there")) {
       t.skip("this environment hides the process table: " + owner.reason);
       return;
@@ -294,7 +470,8 @@ test("a real gateway stub is identified through /proc, and the relay refuses its
     const logs = [];
     const relay = await startEgressRelay({
       dir: join(scratch, "real-relay"), local: NO_LOCAL, log: (l) => logs.push(l),
-      addon: { id: "paperless", loopback: [{ port }], listenerOwner: (a, p) => identifyListener(a, p, {}) },
+      addon: { id: "paperless", loopback: [{ port, source: "owner" }],
+        listenerOwner: (a, p) => identifyListener(a, p, { crowRoots: ["/srv/crow-elsewhere"] }) },
     });
     try {
       assert.equal(await talk(relay.socketPath, `PORT ${port}\nhello`), "", "the connection is closed");
@@ -310,7 +487,8 @@ test("an own process and a container on the same port: neither answer is trusted
     procs: [{ pid: 700, inodes: [SOCK], cwd: "/srv/app", argv: ["node", "server.mjs"] }],
   });
   const r = await identifyListener("127.0.0.1", PORT, {
-    gatewayUid: GW_UID, ...p, docker: async () => [{ hostIp: "0.0.0.0", hostPort: PORT, project: "paperless" }],
+    gatewayUid: GW_UID, ...p, crowRoots: ROOTS, addonId: "media", addonProjects: INSTALLED,
+    docker: async () => [{ hostIp: "0.0.0.0", hostPort: PORT, project: "home-media" }],
   });
   assert.deepEqual([r.kind, r.reason], ["denied", "more than one listener owner"]);
 });

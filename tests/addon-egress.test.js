@@ -97,6 +97,9 @@ const addonOf = (over = {}) => ({
   ...over,
 });
 
+/** A listed loopback entry the owner typed a URL into (anything else is a manifest default). */
+const typed = (entry) => ({ source: "owner", ...entry });
+
 let seq = 0;
 async function relay(opts = {}) {
   const logs = [];
@@ -112,7 +115,7 @@ async function relay(opts = {}) {
 test("a listed port splices raw from the add-on mark, and a WebSocket upgrade passes through", async () => {
   const seen = [];
   const up = await echoServer("E:", (c) => seen.push(c.remoteAddress));
-  const { r } = await relay({ addon: addonOf({ loopback: [{ port: up }] }) });
+  const { r } = await relay({ addon: addonOf({ loopback: [typed({ port: up })] }) });
 
   const out = await talk(r.socketPath, `PORT ${up}\nping`);
   assert.match(out, /E:ping$/);
@@ -158,7 +161,7 @@ test("the owner is asked again once the cache window has passed, and not before"
     calls++;
     return calls === 1 ? { kind: "own-uid", pid: 11 } : { kind: "denied", reason: "nothing listens there" };
   };
-  const { r, logs } = await relay({ addon: addonOf({ loopback: [{ port: up }], listenerOwner: owner, ownerCacheMs: 200 }) });
+  const { r, logs } = await relay({ addon: addonOf({ loopback: [typed({ port: up })], listenerOwner: owner, ownerCacheMs: 200 }) });
   assert.match(await talk(r.socketPath, `PORT ${up}\nfirst`), /E:first$/);
   assert.match(await talk(r.socketPath, `PORT ${up}\nsecond`), /E:second$/);
   assert.equal(calls, 1, "the second splice inside the window used the cached answer");
@@ -172,27 +175,75 @@ test("an ownerProject entry takes only that compose project's published port", a
   const up = await echoServer("E:");
   const one = (owner) => relay({
     addon: addonOf({
-      loopback: [{ port: 8000, ownerProject: "paperless" }],
+      loopback: [typed({ port: 8000, ownerProject: "paperless" })],
       listenerOwner: async () => owner,
     }),
     _connectOverride: () => ({ host: "127.0.0.1", port: up }),
   });
 
-  const foreign = await one({ kind: "docker-publish", project: "other" });
+  const foreign = await one({ kind: "docker-publish", project: "other", projectOwner: "media" });
   assert.equal(await talk(foreign.r.socketPath, "PORT 8000\nping"), "");
   assert.ok(foreign.logs.some((l) => l.includes("(published by another compose project)")), foreign.logs.join("\n"));
 
-  const own = await one({ kind: "docker-publish", project: "paperless" });
+  const own = await one({ kind: "docker-publish", project: "paperless", projectOwner: "media" });
   assert.match(await talk(own.r.socketPath, "PORT 8000\nping"), /E:ping$/);
 
   const sameUid = await one({ kind: "own-uid", pid: 12 });
   assert.equal(await talk(sameUid.r.socketPath, "PORT 8000\nping"), "", "own-uid is not a published port");
+  assert.ok(sameUid.logs.some((l) => l.includes("(the listener is not published by paperless)")), sameUid.logs.join("\n"));
+});
+
+test("a default URL never splices to a process of the same user", async () => {
+  const up = await echoServer("E:");
+  const one = (entry, owner) => relay({
+    addon: addonOf({ loopback: [entry], listenerOwner: async () => owner }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+  for (const entry of [{ port: 8000 }, { port: 8000, source: "default" }, { port: 8000, source: "OWNER" }]) {
+    const def = await one(entry, { kind: "own-uid", pid: 21 });
+    assert.equal(await talk(def.r.socketPath, "PORT 8000\nping"), "", JSON.stringify(entry));
+    assert.ok(def.logs.some((l) => l.includes("(a default URL never reaches a process of this user)")), def.logs.join("\n"));
+  }
+  // The same port typed by the owner does splice.
+  const own = await one(typed({ port: 8000 }), { kind: "own-uid", pid: 21 });
+  assert.match(await talk(own.r.socketPath, "PORT 8000\nping"), /E:ping$/);
+});
+
+test("a docker-publish owner passes only for the compose project it names", async () => {
+  const up = await echoServer("E:");
+  const one = (entry, owner) => relay({
+    addon: addonOf({ loopback: [entry], listenerOwner: async () => owner }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+
+  // This add-on's own project: any listed entry for it, named or not.
+  const ownProject = { kind: "docker-publish", project: "home-media", projectOwner: "media" };
+  const bare = await one(typed({ port: 8000 }), ownProject);
+  assert.match(await talk(bare.r.socketPath, "PORT 8000\nping"), /E:ping$/);
+  const wrong = await one(typed({ port: 8000, ownerProject: "paperless" }), ownProject);
+  assert.equal(await talk(wrong.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(wrong.logs.some((l) => l.includes("(published by another compose project)")), wrong.logs.join("\n"));
+
+  // Another add-on's project (the TTS exception): only the port the entry names.
+  const tts = { kind: "docker-publish", project: "media-kokoro", projectOwner: "kokoro-tts" };
+  const named = await one(typed({ port: 8000, ownerProject: "media-kokoro" }), tts);
+  assert.match(await talk(named.r.socketPath, "PORT 8000\nping"), /E:ping$/);
+  const unnamed = await one(typed({ port: 8000 }), tts);
+  assert.equal(await talk(unnamed.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(unnamed.logs.some((l) => l.includes("(published by another add-on's compose project)")), unnamed.logs.join("\n"));
+  const otherProject = await one(typed({ port: 8000, ownerProject: "media-piper" }), tts);
+  assert.equal(await talk(otherProject.r.socketPath, "PORT 8000\nping"), "");
+
+  // An owner answer that names no project owner is a refusal, whatever the entry.
+  const unnamedOwner = await one(typed({ port: 8000, ownerProject: "media-kokoro" }), { kind: "docker-publish", project: "media-kokoro" });
+  assert.equal(await talk(unnamedOwner.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(unnamedOwner.logs.some((l) => l.includes("(the owner check did not name a compose project)")), unnamedOwner.logs.join("\n"));
 });
 
 test("an owner check that throws is a deny", async () => {
   const up = await echoServer("E:");
   const { r, logs } = await relay({
-    addon: addonOf({ loopback: [{ port: up }], listenerOwner: async () => { throw new Error("proc gone"); } }),
+    addon: addonOf({ loopback: [typed({ port: up })], listenerOwner: async () => { throw new Error("proc gone"); } }),
   });
   assert.equal(await talk(r.socketPath, `PORT ${up}\nping`), "");
   assert.ok(logs.some((l) => l.includes("(owner check failed)")), logs.join("\n"));

@@ -13,12 +13,19 @@
  *   2. a socket owned by the gateway uid is mapped to its process through
  *      `/proc/<pid>/fd` (`socket:[<inode>]`). A gateway or satellite node
  *      process — in any checkout, so a co-hosted instance is caught too — is
- *      refused, and so is an inode that maps to no process;
- *   3. a root-owned socket must be a port a running container publishes. The
- *      docker view is passed in (the gateway already reads it); a port no
- *      container publishes covers tailscaled and every other root daemon. A
- *      container whose compose project belongs to another installed add-on is
- *      refused as a foreign project;
+ *      refused, and so is an inode that maps to no process. Any other process
+ *      of this uid counts as the add-on's own service only if it is none of
+ *      the wall's own processes (this relay, a `pi_netns_entry.mjs` helper,
+ *      `bwrap`) and nothing about it — an argv element, its cwd, its
+ *      executable — lies under this Crow's checkout or home (`crowRoots`):
+ *      with no root to compare against, every same-uid listener is refused;
+ *   3. a root-owned socket must be a port a running container publishes, and
+ *      that container must carry a compose project label naming an installed
+ *      add-on. The docker view is passed in (the gateway already reads it); a
+ *      port no container publishes covers tailscaled and every other root
+ *      daemon. An unlabelled project, a project of no installed add-on and
+ *      another add-on's project are all refused; only this add-on's own
+ *      project passes, plus the one named multi-add-on exception below;
  *   4. any other uid is refused (Caddy runs as its own user);
  *   5. anything that throws is a refusal, never a pass.
  *
@@ -32,6 +39,13 @@ import { isIP } from "node:net";
 
 /** A listening TCP socket's state in /proc/net/tcp{,6}. */
 const LISTEN = "0A";
+
+/**
+ * The one named exception to the foreign-project rule: an add-on (key) may
+ * reach a loopback port published by the compose project of one of these TTS
+ * add-ons (values), and only when the caller names that port explicitly.
+ */
+export const TTS_PORT_EXCEPTION = Object.freeze({ media: Object.freeze(["kokoro-tts", "piper"]) });
 
 /** Host IPs a published port is reachable on from the host's loopback. */
 const PUBLISHED_HOST_IPS = new Set(["127.0.0.1", "0.0.0.0", "::", ""]);
@@ -140,9 +154,43 @@ function argvOf(pid, opts) {
   return text.split("\0").filter((x) => x !== "");
 }
 
-/** The process's own cwd, so a relative argv element can be resolved. */
+/** The process's own cwd, so a relative argv element can be resolved; null when unreadable. */
 function cwdOf(pid, opts) {
-  try { return String(opts.readlink("/proc/" + pid + "/cwd") || ""); } catch { return ""; }
+  try {
+    const t = String(opts.readlink("/proc/" + pid + "/cwd") ?? "");
+    return t === "" ? null : t;
+  } catch { return null; }
+}
+
+/** The process's executable; null when unreadable. */
+function exeOf(pid, opts) {
+  try {
+    const t = String(opts.readlink("/proc/" + pid + "/exe") ?? "");
+    return t === "" ? null : t;
+  } catch { return null; }
+}
+
+/** An absolute path as the comparisons want it: no trailing slashes, "/" kept; null otherwise. */
+function cleanPath(p) {
+  const s = typeof p === "string" ? p.trim() : "";
+  if (!s.startsWith("/")) return null;
+  const t = s.replace(/\/+$/, "");
+  return t === "" ? "/" : t;
+}
+
+/** Is `p` the root itself or below it? By path segment: /srv/crow-other is not under /srv/crow. */
+function underRoot(p, root) {
+  const a = cleanPath(p);
+  if (!a) return false;
+  if (root === "/") return true;
+  return a === root || a.startsWith(root + "/");
+}
+
+/** The last segment of a path, for matching a helper by its program name. */
+function baseName(p) {
+  const s = String(p ?? "");
+  const cut = s.lastIndexOf("/");
+  return cut < 0 ? s : s.slice(cut + 1);
 }
 
 /** One listener's verdict. Every problem is a `denied` result, never a pass. */
@@ -152,10 +200,25 @@ async function verdictFor(listener, opts) {
     const pid = pidForInode(listener.inode, opts);
     if (pid === null) return { kind: "denied", reason: "unmapped", ...base };
     const argv = argvOf(pid, opts);
-    const cwd = cwdOf(pid, opts).replace(/\/+$/, "");
-    const resolved = argv.map((a, i) => (i === 0 || a.startsWith("/") || !cwd ? a : cwd + "/" + a));
+    const cwd = cwdOf(pid, opts);
+    const cwdPrefix = cwd === null ? null : cwd.replace(/\/+$/, "");
+    const resolved = argv.map((a, i) => (i === 0 || a.startsWith("/") || cwdPrefix === null ? a : cwdPrefix + "/" + a));
+    // The gateway and its satellite are named first: those two reasons are
+    // what the relay's refusals read as.
     if (resolved.some((a) => a.endsWith("/servers/gateway/index.js"))) return { kind: "denied", reason: "gateway", ...base, pid };
     if (resolved.some((a) => a.includes("/servers/satellite/"))) return { kind: "denied", reason: "satellite", ...base, pid };
+    // The wall's own processes: this relay, either helper it runs.
+    if (opts.selfPids.has(pid)) return { kind: "denied", reason: "the wall's own process", ...base, pid };
+    if (resolved.some((a) => baseName(a) === "pi_netns_entry.mjs")) return { kind: "denied", reason: "the wall's own process", ...base, pid };
+    if (resolved.length && baseName(resolved[0]) === "bwrap") return { kind: "denied", reason: "the wall's own process", ...base, pid };
+    // This Crow's own code, whichever way the path is spelled on the process.
+    if (!opts.crowRoots.length) return { kind: "denied", reason: "no Crow roots to check against", ...base, pid };
+    const exe = exeOf(pid, opts);
+    const paths = [...resolved, cwd, exe];
+    if (paths.some((p) => opts.crowRoots.some((root) => underRoot(p, root)))) {
+      return { kind: "denied", reason: "Crow's own code", ...base, pid };
+    }
+    if (cwd === null || exe === null) return { kind: "denied", reason: "owner check failed", ...base, pid };
     return { kind: "own-uid", ...base, pid };
   }
   if (listener.uid === 0) {
@@ -165,15 +228,22 @@ async function verdictFor(listener, opts) {
       && Number(e.hostPort) === listener.port
       && PUBLISHED_HOST_IPS.has(e.hostIp == null ? "" : String(e.hostIp)));
     if (!pubs.length) return { kind: "denied", reason: "no container publishes it", ...base };
-    const projects = new Set(pubs.map((e) => (e.project == null ? "" : String(e.project))));
+    const projects = new Set(pubs.map((e) => (e.project == null ? "" : String(e.project).trim())));
     if (projects.size > 1) return { kind: "denied", reason: "published by more than one project", ...base };
-    const project = [...projects][0] || null;
-    for (const p of projects) {
-      if (p && opts.addonProjects.has(p) && opts.addonProjects.get(p) !== opts.addonId) {
-        return { kind: "denied", reason: "foreign project", ...base };
-      }
+    const project = [...projects][0];
+    if (!project) return { kind: "denied", reason: "unlabelled project", ...base };
+    if (!opts.addonProjects.has(project)) {
+      return { kind: "denied", reason: "project of no installed add-on", ...base, project };
     }
-    return { kind: "docker-publish", project, ...base };
+    const owner = String(opts.addonProjects.get(project) ?? "");
+    if (owner && owner === opts.addonId) return { kind: "docker-publish", project, projectOwner: owner, ...base };
+    const exception = Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, opts.addonId)
+      ? TTS_PORT_EXCEPTION[opts.addonId]
+      : null;
+    if (owner && Array.isArray(exception) && exception.includes(owner)) {
+      return { kind: "docker-publish", project, projectOwner: owner, ...base };
+    }
+    return { kind: "denied", reason: "foreign project", ...base, project };
   }
   return { kind: "denied", reason: "other uid", ...base };
 }
@@ -188,15 +258,30 @@ async function verdictFor(listener, opts) {
  *   `addonId`        the add-on being walled
  *   `addonProjects`  Map of compose project -> add-on id, across instances
  *   `docker`         async () => [{ hostIp, hostPort, project }]
+ *   `crowRoots`      absolute paths of this Crow's checkout and home (both
+ *                    spellings); default: `CROW_APP_ROOT` and `CROW_HOME`.
+ *                    Empty: no same-uid listener passes at all
+ *   `selfPids`       pids of the wall's own processes (default `[process.pid]`)
  *   `readFile`, `readdir`, `readlink`  injected /proc readers (tests)
- * @returns {Promise<{kind: "own-uid"|"docker-publish"|"denied", reason?: string, uid?: number, pid?: number, project?: string|null, inode?: string}>}
+ * @returns {Promise<{kind: "own-uid"|"docker-publish"|"denied", reason?: string, uid?: number, pid?: number, project?: string, projectOwner?: string, inode?: string}>}
  */
 export async function identifyListener(addr, port, o = {}) {
+  const roots = (v) => {
+    const out = [];
+    for (const r of Array.isArray(v) ? v : [process.env.CROW_APP_ROOT, process.env.CROW_HOME]) {
+      const c = cleanPath(r);
+      if (c && !out.includes(c)) out.push(c);
+    }
+    return out;
+  };
+  const pids = (v) => new Set((Array.isArray(v) ? v : [process.pid]).map(Number).filter(Number.isInteger));
   const opts = {
     gatewayUid: Number.isInteger(o.gatewayUid) ? o.gatewayUid : (typeof process.getuid === "function" ? process.getuid() : null),
     addonId: o.addonId ?? null,
     addonProjects: o.addonProjects instanceof Map ? o.addonProjects : new Map(),
     docker: typeof o.docker === "function" ? o.docker : null,
+    crowRoots: roots(o.crowRoots),
+    selfPids: pids(o.selfPids),
     readFile: o.readFile || ((p) => readFileSync(p, "utf8")),
     readdir: o.readdir || ((p) => readdirSync(p)),
     readlink: o.readlink || ((p) => readlinkSync(p)),

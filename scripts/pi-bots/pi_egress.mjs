@@ -541,9 +541,11 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
 
 // ---- add-on mode: per-add-on allow lists -----------------------------------
 // A walled add-on gets its own relay: no bot doors, a list of loopback ports
-// splice-checked against the listener's owner, exact CONNECT entries that may
-// be private, and (D1) absolute-form plain HTTP to those same entries. None of
-// this is reachable when `o.addon` is absent (the bot path).
+// splice-checked against the listener's owner (an owner-typed URL may reach a
+// process of this user; a manifest default may reach only a published port),
+// exact CONNECT entries that may be private, and (D1) absolute-form plain HTTP
+// to those same entries. None of this is reachable when `o.addon` is absent
+// (the bot path).
 
 /** The last N refused targets a relay keeps for the owner's status card. */
 const MAX_DENIALS = 20;
@@ -630,7 +632,10 @@ function normalizeAddon(raw) {
       const port = Number(e.port);
       if (!isPortNumber(port) || out.has(port)) continue;
       const ownerProject = typeof e.ownerProject === "string" && e.ownerProject ? e.ownerProject : null;
-      out.set(port, { port, ownerProject });
+      // "owner": the owner typed this URL into the field. Anything else is a
+      // manifest default, which may only reach a published port.
+      const source = e.source === "owner" ? "owner" : "default";
+      out.set(port, { port, ownerProject, source });
     }
     return out;
   };
@@ -958,7 +963,8 @@ export function createEgressRelay(o) {
 
   // ---- add-on mode: listed targets, the owner check, D1 plain HTTP --------
   // A walled add-on's loopback ports are spliced raw (WebSocket upgrades pass:
-  // it is raw TCP) only after the listener's owner is checked, and an
+  // it is raw TCP) only after the listener's owner is checked against the
+  // entry (who it belongs to, and whether the owner typed the URL), and an
   // absolute-form plain-HTTP request to a listed host:port gets one HTTP parser
   // of its own: one request per connection, `Connection: close` on every
   // answer, and the same target checks a listed CONNECT gets.
@@ -1103,10 +1109,21 @@ export function createEgressRelay(o) {
       const r = String(owner.reason || "denied");
       return r === "gateway" || r === "satellite" ? "a gateway listens there; gateways are reached through doors only" : r;
     }
-    if (kind === "own-uid") return entry.ownerProject ? "the listener is not published by " + entry.ownerProject : null;
+    if (kind === "own-uid") {
+      // A process of this user is trusted only for an address the owner typed.
+      if (entry.source !== "owner") return "a default URL never reaches a process of this user";
+      return entry.ownerProject ? "the listener is not published by " + entry.ownerProject : null;
+    }
     if (kind === "docker-publish") {
-      if (!entry.ownerProject || owner.project === entry.ownerProject) return null;
-      return "published by another compose project";
+      const projectOwner = typeof owner.projectOwner === "string" ? owner.projectOwner : "";
+      if (!projectOwner) return "the owner check did not name a compose project";
+      if (projectOwner === cfg.id) return !entry.ownerProject || owner.project === entry.ownerProject
+        ? null
+        : "published by another compose project";
+      // Another add-on's project (the named TTS exception): only a port the
+      // owner named, and only the one that project publishes.
+      if (entry.ownerProject && entry.ownerProject === owner.project) return null;
+      return "published by another add-on's compose project";
     }
     return "owner check failed";
   }
