@@ -18,7 +18,7 @@
  * (preflightBundleUp) with the same checkComposeModel.
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
-import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute, posix } from "node:path";
+import { join, resolve as resolvePath, relative, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -369,18 +369,25 @@ export function reservedCommunityId(id) {
 
 /**
  * The first path segment a bundle-relative value resolves to, or null when it resolves
- * outside the bundle. Resolved EXACTLY as the gateway resolves a declared path — with
- * `path.join` against the bundle dir, which keeps an absolute value and a `..` INSIDE the
- * folder (join("/b", "/data/x.js") and join("/b", "panel/../data/x.js") are both
- * "/b/data/x.js"). A `\` or `$` is an ordinary filename character on Linux, so a file
- * named `ui\r.js` really is the `ui\r.js` entry and is resolved as one.
+ * outside the bundle folder. Resolved EXACTLY as the gateway resolves a declared path — with
+ * `path.join` against the INSTALLED bundle folder, which keeps an absolute value and a `..`
+ * INSIDE that folder (join("<dir>/foo", "/data/x.js") and join("<dir>/foo", "panel/../data/x.js")
+ * both land inside it, and "../foo/data/x.js" lands back in the same folder). Both sides are
+ * real paths (symlinks followed), because the bind this is compared with is resolved the same
+ * way. A `\` or `$` is an ordinary filename character on Linux, so a file named `ui\r.js`
+ * really is the `ui\r.js` entry and is resolved as one.
  */
 const FAKE_BUNDLE_ROOT = "/b";
-function resolvedBundleTop(value) {
+function resolvedBundleTop(value, bundleDir, bundleReal) {
   if (typeof value !== "string" || !value) return null;
-  const rel = posix.relative(FAKE_BUNDLE_ROOT, posix.join(FAKE_BUNDLE_ROOT, value));
-  if (!rel || rel === "." || rel === ".." || rel.startsWith("../")) return null;
-  return rel.split("/")[0];
+  // Without an installed folder to resolve against, the same join against a fixed root is the
+  // best reading available.
+  const base = typeof bundleDir === "string" && bundleDir ? resolvePath(bundleDir) : FAKE_BUNDLE_ROOT;
+  const real = base === FAKE_BUNDLE_ROOT ? null : (bundleReal || resolveHostPath(base));
+  const target = real ? resolveHostPath(join(base, value)) : join(base, value);
+  const rel = relative(real || base, target);
+  if (!rel || rel === "." || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return rel.split(sep)[0];
 }
 
 /**
@@ -388,10 +395,10 @@ function resolvedBundleTop(value) {
  * normalises it with path.relative(".", v), so `deploy/../data/c.yml` becomes `data/c.yml`
  * and is read from there. Repeated here (not imported: that module reaches this one).
  */
-function resolvedComposeTop(declared) {
+function resolvedComposeTop(declared, bundleDir, bundleReal) {
   const v = declared === undefined || declared === null || declared === "" ? "docker-compose.yml" : declared;
   if (typeof v !== "string" || isAbsolute(v) || v.includes("\\") || v.includes("$")) return null;
-  return resolvedBundleTop(v);
+  return resolvedBundleTop(v, bundleDir, bundleReal);
 }
 
 /**
@@ -406,16 +413,19 @@ function resolvedComposeTop(declared) {
  *
  * Which paths a manifest declares is shared/bundle-declared-paths.js (the version refresh
  * reads the same list, so the two can never disagree). Each path is then resolved the way
- * `path.join` places it against the bundle folder, so a declaration that points somewhere
- * else ("/data/routes.js", "panel/../data/x.js", an object panel's id) names the entry it
- * really lands in. Only a value that resolves outside the bundle names nothing here; the
- * manifest contract refuses it. (A manifest declaring a path that its reader skips outright
- * — an absolute skill path — still protects the folder join() puts it in: over-protecting a
- * folder nothing is read from costs nothing.)
+ * `path.join` places it against the INSTALLED bundle folder, so a declaration that points
+ * somewhere else ("/data/routes.js", "panel/../data/x.js", "../<this-folder>/data/x.js", an
+ * object panel's id) names the entry it really lands in. Only a value that really resolves
+ * outside the folder names nothing here; the manifest contract refuses it. (A manifest
+ * declaring a path that its reader skips outright — an absolute skill path — still protects
+ * the folder join() puts it in: over-protecting a folder nothing is read from costs nothing.)
  *
+ * @param {object} manifest
+ * @param {string} [bundleDir]   the installed bundle folder the declaration resolves against
+ * @param {string} [bundleReal]  that folder as it really leads (resolveHostPath)
  * @returns {Map<string, string[]>} top-level entry → the manifest keys naming a file there
  */
-function manifestControlTops(manifest) {
+function manifestControlTops(manifest, bundleDir, bundleReal) {
   const tops = new Map();
   const add = (top, key) => {
     if (!top) return;
@@ -423,8 +433,8 @@ function manifestControlTops(manifest) {
     if (!keys) tops.set(top, [key]);
     else if (!keys.includes(key)) keys.push(key);
   };
-  add(resolvedComposeTop(manifest?.docker?.composefile), "docker.composefile");
-  for (const { key, value } of declaredControlPaths(manifest)) add(resolvedBundleTop(value), key);
+  add(resolvedComposeTop(manifest?.docker?.composefile, bundleDir, bundleReal), "docker.composefile");
+  for (const { key, value } of declaredControlPaths(manifest)) add(resolvedBundleTop(value, bundleDir, bundleReal), key);
   return tops;
 }
 
@@ -439,7 +449,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   // bundle-relative arguments, widgets, the post-install hook, skills): their top-level entry
   // in the bundle folder is control too, whatever the install shipped (ctx.shipped is only
   // built on the Extensions path, from a repo copy that need not exist).
-  const manifestControl = manifestControlTops(manifest);
+  const manifestControl = manifestControlTops(manifest, bundleDir, bundleReal);
   const refuse = (reason) => ({ valid: false, reason });
   const needPriv = (what) => (isPrivilegedAllowed ? null : refuse(`Compose file uses ${what} but manifest does not declare 'privileged: true' (or consent was not verified)`));
   const grants = hostGrants(manifest);

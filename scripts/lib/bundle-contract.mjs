@@ -11,6 +11,10 @@ import { join, isAbsolute, basename } from "node:path";
 import Ajv from "ajv";
 import { INVITE_HANDLER_NAMES, isInviteHandlerName } from "../../servers/gateway/first-admin/registry.js";
 import { firstAdminAfterProblems } from "../../servers/gateway/bundle-first-admin-after.js";
+// The "is this a plain path inside the bundle" rule and the panel-id rule live in one leaf
+// module, shared with routes/bundles.js (which skips such a value at install) and
+// compose-guard.js: a manifest the contract refuses is the same value the runtime refuses.
+import { badBundlePath, badPanelId } from "../../servers/shared/bundle-declared-paths.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -121,16 +125,6 @@ function fileExists(bundleDir, rel) {
   if (typeof rel !== "string" || !rel) return false;
   const p = isAbsolute(rel) ? rel : join(bundleDir, rel);
   return existsSync(p);
-}
-
-/**
- * A manifest path the gateway reads relative to the bundle dir must be a plain relative
- * path that stays inside it: never absolute, never carrying a `\` (an ordinary filename
- * character on Linux, so the gateway would resolve it as written while a reader on another
- * platform would not), never walking out with a `..` segment.
- */
-function badBundlePath(p) {
-  return typeof p !== "string" || p === "" || isAbsolute(p) || p.includes("\\") || p.split("/").includes("..");
 }
 
 /**
@@ -468,7 +462,7 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
   // file name: a plain name, never a path that separates or climbs.
   if (manifest && manifest.panel && typeof manifest.panel === "object" && !Array.isArray(manifest.panel) && manifest.panel.id !== undefined) {
     const panelId = manifest.panel.id;
-    if (typeof panelId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(panelId)) errors.push(`panel.id "${panelId}" must match ^[a-z0-9][a-z0-9-]*$`);
+    if (badPanelId(panelId)) errors.push(`panel.id "${panelId}" must match ^[a-z0-9][a-z0-9-]*$`);
   }
   if (manifest && typeof manifest.panelRoutes === "string") {
     if (badBundlePath(manifest.panelRoutes)) errors.push(`panelRoutes "${manifest.panelRoutes}" must be a relative path inside the bundle`);

@@ -129,11 +129,12 @@ test("declared paths must be plain relative paths inside the bundle", () => {
     skills: ["skills/x.md"],
     postInstall: { script: "scripts/hook.sh" },
   }, b.dir).ok, true);
-  // An object panel's id is a file name (panel/<id>.js): a plain name only.
+  // An object panel's id is a file name (panel/<id>.js): a plain name only. The gateway stringifies
+  // whatever the id is into that path, so a non-string id (an array climbing with `..`) is refused too.
   assert.equal(validateManifest({ ...VALID, panel: { id: "gis", extends: "data-dashboard" } }, b.dir).ok, true);
-  for (const id of ["../data/evil", "a/b", "Data", "demo.js"]) {
+  for (const id of ["../data/evil", "a/b", "Data", "demo.js", ["../data/evil"]]) {
     const r = validateManifest({ ...VALID, panel: { id } }, b.dir);
-    assert.equal(r.ok, false, `panel.id ${id}`);
+    assert.equal(r.ok, false, `panel.id ${JSON.stringify(id)}`);
     assert.ok(r.errors.some((e) => e.startsWith("panel.id ")), r.errors.join("; "));
   }
   // Absolute (`/etc/...` really exists on the host), `..`, and `\`.

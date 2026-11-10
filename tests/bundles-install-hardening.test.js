@@ -13,7 +13,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import express from "express";
 
 const HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
@@ -296,6 +296,61 @@ test("compose-up failure: panel, routes, panels.json (object form), skills and g
     clearTimeout(job._evictTimer);
     _setComposeRunnerForTest(null);
     _setAppEnvPathForTest(null);
+  }
+});
+
+// ─── 2b. panel declarations the manifest contract refuses are skipped, never copied ───
+
+/** Run an install with console.warn captured, and give back what it logged. */
+async function installCapturingWarnings(id, envVars = { FX_SECRET: "s" }) {
+  _setComposeRunnerForTest(async () => ({ stdout: "", stderr: "" }));
+  const warnings = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(" ")); };
+  const job = _createJobForTest(id, "install");
+  try {
+    const manifest = JSON.parse(readFileSync(join(FIXTURES, id, "manifest.json"), "utf8"));
+    const out = await runInstallJob(id, envVars, { job, installedSnapshot: [], consentVerified: false, manifest });
+    return { out, warnings };
+  } finally {
+    console.warn = origWarn;
+    _finishJobForTest(job, "completed");
+    clearTimeout(job._evictTimer);
+    _setComposeRunnerForTest(null);
+  }
+}
+
+/** A file at the place join(destDir, <hostile value>) puts it, so a copy would have happened. */
+function plantClimbedFile(id, rel) {
+  const p = join(FIXTURES, id, rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, "throw new Error('this file must never reach the panel surface');\n");
+}
+
+test("install: a panel or panelRoutes value that is absolute, climbs or carries a `\\` is skipped with one log line (the contract refuses the same values)", async () => {
+  const id = "fx-panel-refused";
+  buildFixture(id, { panel: "panel/../data/evil.js", panelRoutes: "/data/routes.js" });
+  plantClimbedFile(id, "data/evil.js");
+  plantClimbedFile(id, "data/routes.js");
+  const { out, warnings } = await installCapturingWarnings(id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.ok(!existsSync(join(HOME, "panels", id + ".js")), "the climbing panel file was not installed");
+  assert.ok(!existsSync(join(HOME, "panels", id + "-routes.js")), "the absolute routes path was not installed");
+  const said = warnings.filter((w) => w.includes("manifest.panel"));
+  assert.equal(said.length, 2, warnings.join("\n"));
+  assert.match(said.join("\n"), /manifest\.panel '/);
+  assert.match(said.join("\n"), /manifest\.panelRoutes '/);
+});
+
+test("install: an object panel whose id is not a plain name (an array, an uppercase/underscore name) is not installed", async () => {
+  for (const badId of [["../data/evil"], "Bad_Id"]) {
+    const id = "fx-panel-badid-" + (Array.isArray(badId) ? "array" : "string");
+    buildFixture(id, { panel: { id: badId, name: "Evil" } });
+    plantClimbedFile(id, "data/evil.js");
+    const { out, warnings } = await installCapturingWarnings(id);
+    assert.equal(out.ok, true, JSON.stringify(out));
+    assert.ok(!existsSync(join(HOME, "panels", id + ".js")), `panel.id ${JSON.stringify(badId)} was not installed`);
+    assert.ok(warnings.some((w) => w.includes("manifest.panel.id")), warnings.join("\n"));
   }
 });
 

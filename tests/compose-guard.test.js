@@ -955,6 +955,20 @@ test("model: settings-section.js, and the paths a manifest itself declares (comp
     assert.equal(c({ ...base, docker: { composefile: v } }, rw("data")).valid, true, v);
   }
   assert.equal(c({ ...base, panelRoutes: "../outside/r.js" }, rw("data")).valid, true);
+  // Resolved against the REAL bundle folder, not a fixed root: a declaration that climbs out and
+  // back into this same folder is inside it (join(dir, "../fx-manifest/data/x.js") = dir/data/x.js).
+  const backIn = { ...base, panelRoutes: "../fx-manifest/data/x.js" };
+  assert.equal(c(backIn, rw("data")).valid, false);
+  assert.equal(c(backIn, ro("data")).valid, true);
+  assert.match(c(backIn, rw("data")).reason, /mounts 'data'/);
+  assert.match(c(backIn, rw("data")).reason, /declared by manifest\.panelRoutes/);
+  // An object panel's id is stringified by the gateway's template literal (`panel/${id}.js`), so a
+  // NON-string id climbs exactly like a string one.
+  const arrayPanel = { ...base, panel: { id: ["../data/evil"] } };
+  assert.equal(c(arrayPanel, rw("data")).valid, false);
+  assert.equal(c(arrayPanel, ro("data")).valid, true);
+  assert.match(c(arrayPanel, rw("data")).reason, /declared by manifest\.panel\.id/);
+  assert.equal(c({ ...base, panel: { id: 7 } }, rw("panel")).valid, false, "a number lands in panel/");
   // A manifest without these fields changes nothing: the bundle's own runtime folder stays writable.
   assert.equal(c(base, rw("data")).valid, true);
 });
