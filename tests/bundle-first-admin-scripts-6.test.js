@@ -746,13 +746,15 @@ test("kolibri: the superuser is created through Kolibri's own provisioning, neve
   const code = script.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
   for (const text of [code, snippetOf(script, "HTTP"), snippetOf(script, "PROVISION")]) {
     assert.equal(/api\/tasks/.test(text), false, "the tasks API stores the plaintext password in a readable task record");
-    assert.equal(/provisiondevice/.test(text), false, "and its provisiondevice task is the way that happens");
+    assert.equal(/["']provisiondevice["']|kind["']?\s*:\s*["'][^"']*provisiondevice/.test(text), false, "and no provisiondevice TASK is queued (only its validate_options function is imported)");
   }
   const provision = snippetOf(script, "PROVISION");
-  assert.match(provision, /from kolibri\.core\.device\.provisioning import setup_device_and_facility, validate_options/);
+  assert.match(provision, /from kolibri\.core\.device\.utils import device_provisioned, setup_device_and_facility/);
+  assert.match(provision, /from kolibri\.core\.device\.management\.commands\.provisiondevice import validate_options/);
+  assert.match(provision, /if device_provisioned\(\):\s*\n\s*print\("DONE"\)/, "a provisioned device is never provisioned again");
+  assert.match(provision, /setup_device_and_facility\(\*args\)/);
   assert.match(provision, /"preset": "informal"/);
   assert.match(provision, /"language_id": "en"/);
-  assert.match(provision, /DeviceAlreadyProvisioned/, "a device that is already set up is not an error");
 
   const r = run("kolibri");
   assert.equal(r.status, 0, r.stderr);
@@ -779,7 +781,7 @@ test("kolibri: the compose mounts the volume where the image insists, and probes
   assert.equal(compose.includes("KOLIBRI_FACILITY_NAME"), false, "Kolibri does not read that variable: only the setup script does");
   assert.equal(manifestOf("kolibri").refreshFiles.includes("docker-compose.yml"), true, "an installed copy receives the fixed compose");
   // The setup script's snippets run with the same interpreter the healthcheck names (Kolibri
-  // is python3-based; there is no `python` on its PATH).
+  // is python3-based; python3 is the interpreter this script uses).
   assert.match(readFileSync(join(B("kolibri"), "scripts", "first-admin.sh"), "utf8"), /^PYTHON=python3$/m);
 });
 
@@ -973,4 +975,62 @@ test("every skill these bundles changed is in the ledger (an edited skill needs 
     }
   }
   assert.deepEqual(missing, [], "run `node scripts/build-skill-history.mjs` for these skills");
+});
+// ── the python snippets themselves, run by a real interpreter (the fakes above only see words) ──
+
+const PY = spawnSync("python3", ["--version"]).status === 0 ? "python3" : null;
+
+test("changedetection: the settings form parser never re-sends a password input and drops the textarea's leading line break", { skip: !PY && "no python3 on this host" }, () => {
+  const script = readFileSync(join(B("changedetection"), "scripts", "first-admin.sh"), "utf8");
+  const cd = snippetOf(script, "CD");
+  const parserPart = cd.slice(0, cd.indexOf("def opener("));
+  const page = [
+    '<form><input type="hidden" name="csrf_token" value="tok">',
+    '<input name="application-password" type="password" value="">',
+    '<input name="requests-time_between_check-minutes" type="text" value="5">',
+    '<input type="checkbox" name="application-empty_pages_are_a_change" checked>',
+    '<input type="checkbox" name="application-fetch_backend_off">',
+    '<textarea name="application-notification_body">\r\nHello {{watch_url}}</textarea>',
+    '<select name="application-fetch_backend"><option value="a">A</option><option value="b" selected>B</option></select>',
+    "</form>",
+  ].join("");
+  const probe = `${parserPart}\nimport json\np = Fields()\np.feed(${JSON.stringify(page)})\nprint(json.dumps(p.fields))\n`;
+  const r = spawnSync(PY, ["-c", probe], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const fields = JSON.parse(r.stdout.trim().split("\n").pop());
+  const names = fields.map(([n]) => n);
+  assert.equal(names.includes("application-password"), false, "the empty password input would shadow the real one");
+  assert.deepEqual(fields.find(([n]) => n === "application-notification_body"), ["application-notification_body", "Hello {{watch_url}}"]);
+  assert.equal(names.includes("application-fetch_backend_off"), false, "an unchecked checkbox is not sent");
+  assert.deepEqual(fields.find(([n]) => n === "application-fetch_backend"), ["application-fetch_backend", "b"]);
+  assert.deepEqual(fields.find(([n]) => n === "csrf_token"), ["csrf_token", "tok"]);
+});
+
+test("kolibri: the provisioning snippet uses 0.19.5's real functions and never provisions twice", { skip: !PY && "no python3 on this host" }, () => {
+  const script = readFileSync(join(B("kolibri"), "scripts", "first-admin.sh"), "utf8");
+  const provision = snippetOf(script, "PROVISION");
+  const stub = mkdtempSync(join(tmpdir(), "kolibri-stub-"));
+  const pkg = (rel, body) => { mkdirSync(join(stub, dirname(rel)), { recursive: true }); writeFileSync(join(stub, rel), body); };
+  for (const d of ["kolibri", "kolibri/core", "kolibri/core/device", "kolibri/core/device/management", "kolibri/core/device/management/commands"]) pkg(`${d}/__init__.py`, "");
+  pkg("kolibri/core/device/utils.py", [
+    "import os, json",
+    "def device_provisioned():",
+    "    return os.environ.get('STUB_PROVISIONED') == '1'",
+    "def setup_device_and_facility(*args):",
+    "    open(os.environ['STUB_OUT'], 'w').write(json.dumps([len(args)]))",
+  ].join("\n"));
+  pkg("kolibri/core/device/management/commands/provisiondevice.py", [
+    "def validate_options(o):",
+    "    assert o['interactive'] is False and o['facility_settings'] == {} and o['device_settings'] == {}",
+    "    return (o['facility'], o['preset'], o['superusername'], o['superuserpassword'], o['language_id'], {}, {})",
+  ].join("\n"));
+  try {
+    const out = join(stub, "out.json");
+    const fresh = spawnSync(PY, ["-c", provision], { input: `${"x".repeat(16)}\nadmin\nHome Lab\n`, encoding: "utf8", env: { ...process.env, PYTHONPATH: stub, STUB_OUT: out } });
+    assert.equal(fresh.stdout.trim(), "CREATED", fresh.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), [7], "setup_device_and_facility gets validate_options' seven values");
+    const again = spawnSync(PY, ["-c", provision], { input: "pw\nadmin\nHome Lab\n", encoding: "utf8", env: { ...process.env, PYTHONPATH: stub, STUB_OUT: join(stub, "out2.json"), STUB_PROVISIONED: "1" } });
+    assert.equal(again.stdout.trim(), "DONE");
+    assert.equal(existsSync(join(stub, "out2.json")), false, "a provisioned device is never provisioned again");
+  } finally { rmSync(stub, { recursive: true, force: true }); }
 });

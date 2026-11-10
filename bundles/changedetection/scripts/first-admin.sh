@@ -95,7 +95,9 @@ class Fields(HTMLParser):
             if kind in ("checkbox", "radio"):
                 if "checked" in attrs:
                     self.fields.append((name, attrs.get("value") or "on"))
-            elif kind in ("submit", "button", "image", "file", "reset"):
+            elif kind in ("submit", "button", "image", "file", "reset", "password"):
+                # Password inputs are never re-sent: the app own (empty) application-password
+                # field would come first and WTForms reads only the first value.
                 return
             else:
                 self.fields.append((name, attrs.get("value") or ""))
@@ -127,7 +129,13 @@ class Fields(HTMLParser):
             self.fields.append((self.select_name, value))
             self.select_name = None
         elif tag == "textarea" and self.textarea:
-            self.fields.append((self.textarea, "".join(self.text)))
+            text = "".join(self.text)
+            # Browsers drop the one line break that follows <textarea>; so does this re-post.
+            if text.startswith("\r\n"):
+                text = text[2:]
+            elif text.startswith("\n"):
+                text = text[1:]
+            self.fields.append((self.textarea, text))
             self.textarea = None
             self.text = []
 

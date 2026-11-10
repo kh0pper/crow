@@ -8,7 +8,7 @@
 # generated, before the operator's first visit.
 #
 # How: `kolibri manage shell -c` runs a snippet inside the container as the app's own user,
-# so Kolibri's provisioning code (`kolibri.core.device`) writes the database the way its own
+# so Kolibri's provisioning code (`kolibri.core.device.utils` + the provisiondevice command's `validate_options`) writes the database the way its own
 # wizard would. The password, the username and the facility name reach that snippet as its
 # first three stdin lines — never an argument, an environment value or output — and it prints
 # ONE status word.
@@ -120,14 +120,8 @@ def prove(name, password):
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     token = ""
     try:
-        resp = op.open(BASE + "/api/auth/session/current/", timeout=TIMEOUT)
-        try:
-            resp.read()
-        finally:
-            resp.close()
-        for cookie in jar:
-            if cookie.name == "csrftoken":
-                token = cookie.value
+        # Kolibri 0.19.5 accepts an anonymous session POST without a CSRF cookie (its
+        # session/current endpoint answers GET with 405), so the login is asked directly.
         data = json.dumps({"username": name, "password": password}).encode()
         req = urllib.request.Request(
             BASE + "/api/auth/session/",
@@ -135,7 +129,6 @@ def prove(name, password):
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "X-CSRFToken": token,
                 "Referer": BASE + "/",
             },
         )
@@ -177,33 +170,33 @@ username = sys.stdin.readline().rstrip("\n")
 facility = sys.stdin.readline().rstrip("\n")
 
 try:
-    from kolibri.core.device.provisioning import setup_device_and_facility, validate_options
+    from kolibri.core.device.utils import device_provisioned, setup_device_and_facility
+    from kolibri.core.device.management.commands.provisiondevice import validate_options
 except Exception:
     print("UNKNOWN")
     sys.exit(0)
 
-options = {
-    "superusername": username,
-    "superuserpassword": password,
-    "facility": facility,
-    "preset": "informal",
-    "language_id": "en",
-}
+# An already provisioned device is never provisioned again (that would add a second
+# facility and superuser): nothing changes.
+if device_provisioned():
+    print("DONE")
+    sys.exit(0)
 
 try:
-    problem = validate_options(options)
+    args = validate_options({
+        "interactive": False,
+        "facility": facility,
+        "preset": "informal",
+        "language_id": "en",
+        "superusername": username,
+        "superuserpassword": password,
+        "facility_settings": {},
+        "device_settings": {},
+    })
+    setup_device_and_facility(*args)
+    print("CREATED")
 except Exception:
-    problem = "validate_options failed"
-
-if problem:
-    print("UNKNOWN")
-else:
-    try:
-        setup_device_and_facility(options)
-        print("CREATED")
-    except Exception as err:
-        # A device that already has its admin raises DeviceAlreadyProvisioned: nothing changed.
-        print("DONE" if type(err).__name__ == "DeviceAlreadyProvisioned" else "UNKNOWN")'
+    print("UNKNOWN")'
 
 # One snippet run, its answer cut down to the ONE status word the snippet printed. Bounded
 # twice: `timeout` on the host around the whole exec, and the snippet's own request timeouts.
