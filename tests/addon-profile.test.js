@@ -314,7 +314,7 @@ test("a declared crowDb:false contradicted by the scan stays true and is refused
   const profile = deriveProfile(manifest, {}, { crowDbScan: true });
   assert.equal(profile.crowDb, true);
   assert.ok(profile.refused.some((r) => r.what === "crowDb" && r.reason === "profile error: the server code opens crow.db"));
-  assert.equal(profile.label.en.at(-1), "can read Crow's stored keys and change its database");
+  assert.equal(profile.label.en.at(-1), "read Crow's stored keys and change its database");
 });
 
 // --- compose ports --------------------------------------------------------
@@ -540,8 +540,8 @@ test("labels: one sentence per part, in a fixed order, and never the word 'conta
   const studio = profileFor({ id: "studio", entry: {}, appBundlesDir: join(REPO, "bundles"), installedBundlesDir: NO_INSTALLED });
   assert.equal(studio.crowDb, true);
   assert.equal(studio.label.en.length, studio.labelParts.length);
-  assert.equal(studio.label.en.at(-1), "can read Crow's stored keys and change its database");
-  assert.equal(studio.label.es.at(-1), "puede leer las claves guardadas de Crow y cambiar su base de datos");
+  assert.equal(studio.label.en.at(-1), "read Crow's stored keys and change its database");
+  assert.equal(studio.label.es.at(-1), "leer las claves guardadas de Crow y cambiar su base de datos");
   assert.ok(studio.labelParts.some((p) => p.kind === "own-folder"));
 
   for (const profile of [paperless, studio]) {

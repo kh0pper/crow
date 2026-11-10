@@ -71,10 +71,10 @@ test("the paperless profile's line is exactly the one the install modal shows", 
 
 test("studio's line ends with Crow's database, and says storage before it when it carries that residual", () => {
   const line = sandboxLine(REGISTRY_PROFILES.studio, "en", { walled: true, residuals: [{ kind: "storage" }] });
-  assert.ok(line.endsWith("can read Crow's stored keys and change its database"), line);
-  const storageAt = line.indexOf("can use all of Crow's storage");
+  assert.ok(line.endsWith("; read Crow's stored keys and change its database"), line);
+  const storageAt = line.indexOf("; use all of Crow's storage");
   assert.ok(storageAt > 0, line);
-  assert.ok(storageAt < line.indexOf("can read Crow's stored keys"), line);
+  assert.ok(storageAt < line.indexOf("; read Crow's stored keys"), line);
 });
 
 test("walls off here: the line says what the wall WOULD allow, never that a limit is in force", () => {

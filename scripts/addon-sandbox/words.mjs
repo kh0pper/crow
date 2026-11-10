@@ -126,11 +126,11 @@ export function labelPhrase(part) {
     case "oauth-dir":
       return ["use the sign-in folder you chose", "usar la carpeta de inicio de sesión que elegiste"];
     case "crow-db":
-      return ["can read Crow's stored keys and change its database", "puede leer las claves guardadas de Crow y cambiar su base de datos"];
+      return ["read Crow's stored keys and change its database", "leer las claves guardadas de Crow y cambiar su base de datos"];
     case "pending-host":
       return ["reach the address you enter below", "acceder a la dirección que ingreses abajo"];
     case "storage":
-      return ["can use all of Crow's storage", "puede usar todo el almacenamiento de Crow"];
+      return ["use all of Crow's storage", "usar todo el almacenamiento de Crow"];
     default:
       return ["", ""];
   }
