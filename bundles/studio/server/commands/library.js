@@ -297,6 +297,10 @@ defineCommand({
     const amps = libraryInsertUsers(doc, args.library_id);
     if (users.length > 0 || amps.length > 0) {
       const snap = snapshot(doc);
+      // Name the tracks in the song's own order (libraryUsers sorts by id,
+      // which is not an order a person sees).
+      const position = new Map((snap.tracks ?? []).map((track, index) => [track?.id, index]));
+      users.sort((a, b) => (position.get(a) ?? Infinity) - (position.get(b) ?? Infinity));
       const parts = [
         ...users.map((id) => userText(snap, id, false)),
         ...amps.map((id) => userText(snap, id, true)),
