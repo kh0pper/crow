@@ -39,7 +39,7 @@
  */
 import { t, fill } from "./i18n.js";
 import { appTileLink } from "./app-link.js";
-import { isAdminPanelTokenEnvKey, isInviteHandlerName } from "../../first-admin/registry.js";
+import { isAdminPanelTokenEnvKey, isInviteHandlerName, inviteHandlerBundleId } from "../../first-admin/registry.js";
 
 /** The modes a manifest may declare (same list as the contract). */
 export const FIRST_ADMIN_MODES = Object.freeze(["crow", "finish-setup", "default-login", "external", "none"]);
@@ -59,6 +59,7 @@ export const FIRST_ADMIN_INVITE_CREATE_BODY_KEY = "bundles.firstAdmin.invite.cre
 export const FIRST_ADMIN_INVITE_CREATE_OPEN_BODY_KEY = "bundles.firstAdmin.invite.createOpenBody";
 export const FIRST_ADMIN_INVITE_BODY_KEY = "bundles.firstAdmin.invite.inviteBody";
 export const FIRST_ADMIN_INVITE_SIGNUPS_OPEN_KEY = "bundles.firstAdmin.invite.signupsOpen";
+export const FIRST_ADMIN_INVITE_OTHERS_KEY = "bundles.firstAdmin.invite.others";
 
 /**
  * The keychain entry name a bundle's admin login is saved under when its
@@ -75,7 +76,10 @@ export const FIRST_ADMIN_SAVED_KEY = "APP_ADMIN_PASSWORD";
  *
  * `invite` is kept only when the mode is `finish-setup` AND the name is one of
  * Crow's code-held handlers: anything else is as good as absent (the contract
- * refuses it at build time; runtime stays fail-safe).
+ * refuses it at build time; runtime stays fail-safe). The handler is also bound to
+ * the ONE bundle it belongs to, which needs the bundle id: pendingFirstAdminNotices
+ * drops the invite card for any other bundle (inviteHandlerBundleId), and the
+ * gateway resolves a handler with inviteHandlerFor(manifest, bundleId).
  *
  * @param {object|null} manifest
  * @returns {{mode: string, path: string|null, user: string|null, note: string|null, invite: string|null}|null}
@@ -211,22 +215,31 @@ export function firstAdminBody(fa, name, lang = "en") {
  *   invite   nobody at all: ask for the email to invite
  * ("done" never reaches a card, and "blocked" keeps the normal finish-setup body.)
  *
- * @param {{kind: string, email: string|null, signups: string}|null} invite
+ * @param {{kind: string, email: string|null, signups: string, others?: string[]}|null} invite
+ *   `others` are registered addresses that are not the owner's: named in one extra
+ *   sentence, so an account nobody expected cannot hide behind the card.
  * @param {string} name the app's display name
  */
 export function firstAdminInviteBody(invite, name, lang = "en") {
   if (!invite) return null;
-  if (invite.kind === "close") return fill(t(FIRST_ADMIN_INVITE_CLOSE_BODY_KEY, lang), { name });
+  if (invite.kind === "close") return withOthers(fill(t(FIRST_ADMIN_INVITE_CLOSE_BODY_KEY, lang), { name }), invite, lang);
   if (invite.kind === "create") {
     // Never claim sign-ups are closed when the app said they are not.
     const key = invite.signups === "on" ? FIRST_ADMIN_INVITE_CREATE_OPEN_BODY_KEY : FIRST_ADMIN_INVITE_CREATE_BODY_KEY;
-    return fill(t(key, lang), { name, email: invite.email || "" });
+    return withOthers(fill(t(key, lang), { name, email: invite.email || "" }), invite, lang);
   }
   if (invite.kind === "invite") {
     const body = fill(t(FIRST_ADMIN_INVITE_BODY_KEY, lang), { name });
-    return invite.signups === "on" ? `${body} ${t(FIRST_ADMIN_INVITE_SIGNUPS_OPEN_KEY, lang)}` : body;
+    const open = invite.signups === "on" ? `${body} ${t(FIRST_ADMIN_INVITE_SIGNUPS_OPEN_KEY, lang)}` : body;
+    return withOthers(open, invite, lang);
   }
   return null;
+}
+
+/** `body` plus the "also registered" sentence when there is one. */
+function withOthers(body, invite, lang) {
+  const others = firstAdminInviteOthers(invite, lang);
+  return others ? `${body} ${others}`.trim() : body;
 }
 
 /**
@@ -237,8 +250,23 @@ export function firstAdminInviteReason(reason, name, lang = "en") {
   const key = reason === "not-local" ? "notLocal"
     : reason === "no-token" ? "noToken"
       : reason === "unreachable" ? "unreachable"
-        : "unknown";
+        : reason === "rate-limited" ? "rateLimited"
+          : "unknown";
   return fill(t(`bundles.firstAdmin.invite.reason.${key}`, lang), { name });
+}
+
+/**
+ * The "these are not accounts you made" sentence for an invite card whose app has
+ * registered accounts other than the owner's address, or null. `others` comes from
+ * the handler (it knows the owner's address); the renderer escapes the result.
+ *
+ * @param {{others?: string[]}|null} invite
+ * @param {string} lang
+ */
+export function firstAdminInviteOthers(invite, lang = "en") {
+  const others = invite && Array.isArray(invite.others) ? invite.others.filter((e) => typeof e === "string" && e !== "") : [];
+  if (others.length === 0) return null;
+  return fill(t(FIRST_ADMIN_INVITE_OTHERS_KEY, lang), { emails: others.slice(0, 5).join(", ") });
 }
 
 /**
@@ -284,8 +312,10 @@ export function pendingFirstAdminNotices({
       : typeof entry.installed_at === "string" ? entry.installed_at : null;
     // An invite-only app's card is decided by its OWN admin API, not by a keychain
     // entry: its saved admin token is the /admin panel token, never the operator's
-    // login (firstAdminSavedKey returns null for those).
-    const invite = fa.invite ? inviteNotice(fa.invite, invites[id]) : null;
+    // login (firstAdminSavedKey returns null for those). And a handler only ever
+    // applies to the bundle it is written for: a manifest that merely NAMES one
+    // (`invite: "vaultwarden"` on another bundle) gets no invite card at all.
+    const invite = fa.invite && inviteHandlerBundleId(fa.invite) === id ? inviteNotice(fa.invite, invites[id]) : null;
     // A registered account with sign-ups closed: nothing left to ask.
     if (invite && invite.kind === "done") continue;
     // The keychain holds this app's admin login: there is nothing left to ask the
@@ -313,9 +343,12 @@ export function pendingFirstAdminNotices({
       continue; // crow via env/postInstall, external, none: nothing to claim
     }
     // Done is per install: a reinstall (a new installedAt) asks again, because
-    // its own first-run page is back to being claimable.
-    if (installId && done && done[id] === installId) continue;
-    if (!installId && done && done[id]) continue;
+    // its own first-run page is back to being claimable. On an invite-only app the
+    // marker only ever hides the "Crow could not read the app" card: a "close" /
+    // "create" / "invite" state is a live warning and always shows.
+    const inviteHides = !invite || invite.kind === "blocked";
+    if (inviteHides && installId && done && done[id] === installId) continue;
+    if (inviteHides && !installId && done && done[id]) continue;
     const link = firstAdminLink(id, manifest);
     const subpath = link.proxyMode === "subpath";
     // An invite card asks the operator to invite or to close sign-ups — not to save
@@ -354,29 +387,34 @@ export function pendingFirstAdminNotices({
  *
  *   done     a registered account exists AND sign-ups are off → no card at all
  *   close    a registered account exists, sign-ups on/unknown → Close sign-ups
- *   create   no registered account yet, an address is invited → create it
+ *   create   no registered account yet, an INVITED address exists → create it
  *   invite   nobody at all → ask for the email to invite
  *   blocked  nothing could be read → the normal finish-setup card + why
  *
+ * Only `_status === 1` is "invited": a disabled account (`_status === 2`) is present
+ * but neither registered nor invited, so it never turns the card into "create"
+ * (and never into "done" either).
+ *
  * @param {string} handler the manifest's `firstAdmin.invite` name
  * @param {object|null|undefined} state vaultwardenState() output
- * @returns {{handler: string, kind: string, email: string|null, signups: string, reason: string|null}}
+ * @returns {{handler: string, kind: string, email: string|null, signups: string, reason: string|null, others: string[]}}
  */
 export function inviteNotice(handler, state) {
   const s = state && typeof state === "object" ? state : null;
-  if (!s) return { handler, kind: "blocked", email: null, signups: "unknown", reason: "unknown" };
+  if (!s) return { handler, kind: "blocked", email: null, signups: "unknown", reason: "unknown", others: [] };
   const signups = s.signups === "on" || s.signups === "off" ? s.signups : "unknown";
+  const others = Array.isArray(s.others) ? s.others.filter((e) => typeof e === "string" && e !== "").slice(0, 5) : [];
   if (s.reason) {
-    return { handler, kind: "blocked", email: null, signups, reason: typeof s.reason === "string" ? s.reason : "unknown" };
+    return { handler, kind: "blocked", email: null, signups, reason: typeof s.reason === "string" ? s.reason : "unknown", others };
   }
   const users = Array.isArray(s.users) ? s.users : [];
   const registered = users.find((u) => u && u.registered === true) || null;
-  const invited = users.find((u) => u && u.registered !== true && typeof u.email === "string" && u.email !== "") || null;
+  const invited = users.find((u) => u && u.invited === true && typeof u.email === "string" && u.email !== "") || null;
   if (registered) {
     const email = typeof registered.email === "string" && registered.email ? registered.email : null;
-    if (signups === "off") return { handler, kind: "done", email, signups, reason: null };
-    return { handler, kind: "close", email, signups, reason: null };
+    if (signups === "off") return { handler, kind: "done", email, signups, reason: null, others };
+    return { handler, kind: "close", email, signups, reason: null, others };
   }
-  if (invited) return { handler, kind: "create", email: invited.email, signups, reason: null };
-  return { handler, kind: "invite", email: null, signups, reason: null };
+  if (invited) return { handler, kind: "create", email: invited.email, signups, reason: null, others };
+  return { handler, kind: "invite", email: null, signups, reason: null, others };
 }

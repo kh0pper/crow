@@ -85,13 +85,26 @@ export default {
       const manifests = {};
       for (const id of Object.keys(localInstalled)) manifests[id] = getManifest(id);
       // Security audit N3-4 phase 2e: an invite-only app's card is decided by what its
-      // OWN admin API reports (accounts + sign-ups). Best-effort and cached ~60 s in the
-      // handler, so a page render costs one admin login at most per minute, and a
-      // stopped container cannot stall every load.
+      // OWN admin API reports (accounts + sign-ups). The handler is resolved from the
+      // REVIEWED repo manifest (bundles-config getManifest — the same copy the routes
+      // use), never from the installed manifest, which the bundle's own container can
+      // rewrite; and only the real Vaultwarden bundle may run it. Computing a state
+      // means logging in to the app's admin panel, so it is done on the owner's own
+      // session only; otherwise the card stays "cannot read" (cached ~5 min).
       let inviteStates = {};
       try {
-        const { inviteStatesFor } = await import("../../first-admin/vaultwarden-invite.js");
-        inviteStates = await inviteStatesFor(localInstalled, manifests, { db });
+        if (localInstalled.vaultwarden) {
+          const { isLocalPasswordSessionOn } = await import("../../local-session.js");
+          if (await isLocalPasswordSessionOn(db, req)) {
+            const { getManifest: getReviewedManifest } = await import("../../bundles-config.js");
+            const { inviteStatesFor } = await import("../../first-admin/vaultwarden-invite.js");
+            inviteStates = await inviteStatesFor({
+              installed: localInstalled,
+              manifest: getReviewedManifest("vaultwarden"),
+              db,
+            });
+          }
+        }
       } catch { inviteStates = {}; }
       firstAdminPending = pendingFirstAdminNotices({
         installed: localInstalled,

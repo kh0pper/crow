@@ -19,6 +19,12 @@
 export const INVITE_HANDLERS = Object.freeze({
   vaultwarden: Object.freeze({
     /**
+     * The ONE bundle this handler belongs to. A handler is only ever resolved for the
+     * bundle it is written for: a manifest that merely names it (any other installed
+     * bundle can write `invite: "vaultwarden"` into its own manifest) gets nothing.
+     */
+    bundleId: "vaultwarden",
+    /**
      * Env keys holding the APP's admin-PANEL token. They are never the operator's
      * own login, so a keychain entry saved under one must not hide the "create
      * your account" card (firstAdminSavedKey returns null for them).
@@ -33,6 +39,11 @@ export const INVITE_HANDLER_NAMES = Object.freeze(Object.keys(INVITE_HANDLERS));
 /** Is this a handler Crow really ships? Own-property lookup only. */
 export function isInviteHandlerName(name) {
   return typeof name === "string" && Object.hasOwn(INVITE_HANDLERS, name);
+}
+
+/** The bundle a handler belongs to (`"vaultwarden"`), or null for an unknown name. */
+export function inviteHandlerBundleId(name) {
+  return isInviteHandlerName(name) ? INVITE_HANDLERS[name].bundleId : null;
 }
 
 const ADMIN_TOKEN_ENV_KEYS = new Set(INVITE_HANDLER_NAMES.flatMap((n) => INVITE_HANDLERS[n].adminTokenEnvKeys || []));

@@ -3818,10 +3818,11 @@ export default function bundlesRouter() {
   });
 
   // POST /bundles/api/first-admin-invite — the operator's own email, invited through
-  // an app's admin API (security audit N3-4 phase 2e). Only a bundle whose REVIEWED
-  // manifest declares one of Crow's invite handlers (getManifest: the installed copy
-  // can be written from inside the bundle's container), and only the owner at this
-  // machine's dashboard. Sentences are fixed: nothing from the app is echoed.
+  // an app's admin API (security audit N3-4 phase 2e). Only the real Vaultwarden
+  // bundle: the handler is resolved from the REVIEWED manifest (getManifest, bundled
+  // with its bundle id — the installed copy can be written from inside the bundle's
+  // container), and only the owner at this machine's dashboard. Sentences are fixed:
+  // nothing from the app is echoed.
   router.post("/bundles/api/first-admin-invite", async (req, res) => {
     if (!(await isLocalOwner(req))) {
       return res.status(403).json({ error: "Only the owner at this machine's dashboard can invite an account", code: "owner_only" });
@@ -3831,7 +3832,7 @@ export default function bundlesRouter() {
     const entry = getInstalled().find((i) => i && i.id === bundleId);
     if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
     const manifest = getManifest(bundleId);
-    const handler = inviteHandlerFor(manifest);
+    const handler = inviteHandlerFor(manifest, bundleId);
     if (!handler) {
       return res.status(400).json({ error: "This extension does not invite anyone; there is nothing to invite.", code: "no_invite_handler" });
     }
@@ -3840,6 +3841,8 @@ export default function bundlesRouter() {
     const out = await handler.inviteResult({
       email: rawEmail,
       installDir: join(BUNDLES_DIR, bundleId),
+      // The reviewed manifest decides the port the admin token is sent to (B2).
+      manifest,
       ...(_firstAdminInviteDepsForTest || {}),
     });
     // The card re-renders from a fresh read: never a stale "nobody is invited yet".
@@ -3867,13 +3870,15 @@ export default function bundlesRouter() {
     const entry = getInstalled().find((i) => i && i.id === bundleId);
     if (!entry) return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
     const manifest = getManifest(bundleId);
-    const handler = inviteHandlerFor(manifest);
+    const handler = inviteHandlerFor(manifest, bundleId);
     if (!handler) {
       return res.status(400).json({ error: "This extension does not invite anyone; there is nothing to close.", code: "no_invite_handler" });
     }
     const name = manifest?.name || bundleId;
     const result = await handler.closeSignups({
       installDir: join(BUNDLES_DIR, bundleId),
+      // The reviewed manifest decides the port the admin token is sent to (B2).
+      manifest,
       ...(_firstAdminInviteDepsForTest || {}),
     });
     clearInviteStateCache(bundleId);

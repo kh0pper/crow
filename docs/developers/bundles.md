@@ -174,7 +174,12 @@ Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`)
 - `invite` is only allowed with `finish-setup`, and its value must name a handler
   Crow really ships (`INVITE_HANDLER_NAMES` in
   `servers/gateway/first-admin/registry.js`). The manifest names code; it never
-  supplies it — no URL, path or email comes from a manifest.
+  supplies it. Each handler is also bound to the ONE bundle it belongs to
+  (`INVITE_HANDLERS[name].bundleId`): a manifest that merely names it on any other
+  bundle resolves to nothing, so it can never drive that app's admin token. The only
+  value a handler reads from a reviewed manifest is the local port it talks to
+  (`webUI.port`); the operator's email comes from the bundle's own `.env` at install
+  time, never from a manifest.
 - With `crow`/`via: "setup"`, `secretEnv` and `userEnv` must be plain uppercase env
   names (letters, digits and `_`) and must not start with `COMPOSE_`, `DOCKER_` or
   `CROW_` — Crow and Compose reserve those prefixes.
@@ -306,21 +311,34 @@ gateway with a secret in hand:
 What happens, in order:
 
 1. At install, after `compose up` succeeded, the installer waits up to 60 s for the
-   app's `/alive` to answer, then runs the handler: it logs in ONCE to the app's
-   admin panel with the token from Crow's keychain, invites the address in the
-   bundle's `.env` (`VAULTWARDEN_OWNER_EMAIL`), and closes sign-ups — re-reading the
-   app's state to confirm, because a 200 from the app proves nothing on its own.
-   One plain sentence lands in the install log. A failed invite NEVER fails the
-   install.
-2. The Extensions card is driven by the app's own state, not by a Done press: a
-   registered account with sign-ups closed shows nothing; sign-ups still open offer
-   **Close sign-ups**; an invited address with no account yet says to create it; no
-   account at all asks for the email (**Invite my email**); an app Crow cannot read
-   keeps today's card plus one sentence saying why.
+   app's `/alive` to answer, then runs the handler: it logs in to the app's admin
+   panel with the token from Crow's keychain, invites the address in the bundle's
+   `.env` (`VAULTWARDEN_OWNER_EMAIL`), and closes sign-ups. Closing reads the app's
+   WHOLE admin settings form and posts all of it back with `signups_allowed` off
+   (Vaultwarden replaces its stored `config.json` with whatever the body holds, so a
+   partial body would wipe SMTP and every other setting), then re-reads the app's
+   state to confirm — a 200 from the app proves nothing on its own. The bundle's
+   `.env` gets `VAULTWARDEN_SIGNUPS_ALLOWED=false` too. One plain sentence lands in
+   the install log. A failed invite NEVER fails the install.
+2. The Extensions card follows the app's own state. A registered account with
+   sign-ups closed shows nothing; sign-ups still open offer **Close sign-ups**; an
+   invited address (and only that: a *disabled* account does not count) with no
+   account yet says to create it; no account at all asks for the email (**Invite my
+   email**); an app Crow cannot read keeps today's card plus one sentence saying why.
+   Accounts registered under addresses other than the owner's are named on the card.
+   **Done** only hides the "Crow could not read the app" card: every state that is a
+   live warning (close / create / invite) shows the card again on the next render,
+   whether or not Done was pressed.
 3. A handler is only ever resolved from the frozen `INVITE_HANDLERS` map
-   (`servers/gateway/first-admin/vaultwarden-invite.js`), keyed by that manifest
-   name. Handlers talk to `127.0.0.1` only — a bundle whose URL is not a loopback
-   address is refused rather than driven over a network.
+   (`servers/gateway/first-admin/vaultwarden-invite.js`), and only for the bundle it
+   is bound to (`inviteHandlerFor(manifest, bundleId)`); the manifest is always the
+   REVIEWED one (`bundles-config.getManifest`), never `~/.crow/bundles/<id>/manifest.json`.
+   Handlers talk to `http://127.0.0.1:<webUI.port of the reviewed manifest>` and
+   nothing else: `VAULTWARDEN_URL` in the installed `.env` is ignored for admin
+   calls, because that file is writable through `POST /bundles/api/env`.
+   The app's admin cookie is kept in memory and reused while it works, because
+   Vaultwarden rate-limits admin logins; a 429 reads as `rate-limited` in the card
+   and in the action's answer.
 
 A keychain entry named by a handler as its ADMIN-PANEL token (e.g.
 `VAULTWARDEN_ADMIN_TOKEN`) is never treated as "the app's login": it does not hide

@@ -2103,11 +2103,13 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
         var INVITE_RESULT_TEXT = {
           "invalid-email": '${tJs("bundles.firstAdmin.invite.resultInvalidEmail", lang)}',
           "no-token": '${tJs("bundles.firstAdmin.invite.resultNoToken", lang)}',
-          "unreachable": '${tJs("bundles.firstAdmin.invite.resultUnreachable", lang)}'
+          "unreachable": '${tJs("bundles.firstAdmin.invite.resultUnreachable", lang)}',
+          "rate-limited": '${tJs("bundles.firstAdmin.invite.resultRateLimited", lang)}'
         };
         var CLOSE_RESULT_TEXT = {
           "unknown": '${tJs("bundles.firstAdmin.invite.resultCloseUnknown", lang)}',
-          "failed": '${tJs("bundles.firstAdmin.invite.resultCloseFailed", lang)}'
+          "failed": '${tJs("bundles.firstAdmin.invite.resultCloseFailed", lang)}',
+          "rate-limited": '${tJs("bundles.firstAdmin.invite.resultRateLimited", lang)}'
         };
         function reloadFirstAdminCard() {
           try { if (location && typeof location.reload === "function") location.reload(); } catch (e) { /* nothing to reload */ }

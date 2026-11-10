@@ -7,7 +7,7 @@
 
 import { escapeHtml, badge, formatDate } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
-import { firstAdminBody, firstAdminTitle, firstAdminInviteBody, firstAdminInviteReason } from "../../shared/first-admin.js";
+import { firstAdminBody, firstAdminTitle, firstAdminInviteBody, firstAdminInviteReason, firstAdminInviteOthers } from "../../shared/first-admin.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
@@ -329,6 +329,12 @@ export function buildExtensionsHTML({
     let body = firstAdminBody({ mode: e.mode, via: e.via, user: e.user, note: e.note, kept: e.kept }, e.name, lang) || "";
     if (inv && inviteKind !== "blocked") body = firstAdminInviteBody(inv, e.name, lang) || body;
     if (inv && inviteKind === "blocked") body = `${body} ${firstAdminInviteReason(inv.reason, e.name, lang)}`.trim();
+    // Accounts the operator did not make themselves, named on the "cannot read the app"
+    // card too (the other kinds carry the sentence in their body).
+    if (inv && inviteKind === "blocked") {
+      const others = firstAdminInviteOthers(inv, lang);
+      if (others) body = `${body} ${others}`.trim();
+    }
     // Nobody has an account yet in the "invite" state, so there is nothing to open.
     const open = inviteKind === "invite"
       ? ""

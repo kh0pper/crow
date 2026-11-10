@@ -23,10 +23,14 @@ connect to it over HTTP(S).
 
 ## One-time setup (do this in order)
 
-Vaultwarden is **invite-only from install**. Sign-ups are closed from the start,
+Vaultwarden is **invite-only from install**. Sign-ups start closed,
 Crow invites your own email through Vaultwarden's admin panel (no mail server
-needed), and only that address can create an account. Nobody else can ever
-register — not another account on this machine, not a bot, not a visitor.
+needed), and only that address can create an account. Once Crow confirms the
+app's sign-ups are closed — the Extensions card says "Sign-ups are closed" and
+no longer offers **Close sign-ups** — nobody else can register: not another
+account on this machine, not a bot, not a visitor. Until that confirmation is on
+screen, treat sign-ups as open: anyone who can reach the port can make an
+account.
 
 1. **Give Crow your email when you install the extension.** The install form asks
    for `VAULTWARDEN_OWNER_EMAIL` (the address you will use to sign in). Crow
@@ -73,7 +77,9 @@ register — not another account on this machine, not a bot, not a visitor.
 4. **Create your account** at `http://localhost:8097` **with the email Crow
    invited**. This becomes your personal vault. Use a long, memorable master
    password you will remember forever. It cannot be reset from the admin panel.
-   Any other address is refused: the sign-up form says the account is not invited.
+   Any other address is refused once sign-ups are closed: the sign-up form says the
+   account is not invited. (If the Extensions card still offers **Close sign-ups**,
+   they are open — press it first.)
 
    Crow notices the account on the Extensions page and the card goes away on its
    own. If sign-ups are somehow still open, that card offers **Close sign-ups** —
