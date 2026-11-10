@@ -110,6 +110,9 @@
       ]
     },
     "forgejo": {
+      "FORGEJO_DISABLE_REGISTRATION": [
+        "true"
+      ],
       "FORGEJO_URL": [
         "http://localhost:3050"
       ]
@@ -152,6 +155,9 @@
       ]
     },
     "gitea": {
+      "GITEA_DISABLE_REGISTRATION": [
+        "true"
+      ],
       "GITEA_URL": [
         "http://localhost:3040"
       ]
