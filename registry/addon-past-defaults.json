@@ -1,0 +1,618 @@
+{
+  "version": 1,
+  "defaults": {
+    "actual-budget": {
+      "ACTUAL_URL": [
+        "http://localhost:5006"
+      ]
+    },
+    "adguard-home": {
+      "ADGUARD_URL": [
+        "http://localhost:3020"
+      ]
+    },
+    "audiobookshelf": {
+      "AUDIOBOOKSHELF_URL": [
+        "http://localhost:13378"
+      ]
+    },
+    "bookstack": {
+      "BOOKSTACK_URL": [
+        "http://localhost:6875"
+      ]
+    },
+    "browser": {
+      "CROW_BROWSER_CDP_PORT": [
+        "9222"
+      ],
+      "CROW_BROWSER_CONTAINER_NAME": [
+        "crow-browser"
+      ],
+      "CROW_BROWSER_DISPLAY": [
+        "99"
+      ],
+      "CROW_BROWSER_RFB_PORT": [
+        "5900"
+      ],
+      "CROW_BROWSER_VNC_PORT": [
+        "6080"
+      ]
+    },
+    "caddy": {
+      "CADDY_ADMIN_URL": [
+        "http://127.0.0.1:2019"
+      ],
+      "CADDY_CONFIG_DIR": [
+        "~/.crow/caddy"
+      ]
+    },
+    "calibre-server": {
+      "CALIBRE_URL": [
+        "http://localhost:8081"
+      ]
+    },
+    "calibre-web": {
+      "CALIBRE_WEB_URL": [
+        "http://localhost:8083"
+      ]
+    },
+    "calls": {
+      "CROW_CALLS_ENABLED": [
+        "1"
+      ],
+      "CROW_CALLS_MAX_PEERS": [
+        "4"
+      ]
+    },
+    "changedetection": {
+      "CHANGEDETECTION_URL": [
+        "http://localhost:5010"
+      ]
+    },
+    "companion": {
+      "COMPANION_AVATAR": [
+        "mao_pro"
+      ],
+      "COMPANION_CHARACTER_NAME": [
+        "Crow"
+      ],
+      "COMPANION_PERSONA": [
+        "You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud."
+      ],
+      "COMPANION_TTS_VOICE": [
+        "en-US-AvaMultilingualNeural"
+      ],
+      "EIKANYA_MODELS_DIR": [
+        ""
+      ]
+    },
+    "coturn": {
+      "TURN_PORT": [
+        "3478"
+      ],
+      "TURN_REALM": [
+        "crow.local"
+      ]
+    },
+    "crowdsec": {
+      "CROWDSEC_LAPI_URL": [
+        "http://127.0.0.1:8091"
+      ]
+    },
+    "dozzle": {
+      "DOZZLE_URL": [
+        "http://localhost:8095"
+      ]
+    },
+    "faster-whisper-server": {
+      "WHISPER_CPU_THREADS": [
+        "12"
+      ]
+    },
+    "forgejo": {
+      "FORGEJO_URL": [
+        "http://localhost:3050"
+      ]
+    },
+    "frigate": {
+      "FRIGATE_CONFIG_PATH": [
+        "~/.crow/data/frigate/config"
+      ],
+      "FRIGATE_MEDIA_PATH": [
+        "~/.crow/data/frigate/media"
+      ],
+      "FRIGATE_URL": [
+        "http://localhost:8971"
+      ]
+    },
+    "funkwhale": {
+      "FUNKWHALE_NGINX_BIND_ADDR": [
+        "127.0.0.1"
+      ],
+      "FUNKWHALE_NGINX_BIND_PORT": [
+        "8600"
+      ],
+      "FUNKWHALE_PROTOCOL": [
+        "https"
+      ],
+      "FUNKWHALE_S3_REGION": [
+        "us-east-1"
+      ],
+      "FUNKWHALE_URL": [
+        "http://crow-funkwhale",
+        "http://funkwhale-api:5000"
+      ]
+    },
+    "garage": {
+      "GARAGE_BIND_ADDR": [
+        "127.0.0.1"
+      ],
+      "S3_ENDPOINT": [
+        "127.0.0.1:3900"
+      ]
+    },
+    "gitea": {
+      "GITEA_URL": [
+        "http://localhost:3040"
+      ]
+    },
+    "gotosocial": {
+      "GTS_MEDIA_RETENTION_DAYS": [
+        "14"
+      ],
+      "GTS_URL": [
+        "http://gotosocial:8080"
+      ]
+    },
+    "heretic": {
+      "HERETIC_SHM_SIZE": [
+        "16gb"
+      ]
+    },
+    "homepage": {
+      "HOMEPAGE_ALLOWED_HOSTS": [
+        "localhost:3030"
+      ],
+      "HOMEPAGE_CONFIG_DIR": [
+        "~/.crow/homepage"
+      ],
+      "HOMEPAGE_URL": [
+        "http://localhost:3030"
+      ]
+    },
+    "iptv": {
+      "CROW_IPTV_EPG_REFRESH_HOURS": [
+        "12"
+      ],
+      "CROW_IPTV_RECORDINGS_PATH": [
+        "~/.crow/data/iptv-recordings"
+      ]
+    },
+    "jellyfin": {
+      "JELLYFIN_URL": [
+        "http://localhost:8096"
+      ]
+    },
+    "kavita": {
+      "KAVITA_URL": [
+        "http://localhost:5000"
+      ]
+    },
+    "kolibri": {
+      "KOLIBRI_HTTP_PORT": [
+        "8041",
+        "8085"
+      ],
+      "KOLIBRI_URL": [
+        "http://localhost:8041",
+        "http://localhost:8085"
+      ]
+    },
+    "lemmy": {
+      "LEMMY_API_PORT": [
+        "8040"
+      ],
+      "LEMMY_FEDERATION_ENABLED": [
+        "true"
+      ],
+      "LEMMY_OPEN_REGISTRATION": [
+        "false"
+      ],
+      "LEMMY_URL": [
+        "http://lemmy:8536"
+      ]
+    },
+    "linkding": {
+      "LINKDING_URL": [
+        "http://localhost:9090"
+      ]
+    },
+    "localai": {
+      "LOCALAI_HOST": [
+        "http://localhost:8080"
+      ]
+    },
+    "maker-lab": {
+      "MAKER_LAB_KIOSK_BIND": [
+        "127.0.0.1"
+      ],
+      "MAKER_LAB_LLM_ENDPOINT": [
+        ""
+      ],
+      "MAKER_LAB_LLM_MODEL": [
+        "llama3.2:3b"
+      ],
+      "MAKER_LAB_MODE": [
+        "family"
+      ]
+    },
+    "maker-lab-advanced": {
+      "MLA_ADMIN_USER": [
+        "admin"
+      ],
+      "MLA_HTTP_PORT": [
+        "8043",
+        "8088"
+      ]
+    },
+    "mastodon": {
+      "MASTODON_MEDIA_RETENTION_DAYS": [
+        "14"
+      ],
+      "MASTODON_S3_REGION": [
+        "us-east-1"
+      ],
+      "MASTODON_SINGLE_USER_MODE": [
+        "false"
+      ],
+      "MASTODON_SMTP_PORT": [
+        "587"
+      ],
+      "MASTODON_URL": [
+        "http://mastodon-web:3000"
+      ]
+    },
+    "matrix-bridges": {
+      "BRIDGE_SIGNAL_ENABLED": [
+        "false"
+      ],
+      "BRIDGE_TELEGRAM_ENABLED": [
+        "false"
+      ],
+      "BRIDGE_WHATSAPP_ENABLED": [
+        "false"
+      ],
+      "MATRIX_BRIDGE_HOMESERVER_URL": [
+        "http://dendrite:8008"
+      ]
+    },
+    "matrix-dendrite": {
+      "MATRIX_URL": [
+        "http://dendrite:8008"
+      ]
+    },
+    "media": {
+      "CROW_MEDIA_AI_DAILY_TOKEN_BUDGET": [
+        "50000"
+      ],
+      "CROW_MEDIA_AUDIO_MAX_MB": [
+        "500"
+      ],
+      "CROW_MEDIA_LITE": [
+        "0"
+      ],
+      "CROW_MEDIA_MAX_FETCHES": [
+        "3"
+      ],
+      "CROW_MEDIA_TASKS": [
+        "1"
+      ],
+      "CROW_MEDIA_TTS_DAILY_LIMIT": [
+        "50"
+      ],
+      "CROW_SMTP_PORT": [
+        "587"
+      ]
+    },
+    "meeting-recorder": {
+      "MEETING_RECORDER_EXPORT_DIR": [
+        ""
+      ],
+      "WHISPER_FALLBACK_MODEL": [
+        ""
+      ],
+      "WHISPER_FALLBACK_URL": [
+        ""
+      ],
+      "WHISPER_MODEL": [
+        "Systran/faster-whisper-large-v3"
+      ],
+      "WHISPER_URL": [
+        "http://localhost:8004/v1/audio/transcriptions"
+      ]
+    },
+    "miniflux": {
+      "MINIFLUX_ADMIN_USER": [
+        "admin"
+      ],
+      "MINIFLUX_URL": [
+        "http://localhost:8085"
+      ]
+    },
+    "minio": {
+      "MINIO_BIND_ADDR": [
+        "127.0.0.1"
+      ],
+      "MINIO_ENDPOINT": [
+        "localhost"
+      ],
+      "MINIO_PORT": [
+        "9000"
+      ],
+      "MINIO_ROOT_USER": [
+        "crowadmin"
+      ],
+      "MINIO_USE_SSL": [
+        "false"
+      ]
+    },
+    "motioneye": {
+      "MOTIONEYE_CONFIG_PATH": [
+        "~/.crow/data/motioneye/config"
+      ],
+      "MOTIONEYE_GID": [
+        "1000"
+      ],
+      "MOTIONEYE_MEDIA_PATH": [
+        "~/.crow/data/motioneye/media"
+      ],
+      "MOTIONEYE_UID": [
+        "1000"
+      ],
+      "MOTIONEYE_URL": [
+        "http://localhost:8765"
+      ]
+    },
+    "navidrome": {
+      "NAVIDROME_URL": [
+        "http://localhost:4533"
+      ]
+    },
+    "netdata": {
+      "NETDATA_URL": [
+        "http://localhost:19999"
+      ]
+    },
+    "nextcloud": {
+      "NEXTCLOUD_USER": [
+        "admin"
+      ]
+    },
+    "nominatim": {
+      "NOMINATIM_PBF_URL": [
+        "https://download.geofabrik.de/north-america/us-latest.osm.pbf"
+      ],
+      "NOMINATIM_PORT": [
+        "8042",
+        "8088"
+      ],
+      "NOMINATIM_URL": [
+        "http://localhost:8042",
+        "http://localhost:8088"
+      ]
+    },
+    "ntfy": {
+      "NTFY_PORT": [
+        "2586"
+      ],
+      "NTFY_TOPIC": [
+        "crow"
+      ]
+    },
+    "ollama": {
+      "OLLAMA_HOST": [
+        "http://localhost:11434"
+      ]
+    },
+    "paperless": {
+      "PAPERLESS_URL": [
+        "http://localhost:8000"
+      ]
+    },
+    "peertube": {
+      "PEERTUBE_MEDIA_RETENTION_DAYS": [
+        "14"
+      ],
+      "PEERTUBE_S3_REGION": [
+        "us-east-1"
+      ],
+      "PEERTUBE_SIGNUP_ENABLED": [
+        "false"
+      ],
+      "PEERTUBE_SMTP_PORT": [
+        "587"
+      ],
+      "PEERTUBE_TRANSCODING_CONCURRENCY": [
+        "1"
+      ],
+      "PEERTUBE_TRANSCODING_THREADS": [
+        "0"
+      ],
+      "PEERTUBE_URL": [
+        "http://peertube:9000"
+      ],
+      "PEERTUBE_VIDEO_QUOTA_MB": [
+        "10000"
+      ]
+    },
+    "pixelfed": {
+      "PIXELFED_MAX_USERS": [
+        "1000"
+      ],
+      "PIXELFED_MEDIA_RETENTION_DAYS": [
+        "14"
+      ],
+      "PIXELFED_OPEN_REGISTRATION": [
+        "false"
+      ],
+      "PIXELFED_S3_REGION": [
+        "us-east-1"
+      ],
+      "PIXELFED_URL": [
+        "http://pixelfed:80"
+      ]
+    },
+    "romm": {
+      "ROMM_AUTH_SECRET_KEY": [
+        "change_me_to_random_string"
+      ],
+      "ROMM_DB_PASSWORD": [
+        "romm_password"
+      ]
+    },
+    "rookery": {
+      "ROOKERY_MODEL_API_KEY": [
+        "local"
+      ],
+      "ROOKERY_MODEL_ID": [
+        "local-model"
+      ],
+      "ROOKERY_WORKSPACES_DIR": [
+        "~/.crow/data/rookery-workspaces",
+        "~/.crow/data/rookery/workspaces"
+      ],
+      "UV_NO_CACHE": [
+        "1"
+      ]
+    },
+    "scratch-offline": {
+      "SCRATCH_GUI_REF": [
+        "master"
+      ],
+      "SCRATCH_HTTP_PORT": [
+        "8087"
+      ]
+    },
+    "sdxl": {
+      "SDXL_BACKGROUNDS_DIR": [
+        "/app/backgrounds"
+      ],
+      "SDXL_MODEL_CACHE": [
+        "/app/models"
+      ],
+      "SDXL_PORT": [
+        "3005"
+      ]
+    },
+    "searxng": {
+      "SEARXNG_BASE_URL": [
+        "http://localhost:8098/"
+      ]
+    },
+    "shiori": {
+      "SHIORI_URL": [
+        "http://localhost:8086"
+      ],
+      "SHIORI_USERNAME": [
+        "shiori"
+      ]
+    },
+    "stirling-pdf": {
+      "STIRLING_URL": [
+        "http://localhost:8092"
+      ]
+    },
+    "sunvox-studio": {
+      "SUNVOX_MAX_RENDER_SECONDS": [
+        "1200"
+      ],
+      "SUNVOX_READ_DIRS": [
+        ""
+      ],
+      "SUNVOX_WORKDIR": [
+        "",
+        "~/.crow/data/sunvox-studio"
+      ]
+    },
+    "tailscale": {
+      "TS_HOSTNAME": [
+        "crow"
+      ]
+    },
+    "tax": {
+      "CROW_TAX_DB_PATH": [
+        ""
+      ]
+    },
+    "trilium": {
+      "TRILIUM_URL": [
+        "http://localhost:8088"
+      ]
+    },
+    "unsloth": {
+      "UNSLOTH_SHM_SIZE": [
+        "16gb"
+      ]
+    },
+    "uptime-kuma": {
+      "UPTIMEKUMA_URL": [
+        "http://localhost:3007"
+      ]
+    },
+    "vaultwarden": {
+      "VAULTWARDEN_DOMAIN": [
+        "http://localhost:8097"
+      ],
+      "VAULTWARDEN_SIGNUPS_ALLOWED": [
+        "true"
+      ],
+      "VAULTWARDEN_URL": [
+        "http://localhost:8097"
+      ]
+    },
+    "vikunja": {
+      "VIKUNJA_URL": [
+        "http://localhost:3456"
+      ]
+    },
+    "vllm": {
+      "VLLM_GPU_MEMORY_UTILIZATION": [
+        "0.85"
+      ],
+      "VLLM_HTTP_PORT": [
+        "8044",
+        "8089"
+      ],
+      "VLLM_MAX_NUM_SEQS": [
+        "16"
+      ]
+    },
+    "wallabag": {
+      "WALLABAG_URL": [
+        "http://localhost:8084"
+      ]
+    },
+    "workspace": {
+      "WORKSPACE_ADMIN_USER": [
+        "admin"
+      ],
+      "WORKSPACE_NC_SERVE_PORT": [
+        "8456"
+      ],
+      "WORKSPACE_OO_SERVE_PORT": [
+        "8457"
+      ],
+      "WORKSPACE_PUBLIC_HOST": [
+        ""
+      ]
+    },
+    "writefreely": {
+      "WF_SINGLE_USER": [
+        "true"
+      ],
+      "WF_URL": [
+        "http://writefreely:8080"
+      ]
+    }
+  }
+}

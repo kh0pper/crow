@@ -92,6 +92,24 @@
         "envKeys": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "sandbox": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "network": { "oneOf": [
+          { "enum": ["none", "internet"] },
+          { "type": "object", "additionalProperties": false,
+            "properties": {
+              "internet": { "type": "boolean" },
+              "hosts": { "type": "array", "items": { "type": "string", "pattern": "^env:[A-Z_][A-Z0-9_]*$" } } } } ] },
+        "doors": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9-]+$" } },
+        "files": { "type": "object", "additionalProperties": false, "properties": {
+          "read":  { "type": "array", "items": { "type": "string", "pattern": "^env:[A-Z_][A-Z0-9_]*$" } },
+          "write": { "type": "array", "items": { "type": "string", "pattern": "^env:[A-Z_][A-Z0-9_]*$" } },
+          "oauthDir": { "type": "string", "pattern": "^env:[A-Z_][A-Z0-9_]*$" } } },
+        "crowDb": { "type": "boolean" },
+        "ownEnvFile": { "type": "boolean" }
+      }
+    },
     "webUI": {
       "type": ["object", "null"],
       "additionalProperties": true,

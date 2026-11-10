@@ -97,8 +97,8 @@ export const DB_FILE_RE = /^(crow|tasks)\.db(-wal|-shm|-journal)?$/;
 const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
 
 let _home = null;
-function real(p, exists) {
-  if (p && _home && (p === "~" || p.startsWith("~/"))) p = join(_home, p.slice(1));
+function real(p, exists, home = _home) {
+  if (p && home && (p === "~" || p.startsWith("~/"))) p = join(home, p.slice(1));
   if (!p || !isAbsolute(p)) return null;
   if (!exists(p)) return null;
   try { return realpathSync(p); } catch { return null; }
@@ -140,6 +140,189 @@ function otherInstanceHomes(home, crowHome, exists) {
   return out;
 }
 
+// --- pieces shared by the bot plan and the add-on plan ---------------------
+
+/**
+ * One sandbox's bind policy: what is never a bind source (`never`), the
+ * co-hosted Crow homes (`others`), and the two closures a plan builder uses —
+ * `forbidden(p, {write, policy})` (a reason, or null) and
+ * `add(map, p, {write, label, policy})` (bind `p` at its resolved path, or
+ * record the refusal in `refused`).
+ */
+export function makeBindPolicy({ home, crowHome, crowHomeReal, dataDir, appRoot, nodeBin, piLabDir, otherHomes, exists = existsSync, refused = [] } = {}) {
+  const instanceSecrets = [];
+  if (crowHome) {
+    for (const n of ["secrets", "env", "peer-tokens.json", "android-keystore", ".keystore-env"]) instanceSecrets.push(join(crowHome, n));
+    try { for (const e of readdirSync(crowHome)) if (/-token$/.test(e)) instanceSecrets.push(join(crowHome, e)); } catch {}
+  }
+  const never = [...neverBound(home), ...instanceSecrets].map((p) => (exists(p) ? (() => { try { return realpathSync(p); } catch { return p; } })() : p));
+  // No read-write bind may BE the Crow home or its secrets dir, or an ancestor
+  // of either: any of those puts the instance's tokens, secrets/ and env/
+  // inside the sandbox. (A write path INSIDE secrets/ is caught by `never`.)
+  const closedRw = crowHomeReal ? [crowHomeReal, join(crowHomeReal, "secrets")] : [];
+  // Co-hosted homes: the ones the spawner already found (secrets dirs and
+  // declared homes, resolved with realpath on its side) plus the `.crow*`
+  // siblings of $HOME, each resolved here. Self and anything that CONTAINS the
+  // home are dropped: this instance's own home is refused by its own rules, and
+  // an entry that covered the home would refuse every bind.
+  const declaredHomes = (Array.isArray(otherHomes) ? otherHomes : [])
+    .filter((p) => typeof p === "string" && isAbsolute(p));
+  const others = [...new Set([
+    ...declaredHomes.map((p) => real(p, exists, home) || resolve(p)),
+    ...otherInstanceHomes(home, crowHomeReal, exists),
+  ])].filter((p) => p !== home && p !== crowHomeReal && !under(home, p) && !(crowHomeReal && under(crowHomeReal, p)));
+  const homesRoot = dirname(home);
+  const codeRoots = [appRoot, nodeBin && dirname(dirname(nodeBin)), piLabDir].filter(Boolean)
+    .map((p) => real(p, exists, home) || p);
+  const dataReal = dataDir ? (real(dataDir, exists, home) || dataDir) : null;
+
+  function forbidden(p, { write = false, policy = false } = {}) {
+    if (p === "/") return "the whole filesystem";
+    if (SHARED_ROOTS.includes(p)) return "a shared system directory (" + p + ")";
+    if (p === home || p === homesRoot) return "the whole home";
+    if (under(home, p)) return "an ancestor of the home";
+    if (write) for (const c of closedRw) if (under(c, p)) return "the Crow home (" + c + ") is never writable, and neither is an ancestor of it";
+    for (const n of never) if (under(p, n) || under(n, p)) return "a protected path (" + n + ")";
+    // Under, equal to, or an ANCESTOR of a co-hosted home: binding a parent
+    // would put that instance's home (and its secrets) inside the sandbox.
+    for (const x of others) if (under(p, x) || under(x, p)) return "another Crow instance's home";
+    if (under(p, homesRoot) && !under(p, home)) return "another user's home";
+    if (write) for (const c of codeRoots) if (under(p, c) || under(c, p)) return "code (the checkout or the engine) is never writable";
+    if (write && policy && under(p, home)) {
+      const top = p.slice(home.length + 1).split(sep)[0];
+      if (top.startsWith(".") && !(dataReal && under(p, dataReal))) return "a hidden entry of the home (rc files, config, PATH dirs) is never writable from a policy";
+    }
+    return null;
+  }
+
+  function add(map, p, { write = false, label = "", policy = false } = {}) {
+    if (!p) return;
+    const r = real(p, exists, home);
+    if (!r) { refused.push({ path: p, reason: "does not exist" + (label ? " (" + label + ")" : "") }); return; }
+    const why = forbidden(r, { write, policy });
+    if (why) { refused.push({ path: p, reason: why }); return; }
+    map.set(r, r);
+  }
+
+  return { forbidden, add, never, others, closedRw };
+}
+
+/**
+ * The empty root of a sandbox: `--tmpfs /`, the system dirs read-only, the
+ * usr-merge symlinks, a fresh procfs of the sandbox's own pid namespace, /dev
+ * and /tmp, a private /run, the DNS stub, a masked /etc/crow and an empty tmpfs
+ * at the home path.
+ */
+export function rootArgs({ systemDirs, exists = existsSync, home } = {}) {
+  const args = ["--tmpfs", "/"];
+  for (const d of systemDirs || ["/usr", "/etc", "/opt"]) if (exists(d)) args.push("--ro-bind", d, d);
+  for (const [link, target] of [["/bin", "usr/bin"], ["/sbin", "usr/sbin"], ["/lib", "usr/lib"], ["/lib64", "usr/lib64"], ["/lib32", "usr/lib32"]]) {
+    let isLink = false;
+    try { isLink = lstatSync(link).isSymbolicLink(); } catch {}
+    if (isLink) args.push("--symlink", target, link);
+    else if (exists(link) && !systemDirs) args.push("--ro-bind", link, link);
+  }
+  // /proc: a fresh procfs of the sandbox's OWN pid namespace (--unshare-pid,
+  // required: without it a same-uid process could signal every host process of
+  // that uid; kill(2) checks the uid, not the namespace).
+  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run");
+  if (exists("/run/systemd/resolve")) args.push("--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve");
+  if (exists("/etc/crow")) args.push("--tmpfs", "/etc/crow");
+  if (home) args.push("--tmpfs", home);
+  return args;
+}
+
+/** Record one mask for `p` in a mask list: a tmpfs over a directory, /dev/null over a file.
+ *  A symlink is left alone: it is harmless unless its target is itself bound (see
+ *  the `.env` scan, which masks the bound target of a symlinked `.env`). */
+export function maskPathInto(masks, p) {
+  try {
+    const st = lstatSync(p);
+    if (st.isDirectory()) masks.push([p, "dir"]);
+    else if (st.isSymbolicLink()) { /* left alone: only a bound target needs a mask */ }
+    else masks.push([p, "file"]);
+  } catch {}
+}
+
+/**
+ * Mask every `.env` file found in a bound dir (the checkout's .env holds the
+ * gateway's secrets; bundle .env files hold extension secrets, at any depth).
+ * Every bound dir is walked (no symlinked dirs followed; package code under
+ * node_modules/, .venv/, __pycache__/ and .git/ skipped; masked dirs skipped)
+ * with a depth and entry cap. Hitting the cap FAILS CLOSED: a policy path is
+ * not bound at all; any other bound dir refuses the spawn.
+ *
+ * `keep` is an optional Set of exact file paths (lexical or resolved) that stay
+ * readable: an add-on's own `bundles/<id>/.env`, and nothing at all for a bot.
+ */
+export function scanEnvMasks({ ro, rw, masks, policyDirs = new Set(), maxDepth = ENV_SCAN_MAX_DEPTH, maxEntries = ENV_SCAN_MAX_ENTRIES, exists = existsSync, home = null, refused = [], keep = null } = {}) {
+  const maskedDirs = new Set(masks.filter(([, k]) => k === "dir").map(([d]) => d));
+  const boundDirs = () => [...ro.keys(), ...rw.keys()].filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
+  const isBound = (p) => boundDirs().some((d) => under(p, d)) || ro.has(p) || rw.has(p);
+  for (const d of boundDirs()) {
+    const found = [];
+    let seen = 0, capped = false;
+    const walk = (dir, depth) => {
+      if (capped) return;
+      let names = [];
+      try { names = readdirSync(dir); } catch { return; }
+      for (const n of names) {
+        if (++seen > maxEntries) { capped = true; return; }
+        const p = join(dir, n);
+        let st; try { st = lstatSync(p); } catch { continue; }
+        if (ENV_NAME_RE.test(n)) {
+          if (st.isSymbolicLink()) found.push(["link", p]);
+          else if (st.isFile()) found.push(["file", p]);
+          continue;
+        }
+        if (st.isDirectory() && !ENV_SCAN_SKIP.has(n) && !maskedDirs.has(p)) {
+          if (depth >= maxDepth) { capped = true; return; }
+          walk(p, depth + 1);
+          if (capped) return;
+        }
+      }
+    };
+    walk(d, 1);
+    if (capped) {
+      if (policyDirs.has(d)) {
+        ro.delete(d); rw.delete(d);
+        refused.push({ path: d, reason: "too large to scan for .env files (cap " + maxEntries + " entries / depth " + maxDepth + "); not bound" });
+        continue;
+      }
+      throw new ContainRefused(d + " is too large to scan for .env files (cap " + maxEntries + " entries / depth " + maxDepth + "); refusing to bind it unscanned");
+    }
+    for (const [kind, p] of found) {
+      if (keep && (keep.has(p) || keep.has(real(p, exists, home)))) continue;
+      if (kind === "file") masks.push([p, "file"]);
+      else { const t = real(p, exists, home); if (t && isBound(t)) masks.push([t, "file"]); }
+    }
+  }
+}
+
+/**
+ * Assemble every mount op in DESTINATION order: a dir's bind, then the masks
+ * inside it, then the binds of its descendants (a project workspace re-exposed
+ * under a masked projects/ entry). Same destination: the bind first, the mask
+ * after. `extraEntries` are `[flag, src, dest]` triples placed in that order
+ * too (the relay bind, an agent shadow, a bind-fd).
+ */
+export function assembleBindArgs({ ro, rw, masks, extraEntries = [] } = {}) {
+  const binds = [...[...ro.keys()].map((p) => ["--ro-bind", p]), ...[...rw.keys()].map((p) => ["--bind", p])]
+    .sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  const maskOps = [...new Map(masks.map(([d, k]) => [d, k])).entries()]
+    .map(([d, k]) => (k === "dir" ? ["--tmpfs", null, d, 1] : ["--ro-bind", "/dev/null", d, 1]));
+  const all = [...binds.map(([f, p]) => [f, p, p, 0]), ...extraEntries.map((e) => [...e, 0]), ...maskOps].sort((a, b) => {
+    if (a[2] === b[2]) return a[3] - b[3];
+    return a[2] < b[2] ? -1 : 1;
+  });
+  const args = [];
+  for (const [f, s, d] of all) {
+    if (f === "--tmpfs") args.push("--tmpfs", d);
+    else args.push(f, s, d);
+  }
+  return args;
+}
+
 /**
  * Build the bwrap argv (everything before "--") for one contained pi spawn.
  * Pure apart from realpath/stat; nothing is created.
@@ -167,14 +350,7 @@ export function buildContainPlan(o) {
   const ro = new Map(); // dest -> src
   const rw = new Map();
   const masks = []; // [dest, "dir"|"file"]
-  function maskPath(p) {
-    try {
-      const st = lstatSync(p);
-      if (st.isDirectory()) masks.push([p, "dir"]);
-      else if (st.isSymbolicLink()) { /* dangling inside unless its target is bound; handled below */ }
-      else masks.push([p, "file"]);
-    } catch {}
-  }
+  function maskPath(p) { maskPathInto(masks, p); }
 
   for (const list of [o.writePaths || [], o.readPaths || []]) {
     if (list.some((p) => p === "/" || resolve(String(p)) === "/")) {
@@ -182,59 +358,11 @@ export function buildContainPlan(o) {
     }
   }
 
-  const instanceSecrets = [];
-  if (o.crowHome) {
-    for (const n of ["secrets", "env", "peer-tokens.json", "android-keystore", ".keystore-env"]) instanceSecrets.push(join(o.crowHome, n));
-    try { for (const e of readdirSync(o.crowHome)) if (/-token$/.test(e)) instanceSecrets.push(join(o.crowHome, e)); } catch {}
-  }
-  const never = [...neverBound(home), ...instanceSecrets].map((p) => (exists(p) ? (() => { try { return realpathSync(p); } catch { return p; } })() : p));
-  // No read-write bind may BE the Crow home or its secrets dir, or an ancestor
-  // of either: any of those puts the instance's tokens, secrets/ and env/
-  // inside the sandbox. (A write path INSIDE secrets/ is caught by `never`.)
-  const closedRw = crowHomeReal ? [crowHomeReal, join(crowHomeReal, "secrets")] : [];
-  // Co-hosted homes: the ones the spawner already found (secrets dirs and
-  // declared homes, resolved with realpath on its side) plus the `.crow*`
-  // siblings of $HOME, each resolved here. Self and anything that CONTAINS the
-  // home are dropped: this instance's own home is refused by its own rules, and
-  // an entry that covered the home would refuse every bind.
-  const declaredHomes = (Array.isArray(o.otherHomes) ? o.otherHomes : [])
-    .filter((p) => typeof p === "string" && isAbsolute(p));
-  const others = [...new Set([
-    ...declaredHomes.map((p) => real(p, exists) || resolve(p)),
-    ...otherInstanceHomes(home, crowHomeReal, exists),
-  ])].filter((p) => p !== home && p !== crowHomeReal && !under(home, p) && !(crowHomeReal && under(crowHomeReal, p)));
-  const homesRoot = dirname(home);
-  const codeRoots = [o.appRoot, o.nodeBin && dirname(dirname(o.nodeBin)), o.piLabDir].filter(Boolean)
-    .map((p) => real(p, exists) || p);
-
-  function forbidden(p, { write = false, policy = false } = {}) {
-    if (p === "/") return "the whole filesystem";
-    if (SHARED_ROOTS.includes(p)) return "a shared system directory (" + p + ")";
-    if (p === home || p === homesRoot) return "the whole home";
-    if (under(home, p)) return "an ancestor of the home";
-    if (write) for (const c of closedRw) if (under(c, p)) return "the Crow home (" + c + ") is never writable, and neither is an ancestor of it";
-    for (const n of never) if (under(p, n) || under(n, p)) return "a protected path (" + n + ")";
-    // Under, equal to, or an ANCESTOR of a co-hosted home: binding a parent
-    // would put that instance's home (and its secrets) inside the sandbox.
-    for (const x of others) if (under(p, x) || under(x, p)) return "another Crow instance's home";
-    if (under(p, homesRoot) && !under(p, home)) return "another user's home";
-    if (write) for (const c of codeRoots) if (under(p, c) || under(c, p)) return "code (the checkout or the engine) is never writable";
-    if (write && policy && under(p, home)) {
-      const top = p.slice(home.length + 1).split(sep)[0];
-      const dataReal = o.dataDir ? (real(o.dataDir, exists) || o.dataDir) : null;
-      if (top.startsWith(".") && !(dataReal && under(p, dataReal))) return "a hidden entry of the home (rc files, config, PATH dirs) is never writable from a policy";
-    }
-    return null;
-  }
-
-  function add(map, p, { write = false, label = "", policy = false } = {}) {
-    if (!p) return;
-    const r = real(p, exists);
-    if (!r) { refused.push({ path: p, reason: "does not exist" + (label ? " (" + label + ")" : "") }); return; }
-    const why = forbidden(r, { write, policy });
-    if (why) { refused.push({ path: p, reason: why }); return; }
-    map.set(r, r);
-  }
+  const { forbidden, add, closedRw } = makeBindPolicy({
+    home, crowHome: o.crowHome, crowHomeReal, dataDir: o.dataDir,
+    appRoot: o.appRoot, nodeBin: o.nodeBin, piLabDir: o.piLabDir, otherHomes: o.otherHomes,
+    exists, refused,
+  });
 
   // engine (read-only)
   if (o.nodeBin) add(ro, dirname(dirname(o.nodeBin)), { label: "node" });
@@ -338,75 +466,18 @@ export function buildContainPlan(o) {
   for (const k of rw.keys()) ro.delete(k);
 
   // ---- assemble ----
-  const args = ["--tmpfs", "/"];
-  for (const d of o.systemDirs || ["/usr", "/etc", "/opt"]) if (exists(d)) args.push("--ro-bind", d, d);
-  for (const [link, target] of [["/bin", "usr/bin"], ["/sbin", "usr/sbin"], ["/lib", "usr/lib"], ["/lib64", "usr/lib64"], ["/lib32", "usr/lib32"]]) {
-    let isLink = false;
-    try { isLink = lstatSync(link).isSymbolicLink(); } catch {}
-    if (isLink) args.push("--symlink", target, link);
-    else if (exists(link) && !o.systemDirs) args.push("--ro-bind", link, link);
-  }
-  // /proc: a fresh procfs of the sandbox's OWN pid namespace (--unshare-pid,
-  // required: without it a same-uid bot could signal every host process of
-  // that uid; kill(2) checks the uid, not the namespace).
-  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/var/tmp", "--tmpfs", "/run");
-  if (exists("/run/systemd/resolve")) args.push("--ro-bind", "/run/systemd/resolve", "/run/systemd/resolve");
-  if (exists("/etc/crow")) args.push("--tmpfs", "/etc/crow");
-  args.push("--tmpfs", home);
+  const args = rootArgs({ systemDirs: o.systemDirs, exists, home });
 
-  // .env files: never readable from a bound dir (the checkout's .env holds
-  // the gateway's secrets; bundle .env files hold extension secrets, at any
-  // depth). Every bound dir is walked (no symlinked dirs followed; package code
-  // under node_modules/, .venv/, __pycache__/ and .git/ skipped; masked dirs skipped)
-  // with a depth and entry cap. Hitting the cap FAILS CLOSED: a policy path is
-  // not bound at all; an engine or instance dir refuses the spawn.
-  const maskedDirs = new Set(masks.filter(([, k]) => k === "dir").map(([d]) => d));
+  // .env files: see scanEnvMasks (everything masked; a bot keeps nothing).
   const policyDirs = new Set([...(o.writePaths || []), ...(o.readPaths || [])].map((p) => real(String(p), exists)).filter(Boolean));
-  const boundDirs = () => [...ro.keys(), ...rw.keys()].filter((p) => { try { return statSync(p).isDirectory(); } catch { return false; } });
-  const isBound = (p) => boundDirs().some((d) => under(p, d)) || ro.has(p) || rw.has(p);
-  const maxDepth = o.envScanMaxDepth ?? ENV_SCAN_MAX_DEPTH;
-  const maxEntries = o.envScanMaxEntries ?? ENV_SCAN_MAX_ENTRIES;
-  for (const d of boundDirs()) {
-    const found = [];
-    let seen = 0, capped = false;
-    const walk = (dir, depth) => {
-      if (capped) return;
-      let names = [];
-      try { names = readdirSync(dir); } catch { return; }
-      for (const n of names) {
-        if (++seen > maxEntries) { capped = true; return; }
-        const p = join(dir, n);
-        let st; try { st = lstatSync(p); } catch { continue; }
-        if (ENV_NAME_RE.test(n)) {
-          if (st.isSymbolicLink()) found.push(["link", p]);
-          else if (st.isFile()) found.push(["file", p]);
-          continue;
-        }
-        if (st.isDirectory() && !ENV_SCAN_SKIP.has(n) && !maskedDirs.has(p)) {
-          if (depth >= maxDepth) { capped = true; return; }
-          walk(p, depth + 1);
-          if (capped) return;
-        }
-      }
-    };
-    walk(d, 1);
-    if (capped) {
-      if (policyDirs.has(d)) {
-        ro.delete(d); rw.delete(d);
-        refused.push({ path: d, reason: "too large to scan for .env files (cap " + maxEntries + " entries / depth " + maxDepth + "); not bound" });
-        continue;
-      }
-      throw new ContainRefused(d + " is too large to scan for .env files (cap " + maxEntries + " entries / depth " + maxDepth + "); refusing to bind it unscanned");
-    }
-    for (const [kind, p] of found) {
-      if (kind === "file") masks.push([p, "file"]);
-      else { const t = real(p, exists); if (t && isBound(t)) masks.push([t, "file"]); }
-    }
-  }
+  scanEnvMasks({
+    ro, rw, masks, policyDirs,
+    maxDepth: o.envScanMaxDepth ?? ENV_SCAN_MAX_DEPTH,
+    maxEntries: o.envScanMaxEntries ?? ENV_SCAN_MAX_ENTRIES,
+    exists, home, refused,
+  });
 
   // binds, parents first (sorted by path), rw and ro interleaved by path
-  const binds = [...[...ro.keys()].map((p) => ["--ro-bind", p]), ...[...rw.keys()].map((p) => ["--bind", p])]
-    .sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
   // pi agent shadow goes in path order too
   const agentEntries = [];
   // Network tier (2c): the relay's socket dir, read-only, at a fixed path.
@@ -421,16 +492,7 @@ export function buildContainPlan(o) {
   // One list in destination order: a dir's bind, then masks inside it, then
   // binds of its descendants (a project workspace re-exposed under a masked
   // projects/ entry). Same dest: the bind first, the mask after.
-  const maskOps = [...new Map(masks.map(([d, k]) => [d, k])).entries()]
-    .map(([d, k]) => (k === "dir" ? ["--tmpfs", null, d, 1] : ["--ro-bind", "/dev/null", d, 1]));
-  const all = [...binds.map(([f, p]) => [f, p, p, 0]), ...agentEntries.map((e) => [...e, 0]), ...maskOps].sort((a, b) => {
-    if (a[2] === b[2]) return a[3] - b[3];
-    return a[2] < b[2] ? -1 : 1;
-  });
-  for (const [f, s, d] of all) {
-    if (f === "--tmpfs") args.push("--tmpfs", d);
-    else args.push(f, s, d);
-  }
+  args.push(...assembleBindArgs({ ro, rw, masks, extraEntries: agentEntries }));
 
   args.push("--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--cap-drop", "ALL");
   if (o.net) args.push("--unshare-net");

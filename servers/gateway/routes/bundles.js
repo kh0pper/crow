@@ -29,7 +29,7 @@ import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { withoutCredentialKeys } from "../../shared/credentials-env.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, readlinkSync, renameSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, readlinkSync, renameSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync, openSync, closeSync, fchmodSync, fstatSync, constants as fsConstants } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -73,6 +73,8 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
+import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall } from "../../shared/addon-walls-file.js";
+import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
 import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation, mintMissingFlaggedKeys } from "../bundle-env-secrets.js";
@@ -1411,16 +1413,59 @@ function generatedPlainForMcp(manifest, generated) {
   return Object.fromEntries(Object.entries(generated || {}).filter(([k]) => !hashed.has(k)));
 }
 
-export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null } = {}) {
+export function mcpAddonEntryFor(manifest, reqEnv = null, { bundleDir = null, edited = null, generatedKeys = [] } = {}) {
   const env = {};
-  for (const key of manifest?.server?.envKeys || []) if (reqEnv && reqEnv[key]) env[key] = reqEnv[key];
+  const fromRequest = new Set();
+  for (const key of manifest?.server?.envKeys || []) {
+    if (reqEnv && reqEnv[key]) { env[key] = reqEnv[key]; fromRequest.add(key); }
+  }
   for (const v of manifest?.env_vars || []) if (v.default && !env[v.name]) env[v.name] = v.default;
+  // Which values the OWNER entered (never a manifest default): the form's edited list,
+  // plus a requested value that differs from its manifest default (a generated key is
+  // minted by Crow, not typed). The wall's host/bind rules read only owner-set values.
+  const ownerSet = ownerSetFor({ env, fromRequest, edited, generatedKeys, manifest, priorEnv: null, bundleId: null });
   // A launcher outside the root-owned system dirs (a ./run.sh in the bundle)
   // is started only when pinned; the operator's install/update click is the
   // consent for in-bundle code, so the flow that writes the entry pins it.
   const pin = bundleDir ? launcherPin(manifest.server.command, bundleDir) : null;
   return { command: manifest.server.command, args: manifest.server.args || [], ...(Object.keys(env).length > 0 ? { env } : {}),
-    ...(pin ? { command_sha256: pin } : {}) };
+    ...(pin ? { command_sha256: pin } : {}), ...(ownerSet.length > 0 ? { ownerSet } : {}) };
+}
+
+/**
+ * `registry/addon-past-defaults.json` `.defaults`, read lazily (a missing or unreadable
+ * file means "no past defaults"). It holds every `env_vars[].default` each manifest has
+ * ever shipped, which is how an entry written before `ownerSet` existed is judged.
+ */
+function pastDefaultsForEntry(bundleId) {
+  if (!bundleId) return {};
+  try {
+    const doc = JSON.parse(readFileSync(new URL("../../../registry/addon-past-defaults.json", import.meta.url), "utf8"));
+    const defaults = doc && typeof doc === "object" ? doc.defaults : null;
+    return defaults && typeof defaults === "object" ? defaults[bundleId] || {} : {};
+  } catch { return {}; }
+}
+
+/**
+ * The sorted, unique `ownerSet` for an entry being written.
+ *
+ * `fromRequest` holds the keys that came from the install request (never a manifest
+ * default). `priorEnv` seeds a LEGACY entry (one with no `ownerSet`): a value that equals
+ * no default the manifest has ever shipped was owner-entered.
+ */
+function ownerSetFor({ env, fromRequest = new Set(), edited = null, generatedKeys = [], manifest, priorEnv, bundleId }) {
+  const editedSet = new Set(Array.isArray(edited) ? edited : []);
+  const generatedSet = new Set(Array.isArray(generatedKeys) ? generatedKeys : []);
+  const defaults = new Map((manifest?.env_vars || [])
+    .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+    .map((v) => [v.name, String(v.default)]));
+  const owner = new Set(priorEnv ? legacyOwnerKeys(priorEnv, manifest, pastDefaultsForEntry(bundleId)) : []);
+  for (const key of Object.keys(env || {})) {
+    if (editedSet.has(key)) { owner.add(key); continue; }
+    if (!fromRequest.has(key) || generatedSet.has(key)) continue;
+    if (!defaults.has(key) || String(env[key]) !== defaults.get(key)) owner.add(key);
+  }
+  return [...owner].sort();
 }
 
 /**
@@ -1446,20 +1491,38 @@ function mcpForwardableKeys(manifest) {
  *
  * @returns {boolean} true if the add-on registers an MCP server and the file was written
  */
-export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null) {
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, manifest = null, { edited = null } = {}) {
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
   const allowed = mcpForwardableKeys(manifest);
+  const priorEnv = { ...(entry.env || {}) };
   const merged = { ...(entry.env || {}) };
   // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
   // so a blank here would SHADOW a working ambient value rather than clear it. The two
   // install-time writers of this file (see the mcp_server registration paths) guard the
   // same way. Clearing a value stays the .env file's job.
+  const written = [];
   for (const [k, v] of Object.entries(envVars || {})) {
-    if (v && (!allowed || allowed(k))) merged[k] = v;
+    if (v && (!allowed || allowed(k))) { merged[k] = v; written.push(k); }
   }
   entry.env = merged;
+  // Provenance for the wall's host/bind rules: the keys this save actually wrote that
+  // are not just the manifest default. A legacy entry is seeded from the past-defaults rule.
+  if (written.length > 0) {
+    const editedSet = new Set(Array.isArray(edited) ? edited : []);
+    const defaults = new Map((manifest?.env_vars || [])
+      .filter((v) => v && typeof v.name === "string" && v.default !== undefined && v.default !== null)
+      .map((v) => [v.name, String(v.default)]));
+    const owner = new Set(Array.isArray(entry.ownerSet)
+      ? entry.ownerSet
+      : legacyOwnerKeys(priorEnv, manifest, pastDefaultsForEntry(bundleId)));
+    for (const k of written) {
+      if (manifest === null || editedSet.has(k) || !defaults.has(k) || String(merged[k]) !== defaults.get(k)) owner.add(k);
+    }
+    const sorted = [...owner].sort();
+    if (sorted.length > 0) entry.ownerSet = sorted;
+  }
   mcpAddons[bundleId] = entry;
   writeJsonSafe(path, mcpAddons);
   return true;
@@ -2303,6 +2366,100 @@ export function findInvalidEnv(envVars) {
   return null;
 }
 
+/** Existence without following a symlink: a dangling or directory symlink still counts. */
+function pathExistsNoFollow(path) {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+/**
+ * Whether `manifest` is a stdio MCP add-on — the only kind that owns a data folder.
+ * A remote MCP (`server.url`) has no child process and no data dir of its own.
+ */
+function isStdioAddonManifest(manifest) {
+  return !!manifest?.server && !manifest.server.url;
+}
+
+/**
+ * Review item 5: refuse an install over a pre-existing `<dataDir>/<id>`, so an add-on
+ * never starts inside a folder someone else filled (a hand-made dir, a leftover of
+ * another tool). The one exception is Crow's own kept data, recorded per add-on in
+ * `<crowHome>/addon-walls.json` (`keptData`): an install records the folder it made
+ * `<dataDir>/<id>` and keeps that record while the add-on is installed, and an uninstall
+ * never deletes the folder, so the record also covers a reinstall over it. A record names
+ * ONE folder — its device, inode and owner — so a folder swapped in after the uninstall
+ * (or a symlink to one) inherits nothing. A record whose folder is gone is stale and
+ * dropped here. Nothing inside the folder is read for this decision — a planted
+ * `addon-walls.json` there grants nothing.
+ *
+ * @returns {object|null} the refusal ({ok:false,status,code,error,extra}) or null.
+ */
+export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
+  if (!isStdioAddonManifest(manifest) || !bundleId) return null;
+  const dir = join(dataDir, bundleId);
+  if (!pathExistsNoFollow(dir)) {
+    // No folder, so any record for it is stale: drop it rather than let it name a
+    // folder a later install would then create.
+    try { clearKeptData(crowHome, bundleId); } catch (err) {
+      console.warn(`[bundles] could not clear the kept-data record for '${bundleId}': ${err?.message || err}`);
+    }
+    return null;
+  }
+  // A symlink never matches (the record names a plain directory), so it is always refused.
+  if (keptDataMatches(crowHome, bundleId, dir)) return null;
+  return {
+    ok: false, status: 409, code: "addon_data_dir_exists",
+    error: "A folder for this add-on already exists; remove or rename it, then install again",
+    extra: { code: "addon_data_dir_exists" },
+  };
+}
+
+/**
+ * Review item 5: create the add-on's own data folder, BEFORE its MCP entry is
+ * registered, so a folder that cannot be made fails the install with no entry left
+ * behind. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
+ * and recorded as Crow's own kept data — the record names exactly the folder Crow made,
+ * so a failed install can be retried and an in-place reinstall over that same folder is
+ * allowed. The record stays while the add-on is installed; one whose folder is gone is
+ * dropped by the next check (see addonDataDirRefusal).
+ *
+ * The folder just made is opened once and every later step goes through that fd: the
+ * mode is set on the fd and the record is the fd's own `fstat`, so nothing between the
+ * `mkdir` and the record can swap a different directory (or a symlink) in at the path.
+ *
+ * Exported for tests. `mkdir` is the check: a folder that appeared between
+ * validateInstall and here is only accepted when the kept-data record already names
+ * exactly that folder (an uninstall kept it), otherwise the install fails.
+ */
+export function ensureAddonDataDir(bundleId, manifest) {
+  if (!isStdioAddonManifest(manifest) || !bundleId) return;
+  const dir = join(resolveDataDir(), bundleId);
+  // Never `recursive`: the data dir itself is the instance's own and must already exist.
+  // A failure here fails the install (runInstallJob's handler) instead of leaving an
+  // add-on recorded whose only writable folder was never made.
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+    if (keptDataMatches(CROW_HOME, bundleId, dir)) return;
+    throw new Error("a folder for this add-on appeared during the install; remove or rename it, then install again");
+  }
+  let fd;
+  try {
+    // O_NOFOLLOW: a symlink swapped in after the mkdir is refused, never followed.
+    fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    fchmodSync(fd, 0o700);
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isDirectory()) throw new Error("the add-on's data folder is not a directory");
+    try {
+      recordKeptData(CROW_HOME, bundleId, st);
+    } catch (err) {
+      console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
+    }
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
+  }
+}
+
 /**
  * `requireEnv` (single-install route only): refuse with 400 missing_required_env
  * when an installBlockingEnvKeys() key would install blank — `docker compose up`
@@ -2348,6 +2505,12 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     // `extra.code` is the stable answer clients match (the Services Install sheet); the text stays.
     return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed`, extra: { code: "already_installed" } };
   }
+
+  // Review item 5: a data folder this add-on did not get from Crow (and that no
+  // uninstall recorded as kept) is refused BEFORE anything is copied, so the add-on
+  // can never start inside a folder someone else prepared (see addonDataDirRefusal).
+  const dataDirRefusal = addonDataDirRefusal(getManifest(bundleId), bundleId, { dataDir: resolveDataDir(), crowHome: CROW_HOME });
+  if (dataDirRefusal) return dataDirRefusal;
 
   // PR 0: dependency check — refuse install if any required bundle is missing
   const manifest = getManifest(bundleId);
@@ -2871,6 +3034,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
       // Bundle types can also have MCP servers — register if manifest has server config
       if (manifest?.server) {
+        // The data folder first: a folder this add-on cannot get fails the install with
+        // no half-registered MCP server left in mcp-addons.json.
+        ensureAddonDataDir(bundleId, manifest);
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
         // shared by more than one gateway on a host (e.g. the home server runs a
@@ -2880,7 +3046,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         // locked". The MCP child instead inherits the SPAWNING gateway's
         // CROW_DB_PATH via process.env at launch (its own default otherwise),
         // so each gateway's children always use that gateway's DB.
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
         needsRestart = true;
@@ -2916,8 +3082,10 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     } else if (addonType === "mcp-server") {
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
+        // Before the entry is written (see the bundle branch above).
+        ensureAddonDataDir(bundleId, manifest);
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir });
+        mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
       }
@@ -4023,6 +4191,19 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
+        // Review item 5: uninstall never removes the add-on's own data folder (whatever
+        // `delete_data` did to its containers' volumes). It is recorded as Crow's own kept
+        // data only when it is provably the folder Crow made: a folder swapped in since the
+        // install is never re-recorded (addon-walls-file.js decides, and explains in the log).
+        try {
+          recordKeptDataOnUninstall(bundle_id, {
+            crowHome: CROW_HOME,
+            dataDir: resolveDataDir(),
+            log: (line) => appendLog(job, line),
+          });
+        } catch (err) {
+          console.warn(`[bundles] could not record the kept data folder for '${bundle_id}': ${err?.message || err}`);
+        }
         // Its project connections' children stop now (their rows are paused just below).
         try { await stopChildrenForBundle(bundle_id); } catch { appendLog(job, "Warning: could not stop this extension's project connections"); }
         const keptPasswords = await markBundleKeychainRemoved(bundle_id, {
@@ -4353,7 +4534,7 @@ export default function bundlesRouter() {
         : null;
 
       // Also configure the MCP child, which reads mcp-addons.json — not this .env.
-      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id));
+      const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars, MCP_ADDONS_PATH, getInstalledFirstManifest(bundle_id), { edited: changedKeys });
 
       // And the gateway's own env, exactly as install does for docker bundles:
       // gateway-side panel routes read their config from process.env (the phone

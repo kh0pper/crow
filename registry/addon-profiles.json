@@ -1,0 +1,3038 @@
+{
+  "version": 1,
+  "profiles": {
+    "actual-budget": {
+      "id": "actual-budget",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 5006,
+            "scheme": "http",
+            "from": "ACTUAL_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Actual Budget",
+          "host": "localhost",
+          "port": 5006
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Actual Budget on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Actual Budget en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "adguard-home": {
+      "id": "adguard-home",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 3020,
+            "scheme": "http",
+            "from": "ADGUARD_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "AdGuard Home",
+          "host": "localhost",
+          "port": 3020
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach AdGuard Home on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a AdGuard Home en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "arxiv": {
+      "id": "arxiv",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "audiobookshelf": {
+      "id": "audiobookshelf",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 13378,
+            "scheme": "http",
+            "from": "AUDIOBOOKSHELF_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Audiobookshelf",
+          "host": "localhost",
+          "port": 13378
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Audiobookshelf on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Audiobookshelf en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "bookstack": {
+      "id": "bookstack",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 6875,
+            "scheme": "http",
+            "from": "BOOKSTACK_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "BookStack",
+          "host": "localhost",
+          "port": 6875
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach BookStack on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a BookStack en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "brave-search": {
+      "id": "brave-search",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "browser": {
+      "id": "browser",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [
+        "browser"
+      ],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": [
+          "browser-sessions",
+          "browser-downloads",
+          "browser-exports"
+        ]
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "door",
+          "id": "browser"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "talk to Crow's browser door",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "hablar con la puerta browser de Crow",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "caddy": {
+      "id": "caddy",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "calibre-server": {
+      "id": "calibre-server",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8081,
+            "scheme": "http",
+            "from": "CALIBRE_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Calibre",
+          "host": "localhost",
+          "port": 8081
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Calibre on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Calibre en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "calibre-web": {
+      "id": "calibre-web",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8083,
+            "scheme": "http",
+            "from": "CALIBRE_WEB_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Calibre-Web",
+          "host": "localhost",
+          "port": 8083
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Calibre-Web on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Calibre-Web en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "campaigns": {
+      "id": "campaigns",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "canvas-lms": {
+      "id": "canvas-lms",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "changedetection": {
+      "id": "changedetection",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 5010,
+            "scheme": "http",
+            "from": "CHANGEDETECTION_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Change Detection",
+          "host": "localhost",
+          "port": 5010
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Change Detection on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Change Detection en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "crowdsec": {
+      "id": "crowdsec",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "127.0.0.1",
+            "port": 8091,
+            "scheme": "http",
+            "from": "CROWDSEC_LAPI_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "127.0.0.1:8091",
+          "host": "127.0.0.1",
+          "port": 8091
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach 127.0.0.1:8091 on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a 127.0.0.1:8091 en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "data-dashboard": {
+      "id": "data-dashboard",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "discord": {
+      "id": "discord",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "dozzle": {
+      "id": "dozzle",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8095,
+            "scheme": "http",
+            "from": "DOZZLE_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Dozzle",
+          "host": "localhost",
+          "port": 8095
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Dozzle on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Dozzle en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "forgejo": {
+      "id": "forgejo",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 3050,
+            "scheme": "http",
+            "from": "FORGEJO_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Forgejo",
+          "host": "localhost",
+          "port": 3050
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Forgejo on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Forgejo en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "frigate": {
+      "id": "frigate",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8971,
+            "scheme": "http",
+            "from": "FRIGATE_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Frigate",
+          "host": "localhost",
+          "port": 8971
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Frigate on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Frigate en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "funkwhale": {
+      "id": "funkwhale",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:FUNKWHALE_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "gitea": {
+      "id": "gitea",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 3040,
+            "scheme": "http",
+            "from": "GITEA_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Gitea",
+          "host": "localhost",
+          "port": 3040
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Gitea on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Gitea en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "github": {
+      "id": "github",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "gotosocial": {
+      "id": "gotosocial",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:GTS_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "home-assistant": {
+      "id": "home-assistant",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "immich": {
+      "id": "immich",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "iptv": {
+      "id": "iptv",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "jellyfin": {
+      "id": "jellyfin",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8096,
+            "scheme": "http",
+            "from": "JELLYFIN_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Jellyfin",
+          "host": "localhost",
+          "port": 8096
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Jellyfin on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Jellyfin en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "kavita": {
+      "id": "kavita",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 5000,
+            "scheme": "http",
+            "from": "KAVITA_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Kavita",
+          "host": "localhost",
+          "port": 5000
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Kavita on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Kavita en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "kiosk": {
+      "id": "kiosk",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [
+        "kiosk"
+      ],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "door",
+          "id": "kiosk"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "talk to Crow's kiosk door",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "hablar con la puerta kiosk de Crow",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "knowledge-base": {
+      "id": "knowledge-base",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "kodi": {
+      "id": "kodi",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "lemmy": {
+      "id": "lemmy",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "linkding": {
+      "id": "linkding",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 9090,
+            "scheme": "http",
+            "from": "LINKDING_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Linkding",
+          "host": "localhost",
+          "port": 9090
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Linkding on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Linkding en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "mastodon": {
+      "id": "mastodon",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:MASTODON_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "matrix-dendrite": {
+      "id": "matrix-dendrite",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:MATRIX_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "media": {
+      "id": "media",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "meta-glasses": {
+      "id": "meta-glasses",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "miniflux": {
+      "id": "miniflux",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8085,
+            "scheme": "http",
+            "from": "MINIFLUX_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Miniflux",
+          "host": "localhost",
+          "port": 8085
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Miniflux on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Miniflux en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "navidrome": {
+      "id": "navidrome",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 4533,
+            "scheme": "http",
+            "from": "NAVIDROME_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Navidrome",
+          "host": "localhost",
+          "port": 4533
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Navidrome on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Navidrome en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "netdata": {
+      "id": "netdata",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 19999,
+            "scheme": "http",
+            "from": "NETDATA_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Netdata",
+          "host": "localhost",
+          "port": 19999
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Netdata on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Netdata en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "nominatim": {
+      "id": "nominatim",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8042,
+            "scheme": "http",
+            "from": "NOMINATIM_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "localhost:8042",
+          "host": "localhost",
+          "port": 8042
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach localhost:8042 on this computer",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a localhost:8042 en este equipo",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "notion": {
+      "id": "notion",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "obsidian": {
+      "id": "obsidian",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "paperless": {
+      "id": "paperless",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8000,
+            "scheme": "http",
+            "from": "PAPERLESS_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Paperless-ngx",
+          "host": "localhost",
+          "port": 8000
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Paperless-ngx on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Paperless-ngx en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "peertube": {
+      "id": "peertube",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:PEERTUBE_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "pixelfed": {
+      "id": "pixelfed",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:PIXELFED_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "plex": {
+      "id": "plex",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "pm-workspace": {
+      "id": "pm-workspace",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "ramble": {
+      "id": "ramble",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "reader": {
+      "id": "reader",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "render": {
+      "id": "render",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "rookery": {
+      "id": "rookery",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "searxng": {
+      "id": "searxng",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8098,
+            "scheme": "http",
+            "from": "SEARXNG_BASE_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "SearXNG",
+          "host": "localhost",
+          "port": 8098
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach SearXNG on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a SearXNG en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "shiori": {
+      "id": "shiori",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8086,
+            "scheme": "http",
+            "from": "SHIORI_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Shiori",
+          "host": "localhost",
+          "port": 8086
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Shiori on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Shiori en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "stirling-pdf": {
+      "id": "stirling-pdf",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8092,
+            "scheme": "http",
+            "from": "STIRLING_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Stirling PDF",
+          "host": "localhost",
+          "port": 8092
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Stirling PDF on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Stirling PDF en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "studio": {
+      "id": "studio",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [
+        "studio"
+      ],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "door",
+          "id": "studio"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "talk to Crow's studio door",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "hablar con la puerta studio de Crow",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "sunvox-studio": {
+      "id": "sunvox-studio",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "tax": {
+      "id": "tax",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "trello": {
+      "id": "trello",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "trilium": {
+      "id": "trilium",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8088,
+            "scheme": "http",
+            "from": "TRILIUM_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "TriliumNext",
+          "host": "localhost",
+          "port": 8088
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach TriliumNext on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a TriliumNext en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "uptime-kuma": {
+      "id": "uptime-kuma",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 3007,
+            "scheme": "http",
+            "from": "UPTIMEKUMA_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Uptime Kuma",
+          "host": "localhost",
+          "port": 3007
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Uptime Kuma on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Uptime Kuma en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "vaultwarden": {
+      "id": "vaultwarden",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8097,
+            "scheme": "http",
+            "from": "VAULTWARDEN_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Vaultwarden",
+          "host": "localhost",
+          "port": 8097
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Vaultwarden on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Vaultwarden en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "vikunja": {
+      "id": "vikunja",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 3456,
+            "scheme": "http",
+            "from": "VIKUNJA_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Vikunja",
+          "host": "localhost",
+          "port": 3456
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Vikunja on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Vikunja en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "wallabag": {
+      "id": "wallabag",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": [
+          {
+            "host": "localhost",
+            "port": 8084,
+            "scheme": "http",
+            "from": "WALLABAG_URL",
+            "source": "default-own-service"
+          }
+        ]
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "local-host",
+          "label": "Wallabag",
+          "host": "localhost",
+          "port": 8084
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "reach Wallabag on this computer",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "acceder a Wallabag en este equipo",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    },
+    "workspace": {
+      "id": "workspace",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "writefreely": {
+      "id": "writefreely",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": true,
+      "ownEnvFile": false,
+      "refused": [
+        {
+          "what": "host:WF_URL",
+          "reason": "a default address that is not this add-on's own published service"
+        }
+      ],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        },
+        {
+          "kind": "crow-db"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder",
+          "can read Crow's stored keys and change its database"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta",
+          "puede leer las claves guardadas de Crow y cambiar su base de datos"
+        ]
+      }
+    },
+    "zotero": {
+      "id": "zotero",
+      "source": "repo",
+      "network": {
+        "internet": true,
+        "hosts": []
+      },
+      "doors": [],
+      "files": {
+        "read": [],
+        "write": [],
+        "oauthDir": null,
+        "state": []
+      },
+      "crowDb": false,
+      "ownEnvFile": false,
+      "refused": [],
+      "labelParts": [
+        {
+          "kind": "internet"
+        },
+        {
+          "kind": "own-folder"
+        }
+      ],
+      "label": {
+        "en": [
+          "use the internet",
+          "keep files in its own folder"
+        ],
+        "es": [
+          "usar internet",
+          "guardar archivos en su propia carpeta"
+        ]
+      }
+    }
+  }
+}
