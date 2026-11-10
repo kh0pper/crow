@@ -28,6 +28,13 @@
 import { chmodSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+/**
+ * The operator's wall switches (the kill switch and the per-host default). They
+ * are read from the gateway's own unit environment only: never written into the
+ * checkout .env by a bundle install or Configure, and ignored when found there.
+ */
+export const ADDON_WALL_SWITCH_KEYS = Object.freeze(["CROW_ADDON_WALLS", "CROW_ADDON_WALLS_DEFAULT"]);
+
 /** An add-on id this file may hold an entry for (`^[a-z0-9][a-z0-9-]*$`). */
 const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 
