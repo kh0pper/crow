@@ -73,6 +73,7 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
+import { hasKeptData, markKeptData, clearKeptData } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -2365,6 +2366,71 @@ export function findInvalidEnv(envVars) {
   return null;
 }
 
+/** Existence without following a symlink: a dangling or directory symlink still counts. */
+function pathExistsNoFollow(path) {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+/**
+ * Whether `manifest` is a stdio MCP add-on — the only kind that owns a data folder.
+ * A remote MCP (`server.url`) has no child process and no data dir of its own.
+ */
+function isStdioAddonManifest(manifest) {
+  return !!manifest?.server && !manifest.server.url;
+}
+
+/**
+ * Review item 5: refuse an install over a pre-existing `<dataDir>/<id>`, so an add-on
+ * never starts inside a folder someone else filled (a hand-made dir, a leftover of
+ * another tool). The one exception is Crow's own kept data: an uninstall never deletes
+ * the folder and records it in `<crowHome>/addon-walls.json` (`keptData`). Nothing
+ * inside the folder is read for this decision — a planted `addon-walls.json` there
+ * grants nothing.
+ *
+ * @returns {object|null} the refusal ({ok:false,status,code,error,extra}) or null.
+ */
+export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
+  if (!isStdioAddonManifest(manifest) || !bundleId) return null;
+  if (!pathExistsNoFollow(join(dataDir, bundleId))) return null;
+  let kept = false;
+  try {
+    kept = hasKeptData(crowHome, bundleId);
+  } catch (err) {
+    // A read that throws grants nothing: the refusal stands (readAddonWalls is {} then).
+    console.warn(`[bundles] could not read the add-on wall file for '${bundleId}': ${err?.message || err}`);
+    kept = false;
+  }
+  if (kept) return null;
+  return {
+    ok: false, status: 409, code: "addon_data_dir_exists",
+    error: "A folder for this add-on already exists; remove or rename it, then install again",
+    extra: { code: "addon_data_dir_exists" },
+  };
+}
+
+/**
+ * Review item 5: create the add-on's own data folder, right after its MCP entry is
+ * registered. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
+ * and recorded as Crow's own kept data, so a failed install can be retried — the folder
+ * is ours, not a stranger's. A folder that already exists (one an uninstall kept) is
+ * left exactly as it is.
+ */
+function ensureAddonDataDir(bundleId, manifest) {
+  if (!isStdioAddonManifest(manifest) || !bundleId) return;
+  const dir = join(resolveDataDir(), bundleId);
+  if (pathExistsNoFollow(dir)) return;
+  // Never `recursive`: the data dir itself is the instance's own and must already exist.
+  // A failure here fails the install (runInstallJob's handler) instead of leaving an
+  // add-on recorded whose only writable folder was never made.
+  mkdirSync(dir, { mode: 0o700 });
+  chmodSync(dir, 0o700);
+  try {
+    markKeptData(CROW_HOME, bundleId);
+  } catch (err) {
+    console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
+  }
+}
+
 /**
  * `requireEnv` (single-install route only): refuse with 400 missing_required_env
  * when an installBlockingEnvKeys() key would install blank — `docker compose up`
@@ -2410,6 +2476,12 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     // `extra.code` is the stable answer clients match (the Services Install sheet); the text stays.
     return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed`, extra: { code: "already_installed" } };
   }
+
+  // Review item 5: a data folder this add-on did not get from Crow (and that no
+  // uninstall recorded as kept) is refused BEFORE anything is copied, so the add-on
+  // can never start inside a folder someone else prepared (see addonDataDirRefusal).
+  const dataDirRefusal = addonDataDirRefusal(getManifest(bundleId), bundleId, { dataDir: resolveDataDir(), crowHome: CROW_HOME });
+  if (dataDirRefusal) return dataDirRefusal;
 
   // PR 0: dependency check — refuse install if any required bundle is missing
   const manifest = getManifest(bundleId);
@@ -2945,6 +3017,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
+        ensureAddonDataDir(bundleId, manifest);
         needsRestart = true;
       }
 
@@ -2982,6 +3055,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
+        ensureAddonDataDir(bundleId, manifest);
       }
 
       // Install npm dependencies if package.json exists
@@ -3320,6 +3394,11 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       return { ok: false, reason: hookFailure, needsRestart };
     }
 
+    try {
+      clearKeptData(CROW_HOME, bundleId);
+    } catch (err) {
+      console.warn(`[bundles] could not clear the kept-data record for '${bundleId}': ${err?.message || err}`);
+    }
     return { ok: true, needsRestart };
   } catch (err) {
     const reason = err?.message || String(err);
@@ -4085,6 +4164,14 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
+        // Review item 5: uninstall never removes the add-on's own data folder (whatever
+        // `delete_data` did to its containers' volumes). Record it as Crow's own kept data,
+        // so a reinstall over it is allowed and a folder nobody here created stays refused.
+        try {
+          if (pathExistsNoFollow(join(resolveDataDir(), bundle_id))) markKeptData(CROW_HOME, bundle_id);
+        } catch (err) {
+          console.warn(`[bundles] could not record the kept data folder for '${bundle_id}': ${err?.message || err}`);
+        }
         // Its project connections' children stop now (their rows are paused just below).
         try { await stopChildrenForBundle(bundle_id); } catch { appendLog(job, "Warning: could not stop this extension's project connections"); }
         const keptPasswords = await markBundleKeychainRemoved(bundle_id, {
