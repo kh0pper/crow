@@ -14,8 +14,12 @@
  *    `<dataDir>/<id>/addon-walls.json` grants nothing.
  *  - A legacy plain-string entry, or a record missing a field, grants nothing
  *    (it is ignored, and dropped on the next write).
- *  - Later tasks add the per-add-on wall override (an owner's "not walled on
- *    this computer" choice) to this same file.
+ *  - `modes: { <id>: "walled" | "unwalled" }` — the owner's per-add-on wall
+ *    choice for THIS computer. `unwalled` is the only value that changes a
+ *    run; anything else (another string, a non-object, an id that is not a
+ *    slug) reads as no choice at all, so a broken file never frees an add-on.
+ *    The mode decision reads this file and the operator's switches only: never
+ *    the child env, crow.db or an add-on's own folders.
  *
  * A missing, unreadable, unparsable or non-object file reads as `{}`: it grants
  * nothing, so every caller fails closed.
@@ -67,6 +71,35 @@ export function writeAddonWalls(crowHome, obj) {
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);
   chmodSync(path, 0o600);
+}
+
+/**
+ * The owner's wall choice for one add-on: `"walled"`, `"unwalled"` or null.
+ * Only an exact string counts, and only for a slug-shaped id.
+ */
+export function wallModeOverride(crowHome, id) {
+  if (!isAddonId(id)) return null;
+  const modes = readAddonWalls(crowHome).modes;
+  if (!modes || typeof modes !== "object" || Array.isArray(modes)) return null;
+  if (!Object.prototype.hasOwnProperty.call(modes, id)) return null;
+  const mode = modes[id];
+  return mode === "walled" || mode === "unwalled" ? mode : null;
+}
+
+/**
+ * Record the owner's choice for `id`. Every other key of the document is kept
+ * as it is (`keptData` included). False for an id or a mode this file may not
+ * hold, and then nothing is written.
+ */
+export function setWallMode(crowHome, id, mode) {
+  if (!isAddonId(id)) return false;
+  if (mode !== "walled" && mode !== "unwalled") return false;
+  const doc = readAddonWalls(crowHome);
+  const modes = doc.modes && typeof doc.modes === "object" && !Array.isArray(doc.modes) ? { ...doc.modes } : {};
+  modes[id] = mode;
+  doc.modes = modes;
+  writeAddonWalls(crowHome, doc);
+  return true;
 }
 
 /** Whether `e` is a complete kept-data record (an id plus the folder it names). */
