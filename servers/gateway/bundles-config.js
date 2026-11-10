@@ -101,8 +101,8 @@ const isSet = (v) => typeof v === "string" && v.trim() !== "";
  * Three sources, highest precedence first:
  *   1. bundles/<id>/.env              — docker bundles (compose reads it).
  *   2. mcp-addons.json[<id>].env      — MCP add-ons. proxy.js spawns children with the
- *                                       allowlisted base + the keys its reviewed
- *                                       manifest declares + config.env (addon-env.js);
+ *                                       allowlisted base + the keys its registry entry
+ *                                       declares + config.env (addon-env.js);
  *                                       they never read bundles/<id>/.env.
  *   3. ambient process.env            — same spawn: a key supplied via the gateway's
  *                                       own env / systemd Environment= is real config

@@ -6664,7 +6664,7 @@
     {
       "id": "sunvox-studio",
       "name": "SunVox Studio",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "description": "AI-operable music engine — inspect, render and compose SunVox/XM/MOD tracker projects via the MIT-licensed SunVox library. Headless offline rendering (~130x realtime, no audio device) and programmatic composition from JSON specs (patterns, arrangement, song name). Renders and projects are saved to Crow storage; a render can go straight into a Funkwhale library for glasses playback.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6688,12 +6688,7 @@
           "SUNVOX_WORKDIR",
           "SUNVOX_LIB_PATH",
           "SUNVOX_READ_DIRS",
-          "SUNVOX_MAX_RENDER_SECONDS",
-          "MINIO_ENDPOINT",
-          "MINIO_PORT",
-          "MINIO_USE_SSL",
-          "MINIO_ROOT_USER",
-          "MINIO_ROOT_PASSWORD"
+          "SUNVOX_MAX_RENDER_SECONDS"
         ]
       },
       "skills": [

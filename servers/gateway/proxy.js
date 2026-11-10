@@ -20,7 +20,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
-import { addonBaseEnv, declaredPassthrough } from "./addon-env.js";
+import { addonBaseEnv, declaredPassthrough, storagePassthrough } from "./addon-env.js";
 import { createDbClient } from "../db.js";
 import { isApproved, approvalNotFromThisMachine, approvalForAnotherBackend, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { pruneApprovalNonces } from "../shared/data-backend-approval-key.js";
@@ -183,19 +183,24 @@ async function connectToServer(integration) {
 
 /**
  * The environment of a bundle add-on's stdio child started BY THE GATEWAY: the allowlisted base
- * (addon-env.js), the keys the add-on's reviewed repo manifest declares, the entry's own env, and
- * the manifest's derived env. `CROW_ADDON_HOST=gateway` marks the one long-lived copy the gateway
- * supervises, so an add-on can keep background work (schedules, polling) out of the short-lived
- * private copies that bots and other MCP clients start from the same mcp-addons.json entry. Set
- * last: an add-on's own env cannot claim or drop it.
+ * (addon-env.js), the keys the add-on's registry entry declares, the storage env the four
+ * storage-reading bundles keep, the entry's own env, and the manifest's derived env.
+ * `CROW_ADDON_HOST=gateway` marks the one long-lived copy the gateway supervises, so an add-on can
+ * keep background work (schedules, polling) out of the short-lived private copies that bots and
+ * other MCP clients start from the same mcp-addons.json entry. Set last: an add-on's own env
+ * cannot claim or drop it.
  * With an `id`, a service add-on also gets its manifest's derived env (e.g. Render's AUTH_HEADER),
  * rendered from `config.env` over `base`.
+ * The passthrough reads from a base without the names this process applied from systemd
+ * credentials: those values are the gateway's own, not part of the environment it was given.
  */
 export function addonStdioEnv(config = {}, base = process.env, id = null, opts = {}) {
+  const gate = withoutCredentialKeys(base);
   const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
   return {
     ...addonBaseEnv(base),
-    ...declaredPassthrough(id, base, opts),
+    ...declaredPassthrough(id, gate, opts),
+    ...storagePassthrough(id, gate),
     ...(config.env || {}),
     ...derived,
     CROW_ADDON_HOST: "gateway",

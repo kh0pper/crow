@@ -1551,8 +1551,10 @@ function mcpForwardableKeys(manifest) {
 /**
  * Push env values into the add-on's mcp-addons.json entry.
  *
- * MCP children are spawned with { ...process.env, ...(config.env||{}) } from
- * mcp-addons.json (proxy.js) — they never read bundles/<id>/.env. Before this,
+ * MCP children are spawned with the add-on base allowlist, the keys the bundle's registry
+ * entry declares, the storage env the four storage-reading bundles keep, and then
+ * (config.env||{}) from mcp-addons.json (addon-env.js, proxy.js) — never the gateway's whole
+ * environment, and they never read bundles/<id>/.env. Before this,
  * mcp-addons env was only ever written at install time, so post-install
  * configuration silently did nothing (home-assistant would stay dead no matter
  * how carefully you filled in HA_URL/HA_TOKEN).
@@ -1566,8 +1568,9 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH, m
   const allowed = mcpForwardableKeys(manifest);
   const priorEnv = { ...(entry.env || {}) };
   const merged = { ...(entry.env || {}) };
-  // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
-  // so a blank here would SHADOW a working ambient value rather than clear it. The two
+  // Skip falsy values: proxy.js merges the child's entry env last (over the base allowlist
+  // and the declared passthrough), so a blank here would SHADOW a working ambient value that
+  // the bundle's registry entry declares rather than clear it. The two
   // install-time writers of this file (see the mcp_server registration paths) guard the
   // same way. Clearing a value stays the .env file's job.
   const written = [];

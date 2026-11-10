@@ -34,7 +34,7 @@
  * proved the crow-chat --jinja regex scar does NOT reproduce under pi).
  */
 import { resolveAddonCommand, checkLauncherArgs } from "../../servers/shared/resolve-command.js";
-import { withoutCredentialKeys } from "../../servers/shared/credentials-env.js";
+import { buildBotBaseEnv } from "../../servers/shared/bot-env.js";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -541,6 +541,16 @@ async function probeHttpServerTools(block, timeoutMs) {
 }
 
 /**
+ * The environment a probe spawns a server block with: what a bot's pi child would
+ * really give it — the bot env allowlist (servers/shared/bot-env.js) plus the
+ * block's own env — never the gateway's environment this prober runs inside.
+ * Exported so a test can judge the env without spawning.
+ */
+export function probeSpawnEnv(block, source = process.env) {
+  return Object.assign({}, buildBotBaseEnv(source), block?.env || {});
+}
+
+/**
  * Live `tools/list` for one MCP server block. Handles both stdio servers
  * (command/args/cwd/env exactly as pi-lab/mcp-client would spawn it) and
  * URL-based streamable-HTTP servers. Never throws — returns {ok:false,error}.
@@ -575,7 +585,7 @@ export function probeServerTools(block, opts = {}) {
     try {
       child = spawn(block.command, block.args || [], {
         cwd: block.cwd,
-        env: Object.assign({}, withoutCredentialKeys(process.env), block.env || {}),
+        env: probeSpawnEnv(block),
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (e) {

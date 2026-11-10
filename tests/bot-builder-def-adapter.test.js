@@ -326,6 +326,38 @@ test("probeServerTools carries readOnlyHint / destructiveHint when a server decl
   }
 });
 
+test("the probe spawns a server with a bot's env, never the gateway's", async () => {
+  const { probeSpawnEnv } = await import("../scripts/pi-bots/mcp_writer.mjs");
+  // The gateway this prober runs inside: .env loaded, systemd credentials applied.
+  const gatewayEnv = {
+    PATH: "/usr/bin:/bin",
+    HOME: "/home/someone",
+    LANG: "en_US.UTF-8",
+    CROW_HOME: "/home/someone/.crow",
+    CROW_LOCAL_MCP_TOKEN: "tok_local",
+    GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_aaaa",
+    MINIO_ROOT_PASSWORD: "minio-placeholder-aaaaaaaa",
+    S3_SECRET_KEY: "s3-secret-placeholder",
+    BRAVE_API_KEY: "brave-placeholder",
+    PHONE_RUNNER_SECRET: "phone-secret-placeholder-aaaaaaaaaaaaaaaa",
+    CROW_PEER_TOKENS_PATH: "/home/someone/.crow/peer-tokens.json",
+    CREDENTIALS_DIRECTORY: "/run/credentials/crow-gateway.service",
+    VAPID_PRIVATE_KEY: "vapid-placeholder",
+  };
+  const env = probeSpawnEnv({ command: process.execPath, args: ["x.mjs"], env: { OWN_SETTING: "1" } }, gatewayEnv);
+  assert.equal(env.OWN_SETTING, "1", "the block's own env is the server's");
+  assert.equal(env.PATH, gatewayEnv.PATH);
+  assert.equal(env.CROW_HOME, gatewayEnv.CROW_HOME);
+  for (const key of ["CROW_LOCAL_MCP_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "MINIO_ROOT_PASSWORD", "S3_SECRET_KEY",
+    "BRAVE_API_KEY", "PHONE_RUNNER_SECRET", "CROW_PEER_TOKENS_PATH", "CREDENTIALS_DIRECTORY", "VAPID_PRIVATE_KEY"]) {
+    assert.equal(env[key], undefined, key + " reached the probe's spawn");
+  }
+  // The same builder the bridge uses for a bot's pi child: this is the env those
+  // servers really get, so what the probe reports is what a bot would see.
+  const { buildBotBaseEnv } = await import("../servers/shared/bot-env.js");
+  assert.deepEqual(env, { ...buildBotBaseEnv(gatewayEnv), OWN_SETTING: "1" });
+});
+
 test("bash adapter writes only the shared stored vocabulary (parity with servers/shared/bot-bash-policy.js when present)", async () => {
   const { BASH_STORED_VALUES } = await import("../servers/gateway/dashboard/panels/bot-builder/bash-mode.js");
   for (const v of Object.values(BASH_UI_TO_STORED)) assert.ok(BASH_STORED_VALUES.includes(v), v);
