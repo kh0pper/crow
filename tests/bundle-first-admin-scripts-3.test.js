@@ -14,20 +14,28 @@
  *   4. a password the protocol refuses (short, empty): exit 1, and docker is not even asked,
  *   5. an admin username that is not a plain account name: exit 1, docker not asked either,
  *   6. an unreadable detection step: exit 4, never a change,
- *   7. a login the app never accepts after the account was created: exit 5, and the proof is
- *      retried three times,
+ *   7. a login the app never accepts after the account was created: exit 5 — for Uptime
+ *      Kuma only when the app itself said it made the account with Crow's password, and for
+ *      the git apps only after a confirmed PATCH; an account that merely appeared is never
+ *      reported as 5,
  *   8. a create step whose answer the script cannot use: the app's own state is asked again,
  *      so an account that exists is proved (0, or the honest failure when its password could
  *      not be set) and one that does not is exit 1,
  *   9. the git apps: the password and the setup token reach the API inside a curl config on
- *      stdin and never on a command line, the token is deleted afterwards, Forgejo mints its
- *      token with --scopes all (its create-time token has none), and both compose files set
+ *      stdin and never on a command line, the token is deleted afterwards and on the failure
+ *      paths too, a password that cannot be set deletes the lone account this run created
+ *      again (so the next run is not stuck at exit 3), Forgejo mints its token with
+ *      --scopes all (its create-time token has none), and both compose files set
  *      INSTALL_LOCK so /install is closed,
  *  10. Uptime Kuma's in-container snippets (the fake docker never runs them) say what they
  *      must: needSetup, only a real true is FRESH, res.ok === true is CREATED/LOGIN-OK, and
- *      an UNKNOWN timer bounds the wait,
- *  11. the three manifests carry what the contract, the runner and the card need, and the
- *      generated registry carries the same declarations.
+ *      two timers bound every run (a 15 s UNKNOWN and an unconditional exit),
+ *  11. nothing inside a container may outlive the protocol timeout: every curl config
+ *      carries max-time, every wait loop is a $SECONDS budget inside the manifest's
+ *      timeout_s, and the health probe is bounded as well,
+ *  12. the three manifests carry what the contract, the runner and the card need (including
+ *      the note that self-registration turns off at an existing install's next restart), and
+ *      the generated registry carries the same declarations.
  *
  * No docker here: a `docker` executable written into a temp dir sits first on PATH, records
  * every argv and the stdin it received, and replays canned answers. The scripts only ever
@@ -62,6 +70,8 @@ mkdirSync(NO_DOCKER, { recursive: true });
 /** Gitea's own `admin user list` table: a header and no data rows means no admin yet. */
 const HEADER = "ID   Username   Email   IsActive   IsAdmin";
 const ROW = "1    someone    someone@localhost.localdomain    true    true";
+/** The one data row the rollback is allowed to delete: exactly the account Crow created. */
+const CROW_ROW = "1    crow-admin    crow-admin@localhost.localdomain    true    true";
 const GITEA_CREATED =
   `New user crow-admin has been successfully created!\nGenerated random password: Xy9Za8Zt3\nAccess token was successfully created: ${TOKEN}`;
 const GITEA_NO_TOKEN = "New user crow-admin has been successfully created!\nGenerated random password: Xy9Za8Zt3";
@@ -112,6 +122,7 @@ const FAKE_DOCKER = [
   // ── Gitea: the API calls first (they are told apart by their URL), then the CLI.
   '  *crow-gitea*tokens/crow-setup*) next GITEA_DELETE 204; emit ;;',
   '  *crow-gitea*admin/users/*) next GITEA_PATCH 200; emit ;;',
+  '  *crow-gitea*"admin user delete"*) next GITEA_USER_DELETE ""; emit ;;',
   '  *crow-gitea*"admin user create"*) next GITEA_CREATE "${FAKE_GITEA_CREATED:-}"; emit ;;',
   '  *crow-gitea*"admin user list"*) next GITEA_STATE "${FAKE_HEADER:-}"; emit ;;',
   '  *crow-gitea*api/healthz*) next GITEA_UP 0; exit "$NEXT" ;;',
@@ -119,6 +130,7 @@ const FAKE_DOCKER = [
   // ── Forgejo: same shape, plus the separate scoped-token command. ──────────────────
   '  *crow-forgejo*tokens/crow-setup*) next FORGEJO_DELETE 204; emit ;;',
   '  *crow-forgejo*admin/users/*) next FORGEJO_PATCH 200; emit ;;',
+  '  *crow-forgejo*"admin user delete"*) next FORGEJO_USER_DELETE ""; emit ;;',
   '  *crow-forgejo*generate-access-token*) next FORGEJO_TOKEN "${FAKE_TOKEN:-}"; emit ;;',
   '  *crow-forgejo*"admin user create"*) next FORGEJO_CREATE "New user crow-admin has been successfully created!"; emit ;;',
   '  *crow-forgejo*"admin user list"*) next FORGEJO_STATE "${FAKE_HEADER:-}"; emit ;;',
@@ -333,13 +345,15 @@ for (const app of APPS) {
 
 // ── Uptime Kuma: a create the script cannot read is re-checked, not thrown away ─────
 
-test("uptime-kuma: an unclear create whose account appeared is proved (0), and a login that never works is kept (5)", () => {
+test("uptime-kuma: an unclear create whose account appeared is proved (0), and one Crow did not set is exit 1", () => {
   for (const answer of ["UNKNOWN", "REFUSED"]) {
     const created = run("uptime-kuma", { env: { FAKE_KUMA_CREATE_0: answer, FAKE_KUMA_STATE_1: "EXISTS" } });
     assert.equal(created.status, 0, `${answer}: ${created.stderr}`);
     assert.equal(APP["uptime-kuma"].detectCalls(created), 2, `${answer}: the app's own state is asked a second time`);
     assert.equal(APP["uptime-kuma"].proveCalls(created), 1, `${answer}: and the new login is proved`);
 
+    // The proof fails: the account that is there may be somebody else's, made between the
+    // create attempts. Nothing of Crow's was saved, so this is exit 1 — never 5.
     const unproved = run("uptime-kuma", {
       env: {
         FAKE_KUMA_CREATE_0: answer,
@@ -349,9 +363,39 @@ test("uptime-kuma: an unclear create whose account appeared is proved (0), and a
         FAKE_KUMA_LOGIN_2: "LOGIN-FAIL",
       },
     });
-    assert.equal(unproved.status, 5, `${answer}: ${unproved.stderr}`);
-    assert.match(unproved.stderr, /accepted the new password, but logging in with it did not succeed/);
+    assert.equal(unproved.status, 1, `${answer}: ${unproved.stderr}`);
+    assert.match(unproved.stderr, /An account appeared in Uptime Kuma that Crow did not set; nothing of Crow's was saved/);
+    assert.match(unproved.stderr, /Check Uptime Kuma's own users/);
+    assert.doesNotMatch(unproved.stderr, /accepted the new password/, `${answer}: Crow must not claim the app took its password`);
+    assertPasswordStayedOutOfSight(unproved);
   }
+});
+
+test("uptime-kuma: only a CREATED answer can end in exit 5", () => {
+  // The app said it made the account with Crow's password, so a login that never works is
+  // kept and reported as 5 — that is the one path where 5 is honest.
+  const made = run("uptime-kuma", {
+    env: { FAKE_KUMA_CREATE_0: "CREATED", FAKE_KUMA_LOGIN_0: "LOGIN-FAIL", FAKE_KUMA_LOGIN_1: "LOGIN-FAIL", FAKE_KUMA_LOGIN_2: "LOGIN-FAIL" },
+  });
+  assert.equal(made.status, 5, made.stderr);
+  assert.match(made.stderr, /accepted the new password, but logging in with it did not succeed/);
+  assert.equal(APP["uptime-kuma"].proveCalls(made), 3);
+
+  // REFUSED and UNKNOWN, even when an account exists afterwards, never reach 5.
+  for (const answer of ["REFUSED", "UNKNOWN"]) {
+    const r = run("uptime-kuma", {
+      env: {
+        FAKE_KUMA_CREATE_0: answer,
+        FAKE_KUMA_STATE_1: "EXISTS",
+        FAKE_KUMA_LOGIN_0: "LOGIN-FAIL",
+        FAKE_KUMA_LOGIN_1: "LOGIN-FAIL",
+        FAKE_KUMA_LOGIN_2: "LOGIN-FAIL",
+      },
+    });
+    assert.notEqual(r.status, 5, `${answer}: exit 5 is only for an account Crow created`);
+    assert.equal(r.status, 1, `${answer}: ${r.stderr}`);
+  }
+  assertPasswordStayedOutOfSight(made);
 });
 
 test("uptime-kuma: an unclear create with nothing there changes nothing, and an unreadable second look is exit 1", () => {
@@ -463,7 +507,7 @@ for (const app of ["gitea", "forgejo"]) {
     const refused = run(app, { env: { [`FAKE_${key}_0`]: "500", [`FAKE_${APP[app].loginKey}_0`]: "401" } });
     assert.equal(refused.status, 1, refused.stderr);
     assert.match(refused.stderr, /created the account 'crow-admin', but Crow could not set its password/);
-    assert.equal(count(refused, "/tokens/crow-setup"), 0, "nothing else is touched after that");
+    assert.equal(count(refused, "/tokens/crow-setup"), 1, "the setup token is cleaned up on that path too");
 
     // The password was written even though the answer was not 200: the login proves it.
     const written = run(app, { env: { [`FAKE_${key}_0`]: "500" } });
@@ -478,6 +522,62 @@ for (const app of ["gitea", "forgejo"]) {
     assert.match(proof.stdin, /^user = "crow-admin:/m);
     assert.equal(proof.stdin.includes(PASSWORD), true, "the password arrives on the pipe");
     assert.equal(proof.argv.includes(PASSWORD), false);
+  });
+}
+
+// ── Gitea / Forgejo: an account whose password could not be set is rolled back ──────
+
+for (const app of ["gitea", "forgejo"]) {
+  const a = APP[app];
+  const patchKey = app === "gitea" ? "GITEA_PATCH" : "FORGEJO_PATCH";
+  const stateKey = app === "gitea" ? "GITEA_STATE" : "FORGEJO_STATE";
+  // A PATCH that answers 500 and a login that refuses the real password: this run made the
+  // account, and nobody holds a usable password for it.
+  const failedSet = (listAnswer) => ({
+    [`FAKE_${patchKey}_0`]: "500",
+    [`FAKE_${a.loginKey}_0`]: "401",
+    ...(listAnswer === undefined ? {} : { [`FAKE_${stateKey}_1`]: listAnswer }),
+  });
+
+  test(`${app}: a password that could not be set deletes the account this run created`, () => {
+    const r = run(app, { env: failedSet(`${HEADER}\n${CROW_ROW}`) });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(
+      r.stderr,
+      /Crow could not set the new admin account's password, so it removed the account again; nothing was changed\. Try again\./,
+    );
+    const deletion = r.calls.find((c) => c.argv.includes("admin user delete"));
+    assert.ok(deletion, "the lone admin this run created is deleted again");
+    assert.match(deletion.argv, /--username crow-admin/);
+    assert.equal(deletion.argv.includes(PASSWORD), false);
+    assert.equal(count(r, "/tokens/crow-setup"), 1, "the setup token is removed on the failure path too");
+    assert.equal(r.stdout.includes(TOKEN), false, "the token is never printed");
+    assert.equal(r.stdout.includes("Xy9Za8Zt3"), false, "nor the throwaway password");
+    assertPasswordStayedOutOfSight(r);
+  });
+
+  test(`${app}: after that rollback the next run finds a fresh app and proceeds`, () => {
+    // The rollback really did empty the app: the next run's first look shows the header only.
+    const again = run(app, { env: { [`FAKE_${stateKey}_0`]: HEADER } });
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(a.createRan(again), true, "the account is created again");
+    assert.equal(count(again, "admin user delete"), 0, "and nothing is deleted on the way");
+  });
+
+  test(`${app}: an admin list that is not exactly this run's lone account is never deleted`, () => {
+    const twoRows = `${HEADER}\n${CROW_ROW}\n2    someone    someone@localhost.localdomain    true    true`;
+    for (const [label, answer] of [
+      ["somebody else's admin", `${HEADER}\n${ROW}`],
+      ["crow-admin plus another admin", twoRows],
+      ["an empty list", HEADER],
+      ["an unreadable list", "SOMETHING-ELSE"],
+    ]) {
+      const r = run(app, { env: failedSet(answer) });
+      assert.equal(r.status, 1, `${label}: ${r.stderr}`);
+      assert.equal(count(r, "admin user delete"), 0, `${label}: not Crow's to delete`);
+      assert.match(r.stderr, /created the account 'crow-admin', but Crow could not set its password/, label);
+      assert.match(r.stderr, /admin user change-password/, `${label}: the honest way out is named`);
+    }
   });
 }
 
@@ -532,6 +632,11 @@ test("uptime-kuma: every snippet is one status word, printed once, then the proc
     assert.equal(/process\.exit\(0\)/.test(code), true, `${name}: the snippet ends the process itself`);
     assert.equal(code.includes('process.stdout.write(word + "\\n"'), true, `${name}: one line, flushed before the exit`);
     assert.equal(code.includes("setTimeout(() => finish(\"UNKNOWN\"), 15000)"), true, `${name}: a bounded wait, never a hang`);
+    assert.equal(
+      code.includes("setTimeout(() => process.exit(1), 20000)"),
+      true,
+      `${name}: and an unconditional exit behind it, so the docker exec cannot outlive ~20 s`,
+    );
     assert.equal(code.includes("connect_error"), true, `${name}: a socket that cannot connect is UNKNOWN, not a crash`);
     // A syntax error inside the container would be a silent UNKNOWN, so compile it here.
     assert.doesNotThrow(() => new vm.Script(code), `${name}: the snippet parses`);
@@ -561,7 +666,7 @@ test("uptime-kuma: the wait uses the image's own health check, the same one the 
   const compose = readFileSync(join(B("uptime-kuma"), "docker-compose.yml"), "utf8");
   assert.match(compose, /test: \["CMD", "node", "\/app\/extra\/healthcheck\.js"\]/);
   const script = readFileSync(join(B("uptime-kuma"), "scripts", "first-admin.sh"), "utf8");
-  assert.match(script, /docker exec "\$CONTAINER" node \/app\/extra\/healthcheck\.js/);
+  assert.match(script, /docker exec "\$CONTAINER" timeout 10 node \/app\/extra\/healthcheck\.js/);
 });
 
 test("the git apps wait on the same in-container health URL their compose file uses", () => {
@@ -649,5 +754,74 @@ test("gitea/forgejo: self-registration is off by default, so the first web sign-
     const manifest = JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));
     const v = manifest.env_vars.find((e) => e.name === `${prefix}_DISABLE_REGISTRATION`);
     assert.equal(v && v.default, "true", `${id}: declared, default true`);
+  }
+});
+
+// ── nothing inside the container may outlive the protocol timeout ────────────────
+
+const budgetOf = (script, name) => {
+  const line = script.split("\n").find((l) => l.startsWith(`${name}=$((SECONDS + `));
+  assert.ok(line, `${name} is a $SECONDS budget`);
+  const m = /SECONDS \+ (\d+)\)/.exec(line);
+  assert.ok(m, `${name}: the budget is a plain number of seconds`);
+  return Number(m[1]);
+};
+
+for (const app of ["gitea", "forgejo"]) {
+  test(`${app}: every call inside the container is bounded, well inside the manifest timeout`, () => {
+    const script = readFileSync(join(B(app), "scripts", "first-admin.sh"), "utf8");
+    const timeout = manifestOf(app).firstAdmin.setup.timeout_s;
+
+    // The health wait is a $SECONDS budget, and the probe itself cannot hang either.
+    const wait = budgetOf(script, "wait_deadline");
+    assert.equal(wait <= 120, true, `${app}: the health wait is at most 120 s`);
+    assert.equal(wait < timeout, true, `${app}: and inside the ${timeout} s the runner allows`);
+    assert.match(
+      script,
+      /docker exec "\$CONTAINER" curl -fsS --max-time 5 -o \/dev\/null http:\/\/localhost:3000\/api\/healthz/,
+      `${app}: one stuck health probe cannot outlive 5 s`,
+    );
+
+    // The proof loop is a $SECONDS budget too, and the budgets together fit the timeout.
+    const proof = budgetOf(script, "proof_deadline");
+    assert.equal(wait + proof < timeout, true, `${app}: the wait plus the proof loop fit the ${timeout} s`);
+
+    // Every API call carries max-time in the curl config it feeds curl on stdin, so a
+    // stuck request ends and the argv stays free of anything secret-shaped.
+    const r = run(app);
+    assert.equal(r.status, 0, r.stderr);
+    const api = r.calls.filter((c) => ` ${c.argv} `.includes(" -K "));
+    assert.equal(api.length >= 3, true, `${app}: the password PATCH, the proof and the token DELETE all use a config`);
+    for (const call of api) {
+      assert.match(call.stdin, /^max-time = 10$/m, `${app}: ${call.argv} carries max-time in its config`);
+    }
+  });
+}
+
+test("uptime-kuma: the health wait and every snippet are bounded, well inside the manifest timeout", () => {
+  const script = readFileSync(join(B("uptime-kuma"), "scripts", "first-admin.sh"), "utf8");
+  const timeout = manifestOf("uptime-kuma").firstAdmin.setup.timeout_s;
+
+  const wait = budgetOf(script, "wait_deadline");
+  assert.equal(wait <= 90, true, "the health wait is at most 90 s");
+  assert.equal(wait < timeout, true, `and inside the ${timeout} s the runner allows`);
+  // coreutils/busybox `timeout` in the image bounds the health check itself; where the applet
+  // is missing the exec returns at once and the budget alone ends the wait.
+  assert.match(script, /docker exec "\$CONTAINER" timeout 10 node \/app\/extra\/healthcheck\.js/);
+
+  const proof = budgetOf(script, "proof_deadline");
+  assert.equal(wait + proof < timeout, true, `the wait plus the proof loop fit the ${timeout} s`);
+});
+
+// ── the app's settings survive the compose refresh: say so where the operator reads it ──
+
+test("gitea/forgejo: the notes say self-registration turns off for an existing install", () => {
+  const sentence =
+    "Self-registration is off by default: an existing install switches to it at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings.";
+  const registry = JSON.parse(readFileSync(join(REPO, "registry", "add-ons.json"), "utf8"))["add-ons"];
+  for (const id of ["gitea", "forgejo"]) {
+    const notes = manifestOf(id).notes;
+    assert.equal(notes.includes(sentence), true, `${id}: the notes warn that the setting flips at the next restart`);
+    assert.equal(registry.find((e) => e.id === id).notes, notes, `${id}: the registry entry carries the same notes`);
   }
 });

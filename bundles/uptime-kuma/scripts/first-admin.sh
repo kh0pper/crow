@@ -10,10 +10,16 @@
 # is passed on only through a pipe — never in an argument or the environment, and this
 # script prints no secret. Exit 0 = the admin now has that password, 3 = Uptime Kuma
 # already has an admin of its own (left alone), 4 = not running / not answering, 5 =
-# Uptime Kuma took the new password but the login could not be proved, anything else =
-# failed. A create step that answers unclearly is re-checked against Uptime Kuma's own
-# setup state: an account that appeared is proved (exit 0 or 5), one that did not is
-# exit 1.
+# Uptime Kuma took the password THIS RUN created the account with but the login could
+# not be proved, anything else = failed. A create step that answers unclearly is
+# re-checked against Uptime Kuma's own setup state: an account that appeared is proved
+# (exit 0, or exit 1 with "Crow did not set it" when this run never reported CREATED),
+# one that did not is exit 1.
+#
+# Exit 5 is only for an account Crow made itself. Uptime Kuma refuses `setup` whenever
+# any user exists, so REFUSED or an unclear answer followed by EXISTS can mean somebody
+# else claimed the instance in between — that login is proved like any other, but a
+# failed proof is exit 1, because nothing of Crow's was saved.
 #
 # How: Uptime Kuma's only API is socket.io on port 3001 INSIDE the container, and the
 # image ships its own client, so one node script inside the container asks "needSetup"
@@ -48,7 +54,9 @@ running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || tr
 # ── every snippet: one status word, printed once, then the process exits ────────────
 # Each snippet is the same small prelude (connect, one status word, exit) plus its own
 # ask. Nothing is interpolated into the code: the username and the password are read from
-# stdin inside the container.
+# stdin inside the container. Two timers bound it: the 15 s one that still prints an
+# UNKNOWN, and an unconditional 20 s `process.exit(1)` behind it, so no `docker exec` of a
+# snippet can outlive ~20 s even if the socket never answers and stdout never flushes.
 
 # DETECT: is the instance still waiting for its first account? Only a real true means
 # "nobody has claimed it"; anything else (a falsy answer, a connect error, the 15 s
@@ -67,6 +75,7 @@ const finish = (word) => {
   });
 };
 timer = setTimeout(() => finish("UNKNOWN"), 15000);
+setTimeout(() => process.exit(1), 20000);
 sock = io("http://127.0.0.1:3001", { transports: ["websocket"], reconnection: false, timeout: 10000 });
 sock.on("connect_error", () => finish("UNKNOWN"));
 sock.on("connect", () => {
@@ -97,6 +106,7 @@ const finish = (word) => {
   });
 };
 timer = setTimeout(() => finish("UNKNOWN"), 15000);
+setTimeout(() => process.exit(1), 20000);
 sock = io("http://127.0.0.1:3001", { transports: ["websocket"], reconnection: false, timeout: 10000 });
 sock.on("connect_error", () => finish("UNKNOWN"));
 sock.on("connect", () => {
@@ -130,6 +140,7 @@ const finish = (word) => {
   });
 };
 timer = setTimeout(() => finish("UNKNOWN"), 15000);
+setTimeout(() => process.exit(1), 20000);
 sock = io("http://127.0.0.1:3001", { transports: ["websocket"], reconnection: false, timeout: 10000 });
 sock.on("connect_error", () => finish("UNKNOWN"));
 sock.on("connect", () => {
@@ -140,9 +151,13 @@ sock.on("connect", () => {
 });'
 
 # ── wait for the app (a first start creates its database first) ─────────────────────
+# Bounded twice: a $SECONDS budget well inside the manifest's 180 s, and `timeout 10`
+# around the health check itself (coreutils/busybox timeout in the image; where it is
+# missing the exec returns at once and the budget alone ends the wait).
 up=""
-for _ in $(seq 1 45); do
-  if docker exec "$CONTAINER" node /app/extra/healthcheck.js </dev/null >/dev/null 2>&1; then
+wait_deadline=$((SECONDS + 75))
+while [ "$SECONDS" -lt "$wait_deadline" ]; do
+  if docker exec "$CONTAINER" timeout 10 node /app/extra/healthcheck.js </dev/null >/dev/null 2>&1; then
     up=1
     break
   fi
@@ -160,15 +175,18 @@ case "$state" in
 esac
 
 # ── create it (username on the first stdin line, password on the second) ────────────
+# `ours` records whether the app itself said it made the account with OUR password; it
+# is what allows exit 5 at the end, and nothing else does.
+ours=""
 created="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" node -e "$CREATE" 2>/dev/null)" || true
 result="$(printf '%s\n' "$created" | tail -n 1)"
 case "$result" in
-  CREATED) ;;
+  CREATED) ours=1 ;;
   EXISTS) die "Uptime Kuma already has an admin; left alone." 3 ;;
   *)
-    # Unclearly reported create: the account may already be there. Ask Uptime Kuma
-    # itself rather than guess — an account that exists means this password is the only
-    # one anybody has, so it is kept and proved below.
+    # Unclearly reported create: an account may have appeared, made by this run or by
+    # somebody else. Ask Uptime Kuma itself rather than guess — and prove it below either
+    # way. Only CREATED above can lead to exit 5.
     again="$(docker exec "$CONTAINER" node -e "$DETECT" </dev/null 2>/dev/null || true)"
     recheck="$(printf '%s\n' "$again" | tail -n 1)"
     case "$recheck" in
@@ -178,21 +196,30 @@ case "$result" in
     esac
     ;;
 esac
-say "Uptime Kuma's admin account '$ADMIN_USER' is in place."
+[ -z "$ours" ] || say "Uptime Kuma's admin account '$ADMIN_USER' is in place."
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 attempt=1
 proof=""
+# Three tries, and never more than 40 s of them: each proof run is bounded by the
+# snippet's own timers, this budget bounds the whole loop.
+proof_deadline=$((SECONDS + 40))
 while :; do
   proof="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" node -e "$PROVE" 2>/dev/null | tail -n 1)" || true
   if [ "$proof" = "LOGIN-OK" ]; then break; fi
   if [ "$attempt" -ge 3 ]; then break; fi
+  if [ "$SECONDS" -ge "$proof_deadline" ]; then break; fi
   attempt=$((attempt + 1))
   sleep 3
 done
 if [ "$proof" != "LOGIN-OK" ]; then
-  # The account exists with this password, so Crow keeps it and says it could not prove
-  # the login (exit 5).
+  if [ -z "$ours" ]; then
+    # This run never got a CREATED: the account that is there now is not one it can vouch
+    # for, so it must not claim the app took Crow's password (exit 5).
+    die "An account appeared in Uptime Kuma that Crow did not set; nothing of Crow's was saved. Check Uptime Kuma's own users."
+  fi
+  # The account is the one this run created with this password, so Crow keeps it and says
+  # it could not prove the login (exit 5).
   die "Uptime Kuma accepted the new password, but logging in with it did not succeed; open Uptime Kuma's own login page and set its admin password there." 5
 fi
 

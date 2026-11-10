@@ -1543,7 +1543,7 @@
         "user": "crow-admin",
         "secretEnv": "FORGEJO_ADMIN_PASSWORD"
       },
-      "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). Crow creates Forgejo's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by FORGEJO__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Log in as crow-admin and generate a personal access token under Settings > Applications for FORGEJO_TOKEN. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide.",
+      "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). Crow creates Forgejo's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by FORGEJO__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Self-registration is off by default: an existing install switches to it at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings. Log in as crow-admin and generate a personal access token under Settings > Applications for FORGEJO_TOKEN. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide.",
       "official": true
     },
     {
@@ -2141,7 +2141,7 @@
         "user": "crow-admin",
         "secretEnv": "GITEA_ADMIN_PASSWORD"
       },
-      "notes": "Crow creates Gitea's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by GITEA__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Log in as crow-admin and generate a personal access token under Settings > Applications for GITEA_TOKEN. Git over SSH uses port 2223: clone with ssh://git@host:2223/user/repo.git (the scp-style git@host:user/repo silently hits port 22 and will not reach this bundle).",
+      "notes": "Crow creates Gitea's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by GITEA__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Self-registration is off by default: an existing install switches to it at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings. Log in as crow-admin and generate a personal access token under Settings > Applications for GITEA_TOKEN. Git over SSH uses port 2223: clone with ssh://git@host:2223/user/repo.git (the scp-style git@host:user/repo silently hits port 22 and will not reach this bundle).",
       "official": true
     },
     {

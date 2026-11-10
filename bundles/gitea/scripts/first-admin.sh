@@ -14,14 +14,16 @@
 # password but the login could not be proved, anything else = failed. A create step that
 # answers unclearly is re-checked against Gitea's own user list: an account that appeared
 # is kept and proved (exit 0, or the honest exit 1 below when its password could not be
-# set), one that did not is exit 1.
+# set), one that did not is exit 1. When the password cannot be set, the account this run
+# created is deleted again — an admin whose password nobody holds would lock the operator
+# out of the next run (exit 3) for good.
 #
 # How: the account is made with Gitea's own admin CLI inside the container, which mints a
 # throwaway random password (printed once, kept nowhere) and a setup token. The real
 # password is then set through the API with a curl config on stdin, so neither the
 # password nor the token is ever an argument. The setup token is deleted afterwards — it
 # exists only to set the password, and a scoped-all admin token left behind would be a
-# second way in.
+# second way in — and an EXIT trap removes it on every other path too.
 #
 # CROW_FA_CONTAINER overrides the container name for tests only; Crow never sets it.
 set -euo pipefail
@@ -58,9 +60,12 @@ running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || tr
 [ "$running" = "true" ] || die "Gitea is not running; nothing was changed." 4
 
 # ── wait for the app (a first start prepares its database first) ────────────────────
+# Bounded twice: a $SECONDS budget well inside the manifest's 240 s, and --max-time 5 on
+# the probe itself, so a single stuck curl cannot outlive the wait.
 up=""
-for _ in $(seq 1 60); do
-  if docker exec "$CONTAINER" curl -fsS -o /dev/null http://localhost:3000/api/healthz </dev/null >/dev/null 2>&1; then
+wait_deadline=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$wait_deadline" ]; do
+  if docker exec "$CONTAINER" curl -fsS --max-time 5 -o /dev/null http://localhost:3000/api/healthz </dev/null >/dev/null 2>&1; then
     up=1
     break
   fi
@@ -90,9 +95,61 @@ detect() {
 # ── prove a login with the real password (a curl config on stdin) ───────────────────
 prove() {
   local code
-  code="$(printf 'user = "%s"\n' "$ADMIN_USER:$ESC_PW" \
+  code="$(printf 'max-time = 10\nuser = "%s"\n' "$ADMIN_USER:$ESC_PW" \
     | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - http://localhost:3000/api/v1/user 2>/dev/null || true)"
   if [ "$code" = "200" ]; then printf '%s' "LOGIN-OK"; else printf '%s' "LOGIN-FAIL"; fi
+}
+
+# ── remove the account this run created, when its password could not be set ────────
+# Only when Gitea's own list shows EXACTLY ONE admin and it is $ADMIN_USER: anything else
+# (another admin, no admin, an unreadable list) is not ours to delete. Deleting the user
+# also removes the setup token it holds. Non-zero = nothing was deleted.
+rollback() {
+  local out name
+  out="$(docker exec -u git "$CONTAINER" "$CLI" admin user list --admin </dev/null 2>/dev/null)" || return 1
+  name="$(printf '%s\n' "$out" | awk '
+    /^[[:space:]]*$/ { next }
+    first == 0 { first = 1; if (toupper($1) != "ID") bad = 1; next }
+    { rows++; uname = $2 }
+    END {
+      if (bad || first == 0 || rows != 1) exit 1;
+      print uname;
+    }
+  ')" || return 1
+  [ "$name" = "$ADMIN_USER" ] || return 1
+  docker exec -u git "$CONTAINER" "$CLI" admin user delete --username "$ADMIN_USER" </dev/null >/dev/null 2>&1
+}
+
+# ── the setup token, removed on every path after it exists ─────────────────────────
+# Installed as an EXIT trap, so a failed PATCH, a failed proof or an early die cannot leave
+# a scoped-all admin token behind. The token is never printed; only its HTTP status is
+# ever mentioned. Deleting it twice is harmless: the first call clears $TOKEN.
+TOKEN=""
+ACCOUNT_REMOVED=""
+delete_token() {
+  [ -n "$TOKEN" ] || return 0
+  local status
+  status="$(printf 'max-time = 10\nuser = "%s"\nrequest = "DELETE"\n' "$ADMIN_USER:$ESC_PW" \
+    | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/users/$ADMIN_USER/tokens/crow-setup" 2>/dev/null || true)"
+  TOKEN=""
+  # A failure here is worth a line in the log, never a failed setup — and after the account
+  # was deleted again there is no token left to point the operator at.
+  if [ "$status" != "204" ] && [ -z "$ACCOUNT_REMOVED" ]; then
+    say "Note: the temporary setup token could not be removed from Gitea (HTTP $status); remove 'crow-setup' under Settings > Applications by hand."
+  fi
+  return 0
+}
+trap delete_token EXIT
+
+# ── what to say when the real password could not be set ────────────────────────────
+# The account is deleted again when it is a lone account this run created — otherwise it
+# is left for the operator with the only honest way out.
+fail_password() {
+  if rollback; then
+    ACCOUNT_REMOVED=1
+    die "Crow could not set the new admin account's password, so it removed the account again; nothing was changed. Try again." 1
+  fi
+  die "Gitea created the account '$ADMIN_USER', but Crow could not set its password — it was created with a random password that Gitea printed once and nothing kept. Reset it with '$CLI admin user change-password' or delete the account $ADMIN_USER, then try again." 1
 }
 
 state="$(detect)"
@@ -127,7 +184,7 @@ if [ -z "$TOKEN" ]; then
   # The account exists, so its password is the random one Gitea printed once and nothing
   # kept. Try the real password anyway (a previous run may have set it), and be honest.
   if [ "$(prove)" != "LOGIN-OK" ]; then
-    die "Gitea created the account '$ADMIN_USER', but Crow could not set its password — it was created with a random password that Gitea printed once and nothing kept. Reset it with '$CLI admin user change-password' or delete the account $ADMIN_USER, then try again." 1
+    fail_password
   fi
 else
   # ── set the real password (token and password both on stdin) ─────────────────────
@@ -136,31 +193,33 @@ else
   # API would receive a truncated body.
   body_json="{\"login_name\":\"$ADMIN_USER\",\"source_id\":0,\"password\":\"$(esc "$PW")\",\"must_change_password\":false}"
   body="$(esc "$body_json")"
-  patch_status="$(printf 'header = "Authorization: token %s"\nheader = "Content-Type: application/json"\nrequest = "PATCH"\ndata = "%s"\n' "$TOKEN" "$body" \
+  patch_status="$(printf 'max-time = 10\nheader = "Authorization: token %s"\nheader = "Content-Type: application/json"\nrequest = "PATCH"\ndata = "%s"\n' "$TOKEN" "$body" \
     | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/admin/users/$ADMIN_USER" 2>/dev/null || true)"
   if [ "$patch_status" != "200" ]; then
     # The PATCH may have written the password and failed to answer. One login attempt with
-    # the real password decides it; if that fails, say plainly what happened.
+    # the real password decides it; if that fails, the account goes again.
     if [ "$(prove)" != "LOGIN-OK" ]; then
-      die "Gitea created the account '$ADMIN_USER', but Crow could not set its password — it was created with a random password that Gitea printed once and nothing kept. Reset it with '$CLI admin user change-password' or delete the account $ADMIN_USER, then try again." 1
+      fail_password
     fi
   fi
   # ── remove the setup token ───────────────────────────────────────────────────────
-  # It only existed to set the password. A failure here is worth a line in the log, never a
-  # failed setup: the login itself already works.
-  del_status="$(printf 'user = "%s"\nrequest = "DELETE"\n' "$ADMIN_USER:$ESC_PW" \
-    | docker exec -i "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' -K - "http://localhost:3000/api/v1/users/$ADMIN_USER/tokens/crow-setup" 2>/dev/null || true)"
-  [ "$del_status" = "204" ] || say "Note: the temporary setup token could not be removed from Gitea (HTTP $del_status); remove 'crow-setup' under Settings > Applications by hand."
+  # It only existed to set the password. The EXIT trap is the safety net; this call is the
+  # ordinary path, and it clears $TOKEN so the trap has nothing left to do.
+  delete_token
 fi
 say "Gitea's admin account '$ADMIN_USER' is in place."
 
 # ── prove the new login works ───────────────────────────────────────────────────────
 attempt=1
 proof=""
+# Three tries, and never more than 40 s of them: each probe is bounded by max-time 10 in
+# its curl config, this budget bounds the whole loop.
+proof_deadline=$((SECONDS + 40))
 while :; do
   proof="$(prove)"
   if [ "$proof" = "LOGIN-OK" ]; then break; fi
   if [ "$attempt" -ge 3 ]; then break; fi
+  if [ "$SECONDS" -ge "$proof_deadline" ]; then break; fi
   attempt=$((attempt + 1))
   sleep 3
 done
