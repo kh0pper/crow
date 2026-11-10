@@ -202,6 +202,41 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
               }
             }
 
+            // The wall lines (PR D): what this add-on can reach, built from its
+            // manifest only, and the host's wall sentence while walls are off here.
+            // Both arrive with the consent-challenge; a token refresh repaints them
+            // and never drops them.
+            function wallLangText(obj) {
+              if (!obj || typeof obj !== "object") return "";
+              var inLang = obj['${lang}'];
+              if (typeof inLang === "string" && inLang) return inLang;
+              return typeof obj.en === "string" ? obj.en : "";
+            }
+            function renderWallLines(data) {
+              if (!data || typeof data !== "object") return;
+              var line = wallLangText(data.sandbox_line);
+              var state = wallLangText(data.sandbox_state);
+              if (!line && !state) return;
+              var old = frag.querySelector("#ext-wall-lines");
+              if (old && old.parentNode) old.parentNode.removeChild(old);
+              var wrap = document.createElement("div");
+              wrap.id = "ext-wall-lines";
+              wrap.style.cssText = "margin:0 0 1rem";
+              if (line) {
+                var lineP = document.createElement("p");
+                lineP.className = "ext-wall-line";
+                lineP.textContent = line;
+                wrap.appendChild(lineP);
+              }
+              if (state) {
+                var stateP = document.createElement("p");
+                stateP.className = "ext-wall-status-text";
+                stateP.textContent = state;
+                wrap.appendChild(stateP);
+              }
+              frag.insertBefore(wrap, frag.children[1] || null);
+            }
+
             // Async: fetch consent challenge (non-blocking; install button starts disabled if required)
             // A challenge that never answers must not leave Install disabled for
             // good: after 10 s take the failure path (enabled + note; the
@@ -227,6 +262,7 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
               .then(function(data) {
                 if (challengeFailed) return;   // timed out already: the server gates now
                 challengeSettled = true;
+                renderWallLines(data);
                 if (data && Array.isArray(data.install_required)) {
                   requiredNames = data.install_required.filter(function(n) { return typeof n === "string"; });
                 }
@@ -780,6 +816,7 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                   fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
                     .then(function(r) { return r.json(); })
                     .then(function(d) {
+                      renderWallLines(d);
                       if (d && d.token) {
                         consentToken = d.token;
                         installBtn.click();
@@ -1402,6 +1439,65 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
           descP.className = "ext-detail__desc";
           descP.textContent = addon.description || "";
           frag.appendChild(descP);
+
+          // What this add-on can reach, from its live profile, and how its wall
+          // stands. Both are server-computed text: this only writes textContent.
+          if (addon._sandboxLine) {
+            var wallSection = document.createElement("div");
+            wallSection.className = "ext-detail__section";
+            var wallTitle = document.createElement("div");
+            wallTitle.className = "ext-detail__section-title";
+            wallTitle.textContent = '${tJs("extensions.wallTitle", lang)}';
+            wallSection.appendChild(wallTitle);
+
+            var wallLine = document.createElement("p");
+            wallLine.className = "ext-wall-line";
+            wallLine.textContent = addon._sandboxLine;
+            wallSection.appendChild(wallLine);
+
+            if (addon._wallWord) {
+              var wallWordEl = document.createElement("span");
+              wallWordEl.className = addon._wallWordKey && addon._wallWordKey !== "walled"
+                ? "ext-wall-word ext-wall-word--warn"
+                : "ext-wall-word";
+              wallWordEl.textContent = addon._wallWord;
+              wallSection.appendChild(wallWordEl);
+            }
+
+            if (addon._wallOwnerUnwalled) {
+              var wallBtn = document.createElement("button");
+              wallBtn.className = "btn btn-sm btn-secondary ext-wall-rearm";
+              wallBtn.textContent = '${tJs("extensions.wallItAgain", lang)}';
+              var wallStatus = document.createElement("p");
+              wallStatus.className = "ext-wall-status-text";
+              wallStatus.style.display = "none";
+              wallBtn.addEventListener("click", function() {
+                wallBtn.disabled = true;
+                wallBtn.textContent = '${tJs("extensions.wallItAgainWorking", lang)}';
+                apiCall("addon-wall/" + encodeURIComponent(addon.id), { mode: "walled" }).then(function(res) {
+                  if (res.ok) {
+                    wallBtn.textContent = '${tJs("extensions.wallItAgainDone", lang)}';
+                    setTimeout(function() { location.reload(); }, 800);
+                    return;
+                  }
+                  wallBtn.disabled = false;
+                  wallBtn.textContent = '${tJs("extensions.wallItAgain", lang)}';
+                  wallStatus.style.display = "block";
+                  wallStatus.textContent = '${tJs("extensions.wallItAgainFailed", lang)}'
+                    + (res.data && res.data.error ? " " + res.data.error : "");
+                }).catch(function() {
+                  wallBtn.disabled = false;
+                  wallBtn.textContent = '${tJs("extensions.wallItAgain", lang)}';
+                  wallStatus.style.display = "block";
+                  wallStatus.textContent = '${tJs("extensions.wallItAgainFailed", lang)}' + " " + '${tJs("extensions.networkError", lang)}';
+                });
+              });
+              wallSection.appendChild(wallBtn);
+              wallSection.appendChild(wallStatus);
+            }
+
+            frag.appendChild(wallSection);
+          }
 
           // Tags
           if (addon.tags && addon.tags.length > 0) {

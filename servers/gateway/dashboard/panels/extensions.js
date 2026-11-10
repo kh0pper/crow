@@ -137,10 +137,26 @@ export default {
       localModels = localModelsCounts(() => core.listing());
     } catch { /* zero counts rather than no page */ }
 
+    // The wall lines: what each connected add-on can reach, and the summary sentence
+    // above the installed list. Both come from ONE snapshot of proxy.js's entries, so
+    // the modal and the status block cannot describe the same add-on differently.
+    let addonWall = {};
+    let addonWallStatusHtml = "";
+    try {
+      const { CROW_HOME, APP_ROOT } = await import("../../bundles-config.js");
+      const { addonWallEntriesNow, renderAddonWallStatus } = await import("../shared/addon-wall-status.js");
+      const { addonWallDetails } = await import("../shared/addon-wall-details.js");
+      const wallEntries = await addonWallEntriesNow();
+      addonWall = addonWallDetails({ crowHome: CROW_HOME, appRoot: APP_ROOT, entries: wallEntries });
+      addonWallStatusHtml = renderAddonWallStatus({ lang, entries: wallEntries });
+    } catch { /* no line rather than no page */ }
+
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
       installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, needsRepin, legacyAccounts, dockerOk, keychainPending, vaultSecure, localModels, lang,
       firstAdminPending,
       satellites, satelliteEligibleIds, offsite,
+      addonWall,
+      addonWallStatusHtml,
       // A skill's "Go to <extension>" arrives as ?q=<id>: the search box starts filled in.
       searchQuery: typeof req.query?.q === "string" ? req.query.q.slice(0, 100) : "",
     });

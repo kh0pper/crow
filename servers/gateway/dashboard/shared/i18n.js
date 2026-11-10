@@ -963,6 +963,13 @@ export const translations = {
   "extensions.incompatibleHost": { en: "incompatible host", es: "host incompatible" },
   "extensions.binsNotTrusted": { en: "Needs {bins} installed system-wide (not in your home folder) before Crow can run it.", es: "Necesita {bins} instalado para todo el sistema (no en su carpeta personal) antes de que Crow pueda ejecutarlo." },
   "extensions.webUiFallback": { en: "Web UI", es: "Interfaz web" },
+  // Add-on walls (PR D): the line and the owner's one action. Every status word
+  // itself lives in scripts/addon-sandbox/words.mjs, never here.
+  "extensions.wallTitle": { en: "What this add-on can do", es: "Qué puede hacer este complemento" },
+  "extensions.wallItAgain": { en: "Wall it again", es: "Volver a aislar" },
+  "extensions.wallItAgainWorking": { en: "Walling it again...", es: "Volviendo a aislar..." },
+  "extensions.wallItAgainDone": { en: "Walled again.", es: "Aislado de nuevo." },
+  "extensions.wallItAgainFailed": { en: "Could not wall it again.", es: "No se pudo volver a aislar." },
 
   // ─── Extensions Panel — store IA (browse/installed views, collections, groups) ───
   "extensions.viewBrowse": { en: "Browse", es: "Explorar" },

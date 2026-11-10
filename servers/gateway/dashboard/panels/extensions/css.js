@@ -417,6 +417,11 @@ export function extensionStyles() {
 .ext-detail__req { display:flex; flex-wrap:wrap; gap:0.4rem; }
 .ext-detail__req-chip { padding:0.2rem 0.6rem; border-radius:4px; background:var(--crow-bg-elevated); font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--crow-text-secondary); }
 .ext-detail__actions { display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--crow-border); }
+.ext-wall-line { font-size:0.85rem; color:var(--crow-text-secondary); line-height:1.6; margin:0 0 0.4rem; }
+.ext-wall-word { display:inline-block; font-size:0.75rem; padding:0.15rem 0.5rem; border-radius:4px; background:var(--crow-bg-elevated); color:var(--crow-success); }
+.ext-wall-word--warn { color:var(--crow-warning); }
+.ext-wall-rearm { margin-top:0.6rem; }
+.ext-wall-status-text { font-size:0.8rem; color:var(--crow-text-muted); margin:0.35rem 0 0; }
 .ext-detail__close { position:absolute; top:0.5rem; right:0.75rem; background:none; border:none; color:var(--crow-text-muted); font-size:1.4rem; cursor:pointer; padding:0.25rem; line-height:1; transition:color 0.15s; }
 .ext-detail__close:hover { color:var(--crow-text-primary); }
 
