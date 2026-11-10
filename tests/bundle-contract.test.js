@@ -85,6 +85,28 @@ test("external-command server is NOT file-checked (npx -y pkg)", () => {
   assert.equal(validateManifest(m, dir).ok, true, "external command must not require a local file");
 });
 
+test("launcher: only the values that make the spawn run code are contract paths; data arguments are left alone", () => {
+  const b = tmpBundle("demo", { "server/index.js": "//" });
+  const server = (args, command = "node") => ({ ...VALID, server: { command, args } });
+  // The script (the first non-flag argument) must stay inside the bundle — relative or absolute.
+  const climb = validateManifest(server(["../x.js"]), b.dir);
+  assert.equal(climb.ok, false);
+  assert.match(climb.errors.join("\n"), /server\.args "\.\.\/x\.js" must be a relative path inside the bundle/);
+  assert.equal(validateManifest(server(["/etc/x.js"]), b.dir).ok, false, "an absolute script is refused");
+  // A code-loading flag's value is code either way it is written.
+  assert.equal(validateManifest(server(["--import", "../h.mjs", "server/index.js"]), b.dir).ok, false);
+  assert.equal(validateManifest(server(["--import=../h.mjs", "server/index.js"]), b.dir).ok, false);
+  // A local runner spec is code; a registry name is fetched, never read from the bundle.
+  assert.equal(validateManifest(server(["-y", "../data"], "npx"), b.dir).ok, false);
+  assert.equal(validateManifest(server(["-y", "@scope/name"], "npx"), b.dir).ok, true);
+  // Data arguments are not the contract's business, absolute or climbing.
+  for (const args of [["server/index.js", "--config=/etc/x"], ["server/index.js", "--db", "../data/x.db"],
+    ["server/index.js", "--data-dir=data"]]) {
+    assert.equal(validateManifest(server(args), b.dir).ok, true, args.join(" "));
+  }
+  assert.equal(validateManifest(server(["-m", "mypkg"], "python"), b.dir).ok, true);
+});
+
 test("server: null is tolerated", () => {
   const { dir } = tmpBundle("demo");
   assert.equal(validateManifest({ ...VALID, server: null }, dir).ok, true);
@@ -165,11 +187,12 @@ test("declared paths must be plain relative paths inside the bundle", () => {
   }
 });
 
-// The MCP spawn runs with the bundle folder as its cwd, so its launcher values are read there:
-// a path with no `/` (`main.js`, `.`), the value half of a `--opt=value` flag and the command
-// itself when it is a path are all bundle paths — and an absolute one or one that climbs out is
-// refused, exactly as for every other declared path.
-test("launcher paths must be plain relative paths inside the bundle too", () => {
+// The MCP spawn runs with the bundle folder as its cwd, so the launcher values that make it
+// LOAD OR RUN CODE are read there: an interpreter's script (with or without a `/`), the value of
+// a code-loading flag and a LOCAL package spec are bundle paths — and an absolute one or one
+// that climbs out is refused. A relative `command` with a `/` is code too; an absolute command
+// is a host program and a data argument is the program's own input, so neither is checked.
+test("launcher paths that load or run code must be plain relative paths inside the bundle", () => {
   const b = tmpBundle("demo", { "server/index.js": "//", "main.js": "//", "data/h.mjs": "//" });
   const run = (server) => validateManifest({ ...VALID, server }, b.dir);
   // The ordinary shapes still pass — including a script with no separator, and `.` (node runs
@@ -181,7 +204,7 @@ test("launcher paths must be plain relative paths inside the bundle too", () => 
   // npx/uvx/bunx fetch their FIRST non-flag argument from a registry: it is a package, not a path.
   assert.equal(run({ command: "npx", args: ["-y", "@scope/pkg"] }).ok, true);
   assert.equal(run({ command: "uvx", args: ["arxiv-mcp-server"] }).ok, true);
-  // Absolute, climbing and `\`-carrying launcher values are refused, wherever they sit.
+  // Absolute, climbing and `\`-carrying code values are refused, wherever they sit.
   for (const args of [
     ["../other-bundle/server/index.js"],
     ["/etc/evil.js"],
@@ -193,14 +216,18 @@ test("launcher paths must be plain relative paths inside the bundle too", () => 
     assert.equal(r.ok, false, JSON.stringify(args));
     assert.ok(r.errors.some((e) => e.startsWith("server.args \"") && e.includes("relative path")), r.errors.join("; "));
   }
-  for (const command of ["../other-bundle/run.sh", "/usr/local/bin/node"]) {
-    const r = run({ command, args: [] });
-    assert.equal(r.ok, false, command);
-    assert.ok(r.errors.some((e) => e.startsWith("server.command \"") && e.includes("relative path")), r.errors.join("; "));
-  }
-  // An npx package name is never a path, so a package-shaped value is not what gets refused.
-  const pkg = run({ command: "npx", args: ["-y", "../evil"] });
-  assert.equal(pkg.ok, true, pkg.errors.join("; "));
+  // A relative command with a separator is code (resolve-command.js runs it inside the folder).
+  const climbCommand = run({ command: "../other-bundle/run.sh", args: [] });
+  assert.equal(climbCommand.ok, false);
+  assert.ok(climbCommand.errors.some((e) => e.startsWith("server.command \"") && e.includes("relative path")), climbCommand.errors.join("; "));
+  // An absolute command is a host program, not a bundle file.
+  assert.equal(run({ command: "/usr/local/bin/node", args: [] }).ok, true);
+  // A LOCAL runner spec is code, so it is refused when it climbs; a registry name is fetched.
+  const localSpec = run({ command: "npx", args: ["-y", "../evil"] });
+  assert.equal(localSpec.ok, false, "a local package spec is a bundle path");
+  assert.ok(localSpec.errors.some((e) => e.startsWith("server.args \"") && e.includes("relative path")), localSpec.errors.join("; "));
+  // A data argument is never the contract's business.
+  assert.equal(run({ command: "node", args: ["main.js", "--config=/etc/x"] }).ok, true);
 });
 
 test("requires.bundles existence checked via resolver", () => {

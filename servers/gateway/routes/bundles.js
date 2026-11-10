@@ -18,7 +18,7 @@
 
 import { invalidateAppCatalog } from "../apps/catalog.js";
 import { launcherPin } from "../../shared/resolve-command.js";
-import { declaredRoots as bundleDeclaredRoots, badBundlePath, badPanelId } from "../../shared/bundle-declared-paths.js";
+import { declaredRoots as bundleDeclaredRoots, badBundlePath, badPanelId, refusalName } from "../../shared/bundle-declared-paths.js";
 import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
@@ -330,7 +330,10 @@ const warnedPanelDeclarations = new Set();
 const warnedPanelDeclarationsByJob = new WeakMap();
 function warnRefusedPanel(key, value, why, job) {
   const k = `${key}\u0000${String(value)}`;
-  const line = `${key} '${String(value).slice(0, 80)}' ${why} — not installed`;
+  // The value is attacker-controlled: escape control characters and cap it before it reaches
+  // the console or the job log (shared/bundle-declared-paths.js refusalName, the same helper
+  // the compose guard's refusal uses).
+  const line = `${key} '${refusalName(value)}' ${why} — not installed`;
   if (!warnedPanelDeclarations.has(k)) {
     warnedPanelDeclarations.add(k);
     console.warn(`[bundles] ${line}`);

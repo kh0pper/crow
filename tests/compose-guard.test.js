@@ -1025,50 +1025,83 @@ test("declared paths: the version refresh and this check read one list (shared/b
     const model = svc({ volumes: [bind(join(dir, top))] });
     assert.equal(G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX }).valid, false, top);
   }
-  // The check sees strictly more only through the launcher: the command itself and arguments
-  // after the first, which the refresh does not need to copy.
+  // The check sees strictly more only through the launcher, and only for the values that make
+  // it LOAD OR RUN CODE (here: the relative command itself). The arguments after a non-interpreter
+  // command are that program's data — `--flag` and `dist/index.js` are its argv — so they declare
+  // nothing (the refresh's own reading of args[0] is separate and unchanged).
   const launcherOnly = { id: "fx-one-list", server: { command: "./run.sh", args: ["--flag", "dist/index.js"] } };
   assert.deepEqual([...D.declaredRoots(launcherOnly)], ["--flag"]);
-  assert.deepEqual(D.declaredControlPaths(launcherOnly).map((p) => `${p.key}:${p.value}`), ["server.command:./run.sh", "server.args:dist/index.js"]);
+  assert.deepEqual(D.declaredControlPaths(launcherOnly).map((p) => `${p.key}:${p.value}`), ["server.command:./run.sh"]);
 });
 
-test("model: launcher arguments need no `/` — `main.js`, `.` (index.js / package.json main) and a `--opt=value` value are bundle paths too", () => {
+test("model: the launcher values that LOAD OR RUN CODE are bundle paths — data arguments are left alone", () => {
   const dir = join(CROW_HOME, "bundles", "fx-launch");
-  for (const d of ["data", "server", "glob-pkg"]) mkdirSync(join(dir, d), { recursive: true });
+  for (const d of ["data", "server", "glob-pkg", "mypkg", "@scope", "bin"]) mkdirSync(join(dir, d), { recursive: true });
   const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
   const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
   const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
   const base = { id: "fx-launch" };
-  // (a) The spawn's cwd is the bundle folder, so `node main.js` runs the file beside the
-  // manifest — no separator needed to name a bundle file.
+  const refusedRw = (command, args, top) => {
+    const m = { ...base, server: { command, args } };
+    assert.equal(c(m, rw(top)).valid, false, `${command} ${args.join(" ")} must refuse ${top} read-write`);
+    assert.equal(c(m, ro(top)).valid, true, `${command} ${args.join(" ")} must allow ${top} read-only`);
+  };
+  const allowedRw = (command, args, top) => {
+    const m = { ...base, server: { command, args } };
+    assert.equal(c(m, rw(top)).valid, true, `${command} ${args.join(" ")} must allow ${top} read-write`);
+  };
+  // (a) An interpreter's script is its FIRST non-flag argument — no `/` needed, and `node`
+  // tries the extensions itself when the value has none.
+  refusedRw("node", ["main.js"], "main.js");
+  refusedRw("node", ["main"], "main.js");
   const direct = { ...base, server: { command: "node", args: ["main.js"] } };
-  assert.equal(c(direct, rw("main.js")).valid, false);
-  assert.equal(c(direct, ro("main.js")).valid, true);
   assert.match(c(direct, rw("main.js")).reason, /mounts 'main\.js'/);
   assert.match(c(direct, rw("main.js")).reason, /declared by manifest\.server\.args/);
-  // (b) `.` makes node run index.js — and package.json `main` when the INSTALLED copy has one.
-  const rootArg = { ...base, server: { command: "node", args: ["."] } };
-  assert.equal(c(rootArg, rw("index.js")).valid, false);
-  assert.equal(c(rootArg, ro("index.js")).valid, true);
-  assert.equal(c(rootArg, rw("data")).valid, true, "no package.json main: data/ is not what node runs");
+  // (b) `.` / `./` / `.//` is the bundle root: node runs index.js (and package.json `main`, below).
+  for (const root of [".", "./", ".//"]) {
+    const m = { ...base, server: { command: "node", args: [root] } };
+    assert.equal(c(m, rw("index.js")).valid, false, root);
+    assert.equal(c(m, ro("index.js")).valid, true, `${root} ro`);
+  }
+  // (c) A code-loading flag's value is a file it loads, written either way.
+  for (const args of [["--import", "./data/h.mjs", "server/index.js"], ["--import=./data/h.mjs", "server/index.js"]]) {
+    const m = { ...base, server: { command: "node", args } };
+    assert.equal(c(m, rw("data")).valid, false, args.join(" "));
+    assert.equal(c(m, ro("data")).valid, true, `${args.join(" ")} ro`);
+    assert.match(c(m, rw("data")).reason, /declared by manifest\.server\.args/);
+  }
+  // (d) A runner's package slot and the value of -p/--from are code when LOCAL; an absolute
+  // command is still read by its program name (`/usr/bin/npx`).
+  for (const [command, args] of [["npx", ["-y", "./data"]], ["npx", ["-p", "./data", "bin"]],
+    ["uvx", ["--from", "./data", "pkg"]], ["/usr/bin/npx", ["-y", "./data"]], ["deno", ["run", "data/x.ts"]]]) {
+    const m = { ...base, server: { command, args } };
+    assert.equal(c(m, rw("data")).valid, false, `${command} ${args.join(" ")}`);
+    assert.equal(c(m, ro("data")).valid, true, `${command} ${args.join(" ")} ro`);
+  }
+  // (e) Everything else is DATA: the program's own arguments, a registry package name and a
+  // python module name. These are exactly the mounts a third-party bundle legitimately writes.
+  allowedRw("node", ["server/index.js", "--data-dir=data"], "data");
+  allowedRw("node", ["server/index.js", "--db", "data/x.db"], "data");
+  allowedRw("node", ["server/index.js", "--config=/etc/x"], "data");
+  allowedRw("npx", ["-y", "@scope/name"], "@scope");
+  allowedRw("uvx", ["--from", "pkg", "pkg"], "data");
+  allowedRw("python", ["-m", "mypkg"], "mypkg");
+  // After a runner's package slot, every argument belongs to the fetched tool: data.
+  allowedRw("npx", ["-y", "glob-pkg", "main.js"], "main.js");
+  const spawned = { ...base, server: { command: "node", args: ["server/index.js"] } };
+  assert.equal(c(spawned, rw("server")).valid, false, "server/ is still the script's folder");
+  assert.equal(c(spawned, rw("data")).valid, true, "the bundle's own runtime folder is still writable");
+  // (f) A value without an extension also names the extensions node tries — for a bare `main`
+  // those are all TOP-LEVEL files. And `.` follows the installed package.json's `main`.
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fx-launch", main: "data/x.js" }));
   try {
+    const rootArg = { ...base, server: { command: "node", args: ["."] } };
     assert.equal(c(rootArg, rw("data")).valid, false, "package.json main is data/x.js");
     assert.equal(c(rootArg, ro("data")).valid, true);
-    assert.match(c(rootArg, rw("data")).reason, /declared by manifest\.server\.args/);
     assert.equal(c(rootArg, rw("index.js")).valid, false, "index.js stays protected");
   } finally {
     rmSync(join(dir, "package.json"), { force: true });
   }
-  // (c) A `--opt=value` flag carries its value after the `=`.
-  const importArg = { ...base, server: { command: "node", args: ["--import=./data/h.mjs", "server/index.js"] } };
-  assert.equal(c(importArg, rw("data")).valid, false);
-  assert.equal(c(importArg, ro("data")).valid, true);
-  assert.match(c(importArg, rw("data")).reason, /declared by manifest\.server\.args/);
-  // npx runs the package it fetches, not a file: only what follows the package name is a path.
-  const npx = { ...base, server: { command: "npx", args: ["-y", "glob-pkg", "main.js"] } };
-  assert.equal(c(npx, rw("glob-pkg")).valid, true, "the package name is not a bundle path");
-  assert.equal(c(npx, rw("main.js")).valid, false, "an argument after the package name still is");
 });
 
 test("model: a manifest-declared name is escaped in the refusal (a newline or ESC never reaches it raw)", () => {

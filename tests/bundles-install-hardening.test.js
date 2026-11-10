@@ -343,6 +343,17 @@ test("install: a panel or panelRoutes value that is absolute, climbs or carries 
   assert.match(said.join("\n"), /manifest\.panelRoutes '/);
 });
 
+test("install: a refused panel declaration is escaped in the log (a newline never repaints the console or job log)", async () => {
+  const id = "fx-panel-escape";
+  buildFixture(id, { panelRoutes: "/data/routes.js\nforged line" });
+  const { out, warnings } = await installCapturingWarnings(id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const said = warnings.filter((w) => w.includes("manifest.panelRoutes"));
+  assert.equal(said.length, 1, warnings.join("\n"));
+  assert.ok(!said[0].includes("\n"), "the newline is escaped, not echoed");
+  assert.match(said[0], /\\u000a/);
+});
+
 test("install: an object panel whose id is not a plain name (an array, an uppercase/underscore name) is not installed", async () => {
   for (const badId of [["../data/evil"], "Bad_Id"]) {
     const id = "fx-panel-badid-" + (Array.isArray(badId) ? "array" : "string");
