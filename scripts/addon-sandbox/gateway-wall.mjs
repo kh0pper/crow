@@ -540,6 +540,9 @@ export function createWallContext({
         for (const name of names) {
           if (typeof name !== "string" || !WARMUP_HOSTS.includes(name)) throw new AddonWallRefused(WARMUP_HOSTS_REASON);
         }
+        // It also gets none of the add-on's own things: a prepare run executes
+        // package code, so no crow.db, no owner file or folder, no state
+        // folder, no sign-in folder and no own .env reach it.
         profile = {
           ...profile,
           network: {
@@ -547,6 +550,9 @@ export function createWallContext({
             hosts: names.map((h) => ({ host: h, port: 443, scheme: "https", from: "warmup", source: "warmup" })),
           },
           doors: [],
+          crowDb: false,
+          files: { read: [], write: [], oauthDir: null, state: [] },
+          ownEnvFile: false,
         };
       } else if (Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, id)) {
         profile = await withGatewayTtsHosts(profile, { id, appRoot, installedIds, snapshot: await snapshotOrNull() });

@@ -5,7 +5,9 @@
  * walled add-on would run different bytes tomorrow than the ones the owner
  * installed. An install on a host whose walls are on therefore writes the
  * version it resolved (`<pkg>@1.2.3`, `<tool>==1.2.3`) into mcp-addons.json,
- * plus npm's `dist.integrity` for the tarball it will fetch.
+ * plus npm's `dist.integrity` for the tarball it will fetch. The integrity is
+ * RECORDED for the owner and for a later check: nothing compares it today, so
+ * it is a note about what the install resolved, not a guarantee about what runs.
  *
  * A shape this module cannot pin to one exact version is refused with a reason:
  * an install that refuses is better than an add-on that runs a floating range.
@@ -210,6 +212,7 @@ export async function pinLauncherArgs(entry, { npmView, pypiVersion } = {}) {
     }
     const resolved = checkNpmAnswer(spec, answer);
     copy.args = args.map((a, i) => (i === at ? `${name}@${resolved.version}` : a));
+    // Recorded for the owner; nothing checks it yet.
     copy.npx_integrity = resolved.integrity;
     return { entry: copy, pinned: true };
   }

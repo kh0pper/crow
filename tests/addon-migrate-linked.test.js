@@ -57,6 +57,12 @@ function writeAddons(addonsPath, addons) {
 }
 const readAddons = (addonsPath) => JSON.parse(readFileSync(addonsPath, "utf8"));
 
+/** The backup files a home holds (`[]` when there is no backup folder at all). */
+function backupsIn(crowHome) {
+  const dir = join(crowHome, "addon-walls-migrate");
+  return existsSync(dir) ? readdirSync(dir).sort() : [];
+}
+
 function fakeRunner() {
   const calls = [];
   const runner = async (cmd, args, opts = {}) => {
@@ -170,6 +176,36 @@ test("a symlink inside the source survives as a symlink with the same link text"
   assert.equal(readlinkSync(copied), "real.txt");
 });
 
+test("a source reached through a symlinked folder still gets its command rewritten; a second run is a no-op", async (t) => {
+  const root = scratch(t, "symparent");
+  const { crowHome, dataDir, addonsPath } = makeHome(root);
+  const appReal = join(root, "app-real");
+  put(appReal, "bundles/acme/run.sh", "#!/bin/sh\nexec node server/index.js\n");
+  put(appReal, "bundles/acme/server/index.js", "// an mcp server\n");
+  put(appReal, "bundles/acme/manifest.json", JSON.stringify({ id: "acme", version: "1.0.0" }));
+  const appRoot = join(root, "app");
+  symlinkSync(appReal, appRoot, "dir");
+  writeAddons(addonsPath, { acme: { command: join(appRoot, "bundles", "acme", "run.sh"), args: [] } });
+
+  const r = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF, runner: fakeRunner(), now: NOW, log: () => {},
+  });
+  assert.deepEqual(r.migrated, ["acme"]);
+  const installed = join(crowHome, "bundles", "acme");
+  const entry = readAddons(addonsPath).acme;
+  assert.equal(entry.command, join(installed, "run.sh"), "the launcher now points into the copy");
+  assert.equal(entry.command_sha256, sha256(join(installed, "run.sh")), "re-pinned to the copied launcher");
+
+  const after = readFileSync(addonsPath, "utf8");
+  const again = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: fakeRunner(), now: () => new Date("2026-01-02T05:06:07Z"), log: () => {},
+  });
+  assert.deepEqual(again.migrated, [], "the entry no longer points into the checkout");
+  assert.deepEqual(again.failed, []);
+  assert.equal(readFileSync(addonsPath, "utf8"), after, "a second run changes nothing");
+});
+
 test(".venv, .git, __pycache__ (nested too) and node_modules are not copied", async (t) => {
   const root = scratch(t, "excluded");
   const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
@@ -273,6 +309,88 @@ test("a failed verify leaves the link, the entry and the bundles listing untouch
   assert.equal(readlinkSync(join(crowHome, "bundles", "acme")), source);
   assert.equal(readFileSync(addonsPath, "utf8"), addonsBefore, "the entry is untouched");
   assert.deepEqual(readdirSync(join(crowHome, "bundles")), listingBefore, "the half-made copy is gone");
+  assert.deepEqual(backupsIn(crowHome), [], "the backup of that attempt is gone");
+});
+
+test("a failure right after the old link was moved aside puts it back and leaves the bytes unchanged", async (t) => {
+  const root = scratch(t, "switchfail");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "acme");
+  linkBundle(crowHome, "acme", source);
+  writeAddons(addonsPath, { acme: { command: "node", args: ["server/index.js"] } });
+
+  const addonsBefore = readFileSync(addonsPath, "utf8");
+  const listingBefore = readdirSync(join(crowHome, "bundles"));
+
+  const r = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: fakeRunner(), now: NOW, log: () => {},
+    // The copy -> <id> rename is what fails here.
+    afterSwitchStep: ({ step }) => {
+      if (step === "aside") throw new Error("the copy could not be moved into place");
+    },
+  });
+
+  assert.deepEqual(r.migrated, []);
+  assert.equal(r.failed.length, 1);
+  assert.equal(r.failed[0].id, "acme");
+  assert.match(r.failed[0].reason, /could not be moved into place/);
+  assert.equal(lstatSync(join(crowHome, "bundles", "acme")).isSymbolicLink(), true, "the link is a link again");
+  assert.equal(readlinkSync(join(crowHome, "bundles", "acme")), source);
+  assert.equal(readFileSync(addonsPath, "utf8"), addonsBefore, "the entry is untouched");
+  assert.deepEqual(readdirSync(join(crowHome, "bundles")), listingBefore, "the copy is gone and no kept-aside folder is left");
+  assert.deepEqual(backupsIn(crowHome), [], "the backup of that attempt is gone");
+});
+
+test("a failed registry write rolls the folder switch back and removes that attempt's backup", async (t) => {
+  const root = scratch(t, "writefail");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "acme");
+  linkBundle(crowHome, "acme", source);
+  writeAddons(addonsPath, { acme: { command: "node", args: ["server/index.js"] } });
+
+  const addonsBefore = readFileSync(addonsPath, "utf8");
+  const listingBefore = readdirSync(join(crowHome, "bundles"));
+
+  const r = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: fakeRunner(), now: NOW, log: () => {},
+    writeAddons: () => { throw new Error("the registry could not be written"); },
+  });
+
+  assert.deepEqual(r.migrated, []);
+  assert.equal(r.failed.length, 1);
+  assert.match(r.failed[0].reason, /registry could not be written/);
+  assert.equal(lstatSync(join(crowHome, "bundles", "acme")).isSymbolicLink(), true, "the link is a link again");
+  assert.equal(readlinkSync(join(crowHome, "bundles", "acme")), source);
+  assert.equal(readFileSync(addonsPath, "utf8"), addonsBefore, "the entry bytes are untouched");
+  assert.deepEqual(readdirSync(join(crowHome, "bundles")), listingBefore, "the copy is gone and the link is the only entry");
+  assert.deepEqual(backupsIn(crowHome), [], "the backup of that attempt is gone");
+});
+
+test("a failed install leaves nothing behind under the add-on's data folder", async (t) => {
+  const root = scratch(t, "installfail");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "acme", {
+    "package.json": JSON.stringify({ name: "acme", dependencies: {} }),
+    "state/gov.db": "SQLite format 3\n",
+  });
+  linkBundle(crowHome, "acme", source);
+  writeAddons(addonsPath, {
+    acme: { command: "node", args: ["server/index.js"], env: { GOV_DATA_DB_PATH: join(source, "state", "gov.db") } },
+  });
+
+  const r = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF,
+    runner: async () => { throw new Error("npm install failed"); }, now: NOW, log: () => {},
+  });
+
+  assert.deepEqual(r.migrated, []);
+  assert.equal(r.failed[0].id, "acme");
+  assert.match(r.failed[0].reason, /npm install failed/);
+  assert.equal(existsSync(join(dataDir, "acme")), false, "the data copy-out never ran, so no folder was made");
+  assert.equal(lstatSync(join(crowHome, "bundles", "acme")).isSymbolicLink(), true, "the link is untouched");
+  assert.deepEqual(backupsIn(crowHome), [], "the backup of that attempt is gone");
 });
 
 test("a uv project gets UV_PROJECT_ENVIRONMENT inside its data folder", async (t) => {
@@ -316,6 +434,36 @@ test("google-workspace: no manifest plus a uvx git ref installs only the stub ma
   assert.equal(readAddons(addonsPath)["google-workspace"].args[0], "--from", "the launcher args stay as they were");
 });
 
+test("a data folder that is a symlink fails the id and nothing is written through it", async (t) => {
+  const root = scratch(t, "datalink");
+  const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
+  const source = makeSource(root, "acme", { "state/gov.db": "SQLite format 3\n" });
+  linkBundle(crowHome, "acme", source);
+  writeAddons(addonsPath, {
+    acme: { command: "node", args: ["server/index.js"], env: { GOV_DATA_DB_PATH: join(source, "state", "gov.db") } },
+  });
+  const elsewhere = join(root, "elsewhere");
+  mkdirSync(elsewhere, { recursive: true });
+  symlinkSync(elsewhere, join(dataDir, "acme"), "dir");
+
+  const addonsBefore = readFileSync(addonsPath, "utf8");
+  const listingBefore = readdirSync(join(crowHome, "bundles"));
+
+  const r = await migrateLinkedAddons({
+    crowHome, appRoot, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames: NO_SELF, runner: fakeRunner(), now: NOW, log: () => {},
+  });
+
+  assert.deepEqual(r.migrated, []);
+  assert.equal(r.failed.length, 1);
+  assert.equal(r.failed[0].id, "acme");
+  assert.match(r.failed[0].reason, /data folder/);
+  assert.equal(lstatSync(join(dataDir, "acme")).isSymbolicLink(), true, "the link is still a link");
+  assert.deepEqual(readdirSync(elsewhere), [], "nothing was written through it");
+  assert.equal(readFileSync(addonsPath, "utf8"), addonsBefore, "the entry is untouched");
+  assert.deepEqual(readdirSync(join(crowHome, "bundles")), listingBefore, "nothing appeared in the bundles folder");
+  assert.deepEqual(backupsIn(crowHome), [], "no backup was written for a failed id");
+});
+
 // ── finding ─────────────────────────────────────────────────────────────────
 
 test("findLinkedAddons: only stdio, slug-id entries; a satellite, HTTP or non-slug entry is left out", async (t) => {
@@ -346,7 +494,7 @@ test("funkwhale: a URL naming this computer is repointed to its local port; anot
   writeAddons(addonsPath, {
     funkwhale: {
       command: "node", args: ["server/index.js"],
-      env: { FUNKWHALE_URL: "https://crow.example.ts.net:8446", FUNKWHALE_ACCESS_TOKEN: "token-not-real" },
+      env: { FUNKWHALE_URL: "https://crow.example.ts.net:8443", FUNKWHALE_ACCESS_TOKEN: "token-not-real" },
       ownerSet: ["FUNKWHALE_URL"],
     },
   });
@@ -361,7 +509,7 @@ test("funkwhale: a URL naming this computer is repointed to its local port; anot
 
   // The port the entry names wins over the manifest default.
   writeAddons(addonsPath, {
-    funkwhale: { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "https://crow.example.ts.net:8446", FUNKWHALE_NGINX_BIND_PORT: "8611" } },
+    funkwhale: { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "https://crow.example.ts.net:8443", FUNKWHALE_NGINX_BIND_PORT: "8611" } },
   });
   await migrateLinkedAddons({
     crowHome, appRoot: REPO, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames, runner: fakeRunner(), now: NOW, log: () => {},
@@ -412,6 +560,100 @@ test("--undo restores the link and the entry, keeps the copy, and a second undo 
   assert.deepEqual(readAddons(addonsPath).acme, original);
 });
 
+test("one --undo after a repoint and a later migration restores the original URL and the original link", async (t) => {
+  const root = scratch(t, "undo-two");
+  const { crowHome, dataDir, addonsPath } = makeHome(root);
+  const selfNames = { names: ["crow.example.ts.net"], addrs: [] };
+  const original = {
+    command: "node", args: ["server/index.js"],
+    env: { FUNKWHALE_URL: "https://crow.example.ts.net:8443" }, ownerSet: ["FUNKWHALE_URL"],
+  };
+  writeAddons(addonsPath, { funkwhale: original });
+
+  const first = await migrateLinkedAddons({
+    crowHome, appRoot: REPO, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames, runner: fakeRunner(), now: NOW, log: () => {},
+  });
+  assert.deepEqual(first.repointed, ["funkwhale"]);
+  assert.equal(readAddons(addonsPath).funkwhale.env.FUNKWHALE_URL, "http://127.0.0.1:8600");
+
+  // The owner links the bundle into the checkout afterwards, and a later boot migrates it.
+  const source = makeSource(root, "funkwhale");
+  linkBundle(crowHome, "funkwhale", source);
+  const second = await migrateLinkedAddons({
+    crowHome, appRoot: REPO, dataDir, mcpAddonsPath: addonsPath, env: WALLED, selfNames,
+    runner: fakeRunner(), now: () => new Date("2026-01-02T04:05:06Z"), log: () => {},
+  });
+  assert.deepEqual(second.migrated, ["funkwhale"]);
+  assert.equal(lstatSync(join(crowHome, "bundles", "funkwhale")).isSymbolicLink(), false);
+
+  const r = await undoMigration({
+    crowHome, ids: ["funkwhale"], mcpAddonsPath: addonsPath, now: () => new Date("2026-02-03T04:05:06Z"), log: () => {},
+  });
+  assert.deepEqual(r.restored, ["funkwhale"]);
+  assert.equal(lstatSync(join(crowHome, "bundles", "funkwhale")).isSymbolicLink(), true, "the link is a link again");
+  assert.equal(readlinkSync(join(crowHome, "bundles", "funkwhale")), source, "and points where it did");
+  assert.deepEqual(readAddons(addonsPath).funkwhale, original, "the entry before the first change");
+  assert.deepEqual(backupsIn(crowHome), [
+    "funkwhale-20260102T030405Z.undone.json",
+    "funkwhale-20260102T040506Z.undone.json",
+  ], "both live backups are marked undone");
+});
+
+test("--undo skips a backup whose kept folder is a path or whose record names another add-on", async (t) => {
+  const cases = [
+    { name: "path", record: (id) => ({ id, linkName: "../../x" }) },
+    { name: "other id", record: () => ({ id: "studio", linkName: null }) },
+  ];
+  for (const one of cases) {
+    const root = scratch(t, "undo-forged");
+    const { crowHome, addonsPath } = makeHome(root);
+    const dir = join(crowHome, "addon-walls-migrate");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // The folder "../../x" would name, and a folder outside the home: neither moves.
+    mkdirSync(join(root, "x"), { recursive: true });
+    writeFileSync(join(root, "x", "keep.txt"), "keep\n");
+    writeAddons(addonsPath, { acme: { command: "node", args: ["now"] } });
+    const before = readFileSync(addonsPath, "utf8");
+
+    writeFileSync(join(dir, `acme-${STAMP}.json`), JSON.stringify({
+      v: 1, at: "2026-01-02T03:04:05Z", kind: "migrate",
+      entry: { command: "node", args: ["forged"] }, how: "symlink", source: null,
+      ...one.record("acme"),
+    }), { mode: 0o600 });
+
+    const r = await undoMigration({
+      crowHome, ids: ["acme"], mcpAddonsPath: addonsPath, now: () => new Date("2026-02-03T04:05:06Z"), log: () => {},
+    });
+    assert.deepEqual(r.restored, [], one.name);
+    assert.equal(r.skipped[0].id, "acme", one.name);
+    assert.equal(r.skipped[0].reason, "its backup does not match this add-on", one.name);
+    assert.equal(readFileSync(addonsPath, "utf8"), before, one.name + ": the entry is untouched");
+    assert.equal(readFileSync(join(root, "x", "keep.txt"), "utf8"), "keep\n", one.name + ": nothing was renamed out of it");
+    assert.deepEqual(backupsIn(crowHome), [`acme-${STAMP}.json`], one.name + ": the backup is left as it was");
+  }
+});
+
+test("a backup's numeric suffix orders it: -9 is older than -10, so its entry is the one restored", async (t) => {
+  const root = scratch(t, "suffix");
+  const { crowHome, addonsPath } = makeHome(root);
+  const dir = join(crowHome, "addon-walls-migrate");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const [suffix, arg] of [[9, "nine"], [10, "ten"]]) {
+    writeFileSync(join(dir, `acme-${STAMP}-${suffix}.json`), JSON.stringify({
+      v: 1, id: "acme", at: "2026-01-02T03:04:05Z", kind: "repoint",
+      entry: { command: "node", args: [arg] }, how: null, source: null, linkName: null, linkTarget: null,
+    }), { mode: 0o600 });
+  }
+  writeAddons(addonsPath, { acme: { command: "node", args: ["now"] } });
+
+  const r = await undoMigration({
+    crowHome, ids: ["acme"], mcpAddonsPath: addonsPath, now: () => new Date("2026-02-03T04:05:06Z"), log: () => {},
+  });
+  assert.deepEqual(r.restored, ["acme"]);
+  assert.deepEqual(readAddons(addonsPath).acme, { command: "node", args: ["nine"] }, "the oldest live backup is the state before the first change");
+  assert.deepEqual(backupsIn(crowHome), [`acme-${STAMP}-10.undone.json`, `acme-${STAMP}-9.undone.json`]);
+});
+
 test("undo with no ids restores every migrated add-on, and works with the walls off", async (t) => {
   const root = scratch(t, "undoall");
   const { crowHome, dataDir, addonsPath, appRoot } = makeHome(root);
@@ -448,7 +690,7 @@ test("undo with no ids restores every migrated add-on, and works with the walls 
 test("undo after a repoint puts the old URL back", async (t) => {
   const root = scratch(t, "undorepoint");
   const { crowHome, dataDir, addonsPath } = makeHome(root);
-  const original = { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "https://crow.example.ts.net:8446" }, ownerSet: ["FUNKWHALE_URL"] };
+  const original = { command: "node", args: ["server/index.js"], env: { FUNKWHALE_URL: "https://crow.example.ts.net:8443" }, ownerSet: ["FUNKWHALE_URL"] };
   writeAddons(addonsPath, { funkwhale: original });
 
   await migrateLinkedAddons({

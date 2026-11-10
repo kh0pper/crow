@@ -365,8 +365,10 @@ async function connectToServer(integration) {
         ownEnv: {},
       });
       if (!warm || warm.ok !== true) {
-        const message = warm?.reason || WARMUP_REASON;
-        console.warn(`  [proxy] ${integration.name}: not started, its packages could not be prepared — ${message}`);
+        // The entry and the card carry a fixed reason: the prepare run's own
+        // words (a child's stderr can name a path) stay on the console line.
+        const message = warm?.refused ? wallFailureReason({ refused: warm.code || true }) : WARMUP_REASON;
+        console.warn(`  [proxy] ${integration.name}: not started, its packages could not be prepared — ${warm?.reason || message}`);
         connectedServers.set(integration.id, {
           client: null,
           tools: [],
@@ -606,8 +608,10 @@ export async function connectAddonServer(id, config) {
           ownEnv: {},
         });
         if (!warm || warm.ok !== true) {
-          const message = warm?.reason || WARMUP_REASON;
-          console.error(`  [proxy] addon ${id}: not started, its packages could not be prepared — ${message}`);
+          // The entry and the card carry a fixed reason: the prepare run's own
+          // words (a child's stderr can name a path) stay on the console line.
+          const message = warm?.refused ? wallFailureReason({ refused: warm.code || true }) : WARMUP_REASON;
+          console.error(`  [proxy] addon ${id}: not started, its packages could not be prepared — ${warm?.reason || message}`);
           connectedServers.set(id, {
             client: null,
             tools: [],

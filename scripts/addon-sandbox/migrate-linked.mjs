@@ -11,8 +11,11 @@
  *     before mcp-addons.json or any path is touched;
  *   - the backup: for one id, its whole mcp-addons.json entry and the link
  *     target are written to <crowHome>/addon-walls-migrate/<id>-<stamp>.json
- *     (file 0600, folder 0700) BEFORE anything about that id changes. A failed
- *     step leaves that id exactly as it was;
+ *     (file 0600, folder 0700) BEFORE anything about that id changes. Any failed
+ *     step puts the folder switch back, removes what that attempt created and
+ *     drops its backup file, so the id ends up exactly as it was;
+ *   - the registry: the new mcp-addons.json is a clone with the one new entry,
+ *     written before the in-memory document changes;
  *   - the copy: <crowHome>/bundles/<id>.migrating (no .venv, .git, __pycache__,
  *     node_modules; no file the entry env names inside the source), checked
  *     against the source, then swapped in. The old link stays as
@@ -22,9 +25,11 @@
  *   - funkwhale: an entry URL that names this computer is repointed to its own
  *     loopback port.
  *
- * `--undo [<id>...]` (no id = every migrated add-on) puts the link and the entry
- * back from the newest backup and keeps the copy as <id>.migrated-<stamp>. It is
- * never gated — a rollback must always work — and deletes nothing.
+ * `--undo [<id>...]` (no id = every migrated add-on) walks every live backup of
+ * an id, newest first, restoring the folder each one recorded and finally the
+ * entry of the OLDEST live one — the state before the first change. Each backup
+ * is then marked undone and the copy stays as <id>.migrated-<stamp>. It is never
+ * gated — a rollback must always work — and deletes nothing.
  *
  * CLI: node scripts/addon-sandbox/migrate-linked.mjs [--undo [<id>...]]
  * It reads CROW_HOME (default ~/.crow), CROW_DATA_DIR (default <crowHome>/data)
@@ -96,9 +101,41 @@ function writeAtomicPrivate(path, text) {
   }
 }
 
+/**
+ * Create one folder at mode 0700. An existing one is looked at with lstat
+ * first: a symlink (or a file) is refused, never chmodded through.
+ */
 function ensurePrivateDir(dir) {
+  let st = null;
+  try { st = lstatSync(dir); } catch { st = null; }
+  if (st) {
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error("a folder this migration needs is not a plain folder");
+    try { chmodSync(dir, 0o700); } catch { /* someone else's folder */ }
+    return;
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try { chmodSync(dir, 0o700); } catch { /* someone else's folder */ }
+  try { chmodSync(dir, 0o700); } catch { /* just made */ }
+}
+
+/** `<dataDir>/<id>` must be a real folder before anything is written below it. */
+function dataFolderOrFail(dataRoot, id) {
+  const dir = join(dataRoot, id);
+  let st = null;
+  try { st = lstatSync(dir); } catch { st = null; }
+  if (st && !st.isDirectory()) throw new Error("its data folder is not a plain folder");
+  return dir;
+}
+
+/** The highest path on the way to `dest` that does not exist yet, or null. */
+function createdTop(dest) {
+  if (lexists(dest)) return null;
+  let top = dest;
+  let at = dirname(dest);
+  while (!lexists(at) && at !== dirname(at)) {
+    top = at;
+    at = dirname(at);
+  }
+  return top;
 }
 
 const deepCopy = (v) => JSON.parse(JSON.stringify(v));
@@ -387,17 +424,39 @@ function repin(next, dir) {
 }
 
 /**
- * Copy, check and switch one linked add-on. Returns its new entry; throws (with
- * the id left as it was) on any failure. The backup is written first, and a
- * failure removes the half-made copy.
+ * Put the folder back the way it was: the copy aside, the old link back in
+ * place, the copy and every path this attempt created in the data folder
+ * removed, and the backup file this attempt wrote deleted. Every step is
+ * guarded, so one that fails still leaves the rest done.
+ */
+function undoAttempt(state) {
+  const { linkPath, copyPath, keptName, copyInPlace, backupPath, created } = state;
+  if (copyInPlace) {
+    try { renameSync(linkPath, copyPath); } catch { /* the copy stays at <id> */ }
+  }
+  if (keptName) {
+    try { renameSync(join(dirname(linkPath), keptName), linkPath); } catch { /* reported by the caller */ }
+  }
+  rmSync(copyPath, { recursive: true, force: true });
+  for (const p of created || []) rmSync(p, { recursive: true, force: true });
+  if (backupPath) rmSync(backupPath, { force: true });
+}
+
+/**
+ * Copy, check and switch one linked add-on. Returns its new entry and a
+ * `rollback` that puts everything back; throws on any failure, with the id left
+ * exactly as it was and the backup of that attempt removed.
  */
 async function migrateOne({ id, source, how, entry, ctx }) {
-  const { crowHome, stamp, at } = ctx;
+  const { crowHome, stamp, at, dataRoot } = ctx;
   const bundlesDir = join(crowHome, "bundles");
   mkdirSync(bundlesDir, { recursive: true });
   const linkPath = join(bundlesDir, id);
   const copyPath = join(bundlesDir, `${id}.migrating`);
   const stub = isGitUvxStub(entry, source);
+
+  // Nothing is ever written through a data folder that is a link or a file.
+  dataFolderOrFail(dataRoot, id);
 
   // 1. The backup, before a single thing changes for this id.
   const linkName = lexists(linkPath) ? freeName(bundlesDir, `${id}.linked-${stamp}`) : null;
@@ -405,22 +464,25 @@ async function migrateOne({ id, source, how, entry, ctx }) {
   if (linkName) {
     try { linkTarget = lstatSync(linkPath).isSymbolicLink() ? readlinkSync(linkPath) : null; } catch { linkTarget = null; }
   }
-  writeBackup({
+  const backupPath = writeBackup({
     crowHome, id, kind: stub ? "migrate-stub" : "migrate", entry, how, source,
     linkName, linkTarget, stamp, at,
   });
 
+  const state = { linkPath, copyPath, keptName: linkName, copyInPlace: false, backupPath, created: [] };
+  const undo = () => undoAttempt(state);
   try {
-    return await copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx });
+    const next = await copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx, state });
+    return { next, rollback: undo };
   } catch (err) {
-    rmSync(copyPath, { recursive: true, force: true });
+    undo();
     throw err;
   }
 }
 
-/** Steps 2-8 for one id: copy, check, switch in, rewrite the entry. */
-async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx }) {
-  const { dataRoot, homeDir, run, log, verify, afterCopy } = ctx;
+/** Steps 2-8 for one id: copy, check, prepare, copy the data out, switch in, rewrite the entry. */
+async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, stub, ctx, state }) {
+  const { dataRoot, homeDir, run, log, verify, afterCopy, afterSwitchStep } = ctx;
   const next = deepCopy(entry);
   const envPaths = stub ? [] : envPathsInside(entry, source, homeDir);
 
@@ -449,18 +511,6 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
     if (!ok) throw new Error("the copy does not match its source");
   }
 
-  // 4. A data file the entry names inside the source: copy it out, repoint.
-  for (const p of envPaths) {
-    const dest = join(dataRoot, id, p.rel);
-    if (lexists(dest)) {
-      log(`[addon-migrate] ${id}: ${p.rel} is already in the data folder; kept that copy`);
-    } else {
-      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
-      cpSync(p.abs, dest, { recursive: true, verbatimSymlinks: true });
-    }
-    next.env = { ...(next.env || {}), [p.key]: dest };
-  }
-
   if (!stub) {
     // 5. A node bundle installs its runtime deps into the copy.
     if (lexists(join(copyPath, "package.json")) && !lexists(join(copyPath, "node_modules"))) {
@@ -469,20 +519,46 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
     // 6. A uv project gets its own environment; the warm-up builds it.
     if (lexists(join(copyPath, "pyproject.toml"))) {
       const envDir = join(dataRoot, id);
+      const top = createdTop(envDir);
       ensurePrivateDir(envDir);
+      if (top) state.created.push(top);
       next.env = { ...(next.env || {}), UV_PROJECT_ENVIRONMENT: join(envDir, ".venv") };
     }
   }
 
+  // 4. The data files the entry names inside the source: after every step that
+  //    can fail, immediately before the switch. Each destination is recorded,
+  //    so a failure here or later removes what this attempt created.
+  for (const p of envPaths) {
+    const dest = join(dataRoot, id, p.rel);
+    if (lexists(dest)) {
+      log(`[addon-migrate] ${id}: ${p.rel} is already in the data folder; kept that copy`);
+    } else {
+      const top = createdTop(dest);
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+      cpSync(p.abs, dest, { recursive: true, verbatimSymlinks: true });
+      if (top) state.created.push(top);
+    }
+    next.env = { ...(next.env || {}), [p.key]: dest };
+  }
+
   // 7. Switch: the old link aside, the copy in.
-  if (linkName) renameSync(linkPath, join(dirname(linkPath), linkName));
+  if (linkName) {
+    renameSync(linkPath, join(dirname(linkPath), linkName));
+    if (typeof afterSwitchStep === "function") await afterSwitchStep({ id, step: "aside", linkPath, copyPath });
+  }
   renameSync(copyPath, linkPath);
+  state.copyInPlace = true;
+  if (typeof afterSwitchStep === "function") await afterSwitchStep({ id, step: "place", linkPath, copyPath });
 
   // 8. The entry: no cwd any more, and a launcher inside the copy, re-pinned.
+  //    The launcher is compared at its REAL path, so a checkout reached through
+  //    a symlinked folder is rewritten into the copy like any other.
   delete next.cwd;
   const command = next.command;
-  if (typeof command === "string" && isAbsolute(command) && strictlyInside(resolve(command), source)) {
-    next.command = join(linkPath, relative(source, resolve(command)));
+  const launcher = typeof command === "string" && isAbsolute(command) ? (realpathSyncish(command) || resolve(command)) : null;
+  if (launcher && strictlyInside(launcher, source)) {
+    next.command = join(linkPath, relative(source, launcher));
     repin(next, linkPath);
   } else if (typeof command === "string" && !isAbsolute(command) && command.includes("/")) {
     repin(next, linkPath);
@@ -499,7 +575,7 @@ async function copyAndSwitch({ id, source, entry, linkPath, copyPath, linkName, 
 export async function migrateLinkedAddons({
   crowHome, appRoot, dataDir, env = process.env, mcpAddonsPath,
   selfNames, runner, now = () => new Date(), log = console.log, home,
-  verify, afterCopy,
+  verify, afterCopy, afterSwitchStep, writeAddons,
 } = {}) {
   if (!wallsOnForHost(env)) return { skipped: "walls off", migrated: [], repointed: [], failed: [] };
 
@@ -524,18 +600,26 @@ export async function migrateLinkedAddons({
     return result;
   }
 
-  const writeAddons = () => writeAtomicPrivate(addonsPath, JSON.stringify(addons, null, 2));
+  // The ONE write of the registry: the caller-visible document is a clone with
+  // the one new entry, and memory follows only once it is on disk.
+  const writeAddonsDoc = typeof writeAddons === "function"
+    ? writeAddons
+    : (doc) => writeAtomicPrivate(addonsPath, JSON.stringify(doc, null, 2));
   const self = selfNames || await resolveSelfNames({ env });
-  const ctx = { crowHome, appRoot, dataRoot, stamp, at, homeDir, run, log, verify, afterCopy };
+  const ctx = { crowHome, appRoot, dataRoot, stamp, at, homeDir, run, log, verify, afterCopy, afterSwitchStep };
 
   for (const item of findLinkedAddons({ crowHome, appRoot, dataDir: dataRoot, addons, log })) {
+    let made = null;
     try {
-      const next = await migrateOne({ ...item, entry: addons[item.id], ctx });
-      addons[item.id] = next;
-      writeAddons();
+      made = await migrateOne({ ...item, entry: addons[item.id], ctx });
+      await writeAddonsDoc({ ...addons, [item.id]: made.next });
+      addons[item.id] = made.next;
       result.migrated.push(item.id);
       log(`[addon-migrate] ${item.id}: copied into ${join(crowHome, "bundles", item.id)}; the old link is ${item.id}.linked-${stamp}`);
     } catch (err) {
+      // Any failure at all leaves this id exactly as it was: the folder switch
+      // goes back and the backup of this attempt is dropped.
+      if (made) made.rollback();
       const reason = String(err?.message || err).slice(0, 300);
       result.failed.push({ id: item.id, reason });
       log(`[addon-migrate] ${item.id}: ${reason}; left as it was`);
@@ -545,25 +629,23 @@ export async function migrateLinkedAddons({
   const repoint = funkwhaleRepoint({ addons, appRoot, selfNames: self });
   if (repoint) {
     const migratedNow = result.migrated.includes("funkwhale");
-    let allowed = migratedNow;
-    if (!migratedNow) {
-      try {
-        writeBackup({
+    let backupPath = null;
+    try {
+      if (!migratedNow) {
+        backupPath = writeBackup({
           crowHome, id: "funkwhale", kind: "repoint", entry: repoint.previous,
           how: null, source: null, linkName: null, linkTarget: null, stamp, at,
         });
-        result.repointed.push("funkwhale");
-        allowed = true;
-      } catch (err) {
-        const reason = String(err?.message || err).slice(0, 300);
-        result.failed.push({ id: "funkwhale", reason });
-        log(`[addon-migrate] funkwhale: ${reason}; left as it was`);
       }
-    }
-    if (allowed) {
+      await writeAddonsDoc({ ...addons, funkwhale: repoint.next });
       addons.funkwhale = repoint.next;
-      writeAddons();
+      if (!migratedNow) result.repointed.push("funkwhale");
       log("funkwhale: its URL named this computer; repointed to its local port");
+    } catch (err) {
+      if (backupPath) rmSync(backupPath, { force: true });
+      const reason = String(err?.message || err).slice(0, 300);
+      result.failed.push({ id: "funkwhale", reason });
+      log(`[addon-migrate] funkwhale: ${reason}; left as it was`);
     }
   }
 
@@ -572,29 +654,48 @@ export async function migrateLinkedAddons({
 
 // ── undo ────────────────────────────────────────────────────────────────────
 
-/** The newest live backup per id: a file that does not end in ".undone.json". */
+/**
+ * Every live backup, per id, newest first: by stamp, then by the numeric
+ * suffix of a second backup written in the same second (`-10` is newer than
+ * `-9`). A file that ends in ".undone.json" is not live.
+ */
 function liveBackups(dir) {
   const out = new Map();
   let names;
   try { names = readdirSync(dir); } catch { return out; }
   for (const name of names) {
     if (name.endsWith(".undone.json")) continue;
-    const m = /^(.+)-(\d{8}T\d{6}Z(?:-\d+)?)\.json$/.exec(name);
+    const m = /^(.+)-(\d{8}T\d{6}Z)(?:-(\d+))?\.json$/.exec(name);
     if (!m) continue;
-    const [, id, stamp] = m;
-    const cur = out.get(id);
-    if (!cur || stamp > cur.stamp) out.set(id, { id, stamp, file: join(dir, name) });
+    const [, id, stamp, suffix] = m;
+    const list = out.get(id) || [];
+    list.push({ id, stamp, suffix: suffix ? Number(suffix) : 0, file: join(dir, name) });
+    out.set(id, list);
   }
-  for (const rec of out.values()) {
-    try { rec.data = JSON.parse(readFileSync(rec.file, "utf8")); } catch { rec.data = null; }
+  for (const list of out.values()) {
+    list.sort((a, b) => (a.stamp === b.stamp ? b.suffix - a.suffix : (a.stamp < b.stamp ? 1 : -1)));
+    for (const rec of list) {
+      try { rec.data = JSON.parse(readFileSync(rec.file, "utf8")); } catch { rec.data = null; }
+    }
   }
   return out;
 }
 
+/** True when a backup's kept-aside folder name is one this migration writes for this id. */
+function isOwnLinkName(id, name) {
+  if (name === null || name === undefined) return true;
+  const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}\\.linked-\\d{8}T\\d{6}Z(-\\d+)?$`).test(String(name));
+}
+
 /**
- * Put the link and the entry back from the newest backup of each id (or of the
+ * Put the link and the entry back, from every live backup of each id (or of the
  * given ids). Never gated, never deletes anything: the migrated copy stays as
- * <id>.migrated-<stamp> and the backup is renamed, so a second undo is a no-op.
+ * <id>.migrated-<stamp> and each backup is renamed, so a second undo is a no-op.
+ *
+ * Newest backup first, each one restoring the folder it recorded, and finally
+ * the entry of the OLDEST live backup: that is the state before the first
+ * change, so a repoint followed by a migration comes back in one step.
  */
 export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, now = () => new Date(), log = console.log } = {}) {
   const bundlesDir = join(crowHome, "bundles");
@@ -609,15 +710,22 @@ export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, now =
 
   for (const id of wanted) {
     if (!SLUG.test(String(id))) { out.skipped.push({ id, reason: "not an add-on id" }); continue; }
-    const backup = live.get(id);
-    if (!backup) { out.skipped.push({ id, reason: "no backup to undo" }); continue; }
-    const record = backup.data;
-    if (!record || typeof record !== "object") {
+    const backups = live.get(id) || [];
+    if (!backups.length) { out.skipped.push({ id, reason: "no backup to undo" }); continue; }
+    if (backups.some((b) => !b.data || typeof b.data !== "object")) {
       out.skipped.push({ id, reason: "its backup cannot be read" });
       continue;
     }
+    // A backup names this add-on and a folder name this migration writes for it,
+    // or it is not ours to act on: no name in it is ever used as a path.
+    if (backups.some((b) => b.data.id !== id || !isOwnLinkName(id, b.data.linkName))) {
+      out.skipped.push({ id, reason: "its backup does not match this add-on" });
+      continue;
+    }
     try {
-      if (record.kind === "migrate" || record.kind === "migrate-stub") {
+      for (const backup of backups) {
+        const record = backup.data;
+        if (record.kind !== "migrate" && record.kind !== "migrate-stub") continue;
         const linkPath = join(bundlesDir, id);
         const saved = record.linkName ? join(bundlesDir, record.linkName) : null;
         if (saved && lexists(saved)) {
@@ -631,11 +739,12 @@ export async function undoMigration({ crowHome, ids = null, mcpAddonsPath, now =
           renameSync(linkPath, join(bundlesDir, freeName(bundlesDir, `${id}.migrated-${stamp}`)));
         }
       }
-      if (addons && record.entry) {
-        addons[id] = deepCopy(record.entry);
+      const oldest = backups[backups.length - 1].data;
+      if (addons && oldest.entry) {
+        addons[id] = deepCopy(oldest.entry);
         writeAtomicPrivate(addonsPath, JSON.stringify(addons, null, 2));
       }
-      renameSync(backup.file, `${backup.file.replace(/\.json$/, "")}.undone.json`);
+      for (const backup of backups) renameSync(backup.file, `${backup.file.replace(/\.json$/, "")}.undone.json`);
       out.restored.push(id);
       log(`[addon-migrate] ${id}: restored`);
     } catch (err) {

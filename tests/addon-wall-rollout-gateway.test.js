@@ -399,6 +399,59 @@ test("a failed prepare run is worded as its own reason, with the child's evidenc
   assert.equal(failures.wallFailureReason({ refused: true }), failures.REFUSED_REASON, "an uncoded refusal reads as before");
 });
 
+test("a prepare run's own words never reach the add-on's status or its card", async () => {
+  const emitted = [];
+  proxy._setProxyDepsForTest({
+    addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
+    warmAddon: async () => ({
+      ok: false,
+      reason: "the prepare run could not start (EACCES: /home/alex/secret/bin/npm)",
+      exitCode: null,
+      stderrLines: [],
+      denials: [],
+    }),
+    startAddonWall: async () => { throw new Error("no wall is built after a failed prepare run"); },
+    emitFixIt: async (_db, name, payload) => { emitted.push({ name, ...payload }); },
+  });
+
+  assert.equal(await proxy.connectAddonServer(WARMED_ID, { command: "node", args: ["server/index.js"] }), null);
+  const entry = proxy.connectedServers.get(WARMED_ID);
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error, failures.WARMUP_REASON, "the entry shows the fixed reason");
+  assert.equal(entry.wall.reason, failures.WARMUP_REASON);
+  assert.equal(JSON.stringify(entry).includes("/home/alex/secret"), false, "the raw prepare-run text stays on the console");
+
+  const deadline = Date.now() + 5000;
+  while (emitted.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].reason, failures.WARMUP_REASON);
+  assert.equal(JSON.stringify(emitted[0]).includes("/home/alex/secret"), false);
+});
+
+test("a refused prepare run shows the refusal's own fixed text, not its raw message", async () => {
+  proxy._setProxyDepsForTest({
+    addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
+    warmAddon: async () => ({
+      ok: false,
+      refused: true,
+      code: null,
+      reason: "--with: /home/alex/secret/option is not supported for a walled add-on",
+      exitCode: null,
+      stderrLines: [],
+      denials: [],
+    }),
+    startAddonWall: async () => { throw new Error("no wall is built after a refused prepare run"); },
+    emitFixIt: async () => {},
+  });
+
+  assert.equal(await proxy.connectAddonServer(WARMED_ID, { command: "node", args: ["server/index.js"] }), null);
+  const entry = proxy.connectedServers.get(WARMED_ID);
+  assert.equal(entry.status, "error");
+  assert.equal(entry.error, failures.REFUSED_REASON);
+  assert.equal(entry.wall.reason, failures.REFUSED_REASON);
+  assert.equal(JSON.stringify(entry).includes("/home/alex/secret"), false);
+});
+
 // ---- proxy.js: the prepare run in front of the first start ---------------
 
 const WARMED_ID = "warmed";

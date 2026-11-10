@@ -10,12 +10,13 @@
 import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { AddonWallRefused } from "../scripts/addon-sandbox/spawn.mjs";
 import { createWallContext } from "../scripts/addon-sandbox/gateway-wall.mjs";
+import { buildAddonPlan } from "../scripts/addon-sandbox/plan.mjs";
 import { _resetWarmupsForTest, warmAddon, warmupPlanFor } from "../scripts/addon-sandbox/warmup.mjs";
 
 const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-warmup-")));
@@ -524,6 +525,112 @@ test("a warm-up wall reaches the plan's registries only: no internet, no door", 
   assert.equal(calls.length, 3);
   assert.equal(calls[2].profile.network.internet, false);
   assert.equal(calls[2].profile.network.hosts.length, 1, "a real start keeps its listed host");
+});
+
+/** A scratch checkout with a bundle whose own server code opens crow.db. */
+function crowDbAppRoot(id) {
+  const root = freshDir("app-crowdb");
+  mkdirSync(join(root, "registry"), { recursive: true });
+  writeFileSync(join(root, "registry", "addon-past-defaults.json"), JSON.stringify({ version: 1, defaults: {} }));
+  mkdirSync(join(root, "bundles", id, "server"), { recursive: true });
+  writeFileSync(join(root, "bundles", id, "server", "index.js"),
+    'import { createDbClient } from "../../../servers/db.js";\n');
+  writeFileSync(join(root, "bundles", id, "manifest.json"), JSON.stringify({
+    id, name: id, type: "mcp-server", version: "1.0.0",
+    server: { command: "node", args: ["server/index.js"] },
+    env_vars: ["KIT_URL", "ACME_OUT", "ACME_KEY", "ACME_TOKEN_FILE"].map((name) => ({ name })),
+    sandbox: {
+      ownEnvFile: true,
+      files: { read: ["env:ACME_KEY"], write: ["env:ACME_OUT"], oauthDir: "env:ACME_TOKEN_FILE" },
+      network: { internet: true, hosts: ["env:KIT_URL"] },
+      doors: [],
+    },
+  }));
+  return root;
+}
+
+test("a warm-up wall carries none of the add-on's own things: no crow.db, no files, no own .env", async () => {
+  const id = "ledger";
+  const appRoot = crowDbAppRoot(id);
+  const operatorHome = freshDir("operator-home");
+  const crowHome = join(operatorHome, ".crow");
+  mkdirSync(join(crowHome, "bundles", id), { recursive: true });
+  const dataDir = join(crowHome, "data");
+  mkdirSync(join(dataDir, id), { recursive: true });
+  writeFileSync(join(dataDir, "crow.db"), "");
+  const entry = {
+    command: "node",
+    args: ["server/index.js"],
+    env: {
+      KIT_URL: "https://example.invalid:8443",
+      ACME_OUT: join(operatorHome, "notes", "out.txt"),
+      ACME_KEY: join(operatorHome, "notes", "key.pem"),
+      ACME_TOKEN_FILE: join(operatorHome, "signin", "token.json"),
+    },
+    ownerSet: ["ACME_OUT", "ACME_KEY", "ACME_TOKEN_FILE"],
+  };
+
+  const calls = [];
+  const ctx = createWallContext({
+    crowHome,
+    appRoot,
+    dataDir,
+    home: operatorHome,
+    nodeBin: process.execPath,
+    gatewayPort: 3001,
+    gatewayEnv: {},
+    deps: {
+      dockerView: () => ({ snapshot: async () => ({ publishes: [], containers: [], subnets: [], addonProjects: new Map() }) }),
+      tailscaleStatus: async () => null,
+      interfaces: () => ({}),
+      wrapAddonSpawn: async (o) => {
+        calls.push(o);
+        return { walled: true, tier: "walled", cmd: "/usr/bin/bwrap", args: [], env: {}, stdioExtra: [], cleanup: () => {} };
+      },
+    },
+  });
+
+  // The add-on's own start: its profile does carry crow.db and its files.
+  await ctx.startAddonWall({ id, entry, command: "node", args: ["server/index.js"], kind: "addon" });
+  assert.equal(calls[0].profile.crowDb, true, "this bundle's own server code opens crow.db");
+  assert.ok(calls[0].profile.files.write.length > 0, "and it has an owner file to write");
+  assert.equal(calls[0].profile.ownEnvFile, true);
+
+  await ctx.startAddonWall({
+    id, entry, command: "uvx", args: ["tool==1.0"], kind: "addon", purpose: "warmup", warmupHosts: ["pypi.org"],
+  });
+  const warm = calls[1].profile;
+  assert.equal(warm.crowDb, false, "a prepare run gets no crow.db");
+  assert.deepEqual(warm.files, { read: [], write: [], oauthDir: null, state: [] }, "and no owner file, folder or state folder");
+  assert.equal(warm.ownEnvFile, false, "and no own .env");
+
+  // A plan built from that profile never touches crow.db.
+  const plan = buildAddonPlan({
+    id,
+    profile: warm,
+    entry: { command: "uvx", args: ["tool==1.0"] },
+    home: operatorHome,
+    crowHome,
+    appRoot,
+    nodeBin: process.execPath,
+    dataDir,
+    gatewayPort: 3001,
+    otherHomes: [],
+    selfTargets: [],
+  });
+  try {
+    assert.equal("CROW_DB_PATH" in plan.env, false, "no crow.db path in the child env");
+    assert.ok(plan.unsetEnv.includes("CROW_DB_PATH"));
+    const bound = [];
+    for (let i = 0; i + 2 < plan.args.length; i++) {
+      if (["--bind-fd", "--ro-bind-fd", "--ro-bind"].includes(plan.args[i])) bound.push(plan.args[i + 2]);
+    }
+    assert.equal(bound.includes(dataDir), false, "the whole data folder is not bound");
+    assert.equal(plan.args.includes(join(dataDir, "crow.db")), false, "crow.db is not named at all");
+    assert.deepEqual(plan.fds.map((f) => f.role), ["data"], "only the add-on's own data folder is bound by fd");
+  } finally {
+    for (const f of plan.fds) { try { closeSync(f.fd); } catch { /* already closed */ } }
+  }
 });
 
 test("a purpose the wall does not know is refused", async () => {
