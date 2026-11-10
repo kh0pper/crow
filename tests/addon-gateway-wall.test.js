@@ -1,0 +1,311 @@
+/**
+ * `createWallContext` (scripts/addon-sandbox/gateway-wall.mjs): the Crow roots,
+ * the two owner checks, the host's own names and addresses, and the three spawn
+ * kinds. Pure: docker, tailscale, the interface table, the listener
+ * identification and the spawn wrapper are seams, so no bwrap and no docker run
+ * here.
+ *
+ * Scratch dirs under mkdtemp; a fake spawn wrapper records what it was handed.
+ */
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { AddonWallRefused } from "../scripts/addon-sandbox/spawn.mjs";
+import { createWallContext } from "../scripts/addon-sandbox/gateway-wall.mjs";
+
+const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-gateway-wall-")));
+after(() => rmSync(T, { recursive: true, force: true }));
+
+let seq = 0;
+const freshDir = (name) => {
+  const dir = join(T, name + "-" + ++seq);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+};
+
+/** A checkout shape `profileFor` can read: the past-defaults table, and one bundle. */
+function appRootWith(id = null) {
+  const root = freshDir("app");
+  mkdirSync(join(root, "registry"), { recursive: true });
+  writeFileSync(join(root, "registry", "addon-past-defaults.json"), JSON.stringify({ version: 1, defaults: {} }));
+  if (id) {
+    mkdirSync(join(root, "bundles", id), { recursive: true });
+    writeFileSync(join(root, "bundles", id, "manifest.json"), JSON.stringify({
+      id,
+      name: id,
+      description: "a fixture add-on",
+      type: "mcp-server",
+      category: "testing",
+      version: "1.0.0",
+      server: { command: "node", args: [] },
+    }));
+  }
+  return root;
+}
+
+/** The empty docker snapshot a spawn sees when nothing is running. */
+const EMPTY_VIEW = {
+  snapshot: async () => ({ publishes: [], containers: [], subnets: [], addonProjects: new Map() }),
+};
+
+/** A quiet `deps`: no tailscale, no interfaces, no docker. */
+const quietDeps = (extra = {}) => ({
+  dockerView: () => EMPTY_VIEW,
+  tailscaleStatus: async () => null,
+  interfaces: () => ({}),
+  ...extra,
+});
+
+/** A spawn wrapper that records its options. */
+function spawnRecorder() {
+  const calls = [];
+  return {
+    calls,
+    wrapAddonSpawn: async (o) => {
+      calls.push(o);
+      return { walled: true, tier: "walled", cmd: "/usr/bin/bwrap", args: [], env: {}, stdioExtra: [], cleanup: () => {} };
+    },
+  };
+}
+
+/** One context over a fresh layout. */
+function context({ deps = quietDeps(), appRoot = null, dataDir = null, gatewayEnv = {}, crowHome = null, home = null } = {}) {
+  const theHome = home || freshDir("home");
+  return createWallContext({
+    crowHome: crowHome || join(theHome, ".crow"),
+    appRoot: appRoot || appRootWith(),
+    dataDir: dataDir || freshDir("data"),
+    home: theHome,
+    nodeBin: process.execPath,
+    gatewayPort: 3001,
+    gatewayEnv,
+    deps,
+  });
+}
+
+// ---- the Crow roots ------------------------------------------------------
+
+test("crowRoots holds the checkout, the home, the data dir and every co-hosted home, both spellings", () => {
+  const home = join(T, "roots-home");
+  const realCrow = join(T, "roots-real", ".crow");
+  mkdirSync(join(realCrow, "data"), { recursive: true });
+  mkdirSync(join(home, ".crow-r2"), { recursive: true });
+  mkdirSync(join(home, ".config"), { recursive: true });
+  symlinkSync(realCrow, join(home, ".crow"));
+  const crowHome = join(home, ".crow");
+  const dataDir = join(crowHome, "data");
+  const appRoot = appRootWith();
+
+  // Nothing may reach docker or tailscale before a spawn asks for it.
+  let probes = 0;
+  const deps = {
+    dockerView: () => { probes += 1; return EMPTY_VIEW; },
+    tailscaleStatus: async () => { probes += 1; return null; },
+  };
+  const ctx = createWallContext({ crowHome, appRoot, dataDir, home, nodeBin: process.execPath, gatewayPort: 3001, gatewayEnv: {}, deps });
+  assert.equal(probes, 0, "creating the context asks nothing");
+
+  const roots = ctx.crowRoots;
+  for (const p of [appRoot, crowHome, dataDir, realpathSync(crowHome), join(home, ".crow-r2")]) {
+    assert.ok(roots.includes(p), "a root is missing: " + p);
+  }
+  assert.equal(roots.includes(join(home, ".config")), false, "an ordinary hidden entry is not a Crow root");
+  assert.equal(new Set(roots).size, roots.length, "no root is listed twice");
+  assert.deepEqual(ctx.crowRoots, roots, "the roots are computed once");
+  assert.equal(probes, 0);
+});
+
+// ---- the two owner checks -------------------------------------------------
+
+test("listenerOwnerFor identifies the listener with this context's Crow roots and no docker view", async () => {
+  const seen = [];
+  const ctx = context({
+    deps: quietDeps({
+      identifyListener: async (addr, port, opts) => {
+        seen.push({ addr, port, opts });
+        return { kind: "own-uid" };
+      },
+      // A docker read that fails: the listener check must then see no docker view.
+      dockerView: () => ({ snapshot: async () => { throw new Error("docker is down"); } }),
+    }),
+  });
+  const verdict = await ctx.listenerOwnerFor("kiosk")("127.0.0.1", 8123);
+  assert.equal(verdict.kind, "own-uid");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].addr, "127.0.0.1");
+  assert.equal(seen[0].port, 8123);
+  assert.deepEqual(seen[0].opts.crowRoots, ctx.crowRoots);
+  assert.equal(seen[0].opts.addonId, "kiosk");
+  assert.deepEqual(seen[0].opts.selfPids, [process.pid]);
+  assert.equal(seen[0].opts.docker, null, "a failed snapshot is no docker view");
+  assert.ok(seen[0].opts.addonProjects instanceof Map);
+  assert.equal(seen[0].opts.addonProjects.size, 0);
+});
+
+test("containerOwnerFor: this add-on's own project passes; a bridge address with no docker view is denied", async () => {
+  const view = {
+    snapshot: async () => ({
+      publishes: [],
+      containers: [{ id: "c1", name: "own", project: "proj", ips: ["172.18.0.5"] }],
+      subnets: ["172.18.0.0/16"],
+      addonProjects: new Map([["proj", "kiosk"]]),
+    }),
+  };
+  const own = context({ deps: quietDeps({ dockerView: () => view }) });
+  assert.equal((await own.containerOwnerFor("kiosk")("172.18.0.5")).kind, "docker-container");
+
+  const down = context({
+    deps: quietDeps({
+      dockerView: () => ({ snapshot: async () => { throw new Error("docker is down"); } }),
+      interfaces: () => ({ docker0: [{ address: "172.17.0.1", netmask: "255.255.0.0", family: "IPv4" }] }),
+    }),
+  });
+  const verdict = await down.containerOwnerFor("kiosk")("172.17.0.55");
+  assert.equal(verdict.kind, "denied");
+});
+
+// ---- the three spawn kinds ------------------------------------------------
+
+test("a built-in's wall gets the checkout's bundle folder and a data folder Crow creates", async () => {
+  const id = "probe-builtin";
+  const appRoot = appRootWith(id);
+  const dataDir = freshDir("builtin-data");
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot, dataDir, deps: quietDeps(rec) });
+
+  const wall = await ctx.startAddonWall({ id, entry: { env: {} }, command: "node", args: [], env: {}, kind: "builtin" });
+  assert.equal(wall.walled, true);
+  assert.equal(rec.calls.length, 1);
+  assert.equal(rec.calls[0].installDir, join(appRoot, "bundles", id));
+  assert.equal(rec.calls[0].dataSubdir, undefined);
+  assert.equal(rec.calls[0].entry.command, "node", "the entry names the command the caller resolved");
+  assert.equal(statSync(join(dataDir, id)).mode & 0o777, 0o700);
+});
+
+test("a project-service child gets its own services/<uuid> folder below the add-on's data folder", async () => {
+  const id = "probe-service";
+  const appRoot = appRootWith(id);
+  const dataDir = freshDir("service-data");
+  mkdirSync(join(dataDir, id), { recursive: true, mode: 0o755 });
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot, dataDir, deps: quietDeps(rec) });
+  const subdir = "services/0a1b2c3d-0000-4000-8000-00000000abcd";
+
+  await ctx.startAddonWall({ id, entry: {}, command: "node", args: ["server/index.js"], env: {}, kind: "service", dataSubdir: subdir });
+  assert.equal(rec.calls.length, 1);
+  assert.equal(rec.calls[0].dataSubdir, subdir);
+  assert.equal(rec.calls[0].installDir, undefined, "a service child runs the installed copy");
+  assert.equal(statSync(join(dataDir, id, "services")).mode & 0o777, 0o700);
+  assert.equal(statSync(join(dataDir, id, subdir)).mode & 0o777, 0o700);
+});
+
+test("a refusal keeps the add-on off: a missing data folder, an unreadable past-defaults table, a bad id", async () => {
+  const dataDir = freshDir("refuse-data");
+  const rec = spawnRecorder();
+
+  // A service child of an add-on that has no data folder: the wall has nowhere
+  // to put its writable folder, so the child stays off.
+  const missing = context({ appRoot: appRootWith("probe-missing"), dataDir, deps: quietDeps(rec) });
+  await assert.rejects(
+    missing.startAddonWall({ id: "probe-missing", entry: {}, command: "node", args: [], env: {}, kind: "service", dataSubdir: "services/0a1b2c3d-0000-4000-8000-00000000abcd" }),
+    (err) => err instanceof AddonWallRefused && /data folder is missing/.test(err.message),
+  );
+
+  // No past-defaults table: a legacy default would read as owner-entered.
+  const noTable = freshDir("app-no-table");
+  mkdirSync(join(noTable, "bundles", "probe-missing"), { recursive: true });
+  const unreadable = context({ appRoot: noTable, dataDir, deps: quietDeps(rec) });
+  await assert.rejects(
+    unreadable.startAddonWall({ id: "probe-missing", entry: {}, command: "node", args: [], env: {}, kind: "builtin" }),
+    (err) => err instanceof AddonWallRefused && /past-defaults/.test(err.message),
+  );
+
+  // A table that parses but carries no defaults map is as good as unreadable.
+  const emptyTable = freshDir("app-empty-table");
+  mkdirSync(join(emptyTable, "registry"), { recursive: true });
+  writeFileSync(join(emptyTable, "registry", "addon-past-defaults.json"), JSON.stringify({ version: 1 }));
+  const noDefaults = context({ appRoot: emptyTable, dataDir, deps: quietDeps(rec) });
+  await assert.rejects(
+    noDefaults.startAddonWall({ id: "probe-missing", entry: {}, command: "node", args: [], env: {}, kind: "builtin" }),
+    (err) => err instanceof AddonWallRefused,
+  );
+
+  // A profile that cannot be derived refuses too (the id names folders, so it is a slug or nothing).
+  const bad = context({ appRoot: appRootWith("probe-missing"), dataDir, deps: quietDeps(rec) });
+  await assert.rejects(
+    bad.startAddonWall({ id: "../probe-missing", entry: {}, command: "node", args: [], env: {}, kind: "addon" }),
+    (err) => err instanceof AddonWallRefused,
+  );
+
+  assert.deepEqual(rec.calls, [], "a refused wall never reaches the spawn wrapper");
+});
+
+// ---- the host's own names and addresses ----------------------------------
+
+test("selfTargets: the machine name, the tailnet name, the configured names, and every address", async () => {
+  const ctx = context({
+    gatewayEnv: {
+      CROW_GATEWAY_URL: "https://gateway.example.ts.net/",
+      CROW_PUBLIC_URL: "https://public.example.com",
+    },
+    deps: quietDeps({
+      tailscaleStatus: async () => ({ Self: { DNSName: "Crow.Example.TS.net.", TailscaleIPs: ["100.64.20.5", "fd7a:115c:a1e0::7"] } }),
+      interfaces: () => ({ lo: [{ address: "127.0.0.1" }], eth0: [{ address: "192.0.2.10" }] }),
+    }),
+  });
+
+  const targets = await ctx.selfTargets();
+  for (const name of [hostname().toLowerCase(), "crow.example.ts.net", "gateway.example.ts.net", "public.example.com"]) {
+    assert.ok(targets.names.includes(name), "a name is missing: " + name);
+  }
+  for (const addr of ["100.64.20.5", "fd7a:115c:a1e0::7", "127.0.0.1", "192.0.2.10"]) {
+    assert.ok(targets.addrs.includes(addr), "an address is missing: " + addr);
+  }
+  // A copy: a caller that edits its answer cannot change the cache.
+  targets.names.push("added.example.com");
+  assert.equal((await ctx.selfTargets()).names.includes("added.example.com"), false);
+});
+
+test("selfTargets: a failed tailscale read still gives the interface addresses", async () => {
+  const ctx = context({
+    deps: quietDeps({
+      tailscaleStatus: async () => { throw new Error("no tailscale here"); },
+      interfaces: () => ({ lo: [{ address: "127.0.0.1" }] }),
+    }),
+  });
+  const targets = await ctx.selfTargets();
+  assert.deepEqual(targets.names, [hostname().toLowerCase()]);
+  assert.deepEqual(targets.addrs, ["127.0.0.1"]);
+});
+test("a service child's folder is never created through a planted symlink or from a path-shaped uuid", async () => {
+  const id = "probe-service";
+  const appRoot = appRootWith(id);
+  const dataDir = freshDir("service-data");
+  mkdirSync(join(dataDir, id), { recursive: true, mode: 0o700 });
+  // The add-on owns <data>/<id>: it plants services -> another add-on's folder.
+  const victim = freshDir("victim");
+  symlinkSync(victim, join(dataDir, id, "services"));
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot, dataDir, deps: quietDeps(rec) });
+
+  await assert.rejects(
+    ctx.startAddonWall({ id, entry: {}, command: "node", args: [], env: {}, kind: "service", dataSubdir: "services/0a1b2c3d-0000-4000-8000-00000000abcd" }),
+    (err) => err instanceof AddonWallRefused,
+  );
+  assert.deepEqual(readdirSync(victim), [], "nothing was created where the symlink points");
+  assert.equal(rec.calls.length, 0);
+
+  // A uuid from crow.db that is shaped like a path is refused before any mkdir.
+  for (const bad of ["services/../../escape", "services/0a1b2c3d/../x", "../x", "services/ABCDEFGH"]) {
+    await assert.rejects(
+      ctx.startAddonWall({ id, entry: {}, command: "node", args: [], env: {}, kind: "service", dataSubdir: bad }),
+      (err) => err instanceof AddonWallRefused && /invalid data subfolder/.test(err.message),
+      bad,
+    );
+  }
+  assert.equal(existsSync(join(dataDir, "escape")), false);
+  assert.equal(rec.calls.length, 0);
+});

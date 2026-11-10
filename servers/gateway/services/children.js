@@ -40,6 +40,10 @@
  *  - Serving: only the local owner's active connection in a project that is not archived
  *    (servableConnection, m8), else not_active. Every folder field is re-checked at spawn with the
  *    shared folderRefusal, including symlinks planted inside it (M4).
+ *  - Wall: a child is walled by the same rules as a bundle add-on, read from the gateway's env and
+ *    `<CROW_HOME>/addon-walls.json` only. Its writable folder is this CONNECTION's
+ *    (`<dataDir>/<id>/services/<uuid>`), so two projects' children of one add-on never share a
+ *    writable tree. A wall that cannot be built leaves the child unstarted, never unwalled.
  *  - Stderr (I6): piped, never written to the console; each line has this connection's injected
  *    values replaced by [redacted] and is kept in a 50-line ring buffer (Settings → Advanced).
  *    The console gets fixed lines only, and one line per exit with the stderr line count.
@@ -48,11 +52,18 @@
  * A pending callTool settles when its child exits (the SDK rejects open requests on close).
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { resolveCrowHome } from "../../shared/crow-home.js";
+import { resolveDataDir } from "../../db.js";
+import { gatewayListenPort } from "../listen-port.js";
+import { addonWallMode } from "../../../scripts/addon-sandbox/spawn.mjs";
+import { AddonStdioTransport } from "../../../scripts/addon-sandbox/transport.mjs";
+import { createWallContext } from "../../../scripts/addon-sandbox/gateway-wall.mjs";
 import { serviceById, renderDerivedEnv } from "../../shared/service-catalog.js";
 import { listConnections, recordChildFailure, recordChildRecovered, servableConnection } from "../../shared/service-connections.js";
 import { connectionBindingOk, isSensitiveConnection, verifyConnectionFingerprints } from "../../shared/service-sensitivity.js";
@@ -83,15 +94,48 @@ const timing = { windowMs: 5 * 60_000, cooldownMs: 5 * 60_000, connectTimeoutMs:
 let folderOpts = {};
 let now = () => Date.now();
 
-/** Tests only: shorter windows, a folder scan without the host's instance scan, a clock. */
+/** This checkout's root, three levels above `servers/gateway/services`. */
+const APP_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+/** The wall context, one per Crow home, created when the first walled child needs it. */
+const wallContexts = new Map();
+function wallContextFor(crowHome) {
+  const key = String(crowHome ?? "");
+  let ctx = wallContexts.get(key);
+  if (!ctx) {
+    ctx = createWallContext({
+      crowHome: key,
+      appRoot: APP_ROOT,
+      dataDir: resolveDataDir(),
+      home: homedir(),
+      nodeBin: process.execPath,
+      gatewayPort: gatewayListenPort(),
+    });
+    wallContexts.set(key, ctx);
+  }
+  return ctx;
+}
+
+/** The two wall decisions a start makes; a test may replace either (see _setChildrenForTest). */
+let wallSeams = { mode: null, start: null };
+const wallMode = () => wallSeams.mode || addonWallMode;
+const wallStartFor = (crowHome) => wallSeams.start || ((o) => wallContextFor(crowHome).startAddonWall(o));
+
+/** Tests only: shorter windows, a folder scan without the host's instance scan, a clock, wall seams. */
 let beforeSpawnHook = null;
-export function _setChildrenForTest({ windowMs, cooldownMs, connectTimeoutMs, folder, clock, beforeSpawn } = {}) {
+export function _setChildrenForTest({ windowMs, cooldownMs, connectTimeoutMs, folder, clock, beforeSpawn, wall } = {}) {
   if (beforeSpawn !== undefined) beforeSpawnHook = beforeSpawn;
   if (windowMs != null) timing.windowMs = windowMs;
   if (cooldownMs != null) timing.cooldownMs = cooldownMs;
   if (connectTimeoutMs != null) timing.connectTimeoutMs = connectTimeoutMs;
   if (folder !== undefined) folderOpts = folder || {};
   if (clock !== undefined) now = clock || (() => Date.now());
+  if (wall !== undefined) {
+    wallSeams = {
+      mode: wall && typeof wall.mode === "function" ? wall.mode : null,
+      start: wall && typeof wall.start === "function" ? wall.start : null,
+    };
+  }
 }
 
 function intEnv(name, dflt, min = 1) {
@@ -578,9 +622,50 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
   if (r.generation !== generation) throw new ChildError("child_unavailable");
   const env = connectionChildEnv({ service, config: conn.config, secrets, crowHome });
   r.secrets = secretValuesOf(secrets);
-  const transport = new StdioClientTransport({
-    command: rc.command, args: Array.isArray(entry.args) ? entry.args.map(String) : [], env, cwd, stderr: "pipe",
-  });
+
+  // The wall: the mode comes from the gateway's env and `<CROW_HOME>/addon-walls.json`
+  // only. A wall that cannot be built leaves the child unstarted, never unwalled, and
+  // its writable folder is this CONNECTION's (services/<uuid>), not the add-on's shared one.
+  const wm = wallMode()({ id: service.bundleId, gatewayEnv: process.env, crowHome });
+  const args = Array.isArray(entry.args) ? entry.args.map(String) : [];
+  let wall = null;
+  if (wm.mode === "walled") {
+    try {
+      wall = await wallStartFor(crowHome)({
+        id: service.bundleId,
+        entry,
+        command: rc.command,
+        args,
+        env,
+        kind: "service",
+        dataSubdir: "services/" + conn.uuid,
+      });
+    } catch {
+      console.warn("[services] wall refused, child not started");
+      throw await failStart(db, r);
+    }
+    // A Disconnect or uninstall during the wall build: close it, spawn nothing.
+    if (r.generation !== generation) {
+      try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
+      throw new ChildError("child_unavailable");
+    }
+  }
+
+  const transport = wall && wall.walled
+    ? new AddonStdioTransport({
+      id: service.bundleId,
+      command: wall.cmd,
+      args: wall.args,
+      env: wall.env,
+      stdioExtra: wall.stdioExtra,
+      onExit: wall.cleanup,
+      // I6: a service child's stderr never reaches the console (it can carry this
+      // connection's injected values); attachStderr redacts it into the ring buffer.
+      log: () => {},
+    })
+    : wall && wall.tier === "nnp"
+      ? new StdioClientTransport({ command: wall.cmd, args: wall.args, env, cwd, stderr: "pipe" })
+      : new StdioClientTransport({ command: rc.command, args, env, cwd, stderr: "pipe" });
   attachStderr(r, transport, generation);
   const client = new Client({ name: `crow-service-${service.id}`, version: "1.0.0" });
   let timer;
@@ -604,6 +689,7 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
     const tree = transport.pid ? processTree(transport.pid) : [];
     try { await transport.close(); } catch { /* gone */ }
     reapTree(tree);
+    try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
     console.warn(`[services] child did not start (${r.stderr.length} stderr lines)`);
     if (r.generation !== generation) throw new ChildError("child_unavailable");
     throw await failStart(db, r);
@@ -614,6 +700,7 @@ async function start(db, r, conn, service, { key, crowHome, repair }) {
     const tree = transport.pid ? processTree(transport.pid) : [];
     try { await transport.close(); } catch { /* gone */ }
     reapTree(tree);
+    try { wall?.cleanup?.(); } catch { /* nothing left to close */ }
     throw new ChildError("child_unavailable");
   }
   r.transport = transport;
