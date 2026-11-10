@@ -9,7 +9,8 @@
  *     project spaces, read here from the dashboard's database;
  *   - with `?song=<id>`, one song's studio: the session grid (tracks as
  *     columns, scenes as rows), the clip editor, the transport, the shared
- *     history and the presence row.
+ *     history and the presence row, and — plan 1d's Task 10 — the mixer screen,
+ *     which carries one strip per track, then the returns, then the master.
  *
  * The page is a shell the client fills in. The handler knows nothing about
  * songs beyond their id: the session hub is what owns a song, the WebSocket in
@@ -50,6 +51,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { EFFECT_KINDS, EFFECT_PARAMS } from "../server/doc.js";
 
 /** This file's directory (`<bundle>/panel`, or `<crow-home>/panels` when installed). */
 const here = dirname(fileURLToPath(import.meta.url));
@@ -103,6 +105,23 @@ async function loadPanelScript(name, exportName) {
 
 /** The client script, loaded once when the panel module is imported. */
 const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
+
+/**
+ * The mixer's one effect table, handed to the page as `window.StudioMixer`.
+ *
+ * The effects a chain holds and each parameter's range live in exactly one
+ * place (`server/doc.js`: `EFFECT_PARAMS`), which the server checks every
+ * `insert.set` against. The mixer screen's "+ effect" menu and its insert
+ * editor read that same table, so a control can never offer a value the
+ * document would refuse. It travels as its own classic script, the way the
+ * controllers' routing rule does, because the client is emitted as one string
+ * and cannot import a module at runtime.
+ * @type {string}
+ */
+export const MIXER_EFFECTS_SCRIPT =
+  "(function(){window.StudioMixer = " +
+  JSON.stringify({ kinds: EFFECT_KINDS, params: EFFECT_PARAMS }) +
+  ";})();";
 
 /**
  * The catalog's default entry: the one row `library/catalog.json` marks
@@ -842,10 +861,115 @@ const STYLES = `
     border-radius: 1px;
   }
   .studio .st-motion-count { color: var(--st-muted); font-size: 11px; }
+  /* The mixer (plan 1d, Task 10): one strip per track, then the returns, then
+     the master, all inside a box that scrolls SIDEWAYS on its own — so a phone
+     scrolls the strips and never the page. A strip holds its chain as chips
+     (added from a menu, dragged to reorder), its level and pan, its mute and
+     solo and its sends; the master's loudness readings, the song's finishing
+     target and the limiter's look-ahead sit under the strips. */
+  .studio .st-mixer {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+    display: flex; flex-direction: column; gap: 10px; padding: 12px;
+    min-width: 0; max-width: 100%; overflow: hidden;
+  }
+  .studio .st-mixer[hidden] { display: none; }
+  .studio .st-mix-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .studio .st-mix-title { margin: 0; font-size: 15px; font-weight: 700; }
+  .studio .st-mix-notice {
+    flex: 1 1 240px; margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-muted);
+  }
+  .studio .st-mix-banner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    border: 1px solid #2E4D6B; background: #17222D; border-radius: 10px; padding: 10px 12px;
+  }
+  .studio .st-mix-banner-text { flex: 1 1 260px; margin: 0; font-size: 13px; line-height: 1.45; }
+  .studio .st-mix-stopped {
+    flex: 1 1 100%; margin: 0; font-size: 12px; line-height: 1.45; color: var(--st-human);
+  }
+  .studio .st-mix-strips {
+    display: flex; align-items: stretch; min-width: 0; max-width: 100%;
+    overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-panel);
+  }
+  .studio .st-strip {
+    flex: 0 0 180px; min-width: 0; display: flex; flex-direction: column; gap: 8px;
+    padding: 10px; border-right: 1px solid var(--st-line-soft);
+  }
+  .studio .st-strip:last-child { border-right: 0; }
+  .studio .st-strip-master { flex: 0 0 240px; background: var(--st-head); }
+  .studio .st-strip-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .studio .st-strip-return .st-color { background: #7A7F87; }
+  .studio .st-color-master { background: var(--st-text); }
+  .studio .st-strip-name {
+    font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-strip-fx { display: flex; flex-direction: column; gap: 4px; }
+  .studio .st-mix-fx-row { display: flex; align-items: stretch; gap: 3px; }
+  .studio .st-mix-chip {
+    flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 6px; border-radius: 6px;
+    border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
+    font: inherit; font-size: 11px; text-align: left; cursor: grab; touch-action: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-mix-chip-off { border-style: dashed; color: var(--st-muted); }
+  .studio .st-mix-chip-fault { border-color: var(--st-danger); color: var(--st-danger); }
+  .studio .st-mix-mini {
+    flex: 0 0 auto; min-width: 32px; min-height: 44px; padding: 0 4px; border-radius: 6px;
+    border: 1px solid var(--st-edge); background: #24282D; color: var(--st-text);
+    font: inherit; font-size: 10px; cursor: pointer;
+  }
+  .studio .st-mix-mini.st-on { background: #3D3420; border-color: #5C4A1E; }
+  .studio .st-mix-add { width: 100%; min-height: 44px; font-size: 11px; }
+  .studio .st-mix-range { width: 100%; min-height: 44px; accent-color: var(--st-human); }
+  .studio .st-mix-fader, .studio .st-mix-param { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .studio .st-mix-label { font-size: 10px; color: var(--st-muted); }
+  .studio .st-mix-value { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; }
+  .studio .st-strip-btns { display: flex; gap: 4px; }
+  .studio .st-strip-btns .st-toggle { min-width: 44px; min-height: 44px; }
+  .studio .st-strip-sends { display: flex; flex-direction: column; gap: 4px; }
+  .studio .st-send { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .studio .st-send-name {
+    flex: 1 1 100%; font-size: 10px; color: var(--st-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio .st-mix-reads { display: flex; flex-direction: column; gap: 2px; }
+  .studio .st-mix-read { display: flex; align-items: baseline; gap: 4px; margin: 0; font-size: 11px; }
+  .studio .st-mix-read-label { flex: 1 1 auto; color: var(--st-muted); }
+  .studio .st-mix-read-value { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; }
+  .studio .st-mix-read-unit { font-size: 10px; color: var(--st-muted); }
+  .studio .st-mix-target-line { margin: 4px 0 0; font-size: 11px; color: var(--st-human); }
+  .studio .st-mix-editor {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  }
+  .studio .st-mix-editor[hidden] { display: none; }
+  .studio .st-mix-editor-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .studio .st-mix-sub { margin: 0; font-size: 13px; font-weight: 600; }
+  .studio .st-mix-editor-where { flex: 1 1 auto; font-size: 11px; color: var(--st-muted); }
+  .studio .st-mix-params {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 12px;
+  }
+  .studio .st-mix-master {
+    border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-head);
+    display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  }
+  .studio .st-mix-targets { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px; }
+  .studio .st-mix-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 100%; }
+  .studio .st-mix-pick { min-width: 0; max-width: 100%; }
+  .studio .st-mix-number {
+    width: 96px; min-height: 44px; border-radius: 8px; border: 1px solid var(--st-edge);
+    background: var(--st-bg); color: var(--st-text); font: inherit; font-size: 13px; padding: 0 8px;
+  }
+  .studio .st-mix-latency { margin: 0; font-size: 11px; color: var(--st-muted); }
+  .studio .st-mix-latency[hidden] { display: none; }
+  .studio .st-mix-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--st-muted); }
   @media (max-width: 640px) {
     .studio .st-body { padding: 8px; gap: 8px; }
     .studio .st-pos { font-size: 13px; }
     .studio .st-step-strip { grid-template-columns: repeat(8, minmax(0, 1fr)); overflow-x: hidden; }
+    .studio .st-mix-strips { overflow-x: auto; overflow-y: hidden; }
+    .studio .st-strip { flex: 0 0 152px; }
+    .studio .st-strip-master { flex: 0 0 216px; }
   }
 `;
 
@@ -942,6 +1066,7 @@ function studioPage({ songId, render, res }) {
         <div class="st-modes" role="group" aria-label="View">
           <button class="st-mode" type="button" data-act="mode-session" aria-pressed="true" title="Play the scene grid">Session</button>
           <button class="st-mode" type="button" data-act="mode-arrangement" aria-pressed="false" title="Play the song on the timeline">Arrangement</button>
+          <button class="st-mode" type="button" data-act="mode-mixer" aria-pressed="false" title="Mix the tracks, the returns and the master">Mixer</button>
         </div>
         <div class="st-transport">
           <button class="st-btn st-transport-btn" type="button" data-act="play" title="Play" aria-label="Play">▶</button>
@@ -980,6 +1105,7 @@ function studioPage({ songId, render, res }) {
             <div class="st-grid" data-role="grid"></div>
           </div>
           <p class="st-hint" data-role="hint">Add a track and a scene to start.</p>
+          <section class="st-mixer" data-role="mixer" hidden></section>
           <section class="st-recordings" data-role="recordings" hidden></section>
           <section class="st-editor" data-role="editor" hidden></section>
           <section class="st-sampler" data-role="sampler" hidden></section>
@@ -1007,6 +1133,7 @@ function studioPage({ songId, render, res }) {
       <script>${TAKE_STORE_SCRIPT}
 ${MIDI_ROUTE_SCRIPT}
 ${MIDI_SCRIPT}
+${MIXER_EFFECTS_SCRIPT}
 ${CLIENT_SCRIPT}</script>
       <script src="/dashboard/studio/assets/resample.js"></script>
     </div>`;
