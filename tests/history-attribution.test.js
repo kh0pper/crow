@@ -35,6 +35,7 @@ import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
 import {
   currentWriteContext,
   withWriteContext,
+  withoutWriteContext,
   jobIdFor,
   ownerWriteContext,
   botWriteContext,
@@ -221,18 +222,52 @@ test("nested contexts: the inner one wins", async () => {
     assert.equal(outerRows[0].author_kind, "owner", "and the outer one is back afterwards");
     assert.equal(outerRows[0].author_id, outer.authorId);
 
-    // Field by field: a nested context that names only the author keeps the outer
-    // job, so an inner scope narrows the author without losing the unit of work.
+    // Field by field WITHIN one author: a nested owner context that names only a
+    // job keeps the outer author id, so an inner scope narrows without losing who
+    // the write belongs to.
     let narrowed;
     await withWriteContext(outer, async () => {
-      narrowed = await withWriteContext({ authorKind: "bot", authorId: "b2" }, () =>
-        insertMemory(db, "narrowed author"),
+      narrowed = await withWriteContext({ authorKind: "owner", jobId: "card:9" }, () =>
+        insertMemory(db, "narrowed job"),
       );
     });
     const narrowedRows = await versionsOf(db, "memory", narrowed.lastInsertRowid);
-    assert.equal(narrowedRows[0].author_kind, "bot");
-    assert.equal(narrowedRows[0].author_id, "b2");
-    assert.equal(narrowedRows[0].job_id, outer.jobId, "the outer job survives a context that names none");
+    assert.equal(narrowedRows[0].author_kind, "owner");
+    assert.equal(narrowedRows[0].author_id, outer.authorId, "the outer author survives a context that names none");
+    assert.equal(narrowedRows[0].job_id, "card:9", "and the inner job wins");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a peer apply under an owner context carries no session job", async () => {
+  const fx = fixture("hist-attr-peer-in-owner-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    // A different AUTHOR KIND never inherits the outer author's ids: the inner
+    // context REPLACES it, so a peer's applied change inside the owner's dashboard
+    // request is the peer's alone — not the owner's session hash, not the owner's
+    // session job.
+    let applied;
+    await withWriteContext(ownerWriteContext("a-session-token"), async () => {
+      applied = await withWriteContext(peerWriteContext("inst-b"), () => insertMemory(db, "applied from afar"));
+    });
+    const rows = await versionsOf(db, "memory", applied.lastInsertRowid);
+    assert.equal(rows[0].author_kind, "peer");
+    assert.equal(rows[0].author_id, "inst-b");
+    assert.equal(rows[0].origin_instance, "inst-b");
+    assert.equal(rows[0].job_id, null, "the owner's session job does not travel into a peer's write");
+
+    // Same for a bot nested in an owner request: a bot with no thread has no job.
+    let botWrite;
+    await withWriteContext(ownerWriteContext("a-session-token"), async () => {
+      botWrite = await withWriteContext(botWriteContext("hank"), () => insertMemory(db, "a bot's own write"));
+    });
+    const botRows = await versionsOf(db, "memory", botWrite.lastInsertRowid);
+    assert.equal(botRows[0].author_kind, "bot");
+    assert.equal(botRows[0].author_id, "hank");
+    assert.equal(botRows[0].job_id, null, "and neither does it into a bot's");
   } finally {
     db.close();
     fx.dispose();
@@ -313,6 +348,353 @@ test("a batch and a RETURNING write inside a context are stamped, in the same tr
     assert.equal(returningVersions[0].author_id, "b3");
   } finally {
     db.close();
+    fx.dispose();
+  }
+});
+
+test("WITH … INSERT … RETURNING is stamped, not treated as a reader", async () => {
+  const fx = fixture("hist-attr-cte-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    const ctx = { authorKind: "bot", authorId: "b5", jobId: "card:5" };
+    // better-sqlite3 reports a CTE whose main verb is INSERT … RETURNING as a
+    // reader; the verb after the CTE list is what decides.
+    const res = await withWriteContext(ctx, () =>
+      db.execute({
+        sql: "WITH picked AS (SELECT 'a write through a CTE' AS c) INSERT INTO memories (content) SELECT c FROM picked RETURNING id",
+        args: [],
+      }),
+    );
+    const id = Number(res.rows[0].id);
+    const rows = await versionsOf(db, "memory", id);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].author_kind, "bot", "a CTE write is stamped like any other write");
+    assert.equal(rows[0].author_id, "b5");
+    assert.equal(rows[0].job_id, "card:5");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* --------------------------------------- hand-written transactions */
+
+/*
+ * A caller may own its transaction: project-lifecycle's purge, model-roles-store's
+ * save/delete and the c2c outbox each write `BEGIN IMMEDIATE … COMMIT` by hand, and
+ * a request context is open above them (the owner editing a project, a role, a
+ * share). The stamp must then join that transaction INLINE — a second transaction
+ * fails at SQLite ("cannot start a transaction within a transaction") and a
+ * savepoint would be a redundant second mechanism for the same thing.
+ */
+
+test("a hand-written BEGIN … COMMIT inside a context works and its write is stamped", async () => {
+  const fx = fixture("hist-attr-handwritten-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    await withWriteContext({ authorKind: "bot", authorId: "b7", jobId: "card:7" }, async () => {
+      await db.execute("BEGIN IMMEDIATE");
+      try {
+        await insertMemory(db, "inside a hand-written transaction");
+        await db.execute("COMMIT");
+      } catch (err) {
+        try { await db.execute("ROLLBACK"); } catch { /* already closed */ }
+        throw err;
+      }
+    });
+
+    const row = (
+      await db.execute({ sql: "SELECT id FROM memories WHERE content = ?", args: ["inside a hand-written transaction"] })
+    ).rows[0];
+    assert.ok(row, "the write committed");
+    const rows = await versionsOf(db, "memory", row.id);
+    assert.equal(rows[0].author_kind, "bot", "the stamp joined the caller's transaction");
+    assert.equal(rows[0].author_id, "b7");
+    assert.equal(rows[0].job_id, "card:7");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("ROLLBACK inside a context works", async () => {
+  const fx = fixture("hist-attr-rollback-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    const before = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM item_versions", args: [] })).rows[0].n);
+
+    await withWriteContext({ authorKind: "bot", authorId: "b8", jobId: "card:8" }, async () => {
+      await db.execute("BEGIN IMMEDIATE");
+      await insertMemory(db, "never committed");
+      await db.execute("ROLLBACK");
+      // The handle is usable again: a rolled-back stamp leaves no transaction open.
+      await insertMemory(db, "written after the rollback");
+    });
+
+    const rows = await db.execute({ sql: "SELECT id FROM memories WHERE content = ?", args: ["never committed"] });
+    assert.equal(rows.rows.length, 0, "the rolled-back write is gone");
+    const after = await db.execute({ sql: "SELECT id FROM memories WHERE content = ?", args: ["written after the rollback"] });
+    assert.equal(after.rows.length, 1, "and the next write still lands");
+    const versions = Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM item_versions", args: [] })).rows[0].n);
+    assert.equal(versions, before + 1, "only the committed write left a version");
+    const stamped = await versionsOf(db, "memory", after.rows[0].id);
+    assert.equal(stamped[0].author_kind, "bot", "and the stamp went with the commit, not the rollback");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("PRAGMA and DDL inside a context are not wrapped", async () => {
+  const fx = fixture("hist-attr-ddl-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    await withWriteContext({ authorKind: "bot", authorId: "b9", jobId: "card:9" }, async () => {
+      await db.execute("BEGIN IMMEDIATE");
+      try {
+        // Each of these would throw "cannot start a transaction within a
+        // transaction" if the layer had tried to open its own.
+        await db.execute("CREATE TABLE history_probe (id INTEGER PRIMARY KEY, v TEXT)");
+        await db.execute("PRAGMA user_version = 7");
+        await db.execute("INSERT INTO history_probe (v) VALUES ('inside')");
+        // A CTE that only reads is not a write either.
+        const read = await db.execute("WITH one AS (SELECT 1 AS n) SELECT n FROM one");
+        assert.equal(Number(read.rows[0].n), 1);
+        await db.execute("COMMIT");
+      } catch (err) {
+        try { await db.execute("ROLLBACK"); } catch { /* already closed */ }
+        throw err;
+      }
+    });
+
+    assert.equal(Number((await db.execute("PRAGMA user_version")).rows[0].user_version), 7, "the pragma took effect");
+    assert.equal(
+      Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM history_probe", args: [] })).rows[0].n),
+      1,
+      "and the DDL and its write committed",
+    );
+    const stamped = await db.execute({ sql: "SELECT COUNT(*) AS n FROM item_versions WHERE author_id = 'b9'", args: [] });
+    assert.equal(Number(stamped.rows[0].n), 0, "nothing covered was written, so nothing was stamped");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("the c2c outbox's BEGIN IMMEDIATE … COMMIT works inside a context, and its write is stamped", async () => {
+  const fx = fixture("hist-attr-outbox-tx-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    const { withTransaction } = await import("../servers/sharing/c2c/outbox.js");
+    const res = await withWriteContext({ authorKind: "bot", authorId: "b10", jobId: "handoff:6" }, () =>
+      withTransaction(db, () => insertMemory(db, "written inside the outbox transaction")),
+    );
+    const rows = await versionsOf(db, "memory", res.lastInsertRowid);
+    assert.equal(rows[0].author_kind, "bot");
+    assert.equal(rows[0].author_id, "b10");
+    assert.equal(rows[0].job_id, "handoff:6");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a custom model role's BEGIN IMMEDIATE … COMMIT works inside a context", async () => {
+  const fx = fixture("hist-attr-roles-tx-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    const { saveCustomRole, readCustomRoleDefs } = await import("../servers/shared/model-roles-store.js");
+    const saved = await withWriteContext(ownerWriteContext("a-session-token"), () =>
+      saveCustomRole(db, { label: "Deep Work", job: "long reasoning", capability: "chat" }),
+    );
+    assert.equal(saved.ok, true, JSON.stringify(saved));
+    const defs = await readCustomRoleDefs(db);
+    assert.ok(defs[saved.id], "the row committed inside the caller's transaction");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a project delete (BEGIN IMMEDIATE, then the tombstones) works inside a context and stamps the versions it wrote", async () => {
+  const fx = fixture("hist-attr-project-delete-");
+  const previousDataDir = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = fx.dir; // createProjectSpace and the purge resolve the data dir from it
+  const db = createDbClient(fx.dbPath);
+  try {
+    const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+    const { deleteProject } = await import("../servers/shared/project-lifecycle.js");
+    const p = await createProjectSpace(db, { name: "Doomed Project" });
+    // One covered row the purge DELETES and one it UPDATES (unfiles): both fire a
+    // capture trigger inside the caller's hand-written transaction.
+    await db.execute({
+      sql: "INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES ('probe', 'Probe', 'body', ?)",
+      args: [p.id],
+    });
+    await db.execute({
+      sql: "INSERT INTO memories (content, project_id) VALUES ('filed to the doomed project', ?)",
+      args: [p.id],
+    });
+
+    const watermark = Number(
+      (await db.execute({ sql: "SELECT COALESCE(MAX(id), 0) AS id FROM item_versions", args: [] })).rows[0].id,
+    );
+    const ctx = ownerWriteContext("a-session-token");
+    const res = await withWriteContext(ctx, () =>
+      deleteProject(db, p.id, {
+        confirmName: "Doomed Project",
+        dataDir: fx.dir,
+        storageDelete: async () => {},
+        disconnectBackend: () => true,
+      }),
+    );
+    assert.equal(res.ok, true, JSON.stringify(res));
+
+    const { rows } = await db.execute({
+      sql: "SELECT op, item_type, author_kind, author_id, job_id FROM item_versions WHERE id > ? ORDER BY id",
+      args: [watermark],
+    });
+    assert.ok(rows.length > 0, "the purge wrote versions");
+    for (const row of rows) {
+      assert.equal(row.author_kind, "owner", `${row.item_type}/${row.op} is the owner's`);
+      assert.equal(row.author_id, ctx.authorId);
+      assert.equal(row.job_id, ctx.jobId);
+    }
+  } finally {
+    db.close();
+    if (previousDataDir === undefined) delete process.env.CROW_DATA_DIR;
+    else process.env.CROW_DATA_DIR = previousDataDir;
+    fx.dispose();
+  }
+});
+
+/* --------------------------------------------- work that outlives a request */
+
+test("withoutWriteContext drops the ambient author for work that outlives the request", async () => {
+  const fx = fixture("hist-attr-without-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    let inside;
+    let outside;
+    let after;
+    await withWriteContext(ownerWriteContext("a-session-token"), async () => {
+      inside = await insertMemory(db, "the request's own write");
+      outside = await withoutWriteContext(async () => {
+        assert.equal(currentWriteContext(), null, "no author is in scope inside withoutWriteContext");
+        return insertMemory(db, "a worker's write");
+      });
+      after = await insertMemory(db, "back in the request");
+    });
+
+    assert.equal((await versionsOf(db, "memory", inside.lastInsertRowid))[0].author_kind, "owner");
+    assert.equal(
+      (await versionsOf(db, "memory", outside.lastInsertRowid))[0].author_kind,
+      "unattributed",
+      "a worker started during the request never inherits its author",
+    );
+    assert.equal(
+      (await versionsOf(db, "memory", after.lastInsertRowid))[0].author_kind,
+      "owner",
+      "and the request's own context is intact afterwards",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* ------------------------------------------------- in-process tool calls */
+
+test("a bound bot's tool write is stamped as the bot, not the owner", async () => {
+  const fx = fixture("hist-attr-toolbot-");
+  const previousDbPath = process.env.CROW_DB_PATH;
+  process.env.CROW_DB_PATH = fx.dbPath; // the in-process MCP servers open their own clients
+  let executor = null;
+  try {
+    const { createToolExecutor } = await import("../servers/gateway/ai/tool-executor.js");
+    // A bot turn driven while the owner's dashboard request is in flight (a
+    // crow.voice turn asked for from the dashboard): the write is the bot's.
+    executor = createToolExecutor({ botDef: { bot_id: "hank", display_name: "Hank" }, threadId: "perch-9" });
+    const out = await withWriteContext(ownerWriteContext("a-session-token"), () =>
+      executor.executeTool("crow_memory", { action: "store_memory", params: { content: "Hank remembered this" } }),
+    );
+    assert.notEqual(out.isError, true, out.result);
+
+    const db = createDbClient(fx.dbPath);
+    try {
+      const row = (
+        await db.execute({ sql: "SELECT id FROM memories WHERE content = ?", args: ["Hank remembered this"] })
+      ).rows[0];
+      assert.ok(row, "the tool really wrote the memory");
+      const rows = await versionsOf(db, "memory", row.id);
+      assert.equal(rows[0].author_kind, "bot", "the tool call is the bot's write, not the request's owner's");
+      assert.equal(rows[0].author_id, "hank");
+      assert.equal(rows[0].job_id, "turn:perch-9", "with this turn as the job, not the owner's session");
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { await executor?.close(); } catch { /* nothing to close */ }
+    if (previousDbPath === undefined) delete process.env.CROW_DB_PATH;
+    else process.env.CROW_DB_PATH = previousDbPath;
+    fx.dispose();
+  }
+});
+
+/* ------------------------------------------------------- SSO sessions */
+
+test("a session a peer minted through SSO stamps its writes as that peer, not the owner", async () => {
+  const fx = fixture("hist-attr-sso-");
+  const { dashboardAuth, hashToken } = await import("../servers/gateway/dashboard/auth.js");
+  const token = randomBytes(32).toString("hex");
+  const SRC = "cccccccc-0000-0000-0000-000000000003";
+  const seed = rawHandle(fx.dbPath);
+  seed
+    .prepare(
+      "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', ?, datetime('now', '+1 day'))",
+    )
+    .run(hashToken(token), `dashboard sso src:${SRC}`);
+  seed.close();
+
+  const previousDbPath = process.env.CROW_DB_PATH;
+  process.env.CROW_DB_PATH = fx.dbPath; // sessionAuth() opens its own client
+  try {
+    const req = {
+      headers: { cookie: `crow_session=${token}` },
+      get(name) {
+        return this.headers[String(name).toLowerCase()];
+      },
+      socket: { remoteAddress: "100.64.20.6" },
+      connection: { remoteAddress: "100.64.20.6" },
+    };
+    const res = { redirectAfterPost: (to) => assert.fail(`redirected to ${to} instead of running the request`) };
+    let writtenId = null;
+    await new Promise((resolve, reject) => {
+      dashboardAuth(req, res, () => {
+        const db = createDbClient();
+        insertMemory(db, "saved by a peer's SSO session")
+          .then((r) => {
+            writtenId = Number(r.lastInsertRowid);
+            db.close();
+            resolve();
+          }, reject);
+      });
+    });
+    assert.ok(writtenId, "the request ran");
+
+    const db = createDbClient(fx.dbPath);
+    try {
+      const rows = await versionsOf(db, "memory", writtenId);
+      assert.equal(rows[0].author_kind, "peer", "an SSO session is the peer's, never the owner's");
+      assert.equal(rows[0].author_id, SRC, "the author is the minting instance");
+      assert.equal(rows[0].origin_instance, SRC, "and so is the origin");
+      assert.equal(rows[0].job_id, null, "with no owner session job");
+    } finally {
+      db.close();
+    }
+  } finally {
+    if (previousDbPath === undefined) delete process.env.CROW_DB_PATH;
+    else process.env.CROW_DB_PATH = previousDbPath;
     fx.dispose();
   }
 });

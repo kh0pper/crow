@@ -15,9 +15,12 @@
  * another request's caller. ALS follows the promise chain, so a tool handler, its
  * awaits and the DB call they end in all see the same store.
  *
- * `withWriteContext` NESTS: the inner context wins field by field over the outer
- * one, so a schedule firing inside a request (or a job inside a session) can name
- * only what it changes.
+ * `withWriteContext` NESTS, but only within one author: an inner context of the
+ * SAME author kind wins field by field over the outer one, so a schedule firing
+ * inside a request (or a job inside a session) can name only what it changes. An
+ * inner context of a DIFFERENT author kind replaces the outer one wholesale — the
+ * ids of one author's unit of work never travel into another author's write (see
+ * `withWriteContext`).
  *
  * It never throws on a malformed context. A caller that passes junk (a typo'd
  * kind, a number where a string belongs, an actor that did not verify) gets no
@@ -73,8 +76,19 @@ function cleanContext(ctx) {
 }
 
 /**
- * Run `fn` as `ctx`. Nests: the inner context wins field by field over whatever
- * context is already active (`{ ...outer, ...inner }`).
+ * Run `fn` as `ctx`.
+ *
+ * SAME author kind → the inner context wins field by field over whatever context
+ * is already active (`{ ...outer, ...inner }`): a narrower scope inside one
+ * author's work keeps that work's ids unless it names its own.
+ *
+ * DIFFERENT author kind → the inner context REPLACES the outer one wholesale. A
+ * bot's tool call made while the owner's dashboard request is in flight is the
+ * BOT's write, alone: carrying the owner's session hash and `session:<hash>` job
+ * into it would file the bot's work under the owner's sign-in, which is the exact
+ * confusion version history exists to prevent. Same for a peer's applied change
+ * inside an owner request. So no authorId, jobId or originInstance crosses an
+ * author-kind boundary.
  *
  * A malformed or empty `ctx` is ignored (the outer context, if any, stays in
  * effect) and `fn` still runs exactly once: no write path may fail because
@@ -85,11 +99,36 @@ export function withWriteContext(ctx, fn) {
   const add = cleanContext(ctx);
   if (!add) return fn();
   const outer = writeContext.getStore() || null;
-  const merged = outer ? { ...outer, ...add } : add;
+  const merged = !outer
+    ? add
+    : outer.authorKind === add.authorKind
+      ? { ...outer, ...add }
+      : { ...add };
   // No author kind anywhere: nothing to attribute the write to, so do not open a
   // store that would only make the caller's writes look attributable.
   if (!merged.authorKind) return fn();
   return writeContext.run(Object.freeze(merged), fn);
+}
+
+/**
+ * Run `fn` with NO write context, whatever context the caller is in.
+ *
+ * The counterpart of `withWriteContext` for a unit of work that OUTLIVES the
+ * request that started it: a child process, an interval, a background worker
+ * spawned from a dashboard handler would otherwise inherit the ambient store for
+ * its whole life through the promise chain that created it, and every write it
+ * ever makes would be attributed to the sign-in that happened to click the
+ * button. Opened at the top of the long-lived unit, `withoutWriteContext` gives
+ * it the honest answer instead: what it writes is 'unattributed' until the unit
+ * opens a context of its own (a schedule, a card, a bot).
+ *
+ * `AsyncLocalStorage.exit` only unwinds for the duration of `fn`; the caller's own
+ * context is intact afterwards.
+ */
+export function withoutWriteContext(fn) {
+  if (typeof fn !== "function") return undefined;
+  if (!writeContext.getStore()) return fn();
+  return writeContext.exit(fn);
 }
 
 /** The active context as a plain object with all four fields, or null. */

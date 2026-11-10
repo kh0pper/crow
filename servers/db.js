@@ -259,11 +259,145 @@ const STAMP_SQL = `
    WHERE id > ? AND author_kind = 'unattributed'`;
 
 /**
- * A statement whose FIRST keyword writes, even though it returns rows: SQLite's
- * INSERT/UPDATE/DELETE ... RETURNING is a `reader` to better-sqlite3, and it must
- * still be stamped. Comments and leading whitespace are skipped.
+ * A statement whose first keyword writes and must therefore be stamped. Comments
+ * and leading whitespace are skipped. Anything else — transaction control
+ * (BEGIN/COMMIT/END/ROLLBACK/SAVEPOINT/RELEASE), PRAGMA, ATTACH/DETACH, VACUUM,
+ * ANALYZE, DDL, SELECT — passes straight to executeOne: only a write can have
+ * produced the version rows a stamp would attribute, and wrapping a hand-written
+ * `BEGIN IMMEDIATE` in another transaction would fail outright.
  */
-const LEADING_WRITE = /^\s*(?:(?:--[^\n]*\n)|\/\*[\s\S]*?\*\/|\s)*(?:insert|update|delete|replace)\b/i;
+const STAMPED_KEYWORDS = new Set(["INSERT", "UPDATE", "DELETE", "REPLACE"]);
+
+/** The first bare word of a statement, uppercased; null when there is none. */
+const LEADING_KEYWORD_RE = /^(?:(?:--[^\n]*(?:\n|$))|\/\*[\s\S]*?\*\/|\s)*([A-Za-z][A-Za-z0-9_]*)/;
+
+function leadingKeyword(sql) {
+  const m = LEADING_KEYWORD_RE.exec(sql);
+  return m ? m[1].toUpperCase() : null;
+}
+
+/**
+ * The bare words of a statement at paren depth 0, in order, with comments and
+ * quoted/bracketed text skipped. A CTE body is always inside parentheses, so the
+ * only depth-0 words in `WITH …` are the CTE names, their `AS` / `MATERIALIZED`,
+ * and the verb of the statement that follows the CTE list.
+ */
+function topLevelWords(sql) {
+  const words = [];
+  let depth = 0;
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    if (c === "-" && sql[i + 1] === "-") {
+      const nl = sql.indexOf("\n", i);
+      i = nl === -1 ? sql.length : nl;
+      continue;
+    }
+    if (c === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      i = end === -1 ? sql.length : end + 1;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === c) {
+          if (sql[j + 1] === c) { j += 2; continue; } // doubled quote is an escape
+          break;
+        }
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (c === "[") {
+      const close = sql.indexOf("]", i + 1);
+      i = close === -1 ? sql.length : close;
+      continue;
+    }
+    if (c === "(") { depth++; continue; }
+    if (c === ")") { if (depth > 0) depth--; continue; }
+    if (depth === 0 && /[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < sql.length && /[A-Za-z0-9_$]/.test(sql[j])) j++;
+      words.push(sql.slice(i, j).toUpperCase());
+      i = j - 1;
+    }
+  }
+  return words;
+}
+
+/**
+ * The verbs that can START the statement following a `WITH …` CTE list. DML one
+ * of the four stamped verbs; SELECT/VALUES do not write. (`RECURSIVE`, a CTE name
+ * and `AS [NOT] MATERIALIZED` come before it, and a CTE name can never be one of
+ * these: they are reserved words.)
+ */
+const WITH_MAIN_VERBS = new Set([...STAMPED_KEYWORDS, "SELECT", "VALUES"]);
+
+/**
+ * Does a `WITH …` statement WRITE? better-sqlite3 reports
+ * `WITH … INSERT … RETURNING` as a reader (its rows come back like a SELECT's),
+ * so what counts is the verb after the CTE list, not `stmt.reader`. A CTE body is
+ * always parenthesised, so the first depth-0 verb after `WITH` is that verb.
+ */
+function withStatementWrites(sql) {
+  const words = topLevelWords(sql);
+  for (let i = 1; i < words.length; i++) {
+    if (WITH_MAIN_VERBS.has(words[i])) return STAMPED_KEYWORDS.has(words[i]);
+  }
+  return false;
+}
+
+/**
+ * sql → does this statement need a stamp? MODULE-level and keyed by SQL text:
+ * whether a statement writes depends only on the SQL and the SQLite build, never
+ * on the handle, and a dashboard request re-sends the same statements all day.
+ * Bounded LRU (~2000 entries) — a long-lived gateway sees a bounded set of SQL
+ * texts, and the oldest entry is dropped rather than the cache growing forever.
+ */
+const STAMP_VERDICT_CACHE = new Map();
+const STAMP_VERDICT_CACHE_MAX = 2000;
+
+function cacheVerdict(sql, verdict) {
+  if (STAMP_VERDICT_CACHE.size >= STAMP_VERDICT_CACHE_MAX) {
+    const oldest = STAMP_VERDICT_CACHE.keys().next().value;
+    if (oldest !== undefined) STAMP_VERDICT_CACHE.delete(oldest);
+  }
+  STAMP_VERDICT_CACHE.set(sql, verdict);
+}
+
+/**
+ * Does `sql` write — i.e. can it have produced version rows that need stamping?
+ *
+ * The leading keyword answers for almost every statement without preparing
+ * anything: INSERT/UPDATE/DELETE/REPLACE (RETURNING included — it is still a
+ * write) say yes; BEGIN, COMMIT, END, ROLLBACK, SAVEPOINT, RELEASE, PRAGMA,
+ * ATTACH, DETACH, VACUUM, ANALYZE, CREATE/DROP/ALTER and SELECT say no. Only a
+ * `WITH …` needs the prepared statement's reader flag, and only when the verb
+ * after its CTE list is not itself DML.
+ */
+function needsStamp(db, sql) {
+  const keyword = leadingKeyword(sql);
+  if (keyword === null) return false;
+  if (STAMPED_KEYWORDS.has(keyword)) return true;
+  if (keyword !== "WITH") return false;
+  const cached = STAMP_VERDICT_CACHE.get(sql);
+  if (cached !== undefined) {
+    // Refresh recency (a Map iterates in insertion order).
+    STAMP_VERDICT_CACHE.delete(sql);
+    STAMP_VERDICT_CACHE.set(sql, cached);
+    return cached;
+  }
+  let verdict;
+  try {
+    verdict = withStatementWrites(sql) || db.prepare(sql).reader !== true;
+  } catch {
+    // Never cache a failure: let executeOne raise the real error.
+    return false;
+  }
+  cacheVerdict(sql, verdict);
+  return verdict;
+}
 
 /**
  * Per-path keeper handles. SQLite in WAL mode unlinks the -wal/-shm files
@@ -521,22 +655,22 @@ export function createDbClient(dbPath) {
   /* -- attribution state, per handle ------------------------------------- */
 
   // Does this store have the history tables yet? Cached per handle (an instance
-  // that has run the migration never re-checks). A "no" IS re-checked on the
-  // next write: a long-lived client outlives the migration that adds the table.
+  // that has run the migration never re-checks). A "no" IS re-checked, but only
+  // after a minute: a long-lived client outlives the migration that adds the
+  // table and must notice it, yet must not query sqlite_master on every write.
   // item_versions_erase is required too — the append-only guard trigger's WHEN
   // clause reads it, so a stamp on a store that lost it would fail the write.
   let itemVersionsPresent = null;
+  let itemVersionsMissingUntil = 0; // epoch ms; a cached "no" expires here
   const VERSIONS_TABLES = ["item_versions", "item_versions_erase"];
+  const VERSIONS_RECHECK_MS = 60_000;
   let maxIdStmt = null;
   let stampStmt = null;
   let stampingTxn = null;
-  // sql → is it a reader? Attribution wraps a write in a transaction, and a
-  // dashboard request keeps a context open across dozens of SELECTs; preparing
-  // each distinct statement once is cheaper than wrapping reads nobody stamps.
-  const readerCache = new Map();
 
-  function hasItemVersions() {
+  function hasItemVersions(now = Date.now()) {
     if (itemVersionsPresent === true) return true;
+    if (itemVersionsPresent === false && now < itemVersionsMissingUntil) return false;
     try {
       const rows = db
         .prepare(
@@ -547,42 +681,58 @@ export function createDbClient(dbPath) {
     } catch {
       itemVersionsPresent = false;
     }
+    itemVersionsMissingUntil = itemVersionsPresent ? 0 : now + VERSIONS_RECHECK_MS;
     return itemVersionsPresent === true;
   }
 
-  function isReader(sql) {
-    const known = readerCache.get(sql);
-    if (known !== undefined) return known;
-    let reader;
-    try {
-      reader = db.prepare(sql).reader === true && !LEADING_WRITE.test(sql);
-    } catch {
-      reader = false; // let executeOne raise the real error
-    }
-    if (readerCache.size < 500) readerCache.set(sql, reader);
-    return reader;
+  /** The newest item_versions id, or 0 — the watermark a stamp may not cross. */
+  function maxVersionId() {
+    maxIdStmt ||= db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM item_versions");
+    return Number(maxIdStmt.get().id);
   }
 
   /**
-   * Run `work` and the stamp in ONE immediate transaction (BEGIN IMMEDIATE): the
-   * max-id read, the write and the attribution are atomic, so two writers cannot
-   * interleave a stamp onto each other's rows — and a throw from `work` rolls back
-   * everything, including any version the triggers wrote, so nothing is stamped
-   * after a failed write.
+   * Attribute the versions written since `before` to `ctx`. A write that wrote no
+   * version row (an uncovered table, a no-op UPDATE) moves no id, so there is
+   * nothing to stamp and no UPDATE is run at all.
+   */
+  function stampFrom(ctx, before) {
+    if (maxVersionId() <= before) return;
+    stampStmt ||= db.prepare(STAMP_SQL);
+    stampStmt.run(ctx.authorKind, ctx.authorId, ctx.jobId, ctx.originInstance, before);
+  }
+
+  /**
+   * Run `work` and stamp what it wrote.
+   *
+   * Outside a transaction the max-id read, the write and the attribution are ONE
+   * immediate transaction (BEGIN IMMEDIATE): they are atomic, so two writers
+   * cannot interleave a stamp onto each other's rows — and a throw from `work`
+   * rolls back everything, including any version the triggers wrote, so nothing is
+   * stamped after a failed write.
+   *
+   * When the caller ALREADY holds a transaction — the hand-written
+   * `BEGIN IMMEDIATE … COMMIT` in project-lifecycle, model-roles-store and the c2c
+   * outbox — the stamp runs INLINE inside it: opening another transaction would
+   * fail ("cannot start a transaction within a transaction") and a savepoint would
+   * be a second, redundant mechanism for the same thing. The stamp shares that
+   * transaction's fate, so a caller's ROLLBACK un-stamps with everything else.
+   *
+   * The inline branch reads its watermark inside the caller's transaction: with a
+   * `BEGIN IMMEDIATE` (what every hand-written caller uses) that read is stable,
+   * because the write lock is already held.
    */
   function runStamped(work, ctx) {
-    maxIdStmt ||= db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM item_versions");
-    stampStmt ||= db.prepare(STAMP_SQL);
+    if (db.inTransaction) {
+      const before = maxVersionId();
+      const result = work();
+      stampFrom(ctx, before);
+      return result;
+    }
     stampingTxn ||= db.transaction((job) => {
-      const before = Number(maxIdStmt.get().id);
+      const before = maxVersionId();
       const result = job.work(); // throws → the whole transaction rolls back
-      stampStmt.run(
-        job.ctx.authorKind,
-        job.ctx.authorId,
-        job.ctx.jobId,
-        job.ctx.originInstance,
-        before,
-      );
+      stampFrom(job.ctx, before);
       return result;
     });
     return stampingTxn.immediate({ work, ctx });
@@ -595,10 +745,11 @@ export function createDbClient(dbPath) {
     async execute(arg) {
       const sql = sqlOf(arg);
       const ctx = currentWriteContext();
-      // No context, a read, or a store without the history table: exactly as before.
-      if (!ctx || typeof sql !== "string" || isReader(sql) || !hasItemVersions()) {
-        return executeOne(db, sql, argsOf(arg));
-      }
+      // No context (or no SQL text): exactly as before.
+      if (!ctx || typeof sql !== "string") return executeOne(db, sql, argsOf(arg));
+      // A read, a PRAGMA, DDL or transaction control passes straight through: only
+      // a write can have produced the version rows a stamp would attribute.
+      if (!needsStamp(db, sql) || !hasItemVersions()) return executeOne(db, sql, argsOf(arg));
       return runStamped(() => executeOne(db, sql, argsOf(arg)), ctx);
     },
     async batch(statements) {
@@ -606,12 +757,13 @@ export function createDbClient(dbPath) {
       // matching libsql's batch() semantics.
       const txn = db.transaction((stmts) => stmts.map((s) => executeOne(db, sqlOf(s), argsOf(s))));
       const ctx = currentWriteContext();
-      // A batch of pure reads (or no context, or no history table yet) keeps the
-      // old shape. Otherwise the batch AND the stamp are one immediate
-      // transaction: the batch keeps its all-or-nothing rollback, and a failed
-      // statement never leaves a stamp behind for rows that were never written.
-      const writes = statements.some((s) => !isReader(sqlOf(s)));
-      if (!ctx || !writes || !hasItemVersions()) return txn(statements);
+      // No context: the old path exactly, with no reader-ness work at all.
+      if (!ctx || !hasItemVersions()) return txn(statements);
+      // A batch of pure reads keeps the old shape. Otherwise the batch AND the
+      // stamp are one immediate transaction: the batch keeps its all-or-nothing
+      // rollback, and a failed statement never leaves a stamp behind for rows that
+      // were never written.
+      if (!statements.some((s) => needsStamp(db, sqlOf(s)))) return txn(statements);
       // The statements run inline rather than through `txn`, so this is ONE
       // transaction (no nested savepoint): the same all-or-nothing contract.
       return runStamped(() => statements.map((s) => executeOne(db, sqlOf(s), argsOf(s))), ctx);

@@ -19,6 +19,12 @@ import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { sortedServers, sortedByName } from "../../shared/stable-order.js";
 import { connectedServers } from "../proxy.js";
 import { callerContext } from "../caller-context.js";
+import {
+  withWriteContext,
+  currentWriteContext,
+  botWriteContext,
+  jobIdFor,
+} from "../../shared/history/write-context.js";
 import { localFirst, satelliteVisible } from "../satellites/tool-entry.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
@@ -223,11 +229,27 @@ function resolveToolCategory(action) {
  *                                        the crow_* surface.
  * @param {function} [opts.serviceCall]   (name, args) → {result, isError} for a name in
  *                                        serviceRoute (callProjectServiceTool).
+ * @param {string} [opts.threadId]        this turn's thread id, for the job its tool
+ *                                        calls' writes belong to (`turn:<threadId>`).
+ *                                        Optional; without one a bot's writes carry no
+ *                                        job, and the owner's keep the request's.
  */
 export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
   const defaultDeliverTo = opts.defaultDeliverTo || null;
+  // The turn's thread (version-history job `turn:<threadId>`): named directly, else
+  // taken from the deliver target the caller already passed for this turn. Null when
+  // the turn has no thread at all (a one-shot, a voice turn without a session).
+  const turnThreadId = (() => {
+    const direct = typeof opts.threadId === "string" ? opts.threadId.trim() : "";
+    if (direct) return direct;
+    const deliver = defaultDeliverTo && typeof defaultDeliverTo === "object" ? defaultDeliverTo : null;
+    const fromDeliver = deliver
+      ? [deliver.gateway_thread_id, deliver.thread_id].find((v) => typeof v === "string" && v.trim())
+      : null;
+    return fromDeliver ? fromDeliver.trim() : null;
+  })();
   // Project services: only the dashboard chat passes these, and only for the conversation's
   // pinned project. Unset everywhere else (voice, one-shot, a bound bot).
   const serviceRoute = opts.serviceRoute instanceof Map ? opts.serviceRoute : null;
@@ -284,11 +306,35 @@ export function createToolExecutor(opts = {}) {
   }
 
   /**
+   * The write context a model's tool call runs under.
+   *
+   * A BOUND BOT's tool call is the bot's write, always: a crow.voice turn driven by
+   * a dashboard request still belongs to the bot, not to the sign-in that typed the
+   * question. `botWriteContext` names the bot and this turn's job, and — being a
+   * different author kind from the ambient owner context dashboardAuth opened — it
+   * REPLACES that context wholesale (write-context.js), so no session hash or
+   * session job is carried across.
+   *
+   * An UNBOUND model call is the owner's own chat: the ambient owner context stays,
+   * but the job becomes this turn (`turn:<threadId>`) instead of the whole sign-in,
+   * so the edit can be reviewed as part of the conversation it was asked for.
+   */
+  function toolWriteContext() {
+    if (boundBotId) return botWriteContext(boundBotId, { threadId: turnThreadId });
+    if (!turnThreadId) return null;
+    const ambient = currentWriteContext();
+    if (!ambient || ambient.authorKind !== "owner") return null;
+    return { authorKind: "owner", authorId: ambient.authorId, jobId: jobIdFor({ threadId: turnThreadId }) };
+  }
+
+  /**
    * Execute a single tool call.
    * Returns { result: string, isError: boolean }.
    */
   async function executeTool(name, args) {
-    return callerContext.run(callerStore, () => executeToolInner(name, args));
+    const ctx = toolWriteContext();
+    const run = () => callerContext.run(callerStore, () => executeToolInner(name, args));
+    return ctx ? withWriteContext(ctx, run) : run();
   }
 
   async function executeToolInner(name, args) {
