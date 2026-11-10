@@ -23,6 +23,9 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+// The manifest's own list of paths inside the installed bundle (shared, leaf module: it
+// imports nothing, so it can be read from both here and routes/bundles.js).
+import { declaredControlPaths } from "../shared/bundle-declared-paths.js";
 
 // A value Compose sees for a `${VAR:?}` the install left blank (a collection member,
 // finished later with Configure): relative, so it resolves inside the bundle dir.
@@ -173,8 +176,9 @@ const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "c
 // tests/compose-guard.test.js fails if a COMPOSE_*_FILE export stops starting with it.
 export const COMPOSE_STATE_PREFIX = ".crow-compose.";
 // Top-level entries of a bundle folder that the gateway reads or runs. Manifest-declared
-// paths (a non-default compose file, a panel or panel routes outside panel/) join this set
-// per bundle: see manifestControlTops below.
+// paths (a non-default compose file, a panel or panel routes outside panel/, a server entry
+// the MCP spawn runs, a skill, a post-install hook) join this set per bundle: see
+// manifestControlTops below.
 const BUNDLE_CONTROL = new Set(["manifest.json", "settings-section.js", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
@@ -392,15 +396,22 @@ function resolvedComposeTop(declared) {
 
 /**
  * The top-level entries of a bundle folder that its OWN manifest names as code or config:
- * `docker.composefile` (default docker-compose.yml), `panel` and `panelRoutes`. The gateway
- * copies the panel and its routes into PANELS_DIR and imports them, and reads the compose
- * file at every install/Start — so the folder holding one is as much a control entry as
- * `panel/` or the fixed compose names.
+ * `docker.composefile` (default docker-compose.yml), the MCP launch command and its
+ * bundle-relative arguments, `panel`/`panelRoutes`, `widgets`, `postInstall.script` and
+ * every `skills` entry. The gateway copies the panel and its routes into PANELS_DIR and
+ * imports them, reads the compose file at every install/Start, spawns the server with the
+ * bundle folder as cwd, runs the post-install hook with bash, and copies the skills out of
+ * the folder — so the folder holding any of them is as much a control entry as `panel/` or
+ * the fixed compose names.
  *
- * Each declared path is resolved the way that gateway path resolves it, so a declaration
- * that points somewhere else ("/data/routes.js", "panel/../data/x.js", an object panel's
- * id) names the entry it really lands in. Only a value that resolves outside the bundle
- * names nothing here; the manifest contract refuses it.
+ * Which paths a manifest declares is shared/bundle-declared-paths.js (the version refresh
+ * reads the same list, so the two can never disagree). Each path is then resolved the way
+ * `path.join` places it against the bundle folder, so a declaration that points somewhere
+ * else ("/data/routes.js", "panel/../data/x.js", an object panel's id) names the entry it
+ * really lands in. Only a value that resolves outside the bundle names nothing here; the
+ * manifest contract refuses it. (A manifest declaring a path that its reader skips outright
+ * — an absolute skill path — still protects the folder join() puts it in: over-protecting a
+ * folder nothing is read from costs nothing.)
  *
  * @returns {Map<string, string[]>} top-level entry → the manifest keys naming a file there
  */
@@ -413,13 +424,7 @@ function manifestControlTops(manifest) {
     else if (!keys.includes(key)) keys.push(key);
   };
   add(resolvedComposeTop(manifest?.docker?.composefile), "docker.composefile");
-  if (typeof manifest?.panel === "string") add(resolvedBundleTop(manifest.panel), "panel");
-  else if (manifest?.panel && typeof manifest.panel === "object") {
-    // routes/bundles.js resolvePanelPath: the file is panel/<panel.id || bundle id>.js.
-    const panelId = manifest.panel.id || manifest.id;
-    if (typeof panelId === "string") add(resolvedBundleTop(`panel/${panelId}.js`), "panel.id");
-  }
-  if (typeof manifest?.panelRoutes === "string") add(resolvedBundleTop(manifest.panelRoutes), "panelRoutes");
+  for (const { key, value } of declaredControlPaths(manifest)) add(resolvedBundleTop(value), key);
   return tops;
 }
 
@@ -430,7 +435,8 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   const roots = sensitiveRoots(ctx);
   const bundleReal = resolveHostPath(bundleDir);
   const ownId = /^[a-z0-9][a-z0-9-]*$/.test(String(manifest?.id || "")) ? manifest.id : null;
-  // Paths this manifest declares (compose file, panel, panel routes): their top-level entry
+  // Paths this manifest declares (compose file, panel, panel routes, the MCP launcher and its
+  // bundle-relative arguments, widgets, the post-install hook, skills): their top-level entry
   // in the bundle folder is control too, whatever the install shipped (ctx.shipped is only
   // built on the Extensions path, from a repo copy that need not exist).
   const manifestControl = manifestControlTops(manifest);

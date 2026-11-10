@@ -18,6 +18,7 @@
 
 import { invalidateAppCatalog } from "../apps/catalog.js";
 import { launcherPin } from "../../shared/resolve-command.js";
+import { declaredRoots as bundleDeclaredRoots } from "../../shared/bundle-declared-paths.js";
 import { trustedBinsMissing } from "../../shared/trusted-bins.js";
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
@@ -394,24 +395,6 @@ function emitJobChanged(job) {
   } catch {}
 }
 setJobChangedHook(emitJobChanged);
-
-/** Read installed.json as array */
-/**
- * First path segment of a manifest-declared path, or null for a falsy/non-string
- * input. Used to derive extra refresh-eligible roots from manifest.server.args[0],
- * .panel, .panelRoutes, .skills[] — see isValidPathSegment for the guard that
- * keeps a hostile declared path (e.g. "../x") from ever being joined.
- */
-function firstPathSegment(p) {
-  if (!p || typeof p !== "string") return null;
-  const seg = p.split("/")[0];
-  return seg || null;
-}
-
-/** A single, plain, non-traversal path segment (no "/", not "." or ".."). */
-function isValidPathSegment(seg) {
-  return typeof seg === "string" && seg.length > 0 && seg !== "." && seg !== ".." && !seg.includes("/") && !seg.includes("\\");
-}
 
 /**
  * Replace one file at `dst` with a copy of `src` WITHOUT ever writing into the
@@ -1017,28 +1000,13 @@ async function refreshVersionedBundle({ id, appSrc, destDir, runner, log = (m) =
   // read-only-mounted plugin dir — still never .env*, data, node_modules, .git
   // or anything a read-write bind mount reaches.
 
-  // Manifest-declared roots: the bundle contract is manifest-declaration-
-  // driven, so any path a manifest names is code by definition. Each is
-  // reduced to its first path segment and validated to a single plain segment
-  // before any join (R2 minor — same traversal class F-HEALTH-1 fixed for
-  // bundleId elsewhere in this file).
-  const declaredRoots = new Set();
-  const declare = (p) => {
-    const seg = firstPathSegment(p);
-    if (seg && isValidPathSegment(seg)) declaredRoots.add(seg);
-  };
-  if (repoManifest.server?.args?.[0]) declare(repoManifest.server.args[0]);
-  if (typeof repoManifest.panel === "string") declare(repoManifest.panel);
-  else if (repoManifest.panel && typeof repoManifest.panel === "object") declaredRoots.add("panel");
-  if (repoManifest.panelRoutes) declare(repoManifest.panelRoutes);
-  // A bundle's widgets are code: widgets/<id>.js files the gateway imports at page time. The
-  // contract has no path key for them (the file is always widgets/<id>.js), so the root is literal.
-  if (Array.isArray(repoManifest.widgets) && repoManifest.widgets.length) declaredRoots.add("widgets");
-  // The post-install hook's directory is code — refreshed on a version bump like panel/.
-  if (repoManifest.postInstall?.script) declare(repoManifest.postInstall.script);
-  if (Array.isArray(repoManifest.skills)) {
-    for (const s of repoManifest.skills) declare(s);
-  }
+  // Manifest-declared roots (shared/bundle-declared-paths.js): the bundle contract is
+  // manifest-declaration-driven, so any path a manifest names is code by definition.
+  // Each is reduced to its first path segment and validated to a single plain segment
+  // before any join (R2 minor — same traversal class F-HEALTH-1 fixed for bundleId
+  // elsewhere in this file). The install security check reads the same list, so the
+  // two can never disagree about what a manifest declares.
+  const declaredRoots = bundleDeclaredRoots(repoManifest);
 
   // manifest.json is the refresh's commit marker: the version it carries is
   // what makes the NEXT boot skip this bundle. It is copied LAST (below), so

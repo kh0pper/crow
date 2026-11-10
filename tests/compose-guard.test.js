@@ -959,6 +959,65 @@ test("model: settings-section.js, and the paths a manifest itself declares (comp
   assert.equal(c(base, rw("data")).valid, true);
 });
 
+test("model: the MCP launcher, every skill and the post-install hook are manifest-declared control entries too", () => {
+  const dir = join(CROW_HOME, "bundles", "fx-declared");
+  for (const d of ["dist", "docs", "node", "data"]) mkdirSync(join(dir, d), { recursive: true });
+  const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
+  const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
+  const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
+  const base = { id: "fx-declared" };
+  // The MCP spawn runs `node dist/index.js` with the bundle folder as cwd, and the install and
+  // boot skill syncs copy docs/skill.md out of the installed folder.
+  const spawned = { ...base, server: { command: "node", args: ["dist/index.js"] }, skills: ["docs/skill.md"] };
+  assert.equal(c(spawned, rw("dist")).valid, false);
+  assert.equal(c(spawned, ro("dist")).valid, true);
+  assert.match(c(spawned, rw("dist")).reason, /mounts 'dist'/);
+  assert.match(c(spawned, rw("dist")).reason, /declared by manifest\.server\.args/);
+  assert.equal(c(spawned, rw("docs")).valid, false);
+  assert.equal(c(spawned, ro("docs")).valid, true);
+  assert.match(c(spawned, rw("docs")).reason, /mounts 'docs'/);
+  assert.match(c(spawned, rw("docs")).reason, /declared by manifest\.skills/);
+  assert.equal(c(spawned, rw("data")).valid, true, "the bundle's own runtime folder is still writable");
+  // `node` and a flag are not bundle files: they name nothing.
+  const bare = { ...base, server: { command: "node", args: ["--flag"] } };
+  assert.equal(c(bare, rw("node")).valid, true);
+  assert.equal(c(bare, rw("--flag")).valid, true);
+  // A relative launcher IS a bundle file (resolve-command.js resolves it inside the folder).
+  const launcher = { ...base, server: { command: "./run.sh", args: [] } };
+  assert.equal(c(launcher, rw("run.sh")).valid, false);
+  assert.equal(c(launcher, ro("run.sh")).valid, true);
+  assert.match(c(launcher, rw("run.sh")).reason, /declared by manifest\.server\.command/);
+  // An argument after the first counts too (node --x dist/index.js), whatever the flag in front.
+  const later = { ...base, server: { command: "node", args: ["--experimental-strip-types", "dist/index.js"] } };
+  assert.equal(c(later, rw("dist")).valid, false);
+  assert.match(c(later, rw("dist")).reason, /declared by manifest\.server\.args/);
+  // The post-install hook is `bash <bundle>/<script>`.
+  const hooked = { ...base, postInstall: { script: "bootstrap/setup.sh", timeout_s: 60 } };
+  assert.equal(c(hooked, rw("bootstrap")).valid, false);
+  assert.equal(c(hooked, ro("bootstrap")).valid, true);
+  assert.match(c(hooked, rw("bootstrap")).reason, /declared by manifest\.postInstall\.script/);
+});
+
+test("declared paths: the version refresh and this check read one list (shared/bundle-declared-paths.js)", async () => {
+  const D = await import("../servers/shared/bundle-declared-paths.js");
+  // A manifest whose declared paths are all plain relative ones: what the refresh copies is
+  // exactly what the check must refuse read-write, with no drift between the two readers.
+  const manifest = { id: "fx-one-list", server: { command: "node", args: ["dist/index.js"] }, panel: "ui/panel.js", panelRoutes: "ui/routes.js",
+    widgets: [{ id: "w", title: "W" }], postInstall: { script: "bootstrap/setup.sh" }, skills: ["docs/skill.md"] };
+  assert.deepEqual([...D.declaredRoots(manifest)].sort(), ["bootstrap", "dist", "docs", "ui", "widgets"]);
+  const dir = join(CROW_HOME, "bundles", "fx-one-list");
+  mkdirSync(dir, { recursive: true });
+  for (const top of D.declaredRoots(manifest)) {
+    const model = svc({ volumes: [bind(join(dir, top))] });
+    assert.equal(G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX }).valid, false, top);
+  }
+  // The check sees strictly more only through the launcher: the command itself and arguments
+  // after the first, which the refresh does not need to copy.
+  const launcherOnly = { id: "fx-one-list", server: { command: "./run.sh", args: ["--flag", "dist/index.js"] } };
+  assert.deepEqual([...D.declaredRoots(launcherOnly)], ["--flag"]);
+  assert.deepEqual(D.declaredControlPaths(launcherOnly).map((p) => `${p.key}:${p.value}`), ["server.command:./run.sh", "server.args:dist/index.js"]);
+});
+
 test("cross-bundle: no other bundle's project, volume or network names, and no prefix-sibling folders", () => {
   const m = { manifest: { id: "fx-x" } };
   assert.equal(check({ name: "crow-workspace", ...svc() }, m).valid, false, "another bundle's project");
