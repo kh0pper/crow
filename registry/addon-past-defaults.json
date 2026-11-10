@@ -202,6 +202,9 @@
     "kavita": {
       "KAVITA_URL": [
         "http://localhost:5000"
+      ],
+      "KAVITA_USERNAME": [
+        "admin"
       ]
     },
     "kolibri": {
@@ -382,6 +385,9 @@
     "navidrome": {
       "NAVIDROME_URL": [
         "http://localhost:4533"
+      ],
+      "NAVIDROME_USERNAME": [
+        "admin"
       ]
     },
     "netdata": {

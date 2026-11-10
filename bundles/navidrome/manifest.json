@@ -1,7 +1,7 @@
 {
   "id": "navidrome",
   "name": "Navidrome",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
   "type": "bundle",
   "author": "Crow",
@@ -13,14 +13,21 @@
   "panel": "panel/navidrome.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/navidrome.md"],
-  "requires": { "env": ["NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 500 },
+  "requires": { "env": ["NAVIDROME_USERNAME"], "min_ram_mb": 256, "min_disk_mb": 500 },
   "env_vars": [
     { "name": "NAVIDROME_URL", "description": "Navidrome server URL", "default": "http://localhost:4533", "required": true },
-    { "name": "NAVIDROME_USERNAME", "description": "Navidrome username", "required": true },
-    { "name": "NAVIDROME_PASSWORD", "description": "Navidrome password", "required": true, "secret": true },
+    { "name": "NAVIDROME_USERNAME", "description": "Navidrome username (Crow creates `admin` at install and writes it here; leave it as `admin`)", "default": "admin", "required": true },
+    { "name": "NAVIDROME_PASSWORD", "description": "Navidrome password. Crow generates it at install and keeps it in Settings → Passwords.", "required": false, "secret": true },
     { "name": "NAVIDROME_MUSIC_PATH", "description": "Host path for music files (Docker mode). Leave it empty to start with an empty library in Crow's folder (media/music); point it at your music later in Configure.", "required": true, "default_in_crow_home": "media/music", "propagate": false }
   ],
   "ports": [4533],
   "webUI": { "port": 4533, "path": "/", "label": "Navidrome" },
-  "firstAdmin": { "mode": "finish-setup" }
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "NAVIDROME_PASSWORD",
+    "userEnv": "NAVIDROME_USERNAME"
+  }
 }

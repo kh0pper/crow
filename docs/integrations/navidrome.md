@@ -38,7 +38,9 @@ Restart the bundle for changes to take effect:
 
 > "Crow, restart the Navidrome bundle"
 
-Navidrome will be available at `http://your-server:4533`. Create an admin account through the web UI on first launch.
+Navidrome will be available at `http://your-server:4533`. Crow creates Navidrome's first admin (`admin`) during the install and saves its password in **Settings** > **Passwords** in the Crow's Nest, so the first-run admin page is never left open for anything else on the machine to claim. Crow writes that username and password into `NAVIDROME_USERNAME`/`NAVIDROME_PASSWORD` for the bundle's tools.
+
+If you installed Navidrome before this version, its card on the Extensions page offers **Set it up for me**, which creates the account now and keeps the password the same way.
 
 ### Option B: Connect to existing Navidrome
 

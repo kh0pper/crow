@@ -66,6 +66,7 @@ tools:
 ## Tips
 
 - Audiobookshelf tracks listening progress per-user automatically
+- Crow creates Audiobookshelf's root user (`admin`) at install and keeps that login in Settings → Passwords; for an install made before this version, the Extensions card offers "Set it up for me". Never tell the user to fill in the first-run form
 - The web player URL (`/item/<id>`) provides the full playback experience with chapters
 - Duration is returned in HH:MM:SS format
 - Search works across titles, authors, narrators, and descriptions

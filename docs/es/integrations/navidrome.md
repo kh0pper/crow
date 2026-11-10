@@ -38,7 +38,9 @@ Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de Navidrome"
 
-Navidrome estará disponible en `http://tu-servidor:4533`. Crea una cuenta de administrador a través de la interfaz web en el primer arranque.
+Navidrome estará disponible en `http://tu-servidor:4533`. Crow crea el primer administrador de Navidrome (`admin`) durante la instalación y guarda su contraseña en **Ajustes** > **Contraseñas** del Crow's Nest, así que la página de primer arranque nunca queda abierta para que otra cosa en la máquina la reclame. Crow escribe ese usuario y esa contraseña en `NAVIDROME_USERNAME`/`NAVIDROME_PASSWORD` para las herramientas del bundle.
+
+Si instalaste Navidrome antes de esta versión, su tarjeta en la página de Extensiones ofrece **Set it up for me**, que crea la cuenta ahora y guarda la contraseña de la misma forma.
 
 ### Opción B: Conectar a Navidrome existente
 

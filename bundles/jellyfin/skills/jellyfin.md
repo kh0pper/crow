@@ -70,6 +70,7 @@ tools:
 ## Tips
 
 - Jellyfin uses ticks (10,000,000 ticks = 1 second) for time positions in seek commands
+- Crow finishes Jellyfin's setup wizard at install and creates the admin account `admin`, keeping that login in Settings → Passwords; for an install made before this version, the Extensions card offers "Set it up for me". Never tell the user to run Jellyfin's own setup wizard, and never guess the admin password — it is in Settings → Passwords
 - Always get the session ID from `crow_jellyfin_now_playing` before sending control commands
 - Use `crow_jellyfin_get_item` to check available audio/subtitle streams before playing
 - Store the user's media preferences in memory (favorite genres, preferred audio language, etc.)

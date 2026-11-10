@@ -38,7 +38,9 @@ Restart the bundle for changes to take effect:
 
 > "Crow, restart the Kavita bundle"
 
-Kavita will be available at `http://your-server:5000`. Create an admin account through the web UI on first launch.
+Kavita will be available at `http://your-server:5000`. Crow registers Kavita's first account (`admin`) during the install and saves its password in **Settings** > **Passwords** in the Crow's Nest, so the registration page is never left open for anything else on the machine to claim. Crow writes that username and password into `KAVITA_USERNAME`/`KAVITA_PASSWORD` for the bundle's tools.
+
+If you installed Kavita before this version, its card on the Extensions page offers **Set it up for me**, which registers the account now and keeps the password the same way.
 
 ::: tip Port note
 Port 5000 is commonly used by other services. If you have a conflict, remap the port in the bundle's `docker-compose.yml`.
