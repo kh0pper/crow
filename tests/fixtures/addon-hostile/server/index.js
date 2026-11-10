@@ -22,6 +22,8 @@
  *   probe_fd_open {path}       open(path, "r"), usually /proc/<pid>/fd/<n>
  *   probe_pids()               every numeric /proc entry with its comm
  *   probe_sql()                NO_DB without CROW_DB_PATH, else an open of it
+ *   probe_fetch {url}          one fetch() through whatever proxy the env names (10 s cap)
+ *   probe_fds()                the fd numbers this process holds (/proc/self/fd)
  *   crash()                    exit 70
  *
  * With HOSTILE_MARK set to a path, it writes that file as its very first act:
@@ -29,7 +31,7 @@
  * looking at any process table.
  */
 
-import { closeSync, openSync, readFileSync, readdirSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, readlinkSync, writeFileSync, writeSync } from "node:fs";
 import { get as httpGet } from "node:http";
 import { connect as netConnect } from "node:net";
 
@@ -146,6 +148,35 @@ function probePids() {
   return { ok: true, code: null, pids, self: process.pid };
 }
 
+async function probeFetch(args) {
+  try {
+    // fetch() honours HTTPS_PROXY only with NODE_USE_ENV_PROXY=1, which the wall sets.
+    const res = await fetch(String(args?.url ?? ""), { method: "HEAD", redirect: "manual", signal: AbortSignal.timeout(10_000) });
+    return { ok: Number(res.status) < 400, status: Number(res.status), code: null };
+  } catch (err) {
+    return { ok: false, status: null, code: codeOf(err?.cause) !== "ERROR" ? codeOf(err.cause) : codeOf(err) };
+  }
+}
+
+function probeFds() {
+  try {
+    // The listing itself opens one fd; it is gone again by the time the answer is built.
+    const fds = readdirSync("/proc/self/fd").filter((n) => /^\d+$/.test(n)).map(Number).sort((a, b) => a - b);
+    // Each fd's kind only, never a path: node keeps its own anon inodes and pipes,
+    // so "file" or "dir" above fd 2 is what an inherited bind fd would look like.
+    const kinds = {};
+    for (const fd of fds) {
+      let target = "";
+      try { target = readlinkSync("/proc/self/fd/" + fd); } catch { continue; }
+      kinds[fd] = /^anon_inode:/.test(target) ? target : /^pipe:/.test(target) ? "pipe" : /^socket:/.test(target) ? "socket"
+        : target.startsWith("/dev/") ? "dev" : "file";
+    }
+    return { ok: true, code: null, fds, kinds };
+  } catch (err) {
+    return { ok: false, code: codeOf(err), fds: [] };
+  }
+}
+
 function probeSql() {
   const at = process.env.CROW_DB_PATH;
   if (!at) return { ok: false, code: "NO_DB" };
@@ -166,6 +197,8 @@ const TOOLS = [
   { name: "probe_fd_open", description: "Open a path that names an fd", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
   { name: "probe_pids", description: "List the visible processes", inputSchema: { type: "object", properties: {} } },
   { name: "probe_sql", description: "Open the Crow database", inputSchema: { type: "object", properties: {} } },
+  { name: "probe_fetch", description: "One fetch through the environment's proxy", inputSchema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
+  { name: "probe_fds", description: "List this process's open fd numbers", inputSchema: { type: "object", properties: {} } },
   { name: "crash", description: "Exit at once", inputSchema: { type: "object", properties: {} } },
 ];
 
@@ -179,6 +212,8 @@ async function runTool(name, args) {
     case "probe_fd_open": return probeFdOpen(args);
     case "probe_pids": return probePids();
     case "probe_sql": return probeSql();
+    case "probe_fetch": return probeFetch(args);
+    case "probe_fds": return probeFds();
     case "crash":
       // Nothing to answer: the point of the tool.
       process.exit(70);
