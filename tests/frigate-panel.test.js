@@ -701,8 +701,8 @@ test("the panel file ends with exactly one newline", () => {
   assert.ok(!text.endsWith("\n\n"), "and only one");
 });
 
-test("the manifest is 1.2.3 and declares FRIGATE_UI_URL", () => {
-  assert.equal(MANIFEST.version, "1.2.3");
+test("the manifest is 1.2.4 and declares FRIGATE_UI_URL", () => {
+  assert.equal(MANIFEST.version, "1.2.4");
   const ui = (MANIFEST.env_vars || []).find((v) => v && v.name === "FRIGATE_UI_URL");
   assert.ok(ui, "the browser-facing address is a declared env var, or the panel never sees it");
   assert.equal(ui.required, false, "blank means the Web UI link is hidden");
@@ -715,4 +715,11 @@ test("the example camera has detection switched on (Frigate 0.18 needs it)", () 
   const detect = /^\s{4}detect:\n([\s\S]*?)^\s{4}objects:/m.exec(yml);
   assert.ok(detect, "the example camera has a detect: block");
   assert.match(detect[1], /^\s{6}enabled: true$/m, "detect.enabled: true is what turns detection on");
+});
+
+test("an installed copy refreshes its compose file on a version change", () => {
+  // The compose binds WebRTC 8555 to loopback; an install made before that change
+  // kept publishing it on every interface because a docker bundle's compose is
+  // only refreshed when the manifest opts in (manifest.refreshFiles).
+  assert.ok(Array.isArray(MANIFEST.refreshFiles) && MANIFEST.refreshFiles.includes("docker-compose.yml"));
 });
