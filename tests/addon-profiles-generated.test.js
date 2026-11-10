@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPastDefaults, buildPastDefaultsDoc, buildProfiles } from "../scripts/build-addon-profiles.mjs";
@@ -88,6 +89,12 @@ test("every current manifest default is in the committed past-defaults file", ()
 });
 
 test("registry/addon-past-defaults.json regenerates equal to the committed file", (t) => {
+  let haveGit = true;
+  try { execFileSync("git", ["rev-parse", "--git-dir"], { cwd: REPO, stdio: "ignore" }); } catch { haveGit = false; }
+  if (!haveGit) {
+    t.skip("no git repository here (a sandboxed runner): history is unavailable");
+    return;
+  }
   if (isShallowRepo({ repoRoot: REPO })) {
     t.skip("shallow clone: git history is incomplete");
     return;
