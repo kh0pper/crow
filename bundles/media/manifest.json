@@ -1,7 +1,7 @@
 {
   "id": "media",
   "name": "Media Hub",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
   "type": "mcp-server",
   "author": "Crow",
@@ -11,7 +11,7 @@
   "server": {
     "command": "node",
     "args": ["server/index.js"],
-    "envKeys": ["CROW_MEDIA_TASKS"]
+    "envKeys": ["CROW_MEDIA_TASKS", "BRAVE_API_KEY", "CROW_SMTP_HOST", "CROW_SMTP_PORT", "CROW_SMTP_USER", "CROW_SMTP_PASS", "CROW_SMTP_FROM"]
   },
   "panel": "panel/media.js",
   "panelRoutes": "panel/routes.js",

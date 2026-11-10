@@ -1,7 +1,7 @@
 {
   "id": "studio",
   "name": "Crow Studio",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
   "type": "mcp-server",
   "author": "Crow",
@@ -21,7 +21,9 @@
       "server/index.js"
     ],
     "envKeys": [
-      "STUDIO_MAX_RENDER_SECONDS"
+      "STUDIO_MAX_RENDER_SECONDS",
+      "STUDIO_MAX_TAKE_SECONDS",
+      "STORAGE_QUOTA_MB"
     ]
   },
   "panel": "panel/studio.js",

@@ -37,6 +37,10 @@ const EXACT = new Set([
 // in tests/ write what they were handed there); never set on a real gateway.
 const PREFIXES = ["LC_", "PIBOT_TEST_"];
 
+/** The allowlist itself, for a caller that must judge a NAME (servers/gateway/addon-env.js). */
+export const BOT_ENV_EXACT_KEYS = Object.freeze([...EXACT]);
+export const BOT_ENV_PREFIXES = Object.freeze([...PREFIXES]);
+
 /** Names that look like they hold a credential. Never passed. */
 export const SECRET_NAME_RE = /(KEY|TOKEN|SECRET|PASS(WORD|WD)?|CREDENTIAL|AUTH|COOKIE|SESSION|PRIVATE|SIGNING|DSN)/i;
 
