@@ -33,6 +33,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { appImport } from "./app-root.js";
 
 const FUNKWHALE_URL = (process.env.FUNKWHALE_URL || "http://funkwhale-api:5000").replace(/\/+$/, "");
 const FUNKWHALE_ACCESS_TOKEN = process.env.FUNKWHALE_ACCESS_TOKEN || "";
@@ -46,19 +47,19 @@ let createNotification = null;
 
 async function loadSharedDeps() {
   try {
-    const rl = await import("../../../servers/shared/rate-limiter.js");
+    const rl = await appImport("servers/shared/rate-limiter.js");
     wrapRateLimited = rl.wrapRateLimited;
   } catch {
     wrapRateLimited = () => (_toolId, handler) => handler;
   }
   try {
-    const db = await import("../../../servers/db.js");
+    const db = await appImport("servers/db.js");
     getDb = db.createDbClient;
   } catch {
     getDb = null;
   }
   try {
-    const notif = await import("../../../servers/shared/notifications.js");
+    const notif = await appImport("servers/shared/notifications.js");
     createNotification = notif.createNotification;
   } catch {
     createNotification = null;
