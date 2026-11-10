@@ -64,6 +64,7 @@ import {
   guardTriggerSql,
   projectRefExpr,
   snapshotExpr,
+  tableColumns,
   triggerSql,
 } from "../../servers/shared/history/covered.js";
 
@@ -81,10 +82,16 @@ export const rollbackSafe = true;
 // `author_kind` defaults rather than being required.
 //
 // `project_ref` is the erase scope: the item's project at the time of the
-// version (memories: project_uuid else project_id; crow_context: project_id;
-// blog_posts: NULL — a post belongs to the instance, not a project). It is a
-// copy, not a join, so a version stays findable by project after the project row
-// or the item itself is gone. This is Task 4's index.
+// version (memories: project_uuid else project_id; crow_context: the uuid looked
+// up from project_spaces else project_id; blog_posts: NULL — a post belongs to
+// the instance, not a project). It is a copy, not a join, so a version stays
+// findable by project after the project row or the item itself is gone. This is
+// Task 4's index.
+//
+// A snapshot column that the covered table does NOT have is DERIVED: computed
+// from the row when the version is written (crow_context.project_uuid, looked up
+// from project_spaces). It is stored like any other value and restored by api.js
+// as a filing, never written back into the row.
 //
 // The erase control table and the append-only guards are appended from
 // covered.js: the guards must be installed with the table, not later.
@@ -176,13 +183,23 @@ export function run({ dbPath, log = () => {} }) {
       const columns = columnsOf(db, spec.table);
       // A trigger naming a column the table does not have fails to compile, so a
       // half-built table defers instead of breaking the boot. snapshot is a
-      // superset of tracked (covered.js asserts it), so this covers both lists.
-      const missingColumns = [spec.idColumn, ...spec.snapshot].filter((c) => !columns.has(c));
+      // superset of tracked (covered.js asserts it), so this covers both lists —
+      // and a DERIVED snapshot column is computed, never selected, so it is not
+      // one of them.
+      const missingColumns = tableColumns(spec).filter((c) => !columns.has(c));
       if (missingColumns.length) {
         unready.push(spec.table);
         log(
           `  ${spec.table}: missing ${missingColumns.join(", ")} — ${itemType} triggers skipped, will retry`,
         );
+        continue;
+      }
+      // A derived field reading another table (crow_context.project_uuid from
+      // project_spaces) cannot be captured while that table is absent: the
+      // trigger — and this baseline — would fail on every covered row.
+      if (Object.keys(spec.derived || {}).length && !tableExists(db, "project_spaces")) {
+        unready.push(spec.table);
+        log(`  ${spec.table}: project_spaces absent — ${itemType} triggers skipped, will retry`);
         continue;
       }
       const secretColumns = [...spec.tracked, ...spec.snapshot].filter((c) => SECRET_COLUMN.test(c));

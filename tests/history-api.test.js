@@ -354,6 +354,180 @@ test("a restore never files an item into a different project that reused the id"
   }
 });
 
+test("a restored context section never lands in a project that reused its old id", async () => {
+  const fx = fixture("hist-api-section-reuse-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    // The project the section belongs to: local id 42, portable uuid
+    // "proj-uuid-old". crow_context has no project_uuid column, so the uuid rides
+    // in the SNAPSHOT (a derived field, covered.js) — that is what makes the
+    // section's filing portable at all.
+    await insertProject(db, { id: 42, uuid: "proj-uuid-old", slug: "old-project" });
+    const section = await insertSection(db, OWNER, {
+      section_key: "history_project_section",
+      section_title: "History project section",
+      content: "a section of the old project",
+      project_id: 42,
+    });
+    const v1 = (await listVersions(db, { itemType: "context_section", itemId: section }))[0];
+    assert.equal(v1.snapshot.project_uuid, "proj-uuid-old", "the snapshot names the project portably");
+    assert.equal(v1.snapshot.project_id, 42, "beside the local id the row itself holds");
+    await deleteSection(db, OWNER, section);
+
+    // The old project is deleted and a DIFFERENT project takes id 42 — ids are
+    // reused, which is why a section's local project id alone is not a filing.
+    await db.execute({ sql: "DELETE FROM project_spaces WHERE id = 42", args: [] });
+    await insertProject(db, { id: 42, uuid: "proj-uuid-new", slug: "new-project" });
+
+    const deleted = (await listVersions(db, { itemType: "context_section", itemId: section }))[0];
+    assert.equal(deleted.op, "delete");
+    const res = await restoreVersion(db, { versionId: deleted.id }, OWNER);
+    assert.equal(res.unfiled, true, "the project it named is gone, so it came back unfiled");
+    assert.ok(res.newVersionId, "it still came back — unfiled, not refused");
+
+    const row = await sectionRow(db, section, "id, section_key, content, project_id");
+    assert.equal(row.content, "a section of the old project", "the content is back");
+    assert.equal(row.project_id, null, "and it was NOT filed into the stranger holding id 42");
+
+    const stranger = await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM crow_context WHERE project_id = 42",
+      args: [],
+    });
+    assert.equal(Number(stranger.rows[0].n), 0, "the project that reused the id gained nothing");
+
+    // The version the restore wrote is scoped to nothing, not to the stranger.
+    const newest = (await listVersions(db, { itemType: "context_section", itemId: section }))[0];
+    assert.equal(newest.id, Number(res.newVersionId));
+    const { rows } = await db.execute({
+      sql: `SELECT project_ref FROM item_versions
+             WHERE item_type = 'context_section' AND item_id = ? ORDER BY id DESC LIMIT 1`,
+      args: [String(section)],
+    });
+    assert.equal(rows[0].project_ref, null, "an unfiled restore version has no project scope");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("an old context-section version with no portable id comes back unfiled", async () => {
+  const fx = fixture("hist-api-section-oldsnapshot-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    // The project the section names is STILL THERE and its id still means what it
+    // meant — and that is exactly why this case needs its own rule: a version
+    // written before the snapshot carried project_uuid holds a bare per-instance
+    // id, and nothing in the row says which project that id named. Trusting it is
+    // how a section ends up in a stranger's project after a delete and a reuse.
+    await insertProject(db, { id: 42, uuid: "proj-uuid-kept", slug: "kept-project" });
+    const section = await insertSection(db, OWNER, {
+      section_key: "history_old_shape_section",
+      section_title: "Old shape",
+      content: "the old shape's body",
+      project_id: 42,
+    });
+    await deleteSection(db, OWNER, section);
+
+    // An OLD row: the shape item_versions held before project_uuid was captured
+    // (append-only, so a real store's old rows look exactly like this).
+    const oldSnapshot = {
+      section_key: "history_old_shape_section",
+      section_title: "Old shape",
+      content: "the old shape's body",
+      enabled: 1,
+      device_id: null,
+      project_id: 42,
+    };
+    const inserted = await db.execute({
+      sql: `INSERT INTO item_versions (item_type, item_id, op, snapshot_json, project_ref)
+            VALUES ('context_section', ?, 'insert', ?, '42')`,
+      args: [String(section), JSON.stringify(oldSnapshot)],
+    });
+    const oldVersionId = Number(inserted.lastInsertRowid);
+
+    const res = await restoreVersion(db, { versionId: oldVersionId }, OWNER);
+    assert.equal(res.unfiled, true, "a bare local id is not a filing: the section comes back unfiled");
+    assert.ok(res.newVersionId);
+
+    const row = await sectionRow(db, section, "id, content, project_id, device_id");
+    assert.equal(row.content, "the old shape's body", "the content is back");
+    assert.equal(row.project_id, null, "and the un-portable id was not trusted, even though it still resolves");
+    assert.equal(row.device_id, null, "the rest of the snapshot is restored as it was");
+
+    // A memory's old shape is NOT affected: its project_id-only versions are a
+    // normal pre-uuid form, and the local id is kept while it still stands.
+    const memory = await insertMemory(db, OWNER, { content: "a memory of that project", project_id: 42 });
+    await deleteMemory(db, OWNER, memory);
+    const memoryDelete = (await listVersions(db, { itemType: "memory", itemId: memory }))[0];
+    const memoryRes = await restoreVersion(db, { versionId: memoryDelete.id }, OWNER);
+    assert.equal(memoryRes.unfiled, false, "a memory keeps a local id it can still justify");
+    assert.equal((await memoryRow(db, memory, "project_id")).project_id, 42);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a concurrent write on the same client cannot join a restore's transaction", async () => {
+  const fx = fixture("hist-api-concurrent-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    // A restore that ends in a CONFLICT, and therefore ROLLS BACK: the id its
+    // delete version names is live again, held by a different memory.
+    const id = await insertMemory(db, OWNER, { content: "first life" });
+    await deleteMemory(db, OWNER, id);
+    const deleted = (await listVersions(db, { itemType: "memory", itemId: id }))[0];
+    assert.equal(deleted.op, "delete");
+    await db.execute({
+      sql: "INSERT INTO memories (id, content) VALUES (?, ?)",
+      args: [id, "a different memory"],
+    });
+
+    // The concurrent write is issued in the SAME tick as the restore, with the
+    // restore's promise not yet awaited. A handle is ONE connection, so if the
+    // restore's transaction were still open across an await this insert would be
+    // executed INSIDE it — and the restore's rollback would take it with it.
+    const restoring = restoreVersion(db, { versionId: deleted.id }, OWNER);
+    const concurrent = db.execute({
+      sql: "INSERT INTO memories (content) VALUES ('a concurrent write')",
+      args: [],
+    });
+
+    const [restoreOutcome, writeOutcome] = await Promise.allSettled([restoring, concurrent]);
+    assert.equal(restoreOutcome.status, "rejected", "the reused id still refuses the restore");
+    assert.equal(restoreOutcome.reason.code, "conflict", `expected a conflict, got ${restoreOutcome.reason.code}`);
+    assert.equal(writeOutcome.status, "fulfilled", "the concurrent write is its own statement, not part of the restore");
+
+    const { rows } = await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM memories WHERE content = 'a concurrent write'",
+      args: [],
+    });
+    assert.equal(Number(rows[0].n), 1, "and it committed: the restore's rollback did not take it");
+    assert.equal((await memoryRow(db, id)).content, "a different memory", "while the restore left its own row alone");
+
+    // The same holds the other way round: a successful restore writes its OWN
+    // version and nothing else, so the concurrent write's version is separate.
+    const other = await insertMemory(db, OWNER, { content: "third life" });
+    await updateMemory(db, OWNER, other, { content: "fourth life" });
+    const otherV1 = (await listVersions(db, { itemType: "memory", itemId: other })).at(-1);
+    const [ok, alsoConcurrent] = await Promise.allSettled([
+      restoreVersion(db, { versionId: otherV1.id }, OWNER),
+      db.execute({ sql: "INSERT INTO memories (content) VALUES ('another concurrent write')", args: [] }),
+    ]);
+    assert.equal(ok.status, "fulfilled");
+    assert.equal(alsoConcurrent.status, "fulfilled");
+    assert.equal((await memoryRow(db, other)).content, "third life", "the restore landed");
+    const both = await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM memories WHERE content = 'another concurrent write'",
+      args: [],
+    });
+    assert.equal(Number(both.rows[0].n), 1, "and the concurrent write landed too, independently");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
 test("a restore of an identical version writes nothing", async () => {
   const fx = fixture("hist-api-noop-");
   const db = createDbClient(fx.dbPath);
@@ -481,6 +655,50 @@ test('a memory whose text is "hex:DEADBEEF" restores as text', async () => {
     const plain = await insertMemory(db, OWNER, { content: "DEADBEEF" });
     const plainVersion = (await listVersions(db, { itemType: "memory", itemId: plain }))[0];
     assert.equal(plainVersion.snapshot.content, "DEADBEEF", "ordinary text is not escaped");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test('text that starts with "txt:" or "hex:" round-trips exactly', async () => {
+  const fx = fixture("hist-api-textmarkers-");
+  const db = createDbClient(fx.dbPath);
+  try {
+    // The escape must be SYMMETRIC: valueExpr adds one 'txt:' to any text value
+    // that starts with either marker, and decodeValue strips exactly one. Every
+    // case below would be corrupted by an escape that only knew about 'hex:' (a
+    // plain "txt:hello" would come back as "hello") or that stripped twice.
+    const cases = [
+      ["hex:DEADBEEF", "txt:hex:DEADBEEF"],
+      ["txt:hello", "txt:txt:hello"],
+      ["txt:", "txt:txt:"],
+      ["txt:hex:0102", "txt:txt:hex:0102"],
+      ["ordinary text", "ordinary text"],
+      ["atxt:not-a-prefix", "atxt:not-a-prefix"],
+    ];
+    for (const [value, stored] of cases) {
+      const id = await insertMemory(db, OWNER, { content: value });
+      await updateMemory(db, OWNER, id, { content: "edited since" });
+      const v1 = (await listVersions(db, { itemType: "memory", itemId: id })).at(-1);
+      assert.equal(v1.snapshot.content, stored, `${JSON.stringify(value)} is stored escaped exactly one level`);
+
+      const res = await restoreVersion(db, { versionId: v1.id }, BOT);
+      assert.ok(res.newVersionId, `${JSON.stringify(value)}: the restore wrote a version`);
+      const row = await memoryRow(db, id, "content, typeof(content) AS kind");
+      assert.equal(row.content, value, `${JSON.stringify(value)} comes back character for character`);
+      assert.equal(row.kind, "text", `${JSON.stringify(value)} is TEXT, never the blob a marker resembles`);
+
+      // The restore's own version is escaped the same way, so restoring it again
+      // is a no-op: the stored form decodes to exactly the live value.
+      const newest = (await listVersions(db, { itemType: "memory", itemId: id }))[0];
+      assert.equal(newest.snapshot.content, stored, "the restore's version is escaped once, not twice");
+      assert.equal(
+        (await restoreVersion(db, { versionId: newest.id }, BOT)).unchanged,
+        true,
+        `${JSON.stringify(value)} round-trips exactly`,
+      );
+    }
   } finally {
     db.close();
     fx.dispose();

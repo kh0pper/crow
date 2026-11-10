@@ -667,6 +667,7 @@ export function createDbClient(dbPath) {
   let maxIdStmt = null;
   let stampStmt = null;
   let stampingTxn = null;
+  let syncTxn = null;
 
   function hasItemVersions(now = Date.now()) {
     if (itemVersionsPresent === true) return true;
@@ -776,6 +777,39 @@ export function createDbClient(dbPath) {
       // write to covered content, so version attribution does not apply here.
       db.exec(sql);
       return [];
+    },
+    /**
+     * Run `work` as ONE synchronous transaction on the underlying handle.
+     *
+     * `work` is handed a synchronous `run(statement)` — the same execution path
+     * `execute` uses, returning the same libsql-shaped ResultSet — and runs it
+     * inside better-sqlite3's `db.transaction(...).immediate()`, the mechanism
+     * `batch()` gives an erase (servers/shared/history/erase.js). That is the
+     * whole point: a "read → compare → write" unit must not cross an `await`. A
+     * handle has ONE connection, so a statement issued by any other caller on
+     * this client while a transaction is open does not queue behind it — it JOINS
+     * it, and then commits (or rolls back) with it. Running the read, the
+     * comparison and the write in one synchronous callback leaves no await for
+     * that to happen in.
+     *
+     * CONTRACT: `work` MUST NOT await anything. Use `run`, not `execute`. A
+     * throw rolls the whole transaction back and is rethrown to the caller.
+     *
+     * Attribution follows `execute`: inside a write context the callback runs with
+     * the same stamp, so the versions its writes produce belong to that author.
+     *
+     * @param {(run: (statement: {sql: string, args?: any[]}) => {rows: object[], columns: string[],
+     *   rowsAffected: number, lastInsertRowid: number}) => any} work
+     */
+    async runTransaction(work) {
+      if (typeof work !== "function") throw new Error("runTransaction needs a synchronous callback");
+      const run = (statement) => executeOne(db, sqlOf(statement), argsOf(statement));
+      const ctx = currentWriteContext();
+      if (!ctx || !hasItemVersions()) {
+        syncTxn ||= db.transaction((job) => job());
+        return syncTxn.immediate(() => work(run));
+      }
+      return runStamped(() => work(run), ctx);
     },
     close() {
       try { db.close(); } catch {}

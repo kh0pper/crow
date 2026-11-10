@@ -26,12 +26,19 @@
  * exception, the sync layer's uuid stamp, see STAMP_ONLY_TRANSITIONS below.
  *
  * `projectRef` is the ordering used to fill item_versions.project_ref: the first
- * non-empty column in the list, cast to TEXT. That column is the erase scope —
- * Task 4 finds an item's versions by project/learner without joining a table
- * that may have deleted the row.
+ * non-empty project column in the list, cast to TEXT. That column is the erase
+ * scope — Task 4 finds an item's versions by project/learner without joining a
+ * table that may have deleted the row.
  *
- * Two rules the lists obey, both asserted at import below and by
- * tests/history-capture.test.js:
+ * `derived` is for a snapshot field the covered TABLE DOES NOT HAVE, computed
+ * from the row instead of read from it (crow_context's project_uuid — see the
+ * entry below). A derived column is a snapshot field and a legal project_ref,
+ * but never a tracked one, never a column a trigger or the WHOLE-row check
+ * expects to exist in the table, and never something a restore writes back into
+ * the row.
+ *
+ * Nothing else is special. Two rules the lists obey, both asserted at import
+ * below and by tests/history-capture.test.js:
  *   - every column the WHEN clause names is also snapshotted (a change that is
  *     detected must be recorded);
  *   - no column whose name matches /api_key|token|secret|password/i is ever
@@ -72,7 +79,8 @@
  *   - crow_context: the section's key, title, body, its enabled toggle and its
  *     scope keys — a section's identity IS its scope, so device_id and
  *     project_id are tracked. NOT sort_order (an ordering counter),
- *     NOT updated_at, NOT lamport_ts.
+ *     NOT updated_at, NOT lamport_ts, and NOT the derived project_uuid (it is a
+ *     function of project_id, which is tracked).
  *
  * `snapshot` is the full row minus counters/derived/secret-named columns, so
  * memories carries its filing (project_id, project_uuid), blog_posts carries
@@ -155,8 +163,34 @@ export const COVERED = Object.freeze({
       "enabled",
       "device_id",
       "project_id",
+      "project_uuid",
     ]),
-    projectRef: Object.freeze(["project_id"]),
+    // crow_context has NO portable project id of its own: project_id is a
+    // per-instance integer that project_spaces REUSES, so a snapshot carrying
+    // only that id can be restored into a stranger's project that took the id
+    // over — and instance-sync would then spread the mistake. The uuid is looked
+    // up from project_spaces when the version is written (NULL when the section
+    // is unfiled, or when its project row is already gone), so a version records
+    // the project it really belonged to. api.js files a restored section by it.
+    derived: Object.freeze({
+      project_uuid: (row) => `(SELECT uuid FROM project_spaces WHERE id = ${colRef("project_id", row)})`,
+    }),
+    // Portable uuid first, local id second — the same ordering memories uses, and
+    // the same reason (a version that outlives the project row must key on the
+    // portable id).
+    projectRef: Object.freeze(["project_uuid", "project_id"]),
+    // This snapshot cannot be filed by a local project id at all. crow_context
+    // gained project_uuid (a derived field) WITH the triggers and the baseline
+    // that write it, so a section version without one predates them — and its
+    // bare project_id names whatever project held that id THEN. ids are reused,
+    // so trusting it could file a restored section into a stranger's project (the
+    // exact failure the filing machinery exists to prevent), and sync would
+    // spread it. Such a section is restored UNFILED and the caller is told
+    // (`unfiled: true`), which is honest and recoverable.
+    //
+    // memories do NOT set this: project_id-only versions are a normal pre-uuid
+    // shape there, and the live row's own project_uuid is a second opinion.
+    filingRequiresUuid: true,
   }),
 });
 
@@ -174,7 +208,9 @@ export const COVERED = Object.freeze({
  *      the versions it takes go with the project).
  *   2. Match BOTH keys. project_ref holds the portable uuid when the row had one
  *      and the local project id (cast to TEXT) otherwise, because pre-project_uuid
- *      rows and project_id-only writes carry no uuid. So the predicate is
+ *      rows and project_id-only writes carry no uuid. (A context section's uuid is
+ *      looked up from project_spaces at capture time, so it is held the same way.)
+ *      So the predicate is
  *      `project_ref IN (<project uuid>, CAST(<local project id> AS TEXT))`, and
  *      both values must be bound as TEXT (a bare integer never equals the
  *      stored text).
@@ -231,6 +267,17 @@ for (const [itemType, spec] of Object.entries(COVERED)) {
       throw new Error(`history: ${itemType}.${column} is tracked or a project ref but is not snapshotted`);
     }
   }
+  // A derived field is computed for every version, so it must be in the
+  // snapshot; and it is not a real column, so it cannot be tracked (there is no
+  // OLD/NEW value to compare).
+  for (const column of Object.keys(spec.derived || {})) {
+    if (!spec.snapshot.includes(column)) {
+      throw new Error(`history: ${itemType}.${column} is derived but not snapshotted`);
+    }
+    if (spec.tracked.includes(column)) {
+      throw new Error(`history: ${itemType}.${column} is derived, so it cannot be tracked`);
+    }
+  }
   // A stamp exclusion names columns the WHEN clause already compares; if either
   // list changed underneath it, the exclusion would silently stop matching.
   const stamp = STAMP_ONLY_TRANSITIONS[itemType];
@@ -261,7 +308,18 @@ const str = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const colRef = (column, row) => (row ? `${row}."${column}"` : `"${column}"`);
 
 /**
- * One stored value, BLOB-safe and TEXT-safe.
+ * The columns of `spec` a covered TABLE must actually have: its key plus every
+ * snapshotted column that is not derived (a derived one is computed, never
+ * selected). Used by the migration and the boot re-ensure to decide whether a
+ * table is ready for its triggers, and by the History API to decide what to
+ * read and what to write.
+ */
+export function tableColumns(spec) {
+  return [spec.idColumn, ...spec.snapshot].filter((column) => !(spec.derived && spec.derived[column]));
+}
+
+/**
+ * One stored value, BLOB-safe and TEXT-safe, from any SQL expression.
  *
  * json_object() raises "JSON cannot hold BLOB values" for a blob, and SQLite
  * does not enforce declared column types — a `content` column can hold one. A
@@ -269,12 +327,16 @@ const colRef = (column, row) => (row ? `${row}."${column}"` : `"${column}"`);
  * inside the write) and must not fail the migration's baseline, so a blob is
  * stored as the reversible string 'hex:<SQLite hex(), which is UPPERCASE>'.
  *
- * TEXT needs the matching escape. A text value may legitimately START with
- * "hex:" (a memory whose content is "hex:DEADBEEF", a hash written into a
- * section), and read back that is indistinguishable from a stored blob — so such
- * a TEXT value is stored as 'txt:<the value>' instead, which api.js strips
- * again. Every other text value is stored verbatim, so the transpose is exact:
- * 'hex:' means bytes, 'txt:' means text, anything else is itself.
+ * TEXT needs the matching escape, and it must be SYMMETRIC with the reader. A
+ * text value may legitimately START with "hex:" (a memory whose content is
+ * "hex:DEADBEEF", a hash written into a section) and read back that is
+ * indistinguishable from a stored blob; it may equally start with "txt:" (the
+ * escape itself, or a piece of text that simply says so) and read back the
+ * reader would strip a prefix that was never added. So a text value starting
+ * with EITHER marker is stored as 'txt:<the value>', and api.js's decodeValue
+ * strips exactly one 'txt:' prefix again. Every other text value is stored
+ * verbatim, so the transpose is exact: after one 'txt:' strip, 'hex:' means
+ * bytes, 'txt:' means text, anything else is itself.
  *
  * Rows written BEFORE this escape existed carry no marker, so a text value that
  * looked exactly like a blob in one of them is still read back as bytes. That
@@ -283,31 +345,50 @@ const colRef = (column, row) => (row ? `${row}."${column}"` : `"${column}"`);
  * store keep their old body until they are re-created, which is the same set of
  * rows).
  */
-export function valueExpr(column, row = null) {
-  const ref = colRef(column, row);
+function storeValue(expr) {
   return (
-    `CASE typeof(${ref}) ` +
-    `WHEN 'blob' THEN 'hex:' || hex(${ref}) ` +
-    `WHEN 'text' THEN (CASE WHEN substr(${ref}, 1, 4) = 'hex:' THEN 'txt:' || ${ref} ELSE ${ref} END) ` +
-    `ELSE ${ref} END`
+    `CASE typeof(${expr}) ` +
+    `WHEN 'blob' THEN 'hex:' || hex(${expr}) ` +
+    `WHEN 'text' THEN (CASE WHEN substr(${expr}, 1, 4) IN ('hex:', 'txt:') ` +
+    `THEN 'txt:' || ${expr} ELSE ${expr} END) ` +
+    `ELSE ${expr} END`
   );
+}
+
+/** One column's stored value (see storeValue). */
+export function valueExpr(column, row = null) {
+  return storeValue(colRef(column, row));
+}
+
+/**
+ * One snapshot column's stored value: a real column read from the row, or a
+ * derived field computed from it (spec.derived — crow_context.project_uuid).
+ */
+export function columnValueExpr(spec, column, row = null) {
+  const derived = spec.derived && spec.derived[column];
+  return derived ? storeValue(derived(row)) : valueExpr(column, row);
 }
 
 /** A json_object(...) snapshot of the snapshotted columns of one row (NEW/OLD or bare). */
 export function snapshotExpr(spec, row = null) {
   return `json_object(${spec.snapshot
-    .map((c) => `${str(c)}, ${valueExpr(c, row)}`)
+    .map((c) => `${str(c)}, ${columnValueExpr(spec, c, row)}`)
     .join(", ")})`;
 }
 
 /**
  * The item_versions.project_ref expression for one row: the first non-empty
- * project column, cast to TEXT, or NULL when the type has no project filing.
+ * project key (a real column, or a derived lookup such as crow_context's uuid),
+ * cast to TEXT, or NULL when the type has no project filing.
  */
 export function projectRefExpr(spec, row = null) {
   const columns = spec.projectRef || [];
   if (!columns.length) return "NULL";
-  const parts = columns.map((c) => `NULLIF(CAST(${colRef(c, row)} AS TEXT), '')`);
+  const parts = columns.map((c) => {
+    const derived = spec.derived && spec.derived[c];
+    const expr = derived ? derived(row) : colRef(c, row);
+    return `NULLIF(CAST(${expr} AS TEXT), '')`;
+  });
   return parts.length === 1 ? parts[0] : `COALESCE(${parts.join(", ")})`;
 }
 

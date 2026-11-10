@@ -45,6 +45,7 @@ import {
   COVERED,
   ITEM_VERSIONS_ERASE_DDL,
   guardTriggerDefs,
+  tableColumns,
   triggerDefs,
 } from "./covered.js";
 
@@ -138,9 +139,17 @@ export function ensureHistoryTriggers(db) {
     }
     const columns = columnsOf(db, spec.table);
     // snapshot is a superset of tracked (covered.js asserts it), so one check
-    // covers both the WHEN list and the stored fields.
-    const missing = [spec.idColumn, ...spec.snapshot].filter((c) => !columns.has(c));
+    // covers both the WHEN list and the stored fields. A DERIVED field is
+    // computed, not read, so it is not expected to be a column of the table.
+    const missing = tableColumns(spec).filter((c) => !columns.has(c));
     if (missing.length) {
+      skipped.push(spec.table);
+      continue;
+    }
+    // A derived field that reads another table (crow_context.project_uuid from
+    // project_spaces) cannot be captured while that table is absent: the trigger
+    // would fail the covered write itself.
+    if (Object.keys(spec.derived || {}).length && !tableExists(db, "project_spaces")) {
       skipped.push(spec.table);
       continue;
     }

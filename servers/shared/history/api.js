@@ -16,8 +16,21 @@
  *   NO WRITES TO item_versions. A restore writes the COVERED TABLE (the ordinary
  *   INSERT/UPDATE the app would make) and lets the capture trigger record it, so
  *   the restore IS the new version and the append-only guards stay untouched.
- *   Everything goes through `db.execute` inside `withWriteContext(ctx)`, so the
- *   version it produces is stamped with the restorer like any other write.
+ *   The write runs inside `withWriteContext(ctx)` and through the gateway
+ *   client's `runTransaction`, so the version it produces is stamped with the
+ *   restorer like any other write.
+ *
+ *   A RESTORE IS ONE SYNCHRONOUS TRANSACTION. Its read → compare → write →
+ *   version-id all happen inside one `db.runTransaction` callback
+ *   (servers/db.js), i.e. one `db.transaction(...).immediate()` on the
+ *   underlying handle — the same mechanism `batch()` gives an erase
+ *   (erase.js). Nothing may await between the row a restore compares against and
+ *   the row it writes: an `await db.execute(...)` there would let an unrelated
+ *   caller's statement on the SAME shared connection join the open transaction,
+ *   and it would then commit — or roll back — with the restore. So the helpers
+ *   below take a synchronous `run` and never the client. The sync emit is
+ *   deliberately OUTSIDE that transaction (see emitRestored): a sync problem must
+ *   never undo, or hide, a restore the operator asked for.
  *
  *   A RESTORE IS A NORMAL WRITE, SYNC INCLUDED. It used to stop at the local row,
  *   which made a restore the one edit a paired instance never heard about: the
@@ -38,7 +51,11 @@
  *   (uuid → current local id); a uuid whose project is gone files the item
  *   UNFILED (both keys NULL, `unfiled: true`) instead of into a stranger's
  *   project. Without a uuid the local id is kept only while it still exists and
- *   does not contradict the live row's uuid — see resolveFiling().
+ *   does not contradict the live row's uuid — see resolveFiling(). A context
+ *   section adds one more rule: its snapshot carries the project's uuid (a
+ *   derived field, covered.js), so a section version WITHOUT one predates that
+ *   and is restored unfiled rather than trusted by a bare local id
+ *   (spec.filingRequiresUuid).
  *
  *   THE SNAPSHOT IS THE ROW, MINUS COUNTERS. A restore writes every snapshotted
  *   column — not just the tracked ones — because that is what makes a deleted
@@ -60,17 +77,23 @@
  * (covered.js valueExpr — json_object cannot hold a blob). Reading decodes it
  * back to bytes on the way into a restore, so a restored blob is bytes again.
  *
- * TEXT IS ESCAPED OUT OF THE BLOB MARKER'S WAY. A text value can start with
- * "hex:" too ("hex:DEADBEEF" is a hex-looking string, not necessarily bytes), so
- * valueExpr prefixes such a TEXT value with 'txt:' and this file strips that
- * prefix again. `hex:` therefore means bytes and `txt:` means text, unambiguously
+ * TEXT IS ESCAPED OUT OF THE BLOB MARKER'S WAY, BOTH WAYS. A text value can
+ * start with "hex:" ("hex:DEADBEEF" is a hex-looking string, not necessarily
+ * bytes) or with "txt:" (the escape itself), so valueExpr prefixes a TEXT value
+ * starting with EITHER marker with one more 'txt:', and decodeValue below strips
+ * exactly one. `hex:` therefore means bytes and `txt:` means text, unambiguously
  * for every row written since the escape. ROWS WRITTEN BEFORE IT CARRY NO MARKER
  * and cannot be told apart: a pre-escape snapshot holding "hex:DEADBEEF" is read
  * back as the blob [0xDE 0xAD 0xBE 0xEF]. That ambiguity is accepted (there is no
  * information left to resolve it with) and only affects rows stored before this
  * change.
+ *
+ * A DERIVED SNAPSHOT FIELD IS READ, NEVER WRITTEN. crow_context's project_uuid
+ * is computed from project_spaces when the version is written (covered.js
+ * `derived`), not a column of crow_context: it decides the FILING of a restored
+ * section and is never part of the INSERT/UPDATE into the table itself.
  */
-import { COVERED } from "./covered.js";
+import { COVERED, tableColumns } from "./covered.js";
 import { AUTHOR_KINDS, withWriteContext } from "./write-context.js";
 import { lineDiff } from "../line-diff.js";
 
@@ -134,10 +157,12 @@ const quote = (ident) => `"${String(ident).replace(/"/g, '""')}"`;
 /* --------------------------------------------------------------- shapes */
 
 /**
- * A snapshot value as it will be written: 'txt:…' back to text, 'hex:…' back to
- * bytes, anything else as-is. Both markers are self-describing and reversible, so
- * the only value that cannot be recovered is one stored before the 'txt:' escape
- * existed (see the BLOBs note at the top of this file).
+ * A snapshot value as it will be written: one leading 'txt:' back to text,
+ * 'hex:…' back to bytes, anything else as-is. Both markers are self-describing
+ * and reversible — valueExpr adds exactly one 'txt:' to a text value starting
+ * with either marker, and this strips exactly one — so the only value that cannot
+ * be recovered is one stored before the 'txt:' escape existed (see the BLOBs note
+ * at the top of this file).
  */
 function decodeValue(value) {
   if (typeof value !== "string") return value;
@@ -303,19 +328,32 @@ export function diffVersions(a, b) {
 
 /* ------------------------------------------------------- restoreVersion */
 
+/**
+ * The synchronous statement runner a restore works through.
+ *
+ * Every read, comparison and write of a restore goes through this — `run` comes
+ * from `db.runTransaction` (servers/db.js) and executes IMMEDIATELY on the
+ * underlying handle, inside the one transaction the whole restore is. Deliberately
+ * not `db.execute`: awaiting a statement between the read and the write would let
+ * another caller's statement on the same shared connection join the transaction.
+ *
+ * @typedef {(statement: {sql: string, args?: any[]}) =>
+ *   {rows: object[], columns: string[], rowsAffected: number, lastInsertRowid: number}} RunStatement
+ */
+
 /** The version row, or null. */
-async function readVersion(db, versionId) {
-  const { rows } = await db.execute({
-    sql: `SELECT ${VERSION_COLUMNS} FROM item_versions WHERE id = ?`,
-    args: [versionId],
-  });
+function readVersion(run, versionId) {
+  const { rows } = run({ sql: `SELECT ${VERSION_COLUMNS} FROM item_versions WHERE id = ?`, args: [versionId] });
   return rows[0] ?? null;
 }
 
-/** The live row's snapshotted columns, or null when the row is gone. */
-async function readRow(db, spec, itemId) {
-  const columns = [spec.idColumn, ...spec.snapshot];
-  const { rows } = await db.execute({
+/**
+ * The live row's own columns (every snapshotted one the TABLE actually has — a
+ * derived field is computed, not stored), or null when the row is gone.
+ */
+function readRow(run, spec, itemId) {
+  const columns = tableColumns(spec);
+  const { rows } = run({
     sql: `SELECT ${columns.map(quote).join(", ")} FROM ${quote(spec.table)} WHERE ${quote(spec.idColumn)} = ?`,
     args: [itemId],
   });
@@ -323,14 +361,14 @@ async function readRow(db, spec, itemId) {
 }
 
 /** The newest version id in the table — the watermark a restore's write crosses. */
-async function maxVersionId(db) {
-  const { rows } = await db.execute({ sql: "SELECT COALESCE(MAX(id), 0) AS id FROM item_versions", args: [] });
+function maxVersionId(run) {
+  const { rows } = run({ sql: "SELECT COALESCE(MAX(id), 0) AS id FROM item_versions", args: [] });
   return Number(rows[0]?.id ?? 0);
 }
 
 /** The id of the newest `delete` version of this item newer than `versionId`, or null. */
-async function deleteVersionAfter(db, itemType, itemId, versionId) {
-  const { rows } = await db.execute({
+function deleteVersionAfter(run, itemType, itemId, versionId) {
+  const { rows } = run({
     sql: `SELECT MAX(id) AS id FROM item_versions
            WHERE item_type = ? AND item_id = ? AND op = 'delete' AND id > ?`,
     args: [itemType, itemId, versionId],
@@ -345,11 +383,11 @@ async function deleteVersionAfter(db, itemType, itemId, versionId) {
 const nonEmpty = (v) => (typeof v === "string" && v.trim() !== "" ? v : null);
 
 /** One project_spaces row as {id, uuid}, by uuid or by local id; null when absent. */
-async function findProject(db, { uuid = null, id = null } = {}) {
+function findProject(run, { uuid = null, id = null } = {}) {
   const byUuid = uuid !== null;
   const value = byUuid ? uuid : id;
   if (value === null || value === undefined) return null;
-  const { rows } = await db.execute({
+  const { rows } = run({
     sql: `SELECT id, uuid FROM project_spaces WHERE ${byUuid ? "uuid" : "id"} = ?`,
     args: [value],
   });
@@ -362,7 +400,7 @@ async function findProject(db, { uuid = null, id = null } = {}) {
  * project_spaces.id is a per-instance integer and it is REUSED: delete a project
  * and the next one created takes the id. So a version's project_id is not a fact
  * about today's project table, and writing it back verbatim can file an item into
- * a stranger's project. Three cases, in the order they are decided:
+ * a stranger's project. Four cases, in the order they are decided:
  *
  *   the snapshot names a project_uuid   the UUID is the portable key, so it wins:
  *                                       it resolves to whatever local id that
@@ -371,12 +409,22 @@ async function findProject(db, { uuid = null, id = null } = {}) {
  *                                       gone its project was deleted — the item is
  *                                       written UNFILED rather than into whoever
  *                                       holds the old id.
+ *   no project at all in the snapshot   unfiled, and nothing was lost (unfiled is
+ *                                       false: there was no filing to lose).
+ *   no uuid, and the type REQUIRES one  unfiled, `unfiled: true`. crow_context is
+ *                                       that type: project_uuid is a derived
+ *                                       snapshot field written WITH the triggers,
+ *                                       so a version without one predates them and
+ *                                       holds only a per-instance id — the one
+ *                                       thing that cannot be trusted. Filing it
+ *                                       into whoever holds that id now is exactly
+ *                                       the corruption this function prevents.
  *   no uuid, id still exists           keep it — unless the LIVE row already names
  *                                       a different project by uuid, which is proof
  *                                       that this id no longer means this item's
  *                                       project (a memory whose uuid arrived later
  *                                       than the version being restored).
- *   no uuid, id gone (or none)         unfiled: project_id NULL (and project_uuid
+ *   no uuid, id gone                   unfiled: project_id NULL (and project_uuid
  *                                       NULL where the snapshot carries one).
  *
  * `unfiled: true` is reported for the caller to show: an item that came back but
@@ -384,18 +432,18 @@ async function findProject(db, { uuid = null, id = null } = {}) {
  * success either. Only the types with a project filing have one — blog posts
  * belong to the instance, not a project.
  *
- * @returns {Promise<{project_id: number|null|undefined, project_uuid: string|null|undefined,
- *   unfiled: boolean}>} `undefined` for a column the snapshot does not carry: it is
+ * @returns {{project_id: number|null|undefined, project_uuid: string|null|undefined,
+ *   unfiled: boolean}} `undefined` for a column the snapshot does not carry: it is
  *   then not written at all, and a version predating the column stays that way.
  */
-async function resolveFiling(db, spec, snapshot, live) {
+function resolveFiling(run, spec, snapshot, live) {
   const out = { project_id: undefined, project_uuid: undefined, unfiled: false };
   if (!spec.projectRef.includes("project_id")) return out;
   if (!Object.prototype.hasOwnProperty.call(snapshot, "project_id")) return out;
 
   const uuid = nonEmpty(snapshot.project_uuid);
   if (uuid !== null) {
-    const project = await findProject(db, { uuid });
+    const project = findProject(run, { uuid });
     if (project) {
       out.project_id = project.id;
       out.project_uuid = uuid;
@@ -412,7 +460,15 @@ async function resolveFiling(db, spec, snapshot, live) {
     out.project_id = null;
     return out;
   }
-  const project = await findProject(db, { id: wanted });
+  // A type whose snapshot is only portable cannot be filed by a local id: see
+  // spec.filingRequiresUuid and the note above.
+  if (spec.filingRequiresUuid) {
+    out.project_id = null;
+    out.project_uuid = null;
+    out.unfiled = true;
+    return out;
+  }
+  const project = findProject(run, { id: wanted });
   if (!project) {
     out.project_id = null;
     out.project_uuid = null;
@@ -522,36 +578,28 @@ const OWN_CODES = new Set([
 ]);
 
 /**
- * Read → compare → write → take the new version id, in ONE immediate transaction.
+ * Run a restore's read → compare → write → version-id as ONE synchronous
+ * transaction on the underlying handle.
  *
- * The row a restore compared against must still be the row it writes: between a
- * plain read and a plain UPDATE another writer (a bot on its own connection) can
- * edit or delete the item, and the restore would then overwrite work it never
- * saw or re-create a row someone just removed. BEGIN IMMEDIATE takes the write
- * lock before the read, so nothing interleaves; the capture trigger's version row
- * is written inside the same transaction, so the id read back for `newVersionId`
- * is exactly this restore's version.
+ * `db.runTransaction` (servers/db.js) runs the callback inside a single
+ * `db.transaction(...).immediate()` — the same mechanism `batch()` gives an erase
+ * (erase.js) — and hands it a synchronous statement runner. That is the contract
+ * this module needs and the reason it does not use `db.execute`: a handle is ONE
+ * connection, so a statement issued by another caller while a transaction is open
+ * joins it rather than waiting, and anything awaited in the middle would let that
+ * caller's write commit or roll back with the restore.
  *
- * CONTRACT: the caller holds no transaction (the same contract as erase.js).
+ * A client without it refuses rather than falling back to a transaction spread
+ * across awaits, which would look right and be wrong.
  */
-async function inImmediateTransaction(db, work) {
-  let began = false;
-  try {
-    await db.execute("BEGIN IMMEDIATE");
-    began = true;
-    const result = await work();
-    await db.execute("COMMIT");
-    return result;
-  } catch (err) {
-    if (began) {
-      try {
-        await db.execute("ROLLBACK");
-      } catch {
-        /* already unwound */
-      }
-    }
-    throw err;
+function runOneTransaction(db, work) {
+  if (!db || typeof db.runTransaction !== "function") {
+    throw historyError(
+      "unavailable",
+      "this database client cannot run a restore as one transaction (it has no runTransaction)",
+    );
   }
+  return db.runTransaction(work);
 }
 
 /**
@@ -569,8 +617,8 @@ function asHistoryError(err) {
 }
 
 /** The item's newest version id, when it is newer than `watermark`; else null. */
-async function versionIdAfter(db, watermark, itemType, itemId) {
-  const { rows } = await db.execute({
+function versionIdAfter(run, watermark, itemType, itemId) {
+  const { rows } = run({
     sql: "SELECT MAX(id) AS id FROM item_versions WHERE item_type = ? AND item_id = ?",
     args: [itemType, itemId],
   });
@@ -631,9 +679,9 @@ async function versionIdAfter(db, watermark, itemType, itemId) {
  * `synced` says whether the restore actually reached the sync layer (emitted to a
  * live manager, or durably queued): false for a test host, a host with sync off, a
  * blog post (not a synced table) and for a no-op. `unfiled` says the item came
- * back without its project filing, because the project it named is gone (or its
- * id now names a different project): a restore that succeeds partially is
- * reported, never hidden.
+ * back without its project filing: its project is gone, its id now names a
+ * different project, or (a context section) the version predates the portable id.
+ * A restore that succeeds partially is reported, never hidden.
  *
  * @param {object} db
  * @param {{versionId: number|string, syncManager?: object|null}} options
@@ -651,11 +699,13 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
   const id = normalizeVersionId(versionId);
   if (id === null) throw historyError("invalid_request", "restoreVersion needs a version id");
 
-  // One immediate transaction for read → compare → write, with the writer's
-  // context open so servers/db.js stamps the version the trigger writes.
+  // ONE synchronous transaction for read → compare → write → the new version id,
+  // with the writer's context open so servers/db.js stamps the version the
+  // trigger writes. Nothing in here may await: an await would hand the open
+  // transaction to any other caller writing through this same client.
   const outcome = await withWriteContext(ctx, () =>
-    inImmediateTransaction(db, async () => {
-      const version = await readVersion(db, id);
+    runOneTransaction(db, (run) => {
+      const version = readVersion(run, id);
       if (!version) throw historyError("not_found", `no version ${id}`);
       if (Number(version.redacted) === 1) {
         throw historyError(
@@ -668,17 +718,19 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
       if (itemId === null) throw historyError("invalid_request", `version ${id} has no item id`);
 
       const snapshot = JSON.parse(version.snapshot_json);
-      // Only the columns this snapshot actually carries: a version written from an
-      // older field list must not blank the columns it never knew about.
-      const columns = spec.snapshot.filter(
+      // Only the columns this snapshot actually carries, and only the ones the
+      // TABLE has: a version written from an older field list must not blank the
+      // columns it never knew about, and a DERIVED field (a section's
+      // project_uuid) is a filing, not a column to write.
+      const columns = tableColumns(spec).filter(
         (column) => column !== spec.idColumn && Object.prototype.hasOwnProperty.call(snapshot, column),
       );
       const values = columns.map((column) => decodeValue(snapshot[column]));
-      const row = await readRow(db, spec, itemId);
+      const row = readRow(run, spec, itemId);
 
       // The filing is resolved against today's project table, never replayed: a
       // project's integer id can belong to a different project by now.
-      const filing = await resolveFiling(db, spec, snapshot, row);
+      const filing = resolveFiling(run, spec, snapshot, row);
       const setValue = (column, value) => {
         const at = columns.indexOf(column);
         if (at >= 0 && value !== undefined) values[at] = value;
@@ -705,7 +757,7 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
         // deletion is refused even if the item was later restored — the version
         // table cannot tell an un-delete from a stranger's re-create. Restore the
         // `delete` version itself, or a version from after the un-delete.)
-        const laterDelete = await deleteVersionAfter(db, version.item_type, itemId, id);
+        const laterDelete = deleteVersionAfter(run, version.item_type, itemId, id);
         if (laterDelete !== null) {
           throw historyError(
             "conflict",
@@ -720,30 +772,30 @@ export async function restoreVersion(db, { versionId, syncManager = null } = {},
         );
         if (changed.length === 0) return report({ newVersionId: null, unchanged: true, row: null, op: null });
 
-        const watermark = await maxVersionId(db);
+        const watermark = maxVersionId(run);
         const sql =
           `UPDATE ${quote(spec.table)} SET ${changed.map((c) => `${quote(c)} = ?`).join(", ")} ` +
           `WHERE ${quote(spec.idColumn)} = ?`;
         const args = [...changed.map((column) => values[columns.indexOf(column)]), itemId];
-        const written = await db.execute({ sql, args });
+        const written = run({ sql, args });
         // The row was read inside this transaction, so nothing could have removed
         // it — but a restore that updates nothing must never look like success.
         if (Number(written.rowsAffected || 0) === 0) {
           throw historyError("conflict", `${spec.table}/${itemId} disappeared while version ${id} was being restored`);
         }
-        const newVersionId = await versionIdAfter(db, watermark, version.item_type, itemId);
-        return report({ newVersionId, unchanged: false, row: await readRow(db, spec, itemId), op: "update" });
+        const newVersionId = versionIdAfter(run, watermark, version.item_type, itemId);
+        return report({ newVersionId, unchanged: false, row: readRow(run, spec, itemId), op: "update" });
       }
 
       // The row is gone: put it back as itself, id and filing included.
       const insertColumns = [spec.idColumn, ...columns];
-      const watermark = await maxVersionId(db);
+      const watermark = maxVersionId(run);
       const sql =
         `INSERT INTO ${quote(spec.table)} (${insertColumns.map(quote).join(", ")}) ` +
         `VALUES (${insertColumns.map(() => "?").join(", ")})`;
-      await db.execute({ sql, args: [itemId, ...values] });
-      const newVersionId = await versionIdAfter(db, watermark, version.item_type, itemId);
-      return report({ newVersionId, unchanged: false, row: await readRow(db, spec, itemId), op: "insert" });
+      run({ sql, args: [itemId, ...values] });
+      const newVersionId = versionIdAfter(run, watermark, version.item_type, itemId);
+      return report({ newVersionId, unchanged: false, row: readRow(run, spec, itemId), op: "insert" });
     }).catch((err) => {
       throw asHistoryError(err);
     }),

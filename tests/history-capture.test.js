@@ -564,7 +564,7 @@ test("versions can be found by project", () => {
     assert.equal(
       versionsOf(db, "context_section", section.lastInsertRowid)[0].project_ref,
       "7",
-      "a project-scoped context section carries the project",
+      "a section filed by a local id whose project row is absent keys on that id",
     );
     // The scope column is indexed: Task 4's erase is a lookup, not a scan.
     const indexes = db
@@ -572,6 +572,93 @@ test("versions can be found by project", () => {
       .all()
       .map((r) => r.name);
     assert.ok(indexes.includes("idx_item_versions_project"), "project_ref is indexed");
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
+test("a project-scoped context section's snapshot carries the project's portable uuid", () => {
+  // crow_context has no project_uuid column: project_id is a per-instance integer
+  // and project_spaces REUSES it, so a snapshot holding only that id could be
+  // restored into a stranger's project (and sync would spread it). The uuid is
+  // computed into the snapshot — and into project_ref — when the version is
+  // written, so a section version names its project portably.
+  const fx = migratedFixture();
+  try {
+    const db = fx.open();
+    db.prepare("INSERT INTO project_spaces (id, uuid, slug, name) VALUES (?, ?, ?, ?)").run(
+      7,
+      "proj-uuid-1",
+      "project-one",
+      "Project one",
+    );
+    const section = db
+      .prepare("INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES (?, ?, ?, ?)")
+      .run("project-note", "Project note", "scoped body", 7);
+    db.prepare("UPDATE crow_context SET content = ? WHERE id = ?").run("scoped body, edited", section.lastInsertRowid);
+
+    const rows = versionsOf(db, "context_section", section.lastInsertRowid);
+    assert.deepEqual(rows.map((r) => r.op), ["insert", "update"]);
+    for (const row of rows) {
+      const snapshot = JSON.parse(row.snapshot_json);
+      assert.equal(snapshot.project_id, 7, "the local id stays in the snapshot (it is what the row holds)");
+      assert.equal(snapshot.project_uuid, "proj-uuid-1", "and the project's portable id is computed beside it");
+      assert.equal(row.project_ref, "proj-uuid-1", "the uuid is the scope whenever the project is known");
+    }
+
+    // A section whose project row is GONE at capture time keeps the local id as
+    // its scope: the uuid is unknown, not invented.
+    db.prepare("DELETE FROM project_spaces WHERE id = 7").run();
+    db.prepare("UPDATE crow_context SET content = ? WHERE id = ?").run("scoped body, orphaned", section.lastInsertRowid);
+    const orphaned = versionsOf(db, "context_section", section.lastInsertRowid).at(-1);
+    assert.equal(JSON.parse(orphaned.snapshot_json).project_uuid, null, "no project row, no uuid to record");
+    assert.equal(orphaned.project_ref, "7", "so the local id is the scope, as before");
+
+    // Unfiled content has neither, exactly like a memory.
+    const unfiled = db
+      .prepare("INSERT INTO crow_context (section_key, section_title, content) VALUES (?, ?, ?)")
+      .run("global-note", "Global note", "global body");
+    const unfiledVersion = versionsOf(db, "context_section", unfiled.lastInsertRowid)[0];
+    assert.equal(JSON.parse(unfiledVersion.snapshot_json).project_uuid, null);
+    assert.equal(unfiledVersion.project_ref, null, "an unfiled section has no scope");
+    db.close();
+  } finally {
+    fx.dispose();
+  }
+});
+
+test("the migration's baseline records a section's project uuid as well", () => {
+  // An upgraded instance: the section and its project predate the triggers, so the
+  // BASELINE is the version that must carry the portable id.
+  const fx = initDbFixture("hist-section-baseline-");
+  try {
+    let db = fx.open();
+    db.prepare("INSERT INTO project_spaces (id, uuid, slug, name) VALUES (?, ?, ?, ?)").run(
+      3,
+      "proj-uuid-baseline",
+      "baseline-project",
+      "Baseline project",
+    );
+    const section = db
+      .prepare("INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES (?, ?, ?, ?)")
+      .run("baseline-note", "Baseline note", "baselined body", 3);
+    db.close();
+
+    run({ dbPath: fx.dbPath, log: () => {} });
+
+    db = fx.open();
+    const row = db
+      .prepare(
+        `SELECT op, author_kind, snapshot_json, project_ref FROM item_versions
+          WHERE item_type = 'context_section' AND item_id = ?`,
+      )
+      .all(String(section.lastInsertRowid));
+    assert.equal(row.length, 1, "one baseline version for the existing section");
+    assert.equal(row[0].op, "insert");
+    assert.equal(row[0].author_kind, "system");
+    assert.equal(JSON.parse(row[0].snapshot_json).project_uuid, "proj-uuid-baseline");
+    assert.equal(row[0].project_ref, "proj-uuid-baseline", "the baseline is scoped by the uuid too");
     db.close();
   } finally {
     fx.dispose();
@@ -966,14 +1053,26 @@ test("every snapshotted column exists in the real table, and the snapshot is the
     for (const [itemType, spec] of Object.entries(COVERED)) {
       const real = new Set(db.prepare(`PRAGMA table_info(${spec.table})`).all().map((c) => c.name));
       assert.ok(real.size > 0, `${itemType}: ${spec.table} exists (init-db owns it)`);
-      for (const column of [spec.idColumn, ...spec.snapshot]) {
+      // A DERIVED snapshot field is computed from the row (or from another table),
+      // never read from this one: it is snapshotted, it is not a column, and it can
+      // be a project ref, but it is never tracked (there is no OLD/NEW value to
+      // compare) and no restore writes it back into the row.
+      const derived = Object.keys(spec.derived || {});
+      for (const column of derived) {
+        assert.ok(!real.has(column), `${itemType}: ${column} is derived, so it is NOT a real column`);
+        assert.ok(spec.snapshot.includes(column), `${itemType}: derived field ${column} is snapshotted`);
+        assert.ok(!spec.tracked.includes(column), `${itemType}: derived field ${column} is not tracked`);
+      }
+      for (const column of [spec.idColumn, ...spec.snapshot].filter((c) => !derived.includes(c))) {
         assert.ok(real.has(column), `${itemType}: ${spec.table}.${column} is a real column`);
       }
       // The snapshot is the full row minus counters/derived/secret-named columns,
-      // so a new content or filing column cannot be silently left out of history.
-      const expectedSnapshot = [...real].filter(
-        (c) => !SECRET_COLUMN.test(c) && !COUNTER_OR_DERIVED.test(c),
-      );
+      // plus the derived fields, so a new content or filing column cannot be
+      // silently left out of history.
+      const expectedSnapshot = [
+        ...[...real].filter((c) => !SECRET_COLUMN.test(c) && !COUNTER_OR_DERIVED.test(c)),
+        ...derived,
+      ];
       assert.deepEqual(
         [...spec.snapshot].sort(),
         expectedSnapshot.sort(),
@@ -982,7 +1081,10 @@ test("every snapshotted column exists in the real table, and the snapshot is the
       // Every project-ref column must be snapshotted (it is copied per version).
       assert.ok(spec.projectRef.length > 0 || itemType === "blog_post", `${itemType}: has a project scope or none`);
       for (const column of spec.projectRef) {
-        assert.ok(real.has(column), `${itemType}: ${spec.table}.${column} is a real project column`);
+        assert.ok(
+          real.has(column) || derived.includes(column),
+          `${itemType}: ${spec.table}.${column} is a real project column (or a derived one)`,
+        );
         assert.ok(spec.snapshot.includes(column), `${itemType}: project column ${column} is snapshotted`);
       }
     }
