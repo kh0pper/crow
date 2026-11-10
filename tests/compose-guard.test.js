@@ -643,7 +643,7 @@ test("a bundle can't mount its own control files read-write, nor claim a Crow na
   const dir = join(CROW_HOME, "bundles", "fx-ctl");
   mkdirSync(join(dir, "data"), { recursive: true });
   const m = { manifest: { id: "fx-ctl" }, dir };
-  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel"]) {
+  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", ".crow-compose.image-change"]) {
     assert.equal(check(svc({ volumes: [bind(join(dir, rel))] }), m).valid, false, `rw ${rel || "(the folder)"}`);
   }
   assert.equal(check(svc({ volumes: [bind(dir, true)] }), m).valid, true, "read-only is fine");

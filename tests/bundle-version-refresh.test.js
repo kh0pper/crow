@@ -18,6 +18,7 @@
  */
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, openSync, closeSync, readdirSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -1007,6 +1008,459 @@ describe("manifest.refreshFiles — docker opt-in refresh of named code paths", 
     assert.deepEqual(m.refreshFiles, ["docker-compose.yml", "onlyoffice-plugin"]);
     const c = readFileSync(join(import.meta.dirname, "..", "bundles", "workspace", "docker-compose.yml"), "utf8");
     assert.match(c, /- \.\/onlyoffice-plugin:\/var\/www\/onlyoffice\/documentserver\/sdkjs-plugins\/\{6F1C2A5E-0C5D-4C8B-9B57-C0DE0C0FFEE1\}:ro/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default compose refresh (security audit N8-1): a docker bundle's compose is
+// code, so a version change refreshes it even without `refreshFiles` — but only
+// when the installed copy is unmodified (its recorded sha256, or the bundle's
+// compose at any past commit of the checkout). An owner edit is kept and
+// flagged; an override file is never touched; a `refreshFiles` entry for the
+// compose still behaves exactly as before.
+// ---------------------------------------------------------------------------
+describe("default compose refresh (N8-1)", () => {
+  const sha = (text) => createHash("sha256").update(text).digest("hex");
+  const COMPOSE_V1 = 'services:\n  web:\n    image: x\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+  const COMPOSE_V2 = 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+  const OVERRIDE = 'services:\n  web:\n    ports:\n      - "127.0.0.1:9000:9000"\n';
+
+  /** git's own blob id for a text, as the one `git log --raw` row carries it. */
+  const gitBlob = (text) => createHash("sha1").update(`blob ${Buffer.byteLength(text, "utf8")}\0`).update(text, "utf8").digest("hex");
+  /** One `--raw` row of `git log --format= --raw --no-abbrev --no-renames`. */
+  const rawRow = (id, blob, status = "M") => `:100644 100644 ${"0".repeat(40)} ${blob} ${status}\tbundles/${id}/docker-compose.yml`;
+  /** A runner answering the ONE history lookup with the blob ids of `texts`. */
+  function historyRunner(id, texts) {
+    const calls = [];
+    const runner = async (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      if (cmd === "git" && args[2] === "log") {
+        return { stdout: ["", ...texts.map((t) => rawRow(id, gitBlob(t)))].join("\n") + "\n", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    };
+    runner.calls = calls;
+    return runner;
+  }
+
+  function setup(id, { repoCompose = COMPOSE_V2, installedCompose = COMPOSE_V1, recorded = null, refreshFiles = null, installedExtra = {}, installedEnv = null } = {}) {
+    const repoRoot = freshRoot(`crowrepo-compose-${id}-`);
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "Web", version: "2.0.0", type: "bundle", category: "misc", description: "d",
+      docker: { composefile: "docker-compose.yml" }, ...(refreshFiles ? { refreshFiles } : {}),
+    }));
+    put(repoRoot, `${id}/docker-compose.yml`, repoCompose);
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" }, ...installedExtra }));
+    if (installedCompose !== null) put(CROW_HOME, `bundles/${id}/docker-compose.yml`, installedCompose);
+    put(CROW_HOME, `bundles/${id}/docker-compose.override.yml`, OVERRIDE);
+    if (installedEnv !== null) put(CROW_HOME, `bundles/${id}/.env`, installedEnv);
+    if (recorded) put(CROW_HOME, `bundles/${id}/.crow-compose.sha256`, `${recorded}\n`);
+    setInstalled([id]);
+    return repoRoot;
+  }
+  const stateAt = (id) => JSON.parse(readAt(CROW_HOME, `bundles/${id}/.crow-compose.state.json`));
+  const sameVersion = (id) => put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "2.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+
+  test("unmodified (matching the recorded sha) is replaced on a version change; the sha follows; override untouched", async () => {
+    const id = "dc-sha";
+    const repoRoot = setup(id, { recorded: sha(COMPOSE_V1) });
+    const runner = fakeRunner();
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+    assert.equal(readAt(destBundleDir(id), ".crow-compose.sha256").trim(), sha(COMPOSE_V2));
+    assert.equal(readAt(destBundleDir(id), "docker-compose.override.yml"), OVERRIDE, "override files are never touched");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), "no edit was flagged");
+    assert.ok(repaired.some((r) => r.includes(id) && r.includes("compose")), "the refresh reports the compose copy");
+    assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 0, "a recorded sha needs no git history");
+    assert.deepEqual(stateAt(id), { installedSha: sha(COMPOSE_V2), repoComposeSha: sha(COMPOSE_V2), verdict: "match" });
+  });
+
+  // ---------------------------------------------------------------------
+  // THE REAL-HOST SHAPE: a running container publishes 0.0.0.0:8555, the
+  // installed compose is the OLD (0.0.0.0) file, and the installed manifest
+  // version already EQUALS the repo's. A version-gated refresh never runs, so
+  // the compose has to be caught up at any version.
+  // ---------------------------------------------------------------------
+  test("equal version + no record + the compose matches a past commit → refreshed (the real-host shape)", async () => {
+    const id = "dc-reallhost";
+    const repoRoot = setup(id);
+    sameVersion(id);
+    const runner = historyRunner(id, [COMPOSE_V1]);
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2, "the stale compose was caught up at an equal version");
+    assert.equal(readAt(destBundleDir(id), ".crow-compose.sha256").trim(), sha(COMPOSE_V2));
+    assert.ok(repaired.some((r) => r.includes(id) && r.includes("compose")), JSON.stringify(repaired));
+    const gitCalls = runner.calls.filter((c) => c.cmd === "git");
+    assert.equal(gitCalls.length, 1, "ONE git call for the whole history");
+    assert.deepEqual(gitCalls[0].args.slice(0, 3), ["-C", dirname(repoRoot), "log"], "the checkout appBundles comes from");
+    assert.equal(gitCalls[0].args[3], "-n200", "bounded commit walk");
+    for (const flag of ["--format=", "--raw", "--no-abbrev", "--no-renames"]) assert.ok(gitCalls[0].args.includes(flag), flag);
+    assert.ok(gitCalls[0].args.includes(`bundles/${id}/docker-compose.yml`), "for the bundle's compose path");
+    assert.equal(typeof gitCalls[0].opts.timeout, "number", "git runs time-bounded");
+  });
+
+  test("no version change is required: a recorded sha is caught up too, with no git at all", async () => {
+    const id = "dc-same";
+    const repoRoot = setup(id, { recorded: sha(COMPOSE_V1) });
+    sameVersion(id);
+    const runner = fakeRunner();
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+    assert.equal(readAt(destBundleDir(id), ".crow-compose.sha256").trim(), sha(COMPOSE_V2));
+    assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 0, "a recorded sha needs no git history");
+  });
+
+  test("an install from before the sha record matches the bundle's compose at a past commit", async () => {
+    const id = "dc-git";
+    const repoRoot = setup(id); // no .crow-compose.sha256
+    const runner = historyRunner(id, [COMPOSE_V1, `${COMPOSE_V1}# an older spelling\n`]);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+    assert.equal(readAt(destBundleDir(id), ".crow-compose.sha256").trim(), sha(COMPOSE_V2));
+    assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 1);
+  });
+
+  test("the CRLF spelling of a shipped compose counts as unmodified too", async () => {
+    const id = "dc-crlf";
+    const crlf = COMPOSE_V1.split("\n").join("\r\n");
+    const repoRoot = setup(id, { installedCompose: crlf });
+    const runner = historyRunner(id, [COMPOSE_V1]);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+  });
+
+  test("the verdict is cached: a second boot for the same pair runs no git at all", async () => {
+    const id = "dc-cache";
+    const mine = `${COMPOSE_V1}# my own note\n`;
+    const repoRoot = setup(id, { installedCompose: mine });
+    const first = historyRunner(id, [COMPOSE_V1]);
+    const lines = [];
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: first, log: (m) => lines.push(m) });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), mine, "the owner's file is never overwritten");
+    assert.deepEqual(stateAt(id), { installedSha: sha(mine), repoComposeSha: sha(COMPOSE_V2), verdict: "edited" });
+    assert.equal(lines.filter((l) => l.includes("local changes")).length, 1, "one log line");
+
+    const second = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: second, log: () => {} });
+    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 0, "the cached verdict needs no git");
+  });
+
+  // ---------------------------------------------------------------------
+  // History unavailable is `unknown`, never `edited`.
+  // ---------------------------------------------------------------------
+  test("git throwing is `unknown`: nothing copied, no edited mark, no card, one log line, nothing cached", async () => {
+    const id = "dc-unknown";
+    const repoRoot = setup(id); // no record
+    const lines = [];
+    const throwing = async (cmd) => {
+      if (cmd === "git") throw new Error("git: not a git repository");
+      return { stdout: "", stderr: "" };
+    };
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: throwing, log: (m) => lines.push(m) });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, "nothing is copied");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), "no edit mark is written");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.sha256")), "no record is written either");
+    assert.equal(lines.filter((l) => l.includes("git history unavailable")).length, 1, "one log line");
+    assert.ok(!lines.some((l) => l.includes("move your changes into")), "never reported as an owner edit");
+    assert.equal(stateAt(id).verdict, "unknown", "`unknown` is recorded for the bind-drift card (never used as a decision)");
+
+    // Because it is not cached, the NEXT boot asks git again instead of
+    // remembering "cannot tell" for good.
+    const second = fakeRunner();
+    const again = [];
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: second, log: (m) => again.push(m) });
+    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 1, "the retry runs git again");
+    assert.equal(again.filter((l) => l.includes("git history unavailable")).length, 0, "the same undecided pair is logged once, not every boot");
+    assert.equal(stateAt(id).verdict, "unknown");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")));
+  });
+
+  test("one unavailable git stops the history lookups for the rest of the boot pass", async () => {
+    const idA = "dc-down-a";
+    const idB = "dc-down-b";
+    const repoRoot = setup(idA);
+    // A second installed docker bundle in the same state: no record, no cache.
+    put(repoRoot, `${idB}/manifest.json`, JSON.stringify({
+      id: idB, name: "Web", version: "2.0.0", type: "bundle", category: "misc", description: "d", docker: { composefile: "docker-compose.yml" },
+    }));
+    put(repoRoot, `${idB}/docker-compose.yml`, COMPOSE_V2);
+    put(CROW_HOME, `bundles/${idB}/manifest.json`, JSON.stringify({ id: idB, version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    put(CROW_HOME, `bundles/${idB}/docker-compose.yml`, COMPOSE_V1);
+    setInstalled([idA, idB]);
+
+    const gitCalls = [];
+    const hanging = async (cmd, args) => {
+      if (cmd === "git") { gitCalls.push(args.join(" ")); throw new Error("git: timed out"); }
+      return { stdout: "", stderr: "" };
+    };
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: hanging, log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(gitCalls.length, 1, "one git call for the whole boot pass, not one per bundle");
+    for (const id of [idA, idB]) {
+      assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, `${id}: nothing is copied`);
+      assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), `${id}: no edit mark`);
+      assert.equal(stateAt(id).verdict, "unknown", `${id}: unknown recorded for the card, not as a decision`);
+    }
+  });
+
+  test("an empty history for the path is `unknown`, not an edit", async () => {
+    const id = "dc-nohistory";
+    const repoRoot = setup(id);
+    const runner = historyRunner(id, []);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, "nothing is copied");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), "a folder git does not track is no edit");
+    assert.equal(stateAt(id).verdict, "unknown", "`unknown` is recorded for the bind-drift card (never used as a decision)");
+    assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 1, "the lookup did run");
+  });
+
+  test("an untracked bundle's empty history does not stop the next bundle's lookup in the same boot", async () => {
+    const { beginComposeHistoryPass, composeInPastCommits } = await import("../servers/gateway/bundle-compose-state.js");
+    beginComposeHistoryPass();
+    const empty = historyRunner("untracked-one", []);
+    assert.equal(await composeInPastCommits({ appRoot: "/repo", bundleId: "untracked-one", composeRel: "docker-compose.yml", bytes: Buffer.from(COMPOSE_V1), runner: empty }), null);
+    const tracked = historyRunner("tracked-two", [COMPOSE_V1]);
+    assert.equal(await composeInPastCommits({ appRoot: "/repo", bundleId: "tracked-two", composeRel: "docker-compose.yml", bytes: Buffer.from(COMPOSE_V1), runner: tracked }), true, "git still answers for the tracked bundle");
+    assert.equal(tracked.calls.filter((c) => c.cmd === "git").length, 1);
+  });
+
+  // ---------------------------------------------------------------------
+  // The edited note clears by itself: the decision is re-evaluated every boot.
+  // ---------------------------------------------------------------------
+  test("an edited compose's note is removed on the boot where the file matches again", async () => {
+    const id = "dc-clear";
+    const mine = `${COMPOSE_V1}# my own note\n`;
+    const repoRoot = setup(id, { installedCompose: mine });
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: historyRunner(id, [COMPOSE_V1]) });
+    assert.ok(existsSync(join(destBundleDir(id), ".crow-compose.edited")), "precondition: flagged");
+    // The owner moved the change into the override and put Crow's file back.
+    put(CROW_HOME, `bundles/${id}/docker-compose.yml`, COMPOSE_V2);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), "the note cleared by itself");
+    assert.deepEqual(stateAt(id), { installedSha: sha(COMPOSE_V2), repoComposeSha: sha(COMPOSE_V2), verdict: "match" });
+  });
+
+  // ---------------------------------------------------------------------
+  // A refresh never breaks Start: the shipped compose's required variables
+  // must be fillable from the installed .env (or the gateway's env).
+  // ---------------------------------------------------------------------
+  test("a shipped compose needing a ${X:?...} the installed .env does not set is NOT copied", async () => {
+    const id = "dc-needs";
+    const repoV3 = 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:8555:${WEB_PORT:?set WEB_PORT}"\n';
+    const repoRoot = setup(id, { repoCompose: repoV3, recorded: sha(COMPOSE_V1) });
+    const lines = [];
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: (m) => lines.push(m) });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, "the old copy keeps working");
+    assert.deepEqual(JSON.parse(readAt(CROW_HOME, `bundles/${id}/.crow-compose.needs-config`)).missing, ["WEB_PORT"]);
+    assert.equal(stateAt(id).verdict, "needs-config");
+    assert.ok(lines.some((l) => l.includes("WEB_PORT")), "the log names the missing key");
+
+    // Once the owner sets it, the next boot copies and the note clears.
+    put(CROW_HOME, `bundles/${id}/.env`, "WEB_PORT=5000\n");
+    const second = fakeRunner();
+    const after = await repairInstalledBundleAssets({ appBundles: repoRoot, run: second });
+    assert.deepEqual(after.errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repoV3);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.needs-config")));
+    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 0, "the cached match needs no git");
+  });
+
+  test("a defaulted ${X:-...} is not a required key", async () => {
+    const id = "dc-default";
+    const repoV3 = 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:${WEB_PORT:-8555}:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repoV3, recorded: sha(COMPOSE_V1) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repoV3);
+  });
+
+  // ---------------------------------------------------------------------
+  // An update that would also change an image is held (operator ruling): the
+  // new tag may be OLDER than the one running, and a downgraded image can
+  // migrate the data's schema on the next restart.
+  // ---------------------------------------------------------------------
+  const IMG_INSTALLED = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+  const IMG_PINNED = 'services:\n  web:\n    image: linkding:1.47.0\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+  const imageNote = (id) => JSON.parse(readAt(CROW_HOME, `bundles/${id}/.crow-compose.image-change`));
+
+  test("the images are unchanged: a tightened port is still refreshed", async () => {
+    const id = "dc-img-same";
+    const installed = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repo = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: installed, recorded: sha(installed) });
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repo, "the tightened bind is applied");
+    assert.equal(stateAt(id).verdict, "match");
+    assert.ok(repaired.some((r) => r.includes(id) && r.includes("compose updated")));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("a :latest → pinned image change is held: nothing is copied, the note names both images", async () => {
+    const id = "dc-img-hold";
+    const repoRoot = setup(id, { repoCompose: IMG_PINNED, installedCompose: IMG_INSTALLED, recorded: sha(IMG_INSTALLED) });
+    const lines = [];
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: (m) => lines.push(m) });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED, "the installed file is untouched");
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }]);
+    assert.equal(stateAt(id).verdict, "image-change");
+    assert.equal(readAt(destBundleDir(id), "docker-compose.override.yml"), OVERRIDE, "the override is never touched");
+    assert.ok(repaired.every((r) => !r.includes("compose updated")), "not reported as applied");
+    assert.ok(lines.some((l) => l.includes(id) && l.includes("web")), "one line names the bundle and the service");
+
+    // Cached for this exact pair: the next boot decides again with no git at all.
+    const second = fakeRunner();
+    const again = await repairInstalledBundleAssets({ appBundles: repoRoot, run: second, log: () => {} });
+    assert.deepEqual(again.errors, []);
+    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 0);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED);
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }]);
+  });
+
+  test("a service the repo adds counts as a change and is held too", async () => {
+    const id = "dc-img-added";
+    const repo = IMG_INSTALLED + '  api:\n    image: linkding-api:1.0.0\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: IMG_INSTALLED, recorded: sha(IMG_INSTALLED) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED);
+    assert.deepEqual(imageNote(id), [{ service: "api", from: null, to: "linkding-api:1.0.0" }]);
+    assert.equal(stateAt(id).verdict, "image-change");
+  });
+
+  test("a service that stops naming an image is a change too, not a silent apply", async () => {
+    const id = "dc-img-dropped";
+    const repo = 'services:\n  web:\n    build: .\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: IMG_INSTALLED, recorded: sha(IMG_INSTALLED) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED);
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: null }]);
+  });
+
+  test("${IMG:-default} is resolved against the installed .env, both ways", async () => {
+    const id = "dc-img-default";
+    const viaDefault = 'services:\n  web:\n    image: ${IMG:-linkding:latest}\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repo = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    // No .env: the default resolves to the repo's value → not an image change.
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: viaDefault, recorded: sha(viaDefault) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repo);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("a value in the installed .env wins over the ${IMG:-default}, so the difference is held", async () => {
+    const id = "dc-img-env";
+    const viaEnv = 'services:\n  web:\n    image: ${IMG:-linkding:latest}\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: IMG_PINNED, installedCompose: viaEnv, recorded: sha(viaEnv), installedEnv: "IMG=linkding:latest\n" });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), viaEnv);
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }]);
+  });
+
+  test("an image: nested in an extension block is not the service's image", async () => {
+    const id = "dc-img-nested";
+    const installed = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repo = 'services:\n  web:\n    image: linkding:latest\n    x-note:\n      image: something-else\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: installed, recorded: sha(installed) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repo, "the service's own image is unchanged");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("the image-change note clears by itself once the two files name the same image", async () => {
+    const id = "dc-img-clear";
+    const repoRoot = setup(id, { recorded: sha(COMPOSE_V1) });
+    put(CROW_HOME, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify([{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }])}\n`);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+    assert.equal(stateAt(id).verdict, "match");
+  });
+
+  test("an owner-edited compose drops a stale image-change note: that hold is not the reason any more", async () => {
+    const id = "dc-img-edited";
+    const edited = `${IMG_INSTALLED}    # my own note\n`;
+    const repoRoot = setup(id, { repoCompose: IMG_PINNED, installedCompose: edited });
+    put(CROW_HOME, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify([{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }])}\n`);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: historyRunner(id, [IMG_INSTALLED]), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), edited, "the owner's file is never overwritten");
+    assert.ok(existsSync(join(destBundleDir(id), ".crow-compose.edited")));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("an owner-edited compose is kept and flagged; the log names the bundle, never the contents", async () => {
+    const id = "dc-edited";
+    const edited = `${COMPOSE_V1}    # my own note\n`;
+    const repoRoot = setup(id, { installedCompose: edited });
+    const lines = [];
+    const runner = async (cmd, args) => {
+      if (cmd === "git" && args[2] === "log") return { stdout: `${rawRow(id, gitBlob(COMPOSE_V2))}\n`, stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner, log: (m) => lines.push(m) });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), edited, "the owner's file is never overwritten");
+    assert.ok(existsSync(join(destBundleDir(id), ".crow-compose.edited")), "the edit is recorded for the Fix-it card");
+    assert.ok(lines.some((l) => l.includes(id) && l.includes("local changes")), "one line names the bundle");
+    assert.ok(lines.some((l) => l.includes("docker-compose.override.yml")), "the log says where owner changes belong");
+    assert.ok(!lines.some((l) => l.includes("my own note")), "never the file's contents");
+    assert.equal(readAt(destBundleDir(id), "docker-compose.override.yml"), OVERRIDE);
+  });
+
+  test("an installed copy with \"refresh\": false is left completely alone", async () => {
+    const id = "dc-optout";
+    const repoRoot = setup(id, { installedExtra: { refresh: false } });
+    const runner = fakeRunner();
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.sha256")));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")));
+    assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 0);
+  });
+
+  test("a compose listed in refreshFiles is still copied exactly as before, edit or not", async () => {
+    const id = "dc-optin";
+    const edited = `${COMPOSE_V1}    # local note\n`;
+    const repoRoot = setup(id, { installedCompose: edited, refreshFiles: ["docker-compose.yml"] });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+    assert.equal(readAt(destBundleDir(id), ".crow-compose.sha256").trim(), sha(COMPOSE_V2));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")));
+  });
+
+  test("the install/refresh record writes the sha of the compose bytes and clears an old edit note", async () => {
+    const { recordInstalledCompose, readRecordedComposeSha, markComposeEdited, readComposeEdited } = await import("../servers/gateway/bundle-compose-state.js");
+    const id = "dc-record";
+    const repoRoot = setup(id);
+    const dir = destBundleDir(id);
+    put(CROW_HOME, `bundles/${id}/.crow-compose.edited`, "{}\n");
+    assert.ok(readComposeEdited(dir), "precondition: an old edit note is present");
+    const recorded = recordInstalledCompose(dir, JSON.parse(readAt(repoRoot, `${id}/manifest.json`)));
+    assert.equal(recorded, sha(COMPOSE_V1));
+    assert.equal(readRecordedComposeSha(dir), sha(COMPOSE_V1));
+    assert.equal(readComposeEdited(dir), null, "the record is proof the installed copy is Crow's own again");
+    markComposeEdited(dir, "docker-compose.yml");
+    assert.deepEqual(readComposeEdited(dir), { compose: "docker-compose.yml" });
   });
 });
 

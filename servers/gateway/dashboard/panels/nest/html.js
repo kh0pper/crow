@@ -14,6 +14,7 @@ import { isSafeDestPath } from "../../../../shared/sso-ticket.js";
 import { appIconSvg } from "../../shared/app-icons.js";
 import { appTileLink } from "../../shared/app-link.js";
 import { STALE_FLASH, STALE_MESSAGE, UNWALLED_FLASH, unwalledMessageFor } from "../../../fix-it/remedies/addon-unwall.js";
+import { NEEDS_KEY_FLASH, needsKeyMessage, OWNER_ONLY_FLASH, OWNER_ONLY_MESSAGE } from "../../../fix-it/remedies/restore-bundle-compose.js";
 
 // ─── Icons ───
 // One shared stroke set (shared/app-icons.js). Icon strings from manifests and
@@ -116,8 +117,9 @@ function buildPeerTileHref(gatewayUrl, hostname, pathname, port) {
  * @param {string} lang
  * @param {string|null} flash  — flash param from query string after backup action
  * @param {string|null} flashAddon — the add-on a flash may name (re-checked)
+ * @param {string|null} flashKey — the env key a compose flash may name (re-checked)
  */
-function buildHealthStrip(health, lang, flash, flashAddon = null) {
+function buildHealthStrip(health, lang, flash, flashAddon = null, flashKey = null) {
   // Flash banner (shown after POST backup redirect)
   let flashHtml = "";
   if (flash === "backup_ok") {
@@ -136,6 +138,10 @@ function buildHealthStrip(health, lang, flash, flashAddon = null) {
     flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(unwalledMessageFor(flashAddon))}</div>`;
   } else if (flash === STALE_FLASH) {
     flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(STALE_MESSAGE)}</div>`;
+  } else if (flash === OWNER_ONLY_FLASH) {
+    flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(OWNER_ONLY_MESSAGE)}</div>`;
+  } else if (flash === NEEDS_KEY_FLASH) {
+    flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(needsKeyMessage(flashKey))}</div>`;
   }
 
   if (!health) return flashHtml;
@@ -198,7 +204,7 @@ function buildHealthStrip(health, lang, flash, flashAddon = null) {
 }
 
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash, flashAddon, fixItHtml } = data;
+  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash, flashAddon, flashKey, fixItHtml } = data;
   const carouselMode = Array.isArray(peerOverviews) && peerOverviews.length > 0;
 
   let tileIndex = 0;
@@ -318,7 +324,7 @@ export function buildNestHTML(data, lang) {
   </div>`;
 
   // --- Health Strip ---
-  const healthStripHtml = buildHealthStrip(healthSignals || null, lang, flash || null, flashAddon || null);
+  const healthStripHtml = buildHealthStrip(healthSignals || null, lang, flash || null, flashAddon || null, flashKey || null);
 
   // --- Unified carousel (Phase 2) ---
   // Active when the handler wrapper has passed peer overviews. One

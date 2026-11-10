@@ -22,7 +22,7 @@ const FIXTURES = mkdtempSync(join(tmpdir(), "crow-hooks-app-"));
 B._setAppBundlesForTest(FIXTURES);
 const ownerless = async () => ({ stdout: "", stderr: "" }); // `docker ps` → no containers
 after(() => {
-  B._setComposeRunnerForTest(null); B._setHookRunnerForTest(null); B._setDockerRunnerForTest(null);
+  B._setComposeRunnerForTest(null); B._setHookRunnerForTest(null); B._setDockerRunnerForTest(null); B._setBindDriftRecheckForTest(null);
   rmSync(CROW_HOME, { recursive: true, force: true });
   rmSync(FIXTURES, { recursive: true, force: true });
 });
@@ -341,6 +341,40 @@ test("version-bump refresh re-copies the hook script's directory for a docker bu
   writeFileSync(join(CROW_HOME, "installed.json"), JSON.stringify([{ id, type: "bundle", version: "0.1.0" }]));
   await B.repairInstalledBundleAssets({ appBundles: repo, run: async () => ({ stdout: "", stderr: "" }) });
   assert.equal(readFileSync(join(dest, "ops", "bootstrap.sh"), "utf8"), "echo v2\n");
+});
+
+test("the bind-drift check re-runs after Start, after stop and after an install's up", async () => {
+  const seen = [];
+  B._setBindDriftRecheckForTest((id) => seen.push(id));
+  try {
+    // Start: the containers were just recreated, so the card must re-decide now.
+    const startId = "hk-bind-start";
+    seedInstalledCompose(startId, "services:\n  app:\n    image: busybox:1.36\n");
+    B._setDockerRunnerForTest(ownerless);
+    const composeCalls = [];
+    B._setComposeRunnerForTest(async (args) => { composeCalls.push(args[0]); return { stdout: "", stderr: "" }; });
+    const started = await startBundle(startId);
+    assert.equal(started.status, 200, JSON.stringify(started.body));
+    assert.deepEqual(seen, [startId], "Start re-runs the check for the bundle it started");
+
+    // Stop: nothing is running any more, so a drift card must resolve now.
+    const stopId = "hk-bind-stop";
+    seedInstalledCompose(stopId, "services:\n  app:\n    image: busybox:1.36\n");
+    const app = express(); app.use(express.json()); app.use(B.default());
+    const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/bundles/api/stop`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: stopId }) });
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    } finally { server.close(); }
+    assert.deepEqual(seen, [startId, stopId], "stop re-runs the check too");
+
+    // Install: its `up` created the containers, so the check sees them right away.
+    const installId = "hk-bind-install";
+    await install(installId, fixture(installId, {}));
+    assert.deepEqual(seen, [startId, stopId, installId], "an install's up re-runs the check");
+  } finally {
+    B._setBindDriftRecheckForTest(null);
+  }
 });
 
 test("contract: missing postInstall script and unsafe precreate are manifest errors", () => {
