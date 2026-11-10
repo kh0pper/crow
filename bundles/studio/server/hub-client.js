@@ -106,10 +106,18 @@ export function createHubClient({
     return tokenPath || join(crowHome(), TOKEN_FILE);
   }
 
-  /** @returns {string|null} the token as the gateway wrote it, read fresh. */
+  /**
+   * The token this process presents, read fresh on every call.
+   *
+   * A wall hands its spawn a door token on a read-only fd and names it in
+   * `CROW_ADDON_DOOR_TOKEN_FILE`; when that variable is set, that file is the only
+   * place a token is read from (the boot token file belongs to the unwalled path).
+   * @returns {string|null} the token, or null when the file is unreadable or empty.
+   */
   function readToken() {
+    const doorFile = process.env.CROW_ADDON_DOOR_TOKEN_FILE;
     try {
-      const token = String(readFileSync(tokenFile(), "utf8")).trim();
+      const token = String(readFileSync(doorFile || tokenFile(), "utf8")).trim();
       return token === "" ? null : token;
     } catch {
       return null;

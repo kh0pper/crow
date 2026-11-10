@@ -39,6 +39,48 @@ export function canonicalCrowHome(env = process.env) {
   try { return { CROW_HOME: realpathSync(env.CROW_HOME) }; } catch { return { CROW_HOME: resolvePath(env.CROW_HOME) }; }
 }
 
+/** The gateway's door for this instance's browser container (servers/gateway/routes/addon-doors.js). */
+export const BROWSER_CONTAINER_DOOR = "/api/addon-doors/browser/container";
+/** How long a door call may take: a compose recreate can rebuild an image. */
+const DOOR_TIMEOUT_MS = 100_000;
+
+/**
+ * The door token file this spawn was given, or null when this process reaches the
+ * gateway directly (not walled) and drives docker itself.
+ * @returns {string|null}
+ */
+function doorTokenFile() {
+  return process.env.CROW_ADDON_DOOR_TOKEN_FILE || null;
+}
+
+/**
+ * Ask the gateway to restart or recreate this instance's browser container.
+ *
+ * Used instead of the docker CLI when this process runs inside a wall: it has no
+ * docker socket and no shell. Nothing from the request is shaped here except the
+ * action and the proxy value the caller already validated.
+ * @param {"restart"|"recreate"} action
+ * @param {string} [proxyUrl] - only with "recreate"
+ * @returns {Promise<{ok: true}|{ok: false, error: string}>}
+ */
+export async function askContainerDoor(action, proxyUrl) {
+  let token;
+  try { token = readFileSync(String(doorTokenFile()), "utf8").trim(); } catch { return { ok: false, error: "the add-on door token is missing — restart the add-on" }; }
+  const base = `http://127.0.0.1:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+  try {
+    const r = await fetch(base + BROWSER_CONTAINER_DOOR, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(action === "recreate" ? { action, proxy_url: proxyUrl } : { action }),
+      signal: AbortSignal.timeout(DOOR_TIMEOUT_MS),
+    });
+    if (!r.ok) return { ok: false, error: `the gateway answered HTTP ${r.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err?.message || "the gateway did not answer" };
+  }
+}
+
 /**
  * Poll `<cdpUrl>/json/version` until it answers (or the attempts run out). The bearer, when
  * this instance has a token, rides in `headers`; exported so the header contract is testable
@@ -203,22 +245,28 @@ export function createBrowserServer(options = {}) {
           // No VNC password to carry over (1.4.0: loopback VNC behind the Crow
           // sign-in). An older compose file that still demands one reads it from
           // its own .env, next to that file.
-          let composeFile = "";
-          try {
-            composeFile = execFileSync("docker", ["inspect", container, "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
-          } catch { /* no running container: the fallback below */ }
-          // Fallback: this bundle's own compose file, derived from our location
-          // (never an assumed checkout path).
-          if (!composeFile) composeFile = fileURLToPath(new URL("../docker-compose.yml", import.meta.url));
-          try {
-            execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--force-recreate"], {
-              timeout: 90000,
-              // A canonical CROW_HOME (symlinks resolved): the container stamps its
-              // profile with it and refuses a different spelling on the next start.
-              env: { ...process.env, ...canonicalCrowHome(), CROW_BROWSER_PROXY: proxy_url },
-            });
-          } catch (e) {
-            return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${e.message}` }], isError: true };
+          if (doorTokenFile()) {
+            // Walled: the gateway runs the compose recreate with a fixed argv.
+            const done = await askContainerDoor("recreate", proxy_url);
+            if (!done.ok) return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${done.error}` }], isError: true };
+          } else {
+            let composeFile = "";
+            try {
+              composeFile = execFileSync("docker", ["inspect", container, "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
+            } catch { /* no running container: the fallback below */ }
+            // Fallback: this bundle's own compose file, derived from our location
+            // (never an assumed checkout path).
+            if (!composeFile) composeFile = fileURLToPath(new URL("../docker-compose.yml", import.meta.url));
+            try {
+              execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--force-recreate"], {
+                timeout: 90000,
+                // A canonical CROW_HOME (symlinks resolved): the container stamps its
+                // profile with it and refuses a different spelling on the next start.
+                env: { ...process.env, ...canonicalCrowHome(), CROW_BROWSER_PROXY: proxy_url },
+              });
+            } catch (e) {
+              return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${e.message}` }], isError: true };
+            }
           }
           // Poll CDP readiness (the request carries this instance's bearer, if any).
           await waitForCdp(cdpUrl, { headers: cdpHeaders() });
@@ -231,7 +279,13 @@ export function createBrowserServer(options = {}) {
             cdpSession = null;
           }
           try {
-            execFileSync("docker", ["restart", container], { timeout: 30000 });
+            if (doorTokenFile()) {
+              // Walled: the gateway restarts this instance's container.
+              const done = await askContainerDoor("restart");
+              if (!done.ok) throw new Error(done.error);
+            } else {
+              execFileSync("docker", ["restart", container], { timeout: 30000 });
+            }
             // Wait for Chrome to be ready
             await new Promise((r) => setTimeout(r, 5000));
           } catch {
@@ -275,6 +329,9 @@ export function createBrowserServer(options = {}) {
     {},
     async () => {
       const containerRunning = (() => {
+        // A walled process has no docker socket and no shell: the state is unknown
+        // here, and the gateway's door is not asked (status is a read, not an action).
+        if (doorTokenFile()) return "unknown (no docker access)";
         try {
           const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", container], { encoding: "utf-8", timeout: 5000 }).trim();
           return out === "true";

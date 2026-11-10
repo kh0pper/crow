@@ -833,6 +833,18 @@ export function createKioskRuntime(deps) {
       next();
     };
     const internal = async (req, res, next) => {
+      // A walled add-on reaches this router through its relay, which marks the socket:
+      // only this spawn's door token, for this method and the FULL path, is accepted on
+      // it. The legacy announce token is never accepted from the mark, and the mark never
+      // falls through to the loopback check below.
+      const door = deps.addonDoor;
+      if (typeof door?.isAddonRelayed === "function" && door.isAddonRelayed(req)) {
+        const marked = String(req.headers.authorization || "");
+        let ok = false;
+        try { ok = door.validate(marked.startsWith("Bearer ") ? marked.slice(7) : "", "kiosk", req.method, req.baseUrl + req.path) === true; } catch { ok = false; }
+        if (!ok) return res.status(401).json({ error: "unauthorized" });
+        return next();
+      }
       if (!directLoopback(req)) return res.status(403).json({ error: "loopback_only" });
       const auth = String(req.headers.authorization || "");
       const ok = await withDb((db) => deps.announceToken.validate(db, auth.startsWith("Bearer ") ? auth.slice(7) : ""));

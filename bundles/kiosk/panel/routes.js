@@ -34,6 +34,11 @@ const { wrapPcmAsWav } = await appImport("servers/gateway/voice/turn-helpers.js"
 const { crowVoiceTurnOptions, VOICE_DENY_TOOLS, withVoiceProfiles, createVoiceBotLoader, CROW_VOICE_BOT_ID, isVoiceBotId, ownToolsLoaded } = await appImport("servers/gateway/voice/crow-voice.js");
 const { readSetting, writeSetting } = await appImport("servers/gateway/dashboard/settings/registry.js");
 const { ensureKioskAnnounceToken, validateKioskAnnounceToken } = await appImport("servers/gateway/local-token.js");
+// The add-on door: a walled kiosk reaches /api/kiosk/internal through its own egress
+// forwarder, whose sockets carry the add-on mark. That mark and the door-token check are
+// core policy, so both are imported rather than restated here.
+const { isAddonRelayAddr } = await appImport("servers/shared/bot-doors.js");
+const { validateAddonDoorToken } = await appImport("servers/shared/addon-doors.js");
 const { PERCH_TOKENS } = await appImport("servers/gateway/dashboard/shared/design-tokens.js");
 const { readPortrait } = await appImport("servers/sharing/profile-avatar.js");
 const { createKioskRuntime, createSttWarmup, kioskThemeCss } = await bImport("server/runtime.js");
@@ -79,6 +84,7 @@ const runtime = createKioskRuntime({
   themeCss: () => kioskThemeCss(PERCH_TOKENS),
   files: { publicDir: join(BUNDLE_DIR, "public"), birdSvgPath: join(APP_ROOT, "bundles", "ramble", "server", "bird-svg.cjs") },
   announceToken: { validate: validateKioskAnnounceToken },
+  addonDoor: { isAddonRelayed: (req) => isAddonRelayAddr(req.socket?.remoteAddress), validate: validateAddonDoorToken },
   addonEnv, dataDir: resolveDataDir(),
   registerVoiceSurface,
 });

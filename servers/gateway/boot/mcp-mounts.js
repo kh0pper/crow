@@ -24,6 +24,7 @@ import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken, ensurePhoneToken, ensureModelsToken, ensureArtifactsToken, ensurePeerRelayToken, rotateLlmCloudToken, SERVICES_TOKEN, SATELLITE_TOOLS_TOKEN, SECRETS_TOKEN } from "../local-token.js";
 import { peerRelayRouter } from "../routes/peer-relay.js";
+import { addonDoorsRouter } from "../routes/addon-doors.js";
 import { actorSignRouter } from "../routes/actor-sign.js";
 import { initGatewayActorKey, verifyActorSig, verifyBoardActorSig, verifyArtifactsActorSig, verifyBoardThreadActorSig, verifySecretsActorSig } from "../../../scripts/pi-bots/actor-sig.mjs";
 import { pathToFileURL } from "node:url";
@@ -387,6 +388,9 @@ export async function mountMcpServers(app, deps) {
   // Loopback-mount family tokens (pathScopedToken): fresh on every boot.
   await rotateFamilyTokensAtBoot();
   app.use(peerRelayRouter({ createDbClient }));
+  // The add-on doors that must run in the gateway (D3: the browser's container restart and
+  // proxy recreate). A marked socket plus that spawn's door token, and a fixed docker argv.
+  app.use(addonDoorsRouter());
   // Item 46 PR-B: the loopback signing relay for the key-less bot hosts
   // (routes/actor-sign.js). It authenticates the calling process itself (the
   // main process of a live pibot-* unit) and signs with the key minted below;
