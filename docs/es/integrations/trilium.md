@@ -27,11 +27,13 @@ Instala TriliumNext como un bundle de Crow:
 
 O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-TriliumNext estará disponible en `http://tu-servidor:8080` después de la instalación. Completa la configuración inicial en la interfaz web para establecer tu contraseña.
+TriliumNext estará disponible en `http://tu-servidor:8080` después de la instalación. Crow establece la contraseña de TriliumNext durante la instalación, así que nadie más en la máquina puede quedarse con las notas primero — la contraseña se guarda en **Ajustes → Contraseñas** del Crow's Nest.
+
+Si tu instalación es anterior (o si estableciste la contraseña tú mismo), TriliumNext conserva el login que creaste: pulsa **Set it up for me** (configúralo por mí) en la tarjeta de Extensiones para que Crow lo intente donde aún pueda, o **Save the login you made** (guarda el login que creé) para que Crow guarde el tuyo. En cualquier caso sigue visible en **Ajustes → Contraseñas**.
 
 ### Opción B: Conectar a TriliumNext existente
 
-Si ya tienes un servidor TriliumNext funcionando, conecta Crow directamente.
+Si ya tienes un servidor TriliumNext funcionando, conecta Crow directamente. Su login es el de ese servidor; Crow no crea una cuenta allí.
 
 #### Paso 1: Obtener tu token ETAPI
 

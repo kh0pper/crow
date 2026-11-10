@@ -91,7 +91,7 @@
     {
       "id": "adguard-home",
       "name": "AdGuard Home",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Network-wide ads and tracker blocking DNS server. Filters queries with user-configurable blocklists and serves the admin UI in the browser.",
       "type": "bundle",
       "author": "Crow",
@@ -124,10 +124,7 @@
         "skills/adguard-home.md"
       ],
       "requires": {
-        "env": [
-          "ADGUARD_USERNAME",
-          "ADGUARD_PASSWORD"
-        ],
+        "env": [],
         "min_ram_mb": 256,
         "min_disk_mb": 200
       },
@@ -140,13 +137,14 @@
         },
         {
           "name": "ADGUARD_USERNAME",
-          "description": "Admin username (set during initial setup wizard)",
-          "required": true
+          "description": "Admin username. Crow creates `admin` at install and keeps it as `admin`; only change it if you set the app up yourself.",
+          "default": "admin",
+          "required": false
         },
         {
           "name": "ADGUARD_PASSWORD",
-          "description": "Admin password (set during initial setup wizard)",
-          "required": true,
+          "description": "Admin password. Crow generates it at install, fills it into the setup wizard and keeps it in Settings → Passwords.",
+          "required": false,
           "secret": true
         }
       ],
@@ -161,9 +159,17 @@
         "label": "AdGuard Home"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "ADGUARD_PASSWORD",
+        "userEnv": "ADGUARD_USERNAME"
       },
-      "notes": "First-boot: open http://localhost:3020 and complete the setup wizard. Bind admin to port 3000 (container), DNS to port 53, and set admin credentials — then copy them into .env. DNS port exposed on 127.0.0.1:5335 to avoid conflicting with systemd-resolved on host. To serve DNS to your LAN, edit the compose to bind 0.0.0.0:53 (significant — plan the host firewall and upstream DNS redirect first).",
+      "notes": "Crow fills in AdGuard Home's first-run setup at install: the admin account `admin` with a generated password (Settings → Passwords), the web UI kept on container port 3000 (host 3020) and DNS on container port 53. DNS is exposed on 127.0.0.1:5335 to avoid conflicting with systemd-resolved on host. To serve DNS to your LAN, edit the compose to bind 0.0.0.0:53 (significant — plan the host firewall and upstream DNS redirect first).",
       "official": true
     },
     {
@@ -1056,7 +1062,7 @@
     {
       "id": "changedetection",
       "name": "Change Detection",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Watch any webpage for changes — get notified when prices drop, stock appears, or content updates",
       "type": "bundle",
       "author": "Crow",
@@ -1117,10 +1123,16 @@
         "label": "Change Detection"
       },
       "firstAdmin": {
-        "mode": "finish-setup",
-        "note": "It has no password by default; set one in its settings so nobody else on this machine can lock you out."
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "CHANGEDETECTION_PASSWORD"
       },
-      "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management.",
+      "notes": "First-run: Crow turns on Change Detection's password protection at install and keeps the password in Settings → Passwords. Go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management.",
       "official": true
     },
     {
@@ -3023,7 +3035,7 @@
     {
       "id": "kolibri",
       "name": "Kolibri",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Offline-first learning platform from Learning Equality — self-hosted STEM and literacy content for ages 5-18. Classroom-capable, LAN-sync built in, thousands of free educational channels curated by the global learning community.",
       "type": "bundle",
       "author": "Crow",
@@ -3073,7 +3085,7 @@
         },
         {
           "name": "KOLIBRI_FACILITY_NAME",
-          "description": "Optional default facility name displayed on first run. First-run setup wizard is otherwise completed in the web UI.",
+          "description": "Facility name Crow creates at install (default `Home Lab`). Kolibri itself does not read this variable; Crow's setup script does.",
           "required": false
         }
       ],
@@ -3086,12 +3098,22 @@
         "label": "Kolibri"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 240
+        },
+        "user": "admin",
+        "secretEnv": "KOLIBRI_ADMIN_PASSWORD"
       },
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "sibling_of": [
         "maker-lab"
       ],
-      "notes": "First-run setup (admin account + facility) is completed in the Kolibri web UI at http://<host>:<KOLIBRI_HTTP_PORT>/. Once configured, channels can be imported from Kolibri Studio or from a LAN peer. Sized for a Raspberry Pi 4 (512 MB floor); a full primary-grade STEM bundle typically imports 5-10 GB of channels. Kolibri has LAN-sync built in — two instances on the same network auto-discover each other for offline classrooms.",
+      "notes": "Crow creates the superuser `admin` (password in Settings → Passwords) and a facility at install, so Kolibri's own first-run wizard never has to be claimed. Content is stored under the container's /kolibri (its KOLIBRI_HOME) — installs made before this bundle mounted that path never started a container at all, so changing the mount loses no content. Channels are then imported in Kolibri from Kolibri Studio or from a LAN peer. Sized for a Raspberry Pi 4 (512 MB floor); a full primary-grade STEM bundle typically imports 5-10 GB of channels. Kolibri has LAN-sync built in — two instances on the same network auto-discover each other for offline classrooms.",
       "official": true
     },
     {
@@ -6988,7 +7010,7 @@
     {
       "id": "trilium",
       "name": "TriliumNext",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
       "type": "bundle",
       "author": "Crow",
@@ -7054,9 +7076,16 @@
         "label": "TriliumNext"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "trilium",
+        "secretEnv": "TRILIUM_PASSWORD"
       },
-      "notes": "Self-host via Docker or connect to existing TriliumNext (set TRILIUM_URL + TRILIUM_ETAPI_TOKEN). Get your ETAPI token from Options > ETAPI in the TriliumNext UI.",
+      "notes": "Self-host via Docker or connect to existing TriliumNext (set TRILIUM_URL + TRILIUM_ETAPI_TOKEN). TriliumNext's password is set by Crow at install and kept in Settings → Passwords. Get your ETAPI token from Options > ETAPI in the TriliumNext UI.",
       "official": true
     },
     {
@@ -7352,7 +7381,7 @@
     {
       "id": "vikunja",
       "name": "Vikunja",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
       "type": "bundle",
       "author": "Crow",
@@ -7413,9 +7442,13 @@
         "label": "Vikunja"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "finish-setup",
+        "note": "Registration stays open until you turn it off: create your account, then set VIKUNJA_SERVICE_ENABLEREGISTRATION=false."
       },
-      "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create tokens in Vikunja under Settings > API Tokens.",
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
+      "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create accounts in Vikunja's web UI, then tokens under Settings > API Tokens. The compose derives Vikunja's public URL from VIKUNJA_URL.",
       "official": true
     },
     {

@@ -9,6 +9,9 @@
     "adguard-home": {
       "ADGUARD_URL": [
         "http://localhost:3020"
+      ],
+      "ADGUARD_USERNAME": [
+        "admin"
       ]
     },
     "audiobookshelf": {

@@ -27,7 +27,11 @@ Install Vikunja as a Crow bundle. This runs Vikunja in Docker alongside your Cro
 
 Or install from the **Extensions** panel in the Crow's Nest.
 
-Vikunja will be available at `http://your-server:3456` for initial setup. Create an account via the web UI, then generate an API token from **Settings** > **API Tokens**.
+Vikunja will be available at `http://your-server:3456` for initial setup. Vikunja keeps its own registration page, so you create the account: register in the web UI, then close registration again by setting `VIKUNJA_SERVICE_ENABLEREGISTRATION=false` and restarting the bundle. Until you do, anyone who can reach that page can create an account. The Extensions card shows **Finish Vikunja's setup now** with a direct link until you press Done.
+
+After that, generate an API token from **Settings** > **API Tokens**.
+
+Vikunja's compose derives its public URL from `VIKUNJA_URL`, so set that to the address your browsers really use before the first start.
 
 ### Option B: Connect to existing Vikunja
 

@@ -1,7 +1,7 @@
 {
   "id": "vikunja",
   "name": "Vikunja",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
   "type": "bundle",
   "author": "Crow",
@@ -20,6 +20,10 @@
   ],
   "ports": [3456],
   "webUI": { "port": 3456, "path": "/", "label": "Vikunja" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create tokens in Vikunja under Settings > API Tokens."
+  "firstAdmin": {
+    "mode": "finish-setup",
+    "note": "Registration stays open until you turn it off: create your account, then set VIKUNJA_SERVICE_ENABLEREGISTRATION=false."
+  },
+  "refreshFiles": ["docker-compose.yml"],
+  "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create accounts in Vikunja's web UI, then tokens under Settings > API Tokens. The compose derives Vikunja's public URL from VIKUNJA_URL."
 }

@@ -1,7 +1,7 @@
 {
   "id": "changedetection",
   "name": "Change Detection",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Watch any webpage for changes — get notified when prices drop, stock appears, or content updates",
   "type": "bundle",
   "author": "Crow",
@@ -21,8 +21,11 @@
   "ports": [5010],
   "webUI": { "port": 5010, "path": "/", "label": "Change Detection" },
   "firstAdmin": {
-    "mode": "finish-setup",
-    "note": "It has no password by default; set one in its settings so nobody else on this machine can lock you out."
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "CHANGEDETECTION_PASSWORD"
   },
-  "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management."
+  "notes": "First-run: Crow turns on Change Detection's password protection at install and keeps the password in Settings → Passwords. Go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management."
 }

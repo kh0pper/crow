@@ -23,12 +23,19 @@ shifts. This bundle wraps its REST API with five MCP tools.
 ## First-run setup
 
 1. Install and start the bundle. The UI comes up at `http://localhost:5010`.
-2. Open it, go to **Settings > API**, and copy the API key.
-3. Paste the key into Crow settings as `CHANGEDETECTION_API_KEY`.
+2. **Crow turns on Change Detection's password protection itself** at install and keeps the
+   password in **Settings → Passwords**. An install that was already guarded (an older
+   install, or one you set up yourself) is left alone — press **Save the login you made** on
+   the Extensions card so Crow keeps your login. To set or change it by hand, use
+   **Settings → Password protection** in the app.
+3. Go to **Settings > API**, copy the API key, and paste it into Crow settings as
+   `CHANGEDETECTION_API_KEY`.
 4. Use the web UI or `changedetection_create_watch` to add watches.
 
 Without an API key, every tool call fails with "authentication failed" —
 this is expected. Direct the user to complete step 3.
+
+The app password guards the web UI only; the MCP tools keep using the API key.
 
 ## Workflows
 

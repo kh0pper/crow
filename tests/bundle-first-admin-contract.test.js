@@ -319,6 +319,10 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
     "bookstack",
     "calibre-web",
     "stirling-pdf",
+    "adguard-home",
+    "trilium",
+    "changedetection",
+    "kolibri",
   ]) {
     assert.deepEqual(
       { mode: manifests[id]?.firstAdmin?.mode, via: manifests[id]?.firstAdmin?.via, script: manifests[id]?.firstAdmin?.setup?.script },
@@ -353,9 +357,25 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
   // ntfy denies everything by default and signup is off: there is nothing to claim
   // (review S1) — Crow's own login is the only one.
   assert.deepEqual(manifests.ntfy?.firstAdmin, { mode: "none", note: "Crow creates its login for phone alerts; nobody can sign up." });
-  // Change Detection has no password at all until the operator sets one (nit 8).
-  assert.equal(manifests.changedetection?.firstAdmin?.mode, "finish-setup");
-  assert.match(manifests.changedetection?.firstAdmin?.note || "", /has no password by default/);
+  // Change Detection has no password at all until one is set (nit 8). Crow sets it at
+  // install now, through the app's own settings form, so nothing is left to claim — and the
+  // old note telling the operator to set one by hand is gone.
+  assert.equal(manifests.changedetection?.firstAdmin?.mode, "crow");
+  assert.equal(manifests.changedetection?.firstAdmin?.note, undefined);
+  // AdGuard Home's and Kolibri's own setup wizards were the claimable pages; TriliumNext's
+  // first password was. All three are set by Crow's script at install now, and the account
+  // it creates is named in the declaration.
+  assert.deepEqual(
+    {
+      "adguard-home": manifests["adguard-home"]?.firstAdmin?.user,
+      trilium: manifests.trilium?.firstAdmin?.user,
+      kolibri: manifests.kolibri?.firstAdmin?.user,
+    },
+    { "adguard-home": "admin", trilium: "trilium", kolibri: "admin" },
+  );
+  // Vikunja keeps its own registration page, and the card says how to close it.
+  assert.equal(manifests.vikunja?.firstAdmin?.mode, "finish-setup");
+  assert.match(manifests.vikunja?.firstAdmin?.note || "", /VIKUNJA_SERVICE_ENABLEREGISTRATION=false/);
   // These two connect to an app the operator already runs (nit 7).
   assert.equal(manifests.immich?.firstAdmin?.mode, "external");
   assert.equal(manifests.kodi?.firstAdmin?.mode, "external");

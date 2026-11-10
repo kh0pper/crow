@@ -16,6 +16,17 @@ tools:
 
 # Vikunja Task Management
 
+## First-run setup
+
+Vikunja has its own registration page, so **you** create the account: open
+`http://localhost:3456`, register, then turn registration off again by setting
+`VIKUNJA_SERVICE_ENABLEREGISTRATION=false` and restarting the bundle. Until you do, anyone
+who can reach that page can create an account.
+
+Then create an API token under **Settings → API Tokens** and put it in
+`VIKUNJA_API_TOKEN` (Crow's integration settings or the bundle's `.env`). The Extensions card
+adds **Finish Vikunja's setup now** with a direct link until you press Done.
+
 ## When to Activate
 
 - User asks to create, update, or manage tasks
