@@ -2190,7 +2190,9 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   const loaded = await loadComposeModel(bundleDir, { env: composeEnv(), runConfig: runComposeConfig });
   if (loaded.error) return { valid: false, reason: loaded.error };
   // Everything the bundle ships (settings-section.js, run.sh, src/ …) is code or config the
-  // gateway may load: never mountable read-write.
+  // gateway may load: never mountable read-write. (compose-guard.js also refuses
+  // settings-section.js and the manifest-declared compose/panel paths on its own, for the
+  // paths that never build this list: the gpu-orchestrator, the preview renderer, a satellite.)
   let shipped = null;
   try { shipped = new Set(readdirSync(join(APP_BUNDLES, bundleId || basename(bundleDir)))); } catch { /* not in the repo */ }
   // Folders outside Crow's home: given by the install (its owner-typed folders, nothing

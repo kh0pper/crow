@@ -891,6 +891,42 @@ test("anything the bundle ships (settings-section.js, run.sh, src/…) is never 
   assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, "data"))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, "a runtime data folder");
 });
 
+test("model: settings-section.js, and the paths a manifest itself declares (compose file, panel, panel routes), are control entries read-write", () => {
+  const dir = join(CROW_HOME, "bundles", "fx-manifest");
+  for (const d of ["deploy", "ui", "panel", "data"]) mkdirSync(join(dir, d), { recursive: true });
+  // No ctx.shipped here: a bundle with no repo copy, or a check run by the gpu-orchestrator,
+  // the preview renderer or a satellite, gets nothing from the shipped-file list.
+  const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
+  const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
+  const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
+  const base = { id: "fx-manifest" };
+  // The gateway imports settings-section.js in place at boot.
+  assert.equal(c(base, rw("settings-section.js")).valid, false);
+  assert.equal(c(base, ro("settings-section.js")).valid, true);
+  // manifest.docker.composefile at a non-default path: its folder is control.
+  const deployManifest = { ...base, docker: { composefile: "deploy/compose.yml" } };
+  assert.equal(c(deployManifest, rw("deploy")).valid, false);
+  assert.equal(c(deployManifest, ro("deploy")).valid, true);
+  // panelRoutes and panel outside panel/ (copied to PANELS_DIR and run there).
+  const routesManifest = { ...base, panelRoutes: "ui/routes.js" };
+  assert.equal(c(routesManifest, rw("ui")).valid, false);
+  assert.equal(c(routesManifest, ro("ui")).valid, true);
+  const panelManifest = { ...base, panel: "ui/panel.js" };
+  assert.equal(c(panelManifest, rw("ui")).valid, false);
+  assert.equal(c(panelManifest, ro("ui")).valid, true);
+  // An object panel resolves to panel/<id>.js (already control) and names nothing else.
+  const objectPanel = { ...base, panel: { id: "gis", name: "GIS Map" } };
+  assert.equal(c(objectPanel, rw("panel")).valid, false);
+  assert.equal(c(objectPanel, rw("data")).valid, true);
+  // The default compose path, and absolute or .. values, name nothing inside the bundle.
+  assert.equal(c({ ...base, docker: { composefile: "docker-compose.yml" } }, rw("data")).valid, true);
+  for (const v of ["/etc/compose.yml", "../outside/compose.yml", "${MEDIA}/compose.yml"]) {
+    assert.equal(c({ ...base, docker: { composefile: v } }, rw("data")).valid, true, v);
+  }
+  // A manifest without these fields changes nothing: the bundle's own runtime folder stays writable.
+  assert.equal(c(base, rw("data")).valid, true);
+});
+
 test("cross-bundle: no other bundle's project, volume or network names, and no prefix-sibling folders", () => {
   const m = { manifest: { id: "fx-x" } };
   assert.equal(check({ name: "crow-workspace", ...svc() }, m).valid, false, "another bundle's project");

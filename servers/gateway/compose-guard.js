@@ -172,8 +172,10 @@ const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "c
 // (bundles-config → folder-grants → compose-guard), so importing it would make a cycle.
 // tests/compose-guard.test.js fails if a COMPOSE_*_FILE export stops starting with it.
 export const COMPOSE_STATE_PREFIX = ".crow-compose.";
-// Top-level entries of a bundle folder that the gateway reads or runs.
-const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+// Top-level entries of a bundle folder that the gateway reads or runs. Manifest-declared
+// paths (a non-default compose file, a panel or panel routes outside panel/) join this set
+// per bundle: see manifestControlTops below.
+const BUNDLE_CONTROL = new Set(["manifest.json", "settings-section.js", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
 // The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
@@ -361,6 +363,44 @@ export function reservedCommunityId(id) {
   return id === "crow" || String(id).startsWith("crow-");
 }
 
+/**
+ * The first path segment of a bundle-relative path, or null when the value is not one:
+ * absolute, carries a `\`/`$`/NUL, or walks out with `..`. Same shape rule bundles-config.js
+ * applies to `docker.composefile`, kept here so nothing imports that module (cycle).
+ */
+function bundleRelativeTop(p) {
+  if (typeof p !== "string" || !p || isAbsolute(p) || /[\\$\0]/.test(p)) return null;
+  const segs = p.split("/").filter((s) => s !== "" && s !== ".");
+  if (!segs.length || segs.includes("..")) return null;
+  return segs[0];
+}
+
+/**
+ * The top-level entries of a bundle folder that its OWN manifest names as code or config:
+ * `docker.composefile` (default docker-compose.yml), `panel` and `panelRoutes`. The gateway
+ * copies the panel and its routes into PANELS_DIR and imports them, and reads the compose
+ * file at every install/Start — so the folder holding one is as much a control entry as
+ * `panel/` or the fixed compose names.
+ *
+ * An object `panel` resolves to panel/<id>.js (routes/bundles.js resolvePanelPath), i.e. the
+ * `panel` entry itself. Absolute and `..` values name nothing inside the bundle, so they are
+ * left to the manifest contract rather than guessed at here.
+ */
+function manifestControlTops(manifest) {
+  const tops = new Set();
+  const collect = (v) => {
+    if (typeof v === "string") { const t = bundleRelativeTop(v); if (t) tops.add(t); return; }
+    if (Array.isArray(v)) { for (const x of v) collect(x); return; }
+    if (v && typeof v === "object") for (const x of Object.values(v)) collect(x);
+  };
+  const declared = manifest?.docker?.composefile;
+  collect(declared === undefined || declared === null || declared === "" ? "docker-compose.yml" : declared);
+  if (typeof manifest?.panel === "string") collect(manifest.panel);
+  else if (manifest?.panel && typeof manifest.panel === "object") tops.add("panel");
+  collect(manifest?.panelRoutes);
+  return tops;
+}
+
 export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
   if (coreAllowance !== undefined && !CORE_ALLOWANCES.has(coreAllowance)) return { valid: false, reason: `unknown core allowance '${String(coreAllowance).slice(0, 40)}'` };
   const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified && manifest?.origin !== "community");
@@ -368,6 +408,10 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   const roots = sensitiveRoots(ctx);
   const bundleReal = resolveHostPath(bundleDir);
   const ownId = /^[a-z0-9][a-z0-9-]*$/.test(String(manifest?.id || "")) ? manifest.id : null;
+  // Paths this manifest declares (compose file, panel, panel routes): their top-level entry
+  // in the bundle folder is control too, whatever the install shipped (ctx.shipped is only
+  // built on the Extensions path, from a repo copy that need not exist).
+  const manifestControl = manifestControlTops(manifest);
   const refuse = (reason) => ({ valid: false, reason });
   const needPriv = (what) => (isPrivilegedAllowed ? null : refuse(`Compose file uses ${what} but manifest does not declare 'privileged: true' (or consent was not verified)`));
   const grants = hostGrants(manifest);
@@ -428,9 +472,10 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         // The bundle's own folder, but never the folder itself or its control files read-write:
         // the gateway reads the manifest, compose file and .env, and runs server/ code, so a
         // container that could rewrite them could grant itself privileges at the next Start.
-        // Same for Crow's own `.crow-compose.*` bookkeeping (COMPOSE_STATE_PREFIX above).
+        // Same for Crow's own `.crow-compose.*` bookkeeping (COMPOSE_STATE_PREFIX above) and
+        // for whatever path this manifest declares (manifestControl above).
         const top = p.slice(bundleReal.length + 1).split(sep)[0];
-        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || top.startsWith(COMPOSE_STATE_PREFIX) || (ctx.shipped && ctx.shipped.has(top)))) {
+        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || manifestControl.has(top) || top.startsWith(COMPOSE_STATE_PREFIX) || (ctx.shipped && ctx.shipped.has(top)))) {
           return refuse(`${what}: mounts the bundle's own control files read-write`);
         }
         return null;
