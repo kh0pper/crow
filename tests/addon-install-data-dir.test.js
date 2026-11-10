@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import express from "express";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Isolated exactly like tests/bundles-install-job.test.js: routes/bundles.js resolves
 // CROW_HOME-derived paths at module load, and servers/db.js's resolveDataDir() reads
@@ -11,13 +13,24 @@ import { join } from "node:path";
 process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
 process.env.CROW_DATA_DIR = join(process.env.CROW_HOME, "data");
 mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
+// The router's construction (and the uninstall route) must not start background jobs.
+process.env.CROW_AUTO_UPDATE = "0";
+process.env.CROW_DISABLE_HEALTH_MONITOR = "1";
+process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
+process.env.CROW_DISABLE_NOSTR = "1";
 
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CROW_HOME = process.env.CROW_HOME;
 const DATA_DIR = process.env.CROW_DATA_DIR;
 const WALLS_PATH = join(CROW_HOME, "addon-walls.json");
 const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 
-const { validateInstall, addonDataDirRefusal, ensureAddonDataDir } = await import("../servers/gateway/routes/bundles.js");
+const {
+  validateInstall, addonDataDirRefusal, ensureAddonDataDir,
+  runInstallJob, _createJobForTest, _getJobForTest, _finishJobForTest,
+  _setAppBundlesForTest,
+  default: bundlesRouter,
+} = await import("../servers/gateway/routes/bundles.js");
 const { addonWallsPath, readAddonWalls, writeAddonWalls, keptDataRecord, recordKeptData, clearKeptData, keptDataMatches } =
   await import("../servers/shared/addon-walls-file.js");
 
@@ -308,4 +321,192 @@ test("a remote MCP (server.url) or an add-on with no server is never refused by 
   assert.equal(refused.status, 409);
   assert.equal(refused.code, "addon_data_dir_exists");
   reset();
+});
+
+// --- the install job leaves no MCP entry behind ---------------------------------
+
+// A repo-shaped source tree, so runInstallJob/uninstall read a manifest and copy files
+// without touching the real bundles/ (the seam tests/bundles-webui-lifecycle.test.js uses).
+const FIXTURES = mkdtempSync(join(tmpdir(), "crow-addon-fixtures-"));
+
+/** Write one fixture add-on's source tree (manifest + a stub server file). */
+function fixtureAddon(id, manifest) {
+  const dir = join(FIXTURES, id);
+  mkdirSync(join(dir, "server"), { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ id, name: id, version: "0.1.0", ...manifest }, null, 2));
+  writeFileSync(join(dir, "server", "index.js"), "// stub payload\n");
+  return dir;
+}
+
+/** Point manifest lookup at the fixture tree for one test, then back at the repo copy. */
+async function withFixtures(fn) {
+  _setAppBundlesForTest(FIXTURES);
+  try { await fn(); } finally { _setAppBundlesForTest(join(REPO, "bundles")); }
+}
+
+/** An add-on the route believes is installed: source manifest, installed folder, installed.json row. */
+function seedInstalled(id, manifest) {
+  fixtureAddon(id, manifest);
+  const installDir = join(CROW_HOME, "bundles", id);
+  mkdirSync(installDir, { recursive: true });
+  writeFileSync(join(installDir, "manifest.json"), JSON.stringify({ id, name: id, version: "0.1.0", ...manifest }, null, 2));
+  const installedPath = join(CROW_HOME, "installed.json");
+  const installed = existsSync(installedPath) ? JSON.parse(readFileSync(installedPath, "utf8")) : [];
+  writeFileSync(installedPath, JSON.stringify(
+    [...installed.filter((i) => i.id !== id), { id, type: manifest.type || "bundle", version: "0.1.0" }], null, 2,
+  ));
+  return installDir;
+}
+
+/** The bundles router over real HTTP on a loopback port. */
+async function withRouter(fn) {
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
+  try {
+    await fn(`http://127.0.0.1:${server.address().port}`);
+  } finally {
+    server.close();
+  }
+}
+
+/** POST the uninstall and wait for its job to reach a terminal status. */
+async function uninstall(base, bundleId) {
+  const res = await fetch(`${base}/bundles/api/uninstall`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bundle_id: bundleId }),
+  });
+  const body = await res.json();
+  assert.equal(res.status, 200, `uninstall POST rejected: ${JSON.stringify(body)}`);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const job = _getJobForTest(body.job_id);
+    if (job && job.status !== "running") return job;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`uninstall job ${body.job_id} never finished`);
+}
+
+// A stdio add-on of the plainest shape: a node `server` block and nothing that needs
+// docker, a panel or a skill, so the uninstall has no side path to fail on.
+const FIXTURE_MANIFEST = { type: "bundle", server: { command: "node", args: ["server/index.js"], envKeys: [] } };
+
+const MISMATCH_LINE = "Kept data folder was not recorded: it is not the folder Crow made";
+const NOT_OURS_LINE = "Kept data folder was not recorded: it is not a plain folder owned by Crow";
+
+function cleanupFixture(id) {
+  rmSync(join(CROW_HOME, "bundles", id), { recursive: true, force: true });
+  rmSync(join(DATA_DIR, id), { recursive: true, force: true });
+  rmSync(join(FIXTURES, id), { recursive: true, force: true });
+  if (existsSync(WALLS_PATH)) clearKeptData(CROW_HOME, id);
+}
+
+test("runInstallJob fails before registering the MCP server when the data folder is not Crow's", async () => {
+  const id = "fx-datadir-refused";
+  const manifest = { ...FIXTURE_MANIFEST, id, name: id, version: "0.1.0", type: "mcp-server" };
+  fixtureAddon(id, manifest);
+  // The folder nobody recorded: the install must fail instead of starting inside it.
+  mkdirSync(join(DATA_DIR, id), { recursive: true });
+  rmSync(MCP_ADDONS_PATH, { force: true });
+  const job = _createJobForTest(id, "install");
+  try {
+    await withFixtures(async () => {
+      const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
+      assert.equal(out.ok, false, "an install must not report success without its data folder");
+      assert.match(String(out.reason), /a folder for this add-on appeared during the install/);
+      const doc = existsSync(MCP_ADDONS_PATH) ? JSON.parse(readFileSync(MCP_ADDONS_PATH, "utf8")) : {};
+      assert.equal(doc[id] ?? null, null, "no MCP entry may be left for an add-on whose data folder was refused");
+      assert.ok(job.log.some((l) => /^Install failed: a folder for this add-on appeared/.test(l)), job.log.join("\n"));
+    });
+  } finally {
+    _finishJobForTest(job, "failed");
+  }
+  assert.equal(keptDataRecord(CROW_HOME, id), null, "the refused folder is never recorded");
+  cleanupFixture(id);
+});
+
+// --- the uninstall route's kept-data decision -----------------------------------
+
+test("an uninstall keeps the record of the folder Crow made, without rewriting it", async () => {
+  const id = "fx-kept-same";
+  const keptDir = join(DATA_DIR, id);
+  await withFixtures(async () => {
+    seedInstalled(id, FIXTURE_MANIFEST);
+    mkdirSync(keptDir, { recursive: true });
+    assert.equal(recordKeptData(CROW_HOME, id, bigStat(keptDir)), true);
+    const before = readFileSync(WALLS_PATH, "utf8");
+    const record = keptDataRecord(CROW_HOME, id);
+
+    await withRouter(async (base) => {
+      const job = await uninstall(base, id);
+      assert.equal(job.status, "complete", job.log.join("\n"));
+      assert.ok(!job.log.some((l) => l.includes("Kept data folder was not recorded")), job.log.join("\n"));
+      assert.equal(readFileSync(WALLS_PATH, "utf8"), before, "the matching record is left exactly as it is");
+      assert.deepEqual(keptDataRecord(CROW_HOME, id), record);
+    });
+  });
+  cleanupFixture(id);
+});
+
+test("an uninstall records a plain folder Crow owns when there was no record yet", async () => {
+  const id = "fx-kept-norecord";
+  const keptDir = join(DATA_DIR, id);
+  await withFixtures(async () => {
+    seedInstalled(id, FIXTURE_MANIFEST);
+    mkdirSync(keptDir, { recursive: true });
+    assert.equal(keptDataRecord(CROW_HOME, id), null, "nothing recorded before the uninstall");
+    const st = bigStat(keptDir);
+
+    await withRouter(async (base) => {
+      const job = await uninstall(base, id);
+      assert.equal(job.status, "complete", job.log.join("\n"));
+      assert.ok(!job.log.some((l) => l.includes("Kept data folder was not recorded")), job.log.join("\n"));
+      const rec = keptDataRecord(CROW_HOME, id);
+      assert.notEqual(rec, null, "the folder the install made is kept by the uninstall");
+      assert.equal(rec.dev, String(st.dev));
+      assert.equal(rec.ino, String(st.ino));
+      // A reinstall over that same folder is therefore allowed.
+      assert.equal(keptDataMatches(CROW_HOME, id, keptDir), true);
+    });
+  });
+  cleanupFixture(id);
+});
+
+test("an uninstall does not re-record a folder swapped in after the install", async () => {
+  const id = "fx-kept-swapped";
+  const keptDir = join(DATA_DIR, id);
+  const movedAside = `${keptDir}-moved-aside`;
+  await withFixtures(async () => {
+    seedInstalled(id, FIXTURE_MANIFEST);
+    // The folder the install made, recorded from its own lstat.
+    mkdirSync(keptDir, { recursive: true });
+    assert.equal(recordKeptData(CROW_HOME, id, bigStat(keptDir)), true);
+    const record = keptDataRecord(CROW_HOME, id);
+    const walls = readFileSync(WALLS_PATH, "utf8");
+
+    // Swapped in after the install: the original moves aside, a new folder takes the path.
+    renameSync(keptDir, movedAside);
+    mkdirSync(keptDir);
+
+    await withRouter(async (base) => {
+      const job = await uninstall(base, id);
+      assert.equal(job.status, "complete", job.log.join("\n"));
+      assert.ok(job.log.includes(MISMATCH_LINE), job.log.join("\n"));
+      assert.ok(!job.log.includes(NOT_OURS_LINE), "the record exists, so this is the mismatch case");
+      assert.equal(readFileSync(WALLS_PATH, "utf8"), walls, "nothing is written for a folder that is not the recorded one");
+      assert.deepEqual(keptDataRecord(CROW_HOME, id), record, "the record still names the folder Crow made");
+
+      // A later reinstall over the swapped-in folder is refused.
+      const r = await validateInstall(id, { forceInstall: true });
+      assert.equal(r.ok, false);
+      assert.equal(r.status, 409);
+      assert.equal(r.code, "addon_data_dir_exists");
+      assert.equal(r.extra.code, "addon_data_dir_exists");
+    });
+  });
+  rmSync(movedAside, { recursive: true, force: true });
+  cleanupFixture(id);
 });

@@ -29,7 +29,7 @@ import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { withoutCredentialKeys } from "../../shared/credentials-env.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, readlinkSync, renameSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, readlinkSync, renameSync, statSync, realpathSync, readdirSync, lstatSync, mkdtempSync, openSync, closeSync, fchmodSync, fstatSync, constants as fsConstants } from "node:fs";
 import { join, dirname, resolve as resolvePath, relative as relativePath, isAbsolute, basename } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -73,7 +73,7 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
-import { recordKeptData, clearKeptData, keptDataMatches } from "../../shared/addon-walls-file.js";
+import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall } from "../../shared/addon-walls-file.js";
 import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
@@ -2414,12 +2414,17 @@ export function addonDataDirRefusal(manifest, bundleId, { dataDir, crowHome }) {
 }
 
 /**
- * Review item 5: create the add-on's own data folder, right after its MCP entry is
- * registered. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
+ * Review item 5: create the add-on's own data folder, BEFORE its MCP entry is
+ * registered, so a folder that cannot be made fails the install with no entry left
+ * behind. `<dataDir>` itself already exists (Crow's home); the folder is made 0700
  * and recorded as Crow's own kept data — the record names exactly the folder Crow made,
  * so a failed install can be retried and an in-place reinstall over that same folder is
  * allowed. The record stays while the add-on is installed; one whose folder is gone is
  * dropped by the next check (see addonDataDirRefusal).
+ *
+ * The folder just made is opened once and every later step goes through that fd: the
+ * mode is set on the fd and the record is the fd's own `fstat`, so nothing between the
+ * `mkdir` and the record can swap a different directory (or a symlink) in at the path.
  *
  * Exported for tests. `mkdir` is the check: a folder that appeared between
  * validateInstall and here is only accepted when the kept-data record already names
@@ -2438,11 +2443,20 @@ export function ensureAddonDataDir(bundleId, manifest) {
     if (keptDataMatches(CROW_HOME, bundleId, dir)) return;
     throw new Error("a folder for this add-on appeared during the install; remove or rename it, then install again");
   }
-  chmodSync(dir, 0o700);
+  let fd;
   try {
-    recordKeptData(CROW_HOME, bundleId, lstatSync(dir, { bigint: true }));
-  } catch (err) {
-    console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
+    // O_NOFOLLOW: a symlink swapped in after the mkdir is refused, never followed.
+    fd = openSync(dir, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    fchmodSync(fd, 0o700);
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isDirectory()) throw new Error("the add-on's data folder is not a directory");
+    try {
+      recordKeptData(CROW_HOME, bundleId, st);
+    } catch (err) {
+      console.warn(`[bundles] could not record the data folder for '${bundleId}': ${err?.message || err}`);
+    }
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
   }
 }
 
@@ -3020,6 +3034,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 
       // Bundle types can also have MCP servers — register if manifest has server config
       if (manifest?.server) {
+        // The data folder first: a folder this add-on cannot get fails the install with
+        // no half-registered MCP server left in mcp-addons.json.
+        ensureAddonDataDir(bundleId, manifest);
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
         // shared by more than one gateway on a host (e.g. the home server runs a
@@ -3032,7 +3049,6 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
         mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
-        ensureAddonDataDir(bundleId, manifest);
         needsRestart = true;
       }
 
@@ -3066,11 +3082,12 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     } else if (addonType === "mcp-server") {
       // MCP server — register in mcp-addons.json
       if (manifest?.server) {
+        // Before the entry is written (see the bundle branch above).
+        ensureAddonDataDir(bundleId, manifest);
         const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
         mcpAddons[bundleId] = mcpAddonEntryFor(manifest, { ...(reqEnv || {}), ...generatedPlainForMcp(manifest, generated) }, { bundleDir: destDir, edited: editedEnv, generatedKeys: Object.keys(generated || {}) });
         writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
         appendLog(job, `Registered MCP server '${bundleId}'`);
-        ensureAddonDataDir(bundleId, manifest);
       }
 
       // Install npm dependencies if package.json exists
@@ -4175,20 +4192,15 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
         // Review item 5: uninstall never removes the add-on's own data folder (whatever
-        // `delete_data` did to its containers' volumes). Record it as Crow's own kept data,
-        // so a reinstall over it is allowed and a folder nobody here created stays refused.
+        // `delete_data` did to its containers' volumes). It is recorded as Crow's own kept
+        // data only when it is provably the folder Crow made: a folder swapped in since the
+        // install is never re-recorded (addon-walls-file.js decides, and explains in the log).
         try {
-          const keptDir = join(resolveDataDir(), bundle_id);
-          // Already recorded AND unchanged: the record stays as it is.
-          if (!keptDataMatches(CROW_HOME, bundle_id, keptDir)) {
-            let keptStat = null;
-            try { keptStat = lstatSync(keptDir, { bigint: true }); } catch { keptStat = null; }
-            if (keptStat && keptStat.isDirectory() && Number(keptStat.uid) === process.getuid?.()) {
-              recordKeptData(CROW_HOME, bundle_id, keptStat);
-            } else if (keptStat) {
-              appendLog(job, "Kept data folder was not recorded: it is not a plain folder owned by Crow");
-            }
-          }
+          recordKeptDataOnUninstall(bundle_id, {
+            crowHome: CROW_HOME,
+            dataDir: resolveDataDir(),
+            log: (line) => appendLog(job, line),
+          });
         } catch (err) {
           console.warn(`[bundles] could not record the kept data folder for '${bundle_id}': ${err?.message || err}`);
         }

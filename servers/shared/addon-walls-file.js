@@ -123,6 +123,50 @@ export function clearKeptData(crowHome, id) {
 }
 
 /**
+ * Uninstall never removes the add-on's own data folder, so this records the folder
+ * Crow keeps: a reinstall over it is then allowed, and a folder nobody here made
+ * stays refused. The rule is deliberately narrow — an uninstall must never hand an
+ * add-on its wall back for a folder that appeared while it was installed:
+ *
+ *  - no record for `id` (e.g. installed before records existed): the folder is
+ *    recorded only when it is a plain directory (a bigint lstat — never a symlink)
+ *    owned by Crow's own user. Anything else is left unrecorded and reported.
+ *  - a record that still names this folder: left exactly as it is.
+ *  - a record naming a DIFFERENT folder (one swapped in since the install): nothing
+ *    is written and the record stays as it is, so a later install over the
+ *    swapped-in folder is refused. An add-on installed before this rule can be
+ *    reinstalled only after the operator removes the folder themselves.
+ *
+ * `log` gets the operator-facing line (fixed text, never a path). Returns whether a
+ * record now covers the folder at `<dataDir>/<bundleId>`.
+ */
+export function recordKeptDataOnUninstall(bundleId, { crowHome, dataDir, log = () => {} } = {}) {
+  const dir = join(dataDir, bundleId);
+  // Bigint lstat: the record is built from dev/ino, which must not lose precision.
+  let st = null;
+  try { st = lstatSync(dir, { bigint: true }); } catch { st = null; }
+
+  if (keptDataRecord(crowHome, bundleId)) {
+    // The record exists: it is the only folder this add-on may come back to.
+    if (keptDataMatches(crowHome, bundleId, dir)) return true;
+    // No folder at all: keptDataMatches already dropped the stale record; there is
+    // nothing here to keep, so there is nothing to report either.
+    if (!st) return false;
+    log("Kept data folder was not recorded: it is not the folder Crow made");
+    return false;
+  }
+
+  // No record: the folder is only taken when it is provably a plain folder of Crow's
+  // own. Nothing is created, chmodded or read inside it.
+  if (!st) return false; // no folder: there is no kept data, so nothing to record or report
+  if (!st.isDirectory() || Number(st.uid) !== process.getuid?.()) {
+    log("Kept data folder was not recorded: it is not a plain folder owned by Crow");
+    return false;
+  }
+  return recordKeptData(crowHome, bundleId, st);
+}
+
+/**
  * Whether `path` IS the folder `id`'s record names: `lstat` must succeed, the
  * entry must be a plain directory (never a symlink), and its `dev`/`ino` and
  * uid must equal the record's — and the record's uid must be `uid` (Crow's own

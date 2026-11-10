@@ -600,13 +600,23 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
   };
 }
 
+/** An add-on id this file may be asked about (`^[a-z0-9][a-z0-9-]*$`). */
+const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
 /**
  * Load an add-on's policy source and derive its profile.
+ *
+ * `id` is validated before it is ever joined onto a directory: `../x`, `a/b` and
+ * `__proto__` would otherwise read (or look up) something that is not an add-on.
+ * A manifest whose own `id` is different from the one asked for is refused too —
+ * policy is keyed by id, so a file claiming another add-on's id must not supply it.
  *
  * @param {object} opts { id, entry, appBundlesDir, installedBundlesDir, pastDefaultsAll }
  */
 export function profileFor({ id, entry = {}, appBundlesDir, installedBundlesDir, pastDefaultsAll = {} }) {
+  if (typeof id !== "string" || !ADDON_ID_RE.test(id)) throw new Error("invalid add-on id");
   const src = loadPolicySource({ id, appBundlesDir, installedBundlesDir });
+  if (src?.manifest?.id !== id) throw new Error("manifest id does not match");
   return deriveProfile(src.manifest, entry, {
     composePorts: composePortsFrom(src.composeText, src.manifest),
     pastDefaults: pastDefaultsAll && Object.prototype.hasOwnProperty.call(pastDefaultsAll, id) ? pastDefaultsAll[id] : {},

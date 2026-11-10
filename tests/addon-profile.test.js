@@ -536,3 +536,40 @@ test("an own-folder, an oauth dir and a crowDb part appear in that order", () =>
   assert.equal(profile.label.en[0], "reach acme-api.internal:7800 on your network");
   assert.equal(profile.label.en[2], "use the sign-in folder you chose");
 });
+
+// --- the id profileFor is asked about --------------------------------------
+
+test("profileFor refuses an id that is not an add-on id, before it joins it onto a path", () => {
+  const appBundlesDir = join(REPO, "bundles");
+  for (const id of ["../x", "a/b", "__proto__"]) {
+    assert.throws(
+      () => profileFor({ id, entry: {}, appBundlesDir, installedBundlesDir: NO_INSTALLED }),
+      /^Error: invalid add-on id$/,
+      `${id} is not an add-on id`,
+    );
+  }
+  for (const id of ["", "Demo", "demo_x", ".hidden", null, undefined, 42]) {
+    assert.throws(() => profileFor({ id, entry: {}, appBundlesDir, installedBundlesDir: NO_INSTALLED }), /invalid add-on id/);
+  }
+  // A real id still goes through, so the guard is on the id, not on profileFor itself.
+  const kiosk = profileFor({ id: "kiosk", entry: {}, appBundlesDir, installedBundlesDir: NO_INSTALLED });
+  assert.equal(kiosk.id, "kiosk");
+});
+
+test("profileFor refuses a manifest whose own id is not the one asked for", () => {
+  const appBundlesDir = mkdtempSync(join(scratch, "app-mismatch-"));
+  // The directory is named 'demo', the manifest claims 'other'.
+  mkdirSync(join(appBundlesDir, "demo"), { recursive: true });
+  writeFileSync(join(appBundlesDir, "demo", "manifest.json"), JSON.stringify({ ...BASE_MANIFEST, id: "other" }));
+  assert.throws(
+    () => profileFor({ id: "demo", entry: {}, appBundlesDir, installedBundlesDir: NO_INSTALLED }),
+    /^Error: manifest id does not match$/,
+  );
+
+  // The same tree, asked for by the id its manifest carries, is served.
+  mkdirSync(join(appBundlesDir, "other"), { recursive: true });
+  writeFileSync(join(appBundlesDir, "other", "manifest.json"), JSON.stringify({ ...BASE_MANIFEST, id: "other" }));
+  const matched = profileFor({ id: "other", entry: {}, appBundlesDir, installedBundlesDir: NO_INSTALLED });
+  assert.equal(matched.id, "other");
+  assert.equal(matched.source, "repo");
+});
