@@ -225,6 +225,15 @@ const ASSET_FILES = new Map([
   ["dynamics.js", join("engine", "dynamics.js")],
   ["faust-host.js", join("engine", "faust-host.js")],
   ["meter.js", join("engine", "meter.js")],
+  // The amp inserts of plan 1d, Task 13: the NAM host, the cabinet convolver,
+  // the vendored NAM engine (one import-free script defining globalThis.StudioNam)
+  // and its binary. The last two are build output (`tools/build-vendor.mjs`); the
+  // route answers 404 for a checkout that has none, and the engine starts with
+  // amp inserts that play silence rather than failing to load.
+  ["nam-host.js", join("engine", "nam-host.js")],
+  ["convolver.js", join("engine", "convolver.js")],
+  ["nam.js", join("vendor", "nam", "nam.js")],
+  ["nam-engine.wasm", join("vendor", "nam", "nam-engine.wasm")],
   ["engine-client.js", join("engine", "engine-client.js")],
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],
   ["sunvox.wasm", join("vendor", "sunvox", "sunvox.wasm")],
@@ -1455,9 +1464,14 @@ export function createStudioWeb({
       try {
         const engine = createRequire(import.meta.url)(join(bundleDir, "engine", "engine-client.js"));
         const paths = engine.SOURCE_FILES.map((name) => join(bundleDir, ASSET_FILES.get(name)));
-        const key = paths.map((path) => statSync(path).mtimeMs).join(":");
+        const key = paths.map((path) => (existsSync(path) ? statSync(path).mtimeMs : 0)).join(":");
         if (engineModule == null || key !== engineModuleKey) {
-          engineModule = engine.composeEngineModule(paths.map((path) => readFileSync(path, "utf8")));
+          // A source this checkout does not have is left out as an empty line
+          // rather than failing the whole module: `vendor/nam/` is a build
+          // output (`tools/build-vendor.mjs`), and an engine without it starts
+          // with amp inserts that play silence and say so.
+          const texts = paths.map((path) => (existsSync(path) ? readFileSync(path, "utf8") : ""));
+          engineModule = engine.composeEngineModule(texts);
           engineModuleKey = key;
         }
       } catch (error) {
