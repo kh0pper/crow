@@ -2115,3 +2115,97 @@ test("N4-1: the old substring guard and the inline append are gone; the helper i
   assert.ok(defIdx > -1 && defIdx < seamIdx, "defined above the seam so tests can source it");
   assert.ok(callIdx > seamIdx, "and called in the install body");
 });
+
+// ─── Security audit N1c-19: WSL2 detection + the end-of-run networking note ──
+// The gateway listens on all interfaces, so on Windows whether Crow is
+// reachable from another device depends on WSL2's networking mode and the
+// Windows/Hyper-V firewall — both decided OUTSIDE the Linux environment the
+// installer runs in. The installer therefore changes no behaviour: it detects a
+// WSL kernel and adds one pointer to the guide. These tests drive is_wsl and
+// the note through their osrelease-path seams and pin the placement in the
+// closing summary.
+
+/** Write an osrelease fixture (the kernel release line) and return its path. */
+function kernelReleaseFixture(contents) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-wsl-"));
+  const p = join(dir, "osrelease");
+  writeFileSync(p, contents);
+  return p;
+}
+
+test("N1c-19: is_wsl recognises a WSL kernel and nothing else", () => {
+  const wslKernels = [
+    "6.6.87.2-microsoft-standard-WSL2\n",   // current WSL2
+    "5.15.153.1-microsoft-standard-WSL2\n", // WSL 2.0.x
+    "4.4.0-19041-Microsoft\n",              // the Windows 10 spelling: no WSL2 suffix
+    "6.1.0-custom-wsl\n",                   // a hand-built kernel tagged with just the word
+    "6.2.0-MICROSOFT-STANDARD\n",           // the match is case-insensitive
+  ];
+  for (const kernel of wslKernels) {
+    const r = runWithHelpers(`if is_wsl "${kernelReleaseFixture(kernel)}"; then echo WSL_YES; else echo WSL_NO; fi`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /WSL_YES/, `should be recognised as WSL: ${JSON.stringify(kernel)}`);
+  }
+
+  const plainKernels = [
+    "6.8.0-45-generic\n",   // Ubuntu
+    "5.10.0-33-amd64\n",    // Debian
+    "6.6.51+rpt-rpi-v8\n",  // Raspberry Pi OS
+    "6.1.0-27-arm64\n",
+    "\n",                    // empty file
+  ];
+  for (const kernel of plainKernels) {
+    const r = runWithHelpers(`if is_wsl "${kernelReleaseFixture(kernel)}"; then echo WSL_YES; else echo WSL_NO; fi`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /WSL_NO/, `must NOT be taken for a WSL kernel: ${JSON.stringify(kernel)}`);
+  }
+
+  // A missing file is not WSL (and must not fail under `set -e`).
+  const missing = runWithHelpers(`if is_wsl /definitely/not/an/osrelease; then echo WSL_YES; else echo WSL_NO; fi`);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.match(missing.stdout, /WSL_NO/);
+
+  // The default path is the real kernel's, so the no-argument call agrees with
+  // this machine (a WSL host in the suite would invert the expectation).
+  const realRelease = readFileSync("/proc/sys/kernel/osrelease", "utf-8");
+  const hostIsWsl = /microsoft|wsl/i.test(realRelease);
+  const dflt = runWithHelpers(`if is_wsl; then echo WSL_YES; else echo WSL_NO; fi`);
+  assert.equal(dflt.status, 0, dflt.stderr);
+  assert.match(dflt.stdout, hostIsWsl ? /WSL_YES/ : /WSL_NO/, "the default is /proc/sys/kernel/osrelease");
+});
+
+test("N1c-19: the installer summary carries the WSL note only on WSL", () => {
+  const NOTE = "This is WSL2: see the Windows guide's 'Network: who can reach Crow' section before opening Crow to other devices.";
+  // On a WSL kernel: the one note, naming the guide's section and the doc path.
+  const onWsl = runWithHelpers(`print_wsl_note "${kernelReleaseFixture("6.6.87.2-microsoft-standard-WSL2\n")}"`);
+  assert.equal(onWsl.status, 0, onWsl.stderr);
+  assert.ok(onWsl.stdout.includes(NOTE), `the note must be printed verbatim:\n${onWsl.stdout}`);
+  assert.match(onWsl.stdout, /docs\/getting-started\/windows-wsl2\.md/);
+  // On any other kernel: nothing at all (no stray blank line, no prompt, exit 0).
+  const offWsl = runWithHelpers(`print_wsl_note "${kernelReleaseFixture("6.8.0-45-generic\n")}"`);
+  assert.equal(offWsl.status, 0, offWsl.stderr);
+  assert.equal(offWsl.stdout, "", "a non-WSL host gets no extra output");
+
+  // Static placement: the note lives in ONE helper above the source-only seam
+  // (so it is testable), and the install body only CALLS it, inside the closing
+  // summary — no inlined copy, no prompt, and nothing WSL-specific earlier.
+  const s = src();
+  const seamIdx = s.indexOf("CROW_INSTALL_SOURCE_ONLY");
+  const noteIdxs = [...s.matchAll(new RegExp(NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))].map((m) => m.index);
+  assert.equal(noteIdxs.length, 1, "the note text must exist exactly once (in the helper)");
+  assert.ok(noteIdxs[0] < seamIdx, "and be defined above the seam so tests can drive it");
+  const callRe = /^print_wsl_note$/m;
+  const call = s.match(callRe);
+  assert.ok(call, "the install body calls print_wsl_note");
+  const callIdx = call.index;
+  assert.ok(callIdx > seamIdx, "the call is in the install body");
+  const closingIdx = s.indexOf('header "Installation Complete"');
+  assert.ok(closingIdx > -1 && callIdx > closingIdx, "the note belongs to the end-of-run summary");
+  assert.ok(callIdx < s.indexOf("\nadd_crow_to_path\n"), "…before the PATH step closes the run");
+  // No WSL branch may gate, prompt or reconfigure anything: only the helper
+  // asks is_wsl (once) and only the summary calls the helper (once).
+  const codeUses = s.split("\n").filter((l) => !/^\s*#/.test(l) && /\bis_wsl\b/.test(l));
+  assert.equal(codeUses.length, 2, `is_wsl is defined and called exactly once (${codeUses.join(" | ")})`);
+  assert.doesNotMatch(s, /ask_yn[^\n]*WSL|WSL[^\n]*ask_yn/, "no prompt about WSL");
+  assert.doesNotMatch(s, /wslconfig|portproxy|NetFirewallHyperV/, "the installer changes no Windows setting");
+});

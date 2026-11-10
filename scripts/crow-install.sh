@@ -144,6 +144,37 @@ check_platform() {
   return 1
 }
 
+# is_wsl [osrelease_path] — 0 when this kernel is a WSL2 one (security audit
+# N1c-19). The kernel release is the tell: a real WSL2 kernel reports something
+# like 6.6.87.2-microsoft-standard-WSL2, and both spellings have shipped, so
+# either substring counts — case-insensitively, because the tag's casing is not
+# part of any contract. The path is a test seam, the same kind as
+# check_platform's os_release.
+is_wsl() {
+  local osrelease="${1:-/proc/sys/kernel/osrelease}" release=""
+  [ -r "$osrelease" ] || return 1
+  release="$(tr '[:upper:]' '[:lower:]' < "$osrelease" 2>/dev/null || true)"
+  case "$release" in
+    *microsoft*|*wsl*) return 0 ;;
+  esac
+  return 1
+}
+
+# print_wsl_note [osrelease_path] — the one line a WSL2 host gets at the end of
+# the run (audit N1c-19). Whether Crow is reachable from another device on the
+# LAN is decided OUTSIDE this Linux environment — by WSL2's networking mode and
+# the Windows/Hyper-V firewall — so the installer does not guess, prompt or
+# change anything; it points at the guide's section that explains both. On any
+# other host it prints nothing. The path is is_wsl's test seam.
+# shellcheck disable=SC2120  # params are test-only seams; the prod call passes none
+print_wsl_note() {
+  local osrelease="${1:-/proc/sys/kernel/osrelease}"
+  is_wsl "$osrelease" || return 0
+  echo "  This is WSL2: see the Windows guide's 'Network: who can reach Crow' section before opening Crow to other devices."
+  echo "  See docs/getting-started/windows-wsl2.md"
+  echo ""
+}
+
 # Quote one argument for a systemd Exec= line: a path may contain spaces, and a
 # literal % is a systemd specifier (%% writes one).
 sd_quote() { # <arg>
@@ -1549,6 +1580,12 @@ echo ""
 echo "  Everything else happens there — the setup wizard walks you through"
 echo "  passwords, your AI model, and connecting devices."
 echo ""
+
+# A WSL2 host gets one more line: Crow is reachable from this machine, but who
+# else can reach it is a Windows-side question (audit N1c-19). Nothing else
+# changes — no prompt, no reconfiguration.
+# shellcheck disable=SC2119  # the default (real kernel release) is intended here
+print_wsl_note
 
 # Add crow CLI to PATH if not already there (one exact line, added once)
 add_crow_to_path
