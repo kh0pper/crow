@@ -33,8 +33,7 @@ import { tailscaleStatusAsync } from "../../servers/shared/self-dial-address.js"
 import { openCheckedBindSource } from "./bind-fd.mjs";
 import { createDockerView } from "./docker-view.mjs";
 import { bridgeSubnetsFromInterfaces, identifyContainerAddr, identifyListener, localOnlySubnets } from "./listener-owner.mjs";
-import { loadPolicySource, profileFor } from "./profile.mjs";
-import { declaredEnvKeys } from "./wall-env.mjs";
+import { profileFor } from "./profile.mjs";
 import { AddonWallRefused, wrapAddonSpawn } from "./spawn.mjs";
 
 /** Another Crow home beside this one (`~/.crow`, `~/.crow-r2`, …). */
@@ -446,19 +445,6 @@ export function createWallContext({
         realDirOrRefuse(join(base, dataSubdir), "the service child's folder is not a plain folder");
       }
 
-      // The keys the add-on may take from the gateway env beyond the base allowlist:
-      // only what its REVIEWED repo manifest declares (wall-env.mjs).
-      // A bundle add-on only: a project-service child's credentials are its
-      // connection's values (never the gateway's own token for that service), and
-      // a built-in's own vars are already its ownEnv.
-      let declaredKeys = [];
-      let declaredSource = null;
-      if (kind === "addon") try {
-        const src = loadPolicySource({ id, appBundlesDir: join(appRoot, "bundles"), installedBundlesDir: join(crowHome, "bundles") });
-        declaredSource = src && src.source === "repo" ? "repo" : null;
-        declaredKeys = declaredEnvKeys(src && src.manifest, src && src.source);
-      } catch { declaredKeys = []; declaredSource = null; }
-
       const wrap = typeof seam.wrapAddonSpawn === "function" ? seam.wrapAddonSpawn : wrapAddonSpawn;
       return await wrap({
         id,
@@ -466,8 +452,7 @@ export function createWallContext({
         args,
         baseEnv,
         ownEnv,
-        declaredKeys,
-        declaredSource,
+        envKind: kind,
         profile,
         entry: { ...(entry && typeof entry === "object" ? entry : {}), command },
         crowHome,

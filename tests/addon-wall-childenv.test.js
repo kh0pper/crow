@@ -19,7 +19,8 @@ import { fileURLToPath } from "node:url";
 import { createWallContext } from "../scripts/addon-sandbox/gateway-wall.mjs";
 import { wrapAddonSpawn } from "../scripts/addon-sandbox/spawn.mjs";
 import { applyCredentialFiles, _resetCredentialKeysForTest } from "../servers/shared/credentials-env.js";
-import { WALL_BASE_ENV_ALLOW, WALL_ENV_DENY, declaredEnvKeys, wallChildEnv } from "../scripts/addon-sandbox/wall-env.mjs";
+import { wallChildEnv } from "../scripts/addon-sandbox/wall-env.mjs";
+import { addonBaseEnv, isDeniedAddonKey } from "../servers/gateway/addon-env.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 const T = realpathSync(mkdtempSync(join(tmpdir(), "addon-wall-childenv-")));
@@ -83,6 +84,7 @@ test("every walled spawn kind drops the gateway's secrets even when the caller p
       { kind: "service", id: "github", ownEnv: { CROW_ADDON_HOST: "service" }, dataSubdir: "services/0a1b2c3d-0000-4000-8000-0000000000aa" },
       { kind: "builtin", id: "brave-search", ownEnv: { BRAVE_API_KEY: "fake-brave-0104" } },
     ];
+    const BASE_KEYS = addonBaseEnv(process.env);
     for (const k of kinds) {
       const wall = await ctx.startAddonWall({
         id: k.id, entry: {}, command: process.execPath, args: [],
@@ -96,7 +98,7 @@ test("every walled spawn kind drops the gateway's secrets even when the caller p
       // allowlist (no declared keys for them); the plan's own env is the wall's.
       if (k.kind !== "addon") {
         for (const key of Object.keys(wall.env)) {
-          assert.ok(WALL_BASE_ENV_ALLOW.includes(key) || key in k.ownEnv || key in PLAN.env, `${k.kind}: unexpected key ${key}`);
+          assert.ok(key in BASE_KEYS || key in k.ownEnv || key in PLAN.env, `${k.kind}: unexpected key ${key}`);
         }
       }
     }
@@ -115,22 +117,28 @@ test("a project-service child never gets the gateway's own token for its service
   });
 });
 
-test("wallChildEnv: the deny list wins over a declaration; an add-on's own value is its own", () => {
+const FIRST_PARTY = (id) => (id === "frigate" ? { id, origin: "first-party", server: { envKeys: ["FRIGATE_PASSWORD", "CROW_LOCAL_MCP_TOKEN"] }, env_vars: [] } : null);
+
+test("wallChildEnv: a registry-declared key passes for a bundle add-on, a deny-listed one never does", () => {
   const base = { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0105", ...SECRETS, RANDOM_GATEWAY_KEY: "x" };
-  const env = wallChildEnv({ baseEnv: base, ownEnv: { OWN: "1" }, declaredKeys: ["FRIGATE_PASSWORD", "CROW_LOCAL_MCP_TOKEN", "MINIO_ROOT_PASSWORD", "bad-name"], declaredSource: "repo", credentialKeys: [] });
-  assert.deepEqual(env, { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0105", OWN: "1" });
-  for (const k of ["CROW_LOCAL_MCP_TOKEN", "MINIO_ROOT_PASSWORD"]) assert.ok(WALL_ENV_DENY.includes(k));
-  for (const k of Object.keys(SECRETS)) assert.equal(WALL_BASE_ENV_ALLOW.includes(k), false);
+  const env = wallChildEnv({ id: "frigate", kind: "addon", baseEnv: base, ownEnv: { OWN: "1" }, credentialKeys: [], registryFor: FIRST_PARTY });
+  assert.equal(env.FRIGATE_PASSWORD, "fake-frigate-0105");
+  assert.equal(env.OWN, "1");
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal("RANDOM_GATEWAY_KEY" in env, false);
+  assert.ok(isDeniedAddonKey("CROW_LOCAL_MCP_TOKEN"));
+  assertNoSecrets(env, "a declared-key add-on");
 });
 
-test("declaredEnvKeys: only a repo-sourced manifest declares anything", () => {
-  const m = { server: { envKeys: ["A_KEY"] }, env_vars: [{ name: "B_KEY" }, { name: "not ok" }] };
-  assert.deepEqual(declaredEnvKeys(m, "repo"), ["A_KEY", "B_KEY"]);
-  assert.deepEqual(declaredEnvKeys(m, "installed"), []);
+test("wallChildEnv: a service child or a built-in never takes a declared key from the gateway env", () => {
+  const base = { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0111" };
+  for (const kind of ["service", "builtin"]) {
+    const env = wallChildEnv({ id: "frigate", kind, baseEnv: base, credentialKeys: [], registryFor: FIRST_PARTY });
+    assert.equal("FRIGATE_PASSWORD" in env, false, kind);
+  }
 });
 
 test("a key the gateway took from systemd credentials is never passed, even declared; CREDENTIALS_DIRECTORY never is", () => {
-  // The real path: the gateway applies its LoadCredential files, which records the names.
   const root = join(T, "run-credentials");
   const dir = join(root, "crow-gateway.service");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -143,24 +151,14 @@ test("a key the gateway took from systemd credentials is never passed, even decl
   try {
     const r = applyCredentialFiles(process.env, { dir, roots: [root], log: { warn() {}, log() {} } });
     assert.deepEqual(r.applied, ["FRIGATE_PASSWORD"]);
-    const env = wallChildEnv({ baseEnv: process.env, ownEnv: { CREDENTIALS_DIRECTORY: "/x" }, declaredKeys: ["FRIGATE_PASSWORD", "CREDENTIALS_DIRECTORY"], declaredSource: "repo" });
+    const env = wallChildEnv({ id: "frigate", kind: "addon", baseEnv: process.env, ownEnv: { CREDENTIALS_DIRECTORY: "/x" }, registryFor: FIRST_PARTY });
     assert.equal("FRIGATE_PASSWORD" in env, false, "a credential-applied key stays in the gateway");
     assert.equal(Object.values(env).includes("fake-cred-frigate-0106"), false);
     assert.equal("CREDENTIALS_DIRECTORY" in env, false, "the credentials path never reaches the child, not even from its own env");
-    assert.equal(env.PATH, process.env.PATH);
   } finally {
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     _resetCredentialKeysForTest();
   }
-});
-
-test("declared keys count only from a repo-sourced manifest: an installed or third-party one gets nothing", () => {
-  const base = { PATH: "/usr/bin", FRIGATE_PASSWORD: "fake-frigate-0107" };
-  for (const src of [null, "installed", "third-party", undefined]) {
-    const env = wallChildEnv({ baseEnv: base, declaredKeys: ["FRIGATE_PASSWORD"], declaredSource: src, credentialKeys: [] });
-    assert.equal("FRIGATE_PASSWORD" in env, false, String(src));
-  }
-  assert.equal(wallChildEnv({ baseEnv: base, declaredKeys: ["FRIGATE_PASSWORD"], declaredSource: "repo", credentialKeys: [] }).FRIGATE_PASSWORD, "fake-frigate-0107");
 });
 
 test("through the wall context: a third-party add-on declaring FRIGATE_PASSWORD gets nothing; first-party frigate gets its own", async () => {
@@ -168,7 +166,6 @@ test("through the wall context: a third-party add-on declaring FRIGATE_PASSWORD 
   process.env.FRIGATE_PASSWORD = "fake-frigate-0108";
   try {
     const ctx = context();
-    // A third-party bundle, installed only (no repo copy), declaring the same key.
     const crowHome = join(T, "home", ".crow");
     const inst = join(crowHome, "bundles", "acme-cam");
     mkdirSync(join(inst, "server"), { recursive: true });
@@ -179,17 +176,12 @@ test("through the wall context: a third-party add-on declaring FRIGATE_PASSWORD 
     }));
     mkdirSync(join(crowHome, "data", "acme-cam"), { recursive: true, mode: 0o700 });
     const third = await ctx.startAddonWall({ id: "acme-cam", entry: {}, command: process.execPath, args: [], baseEnv: process.env, ownEnv: {}, kind: "addon" });
-    assert.equal("FRIGATE_PASSWORD" in third.env, false, "a third-party manifest declares nothing");
+    assert.equal("FRIGATE_PASSWORD" in third.env, false, "an unpublished manifest declares nothing");
 
     mkdirSync(join(crowHome, "data", "frigate"), { recursive: true, mode: 0o700 });
     const first = await ctx.startAddonWall({ id: "frigate", entry: {}, command: process.execPath, args: [], baseEnv: process.env, ownEnv: {}, kind: "addon" });
-    assert.equal(first.env.FRIGATE_PASSWORD, "fake-frigate-0108", "the reviewed repo manifest's own key reaches it");
+    assert.equal(first.env.FRIGATE_PASSWORD, "fake-frigate-0108", "the published registry entry's own key reaches it");
   } finally {
     if (saved === undefined) delete process.env.FRIGATE_PASSWORD; else process.env.FRIGATE_PASSWORD = saved;
   }
-});
-
-test("the root-password pattern is denied from the gateway env even when a repo manifest declares it", () => {
-  const env = wallChildEnv({ baseEnv: { WORKSPACE_DB_ROOT_PASSWORD: "fake-root-0109", S3_SECRET_KEY: "fake-s3-0110" }, declaredKeys: ["WORKSPACE_DB_ROOT_PASSWORD", "S3_SECRET_KEY"], declaredSource: "repo", credentialKeys: [] });
-  assert.deepEqual(env, {});
 });

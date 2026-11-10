@@ -2,9 +2,7 @@
  * The Phase 0 gate (plan review item 12): what an add-on wall is handed must
  * carry nothing of the gateway's own secrets.
  *
- * This file imports `servers/gateway/addon-env.js`, the allowlist Phase 0 adds.
- * Until that module is on `main` the whole file fails to load — that is the
- * gate, not a broken test.
+ * It imports `servers/gateway/addon-env.js`, the allowlist Phase 0 added.
  *
  * The callers' own env builders are checked here, because they are what an
  * UNWALLED child (walls off, the default) is started with: a bundle add-on's
@@ -15,7 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { addonBaseEnv, ADDON_ENV_ALLOW } from "../servers/gateway/addon-env.js";
+import { addonBaseEnv, ADDON_BASE_KEYS } from "../servers/gateway/addon-env.js";
 import { addonStdioEnv } from "../servers/gateway/proxy.js";
 import { connectionChildEnv } from "../servers/gateway/services/children.js";
 import { serviceById } from "../servers/shared/service-catalog.js";
@@ -47,7 +45,7 @@ function builtinBaseEnv(gatewayEnv) {
     const out = addonBaseEnv(gatewayEnv);
     if (out && typeof out === "object") return out;
   } catch { /* fall through to the allowlist spelling below */ }
-  const allow = ADDON_ENV_ALLOW instanceof Set ? ADDON_ENV_ALLOW : new Set(ADDON_ENV_ALLOW || []);
+  const allow = ADDON_BASE_KEYS instanceof Set ? ADDON_BASE_KEYS : new Set(ADDON_BASE_KEYS || []);
   return Object.fromEntries(Object.entries(gatewayEnv).filter(([key, value]) => allow.has(key) && typeof value === "string"));
 }
 
@@ -89,7 +87,7 @@ test("a built-in integration's env carries none of the gateway's secrets", async
 });
 
 test("the allowlist names neither of the gateway's secrets", () => {
-  const names = ADDON_ENV_ALLOW instanceof Set ? [...ADDON_ENV_ALLOW] : Array.from(ADDON_ENV_ALLOW || []);
+  const names = ADDON_BASE_KEYS instanceof Set ? [...ADDON_BASE_KEYS] : Array.from(ADDON_BASE_KEYS || []);
   assert.ok(names.length > 0, "the allowlist is not empty");
   for (const key of [TOKEN_KEY, GITHUB_KEY, MINIO_KEY]) assert.equal(names.includes(key), false, `the allowlist names ${key}`);
 });

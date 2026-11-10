@@ -2,92 +2,50 @@
  * The environment a walled add-on starts with, built by the wall itself.
  *
  * Defence in depth on top of the callers' own env hygiene: whatever env a spawn
- * site passes in, the wall never spreads it. The child gets exactly
- *   1. the allowlisted keys of the gateway's env (`WALL_BASE_ENV_ALLOW`),
- *   2. the keys the add-on's REVIEWED repo manifest declares (repo source only;
- *      a local or third-party manifest declares nothing here), minus the
- *      gateway secrets in `WALL_ENV_DENY`, read from the gateway's env,
- *   3. the add-on's own env (its mcp-addons.json `env`, a service connection's
- *      values, a built-in's own vars, the derived keys), which wins.
- * Keys in `WALL_ENV_DENY`, and every key the gateway applied from systemd
- * credentials (LoadCredential, `credentialKeyNames()`), are never taken from the
- * gateway's env, whatever a manifest declares; `CREDENTIALS_DIRECTORY` never
- * reaches the child. There is deliberately no name-pattern deny
- * (`*_PASSWORD`, `*_TOKEN`): first-party add-ons declare their own such keys
- * (FRIGATE_PASSWORD). A key the add-on's own env sets is the owner's value.
+ * site holds, the wall never spreads it. It uses Phase 0's own rules
+ * (servers/gateway/addon-env.js), so there is one source of truth:
+ *   1. `addonBaseEnv`: the allowlisted base every add-on child gets;
+ *   2. for a bundle add-on only: `declaredPassthrough` (keys its entry in the
+ *      tracked registry declares, never a deny-listed gateway secret, never for
+ *      a community or unpublished bundle) and `storagePassthrough` (the four
+ *      storage-reading bundles' storage env);
+ *   3. the add-on's own env (its mcp-addons.json `env` and derived keys, a
+ *      service connection's values, a built-in's own vars), which wins.
+ * A project-service child never takes a declared key from the gateway env (its
+ * credentials are its connection's, never the gateway's token for that service);
+ * a built-in's own vars already are its ownEnv.
  *
- * TODO(Phase 0): when lane B's env hygiene PR is on main, replace
- * `WALL_BASE_ENV_ALLOW` with `ADDON_ENV_ALLOW` imported from
- * `servers/gateway/addon-env.js`, so the wall and the callers share one list.
+ * Before any of that, every key the gateway applied from systemd credentials
+ * (`credentialKeyNames()`) and `CREDENTIALS_DIRECTORY` are removed from the
+ * gateway env the wall reads, and `CREDENTIALS_DIRECTORY` never reaches the child
+ * whatever its source.
  */
-
-/** The gateway env keys every add-on may see (backendEnv-style base + Crow's paths). */
-export const WALL_BASE_ENV_ALLOW = Object.freeze([
-  "PATH", "HOME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
-  "NODE_ENV", "NODE_EXTRA_CA_CERTS",
-  "CROW_APP_ROOT", "CROW_HOME", "CROW_DATA_DIR", "CROW_DB_PATH", "CROW_GATEWAY_PORT", "PORT",
-]);
-
-/**
- * Gateway secrets that never come from the gateway env into a wall, even when
- * declared. Aligned with lane B's Phase 0 deny list (ADDON_DENY_KEYS and
- * ADDON_DENY_KEY_RE in servers/gateway/addon-env.js); TODO(Phase 0): import
- * `isDeniedAddonKey` from there instead of keeping this copy.
- */
-export const WALL_ENV_DENY = Object.freeze([
-  "CROW_LOCAL_MCP_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN",
-  "PHONE_RUNNER_SECRET", "CROW_BROWSER_VNC_PASSWORD", "MINIO_ROOT_PASSWORD", "MINIO_ROOT_USER",
-  "S3_ACCESS_KEY", "S3_SECRET_KEY", "VAPID_PRIVATE_KEY", "CROW_OAUTH_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET",
-  "CLOUDFLARE_TUNNEL_TOKEN", "NTFY_AUTH_TOKEN", "CROW_BACKUP_TOKEN", "CROW_SETUP_TOKEN", "CROW_ENROLL_OTC",
-  "CROW_PEER_TOKENS_PATH", "CREDENTIALS_DIRECTORY", "TURN_SECRET",
-  "CROW_DASHBOARD_PASSWORD", "CROW_SESSION_SECRET",
-]);
-/** Any key named like a database root password (Phase 0's ADDON_DENY_KEY_RE). */
-export const WALL_ENV_DENY_RE = /_ROOT_PASSWORD$/;
-
+import { addonBaseEnv, declaredPassthrough, storagePassthrough } from "../../servers/gateway/addon-env.js";
 import { credentialKeyNames } from "../../servers/shared/credentials-env.js";
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
- * The env names a manifest declares: `server.envKeys` and `env_vars[].name`.
- * Only a repo-sourced manifest declares anything (its policy is reviewed).
- */
-export function declaredEnvKeys(manifest, source) {
-  if (source !== "repo" || !manifest || typeof manifest !== "object") return [];
-  const out = new Set();
-  const keys = manifest.server && Array.isArray(manifest.server.envKeys) ? manifest.server.envKeys : [];
-  for (const k of keys) if (typeof k === "string" && ENV_NAME_RE.test(k)) out.add(k);
-  for (const v of Array.isArray(manifest.env_vars) ? manifest.env_vars : []) {
-    if (v && typeof v.name === "string" && ENV_NAME_RE.test(v.name)) out.add(v.name);
-  }
-  return [...out].sort();
-}
-
-/**
  * Build the child env.
  * @param {object} o
- * @param {object} [o.baseEnv]       the gateway's env (only read through the lists)
- * @param {object} [o.ownEnv]        the add-on's own env, used as given
- * @param {string[]} [o.declaredKeys] from `declaredEnvKeys`
- * @param {string} [o.declaredSource] the policy source of those keys: honoured only for "repo"
+ * @param {string} o.id                the add-on id
+ * @param {"addon"|"service"|"builtin"} [o.kind="addon"]
+ * @param {object} [o.baseEnv]         the gateway's env: only read through Phase 0's rules
+ * @param {object} [o.ownEnv]          the add-on's own env, used as given
+ * @param {string[]} [o.credentialKeys] test seam; default: the names applied from credentials
+ * @param {Function} [o.registryFor]   test seam for addon-env.js's registry lookup
  * @returns {object}
  */
-export function wallChildEnv({ baseEnv = {}, ownEnv = {}, declaredKeys = [], declaredSource = null, credentialKeys = credentialKeyNames() } = {}) {
-  const base = baseEnv && typeof baseEnv === "object" ? baseEnv : {};
+export function wallChildEnv({ id, kind = "addon", baseEnv = {}, ownEnv = {}, credentialKeys = credentialKeyNames(), registryFor } = {}) {
+  const base = { ...(baseEnv && typeof baseEnv === "object" ? baseEnv : {}) };
+  for (const k of Array.isArray(credentialKeys) ? credentialKeys : []) delete base[k];
+  delete base.CREDENTIALS_DIRECTORY;
   const own = ownEnv && typeof ownEnv === "object" ? ownEnv : {};
-  // Never read from the gateway env: its secrets, and whatever systemd handed
-  // the gateway as a credential (those live only in the gateway's memory).
-  const deny = new Set([...WALL_ENV_DENY, ...(Array.isArray(credentialKeys) ? credentialKeys : []), "CREDENTIALS_DIRECTORY"]);
-  const env = {};
-  for (const k of WALL_BASE_ENV_ALLOW) {
-    if (!deny.has(k) && typeof base[k] === "string") env[k] = base[k];
-  }
-  // Declared keys come only from a REVIEWED repo manifest (the Phase 0 rule).
-  const declared = declaredSource === "repo" && Array.isArray(declaredKeys) ? declaredKeys : [];
-  for (const k of declared) {
-    if (typeof k !== "string" || !ENV_NAME_RE.test(k) || deny.has(k) || WALL_ENV_DENY_RE.test(k)) continue;
-    if (typeof base[k] === "string") env[k] = base[k];
+  const opts = typeof registryFor === "function" ? { registryFor } : {};
+
+  const env = { ...addonBaseEnv(base) };
+  if (kind === "addon") {
+    Object.assign(env, declaredPassthrough(id, base, opts), storagePassthrough(id, base, opts));
   }
   for (const [k, v] of Object.entries(own)) {
     if (ENV_NAME_RE.test(k) && typeof v === "string") env[k] = v;

@@ -138,8 +138,8 @@ function openSeccompProgram(build, tmpdirFn) {
  * @param {object} [o.baseEnv]        the gateway's env: read ONLY through the wall's allowlist and the
  *                                    manifest's declared keys (wall-env.mjs), never spread
  * @param {object} [o.ownEnv]         the add-on's own env (entry env, connection values, derived keys)
- * @param {string[]} [o.declaredKeys] env names the reviewed repo manifest declares
- * @param {string} [o.declaredSource] where those names came from; only "repo" is honoured
+ * @param {"addon"|"service"|"builtin"} [o.envKind] which env rule applies (wall-env.mjs): only a
+ *                                    bundle add-on takes declared keys from the gateway env
  * @param {object} o.profile          `deriveProfile`'s output
  * @param {object} o.entry            the add-on's registry entry
  * @param {string} o.crowHome
@@ -166,7 +166,7 @@ export async function wrapAddonSpawn(o = {}) {
 
   // The child env is the wall's own build, whatever env the spawn site holds:
   // an allowlisted slice of the gateway env, the declared keys, the add-on's own.
-  const childEnv = wallChildEnv({ baseEnv: o.baseEnv, ownEnv: o.ownEnv, declaredKeys: o.declaredKeys, declaredSource: o.declaredSource });
+  const childEnv = wallChildEnv({ id, kind: o.envKind || "addon", baseEnv: o.baseEnv, ownEnv: o.ownEnv });
 
   let probe;
   try {
