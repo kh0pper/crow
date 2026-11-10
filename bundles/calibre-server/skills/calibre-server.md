@@ -22,10 +22,23 @@ tools:
   creates the `admin` account when the bundle is installed, generates its password and keeps it
   in Settings → Passwords (Crow's keychain) — read it there, never from this skill.
 - Calibre asks for that login on every page under `/ajax` and on downloads; `CALIBRE_USERNAME`
-  and `CALIBRE_PASSWORD` in the bundle's `.env` are the same credentials, so the tools below use
-  them.
-- An install that already has content-server users keeps them: Crow leaves those accounts alone
-  and asks the operator to save the login they use.
+  and `CALIBRE_PASSWORD` in the bundle's `.env` and in the extension's own MCP settings are the
+  same credentials, so the tools below use them.
+- Content-server users made in the old desktop version are not carried over: those lived in the
+  desktop app's own user file under `/config/.config/calibre/`, not in the content server's
+  `/config/users.sqlite`. Crow creates `admin`; more accounts come from calibre's own tools
+  (`calibre-server --manage-users`).
+- Calibre blocks an address after five failed logins, and every caller on this computer shares
+  one address, so a wrong saved password can briefly block Crow's tools too: wait a minute
+  before retrying, or fix the password in Settings → Passwords.
+
+## Upgrading from the desktop version
+
+- The desktop app over the browser is gone with the content-server switch; after pressing
+  **Apply the update**, press **Set it up for me** on the Extensions card so Crow creates the
+  `admin` login (otherwise the server asks for a login no account answers).
+- The library folder on the host is unchanged, so the books stay where they were.
+- The old desktop config volume is left as is; the content server ignores it.
 
 ## When to Activate
 
@@ -81,6 +94,6 @@ tools:
 ## Error Handling
 
 - If Calibre is unreachable: "Cannot connect to Calibre at the configured URL. Make sure the content server is running."
-- If auth fails (401): "Calibre rejected the credentials. Read the login Crow saved in Settings → Passwords, or set CALIBRE_USERNAME and CALIBRE_PASSWORD in the bundle settings."
+- If auth fails (401): "Calibre rejected the credentials. Read the login Crow saved in Settings → Passwords, or set CALIBRE_USERNAME and CALIBRE_PASSWORD in the bundle settings." If it worked a minute ago, Calibre may have blocked this computer's address after five failed logins: wait a minute and try again.
 - If a book is not found: the book may have been removed from the library
 - If a format is not available: show available formats and let the user choose another

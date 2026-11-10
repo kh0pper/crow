@@ -312,7 +312,7 @@ The script reports what happened through its exit code:
 
 | exit | meaning | Crow then |
 |---|---|---|
-| `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords) and into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars` |
+| `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords), into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars`, and into the bundle's `mcp-addons.json` entry when it has one |
 | `3` | the app already has its own admin (set up earlier by the operator); nothing changed | leaves everything alone, and asks the operator to save the login they use |
 | `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
 | `5` | the app accepted the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
@@ -363,6 +363,15 @@ When the keychain save AND the `.env` write both fail after the app's password
 changed, the answer is `failed` with "the app's admin password changed but Crow
 could not keep it; reset it in the app": the login now exists only inside the app,
 so the card and the bell stay until the operator resets it (or saves it by hand).
+
+The saved login also goes into the bundle's own `mcp-addons.json` entry, and the run
+asks for the same gateway reload the operator's Configure save asks for: an MCP child
+is spawned with ITS entry's env and never reads the bundle's `.env`, so a bundle whose
+MCP server logs in (calibre-server, kavita, navidrome) would otherwise start with a
+username and no password and answer 401 to every call. A bundle that declares no
+`server` has no entry, and that is not an error. The install path does not restart
+mid-job: it marks the install as needing one, and its single end-of-install restart
+loads the entry.
 
 Two calls in one install are not wasted: Crow never runs the script when the
 keychain already holds this app's admin login, and it makes sure the keychain can be

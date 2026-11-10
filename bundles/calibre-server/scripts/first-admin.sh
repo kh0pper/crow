@@ -103,15 +103,27 @@ printf '%s' "$PW" | timeout 30 docker exec -i "$CONTAINER" "$CALIBRE_BIN" --user
 if [ "$add_exit" -eq 0 ]; then confirmed=1; fi
 if [ -z "$confirmed" ]; then
   # Calibre answered without saying it created the account (a name that already exists
-  # answers "already exists" with a nonzero exit). Its own account list decides, never the
-  # exit code alone: the name now listed is proved with a real login below, an install that
-  # has other accounts is not ours to change (3), and a list still empty changed nothing (1).
-  read_users || die "Calibre did not report whether it created the account; check the app's own login before trying again." 1
-  if [ -n "$(printf '%s' "$USERS_RAW" | tr -d '[:space:]')" ]; then
-    has_account || die "Calibre has accounts, but none named '$ADMIN_USER', so Crow's password cannot open one; left alone, and nothing of Crow's was saved." 3
-  else
-    die "Calibre did not create the account, so nothing was changed; check the app's own login." 1
-  fi
+  # answers "already exists" with a nonzero exit), or `timeout` killed the docker CLIENT
+  # while the create went on inside the container. Its own account list decides, never the
+  # exit code alone — and it is read again a few times first: a create that just timed out
+  # can appear a second or two later, and dropping the password then would leave an account
+  # nobody here knows the password to. Five reads over ~8 s, well inside this step's share
+  # of the manifest's 180 s. The name appearing is not proof by itself: the login below is.
+  found=""
+  reread=0
+  while [ "$reread" -lt 5 ]; do
+    if [ "$reread" -gt 0 ]; then sleep 2; fi
+    reread=$((reread + 1))
+    # An unreadable list is never "no accounts": creating over one would claim an install
+    # whose accounts are someone else's.
+    read_users || die "Calibre did not report whether it created the account; check the app's own login before trying again." 1
+    if [ -n "$(printf '%s' "$USERS_RAW" | tr -d '[:space:]')" ]; then
+      has_account || die "Calibre has accounts, but none named '$ADMIN_USER', so Crow's password cannot open one; left alone, and nothing of Crow's was saved." 3
+      found=1
+      break
+    fi
+  done
+  [ -n "$found" ] || die "Calibre did not create the account, so nothing was changed; check the app's own login." 1
 fi
 
 # ── prove the new login works ──────────────────────────────────────────────────────

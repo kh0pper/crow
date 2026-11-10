@@ -361,8 +361,14 @@ export function pendingFirstAdminNotices({
     // marker only ever hides the "Crow could not read the app" card: a "close" /
     // "create" / "invite" state is a live warning and always shows.
     const inviteHides = !invite || invite.kind === "blocked";
-    if (inviteHides && installId && done && done[id] === installId) continue;
-    if (inviteHides && !installId && done && done[id]) continue;
+    // A `crow`/via setup bundle never takes the Done marker. Reaching this point means the
+    // keychain holds no login for it, and the card's whole purpose is to create or save one;
+    // a marker pressed under an OLD `finish-setup` declaration carries the same install stamp
+    // (a version refresh does not reinstall), so it would hide exactly that card — how an
+    // upgraded install ended up requiring a login nobody had (review round 2, finding 2).
+    const doneApplies = !setup;
+    if (doneApplies && inviteHides && installId && done && done[id] === installId) continue;
+    if (doneApplies && inviteHides && !installId && done && done[id]) continue;
     const link = firstAdminLink(id, manifest);
     const subpath = link.proxyMode === "subpath";
     // An invite card asks the operator to invite or to close sign-ups — not to save
@@ -388,7 +394,9 @@ export function pendingFirstAdminNotices({
       kept,
       canAuto,
       canSave: !invite,
-      canDone: !inviteAction,
+      // No Done on a setup card either: it could not hide the card (above), so a button
+      // that does nothing would only look broken.
+      canDone: !inviteAction && !setup,
       invite,
     });
   }

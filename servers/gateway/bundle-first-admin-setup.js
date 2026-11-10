@@ -38,7 +38,14 @@
  * .env value if it is an http(s) URL of at most 512 characters (firstAdminLoginUrl).
  * Exit 5 is saved the same way: the app accepted the password, so it must be kept; the run
  * reports `ok` with FIRST_ADMIN_UNPROVEN in its reason and its log, because Crow could not
- * log in with it to confirm. A keychain save
+ * log in with it to confirm.
+ *
+ * The same values also go into the bundle's mcp-addons.json entry (applyEnvToMcpAddons): an
+ * MCP child is spawned with ITS entry's env and never reads the bundle's .env, so a bundle
+ * whose own server logs in (calibre-server, kavita, navidrome) would otherwise start with a
+ * username and no password and answer 401 to every call. After that write the run asks for
+ * the reload the operator's Configure save asks for (a gateway restart: mcp-addons.json is
+ * read when the child is spawned, so a running one keeps the old env). A keychain save
  * that fails AFTER the app's password changed still parks the password in .env, under
  * `secretEnv` even when the manifest does not declare it. When BOTH the keychain and the .env write fail, the run
  * reports `failed` and says the app's password has changed and must be reset in the app:
@@ -191,6 +198,9 @@ export function firstAdminLoginUrl(readEnv, urlEnv) {
   try {
     const parsed = new URL(value);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    // The keychain's `url` column is plain metadata, not a secret: a credential embedded in
+    // the env value (`http://user:pw@host`) must never be copied into it.
+    if (parsed.username || parsed.password) return null;
   } catch {
     return null;
   }
@@ -266,6 +276,20 @@ function defaultDeps() {
     writeMarker: writeFirstAdminAutoResult,
     now: () => Date.now(),
     warn: (m) => console.warn(m),
+    // The bundle's MCP entry (mcp-addons.json) and the reload the operator's own Configure save
+    // asks for are the routes module's. Imported lazily: that module imports THIS one, and it
+    // resolves its paths from CROW_HOME when it is first loaded.
+    applyMcpEnv: async (id, values, reviewed) => {
+      const [{ applyEnvToMcpAddons }, { MCP_ADDONS_PATH }] = await Promise.all([
+        import("./routes/bundles.js"),
+        import("./bundles-config.js"),
+      ]);
+      return applyEnvToMcpAddons(id, values, MCP_ADDONS_PATH, reviewed);
+    },
+    requestReload: async () => {
+      const { scheduleGatewayRestart } = await import("./routes/bundles.js");
+      scheduleGatewayRestart(3000);
+    },
   };
 }
 
@@ -303,10 +327,12 @@ function resolveReviewedScript(scriptDir, relScript) {
  *
  * NEVER throws and NEVER returns or logs the password (every occurrence of it in the
  * log lines and the reason is replaced with `[hidden]`). Returns
- * `{ result: "ok"|"kept"|"not-running"|"failed"|"busy"|"skipped", reason?, log }` where
- * `log` is the last 20 non-empty lines of the script's stdout (the installer appends
- * them to its job log; the route hands them to the card). `"busy"` means another run
- * for this bundle — the install path's or the card's — is already in flight.
+ * `{ result: "ok"|"kept"|"not-running"|"failed"|"busy"|"skipped", reason?, log, mcpEnvUpdated? }`
+ * where `log` is the last 20 non-empty lines of the script's stdout (the installer appends
+ * them to its job log; the route hands them to the card) and `mcpEnvUpdated` says the
+ * bundle's mcp-addons.json entry was written with the new login (see requestReload).
+ * `"busy"` means another run for this bundle — the install path's or the card's — is
+ * already in flight.
  *
  * @param {object} o
  * @param {string} o.bundleId
@@ -316,7 +342,8 @@ function resolveReviewedScript(scriptDir, relScript) {
  * @param {string|null} [o.installId]     installed.json's installedAt for this install
  * @param {string|null} [o.crowHome]
  * @param {object} [o.deps]               seams: runScript, openDb, hasSaved, ensureWriteKey,
- *                                        newSecret, save, writeEnv, writeMarker, now, warn
+ *                                        newSecret, save, writeEnv, writeMarker, now, warn,
+ *                                        applyMcpEnv, requestReload
  */
 export async function runFirstAdminSetup({
   bundleId,
@@ -358,12 +385,34 @@ export async function runFirstAdminSetup({
       if (!password) return s;
       return s.split(password).join("[hidden]");
     };
-    const record = async (result, reason = null) => {
+    const record = async (result, reason = null, extra = {}) => {
       try {
         if (db) await d.writeMarker(db, bundleId, { install: installId, result });
       } catch { /* the marker is bookkeeping: never the outcome's own failure */ }
       const why = reason ? redact(reason) : null;
-      return { result, ...(why ? { reason: why } : {}), log: log.map(redact) };
+      return { result, ...(why ? { reason: why } : {}), log: log.map(redact), ...extra };
+    };
+
+    // The bundle's own MCP server gets its env from ITS mcp-addons.json entry, never from the
+    // bundle's .env (addon-env.js): without this it starts after setup with a username and no
+    // password and answers 401 to every call. The entry is the one the operator's Configure
+    // save writes, and the reload that follows is the same one that save asks for. True when
+    // the entry was written; a bundle that is not an MCP add-on has none, and that is no error.
+    const pushLoginToMcp = async (values) => {
+      if (!values || Object.keys(values).length === 0) return false;
+      let wrote = false;
+      try {
+        wrote = !!(await d.applyMcpEnv(bundleId, values, manifest));
+      } catch {
+        // mcp-addons.json is not this run's to fail over: the keychain already holds the
+        // login, and the next Configure save writes the entry again.
+        return false;
+      }
+      if (!wrote) return false;
+      try {
+        await d.requestReload({ bundleId });
+      } catch { /* the values are saved; a reload that will not start is the gateway's business */ }
+      return true;
     };
 
     try {
@@ -446,17 +495,21 @@ export async function runFirstAdminSetup({
         if (Object.keys(declaredValues).length > 0) {
           try { d.writeEnv(dir, declaredValues); } catch { /* the keychain holds it: .env is a convenience */ }
         }
-        return await record("ok", unproven ? FIRST_ADMIN_UNPROVEN : null);
+        const mcpEnvUpdated = await pushLoginToMcp(declaredValues);
+        return await record("ok", unproven ? FIRST_ADMIN_UNPROVEN : null, mcpEnvUpdated ? { mcpEnvUpdated } : {});
       }
 
       // The keychain save failed AFTER the app's password changed. Some bundles' MCP servers
-      // log in with the value from .env, so it goes there even when undeclared.
+      // log in with the value from .env, so it goes there even when undeclared — and into the
+      // bundle's MCP entry for the same reason.
+      const fallbackValues = { ...declaredValues, [plan.secretEnv]: password };
       try {
-        d.writeEnv(dir, { ...declaredValues, [plan.secretEnv]: password });
+        d.writeEnv(dir, fallbackValues);
+        const mcpEnvUpdated = await pushLoginToMcp(fallbackValues);
         const reasons = [];
         if (unproven) reasons.push(FIRST_ADMIN_UNPROVEN);
         reasons.push("saved in the extension's settings file only");
-        return await record("ok", reasons.join("; "));
+        return await record("ok", reasons.join("; "), mcpEnvUpdated ? { mcpEnvUpdated } : {});
       } catch {
         // Both copies failed: the app now holds a password nobody here keeps. Say so
         // plainly instead of reporting a login Crow cannot show the operator.
@@ -481,6 +534,11 @@ export async function runFirstAdminSetup({
  * throws. A login Crow already keeps is left untouched: that one is changed in
  * Settings → Passwords, not from this form.
  *
+ * Like a setup run, a saved login also reaches the bundle's MCP entry (applyEnvToMcpAddons)
+ * and asks for the reload that loads it: an MCP child reads ITS entry, never the bundle's
+ * .env, so without this the operator's login would leave Crow's own tools answering 401
+ * (review round 2, finding 1 — same gap as the automatic run).
+ *
  * @returns {Promise<"saved"|"already"|"failed">} `"already"` = an active entry exists
  *          for this bundle's admin key; `"failed"` = the caller's fixed sentence.
  */
@@ -504,6 +562,23 @@ export async function saveFirstAdminLogin({ bundleId, manifest, username = "", p
       firstView: false,
       now: new Date(d.now()),
     });
+    // What the run would have written: the declared names only, never a key the manifest
+    // does not declare. A failed mcp-addons write is not the save's failure — the keychain
+    // holds the login, and the next Configure save writes the entry again.
+    const declaredEnv = new Set(
+      (Array.isArray(manifest?.env_vars) ? manifest.env_vars : []).map((v) => (v && typeof v.name === "string" ? v.name : null)).filter(Boolean),
+    );
+    const values = {};
+    const plan = firstAdminSetupPlan(manifest);
+    const secretKey = plan && !plan.refused ? plan.secretEnv : envKey;
+    if (secretKey && declaredEnv.has(secretKey)) values[secretKey] = password;
+    const user = typeof username === "string" ? username.trim() : "";
+    if (plan && !plan.refused && plan.userEnv && user && declaredEnv.has(plan.userEnv)) values[plan.userEnv] = user;
+    if (Object.keys(values).length > 0) {
+      let wrote = false;
+      try { wrote = !!(await d.applyMcpEnv(bundleId, values, manifest)); } catch { wrote = false; }
+      if (wrote) { try { await d.requestReload({ bundleId }); } catch { /* the values are saved */ } }
+    }
     return "saved";
   } catch (err) {
     try { d.warn(`[bundles] ${bundleId}: the admin login was not saved (${err && (err.code || err.name) ? err.code || err.name : "error"})`); } catch { /* console gone */ }

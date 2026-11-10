@@ -41,11 +41,19 @@ Calibre's content server will be available at `http://your-server:8081`.
 
 #### The login
 
-The content server needs a login: every page that shows your books and every download asks for it. Crow creates the `admin` account itself right after the install, generates its password and keeps it in **Settings → Passwords**; the bundle's `.env` gets the same `CALIBRE_USERNAME` and `CALIBRE_PASSWORD`, so Crow's tools log in with them. Change the password in Calibre's own web UI (**Settings → Passwords**) if you want another one.
+The content server needs a login: every page that shows your books and every download asks for it. Crow creates the `admin` account itself right after the install, generates its password and keeps it in **Settings → Passwords**. The same `CALIBRE_USERNAME` and `CALIBRE_PASSWORD` go into the bundle's `.env` and into the extension's own MCP settings, which is what Crow's tools read. Change the password in Calibre's own web UI (**Settings → Passwords**) if you want another one.
 
-An install that already had content-server users keeps them: Crow leaves those accounts alone and asks you to save the login you use on the Extensions card.
+The content server keeps its users in its own user database (`/config/users.sqlite`). Accounts made in the old desktop version are not carried over: those lived in the desktop app's own user file under `/config/.config/calibre/`, and the content server never reads it. Crow creates `admin`; add more accounts with calibre's own tools (`calibre-server --manage-users`) if you need them.
+
+Calibre blocks an address after five failed logins, and every caller on this computer shares one address, so a wrong saved password can briefly block Crow's tools too: wait a minute and try again, or fix the password in **Settings → Passwords**.
 
 A library folder with no `metadata.db` is filled with an empty Calibre library on the first start, so the server has somewhere to run.
+
+### Upgrading from the desktop version
+
+The desktop app in the browser is gone — this bundle runs the content server only, so the old web UI and its ports do not come back. Your books stay where they are: the library is still the folder you mounted.
+
+After pressing **Apply the update**, the content server asks for a login that does not exist yet. Press **Set it up for me** on the Extensions card so Crow creates the `admin` login and keeps it in **Settings → Passwords**.
 
 ### Option B: Connect to existing Calibre
 

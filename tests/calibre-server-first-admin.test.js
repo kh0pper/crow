@@ -26,14 +26,17 @@
  *      failures,
  *   8. a create that answers unclearly is settled by Calibre's own account list: the name now
  *      listed is proved with a real login (0), an install with other accounts is left alone
- *      (3), a list still empty changed nothing (1), and an unreadable re-check changes
- *      nothing (1),
+ *      (3), a list still empty after five re-reads changed nothing (1), an unreadable re-check
+ *      changes nothing (1), and a create the docker client timed out on is kept when the
+ *      account appears on a later read (0) — `timeout` kills the client, not the add,
  *   9. the compose: no 3000/3001, the content server only, `--enable-auth --auth-mode basic`
  *      with the user database, the library mounted at /library, the loopback publish, and a
  *      config-volume owner that runs on the SAME image after Docker's first copy-up,
  *   10. the manifest passes the bundle contract and carries the declaration the installer and
  *      the card need (including the address saved with the login and the refreshed compose),
- *   11. the docs and the skill say who creates the login and where it is kept (en + es).
+ *   11. the docs and the skill say who creates the login and where it is kept, that the old
+ *      desktop-mode users are NOT carried over, how to upgrade, and that five failed logins
+ *      block the address every caller on this machine shares (en + es).
  *
  * No docker and no network here: a `docker` and a `curl` stand-in are written into a temp dir
  * that sits first on PATH, record every argv and the stdin they received, and replay canned
@@ -370,11 +373,25 @@ test("an unclear create re-detected with other accounts is exit 3, nothing saved
 });
 
 test("an unclear create on an app that still has no accounts changes nothing (exit 1)", () => {
-  const r = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "1", FAKE_USERS_1: "" } });
+  const r = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "1" } });
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /did not create the account, so nothing was changed/);
   assert.equal(proofCalls(r).length, 0, "no proof after a create that did not happen");
   assert.equal(/nothing of Crow's was saved/.test(r.stderr), false, "that is the exit-3 sentence");
+  assert.equal(listCalls(r).length, 6, "the list is read once up front and re-read five times before deciding");
+});
+
+test("a create the docker client timed out on is kept when the account shows up on a later read", () => {
+  // `timeout 30` kills the CLIENT; the add can still finish inside the container. Calibre's
+  // own list gaining the account is the proof — dropping the password here would leave an
+  // account nobody on this machine knows the password to.
+  const r = run({ answers: { FAKE_USERS_0: "", FAKE_ADD_0: "124", FAKE_USERS_1: "", FAKE_USERS_2: ADMIN } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(addCalls(r).length, 1, "the create is attempted exactly once");
+  assert.equal(listCalls(r).length, 3, "the account was found on the third read");
+  assert.equal(proofCalls(r).length, 1, "and the password the container took is proved with a real login");
+  assert.equal(configValue(proofCalls(r)[0].stdin, "user"), `${ADMIN}:${PASSWORD}`);
+  assertPasswordStayedOutOfSight(r);
 });
 
 test("an unreadable re-check after an unclear create changes nothing (exit 1)", () => {
@@ -437,7 +454,7 @@ test("the manifest passes the bundle contract and declares the setup script Crow
   const manifest = manifestOf("calibre-server");
   const { errors } = validateManifest(manifest, B, { bundleExists: () => true });
   assert.deepEqual(errors, [], "the whole manifest");
-  assert.equal(manifest.version, "1.0.4", "a bundle change is a version bump (the installed copy refreshes on it)");
+  assert.equal(manifest.version, "1.0.5", "a bundle change is a version bump (the installed copy refreshes on it)");
   assert.deepEqual(manifest.refreshFiles, ["docker-compose.yml"], "an installed copy receives the fixed compose");
   assert.deepEqual(manifest.firstAdmin, {
     mode: "crow",
@@ -504,12 +521,27 @@ test("the docs and the skill say the desktop app is gone and who creates the log
     assert.match(doc, /content server|servidor de contenido/i, `${path}: names the content server`);
     assert.match(doc, /desktop app|aplicación de escritorio/, `${path}: says the desktop app over the browser is gone`);
     assert.match(doc, /Crow creates the `admin` account|Crow crea la cuenta `admin`/, `${path}: says Crow creates it`);
-    assert.match(doc, /keeps them|los conserva/, `${path}: says an existing install keeps its users`);
+    // The old desktop-mode accounts lived in the desktop app's own user file, not in the
+    // content server's users.sqlite: they are NOT carried over, and promising they are is
+    // what round 2 (finding 3) is about.
+    assert.match(doc, /not carried over|no se conservan/, `${path}: says the old users are not carried over`);
+    assert.doesNotMatch(doc, /keeps them|los conserva/, `${path}: no false promise about an existing install's users`);
+    assert.match(doc, /users\.sqlite/, `${path}: names the file the content server's users live in`);
+    // Five failed logins block the address every caller on this machine shares.
+    assert.match(doc, /five failed logins|cinco inicios de sesión fallidos/, `${path}: warns about the login ban`);
+    // The upgrade path: the button that creates the login once the update is applied.
+    assert.match(doc, /Upgrading from the desktop version|Actualizar desde la versión de escritorio/, `${path}: has the upgrade section`);
+    assert.match(doc, /Set it up for me/, `${path}: names the button that creates the login`);
   }
   const skill = readFileSync(join(B, "skills", "calibre-server.md"), "utf8");
   assert.match(skill, /Settings → Passwords/, "the skill names where Crow keeps the login");
   assert.match(skill, /desktop app/, "and says which mode is gone");
-  assert.match(skill, /keeps them/, "and that existing users stay");
+  assert.doesNotMatch(skill, /keeps them/, "no false promise about an existing install's users");
+  assert.match(skill, /not carried over/, "it says the old desktop-mode users do not come over");
+  assert.match(skill, /users\.sqlite/, "and where the content server's own users live");
+  assert.match(skill, /five failed logins/, "it warns about the login ban");
+  assert.match(skill, /Upgrading from the desktop version/, "and covers the upgrade");
+  assert.match(skill, /Set it up for me/, "naming the button that creates the login");
 });
 
 test("the edited skill is in the ledger (an edited skill needs its new hash recorded)", () => {

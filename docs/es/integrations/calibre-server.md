@@ -41,11 +41,19 @@ El servidor de contenido de Calibre estará disponible en `http://tu-servidor:80
 
 #### El inicio de sesión
 
-El servidor de contenido necesita un inicio de sesión: cada página que muestra tus libros y cada descarga lo piden. Crow crea la cuenta `admin` por sí mismo justo después de la instalación, genera su contraseña y la guarda en **Ajustes → Contraseñas**; el `.env` del bundle recibe el mismo `CALIBRE_USERNAME` y `CALIBRE_PASSWORD`, así que las herramientas de Crow inician sesión con ellos. Cambia la contraseña en la interfaz web de Calibre (**Settings → Passwords**) si quieres otra.
+El servidor de contenido necesita un inicio de sesión: cada página que muestra tus libros y cada descarga lo piden. Crow crea la cuenta `admin` por sí mismo justo después de la instalación, genera su contraseña y la guarda en **Ajustes → Contraseñas**. El mismo `CALIBRE_USERNAME` y `CALIBRE_PASSWORD` van al `.env` del bundle y a la configuración MCP de la extensión, que es lo que leen las herramientas de Crow. Cambia la contraseña en la interfaz web de Calibre (**Settings → Passwords**) si quieres otra.
 
-Una instalación que ya tenía usuarios del servidor de contenido los conserva: Crow deja esas cuentas intactas y te pide guardar el inicio de sesión que uses en la tarjeta de Extensiones.
+El servidor de contenido guarda sus usuarios en su propia base de datos de usuarios (`/config/users.sqlite`). Las cuentas creadas en la antigua versión de escritorio no se conservan: vivían en el archivo de usuarios de la aplicación de escritorio, bajo `/config/.config/calibre/`, y el servidor de contenido nunca lo lee. Crow crea `admin`; añade más cuentas con las propias herramientas de Calibre (`calibre-server --manage-users`) si las necesitas.
+
+Calibre bloquea una dirección tras cinco inicios de sesión fallidos, y todos los que llaman desde este ordenador comparten una sola dirección, así que una contraseña guardada equivocada puede bloquear brevemente también las herramientas de Crow: espera un minuto y vuelve a intentarlo, o corrige la contraseña en **Ajustes → Contraseñas**.
 
 Una carpeta de biblioteca sin `metadata.db` se rellena con una biblioteca de Calibre vacía en el primer arranque, para que el servidor tenga dónde funcionar.
+
+### Actualizar desde la versión de escritorio
+
+La aplicación de escritorio en el navegador ya no está: este bundle ejecuta solo el servidor de contenido, así que la antigua interfaz web y sus puertos no vuelven. Tus libros se quedan donde están: la biblioteca sigue siendo la carpeta que montaste.
+
+Después de pulsar **Apply the update**, el servidor de contenido pide un inicio de sesión que todavía no existe. Pulsa **Set it up for me** en la tarjeta de Extensiones para que Crow cree el inicio de sesión `admin` y lo guarde en **Ajustes → Contraseñas**.
 
 ### Opción B: Conectar a Calibre existente
 

@@ -1,7 +1,7 @@
 {
   "id": "calibre-server",
   "name": "Calibre Server",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
   "type": "bundle",
   "author": "Crow",
@@ -32,5 +32,5 @@
     "userEnv": "CALIBRE_USERNAME",
     "urlEnv": "CALIBRE_URL"
   },
-  "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to an existing Calibre content server (set CALIBRE_URL). The bundle runs the content server itself with a login required — the desktop app over a web browser is gone — and Crow creates its `admin` account at install, keeping the password in Settings → Passwords. An install that already had content-server users keeps them."
+  "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to an existing Calibre content server (set CALIBRE_URL). The bundle runs the content server itself with a login required — the desktop app over a web browser is gone — and Crow creates its `admin` account at install, keeping the password in Settings → Passwords. Users made in the old desktop version are not carried over: they lived in the desktop app's own user file, which the content server never reads."
 }

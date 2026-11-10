@@ -6,7 +6,9 @@
  *   1. the contract for `firstAdmin: { mode: "crow", via: "setup", ... }`,
  *   2. the setup-script protocol on stdin (spawnGroup `input`, and stdin still closed
  *      when no input is given),
- *   3. runFirstAdminSetup over every exit code, every keychain failure and the seams,
+ *   3. runFirstAdminSetup over every exit code, every keychain failure and the seams —
+ *      including the bundle's mcp-addons.json entry (an MCP child reads THAT, never the
+ *      bundle's .env) and the one reload that loads it,
  *   4. the same function against a REAL bash script in a temp bundle dir,
  *   5. pendingFirstAdminNotices with `adminSaved` / `autoResults`,
  *   6. the bell for a crow/setup bundle (silent on ok, once on anything else),
@@ -295,7 +297,7 @@ test("spawnGroup survives a large input to a script that never reads it", async 
 
 /** Every seam the setup run needs, with the calls recorded. */
 function seams(over = {}) {
-  const calls = { runScript: [], save: [], writeEnv: [], marker: [], warn: [] };
+  const calls = { runScript: [], save: [], writeEnv: [], marker: [], warn: [], mcpEnv: [], reload: [] };
   const deps = {
     runScript: async (cmd, args, opts) => { calls.runScript.push({ cmd, args, opts }); return { stdout: "step one\nstep two\n", stderr: "" }; },
     openDb: () => ({ close() {} }),
@@ -307,6 +309,9 @@ function seams(over = {}) {
     writeMarker: async (db, id, value) => { calls.marker.push({ id, ...value }); return true; },
     now: () => Date.parse("2026-11-05T12:00:00Z"),
     warn: (m) => { calls.warn.push(String(m)); },
+    // The bundle's MCP entry and the reload that loads it: recorded, never a real file.
+    applyMcpEnv: async (id, values, manifest) => { calls.mcpEnv.push({ id, values, manifest }); return true; },
+    requestReload: async () => { calls.reload.push(true); },
     ...over,
   };
   return { calls, deps };
@@ -334,6 +339,7 @@ test("exit 0: the generated password is saved as a generated keychain entry, mar
   const { calls, deps } = seams();
   const { out, dirs } = await runSetup(deps);
   assert.equal(out.result, "ok");
+  assert.equal(out.mcpEnvUpdated, true, "the login reached the bundle's MCP entry");
   assert.deepEqual(out.log, ["step one", "step two"], "the script's stdout is the log");
   assert.equal(calls.runScript.length, 1);
   const run = calls.runScript[0];
@@ -370,6 +376,53 @@ test("exit 0: the generated password is saved as a generated keychain entry, mar
   );
   assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
   assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
+  // Security review round 2, finding 1: an MCP tool child is spawned with ITS mcp-addons.json
+  // entry and never reads the bundle's .env, so the same values go there — and the run asks for
+  // the one reload the operator's Configure save asks for.
+  assert.deepEqual(calls.mcpEnv, [{ id: "frigate", values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" }, manifest: SETUP_MANIFEST }]);
+  assert.equal(calls.reload.length, 1, "exactly one reload request");
+  assert.equal(JSON.stringify(out).includes(PASSPHRASE), false, "and never the password in the answer");
+});
+
+test("a failed setup leaves the bundle's MCP entry alone", async () => {
+  const { calls, deps } = seams({
+    runScript: async () => { throw Object.assign(new Error("exit 1"), { exitCode: 1, stdout: "", stderr: "login API returned 500" }); },
+  });
+  const { out } = await runSetup(deps);
+  assert.equal(out.result, "failed");
+  assert.deepEqual(calls.mcpEnv, [], "no login was made, so nothing may be written into the entry");
+  assert.equal(calls.reload.length, 0, "and nothing to reload");
+});
+
+test("the real seam writes the bundle's own mcp-addons entry, and a bundle without one is no error", async () => {
+  const addonsPath = join(TMP_HOME, "mcp-addons.json");
+  rmSync(addonsPath, { force: true });
+  // No entry: this app has no MCP server. Nothing is written, nothing is reloaded, and the
+  // run is still an ok — the login is in the keychain either way.
+  const none = seams();
+  delete none.deps.applyMcpEnv;
+  const without = await runSetup(none.deps);
+  assert.equal(without.out.result, "ok");
+  assert.equal(without.out.mcpEnvUpdated, undefined);
+  assert.equal(existsSync(addonsPath), false, "an entry-less bundle is not given a file");
+  assert.equal(none.calls.reload.length, 0);
+
+  // The entry the install registered: both login values land in it, the other values stay.
+  writeFileSync(addonsPath, JSON.stringify({ frigate: { command: "node", args: ["server/index.js"], env: { FRIGATE_URL: "http://127.0.0.1:8971" } } }), { mode: 0o600 });
+  const withEntry = seams();
+  delete withEntry.deps.applyMcpEnv;
+  const second = await runSetup(withEntry.deps);
+  assert.equal(second.out.result, "ok");
+  assert.equal(second.out.mcpEnvUpdated, true);
+  assert.equal(withEntry.calls.reload.length, 1);
+  const doc = JSON.parse(readFileSync(addonsPath, "utf8"));
+  assert.equal(doc.frigate.env.FRIGATE_PASSWORD, PASSPHRASE, "the MCP child gets the password it needs");
+  assert.equal(doc.frigate.env.FRIGATE_USER, "admin");
+  assert.equal(doc.frigate.env.FRIGATE_URL, "http://127.0.0.1:8971", "every other value is kept");
+  assert.equal(statSync(addonsPath).mode & 0o777, 0o600, "the file that now holds a secret stays private");
+  assert.equal(JSON.stringify(second.out).includes(PASSPHRASE), false);
+  // Nothing of this file may leak into the route tests below (they use the real seams).
+  rmSync(addonsPath, { force: true });
 });
 
 test("firstAdmin.urlEnv: the saved login carries the installed .env address, and only when it is an http(s) URL", async () => {
@@ -392,6 +445,16 @@ test("firstAdmin.urlEnv: the saved login carries the installed .env address, and
   assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL" }), null);
   // Anything that is not an http(s) address of at most 512 characters is not the app's address.
   for (const value of ["ftp://127.0.0.1:8971", "/srv/frigate", "127.0.0.1:8971", `http://127.0.0.1:8971/${"a".repeat(500)}`]) {
+    assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL", env: `FRIGATE_URL=${value}\n` }), null, value);
+  }
+  // A credential embedded in the env value is NOT the app's address: the keychain's `url`
+  // column is plain metadata, so it must never become a second copy of a password.
+  for (const value of [
+    "http://admin:s3cret@127.0.0.1:8971",
+    "https://admin:s3cret@frigate.example.com/",
+    "http://admin@127.0.0.1:8971",
+    "http://:s3cret@127.0.0.1:8971",
+  ]) {
     assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL", env: `FRIGATE_URL=${value}\n` }), null, value);
   }
 });
@@ -442,6 +505,8 @@ test("exit 5: the app took the password, so it is saved like exit 0 and reported
     { bundleId: "frigate", envKey: "FRIGATE_PASSWORD", secret: PASSPHRASE, origin: "generated", firstView: true },
   );
   assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
+  assert.equal(calls.mcpEnv.length, 1, "an unproven login is still pushed to the MCP entry");
+  assert.equal(calls.reload.length, 1, "and loaded, exactly as exit 0 does");
   assert.equal(out.reason, FIRST_ADMIN_UNPROVEN);
   assert.equal(out.reason, "Crow saved the new login, but could not log in with it to confirm");
   assert.equal(out.log.includes(FIRST_ADMIN_UNPROVEN), true, "the install log carries the sentence too");
@@ -763,8 +828,14 @@ test("crow/setup asks until Crow's own run for THIS install returned ok", () => 
     const card = pendingFirstAdminNotices({ installed, manifests, liveProxyIds: live, autoResults: { frig: { install: INSTALL, result } } });
     assert.equal(card[0].canAuto, true, result);
   }
-  // Done works here too (the button is on the card).
-  assert.deepEqual(pendingFirstAdminNotices({ installed, manifests, liveProxyIds: live, done: { frig: INSTALL } }), []);
+  // Done does NOT clear this card (review round 2, finding 2): the keychain holds no login for
+  // the app, and a Done marker pressed under the OLD `finish-setup` declaration carries the same
+  // install stamp — it must not hide the card that creates or saves the login.
+  const donePressed = pendingFirstAdminNotices({ installed, manifests, liveProxyIds: live, done: { frig: INSTALL } });
+  assert.equal(donePressed.length, 1, "an old Done press cannot hide a card whose login Crow does not have");
+  assert.equal(donePressed[0].canDone, false, "and the card offers no Done button that could not work");
+  // Once the keychain holds the login, the card is gone without any marker.
+  assert.deepEqual(pendingFirstAdminNotices({ installed, manifests, liveProxyIds: live, done: { frig: INSTALL }, adminSaved: new Set(["frig"]) }), []);
 });
 
 test("crow via env/postInstall still has no card, and the card text is the new sentence", () => {
@@ -1196,6 +1267,37 @@ test("saveFirstAdminLogin reports a keychain failure instead of throwing", async
   });
   assert.equal(status, "failed");
   assert.equal(said.join("\n").includes("Typed-Pass-2"), false, "the cause is logged, never the password");
+});
+
+test("a login the operator saved also reaches the bundle's MCP entry — and a bundle without one is no error", async () => {
+  const calls = { mcpEnv: [], reload: [] };
+  const deps = {
+    openDb: () => ({ close() {} }),
+    hasSaved: async () => false,
+    ensureWriteKey: async () => ({ id: "k1", seed: Buffer.alloc(32) }),
+    save: async () => ({ id: 1 }),
+    applyMcpEnv: async (id, values, manifest) => { calls.mcpEnv.push({ id, values, manifest }); return true; },
+    requestReload: async () => { calls.reload.push(true); },
+  };
+  const status = await saveFirstAdminLogin({ bundleId: "frigate", manifest: SETUP_MANIFEST, username: "admin", password: "Typed-Pass-1", deps });
+  assert.equal(status, "saved");
+  // Same entries a setup run writes: without them Crow's own tools keep answering 401.
+  assert.deepEqual(calls.mcpEnv, [{ id: "frigate", values: { FRIGATE_PASSWORD: "Typed-Pass-1", FRIGATE_USER: "admin" }, manifest: SETUP_MANIFEST }]);
+  assert.equal(calls.reload.length, 1, "and the one reload that loads it");
+
+  // A finish-setup app has no `secretEnv`/`userEnv` to write — nothing is pushed, no error.
+  calls.mcpEnv.length = 0;
+  calls.reload.length = 0;
+  const finish = await saveFirstAdminLogin({
+    bundleId: "kuma",
+    manifest: FINISH,
+    username: "alex",
+    password: "Typed-Pass-1",
+    deps: { ...deps, applyMcpEnv: async () => { throw new Error("there is nothing to write"); } },
+  });
+  assert.equal(finish, "saved");
+  assert.deepEqual(calls.mcpEnv, []);
+  assert.equal(calls.reload.length, 0);
 });
 
 // ── 8. the card ─────────────────────────────────────────────────────────────────────

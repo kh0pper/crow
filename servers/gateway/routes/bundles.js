@@ -2563,7 +2563,10 @@ function scheduleGatewayRestart(delayMs = 2000) {
   }
 }
 /** Test-only: the real restart scheduler (unsupervised in a suite: the .env reload) and the gateway .env writers. */
-export { scheduleGatewayRestart as _scheduleGatewayRestartForTest, propagateEnvToGateway as _propagateEnvToGatewayForTest, revertEnvInGateway as _revertEnvInGatewayForTest };
+// scheduleGatewayRestart is also exported by that name: it is how a caller that changed
+// mcp-addons.json or the gateway .env asks for the reload (bundle-first-admin-setup.js does,
+// after writing a new login into the bundle's MCP entry).
+export { scheduleGatewayRestart, scheduleGatewayRestart as _scheduleGatewayRestartForTest, propagateEnvToGateway as _propagateEnvToGatewayForTest, revertEnvInGateway as _revertEnvInGatewayForTest };
 
 /**
  * Map AI bundle IDs to AI Provider settings for auto-configuration.
@@ -3766,8 +3769,19 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           destDir: join(BUNDLES_DIR, bundleId),
           installId: recordedInstallAt,
           crowHome: CROW_HOME,
-          deps: _firstAdminSetupDepsForTest || {},
+          deps: {
+            // The install path owns its ONE restart (runInstallJob never schedules one itself:
+            // a restart in the middle of the job kills it). A login written into the bundle's
+            // MCP entry needs that restart to be loaded, so it is requested here instead of
+            // started, and `needsRestart` below makes sure the caller's restart happens.
+            requestReload: () => {},
+            ...(_firstAdminSetupDepsForTest || {}),
+          },
         });
+        if (auto.mcpEnvUpdated) {
+          needsRestart = true;
+          appendLog(job, "The new login also went into the extension's MCP settings; the restart below loads it");
+        }
         firstAdminAuto = auto.result;
         for (const line of auto.log || []) appendLog(job, `  ${line}`);
         appendLog(job, firstAdminResultMessage({
