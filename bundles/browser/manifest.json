@@ -1,7 +1,7 @@
 {
   "id": "browser",
   "name": "Browser Automation",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
   "type": "bundle",
   "author": "Crow",
@@ -21,6 +21,11 @@
     "command": "node",
     "args": ["server/index.js"],
     "envKeys": ["CROW_BROWSER_CDP_PORT", "CROW_BROWSER_VNC_PORT", "CROW_BROWSER_RFB_PORT", "CROW_BROWSER_CONTAINER_NAME", "CROW_BROWSER_DISPLAY", "CROW_BROWSER_PROXY_USER", "CROW_BROWSER_PROXY_PASS"]
+  },
+  "sandbox": {
+    "ownEnvFile": true,
+    "network": { "hosts": ["env:CROW_BROWSER_CDP_URL"] },
+    "doors": ["browser"]
   },
   "mcpServers": ["browser", "crow-browser"],
   "desktop": { "path": "vnc.html", "lease": true },
@@ -54,6 +59,11 @@
       "name": "CROW_BROWSER_CDP_PORT",
       "description": "Chrome DevTools Protocol port",
       "default": "9222"
+    },
+    {
+      "name": "CROW_BROWSER_CDP_URL",
+      "description": "CDP address the add-on uses when it runs walled (e.g. http://127.0.0.1:9222). Leave empty unless walls are on.",
+      "required": false
     },
     {
       "name": "CROW_BROWSER_VNC_PORT",

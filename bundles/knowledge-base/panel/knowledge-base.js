@@ -13,11 +13,29 @@ export default {
   navOrder: 35,
   category: "content",
 
-  async handler(req, res, { db, layout, appRoot }) {
+  async handler(req, res, { db, layout, appRoot, lang }) {
     const { pathToFileURL } = await import("node:url");
     const { join } = await import("node:path");
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml } = await import(pathToFileURL(componentsPath).href);
+
+    // A walled add-on is off the local network, so the LAN setting cannot work:
+    // one fixed line beside it. Any failure (no gateway module, no entries) is no
+    // line at all, never a broken page.
+    async function lanWallNote() {
+      try {
+        const proxyPath = join(appRoot, "servers/gateway/proxy.js");
+        const proxy = await import(pathToFileURL(proxyPath).href);
+        const entries = typeof proxy.addonWallEntries === "function" ? proxy.addonWallEntries() : [];
+        const kb = (Array.isArray(entries) ? entries : []).find((e) => e && e.id === "knowledge-base");
+        if (kb?.wall?.mode !== "walled") return "";
+        return lang === "es"
+          ? "El descubrimiento en la red local está desactivado mientras este complemento está aislado"
+          : "LAN discovery is off while this add-on is walled";
+      } catch {
+        return "";
+      }
+    }
 
     // Resolve the public-facing base URL for KB links
     const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
@@ -328,6 +346,11 @@ export default {
             </div>`;
         }).join("");
 
+        const lanNote = await lanWallNote();
+        const lanNoteHtml = lanNote
+          ? `<p class="kb-lan-wall-note" style="margin:0 0 1rem;font-size:0.85rem;color:var(--crow-text-secondary)">${lanNote}</p>`
+          : "";
+
         tabContent = `
           <div style="background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px;padding:0.75rem 1rem;margin-bottom:1rem;font-size:0.85rem;color:var(--crow-text-secondary)">
             <strong>Sharing modes:</strong>
@@ -336,6 +359,7 @@ export default {
             🏢 <strong>LAN</strong> — only accessible from your local network (intranet).
             Enable <strong>mDNS</strong> to let devices on the network discover your KB automatically.
           </div>
+          ${lanNoteHtml}
           ${rows}`;
       }
     }

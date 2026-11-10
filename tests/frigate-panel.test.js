@@ -701,8 +701,8 @@ test("the panel file ends with exactly one newline", () => {
   assert.ok(!text.endsWith("\n\n"), "and only one");
 });
 
-test("the manifest is 1.2.2 and declares FRIGATE_UI_URL", () => {
-  assert.equal(MANIFEST.version, "1.2.2");
+test("the manifest is 1.2.3 and declares FRIGATE_UI_URL", () => {
+  assert.equal(MANIFEST.version, "1.2.3");
   const ui = (MANIFEST.env_vars || []).find((v) => v && v.name === "FRIGATE_UI_URL");
   assert.ok(ui, "the browser-facing address is a declared env var, or the panel never sees it");
   assert.equal(ui.required, false, "blank means the Web UI link is hidden");

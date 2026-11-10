@@ -1,7 +1,7 @@
 {
   "id": "frigate",
   "name": "Frigate NVR",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
   "type": "bundle",
   "author": "Crow",
@@ -9,6 +9,7 @@
   "tags": ["cameras", "nvr", "surveillance", "motion", "ai-detection", "rtsp", "self-hosted"],
   "icon": "phone-video",
   "docker": { "composefile": "docker-compose.yml" },
+  "sandbox": { "files": { "write": ["env:FRIGATE_CONFIG_PATH", "env:FRIGATE_MEDIA_PATH"] } },
   "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["FRIGATE_URL", "FRIGATE_USER", "FRIGATE_PASSWORD"] },
   "panel": "panel/frigate.js",
   "panelRoutes": "panel/routes.js",

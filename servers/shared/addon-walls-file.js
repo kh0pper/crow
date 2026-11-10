@@ -21,7 +21,10 @@
  *    The mode decision reads this file and the operator's switches only: never
  *    the child env, crow.db or an add-on's own folders.
  *  - `walledNoticeV1: true` — this host has already had the first-walled-boot
- *    notice. Flags are written through `setAddonWallsFlag`, which takes a fixed
+ *    notice, which is also the rollout notice on a walled host.
+ *  - `noticeV1: true` — this host has already had the one-time rollout notice,
+ *    whichever it was (the walled one, or the one worded for the kill switch).
+ *    Flags are written through `setAddonWallsFlag`, which takes a fixed
  *    allowlist of keys and keeps every other key of the document.
  *
  * A change found before Crow's own next write is handed to the one outside
@@ -110,7 +113,7 @@ const pendingDiffs = [];
 let pendingDropped = 0;
 
 /** The keys this store may write outside `keptData` and `modes`. */
-const FLAG_KEYS = Object.freeze(["walledNoticeV1"]);
+const FLAG_KEYS = Object.freeze(["walledNoticeV1", "noticeV1"]);
 
 /** How many outside diffs are held while no listener is set (the oldest go first). */
 export const MAX_PENDING_OUTSIDE_DIFFS = 64;
@@ -208,8 +211,8 @@ export function rememberAddonWalls(crowHome) {
  *
  * `null` when the bytes hash to the known hash (a missing file and a known
  * "missing" are equal). Otherwise the modes that differ and whether anything
- * else changed (`walledNoticeV1`, `keptData`), and the known state moves to the
- * new content so one change is reported once. Never throws.
+ * else changed (the flags, `keptData`), and the known state moves to the new
+ * content so one change is reported once. Never throws.
  *
  * @returns {{modesChanged: Array<{id:string,from:string|null,to:string|null}>, otherChanged: boolean}|null}
  */

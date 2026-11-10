@@ -5,10 +5,14 @@
  *  - The boot notice: one note per boot when the kill switch is set, or when
  *    walls are on here and at least one add-on (or approved data backend) is not
  *    walled. With walls off by default and no kill switch nothing is sent, so an
- *    existing install sees no new bell.
+ *    existing install sees no new bell — that host is not even read.
+ *  - The one-time rollout notice (`noticeV1`): the walled note below on a walled
+ *    host, or — on a host whose kill switch is set — one note worded for that,
+ *    which takes the place of that boot's boot notice. Whichever it is, one bell.
  *  - The first-walled-boot notice: once per host, on the first boot that really
- *    runs walls on. The marker lives in addon-walls.json (`walledNoticeV1`), not
- *    in crow.db, so it survives a database anyone can write.
+ *    runs walls on, and it is that host's rollout notice. The markers live in
+ *    addon-walls.json (`walledNoticeV1`, `noticeV1`), not in crow.db, so they
+ *    survive a database anyone can write.
  *  - The watch: fs.watchFile polling, so it survives the store's rename and a
  *    missing file. It only reports — an edit made outside Crow is named, and the
  *    new modes take effect at the next connect.
@@ -48,6 +52,37 @@ function lineName(entry) {
   return id === undefined || id === null ? "" : String(id);
 }
 
+/** The kill-switch line every notice ends with. */
+function killSwitchLine(on, lang) {
+  return fillText(langText(NOTICE.killSwitchLine, lang), {
+    state: langText(on ? NOTICE.stateOn : NOTICE.stateOff, lang),
+  });
+}
+
+/**
+ * One line per add-on (never an approved data backend): its live sandbox line
+ * when a profile is known, its status word otherwise. `walledOf` says whether
+ * that line claims a limit in force or says what the wall would allow.
+ */
+function addonLines(entries, lang, env, walledOf) {
+  const lines = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== "object" || entry.kind === "backend") continue;
+    const id = lineName(entry);
+    if (!id) continue;
+    const wall = entry.wall && typeof entry.wall === "object" ? entry.wall : null;
+    const profile = wall?.profile && typeof wall.profile === "object" ? wall.profile : null;
+    const text = profile
+      ? sandboxLine(profile, lang, {
+        walled: walledOf(wall),
+        residuals: Array.isArray(wall?.residuals) ? wall.residuals : [],
+      })
+      : wallWord(addonWallWord(entry, { env }), lang);
+    lines.push(`${id}: ${text}`);
+  }
+  return lines;
+}
+
 /**
  * The boot notice, or null when this boot has nothing to say.
  *
@@ -72,35 +107,33 @@ export function bootNoticeFor({ entries = [], env = process.env, lang = "en" } =
   // Walls on and every entry walled: the rollout notice covers that boot, not this one.
   if (!killSwitch && lines.length === 0) return null;
 
-  lines.push(fillText(langText(NOTICE.killSwitchLine, L), {
-    state: langText(killSwitch ? NOTICE.stateOn : NOTICE.stateOff, L),
-  }));
+  lines.push(killSwitchLine(killSwitch, L));
   return { title: langText(NOTICE.bootTitle, L), body: lines.join("\n") };
 }
 
 /**
- * The first-walled-boot notice: one line per add-on, its live sandbox line when a
- * profile is known and its status word otherwise. Never null — the caller decides
- * whether this boot sends it.
+ * The first-walled-boot notice, which is this host's one-time rollout notice: one
+ * line per add-on, its live sandbox line when a profile is known and its status
+ * word otherwise. Never null — the caller decides whether this boot sends it.
  */
 export function walledNoticeFor({ entries = [], env = process.env, lang = "en" } = {}) {
   const L = langOf(lang);
-  const lines = [];
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    if (!entry || typeof entry !== "object" || entry.kind === "backend") continue;
-    const id = lineName(entry);
-    if (!id) continue;
-    const wall = entry.wall && typeof entry.wall === "object" ? entry.wall : null;
-    const profile = wall?.profile && typeof wall.profile === "object" ? wall.profile : null;
-    const text = profile
-      ? sandboxLine(profile, L, {
-        walled: wall?.mode === "walled",
-        residuals: Array.isArray(wall?.residuals) ? wall.residuals : [],
-      })
-      : wallWord(addonWallWord(entry, { env }), L);
-    lines.push(`${id}: ${text}`);
-  }
-  return { title: langText(NOTICE.walledTitle, L), body: lines.join("\n") };
+  return {
+    title: langText(NOTICE.walledTitle, L),
+    body: addonLines(entries, L, env, (wall) => wall?.mode === "walled").join("\n"),
+  };
+}
+
+/**
+ * The one-time rollout notice for a host whose operator has the kill switch set:
+ * what each add-on could reach if its wall were on, then the kill-switch line.
+ * Never null.
+ */
+export function rolloutOffNoticeFor({ entries = [], env = process.env, lang = "en" } = {}) {
+  const L = langOf(lang);
+  const lines = addonLines(entries, L, env, () => false);
+  lines.push(killSwitchLine(true, L));
+  return { title: langText(NOTICE.rolloutOffTitle, L), body: lines.join("\n") };
 }
 
 /** The dashboard's language for a bell note: its own setting, else English. */
@@ -120,13 +153,30 @@ async function send(createNotification, db, notice, extra) {
   await createNotification(db, opts);
 }
 
+/** The one-time notice markers this host already carries. */
+function noticeFlags(crowHome) {
+  try {
+    const doc = readAddonWalls(crowHome);
+    return { walledNoticeV1: doc.walledNoticeV1 === true, noticeV1: doc.noticeV1 === true };
+  } catch {
+    return { walledNoticeV1: false, noticeV1: false };
+  }
+}
+
 /**
  * Record the file as the baseline (unless the boot path already did), send this
- * boot's notices, and mark the first-walled-boot notice as had. Never throws.
+ * boot's notices, and mark the one-time notices as had. Never throws.
  *
- * The gateway takes it baseline BEFORE the add-ons load (post-listen) and passes
+ * A host with neither the per-host default nor the kill switch set returns at
+ * once: nothing read, nothing sent, nothing written. Under the kill switch the
+ * one-time rollout notice is worded for it and replaces that boot's boot notice
+ * (one bell, not two); under walls it is PR D's first-walled-boot notice.
+ *
+ * The gateway takes the baseline BEFORE the add-ons load (post-listen) and passes
  * `rememberBaseline: false` here: an edit made between boot and settle is then
  * reported by the watch, not adopted as this process's own.
+ *
+ * `boot` says a bell note about this boot went out; `walled` says the walled one did.
  *
  * @returns {Promise<{boot:boolean, walled:boolean}>}
  */
@@ -134,31 +184,55 @@ export async function runAddonWallNotices({ db = null, crowHome = null, env = pr
   const out = { boot: false, walled: false };
   try {
     if (!crowHome) return out;
+    // Walls off for this host and no kill switch: an unswitched host sees no change.
+    const killSwitch = killSwitchOn(env);
+    if (!killSwitch && !wallsOnForHost(env)) return out;
     // The baseline comes first: an edit made while the gateway was down is not
     // this process's doing, and must not be reported as if it were. A boot that
     // took it before loading the add-ons passes false and keeps the queue.
     if (rememberBaseline) rememberAddonWalls(crowHome);
     if (typeof createNotification !== "function") return out;
     const L = await noticeLanguage(db, lang);
+    const flags = noticeFlags(crowHome);
 
-    try {
-      const boot = bootNoticeFor({ entries, env, lang: L });
-      if (boot) {
+    const sendBoot = async () => {
+      try {
+        const boot = bootNoticeFor({ entries, env, lang: L });
+        if (!boot) return;
         await send(createNotification, db, boot, { action_url: ADDONS_HREF });
         out.boot = true;
+      } catch { /* a notice is never worth a failed boot */ }
+    };
+
+    if (killSwitch) {
+      if (flags.noticeV1) {
+        await sendBoot();
+        return out;
       }
-    } catch { /* a notice is never worth a failed boot */ }
+      try {
+        await send(createNotification, db, rolloutOffNoticeFor({ entries, env, lang: L }), { action_url: ADDONS_HREF });
+        out.boot = true;
+        // Only after the note went out: a throw above leaves the next boot to retry.
+        try { setAddonWallsFlag(crowHome, "noticeV1", true); } catch { /* the note was sent; the marker retries next boot */ }
+      } catch { /* reported next boot */ }
+      return out;
+    }
 
-    if (!wallsOnForHost(env)) return out;
-    let flagged = false;
-    try { flagged = readAddonWalls(crowHome).walledNoticeV1 === true; } catch { flagged = false; }
-    if (flagged) return out;
-
+    // Walls on here: the boot notice first, then the one-time rollout notice.
+    await sendBoot();
+    if (flags.walledNoticeV1) {
+      // Walled on an earlier build: the rollout notice is already had.
+      if (!flags.noticeV1) {
+        try { setAddonWallsFlag(crowHome, "noticeV1", true); } catch { /* retried next boot */ }
+      }
+      return out;
+    }
     try {
       await send(createNotification, db, walledNoticeFor({ entries, env, lang: L }), { action_url: ADDONS_HREF });
       out.walled = true;
       // Only after the note went out: a throw above leaves the next boot to retry.
       try { setAddonWallsFlag(crowHome, "walledNoticeV1", true); } catch { /* the note was sent; the marker retries next boot */ }
+      try { setAddonWallsFlag(crowHome, "noticeV1", true); } catch { /* the note was sent; the marker retries next boot */ }
     } catch { /* reported next boot */ }
     return out;
   } catch {
