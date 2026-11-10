@@ -13,10 +13,12 @@
  *  - an entry in `refused` is something the add-on can start without (one
  *    owner-set file, a sign-in folder, a state folder, the relay socket dir).
  *
- * Everything an add-on can write is bound BY FD, never by path (review focus
- * 5): its data folder, its state folders, a sign-in folder it owns, and every
- * owner-set file. Read-only code (the checkout, the node install, the install
- * folder) keeps the path binds the bot plan uses, with every `.env` masked.
+ * Everything an add-on can touch by fd is bound BY FD, never by path (review
+ * focus 5): its data folder, its state folders, a sign-in folder it owns, every
+ * owner-set file, and an owner-set `files.read` folder (that one read-only,
+ * `--ro-bind-fd`: a read grant is never widened to a write). Read-only code
+ * (the checkout, the node install, the install folder) keeps the path binds the
+ * bot plan uses, with every `.env` masked.
  *
  * Two rules hold for every read-write bind:
  *  - a hidden top-level entry of the home is never writable, except this
@@ -268,10 +270,12 @@ export function buildAddonPlan(o = {}) {
     }
 
     /**
-     * Bind an opened folder read-write by fd with every `.env` inside it masked.
+     * Bind an opened folder by fd with every `.env` inside it masked. `flag`
+     * decides the mode: `--ro-bind-fd` for a read-only role (`dir-read`),
+     * `--bind-fd` for a role the add-on may write.
      * A folder too large to scan is not bound at all: it is dropped and refused.
      */
-    function bindOpenedDirFd(opened, role, labelPath) {
+    function bindOpenedDirFd(opened, role, labelPath, flag) {
       const found = envFilesInFolder(opened.realPath);
       if (!found) {
         dropFd(opened.fd);
@@ -279,7 +283,7 @@ export function buildAddonPlan(o = {}) {
         return;
       }
       for (const p of found) maskPathInto(masks, p);
-      bindFd(opened.fd, role, "--bind-fd", opened.realPath);
+      bindFd(opened.fd, role, flag, opened.realPath);
     }
 
     // ---- root ----
@@ -432,8 +436,12 @@ export function buildAddonPlan(o = {}) {
       }
       openedFds.push(opened.fd);
       // An owner-set entry may be a FOLDER: then every `.env` inside it is
-      // masked too (a folder bound by fd is not in the ro/rw maps).
-      if (opened.isDir) { bindOpenedDirFd(opened, write ? "dir-write" : "dir-read", spec.path); return; }
+      // masked too (a folder bound by fd is not in the ro/rw maps). A folder
+      // granted read stays read-only: a read grant is never widened to write.
+      if (opened.isDir) {
+        bindOpenedDirFd(opened, write ? "dir-write" : "dir-read", spec.path, write ? "--bind-fd" : "--ro-bind-fd");
+        return;
+      }
       bindFd(opened.fd, write ? "file-write" : "file-read", write ? "--bind-fd" : "--ro-bind-fd", opened.realPath);
     };
     for (const spec of Array.isArray(files.read) ? files.read : []) {
@@ -476,7 +484,7 @@ export function buildAddonPlan(o = {}) {
           }
           if (opened) {
             openedFds.push(opened.fd);
-            bindOpenedDirFd(opened, "oauth-dir", oauth.path);
+            bindOpenedDirFd(opened, "oauth-dir", oauth.path, "--bind-fd");
           }
         }
       }
@@ -497,7 +505,7 @@ export function buildAddonPlan(o = {}) {
       }
       if (opened) {
         openedFds.push(opened.fd);
-        bindOpenedDirFd(opened, "state", p);
+        bindOpenedDirFd(opened, "state", p, "--bind-fd");
       }
     }
 

@@ -235,6 +235,49 @@ test("every source in an add-on-writable tree is bound by fd, never by path", ()
   } finally { closePlan(plan); }
 });
 
+// ---- an owner-set read folder is never widened to a write --------------
+
+test("an owner-set files.read folder is bound with --ro-bind-fd; a files.write folder keeps --bind-fd", () => {
+  const readDir = mk(HOME, "shared", "read-dir");
+  writeFileSync(join(readDir, "notes.txt"), "");
+  const writeDir = mk(HOME, "shared", "write-dir");
+  writeFileSync(join(writeDir, "out.txt"), "");
+  const plan = planOf({
+    profile: profileOf({
+      files: {
+        read: [{ from: "ACME_READ_DIR", path: readDir, source: "owner" }],
+        write: [{ from: "ACME_WRITE_DIR", path: writeDir, source: "owner" }],
+        oauthDir: null,
+        state: [],
+      },
+    }),
+  });
+  try {
+    const readReal = realpathSync(readDir);
+    const writeReal = realpathSync(writeDir);
+    const ops = fdOps(plan.args);
+
+    const roOp = ops.find((q) => q[0] === "--ro-bind-fd" && q[2] === readReal);
+    assert.ok(roOp, "the read folder is bound with --ro-bind-fd: " + JSON.stringify(ops));
+    const readSpec = plan.fds.find((f) => String(f.childFd) === roOp[1]);
+    assert.ok(readSpec, "its fd is handed over");
+    assert.equal(readSpec.role, "dir-read");
+    assert.equal(readlinkSync("/proc/self/fd/" + readSpec.fd), readReal, "the fd really is the folder");
+    assert.ok(!has(plan.args, "--bind-fd", roOp[1], readReal), "never the same fd as a read-write bind");
+    assert.ok(!ops.some((q) => q[0] === "--bind-fd" && q[2] === readReal), "no read-write bind of the read folder");
+    assert.ok(!pathSources(plan.args).includes(readReal), "never a path-bind source either");
+    assert.ok(!plan.refused.some((r) => r.path === readDir), "nothing refused: " + JSON.stringify(plan.refused));
+
+    const writeOp = ops.find((q) => q[2] === writeReal);
+    assert.ok(writeOp, "the write folder is bound by fd");
+    assert.equal(writeOp[0], "--bind-fd", "a write folder keeps the read-write bind");
+    assert.equal(plan.fds.find((f) => String(f.childFd) === writeOp[1]).role, "dir-write");
+  } finally {
+    closePlan(plan);
+    rmSync(join(HOME, "shared"), { recursive: true, force: true });
+  }
+});
+
 // ---- the door token ------------------------------------------------------
 
 test("the door token is bind data at a fixed path, never a file in a writable tree", () => {
