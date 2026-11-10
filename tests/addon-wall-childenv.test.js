@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { createWallContext } from "../scripts/addon-sandbox/gateway-wall.mjs";
 import { wrapAddonSpawn } from "../scripts/addon-sandbox/spawn.mjs";
 import { applyCredentialFiles, _resetCredentialKeysForTest } from "../servers/shared/credentials-env.js";
-import { wallChildEnv } from "../scripts/addon-sandbox/wall-env.mjs";
+import { wallChildEnv, wallResiduals, STORAGE_RESIDUAL } from "../scripts/addon-sandbox/wall-env.mjs";
 import { addonBaseEnv, isDeniedAddonKey } from "../servers/gateway/addon-env.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -184,4 +184,39 @@ test("through the wall context: a third-party add-on declaring FRIGATE_PASSWORD 
   } finally {
     if (saved === undefined) delete process.env.FRIGATE_PASSWORD; else process.env.FRIGATE_PASSWORD = saved;
   }
+});
+
+const STORAGE_BASE = { PATH: "/usr/bin", S3_ENDPOINT: "http://127.0.0.1:9000", S3_ACCESS_KEY: "fake-s3-ak-0120", S3_SECRET_KEY: "fake-s3-sk-0121", MINIO_ROOT_USER: "fake-root-0122", MINIO_ROOT_PASSWORD: "fake-root-pw-0123" };
+const PUBLISHED = (id) => ({ id, origin: "first-party", server: {}, env_vars: [] });
+
+test("a walled add-on that is not a storage consumer gets no storage keys", () => {
+  for (const id of ["kiosk", "paperless", "acme-cam"]) {
+    const env = wallChildEnv({ id, kind: "addon", baseEnv: STORAGE_BASE, credentialKeys: [], registryFor: PUBLISHED });
+    for (const k of ["S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD"]) {
+      assert.equal(k in env, false, `${id} got ${k}`);
+    }
+    assert.deepEqual(wallResiduals({ id, kind: "addon" }), [], id);
+  }
+});
+
+test("a storage consumer keeps the storage env (N1b-13) and is marked with the storage residual", () => {
+  const env = wallChildEnv({ id: "studio", kind: "addon", baseEnv: STORAGE_BASE, credentialKeys: [], registryFor: PUBLISHED });
+  assert.equal(env.S3_SECRET_KEY, "fake-s3-sk-0121", "Phase 0's accepted residual, unchanged inside the wall");
+  assert.deepEqual(wallResiduals({ id: "studio", kind: "addon" }), [{ kind: "storage", label: "can use all of Crow's storage" }]);
+  assert.equal(STORAGE_RESIDUAL.label, "can use all of Crow's storage");
+  // A service child or a built-in of the same id takes no storage env and carries no residual.
+  for (const kind of ["service", "builtin"]) {
+    assert.equal("S3_SECRET_KEY" in wallChildEnv({ id: "studio", kind, baseEnv: STORAGE_BASE, credentialKeys: [], registryFor: PUBLISHED }), false, kind);
+    assert.deepEqual(wallResiduals({ id: "studio", kind }), [], kind);
+  }
+});
+
+test("through the wall context, a walled storage consumer's result carries the storage residual and a non-consumer's does not", async () => {
+  const ctx = context();
+  const crowHome = join(T, "home", ".crow");
+  mkdirSync(join(crowHome, "data", "studio"), { recursive: true, mode: 0o700 });
+  const studio = await ctx.startAddonWall({ id: "studio", entry: {}, command: process.execPath, args: [], baseEnv: {}, ownEnv: {}, kind: "addon" });
+  assert.deepEqual(studio.residuals, [{ kind: "storage", label: "can use all of Crow's storage" }]);
+  const kiosk = await ctx.startAddonWall({ id: "kiosk", entry: {}, command: process.execPath, args: [], baseEnv: {}, ownEnv: {}, kind: "addon" });
+  assert.deepEqual(kiosk.residuals, []);
 });

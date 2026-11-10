@@ -32,7 +32,7 @@ import { createEgressRelay } from "../pi-bots/pi_egress.mjs";
 import { probePiSandbox, scrubSandboxEnv } from "../pi-bots/pi_sandbox.mjs";
 import { buildSeccompProgram, seccompSupported } from "../pi-bots/pi_seccomp.mjs";
 import { isLoopbackHost } from "./profile.mjs";
-import { wallChildEnv } from "./wall-env.mjs";
+import { wallChildEnv, wallResiduals } from "./wall-env.mjs";
 import { buildAddonPlan } from "./plan.mjs";
 
 /** The in-namespace entry the walled command runs first. */
@@ -420,6 +420,8 @@ export async function wrapAddonSpawn(o = {}) {
       relay,
       profile,
       refused: Array.isArray(plan.refused) ? plan.refused : [],
+      // What this add-on still reaches beyond its wall (LEDGER N1b-13 storage).
+      residuals: wallResiduals({ id, kind: o.envKind || "addon" }),
       discardFds,
       cleanup,
     };

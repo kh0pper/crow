@@ -20,7 +20,7 @@
  * gateway env the wall reads, and `CREDENTIALS_DIRECTORY` never reaches the child
  * whatever its source.
  */
-import { addonBaseEnv, declaredPassthrough, storagePassthrough } from "../../servers/gateway/addon-env.js";
+import { addonBaseEnv, declaredPassthrough, isStorageEnvConsumer, storagePassthrough } from "../../servers/gateway/addon-env.js";
 import { credentialKeyNames } from "../../servers/shared/credentials-env.js";
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -45,6 +45,11 @@ export function wallChildEnv({ id, kind = "addon", baseEnv = {}, ownEnv = {}, cr
 
   const env = { ...addonBaseEnv(base) };
   if (kind === "addon") {
+    // storagePassthrough hands the four storage-reading bundles the gateway's
+    // ROOT object-storage credentials. Accepted residual LEDGER N1b-13 (Phase 0
+    // behaviour; per-bundle scoped credentials come with the Phase 2 door): the
+    // wall marks such an add-on with the `storage` residual (wallResiduals) so
+    // no status line can call it fully walled.
     Object.assign(env, declaredPassthrough(id, base, opts), storagePassthrough(id, base, opts));
   }
   for (const [k, v] of Object.entries(own)) {
@@ -52,4 +57,16 @@ export function wallChildEnv({ id, kind = "addon", baseEnv = {}, ownEnv = {}, cr
   }
   delete env.CREDENTIALS_DIRECTORY;
   return env;
+}
+
+/** The residual a storage consumer carries (LEDGER N1b-13): its exact status words live with Task 7. */
+export const STORAGE_RESIDUAL = Object.freeze({ kind: "storage", label: "can use all of Crow's storage" });
+
+/**
+ * What a walled spawn still reaches beyond its wall, as plain data for status
+ * surfaces. Today one entry: a bundle add-on in Phase 0's STORAGE_ENV_CONSUMERS
+ * holds the root object-storage credentials (LEDGER N1b-13).
+ */
+export function wallResiduals({ id, kind = "addon" } = {}) {
+  return kind === "addon" && isStorageEnvConsumer(id) ? [{ ...STORAGE_RESIDUAL }] : [];
 }

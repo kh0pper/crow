@@ -138,6 +138,9 @@ function wallInfoFor(wall, mode) {
     tier: wall ? wall.tier : "none",
     reason: wall && wall.walled ? null : (wall?.reason || mode?.reason || null),
     profile: wall?.profile ?? null,
+    // Plain data: what the add-on still reaches beyond its wall (e.g. the
+    // `storage` residual, LEDGER N1b-13), so no status line calls it fully walled.
+    residuals: Array.isArray(wall?.residuals) ? wall.residuals.map((r) => ({ kind: r.kind, label: r.label })) : [],
   };
 }
 
