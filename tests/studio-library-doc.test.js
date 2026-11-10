@@ -25,6 +25,7 @@ import {
   checkInvariants,
   getLibraryEntry,
   isSoundfontTrack,
+  libraryInsertUsers,
   libraryUses,
   libraryUsers,
   newSongDoc,
@@ -43,6 +44,7 @@ import "../bundles/studio/server/commands/arrangement.js";
 import "../bundles/studio/server/commands/sampler.js";
 import "../bundles/studio/server/commands/midi.js";
 import "../bundles/studio/server/commands/library.js";
+import "../bundles/studio/server/commands/mixer.js";
 import {
   GM_DRUM_KITS,
   GM_PROGRAMS,
@@ -269,6 +271,54 @@ test("a font in use cannot be removed", (t) => {
   assert.equal(getCommand("library.add").internal, true);
   addEntry(doc, fontEntry("font-c"));
   refuses(() => addEntry(doc, fontEntry("font-c")), "invalid");
+});
+
+test("a capture in use cannot be removed", (t) => {
+  const doc = scratchDoc(t);
+  addEntry(doc, fontEntry("cap-a", { kind: "nam", name: "Capture", upload_id: "up-cap" }));
+  addEntry(doc, fontEntry("cab-a", { kind: "ir", name: "Cabinet", upload_id: "up-cab" }));
+  addEntry(doc, fontEntry("cab-b", { kind: "ir", name: "Spare cabinet", upload_id: "up-cab-b" }));
+
+  // An amp insert carries the sound the operator chose: its `model_id` is a
+  // capture and its `ir_id` a cabinet, and both are library entries the register
+  // has to count as in use.
+  const trackId = runCommand(doc, "track.add", { name: "Guitar", kind: "audio" }).args.id;
+  runCommand(doc, "insert.add", {
+    id: "amp-1",
+    owner: `track:${trackId}`,
+    kind: "amp",
+    params: { model_id: "cap-a", ir_id: "cab-a" },
+  });
+  assert.deepEqual(libraryInsertUsers(doc, "cap-a"), ["amp-1"]);
+  assert.deepEqual(libraryInsertUsers(doc, "cab-a"), ["amp-1"]);
+  assert.deepEqual(libraryInsertUsers(doc, "cab-b"), []);
+  assert.equal(libraryUses(doc, "cap-a"), true);
+  assert.equal(libraryUses(doc, "cab-b"), false);
+
+  // Neither the capture nor the cabinet may leave the library while an amp
+  // plays it — whoever asks, and with the sentence that names the amp.
+  const capture = refuses(() => runCommand(doc, "library.remove", { library_id: "cap-a" }), "conflict");
+  assert.match(capture.message, /The capture "Capture" is in use by an amp on track "Guitar"/);
+  assert.match(capture.message, /change what that amp plays first/);
+  const cabinet = refuses(() => runCommand(doc, "library.remove", { library_id: "cab-a" }), "conflict");
+  assert.match(cabinet.message, /The cabinet "Cabinet" is in use by an amp on track "Guitar"/);
+  assert.ok(getLibraryEntry(doc, "cap-a"), "the refused removal wrote nothing");
+  assert.ok(getLibraryEntry(doc, "cab-a"));
+
+  // The spare cabinet is nobody's and may go.
+  runCommand(doc, "library.remove", { library_id: "cab-b" });
+  assert.equal(snapshot(doc).library["cab-b"], undefined);
+
+  // The removal is a write to the amp too, which is what `touches` is for:
+  // taking the capture away would leave that amp silent.
+  const touched = getCommand("library.remove").touches({ library_id: "cab-a" }, snapshot(doc));
+  assert.deepEqual(touched, ["library:cab-a", "insert:amp-1"]);
+  // Letting the amp go frees both of its files.
+  runCommand(doc, "insert.remove", { id: "amp-1" });
+  runCommand(doc, "library.remove", { library_id: "cap-a" });
+  runCommand(doc, "library.remove", { library_id: "cab-a" });
+  assert.deepEqual(snapshot(doc).library, {});
+  assert.equal(libraryUses(doc, "cap-a"), false);
 });
 
 test("33rd font refused", (t) => {

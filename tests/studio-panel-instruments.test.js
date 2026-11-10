@@ -223,8 +223,8 @@ function fakeTakeStore() {
   };
 }
 
-/** A context stand-in: the nodes the page builds and its clock. */
-function fakeContext() {
+/** A context stand-in: the nodes the page builds, its clock and its decoder. */
+function fakeContext(decoded = null) {
   const gain = { gain: { value: 1 }, connect() {}, disconnect() {} };
   return {
     sampleRate: 48000,
@@ -235,6 +235,37 @@ function fakeContext() {
     createMediaStreamSource: () => ({ connect() {}, disconnect() {} }),
     resume: async () => {},
     close() {},
+    /** What the page would hear a cabinet IR decoded to, as `decodeAudioData` gives it. */
+    decodeAudioData(buffer, resolve) {
+      resolve(decoded || fakeDecoded(4800, 2));
+      return undefined;
+    },
+  };
+}
+
+/**
+ * A decoded buffer, the way `decodeAudioData` hands one back: a frame count, a
+ * rate, two channels and their samples.
+ * @param {number} frames
+ * @param {number} [channels]
+ * @param {number} [rate]
+ * @returns {object}
+ */
+function fakeDecoded(frames, channels = 2, rate = 48000) {
+  const data = [];
+  for (let channel = 0; channel < channels; channel += 1) {
+    const samples = new Float32Array(frames);
+    for (let frame = 0; frame < frames; frame += 1) {
+      samples[frame] = Math.sin((2 * Math.PI * (frame + 1) * (channel + 2)) / 89) * 0.5;
+    }
+    data.push(samples);
+  }
+  return {
+    length: frames,
+    sampleRate: rate,
+    numberOfChannels: channels,
+    getChannelData: (index) => data[index],
+    channels: data,
   };
 }
 
@@ -431,7 +462,7 @@ async function bootInstrument(options = {}) {
     confirm: () => true,
     prompt: () => null,
     AudioContext: function AudioContextStub() {
-      return fakeContext();
+      return fakeContext(options.decoded);
     },
     StudioTakeStore: fakeTakeStore(),
     StudioEngine: { create: async () => engine },
@@ -557,6 +588,17 @@ async function bootInstrument(options = {}) {
     chooseFile(name, bytes, size) {
       const input = ui.picker().querySelector("[data-act=font-file]");
       assert.ok(input, "the picker offers Add your own bank");
+      ui.chooseInto(input, name, bytes, size);
+      return input;
+    },
+    /** @returns {object} the file input of one of the library's two actions. */
+    libraryInput(act) {
+      const input = ui.document.querySelector(`[data-role=library-acts] [data-act=${act}]`);
+      assert.ok(input, `the library offers ${act}`);
+      return input;
+    },
+    /** Hand one file input a file, as choosing one does. */
+    chooseInto(input, name, bytes, size) {
       const data = bytes instanceof Uint8Array ? bytes : new TextEncoder().encode(String(bytes));
       input.files = [{
         name: name,
@@ -568,9 +610,25 @@ async function bootInstrument(options = {}) {
             },
           };
         },
+        async arrayBuffer() {
+          return data.slice(0).buffer;
+        },
       }];
       input.dispatchEvent(event("change", { target: input }));
       return input;
+    },
+    /** Choose an amp capture, as 'Add an amp capture…' does. */
+    chooseCapture(name, bytes, size) {
+      return ui.chooseInto(ui.libraryInput("capture-file"), name, bytes, size);
+    },
+    /** Choose a cabinet IR, as 'Add a cabinet IR…' does. */
+    chooseCabinet(name, bytes, size) {
+      return ui.chooseInto(ui.libraryInput("cabinet-file"), name, bytes, size);
+    },
+    /** @returns {string} what the two library actions show beside their words. */
+    libraryText() {
+      const box = ui.document.querySelector("[data-role=library-acts]");
+      return box ? String(box.textContent) : "";
     },
     click(selector) {
       const node = document.querySelector(selector);
@@ -1059,6 +1117,152 @@ test("get the default instruments downloads once and the picker lists its preset
   // A pick from the list is one set_program again.
   await ui.pickPreset("0:2");
   assert.deepEqual(commands(ui, "track.set_program").at(-1).args, { track_id: TRACK, bank: 0, program: 2 });
+});
+
+// ---- amp captures and cabinet IRs (plan 1d, Task 12) ----------------------
+
+/** The plan's sentences, word for word. */
+const LEGACY_CAPTURE_TEXT =
+  "This capture uses an older NAM format; Studio plays A2 captures. Re-export it with a current NAM trainer.";
+const NOT_A_CAPTURE_TEXT = "This file is not a NAM capture.";
+
+/**
+ * A capture as a NAM A2 trainer writes one.
+ * @param {object} [overrides]
+ * @returns {string}
+ */
+function captureText(overrides = {}) {
+  return JSON.stringify({
+    version: "0.5.4",
+    architecture: "SlimmableContainer",
+    config: { layers: [{ channels: 8 }] },
+    weights: [0.1, 0.25, -0.5],
+    sample_rate: 48000,
+    metadata: { name: "Tiny capture" },
+    ...overrides,
+  });
+}
+
+test("the page refuses a legacy capture before uploading it", async () => {
+  const ui = await bootInstrument();
+  const before = ui.requests.length;
+
+  // An older NAM model is refused in the browser, with the plan's sentence.
+  ui.chooseCapture("Old capture.nam", captureText({ architecture: "LSTM" }));
+  await ui.settle();
+  assert.equal(ui.toast(), LEGACY_CAPTURE_TEXT);
+  assert.equal(ui.requests.length, before, "no request is made for a legacy capture");
+
+  // A file that is not a capture at all is refused the same way, before it goes
+  // anywhere: not JSON, and JSON with no weights behind it.
+  ui.chooseCapture("notes.nam", "this is not a capture at all");
+  await ui.settle();
+  assert.equal(ui.toast(), NOT_A_CAPTURE_TEXT);
+  ui.chooseCapture("skinny.nam", JSON.stringify({ version: "0.5.4", architecture: "SlimmableContainer" }));
+  await ui.settle();
+  assert.equal(ui.toast(), NOT_A_CAPTURE_TEXT);
+  assert.equal(ui.requests.length, before, "no malformed file was sent");
+
+  // A file of the wrong type is refused by its extension.
+  ui.chooseCapture("capture.wav", captureText());
+  await ui.settle();
+  assert.equal(ui.toast(), "Studio takes NAM captures: a .nam file.");
+
+  // And a capture past 20 MB, in the server's own words.
+  ui.chooseCapture("Huge.nam", captureText(), 21 * 1024 * 1024);
+  await ui.settle();
+  assert.equal(ui.toast(), "That capture is 21 MB; Studio takes captures up to 20 MB.");
+  assert.equal(ui.requests.length, before, "nothing past the limit was sent");
+});
+
+test("an amp capture uploads and the library counts it", async () => {
+  const ui = await bootInstrument();
+  const text = captureText();
+
+  // The button says what it does, and a capture is not a track's instrument: no
+  // pick follows it, because an amp insert chooses it later.
+  assert.match(ui.libraryText(), /Add an amp capture/);
+  assert.match(ui.libraryText(), /Add a cabinet IR/);
+  ui.chooseCapture("My capture.nam", text);
+  await ui.settle(80);
+
+  const begins = requestsTo(ui, "PUT", "/api/studio/takes/").filter((request) => request.body);
+  assert.equal(begins.length, 1, `one begin, got ${JSON.stringify(begins)}`);
+  const body = JSON.parse(begins[0].body);
+  assert.equal(body.kind, "nam", "a capture is its own upload kind");
+  assert.equal(body.song_id, SONG);
+  assert.equal(body.project_id, PROJECT);
+  assert.equal(body.name, "My capture", "the entry is the file's name without its extension");
+  assert.equal(body.bytes, text.length);
+  const head = Buffer.from(body.head, "base64").toString("latin1");
+  assert.match(head, /"architecture":"SlimmableContainer"/, "begin is told the head it declared");
+
+  // Its bytes go up exactly as they are, one chunk each here, and one finish
+  // carries every hash.
+  assert.equal(requestsTo(ui, "PUT", "/chunks/").length, 1);
+  const finish = requestsTo(ui, "POST", "/finish");
+  assert.equal(finish.length, 1);
+  assert.equal(JSON.parse(finish[0].body).chunk_hashes.length, 1);
+  assert.match(ui.toast(), /^Added .+ to the library\.$/);
+  assert.equal(commands(ui, "track.set_font").length, 0, "a capture never changes a track's font");
+
+  // The count beside the action is the song's own library, once it holds one.
+  await ui.apply("library.add", {
+    entry: {
+      id: "lib-cap",
+      kind: "nam",
+      name: "My capture",
+      source: "upload",
+      upload_id: "upload-1",
+      sha256: "b".repeat(64),
+      bytes: 2048,
+      licence: "",
+      credit: "",
+    },
+  });
+  assert.match(ui.libraryText(), /Add an amp capture\u2026 \(1\)/);
+});
+
+test("a cabinet IR over a second is refused before it is uploaded", async () => {
+  const ui = await bootInstrument({ decoded: fakeDecoded(96000, 2, 48000) });
+  const before = ui.requests.length;
+
+  // Two seconds, measured where the plan measures it: after decoding, at the
+  // rate the context runs at.
+  ui.chooseCabinet("Long cabinet.wav", "RIFF");
+  await ui.settle(60);
+  assert.equal(ui.toast(), "An impulse response is at most 1 second long; this one is 2.0 s.");
+  assert.equal(ui.requests.length, before, "nothing over a second was sent");
+
+  // And a cabinet past 10 MB never reaches the decoder.
+  ui.chooseCabinet("Huge cabinet.wav", "RIFF", 11 * 1024 * 1024);
+  await ui.settle();
+  assert.equal(ui.toast(), "That cabinet is 11 MB; Studio takes cabinets up to 10 MB.");
+  assert.equal(ui.requests.length, before);
+});
+
+test("a cabinet IR uploads as 24-bit PCM with the rate it decoded at", async () => {
+  const ui = await bootInstrument();
+  ui.chooseCabinet("My cabinet.wav", "RIFF");
+  await ui.settle(80);
+
+  const begins = requestsTo(ui, "PUT", "/api/studio/takes/").filter((request) => request.body);
+  assert.equal(begins.length, 1);
+  const body = JSON.parse(begins[0].body);
+  assert.equal(body.kind, "ir");
+  assert.equal(body.song_id, SONG);
+  assert.equal(body.name, "My cabinet");
+  assert.equal(body.rate, 48000, "the context's own rate");
+  assert.equal(body.channels, 2);
+  assert.equal(body.frames, 4800, "the frames the page decoded");
+  assert.equal("head" in body, false, "a cabinet is PCM: there is no file head to check");
+
+  // One second of stereo 24-bit PCM is 28,800 bytes: one chunk, and one finish.
+  assert.equal(requestsTo(ui, "PUT", "/chunks/").length, 1);
+  const finish = requestsTo(ui, "POST", "/finish");
+  assert.equal(finish.length, 1);
+  assert.equal(JSON.parse(finish[0].body).chunk_hashes.length, 1);
+  assert.match(ui.toast(), /^Added .+ to the library\.$/);
 });
 
 // ---- real input events, through the DevTools protocol ----------------------

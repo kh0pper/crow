@@ -1547,11 +1547,14 @@ export function createStudioWeb({
     }
 
     // Begin (or re-begin) one upload: a take, a sample, or — with
-    // `kind: "font"` — a SoundFont bank the operator brought. Idempotent for the
-    // same details, so a client that lost the answer can simply ask again. A
-    // bank sends no rate or channels: it sends the file's name, its size, and
-    // the first twelve bytes of it, so a file Studio cannot play is refused
-    // before any of it is staged.
+    // `kind: "font"`, `"nam"` or `"ir"` — a file for the song's library the
+    // operator brought: a SoundFont bank, an amp capture or a cabinet IR.
+    // Idempotent for the same details, so a client that lost the answer can
+    // simply ask again. A bank sends no rate or channels: it sends the file's
+    // name, its size, and the first twelve bytes of it. A capture sends its size
+    // and the bytes of its head. A cabinet sends the rate, channels and frames
+    // the PAGE decoded it to. All three are refused before any byte is staged
+    // when Studio cannot play the file.
     r.put(`${TAKES_BASE}/:take_id`, dashboardAuth, requireCsrf, takesHandled(async (req, res) => {
       const body = req.body ?? {};
       const begun = await takeUploads.begin(String(req.params.take_id ?? ""), {
@@ -1565,6 +1568,7 @@ export function createStudioWeb({
         file_name: body.file_name,
         bytes: body.bytes,
         head: body.head,
+        frames: body.frames,
         rate: body.rate,
         channels: body.channels,
         offset_frames: body.offset_frames,

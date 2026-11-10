@@ -23,17 +23,24 @@ import assert from "node:assert/strict";
 // to different files, and two builds cannot share a document).
 import * as Y from "../bundles/studio/node_modules/yjs/dist/yjs.mjs";
 import {
+  AMP_KIND,
+  AMP_PARAMS,
+  AMP_REFERENCES,
   DEFAULT_MASTER,
   EFFECT_KINDS,
   EFFECT_PARAMS,
   LIMITS,
   MIXER_RANGES,
+  ampParamSpec,
   checkInvariants,
+  defaultAmpParams,
   getInsert,
   getReturn,
   getSend,
   insertMap,
   insertOwnerOf,
+  isAmpKind,
+  libraryMap,
   masterMap,
   masterSettings,
   newSongDoc,
@@ -47,6 +54,7 @@ import {
 } from "../bundles/studio/server/doc.js";
 import {
   StudioError,
+  getCommand,
   listCommands,
   runCommand,
 } from "../bundles/studio/server/commands/registry.js";
@@ -785,20 +793,193 @@ test("the effect table lists every kind and its ranges", () => {
   assert.equal(MIXER_RANGES.master.lufs[0], -30);
 
   // Every kind the panel can add has a label and at least one parameter, and
-  // `amp` is PR C's: the table does not hold it, and `insert.add` says so.
+  // `amp` is NOT one of them: an amp insert is the capture and the cabinet the
+  // operator chose plus three numbers, and those live in `AMP_PARAMS`.
   for (const kind of EFFECT_KINDS) {
     assert.equal(typeof EFFECT_PARAMS[kind].label, "string");
     assert.ok(Object.keys(EFFECT_PARAMS[kind].params).length > 0, `${kind} has parameters`);
   }
   assert.equal("amp" in EFFECT_PARAMS, false);
+  assert.equal(EFFECT_KINDS.includes("amp"), false);
+
+  // The amp's own table: three numbers, frozen, with the plan's ranges.
+  assert.equal(AMP_KIND, "amp");
+  assert.equal(Object.isFrozen(AMP_PARAMS), true);
+  assert.equal(Object.isFrozen(AMP_PARAMS.amp.params.input_db), true);
+  assert.deepEqual(AMP_PARAMS.amp.params.input_db, { min: -24, max: 24, default: 0, unit: "dB" });
+  assert.deepEqual(AMP_PARAMS.amp.params.output_db, { min: -24, max: 12, default: 0, unit: "dB" });
+  assert.deepEqual(AMP_PARAMS.amp.params.ir_mix, { min: 0, max: 1, default: 1, unit: "" });
+  assert.deepEqual(AMP_REFERENCES, ["model_id", "ir_id"]);
+  assert.deepEqual(defaultAmpParams(), { input_db: 0, output_db: 0, ir_mix: 1 });
+  // Own-property lookups only: a name off Object.prototype is not an amp setting.
+  assert.equal(ampParamSpec("constructor"), null);
+  assert.equal(ampParamSpec("__proto__"), null);
+  assert.equal(ampParamSpec("input_db").max, 24);
+  assert.equal(isAmpKind("amp"), true);
+  assert.equal(isAmpKind("eq"), false);
+  assert.equal(isAmpKind("constructor"), false);
 });
 
-test("an amp insert is refused until PR C", (t) => {
+/**
+ * One library entry, the way the gateway's library routes build it.
+ * @param {string} id
+ * @param {"font"|"nam"|"ir"} kind
+ * @param {object} [overrides]
+ * @returns {object}
+ */
+function libraryEntry(id, kind, overrides = {}) {
+  return {
+    id,
+    kind,
+    name: `${kind === "nam" ? "Capture" : kind === "ir" ? "Cabinet" : "Font"} ${id}`,
+    source: "upload",
+    upload_id: `upload-${id}`,
+    storage_key: `projects/7/studio/song-1/library/${id}.${kind === "ir" ? "wav" : kind === "nam" ? "nam" : "sf2"}`,
+    sha256: "a".repeat(64),
+    bytes: 1024,
+    licence: "",
+    credit: "",
+    author_label: "the operator",
+    ...overrides,
+  };
+}
+
+/** Add one library file and return the command's result. */
+function addLibraryFile(doc, id, kind, overrides) {
+  return runCommand(doc, "library.add", { entry: libraryEntry(id, kind, overrides) });
+}
+
+test("an amp insert needs a capture of kind nam", (t) => {
   const s = studio(t);
   const track = addTrack(s.doc, "Guitar");
-  const refused = refuses(() => addInsert(s.doc, trackOwner(track), "amp"), "invalid");
-  assert.equal(refused.message, "Amp inserts arrive in a later Studio version.");
-  assert.deepEqual(snapshot(s.doc).inserts, {});
+  addLibraryFile(s.doc, "font-a", "font");
+  addLibraryFile(s.doc, "cap-a", "nam");
+  addLibraryFile(s.doc, "cab-a", "ir");
+
+  // A capture is required, and it is a library entry of kind "nam": an insert
+  // with nothing to play would be silent for no reason a reader could see.
+  const missing = refuses(
+    () => addInsert(s.doc, trackOwner(track), "amp"),
+    "invalid",
+  );
+  assert.match(missing.message, /needs a capture/);
+  const font = refuses(
+    () => addInsert(s.doc, trackOwner(track), "amp", { params: { model_id: "font-a" } }),
+    "invalid",
+  );
+  assert.match(font.message, /is a font, not a capture/);
+  const nowhere = refuses(
+    () => addInsert(s.doc, trackOwner(track), "amp", { params: { model_id: "nowhere" } }),
+    "invalid",
+  );
+  assert.match(nowhere.message, /no capture with id "nowhere"/);
+  // A cabinet is not a capture either.
+  refuses(
+    () => addInsert(s.doc, trackOwner(track), "amp", { params: { model_id: "cab-a" } }),
+    "invalid",
+  );
+  assert.deepEqual(snapshot(s.doc).inserts, {}, "a refused amp wrote nothing");
+
+  // The amp itself: the capture it was given, no cabinet yet, and the three
+  // numbers at the table's defaults.
+  const added = addInsert(s.doc, trackOwner(track), "amp", { id: "amp-1", params: { model_id: "cap-a" } });
+  assert.equal(added.summary, "Added an amp to Guitar");
+  const insert = snapshot(s.doc).inserts["amp-1"];
+  assert.deepEqual(insert, {
+    id: "amp-1",
+    owner: trackOwner(track),
+    order: 0,
+    kind: "amp",
+    bypass: false,
+    params: { model_id: "cap-a", ir_id: null, input_db: 0, output_db: 0, ir_mix: 1 },
+  });
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // Its own settings are ordinary edits, and its cabinet is a cabinet.
+  const cab = runCommand(s.doc, "insert.set", { id: "amp-1", params: { ir_id: "cab-a" } });
+  assert.equal(cab.summary, 'Set the amp\'s ir_id on Guitar to cab-a');
+  assert.equal(snapshot(s.doc).inserts["amp-1"].params.ir_id, "cab-a");
+  const driven = runCommand(s.doc, "insert.set", { id: "amp-1", params: { input_db: 6, output_db: -3, ir_mix: 0.5 } });
+  assert.match(driven.summary, /input_db, output_db, ir_mix/);
+  assert.deepEqual(snapshot(s.doc).inserts["amp-1"].params, {
+    model_id: "cap-a",
+    ir_id: "cab-a",
+    input_db: 6,
+    output_db: -3,
+    ir_mix: 0.5,
+  });
+  // No cabinet at all is `null`, which is what the table's ir_mix of 1 means.
+  runCommand(s.doc, "insert.set", { id: "amp-1", params: { ir_id: null } });
+  assert.equal(snapshot(s.doc).inserts["amp-1"].params.ir_id, null);
+
+  // A capture in the cabinet slot, a range past the table's and a setting the
+  // amp does not have are each refused by name, and nothing is written.
+  refuses(() => runCommand(s.doc, "insert.set", { id: "amp-1", params: { ir_id: "cap-a" } }), "invalid");
+  const range = refuses(() => runCommand(s.doc, "insert.set", { id: "amp-1", params: { input_db: 30 } }), "invalid");
+  assert.match(range.message, /runs from -24 to 24 dB/);
+  refuses(() => runCommand(s.doc, "insert.set", { id: "amp-1", params: { output_db: -30 } }), "invalid");
+  refuses(() => runCommand(s.doc, "insert.set", { id: "amp-1", params: { ir_mix: 2 } }), "invalid");
+  const unknown = refuses(() => runCommand(s.doc, "insert.set", { id: "amp-1", params: { gain: 1 } }), "invalid");
+  assert.match(unknown.message, /model_id, ir_id, input_db, output_db, ir_mix/);
+  assert.equal(snapshot(s.doc).inserts["amp-1"].params.input_db, 6, "the refusals wrote nothing");
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  // An amp is not an effect a kind can become, and an effect is not an amp.
+  assert.ok(getCommand("insert.add"));
+  assert.deepEqual(chainOf(s.doc, trackOwner(track)), ["amp"]);
+
+  // A capture the library loses leaves the insert naming nothing, which is what
+  // the invariants report (a library.remove is refused while an amp plays it).
+  libraryMap(s.doc).delete("cap-a");
+  const gone = checkInvariants(s.doc);
+  assert.equal(gone.length, 1, `unexpected reasons: ${gone.join(" | ")}`);
+  assert.match(gone[0], /would play the capture "cap-a", which is not in the song's library/);
+});
+
+test("17th amp insert refused", (t) => {
+  const s = studio(t);
+  const tracks = [addTrack(s.doc, "Guitar 1"), addTrack(s.doc, "Guitar 2"), addTrack(s.doc, "Guitar 3")];
+  addLibraryFile(s.doc, "cap-a", "nam");
+
+  // The cap is the SONG's, not one chain's: two chains of eight are sixteen
+  // amps, and the chain cap (8) is met exactly as the song cap is.
+  let made = 0;
+  for (const [at, trackId] of tracks.slice(0, 2).entries()) {
+    for (let index = 0; index < 8; index += 1) {
+      addInsert(s.doc, trackOwner(trackId), "amp", { id: `amp-${at}-${index}`, params: { model_id: "cap-a" } });
+      made += 1;
+    }
+  }
+  assert.equal(made, LIMITS.ampInsertsPerSong);
+  assert.deepEqual(checkInvariants(s.doc), []);
+
+  const before = snapshot(s.doc);
+  const over = refuses(
+    () => addInsert(s.doc, trackOwner(tracks[2]), "amp", { id: "amp-16", params: { model_id: "cap-a" } }),
+    "limit",
+  );
+  assert.equal(over.message, "A song holds at most 16 amp inserts.");
+  assert.deepEqual(snapshot(s.doc), before, "the refused amp wrote nothing");
+
+  // The invariants count them too, so a plan that would land a seventeenth is
+  // refused whole rather than half-applied.
+  const inserts = s.doc.getMap("song").get("inserts");
+  s.doc.transact(() => {
+    inserts.set(
+      "amp-16",
+      objectMap({
+        id: "amp-16",
+        owner: trackOwner(tracks[2]),
+        order: 0,
+        kind: "amp",
+        bypass: false,
+        params: { model_id: "cap-a", ir_id: null, input_db: 0, output_db: 0, ir_mix: 1 },
+      }),
+    );
+  });
+  const reasons = checkInvariants(s.doc);
+  assert.equal(reasons.length, 1, `unexpected reasons: ${reasons.join(" | ")}`);
+  assert.match(reasons[0], /would hold 17 amp inserts; a song can hold at most 16 amp inserts/);
 });
 
 test("a chain's owner is a bare master, a track or a return and nothing else", (t) => {

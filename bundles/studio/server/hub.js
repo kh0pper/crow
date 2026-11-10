@@ -225,6 +225,26 @@ const SOUNDS_NEED_A_YES = "Changing recorded or imported sounds needs a yes from
 const FONT_NEEDS_A_YES = "Only the operator changes the instrument a track plays.";
 
 /**
+ * What an agent is told when a step would change the capture or the cabinet an
+ * amp insert plays.
+ *
+ * An amp insert is a library file by another route: `model_id` and `ir_id` name
+ * a capture and a cabinet the operator chose, so moving either is as much a
+ * sound decision as moving a track's font. The insert's own settings — input,
+ * output and mix — are its own, and an agent may set those.
+ */
+const AMP_CAPTURE_NEEDS_A_YES = "Only the operator changes the capture or cabinet an amp plays.";
+
+/**
+ * What an agent is told when a step would take an amp insert away.
+ *
+ * An amp could otherwise be removed and added again with another capture, which
+ * is the same choice `AMP_CAPTURE_NEEDS_A_YES` refuses, one step at a time. An
+ * agent may still bypass an amp.
+ */
+const AMP_REMOVE_NEEDS_A_YES = "Only the operator removes an amp.";
+
+/**
  * What an agent is told when a step would take a file out of the song's library
  * or put one into it.
  *
@@ -797,6 +817,67 @@ function trackWriteLosesSound(snap, trackId, field, value) {
 }
 
 /**
+ * Which of an amp insert's two reference fields a write names, for the guard's
+ * own question: `model_id` is the capture, `ir_id` the cabinet.
+ * @type {Readonly<string[]>}
+ */
+const AMP_REFERENCES_IN_PARAMS = Object.freeze(["model_id", "ir_id"]);
+
+/**
+ * Whether a write would move an amp insert to another capture or cabinet.
+ *
+ * Judged on the VALUES, never on the shape of the key: a whole-object write, a
+ * `params.model_id` field and an undo's own write all end here, and none of them
+ * counts when it puts back the value the insert already holds.
+ * @param {object} insert - the insert as the snapshot holds it (before the write)
+ * @param {unknown} params - the parameters the write names, whole or one field
+ * @returns {boolean}
+ */
+function ampReferenceMoves(insert, params) {
+  if (!isPlainObject(params)) return false;
+  const before = isPlainObject(insert?.params) ? insert.params : {};
+  for (const name of AMP_REFERENCES_IN_PARAMS) {
+    if (!Object.hasOwn(params, name)) continue;
+    if (!isDeepStrictEqual(before[name] ?? null, params[name] ?? null)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether one write to an insert loses a sound: an amp insert is gone when it is
+ * taken away or turned into something else, and its sound is another one when
+ * the capture or the cabinet it names moves.
+ *
+ * An effect insert has no sound of its own to lose — removing, bypassing,
+ * moving or retuning one is an ordinary agent edit — so only an amp reaches
+ * these two answers. ADDING an amp is not a loss: an agent may build a guitar
+ * chain with a capture the operator put in the song's library (plan 1d, PR C).
+ * @param {object} snap - the song as it stands before the step
+ * @param {string} insertId
+ * @param {string} field - `"*"`, `"kind"`, `"params.<name>"`, or another field
+ * @param {any} value - what the step would write
+ * @returns {string|null} the sentence, or null when nothing is lost
+ */
+function insertWriteLosesSound(snap, insertId, field, value) {
+  const insert = Object.hasOwn(snap.inserts ?? {}, insertId) ? snap.inserts[insertId] : null;
+  if (!isPlainObject(insert) || insert.kind !== "amp") return null;
+  if (field === "*") {
+    if (value === null) return AMP_REMOVE_NEEDS_A_YES;
+    if (!isPlainObject(value)) return null;
+    // A whole insert put back as another kind is the amp taken away.
+    if (typeof value.kind === "string" && value.kind !== "amp") return AMP_REMOVE_NEEDS_A_YES;
+    return ampReferenceMoves(insert, value.params) ? AMP_CAPTURE_NEEDS_A_YES : null;
+  }
+  if (field === "kind") return value === "amp" ? null : AMP_REMOVE_NEEDS_A_YES;
+  if (field.startsWith("params.")) {
+    const name = field.slice("params.".length);
+    if (!AMP_REFERENCES_IN_PARAMS.includes(name)) return null;
+    return ampReferenceMoves(insert, { [name]: value }) ? AMP_CAPTURE_NEEDS_A_YES : null;
+  }
+  return null;
+}
+
+/**
  * The sentence an agent meets for the sound a change set would lose, or null
  * when it loses none.
  *
@@ -854,6 +935,14 @@ function lostSound(changes, snap) {
       const trackId = keyHead(target.id);
       if (trackId === null) continue;
       if (bankHoldsSound(snap, trackId, target.id.slice(trackId.length + 1))) return SOUNDS_NEED_A_YES;
+      continue;
+    }
+    if (target.kind === "insert") {
+      // An amp carries the operator's capture and cabinet; an effect carries
+      // nothing to lose. Both are judged on the values written (see
+      // `insertWriteLosesSound`).
+      const sentence = insertWriteLosesSound(snap, target.id, split.field, value);
+      if (sentence) return sentence;
       continue;
     }
     if (target.kind === "track" && trackWriteLosesSound(snap, target.id, split.field, value)) {
@@ -1616,9 +1705,11 @@ export function createHub({
    * delete a sample, drop or repoint a pad that plays one, remove the bank or
    * the sampler track the pad belongs to, replace a sampler track's device,
    * remove a soundfont track that plays a font, move a soundfont track to another
-   * font, or delete a library entry something still plays is refused for anyone
-   * but the operator (see `lostSound`). A pad that plays nothing may be filled
-   * in, a sample may be renamed, a soundfont track's program may be set and an
+   * font, delete a library entry something still plays, remove an amp insert or
+   * move the capture or cabinet one plays is refused for anyone but the operator
+   * (see `lostSound`). A pad that plays nothing may be filled
+   * in, a sample may be renamed, a soundfont track's program may be set, an amp
+   * insert may be added, bypassed, moved or retuned, and an
    * unused library entry may be tidied away — those write values that are still
    * there afterwards.
    * @param {{changes: Map<string, any>|Object<string, any>, snap: object,

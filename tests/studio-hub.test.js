@@ -3355,6 +3355,301 @@ test("undo of library.add is people-only", async (t) => {
   assert.equal(kept.snapshot.tracks[0].device.font_id, "font-a");
 });
 
+// --- an amp insert's capture and cabinet (plan 1d, PR C) ---------------------
+
+/** What the agent's amp guard answers with, word for word. */
+const AMP_CAPTURE_NEEDS_A_YES = "Only the operator changes the capture or cabinet an amp plays.";
+const AMP_REMOVE_NEEDS_A_YES = "Only the operator removes an amp.";
+
+/** A capture's sha256, as the gateway's upload finish measures it. */
+const CAPTURE_HASH = "c0ffee11".repeat(8);
+
+/**
+ * The library entry `library.add` accepts for a capture or a cabinet, as the
+ * gateway's upload finish route builds it.
+ * @param {string} id
+ * @param {"nam"|"ir"} kind
+ * @returns {object}
+ */
+function makeLibraryFile(id, kind) {
+  return {
+    id,
+    kind,
+    name: `${kind === "nam" ? "Capture" : "Cabinet"} ${id}`,
+    source: "upload",
+    upload_id: `upload-${id}`,
+    storage_key: `projects/21/studio/song/library/${id}.${kind === "nam" ? "nam" : "wav"}`,
+    sha256: CAPTURE_HASH,
+    bytes: 2048,
+    licence: "",
+    credit: "",
+    author_label: "the operator",
+  };
+}
+
+/**
+ * Add one library file the way Studio itself does: `internal: true`, as the
+ * gateway's upload finish route issues it.
+ * @param {object} hub
+ * @param {string} song_id
+ * @param {object} entry
+ * @returns {Promise<object>}
+ */
+async function addLibraryFile(hub, song_id, entry) {
+  const added = await hub.runCommand({
+    song_id,
+    cmd_id: `add-library-${entry.id}`,
+    command: "library.add",
+    args: { entry },
+    author: HUMAN,
+    internal: true,
+  });
+  assert.equal(added.ok, true, `library.add was refused: ${added.error}`);
+  return added;
+}
+
+/**
+ * A song with two captures, two cabinets and one audio track to play them on.
+ * @param {object} hub
+ * @returns {Promise<string>} the song id
+ */
+async function seedAmpSong(hub) {
+  const created = await hub.createSong({ project_id: PROJECT, title: "Amps", author: HUMAN });
+  assert.equal(created.ok, true, `createSong was refused: ${created.error}`);
+  const song_id = created.song_id;
+  for (const entry of [
+    makeLibraryFile("cap-a", "nam"),
+    makeLibraryFile("cap-b", "nam"),
+    makeLibraryFile("cab-a", "ir"),
+    makeLibraryFile("cab-b", "ir"),
+  ]) {
+    await addLibraryFile(hub, song_id, entry);
+  }
+  await applies(hub, song_id, "seed-guitar", "track.add", { id: "guitar", name: "Guitar", kind: "audio" });
+  return song_id;
+}
+
+test("an agent cannot swap or remove an amp's capture", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+
+  // Building a guitar chain is an agent's own work: an amp insert with a
+  // capture the operator put in the song's library.
+  const built = await applies(
+    hub,
+    song_id,
+    "agent-add-amp",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    AGENT,
+  );
+  assert.equal(built.entry.command, "insert.add");
+  const amp = (await hub.openSong(song_id)).snapshot.inserts["amp-1"];
+  assert.deepEqual(amp.params, { model_id: "cap-a", ir_id: null, input_db: 0, output_db: 0, ir_mix: 1 });
+
+  // The operator puts a cabinet behind it, so there is one to try to take away.
+  await applies(
+    hub,
+    song_id,
+    "operator-set-cabinet",
+    "insert.set",
+    { id: "amp-1", params: { ir_id: "cab-a" } },
+    HUMAN,
+  );
+
+  // Choosing the capture and the cabinet an amp plays is the operator's, in
+  // both directions: to another one, and to none at all.
+  const swapped = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-swap-capture",
+      command: "insert.set",
+      args: { id: "amp-1", params: { model_id: "cap-b" } },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(swapped.error, AMP_CAPTURE_NEEDS_A_YES);
+  const cabinet = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-set-cabinet",
+      command: "insert.set",
+      args: { id: "amp-1", params: { ir_id: "cab-b" } },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(cabinet.error, AMP_CAPTURE_NEEDS_A_YES);
+  const cleared = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-clear-cabinet",
+      command: "insert.set",
+      args: { id: "amp-1", params: { ir_id: null } },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(cleared.error, AMP_CAPTURE_NEEDS_A_YES);
+  assert.deepEqual(
+    (await hub.openSong(song_id)).snapshot.inserts["amp-1"].params,
+    { model_id: "cap-a", ir_id: "cab-a", input_db: 0, output_db: 0, ir_mix: 1 },
+    "the refused edits wrote nothing",
+  );
+
+  // And an amp is not removed to be re-added with another capture.
+  const removed = refuses(
+    await hub.runCommand({ song_id, cmd_id: "agent-remove-amp", command: "insert.remove", args: { id: "amp-1" }, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(removed.error, AMP_REMOVE_NEEDS_A_YES);
+  assert.ok((await hub.openSong(song_id)).snapshot.inserts["amp-1"], "the refused removal left the amp");
+
+  // The operator chooses, and that step is theirs to take back as well: undoing
+  // it would put the sound this session replaced back, which is the same
+  // decision.
+  const chosen = await applies(
+    hub,
+    song_id,
+    "operator-set-capture",
+    "insert.set",
+    { id: "amp-1", params: { model_id: "cap-b", ir_id: null } },
+    HUMAN,
+  );
+  const undone = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-capture", entry_id: chosen.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undone.error, AMP_CAPTURE_NEEDS_A_YES);
+  assert.equal((await hub.openSong(song_id)).snapshot.inserts["amp-1"].params.model_id, "cap-b");
+});
+
+test("an agent may bypass an amp and change its input, output and mix", async (t) => {
+  const { hub } = await setup(t);  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-add-amp",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a", ir_id: "cab-a" } },
+    HUMAN,
+  );
+  // A second effect on the same chain, so a move has somewhere to go.
+  await applies(hub, song_id, "add-eq", "insert.add", { id: "eq-1", owner: "track:guitar", kind: "eq" }, HUMAN);
+
+  // The amp's own settings are its settings: an agent may drive it.
+  const driven = await applies(
+    hub,
+    song_id,
+    "agent-drive",
+    "insert.set",
+    { id: "amp-1", params: { input_db: -6, output_db: 3, ir_mix: 0.25 } },
+    AGENT,
+  );
+  assert.equal(driven.entry.command, "insert.set");
+  const bypassed = await applies(hub, song_id, "agent-bypass", "insert.bypass", { id: "amp-1", bypass: true }, AGENT);
+  assert.equal(bypassed.entry.command, "insert.bypass");
+  const moved = await applies(hub, song_id, "agent-move", "insert.move", { id: "amp-1", after: "eq-1" }, AGENT);
+  assert.equal(moved.entry.command, "insert.move");
+  const snapshotAfter = (await hub.openSong(song_id)).snapshot;
+  assert.deepEqual(snapshotAfter.inserts["amp-1"].params, {
+    model_id: "cap-a",
+    ir_id: "cab-a",
+    input_db: -6,
+    output_db: 3,
+    ir_mix: 0.25,
+  });
+  assert.equal(snapshotAfter.inserts["amp-1"].bypass, true);
+
+  // Nor may an agent "change" the capture by taking its own bypass back, or by
+  // adding a second amp with another capture: one is a setting, the other is a
+  // new insert the operator's library file plays.
+  await applies(hub, song_id, "agent-unset-cabinet-noop", "insert.set", { id: "amp-1", params: { input_db: -6 } }, AGENT);
+  const second = await applies(
+    hub,
+    song_id,
+    "agent-second-amp",
+    "insert.add",
+    { id: "amp-2", owner: "track:guitar", kind: "amp", params: { model_id: "cap-b" } },
+    AGENT,
+  );
+  assert.equal(second.entry.command, "insert.add");
+  const amps = Object.values((await hub.openSong(song_id)).snapshot.inserts).filter((insert) => insert.kind === "amp");
+  assert.deepEqual(amps.map((insert) => insert.params.model_id).sort(), ["cap-a", "cap-b"]);
+});
+
+test("an agent cannot undo its way to another capture", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  const added = await applies(
+    hub,
+    song_id,
+    "operator-add-amp",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+
+  // Undoing the operator's `insert.add` would take the amp away: that is the
+  // removal only the operator may make.
+  const undoAdd = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-add", entry_id: added.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoAdd.error, AMP_REMOVE_NEEDS_A_YES);
+  assert.ok((await hub.openSong(song_id)).snapshot.inserts["amp-1"], "the refused undo left the amp");
+
+  // Re-adding is allowed, so the operator's removal may be taken back by an
+  // agent — the amp it puts back is the very same one, with the same capture.
+  const back = await applies(
+    hub,
+    song_id,
+    "operator-remove-amp",
+    "insert.remove",
+    { id: "amp-1" },
+    HUMAN,
+  );
+  assert.deepEqual((await hub.openSong(song_id)).snapshot.inserts, {});
+  const restored = await hub.undo({ song_id, cmd_id: "agent-undo-remove", entry_id: back.entry.id, author: AGENT });
+  assert.equal(restored.ok, true, `undoing a removal was refused: ${restored.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.inserts["amp-1"].params.model_id, "cap-a");
+
+  // The operator moves the amp to another capture, and the history door onto
+  // that choice is closed: undoing it would play the capture this session left.
+  const chosen = await applies(
+    hub,
+    song_id,
+    "operator-set-capture",
+    "insert.set",
+    { id: "amp-1", params: { model_id: "cap-b" } },
+    HUMAN,
+  );
+  const undoSet = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-capture", entry_id: chosen.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoSet.error, AMP_CAPTURE_NEEDS_A_YES);
+  const kept = (await hub.openSong(song_id)).snapshot;
+  assert.equal(kept.inserts["amp-1"].params.model_id, "cap-b");
+
+  // A cabinet is the same question, and an undo of the operator's own cabinet
+  // choice meets the same sentence.
+  const cab = await applies(
+    hub,
+    song_id,
+    "operator-set-cabinet",
+    "insert.set",
+    { id: "amp-1", params: { ir_id: "cab-a" } },
+    HUMAN,
+  );
+  const undoCab = refuses(
+    await hub.undo({ song_id, cmd_id: "agent-undo-cabinet", entry_id: cab.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(undoCab.error, AMP_CAPTURE_NEEDS_A_YES);
+});
+
 // --- MIDI mappings ------------------------------------------------------------
 
 /** What the agent's MIDI guard answers with, word for word. */

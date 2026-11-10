@@ -28,14 +28,24 @@
  *     chain means, and leaving `after` out appends it to the END of the chain,
  *     which is the common case of "one more effect on this track". Both are
  *     documented, and both are tested.
- *   - an insert's parameters are the `EFFECT_PARAMS` table's, and every write
+ *   - an insert's parameters are the `EFFECT_PARAMS` table's (and an amp's the
+ *     `AMP_PARAMS` one), and every write
  *     is checked against it by name and by range: an unknown parameter lists
  *     the ones the effect has, and an out-of-range one names its own range.
  *   - `insert.add` fills every parameter with its default, so an insert is a
  *     complete object from the moment it exists and the engine never has to
  *     guess a value.
- *   - `EFFECT_PARAMS` has no `amp` yet: amp inserts arrive with PR C, and
- *     `insert.add` refuses that kind with its own sentence until then.
+ *   - `amp` is the one insert kind that is not an effect (plan 1d, PR C): its
+ *     settings are `AMP_PARAMS` (three numbers) plus the two reference fields
+ *     `model_id` — the capture it plays, REQUIRED on add and a library entry of
+ *     kind "nam" — and `ir_id`, its cabinet (a library entry of kind "ir", or
+ *     null for no cabinet). Both are checked against the song's library here,
+ *     because an amp that names a file nothing holds is silent, and `amp` is
+ *     not in `EFFECT_KINDS`/`EFFECT_PARAMS` at all: the effects' tables and the
+ *     mixer's menu are the effects.
+ *   - a song holds at most `LIMITS.ampInsertsPerSong` amp inserts, counted over
+ *     the whole song rather than over one chain: every amp loads a capture of
+ *     its own, so the cap is the song's.
  *   - `limiter` may sit on any owner. On the master the engine gives it its
  *     lookahead; on a track or a return it runs at zero latency as a clipper
  *     (plan 1d, DSP rules). Nothing in the document tells the two apart.
@@ -54,11 +64,17 @@
 import { z } from "zod";
 import { defineCommand, StudioError } from "./registry.js";
 import {
+  AMP_KIND,
+  AMP_PARAMS,
   DEFAULT_MASTER,
   EFFECT_KINDS,
   EFFECT_PARAMS,
+  ampParamSpec,
+  ampSpec,
+  defaultAmpParams,
   effectParamSpec,
   effectSpec,
+  isAmpKind,
   LIMITS,
   MASTER_REF,
   MAX_RETURN_NAME,
@@ -67,9 +83,11 @@ import {
   defaultEffectParams,
   effectLabel,
   getInsert,
+  getLibraryEntry,
   getReturn,
   getSend,
   getTrack,
+  insertEntries,
   insertMap,
   insertOwnerOf,
   insertParamsMap,
@@ -112,10 +130,18 @@ const ownerSchema = z
     'an owner is "track:<id>", "return:<id>" or "master"',
   );
 
-/** One effect's parameters to write, by name; the ranges are checked in `apply`. */
+/**
+ * One insert's parameters to write, by name; the ranges are checked in `apply`.
+ *
+ * `null` is allowed because an amp's `ir_id` is a library entry's id or null for
+ * "no cabinet"; an effect parameter set to null is refused by name in `apply`
+ * like any other value of the wrong type.
+ */
 const paramsSchema = z
-  .record(z.union([z.number(), z.string()]))
-  .describe("the parameters to set, by name; each one is inside its own range (see EFFECT_PARAMS)");
+  .record(z.union([z.number(), z.string(), z.null()]))
+  .describe(
+    "the parameters to set, by name; each one is inside its own range (see EFFECT_PARAMS, and AMP_PARAMS for an amp)",
+  );
 
 /** @returns {string} the key a before/after map files one field under. */
 function fieldKey(ref, field) {
@@ -194,7 +220,7 @@ function withArticle(word) {
 
 /** @returns {string} a parameter's value with its unit when it has one. */
 function valueText(kind, name, value) {
-  const unit = effectParamSpec(kind, name)?.unit;
+  const unit = isAmpKind(kind) ? ampParamSpec(name)?.unit : effectParamSpec(kind, name)?.unit;
   return unit ? `${value} ${unit}` : String(value);
 }
 
@@ -264,6 +290,104 @@ function checkParams(kind, params) {
     checked[name] = value;
   }
   return checked;
+}
+
+/**
+ * Check one amp insert's settings: the three numbers against `AMP_PARAMS`, and
+ * the two reference fields against the SONG'S LIBRARY — `model_id` a capture, and
+ * `ir_id` a cabinet or null for none.
+ *
+ * The messages name the setting and, for a number, its range, the way
+ * `checkParams` does for an effect, so a caller learns what an amp accepts rather
+ * than only that it was refused.
+ * @param {Y.Doc} doc - the live document, whose library the ids must name
+ * @param {Object<string, any>} params - the settings to check
+ * @returns {Object<string, any>} a plain copy of the checked values
+ * @throws {StudioError} code "invalid" on an unknown setting, a value out of
+ *   range, or an id the library does not hold (or holds as another kind)
+ */
+function checkAmpParams(doc, params) {
+  const checked = {};
+  const names = Object.keys(ampSpec()?.params ?? {});
+  for (const [name, value] of Object.entries(params ?? {})) {
+    if (name === "model_id") {
+      checked.model_id = requireLibraryFile(doc, value, "nam");
+      continue;
+    }
+    if (name === "ir_id") {
+      checked.ir_id = value === null ? ABSENT : requireLibraryFile(doc, value, "ir");
+      continue;
+    }
+    const field = ampParamSpec(name);
+    if (!field) {
+      refuseInvalid(
+        `The amp has no parameter "${name}"; it has model_id, ir_id, ${names.join(", ")}.`,
+      );
+    }
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      refuseInvalid(`The amp's "${name}" is ${describeValue(value)}; it runs from ${rangeText(field)}.`);
+    }
+    if (value < field.min || value > field.max) {
+      refuseInvalid(`The amp's "${name}" is ${value}; it runs from ${rangeText(field)}.`);
+    }
+    checked[name] = value;
+  }
+  return checked;
+}
+
+/**
+ * An id that has to name a library entry of one kind, refused in the words that
+ * kind goes by: an amp plays a capture (kind "nam") through a cabinet (kind
+ * "ir").
+ * @param {Y.Doc} doc
+ * @param {unknown} value - the id the caller sent
+ * @param {"nam"|"ir"} kind - the kind the entry must be
+ * @returns {string} the id
+ * @throws {StudioError} code "invalid"
+ */
+function requireLibraryFile(doc, value, kind) {
+  const word = kind === "nam" ? "capture" : "cabinet";
+  if (typeof value !== "string" || value === "") {
+    refuseInvalid(
+      kind === "nam"
+        ? 'An amp insert needs a capture to play: pass the library entry\'s id as "model_id".'
+        : 'An amp\'s cabinet is a library entry\'s id, or left out for no cabinet.',
+    );
+  }
+  const entry = getLibraryEntry(doc, value);
+  if (!entry) {
+    refuseInvalid(
+      `The song's library has no ${word} with id "${value}"; add it to the library before an amp plays it.`,
+    );
+  }
+  const held = entry.get("kind");
+  if (held !== kind) {
+    refuseInvalid(
+      `The library entry "${value}" is a ${kindWordOf(held)}, not a ${word}; an amp plays a ${kind === "nam" ? "capture" : "cabinet"} here.`,
+    );
+  }
+  return value;
+}
+
+/** @returns {string} what one library kind is called: "font", "capture", "cabinet". */
+function kindWordOf(kind) {
+  if (kind === "nam") return "capture";
+  if (kind === "ir") return "cabinet";
+  return "font";
+}
+
+/**
+ * How many amp inserts the song holds, over every chain: the cap is the song's,
+ * not one chain's, because every amp loads a capture of its own.
+ * @param {Y.Doc} doc
+ * @returns {number}
+ */
+function ampInsertCount(doc) {
+  let count = 0;
+  for (const { insert } of insertEntries(doc)) {
+    if (insert.get("kind") === AMP_KIND) count += 1;
+  }
+  return count;
 }
 
 /** @returns {Y.Map<any>} the live insert, or a "not_found" refusal naming the id. */
@@ -380,7 +504,9 @@ defineCommand({
         .string()
         .min(1)
         .max(40)
-        .describe(`the effect, one of ${EFFECT_KINDS.join(", ")}`),
+        .describe(
+          `the effect, one of ${EFFECT_KINDS.join(", ")}, or "${AMP_KIND}" for an amp that plays a capture`,
+        ),
       // Its own copy of the id schema: reusing `idSchema` twice in one object
       // publishes a JSON-Schema $ref, which tool-schemas-grammar-safe refuses.
       after: z
@@ -404,12 +530,10 @@ defineCommand({
     return [insertRef(args.id), args.owner];
   },
   apply(doc, args) {
-    // An amp insert is PR C's: refusing it here, in its own words, keeps the
-    // table honest instead of letting the kind in with no parameters.
-    if (args.kind === "amp") refuseInvalid("Amp inserts arrive in a later Studio version.");
-    if (!effectSpec(args.kind)) {
+    const amp = isAmpKind(args.kind);
+    if (!amp && !effectSpec(args.kind)) {
       refuseInvalid(
-        `"${args.kind}" is not an effect a chain holds; the effects are ${EFFECT_KINDS.join(", ")}.`,
+        `"${args.kind}" is not an effect a chain holds; the effects are ${EFFECT_KINDS.join(", ")}, and an amp is "${AMP_KIND}".`,
       );
     }
     requireOwner(doc, args.owner);
@@ -419,6 +543,17 @@ defineCommand({
     const chain = insertsForOwner(doc, args.owner);
     if (chain.length >= LIMITS.insertsPerChain) {
       refuseLimit(`A chain holds at most ${LIMITS.insertsPerChain} effects.`);
+    }
+    // The amp cap is the song's: an amp insert is the one kind that loads a file
+    // of its own, so sixteen is a whole song's worth, whichever chains they sit
+    // in. An amp with no capture is refused here rather than stored silent.
+    if (amp) {
+      if (args.params?.model_id === undefined) {
+        refuseInvalid('An amp insert needs a capture to play: pass the library entry\'s id as "model_id".');
+      }
+      if (ampInsertCount(doc) >= LIMITS.ampInsertsPerSong) {
+        refuseLimit(`A song holds at most ${LIMITS.ampInsertsPerSong} amp inserts.`);
+      }
     }
     const snap = snapshot(doc);
     let order = appendOrder(chain);
@@ -436,7 +571,12 @@ defineCommand({
       }
       order = placed;
     }
-    const params = { ...defaultEffectParams(args.kind), ...checkParams(args.kind, args.params) };
+    // Every setting at its default, so an insert is a complete object from the
+    // moment it exists: an amp starts at 0 dB in, 0 dB out and a cabinet at full
+    // mix, with the capture the caller named and no cabinet until one is chosen.
+    const params = amp
+      ? { ...defaultAmpParams(), model_id: "", ir_id: ABSENT, ...checkAmpParams(doc, args.params) }
+      : { ...defaultEffectParams(args.kind), ...checkParams(args.kind, args.params) };
     const insert = { id: args.id, owner: args.owner, order, kind: args.kind, bypass: false, params };
     const stored = objectMap({
       id: insert.id,
@@ -568,12 +708,16 @@ defineCommand({
   apply(doc, args) {
     const insert = requireInsert(doc, args.id);
     const kind = String(insert.get("kind") ?? "");
-    if (!effectSpec(kind)) {
+    let params;
+    if (isAmpKind(kind)) {
+      params = checkAmpParams(doc, args.params);
+    } else if (!effectSpec(kind)) {
       refuseInvalid(
-        `The insert "${args.id}" holds a "${kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}).`,
+        `The insert "${args.id}" holds a "${kind}", which is not one of the effects a chain holds (${EFFECT_KINDS.join(", ")}, ${AMP_KIND}).`,
       );
+    } else {
+      params = checkParams(kind, args.params);
     }
-    const params = checkParams(kind, args.params);
     const map = insertParamsMap(insert);
     const ref = insertRef(args.id);
     const before = {};

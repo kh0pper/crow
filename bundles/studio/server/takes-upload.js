@@ -63,7 +63,7 @@
  *   5. the `studio.take` audit line;
  *   6. mark the staging finished and drop its chunks.
  *
- * ## Three kinds of upload, one pipeline
+ * ## Five kinds of upload, one pipeline
  *
  * `begin` takes a `kind`, and everything downstream follows it:
  *
@@ -96,6 +96,25 @@
  *           twelve) at begin, from the `head` the client declares, and again at
  *           finish, from chunk 0; it never parses a bank. A song may have 8
  *           bank uploads in progress at once, and a bank is at most 512 MB.
+ *   nam     is an amp capture: a `.nam` file, stored byte for byte like a bank
+ *           (Task 12). It belongs to the library the same way, under
+ *           `<library_id>.nam`, and `finish` issues `library.add` with kind
+ *           "nam". The server never JSON-parses it either. It checks the head
+ *           the client declares at begin, and the stored file's first bytes
+ *           again at finish, for the one shape Studio plays: a JSON object
+ *           whose `architecture` is "SlimmableContainer" (a NAM A2 capture),
+ *           and — at finish, over the whole staged file, streaming — a
+ *           `"weights"` key. Another architecture is the plan's re-export
+ *           sentence; anything else is "not a NAM capture". A capture is at
+ *           most 20 MB, and a song may have 8 capture uploads in progress.
+ *   ir      is a cabinet impulse response: decoded in the BROWSER, like a
+ *           sample, and stored as the 24-bit WAV this file frames at finish
+ *           (Task 12) — `<library_id>.wav` under the same `library/`
+ *           directory, reference type `studio_library`, `library.add` with kind
+ *           "ir". It is at most 1 second long (frames ≤ the declared rate) and
+ *           10 MB, and a song may have 16 cabinet uploads in progress at once.
+ *           The server's own `decodeAudioData` is never used: it only ever sees
+ *           the PCM the page decoded.
  *
  * ## One upload id belongs to one kind
  *
@@ -147,7 +166,10 @@ export const CHUNK_BYTES = 1048576;
 /** The largest chunk index a take may use (six digits of file name). */
 const MAX_CHUNK_INDEX = 99999;
 
-/** The sample rates a take may have been recorded at (spec §18). */
+/**
+ * The sample rates an upload may declare (spec §18). The cabinet IR uses the same
+ * four: the plan's `SAMPLE_RATES`, because the page decoded it at one of them.
+ */
 const TAKE_RATES = Object.freeze([44100, 48000, 88200, 96000]);
 
 /** How many channels a recording may have. */
@@ -156,20 +178,24 @@ const MAX_CHANNELS = 2;
 /**
  * How many un-finished uploads one song may have at a time, by kind. A take is
  * a long recording and 32 is plenty; an import session can queue many short
- * hits at once, so a sample gets its own, larger cap; a bank is a big file the
- * operator brings by hand, so 8 of them at once is plenty.
+ * hits at once, so a sample gets its own, larger cap; a bank or a capture is a
+ * big file the operator brings by hand, so 8 of them at once is plenty; and a
+ * cabinet is a short file the operator may be auditioning a set of, so it gets
+ * 16.
  * @type {Readonly<Object<string, number>>}
  */
-const MAX_OPEN_BY_KIND = Object.freeze({ take: 32, sample: 128, font: 8 });
+const MAX_OPEN_BY_KIND = Object.freeze({ take: 32, sample: 128, font: 8, nam: 8, ir: 16 });
 
 /** The kinds of upload this service stages. */
-const UPLOAD_KINDS = Object.freeze(["take", "sample", "font"]);
+const UPLOAD_KINDS = Object.freeze(["take", "sample", "font", "nam", "ir"]);
 
 /** The `storage_files.reference_type` each kind is filed under. */
 const REFERENCE_TYPES = Object.freeze({
   take: "studio_take",
   sample: "studio_sample",
   font: "studio_library",
+  nam: "studio_library",
+  ir: "studio_library",
 });
 
 /**
@@ -180,10 +206,16 @@ const REFERENCE_TYPES = Object.freeze({
 const PAD_ASSIGN = Object.freeze({ done: "done", skipped: "skipped" });
 
 /** The audit action a finished upload of each kind is recorded with. */
-const AUDIT_ACTIONS = Object.freeze({ take: "studio.take", sample: "studio.sample", font: "studio.library" });
+const AUDIT_ACTIONS = Object.freeze({
+  take: "studio.take",
+  sample: "studio.sample",
+  font: "studio.library",
+  nam: "studio.library",
+  ir: "studio.library",
+});
 
 /** The directory of `studio/<song_id>/` each kind's file lives in. */
-const KEY_DIRS = Object.freeze({ take: "takes", sample: "samples", font: "library" });
+const KEY_DIRS = Object.freeze({ take: "takes", sample: "samples", font: "library", nam: "library", ir: "library" });
 
 /** The file extensions a SoundFont bank may have (plan 1d, Formats). */
 const BANK_EXTENSIONS = Object.freeze(["sf2", "sf3"]);
@@ -199,6 +231,37 @@ const BANK_TYPE_TEXT = "Studio takes SF2 and SF3 banks.";
 
 /** What a file whose first bytes are not a bank is told. */
 const NOT_A_BANK_TEXT = "That file is not an SF2 or SF3 bank.";
+
+/** The extension a capture is stored under: `.nam`, whatever the file was called. */
+const CAPTURE_EXTENSION = "nam";
+
+/** The largest capture the operator may bring: 20 MB (plan 1d, Limits). */
+const CAPTURE_MAX_BYTES = 20971520;
+
+/** How many of a capture's first bytes the server recognises its shape in. */
+const CAPTURE_HEAD_BYTES = 4096;
+
+/** The NAM architecture Studio plays: an A2 model (plan 1d, Formats). */
+const CAPTURE_ARCHITECTURE = "SlimmableContainer";
+
+/** What a file that is not shaped like a NAM capture is told. */
+const NOT_A_CAPTURE_TEXT = "This file is not a NAM capture.";
+
+/**
+ * What an older NAM model is told: the plan's sentence, word for word. Studio
+ * plays A2 captures only, and says how to get one.
+ */
+const LEGACY_CAPTURE_TEXT =
+  "This capture uses an older NAM format; Studio plays A2 captures. Re-export it with a current NAM trainer.";
+
+/** The largest cabinet IR: 10 MB (plan 1d, Limits). */
+const IR_MAX_BYTES = 10485760;
+
+/** The longest cabinet IR: 1 second, after the page has resampled it. */
+const IR_MAX_SECONDS = 1;
+
+/** The extension a cabinet is stored under: the WAV the sample path writes. */
+const IR_EXTENSION = "wav";
 
 /** Bytes in one megabyte, the unit a bank's size refusal is stated in. */
 const MB_BYTES = 1024 * 1024;
@@ -321,11 +384,12 @@ function groupThousands(value) {
 /**
  * The kind of an upload, refusing anything else by name.
  * @param {unknown} value
- * @returns {"take"|"sample"|"font"}
+ * @returns {"take"|"sample"|"font"|"nam"|"ir"}
  */
 function uploadKind(value) {
   if (value === undefined || value === null || value === "") return "take";
   if (value === "take" || value === "sample" || value === "font") return value;
+  if (value === "nam" || value === "ir") return value;
   throw badRequest(`An upload is a ${UPLOAD_KINDS.join(" or ")}, not "${String(value)}".`);
 }
 
@@ -333,18 +397,41 @@ function uploadKind(value) {
  * The kind a staged meta belongs to. A meta written before samples existed has
  * none, and is a take.
  * @param {object|null|undefined} meta
- * @returns {"take"|"sample"|"font"}
+ * @returns {"take"|"sample"|"font"|"nam"|"ir"}
  */
 function kindOf(meta) {
-  if (meta && meta.kind === "sample") return "sample";
-  if (meta && meta.kind === "font") return "font";
+  const kind = meta?.kind;
+  if (kind === "sample" || kind === "font" || kind === "nam" || kind === "ir") return kind;
   return "take";
 }
 
-/** @returns {string} "take", "sample" or "bank", for a refusal's own words. */
+/**
+ * Whether a kind's bytes are the file itself, stored exactly as they arrived —
+ * no PCM, no rate, no channels and no WAV header. A bank and a capture are.
+ * @param {string} kind
+ * @returns {boolean}
+ */
+function isFileKind(kind) {
+  return kind === "font" || kind === "nam";
+}
+
+/**
+ * Whether a kind's finished object is an entry in the song's library, which is
+ * what `library.add` is issued for and where the upload's id becomes the
+ * entry's.
+ * @param {string} kind
+ * @returns {boolean}
+ */
+function isLibraryKind(kind) {
+  return kind === "font" || kind === "nam" || kind === "ir";
+}
+
+/** @returns {string} "take", "sample", "bank", "capture" or "cabinet", for a refusal's own words. */
 function kindNoun(kind) {
   if (kind === "sample") return "sample";
   if (kind === "font") return "bank";
+  if (kind === "nam") return "capture";
+  if (kind === "ir") return "cabinet";
   return "take";
 }
 
@@ -358,10 +445,12 @@ function isPadAssignRecorded(meta) {
   return meta?.pad_assign === PAD_ASSIGN.done || meta?.pad_assign === PAD_ASSIGN.skipped;
 }
 
-/** @returns {string} "Take", "Sample" or "Bank", for a sentence's first word. */
+/** @returns {string} "Take", "Sample", "Bank", "Capture" or "Cabinet", for a sentence's first word. */
 function kindName(kind) {
   if (kind === "sample") return "Sample";
   if (kind === "font") return "Bank";
+  if (kind === "nam") return "Capture";
+  if (kind === "ir") return "Cabinet";
   return "Take";
 }
 
@@ -378,23 +467,57 @@ function libraryIdOf(uploadId) {
 
 /**
  * The id one upload's finished object is held under: a take's and a sample's is
- * the upload's own, a bank's is the library entry's.
+ * the upload's own, and a library file's — a bank, a capture or a cabinet — is
+ * the library entry's.
  * @param {string} kind
  * @param {string} uploadId
  * @returns {string}
  */
 function objectIdOf(kind, uploadId) {
-  return kind === "font" ? libraryIdOf(uploadId) : uploadId;
+  return isLibraryKind(kind) ? libraryIdOf(uploadId) : uploadId;
 }
 
 /**
- * The most samples (frames × channels) one upload of a kind may hold.
+ * The most samples (frames × channels) one upload of a kind may hold. A cabinet
+ * is capped by its length instead: one second at the rate the page declared,
+ * which is `rate × channels` samples.
  * @param {string} kind
  * @param {number} takeCap the service's take cap
+ * @param {object|null} [meta] the staged meta, which says a cabinet's rate
  * @returns {number}
  */
-function uploadCap(kind, takeCap) {
-  return kind === "sample" ? SAMPLE_MAX_SAMPLES : takeCap;
+function uploadCap(kind, takeCap, meta = null) {
+  if (kind === "sample") return SAMPLE_MAX_SAMPLES;
+  if (kind === "ir") {
+    const rate = Number(meta?.rate);
+    const channels = Number(meta?.channels);
+    const usable = Number.isInteger(rate) && rate > 0 && Number.isInteger(channels) && channels > 0;
+    // A meta with no readable rate can hold nothing: the refusal that follows
+    // names the length, and 0 compared against it always refuses.
+    return usable ? rate * channels : 0;
+  }
+  return takeCap;
+}
+
+/**
+ * A length in seconds, with one decimal: "2.0".
+ * @param {number} seconds
+ * @returns {string}
+ */
+function secondsText(seconds) {
+  return (Math.round(seconds * 10) / 10).toFixed(1);
+}
+
+/**
+ * The plan's own sentence for a cabinet longer than one second.
+ * @param {number} frames
+ * @param {number} rate
+ * @returns {Error} 413
+ */
+function irLengthRefusal(frames, rate) {
+  return tooLarge(
+    `An impulse response is at most ${IR_MAX_SECONDS} second long; this one is ${secondsText(frames / rate)} s.`,
+  );
 }
 
 /**
@@ -403,14 +526,21 @@ function uploadCap(kind, takeCap) {
  * @param {string} kind the upload's kind
  * @param {number} actual how many samples (frames × channels) it would hold
  * @param {number} takeCap the service's take cap
+ * @param {object|null} [meta] the staged meta, which says a cabinet's rate
  * @returns {Error} 413
  */
-function capRefusal(kind, actual, takeCap) {
-  const cap = uploadCap(kind, takeCap);
+function capRefusal(kind, actual, takeCap, meta = null) {
+  const cap = uploadCap(kind, takeCap, meta);
   if (kind === "sample") {
     return tooLarge(
       `A sample can be at most ${SAMPLE_MAX_SECONDS} s (${groupThousands(cap)} samples at 48 kHz stereo); this one would hold ${groupThousands(actual)}.`,
     );
+  }
+  if (kind === "ir") {
+    const rate = Number(meta?.rate);
+    const channels = Number(meta?.channels);
+    const frames = channels > 0 ? Math.ceil(actual / channels) : 0;
+    return irLengthRefusal(frames, rate > 0 ? rate : 1);
   }
   return tooLarge(
     `A take can hold at most ${groupThousands(cap)} samples (frames × channels); this one would hold ${groupThousands(actual)}.`,
@@ -492,15 +622,179 @@ function bankExtOf(meta) {
 }
 
 /**
- * The refusal for a chunk that would take a bank past the size it declared.
- * @param {number} declared the bank's declared size, in bytes
+ * What is wrong with a file that is meant to be a NAM capture, judged from the
+ * front of it alone: after optional whitespace the first byte is `{`, the text
+ * holds an `"architecture"` key, and that key's string value is the architecture
+ * Studio plays.
+ *
+ * Another architecture value is the plan's re-export sentence — a legacy model
+ * is a real capture Studio does not play, and telling the operator to find a
+ * current trainer is the useful answer. Anything else (not an object, no
+ * `architecture` key, a value that is not a string) is not a capture at all.
+ * The file is never parsed: this reads the front of it as text.
+ * @param {Buffer|Uint8Array|null|undefined} bytes
+ * @returns {string|null} the refusal's message, or null when it is shaped right
+ */
+function captureProblemOf(bytes) {
+  if (!bytes || bytes.length === 0) return NOT_A_CAPTURE_TEXT;
+  const text = Buffer.from(bytes.subarray(0, CAPTURE_HEAD_BYTES)).toString("latin1");
+  if (!/^\s*\{/.test(text)) return NOT_A_CAPTURE_TEXT;
+  const match = /"architecture"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text);
+  if (!match) return NOT_A_CAPTURE_TEXT;
+  let value;
+  try {
+    value = JSON.parse(match[1]);
+  } catch {
+    return NOT_A_CAPTURE_TEXT;
+  }
+  if (typeof value !== "string") return NOT_A_CAPTURE_TEXT;
+  return value === CAPTURE_ARCHITECTURE ? null : LEGACY_CAPTURE_TEXT;
+}
+
+/**
+ * The head a capture upload declares at `begin`, refusing a file Studio cannot
+ * play before a byte of it is staged.
+ * @param {unknown} value the base64 of the file's first bytes (at most 4096)
+ * @returns {Buffer}
+ */
+function captureHeadOf(value) {
+  const bytes = typeof value === "string" ? Buffer.from(value, "base64") : Buffer.alloc(0);
+  const problem = captureProblemOf(bytes);
+  if (problem) throw badRequest(problem);
+  return bytes.subarray(0, CAPTURE_HEAD_BYTES);
+}
+
+/**
+ * The details a capture upload declares at `begin`: what the library entry is
+ * called and how big the file is. A capture has no extension of its own to
+ * choose — it is stored as `.nam` — so the file's name is not kept.
+ * @param {object} body the begin request
+ * @returns {{name: string, bytes: number}}
+ */
+function captureUploadOf(body) {
+  const name = fileUploadNameOf(body.name, "nam");
+  const declared = Number(body.bytes);
+  if (!Number.isInteger(declared) || declared <= 0) {
+    throw badRequest("A capture upload needs the file's size in bytes.");
+  }
+  if (declared > CAPTURE_MAX_BYTES) {
+    throw tooLarge(
+      `That capture is ${Math.ceil(declared / MB_BYTES)} MB; Studio takes captures up to 20 MB.`,
+    );
+  }
+  captureHeadOf(body.head);
+  return { name, bytes: declared };
+}
+
+/**
+ * Whether a staged capture holds a `"weights"` key anywhere, read by streaming
+ * the bytes once and never parsing them.
+ *
+ * The capture's own JSON can be hundreds of megabytes of weights, so the file
+ * is never held whole and never given to `JSON.parse`. A small overlap between
+ * reads keeps a key that straddles two of them visible.
+ * @param {string[]} files the chunk files, in index order
+ * @returns {Promise<boolean>}
+ */
+async function captureHasWeights(files) {
+  const pattern = /"weights"\s*:/;
+  let tail = "";
+  for (const file of files) {
+    for await (const piece of createReadStream(file)) {
+      const text = tail + piece.toString("latin1");
+      if (pattern.test(text)) return true;
+      tail = text.slice(-64);
+    }
+  }
+  return false;
+}
+
+/**
+ * Check a finished capture without parsing it: the size it declared at `begin`,
+ * the head again (the same check `begin` made, now from the bytes that actually
+ * arrived), and a `"weights"` key somewhere in the file.
+ *
+ * Called before anything is stored, so a file that fails any of the three leaves
+ * nothing behind.
+ * @param {string} takeId
+ * @param {object} meta the staged meta
+ * @param {string[]} files the chunk files, in index order
+ * @param {number} totalBytes the bytes the chunks add up to
+ * @returns {Promise<void>}
+ */
+async function assertCaptureFinish(takeId, meta, files, totalBytes) {
+  const declared = Number(meta.bytes);
+  if (!Number.isInteger(declared) || declared <= 0) {
+    throw conflict(`Capture "${takeId}" has no readable size; begin it again.`);
+  }
+  if (totalBytes !== declared) {
+    throw conflict(
+      `Capture "${takeId}" was declared ${groupThousands(declared)} bytes, but its chunks add up to ${groupThousands(totalBytes)}.`,
+    );
+  }
+  const problem = captureProblemOf(await firstBytesOf(files[0], CAPTURE_HEAD_BYTES));
+  if (problem) throw badRequest(problem);
+  if (!(await captureHasWeights(files))) throw badRequest(NOT_A_CAPTURE_TEXT);
+}
+
+/**
+ * The name a library upload carries (a capture's or a cabinet's), which
+ * `library.add` shows and the picker lists.
+ * @param {unknown} value
+ * @param {string} kind the upload's kind, for the refusal's own words
+ * @returns {string}
+ */
+function fileUploadNameOf(value, kind) {
+  const name = typeof value === "string" ? value.trim().slice(0, MAX_NAME) : "";
+  if (name === "") throw badRequest(`A ${kindNoun(kind)} upload needs a name of 1-${MAX_NAME} characters.`);
+  return name;
+}
+
+/**
+ * The details a cabinet upload declares at `begin`: its name, and the rate,
+ * channels and frames the page decoded it to. A cabinet is PCM like a sample —
+ * the page decodes it, this server never does — so its length is checked here,
+ * before a byte is staged, and again at finish from the bytes that arrived.
+ * @param {object} body the begin request
+ * @param {number} rate the declared rate, already checked against the four
+ * @param {number} channels the declared channel count, already 1 or 2
+ * @returns {{name: string, frames: number}}
+ */
+function irUploadOf(body, rate, channels) {
+  const name = fileUploadNameOf(body.name, "ir");
+  const frames = Number(body.frames);
+  if (!Number.isInteger(frames) || frames <= 0) {
+    throw badRequest("A cabinet upload needs the number of frames it holds.");
+  }
+  if (frames > rate) throw irLengthRefusal(frames, rate);
+  const bytes = frames * channels * BYTES_PER_SAMPLE;
+  if (bytes > IR_MAX_BYTES) {
+    throw tooLarge(`That cabinet is ${Math.ceil(bytes / MB_BYTES)} MB; Studio takes cabinets up to 10 MB.`);
+  }
+  if (body.bytes !== undefined) {
+    const declared = Number(body.bytes);
+    if (!Number.isInteger(declared) || declared <= 0) {
+      throw badRequest("A cabinet upload's size is a whole number of bytes.");
+    }
+    if (declared > IR_MAX_BYTES) {
+      throw tooLarge(`That cabinet is ${Math.ceil(declared / MB_BYTES)} MB; Studio takes cabinets up to 10 MB.`);
+    }
+  }
+  return { name, frames };
+}
+
+/**
+ * The refusal for a chunk that would take a file-kind upload past the size it
+ * declared.
+ * @param {string} kind the upload's kind
+ * @param {number} declared the declared size, in bytes
  * @param {number} staged what is already staged, in bytes
  * @param {number} incoming the refusing chunk's size, in bytes
  * @returns {Error} 413
  */
-function bankPastDeclared(declared, staged, incoming) {
+function filePastDeclared(kind, declared, staged, incoming) {
   return tooLarge(
-    `That bank was declared ${groupThousands(declared)} bytes and ${groupThousands(staged)} are already staged, so a chunk of ${groupThousands(incoming)} bytes would take it past the end.`,
+    `That ${kindNoun(kind)} was declared ${groupThousands(declared)} bytes and ${groupThousands(staged)} are already staged, so a chunk of ${groupThousands(incoming)} bytes would take it past the end.`,
   );
 }
 
@@ -603,6 +897,22 @@ async function sha256File(file) {
  */
 async function sha256Files(files) {
   const hash = createHash("sha256");
+  for (const file of files) {
+    for await (const piece of createReadStream(file)) hash.update(piece);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * The sha256 of a WAV this finish writes: its header and then the staged PCM,
+ * streamed in order, so a cabinet is hashed as the exact file storage holds.
+ * @param {Buffer} header
+ * @param {string[]} files
+ * @returns {Promise<string>} lower-case hex
+ */
+async function sha256Wav(header, files) {
+  const hash = createHash("sha256");
+  hash.update(header);
   for (const file of files) {
     for await (const piece of createReadStream(file)) hash.update(piece);
   }
@@ -903,8 +1213,11 @@ export function createTakeUploads({
    * @returns {Object<string, object>} empty when the song has none
    */
   function songContainer(snapshot, kind) {
-    const container =
-      kind === "sample" ? snapshot?.samples : kind === "font" ? snapshot?.library : snapshot?.takes;
+    const container = isLibraryKind(kind)
+      ? snapshot?.library
+      : kind === "sample"
+        ? snapshot?.samples
+        : snapshot?.takes;
     return container && typeof container === "object" ? container : {};
   }
 
@@ -967,8 +1280,8 @@ export function createTakeUploads({
   }
 
   /**
-   * Record the beginning of one upload — a recorded take, a sample, or a
-   * SoundFont bank the operator brought.
+   * Record the beginning of one upload — a recorded take, a sample, a SoundFont
+   * bank, an amp capture or a cabinet IR the operator brought.
    *
    * It must come before the chunks: without it the gateway would not know whose
    * upload it is staging, and a chunk is never accepted without a song and a
@@ -979,16 +1292,18 @@ export function createTakeUploads({
    * is a conflict, because the upload that id already owns the staged bytes.
    *
    * A take names the clip it was recorded into. A sample names no clip: it
-   * belongs to the song, and may name the pad it should land on. A bank names
-   * neither: it belongs to the song's library, and declares the file's name,
-   * its size and its first twelve bytes so a file Studio cannot play is refused
-   * before a byte of it is staged.
+   * belongs to the song, and may name the pad it should land on. A bank, a
+   * capture and a cabinet name neither: they belong to the song's library. A
+   * bank declares the file's name, its size and its first twelve bytes; a capture
+   * declares its size and the first bytes of its head; a cabinet declares the
+   * rate, channels and frames the page decoded it to — so a file Studio cannot
+   * play is refused before a byte of it is staged.
    *
    * @param {string} uploadId
-   * @param {{kind?: "take"|"sample"|"font", song_id: string, project_id: number,
+   * @param {{kind?: "take"|"sample"|"font"|"nam"|"ir", song_id: string, project_id: number,
    *          clip_id?: string, name?: string, origin?: string,
    *          target?: {track_id: string, bank_id: string, index: number}|null,
-   *          file_name?: string, bytes?: number, head?: string,
+   *          file_name?: string, bytes?: number, head?: string, frames?: number,
    *          rate?: number, channels?: number, author?: object,
    *          offset_frames?: number, compensated?: boolean, bpm?: number}} request
    * @returns {Promise<{chunk_bytes: number}>}
@@ -1014,6 +1329,7 @@ export function createTakeUploads({
     const origin = kind === "sample" ? sampleOriginOf(body.origin) : null;
     const target = kind === "sample" ? uploadTarget(body.target) : null;
     const bank = kind === "font" ? bankUploadOf(body) : null;
+    const capture = kind === "nam" ? captureUploadOf(body) : null;
 
     if (typeof songId !== "string" || !SONG_ID_PATTERN.test(songId)) {
       throw badRequest("That is not a valid song id.");
@@ -1025,15 +1341,19 @@ export function createTakeUploads({
     if (!Number.isInteger(requestedProject)) {
       throw badRequest("An upload needs the song's project.");
     }
-    // A bank is a file, not PCM: it has no rate and no channel count.
-    const sampleRate = kind === "font" ? null : Number(rate);
-    if (kind !== "font" && !TAKE_RATES.includes(sampleRate)) {
+    // A bank and a capture are files, not PCM: they have no rate and no channel
+    // count. A cabinet IS PCM — the page decoded it — so it declares both.
+    const sampleRate = isFileKind(kind) ? null : Number(rate);
+    if (!isFileKind(kind) && !TAKE_RATES.includes(sampleRate)) {
       throw badRequest(`A ${noun}'s rate is one of ${TAKE_RATES.join(", ")} samples per second.`);
     }
-    const channelCount = kind === "font" ? null : Number(channels);
-    if (kind !== "font" && (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > MAX_CHANNELS)) {
+    const channelCount = isFileKind(kind) ? null : Number(channels);
+    if (!isFileKind(kind) && (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > MAX_CHANNELS)) {
       throw badRequest(`A ${noun} has 1 or ${MAX_CHANNELS} channels.`);
     }
+    // A cabinet's length is its own limit, checked here from what the page says
+    // it decoded: at most one second at that rate, and at most 10 MB.
+    const cabinet = kind === "ir" ? irUploadOf(body, sampleRate, channelCount) : null;
     // A take is a place in a clip, so where in the timeline it was captured
     // matters; a sample is a one-shot that starts where the operator starts it.
     const offset = kind === "take" ? Number(offsetFrames) : 0;
@@ -1070,6 +1390,8 @@ export function createTakeUploads({
         origin,
         target,
         bank,
+        capture,
+        cabinet,
         sampleRate,
         channelCount,
         actor,
@@ -1101,18 +1423,15 @@ export function createTakeUploads({
     const openLimit = MAX_OPEN_BY_KIND[kind] ?? MAX_OPEN_BY_KIND.take;
     const open = await openUploadsFor(songId, kind);
     if (open >= openLimit) {
+      const what = kind === "sample" ? "sample" : kindNoun(kind);
       throw tooLarge(
-        kind === "sample"
-          ? `A song can have at most ${openLimit} sample uploads in progress; finish or abandon one before starting another.`
-          : kind === "font"
-            ? `A song can have at most ${openLimit} bank uploads in progress; finish or abandon one before starting another.`
-            : `A song can have at most ${openLimit} uploads in progress; finish or abandon one before starting another.`,
+        `A song can have at most ${openLimit} ${what} uploads in progress; finish or abandon one before starting another.`,
       );
     }
 
-    // A bank is not cut on frame boundaries: it is a file, and its bytes are
-    // whatever the client staged.
-    if (kind !== "font") {
+    // A bank and a capture are not cut on frame boundaries: they are files, and
+    // their bytes are whatever the client staged.
+    if (!isFileKind(kind)) {
       const frameBytes = channelCount * BYTES_PER_SAMPLE;
       const staged = await stagedBytes(uploadId);
       if (staged % frameBytes !== 0) {
@@ -1136,10 +1455,14 @@ export function createTakeUploads({
       meta.file_name = bank.file_name;
       meta.ext = bank.ext;
       meta.bytes = bank.bytes;
-      // One nonce per begin, carried in the bank's `cmd_id`: a retried finish of
-      // this begin replays its own step, but the same upload id begun again
-      // after a remove is a new step, not a replay of the add that was undone.
-      meta.attempt = randomUUID();
+    } else if (kind === "nam") {
+      meta.name = capture.name;
+      meta.bytes = capture.bytes;
+    } else if (kind === "ir") {
+      meta.name = cabinet.name;
+      meta.rate = sampleRate;
+      meta.channels = channelCount;
+      meta.frames = cabinet.frames;
     } else {
       meta.rate = sampleRate;
       meta.channels = channelCount;
@@ -1154,6 +1477,13 @@ export function createTakeUploads({
         meta.bpm = bpm ?? (await songTempo(songId)) ?? 120;
       }
     }
+    if (isLibraryKind(kind)) {
+      // One nonce per begin, carried in the library entry's `cmd_id`: a retried
+      // finish of this begin replays its own step, but the same upload id begun
+      // again after a remove is a new step, not a replay of the add that was
+      // undone.
+      meta.attempt = randomUUID();
+    }
     await writeMeta(uploadId, meta);
     return { chunk_bytes: CHUNK_BYTES };
   }
@@ -1166,7 +1496,8 @@ export function createTakeUploads({
    * @param {object} meta
    * @param {{kind: string, songId: string, projectId: number, clipId?: string,
    *          sampleName: (string|null), origin: (string|null),
-   *          target: (object|null), bank: (object|null), sampleRate: number,
+   *          target: (object|null), bank: (object|null), capture: (object|null),
+   *          cabinet: (object|null), sampleRate: number,
    *          channelCount: number, actor: object, offset: number,
    *          compensated: boolean, bpm: number|null}} request
    * @returns {boolean}
@@ -1184,6 +1515,18 @@ export function createTakeUploads({
       if (meta.file_name !== bank.file_name) return false;
       if (meta.ext !== bank.ext) return false;
       return Number(meta.bytes) === bank.bytes;
+    }
+    // A capture declares its size and nothing else: its head is checked again
+    // for what actually arrived.
+    if (request.kind === "nam") {
+      const capture = request.capture ?? {};
+      if (meta.name !== capture.name) return false;
+      return Number(meta.bytes) === capture.bytes;
+    }
+    if (request.kind === "ir") {
+      const cabinet = request.cabinet ?? {};
+      if (meta.name !== cabinet.name) return false;
+      return Number(meta.frames) === cabinet.frames;
     }
     if (Number(meta.rate) !== request.sampleRate) return false;
     if (Number(meta.channels) !== request.channelCount) return false;
@@ -1279,37 +1622,43 @@ export function createTakeUploads({
     if (meta.finished === true) {
       throw conflict(`${kindName(kind)} "${takeId}" is already finished, so nothing more can be sent to it.`);
     }
-    // A bank has no frames and its own size is its cap: the file the client
-    // declared at begin. A take's or a sample's cap is counted in samples.
-    const isBank = kind === "font";
-    const channelCount = isBank ? 0 : Number(meta.channels);
-    if (!isBank && (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > MAX_CHANNELS)) {
+    // A bank and a capture have no frames and their own size is their cap: the
+    // file the client declared at begin. A take's, a sample's and a cabinet's cap
+    // is counted in samples.
+    const isFile = isFileKind(kind);
+    const channelCount = isFile ? 0 : Number(meta.channels);
+    if (!isFile && (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > MAX_CHANNELS)) {
       throw conflict(`${kindName(kind)} "${takeId}" has no readable channel count; begin it again.`);
     }
     let declaredBytes = 0;
-    if (isBank) {
+    if (isFile) {
       declaredBytes = Number(meta.bytes);
       if (!Number.isInteger(declaredBytes) || declaredBytes <= 0) {
         throw conflict(`${kindName(kind)} "${takeId}" has no readable size; begin it again.`);
       }
     }
 
-    const frameBytes = isBank ? 0 : channelCount * BYTES_PER_SAMPLE;
+    const frameBytes = isFile ? 0 : channelCount * BYTES_PER_SAMPLE;
     const maxBytes = CHUNK_BYTES + frameBytes;
     // No upload of this kind's size can need a chunk past this index.
-    const cap = isBank ? 0 : uploadCap(kind, sampleCap);
-    const lastIndex = isBank
+    const cap = isFile ? 0 : uploadCap(kind, sampleCap, meta);
+    const lastIndex = isFile
       ? Math.ceil(declaredBytes / CHUNK_BYTES)
       : Math.ceil((cap * BYTES_PER_SAMPLE) / CHUNK_BYTES);
     if (at > lastIndex) {
-      if (isBank) {
+      if (isFile) {
         throw tooLarge(
-          `That bank was declared ${groupThousands(declaredBytes)} bytes, so it never needs chunk ${at}.`,
+          `That ${kindNoun(kind)} was declared ${groupThousands(declaredBytes)} bytes, so it never needs chunk ${at}.`,
         );
       }
       if (kind === "sample") {
         throw tooLarge(
           `A sample can be at most ${SAMPLE_MAX_SECONDS} s (${groupThousands(cap)} samples at 48 kHz stereo), so it never needs chunk ${at}.`,
+        );
+      }
+      if (kind === "ir") {
+        throw tooLarge(
+          `An impulse response is at most ${IR_MAX_SECONDS} second long, so it never needs chunk ${at}.`,
         );
       }
       throw tooLarge(
@@ -1318,20 +1667,20 @@ export function createTakeUploads({
     }
     if (bytes.byteLength > maxBytes) {
       throw tooLarge(
-        isBank
-          ? `A bank's chunk can be at most ${CHUNK_BYTES} bytes: ${bytes.byteLength} bytes is too much.`
+        isFile
+          ? `A ${kindNoun(kind)}'s chunk can be at most ${CHUNK_BYTES} bytes: ${bytes.byteLength} bytes is too much.`
           : `A chunk can be at most ${CHUNK_BYTES} bytes plus one frame: ${bytes.byteLength} bytes is too much.`,
       );
     }
-    if (!isBank && bytes.byteLength % frameBytes !== 0) {
+    if (!isFile && bytes.byteLength % frameBytes !== 0) {
       throw badRequest(
         `A chunk covers whole ${channelCount}-channel frames: ${bytes.byteLength} bytes is not a multiple of ${frameBytes}.`,
       );
     }
 
     // The upload's own cap, in samples: a staged byte is one channel's 24-bit
-    // sample, so `cap` samples of PCM weigh `cap × 3` bytes. A bank is capped by
-    // the size it declared instead.
+    // sample, so `cap` samples of PCM weigh `cap × 3` bytes. A bank or a capture
+    // is capped by the size it declared instead.
     const staged = await stagedBytes(takeId);
     const buffer = Buffer.from(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength);
     const sha256 = sha256Of(buffer);
@@ -1346,11 +1695,11 @@ export function createTakeUploads({
       throw conflict(`chunk ${at} was already received with different bytes`);
     }
 
-    if (isBank && staged + bytes.byteLength > declaredBytes) {
-      throw bankPastDeclared(declaredBytes, staged, bytes.byteLength);
+    if (isFile && staged + bytes.byteLength > declaredBytes) {
+      throw filePastDeclared(kind, declaredBytes, staged, bytes.byteLength);
     }
-    if (!isBank && staged + bytes.byteLength > cap * BYTES_PER_SAMPLE) {
-      throw capRefusal(kind, Math.ceil((staged + bytes.byteLength) / BYTES_PER_SAMPLE), sampleCap);
+    if (!isFile && staged + bytes.byteLength > cap * BYTES_PER_SAMPLE) {
+      throw capRefusal(kind, Math.ceil((staged + bytes.byteLength) / BYTES_PER_SAMPLE), sampleCap, meta);
     }
 
     const placed = await linkIntoPlace(dir, "tmp", buffer, file);
@@ -1370,8 +1719,8 @@ export function createTakeUploads({
    * What has arrived for one take, so a client can resume where it stopped.
    *
    * `frames` is null until the take's channel count says how many bytes a frame
-   * is; a take that never began has no song to check, so it is not found. A
-   * bank has no frames at all: it is a file, and its answer is its chunks.
+   * is; a take that never began has no song to check, so it is not found. A bank
+   * or a capture has no frames at all: it is a file, and its answer is its chunks.
    *
    * @param {string} takeId
    * @returns {Promise<{begun: boolean, received: Array<{index: number, sha256: string}>,
@@ -1386,7 +1735,7 @@ export function createTakeUploads({
     await assertWrite(await songProjectOf(meta.song_id));
     const chunks = await listChunks(takeId);
     const received = chunks.map(({ index, sha256 }) => ({ index, sha256 }));
-    if (kindOf(meta) === "font") return { begun: true, received, frames: null };
+    if (isFileKind(kindOf(meta))) return { begun: true, received, frames: null };
     if (meta.finished === true) {
       const frames = Number.isFinite(Number(meta.frames)) ? Number(meta.frames) : null;
       return { begun: true, received, frames };
@@ -1556,13 +1905,13 @@ export function createTakeUploads({
         // cleared or re-filled since keeps what they chose. Only an attempt
         // that stopped between `sample.add` and its own record has none, and it
         // lands the sample now and records that.
-        // A bank whose finish stopped after `library.add` but before it was
-        // recorded settles now, so its staged copy (up to 512 MB) is dropped
+        // A library file whose finish stopped after `library.add` but before it
+        // was recorded settles now, so its staged copy (up to 512 MB) is dropped
         // instead of waiting for the stale sweep.
-        if (kind === "font" && meta.finished !== true) {
+        if (isLibraryKind(kind) && meta.finished !== true) {
           return await completeFinish(takeId, meta, held, {
             kind,
-            frames: 0,
+            frames: Number(meta.frames) || 0,
             key: typeof meta.storage_key === "string" ? meta.storage_key : String(held.storage_key ?? ""),
             chunks: hashes.length,
           });
@@ -1583,9 +1932,9 @@ export function createTakeUploads({
         throw conflict(`${Noun} "${takeId}" was finished, but it is no longer in the song.`);
       }
 
-      const isBank = kind === "font";
-      const channelCount = isBank ? null : Number(meta.channels);
-      const frameBytes = isBank ? 0 : channelCount * BYTES_PER_SAMPLE;
+      const isFile = isFileKind(kind);
+      const channelCount = isFile ? null : Number(meta.channels);
+      const frameBytes = isFile ? 0 : channelCount * BYTES_PER_SAMPLE;
       const files = [];
       const missing = [];
       let totalBytes = 0;
@@ -1611,11 +1960,16 @@ export function createTakeUploads({
         throw badRequest("An upload with no chunks cannot be finished.");
       }
       let frames = null;
-      if (isBank) {
+      if (kind === "font") {
         // A bank is a file, not PCM: the only things checked are the size it
         // declared and the magic bytes at the front of chunk 0. Nothing is
         // stored until both are right.
         await assertBankFinish(takeId, meta, files[0], totalBytes);
+      } else if (kind === "nam") {
+        // A capture is a file too, and is not parsed either: the head is checked
+        // again from the bytes that actually arrived, and one streaming pass
+        // looks for the weights key a capture always holds.
+        await assertCaptureFinish(takeId, meta, files, totalBytes);
       } else {
         if (totalBytes % frameBytes !== 0) {
           throw badRequest(
@@ -1624,29 +1978,46 @@ export function createTakeUploads({
         }
         frames = totalBytes / frameBytes;
         const samples = frames * channelCount;
-        if (samples > uploadCap(kind, sampleCap)) {
-          throw capRefusal(kind, samples, sampleCap);
+        if (samples > uploadCap(kind, sampleCap, meta)) {
+          throw capRefusal(kind, samples, sampleCap, meta);
+        }
+        // A cabinet's own size limit, checked again from what arrived: a page
+        // that declared one second and sent more is refused before anything is
+        // stored.
+        if (kind === "ir" && totalBytes > IR_MAX_BYTES) {
+          throw tooLarge(
+            `That cabinet is ${Math.ceil(totalBytes / MB_BYTES)} MB; Studio takes cabinets up to 10 MB.`,
+          );
         }
       }
 
       const bucket = typeof storage.defaultBucket === "function" ? storage.defaultBucket() : undefined;
       const prefix = await storagePrefixFor(db, projectId);
       const libraryId = objectIdOf(kind, takeId);
-      // A bank's object is named for its library entry, so the library file
+      // A library file's object is named for its entry, so the library file
       // route serves it: `${prefix}studio/<song>/library/<library id>.<ext>`.
-      const storedName = isBank ? `${libraryId}.${bankExtOf(meta)}` : `${takeId}.wav`;
+      // A bank keeps its own extension, a capture is `.nam`, and a cabinet is the
+      // 24-bit WAV the sample path writes.
+      const storedName = isLibraryKind(kind)
+        ? `${libraryId}.${kind === "font" ? bankExtOf(meta) : kind === "nam" ? CAPTURE_EXTENSION : IR_EXTENSION}`
+        : `${takeId}.wav`;
       const key = `${prefix}studio/${meta.song_id}/${KEY_DIRS[kind]}/${storedName}`;
-      const contentType = isBank ? "application/octet-stream" : "audio/wav";
-      const rate = isBank ? null : Number(meta.rate);
+      const contentType = isFile ? "application/octet-stream" : "audio/wav";
+      const rate = isFile ? null : Number(meta.rate);
 
       // The header and then the staged files, streamed: a 1200 s take is 346 MB,
-      // and it must never have to fit in one buffer. A bank has no header: its
-      // bytes are the file the operator brought, exactly as they arrived.
-      const header = isBank ? null : wavHeader(frames, channelCount, rate);
+      // and it must never have to fit in one buffer. A bank or a capture has no
+      // header: its bytes are the file the operator brought, exactly as they
+      // arrived.
+      const header = isFile ? null : wavHeader(frames, channelCount, rate);
       const size = (header ? header.byteLength : 0) + totalBytes;
-      // The hash is what the library entry says the file is: taken over the
-      // chunks as they sit on disk, so no bank is ever held in memory whole.
-      const sha256 = isBank ? await sha256Files(files) : null;
+      // The hash is what the library entry says the file is. A bank's or a
+      // capture's is taken over the chunks as they sit on disk, so neither is
+      // ever held in memory whole; a cabinet's is the WAV that was stored, header
+      // and all, because that is the file the library route serves.
+      let sha256 = null;
+      if (isFile) sha256 = await sha256Files(files);
+      else if (kind === "ir") sha256 = await sha256Wav(header, files);
 
       await serializeUpload(async () => {
         const stats = await storage.getBucketStats(bucket);
@@ -1655,7 +2026,7 @@ export function createTakeUploads({
         if (used + size > quotaBytes) {
           throw outOfQuota(`Storage quota exceeded (${quotaText} MB). Delete files to free space.`);
         }
-        const stream = Readable.from(isBank ? filePieces(files) : wavPieces(header, files), { objectMode: false });
+        const stream = Readable.from(isFile ? filePieces(files) : wavPieces(header, files), { objectMode: false });
         await storage.putObjectStream(key, stream, size, { bucket, contentType });
 
         try {
@@ -1686,11 +2057,11 @@ export function createTakeUploads({
       });
 
       // What the upload adds to the song: a take's record, a sample's, or the
-      // library entry a bank becomes.
-      const entry = isBank
+      // library entry a bank, a capture or a cabinet becomes.
+      const entry = isLibraryKind(kind)
         ? {
             id: libraryId,
-            kind: "font",
+            kind,
             name: typeof meta.name === "string" && meta.name !== "" ? meta.name : libraryId,
             source: "upload",
             upload_id: takeId,
@@ -1714,7 +2085,7 @@ export function createTakeUploads({
               origin: SAMPLE_ORIGINS.includes(meta.origin) ? meta.origin : SAMPLE_ORIGINS[0],
               author_label: authorLabelOf(meta.author),
             }
-          : isBank
+          : isLibraryKind(kind)
             ? null
             : {
                 id: takeId,
@@ -1733,14 +2104,14 @@ export function createTakeUploads({
 
       // `internal: true`: only the gateway's own finish route may issue
       // `take.add`/`sample.add`/`library.add`, and no caller gets to name the
-      // storage key. A bank's command carries its begin's nonce in its
+      // storage key. A library file's command carries its begin's nonce in its
       // `cmd_id`, so a finish of a re-begun upload (after a remove) is a new
       // step rather than a replay of the add that was undone.
       const applied = await hub.runCommand({
         song_id: meta.song_id,
-        cmd_id: isBank ? `${takeId}:library:${String(meta.attempt ?? "")}` : takeId,
-        command: isBank ? "library.add" : kind === "sample" ? "sample.add" : "take.add",
-        args: isBank
+        cmd_id: isLibraryKind(kind) ? `${takeId}:library:${String(meta.attempt ?? "")}` : takeId,
+        command: isLibraryKind(kind) ? "library.add" : kind === "sample" ? "sample.add" : "take.add",
+        args: isLibraryKind(kind)
           ? { entry }
           : kind === "sample"
             ? { sample: record }
@@ -1787,10 +2158,10 @@ export function createTakeUploads({
         );
       }
 
-      const payload = isBank
+      const payload = isLibraryKind(kind)
         ? { storage_key: key, bytes: totalBytes, library_id: libraryId }
         : { storage_key: key, seconds: Math.round((frames / rate) * 1000) / 1000 };
-      if (isBank) {
+      if (isLibraryKind(kind)) {
         // Nothing more: the entry's own id says which file arrived.
       } else if (kind === "sample") {
         payload.sample_id = takeId;
@@ -1869,7 +2240,8 @@ export function createTakeUploads({
 
   /**
    * The answer one finished upload gives its caller: the take itself, a sample
-   * with whether its pad holds it now, or the library entry a bank became.
+   * with whether its pad holds it now, or the library entry a bank, a capture or
+   * a cabinet became.
    * @param {string} kind
    * @param {object} record the object as the song holds it
    * @param {string} [padAssign] what became of the sample's pad
@@ -1877,7 +2249,7 @@ export function createTakeUploads({
    */
   function finishResult(kind, record, padAssign = PAD_ASSIGN.skipped) {
     if (kind === "sample") return { sample: record, pad_assigned: padAssign === PAD_ASSIGN.done };
-    if (kind === "font") return { library: record };
+    if (isLibraryKind(kind)) return { library: record };
     return { take: record };
   }
 
