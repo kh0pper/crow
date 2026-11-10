@@ -2935,7 +2935,9 @@ export class InstanceSyncManager {
    */
   async _applyEntry(remoteInstanceId, entry) {
     return withWriteContext(peerWriteContext(remoteInstanceId), () =>
-      this._applyEntryInner(remoteInstanceId, entry),
+      // Called through the prototype so a caller that binds _applyEntry to a
+      // bare receiver (the keychain local-only test does) still reaches it.
+      InstanceSyncManager.prototype._applyEntryInner.call(this, remoteInstanceId, entry),
     );
   }
 
