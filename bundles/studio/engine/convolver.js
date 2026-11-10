@@ -56,6 +56,14 @@
   const PARTITION_FRAMES = 128;
   const FFT_FRAMES = PARTITION_FRAMES * 2;
 
+  /**
+   * The rate the length tolerance is counted at: one frame per 48000. An IR that
+   * is exactly one second long at another rate comes back one frame long once it
+   * has been resampled to the context's rate, and that is not a cabinet over the
+   * limit (the page refuses on the same tolerance).
+   */
+  const LENGTH_TOLERANCE_RATE = 48000;
+
   /** The most channels an input or an IR may have. */
   const MAX_CHANNELS = 2;
 
@@ -64,7 +72,7 @@
     const count = Math.max(0, Math.trunc(Number(frames) || 0));
     const frequency = Number(rate);
     if (!Number.isFinite(frequency) || frequency <= 0) return null;
-    if (count <= frequency) return null;
+    if (count <= frequency + frequency / LENGTH_TOLERANCE_RATE) return null;
     const seconds = (Math.round((count / frequency) * 10) / 10).toFixed(1);
     return `An impulse response is at most 1 second long; this one is ${seconds} s.`;
   }
@@ -395,6 +403,7 @@
     create: create,
     lengthProblem: lengthProblem,
     MAX_SECONDS: MAX_SECONDS,
+    LENGTH_TOLERANCE_RATE: LENGTH_TOLERANCE_RATE,
     PARTITION_FRAMES: PARTITION_FRAMES,
     FFT_FRAMES: FFT_FRAMES,
     createFft: createFft,

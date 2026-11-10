@@ -39,12 +39,14 @@
  * see its README); the legacy one is built here from the same JSON's shape with
  * another architecture, which is what an older trainer writes.
  */
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
 
 const ENGINE_DIR = fileURLToPath(new URL("../bundles/studio/engine/", import.meta.url));
 const BUNDLE_DIR = fileURLToPath(new URL("../bundles/studio/", import.meta.url));
@@ -157,10 +159,10 @@ function differenceOf(left, right) {
 }
 
 /** @returns {Float32Array} `frames` of a 220 Hz sine at 0.3, the DI signal. */
-function sineTake(frames) {
+function sineTake(frames, rate = SAMPLE_RATE) {
   const samples = new Float32Array(frames);
   for (let at = 0; at < frames; at += 1) {
-    samples[at] = Math.sin((2 * Math.PI * 220 * at) / SAMPLE_RATE) * 0.3;
+    samples[at] = Math.sin((2 * Math.PI * 220 * at) / rate) * 0.3;
   }
   return samples;
 }
@@ -170,11 +172,13 @@ function sineTake(frames) {
 /**
  * Compose the worklet module exactly as `engine-client.js` does and evaluate it
  * with stand-in worklet globals, handing back the processor class it registered.
+ * @param {number} [rate] the context's sample rate
  * @returns {Function} the processor class
  */
-let PROCESSOR_CLASS = null;
-function processorClass() {
-  if (PROCESSOR_CLASS) return PROCESSOR_CLASS;
+const PROCESSOR_CLASSES = new Map();
+function processorClass(rate = SAMPLE_RATE) {
+  const known = PROCESSOR_CLASSES.get(rate);
+  if (known) return known;
   const texts = studioEngine.SOURCE_FILES.map((name) => ASSETS[name]);
   const source = studioEngine.composeEngineModule(texts);
   let registered = null;
@@ -191,12 +195,12 @@ function processorClass() {
     (name, cls) => {
       registered = { name: name, cls: cls };
     },
-    SAMPLE_RATE,
+    rate,
     0,
   );
   assert.ok(registered, "the module has to register the studio processor");
-  PROCESSOR_CLASS = registered.cls;
-  return PROCESSOR_CLASS;
+  PROCESSOR_CLASSES.set(rate, registered.cls);
+  return registered.cls;
 }
 
 /** @returns {Promise<void>} a macrotask, so promise work settles. */
@@ -219,11 +223,12 @@ async function waitFor(predicate, ms = 10000) {
 /**
  * One processor running the real worklet code, with helpers to post messages
  * between blocks and to render them by hand.
+ * @param {number} [rate] the context's sample rate
  * @returns {Promise<{processor: object, posts: object[], post: Function,
  *                    flush: Function, run: Function, blocks: number}>}
  */
-async function processorHost() {
-  const Loaded = processorClass();
+async function processorHost(rate = SAMPLE_RATE) {
+  const Loaded = processorClass(rate);
   const posts = [];
   const processor = new Loaded({ processorOptions: { wasmBinary: EMPTY_WASM } });
   processor.port.postMessage = (message) => posts.push(message);
@@ -398,15 +403,69 @@ function postCapture(host, requestId = "capture", libraryId = CAPTURE_ID, text =
  * Start one song: the song, one bar of DI, the scene, Play.
  * @param {object} host
  * @param {object} song
+ * @param {number} [rate]
  * @returns {Promise<void>}
  */
-async function startSong(host, song) {
+async function startSong(host, song, rate = SAMPLE_RATE) {
   host.post({ type: "song", snapshot: song });
-  host.post({ type: "audio", take_id: "take-1", channels: [sineTake(SAMPLE_RATE)] });
+  host.post({ type: "audio", take_id: "take-1", channels: [sineTake(rate)] });
   await host.flush();
   host.post({ type: "launchScene", id: "scene-1" });
   host.post({ type: "play" });
   await host.flush();
+}
+
+/**
+ * Every runner a chain holds, the paths a blend is fading and the runners an edit
+ * has retired included.
+ * @param {object[]} chain
+ * @param {object[]} [out]
+ * @returns {object[]}
+ */
+function chainRunners(chain, out = []) {
+  for (const node of chain || []) {
+    if (!node) continue;
+    if (node.blend) {
+      chainRunners(node.leaving, out);
+      chainRunners(node.fresh, out);
+      continue;
+    }
+    out.push(node);
+  }
+  return out;
+}
+
+/**
+ * One insert's runner, from the live chains of every owner.
+ * @param {object} host
+ * @param {string} insertId
+ * @param {string} [trackId] the track whose chain to look in (every owner if absent)
+ * @returns {object[]} every runner of that insert the chains still hold
+ */
+function runnersOf(host, insertId, trackId = undefined) {
+  const found = [];
+  const records = [host.processor.masterRecord, ...host.processor.returns, ...host.processor.slots];
+  for (const record of records) {
+    if (!record) continue;
+    if (trackId !== undefined && record.track_id !== trackId) continue;
+    for (const runner of chainRunners(record.chain)) {
+      if (runner.id === insertId && runner.insert) found.push(runner);
+    }
+  }
+  return found;
+}
+
+/**
+ * The state of one amp insert (`params()`), from the chain that is playing it.
+ * @param {object} host
+ * @param {string} [insertId]
+ * @param {string} [trackId]
+ * @returns {object}
+ */
+function ampStateOf(host, insertId = "insert-amp", trackId = "track-1") {
+  const runners = runnersOf(host, insertId, trackId);
+  assert.ok(runners.length > 0, `the amp insert ${insertId} has to be in the chain`);
+  return runners[0].insert.params();
 }
 
 // --- full renders through the real engine -----------------------------------
@@ -954,4 +1013,574 @@ test("four amps render faster than real time in Node", async () => {
     if (engine) engine.dispose();
     if (!rendered) await releaseWorklet(context);
   }
+});
+
+// --- the review's fixes: attach once, per-object instances, the rate bridge ---
+
+/** A second capture library id, playing the same A2 fixture. */
+const CAPTURE_B_ID = "capture-a2-b";
+
+/** One compressor insert, the second half of a chain a reorder can be observed in. */
+function compressorInsert(order) {
+  return {
+    id: "insert-comp",
+    owner: "track:track-1",
+    kind: "compressor",
+    order: order,
+    bypass: false,
+    params: {},
+  };
+}
+
+/**
+ * The frames of a run that are not silent, for a continuity check: a gap is a
+ * stretch of blocks with nothing in them.
+ * @param {Float32Array} samples
+ * @returns {number} how many blocks of 128 hold no signal at all
+ */
+function silentBlocks(samples) {
+  let silent = 0;
+  for (let at = 0; at + BLOCK <= samples.length; at += BLOCK) {
+    let peak = 0;
+    for (let frame = at; frame < at + BLOCK; frame += 1) {
+      const value = Math.abs(samples[frame]);
+      if (value > peak) peak = value;
+    }
+    if (peak === 0) silent += 1;
+  }
+  return silent;
+}
+
+test("moving a fader while an amp plays does not reload its capture or cabinet", async () => {
+  // A song snapshot used to re-attach every amp: the capture's JSON was parsed
+  // again, the model copied into the wasm heap, the cabinet's FFTs rebuilt — on
+  // the message path, under a PLAYING runner. A snapshot that changed nothing
+  // about the amp has to cost nothing at all.
+  const host = await processorHost();
+  postCapture(host, "fader-capture");
+  postCabinet(host, "fader-ir");
+  await host.flush();
+  const song = ampSong([ampInsert({ ir_id: CABINET_ID })]);
+  await startSong(host, song);
+
+  const before = ampStateOf(host);
+  assert.equal(before.attached, true, "the capture has to be attached");
+  assert.equal(before.capture_loads, 1, "one capture load so far");
+  assert.equal(before.cabinet_loads, 1, "one cabinet built so far");
+  const beforeRun = host.run(32);
+  const beforePeak = peakOf(beforeRun.left);
+  assert.ok(beforePeak > 0.001, `the amp has to sound before the fader moves, peak ${beforePeak}`);
+
+  // One fader move: the same capture, the same cabinet, one number changed.
+  song.tracks[0].gain_db = -6;
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+
+  const after = ampStateOf(host);
+  assert.equal(after.capture_loads, 1, `a fader move must not reload the capture, loads ${after.capture_loads}`);
+  assert.equal(after.cabinet_loads, 1, `a fader move must not rebuild the cabinet, builds ${after.cabinet_loads}`);
+  assert.equal(after.attached, true, "and the amp keeps playing its capture");
+
+  const afterRun = host.run(32);
+  const afterPeak = peakOf(afterRun.left);
+  // −6 dB is half the level, and it is a HALF, not silence: the insert was not
+  // torn down and rebuilt between the two runs.
+  const ratio = afterPeak / beforePeak;
+  assert.ok(ratio > 0.4 && ratio < 0.6, `−6 dB is about half the peak, got a ratio of ${ratio}`);
+  assert.equal(silentBlocks(afterRun.left), 0, "the output stays continuous across the snapshot");
+});
+
+test("changing an amp's capture while playing waits for stop", async () => {
+  const host = await processorHost();
+  postCapture(host, "two-captures", CAPTURE_ID);
+  postCapture(host, "two-captures-b", CAPTURE_B_ID);
+  await host.flush();
+  const song = ampSong([ampInsert()]);
+  await startSong(host, song);
+
+  const playing = ampStateOf(host);
+  assert.equal(playing.capture_loads, 1, "the first capture loaded once");
+  assert.ok(peakOf(host.run(8).left) > 0.001, "the amp plays its first capture");
+
+  // The operator picks another capture mid-performance: it is parked, the amp
+  // keeps playing what it has, and nothing is parsed until Stop.
+  song.inserts["insert-amp"].params.model_id = CAPTURE_B_ID;
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+  const parked = ampStateOf(host);
+  assert.equal(parked.model_id, CAPTURE_B_ID, "the document's new capture is what the insert names");
+  assert.equal(parked.parked, true, "and the change waits for Stop (\"Loads when you stop.\")");
+  assert.equal(parked.capture_loads, 1, "nothing was loaded while the song played");
+  assert.equal(parked.attached, true, "the amp keeps the capture it was playing");
+  assert.ok(peakOf(host.run(16).left) > 0.001, "so it is still audible while it waits");
+
+  host.post({ type: "stop" });
+  await host.flush();
+  const stopped = ampStateOf(host);
+  assert.equal(stopped.parked, false, "Stop applies the change");
+  assert.equal(stopped.capture_loads, 2, `Stop loads the new capture once, loads ${stopped.capture_loads}`);
+  assert.equal(stopped.attached, true);
+
+  host.post({ type: "play" });
+  await host.flush();
+  assert.ok(peakOf(host.run(64).left) > 0.001, "and the new capture plays from the next Play");
+});
+
+test("reordering a chain with an amp while playing gives the arriving amp its own instance", async () => {
+  // A reorder crossfades the old chain against the new one, so for the length of
+  // the fade there are TWO runners for one amp insert. Keyed by the document's id
+  // they shared one NAM instance: the capture was reloaded under the playing
+  // runner and both advanced the same state twice per block.
+  const host = await processorHost();
+  postCapture(host, "reorder-capture");
+  await host.flush();
+  const song = ampSong([ampInsert({}, { order: 0 }), compressorInsert(1)]);
+  await startSong(host, song);
+
+  const namHost = host.processor.namHost;
+  assert.ok(namHost, "the NAM host is up");
+  const before = runnersOf(host, "insert-amp");
+  assert.equal(before.length, 1, "one amp runner before the edit");
+  const firstKey = before[0].insert.instanceKey();
+  assert.equal(namHost.instanceCount(), 1, `one instance before the edit, got ${namHost.instanceCount()}`);
+  assert.ok(peakOf(host.run(16).left) > 0.001, "the amp plays before the edit");
+
+  // The same two inserts in the other order: the whole chain is one blend, and
+  // the arriving amp runner is built (and its capture loaded) on the message path.
+  song.inserts["insert-amp"].order = 1;
+  song.inserts["insert-comp"].order = 0;
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+
+  const during = runnersOf(host, "insert-amp");
+  assert.equal(during.length, 2, `a fade holds two amp runners, got ${during.length}`);
+  const keys = new Set(during.map((runner) => runner.insert.instanceKey()));
+  assert.equal(keys.size, 2, "each runner has its own instance key");
+  assert.equal(namHost.instanceCount(), 2, `two instances during the fade, got ${namHost.instanceCount()}`);
+  assert.ok(keys.has(firstKey), "the runner on its way out kept its own instance");
+  // The arriving amp plays (nothing stops mid-fade), and one NAM state per block
+  // is advanced once.
+  assert.ok(peakOf(host.run(8).left) > 0.001, "the amp is audible through the fade");
+
+  // The fade is 64 frames; once it has arrived, a snapshot folds the blend away
+  // and the old instance goes with the runner it belonged to.
+  host.run(8);
+  song.meta.title = "Amp test, folded";
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+  assert.equal(runnersOf(host, "insert-amp").length, 1, "the blend folded away");
+  assert.equal(namHost.instanceCount(), 1, `the old instance is let go, got ${namHost.instanceCount()}`);
+  assert.ok(peakOf(host.run(16).left) > 0.001, "and the amp still plays");
+});
+
+/**
+ * Drive one convert-through-and-back conversion deterministically and hand back
+ * its last frames. The very same function runs in Node and in Chromium, which is
+ * what the parity test below compares — so it uses no trig and no host API.
+ * @param {object} host the nam host module (`createBridge`)
+ * @returns {number[]} the conversion's last 2048 output frames
+ */
+function bridgeParityRun(host) {
+  const BLOCKS = 24;
+  const IN = 128;
+  const MID = 160;
+  const up = host.createBridge({ fromRate: 44100, toRate: 48000, maxIn: IN, maxOut: MID });
+  const down = host.createBridge({ fromRate: 48000, toRate: 44100, maxIn: MID, maxOut: IN });
+  const left = new Float32Array(IN);
+  const right = new Float32Array(IN);
+  const midLeft = new Float32Array(MID);
+  const midRight = new Float32Array(MID);
+  const outLeft = new Float32Array(IN);
+  const outRight = new Float32Array(IN);
+  const collected = [];
+  let seed = 12345;
+  for (let block = 0; block < BLOCKS; block += 1) {
+    for (let at = 0; at < IN; at += 1) {
+      // A deterministic noise-ish signal, with no Math.random and no trig.
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      const value = (seed / 1073741824 - 1) * 0.4;
+      left[at] = value;
+      right[at] = value * 0.25;
+    }
+    const produced = up.process(left, right, IN, midLeft, midRight, MID);
+    const back = down.process(midLeft, midRight, produced, outLeft, outRight, IN);
+    for (let at = 0; at < back; at += 1) collected.push(outLeft[at]);
+  }
+  return collected.slice(Math.max(0, collected.length - 2048));
+}
+
+/** @param {number[]} samples @returns {string} a SHA-256 over their float bits. */
+function hashSamples(samples) {
+  const bytes = Float32Array.from(samples);
+  return createHash("sha256").update(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)).digest("hex");
+}
+
+let chrome = null;
+before(async () => {
+  chrome = await startHeadlessChrome();
+});
+after(async () => {
+  if (chrome) await chrome.close();
+});
+
+/**
+ * One Chromium tab driven over CDP, enough to evaluate a script in a blank page.
+ * @returns {Promise<{evaluate: Function, close: Function}>}
+ */
+async function openTab() {
+  const created = await (await fetch(chrome.cdp + "/json/new?about:blank", { method: "PUT" })).json();
+  const { default: WebSocket } = await import("ws");
+  const ws = new WebSocket(created.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.once("open", resolve);
+    ws.once("error", reject);
+  });
+  let id = 0;
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const mine = (id += 1);
+      const onMessage = (raw) => {
+        const message = JSON.parse(raw);
+        if (message.id !== mine) return;
+        ws.off("message", onMessage);
+        if (message.error) reject(new Error(JSON.stringify(message.error)));
+        else resolve(message.result || {});
+      };
+      ws.on("message", onMessage);
+      ws.send(JSON.stringify({ id: mine, method: method, params: params }));
+    });
+  const evaluate = async (expression) => {
+    const answer = await send("Runtime.evaluate", { expression: expression, returnByValue: true, awaitPromise: true });
+    if (answer.exceptionDetails) throw new Error(answer.exceptionDetails.text || "the page threw");
+    return answer.result.value;
+  };
+  return {
+    evaluate: evaluate,
+    close: async () => {
+      ws.close();
+      await fetch(chrome.cdp + "/json/close/" + created.id).catch(() => {});
+    },
+  };
+}
+
+test("the rate bridge is bit-identical in Chromium and Node", async (t) => {
+  // The bridge is the one piece of an amp's path whose arithmetic could differ
+  // between a page and a render: a polyphase table built from sin/cos, and a
+  // per-sample loop of multiplies. Running the SAME driver in both hosts pins
+  // that they agree bit for bit.
+  const node = bridgeParityRun(namHostApi);
+  assert.equal(hashSamples(node), hashSamples(bridgeParityRun(namHostApi)), "the same input twice is the same bits");
+  assert.ok(peakOf(Float32Array.from(node)) > 1e-4, "the conversion has to carry signal to compare anything");
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+  const tab = await openTab();
+  try {
+    await tab.evaluate(ASSETS["nam-host.js"]);
+    assert.equal(await tab.evaluate("typeof globalThis.StudioNamHost"), "object", "the host script runs in the page");
+    const browser = await tab.evaluate(`(${bridgeParityRun.toString()})(globalThis.StudioNamHost)`);
+    assert.equal(browser.length, node.length, "both hosts produced the same number of frames");
+    assert.equal(
+      hashSamples(browser),
+      hashSamples(node),
+      `Chromium and Node converted different bits over ${node.length} frames`,
+    );
+  } finally {
+    await tab.close();
+  }
+});
+
+/**
+ * Fit `A·sin(2πft) + B·cos(2πft)` to a signal and hand back what is left over,
+ * relative to the tone's own amplitude.
+ * @param {Float32Array} samples
+ * @param {number} frequency
+ * @param {number} rate
+ * @returns {number} the residual's RMS as a fraction of the tone's amplitude
+ */
+function toneResidualOf(samples, frequency, rate) {
+  let sines = 0;
+  let cosines = 0;
+  let squareSines = 0;
+  let squareCosines = 0;
+  let cross = 0;
+  for (let at = 0; at < samples.length; at += 1) {
+    const angle = (2 * Math.PI * frequency * at) / rate;
+    const sine = Math.sin(angle);
+    const cosine = Math.cos(angle);
+    const value = samples[at];
+    sines += value * sine;
+    cosines += value * cosine;
+    squareSines += sine * sine;
+    squareCosines += cosine * cosine;
+    cross += sine * cosine;
+  }
+  const determinant = squareSines * squareCosines - cross * cross;
+  if (determinant === 0) return Infinity;
+  const a = (sines * squareCosines - cosines * cross) / determinant;
+  const b = (cosines * squareSines - sines * cross) / determinant;
+  let residual = 0;
+  for (let at = 0; at < samples.length; at += 1) {
+    const angle = (2 * Math.PI * frequency * at) / rate;
+    const error = samples[at] - (a * Math.sin(angle) + b * Math.cos(angle));
+    residual += error * error;
+  }
+  const amplitude = Math.sqrt(a * a + b * b);
+  return amplitude === 0 ? Infinity : Math.sqrt(residual / samples.length) / amplitude;
+}
+
+test("an amp at 44.1 kHz with a 48 kHz capture reports its delay and does not alias", async () => {
+  // A capture at another rate needs a real converter, and a real converter needs
+  // look-ahead: the amp says so through `latencyFrames` instead of claiming zero,
+  // so the runner system primes for it.
+  const rate = 44100;
+  const host = await processorHost(rate);
+  postCapture(host, "rate-44");
+  await host.flush();
+  const song = ampSong([ampInsert()]);
+  await startSong(host, song, rate);
+
+  const state = ampStateOf(host);
+  assert.equal(state.capture_rate, 48000, "the fixture capture is trained at 48 kHz");
+  assert.equal(state.converted, true, "so the insert converts");
+  assert.ok(state.latency_frames > 0, `a converted amp reports its delay, got ${state.latency_frames}`);
+  // The kernel's 16-frame half-span, counted at each converter's output: 18 model
+  // frames on the way in (17 context frames) and 15 on the way out.
+  const inFrames = Math.ceil(Math.ceil(16 / (rate / 48000)) * (rate / 48000));
+  const outFrames = Math.ceil(16 / (48000 / rate));
+  assert.equal(
+    state.latency_frames,
+    inFrames + outFrames,
+    `the delay is the two converters' look-ahead (${inFrames} + ${outFrames}), got ${state.latency_frames}`,
+  );
+  assert.ok(peakOf(host.run(64).left) > 0.001, "and the converted amp still makes sound");
+
+  // The converter itself: a 20 kHz tone at 44.1 kHz through a 48 kHz capture and
+  // back. A linear, symmetric converter returns that tone and nothing else; a
+  // one-sided kernel modulates it and leaves the difference all over the band.
+  // The residual is everything that is NOT the tone, as a fraction of it.
+  const frames = 8192;
+  const convert = (frequency) => {
+    const up = namHostApi.createBridge({ fromRate: rate, toRate: 48000, maxIn: 128, maxOut: 160 });
+    const down = namHostApi.createBridge({ fromRate: 48000, toRate: rate, maxIn: 160, maxOut: 128 });
+    const input = new Float32Array(128);
+    const midLeft = new Float32Array(160);
+    const midRight = new Float32Array(160);
+    const outLeft = new Float32Array(128);
+    const outRight = new Float32Array(128);
+    const collected = [];
+    for (let block = 0; block * 128 < frames; block += 1) {
+      for (let at = 0; at < 128; at += 1) {
+        input[at] = Math.sin((2 * Math.PI * frequency * (block * 128 + at)) / rate) * 0.5;
+      }
+      const produced = up.process(input, input, 128, midLeft, midRight, 160);
+      const back = down.process(midLeft, midRight, produced, outLeft, outRight, 128);
+      for (let at = 0; at < back; at += 1) collected.push(outLeft[at]);
+    }
+    // The first frames are the converter filling its look-ahead: measure the
+    // steady state, where a conversion's own delay has run off.
+    return Float32Array.from(collected.slice(1024, 1024 + 4096));
+  };
+  const reference = toneResidualOf(convert(1000), 1000, rate);
+  const high = toneResidualOf(convert(20000), 20000, rate);
+  assert.ok(reference < 0.01, `a 1 kHz tone survives the conversion almost exactly, residual ${reference}`);
+  assert.ok(
+    high < 0.05,
+    `a 20 kHz tone at 44.1 kHz must not smear into the band (residual ${high} of the tone, 1 kHz reference ${reference})`,
+  );
+});
+
+test("the monitor delay includes the master limiter", async () => {
+  // What the operator hears while monitoring runs through the armed track's chain
+  // AND the master's, so the limiter's 1.5 ms look-ahead is part of the delay the
+  // page adds to the round trip it measured.
+  const host = await processorHost();
+  postCapture(host, "monitor-latency");
+  await host.flush();
+  const song = ampSong([ampInsert()]);
+  song.inserts["insert-limiter"] = {
+    id: "insert-limiter",
+    owner: "master",
+    kind: "limiter",
+    order: 0,
+    bypass: false,
+    params: {},
+  };
+  host.post({ type: "song", snapshot: song });
+  host.post({ type: "monitor", track_id: "track-1", on: true });
+  await host.flush();
+  // One block, so the master chain's own reading is the running one.
+  host.run(2);
+  const masterFrames = Math.round(0.0015 * SAMPLE_RATE);
+  const masterMs = (masterFrames / SAMPLE_RATE) * 1000;
+  const posted = postsOfType(host.posts, "monitor_latency").filter((message) => message.track_id === "track-1");
+  assert.ok(posted.length > 0, `the engine has to post the chain's delay, got ${JSON.stringify(host.posts.slice(-6))}`);
+  const last = posted[posted.length - 1];
+  assert.ok(
+    Math.abs(last.ms - masterMs) < 1e-9,
+    `the monitor delay has to be the limiter's look-ahead (${masterMs} ms), got ${last.ms} ms`,
+  );
+});
+
+/**
+ * A song of two audio tracks, each playing its own bar of the same tone, with one
+ * amp insert per track.
+ * @param {object[]} inserts
+ * @returns {object}
+ */
+function twoTrackAmpSong(inserts) {
+  const song = ampSong(inserts);
+  song.tracks.push({
+    id: "track-2",
+    name: "Guitar 2",
+    color: "#8FC1E8",
+    device: { engine: "audio" },
+    mute: false,
+    solo: false,
+    gain_db: 0,
+    pan: 0,
+    locked: false,
+  });
+  song.clips["clip-2"] = {
+    id: "clip-2",
+    track_id: "track-2",
+    scene_id: "scene-1",
+    name: "DI 2",
+    length_bars: 1,
+    kind: "audio",
+    notes: [],
+    comp: [{ take_id: "take-1", from_beat: 0, to_beat: 4 }],
+  };
+  return song;
+}
+
+test("a capture that traps while playing silences only its own amp", async () => {
+  // A wasm trap used to take the whole processor down (and with it every track).
+  // It stops the amp that trapped — SILENT, never the dry signal — says so once,
+  // and the shared module is rebuilt for the other amps on the message path.
+  const host = await processorHost();
+  postCapture(host, "trap-capture");
+  await host.flush();
+  const song = twoTrackAmpSong([
+    ampInsert({}, { id: "insert-amp", owner: "track:track-1", order: 0 }),
+    ampInsert({}, { id: "insert-amp-2", owner: "track:track-2", order: 0 }),
+  ]);
+  await startSong(host, song);
+
+  const first = runnersOf(host, "insert-amp", "track-1")[0];
+  const trappedKey = first.insert.instanceKey();
+  assert.ok(peakOf(host.run(16).left) > 0.001, "both amps play before the trap");
+
+  // The test seam: the engine's own process, throwing once for ONE instance.
+  const namHost = host.processor.namHost;
+  const real = namHost.process.bind(namHost);
+  let armed = true;
+  namHost.process = (key, input, output, frames) => {
+    if (armed && key === trappedKey) {
+      armed = false;
+      throw new Error("a wasm trap");
+    }
+    return real(key, input, output, frames);
+  };
+  const trapped = host.run(4);
+  // The other amp carries on, so the mix is not silent: only the trapped amp went.
+  assert.ok(peakOf(trapped.left) > 0.001, `the other amp has to keep playing, peak ${peakOf(trapped.left)}`);
+  const faulted = postsOfType(host.posts, "insert_fault").filter((message) => message.insert_id === "insert-amp");
+  assert.equal(faulted.length, 1, `the trap is reported once, got ${JSON.stringify(faulted)}`);
+  assert.equal(faulted[0].message, "amp on Guitar stopped: its capture could not be played.");
+
+  await host.flush();
+  const stopped = ampStateOf(host, "insert-amp", "track-1");
+  assert.equal(stopped.failed, true, "the amp that trapped is stopped");
+  assert.equal(stopped.attached, false, "with nothing attached");
+  const healthy = ampStateOf(host, "insert-amp-2", "track-2");
+  assert.equal(healthy.failed, false, "the other amp is untouched");
+  assert.equal(healthy.attached, true, "and was re-attached to the rebuilt module");
+  assert.ok(host.processor.namHost !== namHost, "the shared module was rebuilt");
+  assert.equal(host.processor.namHost.instanceCount(), 1, "only the healthy amp has an instance again");
+  // ... and the trapped amp is SILENT, never the dry signal: with track 2 muted,
+  // what is left is nothing at all.
+  song.tracks[1].mute = true;
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+  const silent = host.run(16);
+  assert.ok(peakOf(silent.left) < 1e-9, `a stopped amp is silence, peak ${peakOf(silent.left)}`);
+});
+
+test("an amp whose capture produces a bad sample is silent, never dry", async () => {
+  // Review Focus 1: a capture that cannot be played is silence. The NaN guard
+  // used to bypass an insert to the signal it was given, which for an amp is the
+  // dry guitar — the one thing the insert may never become.
+  const host = await processorHost();
+  postCapture(host, "nan-capture");
+  await host.flush();
+  await startSong(host, ampSong([ampInsert()]));
+  assert.ok(peakOf(host.run(8).left) > 0.001, "the amp plays first");
+
+  const namHost = host.processor.namHost;
+  const real = namHost.process.bind(namHost);
+  let armed = true;
+  namHost.process = (key, input, output, frames) => {
+    const played = real(key, input, output, frames);
+    if (armed) {
+      armed = false;
+      for (let at = 0; at < frames; at += 1) output[at] = Number.NaN;
+    }
+    return played;
+  };
+  const bad = host.run(4);
+  assert.ok(peakOf(bad.left) < 1e-9, `the bad block is silence, peak ${peakOf(bad.left)}`);
+  const after = host.run(16);
+  assert.ok(peakOf(after.left) < 1e-9, `and it stays silent, peak ${peakOf(after.left)} (never the dry signal)`);
+  assert.equal(ampStateOf(host).failed, true, "the insert is stopped, not bypassed");
+  assert.equal(
+    postsOfType(host.posts, "insert_fault").filter((message) => message.insert_id === "insert-amp").length,
+    1,
+    "and it is said once",
+  );
+});
+
+test("monitoring a stereo input with the signal on one side keeps its level", async () => {
+  // A mono instrument on a stereo interface arrives with silence on one side. The
+  // amp's mono sum is (L+R)/2, which costs 6 dB there; the sum has to keep the
+  // level of the channel that carries the signal instead.
+  /**
+   * @param {Float32Array} left
+   * @param {Float32Array} right
+   * @returns {Promise<number>} the peak monitoring heard
+   */
+  const heard = async (left, right) => {
+    const host = await processorHost();
+    postCapture(host, "monitor-level");
+    host.post({ type: "song", snapshot: ampSong([ampInsert()]) });
+    host.post({ type: "audio", take_id: "take-1", channels: [new Float32Array(SAMPLE_RATE)] });
+    await host.flush();
+    host.post({ type: "monitor", track_id: "track-1", on: true });
+    host.post({ type: "launchScene", id: "scene-1" });
+    host.post({ type: "play" });
+    await host.flush();
+    const blocks = 64;
+    const outLeft = new Float32Array(blocks * BLOCK);
+    const outRight = new Float32Array(blocks * BLOCK);
+    for (let index = 0; index < blocks; index += 1) {
+      const start = index * BLOCK;
+      host.processor.process(
+        [[left.subarray(start, start + BLOCK), right.subarray(start, start + BLOCK)]],
+        [[outLeft.subarray(start, start + BLOCK), outRight.subarray(start, start + BLOCK)]],
+      );
+    }
+    return peakOf(outLeft.subarray(blocks * BLOCK - 16 * BLOCK));
+  };
+  const blocks = 64;
+  const tone = sineTake(blocks * BLOCK);
+  const silence = new Float32Array(blocks * BLOCK);
+  const oneSided = await heard(tone, silence);
+  const bothSides = await heard(tone, tone);
+  assert.ok(oneSided > 0.001, `monitoring has to be audible, peak ${oneSided}`);
+  const ratio = oneSided / bothSides;
+  assert.ok(
+    ratio > 0.8 && ratio < 1.25,
+    `signal on one side of a stereo input keeps its level (ratio ${ratio} to the same signal on both)`,
+  );
 });
