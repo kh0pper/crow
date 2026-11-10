@@ -100,12 +100,14 @@ const isSet = (v) => typeof v === "string" && v.trim() !== "";
  *
  * Three sources, highest precedence first:
  *   1. bundles/<id>/.env              — docker bundles (compose reads it).
- *   2. mcp-addons.json[<id>].env      — MCP add-ons. proxy.js spawns children with
- *                                       { ...process.env, ...config.env }; they never
- *                                       read bundles/<id>/.env.
+ *   2. mcp-addons.json[<id>].env      — MCP add-ons. proxy.js spawns children with the
+ *                                       allowlisted base + the keys its reviewed
+ *                                       manifest declares + config.env (addon-env.js);
+ *                                       they never read bundles/<id>/.env.
  *   3. ambient process.env            — same spawn: a key supplied via the gateway's
  *                                       own env / systemd Environment= is real config
- *                                       that appears in neither file.
+ *                                       that appears in neither file, but only when
+ *                                       the manifest declares that key.
  * (2) and (3) apply ONLY to bundles that register an MCP server. NOT because a docker
  * bundle can't see the gateway's environment — it can: run() execFiles `docker compose`
  * with no `env` option, so the child inherits process.env, and Compose interpolation

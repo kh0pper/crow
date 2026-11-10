@@ -20,6 +20,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaToZodObject, SOURCE_BUDGET } from "../shared/json-schema-to-zod.js";
 import { sortedServers, sortedByName } from "../shared/stable-order.js";
 import { legacyEnvSources, isLegacyConfiguredAddon, legacyIntegrationsView, addonDerivedEnv } from "./services/legacy-sources.js";
+import { addonBaseEnv, declaredPassthrough } from "./addon-env.js";
 import { createDbClient } from "../db.js";
 import { isApproved, approvalNotFromThisMachine, approvalForAnotherBackend, hasApproval, isLegacyApproval, LEGACY_APPROVAL_MESSAGE, MACHINE_APPROVAL_MESSAGE, NOT_FOR_THIS_BACKEND_MESSAGE, verifyBackendLaunch, backendEnv, parseStoredSpec, prepareSpawn, PENDING_STATUS } from "../shared/data-backend-approval.js";
 import { pruneApprovalNonces } from "../shared/data-backend-approval-key.js";
@@ -80,11 +81,26 @@ export function resolveCrowHome() {
   return resolveSharedCrowHome();
 }
 
-/** The listed vars that are set in the gateway's environment. */
-function envFromVars(vars = []) {
+/** The listed vars that are set in `source` (the gateway's environment by default). */
+function envFromVars(vars = [], source = process.env) {
   const env = {};
-  for (const v of vars) if (process.env[v]) env[v] = process.env[v];
+  for (const v of vars) if (source[v]) env[v] = source[v];
   return env;
+}
+
+/**
+ * The environment connectToServer() gives a child. A data backend brings its own
+ * allowlisted base env, and a built-in integration gets the add-on base
+ * allowlist — never the gateway's whole environment. On top of either: the
+ * integration's own `env` (a legacy source), or the `envVars` it declares, read
+ * from `base`. Keys applied from systemd credentials are dropped.
+ */
+export function integrationChildEnv(integration, base = process.env) {
+  const spawnEnv = integration.env || envFromVars(integration.envVars, base);
+  return {
+    ...withoutCredentialKeys(integration.baseEnv || addonBaseEnv(base)),
+    ...spawnEnv,
+  };
 }
 
 /**
@@ -94,13 +110,7 @@ function envFromVars(vars = []) {
  * Returns { client, childProcess, tools } or null on failure.
  */
 async function connectToServer(integration) {
-  const spawnEnv = integration.env || envFromVars(integration.envVars);
-  // A data backend brings its own allowlisted base env (never the gateway's
-  // whole environment); built-in integrations keep the old behaviour.
-  const env = {
-    ...withoutCredentialKeys(integration.baseEnv || process.env),
-    ...spawnEnv,
-  };
+  const env = integrationChildEnv(integration);
 
   let command = integration.command;
   let args = integration.args;
@@ -172,16 +182,24 @@ async function connectToServer(integration) {
 }
 
 /**
- * The environment of a bundle add-on's stdio child started BY THE GATEWAY. `CROW_ADDON_HOST=gateway`
- * marks the one long-lived copy the gateway supervises, so an add-on can keep background work
- * (schedules, polling) out of the short-lived private copies that bots and other MCP clients start
- * from the same mcp-addons.json entry. Set last: an add-on's own env cannot claim or drop it.
+ * The environment of a bundle add-on's stdio child started BY THE GATEWAY: the allowlisted base
+ * (addon-env.js), the keys the add-on's reviewed repo manifest declares, the entry's own env, and
+ * the manifest's derived env. `CROW_ADDON_HOST=gateway` marks the one long-lived copy the gateway
+ * supervises, so an add-on can keep background work (schedules, polling) out of the short-lived
+ * private copies that bots and other MCP clients start from the same mcp-addons.json entry. Set
+ * last: an add-on's own env cannot claim or drop it.
  * With an `id`, a service add-on also gets its manifest's derived env (e.g. Render's AUTH_HEADER),
  * rendered from `config.env` over `base`.
  */
-export function addonStdioEnv(config = {}, base = process.env, id = null) {
+export function addonStdioEnv(config = {}, base = process.env, id = null, opts = {}) {
   const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
-  return { ...withoutCredentialKeys(base), ...(config.env || {}), ...derived, CROW_ADDON_HOST: "gateway" };
+  return {
+    ...addonBaseEnv(base),
+    ...declaredPassthrough(id, base, opts),
+    ...(config.env || {}),
+    ...derived,
+    CROW_ADDON_HOST: "gateway",
+  };
 }
 
 /**

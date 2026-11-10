@@ -92,6 +92,17 @@ A bundle runs from its installed copy, never from the app checkout. The MCP serv
 
 Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
 
+## Environment an add-on receives
+
+An add-on's MCP server is a child process of the gateway, and it does **not** inherit the gateway's environment. It starts with exactly this:
+
+1. **A base allowlist.** System basics, locale, time zone, `TMPDIR`, the `XDG_*` folders, proxy/CA settings and `NODE_ENV` — the same list a bot's pi process gets (`servers/shared/bot-env.js`) — plus the Crow instance keys `CROW_APP_ROOT`, `CROW_HOME`, `CROW_DATA_DIR`, `CROW_DB_PATH`, `CROW_GATEWAY_PORT` and `PORT` when the gateway has them.
+2. **What your manifest declares.** A key from the gateway's own environment is passed through only when `manifest.json` names it: either in `server.envKeys` or as an `env_vars[].name`. This is the reviewed copy of the manifest in the Crow checkout, so an installed copy cannot widen it. A bundle with no manifest in the checkout (a community or private bundle) gets no passthrough at all.
+3. **A deny list.** Crow's own secrets never reach an add-on, even when a manifest names them: `CROW_LOCAL_MCP_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`, `PHONE_RUNNER_SECRET`, `CROW_BROWSER_VNC_PASSWORD`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, and any key ending in `_ROOT_PASSWORD`. The one exception is a bundle's own service credential: `minio` may receive its `MINIO_ROOT_*` keys, `phone` its `PHONE_RUNNER_SECRET`, `browser` its old VNC password — and only because those names belong to that bundle.
+4. **The entry's own `env`** (`mcp-addons.json`), which is where values you enter in the extension's form and the manifest's `default`s live, plus the manifest's derived keys (e.g. Render's `AUTH_HEADER`). These win over the passthrough. The gateway sets `CROW_ADDON_HOST=gateway` last; an entry cannot claim or drop it.
+
+So a value your server needs from the gateway's `.env` (an API key, a host, a tuning knob) must be declared in the manifest. `tests/addon-env-declared.test.js` scans every published bundle's `server/` code for environment reads and fails on a key that is neither in the base allowlist nor declared by that manifest; the few exemptions it carries each name a key that is set somewhere else (for example in the bundle's own `.env`) and say why. While developing a server outside the gateway, `node --import ./scripts/dev/addon-env-read-logger.mjs` with `CROW_ADDON_ENV_ALLOW` set to the keys it should have prints one line per undeclared key it reads (`[addon-env] read of undeclared <KEY>`, never a value).
+
 ## Voice display phrase lists (`capabilities.voice_intent`)
 
 An add-on whose tools an assistant may use by voice can say which words mean "this request is for me":

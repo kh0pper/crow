@@ -492,7 +492,7 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "version": "1.5.1",
+      "version": "1.5.2",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "author": "Crow",
@@ -530,7 +530,9 @@
           "CROW_BROWSER_VNC_PORT",
           "CROW_BROWSER_RFB_PORT",
           "CROW_BROWSER_CONTAINER_NAME",
-          "CROW_BROWSER_DISPLAY"
+          "CROW_BROWSER_DISPLAY",
+          "CROW_BROWSER_PROXY_USER",
+          "CROW_BROWSER_PROXY_PASS"
         ]
       },
       "mcpServers": [
@@ -892,7 +894,7 @@
     {
       "id": "campaigns",
       "name": "Campaigns",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
       "type": "mcp-server",
       "author": "Crow",
@@ -911,7 +913,11 @@
           "server/index.js"
         ],
         "envKeys": [
-          "CROW_CAMPAIGNS_ENCRYPTION_KEY"
+          "CROW_CAMPAIGNS_ENCRYPTION_KEY",
+          "AI_PROVIDER",
+          "AI_API_KEY",
+          "AI_MODEL",
+          "AI_BASE_URL"
         ]
       },
       "panel": "panel/campaigns.js",
@@ -3880,7 +3886,7 @@
     {
       "id": "media",
       "name": "Media Hub",
-      "version": "1.2.7",
+      "version": "1.2.8",
       "description": "News aggregation, RSS feeds, YouTube channels, podcasts, a daily spoken briefing read by the local voice, playlists, smart folders, email digests",
       "type": "mcp-server",
       "author": "Crow",
@@ -3901,7 +3907,13 @@
           "server/index.js"
         ],
         "envKeys": [
-          "CROW_MEDIA_TASKS"
+          "CROW_MEDIA_TASKS",
+          "BRAVE_API_KEY",
+          "CROW_SMTP_HOST",
+          "CROW_SMTP_PORT",
+          "CROW_SMTP_USER",
+          "CROW_SMTP_PASS",
+          "CROW_SMTP_FROM"
         ]
       },
       "panel": "panel/media.js",
@@ -6587,7 +6599,7 @@
     {
       "id": "studio",
       "name": "Crow Studio",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "description": "A shared music studio: you in the dashboard and an AI agent over MCP edit one live song together; every edit is tagged and undoable.",
       "type": "mcp-server",
       "author": "Crow",
@@ -6607,7 +6619,9 @@
           "server/index.js"
         ],
         "envKeys": [
-          "STUDIO_MAX_RENDER_SECONDS"
+          "STUDIO_MAX_RENDER_SECONDS",
+          "STUDIO_MAX_TAKE_SECONDS",
+          "STORAGE_QUOTA_MB"
         ]
       },
       "panel": "panel/studio.js",
