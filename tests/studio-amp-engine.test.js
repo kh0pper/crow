@@ -1126,11 +1126,12 @@ test("changing an amp's capture while playing waits for stop", async () => {
   assert.ok(peakOf(host.run(64).left) > 0.001, "and the new capture plays from the next Play");
 });
 
-test("reordering a chain with an amp while playing gives the arriving amp its own instance", async () => {
-  // A reorder crossfades the old chain against the new one, so for the length of
-  // the fade there are TWO runners for one amp insert. Keyed by the document's id
-  // they shared one NAM instance: the capture was reloaded under the playing
-  // runner and both advanced the same state twice per block.
+test("reordering a chain with an amp while playing loads nothing", async () => {
+  // A reorder crossfades the old chain against the new one. The arriving amp
+  // runner TAKES OVER the leaving runner's already-loaded NAM instance and
+  // state — it is moved, not duplicated — so no capture is parsed, no 20 MB
+  // string is copied into the wasm heap and no bridge table is built on the
+  // render thread while the song plays.
   const host = await processorHost();
   postCapture(host, "reorder-capture");
   await host.flush();
@@ -1143,34 +1144,91 @@ test("reordering a chain with an amp while playing gives the arriving amp its ow
   assert.equal(before.length, 1, "one amp runner before the edit");
   const firstKey = before[0].insert.instanceKey();
   assert.equal(namHost.instanceCount(), 1, `one instance before the edit, got ${namHost.instanceCount()}`);
+  assert.equal(ampStateOf(host).capture_loads, 1, "one capture load so far");
   assert.ok(peakOf(host.run(16).left) > 0.001, "the amp plays before the edit");
 
-  // The same two inserts in the other order: the whole chain is one blend, and
-  // the arriving amp runner is built (and its capture loaded) on the message path.
+  // From here on, every load the render path could ask for is counted.
+  const realLoad = namHost.loadModel.bind(namHost);
+  let loadsWhilePlaying = 0;
+  namHost.loadModel = (...args) => {
+    loadsWhilePlaying += 1;
+    return realLoad(...args);
+  };
+
+  // The same two inserts in the other order: the whole chain is one blend.
   song.inserts["insert-amp"].order = 1;
   song.inserts["insert-comp"].order = 0;
   host.post({ type: "song", snapshot: song });
   await host.flush();
 
+  assert.equal(loadsWhilePlaying, 0, `a reorder must load nothing while playing, loads ${loadsWhilePlaying}`);
   const during = runnersOf(host, "insert-amp");
-  assert.equal(during.length, 2, `a fade holds two amp runners, got ${during.length}`);
-  const keys = new Set(during.map((runner) => runner.insert.instanceKey()));
-  assert.equal(keys.size, 2, "each runner has its own instance key");
-  assert.equal(namHost.instanceCount(), 2, `two instances during the fade, got ${namHost.instanceCount()}`);
-  assert.ok(keys.has(firstKey), "the runner on its way out kept its own instance");
+  assert.equal(during.length, 1, `the amp insert was MOVED, so one runner holds it, got ${during.length}`);
+  assert.equal(during[0].insert.instanceKey(), firstKey, "the arriving runner took the leaving runner's instance");
+  assert.equal(namHost.instanceCount(), 1, `still one instance during the fade, got ${namHost.instanceCount()}`);
+  assert.equal(ampStateOf(host).capture_loads, 1, "and the capture was not loaded again");
   // The arriving amp plays (nothing stops mid-fade), and one NAM state per block
   // is advanced once.
   assert.ok(peakOf(host.run(8).left) > 0.001, "the amp is audible through the fade");
 
-  // The fade is 64 frames; once it has arrived, a snapshot folds the blend away
-  // and the old instance goes with the runner it belonged to.
+  // The fade is 64 frames; once it has arrived, a snapshot folds the blend away.
   host.run(8);
   song.meta.title = "Amp test, folded";
   host.post({ type: "song", snapshot: song });
   await host.flush();
   assert.equal(runnersOf(host, "insert-amp").length, 1, "the blend folded away");
-  assert.equal(namHost.instanceCount(), 1, `the old instance is let go, got ${namHost.instanceCount()}`);
+  assert.equal(namHost.instanceCount(), 1, `the instance is kept, got ${namHost.instanceCount()}`);
   assert.ok(peakOf(host.run(16).left) > 0.001, "and the amp still plays");
+  assert.equal(loadsWhilePlaying, 0, "nothing loaded at any point while the song played");
+});
+
+test("a new amp added while playing stays silent until stop and then loads", async () => {
+  // A chain edit that brings in a DIFFERENT amp has nothing already-loaded to
+  // move. It is parked SILENT until Stop ("Loads when you stop.") — never a
+  // capture load on the render thread.
+  const host = await processorHost();
+  postCapture(host, "late-amp");
+  await host.flush();
+  const song = ampSong([compressorInsert(0)]);
+  await startSong(host, song);
+
+  const namHost = host.processor.namHost === null ? null : host.processor.namHost;
+  let loadsWhilePlaying = 0;
+  const watch = (hostNow) => {
+    const realLoad = hostNow.loadModel.bind(hostNow);
+    hostNow.loadModel = (...args) => {
+      loadsWhilePlaying += 1;
+      return realLoad(...args);
+    };
+  };
+  if (namHost !== null) watch(namHost);
+
+  // A brand new amp insert, with a capture, arrives during playback.
+  song.inserts["insert-amp"] = ampInsert({}, { order: 1 });
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+
+  if (namHost === null) watch(host.processor.namHost);
+  const parked = ampStateOf(host);
+  assert.equal(parked.parked, true, "the new amp waits for Stop");
+  assert.equal(parked.attached, false, "and has nothing attached while the song plays");
+  assert.equal(parked.capture_loads, 0, "nothing was loaded while playing");
+  assert.equal(loadsWhilePlaying, 0, `the render path asked for no capture, loads ${loadsWhilePlaying}`);
+  // The amp is SILENT, never the dry signal, while it waits.
+  host.run(24);
+  const silent = host.run(4);
+  assert.ok(peakOf(silent.left) < 1e-9, `a parked amp is silence, peak ${peakOf(silent.left)}`);
+
+  host.post({ type: "stop" });
+  await host.flush();
+  const stopped = ampStateOf(host);
+  assert.equal(stopped.parked, false, "Stop applies the load");
+  assert.equal(stopped.attached, true, "and the capture is attached");
+  assert.equal(stopped.capture_loads, 1, `Stop loads it once, loads ${stopped.capture_loads}`);
+
+  host.post({ type: "play" });
+  await host.flush();
+  assert.ok(peakOf(host.run(64).left) > 0.001, "and it plays from the next Play");
 });
 
 /**
@@ -1455,10 +1513,13 @@ function twoTrackAmpSong(inserts) {
   return song;
 }
 
-test("a capture that traps while playing silences only its own amp", async () => {
+test("one trapping amp does not mark the other amps failed", async () => {
   // A wasm trap used to take the whole processor down (and with it every track).
-  // It stops the amp that trapped — SILENT, never the dry signal — says so once,
-  // and the shared module is rebuilt for the other amps on the message path.
+  // Now it stops the amp that trapped — SILENT, never the dry signal — says so
+  // once, and POISONS the shared module: every other amp reads silence while the
+  // module is rebuilt, but is NOT marked failed. When the song stops they are
+  // re-attached to the rebuilt module and play again (a capture is loaded only
+  // while the transport is stopped).
   const host = await processorHost();
   postCapture(host, "trap-capture");
   await host.flush();
@@ -1484,8 +1545,9 @@ test("a capture that traps while playing silences only its own amp", async () =>
     return real(key, input, output, frames);
   };
   const trapped = host.run(4);
-  // The other amp carries on, so the mix is not silent: only the trapped amp went.
-  assert.ok(peakOf(trapped.left) > 0.001, `the other amp has to keep playing, peak ${peakOf(trapped.left)}`);
+  // The module is poisoned, so the OTHER amp is silent too (without being marked
+  // failed): the audio thread never plays a wounded module.
+  assert.ok(peakOf(trapped.left) < 1e-9, `a poisoned module plays silence, peak ${peakOf(trapped.left)}`);
   const faulted = postsOfType(host.posts, "insert_fault").filter((message) => message.insert_id === "insert-amp");
   assert.equal(faulted.length, 1, `the trap is reported once, got ${JSON.stringify(faulted)}`);
   assert.equal(faulted[0].message, "amp on Guitar stopped: its capture could not be played.");
@@ -1495,17 +1557,27 @@ test("a capture that traps while playing silences only its own amp", async () =>
   assert.equal(stopped.failed, true, "the amp that trapped is stopped");
   assert.equal(stopped.attached, false, "with nothing attached");
   const healthy = ampStateOf(host, "insert-amp-2", "track-2");
-  assert.equal(healthy.failed, false, "the other amp is untouched");
-  assert.equal(healthy.attached, true, "and was re-attached to the rebuilt module");
+  assert.equal(healthy.failed, false, "the other amp is NOT marked failed by another amp's trap");
+  assert.equal(healthy.attached, false, "it waits for Stop: nothing loads while the song plays");
+  assert.equal(
+    postsOfType(host.posts, "library_failed").filter((message) => message.library_id === CAPTURE_ID).length,
+    0,
+    "a trap belongs to one insert, never to the capture for every amp",
+  );
   assert.ok(host.processor.namHost !== namHost, "the shared module was rebuilt");
-  assert.equal(host.processor.namHost.instanceCount(), 1, "only the healthy amp has an instance again");
-  // ... and the trapped amp is SILENT, never the dry signal: with track 2 muted,
-  // what is left is nothing at all.
-  song.tracks[1].mute = true;
-  host.post({ type: "song", snapshot: song });
+  assert.equal(host.processor.namHost.instanceCount(), 0, "and no capture was loaded into it while playing");
+  const waiting = host.run(16);
+  assert.ok(peakOf(waiting.left) < 1e-9, `every amp is silent until Stop, peak ${peakOf(waiting.left)}`);
+
+  host.post({ type: "stop" });
   await host.flush();
-  const silent = host.run(16);
-  assert.ok(peakOf(silent.left) < 1e-9, `a stopped amp is silence, peak ${peakOf(silent.left)}`);
+  const reattached = ampStateOf(host, "insert-amp-2", "track-2");
+  assert.equal(reattached.failed, false, "the healthy amp is still untouched");
+  assert.equal(reattached.attached, true, "and is re-attached to the rebuilt module at Stop");
+  assert.equal(host.processor.namHost.instanceCount(), 1, "only the healthy amp has an instance again");
+  host.post({ type: "play" });
+  await host.flush();
+  assert.ok(peakOf(host.run(64).left) > 0.001, "the healthy amp plays again; the trapped one stays silent");
 });
 
 test("an amp whose capture produces a bad sample is silent, never dry", async () => {
@@ -1542,9 +1614,9 @@ test("an amp whose capture produces a bad sample is silent, never dry", async ()
 });
 
 test("monitoring a stereo input with the signal on one side keeps its level", async () => {
-  // A mono instrument on a stereo interface arrives with silence on one side. The
-  // amp's mono sum is (L+R)/2, which costs 6 dB there; the sum has to keep the
-  // level of the channel that carries the signal instead.
+  // The armed track's 1b input selection says this is a ONE-channel input, so
+  // the amp's mono sum feeds that channel unscaled. (A stereo pair is
+  // (L+R)/2; the selection decides, never the signal's peaks.)
   /**
    * @param {Float32Array} left
    * @param {Float32Array} right
@@ -1556,7 +1628,7 @@ test("monitoring a stereo input with the signal on one side keeps its level", as
     host.post({ type: "song", snapshot: ampSong([ampInsert()]) });
     host.post({ type: "audio", take_id: "take-1", channels: [new Float32Array(SAMPLE_RATE)] });
     await host.flush();
-    host.post({ type: "monitor", track_id: "track-1", on: true });
+    host.post({ type: "monitor", track_id: "track-1", on: true, channels: 1 });
     host.post({ type: "launchScene", id: "scene-1" });
     host.post({ type: "play" });
     await host.flush();
@@ -1581,6 +1653,248 @@ test("monitoring a stereo input with the signal on one side keeps its level", as
   const ratio = oneSided / bothSides;
   assert.ok(
     ratio > 0.8 && ratio < 1.25,
-    `signal on one side of a stereo input keeps its level (ratio ${ratio} to the same signal on both)`,
+    `a one-channel selection feeds its channel unscaled (ratio ${ratio} to the same signal on both)`,
   );
+});
+
+test("a one-channel input feeds the amp unscaled and never switches scale", async () => {
+  // The old mono sum looked at each 128-frame piece's peaks and divided by two
+  // only when BOTH sides had one — a noisy or gated right channel flips that at
+  // every piece boundary, which is a 6 dB step every few milliseconds. The
+  // selection is fixed, so a right channel that alternates between silence and
+  // a tiny noise floor changes nothing at all.
+  const blocks = 64;
+  const tone = sineTake(blocks * BLOCK);
+  const noise = new Float32Array(blocks * BLOCK);
+  for (let at = 0; at < noise.length; at += 1) noise[at] = Math.sin(at / 7) * 1e-6;
+  /**
+   * @param {(block: number) => Float32Array} rightOf
+   * @returns {Promise<Float32Array>} the amp's output
+   */
+  const heard = async (rightOf) => {
+    const host = await processorHost();
+    postCapture(host, "monitor-scale");
+    host.post({ type: "song", snapshot: ampSong([ampInsert()]) });
+    host.post({ type: "audio", take_id: "take-1", channels: [new Float32Array(SAMPLE_RATE)] });
+    await host.flush();
+    host.post({ type: "monitor", track_id: "track-1", on: true, channels: 1 });
+    host.post({ type: "launchScene", id: "scene-1" });
+    host.post({ type: "play" });
+    await host.flush();
+    const outLeft = new Float32Array(blocks * BLOCK);
+    const outRight = new Float32Array(blocks * BLOCK);
+    for (let index = 0; index < blocks; index += 1) {
+      const start = index * BLOCK;
+      host.processor.process(
+        [[tone.subarray(start, start + BLOCK), rightOf(index).subarray(start, start + BLOCK)]],
+        [[outLeft.subarray(start, start + BLOCK), outRight.subarray(start, start + BLOCK)]],
+      );
+    }
+    return outLeft;
+  };
+  const silentRight = await heard(() => new Float32Array(blocks * BLOCK));
+  const noisyRight = await heard(() => noise);
+  const rmsSilent = rmsOf(silentRight.subarray(32 * BLOCK));
+  const rmsNoisy = rmsOf(noisyRight.subarray(32 * BLOCK));
+  assert.ok(rmsSilent > 0.001, `the amp has to make sound, rms ${rmsSilent}`);
+  assert.ok(
+    rmsNoisy / rmsSilent > 0.98 && rmsNoisy / rmsSilent < 1.02,
+    `a nonzero right channel must not change the mono scale (ratio ${rmsNoisy / rmsSilent})`,
+  );
+
+  // Alternating silence and noise on the right, block by block: a peak-driven
+  // scale would alternate half/full here. The fixed selection does not move.
+  const alternating = new Float32Array(blocks * BLOCK);
+  for (let at = 0; at < alternating.length; at += 1) {
+    if (Math.floor(at / BLOCK) % 2 === 1) alternating[at] = Math.sin(at / 7) * 1e-6;
+  }
+  const flipped = await heard(() => alternating);
+  let lowest = Infinity;
+  let highest = 0;
+  for (let at = 32 * BLOCK; at + BLOCK <= flipped.length; at += BLOCK) {
+    const rms = rmsOf(flipped.subarray(at, at + BLOCK));
+    if (rms < lowest) lowest = rms;
+    if (rms > highest) highest = rms;
+  }
+  assert.ok(highest / lowest < 1.25, `no 6 dB scale step between pieces (ratio ${highest / lowest})`);
+});
+
+/**
+ * One 44.1 kHz ↔ 48 kHz bridge pair, exactly the two converters an amp at
+ * 44.1 kHz around a 48 kHz capture builds.
+ * @returns {{up: object, down: object}}
+ */
+function rateBridgePair() {
+  return {
+    up: namHostApi.createBridge({ fromRate: 44100, toRate: 48000, maxIn: 128, maxOut: 160 }),
+    down: namHostApi.createBridge({ fromRate: 48000, toRate: 44100, maxIn: 160, maxOut: 128 }),
+  };
+}
+
+/**
+ * Run one impulse through a bridge pair and hand back the conversion.
+ * @param {{up: object, down: object}} pair
+ * @param {number} [blocks]
+ * @returns {Float32Array}
+ */
+function impulseThroughBridge(pair, blocks = 8) {
+  const input = new Float32Array(128);
+  const midLeft = new Float32Array(160);
+  const midRight = new Float32Array(160);
+  const outLeft = new Float32Array(128);
+  const outRight = new Float32Array(128);
+  const collected = [];
+  for (let block = 0; block < blocks; block += 1) {
+    input.fill(0);
+    if (block === 0) input[0] = 1;
+    const produced = pair.up.process(input, input, 128, midLeft, midRight, 160);
+    const back = pair.down.process(midLeft, midRight, produced, outLeft, outRight, 128);
+    assert.equal(back, 128, `the out bridge has to yield a whole 128-frame block from call ${block + 1}`);
+    for (let at = 0; at < back; at += 1) collected.push(outLeft[at]);
+  }
+  return Float32Array.from(collected);
+}
+
+test("a rate-bridged amp has a constant delay from its first block", () => {
+  // The out bridge used to return 121, 127, 128, 129… frames from call to call
+  // and filled the missing tail of its first block with silence, which is a hole
+  // in the middle of a block on every reset. Both bridges are pre-rolled with
+  // their own look-ahead, so the first call is a whole block and the delay is a
+  // constant `latencyFrames` — from the first sample, and again after reset.
+  const pair = rateBridgePair();
+  const first = impulseThroughBridge(pair);
+  let peakAt = 0;
+  let peak = 0;
+  for (let at = 0; at < first.length; at += 1) {
+    const value = Math.abs(first[at]);
+    if (value > peak) {
+      peak = value;
+      peakAt = at;
+    }
+  }
+  assert.ok(peak > 0.01, `the impulse has to come through, peak ${peak}`);
+  const expected = Math.ceil(pair.up.latencyFrames * (44100 / 48000)) + pair.down.latencyFrames;
+  assert.ok(
+    Math.abs(peakAt - expected) <= 2,
+    `the amp's rate bridge delays by its reported ${expected} frames, the impulse peaked at ${peakAt}`,
+  );
+
+  // reset() restores the very same pipeline: the next first block has the same
+  // timing and the same samples, not a short block with a hole in it.
+  pair.up.reset();
+  pair.down.reset();
+  const afterReset = impulseThroughBridge(pair);
+  assert.equal(differenceOf(first, afterReset), 0, "reset restores the bridge bit for bit");
+
+  // A fresh pair agrees with the one that has been running: the delay is the
+  // rate pair's, never a property of how many blocks came before.
+  const fresh = impulseThroughBridge(rateBridgePair());
+  assert.equal(differenceOf(first, fresh), 0, "a fresh bridge has the same first-block timing");
+});
+
+test("the rate bridge has no periodic one-sample slips", () => {
+  // 44.1 → 48 is 147/160 of an input frame per output frame. The phase used to
+  // be rounded onto 512 rows and a fraction that rounded up to 512 was left on
+  // row 0 at the OLD base, slipping the read a whole sample at the 147/160
+  // period. A sine through the pair is fitted to sin/cos (a constant fractional
+  // delay is a phase shift); a slip is a per-sample error spike.
+  const pair = rateBridgePair();
+  const frequency = 5000;
+  const blocks = 160;
+  const input = new Float32Array(128);
+  const midLeft = new Float32Array(160);
+  const midRight = new Float32Array(160);
+  const outLeft = new Float32Array(128);
+  const outRight = new Float32Array(128);
+  const collected = [];
+  for (let block = 0; block < blocks; block += 1) {
+    for (let at = 0; at < 128; at += 1) {
+      input[at] = Math.sin((2 * Math.PI * frequency * (block * 128 + at)) / 44100) * 0.5;
+    }
+    const produced = pair.up.process(input, input, 128, midLeft, midRight, 160);
+    const back = pair.down.process(midLeft, midRight, produced, outLeft, outRight, 128);
+    assert.equal(back, 128, `the out bridge yields a whole block on call ${block + 1}`);
+    for (let at = 0; at < back; at += 1) collected.push(outLeft[at]);
+  }
+
+  const start = 2048;
+  const count = 16384;
+  const measured = collected.slice(start, start + count);
+  let sines = 0;
+  let cosines = 0;
+  let squareSines = 0;
+  let squareCosines = 0;
+  let cross = 0;
+  for (let at = 0; at < measured.length; at += 1) {
+    const angle = (2 * Math.PI * frequency * (start + at)) / 44100;
+    const sine = Math.sin(angle);
+    const cosine = Math.cos(angle);
+    const value = measured[at];
+    sines += value * sine;
+    cosines += value * cosine;
+    squareSines += sine * sine;
+    squareCosines += cosine * cosine;
+    cross += sine * cosine;
+  }
+  const determinant = squareSines * squareCosines - cross * cross;
+  const a = (sines * squareCosines - cosines * cross) / determinant;
+  const b = (cosines * squareSines - sines * cross) / determinant;
+  const amplitude = Math.sqrt(a * a + b * b);
+  let worst = 0;
+  for (let at = 0; at < measured.length; at += 1) {
+    const angle = (2 * Math.PI * frequency * (start + at)) / 44100;
+    const error = Math.abs(measured[at] - (a * Math.sin(angle) + b * Math.cos(angle)));
+    if (error > worst) worst = error;
+  }
+  assert.ok(amplitude > 0.01, `the tone has to survive the conversion, amplitude ${amplitude}`);
+  assert.ok(
+    worst / amplitude < 0.02,
+    `a 5 kHz tone must not slip a sample at the 147/160 period (worst ${worst / amplitude} of the tone)`,
+  );
+});
+
+test("monitor latency re-posts when an amp's latency changes outside a snapshot", async () => {
+  // A capture finishing its parse (or a parked change applied at Stop) can move
+  // the monitored track's amp latency with no song snapshot at all. The page's
+  // round-trip number has to follow it then too.
+  const rate = 44100;
+  const host = await processorHost(rate);
+  const nativeId = "capture-a2-44100";
+  const nativeText = CAPTURE_TEXT.replace(/"sample_rate":\s*48000(?:\.0)?/g, '"sample_rate": 44100');
+  postCapture(host, "native", nativeId, nativeText);
+  await host.flush();
+
+  const song = ampSong([ampInsert()]);
+  host.post({ type: "song", snapshot: song });
+  host.post({ type: "audio", take_id: "take-1", channels: [sineTake(rate)] });
+  await host.flush();
+  host.post({ type: "monitor", track_id: "track-1", on: true, channels: 2 });
+  await host.flush();
+
+  const latencies = () =>
+    postsOfType(host.posts, "monitor_latency").filter((message) => message.track_id === "track-1");
+  const last = () => {
+    const list = latencies();
+    return list[list.length - 1];
+  };
+  assert.equal(last().ms, 0, "nothing is loaded yet, so the chain adds nothing");
+
+  // The capture finishes its parse while the transport is stopped: rebindAmps()
+  // attaches it and the converted amp's latency appears — with no snapshot.
+  postCapture(host, "converted", CAPTURE_ID);
+  await host.flush();
+  const converted = last();
+  assert.ok(converted.ms > 0, `loading a converted capture has to re-post the delay, got ${converted.ms} ms`);
+
+  // Now a parked change applied at Stop: back to the context-rate capture, which
+  // needs no conversion, so the delay goes back to zero then.
+  host.post({ type: "play" });
+  await host.flush();
+  song.inserts["insert-amp"].params.model_id = nativeId;
+  host.post({ type: "song", snapshot: song });
+  await host.flush();
+  assert.equal(last().ms, converted.ms, "a parked change does not move the number while it waits");
+  host.post({ type: "stop" });
+  await host.flush();
+  assert.equal(last().ms, 0, "Stop applies the change and re-posts the amp's new latency");
 });

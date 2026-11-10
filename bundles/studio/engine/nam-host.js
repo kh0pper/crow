@@ -262,6 +262,27 @@
     return Number.isFinite(number) && number > 0 ? number : fallback;
   }
 
+  /** @returns {number} the greatest common divisor of two positive integers. */
+  function gcd(a, b) {
+    let left = a;
+    let right = b;
+    while (right !== 0) {
+      const next = left % right;
+      left = right;
+      right = next;
+    }
+    return left === 0 ? 1 : left;
+  }
+
+  /**
+   * The kernel table of the LAST bridge built for one rate pair. The table is
+   * read-only once built, so every insert that converts between the same two
+   * rates (and every reset, and every rebuild of the shared NAM module) uses the
+   * very same rows instead of building 512 × 32 weights again on the message
+   * path.
+   */
+  const bridgeKernels = new Map();
+
   /**
    * How a capture's own rate is described: `-1` (unknown) and anything
    * unusable mean "the context's rate", which needs no conversion at all.
@@ -283,7 +304,10 @@
    * @param {number} cutoff cycles per input sample, `0 < cutoff <= 0.5`
    * @returns {Float64Array}
    */
-  function bridgeKernel(cutoff) {
+  function bridgeKernel(from, to, cutoff) {
+    const key = `${from}\u0000${to}`;
+    const known = bridgeKernels.get(key);
+    if (known) return known;
     const table = new Float64Array(BRIDGE_PHASES * BRIDGE_TAPS);
     for (let phase = 0; phase < BRIDGE_PHASES; phase += 1) {
       const fraction = phase / BRIDGE_PHASES;
@@ -307,6 +331,7 @@
         for (let tap = 0; tap < BRIDGE_TAPS; tap += 1) table[row + tap] /= total;
       }
     }
+    bridgeKernels.set(key, table);
     return table;
   }
 
@@ -329,10 +354,18 @@
    * as `StudioResample.toRate` treats a buffer's first and last taps.
    *
    * `process()` is handed the input it has not seen yet and writes up to
-   * `outMax` output frames; both sides' counts are driven by one integer output
-   * index (`index * step`), so the conversion of a block has the same count
-   * whatever block size a host asks for. It allocates nothing per call.
-   * @param {{fromRate: number, toRate: number, maxIn?: number, maxOut?: number}} options
+   * `outMax` output frames; both sides' counts are driven by one rational read
+   * position (the rate ratio's integer numerator over its denominator, 147/160
+   * for 44.1k → 48k), so the conversion of a block has the same count whatever
+   * block size a host asks for and can never slip a sample on a rounding edge.
+   * It is PRE-ROLLED with its own look-ahead at build and reset, so its first
+   * call already yields a whole block at the reported `latencyFrames` delay.
+   * It allocates nothing per call.
+   * @param {{fromRate: number, toRate: number, maxIn?: number, maxOut?: number,
+   *          extraDelayFrames?: number}} options `extraDelayFrames` adds a
+   *   fractional output-frame delay (the ceiling remainder the insert's own
+   *   latency report rounds up), so a pair of bridges delays by exactly the sum
+   *   the insert reports.
    * @returns {{latencyFrames: number, step: number, cutoff: number,
    *            process: function(Float32Array|null, Float32Array|null, number,
    *                            Float32Array, Float32Array|null, number): number,
@@ -349,17 +382,69 @@
     const cutoff = BRIDGE_CUTOFF_SCALE * 0.5 * Math.min(1, to / from);
     const historyFrames = BRIDGE_TAPS;
 
+    // The position of one output frame in the input stream is a RATIONAL
+    // number: 44100 → 48000 is 147/160 of an input frame per output frame. It
+    // is tracked as an integer numerator over `stepDen` (never as
+    // `index * step` floating point), so an output frame can never drift onto
+    // the wrong side of a frame boundary however long the stream runs.
+    const fromInt = Math.round(from);
+    const toInt = Math.round(to);
+    const rational = Math.abs(fromInt - from) < 1e-9 && Math.abs(toInt - to) < 1e-9;
+    const divisor = rational ? gcd(fromInt, toInt) : 1;
+    const stepNum = rational ? fromInt / divisor : from;
+    const stepDen = rational ? toInt / divisor : to;
+
+    /**
+     * The delay this conversion adds, in its own OUTPUT frames: the kernel's
+     * look-ahead, `BRIDGE_HALF` input frames, expressed at the output rate.
+     */
+    const latencyFrames = Math.ceil(BRIDGE_HALF / step);
+
+    // Pre-roll the converter's real look-ahead with silence, so the FIRST call
+    // yields a whole block instead of a short one with a hole in it. The
+    // pre-roll is exactly the delay the converter reports: an output frame is
+    // `latencyFrames` behind the input it stands for, from the first block on.
+    const primeFrames = Math.max(
+      1,
+      Math.min(historyFrames, Math.round(latencyFrames * (stepNum / stepDen))),
+    );
+    // A fractional extra delay, rounded onto the rational grid: an insert that
+    // reports the sum of two converters' look-ahead (rounded up per converter)
+    // can make the pair's real delay match that report exactly.
+    const extraPos = Math.round(Math.max(0, finite(options && options.extraDelayFrames)) * stepNum);
+
     /** The kernel, one row per phase: `table[phase * BRIDGE_TAPS + tap]`. */
-    const table = bridgeKernel(cutoff);
+    const table = bridgeKernel(from, to, cutoff);
     /** The last `BRIDGE_TAPS` input frames, oldest first. */
     const history = [new Float32Array(historyFrames), new Float32Array(historyFrames)];
     let historyFilled = 0;
     /** The input pool one call works in: the history, then the new frames. */
     const work = [new Float32Array(historyFrames + maxIn), new Float32Array(historyFrames + maxIn)];
 
-    let index = 0;
+    /** The read position times `stepDen`, in input frames. */
+    let posNum = 0;
+    /** The input stream's length, pre-roll included, and the real input alone. */
     let received = 0;
+    let realReceived = 0;
     let emitted = 0;
+
+    /**
+     * Put the converter at the start of a stream: silence behind it, a read
+     * position `latencyFrames` behind the first real input frame, and the
+     * pre-roll already in its history. Called once at build, and again on every
+     * `reset()` (a stopped insert must come back with the same timing).
+     * @returns {void}
+     */
+    function prime() {
+      history[0].fill(0);
+      history[1].fill(0);
+      historyFilled = Math.min(historyFrames, primeFrames);
+      received = primeFrames;
+      realReceived = 0;
+      posNum = primeFrames * stepDen - latencyFrames * stepNum - extraPos;
+      emitted = 0;
+    }
+    prime();
 
     /**
      * Convert what arrived, writing at most `outMax` frames.
@@ -393,14 +478,21 @@
       const availableEnd = historyFilled + count - 1;
       let produced = 0;
       while (produced < limit) {
-        const centre = index * step;
-        const base = Math.floor(centre);
+        let base = Math.floor(posNum / stepDen);
         // The kernel reaches `BRIDGE_HALF` frames past the output position: until
         // that input has arrived this output frame cannot be made yet. That is
         // the converter's delay, reported as `latencyFrames`.
         if (base + BRIDGE_HALF > lastAvailable) break;
-        let phase = Math.round((centre - base) * BRIDGE_PHASES) % BRIDGE_PHASES;
-        if (phase < 0) phase += BRIDGE_PHASES;
+        // One row per 1/BRIDGE_PHASES of an input frame. A fraction that rounds
+        // UP to BRIDGE_PHASES is the NEXT frame at phase 0, not this frame at
+        // row 0: leaving it at `base` would slip the read a whole sample every
+        // 147/160 or so output frames.
+        let phase = Math.round(((posNum - base * stepDen) * BRIDGE_PHASES) / stepDen);
+        if (phase >= BRIDGE_PHASES) {
+          phase = 0;
+          base += 1;
+          if (base + BRIDGE_HALF > lastAvailable) break;
+        }
         const row = phase * BRIDGE_TAPS;
         // The pool index of tap 0 (the frame `BRIDGE_HALF - 1` behind the base).
         const firstTap = base - firstAvailable - BRIDGE_HALF + 1;
@@ -417,7 +509,7 @@
           if (channel === 0) outLeft[produced] = sum;
           else outRight[produced] = sum;
         }
-        index += 1;
+        posNum += stepNum;
         produced += 1;
       }
 
@@ -435,35 +527,25 @@
       }
       historyFilled = Math.min(historyFrames, historyFilled + count);
       received += count;
+      realReceived += count;
       emitted += produced;
       return produced;
     }
 
     return {
-      /**
-       * The delay this conversion adds, in its own OUTPUT frames: the kernel's
-       * look-ahead, `BRIDGE_HALF` input frames, expressed at the output rate.
-       */
-      latencyFrames: Math.ceil(BRIDGE_HALF / step),
+      latencyFrames: latencyFrames,
       step: step,
       cutoff: cutoff,
       process: process,
-      reset: function reset() {
-        history[0].fill(0);
-        history[1].fill(0);
-        historyFilled = 0;
-        index = 0;
-        received = 0;
-        emitted = 0;
-      },
+      reset: prime,
       inputFrames: function inputFrames() {
-        return received;
+        return realReceived;
       },
       outputFrames: function outputFrames() {
         return emitted;
       },
       pendingOutput: function pendingOutput() {
-        return Math.ceil(received / step) - emitted;
+        return Math.ceil(realReceived / step) - emitted;
       },
     };
   }
@@ -510,6 +592,15 @@
     let module = null;
     /** The promise of that compile, so two loads share one. */
     let compiling = null;
+    /**
+     * Whether a trap has poisoned this shared module. The amp that trapped
+     * reports itself stopped; every OTHER amp reads silence from here on (its
+     * instance may be on a wounded module) but is NOT marked failed — the
+     * processor rebuilds the module on the message path and re-attaches them
+     * when the transport stops. `process()` returns false for every key while
+     * this is set, which the amp path already plays as silence.
+     */
+    let poisoned = false;
 
     /** insert key → its NAM instance id. */
     const instanceIds = new Map();
@@ -576,7 +667,33 @@
 
     /** @returns {boolean} whether the engine is up (an amp can play). */
     function isReady() {
-      return module !== null;
+      return module !== null && !poisoned;
+    }
+
+    /**
+     * Mark the shared module unusable after a trap. The processor rebuilds it
+     * on the message path; until then every amp reads silence.
+     * @returns {void}
+     */
+    function poison() {
+      poisoned = true;
+    }
+
+    /** @returns {boolean} whether a trap has poisoned this module. */
+    function isPoisoned() {
+      return poisoned;
+    }
+
+    /**
+     * Forget what `checkCapture` remembered about one library entry. A capture
+     * that is unloaded (or replaced under the same id) is checked again when it
+     * comes back.
+     * @param {unknown} libraryId
+     * @returns {void}
+     */
+    function forgetCapture(libraryId) {
+      const id = libraryId === undefined || libraryId === null ? "" : String(libraryId);
+      if (id !== "") checked.delete(id);
     }
 
     /**
@@ -734,7 +851,7 @@
      */
     function process(key, input, output, frames) {
       const id = instanceIds.get(key);
-      if (!id || !module || !models.has(key)) return false;
+      if (!id || !module || poisoned || !models.has(key)) return false;
       let buffer = bufferFor(key, id);
       if (buffer === null) return false;
       for (let at = 0; at < frames; at += QUANTUM_FRAMES) {
@@ -759,6 +876,9 @@
       setWasm: setWasm,
       ready: ready,
       isReady: isReady,
+      poison: poison,
+      isPoisoned: isPoisoned,
+      forgetCapture: forgetCapture,
       checkCapture: checkCapture,
       loadModel: loadModel,
       unloadModel: unloadModel,
@@ -779,6 +899,7 @@
         checked.clear();
         module = null;
         compiling = null;
+        poisoned = false;
       },
     };
   }

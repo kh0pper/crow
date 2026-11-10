@@ -363,8 +363,12 @@
  * **Loads happen while the transport is stopped** — the plan's rule for fonts
  * and captures both, so a capture load that arrives while the song plays is held
  * and answered `{type:"library_deferred"}` (the page says "Loads when you stop.")
- * and parsed on the next Stop. Cabinets are not parsed: their PCM is built into
- * partitions on the message path the moment it arrives, playing or not.
+ * and parsed on the next Stop. A chain edit that arrives during playback is held
+ * the same way: an amp runner it builds is parked SILENT until Stop (a reorder
+ * moves the already-loaded instance instead, so nothing loads and nothing is
+ * duplicated). Cabinets are not parsed: their PCM is built into partitions on
+ * the message path the moment it arrives, and a cabinet for a brand-new amp
+ * runner waits for Stop with its capture.
  *
  * **A capture that cannot be played is SILENCE, not pass-through.** A legacy
  * (non-A2) capture, a broken one, one the engine refuses, one that is not on
@@ -373,11 +377,13 @@
  * reported once with the plan's sentence, a missing one as `library_needed` (so
  * the page can load it or offer the download), exactly as a missing font is
  * (Review Focus 1 and 5), and a trap or a bad sample as an `insert_fault` once.
- * A trap also rebuilds the shared NAM module on the message path for the other
- * amps; the amp that trapped stays stopped until its own settings move. A
- * cabinet longer than a second is refused at load with the plan's sentence. An
- * amp insert with no `model_id` at all is a pass-through: nothing has been chosen
- * for it yet.
+ * A trap also POISONS the shared NAM module (every other amp reads silence
+ * without being marked failed) and rebuilds it on the message path; the rebuilt
+ * module re-attaches them at the next Stop, because a capture is loaded only
+ * while the transport is stopped. The amp that trapped stays stopped until its
+ * own settings move. A cabinet longer than a second is refused at load with the
+ * plan's sentence. An amp insert with no `model_id` at all is a pass-through:
+ * nothing has been chosen for it yet.
  *
  * The insert's own latency is the rate converters' look-ahead: a capture at the
  * context's rate needs no conversion and delays nothing, one at another rate
@@ -1444,11 +1450,34 @@
   }
 
   /**
+   * Whether an error from the NAM engine is a wasm TRAP (the module is wounded)
+   * rather than a capture the engine refused. A trap belongs to the insert that
+   * hit it: the other amps on the same capture must not be marked failed, and
+   * the shared module is rebuilt for them.
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  function isNamTrap(error) {
+    if (!error) return false;
+    if (typeof WebAssembly !== "undefined" && error instanceof WebAssembly.RuntimeError) return true;
+    const message = String(error && error.message ? error.message : error);
+    return /unreachable|out of bounds|memory access|table index|wasm|trap|null function/i.test(message);
+  }
+
+  /**
    * The frames one chain puts on the path it feeds once an edit has settled: the
    * sum of its inserts' own latency. Every track and return insert is
    * zero-latency, so in practice this is the master chain's limiter (plan 1d:
    * only the master limiter looks ahead) — plus any amp insert whose capture has
    * to be converted, which reports the rate bridges' real delay.
+   *
+   * NOTE (a design question for the operator, deliberately NOT implemented): a
+   * rate-converted amp delays its track by ~0.7 ms (the two bridges' look-ahead,
+   * reported here and primed for) but a track has no delay COMPENSATION. A
+   * parallel or doubled track that does not go through the same converted amp
+   * therefore arrives earlier, and the two can comb. Whether a track should be
+   * delayed to match its amp's latency — and where that delay belongs — is the
+   * operator's call; this function only reports the number.
    *
    * A runner an edit has retired does not count — the chain that stays is the one
    * the number is about — and neither does one the NaN guard has bypassed: a
@@ -2091,6 +2120,14 @@
       /** Whether a rebuild of the shared NAM module is already queued. */
       this.namRebuildQueued = false;
 
+      /**
+       * One NAM module a rebuild has kept alive for the amp runners that were
+       * still fading out when it happened. A fading runner keeps its already
+       * loaded instance (no cut) until the chain folds it away, and the old
+       * module is destroyed by `pruneAmpInstances` then.
+       */
+      this.namHeldHosts = [];
+
       /** Cabinet library id → its decoded PCM (`{channels, frames, rate}`). */
       this.cabinets = new Map();
 
@@ -2118,6 +2155,13 @@
       this.monitorTrackId = null;
       this.monitorLeft = null;
       this.monitorRight = null;
+      /**
+       * How many channels the armed track's input selection opens: 1 for a
+       * one-channel input, 2 for a stereo pair (the default when nothing says).
+       * It is the page's 1b input selection, and it decides the amp's mono sum
+       * (see `monoSum` in `createAmpInsert`) — never the signal's own peaks.
+       */
+      this.monitorChannels = 2;
 
       /** The delay the monitored track's chain adds, in ms (posted when it moves). */
       this.monitorLatencyMs = 0;
@@ -2312,6 +2356,10 @@
           // attachments again — and an amp whose files did not change does
           // nothing at all (see `attachCapture`).
           this.rebindAmps();
+          // A capture or cabinet that waited for this Stop has just been
+          // attached (or not), so the amp instances the chains no longer hold can
+          // go now rather than at the next snapshot (plan 1d, Task 13).
+          this.pruneAmpInstances();
           break;
         case "setMode":
           this.sequencer.setMode(message.mode);
@@ -2350,7 +2398,13 @@
         case "monitor":
           // Monitoring through the chain: name the track the node's input runs
           // through (its inserts, amps included, and its fader), or let it go.
-          this.setMonitor(message.track_id, message.on === true);
+          // `channels` is the page's 1b input selection (1 or 2); a test or an
+          // older page that spells it `input_channels` is understood too.
+          this.setMonitor(
+            message.track_id,
+            message.on === true,
+            message.channels !== undefined ? message.channels : message.input_channels,
+          );
           break;
         case "faust-modules":
           // The compiled Faust effects (plan 1d, Task 7). They are compiled once
@@ -2850,17 +2904,32 @@
     async rebuildNamHost() {
       const bytes = this.namWasm;
       const old = this.namHost;
-      // The old instances die with it, so every amp's attachment goes with them.
+      // The old instances die with it, so every amp's attachment goes with them —
+      // EXCEPT one that is still fading out: it keeps its already-loaded instance
+      // on the old module until the chain folds it away (no cut, see
+      // `namHeldHosts`). That is the only way an amp may keep playing across a
+      // rebuild.
       this.namHost = null;
       this.namHostBuilt = false;
+      const held = [];
       this.eachAmpRunnerEverywhere((runner) => {
-        if (runner.insert && typeof runner.insert.forgetCapture === "function") runner.insert.forgetCapture();
+        const insert = runner.insert;
+        if (!insert) return;
+        if (runner.retired && runner.wet > 0 && typeof insert.holdHost === "function") {
+          insert.holdHost(old);
+          held.push(insert);
+          return;
+        }
+        if (typeof insert.forgetModule === "function") insert.forgetModule();
       });
       if (old !== null) {
-        try {
-          old.destroy();
-        } catch {
-          /* the module is gone: nothing is left to clean up */
+        if (held.length > 0) this.namHeldHosts.push({ host: old, inserts: held });
+        else {
+          try {
+            old.destroy();
+          } catch {
+            /* the module is gone: nothing is left to clean up */
+          }
         }
       }
       const host = this.newNamHost();
@@ -2874,6 +2943,12 @@
           /* reported by the amp that wanted it: there is no engine to play */
         }
       }
+      // A capture may only be loaded while the transport is stopped. Rebuilding
+      // the module is allowed during playback; re-attaching the captures is NOT,
+      // so a playing song stays silent (never the dry signal) until the next
+      // Stop, which calls `rebindAmps()` and loads them again. The amp that
+      // trapped has already stopped itself and is left alone.
+      if (this.sequencer.isPlaying()) return;
       this.rebindAmps();
       this.bindAmps();
     }
@@ -3071,6 +3146,11 @@
       this.namModels.delete(id);
       this.namFailed.delete(id);
       this.ampNeeded.delete(id);
+      // The check cache is keyed by library id: a capture that is gone (or is
+      // replaced under the same id) has to be parsed and checked again.
+      if (this.namHost !== null && typeof this.namHost.forgetCapture === "function") {
+        this.namHost.forgetCapture(id);
+      }
       this.rebindAmps(id);
     }
 
@@ -3195,6 +3275,11 @@
         if (capture !== null && amp.captureId() === capture) amp.attachCapture();
         if (cabinet !== null && amp.cabinetId() === cabinet) amp.attachCabinet();
       });
+      // An amp whose capture has just finished parsing (or whose parked change
+      // was applied at Stop) can change the monitored chain's delay, and no song
+      // snapshot is involved. The page's round-trip number has to hear about it
+      // now, exactly as it does after a snapshot (plan 1d, Task 13).
+      this.postMonitorLatency();
     }
 
     /**
@@ -3208,6 +3293,29 @@
      */
     pruneAmpInstances() {
       const host = this.namHost;
+      const liveInserts = new Set();
+      this.eachAmpRunnerEverywhere((runner) => {
+        if (runner.insert) liveInserts.add(runner.insert);
+      });
+      // A module a rebuild kept alive for a fading amp can go once no chain holds
+      // any of the inserts that were playing on it.
+      for (let index = this.namHeldHosts.length - 1; index >= 0; index -= 1) {
+        const holding = this.namHeldHosts[index];
+        let stillHeld = false;
+        for (let at = 0; at < holding.inserts.length; at += 1) {
+          if (liveInserts.has(holding.inserts[at])) {
+            stillHeld = true;
+            break;
+          }
+        }
+        if (stillHeld) continue;
+        this.namHeldHosts.splice(index, 1);
+        try {
+          holding.host.destroy();
+        } catch {
+          /* the module is going away: nothing is left to clean up */
+        }
+      }
       if (host === null || typeof host.instanceKeys !== "function") return;
       const live = new Set();
       this.eachAmpRunnerEverywhere((runner) => {
@@ -3253,13 +3361,40 @@
      * measured round trip it shows.
      * @param {unknown} trackId
      * @param {boolean} on
+     * @param {unknown} [channels] the armed track's 1b input selection: 1 for a
+     *   one-channel input, anything else (or nothing) for a stereo pair
      * @returns {void}
      */
-    setMonitor(trackId, on) {
+    setMonitor(trackId, on, channels) {
       const id = asId(trackId);
-      if (on) this.monitorTrackId = id === "" ? null : id;
-      else if (this.monitorTrackId === id) this.monitorTrackId = null;
+      if (on) {
+        this.monitorTrackId = id === "" ? null : id;
+        this.monitorChannels = Number(channels) === 1 ? 1 : 2;
+      } else {
+        if (this.monitorTrackId === id) this.monitorTrackId = null;
+        this.monitorChannels = 2;
+      }
+      this.applyAmpInputChannels();
       this.postMonitorLatency();
+    }
+
+    /**
+     * Tell every amp insert which input selection its track has. An amp's mono
+     * sum is decided ONCE from this selection (see `monoSum` in
+     * `createAmpInsert`) and never from the signal's peaks, so a one-channel
+     * input is never scaled by a 6 dB flip every few milliseconds. The only amp
+     * that reads a one-channel selection is the one on the monitored track: a
+     * stored clip is always a stereo pair and is averaged. This runs on the
+     * message path only.
+     * @returns {void}
+     */
+    applyAmpInputChannels() {
+      const monitored = this.monitorTrackId === null ? "" : this.monitorTrackId;
+      const channels = this.monitorChannels === 1 ? 1 : 2;
+      this.eachAmpRunner((runner) => {
+        if (!runner.insert || typeof runner.insert.setInputChannels !== "function") return;
+        runner.insert.setInputChannels(runner.trackId === monitored ? channels : 2);
+      });
     }
 
     /**
@@ -4101,6 +4236,10 @@
         kept.push(node);
       }
       owner.chain = kept;
+      // A blend that has folded (or a retired runner that has finished its fade)
+      // is gone: its amp insert's NAM instance is not needed any more, and a
+      // module kept alive for it during a rebuild can be destroyed now too.
+      this.pruneAmpInstances();
     }
 
     /**
@@ -4339,7 +4478,29 @@
     buildParallelChain(owner, specs, label, previous, fadeIn) {
       const fresh = [];
       for (let index = 0; index < specs.length; index += 1) {
-        fresh.push(this.newRunner(specs[index], label, owner, false));
+        const spec = specs[index];
+        const leaving = this.adoptAmpRunner(spec, previous);
+        if (leaving) {
+          // A reorder of an amp whose capture is already playing: MOVE its insert
+          // (and with it its NAM instance, converters, cabinet and state) to the
+          // arriving runner. The leaving runner becomes a pass-through for that
+          // amp, so the two paths of the blend never advance one NAM state twice
+          // and nothing has to be loaded while the song plays.
+          const runner = this.makeRunner(spec, label, owner);
+          runner.insert = leaving.insert;
+          runner.paramsKey = paramsKeyOf(spec.params);
+          runner.faulted = leaving.faulted === true;
+          runner.prime = 0;
+          runner.wet = 1;
+          runner.wetTarget = 1;
+          leaving.insert = null;
+          leaving.paramsKey = null;
+          leaving.faulted = false;
+          runner.insert.setParams(spec.params);
+          fresh.push(runner);
+          continue;
+        }
+        fresh.push(this.newRunner(spec, label, owner, false));
       }
       if (!fadeIn) {
         // Nothing plays, so nothing fades: the arriving chain is simply the one
@@ -4578,10 +4739,41 @@
      * @returns {object} the runner `runChainList` drives
      */
     newRunner(spec, label, owner, fadeIn) {
-      const runner = {
+      const runner = this.makeRunner(spec, label, owner);
+      if (runner.bypass) {
+        // A bypassed insert has nothing to run, so it has nothing to build
+        // either: an un-bypass builds it then (see `refreshRunner`).
+        runner.wet = 0;
+        runner.wetTarget = 0;
+        return runner;
+      }
+      this.attachInsert(runner, spec, owner, fadeIn);
+      // An insert that could not be built (still loading, or never buildable) is
+      // a pass-through at full weight: it is in the path, it just does nothing.
+      if (runner.insert === null) {
+        runner.wet = 1;
+        runner.wetTarget = 1;
+        runner.prime = 0;
+      }
+      return runner;
+    }
+
+    /**
+     * One runner's bookkeeping, before any insert is built. Kept separate so a
+     * reorder can hand an AMP insert from its leaving runner to an arriving one
+     * without building a second one (see `adoptAmpRunner`).
+     * @param {{id: string, kind: string, bypass: boolean, params: object}} spec
+     * @param {string} label
+     * @param {object} owner
+     * @returns {object}
+     */
+    makeRunner(spec, label, owner) {
+      return {
         id: asId(spec.id),
         kind: spec.kind,
         label: insertLabelOf(spec.kind),
+        /** The track this runner belongs to ("" for a return or the master). */
+        trackId: owner && owner.track_id !== undefined && owner.track_id !== null ? asId(owner.track_id) : "",
         bypass: spec.bypass === true,
         insert: null,
         faulted: false,
@@ -4603,22 +4795,42 @@
         /** Dropped by an edit: it fades out and `compactChain` lets it go. */
         retired: false,
       };
-      if (runner.bypass) {
-        // A bypassed insert has nothing to run, so it has nothing to build
-        // either: an un-bypass builds it then (see `refreshRunner`).
-        runner.wet = 0;
-        runner.wetTarget = 0;
+    }
+
+    /**
+     * The amp insert object a chain still holds for one spec, when the edit is a
+     * reorder of the SAME capture: the arriving runner takes the leaving
+     * runner's insert over — its NAM instance, its converters, its cabinet and
+     * all its state — instead of building a second one. Moving it is the only
+     * way a chain edit can keep an amp playing without loading a capture on the
+     * render thread (plan 1d, Task 13).
+     * @param {object} spec the arriving insert's spec
+     * @param {object[]} previous the chain this edit replaces
+     * @returns {object|null} the leaving runner, or null when there is nothing to move
+     */
+    adoptAmpRunner(spec, previous) {
+      if (spec.bypass === true || spec.kind !== AMP_KIND) return null;
+      const id = asId(spec.id);
+      const params = spec.params && typeof spec.params === "object" ? spec.params : {};
+      const modelId = asId(params.model_id);
+      if (modelId === "") return null;
+      const runners = [];
+      collectEveryRunner(previous, runners);
+      for (let index = 0; index < runners.length; index += 1) {
+        const runner = runners[index];
+        if (!runner || runner.id !== id || runner.kind !== AMP_KIND || !runner.insert) continue;
+        if (typeof runner.insert.captureId !== "function" || runner.insert.captureId() !== modelId) continue;
+        // Only an attachment that is really loaded (or one that is stopped) can
+        // be moved. An insert whose capture merely arrived in the document while
+        // a different one plays is parked, and must not carry the old instance
+        // into a spec that names the new capture.
+        if (typeof runner.insert.params === "function") {
+          const state = runner.insert.params();
+          if (!state || (state.attached !== true && state.failed !== true)) continue;
+        }
         return runner;
       }
-      this.attachInsert(runner, spec, owner, fadeIn);
-      // An insert that could not be built (still loading, or never buildable) is
-      // a pass-through at full weight: it is in the path, it just does nothing.
-      if (runner.insert === null) {
-        runner.wet = 1;
-        runner.wetTarget = 1;
-        runner.prime = 0;
-      }
-      return runner;
+      return null;
     }
 
     /**
@@ -4649,11 +4861,20 @@
       // wait for. Reading `latencyFrames` before the capture was attached would
       // always see 0.
       insert.setParams(spec.params);
+      // An amp that has nothing to play yet — a capture parked for Stop, one
+      // this device does not hold, or one that failed — is SILENT from its first
+      // block: fading it in from the dry signal would let the dry guitar through
+      // for 64 frames, which an amp may never do (Review Focus 1).
+      let silentAmp = false;
+      if (runner.kind === AMP_KIND && typeof insert.params === "function") {
+        const ampState = insert.params();
+        silentAmp = !!(ampState && ampState.model_id !== "" && ampState.attached !== true);
+      }
       // Its own delay runs off before its output is mixed in: a limiter fills its
       // lookahead from the incoming signal instead of starting with 72 frames of
       // the silence an empty delay line gives.
-      runner.prime = fadeIn && insert.latencyFrames > 0 ? insert.latencyFrames : 0;
-      runner.wet = fadeIn ? 0 : 1;
+      runner.prime = !silentAmp && fadeIn && insert.latencyFrames > 0 ? insert.latencyFrames : 0;
+      runner.wet = silentAmp ? 1 : fadeIn ? 0 : 1;
       runner.wetTarget = 1;
       // A build that worked clears both marks, so a fault or a missed module that
       // comes back later is reported again.
@@ -4743,8 +4964,10 @@
      *     capture or cabinet mid-performance is parked and applied on the next
      *     Stop ("Loads when you stop.", exactly as a library load is), so nothing
      *     re-parses a `.nam` or rebuilds an FFT while the playhead runs. A runner
-     *     built DURING playback (a chain edit's arriving path) still loads at
-     *     once: it has nothing playing yet.
+     *     built DURING playback (a chain edit's arriving path) is parked SILENT
+     *     until the next Stop ("Loads when you stop."), unless it is the same amp
+     *     the edit moved: then it takes that runner's already-loaded instance over
+     *     (see `adoptAmpRunner`), so a reorder loads nothing at all.
      *
      * The instance key is a per-OBJECT number, never the document's insert id: a
      * chain edit that fades an amp out and back in runs two runners for one insert
@@ -4791,6 +5014,12 @@
         failed: false,
         /** Whether that stop has been reported (one report per stop). */
         reported: false,
+        /**
+         * The armed track's input selection this insert decides its mono sum
+         * from: 1 for a one-channel input, 2 for a stereo pair (the default). It
+         * is fixed for the insert's life and never read from the signal itself.
+         */
+        inputChannels: 2,
         /** How many times this insert built its capture / its cabinet (for tests). */
         captureLoads: 0,
         cabinetLoads: 0,
@@ -4830,6 +5059,20 @@
       /** The converters around the capture, or null when the rates are equal. */
       let inBridge = null;
       let outBridge = null;
+      /**
+       * A module a rebuild has kept alive for this insert while it fades out: it
+       * keeps playing on the module its NAM instance lives on, so a rebuild never
+       * cuts a leaving amp. Null for an insert on the current module.
+       */
+      let hostOverride = null;
+
+      // The input selection the page's 1b arm says the track has. Only the amp
+      // on the monitored track reads a one-channel selection; a stored clip is
+      // always averaged. Fixed until the page changes the selection (a message,
+      // never a block) — never re-decided per 128-frame piece from its peaks.
+      const ownerTrack = owner && owner.track_id !== undefined && owner.track_id !== null ? asId(owner.track_id) : "";
+      state.inputChannels =
+        ownerTrack !== "" && processor.monitorTrackId === ownerTrack && processor.monitorChannels === 1 ? 1 : 2;
 
       /**
        * The scratch, made when a capture is attached: the dry pair at the
@@ -4887,6 +5130,20 @@
       }
 
       /**
+       * The shared NAM module has been rebuilt: this insert's instance died with
+       * the old module, so it has no capture until `attachCapture` runs again at
+       * the next Stop. The insert is SILENT meanwhile (never the dry signal).
+       * @returns {void}
+       */
+      function forgetModule() {
+        forgetCapture();
+        state.attached = false;
+        inBridge = null;
+        outBridge = null;
+        insert.latencyFrames = 0;
+      }
+
+      /**
        * Give this insert its capture: load it into its NAM instance, and build
        * the converters the capture's own rate needs. A capture this device does
        * not hold leaves the insert SILENT (never pass-through), and so does one
@@ -4919,6 +5176,22 @@
           // The very same capture, from the very same library bytes, with the
           // engine in the same state: this insert's instance is already playing
           // it, and touching it here is exactly the click this avoids.
+          return;
+        }
+        // Parsing a capture is only allowed while the transport is stopped. A
+        // runner built (or edited) DURING playback keeps no capture until Stop:
+        // it plays silence meanwhile, and "Loads when you stop." is the page's
+        // sentence for it. This is the one rule that keeps a chain edit from
+        // calling `_nam_loadModel`, building bridge tables, or rebuilding a
+        // cabinet's FFTs on the render thread.
+        const wouldLoad = id !== "" && failed === undefined && text !== undefined && ready;
+        if (wouldLoad && processor.sequencer.isPlaying()) {
+          parkedCapture = true;
+          state.attached = false;
+          state.reason = "";
+          inBridge = null;
+          outBridge = null;
+          insert.latencyFrames = 0;
           return;
         }
         attached.modelId = id;
@@ -4964,23 +5237,39 @@
               maxIn: INSERT_BLOCK,
               maxOut: scratch.capacity,
             });
+            // The two converters' delays are reported rounded up per converter.
+            // Passing the rounding remainder to the out-converter makes the PAIR
+            // delay by exactly the sum the insert reports, so a primed runner is
+            // aligned to the frame rather than to within one.
+            const inExact = inBridge.latencyFrames * (contextRate / state.captureRate);
+            const inFrames = Math.ceil(inExact);
             outBridge = StudioNamHost.createBridge({
               fromRate: state.captureRate,
               toRate: contextRate,
               maxIn: scratch.capacity,
               maxOut: INSERT_BLOCK,
+              extraDelayFrames: inFrames - inExact,
             });
             // Both converters really delay their audio (a symmetric kernel needs
             // look-ahead), and the runner system has to know by how much: the
             // in-converter's delay is counted at the capture's rate, the
             // out-converter's is in the context's frames already.
-            const inFrames = Math.ceil(inBridge.latencyFrames * (contextRate / state.captureRate));
             insert.latencyFrames = inFrames + outBridge.latencyFrames;
           }
         } catch (error) {
           state.attached = false;
           const reason = error && error.message ? error.message : String(error);
           state.reason = reason;
+          // A trap inside the wasm while the rebuild loads a capture belongs to
+          // THIS insert, not to the capture: the other amps that play the same
+          // file must not be marked failed with it. The module is poisoned and
+          // rebuilt for them; this insert stays silent, said once.
+          if (isNamTrap(error)) {
+            if (host && typeof host.poison === "function") host.poison();
+            stopPlaying("its capture could not be played");
+            processor.scheduleNamRebuild();
+            return;
+          }
           processor.reportCaptureFailure(id, reason);
         }
       }
@@ -5008,6 +5297,14 @@
           attached.pcm === (pcm === undefined ? null : pcm) &&
           attached.convolverReady === available
         ) {
+          return;
+        }
+        // A runner built during playback must not build an FFT on the render
+        // thread either: a cabinet it has never had waits for Stop, exactly as a
+        // capture does. A cabinet a LOAD changed on an amp that already had one
+        // is still built on the message path (the page's own cabinet arrival).
+        if (processor.sequencer.isPlaying() && !everAttachedCabinet && id !== "" && pcm !== undefined && available) {
+          parkedCabinet = true;
           return;
         }
         attached.irId = id;
@@ -5062,13 +5359,15 @@
       /**
        * The mono signal an amp's capture is handed, in `out`.
        *
-       * A pair of channels that both carry signal is AVERAGED (the usual (L+R)/2),
-       * but a single-channel source — and a stereo one with silence on a side,
-       * which is what one instrument on a stereo interface looks like — is summed
-       * UNSCALED: dividing by two there is a 6 dB loss, and that is exactly what a
-       * monitored input used to arrive with. The choice is made per piece from the
-       * piece's own peaks, so it cannot flip on a sample that happens to be zero,
-       * and it costs one pass plus one scale pass.
+       * The scale is decided by the armed track's INPUT SELECTION (1b), fixed for
+       * this insert's life — never by a piece's own peaks: a noisy or gated input
+       * used to flip between unscaled and half every few milliseconds, which is a
+       * 6 dB step on the render thread, and an input whose "silent" side was only
+       * quiet never took the one-sided branch at all. One input channel feeds its
+       * channel unscaled (the mono stream a browser hands over is the same signal
+       * on both sides); a stereo pair — which is also what a stored clip is — is
+       * the usual (L+R)/2. The default, when nothing has said otherwise, is the
+       * stereo average.
        * @param {Float32Array} leftIn
        * @param {Float32Array} rightIn
        * @param {number} count
@@ -5076,20 +5375,11 @@
        * @returns {void}
        */
       function monoSum(leftIn, rightIn, count, out) {
-        let peakLeft = 0;
-        let peakRight = 0;
-        for (let at = 0; at < count; at += 1) {
-          const a = leftIn[at];
-          const b = rightIn[at];
-          out[at] = a + b;
-          const magnitudeLeft = a < 0 ? -a : a;
-          const magnitudeRight = b < 0 ? -b : b;
-          if (magnitudeLeft > peakLeft) peakLeft = magnitudeLeft;
-          if (magnitudeRight > peakRight) peakRight = magnitudeRight;
+        if (state.inputChannels === 1) {
+          for (let at = 0; at < count; at += 1) out[at] = leftIn[at];
+          return;
         }
-        if (peakLeft > 0 && peakRight > 0) {
-          for (let at = 0; at < count; at += 1) out[at] *= 0.5;
-        }
+        for (let at = 0; at < count; at += 1) out[at] = (leftIn[at] + rightIn[at]) * 0.5;
       }
 
       /**
@@ -5117,7 +5407,7 @@
           ctxRight[at] = (stereo ? right[base + at] : inLeft) * inputGain;
         }
 
-        const host = processor.namHost;
+        const host = hostOverride !== null ? hostOverride : processor.namHost;
         let played = false;
         if (host !== null && state.attached) {
           try {
@@ -5157,9 +5447,12 @@
               }
             }
           } catch (error) {
-            // A trap inside the engine: THIS amp stops (silent, said once) and the
-            // shared module is rebuilt for the others on the message path. Nothing
-            // is allocated here and nothing is thrown on to the audio thread.
+            // A trap inside the engine: THIS amp stops (silent, said once), the
+            // shared module is marked poisoned (every other amp reads silence
+            // without being marked failed) and is rebuilt for them on the message
+            // path. Nothing is allocated here and nothing is thrown on to the
+            // audio thread.
+            if (typeof host.poison === "function") host.poison();
             stopPlaying("its capture could not be played");
             processor.scheduleNamRebuild();
             played = false;
@@ -5320,6 +5613,35 @@
         forgetCapture: forgetCapture,
 
         /**
+         * The shared module was rebuilt: this insert is silent (and needs no
+         * capture loaded) until the next Stop re-attaches it.
+         * @returns {void}
+         */
+        forgetModule: forgetModule,
+
+        /**
+         * Keep this insert playing on the module its instance is already on
+         * while it fades out across a rebuild (no cut). The old module is
+         * destroyed once no chain holds the insert any more.
+         * @param {object|null} host
+         * @returns {void}
+         */
+        holdHost: function holdHost(host) {
+          hostOverride = host;
+        },
+
+        /**
+         * The armed track's 1b input selection: 1 for a one-channel input, 2 for
+         * a stereo pair. Set from the page's message path only, and fixed in
+         * between — never read from the audio itself.
+         * @param {number} channels
+         * @returns {void}
+         */
+        setInputChannels: function setInputChannels(channels) {
+          state.inputChannels = Number(channels) === 1 ? 1 : 2;
+        },
+
+        /**
          * Stop this amp for good (silence, one report): the NaN guard's route to
          * Review Focus 1. A capture that cannot be played is silence, never the
          * dry signal, so this does not `reset()` and does not bypass to dry.
@@ -5345,6 +5667,7 @@
             converted: inBridge !== null,
             failed: state.failed,
             parked: parkedCapture || parkedCabinet,
+            input_channels: state.inputChannels,
             latency_frames: insert.latencyFrames,
             capture_loads: state.captureLoads,
             cabinet_loads: state.cabinetLoads,

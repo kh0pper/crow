@@ -161,9 +161,11 @@
  *   and the chains then instantiate inserts from (plan 1d, Task 7). `nam-wasm`
  *   is the same for the NAM engine's binary (`vendor/nam/`, Task 13): one
  *   compile per page, one instance per amp insert inside it.
- * - `monitor(track_id, on)` runs the signal connected to this node's own INPUT
- *   through that track's inserts (amps included) and its fader, so the operator
- *   hears themselves through the chain while the take is still recorded dry;
+ * - `monitor(track_id, on, channels)` runs the signal connected to this node's
+ *   own INPUT through that track's inserts (amps included) and its fader, so the
+ *   operator hears themselves through the chain while the take is still recorded
+ *   dry; `channels` is the armed track's 1b input selection (1 for a
+ *   one-channel input, 2 for a stereo pair) and decides an amp's mono sum.
  *   `onMonitorLatency(listener)` follows `{track_id, ms}`, the delay the chain
  *   itself adds, for the page to add to the round trip it shows.
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
@@ -2284,10 +2286,18 @@
        * the recorder taps the input, not this engine.
        * @param {string} trackId
        * @param {boolean} on
+       * @param {number} [channels] the armed track's 1b input selection: 1 for a
+       *   one-channel input, anything else (or nothing) for a stereo pair. An
+       *   amp's mono sum is decided from this, never from the signal's peaks.
        * @returns {void}
        */
-      monitor(trackId, on) {
-        post({ type: "monitor", track_id: String(trackId), on: on === true });
+      monitor(trackId, on, channels) {
+        post({
+          type: "monitor",
+          track_id: String(trackId),
+          on: on === true,
+          channels: Number(channels) === 1 ? 1 : 2,
+        });
       },
 
       /**
