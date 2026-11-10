@@ -76,8 +76,8 @@ import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeImageChanges, composeOverrideFiles, expandComposeVars, hostGrants, normalizeHostGrants, parseDotEnv, requiredComposeVars } from "../compose-guard.js";
-import { COMPOSE_EDITED_FILE, COMPOSE_IMAGE_CHANGE_FILE, COMPOSE_NEEDS_CONFIG_FILE, COMPOSE_SHA_FILE, COMPOSE_STATE_FILE, clearComposeEdited, clearComposeImageChange, clearComposeNeedsConfig, composeInPastCommits, markComposeEdited, markComposeImageChange, markComposeNeedsConfig, readComposeEdited, readComposeImageChange, readComposeState, readRecordedComposeSha, recordInstalledCompose, sha256, writeComposeState } from "../bundle-compose-state.js";
+import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeImageChanges, composeOverrideFiles, expandComposeVars, hostGrants, missingRequiredComposeVars, normalizeHostGrants, parseDotEnv } from "../compose-guard.js";
+import { COMPOSE_EDITED_FILE, COMPOSE_IMAGE_CHANGE_FILE, COMPOSE_NEEDS_CONFIG_FILE, COMPOSE_SHA_FILE, COMPOSE_STATE_FILE, beginComposeHistoryPass, clearComposeEdited, clearComposeImageChange, clearComposeNeedsConfig, clearComposeState, composeInPastCommits, markComposeEdited, markComposeImageChange, markComposeNeedsConfig, readComposeEdited, readComposeImageChange, readComposeState, readRecordedComposeSha, recordInstalledCompose, sha256, writeComposeState } from "../bundle-compose-state.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -736,14 +736,17 @@ const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "no
  *   verdict cached for this pair       reuse it: steady-state boots only hash files.
  *   otherwise                          ONE bounded history lookup (`git log --raw`,
  *                                      one call, blob ids compared in Node): a hit
- *                                      means unmodified → copy; no hit means edited;
- *                                      git cannot answer means unknown.
+ *                                      means unmodified → copy; a lookup that
+ *                                      cannot answer, or has no entry for the path
+ *                                      at all (a bundle folder git does not track),
+ *                                      means unknown; no hit means edited.
  *
  *   edited     the installed bytes match nothing the checkout shipped: left exactly as
  *              it is, marked (`.crow-compose.edited`) for the Fix-it card, logged by
  *              bundle name only.
- *   unknown    no git / no checkout / a timeout: nothing is copied and NO edit mark is
- *              written (we do not know), one log line.
+ *   unknown    no git / no checkout / a timeout / a path the checkout does not track:
+ *              nothing is copied and NO edit mark is written (we do not know), one log
+ *              line. Never cached, so the next boot decides again.
  *   needs-config the shipped compose requires a `${X:?…}` the installed .env does not
  *              set: copying it would break Start, so the old copy stays and a card
  *              names the key to set first.
@@ -755,7 +758,9 @@ const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "no
  *              The restart-to-apply card then appears as usual.
  *
  * The verdict is cached in `.crow-compose.state.json` for the (installed bytes, repo
- * compose) pair, so a given pair costs at most one git call — ever.
+ * compose) pair, so a given pair costs at most one git call — ever. `unknown` is the
+ * exception: it is not a decision, so it is never cached, and after the first lookup
+ * in a boot pass that cannot answer, the rest of that pass runs no git at all.
  *
  * Owner-specific settings belong in `docker-compose.override.yml`, which Crow never
  * writes, reads as part of the live model and does not include here. An installed copy
@@ -807,17 +812,24 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     verdict = "match";
   } else {
     const cached = readComposeState(destDir);
-    if (cached && cached.installedSha === installedSha && cached.repoComposeSha === repoComposeSha && cached.verdict) {
+    // "unknown" is never a decision: a record that says so (an older version wrote
+    // it) must not make "Crow could not tell" permanent for this pair.
+    if (cached && cached.installedSha === installedSha && cached.repoComposeSha === repoComposeSha && cached.verdict && cached.verdict !== "unknown") {
       verdict = cached.verdict;
     }
   }
 
   // 3. Nothing cached for this exact pair: ONE bounded history lookup decides between
-  //    "unmodified" and "owner edit". Unavailable history is `unknown`, never `edited`.
+  //    "unmodified" and "owner edit". Unavailable history (and a path the checkout does
+  //    not track at all) is `unknown`, never `edited`.
   if (!verdict) {
     const hit = await composeInPastCommits({ appRoot: repoRoot, bundleId: id, composeRel, bytes: installedBytes, runner });
     if (hit === null) {
-      writeComposeState(destDir, { installedSha, repoComposeSha, verdict: "unknown" });
+      // Never cached: the next boot asks again (one git call per boot at most).
+      clearComposeState(destDir);
+      // No hold is in effect: this boot could not decide, so an image-change note
+      // from an earlier pair would claim a reason that no longer applies.
+      clearComposeImageChange(destDir);
       log(`[bundles] ${id}: cannot tell whether the installed ${composeRel} has local changes (git history unavailable) — left as it is`);
       return "unknown";
     }
@@ -825,12 +837,6 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     writeComposeState(destDir, { installedSha, repoComposeSha, verdict });
   }
 
-  if (verdict === "unknown") {
-    // No hold is in effect: this boot could not decide, so an image-change note
-    // from an earlier pair would claim a reason that no longer applies.
-    clearComposeImageChange(destDir);
-    return "unknown";
-  }
   if (verdict === "edited") {
     clearComposeImageChange(destDir);
     if (!readComposeEdited(destDir)) {
@@ -853,7 +859,7 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
   // 5. A refresh must never break Start: a compose that requires a variable the
   //    installed .env cannot fill is not copied. The old copy keeps working and the
   //    Fix-it card names the key to set first; the next boot retries.
-  const missing = missingRequiredKeys(repoBytes.toString("utf8"), {
+  const missing = missingRequiredComposeVars(repoBytes.toString("utf8"), {
     dotEnv: parseDotEnv(join(destDir, ".env")),
     env: process.env,
   });
@@ -879,19 +885,6 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
   clearComposeNeedsConfig(destDir);
   clearComposeImageChange(destDir);
   return "copied";
-}
-
-/**
- * The required `${X:?…}` keys a compose text needs that neither the installed .env nor
- * the environment the gateway hands to `docker compose` can fill (a blank value fails
- * the `${X:?}` form too, so blank counts as missing). Names only, never values.
- */
-function missingRequiredKeys(text, { dotEnv = {}, env = {} } = {}) {
-  const set = (k) => {
-    const v = dotEnv[k] !== undefined && dotEnv[k] !== null ? dotEnv[k] : env[k];
-    return v !== undefined && v !== null && String(v).trim() !== "";
-  };
-  return requiredComposeVars(text).filter((k) => !set(k));
 }
 
 /**
@@ -1271,6 +1264,9 @@ export async function backfillBundleKeychain({ log = (m) => console.log(`[keycha
 }
 
 export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run, skillMode = skillSyncMode(), skillLedger = null, log = (m) => console.log(m), env = process.env, migrateLinked = null } = {}) {
+  // This is one boot pass for the compose history lookups: a git that hangs or
+  // cannot answer costs ONE timeout per pass, not one per installed bundle.
+  beginComposeHistoryPass();
   const repaired = [];
   const errors = [];
 

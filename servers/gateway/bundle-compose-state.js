@@ -17,9 +17,11 @@
  *                              steady-state boot only hashes two files and runs
  *                              no git. verdict is one of "match" (the installed
  *                              bytes are a version the checkout ships),
- *                              "edited" (they are not), "unknown" (git could not
- *                              answer) or "needs-config" (the shipped compose
- *                              needs a key the installed .env does not set).
+ *                              "edited" (they are not) or "needs-config" (the
+ *                              shipped compose needs a key the installed .env
+ *                              does not set). "unknown" is NEVER cached: git could
+ *                              not answer, which is no decision at all, so the
+ *                              next boot asks again instead of remembering it.
  *   .crow-compose.edited       present while the installed compose matched
  *                              neither the recorded sha nor any past commit: an
  *                              owner edit, left as is and surfaced on a Fix-it
@@ -55,7 +57,11 @@ export const COMPOSE_STATE_FILE = ".crow-compose.state.json";
 export const COMPOSE_NEEDS_CONFIG_FILE = ".crow-compose.needs-config";
 export const COMPOSE_IMAGE_CHANGE_FILE = ".crow-compose.image-change";
 
-/** The verdicts a state record may carry (anything else is a stale/foreign file). */
+/**
+ * The verdicts a state record may carry (anything else is a stale/foreign file).
+ * "unknown" is read so an older version's record is understood (and then dropped),
+ * never written.
+ */
 export const COMPOSE_VERDICTS = Object.freeze(["match", "edited", "unknown", "needs-config", "image-change"]);
 
 /** How many past commits of the checkout are searched for an unmodified compose. */
@@ -63,6 +69,25 @@ export const COMPOSE_HISTORY_COMMITS = 200;
 
 /** Time bound for one git call (never a git process without one). */
 export const COMPOSE_GIT_TIMEOUT_MS = 20_000;
+
+/**
+ * Whether git history has already failed to decide in THIS boot pass. A hanging or
+ * missing git costs one attempt per pass, not one per installed bundle: after the
+ * first lookup that cannot answer (git failed, or the checkout does not track the
+ * path), every later bundle in the pass is `unknown` at once (see
+ * beginComposeHistoryPass, called by the boot repair).
+ */
+let historyDownThisPass = false;
+
+/** Start one boot pass: the next history lookup may run git again. */
+export function beginComposeHistoryPass() {
+  historyDownThisPass = false;
+}
+
+/** Whether this pass has already given up on git history. */
+export function composeHistoryIsDown() {
+  return historyDownThisPass;
+}
 
 export function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
@@ -147,6 +172,16 @@ export function writeComposeState(destDir, { installedSha, repoComposeSha, verdi
   writeFileAtomic(join(destDir, COMPOSE_STATE_FILE), `${JSON.stringify({ installedSha, repoComposeSha, verdict })}\n`);
 }
 
+/**
+ * Drop the cached verdict for an installed bundle. Used when the answer is
+ * `unknown`: that verdict must never be cached (a record would make "Crow could
+ * not tell" permanent for a pair of files), so a record from an older boot or an
+ * older version is removed rather than left to be read again.
+ */
+export function clearComposeState(destDir) {
+  rmSync(join(destDir, COMPOSE_STATE_FILE), { force: true });
+}
+
 /** Note the shipped compose was not copied: Start would fail on a blank `${X:?}`. */
 export function markComposeNeedsConfig(destDir, { compose, missing }) {
   writeFileAtomic(join(destDir, COMPOSE_NEEDS_CONFIG_FILE), `${JSON.stringify({ compose, missing })}\n`);
@@ -212,7 +247,8 @@ export function clearComposeImageChange(destDir) {
  * `null` when git cannot answer (no `.git`, git missing, an unreadable
  * checkout, a timeout): the caller must treat that as "unknown", never as
  * "no match". An answer with no rows means the checkout has no history for the
- * path at all, which IS a definite "not a shipped version".
+ * path at all — a bundle folder git does not track — which says nothing about
+ * the installed bytes either, so it is `unknown` too (see composeInPastCommits).
  *
  * @param {object} o
  * @param {string} o.appRoot    the repo checkout (git -C)
@@ -250,11 +286,22 @@ export async function composeBlobIdsInHistory({ appRoot, bundleId, composeRel, r
  * on a CRLF host shipped the same compose.
  *
  * @returns {Promise<boolean|null>} true / false, or null when history is
- *   unavailable (see composeBlobIdsInHistory) — never conflated with "edited".
+ *   unavailable (see composeBlobIdsInHistory) or has no entry for this path —
+ *   never conflated with "edited".
  */
 export async function composeInPastCommits({ appRoot, bundleId, composeRel, bytes, runner, maxCommits, timeoutMs }) {
+  // A git that FAILED (missing, unreadable repo, timeout) is down for the rest of this
+  // boot pass, so a hanging git costs one timeout per boot, not one per bundle.
+  if (historyDownThisPass) return null;
   const ids = await composeBlobIdsInHistory({ appRoot, bundleId, composeRel, runner, maxCommits, timeoutMs });
-  if (ids === null) return null;
+  if (ids === null) {
+    historyDownThisPass = true;
+    return null;
+  }
+  // An empty set is a checkout that does not track THIS bundle folder: it cannot tell
+  // a shipped version from an owner edit, so it is not an edit. Git itself answered,
+  // so the other bundles still get their own lookup.
+  if (ids.size === 0) return null;
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(String(bytes ?? ""), "utf8");
   if (ids.has(gitBlobId(buf))) return true;
   const lf = Buffer.from(buf.toString("utf8").split("\r\n").join("\n"), "utf8");

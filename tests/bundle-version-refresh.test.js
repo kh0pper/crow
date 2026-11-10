@@ -1154,7 +1154,7 @@ describe("default compose refresh (N8-1)", () => {
   // ---------------------------------------------------------------------
   // History unavailable is `unknown`, never `edited`.
   // ---------------------------------------------------------------------
-  test("git throwing is `unknown`: nothing copied, no edited mark, no card, one log line", async () => {
+  test("git throwing is `unknown`: nothing copied, no edited mark, no card, one log line, nothing cached", async () => {
     const id = "dc-unknown";
     const repoRoot = setup(id); // no record
     const lines = [];
@@ -1169,25 +1169,66 @@ describe("default compose refresh (N8-1)", () => {
     assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.sha256")), "no record is written either");
     assert.equal(lines.filter((l) => l.includes("git history unavailable")).length, 1, "one log line");
     assert.ok(!lines.some((l) => l.includes("move your changes into")), "never reported as an owner edit");
-    assert.deepEqual(stateAt(id), { installedSha: sha(COMPOSE_V1), repoComposeSha: sha(COMPOSE_V2), verdict: "unknown" });
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")), "`unknown` is never cached");
 
-    // The cached `unknown` costs no second git call, and logs nothing again.
+    // Because it is not cached, the NEXT boot asks git again instead of
+    // remembering "cannot tell" for good.
     const second = fakeRunner();
     const again = [];
     await repairInstalledBundleAssets({ appBundles: repoRoot, run: second, log: (m) => again.push(m) });
-    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 0);
-    assert.deepEqual(again, []);
+    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 1, "the retry runs git again");
+    assert.equal(again.filter((l) => l.includes("git history unavailable")).length, 1);
     assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")));
   });
 
-  test("an empty history for the path is a definite no-match (edited), not `unknown`", async () => {
+  test("one unavailable git stops the history lookups for the rest of the boot pass", async () => {
+    const idA = "dc-down-a";
+    const idB = "dc-down-b";
+    const repoRoot = setup(idA);
+    // A second installed docker bundle in the same state: no record, no cache.
+    put(repoRoot, `${idB}/manifest.json`, JSON.stringify({
+      id: idB, name: "Web", version: "2.0.0", type: "bundle", category: "misc", description: "d", docker: { composefile: "docker-compose.yml" },
+    }));
+    put(repoRoot, `${idB}/docker-compose.yml`, COMPOSE_V2);
+    put(CROW_HOME, `bundles/${idB}/manifest.json`, JSON.stringify({ id: idB, version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    put(CROW_HOME, `bundles/${idB}/docker-compose.yml`, COMPOSE_V1);
+    setInstalled([idA, idB]);
+
+    const gitCalls = [];
+    const hanging = async (cmd, args) => {
+      if (cmd === "git") { gitCalls.push(args.join(" ")); throw new Error("git: timed out"); }
+      return { stdout: "", stderr: "" };
+    };
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: hanging, log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(gitCalls.length, 1, "one git call for the whole boot pass, not one per bundle");
+    for (const id of [idA, idB]) {
+      assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, `${id}: nothing is copied`);
+      assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), `${id}: no edit mark`);
+      assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")), `${id}: no cached unknown`);
+    }
+  });
+
+  test("an empty history for the path is `unknown`, not an edit", async () => {
     const id = "dc-nohistory";
     const repoRoot = setup(id);
     const runner = historyRunner(id, []);
     const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
     assert.deepEqual(errors, []);
-    assert.ok(existsSync(join(destBundleDir(id), ".crow-compose.edited")));
-    assert.equal(stateAt(id).verdict, "edited");
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V1, "nothing is copied");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.edited")), "a folder git does not track is no edit");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.state.json")), "`unknown` is never cached");
+    assert.equal(runner.calls.filter((c) => c.cmd === "git").length, 1, "the lookup did run");
+  });
+
+  test("an untracked bundle's empty history does not stop the next bundle's lookup in the same boot", async () => {
+    const { beginComposeHistoryPass, composeInPastCommits } = await import("../servers/gateway/bundle-compose-state.js");
+    beginComposeHistoryPass();
+    const empty = historyRunner("untracked-one", []);
+    assert.equal(await composeInPastCommits({ appRoot: "/repo", bundleId: "untracked-one", composeRel: "docker-compose.yml", bytes: Buffer.from(COMPOSE_V1), runner: empty }), null);
+    const tracked = historyRunner("tracked-two", [COMPOSE_V1]);
+    assert.equal(await composeInPastCommits({ appRoot: "/repo", bundleId: "tracked-two", composeRel: "docker-compose.yml", bytes: Buffer.from(COMPOSE_V1), runner: tracked }), true, "git still answers for the tracked bundle");
+    assert.equal(tracked.calls.filter((c) => c.cmd === "git").length, 1);
   });
 
   // ---------------------------------------------------------------------

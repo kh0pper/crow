@@ -21,7 +21,10 @@
  *                      bind is WIDE while the REPO's compose binds that port to a
  *                      specific IP: the owner's own file is what keeps it open, so
  *                      a restart would not help. Never raised for a port the owner
- *                      declared in an override file (widened on purpose).
+ *                      declared in an override file (widened on purpose). `unknown`
+ *                      is never cached by the boot catch-up (an undecidable boot
+ *                      writes nothing and drops the record), so it only comes from
+ *                      a record an older install still carries.
  *   needs config       the shipped compose needs a `${X:?…}` the installed .env
  *                      does not set. Copying it would break Start, so the old copy
  *                      stays and the card names the key to set first.
@@ -45,7 +48,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { APP_BUNDLES, CROW_HOME, manifestComposeFile } from "../../bundles-config.js";
-import { composeEnv, composeOverrideFiles, composePortExpectations, composePublishedPorts, parseDotEnv, portBindDrift } from "../../compose-guard.js";
+import { composeEnv, composeOverrideFiles, composePortExpectations, parseDotEnv, portBindDrift, portExpectationsFor } from "../../compose-guard.js";
 import { composeProjectName } from "../../bundle-lifecycle.js";
 import { dockerRunner, readInstalled } from "../../bundle-core.js";
 import { readComposeEdited, readComposeImageChange, readComposeNeedsConfig, readComposeState, sha256 } from "../../bundle-compose-state.js";
@@ -234,17 +237,20 @@ async function resolveCard(store, source, key) {
 }
 
 /**
- * The `containerPort/protocol` publishes an installed override file declares. An
- * override is the owner's own widening of a port Crow never writes, so a port it
- * names is skipped by the repo-tighter card: the owner chose it on purpose.
+ * The published ports the installed override files declare, as the same expectation
+ * map the drift comparison uses. An override is the owner's own widening of a port
+ * Crow never writes, so a port it names is skipped by the repo-tighter card: the
+ * owner chose it on purpose (a range in the override covers the running ports inside
+ * it, exactly as the compose side does).
  */
-function overrideDeclaredPorts(compose) {
-  const ports = new Set();
-  for (const text of compose.overrideTexts) {
-    for (const p of composePublishedPorts(text, compose.env)) ports.add(`${p.containerPort}/${p.protocol}`);
-  }
-  return ports;
+function overridePortExpectations(compose) {
+  return compose.overrideTexts.length > 0 ? composePortExpectations(compose.overrideTexts.join("\n"), compose.env) : {};
 }
+
+const ownerDeclared = (expectations, drift) => portExpectationsFor(expectations, {
+  containerPort: drift.containerPort,
+  protocol: drift.protocol,
+}).length > 0;
 
 export default {
   source: SOURCE,
@@ -380,6 +386,8 @@ export default {
 
       // ── running wider than the REPO's compose, while the installed file is one
       //    Crow cannot refresh: a restart cannot fix this one.
+      //    A cached `unknown` is a leftover (the catch-up never writes one): the next
+      //    boot drops the record, so this branch answers itself away.
       const state = readComposeState(dir);
       const verdict = edited
         ? "edited"
@@ -396,14 +404,14 @@ export default {
         continue;
       }
       const repo = readRepoCompose({ repoBundles, id });
-      const ownerWidened = overrideDeclaredPorts(compose);
+      const ownerWidened = overridePortExpectations(compose);
       // A port the INSTALLED file already narrows is the drift card's job: a restart
       // applies it, so saying "a restart won't change that" would contradict it.
       const appliesOnRestart = new Set(drifted.map((d) => `${d.containerPort}/${d.protocol}`));
       const repoDrift = repo
         ? portBindDrift({ expected: composePortExpectations(repo.text, compose.env), running })
           .filter((d) => d.kind === "wider"
-            && !ownerWidened.has(`${d.containerPort}/${d.protocol}`)
+            && !ownerDeclared(ownerWidened, d)
             && !appliesOnRestart.has(`${d.containerPort}/${d.protocol}`))
         : [];
       if (repoDrift.length === 0) {

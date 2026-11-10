@@ -15,7 +15,7 @@
  */
 import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -35,6 +35,12 @@ let COMPOSE_IMAGE_CHANGE_SOURCE;
 let LINK_REMEDIES;
 let linkRemedyTarget;
 let BOOT_CHECK_DETECTORS;
+let REMEDY_FLASHES;
+let OWNER_ONLY_FLASH;
+let OWNER_ONLY_MESSAGE;
+let NEEDS_KEY_FLASH;
+let NEEDS_KEY_MESSAGE;
+let buildNestHTML;
 let restoreCompose;
 let APPLY_UPDATE_ACTION_ID;
 let registry;
@@ -58,10 +64,16 @@ before(async () => {
   LINK_REMEDIES = idx.LINK_REMEDIES;
   linkRemedyTarget = idx.linkRemedyTarget;
   BOOT_CHECK_DETECTORS = idx.BOOT_CHECK_DETECTORS;
+  REMEDY_FLASHES = idx.REMEDY_FLASHES;
   const remedy = await import("../servers/gateway/fix-it/remedies/restore-bundle-compose.js");
   restoreCompose = remedy.default;
   APPLY_UPDATE_ACTION_ID = remedy.APPLY_UPDATE_ACTION_ID;
+  OWNER_ONLY_FLASH = remedy.OWNER_ONLY_FLASH;
+  OWNER_ONLY_MESSAGE = remedy.OWNER_ONLY_MESSAGE;
+  NEEDS_KEY_FLASH = remedy.NEEDS_KEY_FLASH;
+  NEEDS_KEY_MESSAGE = remedy.NEEDS_KEY_MESSAGE;
   setOwnerCheck = remedy._setOwnerCheckForTest;
+  ({ buildNestHTML } = await import("../servers/gateway/dashboard/panels/nest/html.js"));
   registry = await import("../servers/shared/fix-it/registry.js");
   idx.wireFixIt();
   ({ _setAppBundlesForTest: setAppBundles } = await import("../servers/gateway/bundles-config.js"));
@@ -376,20 +388,37 @@ describe("only wide publishes are carded", () => {
     assert.ok(store.resolved.includes(`${SOURCE}|bundle:drift-extra-loopback`));
   });
 
-  test("a port range is skipped, never carded port by port", async () => {
-    bundle("drift-range", compose);
+  test("a wide running port inside a compose range bound to loopback is drift", async () => {
+    bundle("drift-range", 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:8000-8002:8000-8002"\n');
     setInstalled([{ id: "drift-range" }]);
     const store = fakeStore();
+    // `docker inspect` reports one key per published port, never a range.
     const runner = dockerStub({
       inspect: inspected({
-        "5000/tcp": [{ HostIp: "127.0.0.1", HostPort: "8555" }],
-        "8000-8002/tcp": [{ HostIp: WIDE, HostPort: "8000-8002" }],
+        "8000/tcp": [{ HostIp: "127.0.0.1", HostPort: "8000" }],
+        "8001/tcp": [{ HostIp: WIDE, HostPort: "8001" }],
+        "8002/tcp": [{ HostIp: "127.0.0.1", HostPort: "8002" }],
       }),
     });
 
     await detector.check(store, { crowHome: home, runner, log: silent });
 
-    assert.deepEqual(store.upserts, [], "a range is not compared port by port");
+    assert.equal(store.upserts.length, 1, "the port inside the range is compared, not the range text");
+    assert.equal(store.upserts[0].source, SOURCE);
+    assert.equal(store.upserts[0].context.bind, "0.0.0.0:8001");
+    assert.equal(store.upserts[0].context.containerPort, "8001/tcp");
+  });
+
+  test("a wide running port inside a range the compose publishes wide is not drift", async () => {
+    bundle("drift-range-wide", 'services:\n  web:\n    image: x\n    ports:\n      - "8000-8002:8000-8002"\n');
+    setInstalled([{ id: "drift-range-wide" }]);
+    const store = fakeStore();
+    const runner = dockerStub({ inspect: inspected({ "8001/tcp": [{ HostIp: WIDE, HostPort: "8001" }] }) });
+
+    await detector.check(store, { crowHome: home, runner, log: silent });
+
+    assert.deepEqual(store.upserts, [], "a range declared wide covers a wide running port");
+    assert.ok(store.resolved.includes(`${SOURCE}|bundle:drift-range-wide`));
   });
 
   test("two services sharing a container port do not mask each other", async () => {
@@ -688,11 +717,32 @@ describe("the apply-the-update remedy", () => {
     try {
       const out = await restoreCompose({ bundle: "apply-me" }, { db: null, item: null });
       assert.equal(out.resolved, false);
-      assert.match(out.message, /Only the owner/);
+      assert.equal(out.flash, OWNER_ONLY_FLASH, "the refusal is a flash the Nest can render");
+      assert.equal(out.message, "Only the owner, signed in on this Crow, can do that.");
       assert.equal(readFileSync(join(home, "bundles/apply-me/docker-compose.yml"), "utf8"), INSTALLED_LATEST);
       assert.equal(existsSync(join(home, "bundles/apply-me/docker-compose.yml.bak")), false);
       assert.ok(existsSync(join(home, "bundles/apply-me/.crow-compose.image-change")), "the hold note stays");
     } finally { setAppBundles(originalAppBundles); }
+  });
+
+  test("refuses a shipped compose that needs a key the installed .env does not set", async () => {
+    const repoRoot = fixture();
+    const needsKey = 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:${CROWTEST_NEEDED_KEY:?set it}:5000"\n';
+    put(repoRoot, "apply-me/docker-compose.yml", needsKey);
+    setAppBundles(repoRoot);
+    setOwnerCheck(async () => true);
+    try {
+      const out = await restoreCompose({ bundle: "apply-me" }, { db: null, item: null });
+      assert.equal(out.resolved, false);
+      assert.equal(out.flash, NEEDS_KEY_FLASH);
+      assert.equal(out.message, "set CROWTEST_NEEDED_KEY on the Extensions card first");
+      assert.equal(readFileSync(join(home, "bundles/apply-me/docker-compose.yml"), "utf8"), INSTALLED_LATEST, "nothing is copied");
+      assert.equal(existsSync(join(home, "bundles/apply-me/docker-compose.yml.bak")), false, "no backup either");
+      assert.ok(existsSync(join(home, "bundles/apply-me/.crow-compose.image-change")), "the hold note stays");
+    } finally {
+      setAppBundles(originalAppBundles);
+      setOwnerCheck(null);
+    }
   });
 
   test("writes <compose>.bak, applies Crow's copy, records it and clears every note", async () => {
@@ -758,10 +808,72 @@ describe("the restore-compose remedy", () => {
     try {
       const out = await restoreCompose({ bundle: "restore-me" }, { db: null, item: null });
       assert.equal(out.resolved, false);
-      assert.match(out.message, /Only the owner/);
+      assert.equal(out.flash, OWNER_ONLY_FLASH, "the refusal is a flash the Nest can render");
+      assert.equal(out.message, OWNER_ONLY_MESSAGE);
       assert.equal(readFileSync(join(home, "bundles/restore-me/docker-compose.yml"), "utf8"), OWNER_COMPOSE);
       assert.equal(existsSync(join(home, "bundles/restore-me/docker-compose.yml.bak")), false);
     } finally { setAppBundles(originalAppBundles); }
+  });
+
+  test("the owner-only flash is one of the codes a remedy may send, and the Nest says so", () => {
+    assert.ok(REMEDY_FLASHES.includes(OWNER_ONLY_FLASH));
+    const html = buildNestHTML({
+      pinnedItems: [], bundles: [], instances: [], trustedInstances: [], peerOverviews: [],
+      ssoEnabled: false, healthSignals: null, flash: OWNER_ONLY_FLASH,
+    }, "en");
+    assert.ok(html.includes("Only the owner, signed in on this Crow, can do that."));
+  });
+
+  test("refuses a compose that needs a key the installed .env does not set, naming it", async () => {
+    const repoRoot = fixture();
+    const needsKey = 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:${CROWTEST_NEEDED_KEY:?set it}:5000"\n';
+    put(repoRoot, "restore-me/docker-compose.yml", needsKey);
+    setAppBundles(repoRoot);
+    setOwnerCheck(async () => true);
+    try {
+      // Precondition: the installed .env does NOT set the key.
+      put(home, "bundles/restore-me/.env", "OTHER_KEY=1\n");
+      const out = await restoreCompose({ bundle: "restore-me" }, { db: null, item: null });
+      assert.equal(out.resolved, false);
+      assert.equal(out.flash, NEEDS_KEY_FLASH);
+      assert.equal(out.message, "set CROWTEST_NEEDED_KEY on the Extensions card first");
+      assert.equal(readFileSync(join(home, "bundles/restore-me/docker-compose.yml"), "utf8"), OWNER_COMPOSE, "nothing is copied");
+      assert.equal(existsSync(join(home, "bundles/restore-me/docker-compose.yml.bak")), false, "no backup either");
+      assert.equal(existsSync(join(home, "bundles/restore-me/.crow-compose.sha256")), false, "no record is written");
+      assert.ok(existsSync(join(home, "bundles/restore-me/.crow-compose.edited")), "the card's note stays");
+      assert.ok(REMEDY_FLASHES.includes(NEEDS_KEY_FLASH));
+      const html = buildNestHTML({
+        pinnedItems: [], bundles: [], instances: [], trustedInstances: [], peerOverviews: [],
+        ssoEnabled: false, healthSignals: null, flash: NEEDS_KEY_FLASH, flashKey: "CROWTEST_NEEDED_KEY",
+      }, "en");
+      assert.ok(html.includes("set CROWTEST_NEEDED_KEY on the Extensions card first"));
+      const hostile = buildNestHTML({
+        pinnedItems: [], bundles: [], instances: [], trustedInstances: [], peerOverviews: [],
+        ssoEnabled: false, healthSignals: null, flash: NEEDS_KEY_FLASH, flashKey: "<script>alert(1)</script>",
+      }, "en");
+      assert.ok(hostile.includes(NEEDS_KEY_MESSAGE), "a key that is not a key is never shown");
+      assert.equal(hostile.includes("alert(1)"), false);
+    } finally {
+      setAppBundles(originalAppBundles);
+      setOwnerCheck(null);
+    }
+  });
+
+  test("keeps the installed compose's mode for the restored file and its .bak", async () => {
+    const repoRoot = fixture();
+    setAppBundles(repoRoot);
+    setOwnerCheck(async () => true);
+    try {
+      const dst = join(home, "bundles/restore-me/docker-compose.yml");
+      chmodSync(dst, 0o640);
+      const out = await restoreCompose({ bundle: "restore-me" }, { db: null, item: null });
+      assert.equal(out.resolved, true);
+      assert.equal(statSync(dst).mode & 0o777, 0o640, "the restored compose keeps the owner's mode");
+      assert.equal(statSync(join(home, "bundles/restore-me/docker-compose.yml.bak")).mode & 0o777, 0o640, "so does the .bak");
+    } finally {
+      setAppBundles(originalAppBundles);
+      setOwnerCheck(null);
+    }
   });
 
   test("writes <compose>.bak, puts Crow's copy back, records it and clears the note", async () => {

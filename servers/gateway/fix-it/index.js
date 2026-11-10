@@ -20,6 +20,9 @@ import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import restoreBundleCompose, {
   ACTION_ID as RESTORE_COMPOSE_ACTION,
   APPLY_UPDATE_ACTION_ID as APPLY_COMPOSE_UPDATE_ACTION,
+  FLASH_KEY_RE as COMPOSE_FLASH_KEY_RE,
+  NEEDS_KEY_FLASH,
+  OWNER_ONLY_FLASH,
 } from "./remedies/restore-bundle-compose.js";
 import addonUnwallRemedy, {
   FLASH_ID_RE,
@@ -100,7 +103,7 @@ export function linkRemedyTarget(r) {
  * The flash codes a remedy may send the owner back with. Fixed here, never read
  * from the remedy result unchecked: the redirect target is built from it.
  */
-export const REMEDY_FLASHES = Object.freeze(["fixit_addon_stale", "fixit_addon_unwalled"]);
+export const REMEDY_FLASHES = Object.freeze(["fixit_addon_stale", "fixit_addon_unwalled", OWNER_ONLY_FLASH, NEEDS_KEY_FLASH]);
 
 /** Build a db-bound store; the bound upsertItem also fires urgent push. */
 function boundStore(db) {
@@ -283,13 +286,20 @@ export async function renderFixItCards(db, { lang, req } = {}) {
 }
 
 /**
- * The `&addon=<id>` a flash may carry: only the unwall flash, and only for a
- * slug id (the param is rendered on the next page, so it is checked here).
+ * The query parameter a flash may carry besides its code: `&addon=<id>` for the
+ * unwall flash, `&key=<KEY>` for a compose that needs a key set first. Both are
+ * rendered on the next page, so both are re-checked here.
  */
-function flashAddonQuery(flash, params) {
-  if (flash !== UNWALLED_FLASH) return "";
-  const id = params && typeof params.addon === "string" ? params.addon : "";
-  return FLASH_ID_RE.test(id) ? `&addon=${encodeURIComponent(id)}` : "";
+function flashParamQuery(flash, params) {
+  if (flash === UNWALLED_FLASH) {
+    const id = params && typeof params.addon === "string" ? params.addon : "";
+    return FLASH_ID_RE.test(id) ? `&addon=${encodeURIComponent(id)}` : "";
+  }
+  if (flash === NEEDS_KEY_FLASH) {
+    const key = params && typeof params.key === "string" ? params.key : "";
+    return COMPOSE_FLASH_KEY_RE.test(key) ? `&key=${encodeURIComponent(key)}` : "";
+  }
+  return "";
 }
 
 /** POST /dashboard/fix-it/action — remedy or dismiss. */
@@ -330,10 +340,10 @@ export async function handleFixItAction(req, res, { db }) {
       if (result && result.resolved) {
         await store.markResolved(db, itemId);
         const done = typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash) ? result.flash : "fixit_fixed";
-        return res.redirectAfterPost(`/dashboard/nest?flash=${done}${flashAddonQuery(done, result.flashParams)}`);
+        return res.redirectAfterPost(`/dashboard/nest?flash=${done}${flashParamQuery(done, result.flashParams)}`);
       }
       if (result && typeof result.flash === "string" && REMEDY_FLASHES.includes(result.flash)) {
-        return res.redirectAfterPost(`/dashboard/nest?flash=${result.flash}`);
+        return res.redirectAfterPost(`/dashboard/nest?flash=${result.flash}${flashParamQuery(result.flash, result.flashParams)}`);
       }
       return res.redirectAfterPost("/dashboard/nest?flash=fixit_error");
     }

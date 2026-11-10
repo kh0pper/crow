@@ -769,6 +769,21 @@ export function requiredComposeVars(text) {
 }
 
 /**
+ * The required `${X:?…}` keys a compose text needs that neither the bundle's .env nor
+ * the environment Compose is run with can fill (a blank value fails the `${X:?}` form
+ * too, so blank counts as missing). Names only, never values. Shared by the boot
+ * catch-up (routes/bundles.js) and the compose-restore remedy, so a restore can never
+ * copy a file that would break Start.
+ */
+export function missingRequiredComposeVars(text, { dotEnv = {}, env = {} } = {}) {
+  const set = (k) => {
+    const v = dotEnv[k] !== undefined && dotEnv[k] !== null ? dotEnv[k] : env[k];
+    return v !== undefined && v !== null && String(v).trim() !== "";
+  };
+  return requiredComposeVars(text).filter((k) => !set(k));
+}
+
+/**
  * Compose-style variable expansion of one value: ${V}, ${V:-d}, ${V-d},
  * ${V:?m}, ${V?m}, ${V:+a}, ${V+a} and bare $V (nesting allowed in the
  * default). An unset variable expands to "" (what compose substitutes; a `?`
@@ -833,14 +848,18 @@ function composeScalar(raw) {
   return String(raw ?? "").replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "").trim();
 }
 
-/** Ports in one `a-b` range as a list (capped), or the literal text when it is not one. */
-function expandPortRange(text) {
-  const m = /^(\d+)-(\d+)$/.exec(String(text ?? "").trim());
-  if (!m) { const p = String(text ?? "").trim(); return p ? [p] : []; }
+/**
+ * A port or an `a-b` port range → `{ lo, hi }` (a single port has lo === hi), or
+ * null when the text is not a port at all (an unresolved `${VAR}`, an empty value).
+ * This is the COMPOSE side of a range: `docker inspect` never reports one, it
+ * reports one key per published container port.
+ */
+export function composePortRange(text) {
+  const m = /^(\d{1,5})(?:-(\d{1,5}))?$/.exec(String(text ?? "").trim());
+  if (!m) return null;
   const lo = Number(m[1]);
-  const hi = Number(m[2]);
-  if (!Number.isInteger(lo) || !Number.isInteger(hi) || hi < lo || hi - lo > 63) return [String(text).trim()];
-  return Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i));
+  const hi = m[2] === undefined ? lo : Number(m[2]);
+  return lo >= 1 && hi <= 65535 && hi >= lo ? { lo, hi } : null;
 }
 
 /** One short-syntax port spec (`[ip:][host:]container[/proto]`) → published-port entries. */
@@ -860,7 +879,7 @@ function addShortPort(out, raw, env) {
   else if (parts.length === 2) container = parts[1];
   else { hostIP = parts.slice(0, -2).join(":"); container = parts.at(-1); }
   hostIP = hostIP ? hostIP.replace(/^\[|\]$/g, "").trim() || null : null;
-  for (const containerPort of expandPortRange(container)) out.push({ containerPort, protocol, hostIP });
+  if (container) out.push({ containerPort: container, protocol, hostIP });
 }
 
 /** One long-syntax port entry (`target`/`published`/`host_ip`/`protocol`) → published-port entries. */
@@ -871,7 +890,7 @@ function addLongPort(out, entry, env) {
   const hostIP = entry.host_ip === undefined
     ? null
     : composeScalar(expandComposeVars(String(entry.host_ip), env)).replace(/^\[|\]$/g, "") || null;
-  for (const containerPort of expandPortRange(target)) out.push({ containerPort, protocol, hostIP });
+  out.push({ containerPort: target, protocol, hostIP });
 }
 
 /**
@@ -914,8 +933,10 @@ function serviceByLine(lines) {
 /**
  * The published ports of a compose text: `{ service, containerPort, protocol, hostIP }`
  * per entry. `hostIP: null` means compose publishes it on every interface. Both port
- * syntaxes are read (`- "127.0.0.1:8555:5000"`, long `target:`/`host_ip:` entries, `a-b`
- * ranges) and `${VAR}` values expand against `env` exactly as compose resolves them.
+ * syntaxes are read (`- "127.0.0.1:8555:5000"`, long `target:`/`host_ip:` entries) and
+ * `${VAR}` values expand against `env` exactly as compose resolves them. A range stays
+ * ONE entry (its `containerPort` is the `a-b` text); composePortExpectations turns it
+ * into `{ lo, hi }` rather than inventing a port list.
  * `service` is the enclosing service's name (`null` for a `ports:` outside `services:`),
  * so callers can keep two services' publishes apart. Line-based, like the rest of this
  * module — it reads what a bundle's compose FILE declares, not the merged model
@@ -1025,36 +1046,67 @@ export function composeImageChanges(installedText, repoText, env = {}) {
 }
 
 /**
- * `service|containerPort/protocol` → `{ hostIPs }` for every published port of a compose
- * text (one or more files, e.g. the installed compose plus its overrides, joined by the
- * caller). `hostIPs` holds "" for an all-interfaces publish. The service is part of the
- * key on purpose: two services may publish the same container port, one on a specific IP
- * and one on every interface, and a flat key would let one mask the other.
+ * `service|containerPort/protocol` → `{ service, protocol, port, range, hostIPs }` for
+ * every published port of a compose text (one or more files, e.g. the installed compose
+ * plus its overrides, joined by the caller). `hostIPs` holds "" for an all-interfaces
+ * publish. `range` is the compose side of a port range: `{ lo, hi }` for `8000-8002`
+ * (and `{ lo: n, hi: n }` for a single port), null for a text that is not a port. The
+ * service is part of the key on purpose: two services may publish the same container
+ * port, one on a specific IP and one on every interface.
  */
 export function composePortExpectations(text, env = {}) {
   const byPort = new Map();
   for (const p of composePublishedPorts(text, env)) {
     const key = composeExpectationKey(p.service, p.containerPort, p.protocol);
-    const entry = byPort.get(key) || { hostIPs: [] };
+    const entry = byPort.get(key) || {
+      service: p.service || "",
+      protocol: p.protocol,
+      port: String(p.containerPort),
+      range: composePortRange(p.containerPort),
+      hostIPs: [],
+    };
     entry.hostIPs.push(p.hostIP ? p.hostIP : "");
     byPort.set(key, entry);
   }
   return Object.fromEntries(byPort);
 }
 
-/** A published port (or host port) range: `8000-8002`. Compared by no one, carded as no one. */
-const PORT_RANGE_RE = /-\d+$/;
+/**
+ * The expectations a RUNNING publish answers to: the same service (or, when the
+ * container's compose service label is unknown, any service) and protocol, with the
+ * running container port equal to a declared port or inside a declared `a-b` range.
+ * Docker reports one bind per port, so a range matches the ports it contains.
+ *
+ * @param {object} expected  composePortExpectations() output
+ * @param {{service?: string, containerPort: string|number, protocol?: string}} bind
+ * @returns {Array<object>} the matching expectation entries (empty: not declared)
+ */
+export function portExpectationsFor(expected = {}, { service = "", containerPort, protocol = "tcp" } = {}) {
+  const port = Number(String(containerPort ?? "").trim());
+  const wantedService = service ? String(service) : "";
+  const wantedProtocol = String(protocol || "tcp").toLowerCase();
+  const out = [];
+  for (const entry of Object.values(expected || {})) {
+    if (!entry || entry.protocol !== wantedProtocol) continue;
+    if (wantedService && entry.service !== wantedService) continue;
+    if (entry.range) {
+      if (Number.isInteger(port) && port >= entry.range.lo && port <= entry.range.hi) out.push(entry);
+    } else if (entry.port === String(containerPort ?? "").trim()) {
+      out.push(entry);
+    }
+  }
+  return out;
+}
 
 /**
  * Where the RUNNING containers bind ports WIDER than the compose says: a running
  * `0.0.0.0`/`::`/empty host IP while compose publishes the port on a specific IP, or a
  * WIDE published container port compose no longer has. Narrower or equal is not drift.
  *
- * Expectations are keyed by service + `containerPort/protocol` (composeExpectationKey),
- * so two services sharing a container port cannot mask each other. A bind whose service
- * label is unknown falls back to every expectation for that port. A PORT RANGE (`8000-8002`)
- * is skipped entirely: it is not one port, and carding each port of it as "extra" would
- * invent ports the file does not disown.
+ * Expectations come from composePortExpectations (service + port/protocol, with a
+ * compose range as `{lo, hi}`), so two services sharing a container port cannot mask
+ * each other, and a port inside a declared range is declared. A bind whose service
+ * label is unknown falls back to every expectation for that port.
  *
  * @param {object} o
  * @param {object} o.expected  composePortExpectations() output
@@ -1065,19 +1117,10 @@ export function portBindDrift({ expected = {}, running = [] } = {}) {
   const drifted = [];
   for (const bind of Array.isArray(running) ? running : []) {
     const containerPort = String(bind?.containerPort ?? "").trim();
-    const hostPort = String(bind?.hostPort ?? "").trim();
-    if (PORT_RANGE_RE.test(containerPort) || PORT_RANGE_RE.test(hostPort)) continue;
+    if (!containerPort) continue;
     const protocol = String(bind?.protocol || "tcp").toLowerCase();
     const service = bind?.service ? String(bind.service) : "";
-    const suffix = `|${containerPort}/${protocol}`;
-    const exact = expected[composeExpectationKey(service, containerPort, protocol)];
-    // A KNOWN service whose file does not declare the port is an extra publish;
-    // only an unknown service label falls back to any service's expectation.
-    const entries = exact
-      ? [exact]
-      : service
-        ? []
-        : Object.entries(expected).filter(([k]) => k.endsWith(suffix)).map(([, v]) => v);
+    const entries = portExpectationsFor(expected, { service, containerPort, protocol });
     if (entries.length === 0) {
       // A port the file no longer publishes is only worth a card while it is
       // reachable from other devices: a loopback extra is nobody's business.
