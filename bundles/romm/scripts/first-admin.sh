@@ -45,7 +45,10 @@ IFS= read -r PW || true
 # ── docker, and the container ───────────────────────────────────────────────────────
 command -v docker >/dev/null 2>&1 || die "docker is not available here, so the RomM container cannot be reached; nothing was changed." 4
 if [ -z "$CONTAINER" ]; then
-  ids="$(docker ps -q --filter label=com.docker.compose.service=romm --filter "label=com.docker.compose.project.working_dir=$(pwd -P)" 2>/dev/null || true)"
+  romm_ids() { docker ps -q --filter label=com.docker.compose.service=romm --filter "label=com.docker.compose.project.working_dir=$1" 2>/dev/null || true; }
+  ids="$(romm_ids "$(pwd -P)")"
+  # Compose records the folder it ran in; if that path went through a symlink, try it as given.
+  if [ -z "$(printf '%s' "$ids" | tr -d '[:space:]')" ] && [ "$PWD" != "$(pwd -P)" ]; then ids="$(romm_ids "$PWD")"; fi
   ids="$(printf '%s\n' "$ids" | sed '/^[[:space:]]*$/d')"
   total=0
   if [ -n "$ids" ]; then total="$(printf '%s\n' "$ids" | wc -l | tr -d ' ')"; fi
@@ -129,7 +132,16 @@ created="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | docker exec -i "$CONTAINER" "
 result="$(printf '%s\n' "$created" | tail -n 1)"
 case "$result" in
   CREATED) ;;
-  TAKEN) die "RomM already has an admin; left alone." 3 ;;
+  TAKEN)
+    # A 403 is also RomM's answer to a CSRF check it rejected, so it is not proof that an
+    # admin exists: ask the heartbeat. Only a definite "admin exists" is exit 3.
+    again="$(docker exec "$CONTAINER" "$PY" -c "$DETECT" </dev/null 2>/dev/null || true)"
+    case "$(printf '%s\n' "$again" | tail -n 1)" in
+      EXISTS) die "RomM already has an admin; left alone." 3 ;;
+      FRESH) die "RomM refused the request to create the admin account; nothing was changed." ;;
+      *) die "RomM refused the request, and its heartbeat could not be read afterwards; nothing was changed." ;;
+    esac
+    ;;
   REFUSED) die "RomM refused the new admin account; nothing was changed." ;;
   *)
     # Unclearly reported create: the row may already be there. Ask RomM itself rather than

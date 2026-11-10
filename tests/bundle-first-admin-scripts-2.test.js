@@ -370,7 +370,8 @@ test("romm: the container is found through its compose labels, for this install'
   const script = readFileSync(join(B("romm"), "scripts", "first-admin.sh"), "utf8");
   assert.equal(script.includes("docker compose"), false, "no compose file in the folder is read at all");
   assert.match(script, /docker ps -q --filter label=com\.docker\.compose\.service=romm/);
-  assert.match(script, /--filter "label=com\.docker\.compose\.project\.working_dir=\$\(pwd -P\)"/);
+  assert.match(script, /--filter "label=com\.docker\.compose\.project\.working_dir=\$1"/);
+  assert.match(script, /romm_ids "\$\(pwd -P\)"/, "the resolved folder is tried first");
 });
 
 test("romm: no container for this folder is exit 4, and two of them is refused", () => {
@@ -393,6 +394,21 @@ test("each create snippet reports an unclear result instead of a traceback", () 
     assert.match(create, /except Exception:/, `${app}: any failure while the row is written is caught`);
     assert.match(create, /print\("UNKNOWN"\)/, `${app}: and reported as UNKNOWN, so the shell looks again`);
   }
+});
+
+test("romm: a 403 on create is re-checked: exit 3 only when RomM says an admin exists", () => {
+  const exists = run("romm", { env: { FAKE_ROMM_CREATE_0: "TAKEN", FAKE_ROMM_STATE_1: "EXISTS" } });
+  assert.equal(exists.status, 3, exists.stderr);
+  const fresh = run("romm", { env: { FAKE_ROMM_CREATE_0: "TAKEN", FAKE_ROMM_STATE_1: "FRESH" } });
+  assert.equal(fresh.status, 1, "a refused CSRF check is not an admin: the wizard is still open");
+  const unread = run("romm", { env: { FAKE_ROMM_CREATE_0: "TAKEN", FAKE_ROMM_STATE_1: "garbled" } });
+  assert.equal(unread.status, 1);
+  for (const r of [exists, fresh, unread]) assert.equal(r.calls.some((c) => c.argv.includes("/api/login")), false, "no proof after a refusal");
+});
+
+test("romm: the label lookup falls back to the folder path as given when it went through a symlink", () => {
+  const script = readFileSync(join(B("romm"), "scripts", "first-admin.sh"), "utf8");
+  assert.ok(script.includes('[ "$PWD" != "$(pwd -P)" ]; then ids="$(romm_ids "$PWD")"; fi'), "the path as given is the fallback");
 });
 
 test("romm: only a 4xx is REFUSED, a 403 is TAKEN, and every other outcome is UNKNOWN", () => {
