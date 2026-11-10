@@ -224,20 +224,69 @@ test("a docker-publish owner passes only for the compose project it names", asyn
   assert.equal(await talk(wrong.r.socketPath, "PORT 8000\nping"), "");
   assert.ok(wrong.logs.some((l) => l.includes("(published by another compose project)")), wrong.logs.join("\n"));
 
-  // Another add-on's project (the TTS exception): only the port the entry names.
+  // Another add-on's project (the TTS exception): only the gateway-computed
+  // entry for the port that project publishes, never an owner-typed URL.
   const tts = { kind: "docker-publish", project: "media-kokoro", projectOwner: "kokoro-tts" };
-  const named = await one(typed({ port: 8000, ownerProject: "media-kokoro" }), tts);
+  const named = await one({ port: 8000, ownerProject: "media-kokoro", source: "gateway-tts" }, tts);
   assert.match(await talk(named.r.socketPath, "PORT 8000\nping"), /E:ping$/);
   const unnamed = await one(typed({ port: 8000 }), tts);
   assert.equal(await talk(unnamed.r.socketPath, "PORT 8000\nping"), "");
   assert.ok(unnamed.logs.some((l) => l.includes("(published by another add-on's compose project)")), unnamed.logs.join("\n"));
-  const otherProject = await one(typed({ port: 8000, ownerProject: "media-piper" }), tts);
+  const ownerTyped = await one(typed({ port: 8000, ownerProject: "media-kokoro" }), tts);
+  assert.equal(await talk(ownerTyped.r.socketPath, "PORT 8000\nping"), "", "an owner-typed URL is not the gateway's word");
+  const otherProject = await one({ port: 8000, ownerProject: "media-piper", source: "gateway-tts" }, tts);
   assert.equal(await talk(otherProject.r.socketPath, "PORT 8000\nping"), "");
 
   // An owner answer that names no project owner is a refusal, whatever the entry.
   const unnamedOwner = await one(typed({ port: 8000, ownerProject: "media-kokoro" }), { kind: "docker-publish", project: "media-kokoro" });
   assert.equal(await talk(unnamedOwner.r.socketPath, "PORT 8000\nping"), "");
   assert.ok(unnamedOwner.logs.some((l) => l.includes("(the owner check did not name a compose project)")), unnamedOwner.logs.join("\n"));
+});
+
+test("the cross-add-on TTS splice takes only a gateway-computed entry, and only media has one", async () => {
+  const up = await echoServer("E:");
+  const one = (entry, owner, id = "media") => relay({
+    addon: addonOf({ id, loopback: [entry], listenerOwner: async () => owner }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+  const ttsEntry = { port: 8000, ownerProject: "media-kokoro", source: "gateway-tts" };
+  const kokoro = { kind: "docker-publish", project: "media-kokoro", projectOwner: "kokoro-tts" };
+
+  // media, the entry the gateway computed, the project it names: spliced.
+  const allowed = await one(ttsEntry, kokoro);
+  assert.match(await talk(allowed.r.socketPath, "PORT 8000\nping"), /E:ping$/);
+
+  // An add-on's own manifest and an owner-typed URL are never that entry.
+  for (const entry of [{ port: 8000, ownerProject: "media-kokoro" }, typed({ port: 8000, ownerProject: "media-kokoro" })]) {
+    const denied = await one(entry, kokoro);
+    assert.equal(await talk(denied.r.socketPath, "PORT 8000\nping"), "", JSON.stringify(entry));
+    assert.ok(denied.logs.some((l) => l.includes("(published by another add-on's compose project)")), denied.logs.join("\n"));
+  }
+
+  // Only media does: the exception is re-checked in this relay, not taken
+  // from the entry.
+  const paperless = await one(ttsEntry, kokoro, "paperless");
+  assert.equal(await talk(paperless.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(paperless.logs.some((l) => l.includes("(foreign project)")), paperless.logs.join("\n"));
+
+  // The listener must be the compose project the entry names ...
+  const otherProject = await one(ttsEntry, { kind: "docker-publish", project: "media-piper", projectOwner: "kokoro-tts" });
+  assert.equal(await talk(otherProject.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(otherProject.logs.some((l) => l.includes("(foreign project)")), otherProject.logs.join("\n"));
+
+  // ... and its owner must be one the table lists for this add-on.
+  const notInTable = await one(ttsEntry, { kind: "docker-publish", project: "media-kokoro", projectOwner: "paperless" });
+  assert.equal(await talk(notInTable.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(notInTable.logs.some((l) => l.includes("(foreign project)")), notInTable.logs.join("\n"));
+
+  // A gateway-computed entry is only ever for the exception: not even this
+  // add-on's own published project, and never a process of this user.
+  const ownProject = await one(ttsEntry, { kind: "docker-publish", project: "media-kokoro", projectOwner: "media" });
+  assert.equal(await talk(ownProject.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(ownProject.logs.some((l) => l.includes("(foreign project)")), ownProject.logs.join("\n"));
+  const ownUid = await one(ttsEntry, { kind: "own-uid", pid: 31 });
+  assert.equal(await talk(ownUid.r.socketPath, "PORT 8000\nping"), "");
+  assert.ok(ownUid.logs.some((l) => l.includes("(a default URL never reaches a process of this user)")), ownUid.logs.join("\n"));
 });
 
 test("an owner check that throws is a deny", async () => {
@@ -365,6 +414,57 @@ test("a listed entry still never reaches cloud metadata, bare or v4-mapped", asy
     });
     assert.match(await talk(r.socketPath, "PROXY\nCONNECT media.other.example.ts.net:8446 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/, address);
     assert.ok(logs.some((l) => l.includes("(cloud metadata)")), logs.join("\n"));
+  }
+});
+
+test("own host in a wrapped or non-canonical spelling is refused, listed or not", async () => {
+  const up = await echoServer("U:");
+  const unlisted = (address, selfAddrs) => relay({
+    lookup: async () => [{ address, family: address.includes(":") ? 6 : 4 }],
+    addon: addonOf({ internet: true, selfTargets: { names: [], addrs: selfAddrs } }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+  const listed = (address, selfAddrs) => relay({
+    lookup: async () => [{ address, family: address.includes(":") ? 6 : 4 }],
+    addon: addonOf({ hosts: [{ host: "media.other.example.ts.net", port: 8446 }], selfTargets: { names: [], addrs: selfAddrs } }),
+    _connectOverride: () => ({ host: "127.0.0.1", port: up }),
+  });
+
+  // A NAT64 spelling of this host's own IPv4 address.
+  const nat64 = await unlisted("64:ff9b::5db8:d822", [PUB]);
+  assert.match(await talk(nat64.r.socketPath, "PROXY\nCONNECT example.com:443 HTTP/1.1\r\n\r\nping"), /^HTTP\/1\.1 403/);
+  assert.ok(nat64.logs.some((l) => l.includes("(this host)")), nat64.logs.join("\n"));
+
+  // The same IPv6 address in another spelling.
+  const spelling = await unlisted("2001:4860::1", ["2001:4860:0:0::1"]);
+  assert.match(await talk(spelling.r.socketPath, "PROXY\nCONNECT example.com:443 HTTP/1.1\r\n\r\nping"), /^HTTP\/1\.1 403/);
+  assert.ok(spelling.logs.some((l) => l.includes("(this host)")), spelling.logs.join("\n"));
+
+  // A listed entry resolving to the v4-mapped form, dotted and hex.
+  for (const address of ["::ffff:" + PUB, "::ffff:5db8:d822"]) {
+    const mapped = await listed(address, [PUB]);
+    assert.match(await talk(mapped.r.socketPath, "PROXY\nCONNECT media.other.example.ts.net:8446 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/, address);
+    assert.ok(mapped.logs.some((l) => /deny media\.other\.example\.ts\.net:8446 \((own host|this host)\)/.test(l)), mapped.logs.join("\n"));
+  }
+});
+
+test("a listed entry never reaches an IPv4 wrapped in a tunnelled or translated IPv6 address", async () => {
+  // The on-link row is what makes the closed-network check soft here, so the
+  // hard set (and the embedding rule) is what must refuse.
+  const onLink = { ...NO_LOCAL, onLink4: ["169.254.0.0/16"] };
+  const cases = [
+    ["169.254.169.254", /not allowed for a listed host/],
+    ["64:ff9b::a9fe:a9fe", /IPv4 inside IPv6 is not allowed for a listed host/],
+    ["2002:a9fe:a9fe::1", /IPv4 inside IPv6 is not allowed for a listed host/],
+  ];
+  for (const [address, reason] of cases) {
+    const { r, logs } = await relay({
+      local: onLink,
+      lookup: async () => [{ address, family: address.includes(":") ? 6 : 4 }],
+      addon: addonOf({ hosts: [{ host: "media.other.example.ts.net", port: 8446 }] }),
+    });
+    assert.match(await talk(r.socketPath, "PROXY\nCONNECT media.other.example.ts.net:8446 HTTP/1.1\r\n\r\n"), /^HTTP\/1\.1 403/, address);
+    assert.ok(logs.some((l) => reason.test(l)), address + ": " + logs.join("\n"));
   }
 });
 

@@ -227,8 +227,14 @@ export function buildAddonPlan(o = {}) {
      * is its business; a crow.db profile also keeps the data dir itself and the
      * DB files beside it. Everything else there is another add-on's data or
      * Crow's own — reachable only through a bind of this add-on's own folder.
+     *
+     * A folder that CONTAINS the data dir is refused the same way, for reads
+     * and writes: one bind of an ancestor (the data dir's parent, its
+     * grandparent, / itself) would hand over every add-on's folder and Crow's
+     * own DB without naming any of them.
      */
     function dataDirReason(p) {
+      if (dataDirRoots.some((root) => p !== root && under(root, p))) return DATA_OTHER_REASON;
       if (!dataDirRoots.some((root) => under(p, root))) return null;
       if (ownDataRoots.some((root) => under(p, root))) return null;
       if (profile.crowDb) {

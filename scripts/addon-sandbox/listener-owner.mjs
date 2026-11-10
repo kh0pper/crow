@@ -10,15 +10,18 @@
  *      (state `0A`), which gives the socket's uid and inode. No listener that
  *      accepts a connection to the address is a refusal ("nothing listens
  *      there"), and EVERY matching listener must pass;
- *   2. a socket owned by the gateway uid is mapped to its process through
- *      `/proc/<pid>/fd` (`socket:[<inode>]`). A gateway or satellite node
- *      process — in any checkout, so a co-hosted instance is caught too — is
- *      refused, and so is an inode that maps to no process. Any other process
- *      of this uid counts as the add-on's own service only if it is none of
- *      the wall's own processes (this relay, a `pi_netns_entry.mjs` helper,
- *      `bwrap`) and nothing about it — an argv element, its cwd, its
- *      executable — lies under this Crow's checkout or home (`crowRoots`):
- *      with no root to compare against, every same-uid listener is refused;
+ *   2. a socket owned by the gateway uid is mapped to EVERY process holding it
+ *      through `/proc/<pid>/fd` (`socket:[<inode>]`) — a socket can be shared
+ *      after fork, so each holder is judged and any refusal is the answer. A
+ *      gateway or satellite node process — in any checkout, so a co-hosted
+ *      instance is caught too — is refused, and so is an inode that maps to no
+ *      process. Any other process of this uid counts as the add-on's own
+ *      service only if it is none of the wall's own processes (this relay, a
+ *      `pi_netns_entry.mjs` helper, `bwrap`) and nothing about it — an argv
+ *      element, its cwd, its executable — lies under this Crow's checkout or
+ *      home (`crowRoots`): with no root to compare against, every same-uid
+ *      listener is refused. A process whose argv or cwd cannot be read is
+ *      refused before anything else: what it is cannot be judged;
  *   3. a root-owned socket must be a port a running container publishes, and
  *      that container must carry a compose project label naming an installed
  *      add-on. The docker view is passed in (the gateway already reads it); a
@@ -130,21 +133,29 @@ function listenersIn(text) {
   return out;
 }
 
-/** The pid holding a socket inode, from `/proc/<pid>/fd` links; null when unmapped. */
-function pidForInode(inode, opts) {
+/**
+ * Every pid holding a socket inode, from `/proc/<pid>/fd` links; empty when
+ * unmapped. A socket can be shared after a fork (and a process can hold it on
+ * more than one fd), so all of them are returned, not the first one found.
+ */
+function pidsForInode(inode, opts) {
+  const out = [];
   let pids;
-  try { pids = opts.readdir("/proc"); } catch { return null; }
+  try { pids = opts.readdir("/proc"); } catch { return out; }
   for (const name of pids || []) {
     if (!/^\d+$/.test(String(name))) continue;
     let fds;
     try { fds = opts.readdir("/proc/" + name + "/fd"); } catch { continue; }
+    const pid = Number(name);
     for (const fd of fds || []) {
       let target = "";
       try { target = String(opts.readlink("/proc/" + name + "/fd/" + fd)); } catch { continue; }
-      if (target === "socket:[" + inode + "]") return Number(name);
+      if (target !== "socket:[" + inode + "]") continue;
+      if (!out.includes(pid)) out.push(pid);
+      break; // one fd per process is enough
     }
   }
-  return null;
+  return out;
 }
 
 /** One NUL-separated /proc/<pid>/cmdline, as its argv list. */
@@ -193,33 +204,60 @@ function baseName(p) {
   return cut < 0 ? s : s.slice(cut + 1);
 }
 
+/**
+ * Is this argv element the gateway's entry point? A file below `/servers/gateway/`
+ * (whatever it is named) and the directory form (`node /srv/crow/servers/gateway`)
+ * both are.
+ */
+function isGatewayArg(p) {
+  if (typeof p !== "string" || !p) return false;
+  return p.includes("/servers/gateway/") || p.endsWith("/servers/gateway");
+}
+
+/**
+ * The verdict for ONE same-uid process holding the socket. Every problem is a
+ * `denied` result, never a pass.
+ */
+function sameUidVerdict(pid, opts, base) {
+  const denied = (reason) => ({ kind: "denied", reason, ...base, pid });
+  const argv = argvOf(pid, opts);
+  // No argv at all (unreadable, or an empty cmdline) says nothing about what
+  // this process is: refused before any rule that would otherwise pass it.
+  if (!argv.length) return denied("owner check failed");
+  const cwd = cwdOf(pid, opts);
+  const cwdPrefix = cwd === null ? null : cwd.replace(/\/+$/, "");
+  // A relative argv element cannot be resolved without the cwd, so a gateway
+  // named relatively (`node servers/gateway/index.js`) would slip past the
+  // gateway check: refused before that check and the satellite one.
+  if (cwdPrefix === null && argv.slice(1).some((a) => !a.startsWith("/"))) return denied("owner check failed");
+  const resolved = argv.map((a, i) => (i === 0 || a.startsWith("/") || cwdPrefix === null ? a : cwdPrefix + "/" + a));
+  // The gateway and its satellite are named first: those two reasons are what
+  // the relay's refusals read as.
+  if (resolved.some(isGatewayArg)) return denied("gateway");
+  if (resolved.some((a) => a.includes("/servers/satellite/"))) return denied("satellite");
+  // The wall's own processes: this relay, either helper it runs.
+  if (opts.selfPids.has(pid)) return denied("the wall's own process");
+  if (resolved.some((a) => baseName(a) === "pi_netns_entry.mjs")) return denied("the wall's own process");
+  if (baseName(resolved[0]) === "bwrap") return denied("the wall's own process");
+  // This Crow's own code, whichever way the path is spelled on the process.
+  if (!opts.crowRoots.length) return denied("no Crow roots to check against");
+  const exe = exeOf(pid, opts);
+  const paths = [...resolved, cwd, exe];
+  if (paths.some((p) => opts.crowRoots.some((root) => underRoot(p, root)))) return denied("Crow's own code");
+  if (cwd === null || exe === null) return denied("owner check failed");
+  return { kind: "own-uid", ...base, pid };
+}
+
 /** One listener's verdict. Every problem is a `denied` result, never a pass. */
 async function verdictFor(listener, opts) {
   const base = { uid: listener.uid, inode: listener.inode };
   if (listener.uid === opts.gatewayUid) {
-    const pid = pidForInode(listener.inode, opts);
-    if (pid === null) return { kind: "denied", reason: "unmapped", ...base };
-    const argv = argvOf(pid, opts);
-    const cwd = cwdOf(pid, opts);
-    const cwdPrefix = cwd === null ? null : cwd.replace(/\/+$/, "");
-    const resolved = argv.map((a, i) => (i === 0 || a.startsWith("/") || cwdPrefix === null ? a : cwdPrefix + "/" + a));
-    // The gateway and its satellite are named first: those two reasons are
-    // what the relay's refusals read as.
-    if (resolved.some((a) => a.endsWith("/servers/gateway/index.js"))) return { kind: "denied", reason: "gateway", ...base, pid };
-    if (resolved.some((a) => a.includes("/servers/satellite/"))) return { kind: "denied", reason: "satellite", ...base, pid };
-    // The wall's own processes: this relay, either helper it runs.
-    if (opts.selfPids.has(pid)) return { kind: "denied", reason: "the wall's own process", ...base, pid };
-    if (resolved.some((a) => baseName(a) === "pi_netns_entry.mjs")) return { kind: "denied", reason: "the wall's own process", ...base, pid };
-    if (resolved.length && baseName(resolved[0]) === "bwrap") return { kind: "denied", reason: "the wall's own process", ...base, pid };
-    // This Crow's own code, whichever way the path is spelled on the process.
-    if (!opts.crowRoots.length) return { kind: "denied", reason: "no Crow roots to check against", ...base, pid };
-    const exe = exeOf(pid, opts);
-    const paths = [...resolved, cwd, exe];
-    if (paths.some((p) => opts.crowRoots.some((root) => underRoot(p, root)))) {
-      return { kind: "denied", reason: "Crow's own code", ...base, pid };
-    }
-    if (cwd === null || exe === null) return { kind: "denied", reason: "owner check failed", ...base, pid };
-    return { kind: "own-uid", ...base, pid };
+    const pids = pidsForInode(listener.inode, opts);
+    if (!pids.length) return { kind: "denied", reason: "unmapped", ...base };
+    const verdicts = pids.map((pid) => sameUidVerdict(pid, opts, base));
+    // A socket shared by several processes is only as safe as the least safe
+    // holder: any refusal is the listener's answer.
+    return verdicts.find((v) => v.kind === "denied") || verdicts[0];
   }
   if (listener.uid === 0) {
     if (!opts.docker) return { kind: "denied", reason: "no docker view", ...base };
@@ -294,7 +332,13 @@ export async function identifyListener(addr, port, o = {}) {
     const seen = new Set();
     for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
       let text = "";
-      try { text = String(opts.readFile(file) || ""); } catch { text = ""; }
+      try { text = String(opts.readFile(file) || ""); } catch (e) {
+        // A table the kernel does not have is a family with no listener. Any
+        // other failure could hide the very listener this check exists to
+        // find (an IPv6 one, for tcp6), so it is refused.
+        if (e && e.code === "ENOENT") continue;
+        return { kind: "denied", reason: "owner check failed" };
+      }
       for (const l of listenersIn(text)) {
         if (l.port !== p || !want.has(canon(l.addr))) continue;
         const key = l.addr + "|" + l.inode;

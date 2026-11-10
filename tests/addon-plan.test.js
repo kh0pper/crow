@@ -1060,6 +1060,51 @@ test("nothing under the data dir is a bind source except this add-on's own folde
   }
 });
 
+// ---- a folder that contains the data dir is never a bind source ---------
+
+test("a folder that contains the data dir is refused for a read and a write; a sibling folder is not", () => {
+  const MEDIA = mk(T, "srv", "media");
+  const OUT_DATA = mk(MEDIA, "crow-data");
+  mk(OUT_DATA, "acme");
+  const SIBLING = mk(T, "srv", "other");
+  const siblingFile = join(SIBLING, "notes.txt");
+  writeFileSync(siblingFile, "");
+  const OTHER_DATA_REASON = /another add-on's data, or Crow's own data/;
+  const planWith = (mode, p) => planOf({
+    dataDir: OUT_DATA,
+    profile: profileOf({
+      files: mode === "read"
+        ? { read: [{ from: "P", path: p, source: "owner" }], write: [], oauthDir: null, state: [] }
+        : { read: [], write: [{ from: "P", path: p, source: "owner" }], oauthDir: null, state: [] },
+    }),
+  });
+  const boundByFd = (plan, p) => fdOps(plan.args).some((q) => q[2] === realpathSync(p));
+
+  try {
+    for (const mode of ["read", "write"]) {
+      // An ancestor of the data dir would hand over every add-on's folder and
+      // Crow's own DB through one bind.
+      const plan = planWith(mode, MEDIA);
+      try {
+        assert.ok(plan.refused.some((r) => r.path === MEDIA && OTHER_DATA_REASON.test(r.reason)),
+          mode + ": the containing folder is refused: " + JSON.stringify(plan.refused));
+        assert.ok(!boundByFd(plan, MEDIA), mode + ": never bound by fd");
+        assert.ok(!pathSources(plan.args).includes(realpathSync(MEDIA)), mode + ": never a path-bind source");
+      } finally { closePlan(plan); }
+
+      // A folder beside the data dir says nothing about it.
+      const sibling = planWith(mode, siblingFile);
+      try {
+        assert.ok(!sibling.refused.some((r) => OTHER_DATA_REASON.test(r.reason)),
+          mode + ": the sibling draws no data-dir refusal: " + JSON.stringify(sibling.refused));
+        assert.ok(boundByFd(sibling, siblingFile), mode + ": the sibling is bound");
+      } finally { closePlan(sibling); }
+    }
+  } finally {
+    rmSync(join(T, "srv"), { recursive: true, force: true });
+  }
+});
+
 // ---- the autostart/systemd rule is about the inside of the home ----------
 
 test("the autostart/systemd rule looks only at the part of a path inside the home", () => {

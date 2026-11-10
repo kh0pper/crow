@@ -65,7 +65,8 @@ function fakeProc({ tcp = table(), tcp6 = table(), procs = [] } = {}) {
     const inodes = Array.isArray(p.inodes) ? p.inodes : [];
     dirs.set(fdDir, inodes.map((_, i) => String(i + 3)));
     inodes.forEach((inode, i) => links.set(fdDir + "/" + (i + 3), "socket:[" + inode + "]"));
-    files.set("/proc/" + p.pid + "/cmdline", (p.argv || []).join("\0") + "\0");
+    // `argv: undefined` leaves the cmdline unreadable; `argv: []` is an empty one.
+    if (Array.isArray(p.argv)) files.set("/proc/" + p.pid + "/cmdline", p.argv.join("\0") + "\0");
     if (p.cwd) links.set("/proc/" + p.pid + "/cwd", p.cwd);
     // `<pid>/exe` is a link too; `exe: null` leaves it unreadable.
     const exe = p.exe === undefined ? "/usr/bin/node" : p.exe;
@@ -76,6 +77,17 @@ function fakeProc({ tcp = table(), tcp6 = table(), procs = [] } = {}) {
     readFile: (path) => (files.has(path) ? files.get(path) : miss()),
     readdir: (path) => (dirs.has(path) ? dirs.get(path) : miss()),
     readlink: (path) => (links.has(path) ? links.get(path) : miss()),
+  };
+}
+
+/** The same fake /proc, with one read failing as `code` (EACCES, ENOENT, ...). */
+function failingRead(p, file, code) {
+  return {
+    ...p,
+    readFile: (path) => {
+      if (path === file) throw Object.assign(new Error(code + ": " + file), { code });
+      return p.readFile(path);
+    },
   };
 }
 
@@ -409,6 +421,79 @@ test("a same-uid listener whose cwd or executable cannot be read is refused", as
   assert.deepEqual([noExe.kind, noExe.reason], ["denied", "owner check failed"]);
   const noCwd = await askOwnUid({}, { cwd: undefined });
   assert.deepEqual([noCwd.kind, noCwd.reason], ["denied", "owner check failed"]);
+});
+
+test("a process with no readable argv is refused before any other same-uid rule", async () => {
+  const unreadable = await askOwnUid({}, { argv: undefined });
+  assert.deepEqual([unreadable.kind, unreadable.reason], ["denied", "owner check failed"]);
+  const empty = await askOwnUid({}, { argv: [] });
+  assert.deepEqual([empty.kind, empty.reason], ["denied", "owner check failed"]);
+});
+
+test("a relative argv element with an unreadable cwd is refused before the gateway and satellite rules", async () => {
+  const gw = await askOwnUid({}, { cwd: undefined, argv: ["node", "servers/gateway/index.js"] });
+  assert.deepEqual([gw.kind, gw.reason], ["denied", "owner check failed"]);
+  const sat = await askOwnUid({}, { cwd: undefined, argv: ["node", "servers/satellite/index.js"] });
+  assert.deepEqual([sat.kind, sat.reason], ["denied", "owner check failed"]);
+  // With a readable cwd the same argv IS the gateway.
+  const resolved = await askOwnUid({}, { cwd: "/srv/crow", argv: ["node", "servers/gateway/index.js"] });
+  assert.deepEqual([resolved.kind, resolved.reason], ["denied", "gateway"]);
+});
+
+test("the gateway is recognised in its directory form and under any file name", async () => {
+  for (const argv of [
+    ["node", "/srv/crow/servers/gateway"],
+    ["node", "/srv/crow/servers/gateway/main.mjs"],
+    ["node", "/opt/cohost/servers/gateway/worker/runner.js"],
+    ["/usr/bin/node", "--enable-source-maps", "/srv/crow/servers/gateway"],
+  ]) {
+    const r = await askOwnUid({}, { argv });
+    assert.deepEqual([r.kind, r.reason], ["denied", "gateway"], JSON.stringify(argv));
+  }
+});
+
+test("a socket held by several processes is judged holder by holder", async () => {
+  const holders = (procs) => fakeProc({
+    tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+    procs: procs.map((p, i) => ({ pid: 720 + i, inodes: [SOCK], ...p })),
+  });
+  const ask = (p) => identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, selfPids: [1], crowRoots: ROOTS, ...p });
+
+  // An own service and a gateway share the socket: the gateway is the answer.
+  const shared = await ask(holders([
+    { cwd: "/srv/app", argv: ["node", "server.mjs"] },
+    { cwd: "/srv/crow", argv: ["node", "/srv/crow/servers/gateway/index.js"] },
+  ]));
+  assert.deepEqual([shared.kind, shared.reason, shared.pid], ["denied", "gateway", 721]);
+
+  // A second holder that cannot be read at all is a refusal too.
+  const blind = await ask(holders([
+    { cwd: "/srv/app", argv: ["node", "server.mjs"] },
+    { cwd: "/srv/app", argv: undefined },
+  ]));
+  assert.deepEqual([blind.kind, blind.reason, blind.pid], ["denied", "owner check failed", 721]);
+
+  // Two holders of this user's own service: the listener is the add-on's.
+  const own = await ask(holders([
+    { cwd: "/srv/app", argv: ["node", "server.mjs"] },
+    { cwd: "/opt/app", argv: ["/usr/bin/node", "/opt/app/index.js"] },
+  ]));
+  assert.deepEqual([own.kind, own.pid], ["own-uid", 720]);
+});
+
+test("an unreadable /proc/net table is a refusal; a missing one is a family with no listener", async () => {
+  const ask = (over) => identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, selfPids: [1], crowRoots: ROOTS, ...over });
+
+  for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    // Any failure other than ENOENT could hide the listener: refused.
+    const denied = await ask(failingRead(ownUidProc(), file, "EACCES"));
+    assert.deepEqual([denied.kind, denied.reason], ["denied", "owner check failed"], file);
+  }
+  // A missing tcp6 is a kernel without the family: the IPv4 table still decides.
+  assert.equal((await ask(failingRead(ownUidProc(), "/proc/net/tcp6", "ENOENT"))).kind, "own-uid");
+  // A missing tcp is the same, read as empty: the row was there and is gone.
+  const noV4Table = await ask(failingRead(ownUidProc(), "/proc/net/tcp", "ENOENT"));
+  assert.deepEqual([noV4Table.kind, noV4Table.reason], ["denied", "nothing listens there"]);
 });
 
 // ---- one real case, through the kernel's own tables ----------------------

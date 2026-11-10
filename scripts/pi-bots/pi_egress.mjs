@@ -37,6 +37,7 @@
 import { createServer, connect as netConnect, isIP, BlockList } from "node:net";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { isDoorPath, RELAY_SOURCE_V4, ADDON_RELAY_SOURCE_V4 } from "../../servers/shared/bot-doors.js";
+import { TTS_PORT_EXCEPTION } from "../addon-sandbox/listener-owner.mjs";
 import { spawnSync } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -542,10 +543,11 @@ const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z
 // ---- add-on mode: per-add-on allow lists -----------------------------------
 // A walled add-on gets its own relay: no bot doors, a list of loopback ports
 // splice-checked against the listener's owner (an owner-typed URL may reach a
-// process of this user; a manifest default may reach only a published port),
-// exact CONNECT entries that may be private, and (D1) absolute-form plain HTTP
-// to those same entries. None of this is reachable when `o.addon` is absent
-// (the bot path).
+// process of this user; a manifest default may reach only a published port;
+// a gateway-computed `gateway-tts` entry may reach only the TTS add-ons' own
+// published project, the one named cross-add-on exception), exact CONNECT
+// entries that may be private, and (D1) absolute-form plain HTTP to those same
+// entries. None of this is reachable when `o.addon` is absent (the bot path).
 
 /** The last N refused targets a relay keeps for the owner's status card. */
 const MAX_DENIALS = 20;
@@ -594,14 +596,50 @@ function addonHardDenied(addr) {
 }
 
 /**
+ * How this address carries an IPv4 address, if it does: `"mapped"` for
+ * `::ffff:a.b.c.d` (judged as that IPv4), `"v6"` for every other embedding the
+ * closed-network check unwraps (v4-compatible, SIIT, NAT64 64:ff9b::/96 and the
+ * /48 local-use form, 6to4, Teredo, ISATAP), else null. Unspecified and
+ * loopback are NOT embeddings here: those two are named by their own ranges.
+ */
+function v4Embedding(a) {
+  const h = expand6(a);
+  const zero = (x, y) => h.slice(x, y).every((v) => v === 0);
+  if (zero(0, 5) && h[5] === 0xffff) return "mapped";                                  // ::ffff:a.b.c.d
+  if (zero(0, 8) || (zero(0, 7) && h[7] === 1)) return null;                            // :: and ::1
+  if (zero(0, 5) && h[5] === 0) return "v6";                                            // ::a.b.c.d (v4-compatible)
+  if (zero(0, 4) && h[4] === 0xffff && h[5] === 0) return "v6";                         // SIIT ::ffff:0:a.b.c.d
+  if (h[0] === 0x64 && h[1] === 0xff9b && zero(2, 6)) return "v6";                      // NAT64 64:ff9b::/96
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return "v6";                      // NAT64 local-use 64:ff9b:1::/48
+  if (h[0] === 0x2002) return "v6";                                                     // 6to4
+  if (h[0] === 0x2001 && h[1] === 0) return "v6";                                       // Teredo
+  if ((h[4] === 0 || h[4] === 0x200) && h[5] === 0x5efe) return "v6";                   // ISATAP ::0:5efe:a.b.c.d
+  return null;
+}
+
+/**
  * A listed entry's address: null when allowed. A private or on-link destination
  * is allowed (the owner listed it), but never cloud metadata, loopback, the
- * unspecified/multicast/reserved ranges, or anything while the view is broken.
+ * unspecified/multicast/reserved ranges, an IPv4 wrapped in a tunnelled or
+ * translated IPv6 address, or anything while the view is broken. The one
+ * embedding that is judged as what it carries is a bare `::ffff:a.b.c.d`.
  */
 function listedAddrReason(addr, view) {
-  const a = canonTargetAddr(addr);
-  const fam = isIP(a);
+  let a = canonTargetAddr(addr);
+  let fam = isIP(a);
   if (!fam) return "not an IP address";
+  if (fam === 6) {
+    const kind = v4Embedding(a);
+    if (kind === "mapped") {
+      // The hex spelling of a v4-mapped address (canonTargetAddr unwraps the
+      // dotted one): judged as the IPv4 it carries.
+      const h = expand6(a);
+      a = v4From(h[6], h[7]);
+      fam = 4;
+    } else if (kind === "v6") {
+      return "IPv4 inside IPv6 is not allowed for a listed host";
+    }
+  }
   const r = egressDenyReason(a, { view });
   if (r === null) return null;
   if (r === "loopback") return "own host";
@@ -632,9 +670,12 @@ function normalizeAddon(raw) {
       const port = Number(e.port);
       if (!isPortNumber(port) || out.has(port)) continue;
       const ownerProject = typeof e.ownerProject === "string" && e.ownerProject ? e.ownerProject : null;
-      // "owner": the owner typed this URL into the field. Anything else is a
-      // manifest default, which may only reach a published port.
-      const source = e.source === "owner" ? "owner" : "default";
+      // "owner": the owner typed this URL into the field. "gateway-tts": the
+      // gateway computed it from the TTS add-ons' repo-copy manifests and
+      // compose (the one named cross-add-on exception), which an add-on's own
+      // manifest or config can never produce. Anything else is a manifest
+      // default, which may only reach a published port of this add-on.
+      const source = e.source === "owner" ? "owner" : e.source === "gateway-tts" ? "gateway-tts" : "default";
       out.set(port, { port, ownerProject, source });
     }
     return out;
@@ -719,6 +760,14 @@ export function createEgressRelay(o) {
   const log = o.log || ((l) => console.error(l));
   const local = { local: o.local, hostAddrs: o.hostAddrs,
     denyNets: o.denyNets || String(process.env.CROW_PI_EGRESS_DENY_NETS || "").split(",").map((x) => x.trim()).filter(Boolean) };
+  // In add-on mode the wall's own selfTargets are own addresses TOO: a
+  // destination that resolves to this host in a wrapped form (NAT64, 6to4,
+  // v4-mapped) or in another IPv6 spelling must read as "this host", which is
+  // not a soft reason a listed entry may override. A separate object keeps the
+  // bot path's view exactly as it was.
+  const addonLocal = addon && cfg.selfAddrs.size
+    ? { ...local, hostAddrs: [...(Array.isArray(o.hostAddrs) ? o.hostAddrs : []), ...cfg.selfAddrs] }
+    : local;
   if (local.denyNets.length && localView({ local: { v4: [], v6: [], v4Failed: false, v6Failed: false }, denyNets: local.denyNets }).denyBroken) {
     log(`[pi-egress] bot=${o.botId || "?"} CROW_PI_EGRESS_DENY_NETS has an unreadable entry: this relay refuses every target until it is fixed`);
   }
@@ -1078,7 +1127,7 @@ export function createEgressRelay(o) {
     }
     if (!Array.isArray(addrs) || !addrs.length) return { reason: "no address" };
     if (addrs.some((a) => cfg.selfAddrs.has(canonTargetAddr(a && a.address)))) return { reason: "own host" };
-    const view = localView(local); // one host view per decision
+    const view = localView(addonLocal); // one host view per decision
     noteOwnHostView(view);
     for (const a of addrs) {
       const r = listedAddrReason(a && a.address, view);
@@ -1111,18 +1160,34 @@ export function createEgressRelay(o) {
     }
     if (kind === "own-uid") {
       // A process of this user is trusted only for an address the owner typed.
+      // A gateway-computed TTS entry is never one: it is denied as a default.
       if (entry.source !== "owner") return "a default URL never reaches a process of this user";
       return entry.ownerProject ? "the listener is not published by " + entry.ownerProject : null;
     }
     if (kind === "docker-publish") {
       const projectOwner = typeof owner.projectOwner === "string" ? owner.projectOwner : "";
       if (!projectOwner) return "the owner check did not name a compose project";
+      if (entry.source === "gateway-tts") {
+        // These entries exist for ONE thing: a TTS add-on's published port,
+        // computed by the gateway (D4). This relay re-checks the named
+        // exception itself, the entry must name the compose project the
+        // listener belongs to, and the source is never this add-on's own
+        // project — a gateway-computed entry is only for the TTS exception.
+        if (projectOwner === cfg.id) return "foreign project";
+        const exception = Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, cfg.id)
+          ? TTS_PORT_EXCEPTION[cfg.id]
+          : null;
+        if (entry.ownerProject
+          && entry.ownerProject === owner.project
+          && Array.isArray(exception)
+          && exception.includes(projectOwner)) return null;
+        return "foreign project";
+      }
       if (projectOwner === cfg.id) return !entry.ownerProject || owner.project === entry.ownerProject
         ? null
         : "published by another compose project";
-      // Another add-on's project (the named TTS exception): only a port the
-      // owner named, and only the one that project publishes.
-      if (entry.ownerProject && entry.ownerProject === owner.project) return null;
+      // Another add-on's compose project: no longer reachable by a manifest
+      // default or an owner-typed URL, only by the gateway's own entry above.
       return "published by another add-on's compose project";
     }
     return "owner check failed";
@@ -1237,7 +1302,7 @@ export function createEgressRelay(o) {
       }
       if (!Array.isArray(addrs) || !addrs.length) { note("deny", target, "no address"); return refuse(c, 403, "Forbidden"); }
       if (addrs.some((a) => cfg.selfAddrs.has(canonTargetAddr(a && a.address)))) { note("deny", target, "own host"); return refuse(c, 403, "Forbidden"); }
-      const view = localView(local);
+      const view = localView(addonLocal);
       noteOwnHostView(view);
       const why = addrs.map((a) => egressDenyReason(a && a.address, { view })).find(Boolean);
       if (why) { note("deny", target, why); return refuse(c, 403, "Forbidden"); }
