@@ -210,7 +210,23 @@ say "Vikunja's admin login for '$ADMIN_USER' now uses the password Crow generate
 
 # Registration was open until now: name any other account that appeared in that window so
 # the owner can check it (Crow closes registration next; it never deletes an account).
-others="$(users_state names | grep -vxF "$ADMIN_USER" | tr '\n' ' ' | sed 's/ *$//' || true)"
-if [ -n "$others" ]; then
-  say "Note: Vikunja also has these accounts, made while registration was open: $others. Check that you know them."
+# Names are taken from a drawn table, so each one must look like a plain account name; any
+# row that does not is reported as an unrecognised account, never echoed. An unreadable list
+# is reported as such, never as a name.
+listing="$(users_state names || true)"
+if [ "$listing" = "UNREADABLE" ]; then
+  say "Note: Crow could not list Vikunja's other accounts; check its user list yourself."
+else
+  others=""
+  odd=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$name" = "$ADMIN_USER" ] && continue
+    if [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then others="${others:+$others, }$name"; else odd=$((odd + 1)); fi
+  done <<< "$listing"
+  if [ -n "$others" ] || [ "$odd" -gt 0 ]; then
+    extra=""
+    [ "$odd" -gt 0 ] && extra=" (and $odd account(s) with names Crow could not read)"
+    say "Note: Vikunja also has these accounts, made while registration was open: ${others:-none listed}${extra}. Check that you know them."
+  fi
 fi
