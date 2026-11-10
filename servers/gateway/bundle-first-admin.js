@@ -214,7 +214,8 @@ export async function markFirstAdminDone(db, bundleId, installId, { nowMs = Date
 }
 
 /** The dashboard language, read straight from dashboard_settings; "en" when unreadable. */
-async function readLanguage(db) {  try {
+async function readLanguage(db) {
+  try {
     const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] });
     const v = rows?.[0]?.value;
     return v === "es" || v === "en" ? v : "en";

@@ -78,6 +78,7 @@ after(() => {
 
 beforeEach(() => {
   _resetContainmentForTest();
+  _setHostBwrapProbeForTest(() => true);
   delete process.env.PIBOT_SUPERVISOR;
 });
 
@@ -140,6 +141,54 @@ test("no bot observed: the page never claims enforcement (the level line says so
   assert.ok(html.includes(translations["botbuilder.sfFoldersNotLimits"].en));
   assert.ok(html.includes(t("settings.containment.noBots", "en")), "Bot Runtime's own \"no bots\" sentence");
   assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforced"].en));
+});
+
+test("a bot outside the contained list is told its folders are not limits", async () => {
+  // The contain tier can cover a subset of the bots (CROW_PI_CONTAIN_BOTS), and the
+  // containment list is per bot: another bot's `partly contained` says nothing about
+  // THIS bot's folders, so the enforced wording is never shown from it.
+  const OTHER = "second";
+  const rows = [BOT_ROW, { bot_id: OTHER, display_name: "Second", enabled: 1, definition: JSON.stringify({ engine: "pi" }) }];
+  const status = recordContainSpawn(BOT);
+  assert.equal(status.level, LEVEL_PARTLY, "the other bot really is contained");
+
+  const html = await renderSafety({ ...ctx("en", rows), botId: OTHER });
+  assert.ok(html.includes(translations["botbuilder.sfFoldersNotLimits"].en),
+    "this bot's folders are not limits, whatever another bot's spawn did");
+  assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforced"].en));
+  assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforcedDbs"].en), "no enforcement is claimed");
+  assert.ok(html.includes(translations["botbuilder.sfSummaryNotContained"].en), "the summary agrees");
+
+  // The contained bot's own page still says it — the wording follows the BOT, not the page.
+  const mine = await renderSafety(ctx("en", rows));
+  assert.ok(mine.includes(translations["botbuilder.sfFoldersEnforcedDbs"].en), "the contained bot keeps its wording");
+
+  const es = await renderSafety({ ...ctx("es", rows), botId: OTHER });
+  assert.ok(es.includes(translations["botbuilder.sfFoldersNotLimits"].es), "es folders card");
+
+  // A DISABLED pi bot is not in the list at all (it is enabled pi bots only), so nothing
+  // was observed: not-limits, plus the one true thing — the tier is chosen at every pi
+  // spawn (pi_contain.mjs), so it is decided when the bot runs.
+  const disabledRows = [BOT_ROW, { bot_id: OTHER, display_name: "Second", enabled: 0, definition: JSON.stringify({ engine: "pi" }) }];
+  const disabled = { ...ctx("en", disabledRows), botId: OTHER, bot: { bot_id: OTHER, enabled: 0, definition: JSON.stringify({ engine: "pi" }) } };
+  const off = await renderSafety(disabled);
+  assert.ok(off.includes(translations["botbuilder.sfFoldersNotLimits"].en), "not-limits for a bot that never ran");
+  assert.ok(off.includes(translations["botbuilder.sfContainmentRunsChecked"].en), "and it says when containment is decided");
+  assert.ok(!off.includes(translations["botbuilder.sfFoldersEnforced"].en));
+});
+
+test("a probe failure shows the not-limits wording", async () => {
+  // Review L4: the level is read from the host probe, and a probe that cannot answer
+  // must never turn into a claim of limits. (currentProbe() returns the seam's object
+  // as-is; reading .ok from a broken one is the failure this page has to survive.)
+  recordContainSpawn();
+  _setHostBwrapProbeForTest(() => ({ get ok() { throw new Error("probe exploded"); } }));
+
+  const html = await renderSafety(ctx("en"));
+  assert.ok(html.includes(translations["botbuilder.sfFoldersNotLimits"].en), "the honest wording, not an error page");
+  assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforced"].en));
+  assert.ok(!html.includes(translations["botbuilder.sfFoldersEnforcedDbs"].en), "no enforcement is claimed");
+  assert.ok(html.includes(translations["botbuilder.sfSummaryNotContained"].en), "the summary agrees");
 });
 
 test("the Safety tab reads the level from containment-status.mjs, not from its own rule", async () => {

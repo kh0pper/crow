@@ -13,7 +13,10 @@ import { escapeHtml, actionBar } from "../../shared/components.js";
 import { t, fill } from "../../shared/i18n.js";
 import {
   resolveCrowHome,
+  mcpAddonsPath,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
+import { installedPath, readInstalled } from "../../../bundle-core.js";
+import { readCanonicalMcp } from "../../../../../scripts/pi-bots/mcp_writer.mjs";
 import { loadSkills } from "./data-queries.js";
 import { loadSources, MEMORY_SOURCE, sourceDisplay } from "./sources.js";
 import { sourceMode } from "./tool-access.js";
@@ -46,11 +49,36 @@ import { REPO_SKILLS_DIR } from "../../../../../scripts/pi-bots/skill_resolver.m
 import { addSkillToolsGuarded, skillToolHints } from "../../../../../scripts/pi-bots/skill-tools.mjs";
 import { isVoiceBotDef } from "../../../../shared/voice-bot.js";
 import { isCrowOwnServer } from "../../../../../scripts/pi-bots/containment-status.mjs";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const APP_BUNDLES_DIR = fileURLToPath(new URL("../../../../../bundles", import.meta.url));
+
+/**
+ * What this instance says about a source's PROVENANCE, read once per render:
+ *   addons     every server id the bundle installer registered (mcp-addons.json, keyed by
+ *              the bundle id — the only place an app's server entry comes from)
+ *   installed  every bundle id installed.json records (one entry per installed app)
+ *   canonical  every server of the operator's own ~/.pi/agent/mcp.json
+ * Used only to decide whether a failing source is provably a REMOVED app.
+ */
+function sourceFacts(crowHome) {
+  const facts = { addons: new Set(), installed: new Set(), canonical: new Set() };
+  try {
+    const j = JSON.parse(readFileSync(mcpAddonsPath(crowHome), "utf8"));
+    if (j && typeof j === "object") for (const id of Object.keys(j)) facts.addons.add(id);
+  } catch { /* no add-ons registered on this instance */ }
+  try {
+    for (const r of readInstalled(installedPath(crowHome))) {
+      if (r && typeof r.id === "string") facts.installed.add(r.id);
+    }
+  } catch { /* nothing installed */ }
+  try {
+    for (const id of Object.keys(readCanonicalMcp().mcpServers || {})) facts.canonical.add(id);
+  } catch { /* no canonical config: a fresh install */ }
+  return facts;
+}
 
 /**
  * A source that is an app REMOVED from this Crow (audit N5-4).
@@ -63,9 +91,16 @@ const APP_BUNDLES_DIR = fileURLToPath(new URL("../../../../../bundles", import.m
  * its grants are counted in one quiet line instead, and NOTHING is deleted here —
  * reinstalling the app brings both back. Crow's own servers ship in the checkout, and a
  * connected service or a satellite bundle is never this, whatever it reports.
+ *
+ * It is only ever an APP (review N5-4): the id has to be an entry the bundle installer
+ * registered (mcp-addons.json is keyed by the bundle id) and the bundle has to be gone now.
+ * A server the operator added by hand to ~/.pi/agent/mcp.json has no bundles/<id> folder by
+ * nature, so a missing launcher (`spawn uvx ENOENT`) or an unresolved import there is a
+ * BROKEN SERVICE — it keeps its row, and the row shows its error in plain words, because
+ * that is exactly what the row is for.
  */
 const MISSING_FILES_RE = /ENOENT|Cannot find module|MODULE_NOT_FOUND|no such file or directory|not installed on this instance/i;
-function isRemovedApp(src, crowHome) {
+function isRemovedApp(src, crowHome, facts) {
   if (!src || src.ok || src.connected === true || src.satellite === true) return false;
   // Only a "the files are not there" failure. A timeout, a refused token or a broken
   // launcher is a real service with a problem, and stays a row (that is what the row
@@ -74,6 +109,12 @@ function isRemovedApp(src, crowHome) {
   const id = String(src.server || "");
   if (!id || id.includes("..") || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return false;
   if (isCrowOwnServer(id)) return false;
+  // A canonical ~/.pi/agent/mcp.json server is never "an app that is no longer installed":
+  // the operator configured it, and its failure is the operator's to see.
+  if (facts.canonical.has(id)) return false;
+  // ...and only a bundle's own server can be a removed app.
+  if (!facts.addons.has(id)) return false;
+  if (facts.installed.has(id)) return false;
   try { return !existsSync(join(crowHome, "bundles", id)); } catch { return false; }
 }
 
@@ -222,10 +263,11 @@ export async function renderAbilities(ctx) {
   const others = sources.filter((s) => s.server !== MEMORY_SOURCE && s.connected !== true);
   // Removed apps (audit N5-4): not rows, one quiet line with how many of this bot's
   // grants point at them. Nothing is cleared here; the grants are kept as written.
+  const facts = sourceFacts(crowHome);
   const removedApps = new Set();
   const shownSources = [];
   for (const s of others) {
-    if (isRemovedApp(s, crowHome)) removedApps.add(s.server);
+    if (isRemovedApp(s, crowHome, facts)) removedApps.add(s.server);
     else shownSources.push(s);
   }
   let removedGrants = 0;
@@ -248,7 +290,9 @@ export async function renderAbilities(ctx) {
       ? shownSources.map((s) => sourceRow(s, selected, lang)).join("")
       : `<p class="btb-hint" data-testid="${noToolsYet ? "no-tools-yet" : "no-sources"}">${escapeHtml(t(noToolsYet ? "botbuilder.abNoToolsYet" : "botbuilder.abNoSources", lang))}</p>`) +
     (removedGrants
-      ? `<p class="btb-hint" data-testid="removed-apps">${escapeHtml(fill(t("botbuilder.abRemovedApps", lang), { n: removedGrants }))}</p>`
+      ? `<p class="btb-hint" data-testid="removed-apps">${escapeHtml(removedGrants === 1
+          ? t("botbuilder.abRemovedAppsOne", lang)
+          : fill(t("botbuilder.abRemovedApps", lang), { n: removedGrants }))}</p>`
       : "") +
     `<input type="hidden" name="src_catalog" value="${escapeHtml(JSON.stringify(catalog))}">`;
   const services = card(t("botbuilder.abServicesTitle", lang), servicesBody, t("botbuilder.abServicesLead", lang));

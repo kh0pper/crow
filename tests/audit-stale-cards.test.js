@@ -224,12 +224,15 @@ test("removing a bundle clears its finish-setup card", async () => {
 // 3. a removed app's grants on the Abilities tab
 // ---------------------------------------------------------------------------------
 
-test("the Abilities tab does not list a removed app as a dead service", async () => {
+test("a removed bundle's server is counted, not drawn", async () => {
   const { renderAbilities } = await import("../servers/gateway/dashboard/panels/bot-builder/tab-abilities.js");
   const { _setSourcesForTest } = await import("../servers/gateway/dashboard/panels/bot-builder/sources.js");
   const crowHome = mkdtempSync(join(tmpdir(), "crow-audit-n5-4-ab-"));
-  // A removed bundle leaves its mcp-addons registration behind: the probe cannot start
-  // it, so the source arrives not-ok with a module error, and there is no folder for it.
+  // A removed bundle leaves its mcp-addons registration behind: that entry is what makes
+  // the server provably an app's own, the probe cannot start it, and there is no folder
+  // for it. Nothing is installed, either.
+  writeFileSync(join(crowHome, "mcp-addons.json"),
+    JSON.stringify({ "kuma-app": { command: "node", args: ["server/index.js"] } }));
   _setSourcesForTest({
     error: null,
     errorCode: null,
@@ -244,13 +247,47 @@ test("the Abilities tab does not list a removed app as a dead service", async ()
     assert.ok(!html.includes('data-src="kuma-app"'), "no row for the app that is gone");
     assert.ok(!/Cannot find module/.test(html), "and no module error quoted at the operator");
     assert.match(html, /data-testid="removed-apps"/, "one quiet line instead");
-    assert.ok(html.includes(fill(translations["botbuilder.abRemovedApps"].en, { n: 1 })), "with the count of dead grants");
+    assert.ok(html.includes(translations["botbuilder.abRemovedAppsOne"].en), "one grant reads as one tool, not \"1 tools\"");
     assert.ok(html.includes('data-src="crow-memory"'), "the live source is still listed");
     // Nothing is deleted on read: the grant is still in the def, exactly as written.
     assert.deepEqual(def.tools.crow_mcp, ["kuma-app/kuma_create_monitor", "crow-memory/crow_search_memories"]);
 
     const es = await renderAbilities({ def, lang: "es", hidden: () => "", db: null, req: null, bot: { display_name: "Hank" }, botId: "hank", crowHome });
-    assert.ok(es.includes(fill(translations["botbuilder.abRemovedApps"].es, { n: 1 })), "the Spanish line");
+    assert.ok(es.includes(translations["botbuilder.abRemovedAppsOne"].es), "the Spanish line");
+
+    // Two dead grants from one removed app: the plural key, with its count.
+    def.tools.crow_mcp = ["kuma-app/kuma_create_monitor", "kuma-app/kuma_list_monitors", "crow-memory/crow_search_memories"];
+    const two = await renderAbilities({ def, lang: "en", hidden: () => "", db: null, req: null, bot: { display_name: "Hank" }, botId: "hank", crowHome });
+    assert.ok(two.includes(fill(translations["botbuilder.abRemovedApps"].en, { n: 2 })), "the plural line for two");
+  } finally {
+    _setSourcesForTest(null);
+    rmScratch(crowHome);
+  }
+});
+
+test("a hand-added server that fails keeps its row and its error", async () => {
+  const { renderAbilities } = await import("../servers/gateway/dashboard/panels/bot-builder/tab-abilities.js");
+  const { _setSourcesForTest } = await import("../servers/gateway/dashboard/panels/bot-builder/sources.js");
+  const crowHome = mkdtempSync(join(tmpdir(), "crow-audit-n5-4-hand-"));
+  // A server the operator added to ~/.pi/agent/mcp.json by hand never has a bundles/<id>
+  // folder and is never in mcp-addons.json. A missing launcher (`spawn uvx ENOENT`) is a
+  // broken service, not an app that was removed: it keeps its row, with its error.
+  writeFileSync(join(crowHome, "mcp-addons.json"),
+    JSON.stringify({ "kuma-app": { command: "node", args: ["server/index.js"] } }));
+  _setSourcesForTest({
+    error: null,
+    errorCode: null,
+    sources: [
+      { server: "my-uvx-server", name: "My server", ok: false, error: "spawn uvx ENOENT", catalog: [] },
+    ],
+  });
+  const def = { tools: { crow_mcp: ["my-uvx-server/some_tool"], pi_builtin: [] }, skills: [], permission_policy: { bash: "deny" } };
+  try {
+    const html = await renderAbilities({ def, lang: "en", hidden: () => "", db: null, req: null, bot: { display_name: "Hank" }, botId: "hank", crowHome });
+    assert.ok(html.includes('data-src="my-uvx-server"'), "the broken server keeps its row");
+    assert.ok(html.includes("spawn uvx ENOENT"), "and the row carries its own error");
+    assert.ok(!html.includes('data-testid="removed-apps"'), "it is not counted as an app that is no longer installed");
+    assert.deepEqual(def.tools.crow_mcp, ["my-uvx-server/some_tool"], "and its grants are untouched");
   } finally {
     _setSourcesForTest(null);
     rmScratch(crowHome);

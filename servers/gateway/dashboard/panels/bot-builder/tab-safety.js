@@ -39,12 +39,13 @@ export async function renderSafety(ctx) {
   }
   const readPaths = Array.isArray(pp.read_paths) ? pp.read_paths : [];
   const writePaths = Array.isArray(pp.write_paths) ? pp.write_paths : [];
-  // What the folder lists really are (audit N1b-9). In the default tier a bot's
-  // commands run as this account, so the lists are advice, not limits; only the
-  // contain tier enforces them. The level is COMPUTED by containment-status.mjs
-  // through the same helper Settings → Bot Runtime uses — never re-derived here,
-  // and never inferred from this process's env.
-  const level = await instanceLevel(db, lang);
+  // What the folder lists really are (audit N1b-9, review N5-4). In the default
+  // tier a bot's commands run as this account, so the lists are advice, not limits;
+  // only a contain-tier spawn enforces them, and only for the bots it covers. The
+  // level is COMPUTED by containment-status.mjs through the same helper Settings →
+  // Bot Runtime uses — never re-derived here, and never inferred from this
+  // process's env.
+  const level = await instanceLevel(db, lang, { botId: ctx.botId, bot: ctx.bot });
   const foldersSpeech = level.enforced
     ? t(level.dbsOpen ? "botbuilder.sfFoldersEnforcedDbs" : "botbuilder.sfFoldersEnforced", lang)
     : t("botbuilder.sfFoldersNotLimits", lang);
@@ -58,6 +59,7 @@ export async function renderSafety(ctx) {
     `<p class="btb-hint">${escapeHtml(t("botbuilder.sfWritePathsHint", lang))}</p></div>` +
     `<p class="btb-hint" data-testid="containment-level">${escapeHtml(level.text)}</p>` +
     `<p class="btb-hint" data-testid="containment-folders">${escapeHtml(foldersSpeech)}` +
+    (level.runsChecked ? ` ${escapeHtml(t("botbuilder.sfContainmentRunsChecked", lang))}` : "") +
     (level.enforced ? "" : ` <a href="/dashboard/settings?section=bot-runtime">${escapeHtml(t("botbuilder.sfContainmentLink", lang))}</a>`) +
     `</p>`);
 
@@ -107,28 +109,57 @@ export async function renderSafety(ctx) {
 }
 
 /**
- * This instance's containment level, in the words Settings → Bot Runtime uses.
- * `enforced` is true only when at least one bot was OBSERVED in the contain
- * tier: with no bot to look at, or a `not contained` one, the folder lists are
- * not limits and the page must not say they are. `dbsOpen` follows the open
- * lines (containment-status.mjs's OPEN_DATA_DBS, one per bot, `<bot id>: `-prefixed
- * for the instance), so the database sentence appears only when it is true.
+ * THIS bot's containment, in the words Settings → Bot Runtime uses (audit N1b-9,
+ * review N5-4).
  *
- * @returns {Promise<{level:string, enforced:boolean, dbsOpen:boolean, text:string}>}
+ * `enforced` is true only when THIS bot has its own `contained` / `partly contained`
+ * entry in containmentBots(): that helper lists only ENABLED pi bots, and the contain
+ * tier can cover a subset of them (CROW_PI_CONTAIN_BOTS), so another bot's
+ * containment says nothing about this bot's folders. `dbsOpen` follows this bot's own
+ * open lines (containment-status.mjs's OPEN_DATA_DBS), so the database sentence
+ * appears only when it is true FOR THIS BOT.
+ *
+ * `runsChecked` is true for a pi bot the list does not cover because it is disabled:
+ * pi_contain.mjs picks the tier at every pi spawn (containSelected), so containment is
+ * decided when the bot runs — which is never a reason to claim the folders are limits
+ * now, and never a claim about a non-pi engine, which pi_contain does not touch.
+ *
+ * Never throws: an unreadable level, a failed probe (review L4) or a bad record leaves
+ * the not-limits wording, because this page may not print limits it cannot show.
+ *
+ * @returns {Promise<{level:string, enforced:boolean, dbsOpen:boolean, runsChecked:boolean, text:string}>}
  */
-async function instanceLevel(db, lang) {
-  const bots = await containmentBots(db);
-  const probe = currentProbe();
-  const inst = instanceContainment(bots, { host: { bwrap: probe.ok === true } });
-  const level = Object.hasOwn(LEVEL_KEY, inst.level) ? inst.level : LEVEL_NOT;
-  const enforced = bots.length > 0 && (level === LEVEL_CONTAINED || level === LEVEL_PARTLY);
-  const dbsOpen = inst.open.some((line) => String(line).endsWith(OPEN_DATA_DBS));
-  // The same key (and the same words) Bot Runtime's own level line uses, so the two
-  // surfaces can never drift; "no bots" when this process could observe none.
-  const text = bots.length > 0
-    ? fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[level], lang) })
-    : t("settings.containment.noBots", lang);
-  return { level, enforced, dbsOpen, text };
+async function instanceLevel(db, lang, { botId = null, bot = null } = {}) {
+  try {
+    const bots = await containmentBots(db);
+    const probe = currentProbe();
+    const inst = instanceContainment(bots, { host: { bwrap: probe.ok === true } });
+    const level = Object.hasOwn(LEVEL_KEY, inst.level) ? inst.level : LEVEL_NOT;
+    const mine = botId ? bots.find((b) => b && String(b.botId) === String(botId)) : null;
+    const enforced = !!mine && (mine.level === LEVEL_CONTAINED || mine.level === LEVEL_PARTLY);
+    const dbsOpen = enforced && Array.isArray(mine.open)
+      && mine.open.some((line) => String(line).endsWith(OPEN_DATA_DBS));
+    // The same key (and the same words) Bot Runtime's own level line uses, so the two
+    // surfaces can never drift; "no bots" when this process could observe none.
+    const text = bots.length > 0
+      ? fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[level], lang) })
+      : t("settings.containment.noBots", lang);
+    const runsChecked = !enforced && !mine && isDisabledPiBot(bot);
+    return { level, enforced, dbsOpen, runsChecked, text };
+  } catch {
+    return {
+      level: LEVEL_NOT, enforced: false, dbsOpen: false, runsChecked: false,
+      text: fill(t("settings.botRuntimeContainmentLevel", lang), { level: t(LEVEL_KEY[LEVEL_NOT], lang) }),
+    };
+  }
+}
+
+/** A pi bot the containment list does not cover because it is disabled (so nothing ran here). */
+function isDisabledPiBot(bot) {
+  if (!bot || Number(bot.enabled) === 1) return false;
+  let def = {};
+  try { def = JSON.parse(bot.definition || "{}") || {}; } catch { def = {}; }
+  return def.engine == null || def.engine === "pi";
 }
 
 /**

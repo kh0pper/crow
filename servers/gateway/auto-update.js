@@ -461,7 +461,8 @@ const RESULT_TEXT_IS_SAFE = new Set([
  * @param {string} value the `auto_update_last_result` value being recorded
  * @param {number} [nowMs] clock seam
  * @returns {Promise<object|null>} the notification row, or null when silent
- */async function notifyUpdateFailure(value, nowMs = Date.now()) {
+ */
+async function notifyUpdateFailure(value, nowMs = Date.now()) {
   try {
     if (!db) return null;
     const klass = classifyUpdateResult(value);
@@ -534,6 +535,23 @@ export async function clearUpdateFailureNotifications() {
 }
 
 /**
+ * Forget the failure bell's cooldown, so the same failure returning after a
+ * recovery rings again (review N5-4). The cooldown exists to stop one standing
+ * condition from ringing on every tick; once a result proved the condition gone,
+ * a later reappearance is a NEW event and the operator has to hear it. Both keys
+ * are blanked (not deleted) so an old stamp can never be compared to a future
+ * code. Never throws.
+ */
+async function resetUpdateNotifyCooldown() {
+  if (!db) return;
+  // Nothing stamped (the usual case on a healthy install): no write on every tick.
+  const stamped = await readSettingValue(UPDATE_NOTIFIED_CODE_KEY);
+  if (!stamped) return;
+  await saveSetting(UPDATE_NOTIFIED_CODE_KEY, "", { notify: false });
+  await saveSetting(UPDATE_NOTIFIED_AT_KEY, "", { notify: false });
+}
+
+/**
  * Record an `auto_update_last_result` value from OUTSIDE the tick. The boot guard
  * (scripts/boot-guard/crow-boot-guard.mjs, via boot-guard-state.js) rolls a
  * crash-looping commit back before any gateway process exists, so its result has
@@ -580,8 +598,13 @@ async function saveSetting(key, value, { notify = true } = {}) {
       if (notify) await notifyUpdateFailure(value);
       // A good result ends the failure it followed (audit N5-4): the bell is
       // about a condition that no longer holds, so it is dismissed here, in the
-      // one place every result write passes through.
-      if (classifyUpdateResult(value)?.kind === "ok") await clearUpdateFailureNotifications();
+      // one place every result write passes through — and its cooldown is
+      // forgotten with it, so the same failure returning later rings again
+      // (review N5-4) instead of staying silent for a day.
+      if (classifyUpdateResult(value)?.kind === "ok") {
+        await clearUpdateFailureNotifications();
+        await resetUpdateNotifyCooldown();
+      }
     }
     await db.execute({
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
