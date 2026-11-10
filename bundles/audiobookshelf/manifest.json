@@ -1,7 +1,8 @@
 {
   "id": "audiobookshelf",
   "name": "Audiobookshelf",
-  "version": "1.0.3",
+  "version": "1.0.4",
+  "refreshFiles": ["docker-compose.yml"],
   "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
   "type": "bundle",
   "author": "Crow",
@@ -22,6 +23,12 @@
   ],
   "ports": [13378],
   "webUI": { "port": 13378, "path": "/", "label": "Audiobookshelf" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY)."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "AUDIOBOOKSHELF_ADMIN_PASSWORD"
+  },
+  "notes": "Crow creates Audiobookshelf's root user (`admin`) itself at install and saves the password in Settings → Passwords, so the first-run form is never left open for anything else on the machine to claim. Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY)."
 }

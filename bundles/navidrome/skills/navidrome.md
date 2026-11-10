@@ -66,6 +66,7 @@ tools:
 ## Tips
 
 - Navidrome uses the Subsonic API with salt+token authentication
+- Crow creates Navidrome's first admin (`admin`) at install and keeps that login in Settings → Passwords; for an install made before this version, the Extensions card offers "Set it up for me". Never tell the user to create the admin account on Navidrome's first-run page
 - Stream URLs include auth parameters; they're for direct playback, not for sharing publicly
 - Song, album, and artist IDs are strings in Navidrome
 - Store the user's music preferences in memory (favorite genres, artists, etc.)

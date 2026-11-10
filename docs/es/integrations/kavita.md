@@ -38,7 +38,9 @@ Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de Kavita"
 
-Kavita estará disponible en `http://tu-servidor:5000`. Crea una cuenta de administrador a través de la interfaz web en el primer arranque.
+Kavita estará disponible en `http://tu-servidor:5000`. Crow registra la primera cuenta de Kavita (`admin`) durante la instalación y guarda su contraseña en **Ajustes** > **Contraseñas** del Crow's Nest, así que la página de registro nunca queda abierta para que otra cosa en la máquina la reclame. Crow escribe ese usuario y esa contraseña en `KAVITA_USERNAME`/`KAVITA_PASSWORD` para las herramientas del bundle.
+
+Si instalaste Kavita antes de esta versión, su tarjeta en la página de Extensiones ofrece **Set it up for me**, que registra la cuenta ahora y guarda la contraseña de la misma forma.
 
 ::: tip Nota sobre el puerto
 El puerto 5000 es usado comúnmente por otros servicios. Si tienes un conflicto, reasigna el puerto en el `docker-compose.yml` del bundle.

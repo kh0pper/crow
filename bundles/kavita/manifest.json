@@ -1,7 +1,7 @@
 {
   "id": "kavita",
   "name": "Kavita",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
   "type": "bundle",
   "author": "Crow",
@@ -13,15 +13,22 @@
   "panel": "panel/kavita.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/kavita.md"],
-  "requires": { "env": ["KAVITA_USERNAME", "KAVITA_PASSWORD"], "min_ram_mb": 512, "min_disk_mb": 1000 },
+  "requires": { "env": ["KAVITA_USERNAME"], "min_ram_mb": 512, "min_disk_mb": 1000 },
   "env_vars": [
     { "name": "KAVITA_URL", "description": "Kavita server URL", "default": "http://localhost:5000", "required": true },
-    { "name": "KAVITA_USERNAME", "description": "Kavita username for API authentication", "required": true },
-    { "name": "KAVITA_PASSWORD", "description": "Kavita password for API authentication", "required": true, "secret": true },
+    { "name": "KAVITA_USERNAME", "description": "Kavita username for API authentication (Crow creates `admin` at install and writes it here)", "default": "admin", "required": true },
+    { "name": "KAVITA_PASSWORD", "description": "Kavita password for API authentication. Crow generates it at install and keeps it in Settings → Passwords.", "required": false, "secret": true },
     { "name": "KAVITA_LIBRARY_PATH", "description": "Host path for manga/comics/ebooks (Docker mode).", "required": false }
   ],
   "ports": [5000],
   "webUI": { "port": 5000, "path": "/", "label": "Kavita" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "KAVITA_PASSWORD",
+    "userEnv": "KAVITA_USERNAME"
+  },
+  "notes": "Crow registers Kavita's first account (`admin`) itself at install and saves the password in Settings → Passwords, so the registration page is never left open for anything else on the machine to claim. Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed."
 }

@@ -37,7 +37,9 @@ Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de Jellyfin"
 
-Jellyfin estará disponible en `http://tu-servidor:8096` para la configuración inicial (crea una cuenta de administrador y configura las bibliotecas).
+Jellyfin estará disponible en `http://tu-servidor:8096`. Crow completa el asistente de configuración inicial de Jellyfin durante la instalación: crea la cuenta de administrador `admin`, le pone una contraseña que genera y guarda ese inicio de sesión en **Ajustes** > **Contraseñas** del Crow's Nest, así que no queda ningún asistente abierto para que otra cosa en la máquina lo reclame. Inicia sesión con esa cuenta y configura tus bibliotecas.
+
+Si instalaste Jellyfin antes de esta versión, su tarjeta en la página de Extensiones ofrece **Set it up for me**, que completa el asistente ahora y guarda la contraseña de la misma forma.
 
 ### Opción B: Conectar a Jellyfin existente
 

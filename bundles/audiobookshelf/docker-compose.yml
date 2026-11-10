@@ -13,7 +13,9 @@ services:
     mem_limit: 512m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/healthcheck"]
+      # The image ships wget but no command-line HTTP client for `curl -f`: a curl probe
+      # could never report healthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 5

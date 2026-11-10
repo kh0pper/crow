@@ -39,7 +39,9 @@ Restart the bundle for changes to take effect:
 
 > "Crow, restart the Audiobookshelf bundle"
 
-Audiobookshelf will be available at `http://your-server:13378`. Create an admin account through the web UI on first launch, then generate an API key from **Settings** > **Users** > your user.
+Audiobookshelf will be available at `http://your-server:13378`. Crow creates Audiobookshelf's root user (`admin`) during the install and saves its password in **Settings** > **Passwords** in the Crow's Nest, so the first-run form is never left open for anything else on the machine to claim. Log in with that account, then generate an API key from **Settings** > **Users** > your user.
+
+If you installed Audiobookshelf before this version, its card on the Extensions page offers **Set it up for me**, which creates the account now and keeps the password the same way.
 
 ### Option B: Connect to existing Audiobookshelf
 

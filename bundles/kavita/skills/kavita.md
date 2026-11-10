@@ -60,6 +60,7 @@ tools:
 ## Tips
 
 - Kavita uses JWT authentication; credentials are configured via KAVITA_USERNAME and KAVITA_PASSWORD
+- Crow registers Kavita's first account (`admin`) at install and keeps that login in Settings → Passwords; for an install made before this version, the Extensions card offers "Set it up for me". Never tell the user to register the admin account on Kavita's first-run page
 - Format types: Image, Archive, EPUB, PDF
 - Store the user's reading preferences in memory (favorite genres, preferred format, etc.)
 - Series IDs are numeric in Kavita

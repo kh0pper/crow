@@ -248,7 +248,10 @@
     {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
-      "version": "1.0.3",
+      "version": "1.0.4",
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
       "type": "bundle",
       "author": "Crow",
@@ -319,9 +322,16 @@
         "label": "Audiobookshelf"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "AUDIOBOOKSHELF_ADMIN_PASSWORD"
       },
-      "notes": "Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY).",
+      "notes": "Crow creates Audiobookshelf's root user (`admin`) itself at install and saves the password in Settings → Passwords, so the first-run form is never left open for anything else on the machine to claim. Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY).",
       "official": true
     },
     {
@@ -2609,7 +2619,7 @@
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "author": "Crow",
@@ -2689,15 +2699,22 @@
         "label": "Jellyfin"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "JELLYFIN_ADMIN_PASSWORD"
       },
-      "notes": "Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY).",
+      "notes": "Crow finishes Jellyfin's setup wizard itself at install, creating the admin account `admin` with a password it generates and saves in Settings → Passwords — the wizard is never left open for anything else on the machine to claim. Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY).",
       "official": true
     },
     {
       "id": "kavita",
       "name": "Kavita",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
       "type": "bundle",
       "author": "Crow",
@@ -2731,8 +2748,7 @@
       ],
       "requires": {
         "env": [
-          "KAVITA_USERNAME",
-          "KAVITA_PASSWORD"
+          "KAVITA_USERNAME"
         ],
         "min_ram_mb": 512,
         "min_disk_mb": 1000
@@ -2746,13 +2762,14 @@
         },
         {
           "name": "KAVITA_USERNAME",
-          "description": "Kavita username for API authentication",
+          "description": "Kavita username for API authentication (Crow creates `admin` at install and writes it here)",
+          "default": "admin",
           "required": true
         },
         {
           "name": "KAVITA_PASSWORD",
-          "description": "Kavita password for API authentication",
-          "required": true,
+          "description": "Kavita password for API authentication. Crow generates it at install and keeps it in Settings → Passwords.",
+          "required": false,
           "secret": true
         },
         {
@@ -2770,9 +2787,17 @@
         "label": "Kavita"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "KAVITA_PASSWORD",
+        "userEnv": "KAVITA_USERNAME"
       },
-      "notes": "Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed.",
+      "notes": "Crow registers Kavita's first account (`admin`) itself at install and saves the password in Settings → Passwords, so the registration page is never left open for anything else on the machine to claim. Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed.",
       "official": true
     },
     {
@@ -4597,7 +4622,7 @@
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "author": "Crow",
@@ -4631,8 +4656,7 @@
       ],
       "requires": {
         "env": [
-          "NAVIDROME_USERNAME",
-          "NAVIDROME_PASSWORD"
+          "NAVIDROME_USERNAME"
         ],
         "min_ram_mb": 256,
         "min_disk_mb": 500
@@ -4646,13 +4670,14 @@
         },
         {
           "name": "NAVIDROME_USERNAME",
-          "description": "Navidrome username",
+          "description": "Navidrome username (Crow creates `admin` at install and writes it here)",
+          "default": "admin",
           "required": true
         },
         {
           "name": "NAVIDROME_PASSWORD",
-          "description": "Navidrome password",
-          "required": true,
+          "description": "Navidrome password. Crow generates it at install and keeps it in Settings → Passwords.",
+          "required": false,
           "secret": true
         },
         {
@@ -4672,7 +4697,15 @@
         "label": "Navidrome"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "NAVIDROME_PASSWORD",
+        "userEnv": "NAVIDROME_USERNAME"
       },
       "official": true
     },
