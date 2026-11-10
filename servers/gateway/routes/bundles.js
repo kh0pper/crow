@@ -2040,9 +2040,17 @@ function addonPastDefaults() {
   return _addonPastDefaults;
 }
 
-/** Whether walls are on for this host: the per-host default, minus the kill switch. */
-export function addonWallsOnHere(env = process.env) {
-  return env.CROW_ADDON_WALLS_DEFAULT === "walled" && env.CROW_ADDON_WALLS !== "off";
+/** The host summary codes that mean no add-on runs walled on this computer. */
+const WALLS_OFF_CODES = new Set(["kill-switch", "no-bwrap", "host-off"]);
+
+/**
+ * Whether walls are on for this host. The host summary decides: the per-host
+ * default, the kill switch and whether this computer can run a wall at all
+ * (the bwrap probe), never the default alone.
+ */
+export function addonWallsOnHere(env = process.env, { probe } = {}) {
+  const { code } = addonWallStatus({ env, probe, lang: "en", entries: [] });
+  return !WALLS_OFF_CODES.has(code);
 }
 
 /**
@@ -2056,8 +2064,8 @@ export function addonWallsOnHere(env = process.env) {
  *
  * @returns {{sandbox_line: {en:string, es:string}|null, sandbox_state: {en:string, es:string}|null}}
  */
-export function addonWallConsentFields(bundleId, manifest, env = process.env) {
-  const wallsOn = addonWallsOnHere(env);
+export function addonWallConsentFields(bundleId, manifest, env = process.env, { probe } = {}) {
+  const wallsOn = addonWallsOnHere(env, { probe });
   let line = null;
   if (manifest && manifest.server) {
     try {
@@ -2081,8 +2089,8 @@ export function addonWallConsentFields(bundleId, manifest, env = process.env) {
   const state = wallsOn
     ? null
     : {
-      en: addonWallStatus({ env, lang: "en", entries: [] }).sentence,
-      es: addonWallStatus({ env, lang: "es", entries: [] }).sentence,
+      en: addonWallStatus({ env, probe, lang: "en", entries: [] }).sentence,
+      es: addonWallStatus({ env, probe, lang: "es", entries: [] }).sentence,
     };
   return { sandbox_line: line, sandbox_state: state };
 }

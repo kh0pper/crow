@@ -36,7 +36,8 @@ const {
   sandboxLine, labelPhrase, NOTICE, RESIDUAL_LINE, SANDBOX_LINE, SUMMARY, WALL_WORDS,
 } = await import("../scripts/addon-sandbox/words.mjs");
 const { deriveProfile, pendingHostFields } = await import("../scripts/addon-sandbox/profile.mjs");
-const { _setAddonWallProbeForTest } = await import("../servers/gateway/dashboard/shared/addon-wall-status.js");
+const { _setAddonWallProbeForTest, renderAddonWallStatus } = await import("../servers/gateway/dashboard/shared/addon-wall-status.js");
+const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
 const { extensionsClientJS } = await import("../servers/gateway/dashboard/panels/extensions/client.js");
 const { addonWallDetails } = await import("../servers/gateway/dashboard/shared/addon-wall-details.js");
 const { readAddonWalls } = await import("../servers/shared/addon-walls-file.js");
@@ -46,6 +47,8 @@ const B = await import("../servers/gateway/routes/bundles.js");
 const REGISTRY_PROFILES = JSON.parse(readFileSync(join(REPO, "registry", "addon-profiles.json"), "utf8")).profiles;
 
 const SANDBOXED = Object.freeze({ ok: true, pidns: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null, pidReason: null });
+// bubblewrap is not installed here, so nothing can run walled whatever the default.
+const NO_BWRAP = Object.freeze({ ok: false, pidns: false, bwrap: null, setpriv: null, reason: "bubblewrap (bwrap) is not installed", pidnsReason: null });
 
 // The repo bundles dir the router's profile reads for a fixture bundle.
 const FIXTURES = mkdtempSync(join(tmpdir(), "crow-wall-words-app-"));
@@ -76,7 +79,7 @@ test("studio's line ends with Crow's database, and says storage before it when i
 
 test("walls off here: the line says what the wall WOULD allow, never that a limit is in force", () => {
   assert.ok(sandboxLine(REGISTRY_PROFILES.paperless, "en", { walled: false }).startsWith("When walled, this add-on can: "));
-  assert.ok(sandboxLine(REGISTRY_PROFILES.paperless, "es", { walled: false }).startsWith("Con aislamiento, este complemento puede: "));
+  assert.ok(sandboxLine(REGISTRY_PROFILES.paperless, "es", { walled: false }).startsWith("Cuando esté aislado, este complemento puede: "));
 });
 
 test("every shipped profile has a Spanish line, and it is never the English one", () => {
@@ -86,6 +89,12 @@ test("every shipped profile has a Spanish line, and it is never the English one"
     assert.ok(en.length > 0, id);
     assert.ok(es.trim().length > 0, id);
     assert.notEqual(es, en, `${id}: the Spanish line is its own`);
+    assert.ok(es.startsWith("Este complemento puede: "), `${id}: ${es}`);
+    const unwalledEs = sandboxLine(profile, "es", { walled: false });
+    assert.ok(unwalledEs.startsWith("Cuando esté aislado, este complemento puede: "), `${id}: ${unwalledEs}`);
+    for (const english of ["use the internet", "on this computer", "its own folder"]) {
+      assert.equal(es.includes(english), false, `${id}: the Spanish line never carries "${english}"`);
+    }
   }
 });
 
@@ -141,6 +150,22 @@ test("no add-on string anywhere says 'contained' (or its Spanish stem)", () => {
         }
       }
     }
+  }
+  // The extensions page's own wall keys, both languages.
+  for (const [key, value] of Object.entries(translations)) {
+    if (!key.startsWith("extensions.wall")) continue;
+    strings.push(value.en, value.es);
+  }
+  // The rendered status block for a mix of every word, both languages.
+  const mix = [
+    { id: "plain", kind: "addon", name: "plain", status: "connected", wall: { mode: "walled", source: "walled", profile: null, residuals: [] } },
+    { id: "shared", kind: "addon", name: "shared", status: "connected", wall: { mode: "walled", source: "walled", profile: { crowDb: true }, residuals: [] } },
+    { id: "mine", kind: "addon", name: "mine", status: "connected", wall: { mode: "unwalled", source: "owner" } },
+    { id: "broken", kind: "addon", name: "broken", status: "connected", wall: { mode: "refused", source: "refused" } },
+    { id: "backend-1", kind: "backend", name: "orders-db", status: "connected", wall: { mode: "unwalled", source: "owner" } },
+  ];
+  for (const lang of ["en", "es"]) {
+    strings.push(renderAddonWallStatus({ entries: mix, env: { CROW_ADDON_WALLS_DEFAULT: "walled" }, probe: SANDBOXED, lang }));
   }
   for (const text of strings.filter((s) => typeof s === "string")) {
     assert.doesNotMatch(text, /contained/i, text);
@@ -223,6 +248,42 @@ test("consent-challenge: the kill switch is what the host sentence names, and a 
   } finally {
     delete process.env.CROW_ADDON_WALLS;
   }
+});
+
+test("consent-challenge: a walled host with no usable bwrap says 'When walled' and names the host sentence", async () => {
+  _setAddonWallProbeForTest(() => NO_BWRAP);
+  process.env.CROW_ADDON_WALLS_DEFAULT = "walled";
+  try {
+    await withServer(async (base) => {
+      const r = await getJson(`${base}/bundles/api/consent-challenge/wall-demo-plain`);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.match(r.body.sandbox_line.en, /^When walled, this add-on can: /);
+      assert.deepEqual(r.body.sandbox_state, { en: SUMMARY.noBwrap.en, es: SUMMARY.noBwrap.es });
+    });
+  } finally {
+    delete process.env.CROW_ADDON_WALLS_DEFAULT;
+  }
+});
+
+test("the wall fields read the one probe: no bwrap, the kill switch, and a host that really walls", () => {
+  const manifest = JSON.parse(readFileSync(join(FIXTURES, "wall-demo-plain", "manifest.json"), "utf8"));
+  const walled = { CROW_ADDON_WALLS_DEFAULT: "walled" };
+
+  assert.equal(B.addonWallsOnHere(walled, { probe: NO_BWRAP }), false, "no bwrap here: nothing runs walled");
+  const noBwrap = B.addonWallConsentFields("wall-demo-plain", manifest, walled, { probe: NO_BWRAP });
+  assert.match(noBwrap.sandbox_line.en, /^When walled, this add-on can: /);
+  assert.deepEqual(noBwrap.sandbox_state, { en: SUMMARY.noBwrap.en, es: SUMMARY.noBwrap.es });
+
+  const killed = { CROW_ADDON_WALLS: "off", CROW_ADDON_WALLS_DEFAULT: "walled" };
+  assert.equal(B.addonWallsOnHere(killed, { probe: SANDBOXED }), false);
+  const off = B.addonWallConsentFields("wall-demo-plain", manifest, killed, { probe: SANDBOXED });
+  assert.match(off.sandbox_line.en, /^When walled, this add-on can: /);
+  assert.deepEqual(off.sandbox_state, { en: SUMMARY.killSwitch.en, es: SUMMARY.killSwitch.es });
+
+  assert.equal(B.addonWallsOnHere(walled, { probe: SANDBOXED }), true);
+  const on = B.addonWallConsentFields("wall-demo-plain", manifest, walled, { probe: SANDBOXED });
+  assert.match(on.sandbox_line.en, /^This add-on can: /);
+  assert.equal(on.sandbox_state, null);
 });
 
 // ─── "Wall it again" ───────────────────────────────────────────────────────
@@ -318,7 +379,7 @@ test("the detail modal's data: the live line, the word, and who chose unwalled",
     assert.equal(details.paperless.word.en, WALL_WORDS.owner.en);
     assert.equal(details.paperless.ownerUnwalled, true);
     assert.match(details.paperless.line.en, /^When walled, this add-on can: /, "the line follows the wall's mode");
-    assert.equal(details.paperless.line.es.length > 0, true);
+    assert.match(details.paperless.line.es, /^Cuando esté aislado, este complemento puede: /, "the Spanish line follows the wall's mode");
     assert.equal(details["no-such-addon"].line, null, "an add-on with no manifest gives no line, never a guess");
     assert.equal(details["no-such-addon"].ownerUnwalled, false);
   } finally {
@@ -392,7 +453,7 @@ test("an installed add-on the owner set unwalled shows its line, its word, and W
   const line = "When walled, this add-on can: use the internet; keep files in its own folder";
   const { document, click, settle, flushTimers, calls, reloads } = await bootPanel({
     addonWall: {
-      paperless: { line: { en: line, es: "Con aislamiento, este complemento puede: usar internet" }, word: { en: WALL_WORDS.owner.en, es: WALL_WORDS.owner.es }, wordKey: "owner", ownerUnwalled: true },
+      paperless: { line: { en: line, es: "Cuando esté aislado, este complemento puede: usar internet" }, word: { en: WALL_WORDS.owner.en, es: WALL_WORDS.owner.es }, wordKey: "owner", ownerUnwalled: true },
     },
   });
   click(document.querySelector('.ext-installed__item[data-addon-id="paperless"]'));

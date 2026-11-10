@@ -20,21 +20,21 @@ export const WALL_WORDS = Object.freeze({
   killSwitch: { en: "not walled (switched off by the operator)", es: "no aislado (desactivado por el operador)" },
   noBwrap: { en: "not walled on this computer; docker reachable", es: "no aislado en este equipo; docker accesible" },
   backend: { en: "not walled (approved commands)", es: "no aislado (comandos aprobados)" },
-  failed: { en: "off: it could not run inside its wall", es: "apagado: no pudo ejecutarse aislado" },
+  failed: { en: "off: it could not run inside its wall", es: "apagado: no pudo ejecutarse dentro de su aislamiento" },
   stopped: { en: "off: it stopped", es: "apagado: se detuvo" },
 });
 
 /** What a walled add-on still reaches beyond its wall. */
 export const RESIDUAL_LINE = Object.freeze({
   en: "Bots' and satellites' copies of add-ons, and approved data backends, are not walled.",
-  es: "Las copias de los complementos en bots y satélites, y los backends de datos aprobados, no están aisladas.",
+  es: "Las copias de los complementos en bots y satélites, y los orígenes de datos aprobados, no están aisladas.",
 });
 
 /** The one summary sentence the status page, the settings block and the Nest card share. */
 export const SUMMARY = Object.freeze({
   killSwitch: {
     en: "Add-ons: walls switched off by the operator (CROW_ADDON_WALLS=off)",
-    es: "Complementos: muros desactivados por el operador (CROW_ADDON_WALLS=off)",
+    es: "Complementos: aislamiento desactivado por el operador (CROW_ADDON_WALLS=off)",
   },
   noBwrap: {
     en: "Add-ons: not walled off on this computer; docker reachable",
@@ -78,7 +78,7 @@ export const NOTICE = Object.freeze({
 /** The two ways one sandbox line opens, depending on whether walls are on here. */
 export const SANDBOX_LINE = Object.freeze({
   walled: { en: "This add-on can: ", es: "Este complemento puede: " },
-  unwalled: { en: "When walled, this add-on can: ", es: "Con aislamiento, este complemento puede: " },
+  unwalled: { en: "When walled, this add-on can: ", es: "Cuando esté aislado, este complemento puede: " },
 });
 
 /** The one language this module speaks besides English. */
