@@ -14,7 +14,7 @@ import { firstAdminAfterProblems } from "../../servers/gateway/bundle-first-admi
 // The "is this a plain path inside the bundle" rule and the panel-id rule live in one leaf
 // module, shared with routes/bundles.js (which skips such a value at install) and
 // compose-guard.js: a manifest the contract refuses is the same value the runtime refuses.
-import { badBundlePath, badPanelId, launcherPathValues } from "../../servers/shared/bundle-declared-paths.js";
+import { badBundlePath, badPanelId } from "../../servers/shared/bundle-declared-paths.js";
 
 const schema = JSON.parse(
   readFileSync(new URL("../../registry/manifest.schema.json", import.meta.url), "utf8"),
@@ -449,15 +449,6 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
   if (manifest && manifest.server && typeof manifest.server === "object") {
     const command = manifest.server.command;
     const arg0 = Array.isArray(manifest.server.args) ? manifest.server.args[0] : undefined;
-    // The spawn runs with the bundle folder as its cwd, so every launcher value that makes it
-    // LOAD OR RUN CODE (`launcherPathValues`: a relative command, an interpreter's script and
-    // code-loading flag values, a runner's local package spec) must be a plain relative path
-    // inside the bundle — an absolute one or one that climbs would run a file from elsewhere.
-    // Data arguments are not checked: `--data-dir=data`, `--db data/x.db` or `--config=/etc/x`
-    // are the program's own input, not code, and the launcher's reader leaves them alone.
-    for (const { key, value } of launcherPathValues(manifest)) {
-      if (badBundlePath(value)) errors.push(`${key} "${value}" must be a relative path inside the bundle`);
-    }
     if (command === "node" && typeof arg0 === "string" && !arg0.startsWith("-") && !fileExists(bundleDir, arg0)) {
       errors.push(`server entry "${arg0}" not found`);
     }

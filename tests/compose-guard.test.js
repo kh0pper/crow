@@ -90,7 +90,8 @@ test("model: the narrow exceptions — /etc/localtime read-only; crow.db and the
   assert.equal(check(svc({ volumes: [bind(bundles, true)] }), { manifest: PRIV, consent: true }).valid, true);
   assert.equal(check(svc({ volumes: [bind(bundles, true)] })).valid, false);
   const dir = bundleDir();
-  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), { dir }).valid, true, "the bundle's own folder");
+  assert.equal(check(svc({ volumes: [bind(join(dir, "data"), true)] }), { dir }).valid, true, "the bundle's own folder, read-only");
+  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), { dir }).valid, false, "the bundle's own folder is never mounted read-write");
   assert.equal(check(svc({ volumes: [bind(join(bundles, "other", ".env"), true)] }), { dir }).valid, false, "another bundle's folder");
 });
 
@@ -178,7 +179,7 @@ dockerTest("Start-time sources: an override file and COMPOSE_FILE in .env are pa
   assert.equal((await gateDir(renamed, { textCheck: false, manifest: { id: "fx-r" } })).valid, false, "COMPOSE_PROJECT_NAME can't take another bundle's project");
   const swapped = project({ "docker-compose.yml": C(""), "evil.yml": C("    network_mode: host\n"), ".env": "COMPOSE_FILE=evil.yml\n" });
   assert.equal((await gateDir(swapped, { textCheck: false })).valid, false);
-  const benign = project({ "docker-compose.yml": C("    volumes:\n      - ./data:/d\n"), "docker-compose.override.yml": "services:\n  app:\n    volumes: !override\n      - ./data:/var/lib/x\n" });
+  const benign = project({ "docker-compose.yml": C("    volumes:\n      - ./data:/d:ro\n"), "docker-compose.override.yml": "services:\n  app:\n    volumes: !override\n      - ./data:/var/lib/x:ro\n" });
   assert.equal((await gateDir(benign, { textCheck: false })).valid, true, "an operator's benign override still starts");
 });
 
@@ -213,8 +214,7 @@ dockerTest("every tracked first-party compose passes the model check (with its m
       cpSync(src, dir, { recursive: true, filter: (f) => !f.includes("node_modules") });
       const loaded = await G.loadComposeModel(dir, { env, runConfig: run });
       if (loaded.error) { bad.push(`${id}: ${loaded.error}`); continue; }
-      const { readdirSync } = await import("node:fs");
-      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home, shipped: new Set(readdirSync(src)) } });
+      const r = G.checkComposeModel(loaded.model, { bundleDir: dir, manifest, consentVerified: true, ctx: { crowHome: ch, dataDir: join(ch, "data"), appRoot: REPO, home } });
       if (!r.valid) bad.push(`${id}: ${r.reason}`);
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
@@ -640,19 +640,18 @@ test("Start takes trust flags from the repo manifest, never the installed copy (
   assert.equal(g.manifest.origin, "community");
 });
 
-test("a bundle can't mount its own control files read-write, nor claim a Crow name or file in CROW_HOME by its id", () => {
+test("a bundle can't mount its own folder read-write (its bookkeeping files included), nor claim a Crow name or file in CROW_HOME by its id", () => {
   const dir = join(CROW_HOME, "bundles", "fx-ctl");
   mkdirSync(join(dir, "data"), { recursive: true });
   const m = { manifest: { id: "fx-ctl" }, dir };
   // Every bookkeeping file bundle-compose-state.js writes (the version refresh and the
-  // bind-drift card trust these), plus one no version writes yet: the prefix rule covers it.
+  // bind-drift card trust these), plus one no version writes yet: the whole-folder rule covers it.
   const bookkeeping = [S.COMPOSE_SHA_FILE, S.COMPOSE_EDITED_FILE, S.COMPOSE_STATE_FILE, S.COMPOSE_NEEDS_CONFIG_FILE, S.COMPOSE_IMAGE_CHANGE_FILE, ".crow-compose.future"];
-  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", ...bookkeeping]) {
+  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", "data", ...bookkeeping]) {
     assert.equal(check(svc({ volumes: [bind(join(dir, rel))] }), m).valid, false, `rw ${rel || "(the folder)"}`);
     assert.equal(check(svc({ volumes: [bind(join(dir, rel), true)] }), m).valid, true, `ro ${rel || "(the folder)"}`);
   }
   assert.equal(check(svc({ volumes: [bind(dir, true)] }), m).valid, true, "read-only is fine");
-  assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), m).valid, true, "a data subfolder is fine");
   for (const id of ["mcp", "peer", "secrets", "backups", "panels", "skills", "data", "bundles"]) {
     for (const f of [id, `${id}-addons.json`, `${id}-tokens.json`]) {
       assert.equal(check(svc({ volumes: [bind(join(CROW_HOME, f))] }), { manifest: { id } }).valid, false, `${id} → ${f}`);
@@ -880,243 +879,73 @@ test("no tracked compose bundle's id is a name Crow's data folder reserves", () 
   assert.deepEqual(clash, []);
 });
 
-test("anything the bundle ships (settings-section.js, run.sh, src/…) is never mountable read-write", () => {
-  const dir = join(CROW_HOME, "bundles", "fx-ship");
-  mkdirSync(dir, { recursive: true });
-  const ctx = { ...CTX, shipped: new Set(["settings-section.js", "run.sh", "src", ".venv"]) };
-  for (const rel of ["settings-section.js", "run.sh", "src", ".venv"]) {
-    assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, rel))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, false, rel);
-    assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, rel), true)] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, `${rel} ro`);
+test("model: no read-write bind into the bundle's own folder — read-only only (the operator's rule)", () => {
+  const slug = `fx-own-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = join(CROW_HOME, "bundles", slug);
+  mkdirSync(join(dir, "a", "b", "c"), { recursive: true });
+  mkdirSync(join(dir, "data"), { recursive: true });
+  for (const f of ["main.js", "settings-section.js", ".crow-compose.state.json", join("data", "x.db")]) writeFileSync(join(dir, f), "x");
+  // A symlink inside the folder that leads to another folder inside it…
+  symlinkSync(join(dir, "data"), join(dir, "alias"));
+  // …and one OUTSIDE the folder that leads into it (its written path is a granted folder, so
+  // that pair exercises the read-only side of the rule).
+  const outside = mkdtempSync(join(tmpdir(), "crow-cguard-link-"));
+  symlinkSync(join(dir, "data"), join(outside, "into"));
+  try {
+    const c = (model, ctx = CTX) => G.checkComposeModel(model, { bundleDir: dir, manifest: { id: slug }, consentVerified: false, ctx });
+    const granted = (model) => c(model, { ...CTX, operatorRoots: [outside] });
+    const rw = (p) => svc({ volumes: [bind(p)] });
+    const ro = (p) => svc({ volumes: [bind(p, true)] });
+    // The folder itself, a data folder, a file, the compose bookkeeping, a nested folder and
+    // both kinds of symlink: every read-write mount is refused, every read-only one is allowed.
+    for (const p of [dir, join(dir, "data"), join(dir, "main.js"), join(dir, ".crow-compose.state.json"),
+      join(dir, "settings-section.js"), join(dir, "a", "b", "c"), join(dir, "alias"), join(dir, "alias", "x.db")]) {
+      const r = c(rw(p));
+      assert.equal(r.valid, false, `rw ${p}`);
+      assert.match(r.reason, /mounts its own bundle folder read-write/);
+      assert.equal(c(ro(p)).valid, true, `ro ${p}`);
+    }
+    for (const p of [join(outside, "into"), join(outside, "into", "x.db")]) {
+      assert.equal(granted(rw(p)).valid, false, `rw through a link outside the folder: ${p}`);
+      assert.equal(granted(ro(p)).valid, true, `ro through a link outside the folder: ${p}`);
+    }
+    // The refusal names the entry the mount lands in; the folder itself is ".".
+    assert.match(c(rw(join(dir, "a", "b", "c"))).reason, /read-write \(a\)/);
+    assert.match(c(rw(dir)).reason, /read-write \(\.\)/);
+    // A driver_opts device volume follows the same rule: refused unless `o` says ro.
+    const device = (o) => ({ ...svc(), volumes: { v: { driver_opts: { type: "none", o, device: join(dir, "data") } } } });
+    assert.equal(c(device("bind")).valid, false);
+    assert.match(c(device("bind")).reason, /mounts its own bundle folder read-write/);
+    assert.equal(c(device("bind,ro")).valid, true);
+    // Data belongs in Crow's data folder or a named volume, which stay writable.
+    assert.equal(c(svc({ volumes: [bind(join(CROW_HOME, slug))] })).valid, true);
+    assert.equal(c({ ...svc(), volumes: { v: {} } }).valid, true, "a named volume is fine");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
   }
-  assert.equal(G.checkComposeModel(svc({ volumes: [bind(join(dir, "data"))] }), { bundleDir: dir, manifest: { id: "fx-ship" }, ctx }).valid, true, "a runtime data folder");
 });
 
-test("model: settings-section.js, and the paths a manifest itself declares (compose file, panel, panel routes), are control entries read-write", () => {
-  const dir = join(CROW_HOME, "bundles", "fx-manifest");
-  for (const d of ["deploy", "ui", "panel", "data"]) mkdirSync(join(dir, d), { recursive: true });
-  // No ctx.shipped here: a bundle with no repo copy, or a check run by the gpu-orchestrator,
-  // the preview renderer or a satellite, gets nothing from the shipped-file list.
-  const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
-  const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
-  const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
-  const base = { id: "fx-manifest" };
-  // The gateway imports settings-section.js in place at boot.
-  assert.equal(c(base, rw("settings-section.js")).valid, false);
-  assert.equal(c(base, ro("settings-section.js")).valid, true);
-  // manifest.docker.composefile at a non-default path: its folder is control.
-  const deployManifest = { ...base, docker: { composefile: "deploy/compose.yml" } };
-  assert.equal(c(deployManifest, rw("deploy")).valid, false);
-  assert.equal(c(deployManifest, ro("deploy")).valid, true);
-  // panelRoutes and panel outside panel/ (copied to PANELS_DIR and run there).
-  const routesManifest = { ...base, panelRoutes: "ui/routes.js" };
-  assert.equal(c(routesManifest, rw("ui")).valid, false);
-  assert.equal(c(routesManifest, ro("ui")).valid, true);
-  const panelManifest = { ...base, panel: "ui/panel.js" };
-  assert.equal(c(panelManifest, rw("ui")).valid, false);
-  assert.equal(c(panelManifest, ro("ui")).valid, true);
-  // An object panel resolves to panel/<id>.js (already control) and names nothing else.
-  const objectPanel = { ...base, panel: { id: "gis", name: "GIS Map" } };
-  assert.equal(c(objectPanel, rw("panel")).valid, false);
-  assert.equal(c(objectPanel, rw("data")).valid, true);
-  // Its id is a FILE NAME there (resolvePanelPath: panel/<panel.id || bundle id>.js), so a value
-  // that climbs lands in whatever folder path.join puts it in.
-  const evilPanel = { ...base, panel: { id: "../data/evil" } };
-  assert.equal(c(evilPanel, rw("data")).valid, false);
-  assert.equal(c(evilPanel, ro("data")).valid, true);
-  assert.match(c(evilPanel, rw("data")).reason, /declared by manifest\.panel\.id/);
-  // A string panel is resolved the same way (join(destDir, manifest.panel)).
-  const climbPanel = { ...base, panel: "panel/../data/p.js" };
-  assert.equal(c(climbPanel, rw("data")).valid, false);
-  assert.equal(c(climbPanel, ro("data")).valid, true);
-  assert.match(c(climbPanel, rw("data")).reason, /declared by manifest\.panel\b/);
-  // A declared path is resolved as the gateway resolves it: path.join keeps an absolute value
-  // and a `..` INSIDE the bundle, so both of these are the data/ entry.
-  for (const v of ["panel/../data/x.js", "/data/routes.js"]) {
-    const m = { ...base, panelRoutes: v };
-    assert.equal(c(m, rw("data")).valid, false, v);
-    assert.equal(c(m, ro("data")).valid, true, `${v} ro`);
-  }
-  assert.match(c({ ...base, panelRoutes: "panel/../data/x.js" }, rw("data")).reason, /declared by manifest\.panelRoutes/);
-  assert.match(c({ ...base, panelRoutes: "panel/../data/x.js" }, rw("data")).reason, /mounts 'data'/);
-  // A `\` is an ordinary filename character: the file is the `ui\r.js` entry, not `ui`.
-  const backslashRoutes = { ...base, panelRoutes: "ui\\r.js" };
-  assert.equal(c(backslashRoutes, rw("ui\\r.js")).valid, false);
-  assert.equal(c(backslashRoutes, ro("ui\\r.js")).valid, true);
-  assert.equal(c(backslashRoutes, rw("ui")).valid, true, "the ui folder is not what it names");
-  // docker.composefile is normalised by manifestComposeFile (path.relative(".", v)):
-  // deploy/../data/c.yml is read from data/c.yml.
-  const climbCompose = { ...base, docker: { composefile: "deploy/../data/c.yml" } };
-  assert.equal(c(climbCompose, rw("data")).valid, false);
-  assert.equal(c(climbCompose, ro("data")).valid, true);
-  assert.match(c(climbCompose, rw("data")).reason, /declared by manifest\.docker\.composefile/);
-  // The default compose path, and values that really resolve outside the bundle, name nothing.
-  assert.equal(c({ ...base, docker: { composefile: "docker-compose.yml" } }, rw("data")).valid, true);
-  for (const v of ["/etc/compose.yml", "../outside/compose.yml", "${MEDIA}/compose.yml", "..\\outside\\compose.yml"]) {
-    assert.equal(c({ ...base, docker: { composefile: v } }, rw("data")).valid, true, v);
-  }
-  assert.equal(c({ ...base, panelRoutes: "../outside/r.js" }, rw("data")).valid, true);
-  // Resolved against the REAL bundle folder, not a fixed root: a declaration that climbs out and
-  // back into this same folder is inside it (join(dir, "../fx-manifest/data/x.js") = dir/data/x.js).
-  const backIn = { ...base, panelRoutes: "../fx-manifest/data/x.js" };
-  assert.equal(c(backIn, rw("data")).valid, false);
-  assert.equal(c(backIn, ro("data")).valid, true);
-  assert.match(c(backIn, rw("data")).reason, /mounts 'data'/);
-  assert.match(c(backIn, rw("data")).reason, /declared by manifest\.panelRoutes/);
-  // An object panel's id is stringified by the gateway's template literal (`panel/${id}.js`), so a
-  // NON-string id climbs exactly like a string one.
-  const arrayPanel = { ...base, panel: { id: ["../data/evil"] } };
-  assert.equal(c(arrayPanel, rw("data")).valid, false);
-  assert.equal(c(arrayPanel, ro("data")).valid, true);
-  assert.match(c(arrayPanel, rw("data")).reason, /declared by manifest\.panel\.id/);
-  assert.equal(c({ ...base, panel: { id: 7 } }, rw("panel")).valid, false, "a number lands in panel/");
-  // A manifest without these fields changes nothing: the bundle's own runtime folder stays writable.
-  assert.equal(c(base, rw("data")).valid, true);
-});
-
-test("model: the MCP launcher, every skill and the post-install hook are manifest-declared control entries too", () => {
-  const dir = join(CROW_HOME, "bundles", "fx-declared");
-  for (const d of ["dist", "docs", "node", "data"]) mkdirSync(join(dir, d), { recursive: true });
-  const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
-  const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
-  const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
-  const base = { id: "fx-declared" };
-  // The MCP spawn runs `node dist/index.js` with the bundle folder as cwd, and the install and
-  // boot skill syncs copy docs/skill.md out of the installed folder.
-  const spawned = { ...base, server: { command: "node", args: ["dist/index.js"] }, skills: ["docs/skill.md"] };
-  assert.equal(c(spawned, rw("dist")).valid, false);
-  assert.equal(c(spawned, ro("dist")).valid, true);
-  assert.match(c(spawned, rw("dist")).reason, /mounts 'dist'/);
-  assert.match(c(spawned, rw("dist")).reason, /declared by manifest\.server\.args/);
-  assert.equal(c(spawned, rw("docs")).valid, false);
-  assert.equal(c(spawned, ro("docs")).valid, true);
-  assert.match(c(spawned, rw("docs")).reason, /mounts 'docs'/);
-  assert.match(c(spawned, rw("docs")).reason, /declared by manifest\.skills/);
-  assert.equal(c(spawned, rw("data")).valid, true, "the bundle's own runtime folder is still writable");
-  // `node` and a flag are not bundle files: they name nothing.
-  const bare = { ...base, server: { command: "node", args: ["--flag"] } };
-  assert.equal(c(bare, rw("node")).valid, true);
-  assert.equal(c(bare, rw("--flag")).valid, true);
-  // A relative launcher IS a bundle file (resolve-command.js resolves it inside the folder).
-  const launcher = { ...base, server: { command: "./run.sh", args: [] } };
-  assert.equal(c(launcher, rw("run.sh")).valid, false);
-  assert.equal(c(launcher, ro("run.sh")).valid, true);
-  assert.match(c(launcher, rw("run.sh")).reason, /declared by manifest\.server\.command/);
-  // An argument after the first counts too (node --x dist/index.js), whatever the flag in front.
-  const later = { ...base, server: { command: "node", args: ["--experimental-strip-types", "dist/index.js"] } };
-  assert.equal(c(later, rw("dist")).valid, false);
-  assert.match(c(later, rw("dist")).reason, /declared by manifest\.server\.args/);
-  // The post-install hook is `bash <bundle>/<script>`.
-  const hooked = { ...base, postInstall: { script: "bootstrap/setup.sh", timeout_s: 60 } };
-  assert.equal(c(hooked, rw("bootstrap")).valid, false);
-  assert.equal(c(hooked, ro("bootstrap")).valid, true);
-  assert.match(c(hooked, rw("bootstrap")).reason, /declared by manifest\.postInstall\.script/);
-});
-
-test("declared paths: the version refresh and this check read one list (shared/bundle-declared-paths.js)", async () => {
+test("declared paths: the version refresh reads the manifest's declared roots (shared/bundle-declared-paths.js)", async () => {
   const D = await import("../servers/shared/bundle-declared-paths.js");
-  // A manifest whose declared paths are all plain relative ones: what the refresh copies is
-  // exactly what the check must refuse read-write, with no drift between the two readers.
+  // The paths a manifest declares: what the version refresh copies, and what the contract's
+  // badBundlePath check reads. A plain relative declaration names its top-level entry; one that
+  // climbs out or is absolute names no root (and the contract refuses it).
   const manifest = { id: "fx-one-list", server: { command: "node", args: ["dist/index.js"] }, panel: "ui/panel.js", panelRoutes: "ui/routes.js",
     widgets: [{ id: "w", title: "W" }], postInstall: { script: "bootstrap/setup.sh" }, skills: ["docs/skill.md"] };
   assert.deepEqual([...D.declaredRoots(manifest)].sort(), ["bootstrap", "dist", "docs", "ui", "widgets"]);
-  const dir = join(CROW_HOME, "bundles", "fx-one-list");
-  mkdirSync(dir, { recursive: true });
-  for (const top of D.declaredRoots(manifest)) {
-    const model = svc({ volumes: [bind(join(dir, top))] });
-    assert.equal(G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX }).valid, false, top);
-  }
-  // The check sees strictly more only through the launcher, and only for the values that make
-  // it LOAD OR RUN CODE (here: the relative command itself). The arguments after a non-interpreter
-  // command are that program's data — `--flag` and `dist/index.js` are its argv — so they declare
-  // nothing (the refresh's own reading of args[0] is separate and unchanged).
-  const launcherOnly = { id: "fx-one-list", server: { command: "./run.sh", args: ["--flag", "dist/index.js"] } };
-  assert.deepEqual([...D.declaredRoots(launcherOnly)], ["--flag"]);
-  assert.deepEqual(D.declaredControlPaths(launcherOnly).map((p) => `${p.key}:${p.value}`), ["server.command:./run.sh"]);
+  // An object panel's code lives in panel/; a climbing or absolute declaration names no root.
+  assert.deepEqual([...D.declaredRoots({ id: "x", panel: { id: "gis" } })], ["panel"]);
+  assert.deepEqual([...D.declaredRoots({ id: "x", panelRoutes: "../outside/r.js" })], []);
+  assert.deepEqual([...D.declaredRoots({ id: "x", skills: ["/etc/hostname"] })], []);
 });
 
-test("model: the launcher values that LOAD OR RUN CODE are bundle paths — data arguments are left alone", () => {
-  const dir = join(CROW_HOME, "bundles", "fx-launch");
-  for (const d of ["data", "server", "glob-pkg", "mypkg", "@scope", "bin"]) mkdirSync(join(dir, d), { recursive: true });
-  const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
-  const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
-  const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
-  const base = { id: "fx-launch" };
-  const refusedRw = (command, args, top) => {
-    const m = { ...base, server: { command, args } };
-    assert.equal(c(m, rw(top)).valid, false, `${command} ${args.join(" ")} must refuse ${top} read-write`);
-    assert.equal(c(m, ro(top)).valid, true, `${command} ${args.join(" ")} must allow ${top} read-only`);
-  };
-  const allowedRw = (command, args, top) => {
-    const m = { ...base, server: { command, args } };
-    assert.equal(c(m, rw(top)).valid, true, `${command} ${args.join(" ")} must allow ${top} read-write`);
-  };
-  // (a) An interpreter's script is its FIRST non-flag argument — no `/` needed, and `node`
-  // tries the extensions itself when the value has none.
-  refusedRw("node", ["main.js"], "main.js");
-  refusedRw("node", ["main"], "main.js");
-  const direct = { ...base, server: { command: "node", args: ["main.js"] } };
-  assert.match(c(direct, rw("main.js")).reason, /mounts 'main\.js'/);
-  assert.match(c(direct, rw("main.js")).reason, /declared by manifest\.server\.args/);
-  // (b) `.` / `./` / `.//` is the bundle root: node runs index.js (and package.json `main`, below).
-  for (const root of [".", "./", ".//"]) {
-    const m = { ...base, server: { command: "node", args: [root] } };
-    assert.equal(c(m, rw("index.js")).valid, false, root);
-    assert.equal(c(m, ro("index.js")).valid, true, `${root} ro`);
-  }
-  // (c) A code-loading flag's value is a file it loads, written either way.
-  for (const args of [["--import", "./data/h.mjs", "server/index.js"], ["--import=./data/h.mjs", "server/index.js"]]) {
-    const m = { ...base, server: { command: "node", args } };
-    assert.equal(c(m, rw("data")).valid, false, args.join(" "));
-    assert.equal(c(m, ro("data")).valid, true, `${args.join(" ")} ro`);
-    assert.match(c(m, rw("data")).reason, /declared by manifest\.server\.args/);
-  }
-  // (d) A runner's package slot and the value of -p/--from are code when LOCAL; an absolute
-  // command is still read by its program name (`/usr/bin/npx`).
-  for (const [command, args] of [["npx", ["-y", "./data"]], ["npx", ["-p", "./data", "bin"]],
-    ["uvx", ["--from", "./data", "pkg"]], ["/usr/bin/npx", ["-y", "./data"]], ["deno", ["run", "data/x.ts"]]]) {
-    const m = { ...base, server: { command, args } };
-    assert.equal(c(m, rw("data")).valid, false, `${command} ${args.join(" ")}`);
-    assert.equal(c(m, ro("data")).valid, true, `${command} ${args.join(" ")} ro`);
-  }
-  // (e) Everything else is DATA: the program's own arguments, a registry package name and a
-  // python module name. These are exactly the mounts a third-party bundle legitimately writes.
-  allowedRw("node", ["server/index.js", "--data-dir=data"], "data");
-  allowedRw("node", ["server/index.js", "--db", "data/x.db"], "data");
-  allowedRw("node", ["server/index.js", "--config=/etc/x"], "data");
-  allowedRw("npx", ["-y", "@scope/name"], "@scope");
-  allowedRw("uvx", ["--from", "pkg", "pkg"], "data");
-  allowedRw("python", ["-m", "mypkg"], "mypkg");
-  // After a runner's package slot, every argument belongs to the fetched tool: data.
-  allowedRw("npx", ["-y", "glob-pkg", "main.js"], "main.js");
-  const spawned = { ...base, server: { command: "node", args: ["server/index.js"] } };
-  assert.equal(c(spawned, rw("server")).valid, false, "server/ is still the script's folder");
-  assert.equal(c(spawned, rw("data")).valid, true, "the bundle's own runtime folder is still writable");
-  // (f) A value without an extension also names the extensions node tries — for a bare `main`
-  // those are all TOP-LEVEL files. And `.` follows the installed package.json's `main`.
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fx-launch", main: "data/x.js" }));
-  try {
-    const rootArg = { ...base, server: { command: "node", args: ["."] } };
-    assert.equal(c(rootArg, rw("data")).valid, false, "package.json main is data/x.js");
-    assert.equal(c(rootArg, ro("data")).valid, true);
-    assert.equal(c(rootArg, rw("index.js")).valid, false, "index.js stays protected");
-  } finally {
-    rmSync(join(dir, "package.json"), { force: true });
-  }
-});
-
-test("model: a manifest-declared name is escaped in the refusal (a newline or ESC never reaches it raw)", () => {
-  const dir = join(CROW_HOME, "bundles", "fx-escape");
-  const declared = "ui\nfake line\u001b[31m/routes.js";
-  const top = declared.split("/")[0];
-  mkdirSync(dir, { recursive: true });
-  const r = G.checkComposeModel(svc({ volumes: [bind(join(dir, top))] }), {
-    bundleDir: dir,
-    manifest: { id: "fx-escape", panelRoutes: declared },
-    consentVerified: false,
-    ctx: CTX,
-  });
+test("model: the entry named in the read-write refusal is escaped (a newline or ESC never reaches it raw)", () => {
+  const dir = bundleDir();
+  const entry = "data\nfake line\u001b[31m";
+  mkdirSync(join(dir, entry), { recursive: true });
+  const r = G.checkComposeModel(svc({ volumes: [bind(join(dir, entry))] }), { bundleDir: dir, manifest: {}, consentVerified: false, ctx: CTX });
   assert.equal(r.valid, false);
-  assert.match(r.reason, /declared by manifest\.panelRoutes/);
+  assert.match(r.reason, /mounts its own bundle folder read-write/);
   assert.doesNotMatch(r.reason, /\n/, "the newline is escaped, not echoed");
   assert.ok(!r.reason.includes("\u001b"), "the ESC is escaped, not echoed");
   assert.match(r.reason, /\\u000a/);

@@ -18,18 +18,23 @@
  * (preflightBundleUp) with the same checkComposeModel.
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, lstatSync, readlinkSync, statSync, openSync, fstatSync, readSync, closeSync, constants as fsConstants } from "node:fs";
-import { join, resolve as resolvePath, relative, dirname, basename, sep, isAbsolute } from "node:path";
+import { join, resolve as resolvePath, dirname, basename, sep, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-// The manifest's own list of paths inside the installed bundle (shared, leaf module: it
-// imports nothing, so it can be read from both here and routes/bundles.js).
-import { declaredControlPaths, refusalName } from "../shared/bundle-declared-paths.js";
+// The escaping the shared refusal helper applies to an attacker-controlled name (shared, leaf
+// module: it imports nothing, so it can be read from both here and routes/bundles.js).
+import { refusalName } from "../shared/bundle-declared-paths.js";
 
 // A value Compose sees for a `${VAR:?}` the install left blank (a collection member,
-// finished later with Configure): relative, so it resolves inside the bundle dir.
-export const UNSET_SENTINEL = "./crow-unset-value";
+// finished later with Configure) so the REST of the model can still be checked. It must be a
+// place the check allows for every bundle: a relative value lands inside the bundle folder,
+// which is never mountable read-write now, while Crow's media folder (library defaults) is
+// allowed for everyone — so nothing is widened by a compose that spells this path itself.
+export function unsetSentinel(crowHome) {
+  return join(crowHome || join(homedir(), ".crow"), "media", "crow-unset-value");
+}
 
 /**
  * realpath of p, or of its nearest existing ancestor + the rest (a path Docker would create).
@@ -169,19 +174,12 @@ const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "c
 // Crow's own bookkeeping of an installed compose (bundle-compose-state.js: .crow-compose.sha256,
 // .crow-compose.edited, .crow-compose.state.json, .crow-compose.needs-config,
 // .crow-compose.image-change, and whatever it adds next) is a PREFIX, not a list: read by the
-// version refresh and the bind-drift card, so one of them must never be mountable read-write,
-// or a container could rewrite the record those two trust. Defined here rather than imported
-// from bundle-compose-state.js: that module reaches this one through bundles-config.js
-// (bundles-config → folder-grants → compose-guard), so importing it would make a cycle.
-// tests/compose-guard.test.js fails if a COMPOSE_*_FILE export stops starting with it.
+// version refresh and the bind-drift card. Every one of them is protected by the rule below
+// (no read-write mount of the bundle folder at all, so a container can never rewrite the record
+// those two trust), and this prefix stays as the one name they all share: bundle-compose-state.js
+// reaches this module through bundles-config → folder-grants, so it cannot be imported from
+// there. tests/compose-guard.test.js fails if a COMPOSE_*_FILE export stops starting with it.
 export const COMPOSE_STATE_PREFIX = ".crow-compose.";
-// Top-level entries of a bundle folder that the gateway reads or runs. Manifest-declared
-// paths (a non-default compose file, a panel or panel routes outside panel/, a server entry
-// the MCP spawn runs, a skill, a post-install hook) join this set per bundle: see
-// manifestControlTops below.
-const BUNDLE_CONTROL = new Set(["manifest.json", "settings-section.js", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
-  "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
-  ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
 // The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
 // never reaches bundle "rook-x"'s folder). No bundle id may end in one (tested).
 export const OWN_SUFFIXES = ["-downloads", "-workspaces", "-data", "-cache"];
@@ -302,11 +300,6 @@ function isShippedPreviewSeccomp(opt) {
   }
 }
 
-/**
- * Check a Compose model (the parsed `docker compose config --format json` output).
- * `coreAllowance` names a core allowance (above); bundles never pass one.
- * @returns {{valid: true} | {valid: false, reason: string}}
- */
 /** True when a bundle `id` may own compose project `project` (<id>, crow-<id>, or either + "-suffix"). */
 export function ownableProject(id, project) {
   const p = String(project || "");
@@ -368,83 +361,10 @@ export function reservedCommunityId(id) {
 }
 
 /**
- * The first path segment a bundle-relative value resolves to, or null when it resolves
- * outside the bundle folder. Resolved EXACTLY as the gateway resolves a declared path — with
- * `path.join` against the INSTALLED bundle folder, which keeps an absolute value and a `..`
- * INSIDE that folder (join("<dir>/foo", "/data/x.js") and join("<dir>/foo", "panel/../data/x.js")
- * both land inside it, and "../foo/data/x.js" lands back in the same folder). Both sides are
- * real paths (symlinks followed), because the bind this is compared with is resolved the same
- * way. A `\` or `$` is an ordinary filename character on Linux, so a file named `ui\r.js`
- * really is the `ui\r.js` entry and is resolved as one.
+ * Check a Compose model (the parsed `docker compose config --format json` output).
+ * `coreAllowance` names a core allowance (above); bundles never pass one.
+ * @returns {{valid: true} | {valid: false, reason: string}}
  */
-const FAKE_BUNDLE_ROOT = "/b";
-function resolvedBundleTop(value, bundleDir, bundleReal) {
-  if (typeof value !== "string" || !value) return null;
-  // Without an installed folder to resolve against, the same join against a fixed root is the
-  // best reading available.
-  const base = typeof bundleDir === "string" && bundleDir ? resolvePath(bundleDir) : FAKE_BUNDLE_ROOT;
-  const real = base === FAKE_BUNDLE_ROOT ? null : (bundleReal || resolveHostPath(base));
-  const target = real ? resolveHostPath(join(base, value)) : join(base, value);
-  const rel = relative(real || base, target);
-  if (!rel || rel === "." || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
-  return rel.split(sep)[0];
-}
-
-/**
- * The top-level entry `docker.composefile` names: bundles-config.js manifestComposeFile
- * normalises it with path.relative(".", v), so `deploy/../data/c.yml` becomes `data/c.yml`
- * and is read from there. Repeated here (not imported: that module reaches this one).
- */
-function resolvedComposeTop(declared, bundleDir, bundleReal) {
-  const v = declared === undefined || declared === null || declared === "" ? "docker-compose.yml" : declared;
-  if (typeof v !== "string" || isAbsolute(v) || v.includes("\\") || v.includes("$")) return null;
-  return resolvedBundleTop(v, bundleDir, bundleReal);
-}
-
-/**
- * The top-level entries of a bundle folder that its OWN manifest names as code or config:
- * `docker.composefile` (default docker-compose.yml), the MCP launch command and its
- * bundle-relative arguments, `panel`/`panelRoutes`, `widgets`, `postInstall.script` and
- * every `skills` entry. The gateway copies the panel and its routes into PANELS_DIR and
- * imports them, reads the compose file at every install/Start, spawns the server with the
- * bundle folder as cwd, runs the post-install hook with bash, and copies the skills out of
- * the folder — so the folder holding any of them is as much a control entry as `panel/` or
- * the fixed compose names.
- *
- * Which paths a manifest declares is shared/bundle-declared-paths.js (the version refresh
- * reads the same list, so the two can never disagree). Each path is then resolved the way
- * `path.join` places it against the INSTALLED bundle folder, so a declaration that points
- * somewhere else ("/data/routes.js", "panel/../data/x.js", "../<this-folder>/data/x.js", an
- * object panel's id) names the entry it really lands in. Only a value that really resolves
- * outside the folder names nothing here; the manifest contract refuses it. (A manifest
- * declaring a path that its reader skips outright — an absolute skill path — still protects
- * the folder join() puts it in: over-protecting a folder nothing is read from costs nothing.)
- *
- * The MCP launcher's values are candidates when they make it LOAD OR RUN CODE (the spawn's cwd
- * is the bundle folder, so `main.js` is a file there): a relative command with a `/`, an
- * interpreter's script and code-loading flag values, a runner's local package spec. Its data
- * arguments (`--data-dir=data`, a registry package name) name nothing. An argument that is
- * the root (`.`) also names the files node would run from it — read from the installed
- * package.json.
- *
- * @param {object} manifest
- * @param {string} [bundleDir]   the installed bundle folder the declaration resolves against
- * @param {string} [bundleReal]  that folder as it really leads (resolveHostPath)
- * @returns {Map<string, string[]>} top-level entry → the manifest keys naming a file there
- */
-function manifestControlTops(manifest, bundleDir, bundleReal) {
-  const tops = new Map();
-  const add = (top, key) => {
-    if (!top) return;
-    const keys = tops.get(top);
-    if (!keys) tops.set(top, [key]);
-    else if (!keys.includes(key)) keys.push(key);
-  };
-  add(resolvedComposeTop(manifest?.docker?.composefile, bundleDir, bundleReal), "docker.composefile");
-  for (const { key, value } of declaredControlPaths(manifest, bundleReal || bundleDir)) add(resolvedBundleTop(value, bundleDir, bundleReal), key);
-  return tops;
-}
-
 export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
   if (coreAllowance !== undefined && !CORE_ALLOWANCES.has(coreAllowance)) return { valid: false, reason: `unknown core allowance '${String(coreAllowance).slice(0, 40)}'` };
   const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified && manifest?.origin !== "community");
@@ -452,11 +372,6 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
   const roots = sensitiveRoots(ctx);
   const bundleReal = resolveHostPath(bundleDir);
   const ownId = /^[a-z0-9][a-z0-9-]*$/.test(String(manifest?.id || "")) ? manifest.id : null;
-  // Paths this manifest declares (compose file, panel, panel routes, the MCP launcher and its
-  // bundle-relative arguments, widgets, the post-install hook, skills): their top-level entry
-  // in the bundle folder is control too, whatever the install shipped (ctx.shipped is only
-  // built on the Extensions path, from a repo copy that need not exist).
-  const manifestControl = manifestControlTops(manifest, bundleDir, bundleReal);
   const refuse = (reason) => ({ valid: false, reason });
   const needPriv = (what) => (isPrivilegedAllowed ? null : refuse(`Compose file uses ${what} but manifest does not declare 'privileged: true' (or consent was not verified)`));
   const grants = hostGrants(manifest);
@@ -514,18 +429,16 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
       const rel = p.slice(roots.crowHome.length + 1);
       const first = rel.split(sep)[0];
       if (under(p, bundleReal)) {
-        // The bundle's own folder, but never the folder itself or its control files read-write:
-        // the gateway reads the manifest, compose file and .env, and runs server/ code, so a
-        // container that could rewrite them could grant itself privileges at the next Start.
-        // Same for Crow's own `.crow-compose.*` bookkeeping (COMPOSE_STATE_PREFIX above) and
-        // for whatever path this manifest declares (manifestControl above).
-        const top = p.slice(bundleReal.length + 1).split(sep)[0];
+        // The bundle's own folder, read-only ONLY (operator ruling: no read-write bind into
+        // your own folder). The gateway reads the manifest, the compose file and .env there and
+        // runs server/ code, so a container that could write ANY file there could swap one for
+        // a symlink or an edit and grant itself privileges at the next Start — and guessing
+        // which names count as code is what kept missing routes. Data belongs in a named volume
+        // or in Crow's data folder (<CROW_HOME>/<id>, allowed above), never here.
+        // `.` names the folder itself.
+        const top = p === bundleReal ? "." : p.slice(bundleReal.length + 1).split(sep)[0];
         if (!readOnly) {
-          if (p === bundleReal || BUNDLE_CONTROL.has(top) || top.startsWith(COMPOSE_STATE_PREFIX) || (ctx.shipped && ctx.shipped.has(top))) {
-            return refuse(`${what}: mounts the bundle's own control files read-write`);
-          }
-          const declaredBy = manifestControl.get(top);
-          if (declaredBy) return refuse(`${what}: mounts '${refusalName(top)}' (declared by ${declaredBy.map((k) => `manifest.${k}`).join(", ")}) read-write`);
+          return refuse(`${what}: mounts its own bundle folder read-write (${refusalName(top)}) — use a named volume or Crow's data folder for data; files in the bundle folder may only be mounted read-only`);
         }
         return null;
       }
@@ -1255,8 +1168,9 @@ export function parseDotEnv(path) {
 /**
  * The model `docker compose up` would apply in bundleDir. `runConfig(args, {cwd, env})`
  * runs `docker compose <args>` and resolves {stdout}. A `${VAR:?}` left blank (collection
- * installs leave required keys for "Finish setup") gets UNSET_SENTINEL so the rest of the
- * model can still be checked; Start re-runs this check once the real value is set.
+ * installs leave required keys for "Finish setup") gets unsetSentinel(CROW_HOME from the env)
+ * so the rest of the model can still be checked; Start re-runs this check once the real value
+ * is set.
  * @returns {Promise<{model: object} | {error: string}>}
  */
 export async function loadComposeModel(bundleDir, { env, runConfig, composeFile = null, cwd = bundleDir }) {
@@ -1281,9 +1195,10 @@ export async function loadComposeModel(bundleDir, { env, runConfig, composeFile 
     }
     const dot = parseDotEnv(join(bundleDir, ".env"));
     const filled = { ...env };
+    const sentinel = unsetSentinel(typeof filled.CROW_HOME === "string" && filled.CROW_HOME ? filled.CROW_HOME : null);
     let changed = false;
     for (const k of requiredComposeVars(text)) {
-      if (!filled[k] && !dot[k]) { filled[k] = UNSET_SENTINEL; changed = true; }
+      if (!filled[k] && !dot[k]) { filled[k] = sentinel; changed = true; }
     }
     if (changed) {
       try {

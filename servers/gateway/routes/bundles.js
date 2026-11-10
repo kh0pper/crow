@@ -2212,18 +2212,12 @@ export async function checkBundleCompose(bundleDir, { bundleId, manifest, consen
   }
   const loaded = await loadComposeModel(bundleDir, { env: composeEnv(), runConfig: runComposeConfig });
   if (loaded.error) return { valid: false, reason: loaded.error };
-  // Everything the bundle ships (settings-section.js, run.sh, src/ …) is code or config the
-  // gateway may load: never mountable read-write. (compose-guard.js also refuses
-  // settings-section.js and the manifest-declared compose/panel paths on its own, for the
-  // paths that never build this list: the gpu-orchestrator, the preview renderer, a satellite.)
-  let shipped = null;
-  try { shipped = new Set(readdirSync(join(APP_BUNDLES, bundleId || basename(bundleDir)))); } catch { /* not in the repo */ }
   // Folders outside Crow's home: given by the install (its owner-typed folders, nothing
   // from .env or a record), else the bundle's live grants (Start, shared-storage re-apply).
   const id = bundleId || basename(bundleDir);
   const g = grantRootsFor(id, bundleDir, { exclude: operatorRoots !== undefined ? id : null });
   const roots = operatorRoots !== undefined ? operatorRoots : g.operatorRoots;
-  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: guardCtx({ crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, shipped, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() }) });
+  return checkComposeModel(loaded.model, { bundleDir, manifest, consentVerified, ctx: guardCtx({ crowHome: CROW_HOME, dataDir: resolveDataDir(), appRoot: APP_ROOT, operatorRoots: roots, otherRoots: g.otherRoots, home: process.env.HOME || homedir() }) });
 }
 
 // --- PR 0: Consent token helpers (server-validated install consent) ---

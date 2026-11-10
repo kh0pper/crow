@@ -176,7 +176,7 @@ const satHome = join(scratch, "sat");
 const bundleDir = join(satHome, "bundles", "gitea");
 mkdirSync(bundleDir, { recursive: true });
 mkdirSync(join(satHome, "app"), { recursive: true });
-const ctx = { crowHome: satHome, dataDir: join(satHome, "data"), appRoot: join(satHome, "app"), shipped: null, operatorRoots: [], otherRoots: [], home: scratch };
+const ctx = { crowHome: satHome, dataDir: join(satHome, "data"), appRoot: join(satHome, "app"), operatorRoots: [], otherRoots: [], home: scratch };
 symlinkSync("/var/run/docker.sock", join(bundleDir, "sock-link"));
 symlinkSync(join(bundleDir, "sock-link"), join(scratch, "chain-link")); // a link to a link
 const bind = (source, extra = {}) => svc({ volumes: [{ type: "bind", source, target: "/s", ...extra }] });

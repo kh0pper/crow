@@ -59,7 +59,7 @@ test("guardCtx always provides both ownership seams, and a caller cannot overrid
   assert.equal(typeof ctx.knownBundleIds, "function");
   assert.equal(ctx.home, "/h", "the caller's other fields are kept");
   // The bundle path and the model-container path end up with the same seam keys.
-  const bundlePath = G.guardCtx({ crowHome: "/a", dataDir: "/a/data", appRoot: "/r", shipped: new Set(), operatorRoots: [], otherRoots: [], home: "/h" });
+  const bundlePath = G.guardCtx({ crowHome: "/a", dataDir: "/a/data", appRoot: "/r", operatorRoots: [], otherRoots: [], home: "/h" });
   const modelPath = G.guardCtx({ crowHome: "/a", dataDir: "/a/data", appRoot: "/r", home: "/h", operatorRoots: [] });
   for (const k of ["volumeInfo", "knownBundleIds", "crowHome", "dataDir", "appRoot", "home"]) {
     assert.ok(k in bundlePath && k in modelPath, k);

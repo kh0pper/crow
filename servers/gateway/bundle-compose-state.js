@@ -51,9 +51,9 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { manifestComposeFile } from "./bundles-config.js";
 
-// Every one of these starts with COMPOSE_STATE_PREFIX in compose-guard.js, which refuses a
-// read-write mount of any `.crow-compose.*` entry of a bundle folder (prefix rule, so a new
-// bookkeeping file here is covered without touching the guard); a test keeps the two in step.
+// Every one of these starts with COMPOSE_STATE_PREFIX in compose-guard.js. That module refuses
+// any read-write mount of a bundle folder, so all of them are covered whatever their name; the
+// prefix keeps a new bookkeeping file here recognisable, and a test keeps the two in step.
 export const COMPOSE_SHA_FILE = ".crow-compose.sha256";
 export const COMPOSE_EDITED_FILE = ".crow-compose.edited";
 export const COMPOSE_STATE_FILE = ".crow-compose.state.json";
