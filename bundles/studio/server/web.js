@@ -741,11 +741,14 @@ export function createStudioWeb({
    * The hub calls this after every applied step (`{update, entry}`), after
    * every presence change (`{presence}`) and when a song's document was dropped
    * and rebuilt, whole (`{state}` — a state frame, which the page answers by
-   * building its document from the server's again). Anything else is ignored, so
+   * building its document from the server's again). A `{state, resync: true}`
+   * frame says the same document was rebuilt under the page rather than
+   * answering a fresh hello, so the page keeps the commands it already has on
+   * the wire and says nothing about reconnecting. Anything else is ignored, so
    * the hub can add payloads later without this layer guessing at them.
    * @param {string} song_id
    * @param {{update?: Uint8Array, entry?: object|null, presence?: object[],
-   *          state?: Uint8Array, history?: object[]}} payload
+   *          state?: Uint8Array, history?: object[], resync?: boolean}} payload
    * @returns {void}
    */
   function broadcast(song_id, payload) {
@@ -760,6 +763,7 @@ export function createStudioWeb({
         update: toBase64(payload.state),
         history: payload.history ?? [],
         presence: payload.presence ?? hub.presence(song_id),
+        resync: payload.resync === true,
       });
       return;
     }

@@ -2229,11 +2229,14 @@ export function checkInvariants(doc) {
  * (`subject`) and how much of it (`count`, for the checks that count).
  *
  * `subject` is the object's stable id and never a name — a track, clip, insert,
- * return, take, sampler object or history-stable key such as a send's track id
- * or a motion lane's key, and `"song"`/`"master"` for the song's own numbers.
- * Two reasons share a subject when they are about the same object, which is how
- * a plan that adds a second offender of one kind is told from one that leaves
- * the first where it was.
+ * return, take, sampler object or history-stable key such as a send's
+ * `<track>/<return>`, an insert parameter's `<insert>/<param>`, a motion lane's
+ * key, or a pair of ids in a fixed order (`"a|b"`) for a violation two objects
+ * make together — and `"song"`/`"master"` for the song's own numbers. Nothing
+ * in it is an array index, so a step that inserts or removes an object does not
+ * move every reason behind it. Two reasons share a subject when they are about
+ * the same object, which is how a plan that adds a second offender of one kind
+ * is told from one that leaves the first where it was.
  * @param {string} code
  * @param {string} subject
  * @param {string} text
@@ -2253,8 +2256,12 @@ function reason(code, subject, text, count) {
  * object it is about, and `text` exactly the sentence `checkInvariants`
  * reports. A count-based check also carries `count`, the number it found, so a
  * plan that makes the very same violation worse (one more note past a clip's
- * end, one more effect in an over-full chain) is visible even when the sentence
- * reads the same.
+ * end, one more effect in an over-full chain, a third object with an id the
+ * song already holds twice) is visible even when the sentence reads the same.
+ *
+ * There is at most one reason per object and check: a motion lane with two bad
+ * points is one sentence — the first bad point's first failing check — with
+ * both points counted on it.
  *
  * The history dry-runs an undo against these keyed by `code` + `subject` — not
  * by the sentence: two orphan sends from one missing track read alike, and
@@ -2525,11 +2532,15 @@ function mixerReasons(song) {
 
   const perTrack = new Map();
   for (const send of sends) {
+    // One send is one object, so its reasons are about the pair it joins — not
+    // about its track, which two sends of one track share: a plan that fixes one
+    // of them and breaks another is then two different subjects, not one.
+    const key = sendKey(send.track_id, send.return_id);
     if (!trackIds.has(send.track_id)) {
       reasons.push(
         reason(
           "send-without-track",
-          send.track_id,
+          key,
           `A send would be left without its track: there is no track "${send.track_id}" in the song.`,
         ),
       );
@@ -2539,7 +2550,7 @@ function mixerReasons(song) {
       reasons.push(
         reason(
           "send-without-return",
-          send.track_id,
+          key,
           `The send from "${send.track_id}" would be left without its return: there is no return "${send.return_id}" in the song.`,
         ),
       );
@@ -2549,7 +2560,7 @@ function mixerReasons(song) {
       reasons.push(
         reason(
           "send-level-range",
-          send.track_id,
+          key,
           `The send from "${send.track_id}" would be at ${send.level_db} dB; a send runs from ${sendLow} to ${sendHigh} dB.`,
         ),
       );
@@ -2625,11 +2636,14 @@ function insertParamReasons(which, insert, kind, params) {
   const reasons = [];
   for (const [name, value] of Object.entries(params ?? {})) {
     const field = effectParamSpec(kind, name);
+    // One parameter is one subject, so a plan that brings one into range and
+    // pushes another out of it is not mistaken for leaving the insert alone.
+    const subject = `${insert.id}/${name}`;
     if (!field) {
       reasons.push(
         reason(
           "insert-param-unknown",
-          insert.id,
+          subject,
           `${which} would hold a parameter "${name}", which the ${effectLabel(kind)} does not have.`,
         ),
       );
@@ -2640,7 +2654,7 @@ function insertParamReasons(which, insert, kind, params) {
         reasons.push(
           reason(
             "insert-param-not-a-value",
-            insert.id,
+            subject,
             `${which} would set "${name}" to ${typeof value === "string" ? `"${value}"` : String(value)}; it is one of ${field.values.join(", ")}.`,
           ),
         );
@@ -2651,7 +2665,7 @@ function insertParamReasons(which, insert, kind, params) {
     reasons.push(
       reason(
         "insert-param-range",
-        insert.id,
+        subject,
         `${which} would set "${name}" to ${value}; it runs from ${field.min} to ${field.max}${field.unit ? ` ${field.unit}` : ""}.`,
       ),
     );
@@ -2799,10 +2813,12 @@ function arrangementReasons(song) {
       const previous = lane[index - 1];
       const current = lane[index];
       if (current.start_bar >= previous.start_bar + previous.bars) continue;
+      // The pair is what overlaps, so the pair is the subject — in a fixed
+      // order, so which of the two the sort met second cannot matter.
       reasons.push(
         reason(
           "placements-overlap",
-          current.id,
+          pairKey(previous.id, current.id),
           `The placements "${previous.id}" and "${current.id}" would overlap on track "${trackId}".`,
         ),
       );
@@ -2848,7 +2864,11 @@ function arrangementReasons(song) {
     const current = ordered[index];
     if (current.start_bar >= previous.end_bar) continue;
     reasons.push(
-      reason("sections-overlap", current.id, `The sections "${previous.id}" and "${current.id}" would overlap.`),
+      reason(
+        "sections-overlap",
+        pairKey(previous.id, current.id),
+        `The sections "${previous.id}" and "${current.id}" would overlap.`,
+      ),
     );
   }
 
@@ -3116,7 +3136,7 @@ function samplerReasons(song) {
     if (chain.length > LIMITS.chainLength) {
       reasons.push(
         reason(
-          "chain-over-limit",
+          "pattern-chain-too-long",
           clip.id,
           `${which} would chain ${chain.length} patterns; a chain is at most ${LIMITS.chainLength} long.`,
           chain.length,
@@ -3274,44 +3294,42 @@ function samplerReasons(song) {
         continue;
       }
       if (!(positions > 0)) continue;
-      // The lane is counted whole and reported by its first offender, so one
-      // more point off the loop is visible even though the sentence is the same.
-      let outside = 0;
-      let firstOutside = null;
-      let offRange = 0;
-      let firstOffRange = null;
+      // One lane is one sentence — the one the check has always reported: the
+      // first bad point's first failing check. Every bad point of the lane is
+      // counted on it, so one more point off the loop is still visible even
+      // though the sentence does not change (two peers' writes can leave a lane
+      // with points neither of them wrote alone).
+      let bad = 0;
+      let firstBad = null;
       for (const point of points) {
         const stepFrac = Number(point.step_frac);
         const amount = Number(point.value);
-        if (!(stepFrac >= 0 && stepFrac < positions)) {
-          outside += 1;
-          if (firstOutside === null) firstOutside = stepFrac;
-        }
-        if (!(amount >= range[0] && amount <= range[1])) {
-          offRange += 1;
-          if (firstOffRange === null) firstOffRange = amount;
-        }
+        const outside = !(stepFrac >= 0 && stepFrac < positions);
+        const offRange = !(amount >= range[0] && amount <= range[1]);
+        if (!outside && !offRange) continue;
+        bad += 1;
+        if (firstBad === null) firstBad = { outside, stepFrac, amount };
       }
-      if (firstOutside !== null) {
+      if (firstBad === null) continue;
+      if (firstBad.outside) {
         reasons.push(
           reason(
             "motion-point-past-loop",
             where,
-            `${which} would put a motion point at step ${beatText(firstOutside)}, outside its ${positions} step positions.`,
-            outside,
+            `${which} would put a motion point at step ${beatText(firstBad.stepFrac)}, outside its ${positions} step positions.`,
+            bad,
           ),
         );
+        continue;
       }
-      if (firstOffRange !== null) {
-        reasons.push(
-          reason(
-            "motion-point-range",
-            where,
-            `${which} would sweep "${laneParts.param}" to ${firstOffRange} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
-            offRange,
-          ),
-        );
-      }
+      reasons.push(
+        reason(
+          "motion-point-range",
+          where,
+          `${which} would sweep "${laneParts.param}" to ${firstBad.amount} on pad ${laneParts.index + 1}, outside its ${range[0]} to ${range[1]}.`,
+          bad,
+        ),
+      );
     }
   }
 
@@ -3350,7 +3368,7 @@ function midiReasons(song) {
       reasons.push(
         reason(
           "midi-duplicate-message",
-          `${live[index].id}/${live[other].id}`,
+          pairKey(live[index].id, live[other].id),
           `The mappings "${live[index].id}" and "${live[other].id}" would both be live for ${messageName(live[index].message)} on "${live[index].device_name}"; one message has one live action.`,
         ),
       );
@@ -3573,8 +3591,14 @@ function segmentReasons(clip, label, takesById, limit) {
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     const which = `Segment ${index + 1} of the ${label}`;
-    // A segment has no id of its own: its place in the comp is its identity.
-    const subject = `${clip.id}#${index + 1}`;
+    // A segment's place in the comp is its sentence, never its identity: an
+    // earlier segment inserted by another step must not make this one look
+    // like a new offender. Its own id when it has one, else what it plays and
+    // where it starts.
+    const subject =
+      typeof segment.id === "string" && segment.id !== ""
+        ? `${clip.id}#${segment.id}`
+        : `${clip.id}#${segment.take_id}@${beatText(segment.from_beat)}`;
     if (!(segment.from_beat < segment.to_beat)) {
       reasons.push(
         reason(
@@ -3637,25 +3661,40 @@ function segmentReasons(clip, label, takesById, limit) {
 }
 
 /**
- * One reason per id that two objects of this list share.
+ * One reason per id that two objects of this list share, carrying how many hold
+ * it: the sentence is the one it always was, and the count is what tells a third
+ * copy of the id from the second.
  * @param {Array<object>} items
  * @param {string} label - what the sentence calls the objects, e.g. `"clip"`
  * @param {string} code - the check's stable id, e.g. `"duplicate-clip-id"`
- * @returns {Array<{code: string, subject: string, text: string}>}
+ * @returns {Array<{code: string, subject: string, text: string, count: number}>}
  */
 function duplicateIdReasons(items, label, code) {
-  const seen = new Set();
-  const reported = new Set();
-  const reasons = [];
+  const counts = new Map();
   for (const item of items) {
     const id = typeof item?.id === "string" ? item.id : "";
-    if (seen.has(id) && !reported.has(id)) {
-      reported.add(id);
-      reasons.push(reason(code, id, `The song would have two ${label}s with the id "${id}".`));
-    }
-    seen.add(id);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  const reasons = [];
+  for (const [id, count] of counts) {
+    if (count < 2) continue;
+    // The sentence stays the one it always was; the count is what tells a third
+    // copy of the id from the second the song already held.
+    reasons.push(reason(code, id, `The song would have two ${label}s with the id "${id}".`, count));
   }
   return reasons;
+}
+
+/**
+ * Two objects' ids as one subject, in a fixed order: the pair is the offender,
+ * so which of the two a scan happened to meet first cannot change what the
+ * reason is about.
+ * @param {string} left
+ * @param {string} right
+ * @returns {string}
+ */
+function pairKey(left, right) {
+  return left <= right ? `${left}|${right}` : `${right}|${left}`;
 }
 
 /** @returns {string} a beat position without float noise. */

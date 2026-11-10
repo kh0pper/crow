@@ -1855,8 +1855,11 @@ export function createHub({
    * A full state frame is what the page answers by building its document over
    * from the server's (`onState` in the panel): an incremental update would be
    * merged into the containers the page already holds, which are the ones the
-   * dropped document made. Best effort — the step was refused already, and a
-   * page that misses the frame still rebuilds the song the next time it joins.
+   * dropped document made. The frame says `resync: true`, because it is not the
+   * answer to a fresh hello: the socket, and every command on it, is still the
+   * page's, so the page keeps its in-flight commands and says nothing about
+   * reconnecting. Best effort — the step was refused already, and a page that
+   * misses the frame still rebuilds the song the next time it joins.
    * @param {string} song_id
    * @param {object} row
    * @returns {Promise<void>}
@@ -1869,6 +1872,7 @@ export function createHub({
         state: Y.encodeStateAsUpdate(state.doc),
         history: entries,
         presence: presence(song_id),
+        resync: true,
       });
     } catch (err) {
       warn("resync", err);

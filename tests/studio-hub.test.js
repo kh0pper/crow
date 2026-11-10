@@ -930,6 +930,9 @@ test("a storage refusal on an old song's first step resyncs connected clients", 
   const frame = frames.find((item) => item.state);
   assert.ok(frame, "a state frame was pushed to the song's room");
   assert.equal(frames.some((item) => item.update), false, "the resync is a state frame, not an update");
+  // It is not the answer to a fresh hello: the page keeps the commands it has
+  // on the wire and says nothing about reconnecting (see `onState` in the panel).
+  assert.equal(frame.resync, true, "the frame says it is a resync");
 
   // What a page does with it: a fresh document, from the frame alone. It holds
   // the server's containers — empty, because the refused step was never stored.
