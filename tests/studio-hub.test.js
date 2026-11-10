@@ -3526,7 +3526,8 @@ test("an agent cannot swap or remove an amp's capture", async (t) => {
 });
 
 test("an agent may bypass an amp and change its input, output and mix", async (t) => {
-  const { hub } = await setup(t);  const song_id = await seedAmpSong(hub);
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
   await applies(
     hub,
     song_id,
@@ -3648,6 +3649,75 @@ test("an agent cannot undo its way to another capture", async (t) => {
     "human_only",
   );
   assert.equal(undoCab.error, AMP_CAPTURE_NEEDS_A_YES);
+});
+
+test("an agent cannot remove a track whose chain holds an amp", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-add-amp",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+
+  // The amp is in the track's chain, so removing the track would take the
+  // operator's capture out of the song with it — the same removal
+  // `insert.remove` refuses for an agent, one step further out.
+  const refused = refuses(
+    await hub.runCommand({
+      song_id,
+      cmd_id: "agent-remove-track",
+      command: "track.remove",
+      args: { track_id: "guitar" },
+      author: AGENT,
+    }),
+    "human_only",
+  );
+  assert.equal(refused.error, AMP_REMOVE_NEEDS_A_YES);
+  const kept = (await hub.openSong(song_id)).snapshot;
+  assert.ok(kept.tracks.find((track) => track.id === "guitar"), "the refused removal left the track");
+  assert.ok(kept.inserts["amp-1"], "and the amp it holds");
+
+  // The operator may take the track — and the amp with it — away.
+  const removed = await applies(hub, song_id, "operator-remove-track", "track.remove", { track_id: "guitar" });
+  assert.equal(removed.entry.command, "track.remove");
+  const after = (await hub.openSong(song_id)).snapshot;
+  assert.equal(after.tracks.find((track) => track.id === "guitar"), undefined);
+  assert.equal(after.inserts["amp-1"], undefined);
+});
+
+test("an agent cannot redo its way to removing an amp", async (t) => {
+  const { hub } = await setup(t);
+  const song_id = await seedAmpSong(hub);
+  await applies(
+    hub,
+    song_id,
+    "operator-add-amp",
+    "insert.add",
+    { id: "amp-1", owner: "track:guitar", kind: "amp", params: { model_id: "cap-a" } },
+    HUMAN,
+  );
+  const removed = await applies(hub, song_id, "operator-remove-amp", "insert.remove", { id: "amp-1" });
+
+  // An agent may put the operator's removal back — the amp it restores is the
+  // very same one — but the redo of that undo is the removal again, so it meets
+  // the removal's own sentence and writes nothing.
+  const undone = await hub.undo({ song_id, cmd_id: "agent-undo-remove", entry_id: removed.entry.id, author: AGENT });
+  assert.equal(undone.ok, true, `undoing a removal was refused: ${undone.error}`);
+  assert.equal((await hub.openSong(song_id)).snapshot.inserts["amp-1"].params.model_id, "cap-a");
+
+  const refused = refuses(
+    await hub.redo({ song_id, cmd_id: "agent-redo-remove", entry_id: undone.entry.id, author: AGENT }),
+    "human_only",
+  );
+  assert.equal(refused.error, AMP_REMOVE_NEEDS_A_YES);
+  assert.ok(
+    (await hub.openSong(song_id)).snapshot.inserts["amp-1"],
+    "the refused redo left the amp where it was",
+  );
 });
 
 // --- MIDI mappings ------------------------------------------------------------

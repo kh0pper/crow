@@ -1905,6 +1905,76 @@ test("a capture's head is checked again at finish", async () => {
   assert.equal(hub.commands.length, 0);
 });
 
+test("a capture whose architecture is nested deeper is not taken for A2", async () => {
+  const { uploads, storage, hub, staging } = setup();
+
+  /** @returns {Buffer} a capture-shaped file with `architecture` one level down. */
+  const nestedCapture = (length = 2048) => {
+    const body = JSON.stringify({
+      version: "0.5.4",
+      model: { architecture: "SlimmableContainer" },
+      weights: [0.1, 0.25],
+    });
+    return Buffer.from(body.padEnd(length, " "), "latin1");
+  };
+
+  // A search for the key would find the nested one and take this for an A2
+  // capture; only a top-level `architecture` is the shape Studio plays.
+  const nested = nestedCapture();
+  await assert.rejects(
+    () => uploads.begin(randomUUID(), captureRequest({ bytes: nested.length, head: captureHead(nested) })),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, NOT_A_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.deepEqual(readdirSync(staging), [], "a nested architecture staged nothing");
+
+  // The same answer from the bytes that arrived: the page declares a good head,
+  // and the file that lands keeps its architecture one level down.
+  const id = randomUUID();
+  const declared = captureBytes(2048);
+  await uploads.begin(id, captureRequest({ bytes: declared.length, head: captureHead(declared) }));
+  const arrived = nestedCapture(declared.length);
+  assert.equal(arrived.length, declared.length);
+  const hashes = await stageChunks(uploads, id, [arrived]);
+  await assert.rejects(
+    () => uploads.finish(id, { chunk_hashes: hashes }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.message, NOT_A_CAPTURE_TEXT);
+      return true;
+    },
+  );
+  assert.equal(storage.uploads.length, 0, "nothing reached storage");
+  assert.equal(hub.commands.length, 0, "no library entry was added");
+});
+
+test("a tiny first chunk cannot hide the head", async () => {
+  const { uploads, storage, hub } = setup();
+  const id = randomUUID();
+  // Past one chunk, so the client's own cut can leave a first chunk of a few
+  // bytes and still have somewhere to put the rest.
+  const file = captureBytes(1200000);
+  const chunk = 1048576;
+
+  // The head the finish checks is read ACROSS the staged chunks, in order, not
+  // from chunk 0 alone: the three bytes `{"v` are no head at all on their own.
+  await uploads.begin(id, captureRequest({ name: "Split capture", bytes: file.length, head: captureHead(file) }));
+  const hashes = await stageChunks(uploads, id, [
+    file.subarray(0, 3),
+    file.subarray(3, 3 + chunk),
+    file.subarray(3 + chunk),
+  ]);
+  const finished = await uploads.finish(id, { chunk_hashes: hashes });
+
+  assert.equal(finished.library.kind, "nam");
+  assert.equal(storage.uploads.length, 1);
+  assert.deepEqual(storage.uploads[0].bytes, file, "the capture is stored byte for byte");
+  assert.equal(hub.commands.length, 1);
+});
+
 test("a capture uploads as its own bytes and adds one library entry", async () => {
   const { uploads, storage, db, acl, hub, staging } = setup();
   const id = randomUUID();
@@ -1990,7 +2060,11 @@ test("an IR uploads as 24-bit WAV through the sample path", async () => {
   assert.equal(command.args.entry.name, "My cabinet");
   assert.equal(command.args.entry.storage_key, key);
   assert.equal(command.args.entry.sha256, hashOf(upload.bytes));
-  assert.equal(command.args.entry.bytes, pcm.length);
+  // The entry measures the object storage holds — header and PCM — not just the
+  // PCM that was sent, and says so with a size that matches it.
+  assert.equal(command.args.entry.bytes, upload.bytes.length);
+  assert.notEqual(upload.bytes.length, pcm.length, "the WAV header is part of the object");
+  assert.equal(finished.library.bytes, upload.bytes.length);
   assert.equal(finished.library.kind, "ir");
   const row = db.statements.find(
     (statement) => statement && statement.sql && /INSERT\s+INTO\s+storage_files/i.test(statement.sql),
@@ -2039,4 +2113,31 @@ test("an IR over 1 s is refused", async () => {
     },
   );
   assert.equal(storage.uploads.length, 0);
+});
+
+test("a repeated cabinet begin with other channels or rate is refused", async () => {
+  const { uploads, staging } = setup();
+  const id = randomUUID();
+  await uploads.begin(id, irRequest());
+
+  // The same begin again is the retry it looks like: nothing changes.
+  await uploads.begin(id, irRequest());
+  const meta = () => JSON.parse(readFileSync(join(staging, id, "meta.json"), "utf8"));
+  assert.equal(meta().rate, 48000);
+  assert.equal(meta().channels, 2);
+
+  // But a page that measured another channel count or another rate is another
+  // cabinet under the same id, not this upload sent twice.
+  for (const other of [{ channels: 1 }, { rate: 44100 }]) {
+    await assert.rejects(
+      () => uploads.begin(id, irRequest(other)),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.match(error.message, /already being uploaded with different details/);
+        return true;
+      },
+    );
+  }
+  assert.equal(meta().rate, 48000, "the refused begins wrote nothing");
+  assert.equal(meta().channels, 2);
 });

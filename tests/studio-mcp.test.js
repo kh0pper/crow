@@ -1469,6 +1469,7 @@ const LIB_TINY = "lib-tiny";
 const LIB_ALPHA = "lib-alpha";
 const LIB_BETA = "lib-beta";
 const LIB_UNUSED = "lib-unused";
+const LIB_CAPTURE = "lib-capture";
 
 /** The tiny but valid bank the render below plays, and its two presets' tones. */
 const TINY_FONT = tinySf2();
@@ -1717,8 +1718,9 @@ test("agent sets a program and hears it in a render", async (t) => {
 test("studio_library lists licences and credits", async (t) => {
   const { db, hub, songId } = await realSong(t);
 
-  // Three banks in the song: one CC-BY with a credit on two tracks, one plain
-  // and in use, and one nothing plays. None of them is a file path.
+  // Four library entries: one CC-BY with a credit on two tracks, one plain and
+  // in use, one nothing plays, and a capture an amp insert plays. None of them
+  // is a file path.
   await addLibraryEntry(
     hub,
     songId,
@@ -1730,6 +1732,16 @@ test("studio_library lists licences and credits", async (t) => {
   );
   await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_BETA, { name: "Beta bank" }));
   await addLibraryEntry(hub, songId, makeLibraryEntry(songId, LIB_UNUSED, { name: "Unused bank" }));
+  await addLibraryEntry(
+    hub,
+    songId,
+    makeLibraryEntry(songId, LIB_CAPTURE, {
+      kind: "nam",
+      name: "Amp capture",
+      storage_key: `${RENDER_PREFIX}studio/${songId}/library/${LIB_CAPTURE}.nam`,
+      licence: "",
+    }),
+  );
   await seed(hub, songId, "lib-track-piano", "track.add", {
     id: "piano",
     name: "Piano",
@@ -1741,6 +1753,15 @@ test("studio_library lists licences and credits", async (t) => {
     name: "Bass",
     kind: "soundfont",
     font_id: LIB_BETA,
+  });
+  // The capture is in use by an amp on a guitar track: an agent reading the
+  // library must see that, not an entry merely sitting in the song.
+  await seed(hub, songId, "lib-track-guitar", "track.add", { id: "guitar", name: "Guitar", kind: "audio" });
+  await seed(hub, songId, "lib-amp", "insert.add", {
+    id: "amp-1",
+    owner: "track:guitar",
+    kind: "amp",
+    params: { model_id: LIB_CAPTURE },
   });
 
   // A stub catalog: what this Crow could download, without depending on the
@@ -1773,7 +1794,7 @@ test("studio_library lists licences and credits", async (t) => {
 
     assert.deepEqual(
       body.entries.map((row) => row.id),
-      [LIB_ALPHA, LIB_BETA, LIB_UNUSED],
+      [LIB_ALPHA, LIB_CAPTURE, LIB_BETA, LIB_UNUSED],
       "every entry, in a fixed order",
     );
     assert.deepEqual(body.entries[0], {
@@ -1785,9 +1806,14 @@ test("studio_library lists licences and credits", async (t) => {
       credit: "Alpha bank by a person",
       used_by: [{ track_id: "piano", track_name: "Piano" }],
     });
-    assert.deepEqual(body.entries[1].used_by, [{ track_id: "bass", track_name: "Bass" }]);
-    assert.equal(body.entries[1].credit, "");
-    assert.deepEqual(body.entries[2].used_by, [], "an entry nothing plays says so");
+    assert.deepEqual(
+      body.entries[1].used_by,
+      [{ insert_id: "amp-1", owner: "track:guitar", label: "amp" }],
+      "an amp that plays the capture is named too",
+    );
+    assert.deepEqual(body.entries[2].used_by, [{ track_id: "bass", track_name: "Bass" }]);
+    assert.equal(body.entries[2].credit, "");
+    assert.deepEqual(body.entries[3].used_by, [], "an entry nothing plays says so");
 
     assert.deepEqual(body.available_catalog, [
       { catalog_id: "musescore-general", name: "MuseScore General", licence: "MIT", default: true },
@@ -1811,7 +1837,7 @@ test("studio_library lists licences and credits", async (t) => {
       const without = await missingCatalog.callTool({ name: "studio_library", arguments: { song_id: songId } });
       assert.notEqual(without.isError, true, textOf(without));
       const answer = JSON.parse(textOf(without));
-      assert.equal(answer.entries.length, 3, "the song's own banks are still listed");
+      assert.equal(answer.entries.length, 4, "the song's own banks are still listed");
       assert.deepEqual(answer.available_catalog, [], "and there is nothing to download");
     } finally {
       await missingCatalog.close();

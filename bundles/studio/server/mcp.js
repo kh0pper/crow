@@ -46,8 +46,9 @@
  * chop and pad commands to work with them — never a way to add or drop a sound.
  *
  * `studio_library` is the instrument library's read: the banks a song's soundfont
- * tracks can play, with their licences, their credits and the tracks that play
- * them, plus the catalog rows this Crow could download. It is read-only, and it
+ * tracks can play and the captures and cabinets its amps play, with their
+ * licences, their credits and what uses each of them, plus the catalog rows this
+ * Crow could download. It is read-only, and it
  * has no sibling that downloads or uploads a bank: those are the person's own
  * actions (plan 1d, Global Constraints "Who can change a sound"). What an agent
  * may change about an instrument is the preset, with `studio_track_set_program`.
@@ -97,7 +98,7 @@ import "./commands/instruments.js";
 // mix step is an undoable step, never a sound leaving the song.
 import "./commands/mixer.js";
 import { GENERATOR_TYPES, moduleCatalogue } from "./catalogue.js";
-import { libraryUsers, effectLabel } from "./doc.js";
+import { libraryUsers, libraryInsertUsers, effectLabel } from "./doc.js";
 // The vetted instrument catalog: what `studio_library` says this Crow could
 // download. It is the bundle's own module (Node built-ins only), and a caller
 // may inject its own reader so a test never depends on the checked-in file.
@@ -506,9 +507,12 @@ export function sampleList(snapshot, sampleId = null) {
  * the song. Nothing here is a file path and nothing is a storage key: the file
  * lives on this device and is not the agent's to read or write.
  *
- * `used_by` is `libraryUsers` from the song document, so a second kind of user
- * (an amp insert's capture or cabinet, plan 1d PR C) joins the answer when it
- * joins the document rather than here.
+ * `used_by` is `libraryUsers` and `libraryInsertUsers` from the song document:
+ * a track that plays the entry reads `{track_id, track_name}`, and an amp insert
+ * that plays its capture or its cabinet reads `{insert_id, owner, label}` — the
+ * chain it sits in (`"track:<id>"`, `"return:<id>"` or `"master"`) and the
+ * effect's own label. So a capture or a cabinet an amp plays is never mistaken
+ * for an entry merely sitting in the song.
  *
  * @param {object} snapshot - the hub's `snapshot()` shape
  * @param {object[]} [catalogEntries] - the catalog rows this Crow could download
@@ -517,6 +521,7 @@ export function sampleList(snapshot, sampleId = null) {
 export function libraryList(snapshot, catalogEntries = []) {
   const library = snapshot?.library && typeof snapshot.library === "object" ? snapshot.library : {};
   const tracks = Array.isArray(snapshot?.tracks) ? snapshot.tracks : [];
+  const inserts = snapshot?.inserts && typeof snapshot.inserts === "object" ? snapshot.inserts : {};
   /** @returns {string} a track's name, or its id when the song no longer holds it. */
   const trackName = (id) => tracks.find((track) => track?.id === id)?.name ?? id;
 
@@ -536,10 +541,20 @@ export function libraryList(snapshot, catalogEntries = []) {
       source: typeof entry.source === "string" ? entry.source : "",
       licence: typeof entry.licence === "string" ? entry.licence : "",
       credit: typeof entry.credit === "string" ? entry.credit : "",
-      used_by: libraryUsers(snapshot, entry.id).map((trackId) => ({
-        track_id: trackId,
-        track_name: trackName(trackId),
-      })),
+      used_by: [
+        ...libraryUsers(snapshot, entry.id).map((trackId) => ({
+          track_id: trackId,
+          track_name: trackName(trackId),
+        })),
+        ...libraryInsertUsers(snapshot, entry.id).map((insertId) => {
+          const insert = inserts[insertId];
+          return {
+            insert_id: insertId,
+            owner: typeof insert?.owner === "string" ? insert.owner : "",
+            label: effectLabel(insert?.kind),
+          };
+        }),
+      ],
     }));
 
   const available = (Array.isArray(catalogEntries) ? catalogEntries : [])
@@ -1097,7 +1112,7 @@ export function createStudioServer({
     {
       title: "List the song's instruments",
       description:
-        "Every instrument the song's library holds — the banks a soundfont track can play: id, kind, name, where it came from (catalog, upload or bundled), its licence and its credit line, and the tracks that play it (track_id, track_name). Also lists available_catalog: the instruments this Crow could download (catalog_id, name, licence, default). Read-only, and it names no file path. Only the operator downloads or uploads a bank — both are their own actions and you have no tool for either — and which bank a track plays (studio_track_set_font) is theirs too. What you may change is the preset that track plays, with studio_track_set_program.",
+        "Every instrument the song's library holds — the banks a soundfont track can play, the captures and cabinets an amp plays: id, kind, name, where it came from (catalog, upload or bundled), its licence and its credit line, and what uses it in used_by — a playing track as {track_id, track_name}, or an amp insert as {insert_id, owner, label}. Also lists available_catalog: the instruments this Crow could download (catalog_id, name, licence, default). Read-only, and it names no file path. Only the operator downloads or uploads a file — both are their own actions and you have no tool for either — and which bank a track plays (studio_track_set_font), like which capture or cabinet an amp plays, is theirs too. What you may change is the preset that track plays, with studio_track_set_program.",
       inputSchema: {
         song_id: z.string().min(1).describe("the song whose instruments to list"),
       },

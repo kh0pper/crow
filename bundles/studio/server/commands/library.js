@@ -189,6 +189,20 @@ function userText(snap, id, amp) {
 }
 
 /**
+ * The users of a library entry as one clause: the single one on its own, or
+ * every one of them joined the way a sentence joins a list. Each part already
+ * reads as a user ("track \"Keys\"", "an amp on track \"Guitar\""), so nothing here
+ * adds a word in front of them.
+ * @param {string[]} parts - one clause per user, tracks first
+ * @returns {string}
+ */
+function usersText(parts) {
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
  * An entry as the document stores it: every field present, `null` for the
  * three optional ones it does not have. Building it here means the value a
  * command hands back compares cleanly with what `snapshot()` reads a moment
@@ -287,12 +301,7 @@ defineCommand({
         ...users.map((id) => userText(snap, id, false)),
         ...amps.map((id) => userText(snap, id, true)),
       ];
-      const who =
-        parts.length === 1
-          ? parts[0]
-          : users.length > 0 && amps.length === 0
-            ? `the tracks ${parts.join(", ")}`
-            : `the tracks and amps ${parts.join(", ")}`;
+      const who = usersText(parts);
       const what =
         parts.length === 1
           ? users.length === 1

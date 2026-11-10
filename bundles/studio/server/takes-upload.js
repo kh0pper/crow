@@ -100,13 +100,20 @@
  *           (Task 12). It belongs to the library the same way, under
  *           `<library_id>.nam`, and `finish` issues `library.add` with kind
  *           "nam". The server never JSON-parses it either. It checks the head
- *           the client declares at begin, and the stored file's first bytes
- *           again at finish, for the one shape Studio plays: a JSON object
- *           whose `architecture` is "SlimmableContainer" (a NAM A2 capture),
- *           and — at finish, over the whole staged file, streaming — a
- *           `"weights"` key. Another architecture is the plan's re-export
- *           sentence; anything else is "not a NAM capture". A capture is at
- *           most 20 MB, and a song may have 8 capture uploads in progress.
+ *           the client declares at begin, and the stored file's first 4096
+ *           bytes again at finish — read across the chunks, because a chunk
+ *           boundary is not a file boundary — for the one shape Studio plays: a
+ *           JSON object with a top-level `architecture` of "SlimmableContainer"
+ *           (a NAM A2 capture), and — at finish, over the whole staged file,
+ *           streaming — a `"weights"` key. Another architecture is the plan's
+ *           re-export sentence; anything else is "not a NAM capture". **This
+ *           check is advisory**: it is a shallow look at the front of a file
+ *           that may be hostile, never a parse, and the worklet is the real
+ *           parser — it must cope with a `.nam` this check lets through. A
+ *           capture is at most 20 MB, and a song may have 8 captures uploading.
+ *           A cabinet's entry carries the size of the WAV that was STORED
+ *           (header and PCM), not just the PCM: its `sha256` is measured over
+ *           that same stored object.
  *   ir      is a cabinet impulse response: decoded in the BROWSER, like a
  *           sample, and stored as the 24-bit WAV this file frames at finish
  *           (Task 12) — `<library_id>.wav` under the same `library/`
@@ -243,6 +250,9 @@ const CAPTURE_HEAD_BYTES = 4096;
 
 /** The NAM architecture Studio plays: an A2 model (plan 1d, Formats). */
 const CAPTURE_ARCHITECTURE = "SlimmableContainer";
+
+/** The top-level key a capture declares its architecture in. */
+const CAPTURE_ARCHITECTURE_KEY = "architecture";
 
 /** What a file that is not shaped like a NAM capture is told. */
 const NOT_A_CAPTURE_TEXT = "This file is not a NAM capture.";
@@ -624,14 +634,18 @@ function bankExtOf(meta) {
 /**
  * What is wrong with a file that is meant to be a NAM capture, judged from the
  * front of it alone: after optional whitespace the first byte is `{`, the text
- * holds an `"architecture"` key, and that key's string value is the architecture
- * Studio plays.
+ * holds a TOP-LEVEL `"architecture"` key, and that key's string value is the
+ * architecture Studio plays.
  *
  * Another architecture value is the plan's re-export sentence — a legacy model
  * is a real capture Studio does not play, and telling the operator to find a
  * current trainer is the useful answer. Anything else (not an object, no
- * `architecture` key, a value that is not a string) is not a capture at all.
- * The file is never parsed: this reads the front of it as text.
+ * top-level `architecture` key, a value that is not a string) is not a capture
+ * at all.
+ *
+ * The file is never parsed: this scans the front of it as text. The check is
+ * advisory — the worklet is the real parser, and it must cope with whatever a
+ * hostile `.nam` puts in the bytes this look waves through.
  * @param {Buffer|Uint8Array|null|undefined} bytes
  * @returns {string|null} the refusal's message, or null when it is shaped right
  */
@@ -639,16 +653,106 @@ function captureProblemOf(bytes) {
   if (!bytes || bytes.length === 0) return NOT_A_CAPTURE_TEXT;
   const text = Buffer.from(bytes.subarray(0, CAPTURE_HEAD_BYTES)).toString("latin1");
   if (!/^\s*\{/.test(text)) return NOT_A_CAPTURE_TEXT;
-  const match = /"architecture"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(text);
-  if (!match) return NOT_A_CAPTURE_TEXT;
-  let value;
-  try {
-    value = JSON.parse(match[1]);
-  } catch {
-    return NOT_A_CAPTURE_TEXT;
-  }
-  if (typeof value !== "string") return NOT_A_CAPTURE_TEXT;
+  const value = topLevelArchitecture(text);
+  if (value === null) return NOT_A_CAPTURE_TEXT;
   return value === CAPTURE_ARCHITECTURE ? null : LEGACY_CAPTURE_TEXT;
+}
+
+/**
+ * The `architecture` value a capture's front declares as a key of its outermost
+ * object, or null when the head holds none.
+ *
+ * A plain search for the key would take a nested `architecture` — one inside a
+ * `config` or a `model` object, which a hostile file can write — for the shape
+ * Studio plays, so the head is walked by a small scanner instead: brace depth is
+ * counted, and braces, quotes and colons inside a string literal are skipped
+ * whole. Only a string key at depth 1, followed by `:`, is a candidate; its
+ * value must itself be a string that is complete inside the head.
+ *
+ * Nothing here is `JSON.parse`: the file may be hundreds of megabytes and the
+ * only bytes looked at are the ones in the head.
+ * @param {string} text the head, as latin1 text
+ * @returns {string|null} the value, or null when there is none to read
+ */
+function topLevelArchitecture(text) {
+  let depth = 0;
+  let index = 0;
+  while (index < text.length) {
+    const ch = text[index];
+    if (ch === "{") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (ch === "}") {
+      depth -= 1;
+      index += 1;
+      // The outermost object has closed: a key after it is not its field.
+      if (depth <= 0) return null;
+      continue;
+    }
+    if (ch !== '"') {
+      index += 1;
+      continue;
+    }
+    const token = readJsonStringToken(text, index);
+    // An unterminated string runs past the head, so nothing after it can be read.
+    if (!token) return null;
+    index = token.end;
+    let after = index;
+    while (after < text.length && isJsonSpace(text[after])) after += 1;
+    // Only a key of the outermost object is the shape's own `architecture`:
+    // a string that is a VALUE, or a key one level down, is not.
+    if (depth !== 1 || text[after] !== ":") continue;
+    let key;
+    try {
+      key = JSON.parse(token.literal);
+    } catch {
+      continue;
+    }
+    if (key !== CAPTURE_ARCHITECTURE_KEY) continue;
+    let valueAt = after + 1;
+    while (valueAt < text.length && isJsonSpace(text[valueAt])) valueAt += 1;
+    if (text[valueAt] !== '"') return null;
+    const valueToken = readJsonStringToken(text, valueAt);
+    if (!valueToken) return null;
+    try {
+      const value = JSON.parse(valueToken.literal);
+      return typeof value === "string" ? value : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * One JSON string literal at `start`, with its escapes left as written so
+ * `JSON.parse` can decode it. Null when the closing quote is past the end.
+ * @param {string} text
+ * @param {number} start the index of the opening quote
+ * @returns {{literal: string, end: number}|null}
+ */
+function readJsonStringToken(text, start) {
+  let index = start + 1;
+  while (index < text.length) {
+    const ch = text[index];
+    if (ch === "\\") {
+      // Skip the escaped character whatever it is, a quote included.
+      index += 2;
+      continue;
+    }
+    if (ch === '"') {
+      return { literal: text.slice(start, index + 1), end: index + 1 };
+    }
+    index += 1;
+  }
+  return null;
+}
+
+/** @returns {boolean} whether a character is whitespace JSON allows between tokens. */
+function isJsonSpace(ch) {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
 }
 
 /**
@@ -714,6 +818,10 @@ async function captureHasWeights(files) {
  * the head again (the same check `begin` made, now from the bytes that actually
  * arrived), and a `"weights"` key somewhere in the file.
  *
+ * The head is read ACROSS the staged chunks: a chunk boundary is the client's,
+ * not the file's, so a first chunk of a handful of bytes must not hide the head
+ * that follows it.
+ *
  * Called before anything is stored, so a file that fails any of the three leaves
  * nothing behind.
  * @param {string} takeId
@@ -732,7 +840,7 @@ async function assertCaptureFinish(takeId, meta, files, totalBytes) {
       `Capture "${takeId}" was declared ${groupThousands(declared)} bytes, but its chunks add up to ${groupThousands(totalBytes)}.`,
     );
   }
-  const problem = captureProblemOf(await firstBytesOf(files[0], CAPTURE_HEAD_BYTES));
+  const problem = captureProblemOf(await headBytesOf(files, CAPTURE_HEAD_BYTES));
   if (problem) throw badRequest(problem);
   if (!(await captureHasWeights(files))) throw badRequest(NOT_A_CAPTURE_TEXT);
 }
@@ -935,6 +1043,28 @@ async function firstBytesOf(file, count) {
   } finally {
     await handle.close().catch(() => {});
   }
+}
+
+/**
+ * The first bytes of a run of staged files, read across them in order: the
+ * chunks are pieces of one file, so a head that straddles a chunk boundary is
+ * read whole.
+ * @param {string[]} files the chunk files, in index order
+ * @param {number} count how many bytes of the front to read
+ * @returns {Promise<Buffer>} fewer bytes only when the files hold fewer
+ */
+async function headBytesOf(files, count) {
+  const pieces = [];
+  let have = 0;
+  for (const file of files) {
+    if (have >= count) break;
+    const piece = await firstBytesOf(file, count - have);
+    if (piece.length > 0) {
+      pieces.push(piece);
+      have += piece.length;
+    }
+  }
+  return Buffer.concat(pieces);
 }
 
 /** @returns {string} the file name of one chunk index, e.g. `000003.pcm`. */
@@ -1523,10 +1653,15 @@ export function createTakeUploads({
       if (meta.name !== capture.name) return false;
       return Number(meta.bytes) === capture.bytes;
     }
+    // A cabinet is PCM: its name, its length AND the rate and channel count the
+    // page decoded it at. A retry that measured another rate or another channel
+    // count is another cabinet, not the same upload sent again.
     if (request.kind === "ir") {
       const cabinet = request.cabinet ?? {};
       if (meta.name !== cabinet.name) return false;
-      return Number(meta.frames) === cabinet.frames;
+      if (Number(meta.frames) !== cabinet.frames) return false;
+      if (Number(meta.rate) !== request.sampleRate) return false;
+      return Number(meta.channels) === request.channelCount;
     }
     if (Number(meta.rate) !== request.sampleRate) return false;
     if (Number(meta.channels) !== request.channelCount) return false;
@@ -2067,7 +2202,9 @@ export function createTakeUploads({
             upload_id: takeId,
             storage_key: key,
             sha256,
-            bytes: totalBytes,
+            // The size of the object storage holds: for a cabinet, the WAV's
+            // header and its PCM, which is also what `sha256` was measured over.
+            bytes: size,
             licence: "",
             credit: "",
             author_label: authorLabelOf(meta.author),
@@ -2159,7 +2296,7 @@ export function createTakeUploads({
       }
 
       const payload = isLibraryKind(kind)
-        ? { storage_key: key, bytes: totalBytes, library_id: libraryId }
+        ? { storage_key: key, bytes: size, library_id: libraryId }
         : { storage_key: key, seconds: Math.round((frames / rate) * 1000) / 1000 };
       if (isLibraryKind(kind)) {
         // Nothing more: the entry's own id says which file arrived.

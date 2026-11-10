@@ -245,6 +245,15 @@ test("a font in use cannot be removed", (t) => {
   assert.ok(getLibraryEntry(doc, "font-a"), "the refused removal wrote nothing");
   assert.equal(getLibraryEntry(doc, "font-a").get("name"), "Font font-a");
 
+  // Two tracks playing one font are both named, joined as a sentence joins
+  // them: one clause per track, never a second "the tracks" in front.
+  addSoundfontTrack(doc, "Strings");
+  const many = refuses(() => runCommand(doc, "library.remove", { library_id: "font-a" }), "conflict");
+  assert.match(many.message, /in use by track "Keys" and track "Strings"/);
+  assert.match(many.message, /change what they play first/);
+  assert.doesNotMatch(many.message, /the tracks/);
+  runCommand(doc, "track.remove", { track_id: snapshot(doc).tracks[1].id });
+
   // The unused font may go, and one undo brings it back whole.
   const removed = runCommand(doc, "library.remove", { library_id: "font-b" });
   assert.equal(removed.summary, 'Removed the font "Font font-b" from the library');
