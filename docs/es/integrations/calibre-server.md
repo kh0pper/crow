@@ -20,7 +20,7 @@ Crow soporta dos modos para Calibre: autoalojamiento vía Docker o conexión a u
 
 ### Opción A: Docker (autoalojado)
 
-Instala Calibre como un bundle de Crow. Esto ejecuta el servidor de contenido de Calibre en Docker junto a tu gateway de Crow.
+Instala Calibre como un bundle de Crow. Esto ejecuta el **servidor de contenido** de Calibre en Docker junto a tu gateway de Crow — no la aplicación de escritorio de Calibre a través del navegador, que era lo que este bundle ofrecía antes.
 
 > "Crow, instala el bundle de Calibre Server"
 
@@ -38,6 +38,20 @@ Reinicia el bundle para que los cambios surtan efecto:
 > "Crow, reinicia el bundle de Calibre Server"
 
 El servidor de contenido de Calibre estará disponible en `http://tu-servidor:8081`.
+
+#### El inicio de sesión
+
+El servidor de contenido necesita un inicio de sesión: cada página que muestra tus libros y cada descarga lo piden. Crow crea la cuenta `admin` por sí mismo justo después de la instalación, genera su contraseña y la guarda en **Ajustes → Contraseñas**. El mismo `CALIBRE_USERNAME` y `CALIBRE_PASSWORD` van al `.env` del bundle y a la configuración MCP de la extensión, que es lo que leen las herramientas de Crow. Cambia la contraseña en la interfaz web de Calibre (**Settings → Passwords**) si quieres otra.
+
+El servidor de contenido guarda sus usuarios en su propia base de datos de usuarios (`/config/users.sqlite`). Las cuentas creadas en la antigua versión de escritorio no se conservan: vivían en el archivo de usuarios de la aplicación de escritorio, bajo `/config/.config/calibre/`, y el servidor de contenido nunca lo lee. Crow crea `admin`; añade más cuentas con las propias herramientas de Calibre (`calibre-server --manage-users`) si las necesitas.
+
+Una carpeta de biblioteca sin `metadata.db` se rellena con una biblioteca de Calibre vacía en el primer arranque, para que el servidor tenga dónde funcionar.
+
+### Actualizar desde la versión de escritorio
+
+La aplicación de escritorio en el navegador ya no está: este bundle ejecuta solo el servidor de contenido, así que la antigua interfaz web y sus puertos no vuelven. Tus libros se quedan donde están: la biblioteca sigue siendo la carpeta que montaste.
+
+Después de pulsar **Apply the update**, el servidor de contenido pide un inicio de sesión que todavía no existe. Pulsa **Set it up for me** en la tarjeta de Extensiones para que Crow cree el inicio de sesión `admin` y lo guarde en **Ajustes → Contraseñas**.
 
 ### Opción B: Conectar a Calibre existente
 
@@ -79,7 +93,7 @@ Asegúrate de que la `CALIBRE_URL` sea accesible desde la máquina que ejecuta C
 
 ### "401 No autorizado"
 
-Si tu servidor de Calibre tiene la autenticación habilitada, verifica que `CALIBRE_USERNAME` y `CALIBRE_PASSWORD` estén configurados correctamente en tu archivo `.env`.
+Crow inicia sesión en el servidor de contenido con `CALIBRE_USERNAME` y `CALIBRE_PASSWORD` del `.env` del bundle. La contraseña que Crow generó está en **Ajustes → Contraseñas**; cópiala ahí, o cambia la contraseña de Calibre en su propia interfaz web (**Settings → Passwords**).
 
 ### Los libros no aparecen
 

@@ -1,20 +1,42 @@
 services:
+  # Docker fills a NEW named volume from the image's own /config (root-owned) on its first
+  # mount, so an ownership fix can only run AFTER that copy: on the main service the copy-up
+  # happens as it mounts, which would reset an earlier chown. Same image, so nothing extra is
+  # pulled, and `restart: "no"` + `network_mode: none` keep this to one short run.
+  calibre-server-config-owner:
+    image: linuxserver/calibre:9.17.0
+    user: "0:0"
+    entrypoint: ["chown", "-R", "1000:1000", "/config"]
+    network_mode: none
+    restart: "no"
+    volumes:
+      - calibre-server-config:/config
+
   calibre-server:
     image: linuxserver/calibre:9.17.0
     container_name: crow-calibre-server
+    # The content server only — not the desktop app over a web VNC. calibre-server refuses a
+    # folder with no metadata.db, so an empty library is created first (calibredb … list does
+    # that), and the server then runs with a login: every request for book data needs one.
+    entrypoint: ["sh", "-c"]
+    command: ["[ -f /library/metadata.db ] || /opt/calibre/calibredb --library-path /library list >/dev/null; exec /opt/calibre/calibre-server --enable-auth --auth-mode basic --userdb /config/users.sqlite --listen-on 0.0.0.0 --port 8081 /library"]
+    user: "1000:1000"
+    depends_on:
+      calibre-server-config-owner:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:8081:8081"
     volumes:
-      - ${CALIBRE_LIBRARY_PATH:?Set CALIBRE_LIBRARY_PATH}:/config/Calibre Library
+      - ${CALIBRE_LIBRARY_PATH:?Set CALIBRE_LIBRARY_PATH}:/library
       - calibre-server-config:/config
     environment:
-      - PUID=1000
-      - PGID=1000
+      - HOME=/config
     init: true
     mem_limit: 512m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      # `/` serves the app shell without a login; the data behind it needs one.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8081/"]
       interval: 30s
       timeout: 10s
       retries: 5

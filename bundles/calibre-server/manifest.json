@@ -1,7 +1,7 @@
 {
   "id": "calibre-server",
   "name": "Calibre Server",
-  "version": "1.0.3",
+  "version": "1.0.6",
   "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
   "type": "bundle",
   "author": "Crow",
@@ -9,6 +9,7 @@
   "tags": ["ebooks", "calibre", "OPDS", "library", "self-hosted"],
   "icon": "book",
   "docker": { "composefile": "docker-compose.yml" },
+  "refreshFiles": ["docker-compose.yml"],
   "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CALIBRE_URL", "CALIBRE_USERNAME", "CALIBRE_PASSWORD"] },
   "panel": "panel/calibre-server.js",
   "panelRoutes": "panel/routes.js",
@@ -17,11 +18,19 @@
   "env_vars": [
     { "name": "CALIBRE_URL", "description": "Calibre content server URL", "default": "http://localhost:8081", "required": true },
     { "name": "CALIBRE_LIBRARY_PATH", "description": "Host path to your Calibre library folder", "required": true },
-    { "name": "CALIBRE_USERNAME", "description": "HTTP Basic auth username (if auth enabled)", "required": false },
-    { "name": "CALIBRE_PASSWORD", "description": "HTTP Basic auth password", "required": false, "secret": true }
+    { "name": "CALIBRE_USERNAME", "description": "Calibre login username (Crow creates `admin` at install and writes it here; leave it as `admin`)", "default": "admin", "required": false },
+    { "name": "CALIBRE_PASSWORD", "description": "Calibre login password. Crow generates it at install and keeps it in Settings → Passwords.", "required": false, "secret": true }
   ],
   "ports": [8081],
   "webUI": { "port": 8081, "path": "/", "label": "Calibre" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to existing Calibre content server (set CALIBRE_URL)."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 180 },
+    "user": "admin",
+    "secretEnv": "CALIBRE_PASSWORD",
+    "userEnv": "CALIBRE_USERNAME",
+    "urlEnv": "CALIBRE_URL"
+  },
+  "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to an existing Calibre content server (set CALIBRE_URL). The bundle runs the content server itself with a login required — the desktop app over a web browser is gone — and Crow creates its `admin` account at install, keeping the password in Settings → Passwords. Users made in the old desktop version are not carried over: they lived in the desktop app's own user file, which the content server never reads."
 }

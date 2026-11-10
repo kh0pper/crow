@@ -219,6 +219,7 @@ Optional fields:
 | `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }`, optionally with `after` (see "setup.after" below) |
 | `secretEnv` | with `crow`: the keychain entry name for the admin password — an `env_vars` entry with `generate: "secret"` + `keychain: true` for `via: "env"`, any name for `via: "setup"` |
 | `userEnv` | with `crow`, optional: the `env_vars` entry holding the admin's username |
+| `urlEnv` | with `crow`, optional: a declared, NON-SECRET `env_vars` entry whose installed `.env` value is the app's own address — the saved keychain row then carries that URL (only when it is an `http(s)` URL of at most 512 characters), so Settings → Passwords can link to the app |
 | `invite` | with `finish-setup` only: the name of a CODE-HELD invite handler (today: `"vaultwarden"`) — see the next section |
 
 Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`):
@@ -237,8 +238,8 @@ Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`)
     `.env`) is refused.
 - `default-login` requires `user`; `user` is allowed with `default-login` and with
   `crow`/`via: "setup"` (where the script needs a username to create), and nowhere else.
-- `via`/`secretEnv`/`userEnv` are only allowed with `crow`, and `setup` only with
-  `via: "setup"`.
+- `via`/`secretEnv`/`userEnv`/`urlEnv` are only allowed with `crow`, and `setup` only with
+  `via: "setup"`. `urlEnv` must name a declared, non-secret `env_vars` entry.
 - `invite` is only allowed with `finish-setup`, and its value must name a handler
   Crow really ships (`INVITE_HANDLER_NAMES` in
   `servers/gateway/first-admin/registry.js`). The manifest names code; it never
@@ -304,17 +305,20 @@ argument is visible in the process list on both sides.
 Exit `5` exists so that a password the app really did take is never thrown away because
 the script could not log in with it afterwards: a proof that fails is not a failure of
 the change. Retry the proof a couple of times (an app that just restarted may not answer
-yet), and exit `5` only once the app itself has confirmed the change — then Crow keeps the
-password and says on the card that it could not log in with it to confirm.
+yet), and exit `5` only when the app itself confirmed the change — an app's own account
+list showing the new account counts as that confirmation — then Crow keeps the
+password and says on the card that it could not log in with it to confirm. A create the
+script could not confirm is never exit `5`: if its call timed out and the account never
+shows up in the app's own list, nothing was confirmed, so nothing is saved (`1`).
 
 The script reports what happened through its exit code:
 
 | exit | meaning | Crow then |
 |---|---|---|
-| `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords) and into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars` |
+| `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords), into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars`, and into the bundle's `mcp-addons.json` entry when it has one |
 | `3` | the app already has its own admin (set up earlier by the operator); nothing changed | leaves everything alone, and asks the operator to save the login they use |
 | `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
-| `5` | the app accepted the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
+| `5` | the app itself confirmed the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
 | anything else, or a timeout | failed | says so on the card and in the install log |
 
 ### `setup.after`: what Crow does once the admin exists
@@ -363,6 +367,17 @@ changed, the answer is `failed` with "the app's admin password changed but Crow
 could not keep it; reset it in the app": the login now exists only inside the app,
 so the card and the bell stay until the operator resets it (or saves it by hand).
 
+The saved login also goes into the bundle's own `mcp-addons.json` entry: an MCP child is
+spawned with ITS entry's env and never reads the bundle's `.env`, so a bundle whose MCP server
+logs in (calibre-server, kavita, navidrome) would otherwise start with a username and no
+password and answer 401 to every call. A bundle that declares no `server` has no entry, and
+that is not an error. **Nothing restarts the gateway by itself**: an entry written by a setup
+run (install or card) or by "Save the login you made" comes back as `needs_restart`, and the
+Extensions card shows the same "restart the gateway to apply this change" sentence Configure's
+save shows. A restart started from inside one of these runs would kill any install job that
+is running. The install path marks the install as needing one, and its single end-of-install
+restart loads the entry.
+
 Two calls in one install are not wasted: Crow never runs the script when the
 keychain already holds this app's admin login, and it makes sure the keychain can be
 written *before* the app's password changes — a password that nothing holds would
@@ -372,10 +387,11 @@ setting up this app's admin login" (409 on the card's request) instead of racing
 first.
 In the Extensions card, an app whose setup Crow can do itself offers "Set it up for
 me", and every card offers "Save the login you made" (the operator's own username
-and password, saved under the bundle's admin key) — either one clears the card, and
-so does a keychain entry the operator saved by hand. That form never replaces a
-login Crow already keeps; changing one is done in Settings → Passwords. (An
-invite-only app's card is different: it has neither form — see below.)
+and password, saved under the bundle's admin key) — either one clears the card (when
+the login also reached the bundle's MCP entry, the card stays with the restart
+sentence instead), and so does a keychain entry the operator saved by hand. That form
+never replaces a login Crow already keeps; changing one is done in Settings →
+Passwords. (An invite-only app's card is different: it has neither form — see below.)
 
 **Prefer `crow` whenever the app can take its admin from the environment or a CLI**
 (Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator

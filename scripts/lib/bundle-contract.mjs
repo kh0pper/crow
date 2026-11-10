@@ -214,7 +214,7 @@ function validateFirstAdmin(manifest, bundleDir) {
   if (fa.setup !== undefined && !(mode === "crow" && fa.via === "setup")) {
     errors.push(`firstAdmin.setup is only allowed with mode "crow" via "setup"`);
   }
-  for (const field of ["via", "secretEnv", "userEnv"]) {
+  for (const field of ["via", "secretEnv", "userEnv", "urlEnv"]) {
     if (fa[field] !== undefined && mode !== "crow") {
       errors.push(`firstAdmin.${field} is only allowed with mode "crow"`);
     }
@@ -240,18 +240,32 @@ function validateFirstAdmin(manifest, bundleDir) {
  *     turns the generated value into the app's admin).
  *
  *   { "via": "setup", "setup": { "script": "…/first-admin.sh", "timeout_s"? },
- *     "user": "admin", "secretEnv": "<NAME>", "userEnv": "<NAME>"? }
+ *     "user": "admin", "secretEnv": "<NAME>", "userEnv": "<NAME>"?,
+ *     "urlEnv": "<NAME>"? }
  *     the installer runs that script once, with a password Crow generates on its
  *     stdin (the protocol is in docs/developers/bundles.md). `secretEnv` is the
  *     keychain entry name for that password — it does NOT have to be a generated
  *     env_vars entry, because Crow generates the value itself; when an env_vars
  *     entry of that name exists, the value is also written into the bundle's .env.
  *     `user` is required: it is the username the script must create.
+ *     `urlEnv` names a declared, NON-SECRET env_vars entry whose installed `.env`
+ *     value is the app's own address: the keychain row of the new login carries it
+ *     when it is an http(s) URL, so Settings → Passwords can link to the app.
  */
 function validateCrowFirstAdmin(manifest, bundleDir, fa) {
   const errors = [];
   const envVars = Array.isArray(manifest.env_vars) ? manifest.env_vars : [];
   const keychainSecrets = envVars.filter((v) => v && v.generate === "secret" && v.keychain === true);
+  // `urlEnv` rides on the saved login, whatever created it: it must name a declared field,
+  // and never a secret one — an address is not a secret, and a secret is not an address.
+  if (fa.urlEnv !== undefined) {
+    const entry = envVars.find((v) => v && v.name === fa.urlEnv);
+    if (!entry) {
+      errors.push(`firstAdmin.urlEnv must name a declared env_vars entry`);
+    } else if (entry.secret === true || entry.generate === "secret") {
+      errors.push(`firstAdmin.urlEnv "${fa.urlEnv}" must name a non-secret env_vars entry (the app's address is not a secret)`);
+    }
+  }
   if (fa.via !== "env" && fa.via !== "postInstall" && fa.via !== "setup") {
     errors.push(
       `firstAdmin: mode "crow" needs via "env" (a \${secretEnv} the compose file uses), or "postInstall" ` +

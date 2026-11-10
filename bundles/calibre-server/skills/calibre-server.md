@@ -14,6 +14,29 @@ tools:
 
 # Calibre Content Server
 
+## Login and setup
+
+- The bundle runs Calibre's **content server** (port 8081), not the Calibre desktop app over a
+  web browser: the desktop mode is gone, and the library is served by `calibre-server` itself.
+- The content server now needs a login (Settings → Passwords in Calibre's own web UI). Crow
+  creates the `admin` account when the bundle is installed, generates its password and keeps it
+  in Settings → Passwords (Crow's keychain) — read it there, never from this skill.
+- Calibre asks for that login on every page under `/ajax` and on downloads; `CALIBRE_USERNAME`
+  and `CALIBRE_PASSWORD` in the bundle's `.env` and in the extension's own MCP settings are the
+  same credentials, so the tools below use them.
+- Content-server users made in the old desktop version are not carried over: those lived in the
+  desktop app's own user file under `/config/.config/calibre/`, not in the content server's
+  `/config/users.sqlite`. Crow creates `admin`; more accounts come from calibre's own tools
+  (`calibre-server --manage-users`).
+
+## Upgrading from the desktop version
+
+- The desktop app over the browser is gone with the content-server switch; after pressing
+  **Apply the update**, press **Set it up for me** on the Extensions card so Crow creates the
+  `admin` login (otherwise the server asks for a login no account answers).
+- The library folder on the host is unchanged, so the books stay where they were.
+- The old desktop config volume is left as is; the content server ignores it.
+
 ## When to Activate
 
 - User asks to search for, browse, or download ebooks
@@ -68,6 +91,6 @@ tools:
 ## Error Handling
 
 - If Calibre is unreachable: "Cannot connect to Calibre at the configured URL. Make sure the content server is running."
-- If auth fails (401): "Calibre rejected the credentials. Check CALIBRE_USERNAME and CALIBRE_PASSWORD in settings."
+- If auth fails (401): "Calibre rejected the credentials. Read the login Crow saved in Settings → Passwords, or set CALIBRE_USERNAME and CALIBRE_PASSWORD in the bundle settings."
 - If a book is not found: the book may have been removed from the library
 - If a format is not available: show available formats and let the user choose another

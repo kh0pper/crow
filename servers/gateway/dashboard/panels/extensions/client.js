@@ -2125,6 +2125,18 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
           note.textContent = text;
           note.hidden = false;
         }
+        // The sentence Configure's save shows when its answer carried needs_restart: a login
+        // written into the bundle's MCP settings is read when the MCP child is spawned, and a
+        // running one keeps the old values until the gateway restarts. Nothing restarts the
+        // gateway from here — that would kill any install job that is running.
+        function appendFirstAdminRestart(card) {
+          if (!card) return;
+          var note = document.createElement("p");
+          note.className = "ext-firstadmin__msg ext-firstadmin__needs-restart";
+          note.style.margin = "0";
+          note.textContent = '${tJs("extensions.configureNeedsRestart", lang)}';
+          card.appendChild(note);
+        }
         document.querySelectorAll(".ext-firstadmin-auto").forEach(function(autoBtn) {
           autoBtn.addEventListener("click", function() {
             var id = autoBtn.getAttribute("data-id");
@@ -2157,6 +2169,9 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
                     afterNote.textContent = d.afterFailure;
                     card.appendChild(afterNote);
                   }
+                  // The login also went into the bundle's MCP settings: say a restart applies
+                  // it, in the same words Configure's save uses.
+                  if (d.needs_restart) appendFirstAdminRestart(card);
                 }
                 return;
               }
@@ -2190,6 +2205,16 @@ export function extensionsClientJS(lang, { servicesUi = servicesUiEnabled() } = 
             if (btn) btn.disabled = true;
             apiCall("first-admin-save", { bundle_id: id, username: userEl ? userEl.value : "", password: password }).then(function(res) {
               if (res.ok && res.data && res.data.ok) {
+                // A saved login also reaches the bundle's MCP settings. When the server wrote
+                // them the card stays to say a restart applies it (Configure's own sentence);
+                // otherwise the keychain holds the login and the card has nothing left to say.
+                if (res.data.needs_restart) {
+                  if (card) {
+                    while (card.firstChild) card.removeChild(card.firstChild);
+                    appendFirstAdminRestart(card);
+                  }
+                  return;
+                }
                 if (card && card.parentNode) card.parentNode.removeChild(card);
                 return;
               }

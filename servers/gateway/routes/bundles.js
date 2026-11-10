@@ -2563,6 +2563,8 @@ function scheduleGatewayRestart(delayMs = 2000) {
   }
 }
 /** Test-only: the real restart scheduler (unsupervised in a suite: the .env reload) and the gateway .env writers. */
+// The restart scheduler stays internal to this module: nothing else may start a gateway restart
+// on its own (the first-admin runs only REPORT that one is needed — see bundle-first-admin-setup.js).
 export { scheduleGatewayRestart as _scheduleGatewayRestartForTest, propagateEnvToGateway as _propagateEnvToGatewayForTest, revertEnvInGateway as _revertEnvInGatewayForTest };
 
 /**
@@ -3766,8 +3768,19 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
           destDir: join(BUNDLES_DIR, bundleId),
           installId: recordedInstallAt,
           crowHome: CROW_HOME,
-          deps: _firstAdminSetupDepsForTest || {},
+          deps: {
+            // The install path owns its ONE restart (runInstallJob never schedules one itself:
+            // a restart in the middle of the job kills it). A login written into the bundle's
+            // MCP entry needs that restart to be loaded, so it is requested here instead of
+            // started, and `needsRestart` below makes sure the caller's restart happens.
+            requestReload: () => {},
+            ...(_firstAdminSetupDepsForTest || {}),
+          },
         });
+        if (auto.mcpEnvUpdated) {
+          needsRestart = true;
+          appendLog(job, "The new login also went into the extension's MCP settings; the restart below loads it");
+        }
         firstAdminAuto = auto.result;
         for (const line of auto.log || []) appendLog(job, `  ${line}`);
         appendLog(job, firstAdminResultMessage({
@@ -4260,6 +4273,11 @@ export default function bundlesRouter() {
       // ...and, when it did not finish, the sentence the card shows so a failed follow-up
       // never looks like success.
       ...(afterResult && !afterResult.ok ? { afterFailure: firstAdminAfterFailureSentence(name) } : {}),
+      // The new login was written into the bundle's mcp-addons.json entry, which an MCP child
+      // reads only when it is spawned. NOTHING restarts the gateway from here: a restart while
+      // another bundle's install job runs kills that job (review round 3, finding 1). The card
+      // shows the same "restart to apply" sentence Configure's save answers with.
+      needs_restart: !!out.mcpEnvUpdated,
       log,
     });
   });
@@ -4297,11 +4315,13 @@ export default function bundlesRouter() {
     });
     // A login Crow already keeps is changed in Settings → Passwords, never here (this form
     // is the way to give Crow one, not to overwrite the one it has).
-    if (saved === "already") {
+    if (saved.result === "already") {
       return res.status(409).json({ error: "Crow already keeps a login for this app. Change it in Settings → Passwords." });
     }
-    if (saved !== "saved") return res.status(500).json({ error: "Could not save the password. Try again." });
-    res.json({ ok: true });
+    if (saved.result !== "saved") return res.status(500).json({ error: "Could not save the password. Try again." });
+    // The operator's login also went into the bundle's MCP entry when it was written: the card
+    // asks for the restart, this route never starts one (review round 3, finding 1).
+    res.json({ ok: true, needs_restart: !!saved.mcpEnvUpdated });
   });
 
   // POST /bundles/api/first-admin-invite — the operator's own email, invited through
