@@ -1533,7 +1533,7 @@
     {
       "id": "frigate",
       "name": "Frigate NVR",
-      "version": "1.2.0",
+      "version": "1.2.2",
       "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
       "type": "bundle",
       "author": "Crow",
@@ -1646,8 +1646,15 @@
         "label": "Frigate"
       },
       "firstAdmin": {
-        "mode": "finish-setup",
-        "note": "The first admin password is printed in the app's logs."
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "admin",
+        "secretEnv": "FRIGATE_PASSWORD",
+        "userEnv": "FRIGATE_USER"
       },
       "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — the home server baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed.",
       "official": true
@@ -4411,7 +4418,7 @@
     {
       "id": "motioneye",
       "name": "motionEye",
-      "version": "0.44.1",
+      "version": "0.44.3",
       "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
       "type": "bundle",
       "author": "Crow",
@@ -4481,11 +4488,16 @@
         "label": "motionEye"
       },
       "firstAdmin": {
-        "mode": "default-login",
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
         "user": "admin",
-        "note": "It starts with an empty password; set one now."
+        "secretEnv": "MOTIONEYE_ADMIN_PASSWORD"
       },
-      "notes": "Default admin login on first start: username 'admin', password empty. Rotate immediately via Settings → General. No MCP tools — iframe-only bundle. Use the Frigate bundle if you need MCP-callable camera/event tools or AI object detection.",
+      "notes": "Crow sets the admin password ('admin') at install and saves it in Settings → Passwords. No MCP tools — iframe-only bundle. Use the Frigate bundle if you need MCP-callable camera/event tools or AI object detection.",
       "official": true
     },
     {
@@ -7551,7 +7563,7 @@
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "version": "1.0.3",
+      "version": "1.0.5",
       "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
       "type": "bundle",
       "author": "Crow",
@@ -7641,9 +7653,17 @@
         "label": "Wallabag"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 240
+        },
+        "user": "wallabag",
+        "secretEnv": "WALLABAG_PASSWORD",
+        "userEnv": "WALLABAG_USERNAME"
       },
-      "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Create an API client in Wallabag under Developer > Create a new client.",
+      "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Crow replaces the shipped wallabag/wallabag admin login at install and writes WALLABAG_USERNAME/WALLABAG_PASSWORD into this bundle's settings itself, so the MCP server logs in with no extra step; the password is in Settings → Passwords. Create an API client in Wallabag under Developer > Create a new client, then put its id and secret into WALLABAG_CLIENT_ID/WALLABAG_CLIENT_SECRET. To keep an account of your own, set WALLABAG_USERNAME to it before installing: Crow then leaves that login alone.",
       "official": true
     },
     {

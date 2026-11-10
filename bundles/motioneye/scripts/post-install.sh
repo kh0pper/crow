@@ -4,7 +4,7 @@
 # 1. Create host data directories (config + media).
 # 2. Soft disk check: warn if < 50 GB free, abort only if < 10 GB.
 # 3. Wait for crow-motioneye to report healthy.
-# 4. Print first-login guidance (admin / <empty password>).
+# 4. Print first-login guidance (Crow sets the admin password at install).
 
 set -euo pipefail
 
@@ -57,8 +57,9 @@ motionEye is up. Next steps:
 
   1. Open the Web UI:
        http://localhost:8765
-     Default login: username 'admin', password '' (empty).
-     Rotate immediately via Settings → General.
+     Crow set the admin password at install (username 'admin') and saved it in
+     Settings → Passwords in the Crow's Nest. If Crow could not set it, motionEye
+     still has an empty password — open Settings → General and set one now.
 
   2. Add a camera via the UI:
      - Click the hamburger menu → "add camera"

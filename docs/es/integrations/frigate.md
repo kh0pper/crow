@@ -46,7 +46,11 @@ El puerto `5000` (la API interna no autenticada de Frigate) **intencionalmente n
 
 ### Contraseña de administrador del primer arranque
 
-Frigate genera una contraseña de administrador en el primer inicio. Encuéntrala en los logs del contenedor:
+Crow reemplaza la contraseña del primer arranque de Frigate durante la instalación del bundle: el administrador es `admin` y la contraseña que generó está en **Ajustes → Contraseñas** del Crow's Nest (y en el `.env` del bundle como `FRIGATE_PASSWORD`).
+
+Una instalación que ya estaba funcionando antes de que este bundle pudiera definir la contraseña sola no se queda como está: pulsa **Set it up for me** en la tarjeta del bundle en Extensiones. Si esa instalación nunca cambió la contraseña de administrador, Crow toma la contraseña generada que Frigate imprimió en su log, la reemplaza y guarda la nueva en **Ajustes → Contraseñas**. Si ya hay una contraseña tuya, Crow deja ese login en paz y te pide guardarlo en la tarjeta. Lo mismo vale para una contraseña que ya esté escrita en el `.env` del bundle: Crow la prueba primero y no cambia nada si con ella se puede entrar.
+
+Si la configuración automática no pudo ejecutarse (Frigate aún no estaba arriba), Frigate conserva la contraseña que imprimió en su log, y la defines tú:
 
 ```bash
 docker logs crow-frigate 2>&1 | grep "Password:"
@@ -65,11 +69,9 @@ FRIGATE_PASSWORD=<contraseña de los logs>
 # FRIGATE_UI_URL=
 ```
 
-Luego reinicia el bundle para que el servidor MCP pueda autenticarse:
+Y reinicia el bundle para que el servidor MCP pueda autenticarse:
 
 > "Crow, reinicia el bundle de Frigate"
-
-También deberías iniciar sesión en la interfaz web y rotar la contraseña.
 
 ### Agregar una cámara
 
@@ -161,7 +163,7 @@ cd ~/.crow/bundles/frigate && docker compose up -d
 ```
 
 **"Frigate authentication expired or invalid"**
-`FRIGATE_USER` / `FRIGATE_PASSWORD` en `.env` están mal o faltan. Vuelve a revisar los logs del contenedor para encontrar la contraseña del primer arranque, o usa un usuario que hayas creado en la interfaz web. Reinicia el bundle después de editar `.env`.
+`FRIGATE_USER` / `FRIGATE_PASSWORD` en `.env` están mal o faltan. El par generado está en **Ajustes → Contraseñas**; si Frigate se configuró a mano, usa ese login o la contraseña del log de su primer arranque. Reinicia el bundle después de editar `.env`.
 
 **"Frigate endpoint not found"**
 Desfase de versiones. Nuestro bundle apunta a `:stable`, que actualmente resuelve a Frigate 0.17. Si una versión futura cambia las rutas de los endpoints, abre un issue.

@@ -205,6 +205,18 @@ The generated value is URL-safe, so it can start with `-`: hand it to another
 program only on a stdin pipe (`printf '%s' "$PASSWORD" | app …`), never as a bare
 argument — `app -x $PASSWORD` reads a leading-`-` value as an option.
 
+A script that reaches its app through `docker exec` names the container from the
+compose file's `container_name`, as `${CROW_FA_CONTAINER:-<that name>}`: the override
+exists for the script's tests only, and Crow never sets it. The password goes into the
+container on a pipe (`printf … | docker exec -i …`), never as a command argument — an
+argument is visible in the process list on both sides.
+
+Exit `5` exists so that a password the app really did take is never thrown away because
+the script could not log in with it afterwards: a proof that fails is not a failure of
+the change. Retry the proof a couple of times (an app that just restarted may not answer
+yet), and exit `5` only once the app itself has confirmed the change — then Crow keeps the
+password and says on the card that it could not log in with it to confirm.
+
 The script reports what happened through its exit code:
 
 | exit | meaning | Crow then |
@@ -212,6 +224,7 @@ The script reports what happened through its exit code:
 | `0` | the app's admin `<user>` now has exactly that password | saves it in the keychain (Settings → Passwords) and into the bundle `.env` under `secretEnv`/`userEnv` when those are declared `env_vars` |
 | `3` | the app already has its own admin (set up earlier by the operator); nothing changed | leaves everything alone, and asks the operator to save the login they use |
 | `4` | the app is not running / not answering; nothing changed | tells the operator to use "Set it up for me" on the Extensions card later |
+| `5` | the app accepted the new password, but logging in with it did not succeed | keeps it exactly like `0` (the app holds that password now), and adds "Crow saved the new login, but could not log in with it to confirm" to the card and the install log |
 | anything else, or a timeout | failed | says so on the card and in the install log |
 
 The script's last 20 non-empty stdout lines become part of the install log (and of
@@ -244,10 +257,11 @@ login Crow already keeps; changing one is done in Settings → Passwords.
 (Miniflux's `ADMIN_USERNAME`/`ADMIN_PASSWORD`, JupyterHub's NativeAuthenticator
 bootstrapping, a `postInstall` script that drives the app's own admin command).
 That is the only mode where nothing on the machine can claim the account between
-install and the operator's first visit. Use `finish-setup` when the app only has
-a first-run page, and add a `note` when the app prints or documents the first
-password (Peertube and Frigate print it in their logs; Plex's server is claimed
-by the first Plex account that reaches it unless a claim token was set).
+install and the operator's first visit. Use a `via: "setup"` script when the app has no
+environment variable for its admin but can be given one from inside its container, and
+`finish-setup` when the app only has a first-run page; add a `note` when the app prints
+or documents the first password (Peertube prints it in its logs; Plex's server is
+claimed by the first Plex account that reaches it unless a claim token was set).
 
 Like every other bundle change, a new or edited `firstAdmin` needs a `version`
 bump: the installed copy refreshes only when the version differs.

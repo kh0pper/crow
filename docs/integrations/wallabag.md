@@ -38,7 +38,7 @@ Restart the bundle for changes to take effect:
 
 > "Crow, restart the Wallabag bundle"
 
-Wallabag will be available at `http://your-server:8084` for initial setup. Create an account via the web UI, then create an API client from the **Developer** menu.
+Wallabag will be available at `http://your-server:8084` for initial setup. Crow replaces the shipped `wallabag`/`wallabag` login while it installs the bundle: the new password is in **Settings → Passwords**, and you use that username and password for `WALLABAG_USERNAME`/`WALLABAG_PASSWORD`. Then create an API client from the **Developer** menu.
 
 ::: warning Port mapping
 Wallabag's default port (80) is remapped to **8084** to avoid conflicts with other services.

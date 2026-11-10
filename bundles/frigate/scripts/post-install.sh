@@ -63,14 +63,19 @@ cat <<EOF
 
 Frigate is up. Next steps:
 
-  1. Open the Web UI (first run creates the admin user on a password-reset flow):
+  1. Open the Web UI:
        http://localhost:8971
+     Crow sets Frigate's admin password while it installs the bundle (username 'admin')
+     and saves it in Settings → Passwords in the Crow's Nest. If the automatic setup
+     could not run, Frigate keeps the password it printed in its log; set one in the UI.
 
   2. Edit $CONFIG_PATH/config.yml to add your cameras (see the example block).
      Restart the container after edits:
        crow bundle restart frigate
 
-  3. Set FRIGATE_USER + FRIGATE_PASSWORD in ${ENV_FILE} so the Crow MCP server can authenticate.
+  3. The MCP server logs in with FRIGATE_USER + FRIGATE_PASSWORD in ${ENV_FILE}; both hold
+     the login Crow created. Point FRIGATE_URL at the port your config.yml serves (http
+     when tls.enabled is false, as in config.yml.example).
 
   4. Ask your AI assistant to verify the bundle:
        "list my Frigate cameras"   (expects crow_frigate_list_cameras to return your cameras)

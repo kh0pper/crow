@@ -62,7 +62,7 @@ Rough formula: `GB/day = cameras × bitrate_mbps × 10.8`. At 2 Mbps / 1 camera 
 ## Common errors
 
 - `Cannot reach Frigate…` — the container isn't running. `crow bundle start frigate` or `docker compose up -d` in `bundles/frigate`.
-- `Frigate authentication expired or invalid` — FRIGATE_USER / FRIGATE_PASSWORD in `.env` don't match the admin user, OR `auth.enabled: true` in `config.yml` but no credentials set. On first run Frigate prints the initial admin password in container logs: `docker logs crow-frigate 2>&1 | grep -i password`.
+- `Frigate authentication expired or invalid` — FRIGATE_USER / FRIGATE_PASSWORD in `.env` don't match the admin user, OR `auth.enabled: true` in `config.yml` but no credentials set. Crow sets the admin password when it installs the bundle and saves it in Settings → Passwords; both `.env` values come from there. Only when that setup could not run does Frigate keep the password it printed on first start: `docker logs crow-frigate 2>&1 | grep -i password`.
 - `Frigate endpoint not found` — version skew; `:stable` tag is expected. Confirm with `docker inspect crow-frigate | grep Image`.
 - Tile doesn't appear in Extensions panel — bundle files are installed to `~/.crow/bundles/frigate/` but `registry/add-ons.json` hasn't been reloaded. Restart both gateways (3002 + 3003).
 

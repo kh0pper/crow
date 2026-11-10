@@ -273,8 +273,15 @@ test("every real `crow` declaration names a mechanism the installer really runs"
       const text = existsSync(script) ? readFileSync(script, "utf8") : "";
       if (!manifest.postInstall) bad.push(`${id}: crow via postInstall with no postInstall`);
       else if (!secrets.some((v) => v.name && text.includes(v.name))) bad.push(`${id}: the hook never names a keychain secret`);
+    } else if (fa.via === "setup") {
+      // Crow runs the script itself with the password on stdin, so the script has to
+      // ship in the bundle and the manifest has to name the account it creates.
+      const script = join(BUNDLES, id, manifest.firstAdmin.setup?.script || "");
+      if (!existsSync(script)) bad.push(`${id}: crow via setup with no setup script on disk`);
+      if (typeof fa.user !== "string" || fa.user.trim() === "") bad.push(`${id}: crow via setup with no user`);
+      if (typeof fa.secretEnv !== "string" || fa.secretEnv === "") bad.push(`${id}: crow via setup with no secretEnv`);
     } else {
-      bad.push(`${id}: crow without via "env" or "postInstall"`);
+      bad.push(`${id}: crow without via "env", "postInstall" or "setup"`);
     }
   }
   assert.deepEqual(bad, [], "a `crow` claim must be something the installer really does");
@@ -299,14 +306,20 @@ test("the real manifests use the modes the audit mapped (no silent downgrade to 
       "maker-lab-advanced": { mode: "crow", via: "env", secretEnv: "MLA_ADMIN_PASSWORD", userEnv: "MLA_ADMIN_USER" },
     },
   );
-  // The documented default logins (motioneye's user list; shiori ships shiori/gopher).
+  // The apps whose admin Crow creates from a SCRIPT it runs (via "setup"): the password
+  // reaches the app on stdin, so the discovery window is closed instead of documented.
+  for (const id of ["frigate", "motioneye", "wallabag"]) {
+    assert.deepEqual(
+      { mode: manifests[id]?.firstAdmin?.mode, via: manifests[id]?.firstAdmin?.via, script: manifests[id]?.firstAdmin?.setup?.script },
+      { mode: "crow", via: "setup", script: "scripts/first-admin.sh" },
+      id,
+    );
+    assert.equal(manifests[id]?.firstAdmin?.note, undefined, `${id}: a crow/setup app has no note to read`);
+  }
+  // The documented default logins (shiori ships shiori/gopher).
   assert.deepEqual(
     { mode: manifests.shiori?.firstAdmin?.mode, user: manifests.shiori?.firstAdmin?.user },
     { mode: "default-login", user: "shiori" },
-  );
-  assert.deepEqual(
-    { mode: manifests.motioneye?.firstAdmin?.mode, user: manifests.motioneye?.firstAdmin?.user },
-    { mode: "default-login", user: "admin" },
   );
   // The audit's headline example: uptime-kuma's own setup page.
   assert.equal(manifests["uptime-kuma"]?.firstAdmin?.mode, "finish-setup");

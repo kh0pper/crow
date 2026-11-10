@@ -50,12 +50,9 @@ Expone el puerto `:8765` en loopback. El iframe del Nest carga motionEye desde e
 
 ### Primer inicio de sesión
 
-Credenciales predeterminadas en el primer arranque:
+Crow establece la contraseña de administrador de motionEye durante la instalación del bundle y la guarda en **Ajustes → Contraseñas** del Crow's Nest. El usuario es `admin`.
 
-- **Usuario:** `admin`
-- **Contraseña:** (vacía)
-
-**Rótala de inmediato** vía Settings → General → Admin Password. Si el bundle queda expuesto a cualquier red no confiable (cosa que no debería ocurrir por defecto — Crow lo enlaza a loopback), una contraseña de administrador vacía es un agujero catastrófico.
+Si la configuración automática no pudo ejecutarse (el contenedor aún no estaba arriba), motionEye conserva su contraseña vacía de fábrica: usa **Set it up for me** en la tarjeta del bundle en Extensiones, o abre Settings → General → Admin Password y define una ahora.
 
 ### Agregar una cámara
 
@@ -125,7 +122,7 @@ Luego `crow bundle restart motioneye`. Ten en cuenta que la autenticación integ
 
 ## Notas de seguridad
 
-- La contraseña de administrador predeterminada está vacía — rótala en el primer inicio de sesión, siempre.
+- Crow establece una contraseña de administrador generada durante la instalación; revísala en **Ajustes → Contraseñas**. Una instalación cuya configuración quedó pendiente conserva la contraseña vacía de fábrica hasta que pulses **Set it up for me** o definas una en Settings → General.
 - Enlace de puerto solo a loopback en el archivo compose predeterminado.
 - Nunca mapees `/dashboard/motioneye` a un prefijo de Tailscale Funnel — el middleware `rejectFunneled` lo impone, y `tests/auth-network.test.js` tiene una prueba de regresión para ello.
 - El directorio de configuración de motionEye contiene el hash de la contraseña de administrador; respalda `~/.crow/data/motioneye/config/` si cambias contraseñas.

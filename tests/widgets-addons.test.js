@@ -628,7 +628,7 @@ test("frigate: the manifest declares the widget, and the contract accepts it", (
   const manifest = JSON.parse(readFileSync(join(REPO, "bundles", "frigate", "manifest.json"), "utf8"));
   const r = validateManifest(manifest, join(REPO, "bundles", "frigate"));
   assert.equal(r.ok, true, r.errors.join("; "));
-  assert.equal(manifest.version, "1.2.0");
+  assert.equal(manifest.version, "1.2.2");
   assert.deepEqual(manifest.widgets, [
     { id: "cameras", title: { en: "Cameras", es: "Cámaras" }, sizes: [[2, 2], [4, 2]] },
   ], "the cameras widget, in both languages, two sizes");

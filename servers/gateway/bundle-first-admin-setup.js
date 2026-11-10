@@ -21,6 +21,7 @@
  *   exit 0   the app's admin <user> now has exactly that password
  *   exit 3   the app already has its own admin (set up earlier by the operator)
  *   exit 4   the app is not running / not answering; nothing changed
+ *   exit 5   the app accepted the new password, but logging in with it did not succeed
  *   other    failed (a timeout counts as failed)
  *
  * The manifest and the script come from Crow's OWN copy of the bundle (the reviewed
@@ -32,9 +33,11 @@
  * On exit 0 the password goes into Crow's keychain (origin "generated", one first-view
  * grant so the operator can read it once), and into the bundle's .env under `secretEnv`
  * (and `user` under `userEnv`) when those are declared env_vars — some bundles' own MCP
- * servers log in with the value from .env. A keychain save that fails AFTER the app's
- * password changed still parks the password in .env, under `secretEnv` even when the
- * manifest does not declare it. When BOTH the keychain and the .env write fail, the run
+ * servers log in with the value from .env. Exit 5 is saved the same way: the app accepted
+ * the password, so it must be kept; the run reports `ok` with FIRST_ADMIN_UNPROVEN in its
+ * reason and its log, because Crow could not log in with it to confirm. A keychain save
+ * that fails AFTER the app's password changed still parks the password in .env, under
+ * `secretEnv` even when the manifest does not declare it. When BOTH the keychain and the .env write fail, the run
  * reports `failed` and says the app's password has changed and must be reset in the app:
  * the login then exists only inside the app, so the card and the bell stay.
  *
@@ -70,6 +73,12 @@ export const SETUP_UNAVAILABLE = "This app can't be set up automatically; finish
 
 /** The reason BOTH copies of the new password failing leaves: the app holds it, Crow does not. */
 export const PASSWORD_NOT_KEPT = "the app's admin password changed but Crow could not keep it; reset it in the app";
+
+/**
+ * Exit 5's sentence: the app took the password (Crow therefore KEEPS it, exactly like exit
+ * 0), but logging in with it did not succeed, so Crow cannot claim the login works.
+ */
+export const FIRST_ADMIN_UNPROVEN = "Crow saved the new login, but could not log in with it to confirm";
 
 /** Env names a manifest may hand Crow: shell-safe, and none of the reserved prefixes. */
 const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
@@ -155,9 +164,13 @@ export const firstAdminLabel = (name) => `${name} — admin login`;
 export function firstAdminResultMessage({ result, name = null, user = null, reason = null } = {}) {
   const app = name || "the app";
   if (result === "ok") {
-    return user
+    const saved = user
       ? `Crow created ${app}'s admin login (${user}) and saved it in Settings → Passwords.`
       : `Crow created ${app}'s admin login and saved it in Settings → Passwords.`;
+    // An ok with a reason is a login Crow could keep but not confirm (exit 5), or one that
+    // only reached the extension's settings file: the sentence says so, plainly.
+    const extra = reason && String(reason).trim() ? String(reason).trim().replace(/[.!]?$/, ".") : "";
+    return extra ? `${saved} ${extra}` : saved;
   }
   if (result === "kept") {
     return `${app} already has its own admin; Crow left it alone. Save the login you use on the Extensions card.`;
@@ -296,6 +309,9 @@ export async function runFirstAdminSetup({
     );
     const log = [];
     let db = null;
+    // exit 5: the app took the password (so it is saved like exit 0), but the login it was
+    // proved with did not work. The run still reports ok — with the sentence that says so.
+    let unproven = false;
     // The password is only known after newSecret(); until then (and on every early
     // return) the redaction is a no-op.
     let password = null;
@@ -357,9 +373,13 @@ export async function runFirstAdminSetup({
         }
         if (err && err.exitCode === 3) return await record("kept");
         if (err && err.exitCode === 4) return await record("not-running");
-        return await record("failed", scriptFailureReason(err));
+        // 5 is NOT a refusal to fall back to "failed": the app already holds the new
+        // password, so the run goes on to keep it and reports why it is unproven.
+        if (err && err.exitCode === 5) unproven = true;
+        else return await record("failed", scriptFailureReason(err));
       }
       log.push(...tailLines(stdout, 20));
+      if (unproven) log.push(FIRST_ADMIN_UNPROVEN);
 
       let saved = true;
       try {
@@ -388,14 +408,17 @@ export async function runFirstAdminSetup({
         if (Object.keys(declaredValues).length > 0) {
           try { d.writeEnv(dir, declaredValues); } catch { /* the keychain holds it: .env is a convenience */ }
         }
-        return await record("ok");
+        return await record("ok", unproven ? FIRST_ADMIN_UNPROVEN : null);
       }
 
       // The keychain save failed AFTER the app's password changed. Some bundles' MCP servers
       // log in with the value from .env, so it goes there even when undeclared.
       try {
         d.writeEnv(dir, { ...declaredValues, [plan.secretEnv]: password });
-        return await record("ok", "saved in the extension's settings file only");
+        const reasons = [];
+        if (unproven) reasons.push(FIRST_ADMIN_UNPROVEN);
+        reasons.push("saved in the extension's settings file only");
+        return await record("ok", reasons.join("; "));
       } catch {
         // Both copies failed: the app now holds a password nobody here keeps. Say so
         // plainly instead of reporting a login Crow cannot show the operator.

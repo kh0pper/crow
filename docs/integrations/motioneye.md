@@ -50,12 +50,9 @@ Exposes port `:8765` on loopback. The Nest iframe loads motionEye from that loop
 
 ### First login
 
-Default credentials on first start:
+Crow sets motionEye's admin password while it installs the bundle and saves it in **Settings → Passwords** in the Crow's Nest. The username is `admin`.
 
-- **Username:** `admin`
-- **Password:** (empty)
-
-**Rotate immediately** via Settings → General → Admin Password. If the bundle is exposed to any untrusted network (which it shouldn't be by default — Crow binds it to loopback), an empty admin password is a catastrophic hole.
+If the automatic setup could not run (the container was not up yet), motionEye still has its shipped empty password: use **Set it up for me** on the bundle's Extensions card, or open Settings → General → Admin Password and set one now.
 
 ### Add a camera
 
@@ -125,7 +122,7 @@ Then `crow bundle restart motioneye`. Know that motionEye's built-in auth is wea
 
 ## Security Notes
 
-- Default admin password is empty — rotate on first login, always.
+- Crow sets a generated admin password at install; check **Settings → Passwords**. An install whose setup was postponed keeps the shipped empty password until you press **Set it up for me** or set one in Settings → General.
 - Loopback-only port binding in the default compose file.
 - Never map `/dashboard/motioneye` into a Tailscale Funnel prefix — the `rejectFunneled` middleware enforces this, and `tests/auth-network.test.js` has a regression test for it.
 - motionEye's config dir contains the admin password hash; backup `~/.crow/data/motioneye/config/` if you change passwords.
