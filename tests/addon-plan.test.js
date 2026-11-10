@@ -1158,3 +1158,135 @@ test("the autostart/systemd rule looks only at the part of a path inside the hom
     rmSync(outsideDir, { recursive: true, force: true });
   }
 });
+
+// ---- installDir: a built-in's own copy of its bundle ---------------------
+
+test("installDir names the checkout's copy of the bundle: bound read-only and the working directory", () => {
+  const repoInstall = mk(APP, "bundles", "acme");
+  writeFileSync(join(repoInstall, "index.js"), "");
+  const plan = planOf({ installDir: join(APP, "bundles", "acme") });
+  try {
+    const real = realpathSync(repoInstall);
+    assert.ok(has(plan.args, "--ro-bind", real), "the checkout's copy is bound at its real path");
+    assert.ok(!has(plan.args, "--bind", real), "never writable");
+    assert.ok(pairs(plan.args).some((q) => q[0] === "--chdir" && q[1] === real), "the add-on starts in it");
+    assert.ok(!has(plan.args, "--ro-bind", realpathSync(join(BUNDLES, "acme"))), "the installed copy is not bound instead");
+    assert.ok(!plan.refused.some((r) => r.path === real || r.path === join(APP, "bundles", "acme")),
+      "nothing was refused: " + JSON.stringify(plan.refused));
+  } finally { closePlan(plan); }
+});
+
+test("an install folder outside the two allowed shapes is refused", () => {
+  const elsewhere = mk(HOME, "elsewhere", "acme");
+  const before = scratchFds();
+  for (const bad of [elsewhere, join(BUNDLES, "other"), join(APP, "bundles", "other"), "bundles/acme", ""]) {
+    assert.throws(() => planOf({ installDir: bad }),
+      (e) => e instanceof ContainRefused && /install folder not allowed/.test(e.message),
+      "install folder " + JSON.stringify(bad) + " is refused");
+  }
+  assert.deepEqual(scratchFds(), before, "a refused install folder leaves no fd open");
+  rmSync(elsewhere, { recursive: true, force: true });
+});
+
+// ---- dataSubdir: one project-service child's folder ----------------------
+
+test("dataSubdir: a service child's data bind is its own subfolder, not the add-on's data folder", () => {
+  const subReal = realpathSync(mk(ADDON_DATA, "services", "0f0e0d0c-aaaa"));
+  const plan = planOf({ dataSubdir: "services/0f0e0d0c-aaaa" });
+  try {
+    const dataBinds = fdOps(plan.args).filter((q) => q[0] === "--bind-fd");
+    assert.deepEqual(dataBinds.map((q) => q[2]), [subReal], "one read-write data bind, of the subfolder");
+    assert.ok(!fdOps(plan.args).some((q) => q[2] === ADDON_DATA), "the add-on's whole data folder is never a destination");
+    assert.equal(plan.addonDataDir, subReal);
+    assert.equal(plan.env.XDG_CACHE_HOME, join(subReal, ".cache"));
+    assert.equal(plan.env.npm_config_cache, join(subReal, ".cache", "npm"));
+    assert.ok(plan.env.UV_CACHE_DIR.startsWith(subReal));
+    assert.equal(readlinkSync("/proc/self/fd/" + plan.fds.find((f) => f.role === "data").fd), subReal,
+      "the fd really is the subfolder");
+  } finally { closePlan(plan); }
+});
+
+test("two service subfolders of one add-on never name each other", () => {
+  const a = realpathSync(mk(ADDON_DATA, "services", "aaaaaaaa-1"));
+  const b = realpathSync(mk(ADDON_DATA, "services", "bbbbbbbb-2"));
+  const pa = planOf({ dataSubdir: "services/aaaaaaaa-1" });
+  const pb = planOf({ dataSubdir: "services/bbbbbbbb-2" });
+  try {
+    for (const [own, other, plan] of [[a, b, pa], [b, a, pb]]) {
+      const dests = fdOps(plan.args).map((q) => q[2]);
+      assert.ok(dests.includes(own), own + " is bound");
+      assert.ok(!dests.some((d) => d === other || d.startsWith(other + "/")), other + " is never a destination");
+      assert.ok(!pathSources(plan.args).some((s) => s === other || s.startsWith(other + "/")), other + " is never a source");
+      assert.equal(plan.addonDataDir, own);
+    }
+  } finally {
+    closePlan(pa);
+    closePlan(pb);
+  }
+});
+
+test("a crow.db service child: the add-on's data folder is masked, then its subfolder bound on top", () => {
+  const subReal = realpathSync(mk(ADDON_DATA, "services", "0f0e0d0c-aaaa"));
+  const plan = planOf({ profile: profileOf({ crowDb: true }), dataSubdir: "services/0f0e0d0c-aaaa" });
+  try {
+    assert.ok(masked(plan.args, ADDON_DATA), "the add-on's whole data folder is masked");
+    const ops = pairs(plan.args);
+    const maskAt = ops.findIndex((q) => (q[0] === "--tmpfs" && q[1] === ADDON_DATA)
+      || (q[0] === "--ro-bind" && q[1] === "/dev/null" && q[2] === ADDON_DATA));
+    const bindAt = ops.findIndex((q) => q[0] === "--bind-fd" && q[2] === subReal);
+    assert.ok(maskAt >= 0, "the data folder's mask is in the argv");
+    assert.ok(bindAt >= 0, "the subfolder is bound by fd");
+    assert.ok(bindAt > maskAt, "the subfolder's bind comes after the mask");
+    assert.equal(plan.addonDataDir, subReal);
+    assert.equal(plan.env.XDG_CACHE_HOME, join(subReal, ".cache"));
+  } finally { closePlan(plan); }
+});
+
+test("a data subfolder that is not one services/<uuid> segment is refused before anything is opened", () => {
+  const before = scratchFds();
+  for (const bad of ["../x", "services/../../etc", "services/ABC12345", "x/aaaaaaaa", "services/aaaa",
+    "services/", "services/0f0e0d0c-aaaa/../x", ""]) {
+    assert.throws(() => planOf({ dataSubdir: bad }),
+      (e) => e instanceof ContainRefused && /invalid data subfolder/.test(e.message),
+      "subfolder " + JSON.stringify(bad) + " is refused");
+  }
+  assert.deepEqual(scratchFds(), before, "a refused subfolder leaves no fd open");
+});
+
+test("a data subfolder that is a symlink into another add-on's data folder is refused", (t) => {
+  const services = mk(ADDON_DATA, "services");
+  const link = join(services, "0f0e0d0c-cafe");
+  const target = mk(DATA, "other", "x");
+  try {
+    symlinkSync(target, link);
+  } catch (err) {
+    rmSync(services, { recursive: true, force: true });
+    if (err && (err.code === "EPERM" || err.code === "ENOSYS")) { t.skip("this host does not allow symlinks in the scratch dir"); return; }
+    throw err;
+  }
+  const before = scratchFds();
+  try {
+    assert.throws(() => planOf({ dataSubdir: "services/0f0e0d0c-cafe" }),
+      (e) => e instanceof ContainRefused && /symlink/.test(e.message));
+    assert.deepEqual(scratchFds(), before, "the refused walk leaves no fd open");
+  } finally {
+    rmSync(services, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+});
+
+// ---- the door-token placeholder -----------------------------------------
+
+test("doorTokenFd -1 is accepted as the caller's placeholder and still plans the bind", () => {
+  const plan = planOf({ doorTokenFd: -1 });
+  try {
+    const spec = plan.fds.find((f) => f.role === "door-token");
+    assert.ok(spec, "the placeholder is one of the fds the plan hands over");
+    assert.deepEqual({ fd: spec.fd, role: spec.role }, { fd: -1, role: "door-token" });
+    const ops = pairs(plan.args);
+    const bindAt = ops.findIndex((q) => q[0] === "--ro-bind-data" && q[2] === "/run/crow-addon/door-token");
+    assert.ok(bindAt >= 0, "the bind-data op is in the argv");
+    assert.equal(ops[bindAt][1], String(spec.childFd), "it names the placeholder's child fd");
+    assert.ok(bindAt > 0 && ops[bindAt - 1][0] === "--perms" && ops[bindAt - 1][1] === "0400", "0400 precedes it");
+  } finally { closePlan(plan); }
+});

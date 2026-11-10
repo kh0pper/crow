@@ -552,17 +552,18 @@ export function prepareAgentShadow(piAgentDir, {
 }
 
 /**
- * Remove per-spawn contain dirs (agent shadows, egress relay dirs) left in
- * `parent` by a spawner that died before its cleanup ran. The spawner's pid
- * is in the name; only dirs owned by this uid whose spawner is gone are
- * removed, so a long-lived session of a running gateway is never touched.
+ * Remove per-spawn contain dirs (agent shadows, egress relay dirs, an add-on's
+ * walled relay dirs) left in `parent` by a spawner that died before its cleanup
+ * ran. The spawner's pid is in the name; only dirs owned by this uid whose
+ * spawner is gone are removed, so a long-lived session of a running gateway is
+ * never touched.
  */
 export function sweepStaleContainDirs({ parent = tmpdir(), uid = process.getuid() } = {}) {
   let removed = 0;
   let names = [];
   try { names = readdirSync(parent); } catch { return 0; }
   for (const n of names) {
-    const m = n.match(/^crow-pi-(?:agent|net)-(\d+)-/);
+    const m = n.match(/^(?:crow-pi-(?:agent|net)|crow-addon-net)-(\d+)-/);
     if (!m) continue;
     const pid = Number(m[1]);
     if (pid === process.pid) continue;
