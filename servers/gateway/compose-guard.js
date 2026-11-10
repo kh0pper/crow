@@ -163,12 +163,18 @@ const SERVICE_OK = new Set([
 export const SERVICE_PRIV = new Set(["cgroup_parent", "device_cgroup_rules", "external_links", "isolation", "storage_opt",
   "credential_spec", "oom_kill_disable", "use_api_socket", "post_start", "pre_stop", "develop", "models", "provider"]);
 const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "configs"]);
+// Crow's own bookkeeping of an installed compose (bundle-compose-state.js: .crow-compose.sha256,
+// .crow-compose.edited, .crow-compose.state.json, .crow-compose.needs-config,
+// .crow-compose.image-change, and whatever it adds next) is a PREFIX, not a list: read by the
+// version refresh and the bind-drift card, so one of them must never be mountable read-write,
+// or a container could rewrite the record those two trust. Defined here rather than imported
+// from bundle-compose-state.js: that module reaches this one through bundles-config.js
+// (bundles-config → folder-grants → compose-guard), so importing it would make a cycle.
+// tests/compose-guard.test.js fails if a COMPOSE_*_FILE export stops starting with it.
+export const COMPOSE_STATE_PREFIX = ".crow-compose.";
 // Top-level entries of a bundle folder that the gateway reads or runs.
-// `.crow-compose.*` is Crow's own record of the installed compose (bundle-compose-state.js):
-// read by the version refresh and the bind-drift card, so never mountable read-write.
 const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
-  ".crow-compose.sha256", ".crow-compose.edited", ".crow-compose.image-change",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
 // The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
 // never reaches bundle "rook-x"'s folder). No bundle id may end in one (tested).
@@ -422,8 +428,9 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
         // The bundle's own folder, but never the folder itself or its control files read-write:
         // the gateway reads the manifest, compose file and .env, and runs server/ code, so a
         // container that could rewrite them could grant itself privileges at the next Start.
+        // Same for Crow's own `.crow-compose.*` bookkeeping (COMPOSE_STATE_PREFIX above).
         const top = p.slice(bundleReal.length + 1).split(sep)[0];
-        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || (ctx.shipped && ctx.shipped.has(top)))) {
+        if (!readOnly && (p === bundleReal || BUNDLE_CONTROL.has(top) || top.startsWith(COMPOSE_STATE_PREFIX) || (ctx.shipped && ctx.shipped.has(top)))) {
           return refuse(`${what}: mounts the bundle's own control files read-write`);
         }
         return null;

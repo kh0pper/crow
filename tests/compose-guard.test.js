@@ -26,6 +26,7 @@ const REPO = fileURLToPath(new URL("..", import.meta.url));
 
 const G = await import("../servers/gateway/compose-guard.js");
 const B = await import("../servers/gateway/routes/bundles.js");
+const S = await import("../servers/gateway/bundle-compose-state.js");
 const { trackedBundleSet } = await import("../scripts/build-registry.mjs");
 
 const FIXTURES = mkdtempSync(join(tmpdir(), "crow-cguard-app-"));
@@ -643,8 +644,12 @@ test("a bundle can't mount its own control files read-write, nor claim a Crow na
   const dir = join(CROW_HOME, "bundles", "fx-ctl");
   mkdirSync(join(dir, "data"), { recursive: true });
   const m = { manifest: { id: "fx-ctl" }, dir };
-  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", ".crow-compose.image-change"]) {
+  // Every bookkeeping file bundle-compose-state.js writes (the version refresh and the
+  // bind-drift card trust these), plus one no version writes yet: the prefix rule covers it.
+  const bookkeeping = [S.COMPOSE_SHA_FILE, S.COMPOSE_EDITED_FILE, S.COMPOSE_STATE_FILE, S.COMPOSE_NEEDS_CONFIG_FILE, S.COMPOSE_IMAGE_CHANGE_FILE, ".crow-compose.future"];
+  for (const rel of ["", "manifest.json", "docker-compose.yml", ".env", "server", "panel", ...bookkeeping]) {
     assert.equal(check(svc({ volumes: [bind(join(dir, rel))] }), m).valid, false, `rw ${rel || "(the folder)"}`);
+    assert.equal(check(svc({ volumes: [bind(join(dir, rel), true)] }), m).valid, true, `ro ${rel || "(the folder)"}`);
   }
   assert.equal(check(svc({ volumes: [bind(dir, true)] }), m).valid, true, "read-only is fine");
   assert.equal(check(svc({ volumes: [bind(join(dir, "data"))] }), m).valid, true, "a data subfolder is fine");
@@ -663,6 +668,16 @@ test("no tracked compose bundle's id is a name Crow reserves in CROW_HOME", asyn
   const { RESERVED_HOME_NAMES } = G;
   const clash = [...trackedBundleSet()].filter((id) => existsSync(join(REPO, "bundles", id, "docker-compose.yml")) && RESERVED_HOME_NAMES.has(id));
   assert.deepEqual(clash, []);
+});
+
+test("every compose bookkeeping file bundle-compose-state.js names starts with the guard's prefix", () => {
+  // compose-guard.js cannot import the prefix from bundle-compose-state.js (that module
+  // reaches the guard through bundles-config → folder-grants), so the guard owns it and
+  // this keeps a new COMPOSE_*_FILE export inside the read-write refusal.
+  const named = Object.entries(S).filter(([k, v]) => /^COMPOSE_.*_FILE$/.test(k) && typeof v === "string");
+  assert.ok(named.length >= 5, `expected the bookkeeping file exports, saw ${named.map(([k]) => k).join(", ")}`);
+  for (const [key, name] of named) assert.ok(name.startsWith(G.COMPOSE_STATE_PREFIX), `${key} (${name}) is outside ${G.COMPOSE_STATE_PREFIX}`);
+  assert.equal(G.COMPOSE_STATE_PREFIX, ".crow-compose.");
 });
 
 dockerTest("Compose never sees the gateway's secrets: ${ANY_VAR} interpolates to empty", async () => {
