@@ -387,7 +387,7 @@ test("mcpAddonEntryFor records the owner-entered keys only", () => {
 
   // A requested value equal to its manifest default, not edited: not the owner's.
   const atDefault = B.mcpAddonEntryFor(OWNER_MANIFEST, { D: "the-default" }, { owner: true });
-  assert.equal("ownerSet" in atDefault, false);
+  assert.deepEqual(atDefault.ownerSet, []);
 
   // A value that differs from the default is owner-entered even without the form's list.
   const differs = B.mcpAddonEntryFor(OWNER_MANIFEST, { D: "typed-instead" }, { owner: true });
@@ -395,17 +395,18 @@ test("mcpAddonEntryFor records the owner-entered keys only", () => {
 
   // A generated key is minted by Crow, never typed.
   const generated = B.mcpAddonEntryFor(OWNER_MANIFEST, { G: "s3cret-value" }, { generatedKeys: ["G"], owner: true });
-  assert.equal("ownerSet" in generated, false);
+  assert.deepEqual(generated.ownerSet, []);
 
   // A key with no default at all, not edited: the form just re-sent a filled field.
   const noDefault = B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { owner: true });
-  assert.equal("ownerSet" in noDefault, false);
+  assert.deepEqual(noDefault.ownerSet, []);
 
   // Without the caller's proof that this is the local owner's own write: no provenance.
-  assert.equal("ownerSet" in B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { edited: ["X"] }), false);
+  assert.deepEqual(B.mcpAddonEntryFor(OWNER_MANIFEST, { X: "typed" }, { edited: ["X"] }).ownerSet, []);
 
-  // Nothing owner-entered: the field is absent, so old entries keep their shape.
-  assert.equal("ownerSet" in B.mcpAddonEntryFor(OWNER_MANIFEST), false);
+  // Nothing owner-entered: the list is still written, empty (an absent list reads as a
+  // legacy entry on the wall side, where every non-default value counts).
+  assert.deepEqual(B.mcpAddonEntryFor(OWNER_MANIFEST).ownerSet, []);
 });
 
 test("applyEnvToMcpAddons records the owner-typed keys it writes", () => {

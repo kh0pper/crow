@@ -40,8 +40,8 @@ test("install: a relative bundle launcher is pinned; node/npx entries stay byte-
   const e = mcpAddonEntryFor({ server: { command: "./run.sh", args: [] } }, null, { bundleDir: join(home, "bundles", "rk") });
   assert.equal(e.command_sha256, sha("#!/bin/bash\necho rk\n"));
   assert.deepEqual(mcpAddonEntryFor({ server: { command: "node", args: ["server/index.js"] } }, null, { bundleDir: join(home, "bundles", "rk") }),
-    { command: "node", args: ["server/index.js"] });
-  assert.deepEqual(mcpAddonEntryFor({ server: { command: "npx", args: ["-y", "x"] } }, null), { command: "npx", args: ["-y", "x"] });
+    { command: "node", args: ["server/index.js"], ownerSet: [] });
+  assert.deepEqual(mcpAddonEntryFor({ server: { command: "npx", args: ["-y", "x"] } }, null), { command: "npx", args: ["-y", "x"], ownerSet: [] });
   assert.equal(resolveAddonCommand(e.command, { sha256: e.command_sha256, cwd: join(home, "bundles", "rk") }).missing, false);
 });
 
