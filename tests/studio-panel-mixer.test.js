@@ -1479,6 +1479,14 @@ test("reordering an effect with a real drag sends one insert.move", async (t) =>
   t.after(() => page.close());
   await waitForStudio(page);
   await openMixer(page);
+  // The strips can draw before the song's chain reaches them (a slower runner
+  // gets the state frame later): wait for both chips, not just the strip box.
+  const drawn = await waitFor(
+    page,
+    "document.querySelectorAll('[data-chain=\"track:bass\"] [data-act=insert-chip]').length === 2",
+    10000,
+  );
+  assert.ok(drawn, "the bass chain never drew its two effects");
 
   assert.deepEqual(await chainIds(page), ["ins-eq", "ins-comp"], "the chain starts in the order it was built");
   assert.equal(await historyRows(page, "Moved"), 0, "nothing has been moved yet");
