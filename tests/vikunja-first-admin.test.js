@@ -70,13 +70,18 @@ after(() => {
 /** A curl stand-in answer: the status on the first line, the body after it. */
 const reply = (code, body = "") => `${code}\n${body}`;
 
-/** Vikunja's `user list` table: borders, one header line, one line per account. */
+/**
+ * Vikunja 2.8.0's real `user list` output (from a live run on the pinned image): its own log
+ * lines on stdout, then a table drawn with box-drawing characters; one row per account.
+ */
 const USERS_TABLE = (rows = []) => [
-  "+----+----------+---------------------------+---------------------------+---------------------------+",
-  "| ID | USERNAME | EMAIL                     | CREATED                   | UPDATED                   |",
-  "+----+----------+---------------------------+---------------------------+---------------------------+",
-  ...rows.map(([id, user, mail]) => `| ${String(id).padStart(2)} | ${user.padEnd(8)} | ${mail.padEnd(25)} | 2026-11-10 09:00:00 +0000 | 2026-11-10 09:00:00 +0000 |`),
-  ...(rows.length > 0 ? ["+----+----------+---------------------------+---------------------------+---------------------------+"] : []),
+  'time=2026-11-10T09:00:00Z level=INFO msg="Running migrations…"',
+  'time=2026-11-10T09:00:00Z level=WARN msg="No config file found, using default or env settings."',
+  "┌────┬──────────┬───────────────────────────┬───────────────────────────┬───────────────────────────┐",
+  "│ ID │ USERNAME │ EMAIL                     │ CREATED                   │ UPDATED                   │",
+  "├────┼──────────┼───────────────────────────┼───────────────────────────┼───────────────────────────┤",
+  ...rows.map(([id, user, mail]) => `│ ${String(id).padStart(2)} │ ${user.padEnd(8)} │ ${mail.padEnd(25)} │ 2026-11-10 09:00:00 +0000 │ 2026-11-10 09:00:00 +0000 │`),
+  "└────┴──────────┴───────────────────────────┴───────────────────────────┴───────────────────────────┘",
 ].join("\n");
 
 const INFO_OPEN = reply(200, '{"version":"2.8.0","frontend_url":"http://127.0.0.1:3456/","registration_enabled":true}');
@@ -500,4 +505,22 @@ test("the committed registry carries the same declaration (it is generated from 
   const entry = registry.find((e) => e.id === "vikunja");
   assert.ok(entry, "registry/add-ons.json has an entry for vikunja");
   assert.equal(JSON.stringify(entry), JSON.stringify({ ...manifestOf(), official: true }), "the entry is what build-registry would write");
+});
+
+test("vikunja: the account count reads the real 2.8.0 table — log lines and box borders are not accounts", () => {
+  const fresh = run({ answers: { FAKE_USERS_0: USERS_TABLE([]) } });
+  assert.equal(fresh.status, 0, `a fresh install with only log lines and borders is fresh: ${fresh.stderr}`);
+  const existing = run({ answers: { FAKE_USERS_0: USERS_TABLE([[1, "owner", "owner@example.com"]]) } });
+  assert.equal(existing.status, 3, existing.stderr);
+});
+
+test("vikunja: a user list without the table header is unreadable (exit 4), never 'no accounts'", () => {
+  const r = run({ answers: { FAKE_USERS_0: 'time=2026-11-10T09:00:00Z level=ERROR msg="database is locked"' } });
+  assert.equal(r.status, 4, r.stderr);
+});
+
+test("vikunja: another account made while registration was open is named after setup", () => {
+  const r = run({ answers: { FAKE_USERS_1: USERS_TABLE([[1, "admin", "admin@localhost.invalid"], [2, "intruder", "x@example.com"]]) } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /also has these accounts, made while registration was open: intruder/);
 });

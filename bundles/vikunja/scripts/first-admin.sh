@@ -89,15 +89,25 @@ info_state() {
   esac
 }
 
-# The accounts Vikunja itself reports. `vikunja user list` renders a table: border lines
-# (`+---+---+`), one header line naming USERNAME, and one line per account — so anything
-# left after dropping blanks, borders and the header IS an account.
+# The accounts Vikunja itself reports. `vikunja user list` (2.8.0) draws its table with
+# box-drawing borders (`┌─┬─┐`, `│ ID │ USERNAME │ …`, `└─┴─┘`) and also writes its own
+# INFO/WARN log lines to stdout, so only rows that start with `│` and a numeric ID are
+# accounts. The header row must be there too: without it the output is not the table Crow
+# knows, and that is UNREADABLE (nothing is changed), never "no accounts".
+# Prints PRESENT / NONE / UNREADABLE; with "names" as $1, prints the usernames instead.
 users_state() {
   local raw rows
   if ! raw="$(timeout 20 docker exec "$CONTAINER" "$VIKUNJA_BIN" user list 2>/dev/null)"; then
     printf '%s' "UNREADABLE"; return 0
   fi
-  rows="$(printf '%s\n' "$raw" | grep -v -E '^[[:space:]]*$' | grep -v -E '^\+[-+]+\+$' | grep -v -i 'USERNAME' || true)"
+  if ! printf '%s\n' "$raw" | grep -E '^(│|\|)' | grep -q -i 'USERNAME'; then
+    printf '%s' "UNREADABLE"; return 0
+  fi
+  rows="$(printf '%s\n' "$raw" | grep -E '^(│|\|)[[:space:]]*[0-9]+[[:space:]]*(│|\|)' || true)"
+  if [ "${1:-}" = "names" ]; then
+    printf '%s\n' "$rows" | awk -F'│|\\|' 'NF>2 { gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 != "") print $3 }'
+    return 0
+  fi
   if [ -n "$rows" ]; then printf '%s' "PRESENT"; else printf '%s' "NONE"; fi
 }
 
@@ -197,3 +207,10 @@ if [ "$proof" != "LOGIN-OK" ]; then
 fi
 
 say "Vikunja's admin login for '$ADMIN_USER' now uses the password Crow generated."
+
+# Registration was open until now: name any other account that appeared in that window so
+# the owner can check it (Crow closes registration next; it never deletes an account).
+others="$(users_state names | grep -vxF "$ADMIN_USER" | tr '\n' ' ' | sed 's/ *$//' || true)"
+if [ -n "$others" ]; then
+  say "Note: Vikunja also has these accounts, made while registration was open: $others. Check that you know them."
+fi
