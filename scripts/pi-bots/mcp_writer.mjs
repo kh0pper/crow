@@ -543,7 +543,9 @@ async function probeHttpServerTools(block, timeoutMs) {
 /**
  * The environment a probe spawns a server block with: what a bot's pi child would
  * really give it — the bot env allowlist (servers/shared/bot-env.js) plus the
- * block's own env — never the gateway's environment this prober runs inside.
+ * block's own env — never the gateway's environment this prober runs inside. Under
+ * CROW_BOT_ENV_PASSTHROUGH=1 that allowlist is the whole environment minus credential
+ * keys, which is exactly what bots get under that switch.
  * Exported so a test can judge the env without spawning.
  */
 export function probeSpawnEnv(block, source = process.env) {

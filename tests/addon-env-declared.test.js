@@ -12,6 +12,7 @@
  * A read whose key is never delivered reads as undefined in a gateway-spawned
  * child — that is the bug this check exists to catch.
  */
+// Note: the app-module scan is one level deep (modules those modules import are not scanned).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";

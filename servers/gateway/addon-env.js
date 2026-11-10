@@ -132,8 +132,12 @@ export function isStorageEnvConsumer(id) {
  * every other add-on. Values only: a key absent from the gateway's environment is
  * not invented here.
  */
-export function storagePassthrough(id, base = process.env) {
+export function storagePassthrough(id, base = process.env, { registryFor = registryEntryFor } = {}) {
   if (!isStorageEnvConsumer(id)) return {};
+  // The same gate as declaredPassthrough: only the published first-party bundle under
+  // that id, never an unlisted or community add-on that happens to use the name.
+  const entry = registryFor(id);
+  if (!entry || typeof entry !== "object" || entry.origin === "community") return {};
   const out = {};
   for (const key of STORAGE_ENV_KEYS) {
     if (typeof base?.[key] === "string") out[key] = base[key];
@@ -156,6 +160,8 @@ export function addonBaseEnv(source = process.env) {
 
 /** The published registry (registry/add-ons.json), read once per process. */
 const REGISTRY_PATH = join(APP_ROOT, "registry", "add-ons.json");
+// Read once per process: a pulled registry/add-ons.json takes effect at the next gateway
+// start (auto-update restarts the gateway after a pull).
 let _registryEntries = null;
 
 function registryEntries() {

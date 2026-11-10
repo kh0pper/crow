@@ -341,3 +341,9 @@ test("the dev read logger names an undeclared key and never its value", () => {
   assert.deepEqual(lines, ["[addon-env] read of undeclared UNDECLARED_SECRET"]);
   assert.ok(!r.stderr.includes("value-that-must-not-be-printed"), "never a value");
 });
+test("storage env goes only to the published first-party bundle under a consumer id", () => {
+  const base = { MINIO_ROOT_PASSWORD: "root", S3_SECRET_KEY: "s3" };
+  assert.deepEqual(storagePassthrough("studio", base, { registryFor: () => null }), {}, "unlisted id got storage keys");
+  assert.deepEqual(storagePassthrough("studio", base, { registryFor: () => ({ id: "studio", origin: "community" }) }), {}, "community listing got storage keys");
+  assert.equal(storagePassthrough("studio", base, { registryFor: () => ({ id: "studio" }) }).MINIO_ROOT_PASSWORD, "root");
+});

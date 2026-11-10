@@ -196,7 +196,7 @@ async function connectToServer(integration) {
  */
 export function addonStdioEnv(config = {}, base = process.env, id = null, opts = {}) {
   const gate = withoutCredentialKeys(base);
-  const derived = id ? addonDerivedEnv(id, config.env, undefined, base) : {};
+  const derived = id ? addonDerivedEnv(id, config.env, undefined, gate) : {};
   return {
     ...addonBaseEnv(base),
     ...declaredPassthrough(id, gate, opts),
