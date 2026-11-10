@@ -42,6 +42,7 @@ const GLOBAL_EXEMPT = {
   CROW_KIOSK_STT_HOTWORDS: "operator switch for the hotwords experiment, read as === \"1\"; a child that does not see it keeps hotwords off, the shipped default",
   PI_BOT_ID: "set by the bot engine in a bot's own spawn_env, never in the gateway's environment",
   PI_BOT_PERCH_SESSION_ID: "set by the bot engine in a bot's own spawn_env, never in the gateway's environment",
+  CROW_ADDON_DOOR_TOKEN_FILE: "set by the add-on wall (scripts/addon-sandbox/spawn.mjs) for a walled add-on with a door, never in the gateway's environment; unset, the add-on uses its unwalled token path",
 };
 
 const EXEMPT = {
