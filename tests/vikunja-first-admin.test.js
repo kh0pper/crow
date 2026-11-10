@@ -523,5 +523,29 @@ test("vikunja: another account made while registration was open is named after s
   const both = USERS_TABLE([[1, "admin", "admin@localhost.invalid"], [2, "intruder", "x@example.com"]]);
   const r = run({ answers: { FAKE_USERS_1: both, FAKE_USERS_2: both } });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(`${r.stdout}${r.stderr}`, /also has these accounts, made while registration was open: intruder/, `user list calls: ${usersCalls(r).length}; out: ${r.stdout} | err: ${r.stderr} | stdin of 2nd: ${JSON.stringify(usersCalls(r)[1])}`);
+  assert.match(`${r.stdout}${r.stderr}`, /also has these accounts, made while registration was open: intruder/);
+  assert.doesNotMatch(`${r.stdout}${r.stderr}`, /accounts[^\n]*\badmin\b/);
+});
+
+test("vikunja: an account name that is not a plain name is counted, never echoed", () => {
+  const odd = USERS_TABLE([[1, "admin", "admin@localhost.invalid"], [2, "\u001b[2Jevil;rm", "x@example.com"]]);
+  const r = run({ answers: { FAKE_USERS_1: odd } });
+  assert.equal(r.status, 0, r.stderr);
+  const out = `${r.stdout}${r.stderr}`;
+  assert.match(out, /none listed \(and 1 account\(s\) with names Crow could not read\)/);
+  assert.doesNotMatch(out, /evil/);
+});
+
+test("vikunja: an unreadable list after setup says so, never prints it as a name", () => {
+  const r = run({ answers: { FAKE_USERS_1: "<<fail>>" } });
+  assert.equal(r.status, 0, r.stderr);
+  const out = `${r.stdout}${r.stderr}`;
+  assert.match(out, /could not list Vikunja's other accounts/);
+  assert.doesNotMatch(out, /UNREADABLE/);
+});
+
+test("vikunja: only the admin after setup → no accounts note", () => {
+  const r = run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(`${r.stdout}${r.stderr}`, /also has these accounts|could not list/);
 });
