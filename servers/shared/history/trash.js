@@ -56,10 +56,10 @@ function normalizeLimit(limit) {
   return Math.min(n, MAX_TRASH_ROWS);
 }
 
-/** A Trash period in days: a finite number ≥ 0, else the default. */
+/** A Trash period in days: a finite number ≥ 1, else the default. */
 export function normalizeTrashDays(days) {
   const n = Number(days);
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_TRASH_DAYS;
+  return Number.isFinite(n) ? Math.max(1, n) : DEFAULT_TRASH_DAYS;
 }
 
 /**
@@ -94,13 +94,13 @@ export async function trashEntries(db, { before = null, limit = MAX_TRASH_ROWS }
     sql: `SELECT v.item_type, v.item_id, v.op, v.created_at, v.author_kind, v.author_id,
                  v.job_id, v.origin_instance, v.redacted, v.snapshot_json
             FROM item_versions v
-            JOIN (SELECT item_type, item_id, MAX(id) AS newest_id
-                    FROM item_versions
-                   GROUP BY item_type, item_id) latest
-              ON latest.item_type = v.item_type
-             AND latest.item_id = v.item_id
-             AND latest.newest_id = v.id
            WHERE v.op = 'delete'${ageFilter}
+             AND NOT EXISTS (
+               SELECT 1 FROM item_versions newer
+                WHERE newer.item_type = v.item_type
+                  AND newer.item_id = v.item_id
+                  AND newer.id > v.id
+             )
            ORDER BY v.id DESC
            LIMIT ?`,
     args,
@@ -202,7 +202,11 @@ export async function emptyTrash(db, { olderThanDays = 0, now = new Date(), maxP
   if (!ctx || ctx.authorKind !== "owner") {
     throw trashError("not_owner", "only the owner can empty the Trash");
   }
-  const days = normalizeTrashDays(olderThanDays);
+  // 0 (the default) means "empty it all now". A real period is at least a day
+  // (normalizeTrashDays), so a stray 0 setting cannot turn the aging sweep into
+  // "erase everything that is in the Trash".
+  const requested = Number(olderThanDays);
+  const days = Number.isFinite(requested) && requested <= 0 ? 0 : normalizeTrashDays(requested);
   const before = new Date(now.getTime() - days * MS_PER_DAY).toISOString();
   // One page of MAX_TRASH_ROWS per erase (each page is its own armed transaction),
   // repeated until the Trash is empty or the page cap is reached — so one click
@@ -217,10 +221,16 @@ export async function emptyTrash(db, { olderThanDays = 0, now = new Date(), maxP
       db,
       entries.map((e) => ({ itemType: e.itemType, itemId: e.itemId })),
       ctx,
+      // The conditional is inside the armed transaction: a restore between this
+      // page's listing and its erase wrote a newer version, so it survives.
+      { deletedBefore: before },
     );
-    erased.push(...result.erased);
+    erased.push(...result.erased.filter((item) => item.versions > 0));
     versions += result.versions;
-    if (result.erased.length === 0) break; // nothing progressed: stop rather than spin
+    // `result.erased` is empty only when there was nothing to act on (no history
+    // store). An entry with 0 versions is a restore that won the race: it is not
+    // in the next listing, so the next page is the right place to continue.
+    if (result.erased.length === 0) break;
   }
   return { erased, count: erased.length, versions, before };
 }

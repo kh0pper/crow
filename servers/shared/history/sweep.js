@@ -47,7 +47,7 @@
  */
 import { SECRET_PATTERNS } from "../../../scripts/check-public-hygiene.mjs";
 import { withoutWriteContext } from "./write-context.js";
-import { eraseItems } from "./erase.js";
+import { eraseItems, runArmedStatements } from "./erase.js";
 import { trashEntries, normalizeTrashDays, DEFAULT_TRASH_DAYS } from "./trash.js";
 
 /** Rows per pass when the caller does not say. */
@@ -82,14 +82,41 @@ function normalizeBatch(batchSize) {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_BATCH;
 }
 
+/** A private-key block, header through its matching END (non-greedy, multi-line). */
+const PEM_PRIVATE_KEY_BLOCK = /-----BEGIN ((?:[A-Z0-9]+ )*)PRIVATE KEY-----[\s\S]*?-----END \1PRIVATE KEY-----/g;
+const PGP_PRIVATE_KEY_BLOCK = /-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}[\s\S]*?-{5}END PGP PRIVATE KEY BLOCK-{5}/g;
+const PEM_PRIVATE_KEY_HEADER = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
+const PGP_PRIVATE_KEY_HEADER = /-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}/;
+
 /**
- * Replace every secret-shaped match in `text` with the placeholder.
+ * Replace every secret-shaped match in one DECODED string with the placeholder.
+ *
+ * The snapshot is JSON, so its stored strings are escaped (`\n`, `\"`, ...).
+ * Running the patterns on that raw JSON misses a key that follows an escaped
+ * newline (there is no word boundary between the literal `n` and the key), which
+ * is why the caller decodes first and this function only ever sees real values.
+ *
+ * A private key is not just its header: the body is the secret. PEM/PGP blocks
+ * are redacted from BEGIN through the matching END; an unmatched header (no END)
+ * redacts the WHOLE value, because the field cannot be trusted to end anywhere.
+ *
  * @returns {string|null} the rewritten text, or null when nothing matched
  */
 export function redactText(text) {
   if (typeof text !== "string" || text === "") return null;
   let out = text;
   let hit = false;
+  for (const pattern of [PEM_PRIVATE_KEY_BLOCK, PGP_PRIVATE_KEY_BLOCK]) {
+    const next = out.replace(pattern, REDACTION_PLACEHOLDER);
+    if (next !== out) {
+      out = next;
+      hit = true;
+    }
+  }
+  if (PEM_PRIVATE_KEY_HEADER.test(out) || PGP_PRIVATE_KEY_HEADER.test(out)) {
+    out = REDACTION_PLACEHOLDER;
+    hit = true;
+  }
   for (const [, pattern] of SECRET_PATTERNS) {
     // String#replace resets a global regex's lastIndex itself, so the shared
     // pattern objects are safe to reuse across rows and runs.
@@ -100,6 +127,50 @@ export function redactText(text) {
     }
   }
   return hit ? out : null;
+}
+
+/**
+ * Walk every string VALUE of a decoded snapshot, redacting as it goes.
+ * @returns {*} the rewritten value, or null when nothing matched
+ */
+function redactValue(value) {
+  if (typeof value === "string") return redactText(value);
+  let hit = false;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const next = redactValue(value[i]);
+      if (next !== null) {
+        value[i] = next;
+        hit = true;
+      }
+    }
+  } else if (value && typeof value === "object") {
+    for (const key of Object.keys(value)) {
+      const next = redactValue(value[key]);
+      if (next !== null) {
+        value[key] = next;
+        hit = true;
+      }
+    }
+  }
+  return hit ? value : null;
+}
+
+/**
+ * Redact one stored snapshot: decode the JSON, walk its string values, encode it
+ * back. `redacted = 1` is set by the caller only after this whole row succeeded,
+ * so a row is never marked redacted while any part of it still holds the secret.
+ * @returns {string|null} the rewritten snapshot_json, or null when nothing matched
+ */
+export function redactSnapshot(snapshotJson) {
+  let parsed;
+  try {
+    parsed = JSON.parse(snapshotJson);
+  } catch {
+    return null; // a corrupt snapshot is not a secret we can safely rewrite
+  }
+  const rewritten = redactValue(parsed);
+  return rewritten === null ? null : JSON.stringify(rewritten);
 }
 
 /**
@@ -119,53 +190,24 @@ async function historyReady(db) {
   }
 }
 
-/** Run `work` with the erase switch armed, in one immediate transaction. */
-async function inArmedTransaction(db, work) {
-  let began = false;
-  try {
-    await db.execute("BEGIN IMMEDIATE");
-    began = true;
-    await db.execute("UPDATE item_versions_erase SET armed = 1");
-    const result = await work();
-    await db.execute("UPDATE item_versions_erase SET armed = 0");
-    await db.execute("COMMIT");
-    return result;
-  } catch (err) {
-    if (began) {
-      try {
-        await db.execute("ROLLBACK");
-      } catch {
-        /* already rolled back */
-      }
-    }
-    try {
-      await db.execute("UPDATE item_versions_erase SET armed = 0");
-    } catch {
-      /* unreadable store: the boot ensure disarms a stuck switch */
-    }
-    throw err;
-  }
-}
-
 /* ------------------------------------------------------------- (a) redact */
 
 /** Redact one page of versions. @returns {Promise<number>} rows rewritten */
 async function redactPage(db, rows) {
   const matches = [];
   for (const row of rows) {
-    const rewritten = redactText(row.snapshot_json);
+    const rewritten = redactSnapshot(row.snapshot_json);
     if (rewritten !== null) matches.push({ id: Number(row.id), snapshot: rewritten });
   }
   if (matches.length === 0) return 0;
   await withoutWriteContext(() =>
-    inArmedTransaction(db, async () => {
-      for (const match of matches) {
-        await db.execute({
-          sql: "UPDATE item_versions SET snapshot_json = ?, redacted = 1 WHERE id = ?",
-          args: [match.snapshot, match.id],
-        });
-      }
-    }),
+    runArmedStatements(
+      db,
+      matches.map((match) => ({
+        sql: "UPDATE item_versions SET snapshot_json = ?, redacted = 1 WHERE id = ?",
+        args: [match.snapshot, match.id],
+      })),
+    ),
   );
   return matches.length;
 }
@@ -236,8 +278,14 @@ async function coalescePass(db, batchSize) {
     return 0;
   }
 
+  // A run is anchored on its OLDEST version: the window closes when the newest
+  // save is >= COALESCE_WINDOW_MS after the run started, not merely when it is
+  // 2 minutes after the previous save. An hour of saves every 30 s therefore
+  // keeps one version per two minutes instead of one per hour.
+  const runs = new Map();
   const doomed = new Set();
   for (const row of rows) {
+    const key = `${row.item_type}\u0000${row.item_id}`;
     const { rows: prior } = await db.execute({
       sql: `SELECT id, item_type, item_id, op, author_id, job_id, created_at, redacted
               FROM item_versions
@@ -245,8 +293,42 @@ async function coalescePass(db, batchSize) {
              ORDER BY id DESC LIMIT 1`,
       args: [row.item_type, row.item_id, Number(row.id)],
     });
-    if (!prior.length) continue;
-    if (coalescible(prior[0], row)) doomed.add(Number(prior[0].id));
+    if (!prior.length || row.op !== "update" || Number(row.redacted) === 1) {
+      runs.delete(key);
+      continue;
+    }
+    const priorRow = prior[0];
+    const at = Date.parse(row.created_at);
+    if (!Number.isFinite(at)) {
+      runs.delete(key);
+      continue;
+    }
+
+    let run = runs.get(key);
+    if (!run && coalescible(priorRow, row)) {
+      // The cursor may have started mid-run: anchor on the version just before
+      // the batch so the same window is used across batches.
+      run = {
+        start: Date.parse(priorRow.created_at),
+        authorId: row.author_id,
+        jobId: row.job_id ?? null,
+        lastId: Number(priorRow.id),
+      };
+    }
+    if (!run || !coalescible(priorRow, row) || run.authorId !== row.author_id || run.jobId !== (row.job_id ?? null)) {
+      // A different author/job, or a non-update in between: this row starts a run.
+      runs.set(key, { start: at, authorId: row.author_id, jobId: row.job_id ?? null, lastId: Number(row.id) });
+      continue;
+    }
+    if (at - run.start >= COALESCE_WINDOW_MS) {
+      // The anchored window is closed: the previous run's newest version stays,
+      // and this row is the first of the next run.
+      runs.set(key, { start: at, authorId: row.author_id, jobId: row.job_id ?? null, lastId: Number(row.id) });
+      continue;
+    }
+    doomed.add(Number(priorRow.id));
+    run.lastId = Number(row.id);
+    runs.set(key, run);
   }
   const nextCursor = Number(rows[rows.length - 1].id);
   if (doomed.size === 0) {
@@ -256,12 +338,9 @@ async function coalescePass(db, batchSize) {
 
   const ids = [...doomed];
   await withoutWriteContext(() =>
-    inArmedTransaction(db, async () => {
-      await db.execute({
-        sql: `DELETE FROM item_versions WHERE id IN (${ids.map(() => "?").join(", ")})`,
-        args: ids,
-      });
-    }),
+    runArmedStatements(db, [
+      { sql: `DELETE FROM item_versions WHERE id IN (${ids.map(() => "?").join(", ")})`, args: ids },
+    ]),
   );
   // Only past a batch that actually landed: a failed delete leaves the pair for the
   // next run (it stays history, which is the safe direction).
@@ -281,8 +360,11 @@ async function erasePass(db, { now, trashDays, batchSize }) {
     entries.map((e) => ({ itemType: e.itemType, itemId: e.itemId })),
     // The Trash clock is Crow's own unit of work: no person is pressing a button.
     { authorKind: "system", authorId: "history-sweep" },
+    // The conditional is inside the armed transaction: a restore that landed
+    // after the listing wrote a newer version, so this item is left alive.
+    { deletedBefore: cutoff },
   );
-  return { erased, versions, cutoff };
+  return { erased: erased.filter((e) => e.versions > 0), versions, cutoff };
 }
 
 /**

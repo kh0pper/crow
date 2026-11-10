@@ -16,6 +16,20 @@ import { resolveSqlitePath, tasksDbPath as defaultTasksDbPath } from "../../scri
 const ACTORS = ["local", "contact", "bot", "system"];
 
 /**
+ * Erase what a permanent project delete removed from history, at once. The closure
+ * and the latest-is-a-delete rule live in servers/shared/history/erase.js; this is
+ * only the actor (the delete's own consequence, not an independent history edit).
+ */
+async function eraseProjectHistory(db, project) {
+  const { eraseByProject } = await import("./history/erase.js");
+  return eraseByProject(
+    db,
+    { projectUuid: project.uuid, projectId: project.id },
+    { authorKind: "system", authorId: "project-delete" },
+  );
+}
+
+/**
  * canManageProject's rule (live row, local owner member, not revoked, role owner), except that
  * status='archived' is allowed. archived_at set and learner_profile rows are always false.
  */
@@ -473,6 +487,7 @@ function moveWorkspace(project, dataDir, now, partial) {
  * @param {Function} [opts._afterSummary]  test seam: runs after the summary, before the pre-disconnect re-check
  * @param {Function} [opts._beforeTransaction]  test seam: runs after the pre-transaction steps, before BEGIN
  * @param {Function} [opts._beforeTombstone]  test seam: runs inside the transaction, before the tombstone
+ * @param {(db:object, project:object)=>Promise<object>} [opts._eraseHistory]  test seam over the at-once history erase
  * @returns {Promise<{ ok: true, counts: object, movedTo?: string, partial?: string[] } |
  *   { ok: false, code: 'bad_actor'|'not_owner'|'shared'|'bots'|'name_mismatch'|'failed', detail?: object }>}
  *   A refusal found inside the transaction carries detail.disconnected: the connections already disconnected.
@@ -480,6 +495,7 @@ function moveWorkspace(project, dataDir, now, partial) {
 export async function deleteProject(db, projectId, {
   confirmName, crowHome, actor = "local", storageDelete, disconnectBackend = defaultDisconnectBackend,
   dataDir, tasksDbPath, now = () => new Date(), _afterSummary, _beforeTransaction, _beforeTombstone,
+  _eraseHistory = eraseProjectHistory,
 } = {}) {
   if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
   const summary = await deleteSummary(db, projectId, { tasksDbPath });
@@ -530,20 +546,17 @@ export async function deleteProject(db, projectId, {
   // actually removed: eraseByProject closes over the ITEM but only takes items whose latest
   // version is a delete, so the context sections this purge deleted lose every version while
   // the memories it merely UNFILED keep theirs — they still exist, the user still has them.
-  // Best effort like the rest of this section: the tombstone stands, and a failed erase is
-  // reported rather than restoring the project.
+  // A failure is a partial step: it is recorded (and re-run by resumeProjectDelete), never
+  // silently swallowed, and the tombstone stands either way.
+  const partial = [];
   try {
-    const { eraseByProject } = await import("./history/erase.js");
-    const erased = await eraseByProject(
-      db,
-      { projectUuid: project.uuid, projectId: id },
-      { authorKind: "system", authorId: "project-delete" },
-    );
+    const erased = await _eraseHistory(db, project);
     if (erased.versions > 0) {
       console.log(`[project-lifecycle] delete ${id}: erased ${erased.versions} version(s) of ${erased.erased.length} item(s)`);
     }
   } catch (err) {
     console.warn(`[project-lifecycle] delete ${id}: history erase failed:`, err?.message || err);
+    partial.push("history-erase");
   }
 
   // The backends are gone for good, so their approval nonces go too: with one on record, a
@@ -554,7 +567,6 @@ export async function deleteProject(db, projectId, {
     try { await clearApprovalNonce(backendId); }
     catch { console.warn(`[project-lifecycle] delete ${id}: backend ${backendId} approval record entry could not be dropped`); }
   }
-  const partial = [];
   if (purged.contextChanged) {
     try { (await import("../memory/crow-context.js")).invalidateContextCache(); } catch { /* cache is per-process */ }
   }
@@ -589,7 +601,7 @@ export function deletedProjectsDir(dataDir) {
 // ---------------------------------------------------------------------------------------------
 
 /** The steps a partial delete can list (the ones deleteProject runs after its commit). */
-const RESUME_STEPS = Object.freeze(["cards", "board_defs", "jobs", "files", "workspace"]);
+const RESUME_STEPS = Object.freeze(["history-erase", "cards", "board_defs", "jobs", "files", "workspace"]);
 
 /** What a uuid has to look like to name a folder under deleted-projects (hex digits and dashes). */
 const AUDIT_UUID_RE = /^[0-9a-f-]{36}$/i;
@@ -650,6 +662,7 @@ async function cardsLeft(project, { tasksDbPath } = {}) {
  * @param {string} [opts.dataDir]  defaults to project-spaces.js's anchor
  * @param {string} [opts.tasksDbPath]  the instance-global tasks.db (instance-paths.mjs by default)
  * @param {() => Date} [opts.now]  the date used in the deleted-projects folder name
+ * @param {(db:object, project:object)=>Promise<object>} [opts._eraseHistory]  test seam over the at-once history erase
  * @returns {Promise<{ ok: true, partial: string[], untraceable?: string[] } |
  *   { ok: false, code: 'bad_actor'|'not_owner'|'not_partial' }>}
  *   `partial` lists what failed again this time (empty when the delete is now complete).
@@ -657,7 +670,7 @@ async function cardsLeft(project, { tasksDbPath } = {}) {
  *   rows are gone): they are reported, never silently counted as done, and never owed again.
  */
 export async function resumeProjectDelete(db, projectId, {
-  actor = "local", storageDelete, dataDir, tasksDbPath, now = () => new Date(),
+  actor = "local", storageDelete, dataDir, tasksDbPath, now = () => new Date(), _eraseHistory = eraseProjectHistory,
 } = {}) {
   if (!ACTORS.includes(actor)) return { ok: false, code: "bad_actor" };
   const id = Number(projectId);
@@ -690,6 +703,13 @@ export async function resumeProjectDelete(db, projectId, {
   const project = { ...tomb, id, slug: String(del.details.slug), uuid };
   const partial = [];
   const untraceable = [];
+  if (wanted.has("history-erase")) {
+    try { await _eraseHistory(db, project); }
+    catch (err) {
+      console.warn(`[project-lifecycle] resume ${id}: history erase failed:`, err?.message || err);
+      partial.push("history-erase");
+    }
+  }
   // The ids first: purgeCards removes the rows they name. A card id is per store, so a store with
   // no rows for the project has no queued job that can be tied to it any more (nothing to cancel).
   const cards = wanted.has("jobs") ? await cardsLeft(project, { tasksDbPath }) : null;

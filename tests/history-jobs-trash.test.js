@@ -45,6 +45,10 @@ delete process.env.CROW_DB_PATH;
  *  secret scanner would flag (the redaction sweep's own patterns are what we are
  *  testing; the file itself must stay clean for check-public-hygiene). */
 const AWS_KEY = ["AKIA", "Q7T2", "MN4P", "R8SZ", "WX9K"].join("");
+/** The same trick for a private key: its header is a secret pattern too. */
+const PEM_BEGIN = ["-----BEGIN", "RSA", "PRIVATE", "KEY-----"].join(" ");
+const PEM_END = ["-----END", "RSA", "PRIVATE", "KEY-----"].join(" ");
+const PEM_BODY = ["MIIEowIBAAKCAQEA", "fakebodyfakebody", "notarealkeynotarealkey"].join("");
 
 /** The owner at their dashboard, a verified bot working a board card, a schedule. */
 const OWNER = { authorKind: "owner", authorId: "abcd1234", jobId: "session:abcd1234" };
@@ -176,7 +180,7 @@ test("a job editing 2 memories and 1 post, then undo, restores all 3", async () 
     const m1Versions = await versionsOf(db, "memory", m1);
     assert.deepEqual(m1Versions.map((v) => v.op), ["insert", "update", "update"]);
     assert.equal(m1Versions.at(-1).author_id, OWNER.authorId, "the undo is stamped with its own author");
-    assert.equal(m1Versions.at(-1).job_id, OWNER.jobId);
+    assert.equal(m1Versions.at(-1).job_id, "undo:card:7", "the undo is its own job, never the undone job's id");
   } finally {
     db.close();
     fx.dispose();
@@ -295,6 +299,51 @@ test("an AWS-shaped key in a memory is [redacted] in its versions after one swee
   }
 });
 
+test("a key after a newline is redacted", async () => {
+  const fx = fixture("hist-redact-newline-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: `deploy notes\n${AWS_KEY}\nend of notes` });
+    const result = await sweep(db);
+    assert.ok(result.redacted >= 1);
+
+    const versions = await versionsOf(db, "memory", id);
+    assert.doesNotMatch(versions[0].snapshot_json, /AKIA/, "the key after the escaped newline is gone");
+    assert.equal(
+      JSON.parse(versions[0].snapshot_json).content,
+      "deploy notes\n[redacted]\nend of notes",
+      "the decoded value is what was rewritten",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a PEM private key's body is redacted, not just its header", async () => {
+  const fx = fixture("hist-redact-pem-");
+  const db = fx.open();
+  try {
+    const pem = `${PEM_BEGIN}\n${PEM_BODY}\n${PEM_END}`;
+    const id = await insertMemory(db, OWNER, { content: `the key was:\n${pem}\n(the end)` });
+    const result = await sweep(db);
+    assert.ok(result.redacted >= 1);
+
+    const snapshot = (await versionsOf(db, "memory", id))[0].snapshot_json;
+    assert.doesNotMatch(snapshot, /fakebodyfakebody|notarealkey/, "the body is gone, not just the header");
+    assert.doesNotMatch(snapshot, /BEGIN RSA|END RSA/, "and the whole block, END included, is gone");
+    assert.match(snapshot, /\[redacted\]/);
+    assert.equal(
+      JSON.parse(snapshot).content,
+      "the key was:\n[redacted]\n(the end)",
+      "only the block is replaced; the surrounding text survives",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
 test("a sweep redacts in bounded batches", async () => {
   const fx = fixture("hist-redact-batch-");
   const db = fx.open();
@@ -398,6 +447,79 @@ test("three saves 30 s apart by the same author coalesce to one version", async 
 });
 
 /* ----------------------------------------------------------------- erase */
+
+test("an hour of saves 30 s apart keeps one version per two minutes", async () => {
+  const fx = fixture("hist-coalesce-anchor-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "start" });
+    const t0 = Date.now();
+    const saves = [];
+    for (let i = 0; i < 121; i++) {
+      await updateMemory(db, OWNER, id, { content: `save ${i}` });
+    }
+    const versions = (await versionsOf(db, "memory", id)).filter((v) => v.op === "update");
+    saves.push(...versions);
+
+    // One 30 s cadence over an hour, seeded the same way the other coalescing
+    // tests seed an age (moving a stored version's clock is a history edit).
+    await db.batch([
+      { sql: "UPDATE item_versions_erase SET armed = 1", args: [] },
+      ...saves.map((save, i) => ({
+        sql: "UPDATE item_versions SET created_at = ? WHERE id = ?",
+        args: [new Date(t0 + i * 30_000).toISOString(), save.id],
+      })),
+      { sql: "UPDATE item_versions_erase SET armed = 0", args: [] },
+    ]);
+
+    const result = await sweep(db);
+    const after = (await versionsOf(db, "memory", id)).filter((v) => v.op === "update");
+    // Runs (anchored on their first save): [0..90]s keeps 90, [120..210] keeps
+    // 210, ... plus the final save. That is 31 versions across the hour.
+    assert.equal(after.length, 31, `expected one version per two minutes, got ${after.length}`);
+    assert.equal(result.coalesced, 121 - 31);
+    for (let i = 1; i < after.length; i++) {
+      const gap = Date.parse(after[i].created_at) - Date.parse(after[i - 1].created_at);
+      assert.ok(gap <= COALESCE_WINDOW_MS, `kept versions are at most two minutes apart (got ${gap} ms)`);
+    }
+    assert.equal((await memoryRow(db, id)).content, "save 120", "the live content is untouched");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a restore between listing and erasing keeps the item's history", async () => {
+  const fx = fixture("hist-trash-restore-race-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "restore me, do not erase me" });
+    await deleteMemory(db, OWNER, id);
+
+    // The sweep would list this item as old enough...
+    const cutoff = new Date(Date.now() + 60_000).toISOString();
+    const listed = await listTrash(db, { before: cutoff });
+    assert.deepEqual(listed.map((e) => e.itemId), [String(id)]);
+
+    // ...but a restore lands before its erase runs.
+    await restoreFromTrash(db, { itemType: "memory", itemId: id }, OWNER);
+
+    // The conditional DELETE sees a newer version (the restore), so it matches nothing.
+    const result = await eraseItems(
+      db,
+      listed.map((e) => ({ itemType: e.itemType, itemId: e.itemId })),
+      OWNER,
+      { deletedBefore: cutoff },
+    );
+    assert.equal(result.versions, 0, "nothing was erased");
+    assert.ok((await versionCount(db, "memory", id)) >= 3, "the delete and the restore are still history");
+    assert.equal((await memoryRow(db, id)).content, "restore me, do not erase me");
+    assert.deepEqual(await listTrash(db), [], "and it is not back in the Trash");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
 
 test("a Trash item older than 30 days has zero versions after the sweep", async () => {
   const fx = fixture("hist-trash-age-");
@@ -605,6 +727,142 @@ test("deleting a learner erases their memories' history at once (Maker Lab's rig
   }
 });
 
+test("a learner with 1500 memories is erased completely", async () => {
+  const fx = fixture("hist-learner-1500-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type) VALUES ('learner-big', 'Big', 'learner_profile')",
+      args: [],
+    })).lastInsertRowid);
+    await db.batch(
+      Array.from({ length: 1500 }, (_, i) => ({
+        sql: "INSERT INTO memories (content, project_id, source) VALUES (?, ?, 'maker-lab')",
+        args: [`progress ${i}`, learner],
+      })),
+    );
+    const before = Number((await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM item_versions WHERE item_type = 'memory'",
+      args: [],
+    })).rows[0].n);
+    assert.equal(before, 1500);
+
+    const client = new Client({ name: "history-jobs-big", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    const reply = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    await client.close();
+    const text = (reply.content || []).map((c) => c.text || "").join("\n");
+    assert.equal(reply.isError, undefined, text);
+    assert.match(text, /"deleted": true/, text);
+
+    assert.equal(Number((await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM memories WHERE project_id = ?",
+      args: [learner],
+    })).rows[0].n), 0);
+    assert.equal(Number((await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM item_versions WHERE item_type = 'memory'",
+      args: [],
+    })).rows[0].n), 0, "all 1500 memories' history is gone, not just the first 1000");
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a learner's memory already in the Trash is erased at once", async () => {
+  const fx = fixture("hist-learner-trash-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type) VALUES ('learner-trash', 'Kid', 'learner_profile')",
+      args: [],
+    })).lastInsertRowid);
+    const memory = await insertMemory(db, OWNER, { content: "already deleted", project_id: learner, source: "maker-lab" });
+    await updateMemory(db, OWNER, memory, { content: "already deleted, edited" });
+    await deleteMemory(db, OWNER, memory);
+    assert.ok((await versionCount(db, "memory", memory)) >= 2, "it is in the Trash with its history");
+
+    const client = new Client({ name: "history-jobs-trash", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    const reply = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    await client.close();
+    const text = (reply.content || []).map((c) => c.text || "").join("\n");
+    assert.equal(reply.isError, undefined, text);
+
+    assert.equal(
+      await versionCount(db, "memory", memory),
+      0,
+      "eraseByProject catches the memory the initial DELETE could not see because it was already gone",
+    );
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a failed erase is reported, never \"deleted\"", async () => {
+  const fx = fixture("hist-learner-fail-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type) VALUES ('learner-fail', 'Kid', 'learner_profile')",
+      args: [],
+    })).lastInsertRowid);
+    const memory = await insertMemory(db, OWNER, { content: "cannot be erased", project_id: learner, source: "maker-lab" });
+
+    // Arm the switch, but make that write fail: the erase door itself is broken.
+    await db.execute(`CREATE TRIGGER test_block_history_erase
+      BEFORE UPDATE ON item_versions_erase
+      WHEN NEW.armed = 1
+      BEGIN SELECT RAISE(ABORT, 'simulated history erase failure'); END`);
+
+    const client = new Client({ name: "history-jobs-fail", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    const reply = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    await client.close();
+    await db.execute("DROP TRIGGER test_block_history_erase");
+
+    const text = (reply.content || []).map((c) => c.text || "").join("\n");
+    assert.equal(reply.isError, true, text);
+    assert.match(text, /could not be fully erased; nothing was reported as deleted/i, text);
+    assert.doesNotMatch(text, /"deleted": true/, "never a success with history left behind");
+    assert.ok((await versionCount(db, "memory", memory)) > 0, "the history really was left behind");
+    assert.equal(await armed(db), 0, "the failed armed transaction rolled the switch back shut");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
 test("purging a project erases the history of what it deleted but not of memories it only unfiled", async () => {
   const dataDir = join(ROOT, "purge-instance");
   const fx = fixture("hist-purge-", dataDir);
@@ -653,6 +911,59 @@ test("purging a project erases the history of what it deleted but not of memorie
     const row = await memoryRow(db, memory, "id, content, project_id, project_uuid");
     assert.equal(row.project_id, null, "the memory itself is unfiled, not deleted");
     assert.equal(row.project_uuid, null);
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    fx.dispose();
+  }
+});
+
+test("a failed history erase is partial and the finish path re-runs it", async () => {
+  const dataDir = join(ROOT, "purge-resume-instance");
+  const fx = fixture("hist-purge-resume-", dataDir);
+  const db = fx.open();
+  const dir = mkdtempSync(join(tmpdir(), "hist-purge-resume-tasks-"));
+  try {
+    const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+    const L = await import("../servers/shared/project-lifecycle.js");
+
+    const project = await createProjectSpace(db, { name: "Erase later" });
+    const id = Number(project.id);
+    const section = Number((await withWriteContext(OWNER, () => db.execute({
+      sql: "INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES ('erase-later', 'Note', 'scoped', ?)",
+      args: [id],
+    }))).lastInsertRowid);
+    await withWriteContext(OWNER, () =>
+      db.execute({ sql: "UPDATE crow_context SET content = 'scoped, edited' WHERE id = ?", args: [section] }),
+    );
+    assert.equal(await versionCount(db, "context_section", section), 2);
+
+    const outcome = await L.deleteProject(db, id, {
+      confirmName: "Erase later",
+      dataDir,
+      tasksDbPath: join(dir, "tasks.db"),
+      storageDelete: async () => {},
+      disconnectBackend: async () => true,
+      // The delete succeeded but its history erase did not.
+      _eraseHistory: async () => { throw new Error("simulated history erase failure"); },
+    });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.ok(outcome.partial.includes("history-erase"), "the failed step is reported, not swallowed");
+    assert.equal(
+      await versionCount(db, "context_section", section),
+      3,
+      "the history is still there (insert + edit + the purge's delete)",
+    );
+
+    const resumed = await L.resumeProjectDelete(db, id, {
+      dataDir,
+      tasksDbPath: join(dir, "tasks.db"),
+      storageDelete: async () => {},
+    });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+    assert.deepEqual(resumed.partial, [], "the finish path re-ran the history erase");
+    assert.equal(await versionCount(db, "context_section", section), 0);
     assert.equal(await armed(db), 0);
   } finally {
     db.close();

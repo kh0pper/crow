@@ -99,6 +99,10 @@ export async function undoJob(db, { jobId, syncManager = null } = {}, ctx) {
   }
   const job = str(jobId);
   if (job === null) throw jobError("invalid_request", "undoJob needs a jobId");
+  // The undo is its own unit of work. Without this, a caller that passed the
+  // undone job's id in `ctx` would stamp the undo's versions with the job being
+  // undone, and a second Undo would try to undo its own repair.
+  const undoCtx = { ...ctx, jobId: `undo:${job}` };
 
   // Every item the job touched, and the id of the FIRST version it wrote for
   // each: that id is the boundary between "before the job" and "the job".
@@ -149,7 +153,7 @@ export async function undoJob(db, { jobId, syncManager = null } = {}, ctx) {
         // The job created the item: undo removes it, which the capture trigger
         // turns into a `delete` version — so it waits in the Trash like any
         // other deletion instead of vanishing mid-undo.
-        const r = await withWriteContext(ctx, () =>
+        const r = await withWriteContext(undoCtx, () =>
           db.execute({
             sql: `DELETE FROM ${quote(spec.table)} WHERE ${quote(spec.idColumn)} = ?`,
             args: [itemId],
@@ -173,7 +177,7 @@ export async function undoJob(db, { jobId, syncManager = null } = {}, ctx) {
         continue;
       }
 
-      const result = await restoreVersion(db, { versionId: Number(before[0].id), syncManager }, ctx);
+      const result = await restoreVersion(db, { versionId: Number(before[0].id), syncManager }, undoCtx);
       restored.push({
         itemType,
         itemId,

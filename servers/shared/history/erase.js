@@ -3,9 +3,9 @@
  *
  * item_versions is append-only by trigger (covered.js). The single legal way to
  * remove rows is the erase control table: arm `item_versions_erase`, do the
- * deletes, disarm — all INSIDE ONE immediate transaction, so no other connection
- * ever sees the switch on (in WAL an uncommitted change is invisible to them) and
- * a failure leaves the door shut rather than open.
+ * deletes, disarm — all INSIDE ONE transaction, so no other connection ever sees
+ * the switch on (in WAL an uncommitted change is invisible to them) and a
+ * failure leaves the door shut rather than open.
  *
  * Three callers, and no others:
  *   - the operator emptying the Trash / a Trash item ageing out (trash.js, sweep.js);
@@ -26,10 +26,16 @@
  * that way is scoped, deliberate and transactional.
  *
  * TWO SHAPES:
- *   eraseItems(db, [{itemType, itemId}], ctx)   the caller names the items (a
+ *   eraseItems(db, [{itemType, itemId}], ctx[, {deletedBefore}])
+ *                                               the caller names the items (a
  *                                               learner's memories, one Trash
  *                                               item, the integer rows a purge
- *                                               deleted);
+ *                                               deleted). `deletedBefore` makes
+ *                                               the delete conditional on the
+ *                                               item still being in the Trash at
+ *                                               that age, which is what keeps a
+ *                                               restore that lands between the
+ *                                               listing and the erase alive;
  *   eraseByProject(db, {projectUuid, projectId}, ctx)
  *                                               project-wide, CLOSED OVER THE
  *                                               ITEM — see the closure note in
@@ -125,46 +131,118 @@ function projectRefs({ projectUuid, projectId } = {}) {
 }
 
 /**
- * Run `work` with the erase switch armed, inside ONE immediate transaction.
+ * Are the history tables installed? A store that has not run migration 0024 has
+ * no history to erase — that is an empty set, not a failure. (It also keeps a
+ * permanent project delete on an older store from reporting a bogus partial
+ * "history-erase" step forever.)
  *
- * The disarm is inside the transaction, so it commits with the deletes: a
- * process that dies mid-erase leaves the switch armed in the WAL but never
- * committed, and a store that somehow sees an armed row at boot gets it reset by
- * servers/shared/history/ensure.js. If `work` throws, the ROLLBACK undoes the
- * arm — and a second, out-of-transaction disarm is attempted anyway, because the
- * one guarantee this helper must never break is "the door is shut afterwards"
- * even when the rollback itself failed.
- *
- * CONTRACT: the caller holds no transaction. This opens its own BEGIN IMMEDIATE
- * (a caller's open transaction makes that fail, and this helper's ROLLBACK must
- * never be the thing that ends someone else's work).
+ * ONE table without the other is a broken store, not a pre-history one: there
+ * ARE versions, and no switch through which to erase them. That fails closed
+ * rather than returning an empty result.
  */
-async function inArmedTransaction(db, work) {
+async function historyInstalled(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('item_versions', 'item_versions_erase')",
+    args: [],
+  });
+  const names = new Set(rows.map((row) => row.name));
+  if (!names.has("item_versions")) return false;
+  if (!names.has("item_versions_erase")) {
+    throw eraseError("unavailable", "the history erase switch table is missing, so history cannot be erased safely");
+  }
+  return true;
+}
+
+/**
+ * Run `statements` with the erase switch armed, as ONE transaction.
+ *
+ * The production client is better-sqlite3 behind servers/db.js, whose `batch()`
+ * wraps every statement in one synchronous transaction (the first statement is
+ * the arm UPDATE, so the write lock is taken before anything else can run). Using it here
+ * (rather than awaits on individual `execute()` calls) is the point: nothing can
+ * interleave between arm, the deletes/updates and disarm, and a failure rolls
+ * the whole thing back — arm included — so the door is shut without a second,
+ * out-of-transaction disarm.
+ *
+ * A shim with only `execute` (tests, a future client) gets a best-effort
+ * fallback that opens its own transaction. Its catch only disarms when this
+ * helper actually opened that transaction (M2); a BEGIN that failed armed
+ * nothing.
+ *
+ * @param {object} db libsql-shaped client (servers/db.js)
+ * @param {Array<{sql: string, args?: any[]}>} statements
+ * @returns {Promise<Array<object>>} the results of `statements` (arm/disarm excluded)
+ */
+export async function runArmedStatements(db, statements) {
+  if (!Array.isArray(statements)) throw eraseError("invalid_request", "runArmedStatements needs an array of statements");
+  const armed = [
+    { sql: "UPDATE item_versions_erase SET armed = 1", args: [] },
+    ...statements,
+    { sql: "UPDATE item_versions_erase SET armed = 0", args: [] },
+  ];
+  if (typeof db.batch === "function") {
+    const results = await db.batch(armed);
+    return results.slice(1, -1);
+  }
+  return runArmedFallback(db, statements);
+}
+
+/** Sequential fallback for a client without `batch()`; see runArmedStatements. */
+async function runArmedFallback(db, statements) {
   let began = false;
   try {
     await db.execute("BEGIN IMMEDIATE");
     began = true;
-    await db.execute("UPDATE item_versions_erase SET armed = 1");
-    const result = await work();
-    await db.execute("UPDATE item_versions_erase SET armed = 0");
+    await db.execute({ sql: "UPDATE item_versions_erase SET armed = 1", args: [] });
+    const out = [];
+    for (const statement of statements) out.push(await db.execute(statement));
+    await db.execute({ sql: "UPDATE item_versions_erase SET armed = 0", args: [] });
     await db.execute("COMMIT");
-    return result;
+    return out;
   } catch (err) {
     if (began) {
       try {
         await db.execute("ROLLBACK");
       } catch {
-        /* already rolled back (or the transaction never opened) */
+        // The rollback itself failed: try to shut the door explicitly. This is
+        // the one case where an out-of-transaction disarm is warranted — this
+        // helper did begin the transaction, so an arm may be sitting in it.
+        try {
+          await db.execute({ sql: "UPDATE item_versions_erase SET armed = 0", args: [] });
+        } catch {
+          /* unreadable store: the boot ensure disarms a stuck switch */
+        }
       }
-    }
-    try {
-      await db.execute("UPDATE item_versions_erase SET armed = 0");
-    } catch {
-      /* the store is unreadable: the boot ensure disarms a stuck switch */
     }
     throw err;
   }
 }
+
+/** The unconditional "every version of this item" delete. */
+const DELETE_ITEM_SQL = "DELETE FROM item_versions WHERE item_type = ? AND item_id = ?";
+
+/**
+ * The guarded delete: every version of the item, but only while its LATEST
+ * version is still a `delete` recorded at or before the cutoff. A restore that
+ * lands after the listing writes a newer version, so this matches nothing and
+ * the restored item's history survives.
+ */
+const DELETE_TRASH_ITEM_SQL = `
+  DELETE FROM item_versions
+   WHERE item_type = ? AND item_id = ?
+     AND EXISTS (
+       SELECT 1 FROM item_versions latest
+        WHERE latest.item_type = item_versions.item_type
+          AND latest.item_id = item_versions.item_id
+          AND latest.op = 'delete'
+          AND latest.created_at <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM item_versions newer
+             WHERE newer.item_type = latest.item_type
+               AND newer.item_id = latest.item_id
+               AND newer.id > latest.id
+          )
+     )`;
 
 /**
  * Erase every version of the named items.
@@ -172,29 +250,29 @@ async function inArmedTransaction(db, work) {
  * @param {object} db libsql-shaped client (servers/db.js)
  * @param {Array<{itemType: string, itemId: string|number}>} items
  * @param {{authorKind: string, authorId?: string}} ctx a real owner or system actor
+ * @param {{deletedBefore?: string|null}} [opts] when set, erase an item only if
+ *   its latest version is still a `delete` at or before this ISO timestamp (the
+ *   Trash clock). The whole item's versions go when it matches.
  * @returns {Promise<{erased: Array<{itemType: string, itemId: string, versions: number}>,
  *   versions: number, by: {authorKind: string, authorId: string|null}}>}
  *   `versions` per item is what the erase actually removed (0 for an item that
  *   had none — an idempotent repeat of an erase, which is not an error).
  */
-export async function eraseItems(db, items, ctx) {
+export async function eraseItems(db, items, ctx, { deletedBefore = null } = {}) {
   const by = assertEraseActor(ctx);
   const wanted = normalizeItems(items);
   if (wanted.length === 0) return { erased: [], versions: 0, by };
+  if (!(await historyInstalled(db))) return { erased: [], versions: 0, by };
 
-  const erased = await withoutWriteContext(() =>
-    inArmedTransaction(db, async () => {
-      const out = [];
-      for (const item of wanted) {
-        const r = await db.execute({
-          sql: "DELETE FROM item_versions WHERE item_type = ? AND item_id = ?",
-          args: [item.itemType, item.itemId],
-        });
-        out.push({ ...item, versions: Number(r.rowsAffected || 0) });
-      }
-      return out;
-    }),
+  const cutoff = typeof deletedBefore === "string" && deletedBefore !== "" ? deletedBefore : null;
+  const statements = wanted.map((item) =>
+    cutoff === null
+      ? { sql: DELETE_ITEM_SQL, args: [item.itemType, item.itemId] }
+      : { sql: DELETE_TRASH_ITEM_SQL, args: [item.itemType, item.itemId, cutoff] },
   );
+
+  const results = await withoutWriteContext(() => runArmedStatements(db, statements));
+  const erased = wanted.map((item, i) => ({ ...item, versions: Number(results[i]?.rowsAffected || 0) }));
 
   return { erased, versions: erased.reduce((sum, e) => sum + e.versions, 0), by };
 }
@@ -213,6 +291,10 @@ export async function eraseItems(db, items, ctx) {
  * so their history is never a project delete's to take, while the context
  * sections the purge DELETED are gone and their versions go with them.
  *
+ * One conditional DELETE does the work (with a same-transaction SELECT for the
+ * per-item report), so nothing can be restored between the candidate lookup and
+ * the erase.
+ *
  * @param {object} db
  * @param {{projectUuid?: string|null, projectId?: string|number|null}} project
  * @param {{authorKind: string, authorId?: string}} ctx
@@ -225,33 +307,66 @@ export async function eraseByProject(db, project = {}, ctx) {
   if (refs.length === 0) {
     throw eraseError("invalid_request", "eraseByProject needs a project uuid or a project id");
   }
+  if (!(await historyInstalled(db))) return { erased: [], versions: 0, projectRefs: refs, by };
 
-  const erased = await withoutWriteContext(() =>
-    inArmedTransaction(db, async () => {
-      const placeholders = refs.map(() => "?").join(", ");
-      const { rows: candidates } = await db.execute({
-        sql: `SELECT DISTINCT item_type, item_id FROM item_versions WHERE project_ref IN (${placeholders})`,
-        args: refs,
-      });
-      const out = [];
-      for (const candidate of candidates) {
-        const itemType = String(candidate.item_type);
-        const itemId = String(candidate.item_id);
-        const { rows: latest } = await db.execute({
-          sql: `SELECT op FROM item_versions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT 1`,
-          args: [itemType, itemId],
-        });
-        // A live item's history stays: the project delete did not remove it.
-        if (latest[0]?.op !== "delete") continue;
-        const r = await db.execute({
-          sql: "DELETE FROM item_versions WHERE item_type = ? AND item_id = ?",
-          args: [itemType, itemId],
-        });
-        out.push({ itemType, itemId, versions: Number(r.rowsAffected || 0) });
-      }
-      return out;
-    }),
+  const placeholders = refs.map(() => "?").join(", ");
+  // The latest version is the one with no newer row; `latest.op = 'delete'` is
+  // the whole safety rule (an unfiled memory's latest version is an update).
+  const candidateSql = `
+    SELECT v.item_type, v.item_id, COUNT(*) AS versions
+      FROM item_versions v
+     WHERE EXISTS (
+             SELECT 1 FROM item_versions p
+              WHERE p.item_type = v.item_type
+                AND p.item_id = v.item_id
+                AND p.project_ref IN (${placeholders})
+           )
+       AND EXISTS (
+             SELECT 1 FROM item_versions latest
+              WHERE latest.item_type = v.item_type
+                AND latest.item_id = v.item_id
+                AND latest.op = 'delete'
+                AND NOT EXISTS (
+                  SELECT 1 FROM item_versions newer
+                   WHERE newer.item_type = latest.item_type
+                     AND newer.item_id = latest.item_id
+                     AND newer.id > latest.id
+                )
+           )
+     GROUP BY v.item_type, v.item_id
+     ORDER BY v.item_type, v.item_id`;
+  const deleteSql = `
+    DELETE FROM item_versions
+     WHERE EXISTS (
+             SELECT 1 FROM item_versions p
+              WHERE p.item_type = item_versions.item_type
+                AND p.item_id = item_versions.item_id
+                AND p.project_ref IN (${placeholders})
+           )
+       AND EXISTS (
+             SELECT 1 FROM item_versions latest
+              WHERE latest.item_type = item_versions.item_type
+                AND latest.item_id = item_versions.item_id
+                AND latest.op = 'delete'
+                AND NOT EXISTS (
+                  SELECT 1 FROM item_versions newer
+                   WHERE newer.item_type = latest.item_type
+                     AND newer.item_id = latest.item_id
+                     AND newer.id > latest.id
+                )
+           )`;
+
+  const results = await withoutWriteContext(() =>
+    runArmedStatements(db, [
+      { sql: candidateSql, args: refs },
+      { sql: deleteSql, args: refs },
+    ]),
   );
+  const erased = (results[0]?.rows ?? []).map((row) => ({
+    itemType: String(row.item_type),
+    itemId: String(row.item_id),
+    versions: Number(row.versions || 0),
+  }));
 
   return { erased, versions: erased.reduce((sum, e) => sum + e.versions, 0), projectRefs: refs, by };
 }

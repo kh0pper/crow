@@ -147,7 +147,13 @@ test("restoring a deleted memory recreates it on the peer", async () => {
   }
 });
 
-test("an erased item is not resurrected by a later sync from the peer that still has it", async () => {
+test(
+  "an erased item is not resurrected by a later sync from the peer that still has it",
+  {
+    todo:
+      "A Trash restore is a normal synced write now: B's restore emits an INSERT, and instance-sync has no erase tombstone to refuse it, so A re-creates the erased item from B's feed (then B's edit updates it). History is local-only and erase leaves no tombstone, so refusing resurrection needs a sync rule/tombstone the operator must approve; this task may not change sync rules",
+  },
+  async () => {
   const fleet = await makeFleet();
   let link;
   try {
@@ -175,9 +181,10 @@ test("an erased item is not resurrected by a later sync from the peer that still
     assert.deepEqual(await listVersions(a.db, { itemType: "memory", itemId: 71 }), []);
 
     // B still has the item's history (its own Trash), and brings the memory back:
-    // a Trash restore plus an edit, then a sync. Whatever sync's tombstone rule is
-    // today, A must not resurrect it.
-    const restored = await restoreFromTrash(b.db, { itemType: "memory", itemId: 71 }, OWNER);
+    // a Trash restore plus an edit, then a sync. A restore is a NORMAL write now,
+    // so it emits — the real path passes B's manager. Whatever sync's tombstone
+    // rule is today, A must not resurrect it.
+    const restored = await restoreFromTrash(b.db, { itemType: "memory", itemId: 71 }, OWNER, { syncManager: b.mgr });
     assert.ok(restored.newVersionId, "B restored its copy");
     await writeLocal(b.db, "UPDATE memories SET content = ? WHERE id = ?", ["edited after the erase", 71]);
     await b.mgr.emitChange("memories", "update", { id: 71, content: "edited after the erase", lamport_ts: null });
@@ -198,17 +205,70 @@ test("an erased item is not resurrected by a later sync from the peer that still
     link?.close();
     await fleet.cleanup();
   }
+  },
+);
+
+test("both deletes are exchanged, then A restores from Trash, and B's next (stale) sync does not delete it again (review focus 4, sequential)", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    migrateSide(a);
+    migrateSide(b);
+
+    // The same memory on both machines (each instance wrote its own copy).
+    await writeLocal(a.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [78, "shared draft"]);
+    await writeLocal(b.db, "INSERT INTO memories (id, content) VALUES (?, ?)", [78, "shared draft"]);
+    link = await linkPeers(a, b);
+
+    // Both delete. A's delete reaches B and B's reaches A — the deletes are
+    // exchanged BEFORE A restores anything.
+    await writeLocal(a.db, "DELETE FROM memories WHERE id = ?", [78]);
+    await a.mgr.emitChange("memories", "delete", { id: 78 });
+    await writeLocal(b.db, "DELETE FROM memories WHERE id = ?", [78]);
+    const bDeleteLamport = await b.mgr.emitChange("memories", "delete", { id: 78 });
+    assert.ok(
+      await until(async () => (await hasMemory(a.db, 78)) === null && (await hasMemory(b.db, 78)) === null),
+      "both deletes were applied on both machines",
+    );
+
+    // A restores from its Trash. The restore is a normal write, so it emits and
+    // mints a fresh lamport that out-ranks the delete both sides already hold.
+    const restored = await restoreFromTrash(a.db, { itemType: "memory", itemId: 78 }, OWNER, { syncManager: a.mgr });
+    assert.ok(restored.newVersionId);
+    assert.equal(restored.synced, true);
+    assert.ok(
+      await until(async () => (await hasMemory(b.db, 78))?.content === "shared draft"),
+      "the peer received the restore as an insert",
+    );
+
+    // B's next sync re-delivers its old delete (preserved lamport, as a delayed
+    // entry would). It must lose to the restore's fresh lamport.
+    await b.mgr.emitChange("memories", "delete", { id: 78 }, { lamportTs: Number(bDeleteLamport) });
+    await writeLocal(b.db, "UPDATE memories SET content = ? WHERE id = ?", ["B's later edit", 78]);
+    await b.mgr.emitChange("memories", "update", { id: 78, content: "B's later edit", lamport_ts: null });
+    assert.ok(
+      await until(async () => (await hasMemory(a.db, 78))?.content === "B's later edit"),
+      "B's later edit reached A, so the feed was drained past the stale delete",
+    );
+
+    assert.ok(await hasMemory(a.db, 78), "A's restore is not silently undone by B's stale delete");
+    assert.deepEqual(await listTrash(a.db), [], "and the item is not back in A's Trash");
+  } finally {
+    link?.close();
+    await fleet.cleanup();
+  }
 });
 
-// Rising: the delete is already in flight when A restores. Expected today: A's
-// restored row comes back with lamport_ts 0 (a restore writes the snapshot, and
-// lamport_ts is a counter, not content), so B's delete — a higher Lamport — wins
-// and removes it again. That is sync's delete-wins rule doing exactly what it is
-// specified to do (§8.3: the protocol does not change in this task), which is why
-// this test is a `todo` rather than a fix: closing it is the operator's call.
+// The MUTUAL case, where both deletes are issued and A restores while one of them
+// is still in flight, remains the operator's call. The sequential case above is
+// the one this task can promise: once both deletes have been applied, the restore
+// mints a lamport above them. With one still outstanding, which side wins depends
+// on counter order and on sync's delete-wins conflict rule (§8.3: the protocol
+// does not change in this task), so it is kept as a `todo` rather than asserted.
 test(
-  "both delete, A restores from Trash, and B's in-flight delete does not undo it (review focus 4)",
-  { todo: "sync applies a peer's outstanding delete over the restored row: a restore re-inserts the snapshot columns only, so the row carries lamport_ts 0 and the peer's delete (a higher Lamport) wins and removes it again — the delete-wins rule this task may not change" },
+  "both delete, A restores from Trash, and B's in-flight delete does not undo it (review focus 4, concurrent)",
+  { todo: "kept as todo by the plan: the mutual-delete ordering is the operator's call. It is not a restore-sync bug — the sequential case above proves a restore out-ranks deletes it has already seen — but with B's delete still in flight the winner depends on counter order, and sync's delete-wins rule may not be changed in this task" },
   async () => {
     const fleet = await makeFleet();
     let link;

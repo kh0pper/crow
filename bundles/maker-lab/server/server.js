@@ -279,59 +279,73 @@ export function createMakerLabServer(db, options = {}) {
     },
     async ({ learner_id, reason }) => {
       const r = await db.execute({
-        sql: `SELECT name FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL`,
+        sql: `SELECT name, uuid FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL`,
         args: [learner_id],
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
       const name = r.rows[0].name;
-      // Cascade: sessions → transcripts (FK), codes (FK via session), bound_devices (FK),
-      // settings (FK). Memories tagged source='maker-lab' with project_id = learner_id.
-      // All deletes in one transactional batch (spec S1): child deletes BEFORE the ps
-      // delete so the maker_sessions CHECK constraint doesn't abort. (B3b: the legacy research_projects row no longer exists — table dropped.)
-      const batchResult = await db.batch([
-        { sql: `DELETE FROM maker_sessions WHERE learner_id=?`, args: [learner_id] },
-        { sql: `DELETE FROM maker_transcripts WHERE learner_id=?`, args: [learner_id] },
-        { sql: `DELETE FROM maker_bound_devices WHERE learner_id=?`, args: [learner_id] },
-        { sql: `DELETE FROM maker_learner_settings WHERE learner_id=?`, args: [learner_id] },
-        { sql: `DELETE FROM project_spaces WHERE id=? AND type='learner_profile'`, args: [learner_id] },
-      ]);
-      const psRowsAffected = Number(batchResult[4]?.rowsAffected ?? 0);
-      if (psRowsAffected === 0) {
-        return mcpError(`Learner ${learner_id} not found`);
-      }
-      // The right to be forgotten, AT ONCE (the operator's ruling, 2026-11-10):
-      // DATA-HANDLING.md promises a learner's data is deleted on request (COPPA /
-      // GDPR-K), so a permanent learner delete is never a 30-day Trash. The ids are
-      // read BEFORE the delete, then their whole version history goes through
-      // servers/shared/history/erase.js (armed switch, one transaction). `system`
-      // because this is the flow's own consequence, not an independent history
-      // rewrite: it names maker-lab as the actor and touches only the rows this
-      // statement just deleted. Best effort like the delete above: a store without
-      // the history tables has nothing to erase.
-      let deletedMemoryIds = [];
+      const projectUuid = r.rows[0].uuid ?? null;
+
+      // FAIL CLOSED. A learner delete is a COPPA / GDPR-K promise
+      // (DATA-HANDLING.md): if any part of the delete or of the history erase
+      // cannot finish, the tool says so and never reports `deleted: true` with
+      // data left behind. The operator's ruling (2026-11-10) is that this erase
+      // is AT ONCE, not after a 30-day Trash.
       try {
+        // Memory ids are read BEFORE the delete; their whole version history is
+        // erased afterwards. (The delete itself is in the same batch as the rest
+        // of the cascade.)
         const found = await db.execute({
           sql: `SELECT id FROM memories WHERE project_id=?`,
           args: [learner_id],
         });
-        deletedMemoryIds = found.rows.map((r) => String(r.id));
-        await db.execute({ sql: `DELETE FROM memories WHERE project_id=?`, args: [learner_id] });
-      } catch {
-        deletedMemoryIds = [];
-      }
-      if (deletedMemoryIds.length) {
-        try {
-          const { eraseItems } = await appImport("servers/shared/history/erase.js");
+        const deletedMemoryIds = found.rows.map((row) => String(row.id));
+
+        // Cascade: sessions → transcripts (FK), codes (FK via session), bound_devices
+        // (FK), settings (FK), the learner's memories and project-scoped context
+        // sections, then the profile. Child deletes BEFORE the ps delete so the
+        // maker_sessions CHECK constraint doesn't abort. (B3b: the legacy
+        // research_projects row no longer exists — table dropped.)
+        const batchResult = await db.batch([
+          { sql: `DELETE FROM maker_sessions WHERE learner_id=?`, args: [learner_id] },
+          { sql: `DELETE FROM maker_transcripts WHERE learner_id=?`, args: [learner_id] },
+          { sql: `DELETE FROM maker_bound_devices WHERE learner_id=?`, args: [learner_id] },
+          { sql: `DELETE FROM maker_learner_settings WHERE learner_id=?`, args: [learner_id] },
+          { sql: `DELETE FROM memories WHERE project_id=?`, args: [learner_id] },
+          { sql: `DELETE FROM crow_context WHERE project_id=?`, args: [learner_id] },
+          { sql: `DELETE FROM project_spaces WHERE id=? AND type='learner_profile'`, args: [learner_id] },
+        ]);
+        const psRowsAffected = Number(batchResult.at(-1)?.rowsAffected ?? 0);
+        if (psRowsAffected === 0) {
+          return mcpError(`Learner ${learner_id} not found`);
+        }
+
+        const { eraseItems, eraseByProject } = await appImport("servers/shared/history/erase.js");
+        const ctx = { authorKind: "system", authorId: "maker-lab" };
+
+        // eraseItems names at most 1000 items per call by design: chunk rather
+        // than let a big learner skip the erase entirely.
+        for (let i = 0; i < deletedMemoryIds.length; i += 1000) {
           await eraseItems(
             db,
-            deletedMemoryIds.map((id) => ({ itemType: "memory", itemId: id })),
-            { authorKind: "system", authorId: "maker-lab" },
+            deletedMemoryIds.slice(i, i + 1000).map((id) => ({ itemType: "memory", itemId: id })),
+            ctx,
           );
-        } catch (err) {
-          console.warn(`[maker-lab] learner ${learner_id}: memory history erase skipped:`, err?.message || err);
         }
+
+        // The closure catches what the id list cannot: a memory already in the
+        // Trash before this delete (its latest version is the earlier delete),
+        // and the context sections just deleted. Only items whose latest version
+        // is a delete go, so nothing merely unfiled loses its history.
+        await eraseByProject(db, { projectUuid, projectId: learner_id }, ctx);
+
+        return mcpOk({ deleted: true, learner_id, name, reason: reason || null });
+      } catch (err) {
+        console.warn(`[maker-lab] learner ${learner_id}: delete/erase failed:`, err?.message || err);
+        return mcpError(
+          "The learner's data could not be fully erased; nothing was reported as deleted. Try again.",
+        );
       }
-      return mcpOk({ deleted: true, learner_id, name, reason: reason || null });
     }
   );
 

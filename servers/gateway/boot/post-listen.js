@@ -785,16 +785,27 @@ export async function runPostListenSetup(server, app, deps) {
     const HISTORY_SWEEP_INTERVAL_MS = 5 * 60 * 1000;      // 5 min
     // One handle for the process: the sweep's scan cursors live with it.
     let sweepDb = null;
-    const historySweepCycle = () => {
+    // A tick that lands while a run is still in flight is skipped, not queued:
+    // two overlapping passes would fight over the same coalescing cursor and
+    // could delete a version the other one just decided to keep.
+    let historySweepInFlight = false;
+    const historySweepCycle = async () => {
+      if (historySweepInFlight) return;
       try {
         if (!sweepDb) sweepDb = createDbClient();
       } catch (err) {
         console.warn("[history] sweep skipped: no database handle:", err?.message || err);
         return;
       }
-      runHistorySweep({ db: sweepDb }).catch(() => {
-        /* runHistorySweep already logs; this only guarantees no unhandled rejection */
-      });
+      historySweepInFlight = true;
+      try {
+        await runHistorySweep({ db: sweepDb });
+      } catch (err) {
+        // runHistorySweep already logs; this only guarantees no unhandled rejection.
+        console.warn("[history] sweep cycle failed:", err?.message || err);
+      } finally {
+        historySweepInFlight = false;
+      }
     };
     setTimeout(() => {
       historySweepCycle();
