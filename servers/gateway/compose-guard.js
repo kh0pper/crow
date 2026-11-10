@@ -168,7 +168,7 @@ const TOP_OK = new Set(["name", "services", "networks", "volumes", "secrets", "c
 // read by the version refresh and the bind-drift card, so never mountable read-write.
 const BUNDLE_CONTROL = new Set(["manifest.json", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
   "docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml",
-  ".crow-compose.sha256", ".crow-compose.edited",
+  ".crow-compose.sha256", ".crow-compose.edited", ".crow-compose.image-change",
   ".env", ".env.example", "package.json", "package-lock.json", "node_modules", "server", "panel", "scripts", "ops", "skills", "public", "bin"]);
 // The only "<id><suffix>" names a bundle owns beside <id> itself (a fixed set, so id "rook"
 // never reaches bundle "rook-x"'s folder). No bundle id may end in one (tested).
@@ -966,6 +966,62 @@ export function composePublishedPorts(text, env = {}) {
 /** The expectation map key: the service's name plus `containerPort/protocol`. */
 export function composeExpectationKey(service, containerPort, protocol) {
   return `${service || ""}|${containerPort}/${protocol}`;
+}
+
+/**
+ * The `image:` each service of a compose text names: `{ service: "image:tag" }`, with
+ * `${VAR:-default}` resolved against `env` exactly as Compose resolves it. A service
+ * without an `image:` (a `build:` only) maps to null. Line-based, like the rest of this
+ * module: it reads what the FILE declares, not the merged model (no docker needed).
+ *
+ * Only a key at the service's own depth counts, so an `image:` nested in an extension
+ * block (or inside a block scalar) is never mistaken for the service's image.
+ */
+export function composeServiceImages(text, env = {}) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const services = serviceByLine(lines);
+  const childIndent = new Map();
+  const out = {};
+  for (let i = 0; i < lines.length; i++) {
+    const service = services[i];
+    if (!service) continue;
+    const key = /^(\s*)([A-Za-z0-9._-]+)\s*:(.*)$/.exec(lines[i]);
+    if (!key) continue;
+    const [, spaces, name, rest] = key;
+    const indent = spaces.length;
+    // The line that names the service is not one of its keys: its depth is set by the
+    // first key below it (a block header of its own is never a value either).
+    if (name === service && !rest.trim()) continue;
+    if (!childIndent.has(service)) childIndent.set(service, indent);
+    if (indent !== childIndent.get(service) || name !== "image") continue;
+    const image = composeScalar(expandComposeVars(String(rest ?? ""), env));
+    out[service] = image || null;
+  }
+  return out;
+}
+
+/**
+ * Where two compose texts disagree about which image a service runs:
+ * `[{ service, from, to }]` in service-name order, `from`/`to` being the resolved image
+ * name or null (a service the other file does not have, or one that only builds). A
+ * service ADDED or REMOVED is a change too, so a comparison of the two texts never
+ * blesses a repo compose that would quietly start or drop a container.
+ *
+ * An empty list means the compose refresh can be applied without touching an image.
+ */
+export function composeImageChanges(installedText, repoText, env = {}) {
+  const before = composeServiceImages(installedText, env);
+  const after = composeServiceImages(repoText, env);
+  const changes = [];
+  for (const service of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+    const inBefore = Object.hasOwn(before, service);
+    const inAfter = Object.hasOwn(after, service);
+    const from = inBefore ? before[service] : null;
+    const to = inAfter ? after[service] : null;
+    if (inBefore && inAfter && from === to) continue;
+    changes.push({ service, from, to });
+  }
+  return changes;
 }
 
 /**

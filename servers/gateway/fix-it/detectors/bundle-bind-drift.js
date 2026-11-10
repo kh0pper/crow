@@ -25,6 +25,13 @@
  *   needs config       the shipped compose needs a `${X:?…}` the installed .env
  *                      does not set. Copying it would break Start, so the old copy
  *                      stays and the card names the key to set first.
+ *   image change       the shipped compose would also change a service's image —
+ *                      which may be OLDER than the one running — so the boot
+ *                      catch-up kept the old copy instead of applying it. The card
+ *                      says why and offers "Apply the update" (owner-only, keeps
+ *                      the current file as `<composefile>.bak`). It suppresses the
+ *                      repo-tighter card for that bundle: "a restart won't change
+ *                      that" would contradict "press Apply the update".
  *
  * No event fires for a running container's port bindings, so this is a BOOT
  * check (`runBootChecks()`), and the gateway re-runs it for one bundle after a
@@ -41,14 +48,15 @@ import { APP_BUNDLES, CROW_HOME, manifestComposeFile } from "../../bundles-confi
 import { composeEnv, composeOverrideFiles, composePortExpectations, composePublishedPorts, parseDotEnv, portBindDrift } from "../../compose-guard.js";
 import { composeProjectName } from "../../bundle-lifecycle.js";
 import { dockerRunner, readInstalled } from "../../bundle-core.js";
-import { readComposeEdited, readComposeNeedsConfig, readComposeState, sha256 } from "../../bundle-compose-state.js";
+import { readComposeEdited, readComposeImageChange, readComposeNeedsConfig, readComposeState, sha256 } from "../../bundle-compose-state.js";
 import { isSatelliteEntry, BUNDLE_ID_RE } from "../../satellites/installs.js";
-import { ACTION_ID as RESTORE_COMPOSE_ACTION_ID, LABEL as RESTORE_COMPOSE_LABEL } from "../remedies/restore-bundle-compose.js";
+import { ACTION_ID as RESTORE_COMPOSE_ACTION_ID, APPLY_UPDATE_ACTION_ID, LABEL as RESTORE_COMPOSE_LABEL } from "../remedies/restore-bundle-compose.js";
 
 export const SOURCE = "bundle-bind-drift";
 export const COMPOSE_EDITED_SOURCE = "bundle-compose-edited";
 export const REPO_DRIFT_SOURCE = "bundle-repo-bind-drift";
 export const COMPOSE_NEEDS_CONFIG_SOURCE = "bundle-compose-needs-config";
+export const COMPOSE_IMAGE_CHANGE_SOURCE = "bundle-compose-image-change";
 /** The link remedy whose target lives in code (fix-it/index.js LINK_REMEDIES). */
 export const REMEDY_ACTION_ID = "open-extensions-page";
 /** The owner-only restore action (fix-it/remedies/restore-bundle-compose.js). */
@@ -117,6 +125,24 @@ export function composeNeedsConfigTitle(name) {
 
 export function composeNeedsConfigBody(name, key) {
   return `Crow could not update ${name}'s settings file: it needs ${key} set first (Configure on its Extensions card).`;
+}
+
+export function composeImageChangeTitle(name) {
+  return `${name}'s settings file has an update Crow did not apply`;
+}
+
+/**
+ * The image-change hold: the shipped compose also switches a container's image, and
+ * that image may be older than the one running (a downgrade can migrate the data on
+ * the next restart), so Crow kept the old file. "Apply the update" is the owner's way
+ * to take it; the restart card then appears as usual.
+ */
+export function composeImageChangeBody(name, change) {
+  const from = change?.from || "none";
+  const to = change?.to || "none";
+  return `Crow keeps ${name} on its current settings because the update would also change its image (${from} → ${to}; it may be older than what is running). `
+    + `The update also tightens how ${name} is published. `
+    + "Back up its data, then press 'Apply the update' to switch, or keep it as it is.";
 }
 
 function readJson(path) {
@@ -300,6 +326,29 @@ export default {
         await resolveCard(store, COMPOSE_NEEDS_CONFIG_SOURCE, dedupKeyFor(id));
       }
 
+      // ── the shipped compose would also switch a container's image: the boot
+      //    catch-up kept the old file instead of applying it (the new tag may be
+      //    older than what is running). Applying is the owner's call.
+      const imageChange = readComposeImageChange(dir);
+      if (imageChange) {
+        const first = imageChange[0];
+        await store.upsertItem({
+          source: COMPOSE_IMAGE_CHANGE_SOURCE,
+          dedupKey: dedupKeyFor(id),
+          title: composeImageChangeTitle(name),
+          why: composeImageChangeBody(name, first),
+          severity: "warn",
+          remedies: [
+            { actionId: APPLY_UPDATE_ACTION_ID, kind: "instant", label: "Apply the update", args: { bundle: id } },
+            linkRemedy,
+          ],
+          context: { bundle: id, compose: compose.composeRel, service: first.service, from: first.from, to: first.to },
+        });
+        cards.push(`${id}: compose-image-change`);
+      } else {
+        await resolveCard(store, COMPOSE_IMAGE_CHANGE_SOURCE, dedupKeyFor(id));
+      }
+
       if (dockerFailed) continue;
       let running;
       try {
@@ -336,6 +385,12 @@ export default {
         ? "edited"
         : state && state.verdict === "unknown" && state.installedSha === compose.sha ? "unknown" : null;
       const repoDriftKey = dedupKeyFor(id, "repo");
+      // Held for an image change: "a restart won't change that" would contradict the
+      // Apply-the-update card above, which is the one that actually moves this bundle.
+      if (imageChange) {
+        await resolveCard(store, REPO_DRIFT_SOURCE, repoDriftKey);
+        continue;
+      }
       if (!verdict) {
         await resolveCard(store, REPO_DRIFT_SOURCE, repoDriftKey);
         continue;

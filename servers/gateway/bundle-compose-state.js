@@ -29,6 +29,15 @@
  *                              not copied because `${X:?…}` would fail Start.
  *                              The card names the key to set; the next boot
  *                              retries the refresh.
+ *   .crow-compose.image-change [{ service, from, to }]: the shipped compose was
+ *                              not copied because it would also change a
+ *                              service's image — which may be OLDER than what
+ *                              is running, and a downgraded image can migrate
+ *                              the data's schema on the next restart. The old
+ *                              copy stays until the owner presses "Apply the
+ *                              update" on the Fix-it card. Removed by itself
+ *                              once the two files name the same images (or the
+ *                              repo copy is applied).
  *
  * All of these live inside the installed bundle folder, are never part of
  * `refreshFiles` copying (which only copies repo → installed) and are never
@@ -44,9 +53,10 @@ export const COMPOSE_SHA_FILE = ".crow-compose.sha256";
 export const COMPOSE_EDITED_FILE = ".crow-compose.edited";
 export const COMPOSE_STATE_FILE = ".crow-compose.state.json";
 export const COMPOSE_NEEDS_CONFIG_FILE = ".crow-compose.needs-config";
+export const COMPOSE_IMAGE_CHANGE_FILE = ".crow-compose.image-change";
 
 /** The verdicts a state record may carry (anything else is a stale/foreign file). */
-export const COMPOSE_VERDICTS = Object.freeze(["match", "edited", "unknown", "needs-config"]);
+export const COMPOSE_VERDICTS = Object.freeze(["match", "edited", "unknown", "needs-config", "image-change"]);
 
 /** How many past commits of the checkout are searched for an unmodified compose. */
 export const COMPOSE_HISTORY_COMMITS = 200;
@@ -153,6 +163,42 @@ export function readComposeNeedsConfig(destDir) {
 
 export function clearComposeNeedsConfig(destDir) {
   rmSync(join(destDir, COMPOSE_NEEDS_CONFIG_FILE), { force: true });
+}
+
+/**
+ * Note that the shipped compose was not copied because it would also change an
+ * image: `[{ service, from, to }]`, image names only. Any entry that is not
+ * exactly that shape is dropped, so a hand-written file cannot make the card
+ * display arbitrary text.
+ */
+export function markComposeImageChange(destDir, changes) {
+  const rows = (Array.isArray(changes) ? changes : [])
+    .filter((c) => c && typeof c.service === "string" && c.service)
+    .map((c) => ({
+      service: c.service,
+      from: typeof c.from === "string" ? c.from : null,
+      to: typeof c.to === "string" ? c.to : null,
+    }));
+  writeFileAtomic(join(destDir, COMPOSE_IMAGE_CHANGE_FILE), `${JSON.stringify(rows)}\n`);
+}
+
+/** The image-change note for an installed bundle, or null when there is none. */
+export function readComposeImageChange(destDir) {
+  let raw;
+  try { raw = JSON.parse(readFileSync(join(destDir, COMPOSE_IMAGE_CHANGE_FILE), "utf8")); } catch { return null; }
+  if (!Array.isArray(raw)) return null;
+  const rows = raw
+    .filter((c) => c && typeof c.service === "string" && c.service)
+    .map((c) => ({
+      service: c.service,
+      from: typeof c.from === "string" ? c.from : null,
+      to: typeof c.to === "string" ? c.to : null,
+    }));
+  return rows.length > 0 ? rows : null;
+}
+
+export function clearComposeImageChange(destDir) {
+  rmSync(join(destDir, COMPOSE_IMAGE_CHANGE_FILE), { force: true });
 }
 
 /**

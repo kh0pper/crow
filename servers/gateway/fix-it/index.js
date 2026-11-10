@@ -19,6 +19,7 @@ import addonWallDetector, {
 import exposeCapabilityRemedy from "./remedies/expose-capability.js";
 import restoreBundleCompose, {
   ACTION_ID as RESTORE_COMPOSE_ACTION,
+  APPLY_UPDATE_ACTION_ID as APPLY_COMPOSE_UPDATE_ACTION,
 } from "./remedies/restore-bundle-compose.js";
 import addonUnwallRemedy, {
   FLASH_ID_RE,
@@ -51,6 +52,10 @@ export function wireFixIt() {
   // The owner's own copy of a bundle compose, put back with the previous file kept
   // as <composefile>.bak (bundle-bind-drift.js's compose-edited card).
   registry.registerRemedy(RESTORE_COMPOSE_ACTION, restoreBundleCompose);
+  // The image-change hold's "Apply the update": the same owner-only apply of the
+  // shipped compose, offered when the update would also switch a container's image
+  // (bundle-bind-drift.js's image-change card). It never restarts either.
+  registry.registerRemedy(APPLY_COMPOSE_UPDATE_ACTION, restoreBundleCompose);
   // An add-on that could not run inside its wall: run it unwalled by the
   // owner's choice, or answer the card and leave it off.
   registry.registerRemedy("addon-unwall", addonUnwallRemedy);

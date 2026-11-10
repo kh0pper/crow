@@ -19,6 +19,11 @@
  * (`isLocalPasswordSessionOn`). A peer sign-in, a signed peer request, or a call
  * with no request at all changes nothing. It never restarts a container: the
  * "restart to apply" card does that job, in the owner's hands.
+ *
+ * The same machinery answers the image-change hold's "Apply the update"
+ * (APPLY_UPDATE_ACTION_ID): the shipped compose is applied exactly as above —
+ * previous copy kept as `<composefile>.bak`, install record written, every note
+ * cleared — and the restart card then appears as usual.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +31,7 @@ import { APP_BUNDLES, BUNDLES_DIR, manifestComposeFile } from "../../bundles-con
 import {
   COMPOSE_SHA_FILE,
   clearComposeEdited,
+  clearComposeImageChange,
   clearComposeNeedsConfig,
   sha256,
   writeComposeState,
@@ -36,6 +42,8 @@ import { isLocalPasswordSessionOn } from "../../dashboard/local-session.js";
 
 export const ACTION_ID = "restore-bundle-compose";
 export const LABEL = "Restore Crow's compose";
+/** The image-change card's action: apply the shipped compose the owner held back. */
+export const APPLY_UPDATE_ACTION_ID = "apply-bundle-compose-update";
 
 const NOT_OWNER = "Only the owner at this Crow's own dashboard can restore a compose file. Nothing was changed.";
 const GONE = "Crow's copy of this compose file is not in this install, so nothing was changed.";
@@ -92,6 +100,7 @@ export default async function restoreBundleCompose(args, ctx) {
   writeComposeState(bundleDir, { installedSha: repoSha, repoComposeSha: repoSha, verdict: "match" });
   clearComposeEdited(bundleDir);
   clearComposeNeedsConfig(bundleDir);
+  clearComposeImageChange(bundleDir);
   console.log(`[fix-it] restored Crow's ${composeRel} for bundle ${bundleId} (the previous copy is ${composeRel}.bak)`);
   return { resolved: true };
 }

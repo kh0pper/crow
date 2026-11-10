@@ -76,8 +76,8 @@ import { projectsUsingBundle } from "../../shared/service-connections.js";
 import { stopChildrenForBundle } from "../services/children.js";
 import { precreateDirs, runPostInstall, hookEnv, spawnGroup, pullTimeoutMs, resolveComposeProject, classifyProjectOwners } from "../bundle-lifecycle.js";
 import { provisionNtfy, deprovisionNtfy, AUTOWIRE_KIND } from "../push/ntfy-provision.js";
-import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeOverrideFiles, expandComposeVars, hostGrants, normalizeHostGrants, parseDotEnv, requiredComposeVars } from "../compose-guard.js";
-import { COMPOSE_EDITED_FILE, COMPOSE_NEEDS_CONFIG_FILE, COMPOSE_SHA_FILE, COMPOSE_STATE_FILE, clearComposeEdited, clearComposeNeedsConfig, composeInPastCommits, markComposeEdited, markComposeNeedsConfig, readComposeEdited, readComposeState, readRecordedComposeSha, recordInstalledCompose, sha256, writeComposeState } from "../bundle-compose-state.js";
+import { checkComposeModel, guardCtx, loadComposeModel, usesHostNetwork, resolveHostPath, composeEnv as composeEnvFor, composeImageChanges, composeOverrideFiles, expandComposeVars, hostGrants, normalizeHostGrants, parseDotEnv, requiredComposeVars } from "../compose-guard.js";
+import { COMPOSE_EDITED_FILE, COMPOSE_IMAGE_CHANGE_FILE, COMPOSE_NEEDS_CONFIG_FILE, COMPOSE_SHA_FILE, COMPOSE_STATE_FILE, clearComposeEdited, clearComposeImageChange, clearComposeNeedsConfig, composeInPastCommits, markComposeEdited, markComposeImageChange, markComposeNeedsConfig, readComposeEdited, readComposeImageChange, readComposeState, readRecordedComposeSha, recordInstalledCompose, sha256, writeComposeState } from "../bundle-compose-state.js";
 import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordGrants, dropGrants, composeReferencedKeys, readGrants, ungrantedFolderKeys } from "../folder-grants.js";
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
@@ -699,7 +699,7 @@ function manifestRefreshFiles(manifest, appSrc, destDir) {
     const rel = relativePath(".", p);
     if (!rel || rel === "manifest.json" || rel.startsWith("..") || isAbsolute(rel)) continue;
     // The installed compose's bookkeeping is Crow's own record, never a repo file.
-    if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE || rel === COMPOSE_STATE_FILE || rel === COMPOSE_NEEDS_CONFIG_FILE) continue;
+    if (rel === COMPOSE_SHA_FILE || rel === COMPOSE_EDITED_FILE || rel === COMPOSE_STATE_FILE || rel === COMPOSE_NEEDS_CONFIG_FILE || rel === COMPOSE_IMAGE_CHANGE_FILE) continue;
     if (rel.split("/").some((seg) => REFRESH_FILES_NEVER.test(seg))) continue;
     let real;
     try { real = realpathSync.native(join(appSrc, rel)); } catch { continue; }
@@ -747,6 +747,12 @@ const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "no
  *   needs-config the shipped compose requires a `${X:?…}` the installed .env does not
  *              set: copying it would break Start, so the old copy stays and a card
  *              names the key to set first.
+ *   image-change the shipped compose would also change a service's `image:`, resolved
+ *              against the installed .env the way the drift code resolves it. That may
+ *              be an OLDER tag than what is running, and a downgraded image can migrate
+ *              the data's schema on the next restart, so the old copy stays and a card
+ *              offers "Apply the update" (which keeps the current file as `<compose>.bak`).
+ *              The restart-to-apply card then appears as usual.
  *
  * The verdict is cached in `.crow-compose.state.json` for the (installed bytes, repo
  * compose) pair, so a given pair costs at most one git call — ever.
@@ -755,7 +761,7 @@ const BUILD_CONTEXT_SKIP = new Set([".venv", "__pycache__", ".pytest_cache", "no
  * writes, reads as part of the live model and does not include here. An installed copy
  * whose manifest carries `"refresh": false` never reaches this function.
  *
- * @returns {Promise<"copied"|"current"|"edited"|"unknown"|"needs-config"|"none">}
+ * @returns {Promise<"copied"|"current"|"edited"|"unknown"|"needs-config"|"image-change"|"none">}
  */
 async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoManifest, installedManifest, runner, log = (m) => console.log(m) }) {
   if (installedManifest?.refresh === false) return "none";
@@ -789,6 +795,7 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     // the notes clear by themselves now that the bytes are Crow's own again.
     clearComposeEdited(destDir);
     clearComposeNeedsConfig(destDir);
+    clearComposeImageChange(destDir);
     return "current";
   }
 
@@ -818,8 +825,14 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     writeComposeState(destDir, { installedSha, repoComposeSha, verdict });
   }
 
-  if (verdict === "unknown") return "unknown";
+  if (verdict === "unknown") {
+    // No hold is in effect: this boot could not decide, so an image-change note
+    // from an earlier pair would claim a reason that no longer applies.
+    clearComposeImageChange(destDir);
+    return "unknown";
+  }
   if (verdict === "edited") {
+    clearComposeImageChange(destDir);
     if (!readComposeEdited(destDir)) {
       markComposeEdited(destDir, composeRel);
       log(`[bundles] ${id}: installed ${composeRel} has local changes — not updated; move your changes into docker-compose.override.yml so Crow can update the compose file`);
@@ -827,7 +840,17 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     return "edited";
   }
 
-  // 4. A refresh must never break Start: a compose that requires a variable the
+  // 4. An image the repo would change is never swapped in silently: the new tag may be
+  //    OLDER than the one running, and a downgraded image can migrate the data's schema
+  //    on its next restart. The comparison reads both files the same way (the installed
+  //    .env and the gateway's allowlisted env resolve `${VAR:-default}`), service by
+  //    service, and a service added or removed counts as a change. A hold never lasts
+  //    past the condition: the note clears as soon as the two files agree on images.
+  const composeEnvNow = { ...parseDotEnv(join(destDir, ".env")), ...composeEnvFor(process.env, CROW_HOME) };
+  const imageChanges = composeImageChanges(installedBytes.toString("utf8"), repoBytes.toString("utf8"), composeEnvNow);
+  if (imageChanges.length === 0) clearComposeImageChange(destDir);
+
+  // 5. A refresh must never break Start: a compose that requires a variable the
   //    installed .env cannot fill is not copied. The old copy keeps working and the
   //    Fix-it card names the key to set first; the next boot retries.
   const missing = missingRequiredKeys(repoBytes.toString("utf8"), {
@@ -841,10 +864,20 @@ async function catchUpInstalledCompose({ id, appSrc, destDir, repoRoot, repoMani
     return "needs-config";
   }
 
+  // 6. Held: the shipped compose is not copied, and the note names the images (never a
+  //    registry path built from anything else) for the Fix-it card's "Apply the update".
+  if (imageChanges.length > 0) {
+    markComposeImageChange(destDir, imageChanges);
+    writeComposeState(destDir, { installedSha, repoComposeSha, verdict: "image-change" });
+    log(`[bundles] ${id}: not updating ${composeRel} — it would also change the image of ${imageChanges.map((c) => c.service).join(", ")}; kept as it is until the owner applies the update`);
+    return "image-change";
+  }
+
   copyBundleRefreshItem(appSrc, destDir, composeRel);
   recordInstalledCompose(destDir, repoManifest);
   writeComposeState(destDir, { installedSha: repoComposeSha, repoComposeSha, verdict: "match" });
   clearComposeNeedsConfig(destDir);
+  clearComposeImageChange(destDir);
   return "copied";
 }
 
@@ -1358,9 +1391,9 @@ export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, ru
           if (composeOutcome === "copied") {
             repaired.push(`${id}: compose updated (restart the bundle to apply its network settings)`);
           }
-          // `edited` / `needs-config` / `unknown` are steady states with their own
-          // one-time log line (written when the note is created) — repeating them in
-          // the boot repair report would nag on every start.
+          // `edited` / `needs-config` / `image-change` / `unknown` are steady states
+          // with their own one-time log line (written when the note is created) —
+          // repeating them in the boot repair report would nag on every start.
         }
       } catch (err) {
         errors.push({ id, error: `compose refresh: ${err.message}` });

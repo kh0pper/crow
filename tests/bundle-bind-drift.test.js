@@ -31,10 +31,13 @@ let SOURCE;
 let COMPOSE_EDITED_SOURCE;
 let REPO_DRIFT_SOURCE;
 let COMPOSE_NEEDS_CONFIG_SOURCE;
+let COMPOSE_IMAGE_CHANGE_SOURCE;
 let LINK_REMEDIES;
 let linkRemedyTarget;
 let BOOT_CHECK_DETECTORS;
 let restoreCompose;
+let APPLY_UPDATE_ACTION_ID;
+let registry;
 let setOwnerCheck;
 let setAppBundles;
 let originalAppBundles;
@@ -50,13 +53,17 @@ before(async () => {
   COMPOSE_EDITED_SOURCE = mod.COMPOSE_EDITED_SOURCE;
   REPO_DRIFT_SOURCE = mod.REPO_DRIFT_SOURCE;
   COMPOSE_NEEDS_CONFIG_SOURCE = mod.COMPOSE_NEEDS_CONFIG_SOURCE;
+  COMPOSE_IMAGE_CHANGE_SOURCE = mod.COMPOSE_IMAGE_CHANGE_SOURCE;
   const idx = await import("../servers/gateway/fix-it/index.js");
   LINK_REMEDIES = idx.LINK_REMEDIES;
   linkRemedyTarget = idx.linkRemedyTarget;
   BOOT_CHECK_DETECTORS = idx.BOOT_CHECK_DETECTORS;
   const remedy = await import("../servers/gateway/fix-it/remedies/restore-bundle-compose.js");
   restoreCompose = remedy.default;
+  APPLY_UPDATE_ACTION_ID = remedy.APPLY_UPDATE_ACTION_ID;
   setOwnerCheck = remedy._setOwnerCheckForTest;
+  registry = await import("../servers/shared/fix-it/registry.js");
+  idx.wireFixIt();
   ({ _setAppBundlesForTest: setAppBundles } = await import("../servers/gateway/bundles-config.js"));
   ({ APP_BUNDLES: originalAppBundles } = await import("../servers/gateway/bundles-config.js"));
   ({ sha256 } = await import("../servers/gateway/bundle-compose-state.js"));
@@ -583,6 +590,132 @@ describe("a compose refresh kept back for configuration", () => {
     await detector.check(second, { crowHome: home, runner, log: silent });
     assert.equal(second.upserts.filter((c) => c.source === COMPOSE_NEEDS_CONFIG_SOURCE).length, 0);
     assert.ok(second.resolved.includes(`${COMPOSE_NEEDS_CONFIG_SOURCE}|bundle:${id}`));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The image-change hold: the boot catch-up kept the old compose because the update
+// would also switch a container's image — which may be older than what is running.
+// ---------------------------------------------------------------------------
+const IMAGE_NOTE = [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }];
+const IMAGE_HELD_COMPOSE = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+
+describe("an image-change hold", () => {
+  test("raises one card naming the images, with an owner-only Apply-the-update action", async () => {
+    const id = "drift-image";
+    bundle(id, IMAGE_HELD_COMPOSE);
+    put(home, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify(IMAGE_NOTE)}\n`);
+    setInstalled([{ id }]);
+    const store = fakeStore();
+    const runner = dockerStub({ inspect: inspected({ "5000/tcp": [{ HostIp: "127.0.0.1", HostPort: "8555" }] }) });
+
+    await detector.check(store, { crowHome: home, runner, log: silent });
+
+    const card = store.upserts.find((c) => c.source === COMPOSE_IMAGE_CHANGE_SOURCE);
+    assert.ok(card, "the image-change card is raised");
+    assert.equal(card.dedupKey, "bundle:drift-image");
+    assert.equal(card.title, "Web's settings file has an update Crow did not apply");
+    assert.equal(card.why, "Crow keeps Web on its current settings because the update would also change its image "
+      + "(linkding:latest → linkding:1.47.0; it may be older than what is running). "
+      + "The update also tightens how Web is published. "
+      + "Back up its data, then press 'Apply the update' to switch, or keep it as it is.");
+    assert.deepEqual(card.remedies, [
+      { actionId: APPLY_UPDATE_ACTION_ID, kind: "instant", label: "Apply the update", args: { bundle: id } },
+      { actionId: "open-extensions-page", kind: "link", label: "Open Extensions" },
+    ]);
+    assert.equal(card.context.service, "web");
+    assert.equal(card.context.from, "linkding:latest");
+    assert.equal(registry.getRemedy(APPLY_UPDATE_ACTION_ID), restoreCompose, "the apply action is the owner-checked compose apply");
+  });
+
+  test("the card resolves itself once the note is gone", async () => {
+    const id = "drift-image-clean";
+    bundle(id, IMAGE_HELD_COMPOSE);
+    setInstalled([{ id }]);
+    const store = fakeStore();
+    const runner = dockerStub({ inspect: inspected({ "5000/tcp": [{ HostIp: "127.0.0.1", HostPort: "8555" }] }) });
+
+    await detector.check(store, { crowHome: home, runner, log: silent });
+
+    assert.equal(store.upserts.filter((c) => c.source === COMPOSE_IMAGE_CHANGE_SOURCE).length, 0);
+    assert.ok(store.resolved.includes(`${COMPOSE_IMAGE_CHANGE_SOURCE}|bundle:${id}`));
+  });
+
+  test("the repo-tighter card stays quiet for a bundle in image-change", async () => {
+    const id = "drift-image-repo";
+    const wide = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repoRoot = mkdtempSync(join(tmpdir(), `crowrepo-imagechange-${id}-`));
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "Web", version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    put(repoRoot, `${id}/docker-compose.yml`, IMAGE_HELD_COMPOSE);
+    bundle(id, wide);
+    put(home, `bundles/${id}/.crow-compose.edited`, '{"compose":"docker-compose.yml"}\n');
+    put(home, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify(IMAGE_NOTE)}\n`);
+    setInstalled([{ id }]);
+    const store = fakeStore();
+    const runner = dockerStub({ inspect: inspected({ "5000/tcp": [{ HostIp: WIDE, HostPort: "8555" }] }) });
+
+    await detector.check(store, { crowHome: home, repoBundlesDir: repoRoot, runner, log: silent });
+
+    assert.equal(store.upserts.filter((c) => c.source === REPO_DRIFT_SOURCE).length, 0,
+      "\"a restart won't change that\" would contradict the Apply-the-update card");
+    assert.ok(store.resolved.includes(`${REPO_DRIFT_SOURCE}|bundle:${id}:repo`));
+    assert.ok(store.upserts.some((c) => c.source === COMPOSE_IMAGE_CHANGE_SOURCE));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Apply-the-update remedy: the same owner-only apply as the restore action,
+// and it never restarts anything.
+// ---------------------------------------------------------------------------
+describe("the apply-the-update remedy", () => {
+  const REPO_PINNED = 'services:\n  web:\n    image: linkding:1.47.0\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+  const INSTALLED_LATEST = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+
+  function fixture() {
+    const repoRoot = mkdtempSync(join(tmpdir(), "crowrepo-apply-"));
+    put(repoRoot, "apply-me/manifest.json", JSON.stringify({ id: "apply-me", name: "Web", version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    put(repoRoot, "apply-me/docker-compose.yml", REPO_PINNED);
+    put(home, "bundles/apply-me/manifest.json", JSON.stringify({ id: "apply-me", version: "1.0.0", type: "bundle", docker: { composefile: "docker-compose.yml" } }));
+    put(home, "bundles/apply-me/docker-compose.yml", INSTALLED_LATEST);
+    put(home, "bundles/apply-me/.crow-compose.edited", '{"compose":"docker-compose.yml"}\n');
+    put(home, "bundles/apply-me/.crow-compose.image-change", `${JSON.stringify(IMAGE_NOTE)}\n`);
+    return repoRoot;
+  }
+
+  test("refuses anyone but the owner, and changes nothing", async () => {
+    const repoRoot = fixture();
+    setAppBundles(repoRoot);
+    try {
+      const out = await restoreCompose({ bundle: "apply-me" }, { db: null, item: null });
+      assert.equal(out.resolved, false);
+      assert.match(out.message, /Only the owner/);
+      assert.equal(readFileSync(join(home, "bundles/apply-me/docker-compose.yml"), "utf8"), INSTALLED_LATEST);
+      assert.equal(existsSync(join(home, "bundles/apply-me/docker-compose.yml.bak")), false);
+      assert.ok(existsSync(join(home, "bundles/apply-me/.crow-compose.image-change")), "the hold note stays");
+    } finally { setAppBundles(originalAppBundles); }
+  });
+
+  test("writes <compose>.bak, applies Crow's copy, records it and clears every note", async () => {
+    const repoRoot = fixture();
+    setAppBundles(repoRoot);
+    setOwnerCheck(async () => true);
+    try {
+      const out = await restoreCompose({ bundle: "apply-me" }, { db: null, item: null });
+      assert.equal(out.resolved, true);
+      assert.equal(readFileSync(join(home, "bundles/apply-me/docker-compose.yml.bak"), "utf8"), INSTALLED_LATEST, "the running file is kept");
+      assert.equal(readFileSync(join(home, "bundles/apply-me/docker-compose.yml"), "utf8"), REPO_PINNED);
+      assert.equal(readFileSync(join(home, "bundles/apply-me/.crow-compose.sha256"), "utf8").trim(), sha256(Buffer.from(REPO_PINNED, "utf8")));
+      assert.deepEqual(JSON.parse(readFileSync(join(home, "bundles/apply-me/.crow-compose.state.json"), "utf8")), {
+        installedSha: sha256(Buffer.from(REPO_PINNED, "utf8")),
+        repoComposeSha: sha256(Buffer.from(REPO_PINNED, "utf8")),
+        verdict: "match",
+      });
+      assert.equal(existsSync(join(home, "bundles/apply-me/.crow-compose.image-change")), false);
+      assert.equal(existsSync(join(home, "bundles/apply-me/.crow-compose.edited")), false);
+    } finally {
+      setAppBundles(originalAppBundles);
+      setOwnerCheck(null);
+    }
   });
 });
 

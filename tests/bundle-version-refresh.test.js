@@ -1235,11 +1235,132 @@ describe("default compose refresh (N8-1)", () => {
 
   test("a defaulted ${X:-...} is not a required key", async () => {
     const id = "dc-default";
-    const repoV3 = 'services:\n  web:\n    ports:\n      - "127.0.0.1:${WEB_PORT:-8555}:5000"\n';
+    const repoV3 = 'services:\n  web:\n    image: x\n    ports:\n      - "127.0.0.1:${WEB_PORT:-8555}:5000"\n';
     const repoRoot = setup(id, { repoCompose: repoV3, recorded: sha(COMPOSE_V1) });
     const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
     assert.deepEqual(errors, []);
     assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repoV3);
+  });
+
+  // ---------------------------------------------------------------------
+  // An update that would also change an image is held (operator ruling): the
+  // new tag may be OLDER than the one running, and a downgraded image can
+  // migrate the data's schema on the next restart.
+  // ---------------------------------------------------------------------
+  const IMG_INSTALLED = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+  const IMG_PINNED = 'services:\n  web:\n    image: linkding:1.47.0\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+  const imageNote = (id) => JSON.parse(readAt(CROW_HOME, `bundles/${id}/.crow-compose.image-change`));
+
+  test("the images are unchanged: a tightened port is still refreshed", async () => {
+    const id = "dc-img-same";
+    const installed = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repo = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: installed, recorded: sha(installed) });
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner() });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repo, "the tightened bind is applied");
+    assert.equal(stateAt(id).verdict, "match");
+    assert.ok(repaired.some((r) => r.includes(id) && r.includes("compose updated")));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("a :latest → pinned image change is held: nothing is copied, the note names both images", async () => {
+    const id = "dc-img-hold";
+    const repoRoot = setup(id, { repoCompose: IMG_PINNED, installedCompose: IMG_INSTALLED, recorded: sha(IMG_INSTALLED) });
+    const lines = [];
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: (m) => lines.push(m) });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED, "the installed file is untouched");
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }]);
+    assert.equal(stateAt(id).verdict, "image-change");
+    assert.equal(readAt(destBundleDir(id), "docker-compose.override.yml"), OVERRIDE, "the override is never touched");
+    assert.ok(repaired.every((r) => !r.includes("compose updated")), "not reported as applied");
+    assert.ok(lines.some((l) => l.includes(id) && l.includes("web")), "one line names the bundle and the service");
+
+    // Cached for this exact pair: the next boot decides again with no git at all.
+    const second = fakeRunner();
+    const again = await repairInstalledBundleAssets({ appBundles: repoRoot, run: second, log: () => {} });
+    assert.deepEqual(again.errors, []);
+    assert.equal(second.calls.filter((c) => c.cmd === "git").length, 0);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED);
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }]);
+  });
+
+  test("a service the repo adds counts as a change and is held too", async () => {
+    const id = "dc-img-added";
+    const repo = IMG_INSTALLED + '  api:\n    image: linkding-api:1.0.0\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: IMG_INSTALLED, recorded: sha(IMG_INSTALLED) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED);
+    assert.deepEqual(imageNote(id), [{ service: "api", from: null, to: "linkding-api:1.0.0" }]);
+    assert.equal(stateAt(id).verdict, "image-change");
+  });
+
+  test("a service that stops naming an image is a change too, not a silent apply", async () => {
+    const id = "dc-img-dropped";
+    const repo = 'services:\n  web:\n    build: .\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: IMG_INSTALLED, recorded: sha(IMG_INSTALLED) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), IMG_INSTALLED);
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: null }]);
+  });
+
+  test("${IMG:-default} is resolved against the installed .env, both ways", async () => {
+    const id = "dc-img-default";
+    const viaDefault = 'services:\n  web:\n    image: ${IMG:-linkding:latest}\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repo = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    // No .env: the default resolves to the repo's value → not an image change.
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: viaDefault, recorded: sha(viaDefault) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repo);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("a value in the installed .env wins over the ${IMG:-default}, so the difference is held", async () => {
+    const id = "dc-img-env";
+    const viaEnv = 'services:\n  web:\n    image: ${IMG:-linkding:latest}\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: IMG_PINNED, installedCompose: viaEnv, recorded: sha(viaEnv), installedEnv: "IMG=linkding:latest\n" });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), viaEnv);
+    assert.deepEqual(imageNote(id), [{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }]);
+  });
+
+  test("an image: nested in an extension block is not the service's image", async () => {
+    const id = "dc-img-nested";
+    const installed = 'services:\n  web:\n    image: linkding:latest\n    ports:\n      - "0.0.0.0:8555:5000"\n';
+    const repo = 'services:\n  web:\n    image: linkding:latest\n    x-note:\n      image: something-else\n    ports:\n      - "127.0.0.1:8555:5000"\n';
+    const repoRoot = setup(id, { repoCompose: repo, installedCompose: installed, recorded: sha(installed) });
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), repo, "the service's own image is unchanged");
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+  });
+
+  test("the image-change note clears by itself once the two files name the same image", async () => {
+    const id = "dc-img-clear";
+    const repoRoot = setup(id, { recorded: sha(COMPOSE_V1) });
+    put(CROW_HOME, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify([{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }])}\n`);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: fakeRunner(), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), COMPOSE_V2);
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
+    assert.equal(stateAt(id).verdict, "match");
+  });
+
+  test("an owner-edited compose drops a stale image-change note: that hold is not the reason any more", async () => {
+    const id = "dc-img-edited";
+    const edited = `${IMG_INSTALLED}    # my own note\n`;
+    const repoRoot = setup(id, { repoCompose: IMG_PINNED, installedCompose: edited });
+    put(CROW_HOME, `bundles/${id}/.crow-compose.image-change`, `${JSON.stringify([{ service: "web", from: "linkding:latest", to: "linkding:1.47.0" }])}\n`);
+    const { errors } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: historyRunner(id, [IMG_INSTALLED]), log: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(readAt(destBundleDir(id), "docker-compose.yml"), edited, "the owner's file is never overwritten");
+    assert.ok(existsSync(join(destBundleDir(id), ".crow-compose.edited")));
+    assert.ok(!existsSync(join(destBundleDir(id), ".crow-compose.image-change")));
   });
 
   test("an owner-edited compose is kept and flagged; the log names the bundle, never the contents", async () => {
