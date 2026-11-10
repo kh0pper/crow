@@ -1,8 +1,8 @@
 /**
- * The one prepare run before an add-on's first start
+ * The prepare run before an add-on's first start
  * (scripts/addon-sandbox/warmup.mjs), and the wall it runs in:
- * `warmupPlanFor`'s four shapes, `warmAddon`'s result for every outcome, and
- * gateway-wall.mjs's `purpose: "warmup"` profile.
+ * `warmupPlanFor`'s steps, hosts and env for every launcher, `warmAddon`'s
+ * result for every outcome, and gateway-wall.mjs's `purpose: "warmup"` profile.
  *
  * The spawn, the wall context and the clock are stubs: no bwrap, no npm, no uv,
  * no network.
@@ -30,42 +30,87 @@ const freshDir = (name) => {
 
 const NODE_BIN = "/opt/node/bin/node";
 const GIT_SHA = "a".repeat(40);
+const PYPI_HOSTS = ["pypi.org", "files.pythonhosted.org"];
+const NPM_PATH = join(dirname(NODE_BIN), "npm");
 
 beforeEach(() => _resetWarmupsForTest());
 
 // ---- warmupPlanFor -------------------------------------------------------
 
-test("uv run becomes uv sync, and keeps --quiet", () => {
-  assert.deepEqual(
-    warmupPlanFor({ command: "/usr/local/bin/uv", args: ["run", "server.py"] }),
-    { command: "/usr/local/bin/uv", args: ["sync"] },
-  );
-  assert.deepEqual(
-    warmupPlanFor({ command: "/usr/local/bin/uv", args: ["run", "--quiet", "server.py"] }),
+test("uv run becomes two uv syncs: dependencies from wheels, then the add-on's own project", () => {
+  const quiet = warmupPlanFor({ command: "/usr/local/bin/uv", args: ["run", "server.py"] });
+  assert.deepEqual(quiet, {
+    steps: [
+      { command: "/usr/local/bin/uv", args: ["sync", "--no-build", "--no-install-project"] },
+      { command: "/usr/local/bin/uv", args: ["sync"] },
+    ],
+    hosts: PYPI_HOSTS,
+    env: {},
+  });
+
+  const louder = warmupPlanFor({ command: "/usr/local/bin/uv", args: ["run", "--quiet", "server.py"] });
+  assert.deepEqual(louder.steps, [
+    { command: "/usr/local/bin/uv", args: ["sync", "--no-build", "--no-install-project", "--quiet"] },
     { command: "/usr/local/bin/uv", args: ["sync", "--quiet"] },
-  );
+  ]);
   assert.equal(warmupPlanFor({ command: "/usr/local/bin/uv", args: ["sync"] }), null, "not a run: nothing to prepare");
 });
 
 test("uvx prepares the --from source it will run, else its positional tool", () => {
-  const ref = `git+https://example.invalid/r@${GIT_SHA}`;
-  assert.deepEqual(
-    warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"] }),
-    { command: "uvx", args: ["--from", ref, "python", "-c", "0"] },
-  );
   assert.deepEqual(
     warmupPlanFor({ command: "uvx", args: ["tool==1.0"] }),
-    { command: "uvx", args: ["--from", "tool==1.0", "python", "-c", "0"] },
+    {
+      steps: [{ command: "uvx", args: ["--no-build", "--from", "tool==1.0", "python", "-c", "0"] }],
+      hosts: PYPI_HOSTS,
+      env: {},
+    },
+    "a PyPI tool is never built",
   );
-  assert.equal(warmupPlanFor({ command: "uvx", args: ["--verbose"] }), null, "no tool named");
+  assert.deepEqual(
+    warmupPlanFor({ command: "uvx", args: ["--from=tool==1.0", "tool"] }),
+    {
+      steps: [{ command: "uvx", args: ["--no-build", "--from", "tool==1.0", "python", "-c", "0"] }],
+      hosts: PYPI_HOSTS,
+      env: {},
+    },
+  );
+  assert.equal(warmupPlanFor({ command: "uvx", args: [] }), null, "no tool named");
 });
 
-test("npx prepares through the npm beside the gateway's node", () => {
+test("a pinned github ref adds its hosts, and gets built because it is the add-on's own code", () => {
+  const ref = `git+https://github.com/owner/repo@${GIT_SHA}`;
+  const plan = warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"] });
+  assert.deepEqual(plan.steps, [{ command: "uvx", args: ["--from", ref, "python", "-c", "0"] }]);
+  assert.deepEqual(plan.hosts, [...PYPI_HOSTS, "github.com", "codeload.github.com"]);
+  assert.deepEqual(plan.env, {});
+});
+
+test("a git ref on any other host is refused, not widened to", () => {
+  const ref = `git+https://example.invalid/repo@${GIT_SHA}`;
+  assert.deepEqual(warmupPlanFor({ command: "uvx", args: ["--from", ref, "tool"] }), {
+    refused: "its packages come from a host Crow does not fetch from",
+  });
+});
+
+test("an unsupported launcher option is a refusal, never a throw", () => {
+  assert.deepEqual(warmupPlanFor({ command: "uvx", args: ["--with", "evil", "tool==1.0"] }), {
+    refused: "--with: this launcher option is not supported for a walled add-on",
+  });
+  assert.deepEqual(warmupPlanFor({ command: "npx", args: ["-p", "evil", "pkg@1.2.3"] }), {
+    refused: "-p: this launcher option is not supported for a walled add-on",
+  });
+});
+
+test("npx prepares through the npm beside the gateway's node, without install scripts", () => {
   assert.deepEqual(
     warmupPlanFor({ command: "npx", args: ["-y", "pkg@1.2.3"], nodeBin: NODE_BIN }),
     {
-      command: join(dirname(NODE_BIN), "npm"),
-      args: ["exec", "--yes", "--package=pkg@1.2.3", "--", NODE_BIN, "-e", "0"],
+      steps: [{
+        command: NPM_PATH,
+        args: ["exec", "--yes", "--ignore-scripts", "--package=pkg@1.2.3", "--", NODE_BIN, "-e", "0"],
+      }],
+      hosts: ["registry.npmjs.org"],
+      env: { npm_config_ignore_scripts: "true" },
     },
   );
   assert.equal(warmupPlanFor({ command: "npx", args: [], nodeBin: NODE_BIN }), null, "no package named");
@@ -84,7 +129,14 @@ test("a node add-on has nothing to prepare; a uv project needs its lock file", (
   writeFileSync(join(project, "uv.lock"), "version = 1\n");
   assert.deepEqual(
     warmupPlanFor({ command: "./run.sh", args: [], installDir: project, resolveUv }),
-    { command: "/usr/local/bin/uv", args: ["sync", "--quiet"] },
+    {
+      steps: [
+        { command: "/usr/local/bin/uv", args: ["sync", "--no-build", "--no-install-project", "--quiet"] },
+        { command: "/usr/local/bin/uv", args: ["sync", "--quiet"] },
+      ],
+      hosts: PYPI_HOSTS,
+      env: {},
+    },
   );
   assert.equal(asked, 1);
 
@@ -154,7 +206,7 @@ function fakeSpawn(exitCode, { stderrText = "" } = {}) {
   };
 }
 
-const PLAN_ARGS = ["--from", "tool==1.0", "python", "-c", "0"];
+const PLAN_ARGS = ["--no-build", "--from", "tool==1.0", "python", "-c", "0"];
 
 test("the prepare run happens inside the wall, with the wall's command line and env", async () => {
   const stub = stubWallCtx({ args: ["--unshare-net", "--", "/bin/sh", "-c", "true"], env: { HOME: "/home/alex" } });
@@ -168,7 +220,7 @@ test("the prepare run happens inside the wall, with the wall's command line and 
     installDir: freshDir("kiosk"),
     wallCtx: stub.wallCtx,
     baseEnv: { PATH: "/usr/bin" },
-    ownEnv: { A: "1" },
+    ownEnv: { SECRET_TOKEN: "s3cr3t" },
     deps: { spawn: fake.spawn },
   });
 
@@ -181,7 +233,9 @@ test("the prepare run happens inside the wall, with the wall's command line and 
   assert.equal(asked.command, "uvx");
   assert.deepEqual(asked.args, PLAN_ARGS, "the prepare plan, not the add-on's own args");
   assert.deepEqual(asked.baseEnv, { PATH: "/usr/bin" });
-  assert.deepEqual(asked.ownEnv, { A: "1" });
+  assert.deepEqual(asked.warmupHosts, PYPI_HOSTS, "the plan's hosts, and nothing else");
+  assert.deepEqual(asked.ownEnv, {}, "the plan's own settings only");
+  assert.equal("SECRET_TOKEN" in asked.ownEnv, false, "the caller's own env never reaches the wall");
 
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0].cmd, "/usr/bin/bwrap", "the wall's command line reaches the spawn unchanged");
@@ -190,6 +244,80 @@ test("the prepare run happens inside the wall, with the wall's command line and 
   assert.equal(fake.calls[0].opts.cwd, "/");
   assert.deepEqual(fake.calls[0].opts.stdio, ["ignore", "ignore", "pipe"]);
   assert.equal(stub.counts.cleanup, 1, "the wall is cleaned up once");
+});
+
+test("an npx prepare run asks for the npm registry and carries npm's own no-scripts setting", async () => {
+  const stub = stubWallCtx();
+  const fake = fakeSpawn(0);
+  const out = await warmAddon({
+    id: "npx-addon",
+    command: "npx",
+    args: ["-y", "pkg@1.2.3"],
+    installDir: freshDir("npx-addon"),
+    nodeBin: NODE_BIN,
+    wallCtx: stub.wallCtx,
+    deps: { spawn: fake.spawn },
+  });
+
+  assert.equal(out.ok, true);
+  const asked = stub.starts[0];
+  assert.equal(asked.command, NPM_PATH, "the npm beside the gateway's node");
+  assert.ok(asked.args.includes("--ignore-scripts"), asked.args.join(" "));
+  assert.deepEqual(asked.warmupHosts, ["registry.npmjs.org"]);
+  assert.deepEqual(asked.ownEnv, { npm_config_ignore_scripts: "true" });
+});
+
+test("the first failing step ends the plan: the second step never runs", async () => {
+  const stub = stubWallCtx();
+  const fake = fakeSpawn(1);
+  const out = await warmAddon({
+    id: "uv-project",
+    command: "/usr/local/bin/uv",
+    args: ["run", "server.py"],
+    installDir: freshDir("uv-project-run"),
+    wallCtx: stub.wallCtx,
+    deps: { spawn: fake.spawn },
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.exitCode, 1);
+  assert.equal(stub.starts.length, 1, "one wall, for the first step");
+  assert.equal(fake.calls.length, 1, "the second step was not run");
+  assert.equal(stub.counts.cleanup, 1);
+  assert.deepEqual(stub.starts[0].warmupHosts, PYPI_HOSTS);
+});
+
+test("a plan that cannot be built is a refusal, never a throw and never a wall", async () => {
+  const stub = stubWallCtx();
+  const fake = fakeSpawn(0);
+
+  const option = await warmAddon({
+    id: "kiosk",
+    command: "uvx",
+    args: ["--with", "evil", "tool==1.0"],
+    installDir: freshDir("kiosk-with"),
+    wallCtx: stub.wallCtx,
+    deps: { spawn: fake.spawn },
+  });
+  assert.equal(option.ok, false);
+  assert.equal(option.refused, true);
+  assert.match(option.reason, /not supported for a walled add-on/);
+
+  const ref = `git+https://example.invalid/repo@${GIT_SHA}`;
+  const host = await warmAddon({
+    id: "kiosk",
+    command: "uvx",
+    args: ["--from", ref, "tool"],
+    installDir: freshDir("kiosk-git"),
+    wallCtx: stub.wallCtx,
+    deps: { spawn: fake.spawn },
+  });
+  assert.equal(host.ok, false);
+  assert.equal(host.refused, true);
+  assert.equal(host.reason, "its packages come from a host Crow does not fetch from");
+
+  assert.equal(stub.starts.length, 0, "no wall is built for a plan that was refused");
+  assert.equal(fake.calls.length, 0);
 });
 
 test("a prepared cache is not prepared twice", async () => {
@@ -341,7 +469,7 @@ function appRootWith(id) {
   return root;
 }
 
-test("a warm-up wall reaches the internet only: no listed host, no door", async () => {
+test("a warm-up wall reaches the plan's registries only: no internet, no door", async () => {
   const id = "kiosk";
   const appRoot = appRootWith(id);
   const calls = [];
@@ -371,11 +499,19 @@ test("a warm-up wall reaches the internet only: no listed host, no door", async 
     args: ["tool==1.0"],
     kind: "addon",
     purpose: "warmup",
+    warmupHosts: ["pypi.org"],
   });
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].profile.network, { internet: true, hosts: [] });
+  assert.deepEqual(calls[0].profile.network, {
+    internet: false,
+    hosts: [{ host: "pypi.org", port: 443, scheme: "https", from: "warmup", source: "warmup" }],
+  });
   assert.deepEqual(calls[0].profile.doors, []);
+
+  // A warm-up that names no host reaches nothing at all.
+  await ctx.startAddonWall({ id, entry: {}, command: "uvx", args: ["tool==1.0"], kind: "addon", purpose: "warmup", warmupHosts: [] });
+  assert.deepEqual(calls[1].profile.network, { internet: false, hosts: [] });
 
   // The same id for a real start keeps its own policy.
   await ctx.startAddonWall({
@@ -385,9 +521,9 @@ test("a warm-up wall reaches the internet only: no listed host, no door", async 
     args: ["server/index.js"],
     kind: "addon",
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].profile.network.internet, false);
-  assert.equal(calls[1].profile.network.hosts.length, 1, "a real start keeps its listed host");
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].profile.network.internet, false);
+  assert.equal(calls[2].profile.network.hosts.length, 1, "a real start keeps its listed host");
 });
 
 test("a purpose the wall does not know is refused", async () => {

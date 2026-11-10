@@ -10,6 +10,10 @@
  * A shape this module cannot pin to one exact version is refused with a reason:
  * an install that refuses is better than an add-on that runs a floating range.
  *
+ * `launcherSpec` is the ONE reader of a launcher argument list, used here and by
+ * the warm-up (`warmup.mjs`): a launcher option that could fetch from another
+ * source is refused before either of them reads a spec.
+ *
  * `pinLauncherArgs` never mutates the entry it is given. The two resolvers are
  * injectable (tests never reach npm or PyPI), and the wiring reads the two
  * switches in ONE place (`wallsOnForHost`), so a host with the walls off never
@@ -66,24 +70,59 @@ function splitEquals(spec) {
   return { name: text.slice(0, at), version: text.slice(at + 2) };
 }
 
-/** The first argument that is not an option; a lone `-` is not one either. */
-function firstPositional(args) {
-  for (const a of args) {
-    if (typeof a !== "string") continue;
-    if (a.startsWith("-") && a !== "-") continue;
-    return a;
-  }
-  return null;
-}
+/** The options an `npx` argument list may carry before the package spec. */
+const NPX_OPTIONS = new Set(["-y", "--yes", "-q", "--quiet"]);
+/** The options a `uvx` argument list may carry before the tool spec. */
+const UVX_OPTIONS = new Set(["-q", "--quiet"]);
+/** What a launcher option this module does not read is refused with. */
+const UNSUPPORTED_OPTION = ": this launcher option is not supported for a walled add-on";
 
-/** The `--from` value of a uvx argument list, or null. */
-function fromValue(args) {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--from") return typeof args[i + 1] === "string" ? args[i + 1] : null;
-    if (a.startsWith("--from=")) return a.slice("--from=".length);
+/**
+ * Read a launcher's argument list the one way both the pin and the warm-up do.
+ *
+ * Everything before the spec decides where the code comes from, so only the
+ * options that change nothing about the source are allowed there: `-y`/`--yes`
+ * and `-q`/`--quiet` for `npx`, `-q`/`--quiet` and `--from <ref>` for `uvx`.
+ * Any other option is refused, because an unread one (`-p`, `--package`,
+ * `--index-url`, `--with`, a flag that names another package) would make the
+ * wall guard one source while the child fetches another. Everything after the
+ * spec belongs to the tool and is not parsed.
+ *
+ * A launcher this module does not read is answered, never refused.
+ *
+ * @param {string} command  the launcher path or name
+ * @param {string[]} [args]
+ * @returns {{launcher: "npx"|"uvx"|null, spec: string|null, specIndex: number, from: string|null}}
+ * @throws {PinRefused} an argument list that cannot be read safely
+ */
+export function launcherSpec(command, args) {
+  const list = Array.isArray(args) ? args : [];
+  const launcher = baseOf(command);
+  if (launcher !== "npx" && launcher !== "uvx") return { launcher: null, spec: null, specIndex: -1, from: null };
+  const allowed = launcher === "npx" ? NPX_OPTIONS : UVX_OPTIONS;
+  let from = null;
+
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    if (typeof a !== "string") throw new PinRefused("the argument list cannot be read safely");
+    if (launcher === "uvx" && (a === "--from" || a.startsWith("--from="))) {
+      const value = a === "--from" ? list[i + 1] : a.slice("--from=".length);
+      // A source that is missing, or that is the next option, names nothing.
+      if (typeof value !== "string" || !value || value.startsWith("-")) {
+        throw new PinRefused("--from: no source name in the argument list");
+      }
+      from = value;
+      if (a === "--from") i += 1;
+      continue;
+    }
+    // A lone `-` names something (a tool reads it as stdin), so it is a spec.
+    if (a.startsWith("-") && a !== "-") {
+      if (!allowed.has(a)) throw new PinRefused(a + UNSUPPORTED_OPTION);
+      continue;
+    }
+    return { launcher, spec: a, specIndex: i, from };
   }
-  return null;
+  return { launcher, spec: null, specIndex: -1, from };
 }
 
 /** True when a `--from` ref names one exact thing: a full commit, or `name==version`. */
@@ -154,12 +193,12 @@ function checkNpmAnswer(spec, answer) {
 export async function pinLauncherArgs(entry, { npmView, pypiVersion } = {}) {
   const copy = copyEntry(entry);
   const args = Array.isArray(copy.args) ? copy.args : [];
-  const launcher = baseOf(copy.command);
+  const read = launcherSpec(copy.command, args);
 
-  if (launcher === "npx") {
-    const spec = firstPositional(args);
+  if (read.launcher === "npx") {
+    const spec = read.spec;
     if (spec === null) return { entry: copy, pinned: false };
-    const at = args.indexOf(spec);
+    const at = read.specIndex;
     const { name, version } = splitSpec(spec);
     if (version !== null && EXACT_VERSION_RE.test(version)) return { entry: copy, pinned: true };
     const view = typeof npmView === "function" ? npmView : defaultNpmView;
@@ -175,15 +214,15 @@ export async function pinLauncherArgs(entry, { npmView, pypiVersion } = {}) {
     return { entry: copy, pinned: true };
   }
 
-  if (launcher === "uvx") {
-    const ref = fromValue(args);
+  if (read.launcher === "uvx") {
+    const ref = read.from;
     if (ref !== null) {
       if (!isPinnedRef(ref)) throw new PinRefused(`${ref}: pin --from to a full commit or name==version`);
       return { entry: copy, pinned: true };
     }
-    const spec = firstPositional(args);
+    const spec = read.spec;
     if (spec === null) return { entry: copy, pinned: false };
-    const at = args.indexOf(spec);
+    const at = read.specIndex;
     const pair = splitEquals(spec);
     if (pair) {
       if (!NAME_RE.test(pair.name) || !PYPI_VERSION_RE.test(pair.version)) {

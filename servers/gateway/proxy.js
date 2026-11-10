@@ -349,7 +349,9 @@ async function connectToServer(integration) {
   if (!integration.preSpawn) {
     wallMode = dep("addonWallMode", addonWallMode)({ id: integration.id, gatewayEnv: process.env, crowHome: resolveCrowHome() });
     if (wallMode.mode === "walled") {
-      // The prepare run first: a walled child fetches nothing it did not fetch inside its own wall.
+      // The prepare run first: a walled child fetches nothing it did not fetch
+      // inside its own wall. It gets no env of the add-on's: the wall hands it
+      // the plan's fixed settings only.
       const warm = await dep("warmAddon", warmAddon)({
         id: integration.id,
         kind: "builtin",
@@ -360,7 +362,7 @@ async function connectToServer(integration) {
         nodeBin: process.execPath,
         wallCtx: getWallContext(),
         baseEnv: integration.baseEnv || process.env,
-        ownEnv: spawnEnv,
+        ownEnv: {},
       });
       if (!warm || warm.ok !== true) {
         const message = warm?.reason || WARMUP_REASON;
@@ -589,7 +591,8 @@ export async function connectAddonServer(id, config) {
       if (wm.mode === "walled") {
         // The prepare run comes first, inside the same wall: a walled child
         // reaches no registry of its own, so its cache is filled before the
-        // first real start, or the add-on stays off.
+        // first real start, or the add-on stays off. It gets no env of the
+        // add-on's: the wall hands it the plan's fixed settings only.
         const warm = await dep("warmAddon", warmAddon)({
           id,
           kind: "addon",
@@ -600,7 +603,7 @@ export async function connectAddonServer(id, config) {
           nodeBin: process.execPath,
           wallCtx: getWallContext(),
           baseEnv: process.env,
-          ownEnv: addonOwnEnv(config, process.env, id),
+          ownEnv: {},
         });
         if (!warm || warm.ok !== true) {
           const message = warm?.reason || WARMUP_REASON;

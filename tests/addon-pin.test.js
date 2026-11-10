@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { pinEntryIfWalled, pinLauncherArgs, PinRefused } from "../scripts/addon-sandbox/pin.mjs";
+import { launcherSpec, pinEntryIfWalled, pinLauncherArgs, PinRefused } from "../scripts/addon-sandbox/pin.mjs";
 
 const INTEGRITY = "sha512-" + "A".repeat(64) + "==";
 const GIT_SHA = "0".repeat(39) + "1";
@@ -161,6 +161,67 @@ test("an entry that is not npx or uvx is left alone, and nothing is ever mutated
   assert.deepEqual(pinned.entry.args, ["-y", "pkg@1.2.3"]);
   assert.equal(JSON.stringify(npxEntry), snapshot, "the input entry is untouched");
   assert.notEqual(pinned.entry.args, npxEntry.args, "and its args array is a copy");
+});
+
+// ---- the one argument reader ----------------------------------------------
+
+test("an option that could fetch from another source is refused, for both launchers", async () => {
+  const cases = [
+    { command: "uvx", args: ["--with", "evil", "pkg"] },
+    { command: "npx", args: ["-p", "evil", "pkg"] },
+    { command: "uvx", args: ["--index-url", "http://x", "pkg"] },
+    { command: "npx", args: ["--weird", "pkg"] },
+    { command: "uvx", args: ["--weird", "pkg"] },
+    { command: "npx", args: ["--package=evil", "pkg"] },
+    { command: "uvx", args: ["--extra-index-url=http://x", "pkg"] },
+  ];
+  for (const { command, args } of cases) {
+    assert.throws(
+      () => launcherSpec(command, args),
+      (err) => err instanceof PinRefused && /not supported for a walled add-on/.test(err.message),
+      `${command} ${args.join(" ")}`,
+    );
+    await assert.rejects(
+      pinLauncherArgs({ command, args }, { npmView: async () => { throw new Error("never asked"); }, pypiVersion: async () => { throw new Error("never asked"); } }),
+      PinRefused,
+      `${command} ${args.join(" ")}`,
+    );
+  }
+});
+
+test("an npx spec pins, and what follows it belongs to the tool", async () => {
+  const npm = fakeNpm();
+  const read = launcherSpec("npx", ["-y", "pkg", "--header", "x"]);
+  assert.deepEqual(read, { launcher: "npx", spec: "pkg", specIndex: 1, from: null });
+
+  const out = await pinLauncherArgs(
+    { command: "npx", args: ["-y", "pkg", "--header", "x"] },
+    { npmView: npm.npmView },
+  );
+  assert.deepEqual(out.entry.args, ["-y", "pkg@1.2.3", "--header", "x"], "only the spec changes");
+  assert.deepEqual(npm.calls, ["pkg"]);
+});
+
+test("a uvx --from tool with quiet flags reads its source and leaves the args alone", async () => {
+  const args = ["--quiet", "--from", "tool==1.0", "tool"];
+  assert.deepEqual(launcherSpec("uvx", args), { launcher: "uvx", spec: "tool", specIndex: 3, from: "tool==1.0" });
+  const out = await pinLauncherArgs({ command: "uvx", args }, { pypiVersion: async () => { throw new Error("never asked"); } });
+  assert.deepEqual(out.entry.args, args, "an exact --from is already pinned");
+  assert.equal(out.pinned, true);
+});
+
+test("a --from with no value is refused", () => {
+  assert.throws(() => launcherSpec("uvx", ["--from"]), PinRefused);
+  assert.throws(() => launcherSpec("uvx", ["--from="]), PinRefused);
+});
+
+test("a launcher this module does not read is answered, never thrown at", () => {
+  assert.deepEqual(launcherSpec("node", ["--anything", "server/index.js"]), {
+    launcher: null,
+    spec: null,
+    specIndex: -1,
+    from: null,
+  });
 });
 
 // ---- the install gate -----------------------------------------------------

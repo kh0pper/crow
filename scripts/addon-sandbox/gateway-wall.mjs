@@ -49,6 +49,20 @@ const SELF_URL_VARS = ["CROW_GATEWAY_URL", "CROW_PUBLIC_URL"];
 const SPAWN_KINDS = new Set(["addon", "service", "builtin"]);
 /** Why a wall is built: a real start, or the one prepare run before it. */
 const WALL_PURPOSES = new Set(["run", "warmup"]);
+/**
+ * Every host a prepare run may reach: the package registries, and the copy and
+ * archive hosts of a pinned git source. Frozen, and checked by name: the
+ * prepare plan asks for these, and nothing else widens it.
+ */
+const WARMUP_HOSTS = Object.freeze([
+  "registry.npmjs.org",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "github.com",
+  "codeload.github.com",
+]);
+/** What a prepare run that asks for any other host is refused with. */
+const WARMUP_HOSTS_REASON = "add-on refused: a warm-up may reach package registries only";
 /** The profile refuse entry a changed installed copy produces. */
 const INSTALLED_DIFFERS = "installed manifest differs";
 /** The profile part kinds that describe what an add-on reaches. */
@@ -491,9 +505,10 @@ export function createWallContext({
    * @param {"addon"|"service"|"builtin"} o.kind
    * @param {string} [o.dataSubdir]  `services/<uuid>`, a project-service child only
    * @param {"run"|"warmup"} [o.purpose]  a real start, or the one prepare run before it
+   * @param {string[]} [o.warmupHosts]  a prepare run's egress: registry names, port 443 only
    * @returns {Promise<object>} a WallResult
    */
-  async function startAddonWall({ id, entry, command, args, baseEnv = process.env, ownEnv = {}, kind = "addon", dataSubdir, purpose = "run" } = {}) {
+  async function startAddonWall({ id, entry, command, args, baseEnv = process.env, ownEnv = {}, kind = "addon", dataSubdir, purpose = "run", warmupHosts } = {}) {
     try {
       // The id names folders below the data dir and, for a built-in, the
       // checkout's own bundle: checked before anything touches the filesystem.
@@ -517,9 +532,22 @@ export function createWallContext({
         throw new AddonWallRefused("add-on refused: its installed files differ from Crow's copy", "installed-changed");
       }
       if (purpose === "warmup") {
-        // The prepare run fetches packages and reaches nothing else: internet
-        // only, no listed host, no door, no token.
-        profile = { ...profile, network: { internet: true, hosts: [] }, doors: [] };
+        // The prepare run fetches packages and reaches nothing else: the hosts
+        // its plan names, each an exact CONNECT entry on 443, no general
+        // internet, no door, no token. A host outside the frozen list is a
+        // refusal rather than a wider wall.
+        const names = Array.isArray(warmupHosts) ? warmupHosts : [];
+        for (const name of names) {
+          if (typeof name !== "string" || !WARMUP_HOSTS.includes(name)) throw new AddonWallRefused(WARMUP_HOSTS_REASON);
+        }
+        profile = {
+          ...profile,
+          network: {
+            internet: false,
+            hosts: names.map((h) => ({ host: h, port: 443, scheme: "https", from: "warmup", source: "warmup" })),
+          },
+          doors: [],
+        };
       } else if (Object.prototype.hasOwnProperty.call(TTS_PORT_EXCEPTION, id)) {
         profile = await withGatewayTtsHosts(profile, { id, appRoot, installedIds, snapshot: await snapshotOrNull() });
       }

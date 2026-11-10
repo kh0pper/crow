@@ -243,6 +243,44 @@ test("only this exception's add-ons get those ports, and a stale gateway-tts hos
   assert.equal(profile.network.hosts.length, 1, "the input is untouched");
 });
 
+test("a warm-up wall hands the wrap the plan's registries only, and refuses any other host", async () => {
+  const appRoot = appRootWith({ kiosk: { sandbox: { network: { internet: false, hosts: [] } } } });
+  const rec = spawnRecorder();
+  const ctx = context({ appRoot, deps: rec });
+
+  await ctx.startAddonWall({
+    id: "kiosk",
+    entry: {},
+    command: "uvx",
+    args: ["tool==1.0"],
+    kind: "addon",
+    purpose: "warmup",
+    warmupHosts: ["pypi.org"],
+  });
+  assert.equal(rec.calls.length, 1);
+  assert.deepEqual(rec.calls[0].profile.network, {
+    internet: false,
+    hosts: [{ host: "pypi.org", port: 443, scheme: "https", from: "warmup", source: "warmup" }],
+  });
+  assert.deepEqual(rec.calls[0].profile.doors, []);
+
+  const refused = spawnRecorder();
+  const other = context({ appRoot, deps: refused });
+  await assert.rejects(
+    other.startAddonWall({
+      id: "kiosk",
+      entry: {},
+      command: "uvx",
+      args: ["tool==1.0"],
+      kind: "addon",
+      purpose: "warmup",
+      warmupHosts: ["evil.example"],
+    }),
+    (err) => err instanceof AddonWallRefused && /package registries only/.test(err.message),
+  );
+  assert.equal(refused.calls.length, 0, "a warm-up host outside the list never reaches the wrap");
+});
+
 // ---- spawn.mjs: how a TTS host reaches the relay ------------------------
 
 test("a gateway-tts host keeps its provenance at the relay; an owner host stays owner", async () => {
@@ -292,6 +330,50 @@ test("a gateway-tts host keeps its provenance at the relay; an owner host stays 
     { port: 8880, source: "gateway-tts", ownerProject: "p" },
     { port: 8000, source: "owner" },
   ]);
+  await wall.cleanup();
+});
+
+test("a warm-up's registry host reaches the relay's host list, not loopback and not plain HTTP", async () => {
+  const tmp = freshDir("warmup-relay-tmp");
+  let relayOpts = null;
+  const plan = {
+    args: ["--tmpfs", "/"],
+    env: {},
+    unsetEnv: [],
+    fds: [],
+    net: { sock: "/run/crow-net/relay.sock", ports: [], proxyPort: 39080 },
+    refused: [],
+  };
+  const wall = await wrapAddonSpawn({
+    id: "kiosk",
+    command: "/usr/bin/npm",
+    args: ["exec", "--yes", "--ignore-scripts", "--package=pkg@1.2.3", "--", "/usr/bin/node", "-e", "0"],
+    profile: {
+      network: { internet: false, hosts: [{ host: "pypi.org", port: 443, scheme: "https", from: "warmup", source: "warmup" }] },
+      doors: [],
+    },
+    entry: { command: "/usr/bin/npm" },
+    crowHome: freshDir("warmup-relay-home"),
+    dataDir: freshDir("warmup-relay-data"),
+    home: "/home/alex",
+    nodeBin: "/usr/bin/node",
+    gatewayPort: 3001,
+    deps: {
+      probe: () => ({ ok: true, pidns: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null }),
+      tmpdir: () => tmp,
+      buildPlan: () => plan,
+      seccompSupported: () => false,
+      createRelay: (opts) => {
+        relayOpts = opts;
+        return { dir: opts.dir, socketPath: opts.dir + "/relay.sock", close: () => Promise.resolve() };
+      },
+    },
+  });
+
+  assert.deepEqual(relayOpts.addon.hosts, [{ host: "pypi.org", port: 443 }]);
+  assert.deepEqual(relayOpts.addon.loopback, [], "a registry is not a loopback port");
+  assert.deepEqual(relayOpts.addon.plainHttpHosts, [], "a registry is reached over https");
+  assert.equal(relayOpts.addon.internet, false, "the rest of the internet stays closed");
   await wall.cleanup();
 });
 
@@ -372,10 +454,12 @@ test("a failed prepare run leaves the add-on off, builds no wall and raises one 
   const emitted = [];
   let startCalls = 0;
   let warmCalls = 0;
+  let warmOpts = null;
   proxy._setProxyDepsForTest({
     addonWallMode: () => ({ mode: "walled", reason: null, source: "walled" }),
-    warmAddon: async () => {
+    warmAddon: async (o) => {
       warmCalls += 1;
+      warmOpts = o;
       return { ok: false, reason: "the prepare run stopped with exit code 1", exitCode: 1, stderrLines: [], denials: [] };
     },
     startAddonWall: async () => {
@@ -391,6 +475,7 @@ test("a failed prepare run leaves the add-on off, builds no wall and raises one 
   assert.equal(entry.status, "error");
   assert.equal(entry.wall.mode, "refused");
   assert.equal(warmCalls, 1);
+  assert.deepEqual(warmOpts.ownEnv, {}, "the add-on's own env is not handed to the prepare run");
   assert.equal(startCalls, 0, "no wall is built after a failed prepare run");
 
   const deadline = Date.now() + 5000;
