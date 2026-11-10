@@ -215,12 +215,18 @@ export class AddonStdioTransport {
     this._prefixer = createStderrPrefixer(log ? { id, log } : { id });
     this._proc = null;
     this._exited = false;
+    this._exitCode = null;
     this._started = false;
   }
 
   /** The spawned process's pid, or null. */
   get pid() {
     return this._proc?.pid ?? null;
+  }
+
+  /** The child's exit code, or null while it runs (and for a killed child). */
+  get exitCode() {
+    return Number.isInteger(this._exitCode) ? this._exitCode : null;
   }
 
   /**
@@ -318,8 +324,9 @@ export class AddonStdioTransport {
         settle(reject, err);
       });
       proc.on("spawn", () => settle(resolve, undefined));
-      proc.on("close", () => {
+      proc.on("close", (code) => {
         this._proc = undefined;
+        this._exitCode = Number.isInteger(code) ? code : null;
         if (!this._exited) {
           this._exited = true;
           if (this.onExit) {

@@ -18,7 +18,9 @@
  * owner-set file, and an owner-set `files.read` folder (that one read-only,
  * `--ro-bind-fd`: a read grant is never widened to a write). Read-only code
  * (the checkout, the node install, the install folder) keeps the path binds the
- * bot plan uses, with every `.env` masked.
+ * bot plan uses, with every `.env` masked — and, add-on-only, every `.mcp.json`
+ * too (it carries resolved secrets). A data dir or Crow home that sits inside
+ * the checkout is masked as well, so nothing of it shows through that bind.
  *
  * Two rules hold for every read-write bind:
  *  - a hidden top-level entry of the home is never writable, except this
@@ -73,6 +75,12 @@ const PROXY_PORT = 39080;
 const DOOR_TOKEN_MOUNT = "/run/crow-addon/door-token";
 /** Crow-home entries that are never a bind source, whatever their owner says. */
 const CROW_HOME_SECRET_NAMES = ["secrets", "env", "peer-tokens.json", "identity.json", "android-keystore", ".keystore-env"];
+/**
+ * Add-on-only secret file names masked in every path-bound tree. A generated
+ * `.mcp.json` holds resolved secrets; the bots' plan has its own name set and is
+ * left exactly as it is.
+ */
+const ADDON_SECRET_NAMES = [".mcp.json"];
 /** An add-on id is one lowercase slug: it names a folder, so never a path. */
 const ADDON_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 /** A service child's own folder below the add-on's data folder: one `services/<uuid>` segment. */
@@ -380,6 +388,16 @@ export function buildAddonPlan(o = {}) {
     // ---- read-only code ----
     if (o.nodeBin) add(ro, dirname(dirname(o.nodeBin)), { label: "node" });
     if (o.appRoot) add(ro, o.appRoot, { label: "checkout" });
+    // The checkout is read-only, so anything of this instance that sits INSIDE
+    // it would be readable through that bind: a data dir (`./data`, Docker's
+    // /app/data) or the Crow home itself is masked here. A read-write bind under
+    // the checkout is refused anyway, so a masked data dir only ever hides a
+    // tree the add-on has no bind of its own into; a bind the plan does make
+    // inside the Crow home (its install folder) sits deeper and lands on top.
+    const appRootReal = typeof o.appRoot === "string" && o.appRoot ? realp(resolve(o.appRoot)) : null;
+    if (appRootReal) {
+      for (const p of [dataReal, crowHomeReal]) if (p && under(p, appRootReal)) maskPathInto(masks, p);
+    }
 
     // The installed copy's own folder, at its real path: the add-on's code. A
     // missing folder keeps the add-on off (there is nothing to run).
@@ -614,6 +632,53 @@ export function buildAddonPlan(o = {}) {
     // folder is bound by fd and holds only this add-on's own files, so nothing
     // Crow owns is reachable there.
     scanEnvMasks({ ro, rw, masks, policyDirs: new Set(), exists, home, refused });
+
+    // ---- .mcp.json masks over every path-bound dir ----
+    // The scan above masks `.env` (the name set shared with the bots' plan). A
+    // generated `.mcp.json` carries resolved secrets, so it is masked here under
+    // the same skips and caps: no add-on reads one through a path bind.
+    {
+      // The same caps scanEnvMasks applies to these path-bound trees (its
+      // defaults), so a tree it accepted is walked to the end here too.
+      const secretScanMaxDepth = Number.isInteger(o.secretScanMaxDepth) ? o.secretScanMaxDepth : ENV_SCAN_MAX_DEPTH;
+      const secretScanMaxEntries = Number.isInteger(o.secretScanMaxEntries) ? o.secretScanMaxEntries : ENV_SCAN_MAX_ENTRIES;
+      const maskedDirs = new Set(masks.filter(([, k]) => k === "dir").map(([d]) => d));
+      const boundDirs = [...ro.keys(), ...rw.keys()].filter((p) => {
+        try { return statSync(p).isDirectory(); } catch { return false; }
+      });
+      for (const root of boundDirs) {
+        // The one at the top of the tree is masked whatever the cap does below.
+        for (const name of ADDON_SECRET_NAMES) if (exists(join(root, name))) maskPathInto(masks, join(root, name));
+        let seen = 0;
+        let capped = false;
+        const walk = (at, depth) => {
+          if (capped) return;
+          let names = [];
+          try { names = readdirSync(at); } catch { return; }
+          for (const name of names) {
+            if (++seen > secretScanMaxEntries) { capped = true; return; }
+            const p = join(at, name);
+            let st;
+            try { st = lstatSync(p); } catch { continue; }
+            if (ADDON_SECRET_NAMES.includes(name)) {
+              if (st.isFile()) maskPathInto(masks, p);
+              continue;
+            }
+            if (st.isDirectory() && !ENV_SCAN_SKIP.has(name) && !maskedDirs.has(p)) {
+              if (depth >= secretScanMaxDepth) { capped = true; return; }
+              walk(p, depth + 1);
+              if (capped) return;
+            }
+          }
+        };
+        walk(root, 1);
+        // Fail closed, as the .env scan does: a tree too large to scan is never
+        // bound with a secret file left unmasked somewhere below the cap.
+        if (capped) {
+          throw new ContainRefused(root + " is too large to scan for secret files (cap " + secretScanMaxEntries + " entries / depth " + secretScanMaxDepth + "); refusing to bind it unscanned");
+        }
+      }
+    }
 
     // ---- network ----
     const netCfg = profile.network && typeof profile.network === "object" ? profile.network : {};

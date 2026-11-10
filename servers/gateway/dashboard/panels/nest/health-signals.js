@@ -17,6 +17,11 @@
  *               when the bot runtime is not in use here (runtime flag off, or
  *               no enabled pi bot), and none when CROW_PI_SANDBOX=off — that is
  *               a setting the operator chose, not a fault.
+ *   addonWalls — PR D: the add-on walls in the words the Extensions page uses
+ *               (scripts/addon-sandbox/words.mjs). The kill switch, and a wall
+ *               that could not be built, are warns; a host whose default is off
+ *               is info (strip-only); everything walled is ok. No card when no
+ *               add-on runs here and the kill switch is not set.
  *   peerTrust — PT-1: a trust lookup that failed closed (warn), a paired but
  *               untrusted row holding a bearer/key, an orphan credential (info)
  *   peers     — paired peer's gateway URL failing /health >=2h (warn, pushed);
@@ -128,6 +133,8 @@ import { homePermissionTargets } from "../../../boot/tighten-home-permissions.js
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
 import { botSandboxProbe, botSandboxStatus } from "../../shared/bot-sandbox-status.js";
+import { addonWallStatus, addonWallEntriesNow } from "../../shared/addon-wall-status.js";
+import { langText, NOTICE } from "../../../../../scripts/addon-sandbox/words.mjs";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
 import { getPeerProbeHealth } from "../../../peer-probe-health.js";
@@ -421,6 +428,38 @@ async function botSandboxSignal(db, lang) {
     issueLabel: fill(t("signals.botSandbox.issue", lang), { sentence: status.sentence, next: status.nextStep }),
     actionLabel: t("signals.botSandbox.action", lang),
     actionHref: "/dashboard/settings?section=bot-runtime",
+  };
+}
+
+/**
+ * The add-on walls (PR D). The status line the Extensions page shows, in the
+ * Nest's own words: one sentence from the shared status module plus a link.
+ *
+ * No card when nothing is running and the kill switch is not set — there is
+ * nothing to say about add-ons this host does not have. An info card stays
+ * strip-only (the health monitor pushes warn only).
+ */
+async function addonWallsSignal(lang) {
+  const env = process.env;
+  const killSwitch = env.CROW_ADDON_WALLS === "off";
+  let entries = [];
+  try { entries = await addonWallEntriesNow(); } catch { entries = []; }
+  const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === "object") : [];
+  const running = list.filter((e) => e.kind !== "backend");
+  if (!killSwitch && running.length === 0) return null;
+
+  const status = addonWallStatus({ env, entries: list, lang });
+  const label = langText(NOTICE.label, lang);
+  const href = status.severity === "ok" ? null : "/dashboard/extensions";
+  return {
+    id: "addonWalls",
+    severity: status.severity === "ok" ? null : status.severity,
+    state: status.severity === "ok" ? "ok" : status.severity,
+    label,
+    value: status.sentence,
+    issueLabel: href ? status.sentence : undefined,
+    actionLabel: href ? langText(NOTICE.action, lang) : undefined,
+    actionHref: href || undefined,
   };
 }
 
@@ -2611,6 +2650,7 @@ export async function collectHealthSignals(db, opts = {}) {
     storageSignal(),
     agentsSignal(db),
     botSandboxSignal(db, lang),
+    addonWallsSignal(lang),
     peersSignal(db, lang, nowFn),
     syncDialSignal(db, lang, nowFn),
     Promise.resolve().then(() => peerTrustSignal(lang, nowFn)),

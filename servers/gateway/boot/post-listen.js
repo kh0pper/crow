@@ -14,7 +14,7 @@
  * Internal relative specifiers re-anchored for boot/ (one level deeper).
  */
 
-import { initProxyServers, loadRemoteInstances } from "../proxy.js";
+import { initProxyServers, loadRemoteInstances, resolveCrowHome } from "../proxy.js";
 import { startAutoUpdate } from "../auto-update.js";
 import { startScheduler } from "../scheduler.js";
 import { createDbClient } from "../../db.js";
@@ -107,6 +107,41 @@ export async function ensureVoiceBotAtBoot({ noAuth, dbFactory = createDbClient 
     console.warn("[voice] Crow voice bot not created:", err?.message || err);
     return { created: false, error: err?.message || String(err) };
   }
+}
+
+/**
+ * One bell note for an add-on wall settings change Crow did not write. The watch
+ * only reports: the new modes apply at the next connect. Lines name each mode
+ * that moved, plus one line when something else in the file changed.
+ */
+function sendAddonWallChangeNote(diff) {
+  const changed = Array.isArray(diff?.modesChanged) ? diff.modesChanged : [];
+  const otherChanged = diff?.otherChanged === true;
+  if (changed.length === 0 && !otherChanged) return;
+  let db = null;
+  Promise.resolve()
+    .then(async () => {
+      const [{ createNotification }, { NOTICE, langText }, { noticeLanguage }] = await Promise.all([
+        import("../../shared/notifications.js"),
+        import("../../../scripts/addon-sandbox/words.mjs"),
+        import("../../../scripts/addon-sandbox/notice.mjs"),
+      ]);
+      db = createDbClient();
+      const lang = await noticeLanguage(db);
+      const noChoice = langText(NOTICE.noChoice, lang);
+      const lines = changed.map((c) => `${c.id}: ${c.from ?? noChoice} -> ${c.to ?? noChoice}`);
+      if (otherChanged) lines.push(langText(NOTICE.otherChanged, lang));
+      await createNotification(db, {
+        title: langText(NOTICE.outsideTitle, lang),
+        body: lines.join("\n"),
+        source: "addon-walls",
+        type: "system",
+        priority: "high",
+        action_url: "/dashboard/extensions",
+      });
+    })
+    .catch((err) => console.warn("[addon-walls] change notice skipped:", err?.message || err))
+    .finally(() => { try { db?.close?.(); } catch {} });
 }
 
 export async function runPostListenSetup(server, app, deps) {
@@ -267,6 +302,26 @@ export async function runPostListenSetup(server, app, deps) {
     }
   }).catch(() => {});
   console.log(`\n  First time? Visit http://localhost:${PORT}/setup for integration status and next steps.`);
+
+  // Add-on walls (PR D): the baseline and the settings watch come FIRST, before
+  // the add-ons load — loading can take ten minutes, and an edit made while it
+  // runs must be reported by the watch, not adopted as this process's baseline.
+  // The watch only reports: the new modes apply at the next connect. Skipped on
+  // a --no-auth gateway, which is nobody's dashboard. The notices wait for the
+  // add-ons below, and run without re-taking that baseline.
+  if (!noAuth) {
+    try {
+      const [{ rememberAddonWalls }, { startAddonWallsWatch }] = await Promise.all([
+        import("../../shared/addon-walls-file.js"),
+        import("../../../scripts/addon-sandbox/notice.mjs"),
+      ]);
+      const crowHomeBeforeAddons = resolveCrowHome();
+      rememberAddonWalls(crowHomeBeforeAddons);
+      startAddonWallsWatch({ crowHome: crowHomeBeforeAddons, onChange: sendAddonWallChangeNote });
+    } catch (err) {
+      console.warn("[addon-walls] the settings watch did not start:", err?.message || err);
+    }
+  }
 
   // Initialize external server proxy AFTER listening (so health checks pass during startup).
   initProxyServers().catch((err) => {
@@ -465,6 +520,40 @@ export async function runPostListenSetup(server, app, deps) {
       log: (m) => console.log(`[convergence] ${m}`),
     });
   }).catch((err) => console.warn("[convergence] verification skipped:", err.message));
+
+  // Add-on walls (PR D): once the add-ons have settled, one bell note about the
+  // walls that are not up, then the first-walled-boot note. The baseline and the
+  // change watch were started before the add-ons loaded, so this pass keeps them
+  // (rememberBaseline: false) and an edit made in between stays an outside
+  // change. Fire-and-forget: it never delays listen and never throws. Skipped on
+  // a --no-auth gateway, which is nobody's dashboard (its add-ons are not the
+  // operator's add-ons).
+  if (!noAuth) {
+    (async () => {
+      let db = null;
+      try {
+        const proxy = await import("../proxy.js");
+        await Promise.race([
+          proxy.addonsSettled(),
+          new Promise((r) => setTimeout(r, 10 * 60 * 1000).unref()),
+        ]);
+        const { runAddonWallNotices } = await import("../../../scripts/addon-sandbox/notice.mjs");
+        const { createNotification } = await import("../../shared/notifications.js");
+        const crowHome = proxy.resolveCrowHome();
+        const entries = typeof proxy.addonWallEntries === "function" ? proxy.addonWallEntries() : [];
+        try {
+          db = createDbClient();
+          await runAddonWallNotices({ db, crowHome, env: process.env, entries, createNotification, rememberBaseline: false });
+        } finally {
+          try { db?.close?.(); } catch {}
+        }
+      } catch (err) {
+        console.warn("[addon-walls] notices skipped:", err?.message || err);
+      } finally {
+        try { db?.close?.(); } catch {}
+      }
+    })();
+  }
 
   // Bring up alwaysResident vLLM bundles (embed, etc.) via gpu-orchestrator.
   // Non-fatal — if docker isn't available the gateway still runs; bundles

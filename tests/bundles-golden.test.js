@@ -52,6 +52,13 @@ await db.execute({ sql: "UPDATE crow_instances SET auth_token_hash = ? WHERE id 
 writeFileSync(STORE, JSON.stringify({ [PEER]: { auth_token: PEER_TOKEN, signing_key: PEER_KEY, created_at: new Date().toISOString(), rotated_at: null } }), { mode: 0o600 });
 
 const B = await import("../servers/gateway/routes/bundles.js");
+const { _setAddonWallProbeForTest } = await import("../servers/gateway/dashboard/shared/addon-wall-status.js");
+const { SUMMARY } = await import("../scripts/addon-sandbox/words.mjs");
+// The consent-challenge answer now carries the host's wall sentence. Pin the probe
+// so the sentence does not depend on whether this host has bubblewrap.
+_setAddonWallProbeForTest(() => ({ ok: true, pidns: true, bwrap: "/usr/bin/bwrap", setpriv: null, reason: null, pidnsReason: null }));
+delete process.env.CROW_ADDON_WALLS;
+delete process.env.CROW_ADDON_WALLS_DEFAULT;
 const { signRequest, _resetNonceCache } = await import("../servers/shared/cross-host-auth.js");
 const { _setDockerProbeForTest } = await import("../servers/gateway/dashboard/panels/extensions/data-queries.js");
 const { default: bus } = await import("../servers/shared/event-bus.js");
@@ -82,6 +89,7 @@ after(() => {
   B._setAppEnvPathForTest(null);
   B._setOwnerCheckForTest(null);
   _setDockerProbeForTest(null);
+  _setAddonWallProbeForTest(null);
   try { db.close(); } catch {}
   for (const d of [TMP_HOME, FIXTURES, GW]) rmScratch(d);
 });
@@ -148,6 +156,9 @@ async function waitJob(id) {
 }
 
 const OWNER_ONLY_BODY = { error: "This is an owner action on this instance; a peer instance can't perform it", code: "owner_only" };
+// The two fields Task 7 adds: no `server` block in these fixtures, so no line; the
+// host sentence is the per-host default's (walls are off here by default).
+const WALL_FIELDS = { sandbox_line: null, sandbox_state: { en: SUMMARY.hostOff.en, es: SUMMARY.hostOff.es } };
 
 test("peer (crossHostAuth): every owner action is refused 403 owner_only, in every spelling, and installs nothing", async () => {
   await withServer(async (base) => {
@@ -195,7 +206,7 @@ test("consent: challenge for a plain bundle says not required; a consent bundle 
   await withServer(async (base) => {
     const plain = await call(base, "GET", "/bundles/api/consent-challenge/gold-plain");
     assert.equal(plain.status, 200);
-    assert.deepEqual(plain.body, { required: false, install_required: [], existing_secret_set: [] });
+    assert.deepEqual(plain.body, { required: false, install_required: [], existing_secret_set: [], ...WALL_FIELDS });
 
     const ch = await call(base, "GET", "/bundles/api/consent-challenge/gold-consent");
     assert.equal(ch.status, 200, JSON.stringify(ch.body));
@@ -214,6 +225,7 @@ test("consent: challenge for a plain bundle says not required; a consent bundle 
       expires_in_seconds: 900,
       install_required: [],
       existing_secret_set: [],
+      ...WALL_FIELDS,
     });
 
     const missing = await call(base, "POST", "/bundles/api/install", { bundle_id: "gold-consent" });
@@ -269,11 +281,11 @@ test("env read: names-only for anyone (set secrets listed, unset and placeholder
   assert.deepEqual(B.existingInstallEnv("../etc"), { values: {}, secretSet: [] });
   await withServer(async (base) => {
     const anon = await call(base, "GET", "/bundles/api/consent-challenge/gold-plain");
-    assert.deepEqual(anon.body, { required: false, install_required: [], existing_secret_set: ["API_TOKEN"] });
+    assert.deepEqual(anon.body, { required: false, install_required: [], existing_secret_set: ["API_TOKEN"], ...WALL_FIELDS });
     B._setOwnerCheckForTest(() => true);
     try {
       const owner = await call(base, "GET", "/bundles/api/consent-challenge/gold-plain");
-      assert.deepEqual(owner.body, { required: false, install_required: [], existing_secret_set: ["API_TOKEN"], existing_env: { GREETING: "hey" } });
+      assert.deepEqual(owner.body, { required: false, install_required: [], existing_secret_set: ["API_TOKEN"], existing_env: { GREETING: "hey" }, ...WALL_FIELDS });
     } finally { B._setOwnerCheckForTest(null); }
   });
 });

@@ -80,8 +80,11 @@ import { grantCandidates, activeRoots, otherBundlesRoots, migrateGrants, recordG
 import { isLocalPasswordSession } from "../dashboard/local-session.js";
 import { resolveDataDir } from "../../db.js";
 import { PINNED_PATH_ENV_KEYS } from "../../shared/crow-home.js";
-import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
-import { legacyOwnerKeys } from "../../../scripts/addon-sandbox/profile.mjs";
+import { recordKeptData, clearKeptData, keptDataMatches, recordKeptDataOnUninstall, setWallMode, ADDON_WALL_SWITCH_KEYS } from "../../shared/addon-walls-file.js";
+import { legacyOwnerKeys, profileFor, pendingHostFields } from "../../../scripts/addon-sandbox/profile.mjs";
+import { sandboxLine } from "../../../scripts/addon-sandbox/words.mjs";
+import { addonWallStatus } from "../dashboard/shared/addon-wall-status.js";
+import { isStorageEnvConsumer } from "../addon-env.js";
 import { readStoredNtfyConfig } from "../push/ntfy-config.js";
 import { isPlaceholderValue } from "../bundle-env-placeholders.js";
 import { keychainGeneratedKeys, planGeneratedEnv, retainedEnvPath, legacyFallbackKeys, stripGeneratedKeys, parseEnvText, writePrivateFile, gatewayExcludedKeys, gatewayGeneratedEnv, gatewayEnvNames, retainGeneratedForReinstall, envPatternViolation, breachedValueViolation, mintMissingFlaggedKeys } from "../bundle-env-secrets.js";
@@ -2018,6 +2021,80 @@ function summarizePrivileges(manifest, composePath) {
   return caps;
 }
 
+// --- Add-on walls: what the install modal and the add-on page say ---
+
+/**
+ * The past defaults the provenance rule needs, read once from the checkout.
+ * A missing or unreadable file is `{}`: no owner value is then mistaken for a
+ * past default, which only makes the rule stricter.
+ */
+let _addonPastDefaults = null;
+function addonPastDefaults() {
+  if (_addonPastDefaults) return _addonPastDefaults;
+  try {
+    const doc = JSON.parse(readFileSync(join(APP_ROOT, "registry", "addon-past-defaults.json"), "utf8"));
+    _addonPastDefaults = doc && typeof doc.defaults === "object" && doc.defaults ? doc.defaults : {};
+  } catch {
+    _addonPastDefaults = {};
+  }
+  return _addonPastDefaults;
+}
+
+/** The host summary codes that mean no add-on runs walled on this computer. */
+const WALLS_OFF_CODES = new Set(["kill-switch", "no-bwrap", "host-off"]);
+
+/**
+ * Whether walls are on for this host. The host summary decides: the per-host
+ * default, the kill switch and whether this computer can run a wall at all
+ * (the bwrap probe), never the default alone.
+ */
+export function addonWallsOnHere(env = process.env, { probe } = {}) {
+  const { code } = addonWallStatus({ env, probe, lang: "en", entries: [] });
+  return !WALLS_OFF_CODES.has(code);
+}
+
+/**
+ * The two wall fields a consent-challenge answer carries.
+ *
+ * `sandbox_line` is built from the MANIFEST-ONLY profile (no owner values), so a
+ * field the owner has not filled in yet reads "the address you enter below". A
+ * profile that cannot be built gives null: an install never shows a guess.
+ * `sandbox_state` is the host summary sentence, and only while walls are not on
+ * for this host — on a walled host the line speaks for itself.
+ *
+ * @returns {{sandbox_line: {en:string, es:string}|null, sandbox_state: {en:string, es:string}|null}}
+ */
+export function addonWallConsentFields(bundleId, manifest, env = process.env, { probe } = {}) {
+  const wallsOn = addonWallsOnHere(env, { probe });
+  let line = null;
+  if (manifest && manifest.server) {
+    try {
+      const profile = profileFor({
+        id: bundleId,
+        entry: {},
+        appBundlesDir: APP_BUNDLES,
+        installedBundlesDir: BUNDLES_DIR,
+        pastDefaultsAll: addonPastDefaults(),
+      });
+      const opts = {
+        walled: wallsOn,
+        pendingHostFields: pendingHostFields(manifest, profile),
+        residuals: isStorageEnvConsumer(bundleId) ? [{ kind: "storage" }] : [],
+      };
+      line = { en: sandboxLine(profile, "en", opts), es: sandboxLine(profile, "es", opts) };
+    } catch {
+      line = null;
+    }
+  }
+  const state = wallsOn
+    ? null
+    : {
+      en: addonWallStatus({ env, probe, lang: "en", entries: [] }).sentence,
+      es: addonWallStatus({ env, probe, lang: "es", entries: [] }).sentence,
+    };
+  return { sandbox_line: line, sandbox_state: state };
+}
+
 /**
  * Find installed bundles that depend on a given bundle (via requires.bundles).
  * Used to block uninstall when dependents would break.
@@ -3619,6 +3696,47 @@ export async function handleRepinRequest(req, res, { crowHome = CROW_HOME } = {}
   }
 }
 
+// Test seam: the reconnect the "Wall it again" route runs. Null uses proxy.js.
+let _addonWallReconnectForTest = null;
+export function _setAddonWallReconnectForTest(fn) { _addonWallReconnectForTest = fn || null; }
+
+/**
+ * Connect one add-on again after its wall mode changed. Never throws: a
+ * reconnect failure is an answer (ok:false), not a broken route.
+ */
+async function reconnectForWall(id) {
+  if (_addonWallReconnectForTest) {
+    try { return (await _addonWallReconnectForTest(id)) || {}; } catch { return { ok: false, status: "error" }; }
+  }
+  try {
+    const proxy = await import("../proxy.js");
+    return (await proxy.reconnectAddonServer(id)) || {};
+  } catch {
+    return { ok: false, status: "error" };
+  }
+}
+
+/**
+ * POST /bundles/api/addon-wall/:id — the owner's "Wall it again".
+ *
+ * It can only ever set `walled`: the one way back to an unwalled add-on is the
+ * Fix-it remedy, which is backed by a live failure record.
+ */
+export async function handleAddonWallRequest(req, res, { crowHome = CROW_HOME } = {}) {
+  if (req.crossHostAuth) return res.status(403).json({ error: "walling an add-on is an owner action on this instance", code: "owner_only" });
+  const id = req.params && req.params.id;
+  if (!id || !isValidBundleId(id)) return res.status(400).json({ error: "Invalid bundle ID" });
+  if (!req.body || req.body.mode !== "walled") return res.status(400).json({ error: "Only mode \"walled\" is accepted" });
+  if (!(await isLocalOwner(req))) {
+    return res.status(403).json({ error: "Only the owner at this machine's dashboard can change an add-on's wall", code: "owner_only" });
+  }
+  let written = false;
+  try { written = setWallMode(crowHome, id, "walled"); } catch { written = false; }
+  if (!written) return res.status(500).json({ error: "Could not save that choice. Try again." });
+  const out = await reconnectForWall(id);
+  return res.json({ ok: out.ok === true, status: typeof out.status === "string" ? out.status : null });
+}
+
 export default function bundlesRouter() {
   // Folder grants (follow-up B): grandfather the folders installed extensions already use,
   // once, before any request.
@@ -3656,7 +3774,7 @@ export default function bundlesRouter() {
     // Express matches routes case-insensitively and ignores a trailing slash: compare
     // the same normalized form, so /INSTALL or /install/ can't slip past.
     const p = String(req.path || "").toLowerCase().replace(/\/+$/, "").replace(/\/{2,}/g, "/");
-    if (OWNER_ONLY.has(p) || p.startsWith("/bundles/api/consent-challenge/") || p.startsWith("/bundles/api/shared-storage/apply/")) {
+    if (OWNER_ONLY.has(p) || p.startsWith("/bundles/api/consent-challenge/") || p.startsWith("/bundles/api/addon-wall/") || p.startsWith("/bundles/api/shared-storage/apply/")) {
       return res.status(403).json({ error: "This is an owner action on this instance; a peer instance can't perform it", code: "owner_only" });
     }
     return next();
@@ -3921,6 +4039,10 @@ export default function bundlesRouter() {
     }
   });
 
+  // POST /bundles/api/addon-wall/:id — "Wall it again" on an installed add-on.
+  // Owner at this machine only, and only ever toward `walled`.
+  router.post("/bundles/api/addon-wall/:id", (req, res) => handleAddonWallRequest(req, res, { crowHome: CROW_HOME }));
+
   // GET /bundles/api/consent-challenge/:id — Mint a consent token for a privileged or consent_required bundle.
   // Returns { required: false } for bundles that don't need consent (so the UI can skip the modal).
   router.get("/bundles/api/consent-challenge/:id", async (req, res) => {
@@ -3943,8 +4065,11 @@ export default function bundlesRouter() {
     const existing = existingInstallEnv(bundleId, manifest);
     const existingFields = { existing_secret_set: existing.secretSet };
     if (await isLocalOwner(req)) existingFields.existing_env = existing.values;
+    // What the add-on can reach, from its manifest only: shown whether or not this
+    // bundle needs consent, so no install form is silent about it.
+    const wallFields = addonWallConsentFields(bundleId, manifest);
     if (!manifestRequiresConsent(manifest)) {
-      return res.json({ required: false, install_required: installRequired, ...existingFields });
+      return res.json({ required: false, install_required: installRequired, ...existingFields, ...wallFields });
     }
     const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
     const lang = (req.query.lang || req.headers["accept-language"] || "en").toString().slice(0, 2).toLowerCase();
@@ -3970,6 +4095,7 @@ export default function bundlesRouter() {
         expires_in_seconds,
         install_required: installRequired,
         ...existingFields,
+        ...wallFields,
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to mint consent token: ${err.message}` });

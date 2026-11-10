@@ -200,6 +200,11 @@ export function buildExtensionsHTML({
   // ({uploaded_at, verified_at, exported}), or null when it is unknown. Computed in
   // panels/extensions.js; html.js stays pure.
   offsite = null,
+  // The wall lines per add-on id ({line, word, wordKey, ownerUnwalled}) and the
+  // status block's HTML. Both are computed in panels/extensions.js from proxy.js's
+  // entries snapshot, so this module still reads no ~/.crow and runs no probe.
+  addonWall = {},
+  addonWallStatusHtml = "",
   lang,
 }) {
   // Models plan 3a: model bundles (inference: true) leave Browse — they are
@@ -599,6 +604,7 @@ export function buildExtensionsHTML({
       ${groupsHtml}
     </div>
     <div class="ext-view ext-view--hidden" id="ext-view-installed" role="tabpanel" hidden>
+      ${addonWallStatusHtml}
       ${installedListHtml}
       ${storesHtml}
       ${helpHtml}
@@ -647,6 +653,19 @@ export function buildExtensionsHTML({
       // deprecated, or a requires-bins entry that is not trusted-resolvable).
       _noInstall: isDeprecatedBundle(addon) || trustedBinsMissing(addon).length > 0,
     };
+    // The wall lines, in the page's language (the client only writes textContent).
+    const wall = addonWall && typeof addonWall === "object" ? addonWall[addon.id] : null;
+    if (wall && typeof wall === "object") {
+      const pick = (text) => {
+        if (!text || typeof text !== "object") return "";
+        if (lang === "es" && typeof text.es === "string" && text.es) return text.es;
+        return typeof text.en === "string" ? text.en : "";
+      };
+      addonMap[addon.id]._sandboxLine = pick(wall.line) || null;
+      addonMap[addon.id]._wallWord = pick(wall.word) || null;
+      addonMap[addon.id]._wallWordKey = typeof wall.wordKey === "string" ? wall.wordKey : null;
+      addonMap[addon.id]._wallOwnerUnwalled = wall.ownerUnwalled === true;
+    }
   }
   const addonRegistryJson = JSON.stringify(addonMap).replace(/<\//g, "<\\/");
   const addonRegistryScript = `<script id="addon-registry" type="application/json">${addonRegistryJson}<\/script>`;

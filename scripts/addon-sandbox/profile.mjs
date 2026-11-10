@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { ADDON_DOORS, ADDON_STATE_DIRS } from "../../servers/shared/addon-doors.js";
+import { labelPhrase } from "./words.mjs";
 
 // --- compose ports ---------------------------------------------------------
 
@@ -366,28 +367,12 @@ export function loadPolicySource({ id, appBundlesDir, installedBundlesDir }) {
 
 // --- the profile -----------------------------------------------------------
 
-const HOST_FIELD_NAME_RE = /(_URL|_HOST|_BASE_URL)$/;
+/** The env field names that could name a host (the same rule deriveProfile applies). */
+export const HOST_FIELD_NAME_RE = /(_URL|_HOST|_BASE_URL)$/;
 
-/** Provisional wording; a later task moves these phrases into a constants module. */
+/** One part's phrases, from the one words module every surface reads. */
 function labelPhrases(part) {
-  switch (part.kind) {
-    case "internet":
-      return ["use the internet", "usar internet"];
-    case "local-host":
-      return [`reach ${part.label} on this computer`, `acceder a ${part.label} en este equipo`];
-    case "network-host":
-      return [`reach ${part.host}:${part.port} on your network`, `acceder a ${part.host}:${part.port} en tu red`];
-    case "door":
-      return [`talk to Crow's ${part.id} door`, `hablar con la puerta ${part.id} de Crow`];
-    case "own-folder":
-      return ["keep files in its own folder", "guardar archivos en su propia carpeta"];
-    case "oauth-dir":
-      return ["use the sign-in folder you chose", "usar la carpeta de inicio de sesión que elegiste"];
-    case "crow-db":
-      return ["can read Crow's stored keys and change its database", "puede leer las claves guardadas de Crow y cambiar su base de datos"];
-    default:
-      return ["", ""];
-  }
+  return labelPhrase(part);
 }
 
 function sameJson(a, b) {
@@ -617,6 +602,50 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
     labelParts,
     label,
   };
+}
+
+/**
+ * The address fields the owner has not filled in yet: host-shaped env names (a
+ * manifest without a sandbox block: every declared `*_URL`/`*_HOST`/`*_BASE_URL`;
+ * an object network: the fields it lists) with no entry in `profile.network.hosts`
+ * and not already covered by the internet (an https URL on a public name is).
+ * These are the fields the install modal says "the address you enter below" for.
+ * Pure: reads the manifest and the profile, nothing else.
+ *
+ * @param {object} manifest
+ * @param {object} profile   a deriveProfile()/profileFor() result for the same manifest
+ * @returns {string[]} field names, sorted
+ */
+export function pendingHostFields(manifest, profile) {
+  const sandbox = manifest?.sandbox && typeof manifest.sandbox === "object" ? manifest.sandbox : null;
+  const network = sandbox ? sandbox.network : undefined;
+  let candidates;
+  if (network === undefined || network === null) {
+    const declared = Array.isArray(manifest?.env_vars) ? manifest.env_vars : [];
+    candidates = [...new Set(declared.filter((v) => v && typeof v.name === "string").map((v) => v.name))]
+      .filter((name) => HOST_FIELD_NAME_RE.test(name))
+      .sort();
+  } else if (typeof network === "object") {
+    candidates = (Array.isArray(network.hosts) ? network.hosts : []).map((h) => String(h).replace(/^env:/, ""));
+  } else {
+    return []; // "none" / "internet": the manifest names no field
+  }
+
+  const internet = profile?.network?.internet === true;
+  const known = new Set((Array.isArray(profile?.network?.hosts) ? profile.network.hosts : []).map((h) => h?.from));
+  const defaults = manifestDefaults(manifest);
+  const out = [];
+  for (const name of candidates) {
+    if (known.has(name)) continue;
+    const value = defaults.get(name);
+    if (internet && typeof value === "string") {
+      const parsed = parseHostValue(value);
+      const publicName = parsed && !isLoopbackHost(parsed.host) && !isPrivateIpLiteral(parsed.host);
+      if (publicName && (parsed.scheme === "https" || parsed.scheme === "wss")) continue;
+    }
+    out.push(name);
+  }
+  return out;
 }
 
 /** An add-on id this file may be asked about (`^[a-z0-9][a-z0-9-]*$`). */

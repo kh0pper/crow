@@ -225,14 +225,16 @@ export default {
       fixItHtml = await renderFixItCards(db, { lang, req });
     } catch {}
 
-    // Flash param from post-backup / fix-it redirects
+    // Flash param from post-backup / fix-it redirects, with the add-on an unwall
+    // flash may name (the Nest re-checks the id before it renders it).
     const flash = (typeof req.query?.flash === "string" &&
-      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error", "fixit_not_pending"].includes(req.query.flash))
+      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error", "fixit_not_pending", "fixit_addon_stale", "fixit_addon_unwalled"].includes(req.query.flash))
       ? req.query.flash
       : null;
+    const flashAddon = typeof req.query?.addon === "string" ? req.query.addon : null;
 
     const css = nestCSS();
-    const html = buildNestHTML({ ...data, healthSignals, flash, fixItHtml }, lang);
+    const html = buildNestHTML({ ...data, healthSignals, flash, flashAddon, fixItHtml }, lang);
     const js = nestClientJS(lang);
     const content = css + html + js;
 
