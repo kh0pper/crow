@@ -76,9 +76,11 @@ const ASSETS = {
   // between the vendored synth and the processor that drives them.
   "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
   // Crow's own dynamics and the compiled Faust effects' host (plan 1d,
-  // Tasks 7 and 8) are part of the worklet module too.
+  // Tasks 7 and 8) are part of the worklet module too, and so is the master
+  // meter (Task 9).
   "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
   "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
+  "meter.js": readFileSync(join(ENGINE_DIR, "meter.js"), "utf8"),
   "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
   "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
 };
@@ -845,6 +847,27 @@ const PAGE = [
   '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
   "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
   "};",
+  "window.studioRenderMixer = async function (song, seconds, sampleRate) {",
+  "  var context = new OfflineAudioContext({ numberOfChannels: 2, length: Math.round(seconds * sampleRate), sampleRate: sampleRate });",
+  '  var engine = await StudioEngine.create(context, { assetBase: "/assets/" });',
+  "  engine.setSong(song);",
+  "  engine.launchScene(song.scenes[0].id);",
+  "  engine.play();",
+  "  engine.node.connect(context.destination);",
+  "  await engine.flush();",
+  "  var buffer = await context.startRendering();",
+  "  var left = buffer.getChannelData(0);",
+  "  var right = buffer.getChannelData(1);",
+  "  var peak = 0;",
+  "  for (var i = 0; i < left.length; i++) { var value = Math.abs(left[i]); if (value > peak) peak = value; }",
+  "  var all = new Float32Array(left.length + right.length);",
+  "  all.set(left, 0); all.set(right, left.length);",
+  '  var digest = await crypto.subtle.digest("SHA-256", all.buffer);',
+  "  var bytes = new Uint8Array(digest);",
+  '  var hex = "";',
+  '  for (var k = 0; k < bytes.length; k++) { hex += ("0" + bytes[k].toString(16)).slice(-2); }',
+  "  return { hash: hex, peak: peak, length: left.length, sampleRate: context.sampleRate };",
+  "};",
   "</script>",
 ].join("\n");
 
@@ -861,6 +884,7 @@ const SERVED = {
   "/assets/font-voice.js": ["text/javascript; charset=utf-8", () => ASSETS["font-voice.js"]],
   "/assets/dynamics.js": ["text/javascript; charset=utf-8", () => ASSETS["dynamics.js"]],
   "/assets/faust-host.js": ["text/javascript; charset=utf-8", () => ASSETS["faust-host.js"]],
+  "/assets/meter.js": ["text/javascript; charset=utf-8", () => ASSETS["meter.js"]],
   "/assets/studio-processor.js": ["text/javascript; charset=utf-8", () => ASSETS["studio-processor.js"]],
   "/assets/sunvox.wasm": ["application/wasm", () => ASSETS["sunvox.wasm"]],
 };
@@ -1021,6 +1045,21 @@ async function renderFaustInsert({ kind, params, seconds = 1, sampleRate = SAMPL
 }
 
 before(async () => {
+  // The compiled Faust effects, served under the flat names `engine-client.js`
+  // asks for (`faust-<kind>.wasm` / `.json`), so the browser engine holds the
+  // same effect modules a Node render reads from `vendor/faust/`. Without them a
+  // browser engine starts with no Faust inserts and the mixer null test would
+  // compare two different songs.
+  for (const kind of ["eq", "filter", "delay", "reverb", "chorus", "phaser", "saturation"]) {
+    SERVED[`/assets/faust-${kind}.wasm`] = [
+      "application/wasm",
+      () => readFileSync(join(BUNDLE_DIR, "vendor", "faust", `${kind}.wasm`)),
+    ];
+    SERVED[`/assets/faust-${kind}.json`] = [
+      "application/json; charset=utf-8",
+      () => readFileSync(join(BUNDLE_DIR, "vendor", "faust", `${kind}.json`), "utf8"),
+    ];
+  }
   // The Faust null test's one effect, compiled before the page is served: its
   // wasm and JSON are two more assets for the asset server below.
   const fixture = await faustFixtureOnce();
@@ -2363,6 +2402,154 @@ test("a Faust insert hosted in the processor is bit-identical in Chromium and No
       browser.hash,
       nodeHash,
       `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a Faust insert`,
+    );
+  } finally {
+    tab.close();
+  }
+});
+
+test("mixer song bit-identical in Chromium and Node", async (t) => {
+  if (!chrome) {
+    t.skip("no headless Chrome");
+    return;
+  }
+
+  // The whole mixer in one song (plan 1d, Task 9): two tracks with their own
+  // chains (a Faust equalizer and Crow's own compressor on one, a Faust delay and
+  // saturation on the other), two returns with their own inserts, three sends
+  // (one pre fader, two post), a bypassed insert and a master with a gain and a
+  // limiter. Every one of those runs on the same sample in both hosts, so a
+  // different pan law, a different send tap or a different limiter ramp shows up
+  // in the hash.
+  const track = (index, gainDb, pan) => ({
+    id: `track-${index}`,
+    name: index === 1 ? "Low" : "High",
+    color: "#E8C07A",
+    device: { engine: "sunvox", type: "Analog generator", params: {} },
+    mute: false,
+    solo: false,
+    gain_db: gainDb,
+    pan: pan,
+    locked: false,
+  });
+  const insert = (id, owner, order, kind, params, bypass = false) => ({
+    id: id,
+    owner: owner,
+    order: order,
+    kind: kind,
+    bypass: bypass,
+    params: params,
+  });
+  const song = {
+    meta: { title: "Mixer parity", bpm: 120, meter: [4, 4], key: "C major" },
+    tracks: [track(1, -6, -0.4), track(2, -3, 0.5)],
+    scenes: [{ id: "scene-1", name: "A" }],
+    clips: {
+      "clip-1": {
+        id: "clip-1",
+        track_id: "track-1",
+        scene_id: "scene-1",
+        name: "Low",
+        length_bars: 1,
+        notes: [
+          { t: 0, d: 1, p: 48, v: 110 },
+          { t: 1.5, d: 0.75, p: 55, v: 80 },
+          { t: 2.5, d: 1.5, p: 52, v: 120 },
+        ],
+      },
+      "clip-2": {
+        id: "clip-2",
+        track_id: "track-2",
+        scene_id: "scene-1",
+        name: "High",
+        length_bars: 1,
+        notes: [
+          { t: 0.5, d: 1, p: 72, v: 90 },
+          { t: 2, d: 0.5, p: 67, v: 100 },
+          { t: 3, d: 1, p: 70, v: 70 },
+        ],
+      },
+    },
+    inserts: {
+      "ins-eq": insert("ins-eq", "track:track-1", 1, "eq", {
+        low_freq_hz: 120,
+        low_gain_db: 6,
+        mid_freq_hz: 900,
+        mid_gain_db: -4,
+        mid_q: 1.2,
+        high_freq_hz: 6000,
+        high_gain_db: 3,
+      }),
+      "ins-comp": insert("ins-comp", "track:track-1", 2, "compressor", {
+        detect: "rms",
+        threshold_db: -24,
+        ratio: 4,
+        knee_db: 6,
+        attack_ms: 10,
+        release_ms: 120,
+        makeup_db: 3,
+        sidechain_hp_hz: 80,
+      }),
+      "ins-delay": insert("ins-delay", "track:track-2", 1, "delay", {
+        time_ms: 240,
+        feedback: 0.4,
+        mix: 0.35,
+        highcut_hz: 6000,
+      }),
+      "ins-sat": insert("ins-sat", "track:track-2", 2, "saturation", {
+        drive_db: 9,
+        tone: 0.6,
+        output_db: -3,
+        mix: 0.8,
+      }),
+      "ins-reverb": insert("ins-reverb", "return:ret-1", 1, "reverb", {
+        size: 0.7,
+        damping: 0.6,
+        predelay_ms: 12,
+        mix: 0.4,
+      }),
+      "ins-echo": insert("ins-echo", "return:ret-2", 1, "delay", {
+        time_ms: 375,
+        feedback: 0.5,
+        mix: 0.5,
+        highcut_hz: 5000,
+      }),
+      // A bypassed insert: it is part of the chain and must never run.
+      "ins-bypassed": insert("ins-bypassed", "master", 0, "filter", { mode: "hp", cutoff_hz: 400, resonance: 2 }, true),
+      "ins-limiter": insert("ins-limiter", "master", 1, "limiter", { ceiling_db: -1.5, release_ms: 60 }),
+    },
+    sends: {
+      "track-1/ret-1": { track_id: "track-1", return_id: "ret-1", level_db: -12, pre: false },
+      "track-1/ret-2": { track_id: "track-1", return_id: "ret-2", level_db: -6, pre: true },
+      "track-2/ret-1": { track_id: "track-2", return_id: "ret-1", level_db: -9, pre: true },
+    },
+    returns: {
+      "ret-1": { id: "ret-1", name: "Hall", gain_db: -6, pan: 0.3, mute: false },
+      "ret-2": { id: "ret-2", name: "Echo", gain_db: -9, pan: -0.2, mute: false },
+    },
+    master: { gain_db: -2.5, target: { lufs: -14, true_peak_db: -1 } },
+  };
+
+  const seconds = 3;
+  const node = await renderSong(song, { seconds: seconds, sampleRate: SAMPLE_RATE });
+  const nodePeak = Math.max(peakOf(node.left), peakOf(node.right));
+  assert.ok(nodePeak > 0.01, `the Node mixer render has to be audible, peak was ${nodePeak}`);
+  const nodeHash = hashChannels(node.left, node.right);
+
+  const tab = await openTab();
+  try {
+    await tab.navigate(origin + "/");
+    assert.equal(await tab.evaluate("typeof window.studioRenderMixer"), "function", "the engine page did not load");
+    const browser = await tab.evaluate(
+      `window.studioRenderMixer(${JSON.stringify(song)}, ${seconds}, ${SAMPLE_RATE})`,
+    );
+    assert.equal(browser.length, node.left.length, "the two hosts rendered different lengths");
+    assert.equal(browser.sampleRate, SAMPLE_RATE);
+    assert.ok(browser.peak > 0.01, `the Chromium mixer render has to be audible too, peak was ${browser.peak}`);
+    assert.equal(
+      browser.hash,
+      nodeHash,
+      `Chromium and Node rendered different bytes over ${node.left.length * 2} samples of a mixer song`,
     );
   } finally {
     tab.close();

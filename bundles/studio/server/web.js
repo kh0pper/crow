@@ -218,12 +218,13 @@ const ASSET_FILES = new Map([
   // The SoundFont hosts: one synth per font, one MIDI channel per track. Part of
   // the worklet module (engine-client.js's SOURCE_FILES) like the rest.
   ["font-voice.js", join("engine", "font-voice.js")],
-  // Crow's own dynamics and the host that instantiates the compiled Faust
-  // effects (plan 1d, Tasks 7 and 8): both part of the worklet module too, so
-  // the route that composes `SOURCE_FILES` needs them here or it cannot build
-  // the engine's module at all.
+  // Crow's own dynamics, the host that instantiates the compiled Faust effects
+  // (plan 1d, Tasks 7 and 8) and the master meter (Task 9): all part of the
+  // worklet module too, so the route that composes `SOURCE_FILES` needs them
+  // here or it cannot build the engine's module at all.
   ["dynamics.js", join("engine", "dynamics.js")],
   ["faust-host.js", join("engine", "faust-host.js")],
+  ["meter.js", join("engine", "meter.js")],
   ["engine-client.js", join("engine", "engine-client.js")],
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],
   ["sunvox.wasm", join("vendor", "sunvox", "sunvox.wasm")],

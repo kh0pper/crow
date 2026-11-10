@@ -8,7 +8,7 @@
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
  *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
- *       + studio-processor.js
+ *       + meter.js + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
@@ -19,9 +19,10 @@
  * `globalThis.StudioSpessa` (see `vendor/spessasynth/`), which is the only shape
  * a worklet can load; `font-voice.js` is the host that drives it, one synth per
  * font with one MIDI channel per track (plan 1d). `dynamics.js` is Crow's own
- * compressor, limiter, gate and de-esser, and `faust-host.js` instantiates the
- * compiled Faust effects (both plan 1d, Tasks 7 and 8); both are classic scripts
- * like the rest.
+ * compressor, limiter, gate and de-esser, `faust-host.js` instantiates the
+ * compiled Faust effects (both plan 1d, Tasks 7 and 8) and `meter.js` is the
+ * master meter that reads the master after its inserts (Task 9); all three are
+ * classic scripts like the rest.
  *
  * The compiled Faust effects themselves arrive separately: their wasm and
  * factory JSON are read here (fetched in a page, read from disk in Node) and
@@ -171,6 +172,21 @@
  *   into a pad's sample. The looper's buffers are this page's (the audio thread
  *   allocates none): eight bars at the song's tempo are sent before the first
  *   record, and handed back and forth around a take.
+ * - `onMeter(listener)` follows the master meter: every 100 ms of audio while the
+ *   song plays, and once when it stops, the processor posts
+ *   `{type:"meter", momentary, short_term, integrated, true_peak_db, latency_ms}`
+ *   — BS.1770-4 momentary (400 ms), short-term (3 s) and integrated (gated,
+ *   reset on each Play) loudness in LUFS, the true peak since the last Play in
+ *   dBTP, and the delay the master chain puts on the master path in ms. It is
+ *   the same measurement `server/loudness.js` makes of a render, read after the
+ *   master inserts. `lastMeter()` hands back the latest reading (or null).
+ * - `onMasterLatency(listener)` follows `{type:"master_latency", ms}`, posted
+ *   once per master chain build: the master limiter's lookahead, which the
+ *   master strip shows as its own delay.
+ * - `onInsertFault(listener)` follows `{type:"insert_fault", insert_id,
+ *   message}`: an insert that produced a sample that is not a finite number. It
+ *   is bypassed in the ENGINE (the document is never touched), and this is said
+ *   once — the message names the effect and the track, return or master.
  */
 (function () {
   "use strict";
@@ -188,11 +204,13 @@
     // The SoundFont hosts: one synth per font, one MIDI channel per track (see
     // font-voice.js). Before the processor that hosts them.
     "font-voice.js",
-    // Crow's own dynamics (plan 1d, Task 8), and the host for the compiled Faust
-    // effects (Task 7). Both classic scripts, before the processor that drives
+    // Crow's own dynamics (plan 1d, Task 8), the host for the compiled Faust
+    // effects (Task 7) and the master meter that reads the master after its
+    // inserts (Task 9). All classic scripts, before the processor that drives
     // them.
     "dynamics.js",
     "faust-host.js",
+    "meter.js",
     "studio-processor.js",
   ];
 
@@ -890,6 +908,10 @@
    *                    onLaunch: function(function): function,
    *                    nextBarFrame: function(): Promise<{frame: number, bar: number}>,
    *                    onTap: function(function): function,
+ *                    onMeter: function(function): function,
+ *                    lastMeter: function(): (object|null),
+ *                    onMasterLatency: function(function): function,
+ *                    onInsertFault: function(function): function,
   *                    loadLibrary: function(string, string, Uint8Array): Promise<{status: string, reason?: string}>,
  *                    unloadLibrary: function(string): void,
  *                    onLibraryNeeded: function(function): function,
@@ -1370,6 +1392,15 @@
     const libraryNeededListeners = new Set();
     const libraryPresetsListeners = new Set();
     const tapListeners = new Set();
+    const meterListeners = new Set();
+    const masterLatencyListeners = new Set();
+    const insertFaultListeners = new Set();
+    /**
+     * The latest meter reading, kept so a panel that draws after the fact (or a
+     * test that asks once) can read it without waiting for the next 100 ms. A
+     * reused object: the listeners get their own copy of the numbers.
+     */
+    let lastMeter = null;
     /**
      * Hand one failure to the error listeners and the console: a fault after
      * start-up has no caller to throw to.
@@ -1642,6 +1673,60 @@
             rate: Number.isFinite(rate) ? rate : context.sampleRate,
             bars: Number.isFinite(bars) ? bars : 0,
           });
+        }
+        return;
+      }
+      if (message.type === "meter") {
+        // The master meter (plan 1d, Task 9): BS.1770-4 momentary, short-term
+        // and integrated loudness, the true peak since the last Play, and the
+        // master chain's own latency. One reading every 100 ms of audio while
+        // the song plays, and one when it stops.
+        const reading = {
+          momentary: Number(message.momentary),
+          short_term: Number(message.short_term),
+          integrated: Number(message.integrated),
+          true_peak_db: Number(message.true_peak_db),
+          latency_ms: Number(message.latency_ms),
+        };
+        lastMeter = reading;
+        for (const listener of meterListeners) {
+          try {
+            listener(reading);
+          } catch {
+            /* one bad listener must not stop the meter for the others */
+          }
+        }
+        return;
+      }
+      if (message.type === "master_latency") {
+        // Once per master chain build: the delay the master chain (the limiter's
+        // lookahead) puts on the master path, which the master strip shows as
+        // its own delay.
+        const ms = Number(message.ms);
+        const latency = { ms: Number.isFinite(ms) ? ms : 0 };
+        for (const listener of masterLatencyListeners) {
+          try {
+            listener(latency);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
+        }
+        return;
+      }
+      if (message.type === "insert_fault") {
+        // An insert produced a sample that is not a finite number: the processor
+        // replaced that block with the insert's input and bypassed it in the
+        // ENGINE. The document is untouched, and this is said once.
+        const fault = {
+          insert_id: String(message.insert_id),
+          message: String(message.message),
+        };
+        for (const listener of insertFaultListeners) {
+          try {
+            listener(fault);
+          } catch {
+            /* one bad listener must not stop the others hearing about it */
+          }
         }
         return;
       }
@@ -2195,6 +2280,68 @@
       },
 
       /**
+       * Follow the master meter: `{momentary, short_term, integrated,
+       * true_peak_db, latency_ms}`, one reading every 100 ms of audio while the
+       * song plays and one when it stops. The loudness readings are BS.1770-4
+       * LUFS, measured after the master inserts on the very K-weighting and
+       * gating `server/loudness.js` measures a render with; `true_peak_db` is the
+       * true peak since the last `play()` (a hold), and `latency_ms` is the delay
+       * the master chain puts on the master path (the limiter's lookahead).
+       * @param {(reading: {momentary: number, short_term: number,
+       *                    integrated: number, true_peak_db: number,
+       *                    latency_ms: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onMeter(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        meterListeners.add(listener);
+        return function unsubscribe() {
+          meterListeners.delete(listener);
+        };
+      },
+
+      /**
+       * The latest meter reading, or null before the first one. A copy, so a
+       * caller cannot move the reading another listener sees.
+       * @returns {{momentary: number, short_term: number, integrated: number,
+       *            true_peak_db: number, latency_ms: number}|null}
+       */
+      lastMeter() {
+        return lastMeter === null ? null : { ...lastMeter };
+      },
+
+      /**
+       * Follow the master chain's own latency: `{ms}`, posted once per chain
+       * build. The master limiter's 1.5 ms lookahead is the whole of it — every
+       * track and return insert is zero-latency — and the master strip shows it
+       * as the delay it is.
+       * @param {(latency: {ms: number}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onMasterLatency(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        masterLatencyListeners.add(listener);
+        return function unsubscribe() {
+          masterLatencyListeners.delete(listener);
+        };
+      },
+
+      /**
+       * Follow an insert that produced an invalid sample: `{insert_id, message}`.
+       * The processor replaced that block with the insert's input and bypassed the
+       * insert in the ENGINE — the song is never edited — and says so once.
+       * @param {(fault: {insert_id: string, message: string}) => void} listener
+       * @returns {() => void} unsubscribe
+       */
+      onInsertFault(listener) {
+        if (typeof listener !== "function") return function noop() {};
+        insertFaultListeners.add(listener);
+        return function unsubscribe() {
+          insertFaultListeners.delete(listener);
+        };
+      },
+
+      /**
        * Follow the engine's failures (a device that could not be built, a song
        * the processor refused, a fault it survived). They are also logged.
        * @param {(text: string) => void} listener
@@ -2265,7 +2412,11 @@
         errorListeners.clear();
         sampleNeededListeners.clear();
         libraryNeededListeners.clear();
+        libraryPresetsListeners.clear();
         tapListeners.clear();
+        meterListeners.clear();
+        masterLatencyListeners.clear();
+        insertFaultListeners.clear();
         pendingAudio.clear();
         pendingSamples.clear();
         pendingLibrary.clear();

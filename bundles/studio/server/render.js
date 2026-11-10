@@ -1592,10 +1592,11 @@ function engineAssets() {
     // The SoundFont hosts (one synth per font, one channel per track) ride in the
     // worklet module with the synth they drive.
     "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
-    // Crow's own dynamics and the compiled Faust effects' host: both part of the
-    // worklet module (plan 1d, Tasks 7 and 8).
+    // Crow's own dynamics, the compiled Faust effects' host and the master meter:
+    // all part of the worklet module (plan 1d, Tasks 7, 8 and 9).
     "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
     "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
+    "meter.js": readFileSync(join(ENGINE_DIR, "meter.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };
