@@ -17,19 +17,20 @@ tools:
 Uptime Kuma is a self-hosted uptime monitor. This bundle runs it as a local
 container on `127.0.0.1:3007` and exposes two host-side tools for Crow.
 
-## First-run setup (required)
+## First-run setup
 
 Uptime Kuma stores its entire configuration (monitors, notifications, status
-pages, users) in its own SQLite database. There is **no pre-seeded admin
-account** — you must create one before any other tool call will work.
+pages, users) in its own SQLite database. Crow creates the admin account
+(`crow-admin`) itself right after install, saves the password in Settings →
+Passwords, and writes it into this bundle's settings as `UPTIMEKUMA_USERNAME`
+and `UPTIMEKUMA_PASSWORD` (used for Prometheus `/metrics` basic auth — nothing
+else). An install made before this version shows "Set it up for me" on its
+Extensions card.
 
 1. Install and start the bundle.
-2. Open `http://localhost:3007/` in a browser.
-3. Complete the wizard (create admin username + password).
-4. Save the username / password in Crow settings as `UPTIMEKUMA_USERNAME`
-   and `UPTIMEKUMA_PASSWORD`. These are used for Prometheus `/metrics`
-   basic auth — nothing else.
-5. Add monitors through the Uptime Kuma web UI.
+2. Open `http://localhost:3007/` and sign in as `crow-admin` with the password
+   from Settings → Passwords.
+3. Add monitors through the Uptime Kuma web UI.
 
 ## Why only two tools
 

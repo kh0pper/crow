@@ -1462,7 +1462,10 @@
     {
       "id": "forgejo",
       "name": "Forgejo",
-      "version": "1.0.2",
+      "version": "1.0.4",
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "description": "Community-driven soft-fork of Gitea — self-hosted git with an independent governance model and ActivityPub federation roadmap",
       "type": "bundle",
       "author": "Crow",
@@ -1513,6 +1516,12 @@
           "description": "Personal access token (Settings > Applications > Generate New Token)",
           "required": true,
           "secret": true
+        },
+        {
+          "name": "FORGEJO_DISABLE_REGISTRATION",
+          "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Forgejo's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.",
+          "default": "true",
+          "required": false
         }
       ],
       "ports": [
@@ -1525,9 +1534,16 @@
         "label": "Forgejo"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 240
+        },
+        "user": "crow-admin",
+        "secretEnv": "FORGEJO_ADMIN_PASSWORD"
       },
-      "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). First-run: open http://localhost:3050 to complete the setup wizard, then generate a personal access token under Settings > Applications. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide.",
+      "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). Crow creates Forgejo's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by FORGEJO__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Self-registration is off by default: an existing install switches it off at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings. Log in as crow-admin and generate a personal access token under Settings > Applications for FORGEJO_TOKEN. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide.",
       "official": true
     },
     {
@@ -2045,7 +2061,10 @@
     {
       "id": "gitea",
       "name": "Gitea",
-      "version": "1.0.2",
+      "version": "1.0.4",
+      "refreshFiles": [
+        "docker-compose.yml"
+      ],
       "description": "Self-hosted git service — repos, issues, pull requests, and built-in SSH server for git over SSH",
       "type": "bundle",
       "author": "Crow",
@@ -2095,6 +2114,12 @@
           "description": "Personal access token (Settings > Applications > Generate New Token)",
           "required": true,
           "secret": true
+        },
+        {
+          "name": "GITEA_DISABLE_REGISTRATION",
+          "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Gitea's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.",
+          "default": "true",
+          "required": false
         }
       ],
       "ports": [
@@ -2107,9 +2132,16 @@
         "label": "Gitea"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 240
+        },
+        "user": "crow-admin",
+        "secretEnv": "GITEA_ADMIN_PASSWORD"
       },
-      "notes": "First-run: open http://localhost:3040 to complete the setup wizard (database is preconfigured to SQLite). Then create the first admin user, log in, and generate a personal access token under Settings > Applications. Git over SSH uses port 2223: clone with ssh://git@host:2223/user/repo.git (the scp-style git@host:user/repo silently hits port 22 and will not reach this bundle).",
+      "notes": "Crow creates Gitea's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by GITEA__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Self-registration is off by default: an existing install switches it off at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings. Log in as crow-admin and generate a personal access token under Settings > Applications for GITEA_TOKEN. Git over SSH uses port 2223: clone with ssh://git@host:2223/user/repo.git (the scp-style git@host:user/repo silently hits port 22 and will not reach this bundle).",
       "official": true
     },
     {
@@ -7055,7 +7087,7 @@
     {
       "id": "uptime-kuma",
       "name": "Uptime Kuma",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "description": "Service monitoring and uptime tracking with response-time graphs and status pages",
       "type": "bundle",
       "author": "Crow",
@@ -7101,12 +7133,12 @@
         },
         {
           "name": "UPTIMEKUMA_USERNAME",
-          "description": "Admin username for Prometheus /metrics basic auth (set after first-run wizard)",
+          "description": "Admin username for Prometheus /metrics basic auth (Crow creates this account at install)",
           "required": false
         },
         {
           "name": "UPTIMEKUMA_PASSWORD",
-          "description": "Admin password for /metrics basic auth",
+          "description": "Admin password for /metrics basic auth (Crow creates it at install and saves it in Settings → Passwords)",
           "required": false,
           "secret": true
         }
@@ -7120,9 +7152,17 @@
         "label": "Uptime Kuma"
       },
       "firstAdmin": {
-        "mode": "finish-setup"
+        "mode": "crow",
+        "via": "setup",
+        "setup": {
+          "script": "scripts/first-admin.sh",
+          "timeout_s": 180
+        },
+        "user": "crow-admin",
+        "secretEnv": "UPTIMEKUMA_PASSWORD",
+        "userEnv": "UPTIMEKUMA_USERNAME"
       },
-      "notes": "Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. On first launch, open the web UI to create the admin account. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions.",
+      "notes": "Crow creates Uptime Kuma's admin account itself at install and writes UPTIMEKUMA_USERNAME/UPTIMEKUMA_PASSWORD into this bundle's settings, so the first-run page is never left open for anything else on the machine to claim; the password is in Settings → Passwords. Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions.",
       "official": true
     },
     {

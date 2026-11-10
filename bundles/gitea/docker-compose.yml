@@ -14,6 +14,11 @@
 #
 # Gitea does NOT run sshd — the built-in Go implementation serves on 22 inside
 # the container. Clone with: ssh://git@localhost:2223/user/repo.git
+#
+# First-run: GITEA__security__INSTALL_LOCK closes the web installer, which would
+# otherwise answer on 127.0.0.1 and let anything on the machine claim the
+# instance. Crow creates the admin account itself at install; its password is in
+# Settings → Passwords.
 
 services:
   gitea:
@@ -35,6 +40,11 @@ services:
       - GITEA__server__SSH_PORT=2223
       - GITEA__server__SSH_LISTEN_PORT=22
       - GITEA__server__START_SSH_SERVER=true
+      # The installer page (/install) answers on 127.0.0.1, so it is closed: with the
+      # sqlite settings above the app starts already installed, and Crow creates the
+      # admin account itself at install.
+      - GITEA__security__INSTALL_LOCK=true
+      - GITEA__service__DISABLE_REGISTRATION=${GITEA_DISABLE_REGISTRATION:-true}
     init: true
     mem_limit: 512m
     restart: unless-stopped

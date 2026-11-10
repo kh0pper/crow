@@ -13,6 +13,11 @@
 #   3050 (host) -> 3000 (container) — HTTP web UI + API on 127.0.0.1
 #   2224 (host) -> 22   (container) — built-in Go SSH server on 127.0.0.1.
 #                                     Clone with ssh://git@host:2224/user/repo
+#
+# First-run: FORGEJO__security__INSTALL_LOCK closes the web installer, which
+# would otherwise answer on 127.0.0.1 and let anything on the machine claim the
+# instance. Crow creates the admin account itself at install; its password is in
+# Settings → Passwords.
 
 services:
   forgejo:
@@ -34,6 +39,11 @@ services:
       - FORGEJO__server__SSH_PORT=2224
       - FORGEJO__server__SSH_LISTEN_PORT=22
       - FORGEJO__server__START_SSH_SERVER=true
+      # The installer page (/install) answers on 127.0.0.1, so it is closed: with the
+      # sqlite settings above the app starts already installed, and Crow creates the
+      # admin account itself at install.
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-true}
     init: true
     mem_limit: 512m
     restart: unless-stopped

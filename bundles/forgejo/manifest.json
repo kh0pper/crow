@@ -1,7 +1,8 @@
 {
   "id": "forgejo",
   "name": "Forgejo",
-  "version": "1.0.2",
+  "version": "1.0.4",
+  "refreshFiles": ["docker-compose.yml"],
   "description": "Community-driven soft-fork of Gitea — self-hosted git with an independent governance model and ActivityPub federation roadmap",
   "type": "bundle",
   "author": "Crow",
@@ -16,10 +17,17 @@
   "requires": { "env": ["FORGEJO_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
   "env_vars": [
     { "name": "FORGEJO_URL", "description": "Forgejo server URL", "default": "http://localhost:3050", "required": true },
-    { "name": "FORGEJO_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true }
+    { "name": "FORGEJO_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true },
+    { "name": "FORGEJO_DISABLE_REGISTRATION", "description": "Leave true so nobody can sign themselves up: with self-registration on and no accounts yet, the first person to register on the web page becomes Forgejo's admin. Crow creates the admin (crow-admin); add other people from the admin panel. Set false only to let people register on their own.", "default": "true", "required": false }
   ],
   "ports": [3050, 2224],
   "webUI": { "port": 3050, "path": "/", "label": "Forgejo" },
-  "firstAdmin": { "mode": "finish-setup" },
-  "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). First-run: open http://localhost:3050 to complete the setup wizard, then generate a personal access token under Settings > Applications. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide."
+  "firstAdmin": {
+    "mode": "crow",
+    "via": "setup",
+    "setup": { "script": "scripts/first-admin.sh", "timeout_s": 240 },
+    "user": "crow-admin",
+    "secretEnv": "FORGEJO_ADMIN_PASSWORD"
+  },
+  "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). Crow creates Forgejo's admin account (crow-admin) itself at install and saves the password in Settings → Passwords; the web installer at /install is closed by FORGEJO__security__INSTALL_LOCK in the compose file, which existing installs receive at the next gateway start (then Restart the app in Extensions). Self-registration is off by default: an existing install switches it off at its next restart. To keep people able to sign themselves up, set GITEA_DISABLE_REGISTRATION=false (Forgejo: FORGEJO_DISABLE_REGISTRATION=false) in this app's settings. Log in as crow-admin and generate a personal access token under Settings > Applications for FORGEJO_TOKEN. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide."
 }
