@@ -191,7 +191,7 @@ So **a bundle that declares a `webUI` must also declare `firstAdmin`**, and
 | `mode` | Meaning | What Crow does |
 |---|---|---|
 | `crow` | Crow creates the app's first admin at install | the generated password is in the keychain (Settings → Passwords) |
-| `finish-setup` | The app has its own first-run admin/setup page | shows "Finish <app>'s setup now", with a direct link, until the operator presses Done |
+| `finish-setup` | The app has its own first-run admin/setup page | shows "Finish &lt;app&gt;'s setup now", with a direct link, until the operator presses Done |
 | `default-login` | The app ships a documented default login | same notice, naming the default user |
 | `external` | It connects to an app you already run, whose login is that app's (Immich, Kodi) | nothing — there is no account of ours to claim |
 | `none` | The app has no login of its own (a public/anonymous UI, or a viewer whose gate Crow already applies) | nothing |

@@ -205,7 +205,7 @@ machine can answer that page on `127.0.0.1` before you do. So a manifest with a
 | `mode` | When | What Crow does |
 |---|---|---|
 | `crow` | Crow can create the admin at install | the password is generated and saved in the keychain |
-| `finish-setup` | the app has its own first-run admin page | shows "Finish <app>'s setup now" (with a link) until the operator presses Done, and rings the bell once |
+| `finish-setup` | the app has its own first-run admin page | shows "Finish &lt;app&gt;'s setup now" (with a link) until the operator presses Done, and rings the bell once |
 | `default-login` | the app ships a documented default login | the same notice, naming the default user |
 | `external` | it connects to an app you already run | nothing: the login is that app's |
 | `none` | no login of its own | nothing |

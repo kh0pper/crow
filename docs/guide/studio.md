@@ -82,7 +82,7 @@ Every track, every return and the master has its own strip, and the mixer screen
 
 **An agent's mix pass.** The bot can build chains, set every effect's parameters, add returns, set sends and set the master's level and target — each step undoable, and a run of them outlined in the bot's colour under a banner with **Hear: before (A/B)** / **Hear: after (A/B)** and **Undo pass**. A/B plays the song as it was *before* the pass without changing anything, so you can hear the difference in place; it leaves the moment you change anything. **Undo pass** takes the pass back newest step first, stopping at the first step you changed since and telling you which one. **Undo** on a single step still works exactly as it does anywhere else.
 
-**When an effect fails.** If an effect produces a sample that is not a number — a broken build, a hostile setting — Studio catches it at that effect's output, replaces the block with the signal that went in, bypasses the effect **in the engine** (never in the song) and says so once on the strip: *"<effect> on <track> produced an invalid sample; it is bypassed."* The rest of the chain plays. Moving that effect's own parameters (or its bypass switch) arms it again. A render reports such an effect in its `effect_problems` list rather than failing, and the same goes for a compiled effect this build does not have.
+**When an effect fails.** If an effect produces a sample that is not a number — a broken build, a hostile setting — Studio catches it at that effect's output, replaces the block with the signal that went in, bypasses the effect **in the engine** (never in the song) and says so once on the strip: *"&lt;effect&gt; on &lt;track&gt; produced an invalid sample; it is bypassed."* The rest of the chain plays. Moving that effect's own parameters (or its bypass switch) arms it again. A render reports such an effect in its `effect_problems` list rather than failing, and the same goes for a compiled effect this build does not have.
 
 **What the bot cannot do.** It cannot remove a sound: swapping an amp's capture or cabinet (see **Amp and cabinet**), taking a pad's sample, replacing a track's bank or taking back a library file are all your steps. What it may do is the mix itself, which is why every mixer step is an ordinary undoable field.
 
@@ -228,7 +228,7 @@ Every limit refuses with a plain-English error that names it; nothing is ever tr
 
 ## Credits
 
-> Powered by SunVox (modular synth & tracker) Copyright (c) 2008 - 2026, Alexander Zolotov <nightradio@gmail.com>, WarmPlace.ru>
+> Powered by SunVox (modular synth & tracker) Copyright (c) 2008 - 2026, Alexander Zolotov &lt;nightradio@gmail.com&gt;, WarmPlace.ru&gt;
 >
 > The default instruments are downloaded, not redistributed with Crow: MuseScore General by S. Christian Collins, from FluidR3Mono by Michael Cowgill and FluidR3 by Frank Wen; Temple Blocks by Ethan Winer; Drumline Cymbals by Michael Schorsch — MIT, per its own licence file.
 >
