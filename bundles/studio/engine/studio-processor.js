@@ -5,14 +5,17 @@
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + spessasynth.js + font-voice.js + studio-processor.js
+ *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
+ *       + studio-processor.js
  *
  * so this file shares a module scope with the vendored SunVox glue (which
  * declares the `SunVoxLib` factory), with the pure sequencer
  * (`StudioSequencer` on `globalThis`), with the sampler's voice DSP
  * (`StudioSamplerVoice`), with the performance-effects bus (`StudioPerfFx`) and
  * with the SoundFont hosts (`StudioFontVoice`, which drives the vendored
- * synth's `SpessaSynthProcessor`). Nothing here is imported: the same source
+ * synth's `SpessaSynthProcessor`), with Crow's own dynamics (`StudioDynamics`)
+ * and with the compiled Faust effects' host (`StudioFaustHost`, plan 1d
+ * Tasks 7 and 8). Nothing here is imported: the same source
  * runs in a browser's `AudioWorkletGlobalScope` and in node-web-audio-api's
  * worklet thread.
  *
@@ -1546,6 +1549,12 @@
         case "library_unload":
           this.unloadLibrary(message.library_id);
           break;
+        case "faust-modules":
+          // The compiled Faust effects (plan 1d, Task 7). They are compiled once
+          // per page here, on the message queue — never inside `process()` — and
+          // the chains that use them arrive in Task 9.
+          this.enqueue(() => this.compileFaustModules(message.modules));
+          break;
         case "live":
           this.live(message);
           break;
@@ -1586,6 +1595,19 @@
         default:
           break;
       }
+    }
+
+    /**
+     * Compile the Faust effects this page posted: their wasm, once per kind, so
+     * every insert of that kind instantiates from one module. A host whose build
+     * output is missing posts nothing, and this module was composed without
+     * `faust-host.js` in a test that predates it — both are no-ops.
+     * @param {Object<string, {wasm: ArrayBuffer, json: string}>} modules
+     * @returns {Promise<void>}
+     */
+    async compileFaustModules(modules) {
+      if (typeof StudioFaustHost === "undefined" || StudioFaustHost === null) return;
+      await StudioFaustHost.compileModules(modules);
     }
 
     /**

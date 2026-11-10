@@ -7,7 +7,8 @@
  * `audioWorklet.addModule()`:
  *
  *     sequencer.js + resample.js + sampler-voice.js + perf-fx.js + sunvox.js
- *       + spessasynth.js + font-voice.js + studio-processor.js
+ *       + spessasynth.js + font-voice.js + dynamics.js + faust-host.js
+ *       + studio-processor.js
  *
  * `resample.js` rides along so the worklet scope has the very same resampler a
  * page does (`StudioResample`), even though the conversion itself happens on
@@ -17,7 +18,18 @@
  * the vendored SoundFont synth: one import-free classic script that defines
  * `globalThis.StudioSpessa` (see `vendor/spessasynth/`), which is the only shape
  * a worklet can load; `font-voice.js` is the host that drives it, one synth per
- * font with one MIDI channel per track (plan 1d).
+ * font with one MIDI channel per track (plan 1d). `dynamics.js` is Crow's own
+ * compressor, limiter, gate and de-esser, and `faust-host.js` instantiates the
+ * compiled Faust effects (both plan 1d, Tasks 7 and 8); both are classic scripts
+ * like the rest.
+ *
+ * The compiled Faust effects themselves arrive separately: their wasm and
+ * factory JSON are read here (fetched in a page, read from disk in Node) and
+ * POSTED to the processor as `{type:"faust-modules", modules}` — transferred,
+ * then compiled once per page on the processor's port handler, never in
+ * `process()`. A host that has no `vendor/faust/` output yet (a checkout that
+ * has not run `tools/build-faust.mjs`) starts without effects instead of
+ * failing: a chain that wants one finds it missing (see `faust-host.js`).
  *
  * The vendored `sunvox_lib_loader.js` is deliberately NOT one of them: it keeps
  * one SunVox instance in a module-scope `svlib` (plus scratch pointers into
@@ -133,6 +145,10 @@
  *   instrument picker lists, and `onLibraryPresets(listener)` follows them for a
  *   bank that finished loading after its asker stopped waiting (a load that
  *   waited for Stop answers `deferred` first, and its presets arrive later).
+ * - `faust-modules` is posted once, by `create()`, after the engine comes up: one
+ *   entry per compiled Faust effect — `{<kind>: {wasm, json}}`, the wasm
+ *   transferred rather than copied — which the processor compiles once per page
+ *   and the chains then instantiate inserts from (plan 1d, Task 7).
  * - `livePad(track_id, bank, index, v)` and `liveRelease(track_id, bank, index)`
  *   audition a pad from the panel: straight to the voice, never through a
  *   command or a history step, and never quantized.
@@ -172,6 +188,11 @@
     // The SoundFont hosts: one synth per font, one MIDI channel per track (see
     // font-voice.js). Before the processor that hosts them.
     "font-voice.js",
+    // Crow's own dynamics (plan 1d, Task 8), and the host for the compiled Faust
+    // effects (Task 7). Both classic scripts, before the processor that drives
+    // them.
+    "dynamics.js",
+    "faust-host.js",
     "studio-processor.js",
   ];
 
@@ -198,6 +219,22 @@
 
   /** The wasm binary, passed to the processor as `processorOptions.wasmBinary`. */
   const WASM_FILE = "sunvox.wasm";
+
+  /**
+   * The Faust effects whose compiled wasm and factory JSON the engine loads
+   * (`bundles/studio/vendor/faust/`, built by `tools/build-faust.mjs`). Their
+   * names are the bundle's effect kinds; each is posted to the processor once
+   * the engine is up, and compiled there (see `faust-host.js`).
+   */
+  const FAUST_KINDS = Object.freeze([
+    "eq",
+    "filter",
+    "delay",
+    "reverb",
+    "chorus",
+    "phaser",
+    "saturation",
+  ]);
 
   /** The processor name `studio-processor.js` registers. */
   const PROCESSOR_NAME = "studio-processor";
@@ -416,6 +453,119 @@
     const response = await fetch(joinUrl(options.assetBase, WASM_FILE));
     if (!response.ok) throw new Error(`StudioEngine: could not load ${WASM_FILE} (${response.status})`);
     return response.arrayBuffer();
+  }
+
+  /**
+   * The file one vendored asset sits at, in Node: a path built from this
+   * module's own directory, or null in a host with no filesystem (a browser or a
+   * worklet scope).
+   * @param {string[]} parts the path segments, relative to this directory
+   * @returns {string|null}
+   */
+  function localPathOf(parts) {
+    const req = nodeRequire();
+    if (!req || typeof __dirname !== "string" || __dirname === "") return null;
+    try {
+      return req("node:path").join(__dirname, ...parts);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One OPTIONAL asset's bytes: whatever the host has, or null. The Faust
+   * effects are optional in the sense that a checkout without the build output
+   * still starts an engine — it just has no Faust inserts (see the file header).
+   * @param {string} name the asset name (what `assetBytes` and `assetBase` use)
+   * @param {string[]} localParts where `build-faust.mjs` wrote it, from here
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<ArrayBuffer|null>}
+   */
+  async function readOptionalBytes(name, localParts, options) {
+    const supplied = options.assetBytes;
+    if (supplied && supplied[name] !== undefined) {
+      const bytes = bytesOf(supplied[name]);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
+    if (options.assetBase) {
+      try {
+        const response = await fetch(joinUrl(options.assetBase, name));
+        if (response.ok) return await response.arrayBuffer();
+      } catch {
+        /* no such asset on this host: the engine starts without it */
+      }
+      return null;
+    }
+    const file = localPathOf(localParts);
+    const req = nodeRequire();
+    if (!file || !req) return null;
+    try {
+      const fs = req("node:fs");
+      if (!fs.existsSync(file)) return null;
+      const bytes = new Uint8Array(fs.readFileSync(file));
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One OPTIONAL asset as text — the factory JSON that goes with a compiled
+   * effect.
+   * @param {string} name the asset name
+   * @param {string[]} localParts where `build-faust.mjs` wrote it, from here
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<string|null>}
+   */
+  async function readOptionalText(name, localParts, options) {
+    const supplied = options.assetBytes;
+    if (supplied && supplied[name] !== undefined) return textOf(supplied[name]);
+    if (options.assetBase) {
+      try {
+        const response = await fetch(joinUrl(options.assetBase, name));
+        if (response.ok) return await response.text();
+      } catch {
+        /* no such asset on this host */
+      }
+      return null;
+    }
+    const file = localPathOf(localParts);
+    const req = nodeRequire();
+    if (!file || !req) return null;
+    try {
+      const fs = req("node:fs");
+      if (!fs.existsSync(file)) return null;
+      return fs.readFileSync(file, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The compiled Faust effects this host can hand the processor: one entry per
+   * effect whose wasm AND factory JSON are both here. A checkout that has not run
+   * `tools/build-faust.mjs` has none, and the engine starts anyway.
+   * @param {{assetBase?: string, assetBytes?: object}} options
+   * @returns {Promise<Object<string, {wasm: ArrayBuffer, json: string}>>}
+   */
+  async function readFaustModules(options) {
+    const modules = {};
+    for (const kind of FAUST_KINDS) {
+      const wasm = await readOptionalBytes(
+        `faust-${kind}.wasm`,
+        ["..", "vendor", "faust", `${kind}.wasm`],
+        options,
+      );
+      if (!wasm) continue;
+      const json = await readOptionalText(
+        `faust-${kind}.json`,
+        ["..", "vendor", "faust", `${kind}.json`],
+        options,
+      );
+      if (!json) continue;
+      modules[kind] = { wasm: wasm, json: json };
+    }
+    return modules;
   }
 
   /** A counter so two engines in one Node process never share a temp path. */
@@ -1174,6 +1324,9 @@
       }
     }
     const wasmBinary = await readWasm(opts);
+    // The compiled Faust effects: optional, and posted (transferred) once the
+    // engine is up. See `readFaustModules`.
+    const faustModules = await readFaustModules(opts);
 
     // Claimed synchronously before the registration (and checked again, since
     // the reads above awaited), so two concurrent calls cannot both get as far
@@ -1310,6 +1463,27 @@
       }
       throw error;
     }
+
+    /**
+     * Hand the processor the compiled Faust effects, transferred rather than
+     * copied. The processor compiles each once, on its port handler: compiling
+     * is asynchronous, so it never happens inside `process()`. Nothing is posted
+     * when this host has no built effects, and a chain that asks for one then
+     * reports it missing.
+     * @returns {void}
+     */
+    const postFaustModules = () => {
+      const kinds = Object.keys(faustModules);
+      if (kinds.length === 0) return;
+      const modules = {};
+      const transfer = [];
+      for (const kind of kinds) {
+        modules[kind] = faustModules[kind];
+        transfer.push(faustModules[kind].wasm);
+      }
+      post({ type: "faust-modules", modules: modules }, transfer);
+    };
+    postFaustModules();
 
     node.port.onmessage = (event) => {
       const message = event && event.data;

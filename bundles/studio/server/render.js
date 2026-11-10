@@ -119,7 +119,7 @@
  */
 
 import { createRequire } from "node:module";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -140,6 +140,18 @@ const BUNDLE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** The engine sources, in the names `engine-client.js` looks them up by. */
 const ENGINE_DIR = join(BUNDLE_DIR, "engine");
 const VENDOR_DIR = join(BUNDLE_DIR, "vendor", "sunvox");
+
+/** The compiled Faust effects (`tools/build-faust.mjs`): one wasm + JSON per kind. */
+const FAUST_DIR = join(BUNDLE_DIR, "vendor", "faust");
+
+/**
+ * The Faust effects the engine loads, in the order the build writes them: the
+ * names must match `engine-client.js`'s own list, which is what asks for
+ * `faust-<kind>.wasm` out of this asset map. Exported so a test can hold the two
+ * lists together — a render that quietly dropped one effect would be a silence
+ * nobody asked for.
+ */
+export const FAUST_KINDS = ["eq", "filter", "delay", "reverb", "chorus", "phaser", "saturation"];
 
 /** The engine client, loaded as the CommonJS classic script the bundle ships. */
 const studioEngine = require(join(ENGINE_DIR, "engine-client.js"));
@@ -1559,6 +1571,12 @@ function defaultCrowHome() {
 
 /**
  * The engine's sources and wasm binary, read once per process.
+ *
+ * The compiled Faust effects (plan 1d, Task 7) are read here too: each
+ * `<kind>.wasm` and its factory `<kind>.json`, under the flat asset names
+ * `engine-client.js` asks for. A checkout that has not run
+ * `tools/build-faust.mjs` has none, and the render starts anyway with no Faust
+ * inserts — which is what a page does too, so the two hosts still agree.
  * @returns {Object<string, string|Uint8Array>} name → text or bytes
  */
 function engineAssets() {
@@ -1574,9 +1592,22 @@ function engineAssets() {
     // The SoundFont hosts (one synth per font, one channel per track) ride in the
     // worklet module with the synth they drive.
     "font-voice.js": readFileSync(join(ENGINE_DIR, "font-voice.js"), "utf8"),
+    // Crow's own dynamics and the compiled Faust effects' host: both part of the
+    // worklet module (plan 1d, Tasks 7 and 8).
+    "dynamics.js": readFileSync(join(ENGINE_DIR, "dynamics.js"), "utf8"),
+    "faust-host.js": readFileSync(join(ENGINE_DIR, "faust-host.js"), "utf8"),
     "studio-processor.js": readFileSync(join(ENGINE_DIR, "studio-processor.js"), "utf8"),
     "sunvox.wasm": readFileSync(join(VENDOR_DIR, "sunvox.wasm")),
   };
+  // The compiled effects: read as the pair `faust-<kind>.wasm` /
+  // `faust-<kind>.json` that engine-client.js posts to the processor.
+  for (const kind of FAUST_KINDS) {
+    const wasm = join(FAUST_DIR, `${kind}.wasm`);
+    const json = join(FAUST_DIR, `${kind}.json`);
+    if (!existsSync(wasm) || !existsSync(json)) continue;
+    cachedAssets[`faust-${kind}.wasm`] = readFileSync(wasm);
+    cachedAssets[`faust-${kind}.json`] = readFileSync(json, "utf8");
+  }
   return cachedAssets;
 }
 

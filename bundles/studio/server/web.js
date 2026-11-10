@@ -218,6 +218,12 @@ const ASSET_FILES = new Map([
   // The SoundFont hosts: one synth per font, one MIDI channel per track. Part of
   // the worklet module (engine-client.js's SOURCE_FILES) like the rest.
   ["font-voice.js", join("engine", "font-voice.js")],
+  // Crow's own dynamics and the host that instantiates the compiled Faust
+  // effects (plan 1d, Tasks 7 and 8): both part of the worklet module too, so
+  // the route that composes `SOURCE_FILES` needs them here or it cannot build
+  // the engine's module at all.
+  ["dynamics.js", join("engine", "dynamics.js")],
+  ["faust-host.js", join("engine", "faust-host.js")],
   ["engine-client.js", join("engine", "engine-client.js")],
   ["sunvox.js", join("vendor", "sunvox", "sunvox.js")],
   ["sunvox.wasm", join("vendor", "sunvox", "sunvox.wasm")],
@@ -226,6 +232,25 @@ const ASSET_FILES = new Map([
   // globalThis.StudioSpessa. It is part of the worklet module
   // (engine-client.js's SOURCE_FILES), served here so the browser can fetch it.
   ["spessasynth.js", join("vendor", "spessasynth", "spessasynth.js")],
+  // The compiled Faust effects (tools/build-faust.mjs): each one's wasm and its
+  // factory JSON, under the flat names engine-client.js asks for. The build
+  // output is checked in, so these are files in the bundle like the rest; the
+  // route answers 404 for one that a stale checkout does not have, and an engine
+  // then starts without that effect (see readFaustModules in engine-client.js).
+  ["faust-eq.wasm", join("vendor", "faust", "eq.wasm")],
+  ["faust-eq.json", join("vendor", "faust", "eq.json")],
+  ["faust-filter.wasm", join("vendor", "faust", "filter.wasm")],
+  ["faust-filter.json", join("vendor", "faust", "filter.json")],
+  ["faust-delay.wasm", join("vendor", "faust", "delay.wasm")],
+  ["faust-delay.json", join("vendor", "faust", "delay.json")],
+  ["faust-reverb.wasm", join("vendor", "faust", "reverb.wasm")],
+  ["faust-reverb.json", join("vendor", "faust", "reverb.json")],
+  ["faust-chorus.wasm", join("vendor", "faust", "chorus.wasm")],
+  ["faust-chorus.json", join("vendor", "faust", "chorus.json")],
+  ["faust-phaser.wasm", join("vendor", "faust", "phaser.wasm")],
+  ["faust-phaser.json", join("vendor", "faust", "phaser.json")],
+  ["faust-saturation.wasm", join("vendor", "faust", "saturation.wasm")],
+  ["faust-saturation.json", join("vendor", "faust", "saturation.json")],
   // The panel's read replica of the song needs Yjs in the browser. It is the
   // dependency the hub itself uses, so the page applies updates with exactly
   // the code the hub encoded them with. Its own imports are served beside it
