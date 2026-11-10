@@ -25,10 +25,13 @@
  * rewrite proves nothing.
  *
  * Creating the key is once and crash-safe: the bytes go to a unique temp file
- * in the same dir, are fsynced, and are then `link`ed into place (atomic;
- * EEXIST means another process won, and its key is read). A 0-byte key file —
- * what a crash between create and the write used to leave behind — is replaced
- * the same way; any other wrong length is refused and never overwritten.
+ * in the same dir, are fsynced, and are then `link`ed into place (atomic). First
+ * use is serialised across processes by an exclusive lock directory
+ * (`<key>.lock`, removed after; a lock older than 30 s is a dead holder's), and
+ * the check is repeated inside it, so racing first-use callers all return the
+ * one key on disk. A 0-byte key file — what a crash between create and the write
+ * used to leave behind — is replaced under that lock; any other wrong length is
+ * refused and never overwritten.
  *
  * The check path (readApprovalKey / readApprovalRecord) only ever READS: a
  * missing, unreadable or refused key or record means no approval is valid, and
@@ -36,8 +39,8 @@
  */
 import { randomBytes } from "node:crypto";
 import {
-  closeSync, fsyncSync, linkSync, lstatSync, openSync, readdirSync, readFileSync,
-  renameSync, unlinkSync, writeSync,
+  closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync,
+  renameSync, rmdirSync, unlinkSync, writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resolveCrowHome } from "./crow-home.js";
@@ -46,6 +49,11 @@ import { anchoredPath } from "./secret-values.js";
 
 /** Bytes in the approval key (an HMAC-SHA256 key). */
 export const APPROVAL_KEY_BYTES = 32;
+
+/** First-key creation lock: how long a caller waits, when a lock counts as a dead holder's, and the poll step. */
+const KEY_LOCK_WAIT_MS = 10_000;
+const KEY_LOCK_STALE_MS = 30_000;
+const KEY_LOCK_POLL_MS = 10;
 export const APPROVAL_KEY_FILENAME = "data-backend-approval.key";
 export const APPROVAL_RECORD_FILENAME = "data-backend-approvals.json";
 /** Shape version of the record file; any other value reads as "no record". */
@@ -174,6 +182,48 @@ export function ensureApprovalKey({ crowHome } = {}) {
   const target = secretPath(crowHome, APPROVAL_KEY_FILENAME);
   if (!target) throw new Error(`the secrets directory for ${path} cannot be used`);
 
+  // First use is serialised across processes with an exclusive lock directory:
+  // the check, the removal of an empty crash leftover and the publish all happen
+  // with the lock held, so two first-use callers can never each publish (or
+  // unlink) a key the other already returned.
+  const release = acquireKeyLock(`${target}.lock`, path);
+  try {
+    const raced = readApprovalKey({ crowHome });
+    if (raced) return raced;
+    return createKeyLocked(target, path);
+  } finally {
+    release();
+  }
+}
+
+/** Sleep without an event loop (ensureApprovalKey is synchronous). */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** mkdir is atomic: whoever creates the directory holds the lock. */
+function acquireKeyLock(lockDir, shownPath) {
+  const deadline = Date.now() + KEY_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+      return () => { try { rmdirSync(lockDir); } catch { /* already gone */ } };
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw new Error(`the approval key file ${shownPath} could not be locked (${err?.code || "error"})`);
+    }
+    // A holder that died leaves its lock behind: one older than the stale age is
+    // removed (no live holder keeps it that long), then the next try takes it.
+    try {
+      const st = lstatSync(lockDir);
+      if (Date.now() - st.mtimeMs > KEY_LOCK_STALE_MS) { try { rmdirSync(lockDir); } catch { /* raced */ } continue; }
+    } catch { continue; /* released between the tries */ }
+    if (Date.now() > deadline) throw new Error(`the approval key file ${shownPath} is locked by another process`);
+    sleepSync(KEY_LOCK_POLL_MS);
+  }
+}
+
+/** With the key lock held: replace an empty leftover, then publish a new key. */
+function createKeyLocked(target, path) {
   removeCrashedTmps(target);
 
   // An existing file is replaced ONLY when it is EMPTY: 0 bytes is what a crash
@@ -186,18 +236,7 @@ export function ensureApprovalKey({ crowHome } = {}) {
       throw new Error(`the approval key file ${path} is not a regular file of this user with mode 600; refusing to use or replace it`);
     }
     if (st.size !== 0) throw new Error(`the approval key file ${path} exists but does not hold a key`);
-    // Nothing that uses this code publishes an empty key (the bytes are on disk
-    // before the name exists), so this file is a crash leftover. Re-check just
-    // before removing it: a racing creator may have put its key at that name in
-    // the meantime, and a key with bytes in it is never unlinked.
-    let again = null;
-    try { again = lstatSync(target); } catch { /* gone already */ }
-    if (again && (again.ino !== st.ino || again.size !== 0)) {
-      const raced = readApprovalKey({ crowHome });
-      if (raced) return raced;
-      throw new Error(`the approval key file ${path} exists but does not hold a key`);
-    }
-    if (again) { try { unlinkSync(target); } catch { /* another process replaced it first */ } }
+    try { unlinkSync(target); } catch { /* gone */ }
   }
 
   const key = randomBytes(APPROVAL_KEY_BYTES);
@@ -210,14 +249,15 @@ export function ensureApprovalKey({ crowHome } = {}) {
     throw new Error(`the approval key file ${path} could not be written (${err?.code || "error"})`);
   }
   try {
-    // Atomic and exclusive: the whole key is on disk before the name exists.
+    // Atomic and exclusive: the whole key is on disk before the name exists. With
+    // the lock held nothing else publishes here; EEXIST would mean a writer that
+    // does not take the lock, and then its key is the one used.
     linkSync(tmp, target);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* gone */ }
     if (err?.code !== "EEXIST") throw new Error(`the approval key file ${path} could not be created (${err?.code || "error"})`);
-    // Another process won the race: use its key.
-    const raced = readApprovalKey({ crowHome });
-    if (raced) return raced;
+    const bytes = (() => { try { return readFileSync(target); } catch { return null; } })();
+    if (bytes && bytes.length === APPROVAL_KEY_BYTES) return bytes;
     throw new Error(`the approval key file ${path} exists but does not hold a key`);
   }
   try { unlinkSync(tmp); } catch { /* gone */ }

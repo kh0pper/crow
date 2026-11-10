@@ -15,7 +15,7 @@ import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -191,6 +191,47 @@ test("concurrent ensureApprovalKey calls agree on one key", async () => {
     assert.equal(readApprovalKey({ crowHome: home }).toString("hex"), keys[0], "the key on disk is not the one returned");
     assert.equal(statSync(path).size, APPROVAL_KEY_BYTES);
     assert.equal(statSync(path).mode & 0o777, 0o600);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("concurrent ensureApprovalKey calls agree on one key, with or without an empty leftover, every time", async () => {
+  const moduleUrl = pathToFileURL(join(ROOT, "servers/shared/data-backend-approval-key.js")).href;
+  for (let round = 0; round < 8; round++) {
+    const home = mkdtempSync(join(tmpdir(), "crow-keyrace2-"));
+    try {
+      const path = approvalKeyPath(home);
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      if (round % 2 === 0) { writeFileSync(path, "", { mode: 0o600 }); chmodSync(path, 0o600); }
+      const code = `const m = await import(${JSON.stringify(moduleUrl)});`
+        + `process.stdout.write(m.ensureApprovalKey({ crowHome: ${JSON.stringify(home)} }).toString("hex"));`;
+      const run = () => new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ["--input-type=module", "-e", code], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+        let out = ""; let why = "";
+        child.stdout.on("data", (d) => { out += d; });
+        child.stderr.on("data", (d) => { why += d; });
+        child.on("error", reject);
+        child.on("close", (c) => (c === 0 ? resolve(out) : reject(new Error(`racer failed (${c}): ${why.slice(0, 300)}`))));
+      });
+      const keys = await Promise.all([run(), run(), run(), run(), run(), run()]);
+      assert.equal(new Set(keys).size, 1, `round ${round}: the racing processes minted different keys`);
+      assert.equal(readApprovalKey({ crowHome: home }).toString("hex"), keys[0], `round ${round}: the key on disk is not the one returned`);
+      assert.equal(existsSync(`${path}.lock`), false, `round ${round}: the lock was left behind`);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }
+});
+
+test("a lock left by a dead holder is taken over once it is stale, and a fresh one is waited on", () => {
+  const home = mkdtempSync(join(tmpdir(), "crow-keylock-"));
+  try {
+    const path = approvalKeyPath(home);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    mkdirSync(`${path}.lock`, { mode: 0o700 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${path}.lock`, old, old);
+    const key = ensureApprovalKey({ crowHome: home });
+    assert.equal(key.length, APPROVAL_KEY_BYTES);
+    assert.equal(existsSync(`${path}.lock`), false, "the stale lock was not cleared");
+    assert.equal(readApprovalKey({ crowHome: home }).toString("hex"), key.toString("hex"));
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
