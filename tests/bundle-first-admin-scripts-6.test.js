@@ -473,7 +473,7 @@ const APPS = {
     loginCalls: (r) => snippetCalls(r, "prove"),
     proofTries: 3,
     setPasswordIn: (call) => stdinLines(call)[0],
-    loginPasswordIn: (call) => stdinLines(call)[0],
+    loginPasswordIn: (call) => stdinLines(call)[1],
     freshMessage: /did not create the superuser, so nothing was changed/,
     unknownMessage: /did not report whether it created the superuser/,
     alreadyMessage: /already has its own superuser|already has a superuser that is not Crow's/,
@@ -1033,4 +1033,15 @@ test("kolibri: the provisioning snippet uses 0.19.5's real functions and never p
     assert.equal(again.stdout.trim(), "DONE");
     assert.equal(existsSync(join(stub, "out2.json")), false, "a provisioned device is never provisioned again");
   } finally { rmSync(stub, { recursive: true, force: true }); }
+});
+
+test("kolibri: the login proof gets the username first and the password second, matching prove(name, password)", () => {
+  const script = readFileSync(join(B("kolibri"), "scripts", "first-admin.sh"), "utf8");
+  assert.match(snippetOf(script, "HTTP"), /prove\(sys\.stdin\.readline\(\)\.rstrip\("\\n"\), sys\.stdin\.readline\(\)\.rstrip\("\\n"\)\)/);
+  assert.match(script, /printf '%s\\n%s\\n' "\$ADMIN_USER" "\$PW" \| timeout 20 docker exec -i -u kolibri "\$CONTAINER" "\$PYTHON" -c "\$HTTP" prove/);
+  const r = run("kolibri");
+  assert.equal(r.status, 0, r.stderr);
+  const proof = r.calls.filter((c) => /-c .* prove$/.test(c.argv) || c.argv.endsWith(" prove"));
+  assert.ok(proof.length >= 1, "the proof ran");
+  assert.equal(proof[0].stdin.split("\n")[0], "admin", "the first stdin line is the username");
 });

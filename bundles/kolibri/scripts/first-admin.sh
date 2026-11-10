@@ -209,7 +209,7 @@ detect_word() {
 }
 prove_word() {
   local out
-  out="$(printf '%s\n%s\n' "$PW" "$ADMIN_USER" | timeout 20 docker exec -i -u kolibri "$CONTAINER" "$PYTHON" -c "$HTTP" prove 2>/dev/null || true)"
+  out="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | timeout 20 docker exec -i -u kolibri "$CONTAINER" "$PYTHON" -c "$HTTP" prove 2>/dev/null || true)"
   word_of "$out"
 }
 
