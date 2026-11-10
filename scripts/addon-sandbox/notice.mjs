@@ -27,6 +27,7 @@ import {
   setAddonWallsOutsideListener,
 } from "../../servers/shared/addon-walls-file.js";
 import { addonWallWord } from "../../servers/gateway/dashboard/shared/addon-wall-status.js";
+import { killSwitchOn, wallsOnForHost as hostWallsOn } from "./host-switch.mjs";
 import { NOTICE, langOf, langText, fillText, sandboxLine, wallWord } from "./words.mjs";
 
 /** Where the bell note sends the operator. */
@@ -34,8 +35,7 @@ export const ADDONS_HREF = "/dashboard/extensions";
 
 /** Walls are on for this host: the per-host default is walled and the kill switch is not set. */
 export function wallsOnForHost(env = process.env) {
-  const e = env && typeof env === "object" ? env : {};
-  return e.CROW_ADDON_WALLS_DEFAULT === "walled" && e.CROW_ADDON_WALLS !== "off";
+  return hostWallsOn(env);
 }
 
 /** The name a notice line shows for one entry: a backend's row name, else its id. */
@@ -57,7 +57,7 @@ function lineName(entry) {
 export function bootNoticeFor({ entries = [], env = process.env, lang = "en" } = {}) {
   const L = langOf(lang);
   const e = env && typeof env === "object" ? env : {};
-  const killSwitch = e.CROW_ADDON_WALLS === "off";
+  const killSwitch = killSwitchOn(e);
   if (!killSwitch && !wallsOnForHost(e)) return null;
 
   const lines = [];

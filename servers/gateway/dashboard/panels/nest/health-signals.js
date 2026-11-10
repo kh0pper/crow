@@ -127,6 +127,7 @@ import { docsUrl } from "../../shared/components.js";
 import { readSetting } from "../../settings/registry.js";
 import { isFunnelPublicPath, effectiveFunnelPrefixes } from "../../../funnel.js";
 import { gatewayListenPort } from "../../../listen-port.js";
+import { killSwitchOn } from "../../../../../scripts/addon-sandbox/host-switch.mjs";
 import { gatewayListenHost } from "../../../listen-host.js";
 import { DEFAULT_INTERVAL_HOURS, MIN_INTERVAL_HOURS, classifyUpdateResult, shouldStartAutoUpdate, git as autoUpdateGit, appRoot as autoUpdateAppRoot } from "../../../auto-update.js";
 import { homePermissionTargets } from "../../../boot/tighten-home-permissions.js";
@@ -441,7 +442,7 @@ async function botSandboxSignal(db, lang) {
  */
 async function addonWallsSignal(lang) {
   const env = process.env;
-  const killSwitch = env.CROW_ADDON_WALLS === "off";
+  const killSwitch = killSwitchOn(env);
   let entries = [];
   try { entries = await addonWallEntriesNow(); } catch { entries = []; }
   const list = Array.isArray(entries) ? entries.filter((e) => e && typeof e === "object") : [];
