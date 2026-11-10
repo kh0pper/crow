@@ -81,6 +81,31 @@ test("a default with no matching publish is refused, not added", () => {
   ]);
 });
 
+test("a manifest's ports and webUI.port never make a port this add-on's own service", () => {
+  const manifest = {
+    ...BASE_MANIFEST,
+    ports: [8000],
+    webUI: { port: 8000, label: "X" },
+  };
+  const elsewhere = composePublishing('"127.0.0.1:8001:8001"');
+  const unlisted = deriveProfile(manifest, {}, { composePorts: composePortsFrom(elsewhere, manifest) });
+  assert.deepEqual(unlisted.network.hosts, []);
+  assert.deepEqual(unlisted.refused, [
+    { what: "host:DEMO_URL", reason: "a default address that is not this add-on's own published service" },
+  ]);
+  assert.deepEqual(unlisted.labelParts.map((p) => p.kind), ["internet", "own-folder"]);
+
+  // The label still comes from webUI, but only a real publish makes the host count.
+  const published = composePortsFrom(composePublishing('"127.0.0.1:8000:8000"'), manifest);
+  assert.deepEqual(published, [8000]);
+  const own = deriveProfile(manifest, {}, { composePorts: published });
+  assert.deepEqual(own.network.hosts, [
+    { host: "localhost", port: 8000, scheme: "http", from: "DEMO_URL", source: "default-own-service" },
+  ]);
+  assert.deepEqual(own.refused, []);
+  assert.equal(own.label.en[1], "reach X on this computer");
+});
+
 test("a default naming a port nothing publishes (127.0.0.1:2019) is refused", () => {
   const manifest = { ...BASE_MANIFEST, env_vars: [{ name: "DEMO_URL", default: "http://127.0.0.1:2019" }] };
   const profile = deriveProfile(manifest, {}, { composePorts: composePortsFrom(composePublishing('"127.0.0.1:8000:8000"'), manifest) });
@@ -166,6 +191,84 @@ test("a manifest naming its own door set keeps it; an unknown one is refused", (
   ]);
 });
 
+test("doors and state dirs are first-party only, whatever id a third-party bundle claims", () => {
+  // A third-party bundle carrying a first-party id gets neither.
+  const kioskInstalled = deriveProfile({ ...BASE_MANIFEST, id: "kiosk" }, {}, { source: "installed" });
+  assert.deepEqual(kioskInstalled.doors, []);
+  const browserInstalled = deriveProfile({ ...BASE_MANIFEST, id: "browser" }, {}, { source: "installed" });
+  assert.deepEqual(browserInstalled.files.state, []);
+
+  // Its own manifest asking for that door is refused, not granted.
+  const claimed = deriveProfile(
+    { ...BASE_MANIFEST, id: "kiosk", sandbox: { doors: ["kiosk"] } },
+    {},
+    { source: "installed" },
+  );
+  assert.deepEqual(claimed.doors, []);
+  assert.deepEqual(claimed.refused.filter((r) => r.what.startsWith("door:")), [
+    { what: "door:kiosk", reason: "doors are for first-party add-ons only" },
+  ]);
+
+  // The same ids read from the repo copy keep theirs.
+  const kioskRepo = deriveProfile({ ...BASE_MANIFEST, id: "kiosk" }, {}, { source: "repo" });
+  assert.deepEqual(kioskRepo.doors, ["kiosk"]);
+  const browserRepo = deriveProfile({ ...BASE_MANIFEST, id: "browser" }, {}, { source: "repo" });
+  assert.deepEqual(browserRepo.files.state, ["browser-sessions", "browser-downloads", "browser-exports"]);
+});
+
+test("an id that names an Object.prototype member gets no doors and no state dirs", () => {
+  for (const id of ["__proto__", "constructor", "toString"]) {
+    const plain = deriveProfile({ ...BASE_MANIFEST, id }, {}, { source: "repo" });
+    assert.deepEqual(plain.doors, [], `${id}: no door for a prototype member`);
+    assert.deepEqual(plain.files.state, [], `${id}: no state dirs for a prototype member`);
+
+    const named = deriveProfile({ ...BASE_MANIFEST, id, sandbox: { doors: [id] } }, {}, { source: "repo" });
+    assert.deepEqual(named.doors, [], `${id}: a named door is still no door`);
+    assert.deepEqual(named.refused.filter((r) => r.what.startsWith("door:")), [
+      { what: `door:${id}`, reason: "no such door set" },
+    ]);
+  }
+});
+
+// --- files ----------------------------------------------------------------
+
+test("a file field is bound only when the owner chose the path", () => {
+  const manifest = {
+    ...BASE_MANIFEST,
+    id: "acme",
+    sandbox: {
+      files: { read: ["env:DATA_FILE"], write: ["env:OUT_DIR"], oauthDir: "env:TOKEN_DIR" },
+    },
+    env_vars: [
+      { name: "DATA_FILE", default: "/srv/acme/in.json" },
+      { name: "OUT_DIR", default: "/srv/acme/out" },
+      { name: "TOKEN_DIR", default: "/srv/acme/tokens" },
+    ],
+  };
+
+  // The manifest default is not a choice, so nothing is bound and each says why.
+  const defaulted = deriveProfile(manifest, {}, {});
+  assert.deepEqual(defaulted.files, { read: [], write: [], oauthDir: null, state: [] });
+  assert.deepEqual(defaulted.labelParts.map((p) => p.kind), ["internet", "own-folder"]);
+  const fileRefusals = defaulted.refused.filter((r) => r.what.startsWith("file:"));
+  assert.deepEqual(fileRefusals.map((r) => r.what).sort(), ["file:DATA_FILE", "file:OUT_DIR", "file:TOKEN_DIR"]);
+  for (const refusal of fileRefusals) assert.equal(refusal.reason, "a default path the owner did not choose");
+
+  // The same values, held as owner-entered, are bound.
+  const owned = deriveProfile(manifest, {
+    env: { DATA_FILE: "/srv/acme/in.json", OUT_DIR: "/srv/acme/out", TOKEN_DIR: "/srv/acme/tokens" },
+    ownerSet: ["DATA_FILE", "OUT_DIR", "TOKEN_DIR"],
+  }, {});
+  assert.deepEqual(owned.files, {
+    read: [{ from: "DATA_FILE", path: "/srv/acme/in.json", source: "owner" }],
+    write: [{ from: "OUT_DIR", path: "/srv/acme/out", source: "owner" }],
+    oauthDir: { from: "TOKEN_DIR", path: "/srv/acme/tokens", source: "owner" },
+    state: [],
+  });
+  assert.deepEqual(owned.refused, []);
+  assert.deepEqual(owned.labelParts.map((p) => p.kind), ["internet", "own-folder", "oauth-dir"]);
+});
+
 // --- crow.db scan ---------------------------------------------------------
 
 test("the crow.db scan sees real imports and not the app-root existence probe", () => {
@@ -203,8 +306,9 @@ test("compose ports: only 127.0.0.1 over TCP, with ${VAR:-default} resolved", ()
   assert.deepEqual(composePortsFrom(text, { ports: [], webUI: null }), [8003, 9100]);
 });
 
-test("compose ports include the manifest ports and webUI port", () => {
-  assert.deepEqual(composePortsFrom("", { ports: [5006, 5006], webUI: { port: 5006 } }), [5006]);
+test("compose ports: a manifest's ports and webUI.port never add one", () => {
+  assert.deepEqual(composePortsFrom("", { ports: [8000], webUI: { port: 8000 } }), []);
+  assert.deepEqual(composePortsFrom("", { ports: [5006, 5006], webUI: { port: 5006 } }), []);
   // A list item outside a ports block is not a publish.
   assert.deepEqual(composePortsFrom("services:\n  app:\n    command:\n      - 127.0.0.1:9999:9999\n", { ports: [], webUI: null }), []);
 });
@@ -421,14 +525,14 @@ test("an own-folder, an oauth dir and a crowDb part appear in that order", () =>
   };
   const profile = deriveProfile(
     manifest,
-    { env: { DEMO_URL: "acme-api.internal:7800" }, ownerSet: ["DEMO_URL"] },
+    { env: { DEMO_URL: "acme-api.internal:7800", DEMO_DIR: "~/.config/acme" }, ownerSet: ["DEMO_URL", "DEMO_DIR"] },
     { crowDbScan: true },
   );
   assert.deepEqual(profile.labelParts.map((p) => p.kind), ["network-host", "own-folder", "oauth-dir", "crow-db"]);
   assert.deepEqual(profile.network.hosts, [
     { host: "acme-api.internal", port: 7800, scheme: "tcp", from: "DEMO_URL", source: "owner" },
   ]);
-  assert.deepEqual(profile.files.oauthDir, { from: "DEMO_DIR", path: "~/.config/acme", source: "default" });
+  assert.deepEqual(profile.files.oauthDir, { from: "DEMO_DIR", path: "~/.config/acme", source: "owner" });
   assert.equal(profile.label.en[0], "reach acme-api.internal:7800 on your network");
   assert.equal(profile.label.en[2], "use the sign-in folder you chose");
 });

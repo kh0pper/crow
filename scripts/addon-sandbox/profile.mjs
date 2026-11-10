@@ -99,20 +99,16 @@ function hostPortFromEntry(raw) {
 }
 
 /**
- * Every host port the compose text publishes on 127.0.0.1 over TCP, plus the
- * manifest's own `ports[]` and `webUI.port`. Sorted, unique.
+ * Every host port the compose text publishes on 127.0.0.1 over TCP. Sorted,
+ * unique. `manifest` is not read: a manifest can name any port, so `ports[]`
+ * and `webUI.port` never make a port count as this add-on's own service (the
+ * parameter is kept for callers' sake).
  *
  * There is no YAML parser in the repo, so the text is read directly: a publish
  * is a `-` list item inside a `ports:` block.
  */
 export function composePortsFrom(composeText, manifest) {
   const ports = new Set();
-  for (const p of Array.isArray(manifest?.ports) ? manifest.ports : []) {
-    if (Number.isInteger(p) && p >= 1 && p <= 65535) ports.add(p);
-  }
-  const webPort = manifest?.webUI?.port;
-  if (Number.isInteger(webPort) && webPort >= 1 && webPort <= 65535) ports.add(webPort);
-
   const lines = String(composeText || "").split(/\r?\n/);
   let inBlock = false;
   let blockIndent = 0;
@@ -302,7 +298,8 @@ export function legacyOwnerKeys(entryEnv, manifest, pastDefaultsForId) {
   const out = [];
   for (const [key, value] of Object.entries(entryEnv || {})) {
     const text = String(value);
-    const known = Array.isArray(past[key]) ? past[key].map(String) : [];
+    const pastValues = Object.prototype.hasOwnProperty.call(past, key) ? past[key] : null;
+    const known = Array.isArray(pastValues) ? pastValues.map(String) : [];
     if (known.includes(text)) continue;
     if (defaults.has(key) && defaults.get(key) === text) continue;
     out.push(key);
@@ -500,15 +497,17 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
     uniqueHosts.push(h);
   }
 
-  // --- doors (core table only; a manifest can never widen it) ---
+  // --- doors (core table only, first-party only; a manifest can never widen it) ---
+  const hasOwn = (table, key) => Object.prototype.hasOwnProperty.call(table, key);
   const doors = [];
   const doorsSpec = sandbox?.doors;
   if (doorsSpec === undefined) {
-    if (ADDON_DOORS[id]) doors.push(id);
+    if (source === "repo" && hasOwn(ADDON_DOORS, id)) doors.push(id);
   } else if (Array.isArray(doorsSpec)) {
     for (const name of doorsSpec) {
       if (name !== id) refused.push({ what: `door:${name}`, reason: "an add-on can only name its own door set" });
-      else if (!ADDON_DOORS[name]) refused.push({ what: `door:${name}`, reason: "no such door set" });
+      else if (!hasOwn(ADDON_DOORS, name)) refused.push({ what: `door:${name}`, reason: "no such door set" });
+      else if (source !== "repo") refused.push({ what: `door:${name}`, reason: "doors are for first-party add-ons only" });
       else if (!doors.includes(name)) doors.push(name);
     }
   }
@@ -520,13 +519,19 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
   const filesSpec = sandbox?.files && typeof sandbox.files === "object" ? sandbox.files : null;
   if (filesSpec) {
     const nameOf = (v) => (typeof v === "string" && v.startsWith("env:") ? v.slice(4) : null);
+    // A path is only ever the owner's: a manifest default is not a choice, so a
+    // default-only field is refused rather than bound.
     const collect = (list, target) => {
       for (const raw of Array.isArray(list) ? list : []) {
         const name = nameOf(raw);
         if (!name) continue;
         const field = fieldOf(name);
         if (!field) { refused.push({ what: `file:${name}`, reason: `the field ${name} is not set` }); continue; }
-        target.push({ from: name, path: field.value, source: field.source });
+        if (field.source !== "owner") {
+          refused.push({ what: `file:${name}`, reason: "a default path the owner did not choose" });
+          continue;
+        }
+        target.push({ from: name, path: field.value, source: "owner" });
       }
     };
     collect(filesSpec.read, readPaths);
@@ -535,12 +540,16 @@ export function deriveProfile(manifest, entry = {}, opts = {}) {
     if (oauthName) {
       const field = fieldOf(oauthName);
       if (!field) refused.push({ what: `file:${oauthName}`, reason: `the field ${oauthName} is not set` });
-      else oauthDir = { from: oauthName, path: field.value, source: field.source };
+      else if (field.source !== "owner") {
+        refused.push({ what: `file:${oauthName}`, reason: "a default path the owner did not choose" });
+      } else oauthDir = { from: oauthName, path: field.value, source: "owner" };
     }
   }
 
   // --- state dirs: core allowlist, first-party only ---
-  const state = source === "repo" && Array.isArray(ADDON_STATE_DIRS[id]) ? [...ADDON_STATE_DIRS[id]] : [];
+  const state = source === "repo" && hasOwn(ADDON_STATE_DIRS, id) && Array.isArray(ADDON_STATE_DIRS[id])
+    ? [...ADDON_STATE_DIRS[id]]
+    : [];
 
   // --- crow.db ---
   const crowDb = !!crowDbScan;
@@ -598,7 +607,7 @@ export function profileFor({ id, entry = {}, appBundlesDir, installedBundlesDir,
   const src = loadPolicySource({ id, appBundlesDir, installedBundlesDir });
   return deriveProfile(src.manifest, entry, {
     composePorts: composePortsFrom(src.composeText, src.manifest),
-    pastDefaults: (pastDefaultsAll && pastDefaultsAll[id]) || {},
+    pastDefaults: pastDefaultsAll && Object.prototype.hasOwnProperty.call(pastDefaultsAll, id) ? pastDefaultsAll[id] : {},
     crowDbScan: scanCrowDb(src.serverDir),
     installedManifest: src.installedManifest,
     source: src.source,
