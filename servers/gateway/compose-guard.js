@@ -420,6 +420,10 @@ function resolvedComposeTop(declared, bundleDir, bundleReal) {
  * declaring a path that its reader skips outright — an absolute skill path — still protects
  * the folder join() puts it in: over-protecting a folder nothing is read from costs nothing.)
  *
+ * The MCP launcher's arguments are candidates even without a `/` (the spawn's cwd is the
+ * bundle folder, so `main.js` is a file there), and an argument that is the root (`.`) also
+ * names the files node would run from it — read from the installed package.json.
+ *
  * @param {object} manifest
  * @param {string} [bundleDir]   the installed bundle folder the declaration resolves against
  * @param {string} [bundleReal]  that folder as it really leads (resolveHostPath)
@@ -434,8 +438,18 @@ function manifestControlTops(manifest, bundleDir, bundleReal) {
     else if (!keys.includes(key)) keys.push(key);
   };
   add(resolvedComposeTop(manifest?.docker?.composefile, bundleDir, bundleReal), "docker.composefile");
-  for (const { key, value } of declaredControlPaths(manifest)) add(resolvedBundleTop(value, bundleDir, bundleReal), key);
+  for (const { key, value } of declaredControlPaths(manifest, bundleReal || bundleDir)) add(resolvedBundleTop(value, bundleDir, bundleReal), key);
   return tops;
+}
+
+/**
+ * A manifest-declared name as it appears in a refusal: a manifest is attacker-controlled, and a
+ * name carrying a newline or an ESC would otherwise repaint the line it is echoed in. Control
+ * characters are escaped and the length capped, as the other refusals here do.
+ */
+function refusalName(value) {
+  return String(value).slice(0, 80)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 export function checkComposeModel(model, { bundleDir, manifest, consentVerified = false, ctx, coreAllowance }) {
@@ -518,7 +532,7 @@ export function checkComposeModel(model, { bundleDir, manifest, consentVerified 
             return refuse(`${what}: mounts the bundle's own control files read-write`);
           }
           const declaredBy = manifestControl.get(top);
-          if (declaredBy) return refuse(`${what}: mounts '${top}' (declared by ${declaredBy.map((k) => `manifest.${k}`).join(", ")}) read-write`);
+          if (declaredBy) return refuse(`${what}: mounts '${refusalName(top)}' (declared by ${declaredBy.map((k) => `manifest.${k}`).join(", ")}) read-write`);
         }
         return null;
       }

@@ -165,6 +165,44 @@ test("declared paths must be plain relative paths inside the bundle", () => {
   }
 });
 
+// The MCP spawn runs with the bundle folder as its cwd, so its launcher values are read there:
+// a path with no `/` (`main.js`, `.`), the value half of a `--opt=value` flag and the command
+// itself when it is a path are all bundle paths — and an absolute one or one that climbs out is
+// refused, exactly as for every other declared path.
+test("launcher paths must be plain relative paths inside the bundle too", () => {
+  const b = tmpBundle("demo", { "server/index.js": "//", "main.js": "//", "data/h.mjs": "//" });
+  const run = (server) => validateManifest({ ...VALID, server }, b.dir);
+  // The ordinary shapes still pass — including a script with no separator, and `.` (node runs
+  // index.js or package.json main: both are files the bundle ships).
+  assert.equal(run({ command: "node", args: ["main.js"] }).ok, true);
+  assert.equal(run({ command: "node", args: ["."] }).ok, true);
+  assert.equal(run({ command: "node", args: ["server/index.js"] }).ok, true);
+  assert.equal(run({ command: "node", args: ["--import=./data/h.mjs", "main.js"] }).ok, true);
+  // npx/uvx/bunx fetch their FIRST non-flag argument from a registry: it is a package, not a path.
+  assert.equal(run({ command: "npx", args: ["-y", "@scope/pkg"] }).ok, true);
+  assert.equal(run({ command: "uvx", args: ["arxiv-mcp-server"] }).ok, true);
+  // Absolute, climbing and `\`-carrying launcher values are refused, wherever they sit.
+  for (const args of [
+    ["../other-bundle/server/index.js"],
+    ["/etc/evil.js"],
+    ["data/../../x.js"],
+    ["server\\index.js"],
+    ["--import=../outside/h.mjs", "main.js"],
+  ]) {
+    const r = run({ command: "node", args });
+    assert.equal(r.ok, false, JSON.stringify(args));
+    assert.ok(r.errors.some((e) => e.startsWith("server.args \"") && e.includes("relative path")), r.errors.join("; "));
+  }
+  for (const command of ["../other-bundle/run.sh", "/usr/local/bin/node"]) {
+    const r = run({ command, args: [] });
+    assert.equal(r.ok, false, command);
+    assert.ok(r.errors.some((e) => e.startsWith("server.command \"") && e.includes("relative path")), r.errors.join("; "));
+  }
+  // An npx package name is never a path, so a package-shaped value is not what gets refused.
+  const pkg = run({ command: "npx", args: ["-y", "../evil"] });
+  assert.equal(pkg.ok, true, pkg.errors.join("; "));
+});
+
 test("requires.bundles existence checked via resolver", () => {
   const { dir } = tmpBundle("demo");
   const m = { ...VALID, requires: { bundles: ["companion"] } };

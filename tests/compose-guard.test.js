@@ -1032,6 +1032,64 @@ test("declared paths: the version refresh and this check read one list (shared/b
   assert.deepEqual(D.declaredControlPaths(launcherOnly).map((p) => `${p.key}:${p.value}`), ["server.command:./run.sh", "server.args:dist/index.js"]);
 });
 
+test("model: launcher arguments need no `/` — `main.js`, `.` (index.js / package.json main) and a `--opt=value` value are bundle paths too", () => {
+  const dir = join(CROW_HOME, "bundles", "fx-launch");
+  for (const d of ["data", "server", "glob-pkg"]) mkdirSync(join(dir, d), { recursive: true });
+  const c = (manifest, model) => G.checkComposeModel(model, { bundleDir: dir, manifest, consentVerified: false, ctx: CTX });
+  const rw = (rel) => svc({ volumes: [bind(join(dir, rel))] });
+  const ro = (rel) => svc({ volumes: [bind(join(dir, rel), true)] });
+  const base = { id: "fx-launch" };
+  // (a) The spawn's cwd is the bundle folder, so `node main.js` runs the file beside the
+  // manifest — no separator needed to name a bundle file.
+  const direct = { ...base, server: { command: "node", args: ["main.js"] } };
+  assert.equal(c(direct, rw("main.js")).valid, false);
+  assert.equal(c(direct, ro("main.js")).valid, true);
+  assert.match(c(direct, rw("main.js")).reason, /mounts 'main\.js'/);
+  assert.match(c(direct, rw("main.js")).reason, /declared by manifest\.server\.args/);
+  // (b) `.` makes node run index.js — and package.json `main` when the INSTALLED copy has one.
+  const rootArg = { ...base, server: { command: "node", args: ["."] } };
+  assert.equal(c(rootArg, rw("index.js")).valid, false);
+  assert.equal(c(rootArg, ro("index.js")).valid, true);
+  assert.equal(c(rootArg, rw("data")).valid, true, "no package.json main: data/ is not what node runs");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fx-launch", main: "data/x.js" }));
+  try {
+    assert.equal(c(rootArg, rw("data")).valid, false, "package.json main is data/x.js");
+    assert.equal(c(rootArg, ro("data")).valid, true);
+    assert.match(c(rootArg, rw("data")).reason, /declared by manifest\.server\.args/);
+    assert.equal(c(rootArg, rw("index.js")).valid, false, "index.js stays protected");
+  } finally {
+    rmSync(join(dir, "package.json"), { force: true });
+  }
+  // (c) A `--opt=value` flag carries its value after the `=`.
+  const importArg = { ...base, server: { command: "node", args: ["--import=./data/h.mjs", "server/index.js"] } };
+  assert.equal(c(importArg, rw("data")).valid, false);
+  assert.equal(c(importArg, ro("data")).valid, true);
+  assert.match(c(importArg, rw("data")).reason, /declared by manifest\.server\.args/);
+  // npx runs the package it fetches, not a file: only what follows the package name is a path.
+  const npx = { ...base, server: { command: "npx", args: ["-y", "glob-pkg", "main.js"] } };
+  assert.equal(c(npx, rw("glob-pkg")).valid, true, "the package name is not a bundle path");
+  assert.equal(c(npx, rw("main.js")).valid, false, "an argument after the package name still is");
+});
+
+test("model: a manifest-declared name is escaped in the refusal (a newline or ESC never reaches it raw)", () => {
+  const dir = join(CROW_HOME, "bundles", "fx-escape");
+  const declared = "ui\nfake line\u001b[31m/routes.js";
+  const top = declared.split("/")[0];
+  mkdirSync(dir, { recursive: true });
+  const r = G.checkComposeModel(svc({ volumes: [bind(join(dir, top))] }), {
+    bundleDir: dir,
+    manifest: { id: "fx-escape", panelRoutes: declared },
+    consentVerified: false,
+    ctx: CTX,
+  });
+  assert.equal(r.valid, false);
+  assert.match(r.reason, /declared by manifest\.panelRoutes/);
+  assert.doesNotMatch(r.reason, /\n/, "the newline is escaped, not echoed");
+  assert.ok(!r.reason.includes("\u001b"), "the ESC is escaped, not echoed");
+  assert.match(r.reason, /\\u000a/);
+  assert.match(r.reason, /\\u001b/);
+});
+
 test("cross-bundle: no other bundle's project, volume or network names, and no prefix-sibling folders", () => {
   const m = { manifest: { id: "fx-x" } };
   assert.equal(check({ name: "crow-workspace", ...svc() }, m).valid, false, "another bundle's project");

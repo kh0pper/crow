@@ -28,7 +28,7 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | Surface | Shape | Integrity |
 |---|---|---|
 | `docker` | `{ "composefile": "docker-compose.yml" }` | the composefile exists |
-| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | entry file checked **only** when `command` is `node` and `args[0]` is a path (external `npx`/`uv` servers are exempt) |
+| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | every launcher value that names a file — the relative `command`, every argument (no `/` needed: `main.js`, and `.` for `index.js` / package.json `main`) and the value half of a `--opt=value` flag — must be a plain relative path inside the bundle (absolute, `..` and `\` refused); entry file checked **only** when `command` is `node` and `args[0]` is a path (external `npx`/`uv` servers are exempt: for `npx`/`uvx`/`bunx` the first non-flag argument is the package name) |
 | `panel` | `"panel/<id>.js"` **or** `{ "id": "...", "extends": "..." }` | string form: the file exists; object form: shape-only (resolved at runtime) |
 | `panelRoutes` | `"panel/routes.js"` | the file exists |
 | `widgets` | `[{ "id": "…", "title": "…", "sizes": [[2, 2]] }]` | each declaration's `widgets/<id>.js` exists |

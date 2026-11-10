@@ -9,11 +9,12 @@
  *     folder a container of that bundle may never mount read-write, because the
  *     gateway reads or runs them.
  *
- * A leaf module for the callers' import graph: only node's own `isAbsolute` (no project
- * imports), so both routes/bundles.js and compose-guard.js can use it without a cycle
+ * A leaf module for the callers' import graph: node's own path/fs builtins, no project
+ * imports, so both routes/bundles.js and compose-guard.js can use it without a cycle
  * (compose-guard already sits under bundles-config → folder-grants → compose-guard).
  */
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute, join, normalize } from "node:path";
+import { readFileSync } from "node:fs";
 
 /**
  * First path segment of a manifest-declared path, or null for a falsy/non-string
@@ -56,40 +57,102 @@ export function badPanelId(id) {
   return typeof id !== "string" || !PANEL_ID_RE.test(id);
 }
 
+// Programs that take a package name as their FIRST non-flag argument: the package is fetched
+// from a registry and run from there, so only what follows it can name a bundle file.
+const PACKAGE_RUNNERS = new Set(["npx", "uvx", "bunx"]);
+
 /**
- * A launcher value that names a file in the installed bundle folder: the MCP spawn
- * runs with that folder as its cwd (resolve-command.js resolves a relative launcher
- * inside it, and node resolves a script argument the same way). `node`, `npm`, `npx`,
- * `uvx` and any other bare name are looked up elsewhere (never in the bundle), a
- * leading `-` is a flag, and a bare package name is an argument — none of them are
- * paths here. A scoped package name (`@scope/pkg`) shares the shape of a relative
- * path and is resolved as one: over-declaring a folder no manifest points at costs
- * nothing, while missing one costs the whole check.
+ * The launcher values a manifest declares, as written, that could name a file in the
+ * installed bundle folder. The MCP spawn runs with that folder as its cwd
+ * (servers/gateway/proxy.js), and node resolves a script argument there, so EVERY argument
+ * is a candidate — no `/` needed: `main.js` is the file beside the manifest, `.` makes node
+ * run `index.js` or the package.json `main`, and `--import=./data/h.mjs` carries a path
+ * after its `=`. Over-protecting an argument that is really a bare word costs nothing;
+ * missing one costs the whole check.
+ *
+ * Not candidates: a plain flag (no value), and — for npx/uvx/bunx — the FIRST non-flag
+ * argument, which is the package to run. A relative `command` with a separator does name a
+ * file (resolve-command.js resolves it inside the folder), and so does an absolute one
+ * (it resolves to that host path); a bare `command` (`node`, `npx`) is looked up on PATH,
+ * never in the bundle.
+ *
+ * One list, two readers: the bundle contract refuses any of these values that is absolute,
+ * carries a `..` segment or a `\`, and compose-guard.js refuses a read-write mount of the
+ * folder each one lands in.
+ *
+ * @param {object} manifest
+ * @returns {{key: string, value: string}[]} key = the manifest key naming the value
  */
-function bundleRelativeFile(v) {
-  return typeof v === "string" && v !== "" && !isAbsolute(v) && !v.startsWith("-") && v.includes("/") ? v : null;
+export function launcherPathValues(manifest) {
+  const out = [];
+  const command = manifest?.server?.command;
+  if (typeof command === "string" && command !== "" && !command.startsWith("-") && command.includes("/")) {
+    out.push({ key: "server.command", value: command });
+  }
+  const args = Array.isArray(manifest?.server?.args) ? manifest.server.args : [];
+  const runner = typeof command === "string" && PACKAGE_RUNNERS.has(basename(command));
+  let packageSkipped = false;
+  for (const arg of args) {
+    if (typeof arg !== "string" || arg === "") continue;
+    let value = arg;
+    if (arg.startsWith("-")) {
+      // A flag on its own names nothing; a `-x=value` / `--opt=value` flag carries a value
+      // that may be a file (`--import=./data/h.mjs`, `--require=./hook.js`).
+      const eq = arg.indexOf("=");
+      if (eq < 0) continue;
+      value = arg.slice(eq + 1);
+      if (value === "") continue;
+    } else if (runner && !packageSkipped) {
+      packageSkipped = true;
+      continue;
+    }
+    out.push({ key: "server.args", value });
+  }
+  return out;
+}
+
+/**
+ * What node runs for a launcher argument that resolves to the bundle root (`.` or `./`): its
+ * own default `index.js`, and the top-level entry the INSTALLED package.json's `main` names —
+ * the file node would really start. With no readable package.json (or no `main`) node falls
+ * back to `index.js`, so that is all there is to protect.
+ */
+function rootLauncherValues(bundleDir) {
+  const out = ["index.js"];
+  if (typeof bundleDir !== "string" || bundleDir === "") return out;
+  let main;
+  try { main = JSON.parse(readFileSync(join(bundleDir, "package.json"), "utf8"))?.main; } catch { return out; }
+  if (typeof main !== "string" || main === "") return out;
+  if (normalize(main) !== "." && normalize(main) !== "..") out.push(main);
+  return out;
 }
 
 /**
  * The manifest-declared paths, in the order the refresh copies them.
  *
- * `launcher: true` swaps the refresh's two launcher rules for the spawn's: every
- * server.args entry that is a bundle-relative file (not just args[0], and not a flag
- * or package name), the launch command itself when it is one, and an object panel
- * resolved to the file the gateway imports (`panel/<panel.id || bundle id>.js`,
- * routes/bundles.js resolvePanelPath) instead of the literal `panel` folder.
+ * `launcher: true` swaps the refresh's two launcher rules for the spawn's: every value
+ * launcherPathValues finds (the launch command when it is a path, every argument, the value
+ * half of a `--opt=value` flag, with an npx/uvx/bunx package name skipped), and an object
+ * panel resolved to the file the gateway imports (`panel/<panel.id || bundle id>.js`,
+ * routes/bundles.js resolvePanelPath) instead of the literal `panel` folder. An argument
+ * that resolves to the bundle root expands to the files node would run from it, so
+ * `bundleDir` is read (package.json `main`) when the caller passes it.
  *
  * @param {object} manifest
- * @param {{launcher?: boolean}} [opts]
+ * @param {{launcher?: boolean, bundleDir?: string}} [opts]
  * @returns {{key: string, value: string}[]} key = the manifest key naming the path
  */
-export function declaredPaths(manifest, { launcher = false } = {}) {
+export function declaredPaths(manifest, { launcher = false, bundleDir = null } = {}) {
   const out = [];
   const add = (key, value) => { if (typeof value === "string" && value) out.push({ key, value }); };
   const args = Array.isArray(manifest?.server?.args) ? manifest.server.args : [];
   if (launcher) {
-    add("server.command", bundleRelativeFile(manifest?.server?.command));
-    for (const a of args) add("server.args", bundleRelativeFile(a));
+    for (const { key, value } of launcherPathValues(manifest)) {
+      // `.` / `./` is the bundle folder itself: node then runs index.js, or whatever the
+      // installed package.json's `main` names.
+      if (normalize(value) === ".") for (const v of rootLauncherValues(bundleDir)) add(key, v);
+      else add(key, value);
+    }
   } else if (args.length) {
     add("server.args", args[0]);
   }
@@ -132,10 +195,12 @@ export function declaredRoots(manifest) {
 }
 
 /**
- * The same declarations for the install check: the MCP launcher and its
- * bundle-relative arguments, and an object panel as the file really imported.
+ * The same declarations for the install check: the MCP launcher and its arguments, and an
+ * object panel as the file really imported.
+ * @param {object} manifest
+ * @param {string} [bundleDir] the installed bundle folder (read for package.json `main`)
  * @returns {{key: string, value: string}[]}
  */
-export function declaredControlPaths(manifest) {
-  return declaredPaths(manifest, { launcher: true });
+export function declaredControlPaths(manifest, bundleDir) {
+  return declaredPaths(manifest, { launcher: true, bundleDir });
 }

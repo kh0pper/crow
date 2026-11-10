@@ -25,6 +25,7 @@ const B = await import("../servers/gateway/routes/bundles.js");
 const {
   validateInstall, installBlockingEnvKeys, hardFailComposeKeys, findInvalidEnv, runInstallJob, addPanelEnabled, removePanelEnabled,
   _setAppBundlesForTest, _setComposeRunnerForTest, _setAppEnvPathForTest, _setDockerRunnerForTest,
+  _setRestartHookForTest, _setUninstallAffectedForTest,
   _createJobForTest, _finishJobForTest,
 } = B;
 const bundlesRouter = B.default;
@@ -301,7 +302,7 @@ test("compose-up failure: panel, routes, panels.json (object form), skills and g
 
 // ─── 2b. panel declarations the manifest contract refuses are skipped, never copied ───
 
-/** Run an install with console.warn captured, and give back what it logged. */
+/** Run an install with console.warn captured, and give back what it logged (and the job). */
 async function installCapturingWarnings(id, envVars = { FX_SECRET: "s" }) {
   _setComposeRunnerForTest(async () => ({ stdout: "", stderr: "" }));
   const warnings = [];
@@ -311,7 +312,7 @@ async function installCapturingWarnings(id, envVars = { FX_SECRET: "s" }) {
   try {
     const manifest = JSON.parse(readFileSync(join(FIXTURES, id, "manifest.json"), "utf8"));
     const out = await runInstallJob(id, envVars, { job, installedSnapshot: [], consentVerified: false, manifest });
-    return { out, warnings };
+    return { out, warnings, job };
   } finally {
     console.warn = origWarn;
     _finishJobForTest(job, "completed");
@@ -352,6 +353,72 @@ test("install: an object panel whose id is not a plain name (an array, an upperc
     assert.ok(!existsSync(join(HOME, "panels", id + ".js")), `panel.id ${JSON.stringify(badId)} was not installed`);
     assert.ok(warnings.some((w) => w.includes("manifest.panel.id")), warnings.join("\n"));
   }
+});
+
+// A skipped panel is a bundle that installs "fine" and has no panel: the operator watching the
+// install reads the JOB log, not the gateway's stderr, so the refusal has to land there too.
+test("install: a refused panel declaration is appended to the install job's log", async () => {
+  const id = "fx-panel-joblog";
+  buildFixture(id, { panel: { id: "Bad_Id_Joblog", name: "Bad" } });
+  const { out, job } = await installCapturingWarnings(id);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const said = job.log.filter((l) => l.includes("manifest.panel.id"));
+  assert.equal(said.length, 1, job.log.join("\n"));
+  assert.match(said[0], /^Warning: manifest\.panel\.id 'Bad_Id_Joblog' is not a plain name/);
+  assert.match(said[0], /not installed$/);
+  assert.ok(!existsSync(join(HOME, "panels", id + ".js")), "nothing was copied");
+});
+
+// Uninstall: an install enables the bundle's own id in panels.json, but a panel declaration that
+// is refused NOW makes resolvePanelPath return null — the registration must still be removed, or
+// a panel copy an earlier install made stays enabled for an app that is gone.
+test("uninstall: an app whose panel id is now refused still loses its panels.json registration", async () => {
+  const id = "fx-uninstall-badpanel";
+  const dir = join(FIXTURES, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({
+    id, name: id, type: "bundle", version: "0.1.0", category: "productivity", panel: { id: "Bad_Id" },
+  }));
+  // The installed copy and the registration an earlier install left behind (Crow's own
+  // bookkeeping: no docker-compose.yml, so no docker is involved).
+  const installedDir = join(HOME, "bundles", id);
+  mkdirSync(installedDir, { recursive: true });
+  writeFileSync(join(installedDir, "manifest.json"), readFileSync(join(dir, "manifest.json"), "utf8"));
+  mkdirSync(join(HOME, "panels"), { recursive: true });
+  writeFileSync(join(HOME, "panels", id + ".js"), "export default {};\n");
+  writeFileSync(join(HOME, "panels.json"), JSON.stringify({ enabled: ["other-panel", id] }));
+  writeFileSync(join(HOME, "installed.json"), JSON.stringify([{ id, type: "bundle", version: "0.1.0" }]));
+  writeFileSync(GATEWAY_ENV, "PORT=3001\n");
+  _setAppEnvPathForTest(GATEWAY_ENV);
+  _setRestartHookForTest(() => {});
+  _setUninstallAffectedForTest(async () => []);
+  const app = express();
+  app.use(express.json());
+  app.use(bundlesRouter());
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const r = await fetch(`${base}/bundles/api/uninstall`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bundle_id: id }),
+    });
+    const body = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(body));
+    const deadline = Date.now() + 10_000;
+    let done;
+    do {
+      await new Promise((res) => setTimeout(res, 30));
+      done = await (await fetch(`${base}/bundles/api/jobs/${body.job_id}`)).json();
+    } while (done.status === "running" && Date.now() < deadline);
+    assert.notEqual(done.status, "running", "the uninstall job finished");
+  } finally {
+    server.close();
+    _setRestartHookForTest(null);
+    _setAppEnvPathForTest(null);
+    _setUninstallAffectedForTest(null);
+  }
+  const panels = JSON.parse(readFileSync(join(HOME, "panels.json"), "utf8"));
+  assert.deepEqual(panels.enabled, ["other-panel"], "the refused panel's registration is gone; other panels stay");
 });
 
 // ─── 4. Configure reaches the gateway env ───
