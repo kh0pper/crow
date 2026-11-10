@@ -169,7 +169,9 @@ function argvOf(pid, opts) {
 function cwdOf(pid, opts) {
   try {
     const t = String(opts.readlink("/proc/" + pid + "/cwd") ?? "");
-    return t === "" ? null : t;
+    // A deleted target reads as "<path> (deleted)", which no root comparison
+    // would match: treated as unreadable, so the process is refused.
+    return t === "" || t.endsWith(" (deleted)") ? null : t;
   } catch { return null; }
 }
 
@@ -177,7 +179,9 @@ function cwdOf(pid, opts) {
 function exeOf(pid, opts) {
   try {
     const t = String(opts.readlink("/proc/" + pid + "/exe") ?? "");
-    return t === "" ? null : t;
+    // A deleted target reads as "<path> (deleted)", which no root comparison
+    // would match: treated as unreadable, so the process is refused.
+    return t === "" || t.endsWith(" (deleted)") ? null : t;
   } catch { return null; }
 }
 
@@ -234,7 +238,7 @@ function sameUidVerdict(pid, opts, base) {
   // The gateway and its satellite are named first: those two reasons are what
   // the relay's refusals read as.
   if (resolved.some(isGatewayArg)) return denied("gateway");
-  if (resolved.some((a) => a.includes("/servers/satellite/"))) return denied("satellite");
+  if (resolved.some((a) => a.includes("/servers/satellite/") || a.endsWith("/servers/satellite"))) return denied("satellite");
   // The wall's own processes: this relay, either helper it runs.
   if (opts.selfPids.has(pid)) return denied("the wall's own process");
   if (resolved.some((a) => baseName(a) === "pi_netns_entry.mjs")) return denied("the wall's own process");

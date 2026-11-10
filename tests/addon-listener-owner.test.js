@@ -577,3 +577,29 @@ test("an own process and a container on the same port: neither answer is trusted
   });
   assert.deepEqual([r.kind, r.reason], ["denied", "more than one listener owner"]);
 });
+
+test("a satellite named by its directory is refused", async () => {
+  const p = fakeProc({
+    tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+    procs: [{ pid: 610, inodes: [SOCK], cwd: "/", exe: "/usr/bin/node", argv: ["node", "/opt/sat/servers/satellite"] }],
+  });
+  const r = await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ["/srv/crow-elsewhere"], ...p });
+  assert.deepEqual([r.kind, r.reason], ["denied", "satellite"]);
+});
+
+test("a deleted cwd or executable is refused, not compared", async () => {
+  for (const [cwd, exe] of [["/srv/crow (deleted)", "/usr/bin/node"], ["/srv/app", "/srv/crow/bin/node (deleted)"]]) {
+    const p = fakeProc({
+      tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+      procs: [{ pid: 620, inodes: [SOCK], cwd, exe, argv: ["/usr/bin/node", "/srv/app/x.mjs"] }],
+    });
+    const r = await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ["/srv/crow"], ...p });
+    assert.equal(r.kind, "denied", cwd + " / " + exe);
+  }
+  // The same process with readable paths outside the roots passes (the rule above is what refuses).
+  const ok = fakeProc({
+    tcp: table(v4row("127.0.0.1", PORT, { uid: GW_UID, inode: SOCK })),
+    procs: [{ pid: 621, inodes: [SOCK], cwd: "/srv/app", exe: "/usr/bin/node", argv: ["/usr/bin/node", "/srv/app/x.mjs"] }],
+  });
+  assert.equal((await identifyListener("127.0.0.1", PORT, { gatewayUid: GW_UID, crowRoots: ["/srv/crow"], ...ok })).kind, "own-uid");
+});
