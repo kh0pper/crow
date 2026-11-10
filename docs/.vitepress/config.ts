@@ -308,6 +308,7 @@ export default defineConfig({
           { text: 'Songbook', link: '/architecture/songbook' },
           { text: "Crow's Nest", link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
+          { text: 'Add-on Walls', link: '/architecture/addon-walls' },
           { text: 'Box Reservation', link: '/architecture/box-reservation' },
           { text: 'Artifacts', link: '/architecture/artifacts' },
           { text: 'Models', link: '/architecture/models' },
