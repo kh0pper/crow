@@ -149,7 +149,12 @@ updated="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | timeout 30 docker exec -i -u 
 case "$updated" in
   UPDATED) ;;
   CHANGED) die "Calibre-Web's default password no longer works, so this install already has its own admin password; left alone." 3 ;;
-  *) die "Calibre-Web did not confirm the new password; the default login is unchanged." 1 ;;
+  *)
+    # No clear answer (e.g. the snippet was cut off after its COMMIT): ask the database
+    # whether it now holds THIS password before deciding — never throw away a stored one.
+    check="$(printf '%s\n%s\n' "$ADMIN_USER" "$PW" | timeout 30 docker exec -i -u 1000 "$CONTAINER" python3 -c "$PROVE" 2>/dev/null | tail -n 1 || true)"
+    [ "$check" = "LOGIN-OK" ] || die "Calibre-Web did not confirm the new password; the password may have changed; check the app's own login." 1
+    ;;
 esac
 say "Calibre-Web confirmed the new password for the account '$ADMIN_USER'."
 

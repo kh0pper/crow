@@ -764,14 +764,21 @@ test("calibre-web: a SET that finds the default already gone is exit 3, with not
 test("calibre-web: every snippet runs under the host's own timeout 30", () => {
   const script = readFileSync(join(B("calibre-web"), "scripts", "first-admin.sh"), "utf8");
   const wrapped = script.split('timeout 30 docker exec -i -u 1000 "$CONTAINER" python3 -c').length - 1;
-  assert.equal(wrapped, 3, "the detection, the update and the proof are each bounded");
+  assert.equal(script.includes('docker exec -i -u 1000 "$CONTAINER" python3 -c'), true);
+  assert.equal(script.split('docker exec -i -u 1000 "$CONTAINER" python3 -c').length - 1, wrapped, "no snippet call without the bound");
+  assert.equal(wrapped, 4, "the detection, the update, the check after an unclear update and the proof are each bounded");
 });
 
-test("calibre-web: an UPDATE the app did not confirm is exit 1, nothing claimed", () => {
-  const r = run("calibre-web", { answers: { FAKE_CALIBRE_SET_0: "UNKNOWN" } });
+test("calibre-web: an unclear UPDATE answer asks the database before deciding", () => {
+  // Cut off after its COMMIT: the database holds the new password → carry on to 0.
+  const kept = run("calibre-web", { answers: { FAKE_CALIBRE_SET_0: "UNKNOWN", FAKE_CALIBRE_PROVE_0: "LOGIN-OK" } });
+  assert.equal(kept.status, 0, kept.stderr);
+  // The database does not hold it → exit 1, worded honestly (nothing checked the default).
+  const r = run("calibre-web", { answers: { FAKE_CALIBRE_SET_0: "UNKNOWN", FAKE_CALIBRE_PROVE_0: "LOGIN-FAIL" } });
   assert.equal(r.status, 1, r.stderr);
-  assert.match(r.stderr, /did not confirm the new password; the default login is unchanged/);
-  assert.equal(r.calls.filter((c) => c.argv.includes("LOGIN-OK")).length, 0, "no proof after a refusal");
+  assert.match(r.stderr, /the password may have changed; check the app's own login/);
+  assert.doesNotMatch(r.stderr, /default login is unchanged/);
+  assert.equal(r.calls.filter((c) => c.argv.includes("LOGIN-OK")).length, 1, "exactly one check after the unclear answer");
 });
 
 // ── Stirling PDF: one sign-in attempt, and the lockout respected ──────────────────
