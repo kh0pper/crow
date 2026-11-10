@@ -9,12 +9,17 @@
  *      was handed and can report a meter reading, a faulted insert and a loading
  *      one, and a fake socket that answers the page's commands. What they prove
  *      is what the strips draw and what each control sends: ONE command per
- *      gesture, the agent's mix pass outlined with A/B and Undo pass, and the
- *      master's readings against the song's target;
+ *      gesture (a slider's release, not its drag, and never a value it has just
+ *      sent), the agent's mix pass outlined with A/B and Undo pass, the pass
+ *      staying whole across an undo and a redo, a loading or faulted effect's
+ *      mark going once the engine or the song moves on, and the master's
+ *      readings against the song's target;
  *   2. a private headless Chrome (tests/fixtures/headless-chrome.mjs) against a
  *      real gateway-shaped server and a real session hub: a chip dragged with
- *      real mouse input sends exactly one insert.move, and A/B with real clicks
- *      plays the song before the pass without ever writing to it.
+ *      real mouse input sends exactly one insert.move, an engine report mid-drag
+ *      breaks nothing, A/B clicked with real mouse input hands the engine the
+ *      song before the pass without writing to it, and the mixer's strips scroll
+ *      inside their own box at phone width.
  *
  * No browser: the live half skips, unless CROW_REQUIRE_TEST_CHROME=1.
  */
@@ -33,7 +38,7 @@ import { AclError } from "../servers/shared/project-acl.js";
 import { createHub } from "../bundles/studio/server/hub.js";
 import { initStudioTables } from "../bundles/studio/server/init-tables.js";
 import { createStudioWeb } from "../bundles/studio/server/web.js";
-import studioPanel from "../bundles/studio/panel/studio.js";
+import studioPanel, { MIXER_EFFECTS_SCRIPT } from "../bundles/studio/panel/studio.js";
 import { CLIENT_SCRIPT } from "../bundles/studio/panel/client.js";
 import { EFFECT_PARAMS, EFFECT_KINDS } from "../bundles/studio/server/doc.js";
 import { startHeadlessChrome } from "./fixtures/headless-chrome.mjs";
@@ -75,7 +80,7 @@ function panelDb() {
 async function mixerSong() {
   const { newSongDoc } = await import("../bundles/studio/server/doc.js");
   const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
-  const { planUndo, applyPlan, makeUndoEntry } = await import("../bundles/studio/server/history.js");
+  const { planUndo, applyPlan, makeUndoEntry, REDO_COMMAND } = await import("../bundles/studio/server/history.js");
   await import("../bundles/studio/server/commands/core.js");
   await import("../bundles/studio/server/commands/mixer.js");
 
@@ -140,7 +145,38 @@ async function mixerSong() {
     return made;
   };
 
-  return { doc, history, pass, undo, entries: { bass: "e1", keys: "e2", plate: "e3", send: "e4", master: "e5" } };
+  /**
+   * Redo one undo the way the hub does: the undo's own plan applied to the
+   * document, the redo recorded above it (its undo_of is the undo it takes
+   * back), and the undo marked undone by that redo.
+   * @param {object} undoEntry
+   * @returns {object} the redo entry
+   */
+  const redo = (undoEntry) => {
+    const plan = planUndo(doc, undoEntry);
+    applyPlan(doc, plan);
+    seq += 1;
+    const made = makeUndoEntry({
+      entry: undoEntry,
+      plan,
+      song_id: "song-1",
+      seq,
+      author: HUMAN,
+      command: REDO_COMMAND,
+    });
+    history.push(made);
+    undoEntry.undone_by = made.id;
+    return made;
+  };
+
+  return {
+    doc,
+    history,
+    pass,
+    undo,
+    redo,
+    entries: { bass: "e1", keys: "e2", plate: "e3", send: "e4", master: "e5" },
+  };
 }
 
 // ---- the fake engine, context and browser ----------------------------------
@@ -430,6 +466,15 @@ async function bootMixer(options = {}) {
     for (const [key, value] of Object.entries(props || {})) made[key] = value;
     return made;
   };
+  /**
+   * Dispatch one event on the page's window, the way a pointer move or release
+   * on a drag reaches it: the script's window is the stub the handlers live on.
+   */
+  const windowEvent = (type, props) => {
+    const made = event(type, props);
+    for (const handler of (windowListeners[type] || []).slice()) handler(made);
+    return made;
+  };
 
   await settle();
   frame(stateFrame());
@@ -481,6 +526,7 @@ async function bootMixer(options = {}) {
     click,
     choose,
     event,
+    windowEvent,
     settle,
     frame,
     stateFrame,
@@ -638,12 +684,24 @@ test("turning a control sends one insert.set", async () => {
   assert.ok(gain, "the equalizer's low_gain_db has a control");
   assert.equal(gain.getAttribute("aria-label"), "low gain of the equalizer", "with its own name and unit");
 
-  // A drag that pauses writes once per gesture, and the release closes the
-  // window the pause opened: a whole gesture is ONE insert.set.
+  // A drag: the pointer moves, the operator PAUSES longer than the page's own
+  // debounce (the harness's timers are run, so any timer that was set fires),
+  // moves again, pauses again, and then lets go. Nothing is sent while the
+  // control is held; the release is the ONE insert.set of the gesture.
   gain.value = "6";
   gain.dispatchEvent(ui.event("input"));
+  await ui.settle();
+  ui.runTimers();
+  await ui.settle();
+  assert.equal(ui.commands("insert.set").length, 0, "a held control sends nothing, not even after a pause");
+
   gain.value = "7";
   gain.dispatchEvent(ui.event("input"));
+  await ui.settle();
+  ui.runTimers();
+  await ui.settle();
+  assert.equal(ui.commands("insert.set").length, 0, "and nothing after the second pause");
+
   gain.dispatchEvent(ui.event("change"));
   await ui.settle();
   ui.runTimers();
@@ -653,9 +711,22 @@ test("turning a control sends one insert.set", async () => {
   assert.equal(sets.length, 1, `one gesture is one command (${sets.length})`);
   assert.deepEqual(sets[0].args, { id: "ins-eq", params: { low_gain_db: 7 } });
 
+  // The same value twice in a row is no gesture at all.
+  gain.dispatchEvent(ui.event("change"));
+  await ui.settle();
+  assert.equal(ui.commands("insert.set").length, 1, "an identical value is never sent twice in a row");
+
   // A choice control is one insert.set too, and carries the word itself.
-  const mode = editor.querySelector('[data-param="mid_q"]');
-  assert.ok(mode, "the equalizer's mid_q has a control");
+  ui.chip("ins-comp").dispatchEvent(ui.event("click"));
+  await ui.settle();
+  const compressor = ui.mixer().querySelector("[data-role=mix-editor]");
+  const detect = compressor.querySelector('[data-param="detect"]');
+  assert.ok(detect, "the compressor's detect has a control");
+  ui.choose(detect, "rms");
+  await ui.settle();
+  const chosen = ui.commands("insert.set");
+  assert.equal(chosen.length, 2, "a pick is one command");
+  assert.deepEqual(chosen[1].args, { id: "ins-comp", params: { detect: "rms" } });
 });
 
 test("a send level change sends one send.set", async () => {
@@ -743,6 +814,125 @@ test("a faulted insert shows the engine's message", async () => {
   assert.match(String(ui.chip("ins-eq").textContent), /^Loading/, "a loading effect says Loading");
 });
 
+test("a loading mark clears once audio flows", async () => {
+  const ui = await bootMixer();
+  await ui.openMixer();
+  await ui.startEngine();
+  await ui.settle();
+
+  ui.engine.insertLoading({ insert_id: "ins-eq", message: "The equalizer is on its way." });
+  await ui.settle();
+  assert.match(String(ui.chip("ins-eq").textContent), /^Loading/, "the effect says it is on its way");
+
+  // The engine only reports loading while a module is missing, so a meter
+  // reading means the chain is built and audio is flowing: the mark goes.
+  ui.engine.meter({
+    momentary: -14.2,
+    short_term: -14.5,
+    integrated: -16.8,
+    true_peak_db: -1.0,
+    latency_ms: 0,
+  });
+  await ui.settle();
+  assert.equal(String(ui.chip("ins-eq").textContent), "equalizer", "and the chip is the effect's name again");
+});
+
+test("a fault mark clears when the effect's settings change", async () => {
+  const ui = await bootMixer();
+  await ui.openMixer();
+  await ui.startEngine();
+  await ui.settle();
+
+  const message = "The compressor on Bass produced an invalid sample; it is bypassed.";
+  ui.engine.insertFault({ insert_id: "ins-comp", message });
+  await ui.settle();
+
+  const chip = ui.chip("ins-comp");
+  assert.equal(String(chip.textContent), message, "the chip says what the engine said");
+  assert.equal(String(chip.getAttribute("title")), message, "and its tooltip carries the whole sentence");
+
+  // The editor says it whole as well, where the chip may cut it short.
+  chip.dispatchEvent(ui.event("click"));
+  await ui.settle();
+  const editor = ui.mixer().querySelector("[data-role=mix-editor]");
+  assert.equal(editor.hidden, false, "the chip opened the editor");
+  const fault = editor.querySelector("[data-role=mix-editor-fault]");
+  assert.ok(fault, "the editor shows the engine's sentence too");
+  assert.equal(String(fault.textContent), message);
+
+  // The effect is rebuilt with new settings, so the sentence about the old one
+  // goes with it.
+  const { runCommand } = await import("../bundles/studio/server/commands/registry.js");
+  runCommand(ui.doc, "insert.set", { id: "ins-comp", params: { threshold_db: -24 } }, { author: HUMAN });
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+
+  const fresh = ui.chip("ins-comp");
+  assert.equal(String(fresh.textContent), "compressor", "the fault is gone with the settings that caused it");
+  assert.equal(
+    String(fresh.getAttribute("title")),
+    "Open the compressor: drag it to reorder the chain",
+    "and the tooltip is the chip's own again",
+  );
+  assert.equal(
+    ui.mixer().querySelector("[data-role=mix-editor-fault]"),
+    null,
+    "and the editor's line goes with it",
+  );
+});
+
+test("an engine report during a chip drag does not break the drag", async () => {
+  const ui = await bootMixer();
+  await ui.openMixer();
+  await ui.startEngine();
+  await ui.settle();
+
+  // Two chips with real boxes: the compressor sits below the equalizer, and the
+  // drag's drop index is a position among them (linkedom has no layout).
+  const eq = ui.chip("ins-eq");
+  const comp = ui.chip("ins-comp");
+  const boxAt = (top) => () => ({
+    top,
+    height: 20,
+    width: 120,
+    left: 0,
+    right: 120,
+    bottom: top + 20,
+    x: 0,
+    y: top,
+  });
+  eq.getBoundingClientRect = boxAt(10);
+  comp.getBoundingClientRect = boxAt(40);
+
+  // A real press, then a move above the equalizer's middle: the dragged row is
+  // drawn where it would land.
+  comp.dispatchEvent(ui.event("pointerdown", { button: 0, clientY: 50 }));
+  ui.windowEvent("pointermove", { clientY: 5 });
+  await ui.settle();
+  assert.equal(comp.parentNode.parentNode.firstChild, comp.parentNode, "the chip is drawn where the drag put it");
+
+  // The engine reports a fault mid-drag: the mixer is NOT rebuilt under the
+  // held pointer, so the chip keeps following it.
+  ui.engine.insertFault({
+    insert_id: "ins-comp",
+    message: "The compressor on Bass produced an invalid sample; it is bypassed.",
+  });
+  await ui.settle();
+  assert.ok(ui.mixer().contains(comp), "the chip being dragged is still the one on the page");
+  assert.equal(
+    comp.parentNode.parentNode.firstChild,
+    comp.parentNode,
+    "and it is still where the drag put it",
+  );
+
+  // The release is the one insert.move of the gesture, naming the front.
+  ui.windowEvent("pointerup", { clientY: 5 });
+  await ui.settle();
+  const moves = ui.commands("insert.move");
+  assert.equal(moves.length, 1, `the drop is one command (${moves.length})`);
+  assert.deepEqual(moves[0].args, { id: "ins-comp", after: null });
+});
+
 test("the master meter shows the target", async () => {
   const ui = await bootMixer();
   await ui.openMixer();
@@ -776,40 +966,6 @@ test("the master meter shows the target", async () => {
   assert.ok(latency, "the limiter's delay has its own line");
   assert.equal(latency.hidden, false);
   assert.equal(String(latency.textContent), "Limiter look-ahead: 1.5 ms");
-});
-
-test("the mixer strips scroll inside their box at phone width", async () => {
-  const ui = await bootMixer();
-  await ui.openMixer();
-
-  // Every strip, the master's included, lives inside ONE box: that box is what
-  // scrolls sideways, so the page itself never does.
-  const scroller = ui.mixer().querySelector("[data-role=mix-strips]");
-  assert.ok(scroller, "the strips have a box of their own");
-  const strips = [...ui.mixer().querySelectorAll("[data-strip]")];
-  assert.equal(strips.length, 4);
-  for (const strip of strips) {
-    assert.equal(strip.parentNode, scroller, "a strip is inside the scrolling box");
-  }
-
-  // The stylesheet the page carries: the box scrolls on its own at any width and
-  // still does at phone width, where a strip gets narrower rather than wrapping.
-  const style = /<style>([\s\S]*?)<\/style>/.exec(ui.html);
-  assert.ok(style, "the page carries the panel's styles");
-  const css = style[1];
-  const rule = (selector) => {
-    const at = css.indexOf(selector + " {");
-    assert.ok(at >= 0, `${selector} has a rule`);
-    return css.slice(at, css.indexOf("}", at));
-  };
-  assert.match(rule(".studio .st-mix-strips"), /overflow-x:\s*auto/, "the strips scroll sideways");
-  assert.match(rule(".studio .st-mix-strips"), /overflow-y:\s*hidden/, "and never vertically");
-  assert.match(rule(".studio .st-mixer"), /min-width:\s*0/, "the mixer may be narrower than its strips");
-  assert.match(rule(".studio .st-mixer"), /overflow:\s*hidden/, "and clips them instead of the page scrolling");
-  const phone = css.slice(css.indexOf("@media (max-width: 640px)"));
-  assert.ok(phone.length > 0, "the panel has a phone breakpoint");
-  assert.match(phone, /\.st-mix-strips \{ overflow-x: auto; overflow-y: hidden; \}/, "the strips keep scrolling at phone width");
-  assert.match(phone, /\.st-strip \{ flex: 0 0 152px; \}/, "and a strip is narrower instead of wrapping");
 });
 
 // ---- the agent's mix pass --------------------------------------------------
@@ -934,6 +1090,95 @@ test("undo pass stops at a conflict and says so", async () => {
     String(stopped.textContent),
     `Stopped: ${refused.summary} was changed after the pass; the steps before it are undone.`,
   );
+});
+
+test("a reconnect during an undo pass stops it with a message", async () => {
+  const ui = await bootMixer();
+  await ui.openMixer();
+
+  ui.click("[data-act=mix-undo-pass]");
+  await ui.settle();
+  assert.equal(ui.undos().length, 1, "the pass is waiting on its first step");
+
+  // The socket drops and comes back: the answer to the step that was on the
+  // wire died with it, so the pass stops instead of waiting forever.
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+
+  const stopped = ui.mixer().querySelector("[data-role=mix-stopped]");
+  assert.ok(stopped, `the banner says why it stopped: ${ui.mixer().textContent}`);
+  assert.equal(
+    String(stopped.textContent),
+    "Stopped: the connection dropped; the steps before it are undone.",
+  );
+  assert.equal(
+    String(ui.mixer().querySelector("[data-act=mix-undo-pass]").textContent),
+    "Undo pass",
+    "and the button offers the pass again",
+  );
+  assert.equal(ui.undos().length, 1, "no further step was sent");
+});
+
+test("undo pass stops at a partial undo", async () => {
+  const ui = await bootMixer();
+  await ui.openMixer();
+
+  ui.click("[data-act=mix-undo-pass]");
+  await ui.settle();
+  assert.equal(ui.undos().length, 1, "the pass takes its newest step back first");
+
+  // The hub says ok, but names the fields it could not take back: part of the
+  // step was changed after the pass, so the pass stops there.
+  const partial = ui.fixture.pass[4];
+  ui.fixture.undo(partial);
+  await ui.answerUndo(true, {
+    conflicts: [
+      {
+        ref: "master",
+        field: "target",
+        expected: { lufs: -16, true_peak_db: -1.5 },
+        actual: { lufs: -14, true_peak_db: -1 },
+      },
+    ],
+  });
+
+  assert.equal(ui.undos().length, 1, "a partial undo stops the pass: no next step");
+  const stopped = ui.mixer().querySelector("[data-role=mix-stopped]");
+  assert.ok(stopped, `the banner says why it stopped: ${ui.mixer().textContent}`);
+  assert.equal(
+    String(stopped.textContent),
+    `Stopped: ${partial.summary} was changed after the pass; the steps before it are undone.`,
+  );
+});
+
+test("undo then redo inside a pass keeps the pass whole and A/B includes the redone step", async () => {
+  const ui = await bootMixer();
+
+  // One step of the pass is taken back and put back: the newest step is the
+  // master's target, so the pass is what the page still shows.
+  const step = ui.fixture.pass[4];
+  const undoEntry = ui.fixture.undo(step);
+  ui.fixture.redo(undoEntry);
+  ui.frame(ui.stateFrame());
+  await ui.settle();
+  await ui.openMixer();
+  await ui.startEngine();
+  await ui.settle();
+
+  assert.match(ui.bannerText(), /^Crow agent made a mix pass: /, "the pass is still named");
+  assert.match(ui.bannerText(), /and 2 more/, "and still holds all five of its steps");
+  assert.ok(String(ui.chip("ins-eq").className).includes("st-agent-edit"), "the equalizer's chip is outlined");
+  assert.ok(String(ui.chip("ins-verb").className).includes("st-agent-edit"), "and so is the reverb's");
+
+  // A/B hears the song before the pass — including the step that was undone
+  // and redone: it is part of the pass again.
+  ui.click("[data-act=mix-ab]");
+  await ui.settle();
+  const before = ui.lastSong();
+  assert.ok(before, "the engine was handed the song");
+  assert.equal(before.inserts["ins-eq"], undefined, "the effects the pass added are not in it");
+  assert.equal(before.inserts["ins-verb"], undefined);
+  assert.equal(before.master.target.lufs, -14, "nor is the target the redone step set");
 });
 
 // ---- live, in a real browser ----------------------------------------------
@@ -1263,7 +1508,71 @@ test("reordering an effect with a real drag sends one insert.move", async (t) =>
   assert.equal(editorHidden, true, "a drag opens no editor");
 });
 
-test("A/B with real clicks plays before and after without a command", async (t) => {
+test("the mixer strips scroll inside their box at phone width", async (t) => {
+  if (!chrome) return t.skip("no headless Chrome available");
+  const { songId } = await liveSong();
+  const page = await openPage(studioUrl(songId));
+  t.after(() => page.close());
+  await waitForStudio(page);
+  await openMixer(page);
+
+  // Every strip, the master's included, lives inside ONE box: that box is what
+  // scrolls sideways, so the page itself never does. The draw can happen before
+  // the replica carries the track, so the strips are waited for.
+  const drawn = await waitFor(page, "document.querySelectorAll('[data-role=mixer] [data-strip]').length > 1", 10000);
+  assert.ok(drawn, "the mixer drew its strips");
+  const strips = await page.evaluate(`(function () {
+    var scroller = document.querySelector('[data-role=mix-strips]');
+    if (!scroller) return null;
+    var found = document.querySelectorAll('[data-role=mixer] [data-strip]');
+    var inside = 0;
+    var owners = [];
+    for (var i = 0; i < found.length; i += 1) {
+      owners.push(String(found[i].getAttribute('data-strip')));
+      if (found[i].parentNode === scroller) inside += 1;
+    }
+    return { total: found.length, inside: inside, owners: owners };
+  })()`);
+  assert.ok(strips && strips.total > 1, `the strips are drawn (${JSON.stringify(strips)})`);
+  assert.equal(strips.inside, strips.total, "every strip is inside the scrolling box");
+
+  // A phone: 375 px wide, as the browser lays the page out.
+  await page.send("Emulation.setDeviceMetricsOverride", {
+    width: 375,
+    height: 812,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const measured = await page.evaluate(`(function () {
+    var box = document.querySelector('[data-role=mix-strips]');
+    var strip = document.querySelector('[data-role=mixer] [data-strip]');
+    return {
+      inner: window.innerWidth,
+      pageScroll: document.documentElement.scrollWidth,
+      boxScroll: box.scrollWidth,
+      boxClient: box.clientWidth,
+      stripWidth: strip.getBoundingClientRect().width
+    };
+  })()`);
+  await page.send("Emulation.clearDeviceMetricsOverride");
+
+  assert.equal(measured.inner, 375, "the page is laid out at phone width");
+  assert.ok(
+    measured.boxScroll > measured.boxClient,
+    `the strips scroll inside their box at 375 px (${measured.boxScroll} > ${measured.boxClient})`,
+  );
+  assert.ok(
+    measured.pageScroll <= measured.inner,
+    `the page itself never scrolls sideways (${measured.pageScroll} <= ${measured.inner})`,
+  );
+  assert.ok(
+    measured.stripWidth >= 140 && measured.stripWidth <= 170,
+    `a strip is narrower instead of wrapping (${measured.stripWidth})`,
+  );
+});
+
+test("A/B clicked with real mouse input hands the engine the song before the pass", async (t) => {
   if (!chrome) return t.skip("no headless Chrome available");
   const { songId } = await liveSong();
   const page = await openPage(studioUrl(songId));
@@ -1282,13 +1591,70 @@ test("A/B with real clicks plays before and after without a command", async (t) 
   const outlined = await page.evaluate("document.querySelector('[data-strip=\"track:bass\"]').className.indexOf('st-agent-edit') >= 0");
   assert.equal(outlined, true, "and its strip wears the agent's colour");
 
+  // The transport runs: a comparison is what the engine is PLAYING, and pressing
+  // A/B may neither stop it nor move the playhead.
+  await page.evaluate("document.querySelector('[data-act=play]').click(), true");
+  const played = await waitFor(
+    page,
+    "!!document.querySelector('[data-role=position]') && document.querySelector('[data-role=position]').textContent !== '001.1.1'",
+    15000,
+  );
+  assert.ok(played, "the transport never moved: the engine did not start");
+
+  /** What the page last handed the engine, as the test hook recorded it. */
+  const lastHanded = () => page.evaluate(`(function () {
+    var songs = window.__crowStudioSongs || [];
+    var song = songs.length ? songs[songs.length - 1] : null;
+    if (!song) return null;
+    return {
+      count: songs.length,
+      inserts: Object.keys(song.inserts || {}).sort(),
+      lufs: song.master && song.master.target ? song.master.target.lufs : null
+    };
+  })()`);
+  /** Press one element with a real mouse, at the middle of its box. */
+  const mouseClick = async (selector) => {
+    const at = await page.evaluate(`(function () {
+      var node = document.querySelector(${JSON.stringify(selector)});
+      if (!node) return null;
+      var box = node.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    })()`);
+    assert.ok(at && at.x > 0, `${selector} has a box on screen`);
+    await page.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at.x, y: at.y, button: "left", buttons: 1, clickCount: 1 });
+    await page.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at.x, y: at.y, button: "left", buttons: 0, clickCount: 1 });
+  };
+
   const steps = await page.evaluate("document.querySelectorAll('.st-entry').length");
   const label = () => page.evaluate("document.querySelector('[data-act=mix-ab]').textContent");
 
-  await page.evaluate("document.querySelector('[data-act=mix-ab]').click(), true");
-  assert.ok(await waitFor(page, "document.querySelector('[data-act=mix-ab]').textContent === 'Hear: after (A/B)'", 5000), "the first click plays the song before the pass");
-  await page.evaluate("document.querySelector('[data-act=mix-ab]').click(), true");
-  assert.ok(await waitFor(page, "document.querySelector('[data-act=mix-ab]').textContent === 'Hear: before (A/B)'", 5000), "the second click plays it as it is");
+  await mouseClick("[data-act=mix-ab]");
+  assert.ok(
+    await waitFor(page, "document.querySelector('[data-act=mix-ab]').textContent === 'Hear: after (A/B)'", 5000),
+    "the first click plays the song before the pass",
+  );
+  const before = await lastHanded();
+  assert.ok(before, "the engine was handed a song");
+  assert.deepEqual(before.inserts, [], "the snapshot it was handed lacks the pass's effects");
+
+  // The playhead was kept: it is not back at the start, and it keeps moving.
+  const playhead = await page.evaluate("document.querySelector('[data-role=position]').textContent");
+  assert.notEqual(playhead, "001.1.1", `the comparison did not restart the transport (${playhead})`);
+  const stillMoving = await waitFor(
+    page,
+    `document.querySelector('[data-role=position]').textContent !== ${JSON.stringify(playhead)}`,
+    5000,
+  );
+  assert.ok(stillMoving, "and the transport kept running through the comparison");
+
+  await mouseClick("[data-act=mix-ab]");
+  assert.ok(
+    await waitFor(page, "document.querySelector('[data-act=mix-ab]').textContent === 'Hear: before (A/B)'", 5000),
+    "the second click plays it as it is",
+  );
+  const after = await lastHanded();
+  assert.ok(after && after.count > before.count, "the engine was handed the live song again");
+  assert.deepEqual(after.inserts, ["ins-comp", "ins-eq"], "and that one has the pass's effects");
 
   // Neither press wrote anything: the same history, and the same two effects.
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -1303,6 +1669,20 @@ test("the song page carries the effects table beside the client", () => {
   // server checks every insert.set against.
   const source = readFileSync(new URL("../bundles/studio/panel/studio.js", import.meta.url), "utf8");
   assert.match(source, /export const MIXER_EFFECTS_SCRIPT/);
-  assert.match(source, /JSON\.stringify\(\{ kinds: EFFECT_KINDS, params: EFFECT_PARAMS \}\)/);
   assert.ok(source.includes("${MIXER_EFFECTS_SCRIPT}"), "the song page emits it before the client");
+
+  // The serialised table cannot close the script element or break the statement
+  // it sits in: `<`, U+2028 and U+2029 travel as escapes, which JSON reads back
+  // to the same characters.
+  assert.equal(MIXER_EFFECTS_SCRIPT.includes("<"), false, "no raw < in the emitted JSON");
+  assert.equal(MIXER_EFFECTS_SCRIPT.includes("\u2028"), false, "no raw U+2028");
+  assert.equal(MIXER_EFFECTS_SCRIPT.includes("\u2029"), false, "no raw U+2029");
+  assert.equal(MIXER_EFFECTS_SCRIPT.includes("</script"), false, "the script cannot end its own tag");
+
+  // And it still carries the table itself, word for word.
+  const literal = /window\.StudioMixer = (.*);\}\)\(\);$/.exec(MIXER_EFFECTS_SCRIPT);
+  assert.ok(literal, `the script assigns the table: ${MIXER_EFFECTS_SCRIPT.slice(0, 120)}`);
+  const table = JSON.parse(literal[1]);
+  assert.deepEqual(table.kinds, [...EFFECT_KINDS]);
+  assert.deepEqual(table.params, EFFECT_PARAMS);
 });

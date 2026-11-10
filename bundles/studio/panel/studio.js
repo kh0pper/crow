@@ -120,8 +120,24 @@ const CLIENT_SCRIPT = await loadPanelScript("client.js", "CLIENT_SCRIPT");
  */
 export const MIXER_EFFECTS_SCRIPT =
   "(function(){window.StudioMixer = " +
-  JSON.stringify({ kinds: EFFECT_KINDS, params: EFFECT_PARAMS }) +
+  mixerEffectsJson() +
   ";})();";
+
+/**
+ * The effects table as a JSON literal that is safe inside a classic script tag.
+ *
+ * `<` travels as `\u003c` and the two JavaScript line terminators (U+2028 and
+ * U+2029) as their escapes, so no label an effect table ever grows can close the
+ * element or break the statement it sits in. JSON.parse reads both back to the
+ * same character, so the page sees the table the server checks against.
+ * @returns {string}
+ */
+function mixerEffectsJson() {
+  return JSON.stringify({ kinds: EFFECT_KINDS, params: EFFECT_PARAMS })
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
 
 /**
  * The catalog's default entry: the one row `library/catalog.json` marks
