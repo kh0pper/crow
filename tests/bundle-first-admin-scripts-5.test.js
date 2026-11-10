@@ -923,7 +923,7 @@ for (const app of ["jellyfin", "navidrome", "kavita"]) {
 // ── the declarations that put those scripts to work ───────────────────────────────
 
 const CONVERTED = {
-  jellyfin: { user: "admin", secretEnv: "JELLYFIN_ADMIN_PASSWORD", userEnv: undefined, timeout_s: 180 },
+  jellyfin: { user: "admin", secretEnv: "JELLYFIN_ADMIN_PASSWORD", userEnv: undefined, timeout_s: 240 },
   navidrome: { user: "admin", secretEnv: "NAVIDROME_PASSWORD", userEnv: "NAVIDROME_USERNAME", timeout_s: 180 },
   audiobookshelf: { user: "admin", secretEnv: "AUDIOBOOKSHELF_ADMIN_PASSWORD", userEnv: undefined, timeout_s: 180 },
   kavita: { user: "admin", secretEnv: "KAVITA_PASSWORD", userEnv: "KAVITA_USERNAME", timeout_s: 180 },
