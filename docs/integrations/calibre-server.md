@@ -20,7 +20,7 @@ Crow supports two modes for Calibre: self-hosting via Docker or connecting to an
 
 ### Option A: Docker (self-hosted)
 
-Install Calibre as a Crow bundle. This runs Calibre's content server in Docker alongside your Crow gateway.
+Install Calibre as a Crow bundle. This runs Calibre's **content server** in Docker alongside your Crow gateway — not the Calibre desktop app over a web browser, which this bundle used to expose.
 
 > "Crow, install the Calibre Server bundle"
 
@@ -38,6 +38,14 @@ Restart the bundle for changes to take effect:
 > "Crow, restart the Calibre Server bundle"
 
 Calibre's content server will be available at `http://your-server:8081`.
+
+#### The login
+
+The content server needs a login: every page that shows your books and every download asks for it. Crow creates the `admin` account itself right after the install, generates its password and keeps it in **Settings → Passwords**; the bundle's `.env` gets the same `CALIBRE_USERNAME` and `CALIBRE_PASSWORD`, so Crow's tools log in with them. Change the password in Calibre's own web UI (**Settings → Passwords**) if you want another one.
+
+An install that already had content-server users keeps them: Crow leaves those accounts alone and asks you to save the login you use on the Extensions card.
+
+A library folder with no `metadata.db` is filled with an empty Calibre library on the first start, so the server has somewhere to run.
 
 ### Option B: Connect to existing Calibre
 
@@ -79,7 +87,7 @@ Make sure the `CALIBRE_URL` is reachable from the machine running Crow. If Calib
 
 ### "401 Unauthorized"
 
-If your Calibre server has authentication enabled, verify that `CALIBRE_USERNAME` and `CALIBRE_PASSWORD` are set correctly in your `.env` file.
+Crow logs in to the content server with `CALIBRE_USERNAME` and `CALIBRE_PASSWORD` from the bundle's `.env`. The password Crow generated is in **Settings → Passwords**; copy it there, or change Calibre's password in its own web UI (**Settings → Passwords**).
 
 ### Books not appearing
 

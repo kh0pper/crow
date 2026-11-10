@@ -213,6 +213,24 @@ test("contract: a community bundle is refused at run time even if its manifest a
   assert.match(plan.refused, /first-party bundles only/);
 });
 
+test("contract: urlEnv names a declared, non-secret env_vars entry, and rides only with crow", () => {
+  const { dir } = tmpBundle("frigate", { "scripts/first-admin.sh": "#!/usr/bin/env bash\nexit 0\n" });
+  const withUrl = (urlEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, urlEnv } });
+  const declared = {
+    ...withUrl("FRIGATE_URL"),
+    env_vars: [...SETUP_MANIFEST.env_vars, { name: "FRIGATE_URL", default: "http://127.0.0.1:8971" }],
+  };
+  assert.equal(okManifest(declared, dir), true, errText(declared, dir));
+  assert.match(errText(withUrl("NOT_DECLARED"), dir), /firstAdmin\.urlEnv must name a declared env_vars entry/);
+  // An address is not a secret: a secret entry is refused even though it IS declared.
+  assert.match(errText(withUrl("FRIGATE_PASSWORD"), dir), /firstAdmin\.urlEnv "FRIGATE_PASSWORD" must name a non-secret env_vars entry/);
+  // Like the other mechanism fields, it is only allowed with mode crow.
+  const finish = { ...declared, firstAdmin: { mode: "finish-setup", urlEnv: "FRIGATE_URL" } };
+  assert.match(errText(finish, dir), /firstAdmin\.urlEnv is only allowed with mode "crow"/);
+  // Its SHAPE is the schema's job: an env name is upper case letters, digits and _.
+  assert.equal(okManifest(withUrl("frigate_url"), dir), false);
+});
+
 test("the plan refuses an env name the run would write into the bundle's .env", () => {
   const withSecret = (secretEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, secretEnv } });
   const withUser = (userEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, userEnv } });
@@ -222,6 +240,12 @@ test("the plan refuses an env name the run would write into the bundle's .env", 
   for (const name of ["crow_user", "CROW_USER", "COMPOSE_USER", "not a name"]) {
     assert.match(firstAdminSetupPlan(withUser(name)).refused, /userEnv/, String(name));
   }
+  const withUrlEnv = (urlEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, urlEnv } });
+  for (const name of ["crow_url", "CROW_URL", "COMPOSE_URL", "not a name"]) {
+    assert.match(firstAdminSetupPlan(withUrlEnv(name)).refused, /urlEnv/, String(name));
+  }
+  assert.equal(firstAdminSetupPlan(withUrlEnv("FRIGATE_URL")).urlEnv, "FRIGATE_URL");
+  assert.equal(firstAdminSetupPlan(SETUP_MANIFEST).urlEnv, null, "urlEnv is optional");
   assert.equal(firstAdminSetupPlan(withSecret("FRIGATE_PASSWORD")).refused, undefined, "a plain env name is fine");
 });
 
@@ -346,6 +370,30 @@ test("exit 0: the generated password is saved as a generated keychain entry, mar
   );
   assert.deepEqual(calls.writeEnv, [{ dir: dirs.destDir, values: { FRIGATE_PASSWORD: PASSPHRASE, FRIGATE_USER: "admin" } }]);
   assert.deepEqual(calls.marker, [{ id: "frigate", install: INSTALL, result: "ok" }]);
+});
+
+test("firstAdmin.urlEnv: the saved login carries the installed .env address, and only when it is an http(s) URL", async () => {
+  const withUrl = (urlEnv) => ({ ...SETUP_MANIFEST, firstAdmin: { ...SETUP_MANIFEST.firstAdmin, urlEnv } });
+  const savedUrl = async ({ urlEnv, env }) => {
+    const dirs = bundleDirs();
+    if (env !== undefined) writeFileSync(join(dirs.destDir, ".env"), env);
+    const { calls, deps } = seams();
+    const { out } = await runSetup(deps, { dirs, manifest: urlEnv === undefined ? SETUP_MANIFEST : withUrl(urlEnv) });
+    assert.equal(out.result, "ok");
+    return calls.save[0].url;
+  };
+
+  // The installed .env is read through Crow's own codec, so a quoted value decodes the same.
+  assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL", env: 'FRIGATE_URL="http://127.0.0.1:8971/calibre/"\n' }), "http://127.0.0.1:8971/calibre/");
+  assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL", env: "FRIGATE_URL=https://frigate.example.com\n" }), "https://frigate.example.com");
+  // No urlEnv at all (every manifest before this field), an unset value, and no .env: null.
+  assert.equal(await savedUrl({ env: "FRIGATE_URL=http://127.0.0.1:8971\n" }), null);
+  assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL", env: "FRIGATE_PASSWORD=old\n" }), null);
+  assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL" }), null);
+  // Anything that is not an http(s) address of at most 512 characters is not the app's address.
+  for (const value of ["ftp://127.0.0.1:8971", "/srv/frigate", "127.0.0.1:8971", `http://127.0.0.1:8971/${"a".repeat(500)}`]) {
+    assert.equal(await savedUrl({ urlEnv: "FRIGATE_URL", env: `FRIGATE_URL=${value}\n` }), null, value);
+  }
 });
 
 test("exit 3 (kept) and exit 4 (not running) save nothing and say what they are", async () => {

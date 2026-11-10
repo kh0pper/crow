@@ -219,6 +219,7 @@ Optional fields:
 | `setup` | with `crow`/`via: "setup"`: `{ "script": "scripts/first-admin.sh", "timeout_s": 180 }`, optionally with `after` (see "setup.after" below) |
 | `secretEnv` | with `crow`: the keychain entry name for the admin password — an `env_vars` entry with `generate: "secret"` + `keychain: true` for `via: "env"`, any name for `via: "setup"` |
 | `userEnv` | with `crow`, optional: the `env_vars` entry holding the admin's username |
+| `urlEnv` | with `crow`, optional: a declared, NON-SECRET `env_vars` entry whose installed `.env` value is the app's own address — the saved keychain row then carries that URL (only when it is an `http(s)` URL of at most 512 characters), so Settings → Passwords can link to the app |
 | `invite` | with `finish-setup` only: the name of a CODE-HELD invite handler (today: `"vaultwarden"`) — see the next section |
 
 Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`):
@@ -237,8 +238,8 @@ Contract rules (`scripts/lib/bundle-contract.mjs`, enforced by `build-registry`)
     `.env`) is refused.
 - `default-login` requires `user`; `user` is allowed with `default-login` and with
   `crow`/`via: "setup"` (where the script needs a username to create), and nowhere else.
-- `via`/`secretEnv`/`userEnv` are only allowed with `crow`, and `setup` only with
-  `via: "setup"`.
+- `via`/`secretEnv`/`userEnv`/`urlEnv` are only allowed with `crow`, and `setup` only with
+  `via: "setup"`. `urlEnv` must name a declared, non-secret `env_vars` entry.
 - `invite` is only allowed with `finish-setup`, and its value must name a handler
   Crow really ships (`INVITE_HANDLER_NAMES` in
   `servers/gateway/first-admin/registry.js`). The manifest names code; it never

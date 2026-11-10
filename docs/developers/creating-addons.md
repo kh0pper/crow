@@ -219,13 +219,14 @@ machine can answer that page on `127.0.0.1` before you do. So a manifest with a
 | `via` | With `crow` | `"env"` (the app reads it from its environment) or `"postInstall"` (a hook sets it) |
 | `secretEnv` | With `crow` + `via: "env"` | the `env_vars` entry Crow generates and keeps in the keychain |
 | `userEnv` | No, with `crow` + `via: "env"` | the `env_vars` entry holding the admin username |
+| `urlEnv` | No, with `crow` | a declared, non-secret `env_vars` entry whose installed `.env` value is the app's address; the saved keychain row then links to it (only when it is an `http(s)` URL of at most 512 characters) |
 
 - `crow` must name a mechanism that really creates the admin, wired to this app:
   - `via: "env"`: `secretEnv` names an `env_vars` entry with `generate: "secret"` and `keychain: true`, **and** the compose file interpolates it (`${THAT_NAME…}`). A generated secret the app never reads does not create its admin.
   - `via: "postInstall"`: a `postInstall` script must exist and name at least one `generate: "secret"` + `keychain: true` env var — that is what the hook sets.
   - Without either, the build refuses it — declare `finish-setup` instead.
 - `default-login` needs `user`, and `user` is only allowed with that mode.
-- `via`, `secretEnv` and `userEnv` are only allowed with `crow`.
+- `via`, `secretEnv`, `userEnv` and `urlEnv` are only allowed with `crow`.
 - Prefer `crow`: it is the only mode where nothing can claim the account between the install and the operator's first visit.
 
 A web UI bundle that declares nothing is not silently ignored: at runtime it is

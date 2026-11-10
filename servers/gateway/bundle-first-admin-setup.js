@@ -33,9 +33,12 @@
  * On exit 0 the password goes into Crow's keychain (origin "generated", one first-view
  * grant so the operator can read it once), and into the bundle's .env under `secretEnv`
  * (and `user` under `userEnv`) when those are declared env_vars — some bundles' own MCP
- * servers log in with the value from .env. Exit 5 is saved the same way: the app accepted
- * the password, so it must be kept; the run reports `ok` with FIRST_ADMIN_UNPROVEN in its
- * reason and its log, because Crow could not log in with it to confirm. A keychain save
+ * servers log in with the value from .env. When the manifest also names `urlEnv` (a
+ * declared, non-secret env_vars entry), the keychain row's address is that installed
+ * .env value if it is an http(s) URL of at most 512 characters (firstAdminLoginUrl).
+ * Exit 5 is saved the same way: the app accepted the password, so it must be kept; the run
+ * reports `ok` with FIRST_ADMIN_UNPROVEN in its reason and its log, because Crow could not
+ * log in with it to confirm. A keychain save
  * that fails AFTER the app's password changed still parks the password in .env, under
  * `secretEnv` even when the manifest does not declare it. When BOTH the keychain and the .env write fail, the run
  * reports `failed` and says the app's password has changed and must be reset in the app:
@@ -53,6 +56,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { safeRelPath, spawnGroup, hookEnv, tailLines } from "./bundle-lifecycle.js";
 import { newSecretValue, writeBundleEnv } from "./bundle-env-secrets.js";
+import { parseEnvText } from "./bundle-env-codec.js";
 import { createDbClient } from "../db.js";
 import { ensureWriteKey, ensureKeychainTable, saveExtensionSecret } from "./keychain/store.js";
 import { writeFirstAdminAutoResult } from "./bundle-first-admin.js";
@@ -117,7 +121,7 @@ export function endFirstAdminSetup(bundleId) {
  *   - a `user` / `secretEnv` the protocol cannot work without.
  *
  * @param {object|null} manifest
- * @returns {{script: string, timeoutMs: number, user: string, secretEnv: string, userEnv: string|null}|{refused: string}|null}
+ * @returns {{script: string, timeoutMs: number, user: string, secretEnv: string, userEnv: string|null, urlEnv: string|null}|{refused: string}|null}
  */
 export function firstAdminSetupPlan(manifest) {
   const fa = manifest && typeof manifest === "object" ? manifest.firstAdmin : null;
@@ -141,6 +145,13 @@ export function firstAdminSetupPlan(manifest) {
     const userProblem = envNameRefusal(userEnv, "userEnv");
     if (userProblem) return { refused: userProblem };
   }
+  // Optional: the declared, non-secret env var whose installed value is the app's own
+  // address. Saved with the login when it is an http(s) URL (see firstAdminLoginUrl).
+  const urlEnv = typeof fa.urlEnv === "string" && fa.urlEnv.trim() ? fa.urlEnv.trim() : null;
+  if (urlEnv) {
+    const urlProblem = envNameRefusal(urlEnv, "urlEnv");
+    if (urlProblem) return { refused: urlProblem };
+  }
   const t = setup && Number.isInteger(setup.timeout_s) ? setup.timeout_s : FIRST_ADMIN_SETUP_DEFAULT_TIMEOUT_S;
   return {
     script,
@@ -148,7 +159,42 @@ export function firstAdminSetupPlan(manifest) {
     user,
     secretEnv,
     userEnv,
+    urlEnv,
   };
+}
+
+/** The longest address a saved login carries (a URL longer than this is not the app's). */
+export const FIRST_ADMIN_URL_MAX_LENGTH = 512;
+
+/**
+ * The address saved beside a new login: the installed `.env` value of the manifest's
+ * `firstAdmin.urlEnv`, but only when it really is an http(s) URL of at most
+ * FIRST_ADMIN_URL_MAX_LENGTH characters. Anything else (unset, a path, another scheme, a
+ * value a hand edit mangled) is null: the keychain row then has no address, exactly as
+ * before this field existed.
+ *
+ * @param {() => object} readEnv  the installed bundle's parsed `.env`
+ * @param {string|null} urlEnv    the env var the manifest named, or null
+ * @returns {string|null}
+ */
+export function firstAdminLoginUrl(readEnv, urlEnv) {
+  if (!urlEnv) return null;
+  let env;
+  try {
+    env = readEnv();
+  } catch {
+    return null;
+  }
+  const value = env && typeof env === "object" ? env[urlEnv] : undefined;
+  if (typeof value !== "string") return null;
+  if (!value || value.length > FIRST_ADMIN_URL_MAX_LENGTH) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return value;
 }
 
 /** `name — admin login`: the keychain label, as every other generated entry is labelled. */
@@ -215,6 +261,8 @@ function defaultDeps() {
     newSecret: () => newSecretValue("secret"),
     save: saveExtensionSecret,
     writeEnv: writeBundleEnv,
+    // The installed .env, for the login's address (firstAdmin.urlEnv) only.
+    readEnv: (dir) => parseEnvText(readFileSync(join(dir, ".env"), "utf8")),
     writeMarker: writeFirstAdminAutoResult,
     now: () => Date.now(),
     warn: (m) => console.warn(m),
@@ -378,7 +426,7 @@ export async function runFirstAdminSetup({
           envKey: plan.secretEnv,
           label: firstAdminLabel(name),
           username: plan.user,
-          url: null,
+          url: firstAdminLoginUrl(() => d.readEnv(dir), plan.urlEnv),
           secret: password,
           origin: "generated",
           firstView: true,

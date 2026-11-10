@@ -20,7 +20,7 @@ Crow soporta dos modos para Calibre: autoalojamiento vía Docker o conexión a u
 
 ### Opción A: Docker (autoalojado)
 
-Instala Calibre como un bundle de Crow. Esto ejecuta el servidor de contenido de Calibre en Docker junto a tu gateway de Crow.
+Instala Calibre como un bundle de Crow. Esto ejecuta el **servidor de contenido** de Calibre en Docker junto a tu gateway de Crow — no la aplicación de escritorio de Calibre a través del navegador, que era lo que este bundle ofrecía antes.
 
 > "Crow, instala el bundle de Calibre Server"
 
@@ -38,6 +38,14 @@ Reinicia el bundle para que los cambios surtan efecto:
 > "Crow, reinicia el bundle de Calibre Server"
 
 El servidor de contenido de Calibre estará disponible en `http://tu-servidor:8081`.
+
+#### El inicio de sesión
+
+El servidor de contenido necesita un inicio de sesión: cada página que muestra tus libros y cada descarga lo piden. Crow crea la cuenta `admin` por sí mismo justo después de la instalación, genera su contraseña y la guarda en **Ajustes → Contraseñas**; el `.env` del bundle recibe el mismo `CALIBRE_USERNAME` y `CALIBRE_PASSWORD`, así que las herramientas de Crow inician sesión con ellos. Cambia la contraseña en la interfaz web de Calibre (**Settings → Passwords**) si quieres otra.
+
+Una instalación que ya tenía usuarios del servidor de contenido los conserva: Crow deja esas cuentas intactas y te pide guardar el inicio de sesión que uses en la tarjeta de Extensiones.
+
+Una carpeta de biblioteca sin `metadata.db` se rellena con una biblioteca de Calibre vacía en el primer arranque, para que el servidor tenga dónde funcionar.
 
 ### Opción B: Conectar a Calibre existente
 
@@ -79,7 +87,7 @@ Asegúrate de que la `CALIBRE_URL` sea accesible desde la máquina que ejecuta C
 
 ### "401 No autorizado"
 
-Si tu servidor de Calibre tiene la autenticación habilitada, verifica que `CALIBRE_USERNAME` y `CALIBRE_PASSWORD` estén configurados correctamente en tu archivo `.env`.
+Crow inicia sesión en el servidor de contenido con `CALIBRE_USERNAME` y `CALIBRE_PASSWORD` del `.env` del bundle. La contraseña que Crow generó está en **Ajustes → Contraseñas**; cópiala ahí, o cambia la contraseña de Calibre en su propia interfaz web (**Settings → Passwords**).
 
 ### Los libros no aparecen
 

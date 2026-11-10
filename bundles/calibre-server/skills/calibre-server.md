@@ -14,6 +14,19 @@ tools:
 
 # Calibre Content Server
 
+## Login and setup
+
+- The bundle runs Calibre's **content server** (port 8081), not the Calibre desktop app over a
+  web browser: the desktop mode is gone, and the library is served by `calibre-server` itself.
+- The content server now needs a login (Settings → Passwords in Calibre's own web UI). Crow
+  creates the `admin` account when the bundle is installed, generates its password and keeps it
+  in Settings → Passwords (Crow's keychain) — read it there, never from this skill.
+- Calibre asks for that login on every page under `/ajax` and on downloads; `CALIBRE_USERNAME`
+  and `CALIBRE_PASSWORD` in the bundle's `.env` are the same credentials, so the tools below use
+  them.
+- An install that already has content-server users keeps them: Crow leaves those accounts alone
+  and asks the operator to save the login they use.
+
 ## When to Activate
 
 - User asks to search for, browse, or download ebooks
@@ -68,6 +81,6 @@ tools:
 ## Error Handling
 
 - If Calibre is unreachable: "Cannot connect to Calibre at the configured URL. Make sure the content server is running."
-- If auth fails (401): "Calibre rejected the credentials. Check CALIBRE_USERNAME and CALIBRE_PASSWORD in settings."
+- If auth fails (401): "Calibre rejected the credentials. Read the login Crow saved in Settings → Passwords, or set CALIBRE_USERNAME and CALIBRE_PASSWORD in the bundle settings."
 - If a book is not found: the book may have been removed from the library
 - If a format is not available: show available formats and let the user choose another
