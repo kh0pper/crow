@@ -525,6 +525,27 @@ export async function deleteProject(db, projectId, {
   // After the commit: best effort. The tombstone already hides the project and its id is never
   // reused, so anything left behind is inert.
 
+  // A permanent project delete erases history AT ONCE, never after a Trash period (the
+  // operator's ruling, 2026-11-10: nothing ships until erase works). Scoped to what the purge
+  // actually removed: eraseByProject closes over the ITEM but only takes items whose latest
+  // version is a delete, so the context sections this purge deleted lose every version while
+  // the memories it merely UNFILED keep theirs — they still exist, the user still has them.
+  // Best effort like the rest of this section: the tombstone stands, and a failed erase is
+  // reported rather than restoring the project.
+  try {
+    const { eraseByProject } = await import("./history/erase.js");
+    const erased = await eraseByProject(
+      db,
+      { projectUuid: project.uuid, projectId: id },
+      { authorKind: "system", authorId: "project-delete" },
+    );
+    if (erased.versions > 0) {
+      console.log(`[project-lifecycle] delete ${id}: erased ${erased.versions} version(s) of ${erased.erased.length} item(s)`);
+    }
+  } catch (err) {
+    console.warn(`[project-lifecycle] delete ${id}: history erase failed:`, err?.message || err);
+  }
+
   // The backends are gone for good, so their approval nonces go too: with one on record, a
   // writer that put a row back with the same id, connection_ref and old value would have that
   // value verify again. The delete stands either way — a record that cannot be written leaves

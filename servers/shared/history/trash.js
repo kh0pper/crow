@@ -1,0 +1,219 @@
+/**
+ * trash.js — deleted items, held for N days, then erased for good.
+ *
+ * "Deleting: trash, then gone" (the version history design §3.4). A delete is an
+ * ordinary DELETE on the covered table, so the capture trigger records a `delete`
+ * version holding what was removed. That row IS the Trash entry: an item is
+ * "in the Trash" exactly when its LATEST version is a delete and its versions
+ * still exist.
+ *
+ * That definition gives the three properties this file needs for free:
+ *   - nothing extra to keep in step: no separate trash table, no backfill;
+ *   - a restore (a new version) takes the item out of the Trash by definition,
+ *     and so does a re-create;
+ *   - ERASED means GONE: erase (erase.js) removes every version, so an erased
+ *     item cannot be listed, restored, or resurrected by anything reading this
+ *     module. There is no tombstone row to leak and none to grow.
+ *
+ * Restore goes through api.js's restoreVersion — the one restore in the code
+ * base — so a Trash restore IS a new version (review focus 3), it is attributed,
+ * and a redacted delete version is refused rather than pasting "[redacted]" into
+ * live content.
+ *
+ * Emptying is the owner's alone (the version history design §4: a bot cannot
+ * empty the Trash), and it erases through the same armed door as everything else.
+ */
+import { restoreVersion } from "./api.js";
+import { eraseItems } from "./erase.js";
+
+/** The default Trash period, in days (the design's §8.8 default). */
+export const DEFAULT_TRASH_DAYS = 30;
+
+/** Rows one Trash listing (or one expand of it) returns. */
+export const MAX_TRASH_ROWS = 500;
+
+const MS_PER_DAY = 86_400_000;
+
+function trashError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+const str = (v) => {
+  if (typeof v === "string") {
+    const s = v.trim();
+    return s === "" ? null : s;
+  }
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  return null;
+};
+
+/** 1…MAX_TRASH_ROWS, the default for anything unusable. */
+function normalizeLimit(limit) {
+  const n = Math.trunc(Number(limit));
+  if (!Number.isFinite(n) || n <= 0) return MAX_TRASH_ROWS;
+  return Math.min(n, MAX_TRASH_ROWS);
+}
+
+/** A Trash period in days: a finite number ≥ 0, else the default. */
+export function normalizeTrashDays(days) {
+  const n = Number(days);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_TRASH_DAYS;
+}
+
+/**
+ * The items whose LATEST version is a `delete`, newest deletion first.
+ *
+ * One indexed pass over item_versions: the inner query picks each item's newest
+ * version id (idx_item_versions_item), the outer one keeps the deletes. `before`
+ * is an ISO timestamp: only deletions at or before it (the sweep's and
+ * emptyTrash's age filter).
+ *
+ * Exported because the sweep needs the same definition of "in the Trash" that the
+ * Trash page shows — one query, two callers, no chance of the two drifting.
+ *
+ * @param {object} db
+ * @param {{before?: string|null, limit?: number}} [opts]
+ * @returns {Promise<Array<{itemType: string, itemId: string, deletedAt: string,
+ *   deletedBy: {authorKind: string, authorId: string|null},
+ *   jobId: string|null, originInstance: string|null, redacted: boolean,
+ *   snapshot: object}>>}
+ */
+export async function trashEntries(db, { before = null, limit = MAX_TRASH_ROWS } = {}) {
+  const args = [];
+  let ageFilter = "";
+  if (typeof before === "string" && before !== "") {
+    // `<=`, not `<`: an age filter of 0 days means "everything deleted up to now",
+    // and a deletion recorded in the same millisecond as the call is still that.
+    ageFilter = " AND v.created_at <= ?";
+    args.push(before);
+  }
+  args.push(normalizeLimit(limit));
+  const { rows } = await db.execute({
+    sql: `SELECT v.item_type, v.item_id, v.op, v.created_at, v.author_kind, v.author_id,
+                 v.job_id, v.origin_instance, v.redacted, v.snapshot_json
+            FROM item_versions v
+            JOIN (SELECT item_type, item_id, MAX(id) AS newest_id
+                    FROM item_versions
+                   GROUP BY item_type, item_id) latest
+              ON latest.item_type = v.item_type
+             AND latest.item_id = v.item_id
+             AND latest.newest_id = v.id
+           WHERE v.op = 'delete'${ageFilter}
+           ORDER BY v.id DESC
+           LIMIT ?`,
+    args,
+  });
+  return rows.map((row) => ({
+    itemType: row.item_type,
+    itemId: String(row.item_id),
+    deletedAt: row.created_at,
+    deletedBy: { authorKind: row.author_kind, authorId: row.author_id ?? null },
+    jobId: row.job_id ?? null,
+    originInstance: row.origin_instance ?? null,
+    redacted: Number(row.redacted) === 1,
+    snapshot: JSON.parse(row.snapshot_json),
+  }));
+}
+
+/**
+ * The Trash page's list. Newest deletion first, capped by MAX_TRASH_ROWS.
+ *
+ * @param {object} db
+ * @param {{limit?: number, before?: string|null}} [opts]
+ */
+export async function listTrash(db, opts = {}) {
+  return trashEntries(db, opts);
+}
+
+/** The item's newest version row (id, op), or null when it has none (erased). */
+async function newestVersion(db, itemType, itemId) {
+  const { rows } = await db.execute({
+    sql: `SELECT id, op FROM item_versions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT 1`,
+    args: [itemType, itemId],
+  });
+  return rows[0] ?? null;
+}
+
+/**
+ * Put a deleted item back from the Trash.
+ *
+ * The restore is api.js's restoreVersion on the delete version: the row comes
+ * back as ITSELF (same id, same project filing) and the restore is a new version,
+ * so the delete stays in the item's History afterwards (review focus 3).
+ *
+ * Refusals: `not_found` when the item has no versions at all (erased, or never
+ * existed), `not_in_trash` when its newest version is not a delete (it is live),
+ * and restoreVersion's own `redacted` / `conflict` / `invalid_context`.
+ *
+ * SYNC, stated plainly: this writes the local row through the ordinary client,
+ * exactly like an edit, but the History code base does not yet emit an outbound
+ * sync event for a restore (that wiring is not part of Task 4). So a Trash
+ * restore is visible on this instance and NOT pushed to peers — the item comes
+ * back here and stays deleted there until someone edits it. tests/history-two-
+ * instance.test.js records what sync does today.
+ *
+ * @param {object} db
+ * @param {{itemType: string, itemId: string|number}} item
+ * @param {{authorKind: string, authorId?: string, jobId?: string}} ctx who restored it
+ * @returns {Promise<{itemType: string, itemId: string, newVersionId: number|null,
+ *   unchanged: boolean}>}
+ */
+export async function restoreFromTrash(db, item = {}, ctx) {
+  const itemType = str(item.itemType);
+  const itemId = str(item.itemId);
+  if (itemType === null || itemId === null) {
+    throw trashError("invalid_request", "restoreFromTrash needs an itemType and an itemId");
+  }
+  const newest = await newestVersion(db, itemType, itemId);
+  if (!newest) throw trashError("not_found", `${itemType}/${itemId} has no history: nothing to restore`);
+  if (newest.op !== "delete") {
+    throw trashError("not_in_trash", `${itemType}/${itemId} is live, not in the Trash`);
+  }
+  const { newVersionId, unchanged } = await restoreVersion(db, { versionId: Number(newest.id) }, ctx);
+  return { itemType, itemId, newVersionId, unchanged };
+}
+
+/**
+ * Empty the Trash, or the part of it older than `olderThanDays` days.
+ *
+ * Owner only: a bot may not empty the Trash (the version history design §4).
+ * The removal goes through erase.js, so it is the same armed, one-transaction
+ * door the aging sweep uses — emptying early and ageing out are one operation
+ * with different clocks.
+ *
+ * @param {object} db
+ * @param {{olderThanDays?: number, now?: Date, maxPages?: number}} [opts]
+ *   `olderThanDays` defaults to 0 (empty it all). `now` is injectable for tests.
+ *   `maxPages` bounds one call to that many pages of MAX_TRASH_ROWS items.
+ * @param {{authorKind: string, authorId?: string}} ctx must be the owner
+ * @returns {Promise<{erased: Array<{itemType: string, itemId: string, versions: number}>,
+ *   count: number, versions: number, before: string}>}
+ */
+export async function emptyTrash(db, { olderThanDays = 0, now = new Date(), maxPages = 20 } = {}, ctx) {
+  if (!ctx || ctx.authorKind !== "owner") {
+    throw trashError("not_owner", "only the owner can empty the Trash");
+  }
+  const days = normalizeTrashDays(olderThanDays);
+  const before = new Date(now.getTime() - days * MS_PER_DAY).toISOString();
+  // One page of MAX_TRASH_ROWS per erase (each page is its own armed transaction),
+  // repeated until the Trash is empty or the page cap is reached — so one click
+  // empties the Trash rather than the first 500 items of it, and a pathological
+  // store cannot keep one request busy forever.
+  const erased = [];
+  let versions = 0;
+  for (let page = 0; page < maxPages; page++) {
+    const entries = await trashEntries(db, { before, limit: MAX_TRASH_ROWS });
+    if (entries.length === 0) break;
+    const result = await eraseItems(
+      db,
+      entries.map((e) => ({ itemType: e.itemType, itemId: e.itemId })),
+      ctx,
+    );
+    erased.push(...result.erased);
+    versions += result.versions;
+    if (result.erased.length === 0) break; // nothing progressed: stop rather than spin
+  }
+  return { erased, count: erased.length, versions, before };
+}

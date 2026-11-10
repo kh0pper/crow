@@ -1,0 +1,662 @@
+/**
+ * Version history, Task 4: job undo, Trash, erase, retention, redaction and the
+ * coalescing sweep — plus the operator's 2026-11-10 ruling that a PERMANENT
+ * delete erases history at once instead of waiting for the Trash period.
+ *
+ * Every fixture is a real scripts/init-db.js crow.db in its own temp dir with the
+ * additive 0024 migration applied (the production shape: FTS triggers, seeded
+ * crow_context, the append-only guards), as in tests/history-api.test.js. Writes
+ * go through the gateway's client (servers/db.js) inside a write context, so the
+ * versions they produce are stamped the way a real write's are.
+ *
+ * The two ruling tests drive the real flows, not a re-implementation of them:
+ * `maker_delete_learner` through an in-memory MCP client, and
+ * servers/shared/project-lifecycle.js's deleteProject.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+
+import { createDbClient } from "../servers/db.js";
+import { run as migrate } from "../scripts/migrations/0024-item-versions.mjs";
+import { withWriteContext } from "../servers/shared/history/write-context.js";
+import { undoJob, UNDO_REASONS } from "../servers/shared/history/jobs.js";
+import { emptyTrash, listTrash, restoreFromTrash } from "../servers/shared/history/trash.js";
+import { eraseItems } from "../servers/shared/history/erase.js";
+import { sweep, COALESCE_WINDOW_MS } from "../servers/shared/history/sweep.js";
+
+const REPO = new URL("..", import.meta.url).pathname;
+
+/* The instance anchor this file runs under. Crow's own modules resolve their data
+ * dir from the environment (project-lifecycle, project-spaces), so the whole file
+ * gets one private home — never the real ~/.crow. */
+const ROOT = mkdtempSync(join(tmpdir(), "hist-jobs-home-"));
+process.env.CROW_HOME = join(ROOT, "home");
+process.env.CROW_DATA_DIR = join(ROOT, "data");
+process.env.CROW_DISABLE_INSTANCE_SYNC = "1";
+delete process.env.CROW_DB_PATH;
+
+/** An AWS-shaped access key, built at runtime so this file carries no literal a
+ *  secret scanner would flag (the redaction sweep's own patterns are what we are
+ *  testing; the file itself must stay clean for check-public-hygiene). */
+const AWS_KEY = ["AKIA", "Q7T2", "MN4P", "R8SZ", "WX9K"].join("");
+
+/** The owner at their dashboard, a verified bot working a board card, a schedule. */
+const OWNER = { authorKind: "owner", authorId: "abcd1234", jobId: "session:abcd1234" };
+const BOT = { authorKind: "bot", authorId: "hank", jobId: "card:7" };
+const SYSTEM = { authorKind: "system", authorId: "test-scheduler" };
+
+/** A fresh crow.db (init-db.js) with 0024 applied. `dir` lets one test own the
+ *  instance data dir itself (the project delete resolves workspaces under it). */
+function fixture(prefix, dir = null) {
+  const root = dir || mkdtempSync(join(tmpdir(), prefix));
+  if (dir) mkdirSync(dir, { recursive: true });
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: root, CROW_DB_PATH: "" },
+    cwd: REPO,
+    stdio: "pipe",
+  });
+  const dbPath = join(root, "crow.db");
+  migrate({ dbPath, log: () => {} });
+  return {
+    dir: root,
+    dbPath,
+    open() {
+      return createDbClient(dbPath);
+    },
+    dispose() {
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+/* ------------------------------------------------------------- write helpers */
+
+async function insertMemory(db, ctx, fields = {}) {
+  const row = { content: "a memory", category: "general", ...fields };
+  const columns = Object.keys(row);
+  const { lastInsertRowid } = await withWriteContext(ctx, () =>
+    db.execute({
+      sql: `INSERT INTO memories (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+      args: columns.map((c) => row[c]),
+    }),
+  );
+  return Number(lastInsertRowid);
+}
+
+const updateMemory = (db, ctx, id, fields) => {
+  const columns = Object.keys(fields);
+  return withWriteContext(ctx, () =>
+    db.execute({
+      sql: `UPDATE memories SET ${columns.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+      args: [...columns.map((c) => fields[c]), id],
+    }),
+  );
+};
+
+const deleteMemory = (db, ctx, id) =>
+  withWriteContext(ctx, () => db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] }));
+
+async function insertPost(db, ctx, fields = {}) {
+  const row = { slug: "a-post", title: "A post", content: "body text", ...fields };
+  const columns = Object.keys(row);
+  const { lastInsertRowid } = await withWriteContext(ctx, () =>
+    db.execute({
+      sql: `INSERT INTO blog_posts (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+      args: columns.map((c) => row[c]),
+    }),
+  );
+  return Number(lastInsertRowid);
+}
+
+const updatePost = (db, ctx, id, fields) => {
+  const columns = Object.keys(fields);
+  return withWriteContext(ctx, () =>
+    db.execute({
+      sql: `UPDATE blog_posts SET ${columns.map((c) => `${c} = ?`).join(", ")} WHERE id = ?`,
+      args: [...columns.map((c) => fields[c]), id],
+    }),
+  );
+};
+
+const memoryRow = async (db, id, columns = "id, content") =>
+  (await db.execute({ sql: `SELECT ${columns} FROM memories WHERE id = ?`, args: [id] })).rows[0];
+
+const versionsOf = async (db, itemType, itemId) =>
+  (await db.execute({
+    sql: `SELECT id, op, snapshot_json, redacted, created_at, author_id, job_id
+            FROM item_versions WHERE item_type = ? AND item_id = ? ORDER BY id`,
+    args: [itemType, String(itemId)],
+  })).rows;
+
+const versionCount = async (db, itemType, itemId) =>
+  Number((await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM item_versions WHERE item_type = ? AND item_id = ?",
+    args: [itemType, String(itemId)],
+  })).rows[0].n);
+
+const armed = async (db) =>
+  Number((await db.execute({ sql: "SELECT armed FROM item_versions_erase", args: [] })).rows[0].armed);
+
+/* ------------------------------------------------------------- job undo */
+
+test("a job editing 2 memories and 1 post, then undo, restores all 3", async () => {
+  const fx = fixture("hist-job-undo-");
+  const db = fx.open();
+  try {
+    const m1 = await insertMemory(db, OWNER, { content: "first memory, before the job" });
+    const m2 = await insertMemory(db, OWNER, { content: "second memory, before the job" });
+    const post = await insertPost(db, OWNER, { slug: "job-post", title: "Job post", content: "before the job" });
+
+    // One bot, one card: every write below is stamped card:7.
+    await updateMemory(db, BOT, m1, { content: "first memory, after the job" });
+    await updateMemory(db, BOT, m2, { content: "second memory, after the job" });
+    await updatePost(db, BOT, post, { content: "after the job" });
+
+    const undo = await undoJob(db, { jobId: "card:7" }, OWNER);
+    assert.deepEqual(undo.skipped, [], "nothing was edited after the job, so nothing is skipped");
+    assert.deepEqual(
+      undo.restored.map((r) => `${r.itemType}/${r.itemId}`).sort(),
+      [`blog_post/${post}`, `memory/${m1}`, `memory/${m2}`].sort(),
+      "all three items the job touched",
+    );
+    assert.deepEqual(new Set(undo.restored.map((r) => r.action)), new Set(["restored"]));
+
+    assert.equal((await memoryRow(db, m1)).content, "first memory, before the job");
+    assert.equal((await memoryRow(db, m2)).content, "second memory, before the job");
+    const postRow = (await db.execute({ sql: "SELECT content FROM blog_posts WHERE id = ?", args: [post] })).rows[0];
+    assert.equal(postRow.content, "before the job");
+
+    // The undo is itself a version, attributed to whoever undid it (review focus 3).
+    const m1Versions = await versionsOf(db, "memory", m1);
+    assert.deepEqual(m1Versions.map((v) => v.op), ["insert", "update", "update"]);
+    assert.equal(m1Versions.at(-1).author_id, OWNER.authorId, "the undo is stamped with its own author");
+    assert.equal(m1Versions.at(-1).job_id, OWNER.jobId);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("an owner edit to one of them after the job leaves skipped holding exactly that one", async () => {
+  const fx = fixture("hist-job-skip-");
+  const db = fx.open();
+  try {
+    const m1 = await insertMemory(db, OWNER, { content: "m1 before" });
+    const m2 = await insertMemory(db, OWNER, { content: "m2 before" });
+    const post = await insertPost(db, OWNER, { slug: "skip-post", content: "post before" });
+
+    await updateMemory(db, BOT, m1, { content: "m1 the job wrote" });
+    await updateMemory(db, BOT, m2, { content: "m2 the job wrote" });
+    await updatePost(db, BOT, post, { content: "post the job wrote" });
+
+    // The owner works on m1 afterwards: their edit must never be overwritten.
+    await updateMemory(db, OWNER, m1, { content: "m1 the owner wrote afterwards" });
+
+    const undo = await undoJob(db, { jobId: "card:7" }, OWNER);
+    assert.deepEqual(
+      undo.skipped,
+      [{ itemType: "memory", itemId: String(m1), reason: UNDO_REASONS.EDITED_AFTER }],
+      "exactly the item edited after the job is skipped",
+    );
+    assert.deepEqual(
+      undo.restored.map((r) => `${r.itemType}/${r.itemId}`).sort(),
+      [`blog_post/${post}`, `memory/${m2}`].sort(),
+      "undo is partial: it restores what nothing touched",
+    );
+
+    assert.equal((await memoryRow(db, m1)).content, "m1 the owner wrote afterwards", "the later edit stands");
+    assert.equal((await memoryRow(db, m2)).content, "m2 before");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("undoing a job that CREATED an item sends it to the Trash, and a Trash restore brings it back", async () => {
+  const fx = fixture("hist-trash-");
+  const db = fx.open();
+  try {
+    const created = await insertMemory(db, BOT, { content: "a memory the job created" });
+    assert.equal(await versionCount(db, "memory", created), 1);
+
+    const undo = await undoJob(db, { jobId: "card:7" }, OWNER);
+    assert.deepEqual(undo.skipped, []);
+    assert.equal(undo.restored.length, 1);
+    assert.equal(undo.restored[0].action, "deleted", "undoing a creation is a delete");
+    assert.equal(await memoryRow(db, created), undefined, "the row is gone");
+
+    // ... and it waited in the Trash instead of vanishing mid-undo.
+    const trash = await listTrash(db);
+    assert.deepEqual(
+      trash.map((t) => `${t.itemType}/${t.itemId}`),
+      [`memory/${created}`],
+    );
+    const entry = trash[0];
+    assert.equal(entry.snapshot.content, "a memory the job created", "the Trash holds what was removed");
+    assert.ok(entry.deletedAt, "a deletion has a time (the Trash period is counted from it)");
+    assert.deepEqual(entry.deletedBy, { authorKind: "owner", authorId: OWNER.authorId });
+
+    const back = await restoreFromTrash(db, { itemType: "memory", itemId: created }, OWNER);
+    assert.ok(back.newVersionId, "a Trash restore is a new version");
+    assert.equal((await memoryRow(db, created)).content, "a memory the job created");
+    assert.deepEqual(await listTrash(db), [], "a restored item is not in the Trash by definition");
+
+    // Nothing to restore a second time, and an unknown item is its own refusal.
+    await assert.rejects(
+      () => restoreFromTrash(db, { itemType: "memory", itemId: created }, OWNER),
+      (err) => err.code === "not_in_trash",
+    );
+    await assert.rejects(
+      () => restoreFromTrash(db, { itemType: "memory", itemId: 999999 }, OWNER),
+      (err) => err.code === "not_found",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* ------------------------------------------------------------- redaction */
+
+test("an AWS-shaped key in a memory is [redacted] in its versions after one sweep, but stays live in the memory itself", async () => {
+  const fx = fixture("hist-redact-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: `deploy with ${AWS_KEY} please` });
+    await updateMemory(db, OWNER, id, { content: `still here: ${AWS_KEY}` });
+
+    const result = await sweep(db);
+    assert.ok(result.redacted >= 2, `both versions matched (got ${result.redacted})`);
+
+    const versions = await versionsOf(db, "memory", id);
+    assert.equal(versions.length, 2);
+    for (const v of versions) {
+      assert.equal(Number(v.redacted), 1, "a rewritten version is marked as redacted");
+      assert.doesNotMatch(v.snapshot_json, /AKIA/, "the key is gone from the version table");
+      assert.match(v.snapshot_json, /\[redacted\]/, "and the placeholder says so");
+    }
+
+    // Live data is not History's business: the memory itself keeps its text.
+    const live = await memoryRow(db, id);
+    assert.equal(live.content, `still here: ${AWS_KEY}`);
+
+    // A second sweep has nothing left to do (the rows are redacted = 1).
+    const again = await sweep(db);
+    assert.equal(again.redacted, 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("a sweep redacts in bounded batches", async () => {
+  const fx = fixture("hist-redact-batch-");
+  const db = fx.open();
+  try {
+    // Ten versions, each carrying the secret, each written by a DIFFERENT author so
+    // the coalescing pass cannot remove any of them (this test is about the bound).
+    const id = await insertMemory(db, { authorKind: "bot", authorId: "bot-0", jobId: "card:0" }, {
+      content: `first ${AWS_KEY}`,
+    });
+    for (let i = 1; i <= 9; i++) {
+      await updateMemory(db, { authorKind: "bot", authorId: `bot-${i}`, jobId: `card:${i}` }, id, {
+        content: `edit ${i} ${AWS_KEY}`,
+      });
+    }
+    const total = await versionCount(db, "memory", id);
+    assert.equal(total, 10);
+
+    const first = await sweep(db, { batchSize: 2 });
+    assert.ok(first.redacted > 0, "the pass redacts");
+    assert.ok(
+      first.redacted <= 4,
+      `one run is bounded to a batch (backlog + newest page of 2): got ${first.redacted}`,
+    );
+
+    // Bounded per run, complete over runs: keep sweeping until nothing matches.
+    let unredacted = total - Number(
+      (await db.execute({
+        sql: "SELECT COUNT(*) AS n FROM item_versions WHERE item_type = 'memory' AND item_id = ? AND redacted = 1",
+        args: [String(id)],
+      })).rows[0].n,
+    );
+    for (let run = 0; run < 20 && unredacted > 0; run++) {
+      const r = await sweep(db, { batchSize: 2 });
+      unredacted -= r.redacted;
+    }
+    assert.equal(unredacted, 0, "every version is eventually redacted");
+    const rows = await versionsOf(db, "memory", id);
+    for (const row of rows) assert.doesNotMatch(row.snapshot_json, /AKIA/);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* ------------------------------------------------------------- coalescing */
+
+test("three saves 30 s apart by the same author coalesce to one version", async () => {
+  const fx = fixture("hist-coalesce-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "start" });
+    const t0 = Date.now();
+    await updateMemory(db, OWNER, id, { content: "save 1" });
+    await updateMemory(db, OWNER, id, { content: "save 2" });
+    await updateMemory(db, OWNER, id, { content: "save 3" });
+    assert.equal(await versionCount(db, "memory", id), 4, "insert + three saves");
+
+    // Space the three saves 30 s apart (the trigger's own clock is the write time;
+    // the armed switch is the only way to move a stored version's clock, and this
+    // is a test seeding timestamps, exactly as tests/history-api.test.js does).
+    const versions = await versionsOf(db, "memory", id);
+    const saves = versions.filter((v) => v.op === "update");
+    await db.execute("BEGIN IMMEDIATE");
+    await db.execute("UPDATE item_versions_erase SET armed = 1");
+    for (const [i, save] of saves.entries()) {
+      const at = new Date(t0 - (saves.length - i) * 30_000).toISOString();
+      await db.execute({ sql: "UPDATE item_versions SET created_at = ? WHERE id = ?", args: [at, save.id] });
+    }
+    await db.execute("UPDATE item_versions_erase SET armed = 0");
+    await db.execute("COMMIT");
+
+    const result = await sweep(db);
+    assert.equal(result.coalesced, 2, "two of the three saves go");
+
+    const after = await versionsOf(db, "memory", id);
+    assert.deepEqual(after.map((v) => v.op), ["insert", "update"], "the insert and the newest save remain");
+    assert.equal(JSON.parse(after.at(-1).snapshot_json).content, "save 3");
+    assert.equal((await memoryRow(db, id)).content, "save 3", "the live content is untouched");
+
+    // Two saves further apart than the window are NOT one save.
+    const other = await insertMemory(db, OWNER, { content: "far apart" });
+    await updateMemory(db, OWNER, other, { content: "far save 1" });
+    await updateMemory(db, OWNER, other, { content: "far save 2" });
+    const farVersions = (await versionsOf(db, "memory", other)).filter((v) => v.op === "update");
+    await db.execute("BEGIN IMMEDIATE");
+    await db.execute("UPDATE item_versions_erase SET armed = 1");
+    await db.execute({
+      sql: "UPDATE item_versions SET created_at = ? WHERE id = ?",
+      args: [new Date(Date.now() - 10 * COALESCE_WINDOW_MS).toISOString(), farVersions[0].id],
+    });
+    await db.execute("UPDATE item_versions_erase SET armed = 0");
+    await db.execute("COMMIT");
+
+    const second = await sweep(db);
+    assert.equal(second.coalesced, 0, `${COALESCE_WINDOW_MS} ms apart is not one save`);
+    assert.equal(await versionCount(db, "memory", other), 3);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* ----------------------------------------------------------------- erase */
+
+test("a Trash item older than 30 days has zero versions after the sweep", async () => {
+  const fx = fixture("hist-trash-age-");
+  const db = fx.open();
+  try {
+    const old = await insertMemory(db, OWNER, { content: "deleted long ago" });
+    await deleteMemory(db, OWNER, old);
+    const fresh = await insertMemory(db, OWNER, { content: "deleted just now" });
+    await deleteMemory(db, OWNER, fresh);
+
+    // Age the older item's DELETION by 40 days. The capture trigger's clock is the
+    // write time, and moving a version's clock is a history edit, so this goes
+    // through the armed switch exactly as a redaction does (a test seeding an age).
+    const oldDelete = (await versionsOf(db, "memory", old)).find((v) => v.op === "delete");
+    await db.execute("BEGIN IMMEDIATE");
+    await db.execute("UPDATE item_versions_erase SET armed = 1");
+    await db.execute({
+      sql: "UPDATE item_versions SET created_at = ? WHERE id = ?",
+      args: [new Date(Date.now() - 40 * 86_400_000).toISOString(), oldDelete.id],
+    });
+    await db.execute("UPDATE item_versions_erase SET armed = 0");
+    await db.execute("COMMIT");
+
+    const result = await sweep(db, { trashDays: 30, retention: "forever" });
+    assert.deepEqual(result.erased.map((e) => e.itemId), [String(old)]);
+    assert.equal(await versionCount(db, "memory", old), 0, "every version of the aged item is gone");
+    assert.equal(await versionCount(db, "memory", fresh), 2, "the newer Trash item is untouched (insert + delete)");
+    assert.deepEqual(
+      (await listTrash(db)).map((t) => t.itemId),
+      [String(fresh)],
+      "and it is still in the Trash",
+    );
+    assert.deepEqual(result.retention, { value: "forever", applied: true });
+    assert.equal(await armed(db), 0, "the erase switch is shut again");
+
+    // Nothing left to erase on a second run: erasing is idempotent by definition.
+    const again = await sweep(db, { trashDays: 30 });
+    assert.deepEqual(again.erased, []);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("retention accepts only forever: any other value is reported and changes nothing", async () => {
+  const fx = fixture("hist-retention-");
+  const db = fx.open();
+  try {
+    // A different author per save, so the coalescing pass cannot remove any of them:
+    // this test is about retention, and one rule at a time.
+    const id = await insertMemory(db, OWNER, { content: "kept" });
+    for (let i = 0; i < 3; i++) {
+      await updateMemory(db, { authorKind: "bot", authorId: `bot-${i}`, jobId: `card:${i}` }, id, {
+        content: `kept ${i}`,
+      });
+    }
+    const before = await versionCount(db, "memory", id);
+    assert.equal(before, 4);
+
+    const result = await sweep(db, { retention: "365" });
+    assert.deepEqual(result.retention, { value: "365", applied: false }, "a thinning value is not applied yet");
+    assert.equal(await versionCount(db, "memory", id), before, "no version was thrown away");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("emptyTrash refuses a non-owner ctx", async () => {
+  const fx = fixture("hist-empty-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "to be erased early" });
+    await deleteMemory(db, OWNER, id);
+
+    for (const ctx of [BOT, SYSTEM, null, undefined, { authorKind: "peer", authorId: "inst-a" }, { authorKind: "unattributed" }]) {
+      await assert.rejects(
+        () => emptyTrash(db, {}, ctx),
+        (err) => {
+          assert.equal(err.code, "not_owner", `${JSON.stringify(ctx)} must not empty the Trash`);
+          return true;
+        },
+      );
+    }
+    assert.ok((await versionCount(db, "memory", id)) > 0, "nothing was erased");
+
+    const result = await emptyTrash(db, {}, OWNER);
+    assert.equal(result.count, 1);
+    assert.equal(await versionCount(db, "memory", id), 0, "the owner empties it");
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("erasing is owner/system only, and erases through the armed path", async () => {
+  const fx = fixture("hist-erase-actor-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "erase me" });
+    const items = [{ itemType: "memory", itemId: id }];
+
+    for (const ctx of [BOT, { authorKind: "peer", authorId: "inst-a" }, null, {}, { authorKind: "unattributed" }]) {
+      await assert.rejects(
+        () => eraseItems(db, items, ctx),
+        (err) => err.code === "forbidden",
+        `${JSON.stringify(ctx)} must not erase history`,
+      );
+    }
+    assert.ok((await versionCount(db, "memory", id)) > 0);
+    assert.equal(await armed(db), 0, "a refused erase never armed anything");
+
+    const result = await eraseItems(db, items, SYSTEM);
+    assert.equal(result.versions, 1);
+    assert.equal(await versionCount(db, "memory", id), 0);
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("an erase leaves the guard disarmed even when it fails", async () => {
+  const fx = fixture("hist-erase-fail-");
+  const db = fx.open();
+  try {
+    const id = await insertMemory(db, OWNER, { content: "stay" });
+
+    // A store that fails the DELETE itself: the failure happens AFTER the switch is
+    // armed, which is exactly the case that must not leave history rewritable.
+    const failing = {
+      execute: async (arg) => {
+        const sql = typeof arg === "string" ? arg : arg.sql;
+        if (/^\s*DELETE\s+FROM\s+item_versions/i.test(sql)) throw new Error("simulated store failure");
+        return db.execute(arg);
+      },
+    };
+
+    await assert.rejects(
+      () => eraseItems(failing, [{ itemType: "memory", itemId: id }], OWNER),
+      /simulated store failure/,
+    );
+
+    assert.equal(await armed(db), 0, "the switch is shut after the failure");
+    assert.ok((await versionCount(db, "memory", id)) > 0, "the versions survived the rolled-back erase");
+    await assert.rejects(
+      () => db.execute({ sql: "DELETE FROM item_versions", args: [] }),
+      /version history is append-only/,
+      "and history is append-only again",
+    );
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+/* ------------------------------ the operator's ruling: permanent deletes */
+
+test("deleting a learner erases their memories' history at once (Maker Lab's right to be forgotten)", async () => {
+  const fx = fixture("hist-learner-");
+  const db = fx.open();
+  try {
+    const { initMakerLabTables } = await import("../bundles/maker-lab/server/init-tables.js");
+    await initMakerLabTables(db);
+    const { createMakerLabServer } = await import("../bundles/maker-lab/server/server.js");
+
+    const learner = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name, type) VALUES ('learner-1', 'Kid', 'learner_profile')",
+      args: [],
+    })).lastInsertRowid);
+    const other = Number((await db.execute({
+      sql: "INSERT INTO project_spaces (slug, name) VALUES ('other-project', 'Other')",
+      args: [],
+    })).lastInsertRowid);
+
+    const childMemory = await insertMemory(db, OWNER, { content: "the child's progress", project_id: learner, source: "maker-lab" });
+    await updateMemory(db, OWNER, childMemory, { content: "the child's progress, edited" });
+    const keptMemory = await insertMemory(db, OWNER, { content: "another project's memory", project_id: other });
+    assert.equal(await versionCount(db, "memory", childMemory), 2);
+    assert.equal(await versionCount(db, "memory", keptMemory), 1);
+
+    const client = new Client({ name: "history-jobs", version: "0" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await createMakerLabServer(db, {}).connect(st);
+    await client.connect(ct);
+    const reply = await client.callTool({
+      name: "maker_delete_learner",
+      arguments: { learner_id: learner, confirm: "DELETE" },
+    });
+    const text = (reply.content || []).map((c) => c.text || "").join("\n");
+    assert.match(text, /"deleted": true/, text);
+    await client.close();
+
+    assert.equal(await memoryRow(db, childMemory), undefined, "the learner's memories are deleted");
+    assert.equal(
+      await versionCount(db, "memory", childMemory),
+      0,
+      "and their history is erased AT ONCE, not after a Trash period",
+    );
+    assert.equal(await versionCount(db, "memory", keptMemory), 1, "another project's history is untouched");
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    fx.dispose();
+  }
+});
+
+test("purging a project erases the history of what it deleted but not of memories it only unfiled", async () => {
+  const dataDir = join(ROOT, "purge-instance");
+  const fx = fixture("hist-purge-", dataDir);
+  const db = fx.open();
+  const dir = mkdtempSync(join(tmpdir(), "hist-purge-tasks-"));
+  try {
+    const { createProjectSpace } = await import("../servers/shared/project-spaces.js");
+    const L = await import("../servers/shared/project-lifecycle.js");
+
+    const project = await createProjectSpace(db, { name: "Purge me" });
+    const id = Number(project.id);
+
+    const section = Number((await withWriteContext(OWNER, () => db.execute({
+      sql: "INSERT INTO crow_context (section_key, section_title, content, project_id) VALUES ('purge-note', 'Note', 'scoped body', ?)",
+      args: [id],
+    }))).lastInsertRowid);
+    await withWriteContext(OWNER, () =>
+      db.execute({ sql: "UPDATE crow_context SET content = 'scoped body, edited' WHERE id = ?", args: [section] }),
+    );
+
+    const memory = await insertMemory(db, OWNER, {
+      content: "a filed memory the purge will only unfile",
+      project_id: id,
+      project_uuid: project.uuid,
+    });
+    assert.equal(await versionCount(db, "context_section", section), 2);
+    assert.equal(await versionCount(db, "memory", memory), 1);
+
+    const outcome = await L.deleteProject(db, id, {
+      confirmName: "Purge me",
+      dataDir,
+      tasksDbPath: join(dir, "tasks.db"),
+      storageDelete: async () => {},
+      disconnectBackend: async () => true,
+    });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+
+    assert.equal(
+      await versionCount(db, "context_section", section),
+      0,
+      "the section the purge DELETED has no history left",
+    );
+    assert.equal(await versionCount(db, "memory", memory), 2, "the unfiled memory keeps its history...");
+    const versions = await versionsOf(db, "memory", memory);
+    assert.equal(versions[0].snapshot_json.includes("a filed memory"), true, "...including its project-scoped version");
+    const row = await memoryRow(db, memory, "id, content, project_id, project_uuid");
+    assert.equal(row.project_id, null, "the memory itself is unfiled, not deleted");
+    assert.equal(row.project_uuid, null);
+    assert.equal(await armed(db), 0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+    fx.dispose();
+  }
+});

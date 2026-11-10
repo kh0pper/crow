@@ -299,9 +299,38 @@ export function createMakerLabServer(db, options = {}) {
       if (psRowsAffected === 0) {
         return mcpError(`Learner ${learner_id} not found`);
       }
+      // The right to be forgotten, AT ONCE (the operator's ruling, 2026-11-10):
+      // DATA-HANDLING.md promises a learner's data is deleted on request (COPPA /
+      // GDPR-K), so a permanent learner delete is never a 30-day Trash. The ids are
+      // read BEFORE the delete, then their whole version history goes through
+      // servers/shared/history/erase.js (armed switch, one transaction). `system`
+      // because this is the flow's own consequence, not an independent history
+      // rewrite: it names maker-lab as the actor and touches only the rows this
+      // statement just deleted. Best effort like the delete above: a store without
+      // the history tables has nothing to erase.
+      let deletedMemoryIds = [];
       try {
+        const found = await db.execute({
+          sql: `SELECT id FROM memories WHERE project_id=?`,
+          args: [learner_id],
+        });
+        deletedMemoryIds = found.rows.map((r) => String(r.id));
         await db.execute({ sql: `DELETE FROM memories WHERE project_id=?`, args: [learner_id] });
-      } catch {}
+      } catch {
+        deletedMemoryIds = [];
+      }
+      if (deletedMemoryIds.length) {
+        try {
+          const { eraseItems } = await appImport("servers/shared/history/erase.js");
+          await eraseItems(
+            db,
+            deletedMemoryIds.map((id) => ({ itemType: "memory", itemId: id })),
+            { authorKind: "system", authorId: "maker-lab" },
+          );
+        } catch (err) {
+          console.warn(`[maker-lab] learner ${learner_id}: memory history erase skipped:`, err?.message || err);
+        }
+      }
       return mcpOk({ deleted: true, learner_id, name, reason: reason || null });
     }
   );
