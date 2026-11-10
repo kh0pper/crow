@@ -2703,7 +2703,7 @@
         "via": "setup",
         "setup": {
           "script": "scripts/first-admin.sh",
-          "timeout_s": 180
+          "timeout_s": 240
         },
         "user": "admin",
         "secretEnv": "JELLYFIN_ADMIN_PASSWORD"
